@@ -12,8 +12,7 @@ import {
   SettingTwo,
 } from '@icon-park/react';
 import { Popover, Select } from '@arco-design/web-react';
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { CreativeGenerationStatus } from '../../domain';
@@ -21,7 +20,8 @@ import type {
   CreativeModelOption,
   CreativeModelSelectionRef,
 } from '../../models';
-import styles from './CreativeCanvasAudioComposer.module.css';
+import CreativeCanvasComposerShell from './CreativeCanvasComposerShell';
+import composerStyles from './CreativeCanvasComposerShell.module.css';
 
 export type CanvasAudioFormat = 'mp3' | 'wav';
 
@@ -148,18 +148,7 @@ const CreativeCanvasAudioComposer: React.FC<
   onConfirmSubmission,
 }) => {
   const { t } = useTranslation();
-  const positionerRef = useRef<HTMLDivElement>(null);
-  const anchorRef = useRef<HTMLSpanElement>(null);
-  const horizontalOffsetRef = useRef(0);
   const [prompt, setPrompt] = useState(initialPrompt);
-  const [placement, setPlacement] = useState<'above' | 'below'>('below');
-  const [horizontalOffset, setHorizontalOffset] = useState(0);
-  const [overlay, setOverlay] = useState(false);
-  const [overlayLayout, setOverlayLayout] = useState({
-    left: 16,
-    top: 16,
-    width: 358,
-  });
   const eligibleModelOptions = modelOptions.filter(
     (option) => option.task === 'speech_synthesis'
   );
@@ -208,101 +197,6 @@ const CreativeCanvasAudioComposer: React.FC<
 
   useEffect(() => setPrompt(initialPrompt), [initialPrompt, nodeId]);
 
-  useLayoutEffect(() => {
-    const positioner = positionerRef.current;
-    const anchor = anchorRef.current;
-    const surface = anchor?.closest<HTMLElement>('[data-canvas-surface]');
-    const node = anchor?.closest<HTMLElement>('[data-canvas-node-id]');
-    if (!positioner || !surface || !node) return;
-
-    const updatePlacement = (): void => {
-      const surfaceRect = surface.getBoundingClientRect();
-      const nodeRect = node.getBoundingClientRect();
-      const panelRect = positioner.getBoundingClientRect();
-      const panelHeight = panelRect.height;
-      const inset = 12;
-      const gap = 16;
-      const compactWidth = Math.min(580, Math.max(0, window.innerWidth - 32));
-      const shouldOverlay = surfaceRect.width < compactWidth + inset * 2;
-      const spaceBelow = surfaceRect.bottom - nodeRect.bottom - gap - inset;
-      const spaceAbove = nodeRect.top - surfaceRect.top - gap - inset;
-      const next =
-        panelHeight <= spaceBelow || spaceBelow >= spaceAbove ? 'below' : 'above';
-      setPlacement((current) => (current === next ? current : next));
-
-      setOverlay((current) =>
-        current === shouldOverlay ? current : shouldOverlay
-      );
-      if (shouldOverlay) {
-        const belowTop = nodeRect.bottom + gap;
-        const aboveTop = nodeRect.top - panelHeight - gap;
-        const preferredTop =
-          belowTop + panelHeight <= window.innerHeight - inset
-            ? belowTop
-            : aboveTop >= inset
-              ? aboveTop
-              : Math.max(
-                  inset,
-                  Math.min(
-                    window.innerHeight - panelHeight - inset,
-                    nodeRect.top
-                  )
-                );
-        const nextLayout = {
-          left: Math.max(16, (window.innerWidth - compactWidth) / 2),
-          top: preferredTop,
-          width: compactWidth,
-        };
-        setOverlayLayout((current) =>
-          Math.abs(current.left - nextLayout.left) < 0.5 &&
-          Math.abs(current.top - nextLayout.top) < 0.5 &&
-          Math.abs(current.width - nextLayout.width) < 0.5
-            ? current
-            : nextLayout
-        );
-        if (horizontalOffsetRef.current !== 0) {
-          horizontalOffsetRef.current = 0;
-          setHorizontalOffset(0);
-        }
-        return;
-      }
-
-      const naturalLeft = panelRect.left - horizontalOffsetRef.current;
-      const naturalRight = panelRect.right - horizontalOffsetRef.current;
-      const surfaceCanContainPanel =
-        surfaceRect.width >= panelRect.width + inset * 2;
-      const minimumLeft = (surfaceCanContainPanel ? surfaceRect.left : 0) + inset;
-      const maximumRight =
-        (surfaceCanContainPanel ? surfaceRect.right : window.innerWidth) - inset;
-      const desiredOffset =
-        panelRect.width > maximumRight - minimumLeft
-          ? (minimumLeft + maximumRight) / 2 -
-            (naturalLeft + naturalRight) / 2
-          : naturalLeft < minimumLeft
-            ? minimumLeft - naturalLeft
-            : naturalRight > maximumRight
-              ? maximumRight - naturalRight
-              : 0;
-      if (Math.abs(horizontalOffsetRef.current - desiredOffset) >= 0.5) {
-        horizontalOffsetRef.current = desiredOffset;
-        setHorizontalOffset(desiredOffset);
-      }
-    };
-
-    updatePlacement();
-    const observer =
-      typeof ResizeObserver === 'undefined'
-        ? null
-        : new ResizeObserver(updatePlacement);
-    observer?.observe(surface);
-    observer?.observe(positioner);
-    window.addEventListener('resize', updatePlacement);
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener('resize', updatePlacement);
-    };
-  }, [nodeId, overlay]);
-
   const submit = (): void => {
     const result = dispatchCanvasAudioComposerSubmission({
       disabled,
@@ -329,33 +223,16 @@ const CreativeCanvasAudioComposer: React.FC<
           })
         : null;
 
-  const content = (
-    <div
-      ref={positionerRef}
-      className={styles.positioner}
-      data-canvas-audio-composer
-      data-overlay={overlay || undefined}
-      data-placement={placement}
-      data-node-id={nodeId}
-      data-voice-profile={
+  return (
+    <CreativeCanvasComposerShell
+      kind='audio'
+      nodeId={nodeId}
+      voiceProfile={
         !voiceVisible ? 'unsupported' : voiceRequired ? 'required' : 'optional'
       }
-      style={
-        {
-          '--creative-canvas-audio-composer-offset-x': `${horizontalOffset}px`,
-          '--creative-canvas-audio-composer-overlay-left': `${overlayLayout.left}px`,
-          '--creative-canvas-audio-composer-overlay-top': `${overlayLayout.top}px`,
-          '--creative-canvas-audio-composer-overlay-width': `${overlayLayout.width}px`,
-        } as React.CSSProperties
-      }
-      onMouseDown={(event) => event.stopPropagation()}
-      onPointerDown={(event) => event.stopPropagation()}
-      onDoubleClick={(event) => event.stopPropagation()}
-      onWheel={(event) => event.stopPropagation()}
     >
-      <div className={styles.panel}>
         <textarea
-          className={styles.prompt}
+          className={composerStyles.prompt}
           value={prompt}
           maxLength={normalizedMaxTextLength}
           placeholder={t('creativeStudio.canvas.audio.promptPlaceholder', {
@@ -377,11 +254,11 @@ const CreativeCanvasAudioComposer: React.FC<
           }}
         />
 
-        <div className={styles.footer}>
-          <div className={styles.controls}>
+        <div className={composerStyles.footer}>
+          <div className={composerStyles.controls}>
             <button
               type='button'
-              className={styles.iconButton}
+              className={`${composerStyles.controlButton} ${composerStyles.iconButton}`}
               aria-label={t('creativeStudio.canvas.audio.openPromptLibrary', {
                 defaultValue: '打开朗读提示词库',
               })}
@@ -395,7 +272,8 @@ const CreativeCanvasAudioComposer: React.FC<
             </button>
 
             <Select
-              className={styles.modelSelect}
+              className={composerStyles.modelSelect}
+              size='mini'
               value={selectedModel ? modelKey(selectedModel) : undefined}
               placeholder={
                 eligibleModelOptions.length > 0
@@ -433,9 +311,9 @@ const CreativeCanvasAudioComposer: React.FC<
                 position='top'
                 getPopupContainer={popupContainer}
                 content={
-                  <div className={styles.settingsPanel}>
+                  <div className={composerStyles.popoverSettingsPanel}>
                     {voiceVisible ? (
-                      <label className={styles.field}>
+                      <label className={composerStyles.field}>
                         <span>
                           {t('creativeStudio.canvas.audio.voiceIdLabel', {
                             required: voiceRequired ? ' *' : '',
@@ -443,7 +321,7 @@ const CreativeCanvasAudioComposer: React.FC<
                           })}
                         </span>
                         <input
-                          className={styles.voiceInput}
+                          className={composerStyles.settingsControl}
                           value={settings.voice}
                           maxLength={256}
                           placeholder={
@@ -467,14 +345,14 @@ const CreativeCanvasAudioComposer: React.FC<
                       </label>
                     ) : null}
                     {formatVisible ? (
-                      <label className={styles.field}>
+                      <label className={composerStyles.field}>
                         <span>
                           {t('creativeStudio.canvas.audio.formatLabel', {
                             defaultValue: '音频格式',
                           })}
                         </span>
                         <select
-                          className={styles.settingsSelect}
+                          className={composerStyles.settingsControl}
                           value={settings.format}
                           aria-label={t('creativeStudio.canvas.audio.formatAriaLabel', {
                             defaultValue: '音频格式',
@@ -497,14 +375,14 @@ const CreativeCanvasAudioComposer: React.FC<
               >
                 <button
                   type='button'
-                  className={styles.settingsButton}
+                  className={`${composerStyles.controlButton} ${composerStyles.settingsButton}`}
                   aria-label={t('creativeStudio.canvas.audio.settingsLabel', {
                     defaultValue: '语音生成设置',
                   })}
                   disabled={disabled}
                 >
                   <SettingTwo theme='outline' size={15} fill='currentColor' />
-                  <span className={styles.settingsSummary}>
+                  <span className={composerStyles.settingsSummary}>
                     {settingsSummary}
                   </span>
                 </button>
@@ -514,8 +392,8 @@ const CreativeCanvasAudioComposer: React.FC<
 
           <button
             type='button'
-            className={`${styles.submitButton} ${
-              retrySubmission ? styles.retrySubmitButton : ''
+            className={`${composerStyles.controlButton} ${composerStyles.submitButton} ${
+              retrySubmission ? composerStyles.retrySubmitButton : ''
             }`}
             aria-label={
               retrySubmission
@@ -531,7 +409,7 @@ const CreativeCanvasAudioComposer: React.FC<
           >
             {busy && !retrySubmission ? (
               <Loading
-                className={styles.spin}
+                className={composerStyles.spin}
                 theme='outline'
                 size={17}
                 fill='currentColor'
@@ -539,7 +417,7 @@ const CreativeCanvasAudioComposer: React.FC<
             ) : retrySubmission ? (
               <>
                 <Refresh theme='outline' size={15} fill='currentColor' />
-                <span className={styles.retryLabel}>
+                <span className={composerStyles.retryLabel}>
                   {t('creativeStudio.canvas.audio.retryShortLabel', {
                     defaultValue: '同键重试',
                   })}
@@ -557,14 +435,14 @@ const CreativeCanvasAudioComposer: React.FC<
         </div>
 
         {voiceVisible && voiceRequired && !requiredVoiceReady ? (
-          <div className={styles.message} role='status'>
+          <div className={composerStyles.message} role='status'>
             {t('creativeStudio.canvas.audio.voiceRequiredMessage', {
               defaultValue: '当前协议要求填写 provider Voice ID。',
             })}
           </div>
         ) : null}
         {!promptLengthReady ? (
-          <div className={styles.message} role='status'>
+          <div className={composerStyles.message} role='status'>
             {t('creativeStudio.canvas.audio.promptTooLong', {
               max: normalizedMaxTextLength,
               defaultValue: `朗读文本不能超过 ${normalizedMaxTextLength} 个字符。`,
@@ -572,19 +450,22 @@ const CreativeCanvasAudioComposer: React.FC<
           </div>
         ) : null}
         {modelStatus ? (
-          <div className={styles.message} role='status'>
+          <div className={composerStyles.message} role='status'>
             {modelStatus}
           </div>
         ) : null}
         {error || task.message ? (
-          <div className={styles.message} role={error ? 'alert' : 'status'}>
+          <div
+            className={composerStyles.message}
+            role={error ? 'alert' : 'status'}
+          >
             {error ?? task.message}
           </div>
         ) : null}
         {retrySubmission && onConfirmSubmission ? (
           <button
             type='button'
-            className={styles.confirmSubmissionButton}
+            className={composerStyles.confirmSubmissionButton}
             disabled={disabled}
             onClick={onConfirmSubmission}
           >
@@ -593,23 +474,7 @@ const CreativeCanvasAudioComposer: React.FC<
             })}
           </button>
         ) : null}
-      </div>
-    </div>
-  );
-
-  return (
-    <>
-      <span
-        ref={anchorRef}
-        hidden
-        aria-hidden='true'
-        data-canvas-audio-composer-anchor
-        data-placement={placement}
-      />
-      {overlay && typeof document !== 'undefined'
-        ? createPortal(content, document.body)
-        : content}
-    </>
+    </CreativeCanvasComposerShell>
   );
 };
 

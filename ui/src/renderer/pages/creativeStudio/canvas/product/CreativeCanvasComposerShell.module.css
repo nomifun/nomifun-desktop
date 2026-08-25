@@ -8,7 +8,7 @@
   pointer-events: auto;
   transform:
     translateX(
-      calc(-50% + var(--creative-canvas-audio-composer-offset-x, 0px))
+      calc(-50% + var(--creative-canvas-composer-offset-x, 0px))
     )
     scale(var(--creative-canvas-inverse-zoom));
   transform-origin: center top;
@@ -30,18 +30,18 @@
 
 .positioner[data-overlay='true'] {
   position: fixed;
-  top: var(--creative-canvas-audio-composer-overlay-top, 16px);
+  top: var(--creative-canvas-composer-overlay-top, 16px);
   bottom: auto;
-  left: var(--creative-canvas-audio-composer-overlay-left, 16px);
+  left: var(--creative-canvas-composer-overlay-left, 16px);
   z-index: 1600;
-  width: var(--creative-canvas-audio-composer-overlay-width, calc(100vw - 32px));
+  width: var(--creative-canvas-composer-overlay-width, calc(100vw - 32px));
   transform: none;
   transform-origin: center;
 }
 
 .panel {
   box-sizing: border-box;
-  padding: 12px;
+  padding: 10px;
   border: 1px solid color-mix(in srgb, var(--color-border-2) 86%, transparent);
   border-radius: 16px;
   background: color-mix(in srgb, var(--color-bg-2) 94%, transparent);
@@ -53,18 +53,19 @@
   display: block;
   box-sizing: border-box;
   width: 100%;
-  height: 160px;
+  height: 104px;
   resize: none;
-  padding: 8px 12px;
+  padding: 7px 10px;
   border: 0;
   border-radius: 12px;
   outline: none;
   background: transparent;
   color: var(--color-text-1);
   font: inherit;
-  font-size: 14px;
-  line-height: 20px;
-  scrollbar-color: color-mix(in srgb, var(--color-text-3) 32%, transparent) transparent;
+  font-size: 12px;
+  line-height: 18px;
+  scrollbar-color: color-mix(in srgb, var(--color-text-3) 32%, transparent)
+    transparent;
   scrollbar-width: thin;
 }
 
@@ -73,7 +74,8 @@
 }
 
 .prompt:focus-visible {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, rgb(var(--primary-6)) 42%, var(--color-border-2));
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, rgb(var(--primary-6)) 42%, var(--color-border-2));
 }
 
 .prompt:disabled {
@@ -84,27 +86,32 @@
 .footer {
   display: flex;
   min-width: 0;
+  min-height: 30px;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-top: 8px;
+  gap: 6px;
+  margin-top: 6px;
 }
 
 .controls {
   display: flex;
   min-width: 0;
+  min-height: 30px;
   flex: 1 1 auto;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
-.iconButton,
-.settingsButton,
+.controls > *,
 .submitButton {
+  align-self: center;
+}
+
+.controlButton {
   appearance: none;
   display: inline-flex;
   box-sizing: border-box;
-  height: 40px;
+  height: 30px;
   align-items: center;
   justify-content: center;
   border: 1px solid var(--color-border-2);
@@ -115,9 +122,9 @@
 }
 
 .iconButton {
-  width: 32px;
-  height: 32px;
-  flex: 0 0 32px;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
   padding: 0;
   border-color: transparent;
   border-radius: 50%;
@@ -125,35 +132,70 @@
 }
 
 .modelSelect {
-  width: 184px;
+  width: 156px;
+  height: 30px;
   min-width: 0;
-  flex: 0 1 184px;
+  flex: 0 1 156px;
 }
 
 .modelSelect :global(.arco-select-view) {
-  height: 40px;
+  display: flex;
+  height: 30px;
+  align-items: center;
   border-radius: 999px;
   background: var(--color-bg-1);
+  font-size: 11px;
+}
+
+.modelSelect:global(.arco-select-size-mini.arco-select-single)
+  :global(.arco-select-view) {
+  height: 30px;
+  padding: 0 9px;
+  font-size: 11px;
+  line-height: 28px;
+}
+
+.modelSelect:global(.arco-select-size-mini.arco-select-single)
+  :global(.arco-select-view-value) {
+  font-size: 11px;
+  line-height: 28px;
+}
+
+.footer :global(.i-icon) {
+  display: grid;
+  width: 14px;
+  height: 14px;
+  place-items: center;
+  line-height: 0;
+  vertical-align: middle;
+}
+
+.footer :global(.i-icon > svg) {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .settingsButton {
-  min-width: 132px;
-  max-width: 176px;
-  gap: 7px;
-  padding: 0 12px;
+  min-width: 124px;
+  max-width: 144px;
+  gap: 5px;
+  padding: 0 8px;
   border-radius: 999px;
+  font-size: 11px;
   white-space: nowrap;
 }
 
 .settingsSummary {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .submitButton {
-  width: 64px;
-  min-width: 64px;
+  width: 48px;
+  min-width: 48px;
   border-color: rgb(var(--primary-6));
   border-radius: 999px;
   background: rgb(var(--primary-6));
@@ -161,15 +203,15 @@
 }
 
 .retrySubmitButton {
-  width: 104px;
-  min-width: 104px;
+  width: 100px;
+  min-width: 100px;
   gap: 6px;
-  padding: 0 12px;
+  padding: 0 10px;
 }
 
 .retryLabel {
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .iconButton:hover:not(:disabled),
@@ -197,20 +239,37 @@
   opacity: 0.38;
 }
 
-.settingsPanel {
-  display: grid;
-  box-sizing: border-box;
-  width: 292px;
-  gap: 12px;
-  padding: 4px;
-  color: var(--color-text-1);
+.positioner :global(.arco-select-popup) {
+  padding: 3px 0;
+  border-radius: 10px;
+}
+
+.positioner :global(.arco-select-popup .arco-select-option) {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
+  line-height: 28px;
+}
+
+.positioner :global(.arco-select-popup .arco-select-option-empty) {
+  height: 28px;
+  font-size: 11px;
 }
 
 .positioner :global(.arco-popover-content) {
   border-color: var(--color-border-1);
-  border-radius: 16px;
+  border-radius: 14px;
   background: var(--color-bg-popup);
   box-shadow: 0 18px 48px color-mix(in srgb, #000 22%, transparent);
+}
+
+.popoverSettingsPanel {
+  display: grid;
+  box-sizing: border-box;
+  width: min(292px, calc(100vw - 52px));
+  gap: 10px;
+  padding: 2px;
+  color: var(--color-text-1);
 }
 
 .field {
@@ -221,58 +280,52 @@
   font-size: 11px;
 }
 
-.settingsSelect {
+.settingsControl {
   box-sizing: border-box;
   width: 100%;
-  height: 36px;
-  padding: 0 8px;
-  border: 1px solid var(--color-border-2);
-  border-radius: 9px;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
   outline: none;
-  background: var(--color-bg-1);
+  background: var(--color-fill-2);
   color: var(--color-text-1);
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
+  font-size: 11px;
 }
 
-.settingsSelect:focus-visible {
+input.settingsControl {
+  cursor: text;
+}
+
+select.settingsControl {
+  padding-right: 26px;
+}
+
+.settingsControl::placeholder {
+  color: var(--color-text-4);
+}
+
+.settingsControl:hover:not(:disabled) {
+  border-color: var(--color-border-3);
+  background: var(--color-fill-3);
+}
+
+.settingsControl:focus-visible {
   border-color: rgb(var(--primary-6));
   box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.14);
 }
 
-.settingsSelect:disabled {
+.settingsControl:disabled {
   cursor: not-allowed;
   opacity: 0.5;
 }
 
-.voiceInput {
-  appearance: none;
-  box-sizing: border-box;
-  width: 100%;
-  height: 36px;
-  padding: 0 11px;
-  border: 1px solid var(--color-border-2);
-  border-radius: 9px;
-  outline: none;
-  background: var(--color-bg-1);
+.settingsControl option {
+  background: var(--color-bg-popup);
   color: var(--color-text-1);
-  font: inherit;
-  font-size: 12px;
-}
-
-.voiceInput::placeholder {
-  color: var(--color-text-4);
-}
-
-.voiceInput:focus-visible {
-  border-color: rgb(var(--primary-6));
-  box-shadow: 0 0 0 2px rgba(var(--primary-6), 0.14);
-}
-
-.voiceInput:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
+  font-size: 11px;
 }
 
 .message {
@@ -314,10 +367,10 @@
 }
 
 .spin {
-  animation: spin 0.8s linear infinite;
+  animation: composer-spin 0.8s linear infinite;
 }
 
-@keyframes spin {
+@keyframes composer-spin {
   to {
     transform: rotate(360deg);
   }
@@ -338,20 +391,21 @@
   }
 
   .settingsButton {
-    min-width: 40px;
     width: 40px;
+    min-width: 40px;
+    padding: 0;
+  }
+}
+
+@media (max-width: 420px) {
+  .retrySubmitButton {
+    width: 48px;
+    min-width: 48px;
     padding: 0;
   }
 
-  .submitButton {
-    width: 48px;
-    min-width: 48px;
-  }
-
-  .retrySubmitButton {
-    width: 100px;
-    min-width: 100px;
-    padding: 0 10px;
+  .retryLabel {
+    display: none;
   }
 }
 

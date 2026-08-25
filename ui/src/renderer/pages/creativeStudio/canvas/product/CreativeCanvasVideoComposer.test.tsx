@@ -197,27 +197,29 @@ describe('CreativeCanvasVideoComposer', () => {
     expect(component.includes("'v2v'")).toBe(false);
   });
 
-  test('inherits the active application theme and keeps adaptive viewport structure', () => {
+  test('uses the shared compact shell and keeps video context styling', () => {
     const css = readFileSync(
       new URL('./CreativeCanvasVideoComposer.module.css', import.meta.url),
+      'utf8'
+    );
+    const shellCss = readFileSync(
+      new URL('./CreativeCanvasComposerShell.module.css', import.meta.url),
       'utf8'
     );
     expect(css.includes('--color-bg-1: #faf9f7')).toBe(false);
     expect(css.includes('--color-bg-popup: #faf9f7')).toBe(false);
     expect(css.includes('--color-secondary: #f1efea')).toBe(false);
-    expect(css.includes(":global([data-theme='light']) .positioner")).toBe(true);
-    expect(css.includes(":global([data-theme='dark']) .positioner")).toBe(true);
-    expect(css.includes('background: color-mix(in srgb, var(--color-bg-2)')).toBe(true);
-    expect(css.includes('background: rgb(var(--primary-6))')).toBe(true);
-    expect(css.includes('@media (prefers-color-scheme: dark)')).toBe(false);
-    expect(css.includes('width: 580px')).toBe(true);
-    expect(css.includes('height: 160px')).toBe(true);
-    expect(css.includes(".positioner[data-placement='above']")).toBe(true);
-    expect(css.includes('--creative-canvas-video-composer-offset-x')).toBe(true);
-    expect(css.includes(".positioner[data-overlay='true']")).toBe(true);
-    expect(css.includes('@media (max-width: 760px)')).toBe(true);
-    expect(css.includes('.settingsSummary')).toBe(true);
-    expect(css.includes('.settingsButton span')).toBe(false);
-    expect(css.includes('.confirmSubmissionButton')).toBe(true);
+    expect(shellCss.includes(":global([data-theme='light']) .positioner")).toBe(true);
+    expect(shellCss.includes(":global([data-theme='dark']) .positioner")).toBe(true);
+    expect(shellCss.includes('background: color-mix(in srgb, var(--color-bg-2)')).toBe(true);
+    expect(shellCss.includes('background: rgb(var(--primary-6))')).toBe(true);
+    expect(shellCss.includes('height: 104px')).toBe(true);
+    expect(shellCss.includes('height: 30px')).toBe(true);
+    expect(shellCss.includes(".positioner[data-placement='above']")).toBe(true);
+    expect(shellCss.includes('--creative-canvas-composer-offset-x')).toBe(true);
+    expect(shellCss.includes(".positioner[data-overlay='true']")).toBe(true);
+    expect(css.includes('.contextRow')).toBe(true);
+    expect(css.includes('.modePill')).toBe(true);
+    expect(css.includes('.referencePreview')).toBe(true);
   });
 });
