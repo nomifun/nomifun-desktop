@@ -2424,6 +2424,11 @@ fn operation_from_input(
     sanitized.remove("lane_id");
     sanitized.remove("lane");
     sanitized.remove("lane_name");
+    sanitized.remove("keep_alive");
+    sanitized.remove("keepAlive");
+    sanitized.remove("pinned");
+    sanitized.remove("persistent_media");
+    sanitized.remove("persistentMedia");
     sanitized.remove("expected_browser_epoch");
     for field in TRUSTED_OWNER_INPUT_FIELDS {
         sanitized.remove(*field);

@@ -578,7 +578,10 @@ impl BrowserTool {
              another browser to bypass capacity. Reuse a running Lane or lower concurrency. \
              Existing actions accept optional \
              `lane_id`; use browser_open/browser_fork/browser_list/browser_status/browser_close/\
-             browser_close_all/browser_crawl_many to manage Lanes.",
+              browser_close_all/browser_crawl_many to manage Lanes. Set `keep_alive: true` \
+              on browser_open/browser_fork when a user-requested long-lived media or download Lane \
+              must survive the end of this Agent turn; explicit close and owner teardown still \
+              reclaim it.",
         );
         self
     }
@@ -1454,6 +1457,12 @@ impl BrowserTool {
         action: &str,
         input: &Value,
     ) -> ToolResult {
+        if crate::managed::has_keep_alive_intent(input) {
+            return ToolResult::error(
+                "`keep_alive` is only accepted by browser_open/browser_fork; use browser_open \
+                 with keep_alive=true to create a long-lived Lane.",
+            );
+        }
         execute_existing_operation(
             client.as_ref(),
             self.workspace_dir.as_deref(),
@@ -2741,6 +2750,7 @@ impl Tool for BrowserTool {
                 "lane_id": { "type": "string", "description": "Optional Lane handle returned by browser_open/browser_fork/browser_list. Existing actions use the caller's default Lane when omitted." },
                 "lane_name": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[A-Za-z0-9_-]+$", "description": "Short model-chosen Lane name for browser_open/browser_fork. Trusted owner identity is supplied by the host and cannot be set here." },
                 "presentation": { "type": "string", "enum": ["unattended", "attended"], "description": "Whether this work needs the user's eyes. Omit (or \"unattended\") for routine reading, searching and extraction — the browser stays silent. Use \"attended\" when the user may need to see the page or take over: a sign-in or verification wall, a CAPTCHA, or a consequential confirmation. This declares INTENT, not a window mode: the host decides whether to actually show a window based on the user's own setting, and may decline. Accepted on browser_open/browser_fork and on any existing-lane action." },
+                "keep_alive": { "type": "boolean", "description": "Optional long-lived Lane intent for browser_open/browser_fork. When true, ordinary Agent turn cleanup and idle expiry leave the Lane running for user-requested media/download work. Explicit browser_close, browser_close_all, owner/runtime teardown, and emergency resource reclamation may still close it. Omit for ordinary turn-scoped browsing." },
                 "urls": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string" }, "description": "HTTP(S) URLs for browser_crawl_many. One ordered result is returned per URL." },
                 "concurrency": {
                     "description": "Bounded browser_crawl_many concurrency: \"auto\" (default) or an integer 1-8. Hub capacity may admit fewer and report queued.",
@@ -3231,6 +3241,7 @@ pub(crate) mod tests {
                 error_code: None,
                 error_message: None,
                 recoverable: false,
+                keep_alive: false,
             }
         }
     }
@@ -3397,6 +3408,32 @@ pub(crate) mod tests {
                 already_closed: closed == 0,
                 ..Default::default()
             })
+        }
+
+        async fn close_turn_lanes(&self) -> Result<CloseResult, BrowserPlatformError> {
+            let mut lanes = self.lanes.lock().unwrap();
+            let before = lanes.len();
+            lanes.retain(|lane| lane.keep_alive);
+            let closed = before.saturating_sub(lanes.len());
+            Ok(CloseResult {
+                closed,
+                already_closed: closed == 0,
+                ..Default::default()
+            })
+        }
+
+        async fn set_keep_alive(
+            &self,
+            lane_id: &BrowserLaneId,
+            keep_alive: bool,
+        ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+            let mut lanes = self.lanes.lock().unwrap();
+            let lane = lanes
+                .iter_mut()
+                .find(|lane| &lane.lane_id == lane_id)
+                .ok_or_else(|| BrowserPlatformError::lane_not_found(lane_id.clone()))?;
+            lane.keep_alive = keep_alive;
+            Ok(lane.clone())
         }
 
         async fn apply_presentation_intent(
@@ -3572,6 +3609,23 @@ pub(crate) mod tests {
             "model-provided confirmation sentinel must never cross the managed boundary"
         );
         assert!(result.content.contains("\"lane_id\": \"lane-1\""));
+    }
+
+    #[tokio::test]
+    async fn managed_keep_alive_open_survives_turn_cleanup() {
+        let client = Arc::new(FakeLaneClient::default());
+        let tool = managed_tool(Arc::clone(&client));
+        let result = tool
+            .execute(json!({
+                "action": "browser_open",
+                "lane_name": "media",
+                "keep_alive": true,
+            }))
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(value["lane"]["keep_alive"], true);
+        assert_eq!(client.lanes.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -199,6 +199,9 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
                 {lifecycleLabel(lane.lifecycle_state)}
               </Tag>
               <Tag color='gray'>{t('browser.details.managed')}</Tag>
+              {lane.keep_alive === true && (
+                <Tag color='arcoblue'>{t('browser.details.keepAlive')}</Tag>
+              )}
             </div>
             <div className='mt-4px text-12px font-500 leading-18px text-t-primary'>
               {valueOrDash(activeTitle)}
@@ -320,6 +323,11 @@ const BrowserLaneDetails: React.FC<BrowserLaneDetailsProps> = ({
           <Tag size='small' color={lifecycleColor(lane.lifecycle_state)}>
             {lifecycleLabel(lane.lifecycle_state)}
           </Tag>
+        </Field>
+        <Field label={t('browser.details.fields.keepAlive')}>
+          {lane.keep_alive === true
+            ? t('browser.details.keepAliveEnabled')
+            : t('browser.details.keepAliveDisabled')}
         </Field>
         <Field label={t('browser.details.fields.activeOperations')}>
           {valueOrDash(activeOperations)}

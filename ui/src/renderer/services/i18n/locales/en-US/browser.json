@@ -103,6 +103,9 @@
   "details": {
     "laneFallback": "Browser lane",
     "managed": "Managed",
+    "keepAlive": "Keeps running",
+    "keepAliveEnabled": "Enabled",
+    "keepAliveDisabled": "Disabled",
     "backgroundExecution": "Routine Agent browsing runs silently with no visible window by default. Use the visibility control to open a running Primary lane in the foreground or return it to silent headless mode. Page input remains Agent-controlled.",
     "closeLane": "Close lane",
     "waitingCapacity": "Waiting for browser capacity",
@@ -130,6 +133,7 @@
       "identity": "Identity",
       "identityGeneration": "Identity generation",
       "lifecycle": "Lifecycle",
+      "keepAlive": "Keep alive",
       "activeOperations": "Active operations",
       "queueState": "Queue state",
       "queuePosition": "Queue position",

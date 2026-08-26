@@ -202,6 +202,11 @@ const BrowserInventoryTree: React.FC<BrowserInventoryTreeProps> = ({
                                 <Tag size='small' color={stateColor(lane.lifecycle_state)}>
                                   {lifecycleLabel(lane.lifecycle_state)}
                                 </Tag>
+                                {lane.keep_alive === true && (
+                                  <Tag size='small' color='arcoblue'>
+                                    {t('browser.details.keepAlive')}
+                                  </Tag>
+                                )}
                               </div>
                               <div className='truncate mt-2px text-11px text-t-tertiary'>
                                 {shortUrl(lane, t('browser.tree.noActivePage'))}

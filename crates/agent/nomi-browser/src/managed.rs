@@ -62,6 +62,34 @@ pub(crate) const MODEL_IDENTITY_INPUT_FIELDS: &[&str] = &[
     "account",
 ];
 
+const KEEP_ALIVE_INPUT_FIELDS: &[&str] = &[
+    "keep_alive",
+    "keepAlive",
+    "pinned",
+    "persistent_media",
+    "persistentMedia",
+];
+
+pub(crate) fn parse_keep_alive_setting(input: &Value) -> Result<Option<bool>, String> {
+    let Some(field) = KEEP_ALIVE_INPUT_FIELDS
+        .iter()
+        .find(|field| input.get(**field).is_some())
+    else {
+        return Ok(None);
+    };
+    input
+        .get(*field)
+        .and_then(Value::as_bool)
+        .map(Some)
+        .ok_or_else(|| format!("Browser input field `{field}` must be a boolean."))
+}
+
+pub(crate) fn has_keep_alive_intent(input: &Value) -> bool {
+    KEEP_ALIVE_INPUT_FIELDS
+        .iter()
+        .any(|field| input.get(*field).is_some())
+}
+
 #[async_trait]
 pub(crate) trait BrowserLaneClientPort: Send + Sync {
     /// Legacy ABI name for the exact runtime cleanup key sealed into this
@@ -104,6 +132,19 @@ pub(crate) trait BrowserLaneClientPort: Send + Sync {
     ) -> Result<CloseResult, BrowserPlatformError>;
 
     async fn close_all(&self) -> Result<CloseResult, BrowserPlatformError>;
+
+    /// Close only ordinary turn-scoped Lanes. Explicitly kept-alive Lanes
+    /// survive this operation and are reclaimed by explicit close or owner
+    /// teardown instead.
+    #[allow(dead_code)]
+    async fn close_turn_lanes(&self) -> Result<CloseResult, BrowserPlatformError>;
+
+    /// Apply a bounded host-validated long-lived intent to one Lane.
+    async fn set_keep_alive(
+        &self,
+        lane_id: &BrowserLaneId,
+        keep_alive: bool,
+    ) -> Result<BrowserLaneSnapshot, BrowserPlatformError>;
 
     /// Report the Agent's declared presentation intent for one Lane.
     ///
@@ -172,6 +213,18 @@ impl BrowserLaneClientPort for BrowserLaneClient {
 
     async fn close_all(&self) -> Result<CloseResult, BrowserPlatformError> {
         BrowserLaneClient::close_all(self).await
+    }
+
+    async fn close_turn_lanes(&self) -> Result<CloseResult, BrowserPlatformError> {
+        BrowserLaneClient::close_turn_lanes(self).await
+    }
+
+    async fn set_keep_alive(
+        &self,
+        lane_id: &BrowserLaneId,
+        keep_alive: bool,
+    ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+        BrowserLaneClient::set_keep_alive(self, lane_id, keep_alive).await
     }
 
     async fn apply_presentation_intent(
@@ -287,6 +340,12 @@ impl ManagedBrowserFacade {
     }
 
     async fn execute_existing(&self, action: &str, input: &Value) -> ToolResult {
+        if has_keep_alive_intent(input) {
+            return invalid_browser_request(
+                "`keep_alive` is only accepted by browser_open/browser_fork; \
+                 use browser_open with keep_alive=true to create a long-lived Lane.",
+            );
+        }
         execute_existing_operation(
             self.client.as_ref(),
             self.workspace_dir.as_deref(),
@@ -388,6 +447,10 @@ pub(crate) async fn open_lane(
         Ok(intent) => intent,
         Err(message) => return ToolResult::error(message),
     };
+    let keep_alive = match parse_keep_alive_setting(input) {
+        Ok(value) => value,
+        Err(message) => return ToolResult::error(message),
+    };
     match client
         // Model-facing open/fork always uses the trusted live Primary
         // identity. The model may choose only the logical lane name;
@@ -411,12 +474,25 @@ pub(crate) async fn open_lane(
                     "the declared browser presentation intent was not applied"
                 );
             }
+            let lane = if let Some(keep_alive) = keep_alive {
+                match client.set_keep_alive(&lane.lane_id, keep_alive).await {
+                    Ok(updated) => updated,
+                    Err(error) => {
+                        return platform_error_result(
+                            "Enabling browser Lane keep-alive failed",
+                            error,
+                        );
+                    }
+                }
+            } else {
+                lane.clone()
+            };
             ToolResult::text(pretty_json(&json!({
                 "ok": true,
                 "action": if fork { "browser_fork" } else { "browser_open" },
-                "lane": public_lane_json(lane),
+                "lane": public_lane_json(&lane),
                 "queued": matches!(outcome, OpenLaneOutcome::Queued { .. }),
-                "next_action": lane_next_action(lane),
+                "next_action": lane_next_action(&lane),
             })))
         }
         Err(error) => platform_error_result(context, error),
@@ -2427,6 +2503,9 @@ pub(crate) fn sanitize_operation_input(input: &Value) -> Value {
     // Host visibility policy, consumed by `execute_existing_operation` before
     // dispatch. It is not an action parameter and must not reach the driver.
     sanitized.remove("presentation");
+    for field in KEEP_ALIVE_INPUT_FIELDS {
+        sanitized.remove(*field);
+    }
     sanitized.remove(OUT_OF_BAND_CONFIRMED_KEY);
     for field in TRUSTED_OWNER_INPUT_FIELDS {
         sanitized.remove(*field);
@@ -2600,6 +2679,7 @@ pub fn public_lane_json(lane: &BrowserLaneSnapshot) -> Value {
             .queue
             .as_ref()
             .map(|queue| queue.recommended_concurrency),
+        "keep_alive": lane.keep_alive,
         "recoverable": lane.recoverable,
         "error_code": lane.error_code,
         "error_message": lane.error_message,
@@ -2884,6 +2964,7 @@ mod tests {
                 error_code: None,
                 error_message: None,
                 recoverable: false,
+                keep_alive: false,
             }
         }
 
@@ -3112,6 +3193,32 @@ mod tests {
                 ));
             }
             self.close_all_for_test().await
+        }
+
+        async fn close_turn_lanes(&self) -> Result<CloseResult, BrowserPlatformError> {
+            let mut lanes = self.lanes.lock().unwrap();
+            let before = lanes.len();
+            lanes.retain(|lane| lane.keep_alive);
+            let closed = before.saturating_sub(lanes.len());
+            Ok(CloseResult {
+                closed,
+                already_closed: closed == 0,
+                ..Default::default()
+            })
+        }
+
+        async fn set_keep_alive(
+            &self,
+            lane_id: &BrowserLaneId,
+            keep_alive: bool,
+        ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+            let mut lanes = self.lanes.lock().unwrap();
+            let lane = lanes
+                .iter_mut()
+                .find(|lane| &lane.lane_id == lane_id)
+                .ok_or_else(|| BrowserPlatformError::lane_not_found(lane_id.clone()))?;
+            lane.keep_alive = keep_alive;
+            Ok(lane.clone())
         }
 
         async fn apply_presentation_intent(
@@ -4514,6 +4621,67 @@ mod tests {
         )
         .await;
         assert!(client.presentation_intents.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn keep_alive_open_survives_turn_cleanup_and_explicit_close_still_works() {
+        let client = Arc::new(FakeLaneClient::default());
+        let sequence = AtomicU64::new(0);
+        let opened = open_lane(
+            client.as_ref(),
+            None,
+            &sequence,
+            &json!({"lane_name": "media", "keep_alive": true}),
+            false,
+            "Opening a browser Lane failed",
+        )
+        .await;
+        assert!(!opened.is_error, "{opened:?}");
+        let value: Value = serde_json::from_str(&opened.content).unwrap();
+        assert_eq!(value["lane"]["keep_alive"], true);
+        let lane_id = BrowserLaneId(value["lane"]["lane_id"].as_str().unwrap().to_owned());
+
+        let ordinary = open_lane(
+            client.as_ref(),
+            None,
+            &sequence,
+            &json!({"lane_name": "ordinary"}),
+            false,
+            "Opening a browser Lane failed",
+        )
+        .await;
+        assert!(!ordinary.is_error, "{ordinary:?}");
+
+        let cleanup = client.close_turn_lanes().await.unwrap();
+        assert_eq!(cleanup.closed, 1);
+        assert!(client.status(&lane_id).await.is_ok());
+        assert_eq!(client.lanes.lock().unwrap().len(), 1);
+
+        close_lane(client.as_ref(), Some(lane_id.clone())).await;
+        assert!(client.status(&lane_id).await.is_err());
+    }
+
+    #[test]
+    fn keep_alive_is_removed_before_driver_dispatch() {
+        let sanitized = sanitize_operation_input(&json!({
+            "url": "https://example.test/",
+            "keep_alive": true,
+            "keepAlive": false,
+            "pinned": true,
+        }));
+        assert_eq!(sanitized, json!({"url": "https://example.test/"}));
+    }
+
+    #[test]
+    fn malformed_keep_alive_is_rejected() {
+        for value in [json!("yes"), json!(1), json!(null), json!({})] {
+            assert!(parse_keep_alive_setting(&json!({"keep_alive": value})).is_err());
+        }
+        assert_eq!(parse_keep_alive_setting(&json!({})).unwrap(), None);
+        assert_eq!(
+            parse_keep_alive_setting(&json!({"keep_alive": false})).unwrap(),
+            Some(false)
+        );
     }
 
     /// `presentation` is host policy consumed before dispatch; it must not reach

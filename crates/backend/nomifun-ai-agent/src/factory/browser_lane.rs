@@ -103,8 +103,10 @@ impl BrowserLaneBinding {
         self.inner.revoke();
     }
 
-    /// Close every Lane created by the current Agent turn without revoking the
-    /// runtime's owner lease.
+    /// Close every ordinary Lane created by the current Agent turn without
+    /// revoking the runtime's owner lease. Explicitly keep-alive Lanes (for
+    /// example a user-requested media playback) remain available for the next
+    /// turn; runtime teardown still revokes the owner and closes all Lanes.
     ///
     /// Native Nomi runtimes are intentionally reusable across turns.  A turn
     /// boundary must release its Chromium resources immediately, while the
@@ -113,7 +115,12 @@ impl BrowserLaneBinding {
     /// owner-scoped `close_all` semantics rather than the lease-revocation
     /// path used by runtime teardown.
     pub async fn close_turn_lanes(&self) -> Result<(), AppError> {
-        match self.inner.client.close_all().await {
+        match self
+            .inner
+            .client
+            .close_turn_lanes()
+            .await
+        {
             Ok(_) => Ok(()),
             Err(error) => {
                 // Runtime `kill()` revokes the owner lease before an unwinding

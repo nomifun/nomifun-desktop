@@ -113,6 +113,8 @@ export interface IBrowserLane {
   error_code?: string | null;
   error_message?: string | null;
   recoverable?: boolean;
+  /** Explicitly retained across ordinary Agent turn cleanup. */
+  keep_alive?: boolean;
 }
 
 /** Result returned after explicitly presenting a managed Primary Lane. */

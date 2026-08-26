@@ -197,6 +197,7 @@ export const normalizeBrowserLane = (raw: unknown): IBrowserLane | null => {
       return typeof message === 'string' ? redactSensitiveText(message) : message;
     })(),
     recoverable: firstBoolean(value, 'recoverable', 'retryable'),
+    keep_alive: firstBoolean(value, 'keep_alive', 'keepAlive', 'pinned'),
   };
 };
 

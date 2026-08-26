@@ -549,6 +549,13 @@ pub struct BrowserLaneSnapshot {
     pub error_code: Option<BrowserErrorCode>,
     pub error_message: Option<String>,
     pub recoverable: bool,
+    /// When true, ordinary Agent turn-boundary cleanup leaves this Lane
+    /// running. This is an explicit user-intent declaration for long-lived
+    /// media/download work, not a teardown exemption: explicit close, owner
+    /// revocation, installation shutdown, and emergency resource reclamation
+    /// may still reclaim it.
+    #[serde(default)]
+    pub keep_alive: bool,
 }
 
 impl BrowserLaneSnapshot {
