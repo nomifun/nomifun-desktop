@@ -848,6 +848,7 @@ struct BrowserLaneDto {
     error_code: Option<BrowserErrorCode>,
     error_message: Option<String>,
     recoverable: bool,
+    keep_alive: bool,
 }
 
 /// Renderer-safe tab projection.
@@ -971,6 +972,7 @@ impl From<BrowserLaneSnapshot> for BrowserLaneDto {
             error_code: value.error_code,
             error_message: value.error_message,
             recoverable: value.recoverable,
+            keep_alive: value.keep_alive,
         }
     }
 }

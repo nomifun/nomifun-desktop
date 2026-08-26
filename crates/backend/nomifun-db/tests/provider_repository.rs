@@ -1237,6 +1237,87 @@ async fn model_delete_provider_revision(db: &nomifun_db::Database) -> i64 {
         .unwrap()
 }
 
+async fn add_chat_capability_to_model(db: &nomifun_db::Database, model: &str) {
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM provider_model_capabilities \
+         WHERE provider_id = ? AND model = ? AND task = 'chat'",
+    )
+    .bind(PROVIDER_ID)
+    .bind(model)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    if exists == 0 {
+        sqlx::query(
+            "INSERT INTO provider_model_capabilities \
+                (provider_id, model, task, traits, protocol, connection_role, endpoint, \
+                 allow_cross_origin_credentials, provider_params, context_limit, created_at, updated_at) \
+             VALUES (?, ?, 'chat', '[\"vision_input\"]', 'openai.chat_text', 'default', \
+                     '/chat/completions', 0, '{}', 128000, 1, 1)",
+        )
+        .bind(PROVIDER_ID)
+        .bind(model)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+}
+
+fn conversation_with_model(
+    user_id: &str,
+    model: Option<serde_json::Value>,
+    execution_model_pool: Option<serde_json::Value>,
+    status: &str,
+) -> ConversationRow {
+    let now = nomifun_common::now_ms();
+    ConversationRow {
+        id: 0,
+        conversation_id: nomifun_common::ConversationId::new().into_string(),
+        user_id: user_id.to_owned(),
+        name: "model deletion fixture".to_owned(),
+        r#type: "nomi".to_owned(),
+        extra: "{}".to_owned(),
+        delegation_policy: "automatic".to_owned(),
+        execution_model_pool: execution_model_pool.map(|value| value.to_string()),
+        decision_policy: "automatic".to_owned(),
+        execution_template_id: None,
+        model: model.map(|value| value.to_string()),
+        status: Some(if status == "running" {
+            "finished".to_owned()
+        } else {
+            status.to_owned()
+        }),
+        source: Some("nomifun".to_owned()),
+        channel_chat_id: None,
+        pinned: false,
+        pinned_at: None,
+        cron_job_id: None,
+        preset_id: None,
+        preset_revision: None,
+        preset_snapshot: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn model_json(model: &str) -> serde_json::Value {
+    serde_json::json!({
+        "provider_id": PROVIDER_ID,
+        "model": model,
+        "use_model": model,
+    })
+}
+
+fn model_pool(models: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "mode": "range",
+        "models": models.iter().map(|model| serde_json::json!({
+            "provider_id": PROVIDER_ID,
+            "model": model,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 async fn seed_model_cleanup_project(
     db: &nomifun_db::Database,
     marker: &str,
@@ -1684,4 +1765,136 @@ async fn missing_model_returns_false_without_applying_cleanup() {
             .config_revision,
         0
     );
+}
+
+#[tokio::test]
+async fn coordinated_model_delete_retargets_idle_conversation_model_and_pool() {
+    let db = init_database_memory().await.unwrap();
+    seed_model_delete_provider(&db, true).await;
+    let owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
+    let repo = SqliteConversationRepository::new(db.pool().clone());
+    let conversation = conversation_with_model(
+        &owner,
+        Some(model_json("delete-me")),
+        Some(model_pool(&["delete-me", "keep-me"])),
+        "finished",
+    );
+    let conversation_id = repo.create(&conversation).await.unwrap();
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+
+    assert!(
+        models
+            .delete_coordinated(&CoordinatedProviderModelDelete {
+                provider_id: PROVIDER_ID.to_owned(),
+                model: "delete-me".to_owned(),
+                expected_config_revision: model_delete_provider_revision(&db).await,
+                cleanup: ProviderModelCleanupPlan::default(),
+            })
+            .await
+            .unwrap()
+    );
+
+    let updated = repo.get(&conversation_id).await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(updated.model.as_deref().unwrap()).unwrap(),
+        model_json("keep-me")
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            updated.execution_model_pool.as_deref().unwrap()
+        )
+        .unwrap(),
+        model_pool(&["keep-me"])
+    );
+    assert!(models.get(PROVIDER_ID, "delete-me").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn coordinated_model_delete_rejects_running_conversation_without_writes() {
+    let db = init_database_memory().await.unwrap();
+    seed_model_delete_provider(&db, true).await;
+    add_chat_capability_to_model(&db, "keep-me").await;
+    let owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
+    let repo = SqliteConversationRepository::new(db.pool().clone());
+    let conversation = conversation_with_model(
+        &owner,
+        Some(model_json("delete-me")),
+        Some(model_pool(&["delete-me", "keep-me"])),
+        "running",
+    );
+    let conversation_id = repo.create(&conversation).await.unwrap();
+    let mut tx = db.pool().begin().await.unwrap();
+    let receipt_id = format!("test-running-{conversation_id}");
+    sqlx::query(
+        "INSERT INTO conversation_delivery_receipts \
+            (operation_id, message_id, conversation_id, projected_conversation_id, \
+             projected_message_id, user_id, kind, request_payload, status, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, NULL, ?, 'turn', '{}', 'accepted', 1, 1)",
+    )
+    .bind(&receipt_id)
+    .bind(nomifun_common::MessageId::new().into_string())
+    .bind(&conversation_id)
+    .bind(&conversation_id)
+    .bind(&owner)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE conversations SET status = 'running', active_turn_operation_id = ?, \
+             admission_epoch = admission_epoch + 1 WHERE conversation_id = ?",
+    )
+    .bind(&receipt_id)
+    .bind(&conversation_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+    let error = models
+        .delete_coordinated(&CoordinatedProviderModelDelete {
+            provider_id: PROVIDER_ID.to_owned(),
+            model: "delete-me".to_owned(),
+            expected_config_revision: 1,
+            cleanup: ProviderModelCleanupPlan::default(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::Conflict(message) if message.contains("running Conversation")));
+    assert!(models.get(PROVIDER_ID, "delete-me").await.unwrap().is_some());
+    let unchanged = repo.get(&conversation_id).await.unwrap().unwrap();
+    let expected_model = model_json("delete-me").to_string();
+    assert_eq!(unchanged.model.as_deref(), Some(expected_model.as_str()));
+}
+
+#[tokio::test]
+async fn coordinated_model_delete_clears_idle_conversation_when_no_chat_fallback_exists() {
+    let db = init_database_memory().await.unwrap();
+    seed_model_delete_provider(&db, false).await;
+    let owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
+    let repo = SqliteConversationRepository::new(db.pool().clone());
+    let conversation = conversation_with_model(
+        &owner,
+        Some(model_json("delete-me")),
+        Some(serde_json::json!({
+            "mode": "single",
+            "model": model_json("delete-me"),
+        })),
+        "finished",
+    );
+    let conversation_id = repo.create(&conversation).await.unwrap();
+    let models = SqliteProviderModelRepository::new(db.pool().clone());
+
+    models
+        .delete_coordinated(&CoordinatedProviderModelDelete {
+            provider_id: PROVIDER_ID.to_owned(),
+            model: "delete-me".to_owned(),
+            expected_config_revision: 0,
+            cleanup: ProviderModelCleanupPlan::default(),
+        })
+        .await
+        .unwrap();
+
+    let updated = repo.get(&conversation_id).await.unwrap().unwrap();
+    assert!(updated.model.is_none());
+    assert!(updated.execution_model_pool.is_none());
 }

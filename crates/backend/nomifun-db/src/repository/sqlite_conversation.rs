@@ -4615,9 +4615,12 @@ impl IConversationRepository for SqliteConversationRepository {
             )));
         }
 
-        // Execution events and execution links are registered KEEP_HISTORY.
-        // Since Conversation has no tombstone row, hard deletion must be
-        // restricted rather than leave a dangling historical identity.
+        // Attempt transcripts are execution-owned history and cannot be
+        // hard-deleted. A terminal lead Conversation is different: it is a
+        // user-visible product aggregate, not the audit transcript itself.
+        // Detach the lead provenance below before removing the aggregate so a
+        // failed/completed execution does not make its lead Conversation
+        // undeletable forever.
         //
         // `conversation_delivery_receipts.conversation_id` is deliberately
         // different: it is an immutable idempotency-scope token, not a logical
@@ -4626,25 +4629,38 @@ impl IConversationRepository for SqliteConversationRepository {
         // projection below while retaining the receipt, so a delayed replay
         // still resolves to its terminal outcome without keeping the user
         // visible Conversation alive forever.
-        let historical_reference_exists: bool = sqlx::query_scalar(
-            "SELECT \
-                EXISTS(\
-                    SELECT 1 FROM agent_execution_events \
-                    WHERE actor_conversation_id = ?1\
-                ) \
-                OR EXISTS(\
-                    SELECT 1 FROM conversation_execution_links \
-                    WHERE conversation_id = ?1\
-                )",
+        let retained_attempt_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(\
+                SELECT 1 FROM conversation_execution_links \
+                WHERE conversation_id = ?1 AND relation = 'attempt'\
+            )",
         )
         .bind(conversation_id)
         .fetch_one(&mut *tx)
         .await?;
-        if historical_reference_exists {
+        if retained_attempt_exists {
             return Err(DbError::Conflict(format!(
-                "Conversation '{conversation_id}' is retained by execution or delivery history"
+                "Conversation '{conversation_id}' is retained as an execution attempt transcript"
             )));
         }
+
+        // Lead provenance is audit metadata, not a hard parent dependency.
+        // Preserve the exact link and event actor fields as history, but mark
+        // the lead link inactive so a deleted user-facing aggregate can never
+        // be selected as the current lead again. Keep-history references are
+        // intentionally allowed to outlive this aggregate and remain
+        // deserializable for execution audit reads.
+        sqlx::query(
+            "UPDATE conversation_execution_links \
+             SET active = 0, cleanup_completed_at = COALESCE(cleanup_completed_at, ?), \
+                 updated_at = ? \
+             WHERE conversation_id = ? AND relation = 'lead'",
+        )
+        .bind(nomifun_common::now_ms())
+        .bind(nomifun_common::now_ms())
+        .bind(conversation_id)
+        .execute(&mut *tx)
+        .await?;
 
         // Registry-owned SET_NULL references.
         sqlx::query(
@@ -7204,19 +7220,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_restricts_keep_history_execution_link() {
+    async fn delete_restricts_keep_history_attempt_link() {
         let (repo, db) = setup().await;
         let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.conversation_id = repo.create(&conv).await.unwrap();
         let execution_id = nomifun_common::AgentExecutionId::new().into_string();
+        let step_id = nomifun_common::generate_id();
+        let attempt_id = nomifun_common::generate_id();
         let now = nomifun_common::now_ms();
         sqlx::query(
             "INSERT INTO conversation_execution_links \
-                (conversation_id, execution_id, relation, active, created_at, updated_at) \
-             VALUES (?, ?, 'lead', 1, ?, ?)",
+                (conversation_id, execution_id, relation, step_id, attempt_id, active, created_at, updated_at) \
+             VALUES (?, ?, 'attempt', ?, ?, 1, ?, ?)",
         )
         .bind(&conv.conversation_id)
         .bind(&execution_id)
+        .bind(&step_id)
+        .bind(&attempt_id)
         .bind(now)
         .bind(now)
         .execute(db.pool())
@@ -7226,6 +7246,80 @@ mod tests {
         let error = repo.delete(&conv.conversation_id).await.unwrap_err();
         assert!(matches!(error, DbError::Conflict(_)));
         assert!(repo.get(&conv.conversation_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_allows_terminal_lead_and_retains_inactive_execution_provenance() {
+        let (repo, db) = setup().await;
+        let mut lead = sample_conversation(TEST_INSTALLATION_OWNER);
+        lead.conversation_id = repo.create(&lead).await.unwrap();
+        let mut attempt = sample_conversation(TEST_INSTALLATION_OWNER);
+        attempt.name = "Attempt transcript".to_owned();
+        attempt.conversation_id = repo.create(&attempt).await.unwrap();
+
+        link_lead_and_attempt_conversations(
+            db.pool(),
+            &lead.conversation_id,
+            &attempt.conversation_id,
+        )
+        .await;
+        let execution_id: String = sqlx::query_scalar(
+            "SELECT execution_id FROM conversation_execution_links \
+             WHERE conversation_id = ? AND relation = 'lead'",
+        )
+        .bind(&lead.conversation_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        sqlx::query("UPDATE agent_executions SET status = 'completed' WHERE execution_id = ?")
+            .bind(&execution_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let now = nomifun_common::now_ms();
+        sqlx::query(
+            "INSERT INTO agent_execution_events \
+                (execution_id, sequence, event_type, actor_type, actor_id, \
+                 actor_conversation_id, on_behalf_of_user_id, payload, created_at) \
+             VALUES (?, 1, 'status_changed', 'agent', ?, ?, ?, '{}', ?)",
+        )
+        .bind(&execution_id)
+        .bind(&lead.conversation_id)
+        .bind(&lead.conversation_id)
+        .bind(TEST_INSTALLATION_OWNER)
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        repo.delete(&lead.conversation_id).await.unwrap();
+        assert!(repo.get(&lead.conversation_id).await.unwrap().is_none());
+        assert!(repo.get(&attempt.conversation_id).await.unwrap().is_some());
+
+        let lead_link: (i64, Option<i64>) = sqlx::query_as(
+            "SELECT active, cleanup_completed_at \
+             FROM conversation_execution_links \
+             WHERE conversation_id = ? AND relation = 'lead'",
+        )
+        .bind(&lead.conversation_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(lead_link.0, 0);
+        assert!(lead_link.1.is_some());
+
+        let event: (String, String) = sqlx::query_as(
+            "SELECT actor_conversation_id, payload \
+             FROM agent_execution_events \
+             WHERE execution_id = ? AND sequence = 1",
+        )
+        .bind(&execution_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(event.0, lead.conversation_id);
+        assert_eq!(event.1, "{}");
     }
 
     #[tokio::test]

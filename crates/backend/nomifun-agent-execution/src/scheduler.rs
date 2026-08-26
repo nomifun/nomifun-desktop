@@ -13,7 +13,8 @@ use dashmap::DashMap;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 use nomifun_api_types::{
-    AgentExecution, AgentExecutionDetail, ExecutionModelRef, ExecutionParticipant, ExecutionStep,
+    AgentErrorCode, AgentExecution, AgentExecutionDetail, ExecutionModelRef,
+    ExecutionParticipant, ExecutionStep,
 };
 use nomifun_common::{
     AdaptationPolicy, AgentExecutionEventKind, AgentExecutionStatus, AgentStepMode, AppError,
@@ -49,6 +50,14 @@ const EFFECT_RETRY_MIN: Duration = Duration::from_secs(1);
 const EFFECT_RETRY_MAX: Duration = Duration::from_secs(60);
 const CLEANUP_EFFECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CLEANUP_PARALLELISM: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttemptRetryClass {
+    Deterministic,
+    Provider,
+    RateLimited,
+    Timeout,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CleanupValidation {
@@ -1879,10 +1888,11 @@ impl ExecutionScheduler {
                     artifact_contract_error
                 {
                     // The turn itself finished, but its verified delivery did
-                    // not satisfy the immutable Step requirement. Make the
-                    // integrity failure visible and retryable under the same
-                    // bounded adaptive policy as other provider faults.
-                    (true, true, format!("Agent artifact delivery failed: {error}"))
+                    // not satisfy the immutable Step requirement. This is a
+                    // deterministic contract violation: replaying the same
+                    // Step only creates another Attempt and can duplicate
+                    // side effects without changing the contract.
+                    (false, true, format!("Agent artifact delivery failed: {error}"))
                 } else {
                     let retryable = match outcome.error_retryable {
                         Some(value) => value,
@@ -1919,7 +1929,19 @@ impl ExecutionScheduler {
                     } else {
                         "Agent attempt timed out".to_owned()
                     };
-                    (retryable, has_marker, reason)
+                    let retry_class = attempt_outcome_retry_class(&outcome, has_marker, retryable);
+                    let retryable = has_marker
+                        && matches!(
+                            retry_class,
+                            AttemptRetryClass::Provider
+                                | AttemptRetryClass::RateLimited
+                                | AttemptRetryClass::Timeout
+                        );
+                    (
+                        retryable,
+                        has_marker,
+                        reason,
+                    )
                 };
                 tracing::warn!(
                     %execution_id,
@@ -2478,20 +2500,89 @@ fn attempt_error_transition(
 fn attempt_error_is_retryable(error: &AppError) -> bool {
     match error {
         AppError::RateLimited | AppError::Timeout(_) => true,
-        AppError::BadGateway(_) => nomifun_ai_agent::AgentSendError::from_app_error_ref(error)
-            .stream_error()
-            .retryable
-            .unwrap_or(true),
-        AppError::Conflict(_) => true,
-        AppError::Internal(message) => {
-            message.starts_with("Database error:")
-                || message.starts_with("Database init error:")
+        AppError::BadGateway(_) => {
+            let stream_error = nomifun_ai_agent::AgentSendError::from_app_error_ref(error);
+            stream_error.stream_error().retryable == Some(true)
+                && stream_error
+                    .stream_error()
+                    .code
+                    .is_some_and(is_transient_agent_error_code)
         }
         // Invalid workspace/model/input/config errors are deterministic. A
         // retry would create another Attempt with the same guaranteed failure
         // and is exactly the repeated-node behavior seen in the field report.
         _ => false,
     }
+}
+
+fn attempt_outcome_retry_class(
+    outcome: &AttemptOutcome,
+    has_marker: bool,
+    retryable: bool,
+) -> AttemptRetryClass {
+    if !has_marker {
+        // A completed provider turn without a terminal error marker has no
+        // durable evidence of a deterministic rejection. Treat it as the
+        // bounded timeout path, and never as an open-ended provider retry.
+        return AttemptRetryClass::Timeout;
+    }
+    if !retryable {
+        return AttemptRetryClass::Deterministic;
+    }
+    match outcome.error_code.as_deref() {
+        Some("USER_LLM_PROVIDER_RATE_LIMITED") => AttemptRetryClass::RateLimited,
+        Some("USER_LLM_PROVIDER_TIMEOUT") => AttemptRetryClass::Timeout,
+        Some(code) if is_transient_agent_error_code_name(code) => AttemptRetryClass::Provider,
+        _ if outcome
+            .error
+            .as_deref()
+            .is_some_and(is_transient_provider_message) =>
+        {
+            AttemptRetryClass::Provider
+        }
+        _ => AttemptRetryClass::Deterministic,
+    }
+}
+
+fn is_transient_agent_error_code(code: AgentErrorCode) -> bool {
+    matches!(
+        code,
+        AgentErrorCode::UserLlmProviderGatewayError
+            | AgentErrorCode::UserLlmProviderNetworkError
+            | AgentErrorCode::UserLlmProviderEmptyResponse
+            | AgentErrorCode::UserLlmProviderRateLimited
+            | AgentErrorCode::UserLlmProviderTimeout
+    )
+}
+
+fn is_transient_agent_error_code_name(code: &str) -> bool {
+    matches!(
+        code,
+        "USER_LLM_PROVIDER_GATEWAY_ERROR"
+            | "USER_LLM_PROVIDER_NETWORK_ERROR"
+            | "USER_LLM_PROVIDER_EMPTY_RESPONSE"
+            | "USER_LLM_PROVIDER_RATE_LIMITED"
+            | "USER_LLM_PROVIDER_TIMEOUT"
+    )
+}
+
+fn is_transient_provider_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "rate limit",
+        "rate_limit",
+        "quota",
+        "timeout",
+        "timed out",
+        "deadline exceeded",
+        "gateway",
+        "network",
+        "connection",
+        "provider stream truncated",
+        "empty response",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 fn agent_outcome_can_complete(outcome: &AttemptOutcome, step_spec: &str) -> bool {
@@ -3148,6 +3239,89 @@ mod tests {
             "Nomi agent error: API error: provider stream protocol violation: tool progress 'Bash' was not advertised in this request"
                 .to_owned()
         )));
+        assert!(attempt_error_is_retryable(&AppError::RateLimited));
+        assert!(attempt_error_is_retryable(&AppError::Timeout(
+            "provider did not respond".to_owned()
+        )));
+        assert!(!attempt_error_is_retryable(&AppError::BadGateway(
+            "invalid provider request".to_owned()
+        )));
+    }
+
+    #[test]
+    fn artifact_contract_mismatch_is_deterministic_and_never_retryable() {
+        let outcome = AttemptOutcome {
+            conversation_id: "0190f5fe-7c00-7a00-8000-000000000201".to_owned(),
+            text: Some("done".to_owned()),
+            output_files: vec!["/workspace/result.jpg".to_owned()],
+            ok: true,
+            tokens: Some(1),
+            error: None,
+            error_code: None,
+            error_retryable: None,
+        };
+        assert!(!agent_outcome_can_complete(&outcome, "Generate 2 PNG images"));
+        assert_eq!(
+            attempt_outcome_retry_class(&outcome, true, true),
+            AttemptRetryClass::Deterministic
+        );
+    }
+
+    #[test]
+    fn only_explicit_transient_provider_outcomes_are_retryable() {
+        let transient = |error_code: &str| AttemptOutcome {
+            conversation_id: "0190f5fe-7c00-7a00-8000-000000000202".to_owned(),
+            text: None,
+            output_files: Vec::new(),
+            ok: false,
+            tokens: None,
+            error: Some("provider failed".to_owned()),
+            error_code: Some(error_code.to_owned()),
+            error_retryable: Some(true),
+        };
+        assert_eq!(
+            attempt_outcome_retry_class(
+                &transient("USER_LLM_PROVIDER_GATEWAY_ERROR"),
+                true,
+                true
+            ),
+            AttemptRetryClass::Provider
+        );
+        assert_eq!(
+            attempt_outcome_retry_class(&transient("USER_LLM_PROVIDER_RATE_LIMITED"), true, true),
+            AttemptRetryClass::RateLimited
+        );
+        assert_eq!(
+            attempt_outcome_retry_class(&transient("USER_LLM_PROVIDER_TIMEOUT"), true, true),
+            AttemptRetryClass::Timeout
+        );
+        assert_eq!(
+            attempt_outcome_retry_class(
+                &transient("USER_LLM_PROVIDER_INVALID_REQUEST"),
+                true,
+                true
+            ),
+            AttemptRetryClass::Deterministic
+        );
+
+        let timeout_without_marker = transient("USER_LLM_PROVIDER_TIMEOUT");
+        assert_eq!(
+            attempt_error_transition(
+                ExecutionAttemptStatus::Failed,
+                AdaptationPolicy::Adaptive,
+                1,
+                false,
+            ),
+            (
+                ExecutionAttemptStatus::Failed,
+                ExecutionStepStatus::Failed,
+                false
+            )
+        );
+        assert_eq!(
+            attempt_outcome_retry_class(&timeout_without_marker, false, true),
+            AttemptRetryClass::Timeout
+        );
     }
 
     #[test]
@@ -3940,6 +4114,30 @@ mod tests {
         );
         assert_eq!(runner_guard.call_count("workspace-root"), 1);
         assert!(data_dir.path().join("agent-executions").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scheduler_harness_fails_invalid_workspace_before_creating_attempt() {
+        let runner = Arc::new(HarnessAttemptRunner::parallel());
+        let runner_guard = runner.clone();
+        let (scheduler, repository, execution_id, _data_dir, owner_id) = make_scheduler_harness(
+            runner,
+            &["invalid-workspace"],
+            &[],
+            1,
+            AdaptationPolicy::Adaptive,
+            Some("../outside"),
+        )
+        .await;
+
+        scheduler.start(owner_id.clone(), execution_id.clone());
+        let detail = wait_for_terminal(&repository, &owner_id, &execution_id).await;
+        assert_eq!(detail.execution.status, "failed");
+        assert_eq!(runner_guard.call_count("invalid-workspace"), 0);
+        assert!(
+            detail.attempts.is_empty(),
+            "deterministic workspace preparation must fail the Execution before Attempt creation"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

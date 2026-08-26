@@ -3128,6 +3128,20 @@ impl BrowserSessionHub {
         Ok(result)
     }
 
+    /// Close only turn-scoped Lanes. A Lane explicitly marked keep-alive is
+    /// user-pinned work (for example media playback) and survives the normal
+    /// turn boundary; owner teardown still uses `close_owner_lease` and
+    /// therefore always reclaims it.
+    pub async fn close_turn_lanes(
+        &self,
+        lease_id: &crate::OwnerLeaseId,
+    ) -> Result<CloseResult, BrowserPlatformError> {
+        self.close_matching(|lane| {
+            &lane.caller.owner_lease_id == lease_id && !lane.keep_alive
+        })
+        .await
+    }
+
     /// Revokes one exact owner lease and closes only the lanes that carry that
     /// lease. This capability-scoped path is how runtime lifecycle teardown
     /// reclaims Lanes (runtime kill/drop revokes the owner lease).
@@ -4535,6 +4549,7 @@ impl BrowserSessionHub {
             error_code: None,
             error_message: None,
             recoverable: true,
+            keep_alive: false,
         };
         let start_flight =
             matches!(admission, Admission::Ready).then(|| Arc::new(LaneStartFlight::new()));
@@ -8601,6 +8616,29 @@ impl BrowserSessionHub {
         Ok(Self::scoped_close_result(1, false))
     }
 
+    pub async fn set_keep_alive(
+        &self,
+        caller: &CallerIdentity,
+        lane_id: &BrowserLaneId,
+        keep_alive: bool,
+    ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+        self.require_operation(caller, BrowserOperationKind::Manage)?;
+        let lane = self.authorized_lane(caller, lane_id).await?;
+        let mut snapshot = lane.snapshot.write().await;
+        snapshot.keep_alive = keep_alive;
+        let updated = snapshot.clone();
+        drop(snapshot);
+        self.emit(
+            if keep_alive {
+                "lane_keep_alive_enabled"
+            } else {
+                "lane_keep_alive_disabled"
+            },
+            Some(&updated),
+        );
+        Ok(updated)
+    }
+
     /// Detach one Lane from inventory and scheduler capacity before any driver
     /// I/O. The driver is first copied into the Hub-owned retry queue, so caller
     /// cancellation cannot lose cleanup authority after detachment.
@@ -10649,6 +10687,7 @@ impl BrowserSessionHub {
         };
         let snapshot = lane.current_snapshot().await;
         if lane.closing.load(Ordering::Acquire)
+            || snapshot.keep_alive
             || snapshot.lifecycle_state != LaneLifecycleState::Running
             || snapshot.active_operation_count != 0
             || now.saturating_sub(snapshot.last_active_at_ms) < idle_limit_ms
@@ -10728,6 +10767,7 @@ impl BrowserSessionHub {
             }
         };
         if lane.closing.load(Ordering::Acquire)
+            || snapshot.keep_alive
             || !lifecycle_matches
             || snapshot.active_operation_count != 0
             || now.saturating_sub(snapshot.last_active_at_ms) < idle_limit_ms
@@ -13017,6 +13057,27 @@ impl BrowserLaneClient {
             .require_operation(&self.caller, BrowserOperationKind::Manage)?;
         self.hub
             .close_owner_lanes(&self.caller.owner_lease_id)
+            .await
+    }
+
+    /// Close only ordinary turn-scoped Lanes. Explicitly kept-alive Lanes
+    /// survive a turn boundary; owner/runtime teardown still reclaims them.
+    pub async fn close_turn_lanes(&self) -> Result<CloseResult, BrowserPlatformError> {
+        self.hub
+            .require_operation(&self.caller, BrowserOperationKind::Manage)?;
+        self.hub
+            .close_turn_lanes(&self.caller.owner_lease_id)
+            .await
+    }
+
+    /// Set the trusted host's long-lived Lane intent.
+    pub async fn set_keep_alive(
+        &self,
+        lane_id: &BrowserLaneId,
+        keep_alive: bool,
+    ) -> Result<BrowserLaneSnapshot, BrowserPlatformError> {
+        self.hub
+            .set_keep_alive(&self.caller, lane_id, keep_alive)
             .await
     }
 
@@ -18914,6 +18975,47 @@ mod tests {
         assert!(harness.hub.list_lanes().await.is_empty());
         assert!(harness.hub.managed_host_process_ids().await.is_empty());
         assert_eq!(harness.probe.host_shutdowns.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn keep_alive_lane_survives_turn_cleanup_and_idle_sweep_until_owner_revoke() {
+        let harness = harness();
+        let keep_alive_lane = open(&harness.client, "keep-alive-media").await;
+        let ordinary_lane = open(&harness.client, "turn-scoped").await;
+        harness
+            .client
+            .set_keep_alive(&keep_alive_lane, true)
+            .await
+            .unwrap();
+
+        let turn_cleanup = harness.client.close_turn_lanes().await.unwrap();
+        assert_eq!(turn_cleanup.closed, 1);
+        assert!(harness.hub.lane_snapshot_unchecked(&ordinary_lane).await.is_none());
+        assert!(harness.hub.lane_snapshot_unchecked(&keep_alive_lane).await.is_some());
+
+        let idle_expiry_ms = harness.hub.resource_policy().await.idle_expiry_ms;
+        harness.clock.advance(idle_expiry_ms + 1);
+        assert_eq!(harness.hub.sweep().await.unwrap().closed, 0);
+        assert!(harness.hub.lane_snapshot_unchecked(&keep_alive_lane).await.is_some());
+
+        let owner_lease_id = harness.client.caller().owner_lease_id.clone();
+        let revoked = {
+            let mut result = Err(BrowserPlatformError::new(
+                BrowserErrorCode::BrowserUnavailable,
+                "fixture",
+                true,
+                "retry",
+            ));
+            for _ in 0..3 {
+                result = harness.hub.revoke_owner_lease(&owner_lease_id).await;
+                if result.is_ok() {
+                    break;
+                }
+            }
+            result.unwrap()
+        };
+        assert_eq!(revoked.closed, 1);
+        assert!(harness.hub.lane_snapshot_unchecked(&keep_alive_lane).await.is_none());
     }
 
     #[tokio::test]

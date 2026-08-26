@@ -102,6 +102,9 @@
   "details": {
     "laneFallback": "浏览器通道",
     "managed": "受管",
+    "keepAlive": "持续运行",
+    "keepAliveEnabled": "已启用",
+    "keepAliveDisabled": "未启用",
     "backgroundExecution": "普通 Agent 浏览默认静默执行，不显示窗口。你可以将运行中的主身份通道前台打开，也可以转回静默无头模式；页面输入仍由 Agent 控制。",
     "closeLane": "关闭通道",
     "waitingCapacity": "正在等待浏览器容量",
@@ -129,6 +132,7 @@
       "identity": "身份",
       "identityGeneration": "身份代次",
       "lifecycle": "生命周期",
+      "keepAlive": "持续运行",
       "activeOperations": "活动操作",
       "queueState": "队列状态",
       "queuePosition": "队列位置",

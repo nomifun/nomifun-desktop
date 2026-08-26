@@ -94,6 +94,11 @@ struct EmptyParams {}
 struct OpenParams {
     #[serde(default)]
     lane_name: Option<String>,
+    /// Keep this Lane alive across ordinary Agent turn cleanup for user-requested
+    /// long-lived media/download work. Explicit close and owner teardown still
+    /// reclaim it.
+    #[serde(default)]
+    keep_alive: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -405,25 +410,33 @@ async fn dispatch_management(
 }
 
 async fn browser_open(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: OpenParams) -> Value {
+    let mut input = json!({
+        "action": "browser_open",
+        "lane_name": p.lane_name,
+    });
+    if let Some(keep_alive) = p.keep_alive {
+        input["keep_alive"] = json!(keep_alive);
+    }
     dispatch_management(
         deps,
         ctx,
-        json!({
-            "action": "browser_open",
-            "lane_name": p.lane_name,
-        }),
+        input,
     )
     .await
 }
 
 async fn browser_fork(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: OpenParams) -> Value {
+    let mut input = json!({
+        "action": "browser_fork",
+        "lane_name": p.lane_name,
+    });
+    if let Some(keep_alive) = p.keep_alive {
+        input["keep_alive"] = json!(keep_alive);
+    }
     dispatch_management(
         deps,
         ctx,
-        json!({
-            "action": "browser_fork",
-            "lane_name": p.lane_name,
-        }),
+        input,
     )
     .await
 }
