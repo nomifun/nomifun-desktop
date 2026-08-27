@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use nomifun_common::AppError;
+use nomifun_common::{AppError, KnowledgeSourceItemId};
 use nomifun_net::egress::{
     BodyOverflowPolicy, SafeHttpClient, SafeHttpError, SafeHttpErrorKind,
     redacted_url, validate_untrusted_url,
@@ -279,7 +279,54 @@ pub fn slug_for_url(url: &Url) -> String {
 /// Assemble a snapshot document: a readable Markdown metadata quote
 /// (`source_url`, `fetched_at`, optional `title`) followed by the page body.
 pub fn snapshot_markdown(source_url: &str, fetched_at: &str, title: Option<&str>, body: &str) -> String {
+    snapshot_markdown_with_identity(None, source_url, None, fetched_at, title, false, body)
+}
+
+/// Assemble a managed snapshot with a durable source-item marker.  The marker
+/// survives moves, renames, export/import, and projection rebuilds, so a
+/// directory name is never needed to infer ownership.
+pub fn managed_snapshot_markdown(
+    source_item_id: &KnowledgeSourceItemId,
+    source_url: &str,
+    final_url: Option<&str>,
+    fetched_at: &str,
+    title: Option<&str>,
+    truncated: bool,
+    body: &str,
+) -> String {
+    snapshot_markdown_with_identity(
+        Some(source_item_id),
+        source_url,
+        final_url,
+        fetched_at,
+        title,
+        truncated,
+        body,
+    )
+}
+
+fn snapshot_markdown_with_identity(
+    source_item_id: Option<&KnowledgeSourceItemId>,
+    source_url: &str,
+    final_url: Option<&str>,
+    fetched_at: &str,
+    title: Option<&str>,
+    truncated: bool,
+    body: &str,
+) -> String {
     let mut out = format!("> **source_url**: {source_url}\n> **fetched_at**: {fetched_at}\n");
+    if let Some(source_item_id) = source_item_id {
+        out.push_str(&format!(
+            "> **nomifun_source_item_id**: {source_item_id}\n"
+        ));
+        out.push_str("> **nomifun_source_relationship**: managed\n");
+    }
+    if let Some(final_url) = final_url.filter(|url| *url != source_url) {
+        out.push_str(&format!("> **final_url**: {final_url}\n"));
+    }
+    if truncated {
+        out.push_str("> **truncated**: true\n");
+    }
     if let Some(title) = title.map(str::trim).filter(|t| !t.is_empty()) {
         // Collapse runs of whitespace (incl. newlines/tabs): a multi-line
         // title must remain on one metadata line.
@@ -290,6 +337,69 @@ pub fn snapshot_markdown(source_url: &str, fetched_at: &str, title: Option<&str>
     out.push_str(body.trim_end());
     out.push('\n');
     out
+}
+
+/// Extract and validate the durable source-item marker from the leading
+/// managed header.  A malformed marker is treated as absent here; callers
+/// that reconcile ownership detect duplicate/ambiguous valid markers and fail
+/// closed before publishing.
+pub fn snapshot_source_item_id(content: &str) -> Option<KnowledgeSourceItemId> {
+    let mut lines = content.lines();
+    let first = lines.next()?.trim();
+    if !first.starts_with("> **source_url**:") && first != "---" {
+        return None;
+    }
+
+    if first == "---" {
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed == "---" {
+                return None;
+            }
+            if let Some(value) = trimmed.strip_prefix("nomifun_source_item_id:") {
+                return KnowledgeSourceItemId::parse(value.trim()).ok();
+            }
+        }
+        return None;
+    }
+
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            return None;
+        }
+        if let Some(value) = trimmed.strip_prefix("> **nomifun_source_item_id**:") {
+            return KnowledgeSourceItemId::parse(value.trim()).ok();
+        }
+    }
+    None
+}
+
+/// Relationship marker stored in managed/detached/copied snapshot headers.
+/// Legacy snapshots omit it and are treated as `managed` only while they are
+/// uniquely matched to an active source URL during migration.
+pub fn snapshot_source_relationship(content: &str) -> Option<&str> {
+    let mut lines = content.lines();
+    let first = lines.next()?.trim();
+    if !first.starts_with("> **source_url**:") && first != "---" {
+        return None;
+    }
+    let (prefix, end) = if first == "---" {
+        ("nomifun_source_relationship:", "---")
+    } else {
+        ("> **nomifun_source_relationship**:", "---")
+    };
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == end {
+            return None;
+        }
+        if let Some(value) = trimmed.strip_prefix(prefix) {
+            let value = value.trim();
+            return matches!(value, "managed" | "detached" | "copy").then_some(value);
+        }
+    }
+    None
 }
 
 /// Extract the `source_url` value from a snapshot header. New snapshots use
@@ -540,6 +650,24 @@ mod tests {
             Some("https://e.com/new")
         );
         assert_eq!(snapshot_source_url("---\r\nsource_url: https://e.com/x\r\n---\r\nbody"), Some("https://e.com/x"));
+    }
+
+    #[test]
+    fn managed_snapshot_round_trips_stable_source_item_identity() {
+        let source_item_id = KnowledgeSourceItemId::new();
+        let md = managed_snapshot_markdown(
+            &source_item_id,
+            "https://e.com/docs",
+            Some("https://www.e.com/docs"),
+            "2026-01-01T00:00:00Z",
+            Some("Docs"),
+            true,
+            "body",
+        );
+        assert_eq!(snapshot_source_item_id(&md).as_ref(), Some(&source_item_id));
+        assert!(md.contains("> **final_url**: https://www.e.com/docs"));
+        assert!(md.contains("> **truncated**: true"));
+        assert_eq!(snapshot_source_item_id("# user note\nbody"), None);
     }
 
     #[test]

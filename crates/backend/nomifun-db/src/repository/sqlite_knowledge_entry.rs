@@ -227,7 +227,7 @@ async fn validate_live_parent(
     Ok(Some(parent))
 }
 
-async fn insert_projection_row(
+async fn upsert_projection_row(
     tx: &mut Transaction<'_, Sqlite>,
     params: &UpsertKnowledgeEntryParams,
 ) -> Result<KnowledgeEntryRow, DbError> {
@@ -237,6 +237,15 @@ async fn insert_projection_row(
             rel_path, portable_rel_path, fs_identity, content_hash, revision, deleted_at, \
             created_at, updated_at\
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(knowledge_entry_id) DO UPDATE SET \
+            parent_entry_id = excluded.parent_entry_id, name = excluded.name, \
+            kind = excluded.kind, origin = excluded.origin, rel_path = excluded.rel_path, \
+            portable_rel_path = excluded.portable_rel_path, \
+            fs_identity = excluded.fs_identity, content_hash = excluded.content_hash, \
+            revision = excluded.revision, deleted_at = excluded.deleted_at, \
+            created_at = MIN(knowledge_entries.created_at, excluded.created_at), \
+            updated_at = excluded.updated_at \
+         WHERE knowledge_entries.knowledge_base_id = excluded.knowledge_base_id \
          RETURNING *",
     )
     .bind(params.knowledge_entry_id.as_str())
@@ -518,12 +527,59 @@ impl IKnowledgeEntryRepository for SqliteKnowledgeRepository {
                 current_tree_revision
             )));
         }
-        sqlx::query("DELETE FROM knowledge_entries WHERE knowledge_base_id = ?")
+        // The projection is rebuildable, but its stable IDs are also anchors
+        // for source provenance and editor sessions. Keep missing rows as
+        // tombstones instead of deleting the whole base projection. A later
+        // marker/inode/path match can then resurrect the same identity.
+        let incoming_ids = entries
+            .iter()
+            .map(|entry| entry.knowledge_entry_id.as_str())
+            .collect::<HashSet<_>>();
+        let current_live = sqlx::query_as::<_, KnowledgeEntryRow>(
+            "SELECT * FROM knowledge_entries \
+             WHERE knowledge_base_id = ? AND deleted_at IS NULL",
+        )
+        .bind(knowledge_base_id.as_str())
+        .fetch_all(&mut *tx)
+        .await?;
+        let scan_time = entries
+            .iter()
+            .map(|entry| entry.updated_at)
+            .max()
+            .unwrap_or_else(nomifun_common::now_ms);
+        for missing in current_live.iter().filter(|entry| {
+            !incoming_ids.contains(entry.knowledge_entry_id.as_str())
+        }) {
+            let deleted_at = scan_time.max(missing.updated_at).max(missing.created_at);
+            sqlx::query(
+                "UPDATE knowledge_entries SET deleted_at = ?, revision = revision + 1, \
+                    updated_at = ? \
+                 WHERE knowledge_base_id = ? AND knowledge_entry_id = ? AND deleted_at IS NULL",
+            )
+            .bind(deleted_at)
+            .bind(deleted_at)
             .bind(knowledge_base_id.as_str())
+            .bind(missing.knowledge_entry_id.as_str())
             .execute(&mut *tx)
             .await?;
+            // A source's placement default is a live-directory preference, not
+            // historical provenance. Clear it in the same transaction that
+            // tombstones the directory so the logical SET_NULL contract never
+            // exposes a dangling or deleted parent.
+            sqlx::query(
+                "UPDATE knowledge_sources SET \
+                    default_parent_entry_id = NULL, revision = revision + 1, \
+                    updated_at = MAX(updated_at, ?) \
+                 WHERE knowledge_base_id = ? AND default_parent_entry_id = ?",
+            )
+            .bind(deleted_at)
+            .bind(knowledge_base_id.as_str())
+            .bind(missing.knowledge_entry_id.as_str())
+            .execute(&mut *tx)
+            .await?;
+        }
         for entry in entries {
-            insert_projection_row(&mut tx, entry).await?;
+            upsert_projection_row(&mut tx, entry).await?;
         }
         let tree_revision = bump_tree_revision(&mut tx, knowledge_base_id).await?;
         tx.commit().await?;
@@ -772,6 +828,19 @@ impl IKnowledgeEntryRepository for SqliteKnowledgeRepository {
         .fetch_all(&mut *tx)
         .await
         .map_err(projection_error)?;
+        for affected_id in &affected_ids {
+            sqlx::query(
+                "UPDATE knowledge_sources SET \
+                    default_parent_entry_id = NULL, revision = revision + 1, \
+                    updated_at = MAX(updated_at, ?) \
+                 WHERE knowledge_base_id = ? AND default_parent_entry_id = ?",
+            )
+            .bind(deleted_at)
+            .bind(knowledge_base_id.as_str())
+            .bind(affected_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         let entry = fetch_entry(&mut tx, knowledge_base_id, knowledge_entry_id)
             .await?
             .ok_or_else(|| {

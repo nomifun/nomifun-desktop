@@ -72,6 +72,27 @@ describe('Knowledge detail document action bar', () => {
     expect(detailSource.includes("className='!hidden group-hover:!inline-flex shrink-0'")).toBe(false);
   });
 
+  test('builds source-aware actions from server capabilities instead of provenance', () => {
+    expect(detailSource.includes("hasKnowledgeEntryCapability(item, 'rename')")).toBe(true);
+    expect(detailSource.includes("hasKnowledgeEntryCapability(item, 'relocate')")).toBe(true);
+    expect(detailSource.includes("key='refresh-source'")).toBe(true);
+    expect(detailSource.includes("key='copy-as-editable'")).toBe(true);
+    expect(detailSource.includes("key='detach-source'")).toBe(true);
+    expect(detailSource.includes("key='remove-source'")).toBe(true);
+    expect(detailSource.includes("trigger='contextMenu'")).toBe(true);
+    expect(detailSource.includes("item.origin !== 'url_snapshot'")).toBe(false);
+  });
+
+  test('fails closed on content editing and invalidates the selected read after refresh', () => {
+    expect(detailSource.includes("loadedDocument?.rel_path === selectedPath")).toBe(true);
+    expect(
+      detailSource.includes("hasKnowledgeEntryCapability(loadedDocument, 'edit_content')")
+    ).toBe(true);
+    expect(detailSource.includes('findKnowledgeTreeEntry(treeData, selectedPath)?.origin')).toBe(false);
+    expect(detailSource.includes('forceReloadSelectedDocument')).toBe(true);
+    expect(detailSource.includes('setDocumentReloadToken((token) => token + 1)')).toBe(true);
+  });
+
   test('right-aligns tree row actions and reveals them only for the active row', () => {
     expect(detailSource.includes('knowledge-doc-tree')).toBe(true);
     expect(detailSource.includes('[&_.arco-tree-node-title-wrapper]:flex')).toBe(true);

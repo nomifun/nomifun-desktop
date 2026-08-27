@@ -285,7 +285,9 @@ const PreviewPanel: React.FC = () => {
   // (Word, PPT, PDF, Excel components provide their own)
   // 对所有有 file_path 的文件显示"在系统中打开"按钮（统一在工具栏显示）
   // Show "Open in System" button for all files with file_path (unified in toolbar)
-  const showOpenInSystemButton = Boolean(metadata?.file_path);
+  const showOpenInSystemButton = Boolean(
+    metadata?.file_path && metadata.allow_open_in_system !== false
+  );
 
   // 下载文件到本地 / Download file to local system
   const handleDownload = useCallback(async () => {

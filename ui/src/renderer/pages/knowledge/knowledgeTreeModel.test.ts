@@ -1,5 +1,14 @@
 import { describe, expect, test } from 'bun:test';
-import type { IKnowledgeFileEntry, IKnowledgeTreeEntry } from '@/common/adapter/ipcBridge';
+import type {
+  IKnowledgeEntryCapabilities,
+  IKnowledgeFileEntry,
+  IKnowledgeTreeEntry,
+} from '@/common/adapter/ipcBridge';
+import {
+  parseKnowledgeEntryId,
+  parseKnowledgeSourceId,
+  parseKnowledgeSourceItemId,
+} from '@/common/types/ids';
 import {
   applyKnowledgePathRelocation,
   buildKnowledgeSearchTree,
@@ -23,12 +32,28 @@ const file = (rel_path: string): IKnowledgeFileEntry => ({
   modified_at: null,
 });
 
+const editableCapabilities: IKnowledgeEntryCapabilities = {
+  read_content: true,
+  edit_content: true,
+  rename: true,
+  relocate: true,
+  accept_children: true,
+  delete_entry: true,
+  remove_source: false,
+  refresh_source: false,
+  detach_source: false,
+  copy_as_editable: false,
+  export_entry: true,
+  edit_metadata: true,
+};
+
 const node = (name: string, rel_path: string, is_dir: boolean): IKnowledgeTreeEntry => ({
   name,
   rel_path,
   is_dir,
   is_file: !is_dir,
   modified_at: null,
+  capabilities: editableCapabilities,
   ...(is_dir ? {} : { size: rel_path.length }),
 });
 
@@ -63,6 +88,41 @@ describe('knowledge detail tree model', () => {
         ],
       },
     ]);
+  });
+
+  test('search preserves stable identity, revision, capabilities, and source metadata', () => {
+    const entryId = parseKnowledgeEntryId('01912345-6789-7abc-8def-0123456789ab');
+    const sourceFile: IKnowledgeFileEntry = {
+      ...file('docs/captured.md'),
+      entry_id: entryId,
+      revision: 9,
+      origin: 'url_snapshot',
+      capabilities: {
+        ...editableCapabilities,
+        edit_content: false,
+        remove_source: true,
+        refresh_source: true,
+        detach_source: true,
+        copy_as_editable: true,
+      },
+      source: {
+        source_id: parseKnowledgeSourceId('0190f5fe-7c00-7a00-8000-000000000705'),
+        source_item_id: parseKnowledgeSourceItemId('0190f5fe-7c00-7a00-8000-000000000706'),
+        source_url: 'https://example.com/docs',
+        relationship: 'managed',
+        sync_status: 'synced',
+      },
+    };
+
+    const tree = buildKnowledgeSearchTree([sourceFile], 'captured');
+    const result = tree[0]?.children?.[0];
+
+    expect(result?.entry_id).toBe(entryId);
+    expect(result?.revision).toBe(9);
+    expect(result?.capabilities?.edit_content).toBe(false);
+    expect(result?.capabilities?.relocate).toBe(true);
+    expect(result?.source?.relationship).toBe('managed');
+    expect(result?.source?.source_url).toBe('https://example.com/docs');
   });
 
   test('merges lazy-loaded children into the matching directory only', () => {

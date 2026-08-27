@@ -1,4 +1,8 @@
 import type { IKnowledgeFileEntry, IKnowledgeTreeEntry } from '@/common/adapter/ipcBridge';
+import {
+  hasKnowledgeEntryCapability,
+  knowledgeTreeEntryFromFile,
+} from './entryCapabilities';
 
 function fileName(relPath: string): string {
   return relPath.split('/').filter(Boolean).at(-1) ?? relPath;
@@ -15,14 +19,15 @@ function dirNode(name: string, relPath: string): IKnowledgeTreeEntry {
   };
 }
 
-function fileNode(file: IKnowledgeFileEntry): IKnowledgeTreeEntry {
+function fileNode(
+  file: IKnowledgeFileEntry,
+  known?: IKnowledgeTreeEntry
+): IKnowledgeTreeEntry {
+  const projected = knowledgeTreeEntryFromFile(file);
   return {
+    ...known,
+    ...projected,
     name: fileName(file.rel_path),
-    rel_path: file.rel_path,
-    is_dir: false,
-    is_file: true,
-    size: file.size,
-    modified_at: file.modified_at,
   };
 }
 
@@ -55,6 +60,7 @@ export function knowledgeDirectoryOnlyTree(
 ): IKnowledgeTreeEntry[] {
   return nodes.flatMap((node) => {
     if (!node.is_dir) return [];
+    if (!hasKnowledgeEntryCapability(node, 'accept_children')) return [];
     if (
       movingEntry?.is_dir &&
       (node.rel_path === movingEntry.rel_path ||
@@ -75,13 +81,22 @@ export function knowledgeDirectoryOnlyTree(
 
 export function buildKnowledgeSearchTree(
   files: IKnowledgeFileEntry[],
-  query: string
+  query: string,
+  knownTree: IKnowledgeTreeEntry[] = []
 ): IKnowledgeTreeEntry[] {
   const q = query.trim().toLowerCase();
   if (!q) return [];
 
   const root: IKnowledgeTreeEntry[] = [];
   const dirs = new Map<string, IKnowledgeTreeEntry>();
+  const knownByPath = new Map<string, IKnowledgeTreeEntry>();
+  const collectKnown = (nodes: IKnowledgeTreeEntry[]) => {
+    for (const node of nodes) {
+      knownByPath.set(node.rel_path, node);
+      if (node.children?.length) collectKnown(node.children);
+    }
+  };
+  collectKnown(knownTree);
 
   for (const file of files) {
     if (!file.rel_path.toLowerCase().includes(q)) continue;
@@ -93,14 +108,17 @@ export function buildKnowledgeSearchTree(
       currentPath = currentPath ? `${currentPath}/${segments[i]}` : segments[i];
       let dir = dirs.get(currentPath);
       if (!dir) {
-        dir = dirNode(segments[i], currentPath);
+        const known = knownByPath.get(currentPath);
+        dir = known?.is_dir
+          ? { ...known, children: [] }
+          : dirNode(segments[i], currentPath);
         dirs.set(currentPath, dir);
         level.push(dir);
       }
       dir.children ??= [];
       level = dir.children;
     }
-    level.push(fileNode(file));
+    level.push(fileNode(file, knownByPath.get(file.rel_path)));
   }
 
   return sortKnowledgeTreeNodes(root);

@@ -6,9 +6,8 @@
 //!   rejected before anything touches the registry).
 //! - `meta.json` — `{name, description}` of the exported base.
 //! - `files/**` — every `.md` under the base root with relative paths
-//!   preserved. The walk deliberately carries no path filter: a base holds
-//!   exactly one kind of content, and every document in it is user data that
-//!   must survive a machine migration.
+//!   preserved. Internal machinery/trash directories are excluded; every
+//!   visible document remains user data and survives a machine migration.
 //!
 //! Import extracts into a temp dir under the managed knowledge dir (same
 //! volume as the final destination, so file moves are cheap renames), with
@@ -17,6 +16,11 @@
 //! symlink entries are rejected, decompression-bomb caps bound the
 //! extraction, and only `manifest.json` / `meta.json` / `files/**.md`
 //! entries are accepted.
+//!
+//! This portable document export intentionally imports captures as static,
+//! editable files; it never activates remote URLs on another installation
+//! without consent. The installation-wide offline backup carries the SQLite
+//! source/provenance graph when exact sync restoration is required.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -161,6 +165,7 @@ fn write_zip_to(root: &Path, meta: &ExportMeta, tmp: &Path) -> Result<(u64, u64)
     // Sorted relative paths → deterministic packages (friendlier diffing).
     let mut rels: Vec<String> = walkdir::WalkDir::new(root)
         .into_iter()
+        .filter_entry(|entry| !crate::service::is_machinery_dir(entry))
         .flatten()
         .filter(|e| e.file_type().is_file() && is_md(e.path()))
         .filter_map(|e| {

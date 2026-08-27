@@ -227,6 +227,38 @@ impl IKnowledgeRepository for SqliteKnowledgeRepository {
         .execute(&mut *transaction)
         .await?;
 
+        // Normalized source rows and provenance are logical children of the
+        // base. Provenance is reached through source items (rather than paths or
+        // the rebuildable entry projection) so detached/copy history is removed
+        // together with its source aggregate before entry rows disappear.
+        sqlx::query(
+            "DELETE FROM knowledge_entry_provenance \
+             WHERE knowledge_source_item_id IN (\
+                 SELECT item.knowledge_source_item_id \
+                 FROM knowledge_source_items item \
+                 JOIN knowledge_sources source \
+                   ON source.knowledge_source_id = item.knowledge_source_id \
+                 WHERE source.knowledge_base_id = ?\
+             )",
+        )
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "DELETE FROM knowledge_source_items \
+             WHERE knowledge_source_id IN (\
+                 SELECT knowledge_source_id FROM knowledge_sources \
+                 WHERE knowledge_base_id = ?\
+             )",
+        )
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("DELETE FROM knowledge_sources WHERE knowledge_base_id = ?")
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+
         // Entry rows are a rebuildable projection owned by the base. The v3
         // schema uses logical rather than physical foreign keys, so cleanup is
         // explicit and transactionally precedes deletion of the parent row.

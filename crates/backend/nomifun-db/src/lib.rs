@@ -27,7 +27,11 @@ pub use models::{
     KNOWLEDGE_ENTRY_KIND_DIRECTORY, KNOWLEDGE_ENTRY_KIND_FILE,
     KNOWLEDGE_ENTRY_ORIGIN_GENERATED, KNOWLEDGE_ENTRY_ORIGIN_URL_SNAPSHOT,
     KNOWLEDGE_ENTRY_ORIGIN_USER, KnowledgeBaseRow, KnowledgeBindingRow, KnowledgeEntryRow,
-    KnowledgeTagRow, KnowledgeTreeEventStatus, KnowledgeTreeOperationRow,
+    InvalidKnowledgeSourceValue, KnowledgeEntryProvenanceRelationship,
+    KnowledgeEntryProvenanceRow,
+    KnowledgeSourceItemRow, KnowledgeSourceItemSyncStatus, KnowledgeSourceKind,
+    KnowledgeSourceMode, KnowledgeSourceRow, KnowledgeSourceState, KnowledgeTagRow,
+    KnowledgeTreeEventStatus, KnowledgeTreeOperationRow,
     KnowledgeTreeOperationState, SkillTagRow, TagSettingRow, TerminalSessionRow,
     TerminalTurnAdmissionRow,
     UpdateAgentHandshakeParams,
@@ -106,7 +110,8 @@ pub use repository::{
     IConversationRepository, ICronRepository, IIdmmInterventionRepository,
     IdmmActionReservationKey, IdmmActionReserveResult, IdmmActionSettleResult,
     IdmmActionSettlement, IdmmActionTurnIdentity, IKnowledgeRepository,
-    IKnowledgeEntryRepository, IKnowledgeTreeOperationRepository, KnowledgeEntryMutation,
+    IKnowledgeEntryRepository, IKnowledgeSourceRepository, IKnowledgeTreeOperationRepository,
+    KnowledgeEntryMutation,
     KnowledgeProjectionReplacement,
     RelocateKnowledgeEntryProjectionParams, UpsertKnowledgeEntryParams,
     IMcpServerRepository, IOAuthTokenRepository,
@@ -134,6 +139,13 @@ pub use repository::{
     SqliteUserRepository, SqliteWebhookRepository, TerminalTurnAdmissionClaim,
     TerminalTurnAdmissionKey, TerminalTurnAdmissionScope, TerminalTurnEffectsStart,
     TerminalTurnOutcome, TerminalTurnSettlement, TTL_MS,
+};
+pub use repository::{
+    BindManagedKnowledgeEntryParams, CreateKnowledgeSourceItemParams,
+    EnsureKnowledgeSourceParams, EnsuredKnowledgeSource, RecordKnowledgeEntryCopyParams,
+    RecordKnowledgeSourceSyncFailureParams, RecordKnowledgeSourceSyncSuccessParams,
+    StageKnowledgeSourcePublicationParams, UpdateKnowledgeSourceItemParams,
+    UpdateKnowledgeSourceParams,
 };
 pub use repository::{
     CommitKnowledgeTreeOperationParams, KnowledgeTreeOperationPageCursor,

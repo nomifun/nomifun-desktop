@@ -2582,7 +2582,10 @@ impl AppServices {
             ),
         ));
         knowledge_service.set_entry_repository(
-            sqlite_knowledge_repo as Arc<dyn nomifun_db::IKnowledgeEntryRepository>,
+            sqlite_knowledge_repo.clone() as Arc<dyn nomifun_db::IKnowledgeEntryRepository>,
+        );
+        knowledge_service.set_source_repository(
+            sqlite_knowledge_repo as Arc<dyn nomifun_db::IKnowledgeSourceRepository>,
         );
         knowledge_service.set_tree_operation_repository(Arc::new(
             nomifun_db::SqliteKnowledgeTreeOperationRepository::new(

@@ -14,6 +14,7 @@ pub mod idmm_intervention;
 pub mod companion_token;
 pub mod knowledge;
 pub mod knowledge_entry;
+pub mod knowledge_source;
 pub mod knowledge_tree_operation;
 pub mod mcp_server;
 pub mod miniapp;
@@ -41,6 +42,7 @@ mod sqlite_idmm_intervention;
 mod sqlite_companion_token;
 mod sqlite_knowledge;
 mod sqlite_knowledge_entry;
+mod sqlite_knowledge_source;
 mod sqlite_knowledge_tree_operation;
 mod sqlite_mcp_server;
 mod sqlite_oauth_token;
@@ -99,6 +101,13 @@ pub use knowledge::IKnowledgeRepository;
 pub use knowledge_entry::{
     IKnowledgeEntryRepository, KnowledgeEntryMutation, KnowledgeProjectionReplacement,
     RelocateKnowledgeEntryProjectionParams, UpsertKnowledgeEntryParams,
+};
+pub use knowledge_source::{
+    BindManagedKnowledgeEntryParams, CreateKnowledgeSourceItemParams,
+    EnsureKnowledgeSourceParams, EnsuredKnowledgeSource, IKnowledgeSourceRepository,
+    RecordKnowledgeEntryCopyParams, RecordKnowledgeSourceSyncFailureParams,
+    RecordKnowledgeSourceSyncSuccessParams, StageKnowledgeSourcePublicationParams,
+    UpdateKnowledgeSourceItemParams, UpdateKnowledgeSourceParams,
 };
 pub use knowledge_tree_operation::{
     CommitKnowledgeTreeOperationParams, IKnowledgeTreeOperationRepository,

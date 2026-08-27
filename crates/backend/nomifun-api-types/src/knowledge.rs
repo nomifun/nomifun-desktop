@@ -1,4 +1,6 @@
-use nomifun_common::{KnowledgeBaseId, KnowledgeEntryId};
+use nomifun_common::{
+    KnowledgeBaseId, KnowledgeEntryId, KnowledgeSourceId, KnowledgeSourceItemId,
+};
 use serde::{Deserialize, Serialize};
 
 /// Server-enforced mutation policy for a filesystem-backed knowledge base.
@@ -32,6 +34,105 @@ pub enum KnowledgeEntryOrigin {
     User,
     UrlSnapshot,
     Generated,
+}
+
+/// The durable relationship between a filesystem entry and a source item.
+///
+/// Provenance and edit policy are intentionally separate: a detached or copied
+/// web document still came from the web, but its contents are user-owned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeEntrySourceRelationship {
+    Managed,
+    Detached,
+    Copy,
+}
+
+/// Persisted per-source-item synchronization state.  `conflicted` means the
+/// local managed document changed since the last successful publication and
+/// the refresher deliberately refused to overwrite it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeSourceSyncStatus {
+    #[default]
+    Pending,
+    Syncing,
+    Synced,
+    Failed,
+    Conflicted,
+    Missing,
+    Paused,
+}
+
+/// Source metadata attached to a tree/read DTO.  The stable source-item and
+/// entry identities are authoritative; the current path is never used to
+/// decide ownership or write access.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeEntrySourceInfo {
+    #[ts(type = "string")]
+    pub source_id: KnowledgeSourceId,
+    #[ts(type = "string")]
+    pub source_item_id: KnowledgeSourceItemId,
+    pub source_url: String,
+    pub relationship: KnowledgeEntrySourceRelationship,
+    pub sync_status: KnowledgeSourceSyncStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub final_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub last_success_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_error: Option<String>,
+}
+
+/// Server-resolved product capabilities for one entry.  Clients render these
+/// flags but every mutation is checked again by the service; neither `origin`
+/// nor a directory name is a security boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeEntryCapabilities {
+    pub read_content: bool,
+    pub edit_content: bool,
+    pub rename: bool,
+    pub relocate: bool,
+    pub accept_children: bool,
+    pub delete_entry: bool,
+    pub remove_source: bool,
+    pub refresh_source: bool,
+    pub detach_source: bool,
+    pub copy_as_editable: bool,
+    pub export_entry: bool,
+    pub edit_metadata: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub read_only_reason: Option<String>,
+}
+
+impl Default for KnowledgeEntryCapabilities {
+    fn default() -> Self {
+        Self {
+            read_content: true,
+            edit_content: false,
+            rename: false,
+            relocate: false,
+            accept_children: false,
+            delete_entry: false,
+            remove_source: false,
+            refresh_source: false,
+            detach_source: false,
+            copy_as_editable: false,
+            export_entry: true,
+            edit_metadata: false,
+            read_only_reason: Some("Entry permissions are temporarily unavailable.".into()),
+        }
+    }
 }
 
 /// File/directory identity projected from one knowledge base. `entry_id` is
@@ -211,7 +312,12 @@ pub struct KnowledgeRetrievalConfig {
 /// such sources can go stale between syncs, so the knowledge context builder
 /// surfaces the URLs in a dedicated "Realtime sources" section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KnowledgeSourceEntry {
+    /// Stable source-item identity. Optional only while reading legacy
+    /// `extra.source` JSON; the service allocates it before persistence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_item_id: Option<KnowledgeSourceItemId>,
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -224,6 +330,16 @@ pub struct KnowledgeSourceEntry {
     /// gracefully falls back to HTTP at the dispatch site (`prepare_snapshot_body`).
     #[serde(default)]
     pub rendered: bool,
+    /// Stable managed document identity, independent of its current path.
+    /// Detached/copy provenance lives in the normalized relationship table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_entry_id: Option<KnowledgeEntryId>,
+    #[serde(default)]
+    pub sync_status: KnowledgeSourceSyncStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_success_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// How a URL source feeds the knowledge base.
@@ -233,8 +349,9 @@ pub enum KnowledgeSourceMode {
     /// URLs are surfaced to the agent as realtime sources (rendered into the
     /// knowledge context); nothing is fetched at create time.
     Live,
-    /// URLs are fetched and persisted as markdown snapshots under
-    /// `{kb_root}/snapshots/` (re-fetchable via the refresh endpoint).
+    /// URLs are fetched into managed Markdown entries. `snapshots/` is only
+    /// the default first-capture folder; users may move/rename entries and
+    /// refresh continues through stable identity.
     Snapshot,
 }
 
@@ -244,10 +361,20 @@ pub enum KnowledgeSourceMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KnowledgeSource {
+    /// Stable aggregate identity. Optional only for legacy JSON migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<KnowledgeSourceId>,
     /// Source kind discriminator; `"url"` is the only kind today.
     #[serde(default = "default_source_kind")]
     pub kind: String,
     pub mode: KnowledgeSourceMode,
+    /// Optimistic revision of normalized source configuration.
+    #[serde(default)]
+    pub revision: i64,
+    /// Default destination for newly captured pages. Existing managed pages
+    /// always refresh through their stable entry identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_parent_entry_id: Option<KnowledgeEntryId>,
     #[serde(default)]
     pub entries: Vec<KnowledgeSourceEntry>,
     /// Last successful snapshot fetch (epoch ms); `None` until the first
@@ -256,6 +383,20 @@ pub struct KnowledgeSource {
     /// sources too and stamps this field once an entry succeeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_fetched_at: Option<i64>,
+}
+
+impl Default for KnowledgeSource {
+    fn default() -> Self {
+        Self {
+            source_id: None,
+            kind: default_source_kind(),
+            mode: KnowledgeSourceMode::Snapshot,
+            revision: 0,
+            default_parent_entry_id: None,
+            entries: Vec::new(),
+            last_fetched_at: None,
+        }
+    }
 }
 
 fn default_source_kind() -> String {
@@ -522,8 +663,10 @@ mod tests {
                 url: "https://example.com/docs".into(),
                 title: Some("Docs".into()),
                 rendered: false,
+                ..Default::default()
             }],
             last_fetched_at: Some(1_770_000_000_000),
+            ..Default::default()
         };
         let v = serde_json::to_value(&source).unwrap();
         assert_eq!(v["kind"], "url");
@@ -562,6 +705,7 @@ mod tests {
             url: "https://spa.example.com".into(),
             title: None,
             rendered: true,
+            ..Default::default()
         };
         let v = serde_json::to_value(&entry).unwrap();
         assert_eq!(v["rendered"], true);

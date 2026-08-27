@@ -94,6 +94,7 @@ describe('session knowledge panel is a preview, not an editor', () => {
     // The tree only ever carries .md (backend `is_md` gate), so the preview type
     // is fixed rather than sniffed.
     expect(panel.includes("openPreview(file.content, 'markdown'")).toBe(true);
+    expect(panel.includes("allow_open_in_system: file.source?.relationship !== 'managed'")).toBe(true);
   });
 
   test('reuses the surface preview column rather than rendering its own viewer', () => {

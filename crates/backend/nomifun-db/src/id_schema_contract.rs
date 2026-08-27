@@ -86,6 +86,9 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "knowledge_binding_bases",
     "knowledge_bindings",
     "knowledge_entries",
+    "knowledge_entry_provenance",
+    "knowledge_source_items",
+    "knowledge_sources",
     "knowledge_tags",
     "knowledge_tree_operations",
     "mcp_servers",
@@ -161,6 +164,8 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("knowledge_bases", "knowledge_base_id"),
     ("knowledge_bindings", "knowledge_binding_id"),
     ("knowledge_entries", "knowledge_entry_id"),
+    ("knowledge_source_items", "knowledge_source_item_id"),
+    ("knowledge_sources", "knowledge_source_id"),
     ("knowledge_tree_operations", "operation_id"),
     ("mcp_servers", "mcp_server_id"),
     ("messages", "message_id"),
@@ -244,6 +249,8 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("knowledge_bases", "knowledge_base_id"),
     ("knowledge_bindings", "knowledge_binding_id"),
     ("knowledge_entries", "knowledge_entry_id"),
+    ("knowledge_source_items", "knowledge_source_item_id"),
+    ("knowledge_sources", "knowledge_source_id"),
     ("knowledge_tree_operations", "operation_id"),
     ("knowledge_tree_operations", "request_id"),
     ("mcp_servers", "mcp_server_id"),
@@ -286,6 +293,30 @@ const PARTIAL_UNIQUE_INDEXES: &[PartialUniqueIndexContract] = &[
         table: "knowledge_entries",
         columns: &["knowledge_base_id", "portable_rel_path"],
         predicate: "deleted_at IS NULL",
+    },
+    PartialUniqueIndexContract {
+        index_name: "uq_knowledge_sources_live_kind",
+        table: "knowledge_sources",
+        columns: &["knowledge_base_id", "kind"],
+        predicate: "state <> 'removed'",
+    },
+    PartialUniqueIndexContract {
+        index_name: "uq_knowledge_source_items_live_normalized_url",
+        table: "knowledge_source_items",
+        columns: &["knowledge_source_id", "normalized_url"],
+        predicate: "state <> 'removed'",
+    },
+    PartialUniqueIndexContract {
+        index_name: "uq_knowledge_source_items_live_ordinal",
+        table: "knowledge_source_items",
+        columns: &["knowledge_source_id", "ordinal"],
+        predicate: "state <> 'removed'",
+    },
+    PartialUniqueIndexContract {
+        index_name: "uq_knowledge_entry_provenance_managed_source_item",
+        table: "knowledge_entry_provenance",
+        columns: &["knowledge_source_item_id"],
+        predicate: "relationship = 'managed'",
     },
     PartialUniqueIndexContract {
         index_name: "uq_knowledge_bindings_target_workpath",
@@ -786,6 +817,14 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
         .with_child_predicate("child.deleted_at IS NULL")
         .with_parent_predicate("parent.deleted_at IS NULL")
         .with_aggregate_scope("parent.knowledge_base_id = child.knowledge_base_id AND parent.kind = 'directory'"),
+    text_ref!("knowledge_sources", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, "idx_knowledge_sources_knowledge_base_id", Cascade),
+    text_ref!("knowledge_sources", "default_parent_entry_id" => "knowledge_entries", "knowledge_entry_id", true, "idx_knowledge_sources_default_parent_entry_id", SetNull)
+        .with_parent_predicate("parent.deleted_at IS NULL")
+        .with_aggregate_scope("parent.knowledge_base_id = child.knowledge_base_id AND parent.kind = 'directory'"),
+    text_ref!("knowledge_source_items", "knowledge_source_id" => "knowledge_sources", "knowledge_source_id", false, "idx_knowledge_source_items_knowledge_source_id", Cascade),
+    text_ref!("knowledge_entry_provenance", "knowledge_entry_id" => "knowledge_entries", "knowledge_entry_id", false, "uq_knowledge_entry_provenance_entry_id", KeepHistory),
+    text_ref!("knowledge_entry_provenance", "knowledge_source_item_id" => "knowledge_source_items", "knowledge_source_item_id", false, "idx_knowledge_entry_provenance_source_item_id", Cascade),
+    text_ref!("knowledge_entry_provenance", "derived_from_entry_id" => "knowledge_entries", "knowledge_entry_id", true, "idx_knowledge_entry_provenance_derived_from_entry_id", KeepHistory),
     text_ref!("knowledge_tree_operations", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, "idx_knowledge_tree_operations_knowledge_base_id", Cascade),
     text_ref!("message_correlations", "conversation_id" => "conversations", "conversation_id", false, "idx_message_correlations_conversation_id", Cascade),
     // `turn_message_id` is the wire-scoped owner token supplied by the

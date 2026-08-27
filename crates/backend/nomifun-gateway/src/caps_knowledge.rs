@@ -260,8 +260,11 @@ fn parse_url_source(urls: Option<Vec<String>>, mode: Option<&str>) -> Result<Opt
         return Ok(None);
     }
     Ok(Some(KnowledgeSource {
+        source_id: None,
         kind: "url".into(),
         mode,
+        revision: 0,
+        default_parent_entry_id: None,
         entries: urls
             .into_iter()
             .map(|url| KnowledgeSourceEntry { url, title: None, ..Default::default() })

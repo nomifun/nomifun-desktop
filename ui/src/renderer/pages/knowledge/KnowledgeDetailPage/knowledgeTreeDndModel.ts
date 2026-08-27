@@ -3,6 +3,7 @@ import {
   knowledgeRelocationIssue,
   type KnowledgeRelocationIssue,
 } from './treeModel';
+import { hasKnowledgeEntryCapability } from './entryCapabilities';
 
 export const KNOWLEDGE_ROOT_DROP_ID = 'knowledge-tree-drop:root';
 
@@ -45,7 +46,8 @@ export function knowledgeDragData(entry: IKnowledgeTreeEntry): KnowledgeDragData
 
 export function knowledgeDropData(entry: IKnowledgeTreeEntry): KnowledgeDropTarget {
   return {
-    accepts: entry.is_dir,
+    accepts:
+      entry.is_dir && hasKnowledgeEntryCapability(entry, 'accept_children'),
     destinationParentPath: entry.is_dir ? entry.rel_path : '',
     entry,
   };

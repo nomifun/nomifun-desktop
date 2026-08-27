@@ -21,6 +21,13 @@ describe('knowledge URL entry parsing', () => {
       url: 'file:///tmp/notes',
     });
     expect(
+      parseKnowledgeUrlDrafts([{ url: 'https://user:secret@example.com/docs', title: '' }], false),
+    ).toEqual({
+      ok: false,
+      reason: 'invalid',
+      url: 'https://user:secret@example.com/docs',
+    });
+    expect(
       parseKnowledgeUrlDrafts(
         [
           { url: 'https://example.com', title: '' },
@@ -32,6 +39,19 @@ describe('knowledge URL entry parsing', () => {
       ok: false,
       reason: 'duplicate',
       url: 'https://example.com/',
+    });
+    expect(
+      parseKnowledgeUrlDrafts(
+        [
+          { url: 'https://example.com/docs#intro', title: '' },
+          { url: 'https://example.com/docs#api', title: '' },
+        ],
+        false,
+      ),
+    ).toEqual({
+      ok: false,
+      reason: 'duplicate',
+      url: 'https://example.com/docs#api',
     });
   });
 

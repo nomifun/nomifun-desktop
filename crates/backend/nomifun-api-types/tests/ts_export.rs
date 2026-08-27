@@ -5,8 +5,10 @@ use ts_rs::{Config, TS};
 use nomifun_api_types::{
     AuthSchemeDescriptor, CapabilityHealth, CloneProviderRequest, EndpointRootShape,
     FetchModelsResponse, HealthStatus,
-    KnowledgeEmbeddingConfig, KnowledgeEntry, KnowledgeEntryKind, KnowledgeEntryOrigin,
-    KnowledgeRerankConfig, KnowledgeRetrievalConfig, KnowledgeTreeAccess, ModelInfo,
+    KnowledgeEmbeddingConfig, KnowledgeEntry, KnowledgeEntryCapabilities, KnowledgeEntryKind,
+    KnowledgeEntryOrigin, KnowledgeEntrySourceInfo, KnowledgeEntrySourceRelationship,
+    KnowledgeRerankConfig, KnowledgeRetrievalConfig, KnowledgeSourceSyncStatus,
+    KnowledgeTreeAccess, ModelInfo,
     ModelProtocolManifestResponse, ModelTask, ModelTrait, PlatformPresetDescriptor,
     ProtocolDefaultConnection, ProtocolDescriptor, ProtocolEndpointDescriptor,
     ProtocolEndpointPurpose, ProtocolExecutorKind, ProtocolRecommendation, ProtocolScope,
@@ -54,6 +56,12 @@ fn export_binding_if_changed<T: TS + 'static>(file_name: &str) {
 fn export_provider_domain_bindings() {
     export_binding_if_changed::<KnowledgeEntryKind>("KnowledgeEntryKind.ts");
     export_binding_if_changed::<KnowledgeEntryOrigin>("KnowledgeEntryOrigin.ts");
+    export_binding_if_changed::<KnowledgeEntrySourceRelationship>(
+        "KnowledgeEntrySourceRelationship.ts",
+    );
+    export_binding_if_changed::<KnowledgeSourceSyncStatus>("KnowledgeSourceSyncStatus.ts");
+    export_binding_if_changed::<KnowledgeEntrySourceInfo>("KnowledgeEntrySourceInfo.ts");
+    export_binding_if_changed::<KnowledgeEntryCapabilities>("KnowledgeEntryCapabilities.ts");
     export_binding_if_changed::<KnowledgeEntry>("KnowledgeEntry.ts");
     export_binding_if_changed::<KnowledgeTreeAccess>("KnowledgeTreeAccess.ts");
     export_binding_if_changed::<RelocateKnowledgeEntryConflictPolicy>(
