@@ -7,11 +7,17 @@ const stylesSource = readFileSync(new URL('../../styles/arco-override.css', impo
 describe('Knowledge settings visual layout', () => {
   test('reuses the shared setting row and input for the knowledge base name', () => {
     expect(detailSource.includes('<NomiSettingList>')).toBe(true);
-    expect(detailSource.match(/<NomiSettingRow/g)?.length).toBe(4);
+    expect(detailSource.match(/<NomiSettingRow/g)?.length).toBe(5);
     expect(detailSource.includes('<NomiInput')).toBe(true);
     expect(detailSource.includes('contentFit')).toBe(true);
     expect(detailSource.includes('knowledge-settings-identity-card')).toBe(false);
     expect(stylesSource.includes('.knowledge-settings-inline-input')).toBe(false);
+  });
+
+  test('makes external-folder mutation consent explicit and reversible', () => {
+    expect(detailSource.includes('folderEditAccess')).toBe(true);
+    expect(detailSource.includes("editTreeAccess === 'editable'")).toBe(true);
+    expect(detailSource.includes("checked ? 'editable' : 'read_only'")).toBe(true);
   });
 
   test('places selectable tag chips and the save action below the description', () => {

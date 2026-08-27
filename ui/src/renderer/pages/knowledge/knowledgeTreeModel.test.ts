@@ -1,9 +1,17 @@
 import { describe, expect, test } from 'bun:test';
 import type { IKnowledgeFileEntry, IKnowledgeTreeEntry } from '@/common/adapter/ipcBridge';
 import {
+  applyKnowledgePathRelocation,
   buildKnowledgeSearchTree,
+  collectKnowledgeDirectoryPaths,
+  initialKnowledgeTreeViewState,
   isKnowledgePathWithin,
+  isNewerKnowledgeTreeRevision,
+  knowledgeDirectoryOnlyTree,
   knowledgeFolderPathChain,
+  knowledgeRelocationIssue,
+  knowledgeRelocationPath,
+  knowledgeTreeViewReducer,
   mergeKnowledgeTreeChildren,
   preserveKnowledgeTreeChildren,
   replaceKnowledgePathPrefix,
@@ -88,6 +96,25 @@ describe('knowledge detail tree model', () => {
     expect(knowledgeFolderPathChain('')).toEqual([]);
   });
 
+  test('builds directory-only picker data without the moving directory subtree', () => {
+    const tree = [
+      {
+        ...node('docs', 'docs', true),
+        children: [
+          { ...node('drafts', 'docs/drafts', true), children: [] },
+          node('guide.md', 'docs/guide.md', false),
+        ],
+      },
+      node('archive', 'archive', true),
+    ];
+
+    const result = knowledgeDirectoryOnlyTree(tree, node('drafts', 'docs/drafts', true));
+
+    expect(collectKnowledgeDirectoryPaths(result)).toEqual(['docs', 'archive']);
+    expect(result[0].children).toEqual([]);
+    expect(result[1].children).toBeUndefined();
+  });
+
   test('detects and rewrites paths inside a renamed folder', () => {
     expect(isKnowledgePathWithin('raw/tutorials/topic.md', 'raw/tutorials')).toBe(true);
     expect(isKnowledgePathWithin('raw/tutorials', 'raw/tutorials')).toBe(true);
@@ -95,5 +122,144 @@ describe('knowledge detail tree model', () => {
     expect(replaceKnowledgePathPrefix('raw/tutorials/topic.md', 'raw/tutorials', 'wiki/tutorials')).toBe('wiki/tutorials/topic.md');
     expect(replaceKnowledgePathPrefix('raw/tutorials', 'raw/tutorials', 'wiki/tutorials')).toBe('wiki/tutorials');
     expect(replaceKnowledgePathPrefix(null, 'raw/tutorials', 'wiki/tutorials')).toBeNull();
+  });
+
+  test('rejects no-op, self, and descendant drops while allowing a real move', () => {
+    expect(knowledgeRelocationPath('raw/topic.md', 'archive')).toBe('archive/topic.md');
+    expect(knowledgeRelocationIssue('raw/topic.md', false, 'raw')).toBe('same-parent');
+    expect(knowledgeRelocationIssue('raw', true, 'raw')).toBe('self');
+    expect(knowledgeRelocationIssue('raw', true, 'raw/tutorials')).toBe('descendant');
+    expect(knowledgeRelocationIssue('raw', true, 'archive')).toBeNull();
+    expect(knowledgeRelocationIssue('raw/topic.md', false, '', 'renamed.md')).toBeNull();
+  });
+
+  test('deduplicates and rejects out-of-order tree-changed revisions per base', () => {
+    expect(isNewerKnowledgeTreeRevision(null, 40)).toBe(true);
+    expect(isNewerKnowledgeTreeRevision(40, 41)).toBe(true);
+    expect(isNewerKnowledgeTreeRevision(40, 40)).toBe(false);
+    expect(isNewerKnowledgeTreeRevision(40, 39)).toBe(false);
+  });
+
+  test('atomically remaps every path-backed view when a loaded folder moves', () => {
+    const raw = {
+      ...node('raw', 'raw', true),
+      revision: 3,
+      children: [
+        {
+          ...node('tutorials', 'raw/tutorials', true),
+          revision: 7,
+          children: [
+            { ...node('topic.md', 'raw/tutorials/topic.md', false), revision: 11 },
+          ],
+        },
+      ],
+    };
+    const state = {
+      files: [file('raw/tutorials/topic.md'), file('README.md')],
+      treeData: [raw, { ...node('archive', 'archive', true), children: [] }],
+      expandedTreeKeys: ['raw', 'raw/tutorials'],
+      selectedPath: 'raw/tutorials/topic.md',
+      selectedTreeKey: 'raw/tutorials/topic.md',
+      selectedFolderPath: 'raw/tutorials',
+    };
+
+    const relocated = applyKnowledgePathRelocation(state, 'raw/tutorials', 'archive/tutorials');
+
+    expect(relocated.selectedPath).toBe('archive/tutorials/topic.md');
+    expect(relocated.selectedTreeKey).toBe('archive/tutorials/topic.md');
+    expect(relocated.selectedFolderPath).toBe('archive/tutorials');
+    expect(relocated.expandedTreeKeys).toEqual(['raw', 'archive/tutorials', 'archive']);
+    expect(relocated.files.map((entry) => entry.rel_path)).toEqual([
+      'archive/tutorials/topic.md',
+      'README.md',
+    ]);
+    expect(relocated.treeData[0].children).toEqual([]);
+    expect(relocated.treeData[1].children?.[0].rel_path).toBe('archive/tutorials');
+    expect(relocated.treeData[1].children?.[0].children?.[0].rel_path).toBe(
+      'archive/tutorials/topic.md'
+    );
+    expect(relocated.treeData[1].children?.[0].revision).toBe(8);
+    expect(relocated.treeData[1].children?.[0].children?.[0].revision).toBe(12);
+    // The ancestor outside the moved subtree was not mutated.
+    expect(relocated.treeData[0].revision).toBe(3);
+  });
+
+  test('keeps a lazy destination unloaded instead of hiding its existing children', () => {
+    const state = {
+      ...initialKnowledgeTreeViewState,
+      files: [file('docs/guide.md')],
+      treeData: [
+        { ...node('docs', 'docs', true), children: [node('guide.md', 'docs/guide.md', false)] },
+        node('archive', 'archive', true),
+      ],
+      expandedTreeKeys: ['docs'],
+      selectedPath: 'docs/guide.md',
+      selectedTreeKey: 'docs/guide.md',
+      selectedFolderPath: 'docs',
+    };
+
+    const relocated = applyKnowledgePathRelocation(state, 'docs/guide.md', 'archive/guide.md');
+
+    expect(relocated.treeData[0].children).toEqual([]);
+    expect(relocated.treeData[1].children).toBeUndefined();
+    expect(relocated.selectedFolderPath).toBe('archive');
+    expect(relocated.expandedTreeKeys).toEqual(['docs', 'archive']);
+  });
+
+  test('preserves an independently selected folder when the open document moves', () => {
+    const state = {
+      ...initialKnowledgeTreeViewState,
+      files: [file('docs/guide.md')],
+      selectedPath: 'docs/guide.md',
+      selectedTreeKey: 'archive',
+      selectedFolderPath: 'archive',
+    };
+
+    const relocated = applyKnowledgePathRelocation(state, 'docs/guide.md', 'published/guide.md');
+
+    expect(relocated.selectedPath).toBe('published/guide.md');
+    expect(relocated.selectedTreeKey).toBe('archive');
+    expect(relocated.selectedFolderPath).toBe('archive');
+  });
+
+  test('is idempotent when the same tree-changed relocation is delivered twice', () => {
+    const state = {
+      ...initialKnowledgeTreeViewState,
+      files: [file('docs/guide.md')],
+      treeData: [node('guide.md', 'docs/guide.md', false)],
+      selectedPath: 'docs/guide.md',
+      selectedTreeKey: 'docs/guide.md',
+      selectedFolderPath: 'docs',
+    };
+
+    const once = applyKnowledgePathRelocation(state, 'docs/guide.md', 'archive/guide.md');
+    const twice = applyKnowledgePathRelocation(once, 'docs/guide.md', 'archive/guide.md');
+
+    expect(twice).toEqual(once);
+  });
+
+  test('keeps the active path across a racing remote snapshot until relocate mapping arrives', () => {
+    const active = {
+      ...initialKnowledgeTreeViewState,
+      files: [file('drafts/live.md')],
+      selectedPath: 'drafts/live.md',
+      selectedTreeKey: 'drafts/live.md',
+      selectedFolderPath: 'drafts',
+    };
+
+    const raced = knowledgeTreeViewReducer(active, {
+      type: 'sync',
+      files: [file('archive/live.md')],
+      tree: [node('archive', 'archive', true)],
+    });
+    expect(raced.selectedPath).toBe('drafts/live.md');
+
+    const resolved = knowledgeTreeViewReducer(raced, {
+      type: 'relocated',
+      oldPath: 'drafts/live.md',
+      newPath: 'archive/live.md',
+    });
+    expect(resolved.selectedPath).toBe('archive/live.md');
+    expect(resolved.selectedTreeKey).toBe('archive/live.md');
   });
 });

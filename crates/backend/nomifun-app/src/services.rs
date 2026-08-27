@@ -2063,6 +2063,18 @@ impl AppServices {
                 ),
             ));
         }
+        if let Err(error) = self
+            .knowledge_service
+            .recover_pending_tree_operations()
+            .await
+        {
+            return Err(RetainedAppServicesStartupError::new(
+                self,
+                anyhow::anyhow!(
+                    "knowledge-tree mutation-journal boot reconciliation failed: {error}"
+                ),
+            ));
+        }
         Ok(self)
     }
 
@@ -2556,15 +2568,25 @@ impl AppServices {
         // Singleton knowledge service: knowledge base registry + workspace
         // mounting. Shared by the `/api/knowledge/*` routes and the
         // conversation service (mount-at-task-start).
-        let knowledge_repo: Arc<dyn nomifun_db::IKnowledgeRepository> = Arc::new(
+        let sqlite_knowledge_repo = Arc::new(
             nomifun_db::SqliteKnowledgeRepository::new(database.pool().clone()),
         );
+        let knowledge_repo: Arc<dyn nomifun_db::IKnowledgeRepository> =
+            sqlite_knowledge_repo.clone();
         let knowledge_service = Arc::new(nomifun_knowledge::KnowledgeService::new(
             knowledge_repo,
             &data_dir,
             nomifun_knowledge::KnowledgeEventEmitter::new(
                 event_bus.clone(),
                 authoritative_user_id.clone(),
+            ),
+        ));
+        knowledge_service.set_entry_repository(
+            sqlite_knowledge_repo as Arc<dyn nomifun_db::IKnowledgeEntryRepository>,
+        );
+        knowledge_service.set_tree_operation_repository(Arc::new(
+            nomifun_db::SqliteKnowledgeTreeOperationRepository::new(
+                database.pool().clone(),
             ),
         ));
         knowledge_service.set_retrieval_runtime(

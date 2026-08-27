@@ -38,6 +38,8 @@ export type UrlEntry = KnowledgeUrlDraft;
 export interface SourceConfigValue {
   /** local */
   rootPath?: string;
+  /** Explicit consent for NomiFun to mutate an externally owned folder. */
+  allowLocalEdits?: boolean;
   /** web */
   urlMode?: UrlMode;
   urlEntries?: UrlEntry[];
@@ -158,11 +160,34 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
         <div className={sourceNoteClass}>
           <Info theme='outline' size='14' className='mt-2px flex-none text-[var(--color-text-3)]' />
           <div>
-            {t('knowledge.studio.localReadonlyNote', {
-              defaultValue:
-                '应用以只读引用方式接入，绝不改动你的目录结构。目录里 .md 的增删会自动反映到库里。',
-            })}
+            {value.allowLocalEdits
+              ? t('knowledge.studio.localEditableNote', {
+                  defaultValue: '已授权 NomiFun 新建、编辑、移动和删除此文件夹中的知识内容。',
+                })
+              : t('knowledge.studio.localReadonlyNote', {
+                  defaultValue:
+                    '应用以只读引用方式接入，绝不改动你的目录结构。目录里 .md 的增删会自动反映到库里。',
+                })}
           </div>
+        </div>
+        <div className='flex items-center justify-between gap-12px rounded-12px bg-[var(--color-fill-1)] px-10px py-9px'>
+          <div className='min-w-0'>
+            <div className='text-12px font-600 text-[var(--color-text-1)]'>
+              {t('knowledge.studio.localEditableLabel', {
+                defaultValue: '允许 NomiFun 修改此文件夹',
+              })}
+            </div>
+            <div className='mt-2px text-10px leading-16px text-[var(--color-text-3)]'>
+              {t('knowledge.studio.localEditableHint', {
+                defaultValue: '开启后可在知识库中拖拽、重命名、编辑和删除；默认保持只读。',
+              })}
+            </div>
+          </div>
+          <Switch
+            size='small'
+            checked={value.allowLocalEdits ?? false}
+            onChange={(checked) => update({ allowLocalEdits: checked })}
+          />
         </div>
       </div>
     );

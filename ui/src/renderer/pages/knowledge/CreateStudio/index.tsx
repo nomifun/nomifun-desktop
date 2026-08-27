@@ -275,6 +275,10 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
         name: trimmedName,
         description: desc,
         root_path: rootPath,
+        tree_access:
+          sourceType === 'local' && !sourceConfigValue.allowLocalEdits
+            ? 'read_only'
+            : 'editable',
         source,
         tags: tagKeys,
       });

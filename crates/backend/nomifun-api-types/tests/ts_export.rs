@@ -5,7 +5,8 @@ use ts_rs::{Config, TS};
 use nomifun_api_types::{
     AuthSchemeDescriptor, CapabilityHealth, CloneProviderRequest, EndpointRootShape,
     FetchModelsResponse, HealthStatus,
-    KnowledgeEmbeddingConfig, KnowledgeRerankConfig, KnowledgeRetrievalConfig, ModelInfo,
+    KnowledgeEmbeddingConfig, KnowledgeEntry, KnowledgeEntryKind, KnowledgeEntryOrigin,
+    KnowledgeRerankConfig, KnowledgeRetrievalConfig, KnowledgeTreeAccess, ModelInfo,
     ModelProtocolManifestResponse, ModelTask, ModelTrait, PlatformPresetDescriptor,
     ProtocolDefaultConnection, ProtocolDescriptor, ProtocolEndpointDescriptor,
     ProtocolEndpointPurpose, ProtocolExecutorKind, ProtocolRecommendation, ProtocolScope,
@@ -14,7 +15,8 @@ use nomifun_api_types::{
     ProviderConnectionInput,
     ProviderConnectionResponse, ProviderHealthCheckErrorKind, ProviderHealthCheckRequest,
     ProviderHealthCheckResponse, ProviderModelCapabilityInput, ProviderModelCapabilityResponse,
-    ProviderReachability,
+    ProviderReachability, RelocateKnowledgeEntryConflictPolicy, RelocateKnowledgeEntryRequest,
+    RelocateKnowledgeEntryResponse, UndoKnowledgeEntryRelocationRequest,
     ProviderModelInput, ProviderModelKeyRequest, ProviderModelResponse,
     SaveProviderConnectionRequest, SaveProviderModelRequest,
 };
@@ -50,6 +52,22 @@ fn export_binding_if_changed<T: TS + 'static>(file_name: &str) {
 
 #[test]
 fn export_provider_domain_bindings() {
+    export_binding_if_changed::<KnowledgeEntryKind>("KnowledgeEntryKind.ts");
+    export_binding_if_changed::<KnowledgeEntryOrigin>("KnowledgeEntryOrigin.ts");
+    export_binding_if_changed::<KnowledgeEntry>("KnowledgeEntry.ts");
+    export_binding_if_changed::<KnowledgeTreeAccess>("KnowledgeTreeAccess.ts");
+    export_binding_if_changed::<RelocateKnowledgeEntryConflictPolicy>(
+        "RelocateKnowledgeEntryConflictPolicy.ts",
+    );
+    export_binding_if_changed::<RelocateKnowledgeEntryRequest>(
+        "RelocateKnowledgeEntryRequest.ts",
+    );
+    export_binding_if_changed::<RelocateKnowledgeEntryResponse>(
+        "RelocateKnowledgeEntryResponse.ts",
+    );
+    export_binding_if_changed::<UndoKnowledgeEntryRelocationRequest>(
+        "UndoKnowledgeEntryRelocationRequest.ts",
+    );
     export_binding_if_changed::<KnowledgeEmbeddingConfig>("KnowledgeEmbeddingConfig.ts");
     export_binding_if_changed::<KnowledgeRerankConfig>("KnowledgeRerankConfig.ts");
     export_binding_if_changed::<KnowledgeRetrievalConfig>("KnowledgeRetrievalConfig.ts");

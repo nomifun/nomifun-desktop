@@ -241,6 +241,18 @@ pub async fn create_router(services: &AppServices) -> Router {
     let user_event_rx = services.event_bus.subscribe_user();
     let ws_manager = services.ws_manager.clone();
     tokio::spawn(forward_user_events(user_event_rx, ws_manager));
+    match services.knowledge_service.drain_pending_tree_events().await {
+        Ok(published) if published > 0 => {
+            tracing::info!(published, "startup: published pending knowledge-tree events");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            // The durable rows stay pending. Router availability must not be
+            // blocked by a transient realtime bridge failure; the next
+            // relocation and the next boot both retry the same outbox rows.
+            tracing::warn!(%error, "startup: pending knowledge-tree event drain failed");
+        }
+    }
 
     let (states, channel_components) = build_module_states(services).await;
     tracing::info!(

@@ -64,9 +64,12 @@ async fn migration_052_preserves_legacy_duplicates_and_enforces_new_identity() {
     insert_text_asset(&pool, LEGACY_B, legacy).await.unwrap();
 
     migrate_to(&pool, 52).await;
+    // The runtime contract describes the complete schema shipped by this
+    // binary; later additive migrations must be present before validating it.
+    migrate_to(&pool, i64::MAX).await;
     nomifun_db::validate_id_schema_contract(&pool)
         .await
-        .expect("v52 schema contract");
+        .expect("current schema contract");
 
     let legacy_ids: Vec<String> = sqlx::query_scalar(
         "SELECT asset_id FROM workshop_assets \

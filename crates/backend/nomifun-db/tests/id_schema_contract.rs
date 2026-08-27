@@ -52,6 +52,8 @@ const UNCONDITIONAL_UUIDV7_BUSINESS_IDS: &[(&str, &str)] = &[
     ("agent_metadata", "agent_id"),
     ("knowledge_bases", "knowledge_base_id"),
     ("knowledge_bindings", "knowledge_binding_id"),
+    ("knowledge_entries", "knowledge_entry_id"),
+    ("knowledge_tree_operations", "operation_id"),
     ("attachments", "attachment_id"),
     ("workshop_assets", "asset_id"),
     ("channel_plugins", "channel_plugin_id"),
@@ -193,7 +195,9 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "knowledge_bases",
     "knowledge_binding_bases",
     "knowledge_bindings",
+    "knowledge_entries",
     "knowledge_tags",
+    "knowledge_tree_operations",
     "mcp_servers",
     "message_correlations",
     "messages",
@@ -484,6 +488,8 @@ async fn runtime_v3_schema_has_no_physical_foreign_keys_or_cascades_and_only_gua
             "validate_creation_task_input_bindings_update",
             "validate_creative_asset_origin_insert",
             "validate_creative_asset_origin_update",
+            "validate_prompt_library_asset_origin_insert",
+            "validate_prompt_library_asset_origin_update",
         ],
         "v3 schema permits only registered guard triggers"
     );

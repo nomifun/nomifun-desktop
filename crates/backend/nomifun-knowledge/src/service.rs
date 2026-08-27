@@ -5,7 +5,7 @@
 //! out-of-band at any time, so file listings/stats are computed on demand
 //! rather than cached in the database.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
@@ -13,17 +13,33 @@ use std::time::Duration;
 
 use futures_util::{StreamExt, stream};
 use nomifun_api_types::{
-    KnowledgeEmbeddingConfig, KnowledgeMountInfo, KnowledgeRerankConfig,
-    KnowledgeRetrievalConfig, KnowledgeSource, KnowledgeSourceEntry, KnowledgeSourceMode,
-    KnowledgeTag, ModelTask, UpdateKnowledgeTagRequest,
+    KnowledgeEmbeddingConfig, KnowledgeEntryKind, KnowledgeMountInfo,
+    KnowledgeRerankConfig, KnowledgeRetrievalConfig, KnowledgeSource,
+    KnowledgeSourceEntry, KnowledgeSourceMode, KnowledgeTag, KnowledgeTreeAccess, ModelTask,
+    RelocateKnowledgeEntryConflictPolicy as RelocateConflictPolicy,
+    RelocateKnowledgeEntryRequest as RelocateTreeEntryRequest,
+    RelocateKnowledgeEntryResponse as RelocateTreeEntryResult,
+    UndoKnowledgeEntryRelocationRequest, UpdateKnowledgeTagRequest,
 };
 use nomifun_common::{
-    AppError, CompanionId, ConversationId, KnowledgeBaseId,
-    ProviderWithModel, TerminalId, TimestampMs, UuidV7Error, generate_id,
-    now_ms,
+    AppError, CompanionId, ConversationId, KnowledgeBaseId, KnowledgeEntryId,
+    KnowledgeTreeOperationId, ProviderWithModel, TerminalId, TimestampMs,
+    UuidV7Error, generate_id, now_ms,
 };
-use nomifun_db::models::{CreateKnowledgeTagParams, KnowledgeBaseRow, KnowledgeBindingRow};
-use nomifun_db::{IClientPreferenceRepository, IKnowledgeRepository, KNOWLEDGE_RETRIEVAL_KEY};
+use nomifun_db::models::{
+    CreateKnowledgeTagParams, KnowledgeBaseRow, KnowledgeBindingRow, KnowledgeEntryRow,
+    KnowledgeTreeEventStatus, KnowledgeTreeOperationRow, KnowledgeTreeOperationState,
+};
+use nomifun_db::{
+    CommitKnowledgeTreeOperationParams, IClientPreferenceRepository,
+    IKnowledgeEntryRepository, IKnowledgeRepository, IKnowledgeTreeOperationRepository,
+    KnowledgeTreeOperationPageCursor,
+    KNOWLEDGE_ENTRY_KIND_DIRECTORY, KNOWLEDGE_ENTRY_KIND_FILE,
+    KNOWLEDGE_ENTRY_ORIGIN_URL_SNAPSHOT, KNOWLEDGE_ENTRY_ORIGIN_USER,
+    KNOWLEDGE_RETRIEVAL_KEY,
+    PrepareKnowledgeTreeOperationParams, RelocateKnowledgeEntryProjectionParams,
+    UpsertKnowledgeEntryParams,
+};
 use nomifun_model_invoke::{
     EmbedRequest, ModelInvokeService, ModelRef, RerankRequest, TaskOutcome, TaskRequest,
     TaskResult,
@@ -39,7 +55,7 @@ use unicode_normalization::UnicodeNormalization;
 use url::Url;
 
 use crate::autogen::{self, KnowledgeCompleter};
-use crate::events::KnowledgeEventEmitter;
+use crate::events::{KnowledgeEventEmitter, KnowledgeTreeChangedEvent};
 use crate::mount::{self, MountSpec};
 use crate::source_url::{self, HttpFetcher, PageFetcher};
 use crate::workpath::{WORKPATH_BINDING_KIND, workpath_key};
@@ -124,6 +140,7 @@ pub struct KnowledgeBaseInfo {
     pub description: String,
     pub root_path: String,
     pub managed: bool,
+    pub tree_access: KnowledgeTreeAccess,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
     pub file_count: u64,
@@ -174,6 +191,20 @@ pub struct KbFileEntry {
 /// browse-only; files are markdown documents that can be read/edited.
 #[derive(Debug, Clone, Serialize)]
 pub struct KbTreeEntry {
+    /// Stable identity from the rebuildable entry projection. Omitted only
+    /// when the projection repository is not wired or temporarily unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<KnowledgeEntryId>,
+    /// Revision of this exact projected entry (not the whole tree).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<i64>,
+    /// Stable parent identity. Root children intentionally serialize without
+    /// this field, just like path-only compatibility responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_entry_id: Option<KnowledgeEntryId>,
+    /// `user`, `url_snapshot`, or `generated` when projection metadata exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     pub name: String,
     pub rel_path: String,
     pub is_dir: bool,
@@ -190,6 +221,20 @@ pub struct KbFileContent {
     pub content: String,
     pub size: u64,
     pub modified_at: Option<TimestampMs>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<KnowledgeEntryId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<i64>,
+}
+
+/// Result of one editor CAS update. A stable identity may resolve to a newer
+/// locator than the path the editor last rendered; returning it lets the UI
+/// rebind the document session without guessing.
+#[derive(Debug, Clone, Serialize)]
+pub struct KbFileUpdateResult {
+    pub rel_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<KnowledgeEntryId>,
 }
 
 /// One consumer (binding) of a knowledge base — a workspace/conversation/etc.
@@ -586,9 +631,59 @@ struct SearchCacheInner {
 
 const MAX_SEARCH_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SEARCH_CACHE_FILE_BYTES: usize = 1024 * 1024;
+const MAX_RELOCATE_IDEMPOTENCY_ENTRIES: usize = 1_024;
+#[cfg(not(test))]
+const TREE_OPERATION_SWEEP_PAGE_SIZE: u32 =
+    nomifun_db::MAX_KNOWLEDGE_TREE_OPERATION_PAGE_SIZE;
+// Exercise real keyset pagination without creating hundreds of SQLite rows in
+// every unit-test run.
+#[cfg(test)]
+const TREE_OPERATION_SWEEP_PAGE_SIZE: u32 = 2;
+/// Bound one startup/request journal sweep so a continuously growing producer
+/// cannot starve router startup or a user mutation.
+const MAX_TREE_OPERATION_SWEEP_ROWS: usize = 4_096;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RelocateRequestFingerprint {
+    source_path: String,
+    destination_parent_path: String,
+    new_name: Option<String>,
+    conflict_policy: RelocateConflictPolicy,
+    entry_id: Option<KnowledgeEntryId>,
+    destination_parent_id: Option<KnowledgeEntryId>,
+    expected_revision: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedRelocation {
+    fingerprint: RelocateRequestFingerprint,
+    result: RelocateTreeEntryResult,
+}
+
+#[derive(Default)]
+struct RelocateIdempotencyCache {
+    entries: HashMap<String, CachedRelocation>,
+    insertion_order: VecDeque<String>,
+}
 
 pub struct KnowledgeService {
     repo: Arc<dyn IKnowledgeRepository>,
+    /// Rebuildable stable-identity projection. It is deliberately late-wired
+    /// so lightweight/path-only test repositories remain valid and the
+    /// filesystem stays usable if projection persistence is degraded.
+    entry_repository: RwLock<Option<Arc<dyn IKnowledgeEntryRepository>>>,
+    /// Durable idempotency journal and transactional outbox for tree
+    /// relocations. Like the entry projection this is late-wired so lightweight
+    /// embedders and path-only unit tests retain their in-memory behaviour.
+    tree_operation_repository:
+        RwLock<Option<Arc<dyn IKnowledgeTreeOperationRepository>>>,
+    /// Prevent concurrent startup/retry drains from broadcasting the same
+    /// pending operation in parallel inside this process. The durable outbox
+    /// remains at-least-once across an emit/ack crash window.
+    tree_operation_drain_lock: Arc<AsyncMutex<()>>,
+    /// Bases successfully reconciled in this process. A listed-level mismatch
+    /// or a failed post-rename CAS forces another full filesystem reconcile.
+    projection_reconciled: Arc<StdMutex<HashSet<String>>>,
     data_dir: PathBuf,
     emitter: KnowledgeEventEmitter,
     /// LLM seam for autogen / snapshot compression. Late-wired (the agent
@@ -613,6 +708,14 @@ pub struct KnowledgeService {
     /// mtime-keyed content cache for `search_bases` (perf only; see
     /// [`SearchCacheInner`]). Cloned into the search `spawn_blocking` closure.
     search_cache: Arc<RwLock<SearchCacheInner>>,
+    /// Bounded process-local replay protection for relocation requests. The
+    /// tree writer lock spans lookup, filesystem commit and insertion, so two
+    /// concurrent retries can never execute the same move twice.
+    relocate_idempotency: Arc<StdMutex<RelocateIdempotencyCache>>,
+    /// Monotonic per-base revisions for fine-grained tree events. The value is
+    /// initialized from the persisted base timestamp and advanced on every
+    /// committed relocation.
+    tree_revisions: Arc<StdMutex<HashMap<String, u64>>>,
     /// Per-logical-target write-back lock. Direct mode holds it across
     /// read+merge+replace. Staged mode holds it across duplicate detection,
     /// collision-suffix allocation, and no-replace publication. The staged key
@@ -690,6 +793,11 @@ struct SourcePublicationOutcome {
     fatal_error: Option<AppError>,
 }
 
+struct ProjectionState {
+    entries: Vec<KnowledgeEntryRow>,
+    tree_revision: u64,
+}
+
 impl KnowledgeService {
     pub fn new(repo: Arc<dyn IKnowledgeRepository>, data_dir: &Path, emitter: KnowledgeEventEmitter) -> Self {
         if let Err(error) = std::fs::create_dir_all(data_dir) {
@@ -704,12 +812,20 @@ impl KnowledgeService {
             .unwrap_or_else(|_| data_dir.to_path_buf());
         Self {
             repo,
+            entry_repository: RwLock::new(None),
+            tree_operation_repository: RwLock::new(None),
+            tree_operation_drain_lock: Arc::new(AsyncMutex::new(())),
+            projection_reconciled: Arc::new(StdMutex::new(HashSet::new())),
             data_dir,
             emitter,
             completer: RwLock::new(None),
             fetcher: Arc::new(HttpFetcher::default()),
             render_fetcher: RwLock::new(None),
             search_cache: Arc::new(RwLock::new(SearchCacheInner::default())),
+            relocate_idempotency: Arc::new(StdMutex::new(
+                RelocateIdempotencyCache::default(),
+            )),
+            tree_revisions: Arc::new(StdMutex::new(HashMap::new())),
             turn_writeback_locks: Arc::new(StdMutex::new(HashMap::new())),
             base_lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
             document_tree_locks: Arc::new(StdMutex::new(HashMap::new())),
@@ -719,6 +835,803 @@ impl KnowledgeService {
             retrieval_preferences: RwLock::new(None),
             model_invoke: RwLock::new(None),
         }
+    }
+
+    /// Late-wire the stable entry identity projection. Production passes the
+    /// same concrete SQLite repository used for base registration, while
+    /// path-only embedders and existing unit tests may leave it absent.
+    pub fn set_entry_repository(
+        &self,
+        repository: Arc<dyn IKnowledgeEntryRepository>,
+    ) {
+        *self
+            .entry_repository
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(repository);
+        self.projection_reconciled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    fn entry_repository(&self) -> Option<Arc<dyn IKnowledgeEntryRepository>> {
+        self.entry_repository
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Late-wire the durable relocation journal/outbox. Production supplies
+    /// the SQLite implementation backed by the same pool as the base and
+    /// stable-entry repositories.
+    pub fn set_tree_operation_repository(
+        &self,
+        repository: Arc<dyn IKnowledgeTreeOperationRepository>,
+    ) {
+        *self
+            .tree_operation_repository
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(repository);
+    }
+
+    fn tree_operation_repository(
+        &self,
+    ) -> Option<Arc<dyn IKnowledgeTreeOperationRepository>> {
+        self.tree_operation_repository
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn durable_relocation_receipt(
+        operation: &KnowledgeTreeOperationRow,
+    ) -> Result<RelocateTreeEntryResult, AppError> {
+        let receipt = operation.receipt_json.as_deref().ok_or_else(|| {
+            AppError::Internal(format!(
+                "committed knowledge-tree operation {} has no receipt",
+                operation.operation_id
+            ))
+        })?;
+        serde_json::from_str(receipt).map_err(|error| {
+            AppError::Internal(format!(
+                "committed knowledge-tree operation {} has an invalid receipt: {error}",
+                operation.operation_id
+            ))
+        })
+    }
+
+    /// Attempt one pending outbox publication. A serialization or repository
+    /// acknowledgement failure deliberately leaves the event pending; callers
+    /// have already committed the filesystem mutation and still return its
+    /// durable receipt.
+    async fn publish_pending_tree_event(
+        &self,
+        repository: &Arc<dyn IKnowledgeTreeOperationRepository>,
+        operation: &KnowledgeTreeOperationRow,
+    ) -> bool {
+        if operation.event_status != KnowledgeTreeEventStatus::Pending {
+            return operation.event_status == KnowledgeTreeEventStatus::Published;
+        }
+        let Some(payload) = operation.event_payload_json.as_deref() else {
+            tracing::error!(
+                operation_id = %operation.operation_id,
+                "committed knowledge-tree outbox row has no event payload"
+            );
+            return false;
+        };
+        let event = match serde_json::from_str::<KnowledgeTreeChangedEvent>(payload) {
+            Ok(event) => event,
+            Err(error) => {
+                tracing::error!(
+                    operation_id = %operation.operation_id,
+                    %error,
+                    "knowledge-tree outbox payload is invalid"
+                );
+                return false;
+            }
+        };
+
+        // A no-op still needs a terminal journal receipt. Its outbox payload is
+        // persisted to satisfy the single-row transactional contract, but it
+        // is acknowledged without broadcasting a meaningless old==new mapping.
+        if event.old_prefix != event.new_prefix {
+            if let Err(error) = self.emitter.try_emit_tree_changed(&event) {
+                tracing::warn!(
+                    operation_id = %operation.operation_id,
+                    %error,
+                    "knowledge-tree outbox publication failed; leaving it pending"
+                );
+                return false;
+            }
+        }
+        match repository
+            .mark_event_published(&operation.operation_id, now_ms())
+            .await
+        {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(
+                    operation_id = %operation.operation_id,
+                    %error,
+                    "knowledge-tree outbox acknowledgement failed; leaving it pending"
+                );
+                false
+            }
+        }
+    }
+
+    async fn publish_pending_tree_event_serialized(
+        &self,
+        repository: &Arc<dyn IKnowledgeTreeOperationRepository>,
+        operation: &KnowledgeTreeOperationRow,
+    ) -> bool {
+        let _drain_guard = self.tree_operation_drain_lock.lock().await;
+        let latest = match repository
+            .load_by_operation(&operation.operation_id)
+            .await
+        {
+            Ok(Some(latest)) => latest,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(
+                    operation_id = %operation.operation_id,
+                    %error,
+                    "knowledge-tree outbox refresh failed; leaving it pending"
+                );
+                return false;
+            }
+        };
+        self.publish_pending_tree_event(repository, &latest).await
+    }
+
+    /// Retry committed tree events in bounded keyset pages. Delivery is
+    /// at-least-once across an emit/ack crash window; clients deduplicate by
+    /// `operation_id` and reconcile by `tree_revision`.
+    pub async fn drain_pending_tree_events(&self) -> Result<usize, AppError> {
+        let Some(repository) = self.tree_operation_repository() else {
+            return Ok(0);
+        };
+        let _drain_guard = self.tree_operation_drain_lock.lock().await;
+        let mut published = 0usize;
+        let mut scanned = 0usize;
+        let mut cursor: Option<KnowledgeTreeOperationPageCursor> = None;
+        let mut seen_operation_ids = HashSet::new();
+        while scanned < MAX_TREE_OPERATION_SWEEP_ROWS {
+            let page_limit = (MAX_TREE_OPERATION_SWEEP_ROWS - scanned)
+                .min(TREE_OPERATION_SWEEP_PAGE_SIZE as usize)
+                as u32;
+            let pending = repository
+                .list_pending_events_after(page_limit, cursor.as_ref())
+                .await?;
+            if pending.is_empty() {
+                break;
+            }
+            let page_len = pending.len();
+            let last = pending.last().expect("non-empty outbox page");
+            let committed_at = last.committed_at.ok_or_else(|| {
+                AppError::Internal(format!(
+                    "committed knowledge-tree operation {} has no committed_at cursor",
+                    last.operation_id
+                ))
+            })?;
+            let next_cursor = KnowledgeTreeOperationPageCursor {
+                timestamp: committed_at,
+                operation_id: last.operation_id.clone(),
+            };
+            for operation in pending {
+                if !seen_operation_ids.insert(operation.operation_id.clone()) {
+                    continue;
+                }
+                published += usize::from(
+                    self.publish_pending_tree_event(&repository, &operation)
+                        .await,
+                );
+            }
+            scanned += page_len;
+            cursor = Some(next_cursor);
+            if page_len < page_limit as usize {
+                break;
+            }
+        }
+        if scanned == MAX_TREE_OPERATION_SWEEP_ROWS {
+            tracing::warn!(
+                scanned,
+                "knowledge-tree outbox sweep reached its fairness limit; remaining rows stay pending"
+            );
+        }
+        Ok(published)
+    }
+
+    async fn mark_tree_operation_ambiguous(
+        &self,
+        repository: &Arc<dyn IKnowledgeTreeOperationRepository>,
+        operation: &KnowledgeTreeOperationRow,
+        reason: &str,
+    ) -> AppError {
+        if let Err(error) = repository
+            .mark_needs_recovery(&operation.operation_id, reason, now_ms())
+            .await
+        {
+            tracing::error!(
+                operation_id = %operation.operation_id,
+                %error,
+                "failed to persist ambiguous knowledge-tree recovery state"
+            );
+        }
+        AppError::Conflict(reason.to_owned())
+    }
+
+    async fn finish_durable_relocation_locked(
+        &self,
+        repository: Arc<dyn IKnowledgeTreeOperationRepository>,
+        mut current: KnowledgeBaseRow,
+        operation: KnowledgeTreeOperationRow,
+        publish_event: bool,
+    ) -> Result<RelocateTreeEntryResult, AppError> {
+        if operation.state == KnowledgeTreeOperationState::Committed {
+            let receipt = Self::durable_relocation_receipt(&operation)?;
+            if publish_event {
+                self.publish_pending_tree_event_serialized(&repository, &operation)
+                    .await;
+            }
+            return Ok(receipt);
+        }
+        if operation.state != KnowledgeTreeOperationState::FilesystemCommitted {
+            return Err(AppError::Conflict(format!(
+                "knowledge-tree operation {} is not ready to finalize",
+                operation.operation_id
+            )));
+        }
+
+        let root = PathBuf::from(&current.root_path);
+        let inspect_root = root.clone();
+        let source_path = operation.source_rel_path.clone();
+        let destination_path = operation.destination_rel_path.clone();
+        let moved = tokio::task::spawn_blocking(move || {
+            inspect_committed_relocation(
+                &inspect_root,
+                &source_path,
+                &destination_path,
+            )
+        })
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!(
+                "tree relocation recovery inspection task failed: {error}"
+            ))
+        })??;
+
+        let mut projected_entry_id = None;
+        let mut projected_entry_revision = None;
+        let mut persisted_tree_revision = None;
+        if let Some(entry_repository) = self.entry_repository() {
+            let knowledge_base_id = operation.knowledge_base_id.clone();
+            let source_identity = portable_writeback_path_identity(
+                &operation.source_rel_path,
+            );
+            let destination_identity = portable_writeback_path_identity(
+                &operation.destination_rel_path,
+            );
+            let stable_entry = entry_repository
+                .get_entry_by_path(&knowledge_base_id, &source_identity)
+                .await?
+                .or(entry_repository
+                    .get_entry_by_path(&knowledge_base_id, &destination_identity)
+                    .await?);
+            let mut forced_ids = HashMap::new();
+            if let Some(entry) = stable_entry {
+                forced_ids.insert(
+                    destination_identity.clone(),
+                    entry.knowledge_entry_id,
+                );
+            }
+            self.mark_projection_dirty(&current);
+            let projection = self
+                .reconcile_projection_locked(&current, forced_ids)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Internal(
+                        "knowledge entry repository disappeared during relocation recovery"
+                            .into(),
+                    )
+                })?;
+            if let Some(entry) = projection
+                .entries
+                .iter()
+                .find(|entry| entry.portable_rel_path == destination_identity)
+            {
+                projected_entry_id = Some(entry.knowledge_entry_id.clone());
+                projected_entry_revision = Some(entry.revision);
+            }
+            persisted_tree_revision = Some(projection.tree_revision);
+        }
+
+        let changed = operation.source_rel_path != operation.destination_rel_path;
+        let legacy_tree_revision = if changed && persisted_tree_revision.is_none() {
+            Some(self.next_tree_revision(&current))
+        } else {
+            None
+        };
+        let tree_revision = persisted_tree_revision
+            .or(legacy_tree_revision)
+            .unwrap_or_else(|| self.current_tree_revision(&current));
+
+        if changed {
+            self.invalidate_search_cache_prefix(
+                &root.join(&operation.source_rel_path),
+            );
+            self.invalidate_search_cache_prefix(
+                &root.join(&operation.destination_rel_path),
+            );
+            // `tree_revision` is a logical sequence stored separately in
+            // SQLite; `updated_at` remains an epoch timestamp exposed by the
+            // public base DTO. Mixing them rewound durable moves to 1970.
+            current.updated_at = now_ms();
+            self.repo.update_base(&current).await?;
+        }
+
+        let warnings = (!changed).then(|| {
+            vec!["The entry is already at the requested destination.".to_owned()]
+        });
+        let operation_id = operation.operation_id.to_string();
+        let result = RelocateTreeEntryResult {
+            operation_id: operation_id.clone(),
+            entry_id: projected_entry_id.clone(),
+            old_path: operation.source_rel_path.clone(),
+            new_path: operation.destination_rel_path.clone(),
+            kind: if moved.entry.is_dir {
+                KnowledgeEntryKind::Directory
+            } else {
+                KnowledgeEntryKind::File
+            },
+            moved_descendant_count: moved.moved_descendant_count,
+            revision: projected_entry_revision,
+            tree_revision,
+            undo_token: changed.then(|| format!("relocate:{operation_id}")),
+            warnings,
+        };
+        let event = KnowledgeTreeChangedEvent {
+            knowledge_base_id: operation.knowledge_base_id.clone(),
+            operation_id,
+            entry_id: projected_entry_id,
+            old_prefix: operation.source_rel_path,
+            new_prefix: operation.destination_rel_path,
+            kind: moved.kind,
+            moved_descendant_count: moved.moved_descendant_count,
+            tree_revision,
+            revision: projected_entry_revision,
+        };
+        let committed = repository
+            .commit_operation(&CommitKnowledgeTreeOperationParams {
+                operation_id: operation.operation_id,
+                receipt: serde_json::to_value(&result).map_err(|error| {
+                    AppError::Internal(format!(
+                        "failed to serialize knowledge-tree receipt: {error}"
+                    ))
+                })?,
+                event_payload: serde_json::to_value(&event).map_err(|error| {
+                    AppError::Internal(format!(
+                        "failed to serialize knowledge-tree event: {error}"
+                    ))
+                })?,
+                committed_at: now_ms(),
+            })
+            .await?;
+        if publish_event {
+            self.publish_pending_tree_event_serialized(&repository, &committed)
+                .await;
+        }
+
+        if changed {
+            match self.row_to_info(current).await {
+                Ok(info) => self.emitter.emit_base_updated(&info),
+                Err(error) => tracing::warn!(
+                    knowledge_base_id = %operation.knowledge_base_id,
+                    %error,
+                    "durable tree relocation committed but base-updated payload could not be built"
+                ),
+            }
+        }
+        Ok(result)
+    }
+
+    async fn resume_durable_relocation_locked(
+        &self,
+        repository: Arc<dyn IKnowledgeTreeOperationRepository>,
+        current: KnowledgeBaseRow,
+        operation: KnowledgeTreeOperationRow,
+        strict_recovery: bool,
+        publish_event: bool,
+    ) -> Result<RelocateTreeEntryResult, AppError> {
+        match operation.state {
+            KnowledgeTreeOperationState::Committed => {
+                let receipt = Self::durable_relocation_receipt(&operation)?;
+                if publish_event {
+                    self.publish_pending_tree_event_serialized(&repository, &operation)
+                        .await;
+                }
+                return Ok(receipt);
+            }
+            KnowledgeTreeOperationState::FilesystemCommitted => {
+                return self
+                    .finish_durable_relocation_locked(
+                        repository,
+                        current,
+                        operation,
+                        publish_event,
+                    )
+                    .await;
+            }
+            KnowledgeTreeOperationState::Prepared
+            | KnowledgeTreeOperationState::NeedsRecovery => {}
+        }
+
+        let root = PathBuf::from(&current.root_path);
+        let inspect_root = root.clone();
+        let source_path = operation.source_rel_path.clone();
+        let destination_path = operation.destination_rel_path.clone();
+        let temporary_path = durable_relocation_temporary_path(
+            &root,
+            &operation.destination_rel_path,
+            &operation.operation_id,
+        )?;
+        let (source_exists, destination_exists, temporary_exists) =
+            tokio::task::spawn_blocking(move || {
+                Ok::<_, AppError>((
+                    recovery_tree_path_exists(&inspect_root, &source_path)?,
+                    recovery_tree_path_exists(&inspect_root, &destination_path)?,
+                    recovery_absolute_path_exists(&inspect_root, &temporary_path)?,
+                ))
+            })
+            .await
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "tree relocation recovery state inspection task failed: {error}"
+                ))
+            })??;
+
+        if operation.source_rel_path == operation.destination_rel_path {
+            if !source_exists || temporary_exists {
+                return Err(self
+                    .mark_tree_operation_ambiguous(
+                        &repository,
+                        &operation,
+                        "no-op tree relocation no longer has one unambiguous source entry",
+                    )
+                    .await);
+            }
+            let filesystem_committed = repository
+                .mark_filesystem_committed(&operation.operation_id, now_ms())
+                .await?;
+            return self
+                .finish_durable_relocation_locked(
+                    repository,
+                    current,
+                    filesystem_committed,
+                    publish_event,
+                )
+                .await;
+        }
+
+        if !source_exists && destination_exists && !temporary_exists {
+            if strict_recovery
+                && let Some(expected_identity) = operation.source_fs_identity.as_deref()
+            {
+                let identity_root = root.clone();
+                let identity_path = operation.destination_rel_path.clone();
+                let actual_identity = tokio::task::spawn_blocking(move || {
+                    recovery_tree_path_identity(&identity_root, &identity_path)
+                })
+                .await
+                .map_err(|error| {
+                    AppError::Internal(format!(
+                        "tree relocation recovery identity task failed: {error}"
+                    ))
+                })??;
+                if actual_identity.as_deref() != Some(expected_identity) {
+                    return Err(self
+                        .mark_tree_operation_ambiguous(
+                            &repository,
+                            &operation,
+                            "knowledge-tree relocation destination identity does not match the prepared source; refusing to claim an unrelated target",
+                        )
+                        .await);
+                }
+            }
+            let filesystem_committed = repository
+                .mark_filesystem_committed(&operation.operation_id, now_ms())
+                .await?;
+            return self
+                .finish_durable_relocation_locked(
+                    repository,
+                    current,
+                    filesystem_committed,
+                    publish_event,
+                )
+                .await;
+        }
+
+        if !source_exists && !destination_exists && temporary_exists {
+            let target = root.join(&operation.destination_rel_path);
+            let temporary = durable_relocation_temporary_path(
+                &root,
+                &operation.destination_rel_path,
+                &operation.operation_id,
+            )?;
+            tokio::task::spawn_blocking(move || {
+                rename_path_no_replace(&temporary, &target)
+                    .map_err(|error| map_relocate_io_error(error, &temporary, &target))
+            })
+            .await
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "tree relocation temporary recovery task failed: {error}"
+                ))
+            })??;
+            let filesystem_committed = repository
+                .mark_filesystem_committed(&operation.operation_id, now_ms())
+                .await?;
+            return self
+                .finish_durable_relocation_locked(
+                    repository,
+                    current,
+                    filesystem_committed,
+                    publish_event,
+                )
+                .await;
+        }
+
+        let portable_alias_rename = operation.source_rel_path
+            != operation.destination_rel_path
+            && portable_writeback_path_identity(&operation.source_rel_path)
+                == portable_writeback_path_identity(
+                    &operation.destination_rel_path,
+                );
+        if !source_exists
+            || temporary_exists
+            || (strict_recovery
+                && destination_exists
+                && !portable_alias_rename)
+        {
+            return Err(self
+                .mark_tree_operation_ambiguous(
+                    &repository,
+                    &operation,
+                    "knowledge-tree relocation source/destination state is ambiguous; manual recovery is required",
+                )
+                .await);
+        }
+
+        // A live request may safely retry a prepared command while the source
+        // is still at its original path. A pre-existing target simply causes
+        // the same no-replace conflict and leaves the journal retryable.
+        if self.entry_repository().is_some() && !self.projection_is_reconciled(&current) {
+            self.reconcile_projection_locked(&current, HashMap::new())
+                .await?;
+        }
+        let destination_parent = operation
+            .destination_rel_path
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or_default()
+            .to_owned();
+        let destination_name = operation
+            .destination_rel_path
+            .rsplit('/')
+            .next()
+            .expect("durable destination path is non-empty")
+            .to_owned();
+        let move_root = root.clone();
+        let move_source = operation.source_rel_path.clone();
+        let move_operation_id = operation.operation_id.clone();
+        let move_result = tokio::task::spawn_blocking(move || {
+            relocate_tree_entry_on_disk(
+                &move_root,
+                &move_source,
+                &destination_parent,
+                Some(&destination_name),
+                Some(&move_operation_id),
+            )
+        })
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("tree relocate task join error: {error}"))
+        })?;
+        if let Err(error) = move_result {
+            let inspect_root = root.clone();
+            let source_path = operation.source_rel_path.clone();
+            let destination_path = operation.destination_rel_path.clone();
+            let (source_still_exists, destination_now_exists) =
+                tokio::task::spawn_blocking(move || {
+                    Ok::<_, AppError>((
+                        recovery_tree_path_exists(&inspect_root, &source_path)?,
+                        recovery_tree_path_exists(&inspect_root, &destination_path)?,
+                    ))
+                })
+                .await
+                .map_err(|join_error| {
+                    AppError::Internal(format!(
+                        "tree relocation failure inspection task failed: {join_error}"
+                    ))
+                })??;
+            if source_still_exists {
+                return Err(error);
+            }
+            if destination_now_exists {
+                let filesystem_committed = repository
+                    .mark_filesystem_committed(&operation.operation_id, now_ms())
+                    .await?;
+                return self
+                    .finish_durable_relocation_locked(
+                        repository,
+                        current,
+                        filesystem_committed,
+                        publish_event,
+                    )
+                    .await;
+            }
+            return Err(self
+                .mark_tree_operation_ambiguous(
+                    &repository,
+                    &operation,
+                    &format!(
+                        "tree relocation failed after the source left its original path: {error}"
+                    ),
+                )
+                .await);
+        }
+
+        // This marker is intentionally the very next durable step after the
+        // rename. A crash before it is reconciled from source/target state.
+        let filesystem_committed = match repository
+            .mark_filesystem_committed(&operation.operation_id, now_ms())
+            .await
+        {
+            Ok(operation) => operation,
+            Err(error) => {
+                let _ = repository
+                    .mark_needs_recovery(
+                        &operation.operation_id,
+                        "filesystem rename committed but its journal marker failed",
+                        now_ms(),
+                    )
+                    .await;
+                return Err(error.into());
+            }
+        };
+        self.finish_durable_relocation_locked(
+            repository,
+            current,
+            filesystem_committed,
+            publish_event,
+        )
+        .await
+    }
+
+    async fn recover_one_pending_tree_operation(
+        &self,
+        repository: Arc<dyn IKnowledgeTreeOperationRepository>,
+        operation: KnowledgeTreeOperationRow,
+    ) -> bool {
+        let row = match self
+            .require_base(operation.knowledge_base_id.as_str())
+            .await
+        {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::warn!(
+                    operation_id = %operation.operation_id,
+                    %error,
+                    "knowledge-tree recovery skipped an unavailable base"
+                );
+                return false;
+            }
+        };
+        let tree_guard = match self.acquire_document_tree_write_lock(&row).await {
+            Ok(guard) => guard,
+            Err(error) => {
+                tracing::warn!(operation_id = %operation.operation_id, %error, "knowledge-tree recovery could not acquire its tree lock");
+                return false;
+            }
+        };
+        let base_guard = match self.acquire_base_lifecycle_lock(&row).await {
+            Ok(guard) => guard,
+            Err(error) => {
+                tracing::warn!(operation_id = %operation.operation_id, %error, "knowledge-tree recovery could not acquire its lifecycle lock");
+                drop(tree_guard);
+                return false;
+            }
+        };
+        let current = match self
+            .require_base(operation.knowledge_base_id.as_str())
+            .await
+        {
+            Ok(current) if current.root_path == row.root_path => current,
+            Ok(_) => {
+                tracing::warn!(operation_id = %operation.operation_id, "knowledge-tree recovery observed a changed base root");
+                drop(base_guard);
+                drop(tree_guard);
+                return false;
+            }
+            Err(error) => {
+                tracing::warn!(operation_id = %operation.operation_id, %error, "knowledge-tree recovery lost its base registration");
+                drop(base_guard);
+                drop(tree_guard);
+                return false;
+            }
+        };
+        let recovered = match self
+            .resume_durable_relocation_locked(
+                repository,
+                current,
+                operation.clone(),
+                true,
+                false,
+            )
+            .await
+        {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(
+                    operation_id = %operation.operation_id,
+                    %error,
+                    "knowledge-tree operation remains pending recovery"
+                );
+                false
+            }
+        };
+        drop(base_guard);
+        drop(tree_guard);
+        recovered
+    }
+
+    /// Reconcile non-terminal relocation journal rows before routes begin
+    /// serving. Recovered events stay pending until a realtime subscriber is
+    /// installed (or the first mutation drains them). Ambiguous rows remain
+    /// explicitly recoverable and do not block unrelated knowledge bases;
+    /// repository scan failures are surfaced.
+    pub async fn recover_pending_tree_operations(&self) -> Result<usize, AppError> {
+        let Some(repository) = self.tree_operation_repository() else {
+            return Ok(0);
+        };
+        let mut recovered = 0usize;
+        let mut scanned = 0usize;
+        let mut cursor: Option<KnowledgeTreeOperationPageCursor> = None;
+        while scanned < MAX_TREE_OPERATION_SWEEP_ROWS {
+            let page_limit = (MAX_TREE_OPERATION_SWEEP_ROWS - scanned)
+                .min(TREE_OPERATION_SWEEP_PAGE_SIZE as usize)
+                as u32;
+            let pending = repository
+                .list_pending_recovery_after(page_limit, cursor.as_ref())
+                .await?;
+            if pending.is_empty() {
+                break;
+            }
+            let page_len = pending.len();
+            let last = pending.last().expect("non-empty recovery page");
+            let next_cursor = KnowledgeTreeOperationPageCursor {
+                timestamp: last.created_at,
+                operation_id: last.operation_id.clone(),
+            };
+            for operation in pending {
+                recovered += usize::from(
+                    self.recover_one_pending_tree_operation(repository.clone(), operation)
+                        .await,
+                );
+            }
+            scanned += page_len;
+            cursor = Some(next_cursor);
+            if page_len < page_limit as usize {
+                break;
+            }
+        }
+        if scanned == MAX_TREE_OPERATION_SWEEP_ROWS {
+            tracing::warn!(
+                scanned,
+                "knowledge-tree recovery sweep reached its fairness limit; remaining rows stay pending"
+            );
+        }
+        Ok(recovered)
     }
 
     /// Late-wire the one install-wide retrieval preference source and the
@@ -1028,7 +1941,34 @@ impl KnowledgeService {
         root_path: Option<&str>,
         source: Option<KnowledgeSource>,
     ) -> Result<KnowledgeBaseInfo, AppError> {
-        let (row, info, snapshot_source) = self.register_base(name, description, root_path, source).await?;
+        // Internal callers historically use this helper to create test/import
+        // fixtures they immediately mutate. Public create routes call
+        // `create_base_with_access` and retain the safe external-read-only
+        // default when no explicit consent is supplied.
+        self.create_base_with_access(
+            name,
+            description,
+            root_path,
+            source,
+            Some(KnowledgeTreeAccess::Editable),
+        )
+            .await
+    }
+
+    /// Create a base with an explicit filesystem mutation policy. Managed
+    /// directories default to editable; externally owned directories default to
+    /// read-only unless the user deliberately grants write access.
+    pub async fn create_base_with_access(
+        &self,
+        name: &str,
+        description: &str,
+        root_path: Option<&str>,
+        source: Option<KnowledgeSource>,
+        requested_access: Option<KnowledgeTreeAccess>,
+    ) -> Result<KnowledgeBaseInfo, AppError> {
+        let (row, info, snapshot_source) = self
+            .register_base(name, description, root_path, source, requested_access)
+            .await?;
         match snapshot_source {
             Some(src) => self.fetch_source_and_autogen(row, src).await,
             None => Ok(info),
@@ -1053,7 +1993,9 @@ impl KnowledgeService {
         root_path: Option<&str>,
         source: Option<KnowledgeSource>,
     ) -> Result<KnowledgeBaseInfo, AppError> {
-        let (row, info, snapshot_source) = self.register_base(name, description, root_path, source).await?;
+        let (row, info, snapshot_source) = self
+            .register_base(name, description, root_path, source, None)
+            .await?;
         if let Some(src) = snapshot_source {
             // Same pattern as the import handler's spawned autogen
             // (`routes.rs::import_base`): the task holds its own Arc so it
@@ -1080,6 +2022,7 @@ impl KnowledgeService {
         description: &str,
         root_path: Option<&str>,
         source: Option<KnowledgeSource>,
+        requested_access: Option<KnowledgeTreeAccess>,
     ) -> Result<(KnowledgeBaseRow, KnowledgeBaseInfo, Option<KnowledgeSource>), AppError> {
         let name = name.trim();
         if name.is_empty() {
@@ -1194,10 +2137,34 @@ impl KnowledgeService {
             })?
             .to_owned();
 
-        let extra = match &source {
-            Some(src) => serde_json::json!({ "source": src }).to_string(),
-            None => "{}".into(),
-        };
+        let tree_access = requested_access.unwrap_or(if managed {
+            KnowledgeTreeAccess::Editable
+        } else {
+            KnowledgeTreeAccess::ReadOnly
+        });
+        if tree_access == KnowledgeTreeAccess::ReadOnly
+            && source
+                .as_ref()
+                .is_some_and(|source| source.mode == KnowledgeSourceMode::Snapshot)
+        {
+            return Err(AppError::BadRequest(
+                "snapshot knowledge sources require editable tree access".into(),
+            ));
+        }
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "tree_access".into(),
+            serde_json::to_value(tree_access)
+                .map_err(|error| AppError::Internal(format!("failed to serialize knowledge tree access: {error}")))?,
+        );
+        if let Some(source) = &source {
+            extra.insert(
+                "source".into(),
+                serde_json::to_value(source)
+                    .map_err(|error| AppError::Internal(format!("failed to serialize knowledge source: {error}")))?,
+            );
+        }
+        let extra = serde_json::Value::Object(extra).to_string();
         let now = now_ms();
         let row = KnowledgeBaseRow {
             id: 0,
@@ -1347,6 +2314,18 @@ impl KnowledgeService {
         description: Option<&str>,
         tags: Option<Vec<String>>,
     ) -> Result<KnowledgeBaseInfo, AppError> {
+        self.update_base_with_access(id, name, description, tags, None)
+            .await
+    }
+
+    pub async fn update_base_with_access(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+        tags: Option<Vec<String>>,
+        tree_access: Option<KnowledgeTreeAccess>,
+    ) -> Result<KnowledgeBaseInfo, AppError> {
         let initial = self.require_base(id).await?;
         let _base_guard =
             self.acquire_base_lifecycle_write_lock(&initial).await?;
@@ -1373,6 +2352,27 @@ impl KnowledgeService {
             } else {
                 Some(serde_json::to_string(tag_keys).unwrap())
             };
+        }
+        if let Some(tree_access) = tree_access {
+            let mut extra: serde_json::Value = serde_json::from_str(&row.extra).map_err(|error| {
+                AppError::Internal(format!(
+                    "knowledge base {} has invalid extra JSON: {error}",
+                    row.knowledge_base_id
+                ))
+            })?;
+            let object = extra.as_object_mut().ok_or_else(|| {
+                AppError::Internal(format!(
+                    "knowledge base {} extra must be a JSON object",
+                    row.knowledge_base_id
+                ))
+            })?;
+            object.insert(
+                "tree_access".into(),
+                serde_json::to_value(tree_access).map_err(|error| {
+                    AppError::Internal(format!("failed to serialize knowledge tree access: {error}"))
+                })?,
+            );
+            row.extra = extra.to_string();
         }
         row.updated_at = now_ms();
         self.repo.update_base(&row).await?;
@@ -1439,6 +2439,10 @@ impl KnowledgeService {
             }
         }
         self.repo.delete_base(id).await?;
+        self.projection_reconciled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&row.knowledge_base_id);
         self.root_lock_identity_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1486,20 +2490,246 @@ impl KnowledgeService {
         )
     }
 
+    fn projection_is_reconciled(&self, row: &KnowledgeBaseRow) -> bool {
+        self.projection_reconciled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&row.knowledge_base_id)
+    }
+
+    fn mark_projection_reconciled(&self, row: &KnowledgeBaseRow) {
+        self.projection_reconciled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(row.knowledge_base_id.clone());
+    }
+
+    fn mark_projection_dirty(&self, row: &KnowledgeBaseRow) {
+        self.projection_reconciled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&row.knowledge_base_id);
+    }
+
+    /// Reconcile once per process before serving projected identities. This
+    /// method owns the same tree→lifecycle lock order used by every mutation;
+    /// callers already holding those locks use `reconcile_projection_locked`
+    /// directly to avoid re-entrant deadlocks.
+    async fn ensure_projection_reconciled(
+        &self,
+        row: &KnowledgeBaseRow,
+    ) -> Result<(), AppError> {
+        if self.entry_repository().is_none() || self.projection_is_reconciled(row) {
+            return Ok(());
+        }
+        let _tree_guard = self.acquire_document_tree_write_lock(row).await?;
+        let _base_guard = self.acquire_base_lifecycle_lock(row).await?;
+        let current = self.require_base(&row.knowledge_base_id).await?;
+        if current.root_path != row.root_path {
+            return Err(AppError::Conflict(
+                "knowledge base root changed while its entry projection was reconciling; retry"
+                    .into(),
+            ));
+        }
+        if !self.projection_is_reconciled(&current) {
+            self.reconcile_projection_locked(&current, HashMap::new())
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Rebuild the complete identity projection from the real filesystem.
+    /// Existing IDs win first by portable path, then by platform file identity;
+    /// `forced_ids` bridges the narrow post-rename recovery window even on a
+    /// filesystem that cannot expose a stable inode/file-index.
+    async fn reconcile_projection_locked(
+        &self,
+        row: &KnowledgeBaseRow,
+        forced_ids: HashMap<String, KnowledgeEntryId>,
+    ) -> Result<Option<ProjectionState>, AppError> {
+        let Some(repository) = self.entry_repository() else {
+            return Ok(None);
+        };
+        let knowledge_base_id = KnowledgeBaseId::parse(&row.knowledge_base_id).map_err(|error| {
+            AppError::Internal(format!(
+                "stored knowledge base id '{}' is invalid: {error}",
+                row.knowledge_base_id
+            ))
+        })?;
+        let existing = repository
+            .list_entries_for_base(&knowledge_base_id, true)
+            .await?;
+        let expected_tree_revision = repository.tree_revision(&knowledge_base_id).await?;
+        let has_source = source_from_extra(&row.extra)
+            .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?
+            .is_some();
+        let root = PathBuf::from(&row.root_path);
+        let scan_root = root.clone();
+        let scan_knowledge_base_id = knowledge_base_id.clone();
+        let snapshot = bounded_root_blocking(
+            &root,
+            BASE_WALK_BUDGET,
+            Err(AppError::Timeout(format!(
+                "knowledge entry projection scan timed out: {}",
+                root.display()
+            ))),
+            move || {
+                scan_knowledge_entry_projection(
+                    &scan_root,
+                    &scan_knowledge_base_id,
+                    &existing,
+                    has_source,
+                    &forced_ids,
+                )
+            },
+        )
+        .await?;
+
+        let current_live = repository
+            .list_entries_for_base(&knowledge_base_id, false)
+            .await?;
+        let tree_revision = if projection_snapshot_matches(&current_live, &snapshot) {
+            expected_tree_revision
+        } else {
+            repository
+                .replace_projection(
+                    &knowledge_base_id,
+                    Some(expected_tree_revision),
+                    &snapshot,
+                )
+                .await?
+                .tree_revision
+        };
+        let entries = repository
+            .list_entries_for_base(&knowledge_base_id, false)
+            .await?;
+        self.mark_projection_reconciled(row);
+        Ok(Some(ProjectionState {
+            entries,
+            tree_revision: non_negative_tree_revision(tree_revision)?,
+        }))
+    }
+
+    /// Serialize a projection refresh after a tree-level mismatch. The caller
+    /// must not retain a tree read guard: upgrading an async `RwLock` in place
+    /// would deadlock behind itself.
+    async fn reconcile_projection_after_tree_mismatch(
+        &self,
+        row: &KnowledgeBaseRow,
+    ) -> Result<(), AppError> {
+        if self.entry_repository().is_none() {
+            return Ok(());
+        }
+        self.mark_projection_dirty(row);
+        let _tree_guard = self.acquire_document_tree_write_lock(row).await?;
+        let _base_guard = self.acquire_base_lifecycle_lock(row).await?;
+        let current = self.require_base(&row.knowledge_base_id).await?;
+        if current.root_path != row.root_path {
+            return Err(AppError::Conflict(
+                "knowledge base root changed while its entry projection was refreshing; retry"
+                    .into(),
+            ));
+        }
+        self.reconcile_projection_locked(&current, HashMap::new())
+            .await?;
+        Ok(())
+    }
+
     pub async fn list_tree(&self, id: &str, rel_path: &str) -> Result<Vec<KbTreeEntry>, AppError> {
         let row = self.require_base(id).await?;
-        let root = PathBuf::from(&row.root_path);
-        let lock_root = root.clone();
+        if let Err(error) = self.ensure_projection_reconciled(&row).await {
+            tracing::warn!(
+                kb_id = %row.knowledge_base_id,
+                %error,
+                "knowledge tree listing is continuing without a reconciled entry projection"
+            );
+        }
         let rel_path = normalize_tree_rel_path(rel_path)?;
-        Ok(
-            bounded_root_blocking(
+        // A list must observe the filesystem and its identity projection under
+        // one tree snapshot. Without this reader, a concurrent relocation can
+        // leave us hydrating pre-move paths with post-move IDs. On mismatch we
+        // drop both readers, rebuild under the writer, and list once more.
+        for attempt in 0..2 {
+            let _tree_guard = self.acquire_document_tree_read_lock(&row).await?;
+            let _base_guard = self.acquire_base_lifecycle_lock(&row).await?;
+            let current = self.require_base(id).await?;
+            if current.root_path != row.root_path {
+                return Err(AppError::Conflict(
+                    "knowledge base root changed while its tree was being listed; retry".into(),
+                ));
+            }
+            let root = PathBuf::from(&current.root_path);
+            let lock_root = root.clone();
+            let listed_rel_path = rel_path.clone();
+            let mut entries = bounded_root_blocking(
                 &lock_root,
                 BASE_WALK_BUDGET,
                 Ok(Vec::new()),
-                move || list_tree_level(&root, &rel_path),
+                move || list_tree_level(&root, &listed_rel_path),
             )
-            .await?,
-        )
+            .await?;
+
+            let Some(repository) = self.entry_repository() else {
+                return Ok(entries);
+            };
+            let knowledge_base_id = KnowledgeBaseId::parse(&current.knowledge_base_id).map_err(
+                |error| {
+                    AppError::Internal(format!(
+                        "stored knowledge base id '{}' is invalid: {error}",
+                        current.knowledge_base_id
+                    ))
+                },
+            )?;
+            let projected = match repository
+                .list_entries_for_base(&knowledge_base_id, false)
+                .await
+            {
+                Ok(projected) => projected,
+                Err(error) => {
+                    tracing::warn!(
+                        kb_id = %row.knowledge_base_id,
+                        path = %rel_path,
+                        %error,
+                        "knowledge tree listing is continuing with path-only entries"
+                    );
+                    return Ok(entries);
+                }
+            };
+            if projection_tree_level_matches(
+                Path::new(&current.root_path),
+                &rel_path,
+                &entries,
+                &projected,
+            ) {
+                hydrate_tree_entries(&mut entries, &projected);
+                return Ok(entries);
+            }
+
+            drop(_base_guard);
+            drop(_tree_guard);
+            if attempt == 0 {
+                if let Err(error) = self
+                    .reconcile_projection_after_tree_mismatch(&row)
+                    .await
+                {
+                    tracing::warn!(
+                        kb_id = %row.knowledge_base_id,
+                        path = %rel_path,
+                        %error,
+                        "knowledge tree listing is continuing with path-only entries after projection refresh failed"
+                    );
+                    return Ok(entries);
+                }
+                continue;
+            }
+            tracing::warn!(
+                kb_id = %row.knowledge_base_id,
+                path = %rel_path,
+                "knowledge entry projection changed again while listing; returning current path-only entries"
+            );
+            return Ok(entries);
+        }
+        unreachable!("bounded tree listing attempts always return")
     }
 
     /// Copy every portable UTF-8 Markdown document from `source_path` into a
@@ -1511,7 +2741,18 @@ impl KnowledgeService {
         id: &str,
         source_path: &str,
     ) -> Result<FolderImportSummary, AppError> {
+        self.import_markdown_folder_into(id, source_path, "").await
+    }
+
+    pub async fn import_markdown_folder_into(
+        &self,
+        id: &str,
+        source_path: &str,
+        destination_parent_path: &str,
+    ) -> Result<FolderImportSummary, AppError> {
         let initial = self.require_base(id).await?;
+        require_editable_knowledge_tree(&initial)?;
+        let destination_parent_path = normalize_tree_rel_path(destination_parent_path)?;
         let destination_root = PathBuf::from(&initial.root_path);
         let source_path = PathBuf::from(source_path.trim());
         let prepared_destination = destination_root.clone();
@@ -1534,17 +2775,44 @@ impl KnowledgeService {
                 "knowledge base root changed while folder import was being prepared; retry".into(),
             ));
         }
+        // Access can be revoked while the potentially slow source scan is in
+        // progress. Revalidate after taking the lifecycle writer so revocation
+        // cannot race publication.
+        require_editable_knowledge_tree(&current)?;
         validate_knowledge_root_bounded(destination_root.clone()).await?;
 
         let preferred_name = prepared.source_name.clone();
+        let preferred_target = join_tree_rel_path(&destination_parent_path, &preferred_name);
+        validate_source_managed_tree_mutation(
+            &current,
+            [&destination_parent_path, &preferred_target],
+        )?;
         let allocation_root = destination_root.clone();
-        let (target_directory, target_path) = tokio::task::spawn_blocking(move || {
-            create_unique_import_directory(&allocation_root, &preferred_name)
+        let allocation_parent_path = destination_parent_path.clone();
+        let (allocated_name, target_path) = tokio::task::spawn_blocking(move || {
+            let allocation_parent = if allocation_parent_path.is_empty() {
+                allocation_root
+            } else {
+                let (path, metadata) =
+                    resolve_tree_existing_path(&allocation_root, &allocation_parent_path)?;
+                if !metadata.is_dir() {
+                    return Err(AppError::BadRequest(format!(
+                        "import destination is not a directory: {allocation_parent_path}"
+                    )));
+                }
+                path
+            };
+            create_unique_import_directory(&allocation_parent, &preferred_name)
         })
         .await
         .map_err(|error| {
             AppError::Internal(format!("folder import allocation task failed: {error}"))
         })??;
+        let target_directory = join_tree_rel_path(&destination_parent_path, &allocated_name);
+        // Allocation itself changed the tree. Mark the identity projection
+        // dirty before publishing children so every partial-failure/rollback
+        // branch is conservative as well.
+        self.mark_projection_dirty(&current);
 
         let mut published_paths = Vec::with_capacity(imported);
         let publish_result: Result<(), AppError> = async {
@@ -1609,57 +2877,723 @@ impl KnowledgeService {
 
     pub async fn create_folder(&self, id: &str, rel_path: &str) -> Result<KbTreeEntry, AppError> {
         let row = self.require_base(id).await?;
+        require_editable_knowledge_tree(&row)?;
         let _tree_guard =
             self.acquire_document_tree_write_lock(&row).await?;
         let _base_guard = self.acquire_base_lifecycle_lock(&row).await?;
-        self.require_base(id).await?;
+        let current = self.require_base(id).await?;
+        require_editable_knowledge_tree(&current)?;
         let root = PathBuf::from(&row.root_path);
         let rel_path = normalize_tree_rel_path(rel_path)?;
         if rel_path.is_empty() {
             return Err(AppError::BadRequest("folder path must not be empty".into()));
         }
-        tokio::task::spawn_blocking(move || create_tree_folder(&root, &rel_path))
+        validate_source_managed_tree_mutation(&current, [&rel_path])?;
+        let created = tokio::task::spawn_blocking(move || create_tree_folder(&root, &rel_path))
             .await
-            .map_err(|e| AppError::Internal(format!("folder create task join error: {e}")))?
+            .map_err(|e| AppError::Internal(format!("folder create task join error: {e}")))??;
+        self.mark_projection_dirty(&row);
+        Ok(created)
     }
 
     pub async fn delete_folder(&self, id: &str, rel_path: &str) -> Result<(), AppError> {
         let row = self.require_base(id).await?;
+        require_editable_knowledge_tree(&row)?;
         let _tree_guard =
             self.acquire_document_tree_write_lock(&row).await?;
         let _base_guard = self.acquire_base_lifecycle_lock(&row).await?;
-        self.require_base(id).await?;
+        let current = self.require_base(id).await?;
+        require_editable_knowledge_tree(&current)?;
         let root = PathBuf::from(&row.root_path);
         let rel_path = normalize_tree_rel_path(rel_path)?;
         if rel_path.is_empty() {
             return Err(AppError::BadRequest("folder path must not be empty".into()));
         }
+        validate_source_managed_tree_mutation(&current, [&rel_path])?;
         tokio::task::spawn_blocking(move || delete_tree_folder(&root, &rel_path))
             .await
-            .map_err(|e| AppError::Internal(format!("folder delete task join error: {e}")))?
+            .map_err(|e| AppError::Internal(format!("folder delete task join error: {e}")))??;
+        self.mark_projection_dirty(&row);
+        Ok(())
     }
 
-    pub async fn rename_tree_entry(&self, id: &str, rel_path: &str, new_name: &str) -> Result<KbTreeEntry, AppError> {
+    /// Atomically move or rename one tree entry without replacing an existing
+    /// portable path alias. Filesystem state is authoritative; metadata and
+    /// events are committed only after the atomic rename succeeds.
+    pub async fn relocate_tree_entry(
+        &self,
+        id: &str,
+        request: RelocateTreeEntryRequest,
+    ) -> Result<RelocateTreeEntryResult, AppError> {
+        validate_relocate_request_id(&request.request_id)?;
+        if self.tree_operation_repository().is_some()
+            && let Err(error) = self.drain_pending_tree_events().await
+        {
+            // Publication failure cannot roll back an already committed tree
+            // mutation. Keep the rows pending and continue this command.
+            tracing::warn!(
+                %error,
+                "knowledge-tree outbox drain failed before relocation"
+            );
+        }
         let row = self.require_base(id).await?;
+        require_editable_knowledge_tree(&row)?;
         let _tree_guard =
             self.acquire_document_tree_write_lock(&row).await?;
         let _base_guard = self.acquire_base_lifecycle_lock(&row).await?;
-        self.require_base(id).await?;
+        let mut current = self.require_base(id).await?;
+        if current.root_path != row.root_path {
+            return Err(AppError::Conflict(
+                "knowledge base root changed while relocation was starting; retry".into(),
+            ));
+        }
+        // Consent is mutable metadata protected by the lifecycle lock. The
+        // pre-lock check alone would allow a completed revocation to be
+        // ignored by a relocation already waiting on that lock.
+        require_editable_knowledge_tree(&current)?;
+
         let root = PathBuf::from(&row.root_path);
-        let rel_path = normalize_tree_rel_path(rel_path)?;
-        if rel_path.is_empty() {
+        let requested_source_path = normalize_tree_rel_path(&request.source_path)?;
+        if requested_source_path.is_empty() {
             return Err(AppError::BadRequest("path must not be empty".into()));
         }
-        let new_name = validate_tree_entry_name(new_name)?;
-        tokio::task::spawn_blocking(move || rename_tree_entry(&root, &rel_path, &new_name))
+        let requested_destination_parent_path =
+            normalize_tree_rel_path(&request.destination_parent_path)?;
+        let new_name = request
+            .new_name
+            .as_deref()
+            .map(validate_tree_entry_name)
+            .transpose()?;
+        let fingerprint = RelocateRequestFingerprint {
+            source_path: requested_source_path.clone(),
+            destination_parent_path: requested_destination_parent_path.clone(),
+            new_name: new_name.clone(),
+            conflict_policy: request.conflict_policy,
+            entry_id: request.entry_id.clone(),
+            destination_parent_id: request.destination_parent_id.clone(),
+            expected_revision: request.expected_revision,
+        };
+        let durable_fingerprint = relocate_request_sha256(&fingerprint)?;
+        let tree_operation_repository = self.tree_operation_repository();
+        let cache_key = format!("{}\0{}", current.knowledge_base_id, request.request_id);
+
+        if request.expected_revision.is_some_and(|revision| revision < 0) {
+            return Err(AppError::BadRequest(
+                "expected_revision must be non-negative".into(),
+            ));
+        }
+
+        if let Some(repository) = tree_operation_repository.as_ref() {
+            let knowledge_base_id = KnowledgeBaseId::parse(&current.knowledge_base_id)
+                .map_err(|error| {
+                    AppError::Internal(format!(
+                        "stored knowledge base id '{}' is invalid: {error}",
+                        current.knowledge_base_id
+                    ))
+                })?;
+            if let Some(operation) = repository
+                .load_by_request(&knowledge_base_id, &request.request_id)
+                .await?
+            {
+                if operation.fingerprint != durable_fingerprint {
+                    return Err(AppError::Conflict(
+                        "request_id was already used for a different tree relocation"
+                            .into(),
+                    ));
+                }
+                return self
+                    .resume_durable_relocation_locked(
+                        repository.clone(),
+                        current,
+                        operation,
+                        false,
+                        true,
+                    )
+                    .await;
+            }
+        }
+        if let Some(result) = self.cached_relocation(&cache_key, &fingerprint)? {
+            return Ok(result);
+        }
+
+        let mut warnings = Vec::new();
+        let entry_repository = self.entry_repository();
+        let projected_knowledge_base_id = if entry_repository.is_some() {
+            Some(KnowledgeBaseId::parse(&current.knowledge_base_id).map_err(|error| {
+                AppError::Internal(format!(
+                    "stored knowledge base id '{}' is invalid: {error}",
+                    current.knowledge_base_id
+                ))
+            })?)
+        } else {
+            None
+        };
+        let projection_state = if entry_repository.is_some() {
+            match self
+                .reconcile_projection_locked(&current, HashMap::new())
+                .await
+            {
+                Ok(state) => state,
+                Err(error) => {
+                    self.mark_projection_dirty(&current);
+                    if request.entry_id.is_some()
+                        || request.destination_parent_id.is_some()
+                        || request.expected_revision.is_some()
+                    {
+                        return Err(AppError::Conflict(format!(
+                            "the knowledge entry identity/revision could not be validated; retry after projection recovery: {error}"
+                        )));
+                    }
+                    tracing::warn!(
+                        kb_id = %current.knowledge_base_id,
+                        %error,
+                        "tree relocation is continuing with path identity because projection reconciliation failed"
+                    );
+                    warnings.push(
+                        "Stable entry metadata was temporarily unavailable; the filesystem move will be reconciled."
+                            .into(),
+                    );
+                    None
+                }
+            }
+        } else if request.entry_id.is_some()
+            || request.destination_parent_id.is_some()
+            || request.expected_revision.is_some()
+        {
+            return Err(AppError::Conflict(
+                "stable entry identity/revision validation is unavailable".into(),
+            ));
+        } else {
+            None
+        };
+
+        let source_portable_path = portable_writeback_path_identity(&requested_source_path);
+        let projected_source = projection_state.as_ref().and_then(|state| {
+            match request.entry_id.as_ref() {
+                Some(entry_id) => state
+                    .entries
+                    .iter()
+                    .find(|entry| &entry.knowledge_entry_id == entry_id),
+                None => state
+                    .entries
+                    .iter()
+                    .find(|entry| entry.portable_rel_path == source_portable_path),
+            }
+            .cloned()
+        });
+        let source_path = if let Some(expected_entry_id) = request.entry_id.as_ref() {
+            projected_source
+                .as_ref()
+                .map(|entry| entry.rel_path.clone())
+                .ok_or_else(|| {
+                AppError::Conflict(
+                    format!(
+                        "knowledge entry identity no longer resolves in this knowledge base: {expected_entry_id}"
+                    ),
+                )
+            })?
+        } else {
+            requested_source_path.clone()
+        };
+        if let Some(expected_revision) = request.expected_revision {
+            let actual = projected_source.as_ref().ok_or_else(|| {
+                AppError::Conflict(
+                    "the source path no longer resolves to a projected knowledge entry".into(),
+                )
+            })?;
+            if actual.revision != expected_revision {
+                return Err(AppError::Conflict(format!(
+                    "knowledge entry revision conflict: expected {expected_revision}, current {}",
+                    actual.revision
+                )));
+            }
+        }
+        let destination_parent_portable_path = portable_writeback_path_identity(
+            &requested_destination_parent_path,
+        );
+        let projected_destination_parent = projection_state.as_ref().and_then(|state| {
+            match request.destination_parent_id.as_ref() {
+                Some(entry_id) => state
+                    .entries
+                    .iter()
+                    .find(|entry| &entry.knowledge_entry_id == entry_id),
+                None if requested_destination_parent_path.is_empty() => None,
+                None => state.entries.iter().find(|entry| {
+                    entry.portable_rel_path == destination_parent_portable_path
+                }),
+            }
+            .cloned()
+        });
+        if let Some(destination_parent) = projected_destination_parent.as_ref() {
+            if destination_parent.kind != KNOWLEDGE_ENTRY_KIND_DIRECTORY {
+                return Err(AppError::BadRequest(format!(
+                    "relocation destination is not a directory: {}",
+                    destination_parent.rel_path
+                )));
+            }
+            if destination_parent.origin == KNOWLEDGE_ENTRY_ORIGIN_URL_SNAPSHOT {
+                return Err(AppError::Forbidden(
+                    "source-managed web snapshots are read-only and cannot receive moved content"
+                        .into(),
+                ));
+            }
+        }
+        let destination_parent_path = if let Some(destination_parent_id) =
+            request.destination_parent_id.as_ref()
+        {
+            projected_destination_parent
+                .as_ref()
+                .map(|entry| entry.rel_path.clone())
+                .ok_or_else(|| {
+                    AppError::Conflict(format!(
+                        "destination parent identity no longer resolves in this knowledge base: {destination_parent_id}"
+                    ))
+                })?
+        } else {
+            requested_destination_parent_path.clone()
+        };
+        let projected_destination_parent_id = projected_destination_parent
+            .as_ref()
+            .map(|entry| entry.knowledge_entry_id.clone());
+
+        let requested_name = new_name.clone().unwrap_or_else(|| {
+            source_path
+                .rsplit('/')
+                .next()
+                .expect("non-empty normalized source has a final component")
+                .to_owned()
+        });
+        let requested_target =
+            join_tree_rel_path(&destination_parent_path, &requested_name);
+        validate_source_managed_tree_mutation(
+            &current,
+            [&source_path, &requested_target],
+        )?;
+
+        if let Some(repository) = tree_operation_repository.as_ref() {
+            let plan_root = root.clone();
+            let plan_source = source_path.clone();
+            let plan_destination_parent = destination_parent_path.clone();
+            let plan_new_name = new_name.clone();
+            let (journal_source_path, journal_destination_path, source_fs_identity) =
+                tokio::task::spawn_blocking(move || {
+                    plan_durable_relocation_paths(
+                        &plan_root,
+                        &plan_source,
+                        &plan_destination_parent,
+                        plan_new_name.as_deref(),
+                    )
+                })
+                .await
+                .map_err(|error| {
+                    AppError::Internal(format!(
+                        "tree relocation planning task failed: {error}"
+                    ))
+                })??;
+            validate_source_managed_tree_mutation(
+                &current,
+                [&journal_source_path, &journal_destination_path],
+            )?;
+
+            // Exact no-ops do not create a durable mutation/outbox row: the
+            // schema intentionally couples every committed operation to a real
+            // tree event. Their request replay is therefore process-local and
+            // is re-evaluated after restart. This is safe only because this
+            // branch has no filesystem effect and advertises no undo token.
+            // Case/normalization-only renames remain distinct and durable.
+            if journal_source_path != journal_destination_path {
+            let knowledge_base_id = projected_knowledge_base_id
+                .clone()
+                .unwrap_or(KnowledgeBaseId::parse(&current.knowledge_base_id).map_err(
+                    |error| {
+                        AppError::Internal(format!(
+                            "stored knowledge base id '{}' is invalid: {error}",
+                            current.knowledge_base_id
+                        ))
+                    },
+                )?);
+            let prepared = repository
+                .prepare_operation(&PrepareKnowledgeTreeOperationParams {
+                    knowledge_base_id,
+                    request_id: request.request_id,
+                    fingerprint: durable_fingerprint,
+                    source_rel_path: journal_source_path,
+                    destination_rel_path: journal_destination_path,
+                    source_fs_identity,
+                    created_at: now_ms(),
+                })
+                .await?;
+            return self
+                .resume_durable_relocation_locked(
+                    repository.clone(),
+                    current,
+                    prepared.operation,
+                    false,
+                    true,
+                )
+                .await;
+            }
+        }
+
+        let root_for_move = root.clone();
+        let source_for_move = source_path.clone();
+        let destination_for_move = destination_parent_path.clone();
+        let operation_id = generate_id();
+        let moved = tokio::task::spawn_blocking(move || {
+            relocate_tree_entry_on_disk(
+                &root_for_move,
+                &source_for_move,
+                &destination_for_move,
+                new_name.as_deref(),
+                None,
+            )
+        })
             .await
-            .map_err(|e| AppError::Internal(format!("tree rename task join error: {e}")))?
+            .map_err(|e| AppError::Internal(format!("tree relocate task join error: {e}")))??;
+
+        let mut projected_entry_id = projected_source
+            .as_ref()
+            .map(|entry| entry.knowledge_entry_id.clone());
+        let mut projected_entry_revision = projected_source
+            .as_ref()
+            .map(|entry| entry.revision);
+        let mut persisted_tree_revision = projection_state
+            .as_ref()
+            .map(|state| state.tree_revision);
+        let legacy_committed_tree_revision =
+            (!moved.no_op && entry_repository.is_none()).then(|| self.next_tree_revision(&current));
+
+        if !moved.no_op {
+            self.invalidate_search_cache_prefix(&root.join(&moved.old_path));
+            self.invalidate_search_cache_prefix(&root.join(&moved.new_path));
+
+            current.updated_at = legacy_committed_tree_revision
+                .and_then(|revision| i64::try_from(revision).ok())
+                .unwrap_or_else(now_ms);
+            if let Err(error) = self.repo.update_base(&current).await {
+                tracing::warn!(
+                    kb_id = %current.knowledge_base_id,
+                    %error,
+                    "tree relocation completed but knowledge timestamp update failed"
+                );
+                warnings.push(
+                    "The entry was moved, but the knowledge-base timestamp could not be persisted."
+                        .into(),
+                );
+            }
+
+            if let (Some(repository), Some(knowledge_base_id), Some(source_entry)) = (
+                entry_repository.as_ref(),
+                projected_knowledge_base_id.as_ref(),
+                projected_source.as_ref(),
+            ) {
+                let projection_result = if destination_parent_path.is_empty()
+                    || projected_destination_parent_id.is_some()
+                {
+                    repository
+                        .relocate_entry(&RelocateKnowledgeEntryProjectionParams {
+                            knowledge_base_id: knowledge_base_id.clone(),
+                            knowledge_entry_id: source_entry.knowledge_entry_id.clone(),
+                            destination_parent_entry_id: projected_destination_parent_id.clone(),
+                            new_name: moved.entry.name.clone(),
+                            new_rel_path: moved.new_path.clone(),
+                            new_portable_rel_path: portable_writeback_path_identity(
+                                &moved.new_path,
+                            ),
+                            expected_revision: source_entry.revision,
+                            updated_at: now_ms(),
+                        })
+                        .await
+                        .map(Some)
+                } else {
+                    Ok(None)
+                };
+                match projection_result {
+                    Ok(Some(mutation)) => {
+                        projected_entry_id = Some(mutation.entry.knowledge_entry_id);
+                        projected_entry_revision = Some(mutation.entry.revision);
+                        persisted_tree_revision =
+                            Some(non_negative_tree_revision(mutation.tree_revision)?);
+                        self.mark_projection_reconciled(&current);
+                    }
+                    unresolved => {
+                        let projection_error = unresolved.err();
+                        self.mark_projection_dirty(&current);
+                        let mut forced_ids = HashMap::new();
+                        forced_ids.insert(
+                            portable_writeback_path_identity(&moved.new_path),
+                            source_entry.knowledge_entry_id.clone(),
+                        );
+                        match self
+                            .reconcile_projection_locked(&current, forced_ids)
+                            .await
+                        {
+                            Ok(Some(state)) => {
+                                if let Some(entry) = state.entries.iter().find(|entry| {
+                                    entry.portable_rel_path
+                                        == portable_writeback_path_identity(&moved.new_path)
+                                }) {
+                                    projected_entry_id =
+                                        Some(entry.knowledge_entry_id.clone());
+                                    projected_entry_revision = Some(entry.revision);
+                                }
+                                persisted_tree_revision = Some(state.tree_revision);
+                                warnings.push(
+                                    "Stable entry metadata was repaired from the filesystem after the move."
+                                        .into(),
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(reconcile_error) => {
+                                tracing::warn!(
+                                    kb_id = %current.knowledge_base_id,
+                                    error = ?projection_error,
+                                    %reconcile_error,
+                                    "filesystem relocation committed but its entry projection could not be repaired"
+                                );
+                                warnings.push(
+                                    "The entry was moved, but stable entry metadata is pending reconciliation."
+                                        .into(),
+                                );
+                            }
+                        }
+                    }
+                }
+            } else if entry_repository.is_some() {
+                let mut forced_ids = HashMap::new();
+                if let Some(entry_id) = projected_entry_id.clone() {
+                    forced_ids.insert(
+                        portable_writeback_path_identity(&moved.new_path),
+                        entry_id,
+                    );
+                }
+                self.mark_projection_dirty(&current);
+                match self
+                    .reconcile_projection_locked(&current, forced_ids)
+                    .await
+                {
+                    Ok(Some(state)) => {
+                        if let Some(entry) = state.entries.iter().find(|entry| {
+                            entry.portable_rel_path
+                                == portable_writeback_path_identity(&moved.new_path)
+                        }) {
+                            projected_entry_id = Some(entry.knowledge_entry_id.clone());
+                            projected_entry_revision = Some(entry.revision);
+                        }
+                        persisted_tree_revision = Some(state.tree_revision);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            kb_id = %current.knowledge_base_id,
+                            %error,
+                            "filesystem relocation committed but its entry projection could not be created"
+                        );
+                        warnings.push(
+                            "The entry was moved, but stable entry metadata is pending reconciliation."
+                                .into(),
+                        );
+                    }
+                }
+            }
+        }
+
+        let tree_revision = persisted_tree_revision
+            .or(legacy_committed_tree_revision)
+            .unwrap_or_else(|| {
+            if moved.no_op {
+                self.current_tree_revision(&current)
+            } else {
+                self.next_tree_revision(&current)
+            }
+        });
+
+        // Path-only embedders have no durable operation history, so advertising
+        // an undo token would promise a capability the server cannot honor.
+        let undo_token = None;
+        if moved.no_op {
+            warnings.push("The entry is already at the requested destination.".into());
+        }
+        let result = RelocateTreeEntryResult {
+            operation_id: operation_id.clone(),
+            entry_id: projected_entry_id.clone(),
+            old_path: moved.old_path.clone(),
+            new_path: moved.new_path.clone(),
+            kind: if moved.entry.is_dir {
+                KnowledgeEntryKind::Directory
+            } else {
+                KnowledgeEntryKind::File
+            },
+            moved_descendant_count: moved.moved_descendant_count,
+            revision: projected_entry_revision,
+            tree_revision,
+            undo_token,
+            warnings: (!warnings.is_empty()).then_some(warnings),
+        };
+        self.remember_relocation(cache_key, fingerprint, result.clone());
+        drop(_base_guard);
+        drop(_tree_guard);
+
+        if !moved.no_op {
+            let knowledge_base_id = KnowledgeBaseId::parse(&current.knowledge_base_id)
+                .map_err(|error| {
+                    AppError::Internal(format!(
+                        "stored knowledge base id '{}' is invalid after relocation: {error}",
+                        current.knowledge_base_id
+                    ))
+                })?;
+            self.emitter.emit_tree_changed(&KnowledgeTreeChangedEvent {
+                knowledge_base_id,
+                operation_id,
+                entry_id: projected_entry_id,
+                old_prefix: moved.old_path,
+                new_prefix: moved.new_path,
+                kind: moved.kind,
+                moved_descendant_count: moved.moved_descendant_count,
+                tree_revision,
+                revision: projected_entry_revision,
+            });
+            match self.row_to_info(current).await {
+                Ok(info) => self.emitter.emit_base_updated(&info),
+                Err(error) => tracing::warn!(
+                    kb_id = id,
+                    %error,
+                    "tree relocation completed but base-updated payload could not be built"
+                ),
+            }
+        }
+
+        Ok(result)
+    }
+
+    pub async fn undo_tree_relocation(
+        &self,
+        id: &str,
+        request: UndoKnowledgeEntryRelocationRequest,
+    ) -> Result<RelocateTreeEntryResult, AppError> {
+        validate_relocate_request_id(&request.request_id)?;
+        let operation_id = request
+            .undo_token
+            .strip_prefix("relocate:")
+            .ok_or_else(|| AppError::BadRequest("invalid knowledge relocation undo token".into()))?;
+        let operation_id = KnowledgeTreeOperationId::parse(operation_id).map_err(|error| {
+            AppError::BadRequest(format!("invalid knowledge relocation undo token: {error}"))
+        })?;
+        let repository = self.tree_operation_repository().ok_or_else(|| {
+            AppError::Conflict(
+                "durable knowledge relocation history is unavailable; this move cannot be undone"
+                    .into(),
+            )
+        })?;
+        let operation = repository
+            .load_by_operation(&operation_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("knowledge relocation operation not found".into()))?;
+        if operation.knowledge_base_id.as_str() != id {
+            return Err(AppError::Forbidden(
+                "knowledge relocation undo token belongs to another knowledge base".into(),
+            ));
+        }
+        if operation.state != KnowledgeTreeOperationState::Committed {
+            return Err(AppError::Conflict(
+                "knowledge relocation has not reached a committed state and cannot be undone yet"
+                    .into(),
+            ));
+        }
+        let receipt: RelocateTreeEntryResult = serde_json::from_str(
+            operation
+                .receipt_json
+                .as_deref()
+                .ok_or_else(|| AppError::Internal("committed relocation has no receipt".into()))?,
+        )
+        .map_err(|error| {
+            AppError::Internal(format!("committed relocation receipt is invalid: {error}"))
+        })?;
+        let destination_parent_path = tree_parent_rel_path(&receipt.old_path).to_owned();
+        let original_name = receipt
+            .old_path
+            .rsplit('/')
+            .next()
+            .ok_or_else(|| AppError::Internal("relocation receipt has an empty old path".into()))?
+            .to_owned();
+
+        self.relocate_tree_entry(
+            id,
+            RelocateTreeEntryRequest {
+                request_id: request.request_id,
+                source_path: receipt.new_path,
+                destination_parent_path,
+                entry_id: receipt.entry_id,
+                destination_parent_id: None,
+                new_name: Some(original_name),
+                expected_revision: receipt.revision,
+                conflict_policy: RelocateConflictPolicy::Reject,
+            },
+        )
+        .await
+    }
+
+    /// Legacy same-parent rename, retained as a compatibility wrapper around
+    /// the single relocation implementation.
+    pub async fn rename_tree_entry(
+        &self,
+        id: &str,
+        rel_path: &str,
+        new_name: &str,
+    ) -> Result<KbTreeEntry, AppError> {
+        let source_path = normalize_tree_rel_path(rel_path)?;
+        let destination_parent_path = source_path
+            .rsplit_once('/')
+            .map(|(parent, _)| parent.to_owned())
+            .unwrap_or_default();
+        let result = self
+            .relocate_tree_entry(
+                id,
+                RelocateTreeEntryRequest {
+                    source_path,
+                    destination_parent_path,
+                    new_name: Some(new_name.to_owned()),
+                    request_id: generate_id(),
+                    conflict_policy: RelocateConflictPolicy::Reject,
+                    entry_id: None,
+                    destination_parent_id: None,
+                    expected_revision: None,
+                },
+            )
+            .await?;
+        let parent_path = result
+            .new_path
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or_default();
+        self.list_tree(id, parent_path)
+            .await?
+            .into_iter()
+            .find(|entry| entry.rel_path == result.new_path)
+            .ok_or_else(|| {
+                AppError::Internal(format!(
+                    "renamed knowledge entry could not be listed at {}",
+                    result.new_path
+                ))
+            })
     }
 
     pub async fn read_file(&self, id: &str, rel_path: &str) -> Result<KbFileContent, AppError> {
         let row = self.require_base(id).await?;
+        if self.entry_repository().is_some()
+            && let Err(error) = self.ensure_projection_reconciled(&row).await
+        {
+            tracing::warn!(
+                kb_id = %row.knowledge_base_id,
+                path = rel_path,
+                %error,
+                "knowledge file read is continuing without stable identity metadata"
+            );
+        }
+        let _tree_guard = self.acquire_document_tree_read_lock(&row).await?;
+        let root = PathBuf::from(&row.root_path);
         let path = safe_md_path_bounded(
-            PathBuf::from(&row.root_path),
+            root.clone(),
             rel_path.to_owned(),
         )
         .await?;
@@ -1690,11 +3624,46 @@ impl KnowledgeService {
             .await
             .map_err(|_| AppError::Timeout(format!("file read timed out: {rel_path}")))?
             .map_err(|e| AppError::Internal(format!("failed to read file: {e}")))?;
+        let actual_rel_path = tree_relative_path(&root, &path)?;
+        let projected = if let Some(repository) = self.entry_repository() {
+            let knowledge_base_id = KnowledgeBaseId::parse(&row.knowledge_base_id).map_err(
+                |error| {
+                    AppError::Internal(format!(
+                        "stored knowledge base id '{}' is invalid: {error}",
+                        row.knowledge_base_id
+                    ))
+                },
+            )?;
+            match repository
+                .get_entry_by_path(
+                    &knowledge_base_id,
+                    &portable_writeback_path_identity(&actual_rel_path),
+                )
+                .await
+            {
+                Ok(entry) => entry,
+                Err(error) => {
+                    tracing::warn!(
+                        kb_id = %row.knowledge_base_id,
+                        path = %actual_rel_path,
+                        %error,
+                        "knowledge file read could not attach stable identity metadata"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Ok(KbFileContent {
-            rel_path: rel_path.replace('\\', "/"),
+            rel_path: actual_rel_path,
             content,
             size: meta.len(),
             modified_at: modified_ms(&meta),
+            entry_id: projected
+                .as_ref()
+                .map(|entry| entry.knowledge_entry_id.clone()),
+            revision: projected.as_ref().map(|entry| entry.revision),
         })
     }
 
@@ -1714,14 +3683,160 @@ impl KnowledgeService {
             .await?;
         // Re-resolve after acquiring the portable target lock so a racing
         // create cannot slip in between resolution and no-clobber publication.
-        let resolved = resolve_portable_md_path(root, resolved.rel_path).await?;
+        let resolved = resolve_portable_md_path(root.clone(), resolved.rel_path).await?;
         self.write_file_under_target_lock(
             id,
             &resolved.rel_path,
-            None,
+            Some(&resolved.rel_path),
             content,
         )
             .await
+    }
+
+    /// Update an existing editor document using exact-content compare-and-swap.
+    /// A moved or deleted path is never recreated, and an external edit wins
+    /// with a conflict rather than being silently overwritten.
+    pub async fn update_file_if_unchanged(
+        &self,
+        id: &str,
+        rel_path: &str,
+        expected_content: &str,
+        content: &str,
+    ) -> Result<(), AppError> {
+        self.update_file_by_identity_if_unchanged(
+            id,
+            rel_path,
+            None,
+            None,
+            expected_content,
+            content,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Stable-identity editor update. When identity/version are supplied they
+    /// are authoritative over the stale path locator, then exact content CAS
+    /// protects against concurrent body edits. The two version fields must be
+    /// supplied together so a client cannot accidentally opt into half of the
+    /// identity contract.
+    pub async fn update_file_by_identity_if_unchanged(
+        &self,
+        id: &str,
+        rel_path: &str,
+        expected_entry_id: Option<&KnowledgeEntryId>,
+        expected_revision: Option<i64>,
+        expected_content: &str,
+        content: &str,
+    ) -> Result<KbFileUpdateResult, AppError> {
+        match (expected_entry_id, expected_revision) {
+            (Some(_), Some(revision)) if revision < 0 => {
+                return Err(AppError::BadRequest(
+                    "expected_revision must be non-negative".into(),
+                ));
+            }
+            (Some(_), Some(_)) | (None, None) => {}
+            _ => {
+                return Err(AppError::BadRequest(
+                    "entry_id and expected_revision must be supplied together for an editor update"
+                        .into(),
+                ));
+            }
+        }
+
+        let kb_id = KnowledgeBaseId::parse(id)
+            .map_err(|error| AppError::BadRequest(format!("invalid knowledge base id: {error}")))?;
+        let row = self.require_base(id).await?;
+        if expected_entry_id.is_some() {
+            if self.entry_repository().is_none() {
+                return Err(AppError::Conflict(
+                    "stable knowledge entry validation is unavailable".into(),
+                ));
+            }
+            self.ensure_projection_reconciled(&row).await?;
+        }
+        let _tree_guard = self.acquire_document_tree_read_lock(&row).await?;
+        let root = PathBuf::from(&row.root_path);
+        let (storage_rel_path, stable_entry_id, stable_fs_identity) =
+            if let Some(entry_id) = expected_entry_id {
+                let repository = self.entry_repository().ok_or_else(|| {
+                    AppError::Conflict("stable knowledge entry validation is unavailable".into())
+                })?;
+                let entry = repository
+                    .get_entry(&kb_id, entry_id)
+                    .await?
+                    .filter(|entry| !entry.is_deleted())
+                    .ok_or_else(|| {
+                        AppError::Conflict(format!(
+                            "knowledge entry identity no longer resolves in this knowledge base: {entry_id}"
+                        ))
+                    })?;
+                if entry.is_directory() || entry.kind != KNOWLEDGE_ENTRY_KIND_FILE {
+                    return Err(AppError::BadRequest(
+                        "knowledge editor identity does not refer to a file".into(),
+                    ));
+                }
+                let expected_revision = expected_revision.expect("paired above");
+                if entry.revision != expected_revision {
+                    return Err(AppError::Conflict(format!(
+                        "knowledge entry revision conflict: expected {expected_revision}, current {}",
+                        entry.revision
+                    )));
+                }
+                (
+                    entry.rel_path,
+                    Some(entry.knowledge_entry_id),
+                    entry.fs_identity,
+                )
+            } else {
+                (rel_path.to_owned(), None, None)
+            };
+        let resolved = resolve_portable_md_path(root.clone(), storage_rel_path).await?;
+        if !resolved.exists {
+            return Err(AppError::NotFound(format!(
+                "knowledge document moved or no longer exists: {rel_path}"
+            )));
+        }
+        let lock_path = portable_turn_writeback_lock_path(&deconfuse_rel_path(&resolved.rel_path));
+        let _target_guard = self
+            .acquire_turn_writeback_target_lock(&kb_id, &lock_path)
+            .await?;
+        let resolved = resolve_portable_md_path(root.clone(), resolved.rel_path).await?;
+        if !resolved.exists {
+            return Err(AppError::NotFound(format!(
+                "knowledge document moved or no longer exists: {rel_path}"
+            )));
+        }
+        if let Some(expected_identity) = stable_fs_identity.as_deref() {
+            let resolved_path = root.join(&resolved.rel_path);
+            let metadata = tokio::fs::symlink_metadata(&resolved_path)
+                .await
+                .map_err(|error| {
+                    AppError::Conflict(format!(
+                        "knowledge document identity changed before save: {error}"
+                    ))
+                })?;
+            if metadata_is_link_or_reparse(&resolved_path, &metadata)
+                || filesystem_entry_identity(&metadata).as_deref() != Some(expected_identity)
+            {
+                return Err(AppError::Conflict(
+                    "knowledge document was replaced by another filesystem entry before save"
+                        .into(),
+                ));
+            }
+        }
+        self.write_file_if_unchanged(
+            id,
+            &resolved.rel_path,
+            &resolved.rel_path,
+            expected_content,
+            content,
+        )
+        .await?;
+        Ok(KbFileUpdateResult {
+            rel_path: resolved.rel_path,
+            entry_id: stable_entry_id,
+        })
     }
 
     /// Create a Markdown document without replacing an existing portable path
@@ -1839,6 +3954,7 @@ impl KnowledgeService {
                 "knowledge base root changed while write-back was starting; retry".into(),
             ));
         }
+        require_editable_knowledge_tree(&current)?;
         if let Some(logical_rel_path) = logical_rel_path {
             validate_source_owned_write_target(&current, logical_rel_path)?;
         }
@@ -1854,6 +3970,10 @@ impl KnowledgeService {
         // has definitively completed or failed.
         write_text_atomic(&path, content).await?;
         self.invalidate_search_cache_path(&path);
+        // Atomic replacement commonly changes inode/file-index. Refresh that
+        // identity before a later external rename needs it to preserve the
+        // stable knowledge-entry ID.
+        self.mark_projection_dirty(&current);
         Ok(())
     }
 
@@ -1873,6 +3993,7 @@ impl KnowledgeService {
                 "knowledge base root changed while write-back was starting; retry".into(),
             ));
         }
+        require_editable_knowledge_tree(&current)?;
         validate_source_owned_write_target(&current, logical_rel_path)?;
         let path = safe_md_path_bounded(
             PathBuf::from(&row.root_path),
@@ -1881,6 +4002,7 @@ impl KnowledgeService {
         .await?;
         write_text_atomic_if_unchanged(&path, expected, content).await?;
         self.invalidate_search_cache_path(&path);
+        self.mark_projection_dirty(&current);
         Ok(())
     }
 
@@ -1899,6 +4021,7 @@ impl KnowledgeService {
                 "knowledge base root changed while write-back was starting; retry".into(),
             ));
         }
+        require_editable_knowledge_tree(&current)?;
         validate_source_owned_write_target(&current, logical_rel_path)?;
         let path = safe_md_path_bounded(
             PathBuf::from(&row.root_path),
@@ -1907,6 +4030,7 @@ impl KnowledgeService {
         .await?;
         write_text_atomic_if_absent(&path, content).await?;
         self.invalidate_search_cache_path(&path);
+        self.mark_projection_dirty(&current);
         Ok(())
     }
 
@@ -1923,6 +4047,101 @@ impl KnowledgeService {
             }
         });
         guard.total_bytes = guard.total_bytes.saturating_sub(freed);
+    }
+
+    fn invalidate_search_cache_prefix(&self, path: &Path) {
+        let mut guard = self.search_cache.write().unwrap_or_else(|e| e.into_inner());
+        let target_identity = portable_absolute_path_identity(path);
+        let mut freed = 0usize;
+        guard.entries.retain(|cached_path, cached| {
+            let cached_identity = portable_absolute_path_identity(cached_path);
+            let is_within = cached_identity == target_identity
+                || cached_identity
+                    .strip_prefix(&target_identity)
+                    .is_some_and(|suffix| suffix.starts_with('/'));
+            if is_within {
+                freed = freed.saturating_add(cached.bytes);
+                false
+            } else {
+                true
+            }
+        });
+        guard.total_bytes = guard.total_bytes.saturating_sub(freed);
+    }
+
+    fn cached_relocation(
+        &self,
+        key: &str,
+        fingerprint: &RelocateRequestFingerprint,
+    ) -> Result<Option<RelocateTreeEntryResult>, AppError> {
+        let cache = self
+            .relocate_idempotency
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(cached) = cache.entries.get(key) else {
+            return Ok(None);
+        };
+        if &cached.fingerprint != fingerprint {
+            return Err(AppError::Conflict(
+                "request_id was already used for a different tree relocation".into(),
+            ));
+        }
+        Ok(Some(cached.result.clone()))
+    }
+
+    fn remember_relocation(
+        &self,
+        key: String,
+        fingerprint: RelocateRequestFingerprint,
+        result: RelocateTreeEntryResult,
+    ) {
+        let mut cache = self
+            .relocate_idempotency
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.entries.contains_key(&key) {
+            return;
+        }
+        while cache.entries.len() >= MAX_RELOCATE_IDEMPOTENCY_ENTRIES {
+            let Some(oldest) = cache.insertion_order.pop_front() else {
+                cache.entries.clear();
+                break;
+            };
+            cache.entries.remove(&oldest);
+        }
+        cache.insertion_order.push_back(key.clone());
+        cache.entries.insert(
+            key,
+            CachedRelocation {
+                fingerprint,
+                result,
+            },
+        );
+    }
+
+    fn current_tree_revision(&self, row: &KnowledgeBaseRow) -> u64 {
+        let persisted = u64::try_from(row.updated_at).unwrap_or_default();
+        let mut revisions = self
+            .tree_revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *revisions
+            .entry(row.knowledge_base_id.clone())
+            .or_insert(persisted)
+    }
+
+    fn next_tree_revision(&self, row: &KnowledgeBaseRow) -> u64 {
+        let persisted = u64::try_from(row.updated_at).unwrap_or_default();
+        let wall_clock = u64::try_from(now_ms()).unwrap_or_default();
+        let mut revisions = self
+            .tree_revisions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let revision = revisions
+            .entry(row.knowledge_base_id.clone())
+            .or_insert(persisted);
+        *revision = wall_clock.max(persisted).max(revision.saturating_add(1));
+        *revision
     }
 
     /// Bindings currently mounting this base (enabled AND disabled — the UI
@@ -2536,16 +4755,20 @@ impl KnowledgeService {
         let _tree_guard =
             self.acquire_document_tree_write_lock(&row).await?;
         let _base_guard = self.acquire_base_lifecycle_lock(&row).await?;
-        self.require_base(id).await?;
+        let current = self.require_base(id).await?;
+        require_editable_knowledge_tree(&current)?;
+        let rel_path = normalize_tree_rel_path(rel_path)?;
+        validate_source_managed_tree_mutation(&current, [&rel_path])?;
         let path = safe_md_path_bounded(
             PathBuf::from(&row.root_path),
-            rel_path.to_owned(),
+            rel_path.clone(),
         )
         .await?;
         tokio::fs::remove_file(&path)
             .await
             .map_err(|_| AppError::NotFound(format!("file not found: {rel_path}")))?;
         self.invalidate_search_cache_path(&path);
+        self.mark_projection_dirty(&current);
         Ok(())
     }
 
@@ -2581,6 +4804,7 @@ impl KnowledgeService {
     ) -> Result<AutogenOutcome, AppError> {
         let completer = self.require_completer()?;
         let row = self.require_base(kb_id).await?;
+        require_editable_knowledge_tree(&row)?;
         let root = PathBuf::from(&row.root_path);
         let samples = autogen::sample_base_files(&root).await;
         if samples.is_empty() {
@@ -2726,6 +4950,7 @@ impl KnowledgeService {
     /// without changing its realtime contract).
     pub async fn refresh_source(&self, kb_id: &str) -> Result<RefreshSourceSummary, AppError> {
         let mut row = self.require_base(kb_id).await?;
+        require_editable_knowledge_tree(&row)?;
         let mut source = source_from_extra(&row.extra)
             .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?
             .ok_or_else(|| AppError::BadRequest("knowledge base has no URL source to refresh".into()))?;
@@ -2781,6 +5006,7 @@ impl KnowledgeService {
         }
 
         let mut row = self.require_base(kb_id).await?;
+        require_editable_knowledge_tree(&row)?;
         let stored_source = source_from_extra(&row.extra)
             .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?;
         let mut source = match stored_source {
@@ -3140,6 +5366,12 @@ impl KnowledgeService {
                 return outcome;
             }
         };
+        // Network/LLM preparation occurs before these locks and can be slow.
+        // Re-check current consent before publishing any prepared snapshot.
+        if let Err(error) = require_editable_knowledge_tree(&current) {
+            outcome.fatal_error = Some(error);
+            return outcome;
+        }
         let root = PathBuf::from(&current.root_path);
         if let Err(error) = validate_knowledge_root_bounded(root.clone()).await {
             outcome.fatal_error = Some(error);
@@ -3167,6 +5399,7 @@ impl KnowledgeService {
                     outcome.fetched += 1;
                     outcome.published_paths.push(published_path);
                     self.invalidate_search_cache_path(&path);
+                    self.mark_projection_dirty(&current);
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -3183,12 +5416,14 @@ impl KnowledgeService {
         if outcome.fetched > 0 {
             source.last_fetched_at = Some(now_ms());
         }
-        if prune_orphans
-            && let Err(error) =
-                prune_orphan_snapshots(&root, &source.entries).await
-        {
-            outcome.fatal_error = Some(error);
-            return outcome;
+        if prune_orphans {
+            // Pruning may quarantine several files before a later entry fails;
+            // mark first so partial success cannot leave stale identities.
+            self.mark_projection_dirty(&current);
+            if let Err(error) = prune_orphan_snapshots(&root, &source.entries).await {
+                outcome.fatal_error = Some(error);
+                return outcome;
+            }
         }
         if let Err(error) = self
             .persist_source_in_current_row(&mut current, source)
@@ -4385,6 +6620,7 @@ impl KnowledgeService {
     async fn row_to_info(&self, row: KnowledgeBaseRow) -> Result<KnowledgeBaseInfo, AppError> {
         let source = source_from_extra(&row.extra)
             .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?;
+        let tree_access = knowledge_tree_access(&row)?;
         let root = PathBuf::from(&row.root_path);
         let root_for_stats_lock = root.clone();
         // Bounded so a slow/stale NAS mount degrades (assume present, counts
@@ -4427,6 +6663,7 @@ impl KnowledgeService {
             description: row.description,
             root_path: row.root_path,
             managed: row.managed,
+            tree_access,
             created_at: row.created_at,
             updated_at: row.updated_at,
             file_count,
@@ -4548,6 +6785,7 @@ enum KnowledgeExtraError {
     InvalidJson(serde_json::Error),
     NotObject,
     InvalidSource(serde_json::Error),
+    InvalidTreeAccess(serde_json::Error),
 }
 
 impl std::fmt::Display for KnowledgeExtraError {
@@ -4557,6 +6795,9 @@ impl std::fmt::Display for KnowledgeExtraError {
             Self::NotObject => formatter.write_str("extra must be a JSON object"),
             Self::InvalidSource(error) => {
                 write!(formatter, "extra.source is invalid: {error}")
+            }
+            Self::InvalidTreeAccess(error) => {
+                write!(formatter, "extra.tree_access is invalid: {error}")
             }
         }
     }
@@ -4583,6 +6824,41 @@ fn source_from_extra(extra: &str) -> Result<Option<KnowledgeSource>, KnowledgeEx
         .map(serde_json::from_value)
         .transpose()
         .map_err(KnowledgeExtraError::InvalidSource)
+}
+
+fn knowledge_tree_access(row: &KnowledgeBaseRow) -> Result<KnowledgeTreeAccess, AppError> {
+    let value: serde_json::Value = serde_json::from_str(&row.extra)
+        .map_err(KnowledgeExtraError::InvalidJson)
+        .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?;
+    let object = value
+        .as_object()
+        .ok_or(KnowledgeExtraError::NotObject)
+        .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?;
+    object
+        .get("tree_access")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(KnowledgeExtraError::InvalidTreeAccess)
+        .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))
+        .map(|access| {
+            access.unwrap_or(if row.managed {
+                KnowledgeTreeAccess::Editable
+            } else {
+                KnowledgeTreeAccess::ReadOnly
+            })
+        })
+}
+
+fn require_editable_knowledge_tree(row: &KnowledgeBaseRow) -> Result<(), AppError> {
+    if knowledge_tree_access(row)? == KnowledgeTreeAccess::Editable {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden(
+            "knowledge base is read-only; explicitly grant folder edit access before changing its files or directories"
+                .into(),
+        ))
+    }
 }
 
 fn tags_from_row(row: &KnowledgeBaseRow) -> Result<Vec<String>, AppError> {
@@ -6575,9 +8851,7 @@ fn validate_source_owned_write_target(
             .next()
             .is_some_and(|component| {
                 portable_path_component_identity(component)
-                    == portable_path_component_identity(
-                        source_url::SNAPSHOT_REL_DIR,
-                    )
+                    == portable_path_component_identity(source_url::SNAPSHOT_REL_DIR)
             })
     {
         return Err(AppError::Forbidden(
@@ -6586,6 +8860,58 @@ fn validate_source_owned_write_target(
         ));
     }
     Ok(())
+}
+
+fn validate_source_managed_tree_mutation<'a>(
+    row: &KnowledgeBaseRow,
+    rel_paths: impl IntoIterator<Item = &'a String>,
+) -> Result<(), AppError> {
+    let has_source = source_from_extra(&row.extra)
+        .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?
+        .is_some();
+    if !has_source {
+        return Ok(());
+    }
+    for rel_path in rel_paths {
+        if rel_path.split('/').next().is_some_and(|component| {
+            portable_path_component_identity(component)
+                == portable_path_component_identity(source_url::SNAPSHOT_REL_DIR)
+        }) {
+            return Err(AppError::Forbidden(
+                "source snapshots are managed by refresh/sync and cannot be moved or renamed"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_relocate_request_id(request_id: &str) -> Result<(), AppError> {
+    if request_id.is_empty()
+        || request_id.len() > 128
+        || !request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !byte.is_ascii_whitespace())
+    {
+        return Err(AppError::BadRequest(
+            "request_id must contain 1 to 128 visible ASCII characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn relocate_request_sha256(
+    fingerprint: &RelocateRequestFingerprint,
+) -> Result<String, AppError> {
+    let canonical = serde_json::to_vec(fingerprint).map_err(|error| {
+        AppError::Internal(format!(
+            "failed to canonicalize knowledge-tree relocation command: {error}"
+        ))
+    })?;
+    let mut digest = Sha256::new();
+    digest.update(b"knowledge-tree-relocate-v1\0");
+    digest.update(canonical);
+    Ok(hex::encode(digest.finalize()))
 }
 
 fn validate_write_request(req: &WriteRequest) -> Result<(), AppError> {
@@ -7015,6 +9341,375 @@ fn join_tree_rel_path(parent: &str, name: &str) -> String {
     }
 }
 
+#[derive(Debug)]
+struct ScannedProjectionEntry {
+    name: String,
+    rel_path: String,
+    portable_rel_path: String,
+    kind: String,
+    fs_identity: Option<String>,
+}
+
+fn scan_knowledge_entry_projection(
+    root: &Path,
+    knowledge_base_id: &KnowledgeBaseId,
+    existing: &[KnowledgeEntryRow],
+    has_source: bool,
+    forced_ids: &HashMap<String, KnowledgeEntryId>,
+) -> Result<Vec<UpsertKnowledgeEntryParams>, AppError> {
+    validate_knowledge_root(root)?;
+    let mut scanned = Vec::new();
+    let mut directories = vec![(String::new(), root.to_path_buf())];
+    while let Some((parent_rel_path, directory)) = directories.pop() {
+        let children = std::fs::read_dir(&directory).map_err(|error| {
+            AppError::Internal(format!(
+                "failed to read knowledge directory {} while reconciling identities: {error}",
+                directory.display()
+            ))
+        })?;
+        let mut children = children
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "failed to enumerate knowledge directory {} while reconciling identities: {error}",
+                    directory.display()
+                ))
+            })?;
+        children.sort_by_key(|entry| entry.file_name());
+        for child in children {
+            let Some(name) = child.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            // An entry that cannot participate in the product's portable path
+            // policy stays filesystem-owned and visible in legacy listings,
+            // but cannot safely receive a cross-platform stable projection.
+            if validate_portable_path_component(&name).is_err() {
+                continue;
+            }
+            let path = child.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                AppError::Internal(format!(
+                    "failed to inspect knowledge entry {} while reconciling identities: {error}",
+                    path.display()
+                ))
+            })?;
+            if metadata_is_link_or_reparse(&path, &metadata) {
+                continue;
+            }
+            let rel_path = join_tree_rel_path(&parent_rel_path, &name);
+            let portable_rel_path = portable_writeback_path_identity(&rel_path);
+            if metadata.is_dir() {
+                if is_excluded_tree_dir_name(&name) {
+                    continue;
+                }
+                scanned.push(ScannedProjectionEntry {
+                    name,
+                    rel_path: rel_path.clone(),
+                    portable_rel_path,
+                    kind: KNOWLEDGE_ENTRY_KIND_DIRECTORY.into(),
+                    fs_identity: filesystem_entry_identity(&metadata),
+                });
+                directories.push((rel_path, path));
+            } else if metadata.is_file() {
+                scanned.push(ScannedProjectionEntry {
+                    name,
+                    rel_path,
+                    portable_rel_path,
+                    kind: KNOWLEDGE_ENTRY_KIND_FILE.into(),
+                    fs_identity: filesystem_entry_identity(&metadata),
+                });
+            }
+        }
+    }
+    scanned.sort_by(|left, right| {
+        left.rel_path
+            .matches('/')
+            .count()
+            .cmp(&right.rel_path.matches('/').count())
+            .then_with(|| left.portable_rel_path.cmp(&right.portable_rel_path))
+            .then_with(|| left.rel_path.cmp(&right.rel_path))
+    });
+
+    let mut existing_by_id = HashMap::with_capacity(existing.len());
+    let mut existing_by_path: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut existing_by_fs_identity: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, entry) in existing.iter().enumerate() {
+        existing_by_id.insert(entry.knowledge_entry_id.clone(), index);
+        existing_by_path
+            .entry(entry.portable_rel_path.clone())
+            .or_default()
+            .push(index);
+        if let Some(identity) = entry.fs_identity.as_ref() {
+            existing_by_fs_identity
+                .entry(identity.clone())
+                .or_default()
+                .push(index);
+        }
+    }
+
+    let mut used_ids = HashSet::with_capacity(scanned.len());
+    let mut assigned = Vec::with_capacity(scanned.len());
+    for scanned_entry in scanned {
+        let forced_id = forced_ids.get(&scanned_entry.portable_rel_path).cloned();
+        let candidate_index = forced_id
+            .as_ref()
+            .and_then(|id| existing_by_id.get(id).copied())
+            .or_else(|| {
+                select_projection_identity_candidate(
+                    existing_by_path.get(&scanned_entry.portable_rel_path),
+                    existing,
+                    &used_ids,
+                    &scanned_entry.kind,
+                )
+            })
+            .or_else(|| {
+                scanned_entry.fs_identity.as_ref().and_then(|identity| {
+                    select_projection_identity_candidate(
+                        existing_by_fs_identity.get(identity),
+                        existing,
+                        &used_ids,
+                        &scanned_entry.kind,
+                    )
+                })
+            });
+        let prior = candidate_index.map(|index| existing[index].clone());
+        let knowledge_entry_id = forced_id
+            .or_else(|| prior.as_ref().map(|entry| entry.knowledge_entry_id.clone()))
+            .unwrap_or_else(KnowledgeEntryId::new);
+        // A malformed historical projection or ambiguous hard-link identity
+        // must never assign one stable ID to two live filesystem entries.
+        let knowledge_entry_id = if used_ids.insert(knowledge_entry_id.clone()) {
+            knowledge_entry_id
+        } else {
+            let fresh = KnowledgeEntryId::new();
+            used_ids.insert(fresh.clone());
+            fresh
+        };
+        assigned.push((scanned_entry, knowledge_entry_id, prior));
+    }
+
+    let ids_by_path = assigned
+        .iter()
+        .map(|(entry, id, _)| (entry.portable_rel_path.clone(), id.clone()))
+        .collect::<HashMap<_, _>>();
+    let timestamp = now_ms();
+    let snapshot_prefix = portable_path_component_identity(source_url::SNAPSHOT_REL_DIR);
+    let mut projected = Vec::with_capacity(assigned.len());
+    for (entry, knowledge_entry_id, prior) in assigned {
+        let parent_portable_path = entry
+            .portable_rel_path
+            .rsplit_once('/')
+            .map(|(parent, _)| parent);
+        let parent_entry_id = parent_portable_path
+            .and_then(|parent| ids_by_path.get(parent))
+            .cloned();
+        let inferred_origin = if has_source
+            && entry
+                .portable_rel_path
+                .split('/')
+                .next()
+                .is_some_and(|component| component == snapshot_prefix)
+        {
+            KNOWLEDGE_ENTRY_ORIGIN_URL_SNAPSHOT
+        } else {
+            KNOWLEDGE_ENTRY_ORIGIN_USER
+        };
+        let origin = prior
+            .as_ref()
+            .map(|prior| prior.origin.clone())
+            .unwrap_or_else(|| inferred_origin.into());
+        let unchanged = prior.as_ref().is_some_and(|prior| {
+            prior.parent_entry_id == parent_entry_id
+                && prior.name == entry.name
+                && prior.kind == entry.kind
+                && prior.origin == origin
+                && prior.rel_path == entry.rel_path
+                && prior.portable_rel_path == entry.portable_rel_path
+                && prior.fs_identity == entry.fs_identity
+                && prior.deleted_at.is_none()
+        });
+        let revision = prior
+            .as_ref()
+            .map(|prior| {
+                if unchanged {
+                    prior.revision
+                } else {
+                    prior.revision.saturating_add(1)
+                }
+            })
+            .unwrap_or_default();
+        projected.push(UpsertKnowledgeEntryParams {
+            knowledge_entry_id,
+            knowledge_base_id: knowledge_base_id.clone(),
+            parent_entry_id,
+            name: entry.name,
+            kind: entry.kind,
+            origin,
+            rel_path: entry.rel_path,
+            portable_rel_path: entry.portable_rel_path,
+            fs_identity: entry.fs_identity,
+            // Content remains filesystem-owned. Hashing every document is not
+            // required to establish identity and would turn a metadata repair
+            // into an unbounded content read.
+            content_hash: None,
+            revision,
+            deleted_at: None,
+            created_at: prior.as_ref().map_or(timestamp, |prior| prior.created_at),
+            updated_at: prior
+                .as_ref()
+                .filter(|_| unchanged)
+                .map_or(timestamp, |prior| prior.updated_at),
+        });
+    }
+    projected.sort_by(|left, right| {
+        left.portable_rel_path
+            .cmp(&right.portable_rel_path)
+            .then_with(|| left.knowledge_entry_id.cmp(&right.knowledge_entry_id))
+    });
+    Ok(projected)
+}
+
+fn select_projection_identity_candidate(
+    candidates: Option<&Vec<usize>>,
+    existing: &[KnowledgeEntryRow],
+    used_ids: &HashSet<KnowledgeEntryId>,
+    kind: &str,
+) -> Option<usize> {
+    candidates?.iter().copied().filter(|index| {
+        !used_ids.contains(&existing[*index].knowledge_entry_id)
+    }).min_by_key(|index| {
+        let entry = &existing[*index];
+        (
+            entry.deleted_at.is_some(),
+            entry.kind != kind,
+            std::cmp::Reverse(entry.updated_at),
+        )
+    })
+}
+
+#[cfg(unix)]
+fn filesystem_entry_identity(metadata: &std::fs::Metadata) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    Some(format!("unix:{}:{}", metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn filesystem_entry_identity(metadata: &std::fs::Metadata) -> Option<String> {
+    use std::os::windows::fs::MetadataExt;
+    Some(format!(
+        "windows:{}:{}",
+        metadata.volume_serial_number()?,
+        metadata.file_index()?
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn filesystem_entry_identity(_metadata: &std::fs::Metadata) -> Option<String> {
+    None
+}
+
+fn projection_snapshot_matches(
+    current: &[KnowledgeEntryRow],
+    snapshot: &[UpsertKnowledgeEntryParams],
+) -> bool {
+    if current.len() != snapshot.len() {
+        return false;
+    }
+    let mut current = current
+        .iter()
+        .map(UpsertKnowledgeEntryParams::from)
+        .collect::<Vec<_>>();
+    current.sort_by(|left, right| {
+        left.portable_rel_path
+            .cmp(&right.portable_rel_path)
+            .then_with(|| left.knowledge_entry_id.cmp(&right.knowledge_entry_id))
+    });
+    current == snapshot
+}
+
+fn tree_parent_rel_path(rel_path: &str) -> &str {
+    rel_path.rsplit_once('/').map_or("", |(parent, _)| parent)
+}
+
+fn projection_tree_level_matches(
+    root: &Path,
+    rel_path: &str,
+    filesystem_entries: &[KbTreeEntry],
+    projected: &[KnowledgeEntryRow],
+) -> bool {
+    let filesystem = filesystem_entries
+        .iter()
+        .filter_map(|entry| {
+            normalize_tree_rel_path(&entry.rel_path)
+                .ok()
+                .map(|path| (portable_writeback_path_identity(&path), entry.is_dir))
+        })
+        .collect::<HashSet<_>>();
+    let projected_paths = projected
+        .iter()
+        .filter(|entry| {
+            tree_parent_rel_path(&entry.rel_path) == rel_path
+                && (entry.kind == KNOWLEDGE_ENTRY_KIND_DIRECTORY
+                    || is_md(Path::new(&entry.rel_path)))
+        })
+        .map(|entry| {
+            (
+                entry.portable_rel_path.clone(),
+                entry.kind == KNOWLEDGE_ENTRY_KIND_DIRECTORY,
+            )
+        })
+        .collect::<HashSet<_>>();
+    if filesystem != projected_paths {
+        return false;
+    }
+
+    // Path-only comparison misses the atomic-save pattern used by Obsidian
+    // and many editors: replace the file at the same path with a new inode,
+    // then rename it later. Refreshing the projected physical identity while
+    // the path is still known is what lets that later rename retain its ID.
+    let projected_by_path = projected
+        .iter()
+        .map(|entry| (entry.portable_rel_path.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    filesystem_entries.iter().all(|entry| {
+        let portable_path = portable_writeback_path_identity(&entry.rel_path);
+        let Some(projected) = projected_by_path.get(portable_path.as_str()) else {
+            return false;
+        };
+        let path = root.join(&entry.rel_path);
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            return false;
+        };
+        !metadata_is_link_or_reparse(&path, &metadata)
+            && filesystem_entry_identity(&metadata) == projected.fs_identity
+    })
+}
+
+fn hydrate_tree_entries(entries: &mut [KbTreeEntry], projected: &[KnowledgeEntryRow]) {
+    let by_path = projected
+        .iter()
+        .map(|entry| (entry.portable_rel_path.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    for entry in entries {
+        let portable_path = portable_writeback_path_identity(&entry.rel_path);
+        let Some(projected) = by_path.get(portable_path.as_str()) else {
+            continue;
+        };
+        entry.entry_id = Some(projected.knowledge_entry_id.clone());
+        entry.revision = Some(projected.revision);
+        entry.parent_entry_id = projected.parent_entry_id.clone();
+        entry.origin = Some(projected.origin.clone());
+    }
+}
+
+fn non_negative_tree_revision(revision: i64) -> Result<u64, AppError> {
+    u64::try_from(revision).map_err(|_| {
+        AppError::Internal(format!(
+            "knowledge tree projection returned a negative revision: {revision}"
+        ))
+    })
+}
+
 fn list_tree_level(root: &Path, rel_path: &str) -> Result<Vec<KbTreeEntry>, AppError> {
     validate_knowledge_root(root)?;
     let dir = if rel_path.is_empty() {
@@ -7055,6 +9750,10 @@ fn list_tree_level(root: &Path, rel_path: &str) -> Result<Vec<KbTreeEntry>, AppE
                 continue;
             }
             out.push(KbTreeEntry {
+                entry_id: None,
+                revision: None,
+                parent_entry_id: None,
+                origin: None,
                 name,
                 rel_path: child_rel,
                 is_dir: true,
@@ -7066,6 +9765,10 @@ fn list_tree_level(root: &Path, rel_path: &str) -> Result<Vec<KbTreeEntry>, AppE
         }
         if metadata.is_file() && is_md(&entry.path()) {
             out.push(KbTreeEntry {
+                entry_id: None,
+                revision: None,
+                parent_entry_id: None,
+                origin: None,
                 name,
                 rel_path: child_rel,
                 is_dir: false,
@@ -7138,6 +9841,10 @@ fn create_tree_folder(root: &Path, rel_path: &str) -> Result<KbTreeEntry, AppErr
 
     let meta = std::fs::metadata(&cursor).ok();
     Ok(KbTreeEntry {
+        entry_id: None,
+        revision: None,
+        parent_entry_id: None,
+        origin: None,
         name: actual_segments
             .last()
             .cloned()
@@ -7238,85 +9945,593 @@ fn delete_tree_folder(root: &Path, rel_path: &str) -> Result<(), AppError> {
     remove_tree_dir_no_follow(&path)
 }
 
-fn rename_tree_entry(root: &Path, rel_path: &str, new_name: &str) -> Result<KbTreeEntry, AppError> {
-    let (from, meta) = resolve_tree_existing_path(root, rel_path)?;
+struct RelocatedTreeEntry {
+    old_path: String,
+    new_path: String,
+    kind: String,
+    moved_descendant_count: u64,
+    no_op: bool,
+    entry: KbTreeEntry,
+}
+
+fn relocate_tree_entry_on_disk(
+    root: &Path,
+    source_rel_path: &str,
+    destination_parent_rel_path: &str,
+    requested_new_name: Option<&str>,
+    durable_operation_id: Option<&KnowledgeTreeOperationId>,
+) -> Result<RelocatedTreeEntry, AppError> {
+    let (from, meta) = resolve_tree_existing_path(root, source_rel_path)?;
     let file_type = meta.file_type();
     let is_file = file_type.is_file();
     let is_dir = file_type.is_dir();
     if !is_file && !is_dir {
-        return Err(AppError::BadRequest(format!("unsupported path type: {rel_path}")));
+        return Err(AppError::BadRequest(format!(
+            "unsupported path type: {source_rel_path}"
+        )));
     }
-    if is_file && !is_md(Path::new(new_name)) {
-        return Err(AppError::BadRequest("markdown files must keep a .md extension".into()));
-    }
-
-    let segments: Vec<&str> = rel_path.split('/').filter(|segment| !segment.is_empty()).collect();
-    let parent_rel = if segments.len() <= 1 {
-        String::new()
-    } else {
-        segments[..segments.len() - 1].join("/")
-    };
-    let parent = from
-        .parent()
-        .ok_or_else(|| AppError::BadRequest(format!("invalid path: {rel_path}")))?;
-    let to = parent.join(new_name);
-    if let Some(existing) = find_portable_tree_child(parent, new_name)? {
-        if existing.path != from {
-            return Err(AppError::Conflict(format!(
-                "a portable path alias already exists: {}",
-                join_tree_rel_path(&parent_rel, &existing.name)
-            )));
-        }
-        if to == from {
-            return Err(AppError::Conflict(format!(
-                "path already has that name: {}",
-                join_tree_rel_path(&parent_rel, new_name)
-            )));
-        }
+    if is_file && !is_md(&from) {
+        return Err(AppError::BadRequest(
+            "only markdown files and directories can be relocated".into(),
+        ));
     }
 
+    let old_path = tree_relative_path(root, &from)?;
     let old_name = from
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| AppError::BadRequest("path must be valid Unicode".into()))?;
-    if portable_path_component_identity(old_name)
-        == portable_path_component_identity(new_name)
+    let new_name = match requested_new_name {
+        Some(name) => validate_tree_entry_name(name)?,
+        None => old_name.to_owned(),
+    };
+    if is_file && !is_md(Path::new(&new_name)) {
+        return Err(AppError::BadRequest(
+            "markdown files must keep a .md extension".into(),
+        ));
+    }
+
+    let (destination_parent, destination_parent_meta) =
+        if destination_parent_rel_path.is_empty() {
+            validate_knowledge_root(root)?;
+            let metadata = std::fs::symlink_metadata(root).map_err(|error| {
+                AppError::Internal(format!(
+                    "failed to inspect knowledge base root before relocation: {error}"
+                ))
+            })?;
+            (root.to_path_buf(), metadata)
+        } else {
+            resolve_tree_existing_path(root, destination_parent_rel_path)?
+        };
+    if !destination_parent_meta.file_type().is_dir() {
+        return Err(AppError::BadRequest(format!(
+            "relocation destination is not a directory: {destination_parent_rel_path}"
+        )));
+    }
+    if is_dir && destination_parent.starts_with(&from) {
+        return Err(AppError::BadRequest(
+            "a directory cannot be moved into itself or one of its descendants".into(),
+        ));
+    }
+
+    let destination_parent_rel = tree_relative_path_allow_root(root, &destination_parent)?;
+    let to = destination_parent.join(&new_name);
+    let new_path = join_tree_rel_path(&destination_parent_rel, &new_name);
+    if let Some(existing) = find_portable_tree_child(&destination_parent, &new_name)? {
+        if existing.path != from {
+            return Err(AppError::Conflict(format!(
+                "a portable path alias already exists: {}",
+                join_tree_rel_path(&destination_parent_rel, &existing.name)
+            )));
+        }
+    }
+
+    let moved_descendant_count = if is_dir {
+        count_tree_descendants_no_follow(&from)?
+    } else {
+        0
+    };
+    if to == from {
+        return Ok(RelocatedTreeEntry {
+            old_path,
+            new_path: new_path.clone(),
+            kind: if is_dir { "directory" } else { "file" }.into(),
+            moved_descendant_count,
+            no_op: true,
+            entry: tree_entry_from_metadata(new_name, new_path, is_dir, &meta),
+        });
+    }
+
+    let same_parent = from.parent() == Some(destination_parent.as_path());
+    if same_parent
+        && portable_path_component_identity(old_name)
+            == portable_path_component_identity(&new_name)
     {
         // A two-step rename makes case/normalization-only changes behave the
         // same on case-insensitive Windows/macOS and case-sensitive Linux.
-        let temporary = parent.join(format!(
-            ".nomi-tree-rename-{}.tmp",
-            KnowledgeBaseId::new()
-        ));
-        std::fs::rename(&from, &temporary).map_err(|error| {
-            AppError::Internal(format!(
-                "failed to prepare portable tree rename: {error}"
-            ))
+        let temporary = destination_parent.join(match durable_operation_id {
+            Some(operation_id) => {
+                format!(".nomi-tree-rename-{operation_id}.tmp")
+            }
+            None => format!(
+                ".nomi-tree-rename-{}.tmp",
+                KnowledgeBaseId::new()
+            ),
+        });
+        rename_path_no_replace(&from, &temporary).map_err(|error| {
+            map_relocate_io_error(error, &from, &temporary)
         })?;
-        if let Err(error) = std::fs::rename(&temporary, &to) {
-            let restore = std::fs::rename(&temporary, &from);
-            return Err(AppError::Internal(format!(
-                "failed to finish portable tree rename: {error}; original restore: {}",
-                restore
-                    .err()
-                    .map(|restore_error| restore_error.to_string())
-                    .unwrap_or_else(|| "ok".into())
-            )));
+        if let Err(error) = rename_path_no_replace(&temporary, &to) {
+            let restore = rename_path_no_replace(&temporary, &from);
+            return match restore {
+                Ok(()) => Err(map_relocate_io_error(error, &from, &to)),
+                Err(restore_error) => Err(AppError::Internal(format!(
+                    "failed to finish portable tree rename: {error}; failed to restore the original path: {restore_error}; the entry remains recoverable at {}",
+                    temporary.display()
+                ))),
+            };
         }
     } else {
-        std::fs::rename(&from, &to)
-            .map_err(|e| AppError::Internal(format!("failed to rename tree entry: {e}")))?;
+        rename_path_no_replace(&from, &to)
+            .map_err(|error| map_relocate_io_error(error, &from, &to))?;
     }
 
-    let target_meta = std::fs::metadata(&to).ok();
-    Ok(KbTreeEntry {
-        name: new_name.to_owned(),
-        rel_path: join_tree_rel_path(&parent_rel, new_name),
-        is_dir,
-        is_file,
-        size: if is_file { target_meta.as_ref().map(|m| m.len()) } else { None },
-        modified_at: target_meta.as_ref().and_then(modified_ms),
+    let target_meta = std::fs::symlink_metadata(&to).map_err(|error| {
+        AppError::Internal(format!(
+            "relocated entry could not be inspected at {}: {error}",
+            to.display()
+        ))
+    })?;
+    Ok(RelocatedTreeEntry {
+        old_path,
+        new_path: new_path.clone(),
+        kind: if is_dir { "directory" } else { "file" }.into(),
+        moved_descendant_count,
+        no_op: false,
+        entry: tree_entry_from_metadata(new_name, new_path, is_dir, &target_meta),
     })
+}
+
+fn durable_relocation_temporary_path(
+    root: &Path,
+    destination_rel_path: &str,
+    operation_id: &KnowledgeTreeOperationId,
+) -> Result<PathBuf, AppError> {
+    let destination = Path::new(destination_rel_path);
+    let parent = destination.parent().unwrap_or_else(|| Path::new(""));
+    let mut resolved_parent = root.to_path_buf();
+    for component in parent.components() {
+        let Component::Normal(component) = component else {
+            return Err(AppError::Internal(format!(
+                "durable tree operation {operation_id} has an invalid destination path"
+            )));
+        };
+        resolved_parent.push(component);
+    }
+    Ok(resolved_parent.join(format!(
+        ".nomi-tree-rename-{operation_id}.tmp"
+    )))
+}
+
+/// Existence inspection for recovery uses the same portable, component-wise,
+/// no-follow resolver as normal tree mutation. Missing is data, while an
+/// unsafe or unreadable path remains an error.
+fn recovery_tree_path_exists(root: &Path, rel_path: &str) -> Result<bool, AppError> {
+    match resolve_tree_existing_path(root, rel_path) {
+        Ok(_) => Ok(true),
+        Err(AppError::NotFound(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn recovery_tree_path_identity(
+    root: &Path,
+    rel_path: &str,
+) -> Result<Option<String>, AppError> {
+    let (path, metadata) = resolve_tree_existing_path(root, rel_path)?;
+    if metadata_is_link_or_reparse(&path, &metadata) {
+        return Err(AppError::Conflict(format!(
+            "durable relocation recovery refuses an unsafe destination: {rel_path}"
+        )));
+    }
+    Ok(filesystem_entry_identity(&metadata))
+}
+
+fn recovery_absolute_path_exists(root: &Path, path: &Path) -> Result<bool, AppError> {
+    validate_knowledge_root(root)?;
+    let relative = path.strip_prefix(root).map_err(|_| {
+        AppError::Internal(format!(
+            "durable relocation temporary path escaped its knowledge root: {}",
+            path.display()
+        ))
+    })?;
+    let mut cursor = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            return Err(AppError::Internal(format!(
+                "durable relocation temporary path is invalid: {}",
+                path.display()
+            )));
+        };
+        cursor.push(component);
+        match std::fs::symlink_metadata(&cursor) {
+            Ok(metadata) => {
+                if metadata_is_link_or_reparse(&cursor, &metadata) {
+                    return Err(AppError::Conflict(format!(
+                        "durable relocation recovery refuses a symlink, junction, or name-surrogate reparse point: {}",
+                        cursor.display()
+                    )));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(false);
+            }
+            Err(error) => {
+                return Err(AppError::Internal(format!(
+                    "failed to inspect durable relocation recovery path {}: {error}",
+                    cursor.display()
+                )));
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn inspect_committed_relocation(
+    root: &Path,
+    source_rel_path: &str,
+    destination_rel_path: &str,
+) -> Result<RelocatedTreeEntry, AppError> {
+    let (destination, metadata) = resolve_tree_existing_path(root, destination_rel_path)?;
+    let file_type = metadata.file_type();
+    let is_file = file_type.is_file();
+    let is_dir = file_type.is_dir();
+    if !is_file && !is_dir {
+        return Err(AppError::Conflict(format!(
+            "relocated destination has an unsupported filesystem type: {destination_rel_path}"
+        )));
+    }
+    if is_file && !is_md(&destination) {
+        return Err(AppError::Conflict(format!(
+            "relocated destination is not a markdown file: {destination_rel_path}"
+        )));
+    }
+    let actual_destination = tree_relative_path(root, &destination)?;
+    let name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| AppError::Conflict("relocated destination name is not Unicode".into()))?
+        .to_owned();
+    let moved_descendant_count = if is_dir {
+        count_tree_descendants_no_follow(&destination)?
+    } else {
+        0
+    };
+    Ok(RelocatedTreeEntry {
+        old_path: source_rel_path.to_owned(),
+        new_path: actual_destination.clone(),
+        kind: if is_dir { "directory" } else { "file" }.into(),
+        moved_descendant_count,
+        no_op: source_rel_path == actual_destination,
+        entry: tree_entry_from_metadata(name, actual_destination, is_dir, &metadata),
+    })
+}
+
+/// Resolve the exact portable paths that the filesystem mutation will use
+/// without crossing the rename boundary. The journal therefore records real
+/// on-disk casing/normalization even for path-only/degraded callers.
+fn plan_durable_relocation_paths(
+    root: &Path,
+    source_rel_path: &str,
+    destination_parent_rel_path: &str,
+    requested_new_name: Option<&str>,
+) -> Result<(String, String, Option<String>), AppError> {
+    let (source, source_metadata) = resolve_tree_existing_path(root, source_rel_path)?;
+    let source_type = source_metadata.file_type();
+    let source_is_file = source_type.is_file();
+    let source_is_directory = source_type.is_dir();
+    if !source_is_file && !source_is_directory {
+        return Err(AppError::BadRequest(format!(
+            "unsupported path type: {source_rel_path}"
+        )));
+    }
+    if source_is_file && !is_md(&source) {
+        return Err(AppError::BadRequest(
+            "only markdown files and directories can be relocated".into(),
+        ));
+    }
+    let source_path = tree_relative_path(root, &source)?;
+    let old_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| AppError::BadRequest("path must be valid Unicode".into()))?;
+    let target_name = match requested_new_name {
+        Some(name) => validate_tree_entry_name(name)?,
+        None => old_name.to_owned(),
+    };
+    if source_is_file && !is_md(Path::new(&target_name)) {
+        return Err(AppError::BadRequest(
+            "markdown files must keep a .md extension".into(),
+        ));
+    }
+
+    let destination_parent = if destination_parent_rel_path.is_empty() {
+        validate_knowledge_root(root)?;
+        root.to_path_buf()
+    } else {
+        let (destination, metadata) =
+            resolve_tree_existing_path(root, destination_parent_rel_path)?;
+        if !metadata.file_type().is_dir() {
+            return Err(AppError::BadRequest(format!(
+                "relocation destination is not a directory: {destination_parent_rel_path}"
+            )));
+        }
+        destination
+    };
+    if source_is_directory && destination_parent.starts_with(&source) {
+        return Err(AppError::BadRequest(
+            "a directory cannot be moved into itself or one of its descendants".into(),
+        ));
+    }
+    let destination_parent_path =
+        tree_relative_path_allow_root(root, &destination_parent)?;
+    Ok((
+        source_path,
+        join_tree_rel_path(&destination_parent_path, &target_name),
+        filesystem_entry_identity(&source_metadata),
+    ))
+}
+
+fn tree_entry_from_metadata(
+    name: String,
+    rel_path: String,
+    is_dir: bool,
+    metadata: &std::fs::Metadata,
+) -> KbTreeEntry {
+    KbTreeEntry {
+        entry_id: None,
+        revision: None,
+        parent_entry_id: None,
+        origin: None,
+        name,
+        rel_path,
+        is_dir,
+        is_file: !is_dir,
+        size: (!is_dir).then(|| metadata.len()),
+        modified_at: modified_ms(metadata),
+    }
+}
+
+fn tree_relative_path(root: &Path, path: &Path) -> Result<String, AppError> {
+    let rel_path = tree_relative_path_allow_root(root, path)?;
+    if rel_path.is_empty() {
+        return Err(AppError::BadRequest(
+            "knowledge base root cannot be relocated".into(),
+        ));
+    }
+    Ok(rel_path)
+}
+
+fn tree_relative_path_allow_root(root: &Path, path: &Path) -> Result<String, AppError> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        AppError::BadRequest("relocation path escapes the knowledge base root".into())
+    })?;
+    let mut components = Vec::new();
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            return Err(AppError::BadRequest(
+                "relocation path is not a portable relative path".into(),
+            ));
+        };
+        components.push(
+            component
+                .to_str()
+                .ok_or_else(|| AppError::BadRequest("path must be valid Unicode".into()))?,
+        );
+    }
+    Ok(components.join("/"))
+}
+
+fn count_tree_descendants_no_follow(path: &Path) -> Result<u64, AppError> {
+    let mut count = 0u64;
+    let entries = std::fs::read_dir(path).map_err(|error| {
+        AppError::Internal(format!(
+            "failed to inspect directory before relocation {}: {error}",
+            path.display()
+        ))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            AppError::Internal(format!(
+                "failed to inspect directory entry before relocation: {error}"
+            ))
+        })?;
+        let child = entry.path();
+        let metadata = std::fs::symlink_metadata(&child).map_err(|error| {
+            AppError::Internal(format!(
+                "failed to inspect descendant before relocation {}: {error}",
+                child.display()
+            ))
+        })?;
+        if metadata_is_link_or_reparse(&child, &metadata) {
+            return Err(AppError::BadRequest(format!(
+                "refusing to relocate a directory containing a symlink, junction, or name-surrogate reparse point: {}",
+                child.display()
+            )));
+        }
+        if metadata.file_type().is_dir() {
+            count = count
+                .saturating_add(1)
+                .saturating_add(count_tree_descendants_no_follow(&child)?);
+        } else if metadata.file_type().is_file() {
+            count = count.saturating_add(1);
+        } else {
+            return Err(AppError::BadRequest(format!(
+                "refusing to relocate an unsupported filesystem entry: {}",
+                child.display()
+            )));
+        }
+    }
+    Ok(count)
+}
+
+fn map_relocate_io_error(error: std::io::Error, source: &Path, target: &Path) -> AppError {
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        return AppError::Conflict(format!(
+            "relocation target already exists: {}",
+            target.display()
+        ));
+    }
+    if relocate_error_is_cross_device(&error) {
+        return AppError::Conflict(format!(
+            "cannot atomically relocate {} to {} across filesystems; no copy-and-delete fallback was attempted",
+            source.display(),
+            target.display()
+        ));
+    }
+    if error.kind() == std::io::ErrorKind::Unsupported {
+        return AppError::Conflict(format!(
+            "this filesystem does not provide atomic no-overwrite relocation; no files were changed: {error}"
+        ));
+    }
+    AppError::Internal(format!(
+        "failed to relocate tree entry from {} to {}: {error}",
+        source.display(),
+        target.display()
+    ))
+}
+
+#[cfg(unix)]
+fn relocate_error_is_cross_device(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::EXDEV)
+}
+
+#[cfg(windows)]
+fn relocate_error_is_cross_device(error: &std::io::Error) -> bool {
+    use windows_sys::Win32::Foundation::ERROR_NOT_SAME_DEVICE;
+    error.raw_os_error() == Some(ERROR_NOT_SAME_DEVICE as i32)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn relocate_error_is_cross_device(_error: &std::io::Error) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn rename_path_no_replace(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source = CString::new(source.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "knowledge source path contains NUL",
+        )
+    })?;
+    let target = CString::new(target.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "knowledge target path contains NUL",
+        )
+    })?;
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    // SAFETY: both C strings remain alive for the synchronous syscall.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    // SAFETY: both C strings remain alive for the synchronous syscall.
+    let result = unsafe {
+        libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL)
+    } as libc::c_long;
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    )))]
+    let result = -1;
+
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let unsupported = matches!(
+        error.raw_os_error(),
+        Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP)
+    );
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let unsupported = matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOTSUP));
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    )))]
+    let unsupported = true;
+    if unsupported {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "atomic no-replace rename is unavailable",
+        ))
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(windows)]
+fn rename_path_no_replace(source: &Path, target: &Path) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+
+    let source = windows_api_path(source);
+    let target = windows_api_path(target);
+    for &retry_delay_ms in WINDOWS_ATOMIC_RETRY_DELAYS_MS {
+        if retry_delay_ms != 0 {
+            std::thread::sleep(Duration::from_millis(retry_delay_ms));
+        }
+        // SAFETY: both buffers are NUL-terminated and live for this call.
+        if unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                target.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        } != 0
+        {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        let retryable = error.raw_os_error().is_some_and(|code| {
+            code as u32 == ERROR_SHARING_VIOLATION || code as u32 == ERROR_LOCK_VIOLATION
+        });
+        if !retryable
+            || retry_delay_ms
+                == *WINDOWS_ATOMIC_RETRY_DELAYS_MS
+                    .last()
+                    .expect("retry schedule is non-empty")
+        {
+            return Err(error);
+        }
+    }
+    unreachable!("bounded MoveFileExW attempts always return")
+}
+
+#[cfg(not(any(unix, windows)))]
+fn rename_path_no_replace(_source: &Path, _target: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic no-replace rename is unavailable",
+    ))
 }
 
 struct PortableTreeChild {
@@ -7684,6 +10899,115 @@ fn deduplicate_slug(base: &str, existing: &HashSet<String>) -> String {
 mod tests {
     use super::*;
 
+    struct FailNextProjectionRelocate {
+        inner: Arc<nomifun_db::SqliteKnowledgeRepository>,
+        fail_next_relocate: std::sync::atomic::AtomicBool,
+    }
+
+    impl FailNextProjectionRelocate {
+        fn new(inner: Arc<nomifun_db::SqliteKnowledgeRepository>) -> Self {
+            Self {
+                inner,
+                fail_next_relocate: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn fail_next_relocate(&self) {
+            self.fail_next_relocate
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl IKnowledgeEntryRepository for FailNextProjectionRelocate {
+        async fn get_entry(
+            &self,
+            knowledge_base_id: &KnowledgeBaseId,
+            knowledge_entry_id: &KnowledgeEntryId,
+        ) -> Result<Option<KnowledgeEntryRow>, nomifun_db::DbError> {
+            self.inner
+                .get_entry(knowledge_base_id, knowledge_entry_id)
+                .await
+        }
+
+        async fn get_entry_by_path(
+            &self,
+            knowledge_base_id: &KnowledgeBaseId,
+            portable_rel_path: &str,
+        ) -> Result<Option<KnowledgeEntryRow>, nomifun_db::DbError> {
+            self.inner
+                .get_entry_by_path(knowledge_base_id, portable_rel_path)
+                .await
+        }
+
+        async fn list_entries_for_base(
+            &self,
+            knowledge_base_id: &KnowledgeBaseId,
+            include_deleted: bool,
+        ) -> Result<Vec<KnowledgeEntryRow>, nomifun_db::DbError> {
+            self.inner
+                .list_entries_for_base(knowledge_base_id, include_deleted)
+                .await
+        }
+
+        async fn tree_revision(
+            &self,
+            knowledge_base_id: &KnowledgeBaseId,
+        ) -> Result<i64, nomifun_db::DbError> {
+            self.inner.tree_revision(knowledge_base_id).await
+        }
+
+        async fn upsert_entry(
+            &self,
+            params: &UpsertKnowledgeEntryParams,
+        ) -> Result<nomifun_db::KnowledgeEntryMutation, nomifun_db::DbError> {
+            self.inner.upsert_entry(params).await
+        }
+
+        async fn replace_projection(
+            &self,
+            knowledge_base_id: &KnowledgeBaseId,
+            expected_tree_revision: Option<i64>,
+            entries: &[UpsertKnowledgeEntryParams],
+        ) -> Result<nomifun_db::KnowledgeProjectionReplacement, nomifun_db::DbError> {
+            self.inner
+                .replace_projection(knowledge_base_id, expected_tree_revision, entries)
+                .await
+        }
+
+        async fn relocate_entry(
+            &self,
+            params: &RelocateKnowledgeEntryProjectionParams,
+        ) -> Result<nomifun_db::KnowledgeEntryMutation, nomifun_db::DbError> {
+            if self
+                .fail_next_relocate
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(nomifun_db::DbError::Conflict(
+                    "injected projection relocate failure".into(),
+                ));
+            }
+            self.inner.relocate_entry(params).await
+        }
+
+        async fn soft_delete_entry_subtree(
+            &self,
+            knowledge_base_id: &KnowledgeBaseId,
+            knowledge_entry_id: &KnowledgeEntryId,
+            expected_revision: i64,
+            deleted_at: TimestampMs,
+        ) -> Result<nomifun_db::KnowledgeEntryMutation, nomifun_db::DbError> {
+            self.inner
+                .soft_delete_entry_subtree(
+                    knowledge_base_id,
+                    knowledge_entry_id,
+                    expected_revision,
+                    deleted_at,
+                )
+                .await
+        }
+    }
+
     const TEST_OWNER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const TEST_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000011";
     const TEST_CONVERSATION_ID_2: &str = "0190f5fe-7c00-7a00-8000-000000000012";
@@ -7695,6 +11019,58 @@ mod tests {
     const TEST_KB_PENDING: &str = "0190f5fe-7c00-7a00-8000-000000000091";
     const TEST_KB_LIVE: &str = "0190f5fe-7c00-7a00-8000-000000000092";
     const TEST_KB_STAMPED: &str = "0190f5fe-7c00-7a00-8000-000000000093";
+
+    fn durable_sqlite_service(
+        database: &nomifun_db::Database,
+        data_dir: &Path,
+        events: Arc<dyn nomifun_realtime::UserEventSink>,
+    ) -> (
+        KnowledgeService,
+        Arc<nomifun_db::SqliteKnowledgeRepository>,
+        Arc<nomifun_db::SqliteKnowledgeTreeOperationRepository>,
+    ) {
+        let knowledge_repository = Arc::new(
+            nomifun_db::SqliteKnowledgeRepository::new(database.pool().clone()),
+        );
+        let operation_repository = Arc::new(
+            nomifun_db::SqliteKnowledgeTreeOperationRepository::new(
+                database.pool().clone(),
+            ),
+        );
+        let base_repository: Arc<dyn IKnowledgeRepository> =
+            knowledge_repository.clone();
+        let service = KnowledgeService::new(
+            base_repository,
+            data_dir,
+            KnowledgeEventEmitter::new(events, Arc::from(TEST_OWNER_ID)),
+        );
+        service.set_entry_repository(knowledge_repository.clone());
+        service.set_tree_operation_repository(operation_repository.clone());
+        (service, knowledge_repository, operation_repository)
+    }
+
+    fn test_relocation_fingerprint(
+        request: &RelocateTreeEntryRequest,
+    ) -> String {
+        relocate_request_sha256(&RelocateRequestFingerprint {
+            source_path: normalize_tree_rel_path(&request.source_path).unwrap(),
+            destination_parent_path: normalize_tree_rel_path(
+                &request.destination_parent_path,
+            )
+            .unwrap(),
+            new_name: request
+                .new_name
+                .as_deref()
+                .map(validate_tree_entry_name)
+                .transpose()
+                .unwrap(),
+            conflict_policy: request.conflict_policy,
+            entry_id: request.entry_id.clone(),
+            destination_parent_id: request.destination_parent_id.clone(),
+            expected_revision: request.expected_revision,
+        })
+        .unwrap()
+    }
 
     fn retrieval_document(index: usize, content: impl Into<Arc<str>>) -> RetrievalDocument {
         RetrievalDocument {
@@ -8868,6 +12244,1230 @@ mod tests {
         assert!(service.rename_tree_entry(&info.knowledge_base_id, "taken.md", "existing.md").await.is_err());
     }
 
+    #[tokio::test]
+    async fn relocate_tree_entry_moves_a_complete_directory_and_replays_idempotently() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = Arc::new(MemRepo::default());
+        let events = Arc::new(RecordingBroadcaster::default());
+        let service = KnowledgeService::new(
+            repo,
+            &dir.path().join("data"),
+            KnowledgeEventEmitter::new(events.clone(), Arc::from(TEST_OWNER_ID)),
+        );
+
+        let vault = dir.path().join("vault");
+        std::fs::create_dir_all(vault.join("source/nested")).unwrap();
+        std::fs::create_dir_all(vault.join("archive")).unwrap();
+        std::fs::write(vault.join("source/readme.md"), "# Readme").unwrap();
+        std::fs::write(vault.join("source/nested/topic.md"), "# Topic needle").unwrap();
+        std::fs::write(vault.join("source/asset.bin"), [1, 2, 3]).unwrap();
+
+        let info = service
+            .create_base("vault", "", Some(vault.to_str().unwrap()), None)
+            .await
+            .unwrap();
+        let original_updated_at = info.updated_at;
+        service
+            .search_bases(
+                std::slice::from_ref(&info.knowledge_base_id),
+                "needle",
+                10,
+            )
+            .await
+            .unwrap();
+        assert!(service.search_cache_len() >= 1);
+
+        let request = RelocateTreeEntryRequest {
+            source_path: "source".into(),
+            destination_parent_path: "archive".into(),
+            new_name: Some("moved".into()),
+            request_id: "relocate-directory-once".into(),
+            conflict_policy: RelocateConflictPolicy::Reject,
+            entry_id: None,
+            destination_parent_id: None,
+            expected_revision: None,
+        };
+        let first = service
+            .relocate_tree_entry(&info.knowledge_base_id, request.clone())
+            .await
+            .unwrap();
+        assert_eq!(first.old_path, "source");
+        assert_eq!(first.new_path, "archive/moved");
+        assert_eq!(first.kind, KnowledgeEntryKind::Directory);
+        assert_eq!(first.moved_descendant_count, 4);
+        assert!(first.undo_token.is_none());
+        assert!(first.warnings.is_none());
+        assert!(first.tree_revision > u64::try_from(original_updated_at).unwrap());
+        assert!(!vault.join("source").exists());
+        assert!(vault.join("archive/moved/readme.md").is_file());
+        assert!(vault.join("archive/moved/nested/topic.md").is_file());
+        assert!(vault.join("archive/moved/asset.bin").is_file());
+        assert_eq!(service.search_cache_len(), 0);
+        let refreshed = service
+            .get_base_info(&info.knowledge_base_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            u64::try_from(refreshed.updated_at).unwrap(),
+            first.tree_revision
+        );
+
+        let replay = service
+            .relocate_tree_entry(&info.knowledge_base_id, request)
+            .await
+            .unwrap();
+        assert_eq!(replay.operation_id, first.operation_id);
+        assert_eq!(replay.tree_revision, first.tree_revision);
+        assert!(vault.join("archive/moved").is_dir());
+        let names = events.names.lock().unwrap();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "knowledge.tree-changed")
+                .count(),
+            1
+        );
+        drop(names);
+
+        let mismatched_replay = service
+            .relocate_tree_entry(
+                &info.knowledge_base_id,
+                RelocateTreeEntryRequest {
+                    source_path: "archive/moved".into(),
+                    destination_parent_path: "".into(),
+                    new_name: None,
+                    request_id: "relocate-directory-once".into(),
+                    conflict_policy: RelocateConflictPolicy::Reject,
+                    entry_id: None,
+                    destination_parent_id: None,
+                    expected_revision: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(mismatched_replay, AppError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn sqlite_journal_recovers_post_rename_crash_replays_receipt_and_drains_outbox() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database_path = dir.path().join("knowledge-tree.db");
+        let vault = dir.path().join("vault");
+        std::fs::create_dir_all(vault.join("docs")).unwrap();
+        std::fs::create_dir_all(vault.join("archive")).unwrap();
+        std::fs::write(vault.join("docs/note.md"), "# Durable").unwrap();
+
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let (service, knowledge_repository, operation_repository) =
+            durable_sqlite_service(
+                &database,
+                &dir.path().join("data"),
+                Arc::new(NoopBroadcaster),
+            );
+        let info = service
+            .create_base("durable", "", Some(vault.to_str().unwrap()), None)
+            .await
+            .unwrap();
+        let original_entry_id = service
+            .list_tree(info.knowledge_base_id.as_str(), "docs")
+            .await
+            .unwrap()[0]
+            .entry_id
+            .clone()
+            .unwrap();
+        let request = RelocateTreeEntryRequest {
+            request_id: "sqlite-crash-after-rename".into(),
+            source_path: "docs/note.md".into(),
+            destination_parent_path: "archive".into(),
+            new_name: None,
+            conflict_policy: RelocateConflictPolicy::Reject,
+            entry_id: None,
+            destination_parent_id: None,
+            expected_revision: None,
+        };
+        let prepared = operation_repository
+            .prepare_operation(&PrepareKnowledgeTreeOperationParams {
+                knowledge_base_id: info.knowledge_base_id.clone(),
+                request_id: request.request_id.clone(),
+                fingerprint: test_relocation_fingerprint(&request),
+                source_rel_path: "docs/note.md".into(),
+                destination_rel_path: "archive/note.md".into(),
+                source_fs_identity: filesystem_entry_identity(
+                    &std::fs::metadata(vault.join("docs/note.md")).unwrap(),
+                ),
+                created_at: now_ms(),
+            })
+            .await
+            .unwrap();
+        std::fs::rename(
+            vault.join("docs/note.md"),
+            vault.join("archive/note.md"),
+        )
+        .unwrap();
+        assert_eq!(prepared.operation.state, KnowledgeTreeOperationState::Prepared);
+        drop(service);
+        drop(knowledge_repository);
+        drop(operation_repository);
+        database.close().await;
+        drop(database);
+
+        let reopened = nomifun_db::init_database(&database_path).await.unwrap();
+        let recovery_events = Arc::new(RecordingBroadcaster::default());
+        let (recovered_service, recovered_knowledge, recovered_operations) =
+            durable_sqlite_service(
+                &reopened,
+                &dir.path().join("data"),
+                recovery_events.clone(),
+            );
+        assert_eq!(
+            recovered_service
+                .recover_pending_tree_operations()
+                .await
+                .unwrap(),
+            1
+        );
+        let recovered = recovered_operations
+            .load_by_request(&info.knowledge_base_id, &request.request_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.state, KnowledgeTreeOperationState::Committed);
+        assert_eq!(recovered.event_status, KnowledgeTreeEventStatus::Pending);
+        assert_eq!(
+            recovered_service.drain_pending_tree_events().await.unwrap(),
+            1
+        );
+        let committed = recovered_operations
+            .load_by_operation(&recovered.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(committed.event_status, KnowledgeTreeEventStatus::Published);
+        let receipt = KnowledgeService::durable_relocation_receipt(&committed).unwrap();
+        assert_eq!(receipt.old_path, "docs/note.md");
+        assert_eq!(receipt.new_path, "archive/note.md");
+        assert_eq!(receipt.entry_id.as_ref(), Some(&original_entry_id));
+        let recovered_info = recovered_service
+            .get_base_info(info.knowledge_base_id.as_str())
+            .await
+            .unwrap();
+        assert!(
+            recovered_info.updated_at >= recovered_info.created_at,
+            "a logical tree revision must never replace the public epoch timestamp"
+        );
+
+        let replay = recovered_service
+            .relocate_tree_entry(info.knowledge_base_id.as_str(), request.clone())
+            .await
+            .unwrap();
+        assert_eq!(replay, receipt);
+        assert_eq!(
+            recovery_events
+                .names
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|name| name.as_str() == "knowledge.tree-changed")
+                .count(),
+            1,
+            "a published durable replay must not rebroadcast"
+        );
+
+        let undo_request = UndoKnowledgeEntryRelocationRequest {
+            request_id: "sqlite-undo-relocation".into(),
+            undo_token: receipt.undo_token.clone().unwrap(),
+        };
+        let undone = recovered_service
+            .undo_tree_relocation(info.knowledge_base_id.as_str(), undo_request.clone())
+            .await
+            .unwrap();
+        assert_eq!(undone.old_path, "archive/note.md");
+        assert_eq!(undone.new_path, "docs/note.md");
+        assert!(vault.join("docs/note.md").is_file());
+        assert!(!vault.join("archive/note.md").exists());
+        let undo_replay = recovered_service
+            .undo_tree_relocation(info.knowledge_base_id.as_str(), undo_request)
+            .await
+            .unwrap();
+        assert_eq!(undo_replay.operation_id, undone.operation_id);
+
+        // Commit another receipt/outbox directly and stop before publication,
+        // simulating the commit-before-emit crash window without mutating the
+        // repository's persisted state behind its contract.
+        let outbox_prepared = recovered_operations
+            .prepare_operation(&PrepareKnowledgeTreeOperationParams {
+                knowledge_base_id: info.knowledge_base_id.clone(),
+                request_id: "sqlite-pending-outbox".into(),
+                fingerprint: "b".repeat(64),
+                source_rel_path: "archive/note.md".into(),
+                destination_rel_path: "archive/note-2.md".into(),
+                source_fs_identity: None,
+                created_at: now_ms(),
+            })
+            .await
+            .unwrap();
+        let outbox_filesystem = recovered_operations
+            .mark_filesystem_committed(
+                &outbox_prepared.operation.operation_id,
+                now_ms(),
+            )
+            .await
+            .unwrap();
+        let mut outbox_receipt = receipt.clone();
+        outbox_receipt.operation_id = outbox_filesystem.operation_id.to_string();
+        outbox_receipt.old_path = "archive/note.md".into();
+        outbox_receipt.new_path = "archive/note-2.md".into();
+        let outbox_event = KnowledgeTreeChangedEvent {
+            knowledge_base_id: info.knowledge_base_id.clone(),
+            operation_id: outbox_receipt.operation_id.clone(),
+            entry_id: outbox_receipt.entry_id.clone(),
+            old_prefix: outbox_receipt.old_path.clone(),
+            new_prefix: outbox_receipt.new_path.clone(),
+            kind: "file".into(),
+            moved_descendant_count: 0,
+            tree_revision: outbox_receipt.tree_revision,
+            revision: outbox_receipt.revision,
+        };
+        let pending_outbox = recovered_operations
+            .commit_operation(&CommitKnowledgeTreeOperationParams {
+                operation_id: outbox_filesystem.operation_id.clone(),
+                receipt: serde_json::to_value(&outbox_receipt).unwrap(),
+                event_payload: serde_json::to_value(&outbox_event).unwrap(),
+                committed_at: now_ms(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(pending_outbox.event_status, KnowledgeTreeEventStatus::Pending);
+        let pending_outbox_operation_id = pending_outbox.operation_id.clone();
+        drop(recovered_service);
+        drop(recovered_knowledge);
+        drop(recovered_operations);
+        reopened.close().await;
+        drop(reopened);
+
+        let reopened_again = nomifun_db::init_database(&database_path).await.unwrap();
+        let replay_events = Arc::new(RecordingBroadcaster::default());
+        let (outbox_service, _knowledge_repository, outbox_repository) =
+            durable_sqlite_service(
+                &reopened_again,
+                &dir.path().join("data"),
+                replay_events.clone(),
+            );
+        assert_eq!(outbox_service.drain_pending_tree_events().await.unwrap(), 1);
+        assert_eq!(
+            outbox_repository
+                .load_by_operation(&pending_outbox_operation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .event_status,
+            KnowledgeTreeEventStatus::Published
+        );
+        assert_eq!(
+            replay_events
+                .names
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|name| name.as_str() == "knowledge.tree-changed")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_journal_recovers_filesystem_marker_and_deterministic_case_rename_temp() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database_path = dir.path().join("knowledge-tree-temp.db");
+        let vault = dir.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::write(vault.join("Note.md"), "# Case rename").unwrap();
+
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let (service, knowledge_repository, operation_repository) =
+            durable_sqlite_service(
+                &database,
+                &dir.path().join("data"),
+                Arc::new(NoopBroadcaster),
+            );
+        let info = service
+            .create_base("case", "", Some(vault.to_str().unwrap()), None)
+            .await
+            .unwrap();
+        let request = RelocateTreeEntryRequest {
+            request_id: "sqlite-case-temp-crash".into(),
+            source_path: "Note.md".into(),
+            destination_parent_path: "".into(),
+            new_name: Some("note.md".into()),
+            conflict_policy: RelocateConflictPolicy::Reject,
+            entry_id: None,
+            destination_parent_id: None,
+            expected_revision: None,
+        };
+        let prepared = operation_repository
+            .prepare_operation(&PrepareKnowledgeTreeOperationParams {
+                knowledge_base_id: info.knowledge_base_id.clone(),
+                request_id: request.request_id.clone(),
+                fingerprint: test_relocation_fingerprint(&request),
+                source_rel_path: "Note.md".into(),
+                destination_rel_path: "note.md".into(),
+                source_fs_identity: filesystem_entry_identity(
+                    &std::fs::metadata(vault.join("Note.md")).unwrap(),
+                ),
+                created_at: now_ms(),
+            })
+            .await
+            .unwrap();
+        let temporary = durable_relocation_temporary_path(
+            &vault,
+            "note.md",
+            &prepared.operation.operation_id,
+        )
+        .unwrap();
+        std::fs::rename(vault.join("Note.md"), &temporary).unwrap();
+        assert!(temporary.is_file());
+        drop(service);
+        drop(knowledge_repository);
+        drop(operation_repository);
+        database.close().await;
+        drop(database);
+
+        let reopened = nomifun_db::init_database(&database_path).await.unwrap();
+        let (recovered_service, _knowledge_repository, recovered_operations) =
+            durable_sqlite_service(
+                &reopened,
+                &dir.path().join("data"),
+                Arc::new(NoopBroadcaster),
+            );
+        assert_eq!(
+            recovered_service
+                .recover_pending_tree_operations()
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(vault.join("note.md").is_file());
+        assert!(!temporary.exists());
+        let committed = recovered_operations
+            .load_by_request(&info.knowledge_base_id, &request.request_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(committed.state, KnowledgeTreeOperationState::Committed);
+
+        // A separate operation already carrying the filesystem marker skips
+        // rename and completes its projection/receipt after restart.
+        std::fs::write(vault.join("second.md"), "# Second").unwrap();
+        std::fs::create_dir_all(vault.join("archive")).unwrap();
+        recovered_service.mark_projection_dirty(
+            &recovered_service
+                .require_base(info.knowledge_base_id.as_str())
+                .await
+                .unwrap(),
+        );
+        recovered_service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap();
+        let marker_request = RelocateTreeEntryRequest {
+            request_id: "sqlite-filesystem-marker-crash".into(),
+            source_path: "second.md".into(),
+            destination_parent_path: "archive".into(),
+            new_name: None,
+            conflict_policy: RelocateConflictPolicy::Reject,
+            entry_id: None,
+            destination_parent_id: None,
+            expected_revision: None,
+        };
+        let marker = recovered_operations
+            .prepare_operation(&PrepareKnowledgeTreeOperationParams {
+                knowledge_base_id: info.knowledge_base_id.clone(),
+                request_id: marker_request.request_id.clone(),
+                fingerprint: test_relocation_fingerprint(&marker_request),
+                source_rel_path: "second.md".into(),
+                destination_rel_path: "archive/second.md".into(),
+                source_fs_identity: filesystem_entry_identity(
+                    &std::fs::metadata(vault.join("second.md")).unwrap(),
+                ),
+                created_at: now_ms(),
+            })
+            .await
+            .unwrap();
+        std::fs::rename(
+            vault.join("second.md"),
+            vault.join("archive/second.md"),
+        )
+        .unwrap();
+        recovered_operations
+            .mark_filesystem_committed(&marker.operation.operation_id, now_ms())
+            .await
+            .unwrap();
+        drop(recovered_service);
+        drop(recovered_operations);
+        reopened.close().await;
+        drop(reopened);
+
+        let final_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let (final_service, _knowledge_repository, final_operations) =
+            durable_sqlite_service(
+                &final_database,
+                &dir.path().join("data"),
+                Arc::new(NoopBroadcaster),
+            );
+        assert_eq!(
+            final_service
+                .recover_pending_tree_operations()
+                .await
+                .unwrap(),
+            1
+        );
+        let marker_committed = final_operations
+            .load_by_request(&info.knowledge_base_id, &marker_request.request_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(marker_committed.state, KnowledgeTreeOperationState::Committed);
+        assert!(vault.join("archive/second.md").is_file());
+    }
+
+    #[tokio::test]
+    async fn prepared_recovery_never_claims_an_unrelated_destination_identity() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (service, _knowledge_repository, operations) = durable_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        let vault = dir.path().join("identity-recovery-vault");
+        std::fs::create_dir_all(vault.join("archive")).unwrap();
+        std::fs::write(vault.join("note.md"), "# Original").unwrap();
+        let info = service
+            .create_base("identity", "", Some(vault.to_str().unwrap()), None)
+            .await
+            .unwrap();
+        let source_identity = filesystem_entry_identity(
+            &std::fs::metadata(vault.join("note.md")).unwrap(),
+        );
+        let prepared = operations
+            .prepare_operation(&PrepareKnowledgeTreeOperationParams {
+                knowledge_base_id: info.knowledge_base_id.clone(),
+                request_id: "unrelated-recovery-target".into(),
+                fingerprint: "c".repeat(64),
+                source_rel_path: "note.md".into(),
+                destination_rel_path: "archive/note.md".into(),
+                source_fs_identity: source_identity,
+                created_at: now_ms(),
+            })
+            .await
+            .unwrap();
+
+        // The prepared command never performed its rename. Another actor
+        // moved the source elsewhere and an unrelated file later occupied the
+        // intended destination.
+        std::fs::rename(vault.join("note.md"), vault.join("elsewhere.md")).unwrap();
+        std::fs::write(vault.join("archive/note.md"), "# Unrelated").unwrap();
+        assert_eq!(service.recover_pending_tree_operations().await.unwrap(), 0);
+        let retained = operations
+            .load_by_operation(&prepared.operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.state, KnowledgeTreeOperationState::NeedsRecovery);
+        assert_eq!(
+            std::fs::read_to_string(vault.join("archive/note.md")).unwrap(),
+            "# Unrelated"
+        );
+        assert!(vault.join("elsewhere.md").is_file());
+    }
+
+    #[tokio::test]
+    async fn outbox_drain_crosses_keyset_pages_in_one_bounded_sweep() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let events = Arc::new(RecordingBroadcaster::default());
+        let (service, _knowledge_repository, operations) = durable_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            events.clone(),
+        );
+        let info = service.create_base("events", "", None, None).await.unwrap();
+        let journal_clock = now_ms() - 100;
+
+        for index in 0..3_u64 {
+            let prepared = operations
+                .prepare_operation(&PrepareKnowledgeTreeOperationParams {
+                    knowledge_base_id: info.knowledge_base_id.clone(),
+                    request_id: format!("paged-event-{index}"),
+                    fingerprint: format!("{index:064x}"),
+                    source_rel_path: format!("old-{index}.md"),
+                    destination_rel_path: format!("new-{index}.md"),
+                    source_fs_identity: None,
+                    created_at: journal_clock + i64::try_from(index).unwrap(),
+                })
+                .await
+                .unwrap();
+            let filesystem = operations
+                .mark_filesystem_committed(
+                    &prepared.operation.operation_id,
+                    journal_clock + 10,
+                )
+                .await
+                .unwrap();
+            let operation_id = filesystem.operation_id.to_string();
+            let receipt = RelocateTreeEntryResult {
+                operation_id: operation_id.clone(),
+                entry_id: None,
+                old_path: format!("old-{index}.md"),
+                new_path: format!("new-{index}.md"),
+                kind: KnowledgeEntryKind::File,
+                moved_descendant_count: 0,
+                revision: None,
+                tree_revision: index + 1,
+                undo_token: None,
+                warnings: None,
+            };
+            let event = KnowledgeTreeChangedEvent {
+                knowledge_base_id: info.knowledge_base_id.clone(),
+                operation_id,
+                entry_id: None,
+                old_prefix: receipt.old_path.clone(),
+                new_prefix: receipt.new_path.clone(),
+                kind: "file".into(),
+                moved_descendant_count: 0,
+                tree_revision: receipt.tree_revision,
+                revision: None,
+            };
+            operations
+                .commit_operation(&CommitKnowledgeTreeOperationParams {
+                    operation_id: filesystem.operation_id,
+                    receipt: serde_json::to_value(receipt).unwrap(),
+                    event_payload: serde_json::to_value(event).unwrap(),
+                    committed_at: journal_clock + 20,
+                })
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(service.drain_pending_tree_events().await.unwrap(), 3);
+        assert_eq!(
+            events
+                .names
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|name| name.as_str() == "knowledge.tree-changed")
+                .count(),
+            3
+        );
+        assert!(operations.list_pending_events(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn durable_no_replace_failure_keeps_the_same_request_safely_retryable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (service, _knowledge_repository, operation_repository) =
+            durable_sqlite_service(
+                &database,
+                &dir.path().join("data"),
+                Arc::new(NoopBroadcaster),
+            );
+        let vault = dir.path().join("retry-vault");
+        std::fs::create_dir_all(vault.join("archive")).unwrap();
+        std::fs::write(vault.join("note.md"), "# Source").unwrap();
+        std::fs::write(vault.join("archive/note.md"), "# Existing").unwrap();
+        let info = service
+            .create_base("retry", "", Some(vault.to_str().unwrap()), None)
+            .await
+            .unwrap();
+        let request = RelocateTreeEntryRequest {
+            request_id: "durable-safe-retry".into(),
+            source_path: "note.md".into(),
+            destination_parent_path: "archive".into(),
+            new_name: None,
+            conflict_policy: RelocateConflictPolicy::Reject,
+            entry_id: None,
+            destination_parent_id: None,
+            expected_revision: None,
+        };
+        let first_error = service
+            .relocate_tree_entry(info.knowledge_base_id.as_str(), request.clone())
+            .await
+            .unwrap_err();
+        assert!(matches!(first_error, AppError::Conflict(_)));
+        let prepared = operation_repository
+            .load_by_request(&info.knowledge_base_id, &request.request_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.state, KnowledgeTreeOperationState::Prepared);
+        assert!(vault.join("note.md").is_file());
+
+        std::fs::remove_file(vault.join("archive/note.md")).unwrap();
+        let retried = service
+            .relocate_tree_entry(info.knowledge_base_id.as_str(), request)
+            .await
+            .unwrap();
+        assert_eq!(retried.operation_id, prepared.operation_id.to_string());
+        assert!(vault.join("archive/note.md").is_file());
+        assert!(!vault.join("note.md").exists());
+
+        let no_op_request = RelocateTreeEntryRequest {
+            request_id: "durable-exact-no-op".into(),
+            source_path: "archive/note.md".into(),
+            destination_parent_path: "archive".into(),
+            new_name: None,
+            conflict_policy: RelocateConflictPolicy::Reject,
+            entry_id: None,
+            destination_parent_id: None,
+            expected_revision: None,
+        };
+        let no_op = service
+            .relocate_tree_entry(
+                info.knowledge_base_id.as_str(),
+                no_op_request.clone(),
+            )
+            .await
+            .unwrap();
+        let no_op_replay = service
+            .relocate_tree_entry(info.knowledge_base_id.as_str(), no_op_request.clone())
+            .await
+            .unwrap();
+        assert_eq!(no_op_replay.operation_id, no_op.operation_id);
+        assert!(no_op.undo_token.is_none());
+        assert!(no_op.warnings.as_ref().is_some_and(|warnings| {
+            warnings.iter().any(|warning| warning.contains("already"))
+        }));
+        assert!(
+            operation_repository
+                .load_by_request(
+                    &info.knowledge_base_id,
+                    &no_op_request.request_id,
+                )
+                .await
+                .unwrap()
+                .is_none(),
+            "an exact no-op must not create a committed outbox event"
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_entry_projection_reconciles_and_preserves_identity_across_moves() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let sqlite_repository = Arc::new(nomifun_db::SqliteKnowledgeRepository::new(
+            database.pool().clone(),
+        ));
+        let base_repository: Arc<dyn IKnowledgeRepository> = sqlite_repository.clone();
+        let events = Arc::new(RecordingBroadcaster::default());
+        let service = KnowledgeService::new(
+            base_repository,
+            &dir.path().join("data"),
+            KnowledgeEventEmitter::new(events, Arc::from(TEST_OWNER_ID)),
+        );
+        let entry_repository: Arc<dyn IKnowledgeEntryRepository> =
+            sqlite_repository.clone();
+        service.set_entry_repository(entry_repository);
+        service.set_tree_operation_repository(Arc::new(
+            nomifun_db::SqliteKnowledgeTreeOperationRepository::new(
+                database.pool().clone(),
+            ),
+        ));
+
+        let vault = dir.path().join("projected-vault");
+        std::fs::create_dir_all(vault.join("docs/nested")).unwrap();
+        std::fs::create_dir_all(vault.join("archive")).unwrap();
+        std::fs::write(vault.join("docs/note.md"), "# Stable").unwrap();
+        std::fs::write(vault.join("docs/nested/child.md"), "# Child").unwrap();
+        std::fs::write(vault.join("docs/asset.bin"), [1_u8, 2, 3]).unwrap();
+        let info = service
+            .create_base("projected", "", Some(vault.to_str().unwrap()), None)
+            .await
+            .unwrap();
+
+        // The first real tree read builds the complete projection, not merely
+        // the requested root level, so descendants immediately have IDs.
+        let root_entries = service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap();
+        let docs = root_entries
+            .iter()
+            .find(|entry| entry.name == "docs")
+            .unwrap();
+        let docs_id = docs.entry_id.clone().expect("directory must be projected");
+        let docs_revision = docs.revision.expect("directory revision");
+        let archive_id = root_entries
+            .iter()
+            .find(|entry| entry.name == "archive")
+            .and_then(|entry| entry.entry_id.clone())
+            .expect("destination directory must be projected");
+        assert_eq!(docs.parent_entry_id, None);
+        assert_eq!(docs.origin.as_deref(), Some(KNOWLEDGE_ENTRY_ORIGIN_USER));
+
+        let docs_children = service
+            .list_tree(info.knowledge_base_id.as_str(), "docs")
+            .await
+            .unwrap();
+        let note_id = docs_children
+            .iter()
+            .find(|entry| entry.name == "note.md")
+            .and_then(|entry| entry.entry_id.clone())
+            .expect("file must be projected");
+        assert!(docs_children
+            .iter()
+            .all(|entry| entry.parent_entry_id.as_ref() == Some(&docs_id)));
+        let asset_id = sqlite_repository
+            .get_entry_by_path(
+                &info.knowledge_base_id,
+                &portable_writeback_path_identity("docs/asset.bin"),
+            )
+            .await
+            .unwrap()
+            .expect("non-Markdown attachments belong to the complete projection")
+            .knowledge_entry_id;
+
+        let moved = service
+            .relocate_tree_entry(
+                info.knowledge_base_id.as_str(),
+                RelocateTreeEntryRequest {
+                    // Stable identities win over stale path locators. Legacy
+                    // and projection-degraded callers continue using paths.
+                    source_path: "stale/docs".into(),
+                    destination_parent_path: "stale/archive".into(),
+                    new_name: Some("moved".into()),
+                    request_id: "projected-relocate".into(),
+                    conflict_policy: RelocateConflictPolicy::Reject,
+                    entry_id: Some(docs_id.clone()),
+                    destination_parent_id: Some(archive_id.clone()),
+                    expected_revision: Some(docs_revision),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(moved.entry_id.as_ref(), Some(&docs_id));
+        assert!(moved.revision.is_some_and(|revision| revision > docs_revision));
+        assert_eq!(
+            moved.tree_revision,
+            non_negative_tree_revision(
+                sqlite_repository
+                    .tree_revision(&info.knowledge_base_id)
+                    .await
+                    .unwrap()
+            )
+            .unwrap()
+        );
+
+        let archive_children = service
+            .list_tree(info.knowledge_base_id.as_str(), "archive")
+            .await
+            .unwrap();
+        let projected_moved = archive_children
+            .iter()
+            .find(|entry| entry.name == "moved")
+            .unwrap();
+        assert_eq!(projected_moved.entry_id.as_ref(), Some(&docs_id));
+        assert_eq!(projected_moved.parent_entry_id.as_ref(), Some(&archive_id));
+        let moved_revision = projected_moved.revision.unwrap();
+        let moved_children = service
+            .list_tree(info.knowledge_base_id.as_str(), "archive/moved")
+            .await
+            .unwrap();
+        assert_eq!(
+            moved_children
+                .iter()
+                .find(|entry| entry.name == "note.md")
+                .and_then(|entry| entry.entry_id.as_ref()),
+            Some(&note_id),
+            "a projected descendant keeps its stable ID when its directory moves"
+        );
+        assert_eq!(
+            sqlite_repository
+                .get_entry_by_path(
+                    &info.knowledge_base_id,
+                    &portable_writeback_path_identity("archive/moved/asset.bin"),
+                )
+                .await
+                .unwrap()
+                .map(|entry| entry.knowledge_entry_id)
+                .as_ref(),
+            Some(&asset_id),
+            "non-Markdown descendants move in the same projected subtree"
+        );
+
+        // Simulate Finder/Obsidian bypassing the service. The next listing of
+        // that exact level detects the path-set mismatch, performs a full
+        // reconcile, and preserves identity through the filesystem inode.
+        std::fs::rename(
+            vault.join("archive/moved"),
+            vault.join("archive/external-rename"),
+        )
+        .unwrap();
+        let after_external = service
+            .list_tree(info.knowledge_base_id.as_str(), "archive")
+            .await
+            .unwrap();
+        let externally_renamed = after_external
+            .iter()
+            .find(|entry| entry.name == "external-rename")
+            .unwrap();
+        assert_eq!(externally_renamed.entry_id.as_ref(), Some(&docs_id));
+        assert!(externally_renamed.revision.is_some_and(|revision| revision > moved_revision));
+
+        let stale_error = service
+            .relocate_tree_entry(
+                info.knowledge_base_id.as_str(),
+                RelocateTreeEntryRequest {
+                    source_path: "archive/external-rename".into(),
+                    destination_parent_path: "".into(),
+                    new_name: None,
+                    request_id: "projected-stale-revision".into(),
+                    conflict_policy: RelocateConflictPolicy::Reject,
+                    entry_id: Some(docs_id),
+                    destination_parent_id: None,
+                    expected_revision: Some(moved_revision),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(stale_error, AppError::Conflict(_)), "{stale_error:?}");
+        assert!(vault.join("archive/external-rename").is_dir());
+    }
+
+    #[tokio::test]
+    async fn projection_reconcile_repairs_a_committed_move_after_cas_failure() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let sqlite_repository = Arc::new(nomifun_db::SqliteKnowledgeRepository::new(
+            database.pool().clone(),
+        ));
+        let base_repository: Arc<dyn IKnowledgeRepository> = sqlite_repository.clone();
+        let flaky_projection = Arc::new(FailNextProjectionRelocate::new(
+            sqlite_repository.clone(),
+        ));
+        let service = KnowledgeService::new(
+            base_repository,
+            &dir.path().join("data"),
+            KnowledgeEventEmitter::new(
+                Arc::new(NoopBroadcaster),
+                Arc::from(TEST_OWNER_ID),
+            ),
+        );
+        service.set_entry_repository(flaky_projection.clone());
+
+        let vault = dir.path().join("projection-recovery-vault");
+        std::fs::create_dir_all(vault.join("docs")).unwrap();
+        std::fs::create_dir_all(vault.join("archive")).unwrap();
+        std::fs::write(vault.join("docs/note.md"), "# Recoverable").unwrap();
+        let info = service
+            .create_base("recoverable", "", Some(vault.to_str().unwrap()), None)
+            .await
+            .unwrap();
+        let root_entries = service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap();
+        let docs = root_entries
+            .iter()
+            .find(|entry| entry.name == "docs")
+            .unwrap();
+        let docs_id = docs.entry_id.clone().unwrap();
+        let docs_revision = docs.revision.unwrap();
+
+        flaky_projection.fail_next_relocate();
+        let moved = service
+            .relocate_tree_entry(
+                info.knowledge_base_id.as_str(),
+                RelocateTreeEntryRequest {
+                    source_path: "docs".into(),
+                    destination_parent_path: "archive".into(),
+                    new_name: None,
+                    request_id: "projection-cas-recovery".into(),
+                    conflict_policy: RelocateConflictPolicy::Reject,
+                    entry_id: Some(docs_id.clone()),
+                    destination_parent_id: None,
+                    expected_revision: Some(docs_revision),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(vault.join("archive/docs/note.md").is_file());
+        assert_eq!(moved.entry_id.as_ref(), Some(&docs_id));
+        assert!(moved.warnings.as_ref().is_some_and(|warnings| {
+            warnings.iter().any(|warning| warning.contains("repaired"))
+        }));
+        let persisted = sqlite_repository
+            .get_entry_by_path(
+                &info.knowledge_base_id,
+                &portable_writeback_path_identity("archive/docs"),
+            )
+            .await
+            .unwrap()
+            .expect("reconcile must publish the committed filesystem location");
+        assert_eq!(persisted.knowledge_entry_id, docs_id);
+        assert_eq!(moved.revision, Some(persisted.revision));
+        assert_eq!(
+            moved.tree_revision,
+            non_negative_tree_revision(
+                sqlite_repository
+                    .tree_revision(&info.knowledge_base_id)
+                    .await
+                    .unwrap()
+            )
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_document_write_refreshes_file_identity_before_external_rename() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let sqlite_repository = Arc::new(nomifun_db::SqliteKnowledgeRepository::new(
+            database.pool().clone(),
+        ));
+        let base_repository: Arc<dyn IKnowledgeRepository> = sqlite_repository.clone();
+        let service = KnowledgeService::new(
+            base_repository,
+            &dir.path().join("data"),
+            KnowledgeEventEmitter::new(Arc::new(NoopBroadcaster), Arc::from(TEST_OWNER_ID)),
+        );
+        service.set_entry_repository(sqlite_repository.clone());
+
+        let vault = dir.path().join("atomic-write-projection-vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::write(vault.join("note.md"), "# Before").unwrap();
+        let info = service
+            .create_base("atomic-write", "", Some(vault.to_str().unwrap()), None)
+            .await
+            .unwrap();
+        let before = service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap();
+        let entry_id = before[0].entry_id.clone().unwrap();
+
+        // `write_file` publishes through an atomic replacement and therefore
+        // commonly changes the inode/file-index while keeping the path. The
+        // next list must refresh that physical identity even though the path
+        // set itself still matches the old projection.
+        service
+            .write_file(info.knowledge_base_id.as_str(), "note.md", "# After")
+            .await
+            .unwrap();
+        let after_write = service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap();
+        assert_eq!(after_write[0].entry_id.as_ref(), Some(&entry_id));
+
+        // Finder/Obsidian now renames the replacement inode. If the service
+        // had left the pre-write fs_identity cached, this reconciliation would
+        // allocate a new stable ID for the same logical document.
+        std::fs::rename(vault.join("note.md"), vault.join("renamed.md")).unwrap();
+        let after_external_rename = service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap();
+        assert_eq!(after_external_rename.len(), 1);
+        assert_eq!(after_external_rename[0].rel_path, "renamed.md");
+        assert_eq!(
+            after_external_rename[0].entry_id.as_ref(),
+            Some(&entry_id),
+            "service-owned atomic saves must not break identity on the next external rename"
+        );
+
+        // Simulate an editor doing another atomic save without going through
+        // KnowledgeService. A same-path tree listing must notice the changed
+        // physical identity even though names/kinds are identical.
+        write_text_atomic(&vault.join("renamed.md"), "# External replacement")
+            .await
+            .unwrap();
+        let after_external_write = service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap();
+        assert_eq!(after_external_write[0].entry_id.as_ref(), Some(&entry_id));
+        std::fs::rename(vault.join("renamed.md"), vault.join("final.md")).unwrap();
+        let final_listing = service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap();
+        assert_eq!(final_listing[0].rel_path, "final.md");
+        assert_eq!(
+            final_listing[0].entry_id.as_ref(),
+            Some(&entry_id),
+            "same-path external atomic saves must refresh identity before a later rename"
+        );
+    }
+
+    #[tokio::test]
+    async fn relocate_tree_entry_rejects_unsafe_destinations_and_never_overwrites() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let service = make_service(&dir.path().join("data"));
+        let vault = dir.path().join("vault");
+        std::fs::create_dir_all(vault.join("docs/child")).unwrap();
+        std::fs::create_dir_all(vault.join("target")).unwrap();
+        std::fs::write(vault.join("docs/note.md"), "source").unwrap();
+        std::fs::write(vault.join("target/NOTE.md"), "target").unwrap();
+        std::fs::write(vault.join("not-a-directory.md"), "file").unwrap();
+        let info = service
+            .create_base("vault", "", Some(vault.to_str().unwrap()), None)
+            .await
+            .unwrap();
+
+        for (request_id, source, destination) in [
+            ("self", "docs", "docs"),
+            ("descendant", "docs", "docs/child"),
+            ("file-target", "docs/note.md", "not-a-directory.md"),
+            ("collision", "docs/note.md", "target"),
+        ] {
+            let error = service
+                .relocate_tree_entry(
+                    &info.knowledge_base_id,
+                    RelocateTreeEntryRequest {
+                        source_path: source.into(),
+                        destination_parent_path: destination.into(),
+                        new_name: None,
+                        request_id: request_id.into(),
+                        conflict_policy: RelocateConflictPolicy::Reject,
+                        entry_id: None,
+                        destination_parent_id: None,
+                        expected_revision: None,
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, AppError::BadRequest(_) | AppError::Conflict(_)),
+                "{request_id}: {error:?}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(vault.join("docs/note.md")).unwrap(), "source");
+        assert_eq!(std::fs::read_to_string(vault.join("target/NOTE.md")).unwrap(), "target");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn relocate_tree_entry_rejects_symlinks_anywhere_in_a_directory() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let service = make_service(&dir.path().join("data"));
+        let vault = dir.path().join("vault");
+        std::fs::create_dir_all(vault.join("docs")).unwrap();
+        std::fs::create_dir_all(vault.join("target")).unwrap();
+        std::fs::write(vault.join("outside.md"), "outside").unwrap();
+        symlink(vault.join("outside.md"), vault.join("docs/link.md")).unwrap();
+        let info = service
+            .create_base("vault", "", Some(vault.to_str().unwrap()), None)
+            .await
+            .unwrap();
+
+        let error = service
+            .relocate_tree_entry(
+                &info.knowledge_base_id,
+                RelocateTreeEntryRequest {
+                    source_path: "docs".into(),
+                    destination_parent_path: "target".into(),
+                    new_name: None,
+                    request_id: "reject-linked-tree".into(),
+                    conflict_policy: RelocateConflictPolicy::Reject,
+                    entry_id: None,
+                    destination_parent_id: None,
+                    expected_revision: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::BadRequest(_)), "{error:?}");
+        assert!(vault.join("docs/link.md").is_symlink());
+        assert!(!vault.join("target/docs").exists());
+    }
+
+    #[tokio::test]
+    async fn source_managed_snapshots_reject_every_general_tree_mutator() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let service = make_service(&dir.path().join("data"));
+        let info = service
+            .create_base(
+                "source",
+                "",
+                None,
+                Some(url_source(
+                    KnowledgeSourceMode::Live,
+                    &["https://example.com/docs"],
+                )),
+            )
+            .await
+            .unwrap();
+        let root = PathBuf::from(&info.root_path);
+        std::fs::create_dir_all(root.join("snapshots")).unwrap();
+        std::fs::write(root.join("snapshots/page.md"), "managed").unwrap();
+
+        let error = service
+            .relocate_tree_entry(
+                &info.knowledge_base_id,
+                RelocateTreeEntryRequest {
+                    source_path: "snapshots/page.md".into(),
+                    destination_parent_path: "".into(),
+                    new_name: None,
+                    request_id: "managed-snapshot".into(),
+                    conflict_policy: RelocateConflictPolicy::Reject,
+                    entry_id: None,
+                    destination_parent_id: None,
+                    expected_revision: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Forbidden(_)), "{error:?}");
+
+        let overwrite = service
+            .write_file(&info.knowledge_base_id, "snapshots/page.md", "replacement")
+            .await
+            .unwrap_err();
+        assert!(matches!(overwrite, AppError::Forbidden(_)), "{overwrite:?}");
+
+        let delete_file = service
+            .delete_file(&info.knowledge_base_id, "snapshots/page.md")
+            .await
+            .unwrap_err();
+        assert!(matches!(delete_file, AppError::Forbidden(_)), "{delete_file:?}");
+
+        let create_folder = service
+            .create_folder(&info.knowledge_base_id, "snapshots/manual")
+            .await
+            .unwrap_err();
+        assert!(matches!(create_folder, AppError::Forbidden(_)), "{create_folder:?}");
+
+        let import_source = dir.path().join("import-source");
+        std::fs::create_dir_all(&import_source).unwrap();
+        std::fs::write(import_source.join("note.md"), "# Imported").unwrap();
+        let import = service
+            .import_markdown_folder_into(
+                &info.knowledge_base_id,
+                import_source.to_str().unwrap(),
+                "snapshots",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(import, AppError::Forbidden(_)), "{import:?}");
+        assert!(!root.join("snapshots/import-source").exists());
+
+        let delete_folder = service
+            .delete_folder(&info.knowledge_base_id, "snapshots")
+            .await
+            .unwrap_err();
+        assert!(matches!(delete_folder, AppError::Forbidden(_)), "{delete_folder:?}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("snapshots/page.md")).unwrap(),
+            "managed"
+        );
+        assert!(root.join("snapshots/page.md").is_file());
+
+    }
+
     /// The per-base walk must be bounded: a walk that finishes within budget
     /// returns its real value, but one that exceeds it degrades to the fallback
     /// (a slow/stale NAS mount must never hang the response past the client
@@ -9481,11 +14081,92 @@ mod tests {
         assert_eq!(second.target_directory, "team-notes (2)");
         assert_eq!(std::fs::read_to_string(source.join("README.md")).unwrap(), "# Team notes\n");
 
+        service
+            .create_folder(kb.knowledge_base_id.as_str(), "archive")
+            .await
+            .unwrap();
+        let nested = service
+            .import_markdown_folder_into(
+                kb.knowledge_base_id.as_str(),
+                source.to_str().unwrap(),
+                "archive",
+            )
+            .await
+            .unwrap();
+        assert_eq!(nested.target_directory, "archive/team-notes");
+        assert_eq!(
+            nested.first_file.as_deref(),
+            Some("archive/team-notes/README.md")
+        );
+        assert!(PathBuf::from(&kb.root_path)
+            .join("archive/team-notes/guides/setup.md")
+            .is_file());
+
         let overlap = service
             .import_markdown_folder(kb.knowledge_base_id.as_str(), &kb.root_path)
             .await
             .unwrap_err();
         assert!(matches!(overlap, AppError::BadRequest(_)), "{overlap:?}");
+    }
+
+    #[tokio::test]
+    async fn external_knowledge_tree_requires_explicit_edit_consent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let service = make_service(&dir.path().join("data"));
+
+        let read_only_root = dir.path().join("external-read-only");
+        std::fs::create_dir_all(&read_only_root).unwrap();
+        std::fs::write(read_only_root.join("existing.md"), "# Existing\n").unwrap();
+        let read_only = service
+            .create_base_with_access(
+                "external",
+                "",
+                Some(read_only_root.to_str().unwrap()),
+                None,
+                Some(KnowledgeTreeAccess::ReadOnly),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read_only.tree_access, KnowledgeTreeAccess::ReadOnly);
+        assert!(matches!(
+            service
+                .create_folder(read_only.knowledge_base_id.as_str(), "blocked")
+                .await,
+            Err(AppError::Forbidden(_))
+        ));
+        assert!(matches!(
+            service
+                .write_file(
+                    read_only.knowledge_base_id.as_str(),
+                    "existing.md",
+                    "# Changed\n",
+                )
+                .await,
+            Err(AppError::Forbidden(_))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(read_only_root.join("existing.md")).unwrap(),
+            "# Existing\n"
+        );
+
+        let editable_root = dir.path().join("external-editable");
+        std::fs::create_dir_all(&editable_root).unwrap();
+        let editable = service
+            .create_base_with_access(
+                "editable external",
+                "",
+                Some(editable_root.to_str().unwrap()),
+                None,
+                Some(KnowledgeTreeAccess::Editable),
+            )
+            .await
+            .unwrap();
+        assert_eq!(editable.tree_access, KnowledgeTreeAccess::Editable);
+        service
+            .create_folder(editable.knowledge_base_id.as_str(), "allowed")
+            .await
+            .unwrap();
+        assert!(editable_root.join("allowed").is_dir());
     }
 
     #[tokio::test]
@@ -9506,6 +14187,176 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(PathBuf::from(&kb.root_path).join("Guide.md")).unwrap(),
             "# First\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn editor_update_is_existing_only_and_compare_and_swap() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let service = make_service(&dir.path().join("data"));
+        let kb = service.create_base("notes", "", None, None).await.unwrap();
+        service
+            .create_document(kb.knowledge_base_id.as_str(), "draft.md", "# One\n")
+            .await
+            .unwrap();
+
+        service
+            .update_file_if_unchanged(
+                kb.knowledge_base_id.as_str(),
+                "draft.md",
+                "# One\n",
+                "# Two\n",
+            )
+            .await
+            .unwrap();
+        let path = PathBuf::from(&kb.root_path).join("draft.md");
+        std::fs::write(&path, "# External\n").unwrap();
+        assert!(matches!(
+            service
+                .update_file_if_unchanged(
+                    kb.knowledge_base_id.as_str(),
+                    "draft.md",
+                    "# Two\n",
+                    "# Stale overwrite\n",
+                )
+                .await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# External\n");
+
+        std::fs::rename(&path, PathBuf::from(&kb.root_path).join("moved.md")).unwrap();
+        assert!(matches!(
+            service
+                .update_file_if_unchanged(
+                    kb.knowledge_base_id.as_str(),
+                    "draft.md",
+                    "# External\n",
+                    "# Must not recreate\n",
+                )
+                .await,
+            Err(AppError::NotFound(_))
+        ));
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn editor_identity_cas_follows_a_move_and_never_overwrites_a_same_content_impostor() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (service, _knowledge_repository, _operation_repository) = durable_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        let kb = service.create_base("notes", "", None, None).await.unwrap();
+        service
+            .create_folder(kb.knowledge_base_id.as_str(), "archive")
+            .await
+            .unwrap();
+        service
+            .create_document(kb.knowledge_base_id.as_str(), "draft.md", "# Same\n")
+            .await
+            .unwrap();
+        let root_entries = service
+            .list_tree(kb.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap();
+        let draft = root_entries
+            .iter()
+            .find(|entry| entry.rel_path == "draft.md")
+            .unwrap();
+        let archive = root_entries
+            .iter()
+            .find(|entry| entry.rel_path == "archive")
+            .unwrap();
+        let opened = service
+            .read_file(kb.knowledge_base_id.as_str(), "draft.md")
+            .await
+            .unwrap();
+        assert_eq!(opened.entry_id.as_ref(), draft.entry_id.as_ref());
+        assert_eq!(opened.revision, draft.revision);
+        let moved = service
+            .relocate_tree_entry(
+                kb.knowledge_base_id.as_str(),
+                RelocateTreeEntryRequest {
+                    request_id: "editor-identity-move".into(),
+                    source_path: "draft.md".into(),
+                    destination_parent_path: "archive".into(),
+                    entry_id: draft.entry_id.clone(),
+                    destination_parent_id: archive.entry_id.clone(),
+                    new_name: None,
+                    expected_revision: draft.revision,
+                    conflict_policy: RelocateConflictPolicy::Reject,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Reuse the old path with byte-identical content. Path+content CAS
+        // alone would overwrite this different document.
+        service
+            .create_document(kb.knowledge_base_id.as_str(), "draft.md", "# Same\n")
+            .await
+            .unwrap();
+        let result = service
+            .update_file_by_identity_if_unchanged(
+                kb.knowledge_base_id.as_str(),
+                "draft.md",
+                moved.entry_id.as_ref(),
+                moved.revision,
+                "# Same\n",
+                "# Updated original\n",
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.rel_path, "archive/draft.md");
+        let root = PathBuf::from(&kb.root_path);
+        assert_eq!(
+            std::fs::read_to_string(root.join("archive/draft.md")).unwrap(),
+            "# Updated original\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("draft.md")).unwrap(),
+            "# Same\n"
+        );
+
+        let stale = service
+            .update_file_by_identity_if_unchanged(
+                kb.knowledge_base_id.as_str(),
+                "archive/draft.md",
+                moved.entry_id.as_ref(),
+                moved.revision,
+                "# Updated original\n",
+                "# Stale revision\n",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, AppError::Conflict(_)), "{stale:?}");
+
+        let current = service
+            .list_tree(kb.knowledge_base_id.as_str(), "archive")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.rel_path == "archive/draft.md")
+            .unwrap();
+        std::fs::remove_file(root.join("archive/draft.md")).unwrap();
+        std::fs::write(root.join("archive/draft.md"), "# Updated original\n").unwrap();
+        let replaced = service
+            .update_file_by_identity_if_unchanged(
+                kb.knowledge_base_id.as_str(),
+                "archive/draft.md",
+                current.entry_id.as_ref(),
+                current.revision,
+                "# Updated original\n",
+                "# Must not overwrite replacement\n",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(replaced, AppError::Conflict(_)), "{replaced:?}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("archive/draft.md")).unwrap(),
+            "# Updated original\n"
         );
     }
 

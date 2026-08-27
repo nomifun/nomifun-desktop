@@ -238,6 +238,22 @@ define_entity_id!(
     KnowledgeBaseId
 );
 define_entity_id!(
+    /// Globally unique identity of a file or directory inside a knowledge base.
+    ///
+    /// Unlike the entry's relative path, this identity survives renames and
+    /// moves. The filesystem remains the content source of truth; this ID
+    /// belongs to the rebuildable knowledge-entry projection.
+    KnowledgeEntryId
+);
+define_entity_id!(
+    /// Globally unique identity of one durable knowledge-tree mutation.
+    ///
+    /// A client request key is scoped to a knowledge base and may be replayed;
+    /// this ID identifies the single journal/outbox operation created for that
+    /// request across recovery and event publication.
+    KnowledgeTreeOperationId
+);
+define_entity_id!(
     /// Globally unique knowledge-binding identifier.
     ///
     /// This is the product-facing business ID. The SQLite row `id` remains

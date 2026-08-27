@@ -131,9 +131,12 @@ pub use idmm::{
     ScanScope, SetIdmmRequest, Tendency, WakeStrategy, WatchBase, WatchTier,
 };
 pub use knowledge::{
-    CreateKnowledgeTagRequest, KnowledgeEmbeddingConfig, KnowledgeMountInfo,
-    KnowledgeRerankConfig, KnowledgeRetrievalConfig, KnowledgeSource, KnowledgeSourceEntry,
-    KnowledgeSourceMode, KnowledgeTag, UpdateKnowledgeTagRequest,
+    CreateKnowledgeTagRequest, KnowledgeEmbeddingConfig, KnowledgeEntry, KnowledgeEntryKind,
+    KnowledgeEntryOrigin, KnowledgeMountInfo, KnowledgeRerankConfig, KnowledgeRetrievalConfig,
+    KnowledgeSource, KnowledgeSourceEntry, KnowledgeSourceMode, KnowledgeTag, KnowledgeTreeAccess,
+    RelocateKnowledgeEntryConflictPolicy, RelocateKnowledgeEntryRequest,
+    RelocateKnowledgeEntryResponse, UndoKnowledgeEntryRelocationRequest,
+    UpdateKnowledgeTagRequest,
 };
 pub use lifecycle::{
     GitHubReleaseAsset, SystemInfoResponse, UpdateCheckRequest, UpdateCheckResult,

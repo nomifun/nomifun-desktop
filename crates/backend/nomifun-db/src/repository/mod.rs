@@ -13,6 +13,8 @@ pub mod customer_service_search;
 pub mod idmm_intervention;
 pub mod companion_token;
 pub mod knowledge;
+pub mod knowledge_entry;
+pub mod knowledge_tree_operation;
 pub mod mcp_server;
 pub mod miniapp;
 pub mod oauth_token;
@@ -38,6 +40,8 @@ mod sqlite_customer_service;
 mod sqlite_idmm_intervention;
 mod sqlite_companion_token;
 mod sqlite_knowledge;
+mod sqlite_knowledge_entry;
+mod sqlite_knowledge_tree_operation;
 mod sqlite_mcp_server;
 mod sqlite_oauth_token;
 mod sqlite_provider;
@@ -92,6 +96,15 @@ pub use idmm_intervention::{
 };
 pub use companion_token::ICompanionTokenRepository;
 pub use knowledge::IKnowledgeRepository;
+pub use knowledge_entry::{
+    IKnowledgeEntryRepository, KnowledgeEntryMutation, KnowledgeProjectionReplacement,
+    RelocateKnowledgeEntryProjectionParams, UpsertKnowledgeEntryParams,
+};
+pub use knowledge_tree_operation::{
+    CommitKnowledgeTreeOperationParams, IKnowledgeTreeOperationRepository,
+    KnowledgeTreeOperationPageCursor, MAX_KNOWLEDGE_TREE_OPERATION_PAGE_SIZE,
+    PrepareKnowledgeTreeOperationParams, PreparedKnowledgeTreeOperation,
+};
 pub use mcp_server::IMcpServerRepository;
 pub use oauth_token::IOAuthTokenRepository;
 pub use provider::IProviderRepository;
@@ -121,6 +134,7 @@ pub use sqlite_customer_service::SqliteCustomerServiceRepository;
 pub use sqlite_idmm_intervention::SqliteIdmmInterventionRepository;
 pub use sqlite_companion_token::SqliteCompanionTokenRepository;
 pub use sqlite_knowledge::SqliteKnowledgeRepository;
+pub use sqlite_knowledge_tree_operation::SqliteKnowledgeTreeOperationRepository;
 pub use sqlite_mcp_server::SqliteMcpServerRepository;
 pub use sqlite_oauth_token::SqliteOAuthTokenRepository;
 pub use sqlite_provider::SqliteProviderRepository;

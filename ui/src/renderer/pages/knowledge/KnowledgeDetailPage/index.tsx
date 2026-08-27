@@ -16,9 +16,10 @@
  */
 
 import classNames from 'classnames';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { parseKnowledgeBaseId } from '@/common/types/ids';
+import { uuidv7 } from '@/common/utils/uuidv7';
 import { useTranslation } from 'react-i18next';
 import {
   Button,
@@ -29,8 +30,10 @@ import {
   Menu,
   Message,
   Modal,
+  Notification,
   Result,
   Spin,
+  Switch,
   Tabs,
   Tooltip,
   Tree,
@@ -57,6 +60,7 @@ import {
 import type {
   IKnowledgeAddContentResult,
   IKnowledgeBase,
+  IKnowledgeRelocateResult,
   IKnowledgeTag,
   IKnowledgeTreeEntry,
 } from '@/common/adapter/ipcBridge';
@@ -82,12 +86,22 @@ import KnowledgeAddContentControl, {
   type KnowledgeAddContentControlHandle,
 } from './KnowledgeAddContentControl';
 import {
+  KnowledgeTreeDnd,
+  KnowledgeTreeDndHandle,
+  KnowledgeTreeDndRow,
+} from './KnowledgeTreeDnd';
+import {
   buildKnowledgeSearchTree,
+  collectKnowledgeDirectoryPaths,
+  initialKnowledgeTreeViewState,
   isKnowledgePathWithin,
+  isNewerKnowledgeTreeRevision,
+  knowledgeDirectoryOnlyTree,
   knowledgeFolderPathChain,
+  knowledgeRelocationIssue,
+  knowledgeTreeViewReducer,
   mergeKnowledgeTreeChildren,
   parentDirOfKnowledgePath,
-  preserveKnowledgeTreeChildren,
   replaceKnowledgePathPrefix,
 } from './treeModel';
 
@@ -103,17 +117,18 @@ function DetailKindIcon({ kind, config }: { kind: IKnowledgeBase['kind']; config
   return <KindIcon kind={kind} config={config} size={22} containerClass='w-52px h-52px rounded-14px' />;
 }
 
-function collectKnowledgeDirKeys(nodes: IKnowledgeTreeEntry[]): string[] {
-  const keys: string[] = [];
-  const visit = (items: IKnowledgeTreeEntry[]) => {
-    for (const item of items) {
-      if (!item.is_dir) continue;
-      keys.push(item.rel_path);
-      if (item.children?.length) visit(item.children);
+function findKnowledgeTreeEntry(
+  nodes: IKnowledgeTreeEntry[],
+  relPath: string
+): IKnowledgeTreeEntry | undefined {
+  for (const node of nodes) {
+    if (node.rel_path === relPath) return node;
+    if (node.children?.length) {
+      const child = findKnowledgeTreeEntry(node.children, relPath);
+      if (child) return child;
     }
-  };
-  visit(nodes);
-  return keys;
+  }
+  return undefined;
 }
 
 const knowledgeDetailSoftActiveClass =
@@ -170,6 +185,7 @@ const SettingsTab: React.FC<SettingsTabProps> = ({ base, allTags, createTag, onR
   const [editName, setEditName] = useState(base.name);
   const [editDesc, setEditDesc] = useState(base.description);
   const [editTags, setEditTags] = useState<string[]>(base.tags);
+  const [editTreeAccess, setEditTreeAccess] = useState(base.tree_access);
   const [saving, setSaving] = useState(false);
 
   // Sync local state when base changes from parent refresh
@@ -177,9 +193,14 @@ const SettingsTab: React.FC<SettingsTabProps> = ({ base, allTags, createTag, onR
     setEditName(base.name);
     setEditDesc(base.description);
     setEditTags(base.tags);
-  }, [base.name, base.description, base.tags]);
+    setEditTreeAccess(base.tree_access);
+  }, [base.name, base.description, base.tags, base.tree_access]);
 
-  const isDirty = editName !== base.name || editDesc !== base.description || JSON.stringify(editTags) !== JSON.stringify(base.tags);
+  const isDirty =
+    editName !== base.name ||
+    editDesc !== base.description ||
+    editTreeAccess !== base.tree_access ||
+    JSON.stringify(editTags) !== JSON.stringify(base.tags);
 
   const handleSaveInfo = async () => {
     if (!isDirty) return;
@@ -190,6 +211,7 @@ const SettingsTab: React.FC<SettingsTabProps> = ({ base, allTags, createTag, onR
         name: editName.trim() || base.name,
         description: editDesc,
         tags: editTags,
+        tree_access: editTreeAccess,
       });
       Message.success(t('knowledge.detail.settings.saveOk', { defaultValue: '保存成功' }));
       onRefresh();
@@ -277,6 +299,23 @@ const SettingsTab: React.FC<SettingsTabProps> = ({ base, allTags, createTag, onR
             />
           }
         />
+        {base.kind === 'local' && (
+          <NomiSettingRow
+            title={t('knowledge.detail.settings.folderEditAccess', {
+              defaultValue: '允许修改本地文件夹',
+            })}
+            description={t('knowledge.detail.settings.folderEditAccessHint', {
+              defaultValue: '开启后可在知识库中创建、编辑、移动和删除文件；关闭时保持严格只读。',
+            })}
+            controls={
+              <Switch
+                size='small'
+                checked={editTreeAccess === 'editable'}
+                onChange={(checked) => setEditTreeAccess(checked ? 'editable' : 'read_only')}
+              />
+            }
+          />
+        )}
       </NomiSettingList>
 
       <NomiSettingSection
@@ -432,12 +471,14 @@ const KnowledgeDetailPage: React.FC = () => {
   const navigate = useNavigate();
   const { id: rawId } = useParams<{ id: string }>();
   const id = rawId == null ? undefined : parseKnowledgeBaseId(rawId);
+  const activeKnowledgeBaseIdRef = useRef(id);
+  activeKnowledgeBaseIdRef.current = id;
   const [searchParams, setSearchParams] = useSearchParams();
   const layout = useLayoutContext();
   const isMobile = layout?.isMobile ?? false;
 
   // ─── Data hooks ─────────────────────────────────────────────────────────────
-  const { base, files, tree, loading, error, refresh } = useKnowledgeBase(id);
+  const { base, files: remoteFiles, tree, loading, error, refresh } = useKnowledgeBase(id);
   const { choice: modelChoice, setChoice: setModelChoice } = useKnowledgeAutogenModel();
   const { tags: allTags, createTag } = useKnowledgeTags();
 
@@ -466,7 +507,15 @@ const KnowledgeDetailPage: React.FC = () => {
   }, [allTags]);
 
   // ─── Document state (preserved from original — D2 will own this) ────────────
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [treeState, dispatchTree] = useReducer(knowledgeTreeViewReducer, initialKnowledgeTreeViewState);
+  const {
+    files,
+    treeData,
+    expandedTreeKeys,
+    selectedFolderPath,
+    selectedPath,
+    selectedTreeKey,
+  } = treeState;
   const [content, setContent] = useState<string>('');
   const [fileLoading, setFileLoading] = useState(false);
   const [editMode, setEditMode] = useState(false);
@@ -479,34 +528,35 @@ const KnowledgeDetailPage: React.FC = () => {
   const [renameName, setRenameName] = useState('');
   const [autogenLoading, setAutogenLoading] = useState(false);
   const [refreshingSource, setRefreshingSource] = useState(false);
-  const [treeData, setTreeData] = useState<IKnowledgeTreeEntry[]>([]);
-  const [expandedTreeKeys, setExpandedTreeKeys] = useState<string[]>([]);
-  const [selectedFolderPath, setSelectedFolderPath] = useState('');
-  const [selectedTreeKey, setSelectedTreeKey] = useState<string | null>(null);
   const [fileSearch, setFileSearch] = useState('');
   const [treeAction, setTreeAction] = useState<'reveal' | 'expand' | null>(null);
+  const [movingPath, setMovingPath] = useState<string | null>(null);
+  const [moveTarget, setMoveTarget] = useState<IKnowledgeTreeEntry | null>(null);
+  const [moveDestinationPath, setMoveDestinationPath] = useState('');
+  const [moveDirectoryTree, setMoveDirectoryTree] = useState<IKnowledgeTreeEntry[]>([]);
+  const [moveDirectoryLoading, setMoveDirectoryLoading] = useState(false);
   const treeScrollRef = React.useRef<HTMLDivElement>(null);
   const addContentControlRef = React.useRef<KnowledgeAddContentControlHandle>(null);
+  const loadedDocumentPathRef = useRef<string | null>(null);
+  const loadedDocumentVersionRef = useRef<{
+    entryId: NonNullable<IKnowledgeTreeEntry['entry_id']>;
+    revision: number;
+  } | null>(null);
+  const relocationInFlightRef = useRef(false);
+  const saveInFlightRef = useRef(false);
+  const moveDirectoryRequestRef = useRef(0);
+  const lastTreeRevisionRef = useRef<number | null>(null);
   const isTreeSearch = fileSearch.trim().length > 0;
 
   const source = getBaseSource(base);
+  const canMutateTree = base?.tree_access === 'editable';
+  const canEditSelectedDocument =
+    canMutateTree &&
+    (!selectedPath || findKnowledgeTreeEntry(treeData, selectedPath)?.origin !== 'url_snapshot');
 
   useEffect(() => {
-    setTreeData((prev) => preserveKnowledgeTreeChildren(tree, prev));
-  }, [tree]);
-
-  // Auto-select first file
-  useEffect(() => {
-    if (!selectedPath && files.length > 0) {
-      setSelectedPath(files[0].rel_path);
-      setSelectedTreeKey(files[0].rel_path);
-    }
-    if (selectedPath && !files.some((f) => f.rel_path === selectedPath)) {
-      const nextPath = files.length > 0 ? files[0].rel_path : null;
-      setSelectedPath(nextPath);
-      setSelectedTreeKey(nextPath);
-    }
-  }, [files, selectedPath]);
+    dispatchTree({ type: 'sync', files: remoteFiles, tree });
+  }, [remoteFiles, tree]);
 
   // Reset per-base view state when switching knowledge bases — the route param
   // changes but React reuses this component instance, so the previous base's
@@ -515,24 +565,49 @@ const KnowledgeDetailPage: React.FC = () => {
   useEffect(() => {
     setFileSearch('');
     setEditMode(false);
-    setExpandedTreeKeys([]);
-    setSelectedFolderPath('');
-    setSelectedTreeKey(null);
+    setNewFolderVisible(false);
+    setNewFolderPath('');
+    setRenameVisible(false);
+    setRenameTarget(null);
+    setRenameName('');
+    moveDirectoryRequestRef.current += 1;
+    setMoveTarget(null);
+    setMoveDestinationPath('');
+    setMoveDirectoryTree([]);
+    setMoveDirectoryLoading(false);
+    loadedDocumentPathRef.current = null;
+    loadedDocumentVersionRef.current = null;
+    lastTreeRevisionRef.current = null;
+    dispatchTree({ type: 'reset-base' });
   }, [id]);
 
   // Load file content
   useEffect(() => {
     if (!id || !selectedPath) {
       setContent('');
+      loadedDocumentPathRef.current = null;
+      loadedDocumentVersionRef.current = null;
       return;
     }
+    // A relocate changes the document's locator, not the editor session. The
+    // move handler advances this ref before dispatching the path transition so
+    // an unsaved draft is never replaced by a redundant disk read.
+    if (loadedDocumentPathRef.current === selectedPath) return;
+    loadedDocumentVersionRef.current = null;
     let cancelled = false;
     setFileLoading(true);
     setEditMode(false);
     ipcBridge.knowledge.readFile
       .invoke({ knowledge_base_id: id, path: selectedPath })
       .then((res) => {
-        if (!cancelled) setContent(res.content);
+        if (!cancelled) {
+          setContent(res.content);
+          loadedDocumentPathRef.current = selectedPath;
+          loadedDocumentVersionRef.current =
+            res.entry_id != null && res.revision != null
+              ? { entryId: res.entry_id, revision: res.revision }
+              : null;
+        }
       })
       .catch((e) => {
         if (!cancelled) Message.error(String(e));
@@ -546,22 +621,68 @@ const KnowledgeDetailPage: React.FC = () => {
   }, [id, selectedPath]);
 
   const startEdit = () => {
+    if (!canEditSelectedDocument) return;
     setDraft(content);
     setEditMode(true);
   };
 
   const handleSave = async () => {
-    if (!id || !selectedPath) return;
+    if (
+      !id ||
+      !selectedPath ||
+      !canEditSelectedDocument ||
+      saveInFlightRef.current ||
+      relocationInFlightRef.current
+    ) return;
+    const saveBaseId = id;
+    const savePath = selectedPath;
+    const draftToSave = draft;
+    const selectedEntry = findKnowledgeTreeEntry(treeData, savePath);
+    const loadedVersion =
+      loadedDocumentPathRef.current === savePath
+        ? loadedDocumentVersionRef.current
+        : null;
+    const stableEntryId = loadedVersion?.entryId ?? selectedEntry?.entry_id;
+    const stableRevision = loadedVersion?.revision ?? selectedEntry?.revision;
+    const hasStableVersion = stableEntryId != null && stableRevision != null;
+    saveInFlightRef.current = true;
     setSaving(true);
     try {
-      await ipcBridge.knowledge.writeFile.invoke({ knowledge_base_id: id, path: selectedPath, content: draft });
-      setContent(draft);
+      const result = await ipcBridge.knowledge.writeFile.invoke({
+        knowledge_base_id: saveBaseId,
+        path: savePath,
+        content: draftToSave,
+        expected_content: content,
+        entry_id: hasStableVersion ? stableEntryId : undefined,
+        expected_revision: hasStableVersion ? stableRevision : undefined,
+      });
+      if (activeKnowledgeBaseIdRef.current !== saveBaseId) return;
+      if (result.rel_path !== savePath) {
+        preserveLoadedDocumentRelocation(savePath, result.rel_path);
+        dispatchTree({ type: 'relocated', oldPath: savePath, newPath: result.rel_path });
+      }
+      if (hasStableVersion && loadedDocumentVersionRef.current?.entryId === stableEntryId) {
+        // Atomic replacement changes the projected filesystem identity; the
+        // next reconciliation deterministically advances this entry once.
+        loadedDocumentVersionRef.current = {
+          entryId: stableEntryId,
+          revision: stableRevision + 1,
+        };
+      }
+      setContent(draftToSave);
       setEditMode(false);
       Message.success(t('knowledge.actions.saveOk'));
-      void refresh();
+      await Promise.all([
+        refresh(),
+        reloadTreeBranches([
+          parentDirOfKnowledgePath(savePath),
+          parentDirOfKnowledgePath(result.rel_path),
+        ]),
+      ]);
     } catch (e) {
       Message.error(String(e));
     } finally {
+      saveInFlightRef.current = false;
       setSaving(false);
     }
   };
@@ -570,27 +691,34 @@ const KnowledgeDetailPage: React.FC = () => {
     async (node: IKnowledgeTreeEntry) => {
       if (!id || node.is_file || isTreeSearch) return;
       const children = await ipcBridge.knowledge.listTree.invoke({ knowledge_base_id: id, path: node.rel_path });
-      setTreeData((prev) => mergeKnowledgeTreeChildren(prev, node.rel_path, children));
+      dispatchTree({ type: 'merge-children', parentPath: node.rel_path, children });
     },
     [id, isTreeSearch]
   );
 
-  const reloadTreePath = useCallback(
-    async (folderPath: string) => {
+  const reloadTreeBranches = useCallback(
+    async (folderPaths: string[]) => {
       if (!id) return;
       const rootChildren = await ipcBridge.knowledge.listTree.invoke({ knowledge_base_id: id });
-      setTreeData(rootChildren);
+      dispatchTree({ type: 'set-root', tree: rootChildren });
 
-      const branchesToReload = knowledgeFolderPathChain(folderPath);
+      const branchesToReload = [
+        ...new Set(folderPaths.flatMap((folderPath) => knowledgeFolderPathChain(folderPath))),
+      ];
       for (const branchPath of branchesToReload) {
         const children = await ipcBridge.knowledge.listTree.invoke({ knowledge_base_id: id, path: branchPath });
-        setTreeData((prev) => mergeKnowledgeTreeChildren(prev, branchPath, children));
+        dispatchTree({ type: 'merge-children', parentPath: branchPath, children });
       }
       if (branchesToReload.length > 0) {
-        setExpandedTreeKeys((prev) => [...new Set([...prev, ...branchesToReload])]);
+        dispatchTree({ type: 'expand', paths: branchesToReload });
       }
     },
     [id]
+  );
+
+  const reloadTreePath = useCallback(
+    (folderPath: string) => reloadTreeBranches([folderPath]),
+    [reloadTreeBranches]
   );
 
   const scrollCurrentTreeNodeIntoView = useCallback(() => {
@@ -621,8 +749,8 @@ const KnowledgeDetailPage: React.FC = () => {
       const ancestorKeys = knowledgeFolderPathChain(parentPath);
       setFileSearch('');
       await reloadTreePath(parentPath);
-      setExpandedTreeKeys((prev) => [...new Set([...prev, ...ancestorKeys])]);
-      setSelectedTreeKey(selectedPath);
+      dispatchTree({ type: 'expand', paths: ancestorKeys });
+      dispatchTree({ type: 'select-tree-key', path: selectedPath });
       scrollCurrentTreeNodeIntoView();
     } catch (e) {
       Message.error(String(e));
@@ -631,36 +759,42 @@ const KnowledgeDetailPage: React.FC = () => {
     }
   }, [reloadTreePath, scrollCurrentTreeNodeIntoView, selectedPath, t]);
 
+  const loadEntireKnowledgeTree = useCallback(async (): Promise<IKnowledgeTreeEntry[]> => {
+    if (!id) return [];
+    const loadAllChildren = async (nodes: IKnowledgeTreeEntry[]): Promise<IKnowledgeTreeEntry[]> =>
+      Promise.all(
+        nodes.map(async (node) => {
+          if (!node.is_dir) return node;
+          const children = await ipcBridge.knowledge.listTree.invoke({
+            knowledge_base_id: id,
+            path: node.rel_path,
+          });
+          return { ...node, children: await loadAllChildren(children) };
+        })
+      );
+
+    const rootNodes = await ipcBridge.knowledge.listTree.invoke({ knowledge_base_id: id });
+    return loadAllChildren(rootNodes);
+  }, [id]);
+
   const handleExpandAllTreeNodes = useCallback(async () => {
     if (!id) return;
 
     setTreeAction('expand');
     try {
-      const loadAllChildren = async (nodes: IKnowledgeTreeEntry[]): Promise<IKnowledgeTreeEntry[]> =>
-        Promise.all(
-          nodes.map(async (node) => {
-            if (!node.is_dir) return node;
-            const children = await ipcBridge.knowledge.listTree.invoke({
-              knowledge_base_id: id,
-              path: node.rel_path,
-            });
-            return { ...node, children: await loadAllChildren(children) };
-          })
-        );
-
-      const rootNodes = await ipcBridge.knowledge.listTree.invoke({ knowledge_base_id: id });
-      const fullTree = await loadAllChildren(rootNodes);
+      const fullTree = await loadEntireKnowledgeTree();
       setFileSearch('');
-      setTreeData(fullTree);
-      setExpandedTreeKeys(collectKnowledgeDirKeys(fullTree));
+      dispatchTree({ type: 'set-root', tree: fullTree });
+      dispatchTree({ type: 'replace-expanded', paths: collectKnowledgeDirectoryPaths(fullTree) });
     } catch (e) {
       Message.error(String(e));
     } finally {
       setTreeAction(null);
     }
-  }, [id]);
+  }, [id, loadEntireKnowledgeTree]);
 
   const openNewFolderModal = (folderOverride?: string) => {
+    if (!canMutateTree) return;
     const folder = folderOverride ?? (selectedFolderPath || parentDirOfKnowledgePath(selectedPath));
     setNewFolderPath(folder ? `${folder}/` : '');
     setNewFolderVisible(true);
@@ -672,29 +806,22 @@ const KnowledgeDetailPage: React.FC = () => {
     if (result.type === 'document') {
       const parent = parentDirOfKnowledgePath(result.path);
       await reloadTreePath(parent);
-      setSelectedPath(result.path);
-      setSelectedTreeKey(result.path);
-      setSelectedFolderPath(parent);
+      dispatchTree({ type: 'select-file', path: result.path });
       return;
     }
     if (result.type === 'local_folder') {
       await reloadTreePath(result.target_directory);
       if (result.first_file) {
-        setSelectedPath(result.first_file);
-        setSelectedTreeKey(result.first_file);
-        setSelectedFolderPath(parentDirOfKnowledgePath(result.first_file));
+        dispatchTree({ type: 'select-file', path: result.first_file });
       } else {
-        setSelectedFolderPath(result.target_directory);
-        setSelectedTreeKey(result.target_directory);
+        dispatchTree({ type: 'select-folder', path: result.target_directory });
       }
       return;
     }
     if (result.first_file) {
       const parent = parentDirOfKnowledgePath(result.first_file);
       await reloadTreePath(parent);
-      setSelectedPath(result.first_file);
-      setSelectedTreeKey(result.first_file);
-      setSelectedFolderPath(parent);
+      dispatchTree({ type: 'select-file', path: result.first_file });
     }
   };
 
@@ -704,8 +831,193 @@ const KnowledgeDetailPage: React.FC = () => {
     setRenameVisible(true);
   };
 
+  const preserveLoadedDocumentRelocation = useCallback((oldPath: string, newPath: string) => {
+    const previousPath = loadedDocumentPathRef.current;
+    const relocatedPath = replaceKnowledgePathPrefix(
+      previousPath,
+      oldPath,
+      newPath
+    );
+    loadedDocumentPathRef.current = relocatedPath;
+    if (
+      previousPath != null &&
+      relocatedPath !== previousPath &&
+      loadedDocumentVersionRef.current
+    ) {
+      loadedDocumentVersionRef.current = {
+        ...loadedDocumentVersionRef.current,
+        revision: loadedDocumentVersionRef.current.revision + 1,
+      };
+    }
+  }, []);
+
+  const scrollKnowledgeTreePathIntoView = useCallback((path: string) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const container = treeScrollRef.current;
+        if (!container) return;
+        const target = Array.from(
+          container.querySelectorAll<HTMLElement>('[data-knowledge-path]')
+        ).find((element) => element.dataset.knowledgePath === path);
+        target?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      });
+    });
+  }, []);
+
+  const describeRelocationIssue = useCallback(
+    (issue: ReturnType<typeof knowledgeRelocationIssue>): string => {
+      switch (issue) {
+        case 'same-parent':
+          return t('knowledge.detail.docs.moveSameParent', { defaultValue: '项目已经在这个文件夹中' });
+        case 'self':
+          return t('knowledge.detail.docs.moveIntoSelf', { defaultValue: '文件夹不能移动到自身' });
+        case 'descendant':
+          return t('knowledge.detail.docs.moveIntoDescendant', {
+            defaultValue: '文件夹不能移动到自己的子文件夹中',
+          });
+        default:
+          return '';
+      }
+    },
+    [t]
+  );
+
+  const applyRelocationReceipt = useCallback(
+    async (result: IKnowledgeRelocateResult, operationBaseId: NonNullable<typeof id>) => {
+      if (activeKnowledgeBaseIdRef.current !== operationBaseId) return false;
+      preserveLoadedDocumentRelocation(result.old_path, result.new_path);
+      lastTreeRevisionRef.current = Math.max(
+        lastTreeRevisionRef.current ?? 0,
+        result.tree_revision
+      );
+      dispatchTree({ type: 'relocated', oldPath: result.old_path, newPath: result.new_path });
+      setFileSearch('');
+      await refresh();
+      await reloadTreeBranches([
+        parentDirOfKnowledgePath(result.old_path),
+        parentDirOfKnowledgePath(result.new_path),
+      ]);
+      scrollKnowledgeTreePathIntoView(result.new_path);
+      return true;
+    },
+    [preserveLoadedDocumentRelocation, refresh, reloadTreeBranches, scrollKnowledgeTreePathIntoView]
+  );
+
+  const relocateTreeEntry = useCallback(
+    async (
+      sourceEntry: IKnowledgeTreeEntry,
+      destinationParentPath: string,
+      options?: { newName?: string; successKind?: 'move' | 'rename' }
+    ): Promise<IKnowledgeRelocateResult | null> => {
+      if (!id || !canMutateTree || relocationInFlightRef.current || saveInFlightRef.current) return null;
+      const issue = knowledgeRelocationIssue(
+        sourceEntry.rel_path,
+        sourceEntry.is_dir,
+        destinationParentPath,
+        options?.newName
+      );
+      if (issue) {
+        if (issue !== 'same-parent' || options?.successKind === 'rename') {
+          Message.warning(describeRelocationIssue(issue));
+        }
+        return null;
+      }
+
+      relocationInFlightRef.current = true;
+      setMovingPath(sourceEntry.rel_path);
+      try {
+        const result = await ipcBridge.knowledge.relocateTreeEntry.invoke({
+          knowledge_base_id: id,
+          source_path: sourceEntry.rel_path,
+          destination_parent_path: destinationParentPath,
+          new_name: options?.newName,
+          request_id: uuidv7(),
+          conflict_policy: 'reject',
+          entry_id: sourceEntry.entry_id,
+          destination_parent_id: destinationParentPath
+            ? findKnowledgeTreeEntry(treeData, destinationParentPath)?.entry_id ??
+              findKnowledgeTreeEntry(moveDirectoryTree, destinationParentPath)?.entry_id
+            : undefined,
+          expected_revision: sourceEntry.revision,
+        });
+        // The route can switch knowledge bases while the filesystem mutation is
+        // in flight. The old operation still succeeded, but must never rewrite
+        // the newly mounted base's local tree/editor state.
+        if (!(await applyRelocationReceipt(result, id))) return result;
+        const successMessage = options?.successKind === 'rename'
+            ? t('knowledge.actions.renameOk', { defaultValue: '已重命名' })
+            : t('knowledge.actions.moveOk', {
+                defaultValue: '已移动到“{{folder}}”',
+                folder:
+                  parentDirOfKnowledgePath(result.new_path) ||
+                  t('knowledge.detail.docs.rootFolder', { defaultValue: '知识库根目录' }),
+              });
+        if (result.undo_token) {
+          const notificationId = `knowledge-relocation-${result.operation_id}`;
+          Notification.success({
+            id: notificationId,
+            title: successMessage,
+            content: t('knowledge.actions.undoMoveHint', {
+              defaultValue: '如需恢复原位置，可在通知关闭前撤销。',
+            }),
+            btn: (
+              <Button
+                size='mini'
+                onClick={() => {
+                  if (relocationInFlightRef.current || saveInFlightRef.current) return;
+                  Notification.remove(notificationId);
+                  relocationInFlightRef.current = true;
+                  setMovingPath(result.new_path);
+                  void ipcBridge.knowledge.undoRelocateTreeEntry
+                    .invoke({
+                      knowledge_base_id: id,
+                      request_id: uuidv7(),
+                      undo_token: result.undo_token!,
+                    })
+                    .then(async (undone) => {
+                      if (await applyRelocationReceipt(undone, id)) {
+                        Message.success(
+                          t('knowledge.actions.moveUndone', { defaultValue: '已撤销移动' })
+                        );
+                      }
+                    })
+                    .catch((error: unknown) => Message.error(String(error)))
+                    .finally(() => {
+                      relocationInFlightRef.current = false;
+                      setMovingPath(null);
+                    });
+                }}
+              >
+                {t('knowledge.actions.undoMove', { defaultValue: '撤销' })}
+              </Button>
+            ),
+            duration: 8000,
+          });
+        } else {
+          Message.success(successMessage);
+        }
+        return result;
+      } catch (e) {
+        Message.error(String(e));
+        return null;
+      } finally {
+        relocationInFlightRef.current = false;
+        setMovingPath(null);
+      }
+    },
+    [
+      applyRelocationReceipt,
+      canMutateTree,
+      describeRelocationIssue,
+      id,
+      moveDirectoryTree,
+      t,
+      treeData,
+    ]
+  );
+
   const handleCreateFolder = async () => {
-    if (!id) return;
+    if (!id || !canMutateTree) return;
     const path = newFolderPath.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
     if (!path) return;
     const parent = parentDirOfKnowledgePath(path);
@@ -715,8 +1027,7 @@ const KnowledgeDetailPage: React.FC = () => {
       setNewFolderPath('');
       setFileSearch('');
       await reloadTreePath(parent);
-      setSelectedFolderPath(path);
-      setSelectedTreeKey(path);
+      dispatchTree({ type: 'select-folder', path });
       Message.success(t('knowledge.actions.createFolderOk', { defaultValue: '文件夹已创建' }));
     } catch (e) {
       Message.error(String(e));
@@ -724,41 +1035,31 @@ const KnowledgeDetailPage: React.FC = () => {
   };
 
   const handleRenameTreeEntry = async () => {
-    if (!id || !renameTarget) return;
+    if (!id || !renameTarget || !canMutateTree) return;
     let newName = renameName.trim();
     if (!newName) return;
     if (renameTarget.is_file && !newName.toLowerCase().endsWith('.md')) newName = `${newName}.md`;
-    const oldPath = renameTarget.rel_path;
-    const parent = parentDirOfKnowledgePath(oldPath);
-    try {
-      const renamed = await ipcBridge.knowledge.renameTreeEntry.invoke({ knowledge_base_id: id, path: oldPath, newName });
+    const result = await relocateTreeEntry(renameTarget, parentDirOfKnowledgePath(renameTarget.rel_path), {
+      newName,
+      successKind: 'rename',
+    });
+    if (result) {
       setRenameVisible(false);
       setRenameTarget(null);
       setRenameName('');
-      setFileSearch('');
-      setExpandedTreeKeys((prev) =>
-        prev.map((key) => replaceKnowledgePathPrefix(key, oldPath, renamed.rel_path) ?? key)
-      );
-      setSelectedPath((prev) => replaceKnowledgePathPrefix(prev, oldPath, renamed.rel_path));
-      setSelectedFolderPath((prev) => replaceKnowledgePathPrefix(prev || null, oldPath, renamed.rel_path) || '');
-      setSelectedTreeKey((prev) => replaceKnowledgePathPrefix(prev, oldPath, renamed.rel_path));
-      await refresh();
-      await reloadTreePath(parent);
-      Message.success(t('knowledge.actions.renameOk', { defaultValue: '已重命名' }));
-    } catch (e) {
-      Message.error(String(e));
     }
   };
 
   const handleDeleteFile = async (path: string) => {
-    if (!id) return;
+    if (!id || !canMutateTree) return;
     const parent = parentDirOfKnowledgePath(path);
     try {
       await ipcBridge.knowledge.deleteFile.invoke({ knowledge_base_id: id, path });
       Message.success(t('knowledge.actions.deleteOk'));
       if (selectedPath === path) {
-        setSelectedPath(null);
-        setSelectedTreeKey(parent || null);
+        loadedDocumentPathRef.current = null;
+        loadedDocumentVersionRef.current = null;
+        dispatchTree({ type: 'remove-path', path, parentPath: parent });
       }
       await refresh();
       await reloadTreePath(parent);
@@ -768,25 +1069,20 @@ const KnowledgeDetailPage: React.FC = () => {
   };
 
   const handleDeleteFolder = async (path: string) => {
-    if (!id) return;
+    if (!id || !canMutateTree) return;
     const parent = parentDirOfKnowledgePath(path);
     try {
       await ipcBridge.knowledge.deleteFolder.invoke({ knowledge_base_id: id, path });
       Message.success(t('knowledge.actions.deleteFolderOk', { defaultValue: '目录已删除' }));
       setFileSearch('');
-      setExpandedTreeKeys((prev) => prev.filter((key) => !isKnowledgePathWithin(key, path)));
       if (isKnowledgePathWithin(selectedPath, path)) {
-        setSelectedPath(null);
+        loadedDocumentPathRef.current = null;
+        loadedDocumentVersionRef.current = null;
         setContent('');
         setDraft('');
         setEditMode(false);
       }
-      if (isKnowledgePathWithin(selectedTreeKey, path)) {
-        setSelectedTreeKey(parent || null);
-      }
-      if (isKnowledgePathWithin(selectedFolderPath || null, path)) {
-        setSelectedFolderPath(parent);
-      }
+      dispatchTree({ type: 'remove-path', path, parentPath: parent });
       await refresh();
       await reloadTreePath(parent);
     } catch (e) {
@@ -825,6 +1121,67 @@ const KnowledgeDetailPage: React.FC = () => {
     });
   };
 
+  const openMoveModal = useCallback(
+    async (item: IKnowledgeTreeEntry) => {
+      const requestNumber = moveDirectoryRequestRef.current + 1;
+      moveDirectoryRequestRef.current = requestNumber;
+      setMoveTarget(item);
+      setMoveDestinationPath(parentDirOfKnowledgePath(item.rel_path));
+      setMoveDirectoryTree(knowledgeDirectoryOnlyTree(treeData, item));
+      setMoveDirectoryLoading(true);
+      try {
+        if (!id) return;
+        const rootTree = await ipcBridge.knowledge.listTree.invoke({ knowledge_base_id: id });
+        if (moveDirectoryRequestRef.current === requestNumber) {
+          setMoveDirectoryTree(knowledgeDirectoryOnlyTree(rootTree, item));
+        }
+      } catch (error) {
+        Message.error(String(error));
+      } finally {
+        if (moveDirectoryRequestRef.current === requestNumber) {
+          setMoveDirectoryLoading(false);
+        }
+      }
+    },
+    [id, treeData]
+  );
+
+  const confirmMoveTreeEntry = useCallback(async () => {
+    if (!moveTarget) return;
+    const result = await relocateTreeEntry(moveTarget, moveDestinationPath, { successKind: 'move' });
+    if (result) {
+      moveDirectoryRequestRef.current += 1;
+      setMoveTarget(null);
+      setMoveDestinationPath('');
+      setMoveDirectoryTree([]);
+    }
+  }, [moveDestinationPath, moveTarget, relocateTreeEntry]);
+
+  useEffect(() => {
+    if (!id) return;
+    return ipcBridge.knowledge.onTreeChanged.on((event) => {
+      if (
+        event.knowledge_base_id !== id ||
+        !event.old_prefix ||
+        !event.new_prefix ||
+        !isNewerKnowledgeTreeRevision(lastTreeRevisionRef.current, event.tree_revision)
+      ) {
+        return;
+      }
+      lastTreeRevisionRef.current = event.tree_revision;
+      preserveLoadedDocumentRelocation(event.old_prefix, event.new_prefix);
+      dispatchTree({ type: 'relocated', oldPath: event.old_prefix, newPath: event.new_prefix });
+      setFileSearch('');
+      void Promise.all([
+        refresh(),
+        reloadTreeBranches([
+          parentDirOfKnowledgePath(event.old_prefix),
+          parentDirOfKnowledgePath(event.new_prefix),
+        ]),
+      ]).catch((error: unknown) => Message.error(String(error)));
+    });
+  }, [id, preserveLoadedDocumentRelocation, refresh, reloadTreeBranches]);
+
   const handleTreeNodeMenuClick = (key: string, item: IKnowledgeTreeEntry) => {
     if (key === 'new-file' && item.is_dir) {
       addContentControlRef.current?.openDocument(item.rel_path);
@@ -836,6 +1193,10 @@ const KnowledgeDetailPage: React.FC = () => {
     }
     if (key === 'rename') {
       openRenameModal(item);
+      return;
+    }
+    if (key === 'move') {
+      void openMoveModal(item);
       return;
     }
     if (key === 'delete') {
@@ -890,10 +1251,13 @@ const KnowledgeDetailPage: React.FC = () => {
     [files, fileSearch, isTreeSearch, treeData]
   );
   const visibleTreeExpandedKeys = useMemo(
-    () => (isTreeSearch ? collectKnowledgeDirKeys(displayedTreeData) : expandedTreeKeys),
+    () => (isTreeSearch ? collectKnowledgeDirectoryPaths(displayedTreeData) : expandedTreeKeys),
     [displayedTreeData, expandedTreeKeys, isTreeSearch]
   );
-  const loadedTreeDirectoryKeys = useMemo(() => collectKnowledgeDirKeys(treeData), [treeData]);
+  const loadedTreeDirectoryKeys = useMemo(
+    () => collectKnowledgeDirectoryPaths(treeData),
+    [treeData]
+  );
   const isEntireTreeExpanded = useMemo(
     () =>
       loadedTreeDirectoryKeys.length > 0 &&
@@ -903,11 +1267,19 @@ const KnowledgeDetailPage: React.FC = () => {
 
   const handleToggleEntireTree = useCallback(() => {
     if (isEntireTreeExpanded && !isTreeSearch) {
-      setExpandedTreeKeys([]);
+      dispatchTree({ type: 'replace-expanded', paths: [] });
       return;
     }
     void handleExpandAllTreeNodes();
   }, [handleExpandAllTreeNodes, isEntireTreeExpanded, isTreeSearch]);
+
+  const moveModalIssue = moveTarget
+    ? knowledgeRelocationIssue(
+        moveTarget.rel_path,
+        moveTarget.is_dir,
+        moveDestinationPath
+      )
+    : null;
 
   // Build breadcrumb segments from selected path
   const breadcrumbSegments = useMemo(() => {
@@ -1089,7 +1461,7 @@ const KnowledgeDetailPage: React.FC = () => {
               >
                 {/* Compact document toolbar: icon-first, labels are shown in small hover bubbles. */}
                 <div className='knowledge-doc-divider-bottom knowledge-doc-toolbar flex h-42px shrink-0 items-center gap-2px bg-transparent px-9px'>
-                  {id && base && (
+                  {id && base && canMutateTree && (
                     <KnowledgeAddContentControl
                       key={id}
                       ref={addContentControlRef}
@@ -1100,11 +1472,13 @@ const KnowledgeDetailPage: React.FC = () => {
                       onAdded={handleContentAdded}
                     />
                   )}
-                  <KnowledgeIconButton
-                    label={t('knowledge.detail.docs.newFolder', { defaultValue: '新建文件夹' })}
-                    icon={<FolderPlus theme='outline' size='15' />}
-                    onClick={() => openNewFolderModal()}
-                  />
+                  {canMutateTree && (
+                    <KnowledgeIconButton
+                      label={t('knowledge.detail.docs.newFolder', { defaultValue: '新建文件夹' })}
+                      icon={<FolderPlus theme='outline' size='15' />}
+                      onClick={() => openNewFolderModal()}
+                    />
+                  )}
                   <div className='ml-auto flex items-center gap-2px'>
                     <KnowledgeIconButton
                       label={t('knowledge.detail.docs.revealCurrentFile', { defaultValue: '自动显示当前文件' })}
@@ -1147,7 +1521,39 @@ const KnowledgeDetailPage: React.FC = () => {
                   ref={treeScrollRef}
                   className='knowledge-doc-tree-scroll min-h-0 flex-1 overflow-y-auto px-7px py-8px'
                 >
-                  <Spin loading={loading} className='w-full'>
+                  <KnowledgeTreeDnd
+                    disabled={!canMutateTree || isTreeSearch || Boolean(movingPath) || saving}
+                    expandedDirectoryPaths={expandedTreeKeys}
+                    labels={{
+                      dropHint: t('knowledge.detail.docs.moveDropHint', {
+                        defaultValue: '拖到文件夹以移动',
+                      }),
+                      invalidTarget: t('knowledge.detail.docs.moveFileInvalidTarget', {
+                        defaultValue: '文件不能作为目标位置',
+                      }),
+                      rootFolder: t('knowledge.detail.docs.rootFolder', {
+                        defaultValue: '知识库根目录',
+                      }),
+                      describeIssue: describeRelocationIssue,
+                      moveTo: (folder) =>
+                        t('knowledge.detail.docs.moveToTarget', {
+                          defaultValue: '移动到“{{folder}}”',
+                          folder,
+                        }),
+                    }}
+                    onExpandDirectory={(path) =>
+                      dispatchTree({ type: 'expand', paths: [path] })
+                    }
+                    onInvalidDrop={(issue) => Message.warning(describeRelocationIssue(issue))}
+                    onLoadDirectory={handleLoadTreeChildren}
+                    onLoadError={(error) => Message.error(String(error))}
+                    onRelocate={(entry, destinationParentPath) => {
+                      void relocateTreeEntry(entry, destinationParentPath, {
+                        successKind: 'move',
+                      });
+                    }}
+                  >
+                    <Spin loading={loading} className='w-full'>
                     {displayedTreeData.length === 0 ? (
                       <Empty
                         description={
@@ -1189,16 +1595,14 @@ const KnowledgeDetailPage: React.FC = () => {
                           const dataRef = (extra?.node as { props?: { dataRef?: IKnowledgeTreeEntry } } | undefined)
                             ?.props?.dataRef;
                           if (!dataRef) return;
-                          setSelectedTreeKey(dataRef.rel_path);
                           if (dataRef.is_file) {
-                            setSelectedPath(dataRef.rel_path);
-                            setSelectedFolderPath(parentDirOfKnowledgePath(dataRef.rel_path));
+                            dispatchTree({ type: 'select-file', path: dataRef.rel_path });
                           } else {
-                            setSelectedFolderPath(dataRef.rel_path);
+                            dispatchTree({ type: 'select-folder', path: dataRef.rel_path });
                           }
                         }}
                         onExpand={(keys) => {
-                          if (!isTreeSearch) setExpandedTreeKeys(keys.map(String));
+                          if (!isTreeSearch) dispatchTree({ type: 'replace-expanded', paths: keys.map(String) });
                         }}
                         loadMore={(treeNode) => {
                           const dataRef = (treeNode.props as { dataRef?: IKnowledgeTreeEntry }).dataRef;
@@ -1210,13 +1614,18 @@ const KnowledgeDetailPage: React.FC = () => {
                         renderTitle={(node) => {
                           const item = node.dataRef as IKnowledgeTreeEntry;
                           return (
+                            <KnowledgeTreeDndRow item={item}>
                             <div className='knowledge-tree-node-row group flex w-full min-w-0 items-center gap-3px pr-1px'>
-                              <span className='knowledge-tree-node-main flex min-w-0 flex-1 items-center'>
+                              <KnowledgeTreeDndHandle
+                                aria-label={`${t('knowledge.actions.move', { defaultValue: '移动' })} ${item.name}`}
+                                className='knowledge-tree-node-main flex min-w-0 flex-1 items-center'
+                              >
                                 <span className='knowledge-tree-node-name block min-w-0 truncate leading-17px' title={item.rel_path}>
                                   {node.title}
                                 </span>
-                              </span>
-                              <span className='knowledge-tree-node-action ml-auto w-21px grid shrink-0 place-items-center opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100'>
+                              </KnowledgeTreeDndHandle>
+                              {canMutateTree && item.origin !== 'url_snapshot' && (
+                                <span className='knowledge-tree-node-action ml-auto w-21px grid shrink-0 place-items-center opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100'>
                                 <Dropdown
                                   trigger='click'
                                   droplist={
@@ -1246,6 +1655,12 @@ const KnowledgeDetailPage: React.FC = () => {
                                           {t('knowledge.actions.rename', { defaultValue: '重命名' })}
                                         </span>
                                       </Menu.Item>
+                                      <Menu.Item key='move'>
+                                        <span className='inline-flex items-center gap-4px'>
+                                          <FolderOpen theme='outline' size='11' />
+                                          {t('knowledge.actions.move', { defaultValue: '移动到…' })}
+                                        </span>
+                                      </Menu.Item>
                                       <Menu.Item key='delete' className='!text-danger-6'>
                                         <span className='inline-flex items-center gap-4px'>
                                           <Delete theme='outline' size='11' />
@@ -1258,6 +1673,7 @@ const KnowledgeDetailPage: React.FC = () => {
                                   <button
                                     type='button'
                                     className='knowledge-tree-node-more grid h-20px w-20px shrink-0 place-items-center rounded-5px border-0 bg-transparent p-0 text-[var(--color-text-3)] cursor-pointer hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)] focus-visible:outline-none focus-visible:bg-[var(--color-fill-2)]'
+                                    onPointerDown={(e) => e.stopPropagation()}
                                     onMouseDown={(e) => e.stopPropagation()}
                                     onClick={(e) => e.stopPropagation()}
                                     title={t('common.more', { defaultValue: '更多' })}
@@ -1266,32 +1682,39 @@ const KnowledgeDetailPage: React.FC = () => {
                                     <More theme='outline' size='13' />
                                   </button>
                                 </Dropdown>
-                              </span>
+                                </span>
+                              )}
                             </div>
+                            </KnowledgeTreeDndRow>
                           );
                         }}
                       />
                     )}
-                  </Spin>
+                    </Spin>
+                  </KnowledgeTreeDnd>
                 </div>
 
                 {/* This footer remains pinned while only the directory tree scrolls. */}
                 <div className='knowledge-doc-divider-top knowledge-doc-footer flex h-44px shrink-0 items-center gap-2px bg-transparent px-8px'>
-                  <KnowledgeIconButton
-                    label={t('knowledge.actions.aiGenerateOverview')}
-                    icon={<MagicHat theme='outline' size='13' />}
-                    loading={autogenLoading}
-                    tooltipPosition='top'
-                    onClick={() => void handleAutogen()}
-                  />
-                  <div className='min-w-0 flex-1'>
-                    <KnowledgeModelSelector
-                      size='small'
-                      choice={modelChoice}
-                      onChange={(c) => void setModelChoice(c)}
-                      triggerClassName='knowledge-doc-model-trigger'
-                    />
-                  </div>
+                  {canMutateTree && (
+                    <>
+                      <KnowledgeIconButton
+                        label={t('knowledge.actions.aiGenerateOverview')}
+                        icon={<MagicHat theme='outline' size='13' />}
+                        loading={autogenLoading}
+                        tooltipPosition='top'
+                        onClick={() => void handleAutogen()}
+                      />
+                      <div className='min-w-0 flex-1'>
+                        <KnowledgeModelSelector
+                          size='small'
+                          choice={modelChoice}
+                          onChange={(c) => void setModelChoice(c)}
+                          triggerClassName='knowledge-doc-model-trigger'
+                        />
+                      </div>
+                    </>
+                  )}
                   {source && (
                     <KnowledgeIconButton
                       label={t('knowledge.source.refresh')}
@@ -1342,21 +1765,29 @@ const KnowledgeDetailPage: React.FC = () => {
                           >
                             {t('knowledge.detail.docs.preview', { defaultValue: '预览' })}
                           </button>
-                          <button
-                            className={classNames(
-                              'bg-transparent text-12px px-12px py-5px rd-6px cursor-pointer font-inherit transition-colors',
-                              editMode
-                                ? `${knowledgeDetailSoftActiveClass} font-600`
-                                : knowledgeDetailSegmentIdleClass
-                            )}
-                            onClick={startEdit}
-                          >
-                            {t('knowledge.detail.docs.edit', { defaultValue: '编辑' })}
-                          </button>
+                          {canEditSelectedDocument && (
+                            <button
+                              className={classNames(
+                                'bg-transparent text-12px px-12px py-5px rd-6px cursor-pointer font-inherit transition-colors',
+                                editMode
+                                  ? `${knowledgeDetailSoftActiveClass} font-600`
+                                  : knowledgeDetailSegmentIdleClass
+                              )}
+                              onClick={startEdit}
+                            >
+                              {t('knowledge.detail.docs.edit', { defaultValue: '编辑' })}
+                            </button>
+                          )}
                         </div>
                         {/* Save button (visible when editing) */}
                         {editMode && (
-                          <Button size='small' type='primary' loading={saving} onClick={() => void handleSave()}>
+                          <Button
+                            size='small'
+                            type='primary'
+                            loading={saving}
+                            disabled={Boolean(movingPath)}
+                            onClick={() => void handleSave()}
+                          >
                             {t('knowledge.actions.save')}
                           </Button>
                         )}
@@ -1559,6 +1990,92 @@ const KnowledgeDetailPage: React.FC = () => {
           onChange={setRenameName}
           onPressEnter={() => void handleRenameTreeEntry()}
         />
+      </Modal>
+
+      <Modal
+        title={t('knowledge.detail.docs.moveTitle', {
+          defaultValue: '移动“{{name}}”',
+          name: moveTarget?.name ?? '',
+        })}
+        visible={Boolean(moveTarget)}
+        onOk={() => void confirmMoveTreeEntry()}
+        onCancel={() => {
+          moveDirectoryRequestRef.current += 1;
+          setMoveTarget(null);
+          setMoveDestinationPath('');
+          setMoveDirectoryTree([]);
+        }}
+        okText={t('knowledge.actions.moveConfirm', { defaultValue: '移动' })}
+        okButtonProps={{
+          disabled: Boolean(moveModalIssue) || moveDirectoryLoading || saving,
+          loading: Boolean(movingPath),
+        }}
+        autoFocus={false}
+      >
+        <div className='mb-8px text-12px text-[var(--color-text-3)]'>
+          {t('knowledge.detail.docs.moveChooseDestination', { defaultValue: '选择目标文件夹' })}
+        </div>
+        <button
+          type='button'
+          className={classNames(
+            'mb-6px flex h-30px w-full items-center gap-7px rounded-7px border border-solid px-9px text-left text-12px font-[inherit] cursor-pointer',
+            moveDestinationPath === ''
+              ? 'border-[rgba(var(--primary-6),0.38)] bg-[rgba(var(--primary-6),0.12)] text-[var(--color-text-1)]'
+              : 'border-transparent bg-transparent text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)]'
+          )}
+          onClick={() => setMoveDestinationPath('')}
+        >
+          <FolderOpen theme='outline' size='14' />
+          {t('knowledge.detail.docs.rootFolder', { defaultValue: '知识库根目录' })}
+        </button>
+        <div className='max-h-300px overflow-y-auto rounded-8px border border-solid border-[var(--color-border-2)] p-6px'>
+          <Spin loading={moveDirectoryLoading} className='w-full'>
+            {moveDirectoryTree.length > 0 ? (
+              <Tree
+                size='mini'
+                blockNode
+                showLine
+                treeData={moveDirectoryTree}
+                selectedKeys={moveDestinationPath ? [moveDestinationPath] : []}
+                fieldNames={{ children: 'children', title: 'name', key: 'rel_path', isLeaf: 'is_file' }}
+                actionOnClick={['select']}
+                loadMore={async (treeNode) => {
+                  if (!id || !moveTarget) return;
+                  const directory = (treeNode.props as { dataRef?: IKnowledgeTreeEntry }).dataRef;
+                  if (!directory?.is_dir) return;
+                  try {
+                    const children = await ipcBridge.knowledge.listTree.invoke({
+                      knowledge_base_id: id,
+                      path: directory.rel_path,
+                    });
+                    setMoveDirectoryTree((previous) =>
+                      mergeKnowledgeTreeChildren(
+                        previous,
+                        directory.rel_path,
+                        knowledgeDirectoryOnlyTree(children, moveTarget)
+                      )
+                    );
+                  } catch (error) {
+                    Message.error(String(error));
+                  }
+                }}
+                onSelect={(keys) => {
+                  const path = keys[0];
+                  if (path != null) setMoveDestinationPath(String(path));
+                }}
+              />
+            ) : (
+              <Empty
+                description={t('knowledge.detail.docs.noDestinationFolders', {
+                  defaultValue: '没有其他文件夹，可移动到知识库根目录',
+                })}
+              />
+            )}
+          </Spin>
+        </div>
+        {moveModalIssue && (
+          <div className='mt-8px text-11px text-warning-6'>{describeRelocationIssue(moveModalIssue)}</div>
+        )}
       </Modal>
     </div>
   );

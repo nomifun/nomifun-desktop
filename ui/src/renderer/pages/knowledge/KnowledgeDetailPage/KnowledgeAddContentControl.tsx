@@ -198,6 +198,7 @@ const KnowledgeAddContentControl = forwardRef<
       const result = await addKnowledgeContent(knowledgeBaseId, {
         type: 'local_folder',
         source_path: sourcePath,
+        destination_parent_path: defaultFolderPath || undefined,
       });
       if (result.type !== 'local_folder') throw new Error('Unexpected knowledge content response');
       setFolderImportVisible(false);
@@ -409,7 +410,9 @@ const KnowledgeAddContentControl = forwardRef<
           <div className='text-10px leading-16px text-[var(--color-text-3)]'>
             {t('knowledge.detail.docs.importNotesDestination', {
               defaultValue: '将复制到当前知识库目录：{{path}}',
-              path: baseRootPath,
+              path: defaultFolderPath
+                ? `${baseRootPath.replace(/[\\/]+$/, '')}/${defaultFolderPath}`
+                : baseRootPath,
             })}
           </div>
         </div>
