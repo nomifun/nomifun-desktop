@@ -166,10 +166,7 @@ impl GeminiProvider {
         }
         if !request.tools.is_empty() {
             body["tools"] = json!([{
-                "functionDeclarations": build_tools(
-                    &request.tools,
-                    self.compat.sanitize_schema(),
-                )?
+                "functionDeclarations": build_tools(&request.tools)?
             }]);
         }
         let mut body = crate::request_body_with_extra(
@@ -397,8 +394,7 @@ fn build_message_parts(
                         "Gemini function response '{tool_use_id}' has no matching function call"
                     ))
                 })?;
-                let result = serde_json::from_str::<Value>(content)
-                    .unwrap_or_else(|_| Value::String(content.clone()));
+                let result = encode_function_response_content(content);
                 let response = if *is_error {
                     json!({ "error": result })
                 } else {
@@ -430,6 +426,31 @@ fn build_message_parts(
         }
     }
     Ok(parts)
+}
+
+/// Preserve useful structured tool output unless it contains Gemini's reserved
+/// multimodal function-response reference key. JSON Schema documents commonly
+/// carry `$ref` for an unrelated purpose; if one enters structured
+/// `functionResponse.response`, Gemini interprets its value as a display name in
+/// `functionResponse.parts` and rejects the request when no such media part
+/// exists. Keeping the complete result as one string avoids that namespace
+/// collision without deleting or rewriting tool output.
+fn encode_function_response_content(content: &str) -> Value {
+    match serde_json::from_str::<Value>(content) {
+        Ok(value) if !contains_function_response_ref(&value) => value,
+        _ => Value::String(content.to_owned()),
+    }
+}
+
+fn contains_function_response_ref(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            object.contains_key("$ref")
+                || object.values().any(contains_function_response_ref)
+        }
+        Value::Array(items) => items.iter().any(contains_function_response_ref),
+        _ => false,
+    }
 }
 
 fn extra_thought_signature(extra: &Option<Value>) -> Result<Option<&str>, ProviderError> {
@@ -469,7 +490,7 @@ fn append_content(contents: &mut Vec<Value>, role: &str, parts: Vec<Value>, merg
     contents.push(json!({ "role": role, "parts": parts }));
 }
 
-fn build_tools(tools: &[ToolDef], sanitize: bool) -> Result<Vec<Value>, ProviderError> {
+fn build_tools(tools: &[ToolDef]) -> Result<Vec<Value>, ProviderError> {
     let mut names = HashSet::new();
     tools
         .iter()
@@ -495,11 +516,12 @@ fn build_tools(tools: &[ToolDef], sanitize: bool) -> Result<Vec<Value>, Provider
                     }
                 }))
             } else {
-                let parameters = if sanitize {
-                    compat::sanitize_json_schema(&tool.input_schema)
-                } else {
-                    tool.input_schema.clone()
-                };
+                // Provider declarations are projections only; runtime dispatch
+                // still validates against the registry's original schema. Keep
+                // this hard protocol invariant unconditional even if a legacy
+                // compatibility override disabled generic sanitization.
+                let parameters =
+                    compat::sanitize_json_schema_for_gemini(&tool.input_schema);
                 Ok(json!({
                     "name": tool.name,
                     "description": tool.description,
@@ -1107,6 +1129,39 @@ mod tests {
             .to_string(),
         });
         assert!(matches!(error, ProviderError::PromptTooLong(_)));
+    }
+
+    #[test]
+    fn function_response_encoder_preserves_json_without_reserved_refs() {
+        assert_eq!(
+            encode_function_response_content(r#"{"temperature":27,"nested":{"ok":true}}"#),
+            json!({"temperature": 27, "nested": {"ok": true}})
+        );
+        assert_eq!(
+            encode_function_response_content(r#""literal text containing $ref""#),
+            json!("literal text containing $ref")
+        );
+        assert_eq!(
+            encode_function_response_content(r##"{"schema_ref":"#/$defs/X"}"##),
+            json!({"schema_ref": "#/$defs/X"})
+        );
+    }
+
+    #[test]
+    fn function_response_encoder_keeps_any_structured_ref_opaque() {
+        for content in [
+            r##"{"$ref":"#/$defs/Root"}"##,
+            r##"{"nested":{"$ref":"#/$defs/Deep"}}"##,
+            r##"[{"$ref":"#/$defs/ArrayItem"}]"##,
+            r##"{"$ref":"#/$defs/WithSibling","description":"sibling"}"##,
+            r#"{"$ref":42}"#,
+        ] {
+            assert_eq!(
+                encode_function_response_content(content),
+                Value::String(content.to_owned()),
+                "reserved ref must remain opaque: {content}"
+            );
+        }
     }
 
     #[test]

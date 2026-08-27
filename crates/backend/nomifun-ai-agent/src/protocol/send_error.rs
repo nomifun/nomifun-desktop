@@ -283,6 +283,7 @@ impl From<AppError> for AgentSendError {
 fn classify_upstream_detail(detail: &str) -> AgentSendError {
     let lower = detail.to_ascii_lowercase();
     let classified = classify_agent_lifecycle(&lower)
+        .or_else(|| classify_nomifun_tool_result_encoding(&lower))
         .or_else(|| classify_provider_api(&lower))
         .or_else(|| classify_nomifun_state(&lower))
         .unwrap_or(ClassifiedError {
@@ -296,6 +297,52 @@ fn classify_upstream_detail(detail: &str) -> AgentSendError {
         });
 
     classified.into_send_error(detail.to_owned())
+}
+
+/// Gemini reserves JSON objects containing `$ref` inside a function response
+/// for references to named multimedia parts. A normal tool result can contain
+/// the same shape as JSON Schema data, which makes the provider reject Nomi's
+/// encoded follow-up request. Keep this signature deliberately conjunctive:
+/// ownership changes from the user's provider to Nomi only when the upstream
+/// 400 identifies every part of that exact encoding collision.
+fn classify_nomifun_tool_result_encoding(lower: &str) -> Option<ClassifiedError> {
+    let signature = [
+        "referenced name",
+        "function_response.response",
+        "display_name",
+        "function_response.parts",
+    ];
+    if identifies_http_400(lower) && signature.iter().all(|part| lower.contains(part)) {
+        return Some(ClassifiedError {
+            message: "Nomi could not encode a tool result for the selected model",
+            code: AgentErrorCode::NomifunToolResultEncodingError,
+            ownership: AgentErrorOwnership::Nomifun,
+            retryable: false,
+            feedback_recommended: true,
+            resolution_kind: AgentErrorResolutionKind::SendFeedback,
+            resolution_target: Some(AgentErrorResolutionTarget::Feedback),
+        });
+    }
+
+    None
+}
+
+fn identifies_http_400(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "api error 400",
+            "http 400",
+            "http status 400",
+            "status code 400",
+            "\"code\":400",
+            "\"code\": 400",
+            "\"code\":\"400\"",
+            "\"status\":400",
+            "\"status\": 400",
+            "\"status\":\"400\"",
+        ],
+    )
 }
 
 fn classify_agent_lifecycle(lower: &str) -> Option<ClassifiedError> {
@@ -1312,6 +1359,45 @@ mod tests {
             AgentErrorOwnership::UserLlmProvider,
             AgentErrorResolutionKind::Retry,
         );
+    }
+
+    #[test]
+    fn classifies_gemini_tool_result_ref_collision_as_nomifun_encoding_error() {
+        let detail = r##"Nomi agent error: Provider error: API error 400: {"error":{"message":"The referenced name `#/$defs/ModelRefParam` in function_response.response does not match to a display_name in the function_response.parts.","type":"upstream_error","param":"","code":400}}"##;
+        let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
+
+        assert_eq!(
+            err.code(),
+            Some(AgentErrorCode::NomifunToolResultEncodingError)
+        );
+        assert_eq!(err.ownership(), Some(AgentErrorOwnership::Nomifun));
+        assert_eq!(err.stream_error().retryable, Some(false));
+        assert_eq!(err.stream_error().feedback_recommended, Some(true));
+        assert_eq!(
+            err.stream_error().resolution,
+            Some(AgentErrorResolution::new(
+                AgentErrorResolutionKind::SendFeedback,
+                Some(AgentErrorResolutionTarget::Feedback),
+            ))
+        );
+    }
+
+    #[test]
+    fn tool_result_encoding_classifier_requires_the_complete_400_signature() {
+        for detail in [
+            "API error 500: The referenced name schema400 in function_response.response does not match to a display_name in the function_response.parts.",
+            "API error 400: The referenced value x in function_response.response does not match to a display_name in the function_response.parts.",
+            "API error 400: The referenced name x in the response does not match to a display_name in the function_response.parts.",
+            "API error 400: The referenced name x in function_response.response does not match to a name in the function_response.parts.",
+            "API error 400: The referenced name x in function_response.response does not match to a display_name in the response parts.",
+        ] {
+            let err = AgentSendError::from_app_error(AppError::BadGateway(detail.into()));
+            assert_ne!(
+                err.code(),
+                Some(AgentErrorCode::NomifunToolResultEncodingError),
+                "partial signature must not transfer ownership to Nomi: {detail}"
+            );
+        }
     }
 
     #[test]

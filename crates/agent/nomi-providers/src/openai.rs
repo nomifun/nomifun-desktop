@@ -474,7 +474,7 @@ fn push_tool_result_message(result: &mut Vec<Value>, msg: &Message, compat: &Pro
             let content = if *is_error {
                 format!("[tool error] {content}")
             } else {
-                content.clone()
+                crate::compatibility_gateway_safe_tool_result(content)
             };
             result.push(json!({
                 "role": "tool",
@@ -3181,6 +3181,75 @@ mod tests {
                 .unwrap()
                 .starts_with("data:image/png;base64,")
         );
+    }
+
+    #[test]
+    fn json_schema_tool_results_stay_opaque_for_gemini_compatibility_gateways() {
+        use nomi_types::message::{ContentBlock, Message, Role};
+
+        let schema = json!([{
+            "name": "nomi_delegate",
+            "parameters": {
+                "$defs": {
+                    "ModelRefParam": {
+                        "type": "object",
+                        "properties": {"model": {"type": "string"}}
+                    }
+                },
+                "properties": {
+                    "model": {"$ref": "#/$defs/ModelRefParam"}
+                }
+            }
+        }])
+        .to_string();
+        let messages = vec![Message::new(
+            Role::Tool,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "call_schema".to_owned(),
+                content: schema.clone(),
+                is_error: false,
+                images: Vec::new(),
+            }],
+        )];
+
+        let wire = OpenAIProvider::build_messages(
+            &messages,
+            "",
+            &nomi_config::compat::ProviderCompat::openai_defaults(),
+            false,
+        );
+        let content = wire[0]["content"].as_str().unwrap();
+        assert!(content.starts_with(crate::LITERAL_JSON_TOOL_RESULT_PREFIX));
+        assert!(content.ends_with(&schema));
+        assert!(content.contains("#/$defs/ModelRefParam"));
+        assert!(
+            serde_json::from_str::<Value>(content).is_err(),
+            "a compatibility gateway must not mistake the whole tool output for structured JSON"
+        );
+    }
+
+    #[test]
+    fn ordinary_json_tool_results_remain_byte_identical() {
+        use nomi_types::message::{ContentBlock, Message, Role};
+
+        let content = r#"{"temperature":27,"nested":{"ok":true}}"#;
+        let messages = vec![Message::new(
+            Role::Tool,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "call_json".to_owned(),
+                content: content.to_owned(),
+                is_error: false,
+                images: Vec::new(),
+            }],
+        )];
+
+        let wire = OpenAIProvider::build_messages(
+            &messages,
+            "",
+            &nomi_config::compat::ProviderCompat::openai_defaults(),
+            false,
+        );
+        assert_eq!(wire[0]["content"], content);
     }
 
     #[test]

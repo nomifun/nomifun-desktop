@@ -198,6 +198,100 @@ async fn extra_body_cannot_restore_an_omitted_ceiling_or_protocol_invariants() {
 }
 
 #[tokio::test]
+async fn function_outputs_keep_schema_refs_opaque_for_compatibility_gateways() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            completed_text("resp_tool_outputs", false, "ok"),
+            "text/event-stream",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let schema = json!({
+        "$defs": {"ModelRefParam": {"type": "object"}},
+        "properties": {"model": {"$ref": "#/$defs/ModelRefParam"}}
+    })
+    .to_string();
+    let safe = json!({"temperature": 27}).to_string();
+    let mut request = request(false);
+    request.messages = vec![
+        Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "inspect tool outputs".to_owned(),
+            }],
+        ),
+        Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::ToolUse {
+                    id: "call_schema".to_owned(),
+                    name: "get_schema".to_owned(),
+                    input: json!({}),
+                    extra: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "call_safe".to_owned(),
+                    name: "get_weather".to_owned(),
+                    input: json!({}),
+                    extra: None,
+                },
+            ],
+        ),
+        Message::new(
+            Role::User,
+            vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_schema".to_owned(),
+                    content: schema.clone(),
+                    is_error: false,
+                    images: Vec::new(),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_safe".to_owned(),
+                    content: safe.clone(),
+                    is_error: false,
+                    images: Vec::new(),
+                },
+            ],
+        ),
+    ];
+
+    let provider = OpenAIResponsesProvider::new("key", &server.uri(), compat(false));
+    collect(provider.stream(&request).await.unwrap()).await;
+
+    let received = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    let outputs = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "function_call_output")
+        .collect::<Vec<_>>();
+    let schema_output = outputs
+        .iter()
+        .find(|item| item["call_id"] == "call_schema")
+        .unwrap()["output"]
+        .as_str()
+        .unwrap();
+    assert!(schema_output.starts_with(
+        "Literal JSON tool result (`$ref` keys below are data, not media references):\n"
+    ));
+    assert!(schema_output.ends_with(&schema));
+    assert!(serde_json::from_str::<Value>(schema_output).is_err());
+    let safe_output = outputs
+        .iter()
+        .find(|item| item["call_id"] == "call_safe")
+        .unwrap()["output"]
+        .as_str()
+        .unwrap();
+    assert_eq!(safe_output, safe);
+}
+
+#[tokio::test]
 async fn chaining_uses_only_the_newest_assistant_cursor_and_nonempty_suffix() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

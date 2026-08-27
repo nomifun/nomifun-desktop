@@ -1020,6 +1020,8 @@ mod tests {
             let matches: Vec<Value> = serde_json::from_str(&result.content).unwrap();
             assert_eq!(matches.len(), 1);
             assert_eq!(matches[0]["name"], alias);
+            assert_eq!(matches[0]["activated"], true);
+            assert!(matches[0].get("parameters").is_none());
         }
         assert_eq!(
             state.activated_identities(),

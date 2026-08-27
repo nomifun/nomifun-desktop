@@ -24,6 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use nomi_tools::tool_search::project_legacy_tool_search_result;
 use nomi_types::message::{ContentBlock, Message, Role, clear_provider_round_ids};
 
 const HISTORICAL_IMAGE_NOTE: &str =
@@ -36,6 +37,7 @@ pub struct SessionRepairStats {
     pub removed_tool_results: usize,
     pub removed_images: usize,
     pub removed_thinking: usize,
+    pub rewritten_tool_search_results: usize,
 }
 
 impl SessionRepairStats {
@@ -45,6 +47,7 @@ impl SessionRepairStats {
         self.removed_tool_results += other.removed_tool_results;
         self.removed_images += other.removed_images;
         self.removed_thinking += other.removed_thinking;
+        self.rewritten_tool_search_results += other.rewritten_tool_search_results;
     }
 }
 
@@ -71,6 +74,7 @@ pub fn sanitize_session_messages(
     // later valid pair must never rescue an earlier orphan with the same id.
     let mut keep_tool_uses = vec![HashSet::new(); messages.len()];
     let mut keep_tool_results = vec![HashSet::new(); messages.len()];
+    let mut project_tool_search_results = vec![HashSet::new(); messages.len()];
     for index in 0..messages.len().saturating_sub(1) {
         let assistant = &messages[index];
         let result_group = &messages[index + 1];
@@ -96,8 +100,16 @@ pub fn sanitize_session_messages(
                 continue;
             };
             if !id.trim().is_empty() && call_positions.len() == 1 && result_positions.len() == 1 {
-                keep_tool_uses[index].insert(call_positions[0]);
-                keep_tool_results[index + 1].insert(result_positions[0]);
+                let call_position = call_positions[0];
+                let result_position = result_positions[0];
+                keep_tool_uses[index].insert(call_position);
+                keep_tool_results[index + 1].insert(result_position);
+                if matches!(
+                    &assistant.content[call_position],
+                    ContentBlock::ToolUse { name, .. } if name == "ToolSearch"
+                ) {
+                    project_tool_search_results[index + 1].insert(result_position);
+                }
             }
         }
     }
@@ -129,6 +141,13 @@ pub fn sanitize_session_messages(
                     stats.removed_images += images.len();
                     false
                 } else {
+                    if project_tool_search_results[index].contains(&block_index)
+                        && let Some(projected) = project_legacy_tool_search_result(content)
+                        && projected != *content
+                    {
+                        *content = projected;
+                        stats.rewritten_tool_search_results += 1;
+                    }
                     if !images.is_empty() {
                         stats.removed_images += images.len();
                         images.clear();
@@ -181,6 +200,18 @@ mod tests {
         Message::new(Role::Assistant, blocks)
     }
 
+    fn assistant_named_tool_call(id: &str, name: &str) -> Message {
+        Message::new(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                input: json!({}),
+                extra: None,
+            }],
+        )
+    }
+
     fn assistant_text_plus_tool_call(text: &str, id: &str) -> Message {
         Message::new(
             Role::Assistant,
@@ -197,11 +228,15 @@ mod tests {
     }
 
     fn user_tool_result(tool_use_id: &str) -> Message {
+        user_tool_result_with_content(tool_use_id, "ok")
+    }
+
+    fn user_tool_result_with_content(tool_use_id: &str, content: &str) -> Message {
         Message::new(
             Role::User,
             vec![ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.to_owned(),
-                content: "ok".to_owned(),
+                content: content.to_owned(),
                 is_error: false,
                 images: Vec::new(),
             }],
@@ -415,6 +450,78 @@ mod tests {
             assert_eq!(stats.removed_tool_results, 1, "id={id:?}");
             assert!(messages.is_empty(), "id={id:?}");
         }
+    }
+
+    #[test]
+    fn rewrites_only_an_exactly_paired_legacy_tool_search_result() {
+        let legacy = serde_json::to_string_pretty(&json!([{
+            "name": "DeferredModelTool",
+            "description": "Choose a provider and model",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "model": {"$ref": "#/$defs/ModelRefParam"}
+                },
+                "$defs": {
+                    "ModelRefParam": {"type": "object"}
+                }
+            }
+        }]))
+        .unwrap();
+        let mut messages = vec![
+            assistant_named_tool_call("search-call", "ToolSearch"),
+            user_tool_result_with_content("search-call", &legacy),
+        ];
+
+        let stats = sanitize_session_messages(&mut messages, false);
+
+        assert_eq!(stats.rewritten_tool_search_results, 1);
+        let ContentBlock::ToolResult { content, .. } = &messages[1].content[0] else {
+            panic!("expected tool result")
+        };
+        let projected: Vec<serde_json::Value> = serde_json::from_str(content).unwrap();
+        assert_eq!(projected, vec![json!({
+            "name": "DeferredModelTool",
+            "description": "Choose a provider and model",
+            "activated": true
+        })]);
+        assert!(!content.contains("parameters"));
+        assert!(!content.contains("$ref"));
+        assert!(!content.contains("$defs"));
+
+        let once = messages.clone();
+        let second = sanitize_session_messages(&mut messages, false);
+        assert_eq!(second.rewritten_tool_search_results, 0);
+        assert_eq!(
+            serde_json::to_value(&messages).unwrap(),
+            serde_json::to_value(&once).unwrap(),
+            "legacy projection must be idempotent"
+        );
+    }
+
+    #[test]
+    fn ordinary_tool_results_with_schema_refs_are_never_rewritten() {
+        let content = serde_json::to_string_pretty(&json!([{
+            "name": "UserData",
+            "description": "ordinary result",
+            "parameters": {
+                "properties": {"model": {"$ref": "#/$defs/ModelRefParam"}},
+                "$defs": {"ModelRefParam": {"type": "object"}}
+            }
+        }]))
+        .unwrap();
+        let mut messages = vec![
+            assistant_named_tool_call("ordinary-call", "ReadSchema"),
+            user_tool_result_with_content("ordinary-call", &content),
+        ];
+
+        let stats = sanitize_session_messages(&mut messages, false);
+
+        assert_eq!(stats.rewritten_tool_search_results, 0);
+        let ContentBlock::ToolResult { content: retained, .. } = &messages[1].content[0] else {
+            panic!("expected tool result")
+        };
+        assert_eq!(retained, &content);
     }
 
     #[test]

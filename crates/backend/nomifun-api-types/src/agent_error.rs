@@ -22,6 +22,10 @@ pub enum AgentErrorCode {
     NomifunAgentSessionInconsistent,
     NomifunPermissionError,
     NomifunInternalError,
+    /// Nomi serialized a tool result into a provider function-response shape
+    /// whose reserved fields changed the result's meaning. Replaying the same
+    /// accepted turn would deterministically reproduce the rejected payload.
+    NomifunToolResultEncodingError,
     WorkspacePathEdgeWhitespaceRuntimeUnsupported,
     UserAgentHandshakeFailed,
     UserAgentHandshakeTimeout,
@@ -192,6 +196,15 @@ mod tests {
         let code = AgentErrorCode::NomifunAgentSessionInconsistent;
         let json = serde_json::to_string(&code).unwrap();
         assert_eq!(json, "\"NOMIFUN_AGENT_SESSION_INCONSISTENT\"");
+        let back: AgentErrorCode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, code);
+    }
+
+    #[test]
+    fn tool_result_encoding_error_serde_roundtrip() {
+        let code = AgentErrorCode::NomifunToolResultEncodingError;
+        let json = serde_json::to_string(&code).unwrap();
+        assert_eq!(json, "\"NOMIFUN_TOOL_RESULT_ENCODING_ERROR\"");
         let back: AgentErrorCode = serde_json::from_str(&json).unwrap();
         assert_eq!(back, code);
     }

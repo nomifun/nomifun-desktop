@@ -279,7 +279,7 @@ fn tool_output(
     let text = if is_error {
         format!("[tool error]\n{content}")
     } else {
-        content.to_owned()
+        crate::compatibility_gateway_safe_tool_result(content)
     };
     let usable_images: Vec<Value> = if compat.supports_image() {
         images

@@ -288,6 +288,273 @@ pub fn sanitize_json_schema(schema: &Value) -> Value {
     schema
 }
 
+/// Sanitize a function-declaration schema for Gemini's native API.
+///
+/// Gemini uses `$ref` inside a `FunctionResponse` for an unrelated multimodal
+/// display-name reference and its function-declaration dialect is not a full
+/// JSON Schema implementation.  Start with the shared strict-provider
+/// projection, then inline bounded local JSON-pointer references and remove all
+/// reference-definition containers.  Unresolvable, external, cyclic, or
+/// over-budget references degrade to an unconstrained schema node (`{}`).  The
+/// execution-time validator keeps the original schema, so this provider-facing
+/// broadening cannot authorize an invalid tool invocation.
+pub fn sanitize_json_schema_for_gemini(schema: &Value) -> Value {
+    let sanitized = sanitize_json_schema(schema);
+    let root = sanitized.clone();
+    let mut work = GeminiSchemaInlineWork::new();
+    let mut inlined = inline_gemini_schema_node(&root, &sanitized, &mut work, 0);
+
+    // Defense in depth: every normal exit above already drops these keywords,
+    // but this final pass keeps the public contract true if a future merge path
+    // starts preserving additional schema metadata.
+    strip_gemini_schema_reference_keywords(&mut inlined);
+    inlined
+}
+
+const MAX_GEMINI_SCHEMA_INLINE_WORK: usize = 4_096;
+const MAX_GEMINI_SCHEMA_INLINE_DEPTH: usize = 32;
+
+struct GeminiSchemaInlineWork {
+    remaining: usize,
+    active_refs: Vec<String>,
+}
+
+impl GeminiSchemaInlineWork {
+    fn new() -> Self {
+        Self {
+            remaining: MAX_GEMINI_SCHEMA_INLINE_WORK,
+            active_refs: Vec::new(),
+        }
+    }
+
+    fn visit(&mut self) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+        self.remaining -= 1;
+        true
+    }
+
+    fn enter_ref(&mut self, reference: &str) -> bool {
+        if self.active_refs.iter().any(|active| active == reference) {
+            return false;
+        }
+        self.active_refs.push(reference.to_owned());
+        true
+    }
+
+    fn leave_ref(&mut self) {
+        self.active_refs.pop();
+    }
+}
+
+fn inline_gemini_schema_node(
+    root: &Value,
+    schema: &Value,
+    work: &mut GeminiSchemaInlineWork,
+    depth: usize,
+) -> Value {
+    if depth > MAX_GEMINI_SCHEMA_INLINE_DEPTH || !work.visit() {
+        return Value::Object(Map::new());
+    }
+
+    match schema {
+        Value::Object(object) => {
+            let mut output = Map::new();
+            if let Some(reference) = object.get("$ref").and_then(Value::as_str)
+                && let Some(target) = resolve_gemini_local_schema_ref(root, reference)
+                && work.enter_ref(reference)
+            {
+                let resolved = inline_gemini_schema_node(root, target, work, depth + 1);
+                work.leave_ref();
+                if let Value::Object(resolved) = resolved {
+                    output = resolved;
+                }
+            }
+
+            // JSON Schema 2020-12 permits siblings next to `$ref`. Preserve them
+            // as provider guidance even when the reference itself had to degrade.
+            for (key, value) in object {
+                if matches!(key.as_str(), "$ref" | "$defs" | "definitions") {
+                    continue;
+                }
+                let value = if is_named_schema_map_keyword(key) {
+                    inline_gemini_named_schema_map(root, value, work, depth + 1)
+                } else if is_schema_array_keyword(key)
+                    || (key == "items" && value.is_array())
+                {
+                    inline_gemini_schema_array(root, value, work, depth + 1)
+                } else if is_schema_value_keyword(key) {
+                    inline_gemini_schema_node(root, value, work, depth + 1)
+                } else {
+                    value.clone()
+                };
+                merge_gemini_schema_keyword(&mut output, key, value);
+            }
+            Value::Object(output)
+        }
+        // Arrays are schema containers only when reached through a keyword such
+        // as `anyOf` or `prefixItems`. At a schema position an array is invalid
+        // (or a legacy property-dependency value), so preserve it opaquely.
+        Value::Array(items) => Value::Array(items.clone()),
+        primitive => primitive.clone(),
+    }
+}
+
+/// Keywords whose object keys are user-defined property/pattern names rather
+/// than schema keywords. Their keys must survive even when a caller legally
+/// names a tool argument `$ref`, `$defs`, or `definitions`.
+fn is_named_schema_map_keyword(keyword: &str) -> bool {
+    matches!(
+        keyword,
+        "properties"
+            | "patternProperties"
+            | "dependentSchemas"
+            | "dependencies"
+            | "dependentRequired"
+    )
+}
+
+fn is_schema_array_keyword(keyword: &str) -> bool {
+    matches!(keyword, "allOf" | "anyOf" | "oneOf" | "prefixItems")
+}
+
+fn is_schema_value_keyword(keyword: &str) -> bool {
+    matches!(
+        keyword,
+        "additionalProperties"
+            | "unevaluatedProperties"
+            | "propertyNames"
+            | "contains"
+            | "contentSchema"
+            | "if"
+            | "then"
+            | "else"
+            | "not"
+            | "items"
+            | "additionalItems"
+            | "unevaluatedItems"
+    )
+}
+
+fn inline_gemini_named_schema_map(
+    root: &Value,
+    schemas: &Value,
+    work: &mut GeminiSchemaInlineWork,
+    depth: usize,
+) -> Value {
+    if depth > MAX_GEMINI_SCHEMA_INLINE_DEPTH || !work.visit() {
+        return Value::Object(Map::new());
+    }
+    let Value::Object(schemas) = schemas else {
+        return schemas.clone();
+    };
+    Value::Object(
+        schemas
+            .iter()
+            .map(|(name, schema)| {
+                (
+                    name.clone(),
+                    inline_gemini_schema_node(root, schema, work, depth + 1),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn inline_gemini_schema_array(
+    root: &Value,
+    schemas: &Value,
+    work: &mut GeminiSchemaInlineWork,
+    depth: usize,
+) -> Value {
+    if depth > MAX_GEMINI_SCHEMA_INLINE_DEPTH {
+        // An empty anyOf/oneOf/allOf is itself invalid and would turn a safe
+        // budget fallback back into a provider-side 400. One unconstrained
+        // branch keeps every schema-array keyword valid while broadening only
+        // the provider-facing declaration; the runtime validator remains exact.
+        return Value::Array(vec![Value::Object(Map::new())]);
+    }
+    let Value::Array(schemas) = schemas else {
+        return schemas.clone();
+    };
+    Value::Array(
+        schemas
+            .iter()
+            .map(|schema| inline_gemini_schema_node(root, schema, work, depth + 1))
+            .collect(),
+    )
+}
+
+fn resolve_gemini_local_schema_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    let pointer = reference.strip_prefix('#')?;
+    if !pointer.starts_with('/') {
+        return None;
+    }
+    root.pointer(pointer)
+}
+
+fn merge_gemini_schema_keyword(output: &mut Map<String, Value>, key: &str, incoming: Value) {
+    match (key, output.get_mut(key), incoming) {
+        ("properties", Some(Value::Object(existing)), Value::Object(incoming)) => {
+            existing.extend(incoming);
+        }
+        ("required", Some(Value::Array(existing)), Value::Array(incoming)) => {
+            for value in incoming {
+                if !existing.contains(&value) {
+                    existing.push(value);
+                }
+            }
+        }
+        (_, _, incoming) => {
+            output.insert(key.to_owned(), incoming);
+        }
+    }
+}
+
+fn strip_gemini_schema_reference_keywords(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("$ref");
+            object.remove("$defs");
+            object.remove("definitions");
+            for (key, child) in object {
+                if is_named_schema_map_keyword(key) {
+                    strip_gemini_named_schema_map_reference_keywords(child);
+                } else if is_schema_array_keyword(key) || (key == "items" && child.is_array()) {
+                    strip_gemini_schema_array_reference_keywords(child);
+                } else if is_schema_value_keyword(key) {
+                    strip_gemini_schema_reference_keywords(child);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_gemini_schema_reference_keywords(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn strip_gemini_named_schema_map_reference_keywords(value: &mut Value) {
+    let Value::Object(schemas) = value else {
+        return;
+    };
+    for schema in schemas.values_mut() {
+        strip_gemini_schema_reference_keywords(schema);
+    }
+}
+
+fn strip_gemini_schema_array_reference_keywords(value: &mut Value) {
+    let Value::Array(schemas) = value else {
+        return;
+    };
+    for schema in schemas {
+        strip_gemini_schema_reference_keywords(schema);
+    }
+}
+
 const MAX_SCHEMA_PROJECTION_WORK: usize = 4_096;
 
 #[derive(Clone, Default)]
@@ -642,6 +909,39 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn contains_gemini_reference_keyword(value: &Value) -> bool {
+        match value {
+            Value::Object(object) => {
+                object.contains_key("$ref")
+                    || object.contains_key("$defs")
+                    || object.contains_key("definitions")
+                    || object.iter().any(|(key, child)| {
+                        if is_named_schema_map_keyword(key) {
+                            child.as_object().is_some_and(|schemas| {
+                                schemas.values().any(contains_gemini_reference_keyword)
+                            })
+                        } else {
+                            contains_gemini_reference_keyword(child)
+                        }
+                    })
+            }
+            Value::Array(items) => items.iter().any(contains_gemini_reference_keyword),
+            _ => false,
+        }
+    }
+
+    fn contains_empty_schema_composition(value: &Value) -> bool {
+        match value {
+            Value::Object(object) => object.iter().any(|(key, child)| {
+                (matches!(key.as_str(), "allOf" | "anyOf" | "oneOf")
+                    && child.as_array().is_some_and(Vec::is_empty))
+                    || contains_empty_schema_composition(child)
+            }),
+            Value::Array(items) => items.iter().any(contains_empty_schema_composition),
+            _ => false,
+        }
+    }
+
     #[test]
     fn test_anthropic_defaults() {
         let compat = ProviderCompat::anthropic_defaults();
@@ -990,6 +1290,188 @@ mod tests {
         let sanitized = sanitize_json_schema(&schema);
         assert_eq!(sanitized["properties"]["count"]["type"], "integer");
         assert_eq!(sanitized["required"], json!(["base", "count"]));
+    }
+
+    #[test]
+    fn gemini_sanitizer_inlines_deep_model_ref_schema_without_mutating_source() {
+        let schema = json!({
+            "$defs": {
+                "ModelRefParam": {
+                    "type": "object",
+                    "properties": {
+                        "provider_id": {"type": "string"},
+                        "model": {"type": "string"}
+                    },
+                    "required": ["provider_id", "model"],
+                    "additionalProperties": false
+                },
+                "ModelPoolParam": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "mode": {"const": "single"},
+                                "model": {"$ref": "#/$defs/ModelRefParam"}
+                            },
+                            "required": ["mode", "model"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "mode": {"const": "range"},
+                                "models": {
+                                    "type": "array",
+                                    "items": {"$ref": "#/$defs/ModelRefParam"}
+                                }
+                            },
+                            "required": ["mode", "models"]
+                        }
+                    ]
+                }
+            },
+            "type": "object",
+            "properties": {
+                "model_pool": {
+                    "anyOf": [
+                        {"$ref": "#/$defs/ModelPoolParam"},
+                        {"type": "null"}
+                    ]
+                }
+            }
+        });
+        let original = schema.clone();
+
+        let sanitized = sanitize_json_schema_for_gemini(&schema);
+
+        assert!(!contains_gemini_reference_keyword(&sanitized));
+        assert_eq!(
+            sanitized["properties"]["model_pool"]["anyOf"][0]["oneOf"][0]
+                ["properties"]["model"]["properties"]["provider_id"]["type"],
+            "string"
+        );
+        assert_eq!(
+            sanitized["properties"]["model_pool"]["anyOf"][0]["oneOf"][1]
+                ["properties"]["models"]["items"]["properties"]["model"]["type"],
+            "string"
+        );
+        assert_eq!(schema, original, "provider projection must not rewrite the runtime schema");
+        assert_eq!(
+            schema["$defs"]["ModelPoolParam"]["oneOf"][0]["properties"]["model"]
+                ["$ref"],
+            "#/$defs/ModelRefParam"
+        );
+    }
+
+    #[test]
+    fn gemini_sanitizer_degrades_recursive_and_external_refs_without_leaking_keywords() {
+        let schema = json!({
+            "definitions": {
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"},
+                        "next": {"$ref": "#/definitions/Node"}
+                    }
+                }
+            },
+            "type": "object",
+            "properties": {
+                "node": {"$ref": "#/definitions/Node"},
+                "remote": {
+                    "$ref": "https://example.invalid/schema.json#/$defs/Remote",
+                    "description": "resolved only by the runtime validator"
+                }
+            }
+        });
+
+        let sanitized = sanitize_json_schema_for_gemini(&schema);
+
+        assert!(!contains_gemini_reference_keyword(&sanitized));
+        assert_eq!(sanitized["properties"]["node"]["type"], "object");
+        assert_eq!(sanitized["properties"]["node"]["properties"]["value"]["type"], "string");
+        assert_eq!(
+            sanitized["properties"]["node"]["properties"]["next"],
+            json!({})
+        );
+        assert_eq!(
+            sanitized["properties"]["remote"]["description"],
+            "resolved only by the runtime validator"
+        );
+        assert_eq!(schema["properties"]["node"]["$ref"], "#/definitions/Node");
+    }
+
+    #[test]
+    fn gemini_sanitizer_preserves_property_and_pattern_names_that_look_like_keywords() {
+        let schema = json!({
+            "$defs": {
+                "Target": {"type": "string"}
+            },
+            "type": "object",
+            "properties": {
+                "$ref": {"type": "string"},
+                "$defs": {"type": "integer"},
+                "definitions": {"type": "boolean"}
+            },
+            "patternProperties": {
+                "^definitions$": {"$ref": "#/$defs/Target"}
+            }
+        });
+
+        let sanitized = sanitize_json_schema_for_gemini(&schema);
+
+        assert_eq!(sanitized["properties"]["$ref"]["type"], "string");
+        assert_eq!(sanitized["properties"]["$defs"]["type"], "integer");
+        assert_eq!(
+            sanitized["properties"]["definitions"]["type"],
+            "boolean"
+        );
+        assert_eq!(
+            sanitized["patternProperties"]["^definitions$"]["type"],
+            "string"
+        );
+        assert!(!contains_gemini_reference_keyword(&sanitized));
+    }
+
+    #[test]
+    fn gemini_sanitizer_inlines_legacy_additional_items_refs() {
+        let schema = json!({
+            "$defs": {
+                "Tail": {"type": "string"}
+            },
+            "type": "object",
+            "properties": {
+                "tuple": {
+                    "type": "array",
+                    "items": [{"type": "integer"}],
+                    "additionalItems": {"$ref": "#/$defs/Tail"}
+                }
+            }
+        });
+
+        let sanitized = sanitize_json_schema_for_gemini(&schema);
+
+        assert!(!contains_gemini_reference_keyword(&sanitized));
+        assert_eq!(
+            sanitized["properties"]["tuple"]["additionalItems"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
+    fn gemini_sanitizer_depth_fallback_never_creates_an_empty_composition() {
+        let mut nested = json!({"type": "string"});
+        for _ in 0..(MAX_GEMINI_SCHEMA_INLINE_DEPTH + 4) {
+            nested = json!({"anyOf": [nested]});
+        }
+        let schema = json!({
+            "type": "object",
+            "properties": {"deep": nested}
+        });
+
+        let sanitized = sanitize_json_schema_for_gemini(&schema);
+
+        assert!(!contains_gemini_reference_keyword(&sanitized));
+        assert!(!contains_empty_schema_composition(&sanitized));
     }
 
     #[test]

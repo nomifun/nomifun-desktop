@@ -3303,6 +3303,14 @@ mod tests {
             ),
             AttemptRetryClass::Deterministic
         );
+        assert_eq!(
+            attempt_outcome_retry_class(
+                &transient("NOMIFUN_TOOL_RESULT_ENCODING_ERROR"),
+                true,
+                true
+            ),
+            AttemptRetryClass::Deterministic
+        );
 
         let timeout_without_marker = transient("USER_LLM_PROVIDER_TIMEOUT");
         assert_eq!(

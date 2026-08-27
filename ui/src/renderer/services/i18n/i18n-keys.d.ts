@@ -585,6 +585,8 @@ export type I18nKey =
   | 'conversation.agentError.codes.NOMIFUN_STATE_INCONSISTENT.title'
   | 'conversation.agentError.codes.NOMIFUN_STREAM_BROKEN.body'
   | 'conversation.agentError.codes.NOMIFUN_STREAM_BROKEN.title'
+  | 'conversation.agentError.codes.NOMIFUN_TOOL_RESULT_ENCODING_ERROR.body'
+  | 'conversation.agentError.codes.NOMIFUN_TOOL_RESULT_ENCODING_ERROR.title'
   | 'conversation.agentError.codes.OUTPUT_TRUNCATED.body'
   | 'conversation.agentError.codes.OUTPUT_TRUNCATED.title'
   | 'conversation.agentError.codes.PROVIDER_UNAVAILABLE.body'

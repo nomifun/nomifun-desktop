@@ -12,7 +12,7 @@ use nomi_providers::{LlmProvider, ProviderError};
 use nomi_tools::registry::ToolRegistry;
 use nomi_tools::{Tool, tool_search::ToolSearchTool};
 use nomi_types::llm::{LlmEvent, LlmRequest};
-use nomi_types::message::{StopReason, TokenUsage};
+use nomi_types::message::{ContentBlock, StopReason, TokenUsage};
 use nomi_types::tool::ToolResult;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -184,6 +184,29 @@ async fn tool_search_activates_full_schema_on_next_provider_turn() {
         .as_object()
         .unwrap()
         .is_empty());
+
+    let search_result = requests[1]
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } if tool_use_id == "search-1" => Some(content),
+            _ => None,
+        })
+        .expect("second provider turn must receive the ToolSearch result");
+    let matches: Vec<Value> = serde_json::from_str(search_result).unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0]["name"], DEFERRED_TOOL);
+    assert_eq!(matches[0]["description"], "Update a managed knowledge base");
+    assert_eq!(matches[0]["activated"], true);
+    assert!(matches[0].get("parameters").is_none());
+    assert!(!search_result.contains("input_schema"));
+    assert!(!search_result.contains("$ref"));
+    assert!(!search_result.contains("$defs"));
 
     let second = find_tool(&requests[1], DEFERRED_TOOL);
     assert!(!second.deferred, "ToolSearch must activate the next provider definition");

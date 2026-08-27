@@ -52,6 +52,7 @@ pub fn build_messages(messages: &[Message], compat: &ProviderCompat) -> Vec<Valu
                     is_error,
                     images,
                 } => {
+                    let content = crate::compatibility_gateway_safe_tool_result(content);
                     if images.is_empty() {
                         json!({
                             "type": "tool_result",
@@ -1017,6 +1018,47 @@ mod tests {
         assert_eq!(content[0]["tool_use_id"], "call_1");
         assert_eq!(content[0]["content"], "file list");
         assert_eq!(content[0]["is_error"], false);
+    }
+
+    #[test]
+    fn schema_ref_tool_results_stay_opaque_for_compatibility_gateways() {
+        let schema = json!({
+            "$defs": {"ModelRefParam": {"type": "object"}},
+            "properties": {"model": {"$ref": "#/$defs/ModelRefParam"}}
+        })
+        .to_string();
+        let messages = vec![Message::new(
+            Role::Tool,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "call_schema".to_owned(),
+                content: schema.clone(),
+                is_error: false,
+                images: Vec::new(),
+            }],
+        )];
+
+        let result = build_messages(&messages, &default_compat());
+        let content = result[0]["content"][0]["content"].as_str().unwrap();
+        assert!(content.starts_with(crate::LITERAL_JSON_TOOL_RESULT_PREFIX));
+        assert!(content.ends_with(&schema));
+        assert!(serde_json::from_str::<Value>(content).is_err());
+    }
+
+    #[test]
+    fn ordinary_json_tool_results_remain_unchanged_for_anthropic_wire() {
+        let content = json!({"temperature": 27}).to_string();
+        let messages = vec![Message::new(
+            Role::Tool,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "call_safe".to_owned(),
+                content: content.clone(),
+                is_error: false,
+                images: Vec::new(),
+            }],
+        )];
+
+        let result = build_messages(&messages, &default_compat());
+        assert_eq!(result[0]["content"][0]["content"], content);
     }
 
     #[test]

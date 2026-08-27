@@ -531,6 +531,7 @@ pub(super) async fn build(
                     removed_tool_results = repair.removed_tool_results,
                     removed_images = repair.removed_images,
                     removed_thinking = repair.removed_thinking,
+                    rewritten_tool_search_results = repair.rewritten_tool_search_results,
                     "Loaded existing nomi session for resume"
                 );
                 retarget_resumed_session(&mut session, &fields.provider, &fields.model);

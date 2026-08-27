@@ -68,6 +68,19 @@ async fn collect_events(mut receiver: tokio::sync::mpsc::Receiver<LlmEvent>) -> 
     events
 }
 
+fn contains_schema_reference_keyword(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            object.contains_key("$ref")
+                || object.contains_key("$defs")
+                || object.contains_key("definitions")
+                || object.values().any(contains_schema_reference_keyword)
+        }
+        Value::Array(items) => items.iter().any(contains_schema_reference_keyword),
+        _ => false,
+    }
+}
+
 #[tokio::test]
 async fn native_multi_key_rotates_after_auth_failure() {
     let server = MockServer::start().await;
@@ -290,11 +303,202 @@ async fn native_request_preserves_multimodal_tools_ids_and_signatures() {
     assert_eq!(body["contents"][1]["parts"][0]["thoughtSignature"], "tool-signature");
     assert_eq!(body["contents"][2]["parts"][0]["functionResponse"]["id"], "call-weather-1");
     assert_eq!(body["contents"][2]["parts"][0]["functionResponse"]["name"], "get_weather");
+    assert_eq!(
+        body["contents"][2]["parts"][0]["functionResponse"]["response"]["result"]
+            ["temperature"],
+        27
+    );
     assert_eq!(body["contents"][2]["parts"][0]["functionResponse"]["parts"][0]["inlineData"]["data"], "TOOL_IMAGE");
     assert_eq!(body["tools"][0]["functionDeclarations"][0]["name"], "get_weather");
     assert!(body["tools"][0]["functionDeclarations"][0]["parameters"]
         .get("additionalProperties")
         .is_none());
+}
+
+#[tokio::test]
+async fn native_function_response_keeps_json_refs_opaque_and_preserves_image_parts() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(text_sse(), "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let schema_result = json!([{
+        "name": "mcp__nomifun_desktop__nomi_delegate",
+        "parameters": {
+            "$defs": {
+                "ModelRefParam": {
+                    "type": "object",
+                    "properties": {
+                        "provider_id": {"type": "string"},
+                        "model": {"type": "string"}
+                    }
+                }
+            },
+            "type": "object",
+            "properties": {
+                "model": {"$ref": "#/$defs/ModelRefParam"}
+            }
+        }
+    }])
+    .to_string();
+    let mut request = minimal_request();
+    request.messages = vec![
+        Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "Find the delegation tool".to_owned(),
+            }],
+        ),
+        Message::new(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "call-search-1".to_owned(),
+                name: "ToolSearch".to_owned(),
+                input: json!({"query": "nomi_delegate"}),
+                extra: None,
+            }],
+        ),
+        Message::new(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "call-search-1".to_owned(),
+                content: schema_result.clone(),
+                is_error: false,
+                images: vec![ToolImage {
+                    media_type: "image/png".to_owned(),
+                    data: "TOOL_SEARCH_IMAGE".to_owned(),
+                }],
+            }],
+        ),
+    ];
+    request.tools = vec![ToolDef {
+        name: "ToolSearch".to_owned(),
+        description: "Search deferred tools".to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"]
+        }),
+        deferred: false,
+    }];
+
+    let provider = GeminiProvider::new(
+        "test-key",
+        &format!("{}/v1beta", server.uri()),
+        ProviderCompat::gemini_defaults(),
+    );
+    collect_events(provider.stream(&request).await.unwrap()).await;
+
+    let requests = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let function_response = &body["contents"][2]["parts"][0]["functionResponse"];
+    assert_eq!(
+        function_response["response"]["result"].as_str(),
+        Some(schema_result.as_str())
+    );
+    let round_trip: Value =
+        serde_json::from_str(function_response["response"]["result"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        round_trip[0]["parameters"]["properties"]["model"]["$ref"],
+        "#/$defs/ModelRefParam"
+    );
+    assert_eq!(
+        function_response["parts"][0]["inlineData"]["data"],
+        "TOOL_SEARCH_IMAGE"
+    );
+}
+
+#[tokio::test]
+async fn native_tool_declarations_inline_local_refs_and_drop_recursive_or_external_refs() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(text_sse(), "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let input_schema = json!({
+        "$defs": {
+            "ModelRefParam": {
+                "type": "object",
+                "properties": {
+                    "provider_id": {"type": "string"},
+                    "model": {"type": "string"}
+                },
+                "required": ["provider_id", "model"]
+            },
+            "ModelPoolParam": {
+                "type": "object",
+                "properties": {
+                    "mode": {"const": "single"},
+                    "model": {"$ref": "#/$defs/ModelRefParam"}
+                },
+                "required": ["mode", "model"]
+            },
+            "Node": {
+                "type": "object",
+                "properties": {
+                    "next": {"$ref": "#/$defs/Node"}
+                }
+            }
+        },
+        "definitions": {
+            "Legacy": {"type": "string"}
+        },
+        "type": "object",
+        "properties": {
+            "model_pool": {
+                "anyOf": [
+                    {"$ref": "#/$defs/ModelPoolParam"},
+                    {"type": "null"}
+                ]
+            },
+            "tree": {"$ref": "#/$defs/Node"},
+            "legacy": {"$ref": "#/definitions/Legacy"},
+            "external": {"$ref": "https://example.invalid/schema.json#/$defs/Remote"}
+        }
+    });
+    let mut request = minimal_request();
+    request.tools = vec![ToolDef {
+        name: "nomi_delegate".to_owned(),
+        description: "Delegate work".to_owned(),
+        input_schema: input_schema.clone(),
+        deferred: false,
+    }];
+
+    let provider = GeminiProvider::new(
+        "test-key",
+        &format!("{}/v1beta", server.uri()),
+        ProviderCompat::gemini_defaults(),
+    );
+    collect_events(provider.stream(&request).await.unwrap()).await;
+
+    let requests = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let parameters = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+    assert!(!contains_schema_reference_keyword(parameters));
+    assert_eq!(
+        parameters["properties"]["model_pool"]["anyOf"][0]["properties"]["model"]
+            ["properties"]["model"]["type"],
+        "string"
+    );
+    assert_eq!(
+        parameters["properties"]["tree"]["properties"]["next"],
+        json!({})
+    );
+    assert_eq!(parameters["properties"]["legacy"]["type"], "string");
+    assert_eq!(parameters["properties"]["external"], json!({}));
+    assert_eq!(
+        request.tools[0].input_schema["properties"]["model_pool"]["anyOf"][0]["$ref"],
+        "#/$defs/ModelPoolParam"
+    );
+    assert_eq!(input_schema["$defs"]["Node"]["properties"]["next"]["$ref"], "#/$defs/Node");
 }
 
 #[tokio::test]
