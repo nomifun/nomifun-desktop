@@ -20,9 +20,9 @@
  * network round-trip, while `force` re-checks on retry / modal reopen.
  *
  * The updater compares against the running bundle's version (Tauri reads it from
- * the workspace `Cargo.toml`, the single source of truth) and fetches the signed
- * `latest.json` from `plugins.updater.endpoints` in tauri.conf.json, verifying
- * each artifact against `plugins.updater.pubkey`.
+ * the workspace `Cargo.toml`, the single source of truth) and checks the ordered
+ * `plugins.updater.endpoints` in tauri.conf.json (CrabNebula first, GitHub
+ * fallback), verifying every selected artifact against `plugins.updater.pubkey`.
  */
 
 import type { AutoUpdateStatus } from '@/common/update/updateTypes';
@@ -44,6 +44,8 @@ interface TauriUpdate {
   body?: string;
   close(): Promise<void>;
 }
+
+const UPDATE_CHECK_TIMEOUT_MS = 8_000;
 
 export interface TauriUpdateInfo {
   version: string;
@@ -101,7 +103,7 @@ async function runCheck(): Promise<TauriUpdateInfo | null> {
     }
     pendingUpdate = null;
   }
-  const update = (await check()) as TauriUpdate | null;
+  const update = (await check({ timeout: UPDATE_CHECK_TIMEOUT_MS })) as TauriUpdate | null;
   pendingUpdate = update;
   return update ? infoFromHandle(update) : null;
 }
@@ -201,6 +203,19 @@ export async function tauriUpdateDownload(emit: (s: AutoUpdateStatus) => void): 
 
   await tauriDownloadUpdate(downloadVersion, (event: TauriDownloadUpdateProgress) => {
     if (event.phase === 'checking') return;
+    if (event.phase === 'retrying') {
+      total = 0;
+      downloaded = 0;
+      speed = 0;
+      lastTs = performance.now();
+      lastBytes = 0;
+      emit({
+        status: 'downloading',
+        version: downloadVersion,
+        progress: { percent: 0, transferred: 0, total: 0, bytesPerSecond: 0 },
+      });
+      return;
+    }
     if (event.phase === 'downloading') {
       total = event.contentLength ?? total;
       downloaded += event.chunkLength ?? 0;

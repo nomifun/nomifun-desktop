@@ -332,6 +332,14 @@ const UPDATE_NOT_RETAINED_ERROR: &str = "NOMIFUN_UPDATE_NOT_RETAINED";
 /// click the user was waiting to make. Bytes are accumulated between sends, so
 /// coalescing changes the message RATE and never the reported total.
 const UPDATE_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
+/// A failed primary metadata request should reach the configured GitHub
+/// endpoint promptly instead of pinning the update UI behind a dead route.
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
+/// Package downloads are allowed to be slow, but not indefinitely stuck. A
+/// timeout on a non-GitHub source unlocks the explicit GitHub retry below.
+const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const GITHUB_UPDATER_ENDPOINT: &str =
+    "https://github.com/nomifun/nomifun-desktop/releases/latest/download/latest.json";
 
 /// What the native side currently holds for the in-app updater. This is the
 /// single source of truth for "is an update installable right now" — the
@@ -570,6 +578,76 @@ fn checked_update_version(version: &str) -> Result<&str, String> {
     }
 }
 
+fn is_github_download_url(url: &url::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("github.com")
+            || host.eq_ignore_ascii_case("release-assets.githubusercontent.com")
+            || host.ends_with(".githubusercontent.com")
+    })
+}
+
+fn build_desktop_updater(
+    app: &tauri::AppHandle,
+    shutdown_server: Arc<DesktopServer>,
+    endpoints: Option<Vec<url::Url>>,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let cleanup_app = app.clone();
+    let builder = app
+        .updater_builder()
+        .timeout(UPDATE_CHECK_TIMEOUT)
+        .on_before_exit(move || {
+            let verified = updater_before_exit_until_verified(
+                || shutdown_server.shutdown_all_blocking(),
+                || cleanup_app.cleanup_before_exit(),
+                |attempt, error| {
+                    tracing::error!(
+                        attempt,
+                        %error,
+                        "updater installer handoff blocked until desktop shutdown is verified"
+                    );
+                },
+                || std::thread::sleep(Duration::from_millis(250)),
+                UPDATER_SHUTDOWN_MAX_ATTEMPTS,
+            );
+            if !verified {
+                tracing::error!(
+                    attempts = UPDATER_SHUTDOWN_MAX_ATTEMPTS,
+                    "proceeding with the updater installer handoff after exhausting bounded \
+                     shutdown attempts; desktop shutdown is NOT verified"
+                );
+            }
+        });
+    let builder = match endpoints {
+        Some(endpoints) => builder.endpoints(endpoints).map_err(|error| error.to_string())?,
+        None => builder,
+    };
+    builder.build().map_err(|error| error.to_string())
+}
+
+async fn check_requested_update(
+    app: &tauri::AppHandle,
+    shutdown_server: Arc<DesktopServer>,
+    requested_version: &str,
+    endpoints: Option<Vec<url::Url>>,
+) -> Result<tauri_plugin_updater::Update, String> {
+    let updater = build_desktop_updater(app, shutdown_server, endpoints)?;
+    let mut update = updater
+        .check()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "no update is currently available".to_owned())?;
+    if update.version != requested_version {
+        return Err(format!(
+            "available update version changed from {requested_version} to {}",
+            update.version
+        ));
+    }
+    update.timeout = Some(UPDATE_DOWNLOAD_TIMEOUT);
+    Ok(update)
+}
+
 /// Accumulate `chunk` into `buffered` and decide whether to publish now.
 ///
 /// Returns `Some(bytes)` — everything buffered since the last publish, INCLUDING
@@ -597,6 +675,69 @@ fn coalesce_progress_chunk(
     Some(pending)
 }
 
+async fn download_verified_update(
+    update: &tauri_plugin_updater::Update,
+    on_event: tauri::ipc::Channel<DownloadUpdateProgress>,
+) -> Result<Vec<u8>, String> {
+    let download_progress = on_event.clone();
+    let download_finished = on_event.clone();
+    // Bytes seen since the last message, shared with the completion callback
+    // so the coalesced remainder is always flushed and the renderer's running
+    // total ends up exact.
+    let buffered = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let buffered_tail = Arc::clone(&buffered);
+    let observed_length = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let observed_length_tail = Arc::clone(&observed_length);
+    let mut last_sent = Instant::now();
+    let bytes = update
+        .download(
+            move |chunk_length, content_length| {
+                use std::sync::atomic::Ordering;
+                if let Some(total) = content_length {
+                    observed_length.store(total, Ordering::Relaxed);
+                }
+                let Some(pending) = coalesce_progress_chunk(
+                    &buffered,
+                    &mut last_sent,
+                    chunk_length as u64,
+                    UPDATE_PROGRESS_MIN_INTERVAL,
+                    Instant::now(),
+                ) else {
+                    return;
+                };
+                let _ = download_progress.send(DownloadUpdateProgress {
+                    phase: "downloading",
+                    chunk_length: Some(pending as usize),
+                    content_length,
+                });
+            },
+            move || {
+                use std::sync::atomic::Ordering;
+                let total = observed_length_tail.load(Ordering::Relaxed);
+                let content_length = (total > 0).then_some(total);
+                // Flush whatever the interval swallowed. The final "downloaded"
+                // event is emitted only after the plugin verifies the signature.
+                let tail = buffered_tail.swap(0, Ordering::Relaxed);
+                if tail > 0 {
+                    let _ = download_finished.send(DownloadUpdateProgress {
+                        phase: "downloading",
+                        chunk_length: Some(tail as usize),
+                        content_length,
+                    });
+                }
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let _ = on_event.send(DownloadUpdateProgress {
+        phase: "downloaded",
+        chunk_length: None,
+        content_length: Some(bytes.len() as u64),
+    });
+    Ok(bytes)
+}
+
 /// Download and verify the exact update selected by the renderer, retaining the
 /// native Update handle and verified bytes together until installation. This is
 /// the only command that performs package network I/O.
@@ -608,8 +749,6 @@ async fn download_update(
     version: String,
     on_event: tauri::ipc::Channel<DownloadUpdateProgress>,
 ) -> Result<(), String> {
-    use tauri_plugin_updater::UpdaterExt;
-
     let requested_version = checked_update_version(&version)?.to_owned();
     match downloaded.begin_download(&requested_version, |package| package.bytes.len() as u64)? {
         BeginUpdateDownload::AlreadyReady { retained_len } => {
@@ -638,102 +777,56 @@ async fn download_update(
         content_length: None,
     });
 
-    let shutdown_server = server.inner().clone();
-    let cleanup_app = app.clone();
     let result = async {
-        let updater = app
-            .updater_builder()
-            .on_before_exit(move || {
-                let verified = updater_before_exit_until_verified(
-                    || shutdown_server.shutdown_all_blocking(),
-                    || cleanup_app.cleanup_before_exit(),
-                    |attempt, error| {
-                        tracing::error!(
-                            attempt,
-                            %error,
-                            "updater installer handoff blocked until desktop shutdown is verified"
-                        );
-                    },
-                    || std::thread::sleep(Duration::from_millis(250)),
-                    UPDATER_SHUTDOWN_MAX_ATTEMPTS,
+        let primary_update = check_requested_update(
+            &app,
+            server.inner().clone(),
+            &requested_version,
+            None,
+        )
+        .await?;
+        let primary_url = primary_update.download_url.clone();
+        let primary_download = download_verified_update(&primary_update, on_event.clone()).await;
+        let (update, bytes) = match primary_download {
+            Ok(bytes) => (primary_update, bytes),
+            Err(primary_error) if !is_github_download_url(&primary_url) => {
+                tracing::warn!(
+                    url = %primary_url,
+                    error = %primary_error,
+                    "primary update download failed; retrying the same version from GitHub"
                 );
-                if !verified {
-                    tracing::error!(
-                        attempts = UPDATER_SHUTDOWN_MAX_ATTEMPTS,
-                        "proceeding with the updater installer handoff after exhausting bounded \
-                         shutdown attempts; desktop shutdown is NOT verified"
-                    );
-                }
-            })
-            .build()
-            .map_err(|error| error.to_string())?;
-        let update = updater
-            .check()
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "no update is currently available".to_owned())?;
-        if update.version != requested_version {
-            return Err(format!(
-                "available update version changed from {requested_version} to {}",
-                update.version
-            ));
-        }
-
-        let download_progress = on_event.clone();
-        let download_finished = on_event.clone();
-        // Bytes seen since the last message, shared with the completion callback
-        // so the coalesced remainder is always flushed and the renderer's running
-        // total ends up exact.
-        let buffered = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let buffered_tail = Arc::clone(&buffered);
-        let observed_length = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let observed_length_tail = Arc::clone(&observed_length);
-        let mut last_sent = Instant::now();
-        let bytes = update
-            .download(
-                move |chunk_length, content_length| {
-                    use std::sync::atomic::Ordering;
-                    if let Some(total) = content_length {
-                        observed_length.store(total, Ordering::Relaxed);
-                    }
-                    let Some(pending) = coalesce_progress_chunk(
-                        &buffered,
-                        &mut last_sent,
-                        chunk_length as u64,
-                        UPDATE_PROGRESS_MIN_INTERVAL,
-                        Instant::now(),
-                    ) else {
-                        return;
-                    };
-                    let _ = download_progress.send(DownloadUpdateProgress {
-                        phase: "downloading",
-                        chunk_length: Some(pending as usize),
-                        content_length,
-                    });
-                },
-                move || {
-                    use std::sync::atomic::Ordering;
-                    let total = observed_length_tail.load(Ordering::Relaxed);
-                    let content_length = (total > 0).then_some(total);
-                    // Flush whatever the interval swallowed before declaring the
-                    // download complete.
-                    let tail = buffered_tail.swap(0, Ordering::Relaxed);
-                    if tail > 0 {
-                        let _ = download_finished.send(DownloadUpdateProgress {
-                            phase: "downloading",
-                            chunk_length: Some(tail as usize),
-                            content_length,
-                        });
-                    }
-                    let _ = download_finished.send(DownloadUpdateProgress {
-                        phase: "downloaded",
-                        chunk_length: None,
-                        content_length,
-                    });
-                },
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+                let _ = on_event.send(DownloadUpdateProgress {
+                    phase: "retrying",
+                    chunk_length: None,
+                    content_length: None,
+                });
+                let github_endpoint =
+                    url::Url::parse(GITHUB_UPDATER_ENDPOINT).map_err(|error| error.to_string())?;
+                let github_update = check_requested_update(
+                    &app,
+                    server.inner().clone(),
+                    &requested_version,
+                    Some(vec![github_endpoint]),
+                )
+                .await
+                .map_err(|fallback_error| {
+                    format!(
+                        "primary update download failed: {primary_error}; \
+                         GitHub fallback check failed: {fallback_error}"
+                    )
+                })?;
+                let bytes = download_verified_update(&github_update, on_event.clone())
+                    .await
+                    .map_err(|fallback_error| {
+                        format!(
+                            "primary update download failed: {primary_error}; \
+                             GitHub fallback download failed: {fallback_error}"
+                        )
+                    })?;
+                (github_update, bytes)
+            }
+            Err(error) => return Err(error),
+        };
 
         downloaded.finish_download(
             &requested_version,
@@ -3182,6 +3275,22 @@ mod tests {
             ),
             Some(512)
         );
+    }
+
+    #[test]
+    fn github_download_detection_only_suppresses_redundant_fallbacks() {
+        assert!(is_github_download_url(
+            &url::Url::parse(
+                "https://github.com/nomifun/nomifun-desktop/releases/download/v0.8.0/app.exe"
+            )
+            .unwrap()
+        ));
+        assert!(is_github_download_url(
+            &url::Url::parse("https://release-assets.githubusercontent.com/asset").unwrap()
+        ));
+        assert!(!is_github_download_url(
+            &url::Url::parse("https://cdn.crabnebula.app/asset/01ABC").unwrap()
+        ));
     }
 
     #[test]

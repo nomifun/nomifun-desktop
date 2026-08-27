@@ -5,7 +5,13 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
-No unreleased changes yet.
+- **Desktop downloads now use a resilient dual-source update path.** New desktop
+  builds check and download from CrabNebula Cloud first, fall back to GitHub
+  Releases when metadata is unavailable, and retry the exact same signed version
+  from GitHub if a non-GitHub package download or signature verification fails.
+  Release tooling now supports staged CrabNebula drafts, explicit signed
+  platform uploads, publication, and endpoint verification without changing the
+  existing updater trust key.
 
 ## v0.7.2 - 2026-08-24
 

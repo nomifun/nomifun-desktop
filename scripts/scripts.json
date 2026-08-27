@@ -47,6 +47,7 @@
     "release:mac":   { "group": "build", "desc": "一键 macOS 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检" },
     "release:win":   { "group": "build", "desc": "一键 Windows 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检" },
     "release:linux": { "group": "build", "desc": "一键 Linux 发版：自动判定追加/首发；首发用 -Version 打版本号 + -NotesFile/-Notes 建 Release；-DryRun 只预检" },
+    "release:cloud": { "group": "build", "desc": "管理 CrabNebula Cloud 发布草稿、分平台上传、发布与更新端点验证" },
     "build:ui":      { "group": "build", "desc": "前端生产构建 → ui/dist" },
     "docker:prebuilt": { "group": "build", "desc": "用已有 ui/dist + nomifun-web release 二进制快速构建 Docker 运行时镜像" },
     "serve:web":     { "group": "serve", "desc": "启动 Web 服务器，托管已构建的前端" },

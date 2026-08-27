@@ -150,7 +150,7 @@ export async function tauriGetUpdaterInstallContext(): Promise<UpdaterInstallCon
   return invoke<UpdaterInstallContext>('get_updater_install_context');
 }
 
-export type TauriDownloadUpdatePhase = 'checking' | 'downloading' | 'downloaded';
+export type TauriDownloadUpdatePhase = 'checking' | 'retrying' | 'downloading' | 'downloaded';
 
 export interface TauriDownloadUpdateProgress {
   phase: TauriDownloadUpdatePhase;
