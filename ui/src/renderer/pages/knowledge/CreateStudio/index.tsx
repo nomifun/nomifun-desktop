@@ -22,6 +22,7 @@ import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
 import { isAutogenNoProviderError, knowledgeErrorText, notifySourceFetchResult } from '../useKnowledge';
 import { useKnowledgeTags } from '../useKnowledgeTags';
 import KnowledgeModelSelector, { useKnowledgeAutogenModel } from '../KnowledgeModelSelector';
+import { parseKnowledgeUrlDrafts } from '../knowledgeUrlEntries';
 import SourceConfig from './SourceConfig';
 import type { SourceConfigValue } from './SourceConfig';
 import TeachingCard from './TeachingCard';
@@ -233,40 +234,39 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
 
       if (sourceType === 'web') {
         const urlMode = sourceConfigValue.urlMode ?? 'snapshot';
-        const entries = (sourceConfigValue.urlEntries ?? [])
-          .map((e) => ({
-            url: e.url.trim(),
-            title: e.title?.trim() || undefined,
-            rendered: sourceConfigValue.browserRender || undefined,
-          }))
-          .filter((e) => e.url.length > 0);
-        if (entries.length === 0) {
-          Message.warning(t('knowledge.studio.webUrlRequired', { defaultValue: '请至少填写一个网址' }));
-          setSubmitting(false);
-          return;
-        }
-        // Validate each URL is a well-formed http(s) address before submitting:
-        // snapshot mode fails on first fetch for a malformed URL, and live mode
-        // would otherwise silently store a dead source.
-        const invalidEntry = entries.find((e) => {
-          try {
-            const u = new URL(e.url);
-            return u.protocol !== 'http:' && u.protocol !== 'https:';
-          } catch {
-            return true;
+        const parsed = parseKnowledgeUrlDrafts(
+          sourceConfigValue.urlEntries ?? [],
+          sourceConfigValue.browserRender ?? false,
+        );
+        if (!parsed.ok) {
+          if (parsed.reason === 'empty') {
+            Message.warning(t('knowledge.studio.webUrlRequired', { defaultValue: '请至少填写一个网址' }));
+          } else if (parsed.reason === 'duplicate') {
+            Message.warning(
+              t('knowledge.studio.webUrlDuplicate', {
+                defaultValue: '网址重复，请只保留一条：{{url}}',
+                url: parsed.url,
+              }),
+            );
+          } else if (parsed.reason === 'limit') {
+            Message.warning(
+              t('knowledge.studio.webUrlLimit', {
+                defaultValue: '一次最多添加 {{limit}} 个网址',
+                limit: parsed.limit,
+              }),
+            );
+          } else {
+            Message.warning(
+              t('knowledge.studio.webUrlInvalid', {
+                defaultValue: '网址格式不正确，需以 http:// 或 https:// 开头：{{url}}',
+                url: parsed.url,
+              }),
+            );
           }
-        });
-        if (invalidEntry) {
-          Message.warning(
-            t('knowledge.studio.webUrlInvalid', {
-              defaultValue: '网址格式不正确,需以 http:// 或 https:// 开头:{{url}}',
-              url: invalidEntry.url,
-            })
-          );
           setSubmitting(false);
           return;
         }
-        source = { kind: 'url', mode: urlMode, entries };
+        source = { kind: 'url', mode: urlMode, entries: parsed.entries };
       }
 
       const rootPath = sourceType === 'local' ? sourceConfigValue.rootPath?.trim() || undefined : undefined;

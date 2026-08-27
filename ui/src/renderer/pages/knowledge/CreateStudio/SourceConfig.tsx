@@ -19,19 +19,21 @@
 import React, { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Input, Message, Switch } from '@arco-design/web-react';
-import { Close, FolderOpen, Info } from '@icon-park/react';
+import { FolderOpen, Info } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import { isDesktopShell } from '@renderer/utils/platform';
+import KnowledgeUrlEntriesEditor from '../KnowledgeUrlEntriesEditor';
+import {
+  MAX_KNOWLEDGE_SOURCE_ENTRIES,
+  type KnowledgeUrlDraft,
+} from '../knowledgeUrlEntries';
 import type { StudioSourceType } from './sourceTypes';
 
 // ─── Value Shape ────────────────────────────────────────────────────────────
 
 export type UrlMode = 'snapshot' | 'live';
 
-export interface UrlEntry {
-  url: string;
-  title: string;
-}
+export type UrlEntry = KnowledgeUrlDraft;
 
 export interface SourceConfigValue {
   /** local */
@@ -51,10 +53,6 @@ export interface SourceConfigProps {
   value: SourceConfigValue;
   onChange: (value: SourceConfigValue) => void;
 }
-
-// ─── Max URL entries ────────────────────────────────────────────────────────
-
-const MAX_URLS = 16;
 
 const sourcePanelClass =
   'knowledge-source-panel space-y-12px rounded-16px bg-[var(--color-bg-2)] p-14px shadow-[0_10px_30px_rgba(15,23,42,0.035)]';
@@ -176,26 +174,6 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
     const urlMode = value.urlMode ?? 'snapshot';
     const entries = value.urlEntries ?? [{ url: '', title: '' }];
 
-    const setEntries = (newEntries: UrlEntry[]) => {
-      update({ urlEntries: newEntries });
-    };
-
-    const handleEntryChange = (idx: number, field: 'url' | 'title', val: string) => {
-      const next = [...entries];
-      next[idx] = { ...next[idx], [field]: val };
-      setEntries(next);
-    };
-
-    const handleAddEntry = () => {
-      if (entries.length >= MAX_URLS) return;
-      setEntries([...entries, { url: '', title: '' }]);
-    };
-
-    const handleDeleteEntry = (idx: number) => {
-      if (entries.length <= 1) return;
-      setEntries(entries.filter((_, i) => i !== idx));
-    };
-
     return (
       <div className={sourcePanelClass}>
         <div className={sourceTitleClass}>
@@ -239,39 +217,11 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
               {t('knowledge.studio.webUrlMax', { defaultValue: '（最多 16 条）' })}
             </span>
           </label>
-          {entries.map((entry, idx) => (
-            <div key={idx} className='mb-8px flex items-center gap-8px'>
-              <Input
-                className={`${sourceInputClass} flex-1`}
-                placeholder='https://example.com/docs'
-                value={entry.url}
-                onChange={(v) => handleEntryChange(idx, 'url', v)}
-              />
-              <Input
-                className={`${sourceInputClass} w-128px flex-none`}
-                placeholder={t('knowledge.studio.webTitleOptional', { defaultValue: '标题（可选）' })}
-                value={entry.title}
-                onChange={(v) => handleEntryChange(idx, 'title', v)}
-              />
-              <button
-                type='button'
-                className='flex size-34px flex-none cursor-pointer items-center justify-center rounded-10px border-none bg-[var(--color-fill-1)] text-[var(--color-text-3)] transition-colors hover:bg-[var(--color-danger-light-1)] hover:text-danger-6 disabled:cursor-not-allowed disabled:opacity-45'
-                onClick={() => handleDeleteEntry(idx)}
-                disabled={entries.length <= 1}
-              >
-                <Close theme='outline' size='14' />
-              </button>
-            </div>
-          ))}
-          {entries.length < MAX_URLS && (
-            <button
-              type='button'
-              className='w-full cursor-pointer rounded-12px border-none bg-[rgba(var(--primary-6),0.07)] p-10px text-12px font-500 text-primary-6 transition-colors hover:bg-[rgba(var(--primary-6),0.12)] focus-visible:outline-none focus-visible:shadow-[0_0_0_3px_rgba(var(--primary-6),0.12)]'
-              onClick={handleAddEntry}
-            >
-              ＋ {t('knowledge.studio.webAddUrl', { defaultValue: '添加网址' })}
-            </button>
-          )}
+          <KnowledgeUrlEntriesEditor
+            entries={entries}
+            maxEntries={MAX_KNOWLEDGE_SOURCE_ENTRIES}
+            onChange={(urlEntries) => update({ urlEntries })}
+          />
         </div>
 
         {/* Browser render switch */}

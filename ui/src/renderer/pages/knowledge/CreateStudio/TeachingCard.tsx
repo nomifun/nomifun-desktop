@@ -45,7 +45,7 @@ const getTeachRows = (sourceType: StudioSourceType): TeachRow[] => {
           labelKey: 'knowledge.studio.teachHow',
           labelDefault: '怎么填',
           textKey: 'knowledge.studio.blankTeachHow',
-          textDefault: '创建后在详情页直接编辑、拖入文件，或让 AI 生成。',
+          textDefault: '创建后在详情页新建文档、上传笔记、抓取网页，或让 AI 生成。',
         },
         {
           labelKey: 'knowledge.studio.teachUse',

@@ -9,6 +9,8 @@ import { Message, Notification } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type {
+  IKnowledgeAddContentInput,
+  IKnowledgeAddContentResult,
   IKnowledgeBase,
   IKnowledgeConsumer,
   IKnowledgeFileEntry,
@@ -135,6 +137,21 @@ export function useKnowledgeConsumers(id: KnowledgeBaseId | undefined) {
 /** Null-safe accessor for a base's URL source config (top-level `source` on the wire). */
 export function getBaseSource(base: IKnowledgeBase | null | undefined): IKnowledgeSource | undefined {
   return base?.source;
+}
+
+/**
+ * Type-safe frontend boundary for the unified append-only content endpoint.
+ * The lower bridge uses optional fields because mapped invoke types cannot
+ * retain a discriminated union; callers stay strict by going through here.
+ */
+export function addKnowledgeContent(
+  knowledgeBaseId: KnowledgeBaseId,
+  input: IKnowledgeAddContentInput,
+): Promise<IKnowledgeAddContentResult> {
+  return ipcBridge.knowledge.addContent.invoke({
+    knowledge_base_id: knowledgeBaseId,
+    ...input,
+  });
 }
 
 /** Human-readable message for a knowledge API failure (prefers the backend-provided message). */

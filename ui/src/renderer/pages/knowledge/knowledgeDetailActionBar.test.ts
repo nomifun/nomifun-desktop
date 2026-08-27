@@ -43,7 +43,8 @@ describe('Knowledge detail document action bar', () => {
     expect(actionsIndex).toBeGreaterThan(-1);
     expect(searchIndex).toBeGreaterThan(-1);
     expect(actionsIndex).toBeLessThan(searchIndex);
-    expect(detailSource.includes('openNewFileModal')).toBe(true);
+    expect(detailSource.includes('KnowledgeAddContentControl')).toBe(true);
+    expect(detailSource.includes('addContentControlRef')).toBe(true);
     expect(detailSource.includes('openNewFolderModal')).toBe(true);
     expect(detailSource.includes('FolderPlus')).toBe(true);
 

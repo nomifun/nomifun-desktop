@@ -5823,6 +5823,45 @@ export interface IKnowledgeSourceFetchSummary {
   last_fetched_at?: number;
 }
 
+/** Append-only inputs accepted by the unified knowledge-content endpoint. */
+export type IKnowledgeAddContentInput =
+  | { type: 'document'; path: string; content: string }
+  | { type: 'local_folder'; source_path: string }
+  | { type: 'web'; entries: IKnowledgeSourceEntry[] };
+
+/**
+ * Bridge request shape. Fields stay optional here because the bridge's mapped
+ * invoke type does not preserve discriminated unions; the exported input union
+ * above remains the canonical per-variant contract and the Rust route enforces
+ * the selected variant strictly.
+ */
+export interface IKnowledgeAddContentRequest {
+  knowledge_base_id: KnowledgeBaseId;
+  type: IKnowledgeAddContentInput['type'];
+  path?: string;
+  content?: string;
+  source_path?: string;
+  entries?: IKnowledgeSourceEntry[];
+}
+
+/** Per-method outcome of adding content to an existing knowledge base. */
+export type IKnowledgeAddContentResult =
+  | { type: 'document'; path: string }
+  | {
+      type: 'local_folder';
+      target_directory: string;
+      imported: number;
+      skipped: number;
+      total_size: number;
+      first_file?: string;
+    }
+  | ({
+      type: 'web';
+      added: number;
+      duplicates: number;
+      first_file?: string;
+    } & IKnowledgeSourceFetchSummary);
+
 /** Result of POST /api/knowledge/bases/{id}/autogen (AI overview generation). */
 export interface IKnowledgeAutogenOutcome {
   /** The (possibly clamped) description after the run. */
@@ -6315,6 +6354,14 @@ export const knowledge = {
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}${p.purge ? '?purge=true' : ''}`
   ),
   listFiles: httpGet<IKnowledgeFileEntry[], { knowledge_base_id: KnowledgeBaseId }>((p) => `/api/knowledge/bases/${p.knowledge_base_id}/files`, { timeoutMs: KB_READ_TIMEOUT_MS }),
+  /** Add a new document, copied Markdown folder, or web snapshots to an existing base. */
+  addContent: httpPost<IKnowledgeAddContentResult, IKnowledgeAddContentRequest>(
+    (p) => `/api/knowledge/bases/${p.knowledge_base_id}/content`,
+    (p) => {
+      const { knowledge_base_id: _knowledgeBaseId, ...body } = p;
+      return body;
+    }
+  ),
   listTree: httpGet<IKnowledgeTreeEntry[], { knowledge_base_id: KnowledgeBaseId; path?: string }>(
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}/tree${p.path ? `?path=${encodeURIComponent(p.path)}` : ''}`,
     { timeoutMs: KB_READ_TIMEOUT_MS }

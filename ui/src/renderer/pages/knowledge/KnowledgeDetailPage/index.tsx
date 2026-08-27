@@ -53,9 +53,13 @@ import {
   Right,
   Search,
   SettingTwo,
-  Upload,
 } from '@icon-park/react';
-import type { IKnowledgeBase, IKnowledgeTag, IKnowledgeTreeEntry } from '@/common/adapter/ipcBridge';
+import type {
+  IKnowledgeAddContentResult,
+  IKnowledgeBase,
+  IKnowledgeTag,
+  IKnowledgeTreeEntry,
+} from '@/common/adapter/ipcBridge';
 import Markdown from '@renderer/components/Markdown';
 import NomiInput from '@/renderer/components/base/NomiInput';
 import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
@@ -74,6 +78,9 @@ import KnowledgeModelSelector, { useKnowledgeAutogenModel } from '../KnowledgeMo
 import KnowledgeConsumersSection from '../KnowledgeConsumersSection';
 import TagPicker from '../CreateStudio/TagPicker';
 import { getKindConfig, KindIcon, type KindConfig } from '../knowledgeKind';
+import KnowledgeAddContentControl, {
+  type KnowledgeAddContentControlHandle,
+} from './KnowledgeAddContentControl';
 import {
   buildKnowledgeSearchTree,
   isKnowledgePathWithin,
@@ -465,8 +472,6 @@ const KnowledgeDetailPage: React.FC = () => {
   const [editMode, setEditMode] = useState(false);
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
-  const [newFileVisible, setNewFileVisible] = useState(false);
-  const [newFilePath, setNewFilePath] = useState('');
   const [newFolderVisible, setNewFolderVisible] = useState(false);
   const [newFolderPath, setNewFolderPath] = useState('');
   const [renameVisible, setRenameVisible] = useState(false);
@@ -481,6 +486,7 @@ const KnowledgeDetailPage: React.FC = () => {
   const [fileSearch, setFileSearch] = useState('');
   const [treeAction, setTreeAction] = useState<'reveal' | 'expand' | null>(null);
   const treeScrollRef = React.useRef<HTMLDivElement>(null);
+  const addContentControlRef = React.useRef<KnowledgeAddContentControlHandle>(null);
   const isTreeSearch = fileSearch.trim().length > 0;
 
   const source = getBaseSource(base);
@@ -654,44 +660,48 @@ const KnowledgeDetailPage: React.FC = () => {
     }
   }, [id]);
 
-  const openNewFileModal = (folderOverride?: string) => {
-    const folder = folderOverride ?? (selectedFolderPath || parentDirOfKnowledgePath(selectedPath));
-    setNewFilePath(folder ? `${folder}/` : '');
-    setNewFileVisible(true);
-  };
-
   const openNewFolderModal = (folderOverride?: string) => {
     const folder = folderOverride ?? (selectedFolderPath || parentDirOfKnowledgePath(selectedPath));
     setNewFolderPath(folder ? `${folder}/` : '');
     setNewFolderVisible(true);
   };
 
+  const handleContentAdded = async (result: IKnowledgeAddContentResult) => {
+    setFileSearch('');
+    await refresh();
+    if (result.type === 'document') {
+      const parent = parentDirOfKnowledgePath(result.path);
+      await reloadTreePath(parent);
+      setSelectedPath(result.path);
+      setSelectedTreeKey(result.path);
+      setSelectedFolderPath(parent);
+      return;
+    }
+    if (result.type === 'local_folder') {
+      await reloadTreePath(result.target_directory);
+      if (result.first_file) {
+        setSelectedPath(result.first_file);
+        setSelectedTreeKey(result.first_file);
+        setSelectedFolderPath(parentDirOfKnowledgePath(result.first_file));
+      } else {
+        setSelectedFolderPath(result.target_directory);
+        setSelectedTreeKey(result.target_directory);
+      }
+      return;
+    }
+    if (result.first_file) {
+      const parent = parentDirOfKnowledgePath(result.first_file);
+      await reloadTreePath(parent);
+      setSelectedPath(result.first_file);
+      setSelectedTreeKey(result.first_file);
+      setSelectedFolderPath(parent);
+    }
+  };
+
   const openRenameModal = (item: IKnowledgeTreeEntry) => {
     setRenameTarget(item);
     setRenameName(item.name);
     setRenameVisible(true);
-  };
-
-  const handleCreateFile = async () => {
-    if (!id) return;
-    let path = newFilePath.trim();
-    if (!path) return;
-    if (!path.toLowerCase().endsWith('.md')) path = `${path}.md`;
-    const parent = parentDirOfKnowledgePath(path);
-    const fileTitle = path.split('/').filter(Boolean).at(-1)?.replace(/\.md$/i, '') || path.replace(/\.md$/i, '');
-    try {
-      await ipcBridge.knowledge.writeFile.invoke({ knowledge_base_id: id, path, content: `# ${fileTitle}\n` });
-      setNewFileVisible(false);
-      setNewFilePath('');
-      await refresh();
-      setFileSearch('');
-      await reloadTreePath(parent);
-      setSelectedPath(path);
-      setSelectedTreeKey(path);
-      Message.success(t('knowledge.actions.createOk'));
-    } catch (e) {
-      Message.error(String(e));
-    }
   };
 
   const handleCreateFolder = async () => {
@@ -817,7 +827,7 @@ const KnowledgeDetailPage: React.FC = () => {
 
   const handleTreeNodeMenuClick = (key: string, item: IKnowledgeTreeEntry) => {
     if (key === 'new-file' && item.is_dir) {
-      openNewFileModal(item.rel_path);
+      addContentControlRef.current?.openDocument(item.rel_path);
       return;
     }
     if (key === 'new-folder' && item.is_dir) {
@@ -1079,20 +1089,21 @@ const KnowledgeDetailPage: React.FC = () => {
               >
                 {/* Compact document toolbar: icon-first, labels are shown in small hover bubbles. */}
                 <div className='knowledge-doc-divider-bottom knowledge-doc-toolbar flex h-42px shrink-0 items-center gap-2px bg-transparent px-9px'>
-                  <KnowledgeIconButton
-                    label={t('knowledge.detail.docs.newFile', { defaultValue: '新建文档' })}
-                    icon={<Plus theme='outline' size='15' />}
-                    onClick={() => openNewFileModal()}
-                  />
+                  {id && base && (
+                    <KnowledgeAddContentControl
+                      key={id}
+                      ref={addContentControlRef}
+                      knowledgeBaseId={id}
+                      baseRootPath={base.root_path}
+                      defaultFolderPath={selectedFolderPath || parentDirOfKnowledgePath(selectedPath)}
+                      existingUrlCount={source?.entries.length ?? 0}
+                      onAdded={handleContentAdded}
+                    />
+                  )}
                   <KnowledgeIconButton
                     label={t('knowledge.detail.docs.newFolder', { defaultValue: '新建文件夹' })}
                     icon={<FolderPlus theme='outline' size='15' />}
                     onClick={() => openNewFolderModal()}
-                  />
-                  <KnowledgeIconButton
-                    label={t('knowledge.detail.docs.upload', { defaultValue: '上传' })}
-                    icon={<Upload theme='outline' size='15' />}
-                    onClick={() => Message.info(t('knowledge.detail.docs.uploadTodo', { defaultValue: '上传功能开发中' }))}
                   />
                   <div className='ml-auto flex items-center gap-2px'>
                     <KnowledgeIconButton
@@ -1515,22 +1526,6 @@ const KnowledgeDetailPage: React.FC = () => {
           </Tabs.TabPane>
         </Tabs>
       </div>
-
-      {/* ─── New file modal (preserved) ────────────────────────────────────── */}
-      <Modal
-        title={t('knowledge.newFile')}
-        visible={newFileVisible}
-        onOk={() => void handleCreateFile()}
-        onCancel={() => setNewFileVisible(false)}
-        autoFocus={false}
-      >
-        <Input
-          placeholder={t('knowledge.newFilePlaceholder')}
-          value={newFilePath}
-          onChange={setNewFilePath}
-          onPressEnter={() => void handleCreateFile()}
-        />
-      </Modal>
 
       <Modal
         title={t('knowledge.newFolder', { defaultValue: '新建文件夹' })}
