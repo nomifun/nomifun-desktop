@@ -22,6 +22,26 @@ bun run bump 1.2.3 --tag      # also: git commit + git tag v1.2.3 (needs a clean
 Tags use the `vX.Y.Z` form. The decorative `package.json` / `ui/package.json`
 versions are kept in sync by the script but are not read by any build.
 
+## Desktop distribution
+
+Desktop releases use **CrabNebula Cloud as the primary updater/download source**
+and **GitHub Releases as the fallback and archive**. Keep both distributions on
+the same version and upload byte-identical signed artifacts.
+
+The CrabNebula release must remain a draft while platform machines build and
+upload their artifacts:
+
+```bash
+bun run release:cloud -- draft --version "$VERSION" --notes-file notes.md
+bun run release:cloud -- upload --release-id <release-id>  # each platform
+bun run release:cloud -- publish --release-id <release-id>
+bun run release:cloud -- verify
+```
+
+Credentials belong in the gitignored `apps/desktop/signing/.env.release`.
+Do not rotate the existing Tauri updater key. See
+`apps/desktop/updater/README.md` for endpoint fallback and migration details.
+
 ## Releasing the `nfagent` runtime
 
 Desktop installers no longer bundle `nfagent`. On the first NomiRelay pairing,

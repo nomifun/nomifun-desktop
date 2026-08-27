@@ -49,6 +49,7 @@
     },
     "updater": {
       "endpoints": [
+        "https://cdn.crabnebula.app/update/nomifun/nomifun-desktop/{{target}}-{{arch}}/{{current_version}}",
         "https://github.com/nomifun/nomifun-desktop/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYzQUEyNzJFNjBBQTc5NTIKUldSU2VhcGdMaWVxODRRbUdXczZodEJZOE1Ja2Zta011eWUxUko2SG5XclVaSUdtaWNobXJNemEK"

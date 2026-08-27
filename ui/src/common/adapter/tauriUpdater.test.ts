@@ -15,6 +15,13 @@ const desktopSource = readFileSync(
   new URL('../../../../apps/desktop/src/main.rs', import.meta.url),
   'utf8'
 );
+const desktopConfig = JSON.parse(
+  readFileSync(new URL('../../../../apps/desktop/tauri.conf.json', import.meta.url), 'utf8')
+) as { plugins: { updater: { endpoints: string[] } } };
+const cloudReleaseSource = readFileSync(
+  new URL('../../../../scripts/crabnebula-release.mjs', import.meta.url),
+  'utf8'
+);
 const capability = JSON.parse(
   readFileSync(new URL('../../../../apps/desktop/capabilities/default.json', import.meta.url), 'utf8')
 ) as { permissions: string[] };
@@ -132,6 +139,40 @@ describe('desktop updater security boundary', () => {
     // download flow could repaint the bar with a second, contradictory series.
     expect(desktopSource.includes('UPDATE_PROGRESS_MIN_INTERVAL')).toBe(true);
     expect(updaterSource.includes('version: downloadVersion')).toBe(true);
+  });
+
+  test('CrabNebula is primary, while check and package download have bounded GitHub fallback', () => {
+    expect(desktopConfig.plugins.updater.endpoints).toEqual([
+      'https://cdn.crabnebula.app/update/nomifun/nomifun-desktop/{{target}}-{{arch}}/{{current_version}}',
+      'https://github.com/nomifun/nomifun-desktop/releases/latest/download/latest.json',
+    ]);
+    expect(updaterSource.includes('check({ timeout: UPDATE_CHECK_TIMEOUT_MS })')).toBe(true);
+    expect(desktopSource.includes('const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(8)')).toBe(true);
+    expect(desktopSource.includes('const GITHUB_UPDATER_ENDPOINT: &str')).toBe(true);
+    expect(desktopSource.includes('Some(vec![github_endpoint])')).toBe(true);
+    expect(desktopSource.includes('GitHub fallback download failed')).toBe(true);
+  });
+
+  test('switching download source resets renderer progress before GitHub bytes arrive', () => {
+    expect(shellSource.includes("'checking' | 'retrying' | 'downloading' | 'downloaded'")).toBe(true);
+    const retryStart = updaterSource.indexOf("if (event.phase === 'retrying')");
+    const retryEnd = updaterSource.indexOf("if (event.phase === 'downloading')", retryStart);
+    const retryBranch = updaterSource.slice(retryStart, retryEnd);
+    expect(retryStart).toBeGreaterThan(-1);
+    expect(retryBranch.includes('downloaded = 0')).toBe(true);
+    expect(retryBranch.includes('lastBytes = 0')).toBe(true);
+    expect(retryBranch.includes('transferred: 0')).toBe(true);
+  });
+
+  test('cloud release helper keeps credentials external and requires signed updater assets', () => {
+    expect(cloudReleaseSource.includes('process.env.CN_API_KEY')).toBe(true);
+    expect(cloudReleaseSource.includes("RELEASE_ENV_FILE")).toBe(true);
+    expect(cloudReleaseSource.includes('CN_API_KEY=REPLACE_ME')).toBe(false);
+    expect(cloudReleaseSource.includes("'--signature'")).toBe(true);
+    expect(cloudReleaseSource.includes('does not match requested release')).toBe(true);
+    expect(cloudReleaseSource.includes("'--channel'")).toBe(true);
+    expect(cloudReleaseSource.includes('signatureMatches(path, entry.signature)')).toBe(true);
+    expect(cloudReleaseSource.includes("['release', 'publish', app, releaseId]")).toBe(true);
   });
 
   test('renderer adapter cannot invoke the removed pre-shutdown command', () => {

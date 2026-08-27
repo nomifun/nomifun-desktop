@@ -3,15 +3,18 @@
 中文说明见 `apps/desktop/updater/README.zh-CN.md`.
 
 In-app auto-update for `nomifun-desktop`, built on **Tauri's native updater**
-(`tauri-plugin-updater` + minisign signatures + a `latest.json` manifest hosted
-on GitHub Releases). The app checks → downloads → verifies → installs → relaunches.
+(`tauri-plugin-updater` + minisign signatures). CrabNebula Cloud is the primary
+update and download service; GitHub Releases remains the fallback and archive.
+The app checks → downloads → verifies → installs → relaunches.
 
 ## How it works
 
 ```
 App (running version, from workspace Cargo.toml)
-  └─ check() ──► plugins.updater.endpoints  (GitHub Releases latest.json)
-        └─ newer version? ──► download the platform artifact + its .sig
+  └─ check() ──► CrabNebula dynamic endpoint
+        ├─ request failure ──► GitHub Releases latest.json
+        └─ newer version? ──► download the selected platform artifact
+              ├─ non-GitHub download/verification failure ──► retry same version from GitHub
               └─ verify signature against plugins.updater.pubkey
                     └─ install (swap .app / run NSIS) ──► relaunch
 ```
@@ -26,8 +29,13 @@ App (running version, from workspace Cargo.toml)
   - **Startup silent check** (`Layout.tsx`): on launch, if a newer version is
     available the modal opens automatically; otherwise it stays silent.
 - **Config:** `apps/desktop/tauri.conf.json` →
-  - `plugins.updater.endpoints` = `https://github.com/nomifun/nomifun-desktop/releases/latest/download/latest.json`
+  - Primary endpoint = CrabNebula dynamic Tauri endpoint.
+  - Secondary endpoint = GitHub Releases `latest.json`.
   - `plugins.updater.pubkey` = the project updater public key (committed; safe).
+- **Timeout and fallback:** metadata checks are bounded to eight seconds. The
+  native download command retries GitHub explicitly when a package selected
+  from a non-GitHub endpoint fails to download or verify. The retry must select
+  the exact version requested by the renderer.
 - **Permissions:** `apps/desktop/capabilities/default.json` grants the renderer
   `updater:allow-check` and `process:default` (relaunch/exit). Raw updater
   download/install permissions are intentionally absent; the version-bound Rust
@@ -103,11 +111,13 @@ $env:WINDOWS_CERTIFICATE_THUMBPRINT = "A1B2C3..."
 bun run build:win --signed --config apps/desktop/tauri.updater.conf.json
 ```
 
-## Generating `latest.json`
+## Generating the GitHub fallback `latest.json`
 
 `bun run make:latest` scans `target/` for this machine's updater artifacts + their
 `.sig` files, derives the `<os>-<arch>` platform keys, and **merges** them into
-`apps/desktop/updater/latest.json` (preserving entries built on other machines):
+`apps/desktop/updater/latest.json` (preserving entries built on other machines).
+This file serves GitHub fallback clients and is also the local source of truth
+used by the CrabNebula upload helper:
 
 ```bash
 bun run make:latest                     # version from Cargo.toml, notes from CHANGELOG
@@ -125,25 +135,67 @@ updater package for the manifest and still leaves the other installers available
 for upload. On Linux, the updater entry prefers `.AppImage`; `.deb` and `.rpm`
 are manual download assets.
 
+## CrabNebula Cloud
+
+Create the CrabNebula application and API key once, then place `CN_API_KEY` and
+optionally `CN_APP` in the gitignored
+`apps/desktop/signing/.env.release`. Do **not** run `cn bootstrap` against this
+existing application: it may replace the updater key/configuration, which would
+strand already-installed clients.
+
+The repository helper wraps the official `cn` CLI:
+
+```bash
+# After choosing/bumping the version, create one hidden draft and record its ID.
+bun run release:cloud -- draft --version <version> --notes-file notes.md
+
+# Run on each platform after build + make:latest. Pass the same release ID.
+bun run release:cloud -- upload --release-id <release-id>
+
+# Publish only after every shipped platform is present.
+bun run release:cloud -- publish --release-id <release-id>
+bun run release:cloud -- verify
+```
+
+`upload` only accepts a local updater artifact when its adjacent `.sig` exactly
+matches the signature already merged into `latest.json`. Windows NSIS and Linux
+AppImage packages also become public manual downloads; DMG/DEB/RPM files found
+in `dist/desktop/` are uploaded as manual installers. The helper rejects a
+stale `latest.json` whose version does not match the release version.
+
 ## Releasing
 
-1. Build signed updater artifacts on each platform (above).
-2. `bun run make:latest` on each, merging into one `latest.json`.
-3. Create a GitHub Release tagged `v<version>`.
-4. Upload **all** manual installers, updater packages, updater `.sig` files, and
-   `latest.json` as release assets. For macOS this means both:
+1. Create one CrabNebula release draft and share its release ID between build
+   machines.
+2. Build signed updater artifacts on each platform.
+3. Run `bun run make:latest` on each, merging into one `latest.json`.
+4. Upload each platform to the hidden CrabNebula draft with
+   `bun run release:cloud -- upload --release-id <id>`.
+5. After all shipped platforms are present, publish CrabNebula and run
+   `bun run release:cloud -- verify`.
+6. Create/update the matching GitHub Release and upload **all** manual
+   installers, updater packages, updater `.sig` files, and `latest.json`. For
+   macOS this means both:
    - `dist/desktop/NomiFun_<version>_universal.dmg` for manual install.
    - `target/universal-apple-darwin/release/bundle/macos/NomiFun.app.tar.gz`
      plus `NomiFun.app.tar.gz.sig` for auto-update.
    For Windows, the updater `.exe` is also the normal manual installer; upload
    any `.msi` only if the build generated one.
-5. The endpoint `releases/latest/download/latest.json` resolves to the newest
-   release automatically — clients pick up the update on their next check.
+7. Verify the GitHub `latest.json` version, platform set, and signatures match
+   CrabNebula.
+
+The first build containing the CrabNebula endpoint must still be published to
+GitHub. Existing installations have the old GitHub-only endpoint embedded, so
+they need one GitHub update (or one manual CrabNebula install) before subsequent
+checks use CrabNebula.
 
 ## Safety checklist
 
 - Private updater key stored only in your release secret store; never committed.
 - `plugins.updater.pubkey` matches the private key used to sign.
-- `plugins.updater.endpoints` is HTTPS (GitHub Releases).
+- CrabNebula is fully uploaded and published before announcing the GitHub
+  release to users.
+- CrabNebula and GitHub contain the same version, artifact bytes, and signatures.
+- `plugins.updater.endpoints` contains HTTPS CrabNebula primary + GitHub fallback.
 - Every shipped `<os>-<arch>` has a `latest.json` entry with the exact `.sig` content.
 - OS code signing / notarization handled separately per platform.

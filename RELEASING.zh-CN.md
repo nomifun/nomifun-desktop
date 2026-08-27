@@ -6,7 +6,7 @@
 
 桌面发版有两类产物：
 
-- **手动安装包**：用户从 GitHub Releases 下载后自己安装，例如 macOS `.dmg`、Windows `.exe` / `.msi`、Linux `.AppImage` / `.deb` / `.rpm`。
+- **手动安装包**：优先由 CrabNebula Cloud 分发，GitHub Releases 作为备用和历史归档，例如 macOS `.dmg`、Windows `.exe` / `.msi`、Linux `.AppImage` / `.deb` / `.rpm`。
 - **自动更新产物**：Tauri updater 使用的包、对应 `.sig` 签名、以及合并后的 `latest.json`。
 
 自动更新签名和系统代码签名不是一回事：
@@ -14,6 +14,25 @@
 - `TAURI_SIGNING_PRIVATE_KEY` 只用于 Tauri updater 验签，证明自动更新包没有被篡改。
 - macOS Developer ID / 公证、Windows Authenticode 用于系统信任，影响 Gatekeeper、SmartScreen、未知发布者提示。
 - Windows 当前没有 Authenticode 签名时，自动更新验签仍可工作，但手动安装包会有未知发布者 / SmartScreen 风险。
+
+## 桌面分发策略
+
+桌面端以 **CrabNebula Cloud 为更新与下载主源**，以 **GitHub Releases 为
+兜底和历史归档**。两边必须发布同一版本、相同安装包和相同 `.sig`。
+
+多平台构建期间，CrabNebula Release 保持草稿状态：
+
+```bash
+bun run release:cloud -- draft --version "$VERSION" --notes-file notes.md
+bun run release:cloud -- upload --release-id <release-id>  # 每个平台构建机执行
+bun run release:cloud -- publish --release-id <release-id>
+bun run release:cloud -- verify
+```
+
+`CN_API_KEY`、`CN_APP` 和可选的 `CN_RELEASE_ID` 写入已被 gitignore 的
+`apps/desktop/signing/.env.release`。不要更换现有 Tauri updater 私钥。
+端点兜底、安装包重试和旧客户端迁移细节见
+`apps/desktop/updater/README.zh-CN.md`。
 
 ## 版本号
 
