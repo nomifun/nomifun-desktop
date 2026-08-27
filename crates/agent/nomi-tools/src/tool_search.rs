@@ -11,6 +11,68 @@ use crate::{
 
 const MIN_INEXACT_QUERY_CHARS: usize = 3;
 
+fn projected_match(name: &str, description: &str) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "activated": true
+    })
+}
+
+/// Project a persisted ToolSearch success payload onto the schema-free result
+/// contract used today.
+///
+/// Older sessions contain each matched tool's complete JSON Schema under
+/// `parameters`. Replaying that data inside Gemini `functionResponse.response`
+/// makes `$ref` look like a multimodal attachment reference. This parser is
+/// intentionally strict: it accepts only the exact legacy array shape or the
+/// exact current shape, never arbitrary tool output that happens to contain a
+/// `parameters` field. Current payloads are returned byte-for-byte, making the
+/// operation idempotent.
+pub fn project_legacy_tool_search_result(content: &str) -> Option<String> {
+    let entries = serde_json::from_str::<Value>(content).ok()?;
+    let entries = entries.as_array()?;
+    if entries.is_empty() || entries.len() > MAX_DEFERRED_SEARCH_MATCHES {
+        return None;
+    }
+
+    let all_current = entries.iter().all(|entry| {
+        let Some(entry) = entry.as_object() else {
+            return false;
+        };
+        entry.len() == 3
+            && entry.get("name").and_then(Value::as_str).is_some_and(|name| {
+                !name.is_empty() && name.trim() == name
+            })
+            && entry.get("description").is_some_and(Value::is_string)
+            && entry.get("activated") == Some(&Value::Bool(true))
+    });
+    if all_current {
+        return Some(content.to_owned());
+    }
+
+    let mut projected = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let entry = entry.as_object()?;
+        if entry.len() != 3
+            || !entry.contains_key("name")
+            || !entry.contains_key("description")
+            || !entry.contains_key("parameters")
+            || !entry.get("parameters").is_some_and(Value::is_object)
+        {
+            return None;
+        }
+        let name = entry.get("name")?.as_str()?;
+        if name.is_empty() || name.trim() != name {
+            return None;
+        }
+        let description = entry.get("description")?.as_str()?;
+        projected.push(projected_match(name, description));
+    }
+
+    serde_json::to_string_pretty(&projected).ok()
+}
+
 /// Built-in tool that searches for deferred tools and activates their full
 /// schemas for subsequent provider turns.
 /// Core tool (never deferred itself) — always available to the LLM.
@@ -90,13 +152,7 @@ impl Tool for ToolSearchTool {
 
         let matches: Vec<Value> = matched_defs
             .into_iter()
-            .map(|d| {
-                json!({
-                    "name": d.name,
-                    "description": d.description,
-                    "parameters": d.input_schema
-                })
-            })
+            .map(|definition| projected_match(&definition.name, &definition.description))
             .collect();
 
         debug_assert!(matches.len() <= MAX_DEFERRED_SEARCH_MATCHES);
@@ -227,9 +283,12 @@ mod tests {
             .execute(json!({"query": "AgentDelegateTool"}))
             .await;
         assert!(!result.is_error);
-        assert!(result.content.contains("AgentDelegateTool"));
-        assert!(result.content.contains("Delegate work to an Agent"));
-        assert!(result.content.contains("parameters"));
+        let matches: Vec<Value> = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["name"], "AgentDelegateTool");
+        assert_eq!(matches[0]["description"], "Delegate work to an Agent");
+        assert_eq!(matches[0]["activated"], true);
+        assert!(matches[0].get("parameters").is_none());
         assert!(state.is_activated("AgentDelegateTool"));
         assert!(!state.is_activated("EnterPlanMode"));
     }
@@ -459,7 +518,12 @@ mod tests {
         let result = search.execute(json!({"query": "DynamicDeferred"})).await;
 
         assert!(!result.is_error);
-        assert!(result.content.contains("required_value"));
+        let matches: Vec<Value> = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["name"], "DynamicDeferred");
+        assert_eq!(matches[0]["activated"], true);
+        assert!(matches[0].get("parameters").is_none());
+        assert!(!result.content.contains("required_value"));
         assert!(state.is_activated("DynamicDeferred"));
         let definition = registry
             .to_tool_defs()
@@ -468,5 +532,56 @@ mod tests {
             .unwrap();
         assert!(!definition.deferred);
         assert_eq!(definition.input_schema["required"][0], "required_value");
+    }
+
+    #[test]
+    fn legacy_result_projection_is_strict_schema_free_and_idempotent() {
+        let legacy = serde_json::to_string_pretty(&json!([{
+            "name": "DeferredModelTool",
+            "description": "Choose a provider and model",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "model": {"$ref": "#/$defs/ModelRefParam"}
+                },
+                "$defs": {
+                    "ModelRefParam": {
+                        "type": "object",
+                        "properties": {"model": {"type": "string"}}
+                    }
+                }
+            }
+        }]))
+        .unwrap();
+
+        let projected = project_legacy_tool_search_result(&legacy).unwrap();
+        let matches: Vec<Value> = serde_json::from_str(&projected).unwrap();
+        assert_eq!(matches, vec![json!({
+            "name": "DeferredModelTool",
+            "description": "Choose a provider and model",
+            "activated": true
+        })]);
+        assert!(!projected.contains("parameters"));
+        assert!(!projected.contains("$ref"));
+        assert!(!projected.contains("$defs"));
+        assert_eq!(
+            project_legacy_tool_search_result(&projected).as_deref(),
+            Some(projected.as_str())
+        );
+    }
+
+    #[test]
+    fn legacy_result_projection_rejects_non_tool_search_shapes() {
+        for content in [
+            r##"{"name":"not-an-array","parameters":{"$ref":"#/$defs/X"}}"##,
+            r##"[{"name":"Tool","description":"desc","parameters":{},"extra":true}]"##,
+            r##"[{"name":" Tool ","description":"desc","parameters":{}}]"##,
+            r##"[{"name":"Tool","description":"desc","activated":false}]"##,
+        ] {
+            assert!(
+                project_legacy_tool_search_result(content).is_none(),
+                "unexpectedly projected {content}"
+            );
+        }
     }
 }

@@ -25,6 +25,34 @@ const MAX_DOUBLE_ENCODED_TOOL_ARGUMENT_BYTES: usize = 512 * 1024;
 const MAX_PROVIDER_ERROR_BODY_BYTES: usize = 16 * 1024;
 const PROVIDER_ERROR_BODY_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const TRUNCATED_PROVIDER_ERROR_BODY: &str = "\n[provider error body truncated]";
+pub(crate) const LITERAL_JSON_TOOL_RESULT_PREFIX: &str =
+    "Literal JSON tool result (`$ref` keys below are data, not media references):\n";
+
+/// Text-wire providers are allowed to carry arbitrary tool output strings, but
+/// some compatibility gateways JSON-decode those strings before translating
+/// them to a native Gemini `functionResponse`. Keep structural `$ref` data
+/// opaque across that boundary while leaving all ordinary text and JSON exactly
+/// unchanged.
+pub(crate) fn compatibility_gateway_safe_tool_result(content: &str) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(content) else {
+        return content.to_owned();
+    };
+    if contains_structured_json_ref(&value) {
+        format!("{LITERAL_JSON_TOOL_RESULT_PREFIX}{content}")
+    } else {
+        content.to_owned()
+    }
+}
+
+fn contains_structured_json_ref(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            object.contains_key("$ref") || object.values().any(contains_structured_json_ref)
+        }
+        Value::Array(items) => items.iter().any(contains_structured_json_ref),
+        _ => false,
+    }
+}
 
 fn merge_json_value(target: &mut Value, incoming: &Value) {
     match (target, incoming) {

@@ -553,6 +553,9 @@ mod tests {
         // 非 provider 故障:用户取消 / 会话忙 等不应触发转移。
         assert!(!is_provider_fault(AgentErrorCode::UserAgentNotInstalled));
         assert!(!is_provider_fault(AgentErrorCode::NomifunConversationBusy));
+        assert!(!is_provider_fault(
+            AgentErrorCode::NomifunToolResultEncodingError
+        ));
     }
 
     #[test]
