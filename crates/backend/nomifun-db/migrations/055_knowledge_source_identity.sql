@@ -151,55 +151,12 @@ CREATE TABLE knowledge_source_items (
                                       AND last_published_hash NOT GLOB '*[^0-9a-f]*'
                                   )
                               ),
-    pending_published_hash    TEXT
-                              CHECK (
-                                  pending_published_hash IS NULL
-                                  OR (
-                                      length(pending_published_hash) = 64
-                                      AND lower(pending_published_hash) = pending_published_hash
-                                      AND pending_published_hash NOT GLOB '*[^0-9a-f]*'
-                                  )
-                              ),
-    pending_final_url         TEXT
-                              CHECK (
-                                  pending_final_url IS NULL
-                                  OR (
-                                      length(pending_final_url) BETWEEN 1 AND 8192
-                                      AND trim(pending_final_url) = pending_final_url
-                                      AND instr(pending_final_url, char(0)) = 0
-                                  )
-                              ),
-    pending_title             TEXT
-                              CHECK (
-                                  pending_title IS NULL
-                                  OR (
-                                      length(pending_title) BETWEEN 1 AND 1024
-                                      AND trim(pending_title) = pending_title
-                                      AND instr(pending_title, char(0)) = 0
-                                  )
-                              ),
-    pending_publication_at    INTEGER
-                              CHECK (
-                                  pending_publication_at IS NULL
-                                  OR pending_publication_at >= 0
-                              ),
     removed_at                INTEGER,
     created_at                INTEGER NOT NULL CHECK (created_at >= 0),
     updated_at                INTEGER NOT NULL CHECK (updated_at >= created_at),
     CHECK (removed_at IS NULL OR removed_at >= created_at),
     CHECK (state <> 'removed' OR sync_status <> 'syncing'),
     CHECK (sync_status <> 'syncing' OR last_attempt_at IS NOT NULL),
-    CHECK (
-        (pending_published_hash IS NULL
-            AND pending_final_url IS NULL
-            AND pending_title IS NULL
-            AND pending_publication_at IS NULL)
-        OR
-        (pending_published_hash IS NOT NULL
-            AND pending_publication_at IS NOT NULL
-            AND state = 'active'
-            AND sync_status = 'syncing')
-    ),
     CHECK (
         (state = 'removed' AND removed_at IS NOT NULL)
         OR (state <> 'removed' AND removed_at IS NULL)

@@ -4,7 +4,11 @@ use nomifun_db::{
     init_database, init_database_memory, init_database_memory_with_owner,
     inspect_supported_migration_lineage,
 };
+use sha2::{Digest, Sha384};
+use sqlx::migrate::{Migrate, Migrator};
 use sqlx::Row;
+
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 const BASELINE: &str = include_str!("../migrations/001_v3_baseline.sql");
 const IDMM_ACTION_RESERVATIONS: &str =
@@ -19,6 +23,10 @@ const CONVERSATION_RECEIPT_PROJECTIONS: &str =
     include_str!("../migrations/006_conversation_receipt_projections.sql");
 const TERMINAL_TURN_ADMISSIONS: &str =
     include_str!("../migrations/007_terminal_turn_admissions.sql");
+const KNOWLEDGE_SOURCE_IDENTITY: &str =
+    include_str!("../migrations/055_knowledge_source_identity.sql");
+const PUBLISHED_KNOWLEDGE_SOURCE_IDENTITY_CHECKSUM: &str =
+    "08567374a7c524c9550ac3cb4dbd4043ca485481457c23cc84484389a86867b00637db9182061029743f4e9f8530f8a1";
 const CONVERSATION_TURN_AUTHORITY: &str =
     include_str!("../migrations/008_conversation_turn_authority.sql");
 const REQUIREMENT_CLAIM_CAPABILITIES: &str =
@@ -50,6 +58,37 @@ fn sql_tokens(sql: &str) -> Vec<String> {
         .filter(|token| !token.is_empty())
         .map(str::to_ascii_uppercase)
         .collect()
+}
+
+async fn migrate_through(pool: &sqlx::SqlitePool, maximum_version: i64) {
+    let mut connection = pool.acquire().await.unwrap();
+    connection.ensure_migrations_table().await.unwrap();
+    let applied: std::collections::BTreeSet<i64> = connection
+        .list_applied_migrations()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|migration| migration.version)
+        .collect();
+    for migration in MIGRATOR.iter() {
+        if migration.version <= maximum_version && !applied.contains(&migration.version) {
+            connection.apply(migration).await.unwrap();
+        }
+    }
+}
+
+async fn create_v55_database(path: &std::path::Path) {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+    migrate_through(&pool, 55).await;
+    pool.close().await;
 }
 
 /// Two migration files sharing one version number brick every database open:
@@ -95,6 +134,203 @@ fn migration_file_versions_are_unique() {
         "migration versions must be unique; duplicates: {}",
         duplicates.join("; ")
     );
+}
+
+#[test]
+fn published_knowledge_source_identity_checksum_is_immutable() {
+    let checksum = Sha384::digest(KNOWLEDGE_SOURCE_IDENTITY.as_bytes());
+    assert_eq!(
+        hex::encode(checksum),
+        PUBLISHED_KNOWLEDGE_SOURCE_IDENTITY_CHECKSUM,
+        "migration 055 is published; new source-publication fields belong in migration 056"
+    );
+}
+
+#[tokio::test]
+async fn v55_prefix_is_read_only_supported_then_file_init_applies_v56() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("v55-prefix.db");
+    create_v55_database(&path).await;
+
+    let read_only = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(false)
+                .read_only(true),
+        )
+        .await
+        .unwrap();
+    let checksum_before: Vec<u8> =
+        sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 55")
+            .fetch_one(&read_only)
+            .await
+            .unwrap();
+    assert_eq!(
+        hex::encode(&checksum_before),
+        PUBLISHED_KNOWLEDGE_SOURCE_IDENTITY_CHECKSUM
+    );
+    assert_eq!(
+        inspect_supported_migration_lineage(&read_only)
+            .await
+            .unwrap(),
+        MigrationLineageStatus::UpgradeRequired
+    );
+    let checksum_after: Vec<u8> =
+        sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 55")
+            .fetch_one(&read_only)
+            .await
+            .unwrap();
+    assert_eq!(checksum_after, checksum_before, "read-only probe must not normalize metadata");
+    let pending_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('knowledge_source_items') \
+         WHERE name LIKE 'pending_%'",
+    )
+    .fetch_one(&read_only)
+    .await
+    .unwrap();
+    assert_eq!(pending_before, 0);
+    read_only.close().await;
+
+    let upgraded = init_database(&path).await.unwrap();
+    let latest: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+        .fetch_one(upgraded.pool())
+        .await
+        .unwrap();
+    assert_eq!(latest, 56);
+    let checksum_after_upgrade: Vec<u8> =
+        sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 55")
+            .fetch_one(upgraded.pool())
+            .await
+            .unwrap();
+    assert_eq!(checksum_after_upgrade, checksum_before);
+    let pending_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('knowledge_source_items') \
+         WHERE name IN (\
+             'pending_published_hash', 'pending_final_url', \
+             'pending_title', 'pending_publication_at'\
+         )",
+    )
+    .fetch_one(upgraded.pool())
+    .await
+    .unwrap();
+    assert_eq!(pending_after, 4);
+    upgraded.close().await;
+}
+
+#[tokio::test]
+async fn v55_unknown_checksum_fails_closed_without_applying_v56() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("v55-tampered-checksum.db");
+    create_v55_database(&path).await;
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(false),
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = 55")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let read_only = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(false)
+                .read_only(true),
+        )
+        .await
+        .unwrap();
+    assert!(inspect_supported_migration_lineage(&read_only).await.is_err());
+    read_only.close().await;
+    assert!(init_database(&path).await.is_err());
+
+    let verification = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(false)
+                .read_only(true),
+        )
+        .await
+        .unwrap();
+    let latest: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+        .fetch_one(&verification)
+        .await
+        .unwrap();
+    assert_eq!(latest, 55);
+    let checksum: Vec<u8> =
+        sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 55")
+            .fetch_one(&verification)
+            .await
+            .unwrap();
+    assert_eq!(checksum, vec![0]);
+    verification.close().await;
+}
+
+#[tokio::test]
+async fn v55_missing_base_source_schema_fails_closed_without_recording_v56() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("v55-missing-source-table.db");
+    create_v55_database(&path).await;
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(false),
+        )
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE knowledge_source_items")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let error = init_database(&path)
+        .await
+        .expect_err("migration 056 must not manufacture a missing v55 parent table");
+    assert!(
+        error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("knowledge_source_items"),
+        "unexpected migration failure: {error}"
+    );
+    let verification = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(false)
+                .read_only(true),
+        )
+        .await
+        .unwrap();
+    let latest: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+        .fetch_one(&verification)
+        .await
+        .unwrap();
+    assert_eq!(latest, 55);
+    let source_items_exist: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema \
+         WHERE type = 'table' AND name = 'knowledge_source_items')",
+    )
+    .fetch_one(&verification)
+    .await
+    .unwrap();
+    assert!(!source_items_exist);
+    verification.close().await;
 }
 
 #[tokio::test]
@@ -161,7 +397,7 @@ async fn published_provider_output_limit_lineage_upgrades_in_place() {
         .fetch_one(upgraded.pool())
         .await
         .unwrap();
-    assert_eq!(latest, 55);
+    assert_eq!(latest, 56);
     let creative_studio_tables: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_schema \
          WHERE type = 'table' AND name IN (\

@@ -178,6 +178,27 @@ async fn migration_adds_normalized_source_tables_without_rewriting_legacy_extra(
     .await
     .unwrap();
     assert_eq!(foreign_keys, 0);
+    let pending_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('knowledge_source_items') \
+         WHERE name LIKE 'pending_%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending_before, 0, "v55 is the immutable base source schema");
+
+    migrate_through(&pool, 56).await;
+    let pending_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('knowledge_source_items') \
+         WHERE name IN (\
+             'pending_published_hash', 'pending_final_url', \
+             'pending_title', 'pending_publication_at'\
+         )",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending_after, 4);
 }
 
 #[tokio::test]
