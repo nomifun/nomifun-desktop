@@ -426,6 +426,39 @@ body[arco-theme='dark'] .sider-soft-popover .arco-popover-arrow {
   background: var(--color-fill-2) !important;
 }
 
+/* Primary add-content popover: the panel itself is the visual bubble, so Arco's
+   default inner padding/chrome must not create a second nested card. */
+.knowledge-add-popover .arco-popover-content {
+  overflow: hidden;
+  padding: 0 !important;
+  border: 1px solid var(--color-border-2) !important;
+  border-radius: 13px !important;
+  background: var(--color-bg-2) !important;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.2) !important;
+}
+
+.knowledge-add-popover .arco-popover-content-inner {
+  padding: 0 !important;
+}
+
+.knowledge-add-popover .arco-popover-arrow {
+  border-color: var(--color-border-2) !important;
+  background: var(--color-bg-2) !important;
+}
+
+.knowledge-add-modal-input.arco-input-wrapper {
+  border-color: transparent !important;
+  border-radius: 10px !important;
+  background: var(--color-fill-1) !important;
+}
+
+.knowledge-add-modal-input.arco-input-wrapper:hover,
+.knowledge-add-modal-input.arco-input-focus {
+  border-color: rgba(var(--primary-6), 0.32) !important;
+  background: var(--color-fill-2) !important;
+  box-shadow: 0 0 0 3px rgba(var(--primary-6), 0.1) !important;
+}
+
 .knowledge-doc-model-trigger.arco-btn {
   max-width: 100%;
   height: 28px;

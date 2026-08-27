@@ -7,7 +7,7 @@ use axum::routing::{get, post};
 
 use nomifun_api_types::{
     ApiResponse, CreateKnowledgeTagRequest, KnowledgeRetrievalConfig, KnowledgeSource,
-    KnowledgeTag, UpdateKnowledgeTagRequest,
+    KnowledgeSourceEntry, KnowledgeTag, UpdateKnowledgeTagRequest,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_common::{AppError, KnowledgeBaseId};
@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::export::{self, ExportSummary, ImportSummary};
 use crate::service::{
-    AutogenOutcome, ConsumerInfo, KbFileContent, KbFileEntry, KbTreeEntry, KnowledgeBaseInfo,
-    KnowledgeBinding, KnowledgeSearchHit, RefreshSourceSummary,
+    AppendUrlSourceSummary, AutogenOutcome, ConsumerInfo, FolderImportSummary, KbFileContent,
+    KbFileEntry, KbTreeEntry, KnowledgeBaseInfo, KnowledgeBinding, KnowledgeSearchHit,
+    RefreshSourceSummary,
 };
 use crate::state::KnowledgeRouterState;
 
@@ -57,6 +58,10 @@ pub fn knowledge_routes(state: KnowledgeRouterState) -> Router {
         .route(
             "/api/knowledge/bases/{knowledge_base_id}/files",
             get(list_files),
+        )
+        .route(
+            "/api/knowledge/bases/{knowledge_base_id}/content",
+            post(add_content),
         )
         .route(
             "/api/knowledge/bases/{knowledge_base_id}/tree",
@@ -241,6 +246,105 @@ async fn list_files(
     Ok(Json(ApiResponse::ok(
         state.service.list_files(knowledge_base_id.as_str()).await?,
     )))
+}
+
+/// One append-only contract for every user-facing "add knowledge" method.
+/// Editor saves intentionally stay on PUT /file because they overwrite an
+/// existing document; this endpoint's document variant is no-clobber.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum AddContentRequest {
+    Document { path: String, content: String },
+    LocalFolder { source_path: String },
+    Web { entries: Vec<KnowledgeSourceEntry> },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AddContentResponse {
+    Document {
+        path: String,
+    },
+    LocalFolder {
+        target_directory: String,
+        imported: usize,
+        skipped: usize,
+        total_size: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        first_file: Option<String>,
+    },
+    Web {
+        added: usize,
+        duplicates: usize,
+        fetched: usize,
+        failed: usize,
+        errors: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_fetched_at: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        first_file: Option<String>,
+    },
+}
+
+async fn add_content(
+    State(state): State<KnowledgeRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(knowledge_base_id): Path<KnowledgeBaseId>,
+    body: Result<Json<AddContentRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<AddContentResponse>>, AppError> {
+    let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let result = match req {
+        AddContentRequest::Document { path, content } => {
+            let path = state
+                .service
+                .create_document(knowledge_base_id.as_str(), &path, &content)
+                .await?;
+            AddContentResponse::Document { path }
+        }
+        AddContentRequest::LocalFolder { source_path } => {
+            let FolderImportSummary {
+                target_directory,
+                imported,
+                skipped,
+                total_size,
+                first_file,
+            } = state
+                .service
+                .import_markdown_folder(knowledge_base_id.as_str(), &source_path)
+                .await?;
+            AddContentResponse::LocalFolder {
+                target_directory,
+                imported,
+                skipped,
+                total_size,
+                first_file,
+            }
+        }
+        AddContentRequest::Web { entries } => {
+            let AppendUrlSourceSummary {
+                added,
+                duplicates,
+                fetched,
+                failed,
+                errors,
+                last_fetched_at,
+                first_file,
+            } = state
+                .service
+                .append_url_entries(knowledge_base_id.as_str(), entries)
+                .await?;
+            AddContentResponse::Web {
+                added,
+                duplicates,
+                fetched,
+                failed,
+                errors,
+                last_fetched_at,
+                first_file,
+            }
+        }
+    };
+    Ok(Json(ApiResponse::ok(result)))
 }
 
 #[derive(Deserialize, Default)]

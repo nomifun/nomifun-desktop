@@ -110,6 +110,12 @@ pub const MAX_SOURCE_ENTRIES: usize = 16;
 /// How many source entries are fetched concurrently per batch.
 const SOURCE_FETCH_CONCURRENCY: usize = 4;
 
+/// Folder imports are staged in memory before publication so an unreadable or
+/// oversized source never leaves a half-copied tree in a knowledge base.
+const MAX_FOLDER_IMPORT_FILES: usize = 1_000;
+const MAX_FOLDER_IMPORT_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_FOLDER_IMPORT_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+
 /// A knowledge base plus directory statistics, as returned by the API.
 #[derive(Debug, Clone, Serialize)]
 pub struct KnowledgeBaseInfo {
@@ -508,6 +514,35 @@ pub struct RefreshSourceSummary {
     pub last_fetched_at: Option<TimestampMs>,
 }
 
+/// Result of copying a local Markdown folder into an existing knowledge base.
+/// The source directory is never modified; a collision-free top-level folder
+/// is allocated inside the destination base and the source tree is preserved.
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderImportSummary {
+    pub target_directory: String,
+    pub imported: usize,
+    pub skipped: usize,
+    pub total_size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_file: Option<String>,
+}
+
+/// Result of appending URL entries to an existing base and snapshotting only
+/// the newly accepted entries. Existing entries are never re-fetched by this
+/// operation, and duplicates are reported instead of being stored twice.
+#[derive(Debug, Clone, Serialize)]
+pub struct AppendUrlSourceSummary {
+    pub added: usize,
+    pub duplicates: usize,
+    pub fetched: usize,
+    pub failed: usize,
+    pub errors: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_fetched_at: Option<TimestampMs>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_file: Option<String>,
+}
+
 /// Per-file cached content for `search_bases`, keyed by absolute path + mtime.
 struct CachedDoc {
     mtime_ms: u64,
@@ -635,9 +670,22 @@ struct PreparedSourceFile {
     content: String,
 }
 
+struct PreparedFolderImportFile {
+    rel_path: String,
+    content: String,
+}
+
+struct PreparedFolderImport {
+    source_name: String,
+    files: Vec<PreparedFolderImportFile>,
+    skipped: usize,
+    total_size: u64,
+}
+
 struct SourcePublicationOutcome {
     fetched: usize,
     errors: Vec<String>,
+    published_paths: Vec<String>,
     persisted_stamp: Option<TimestampMs>,
     fatal_error: Option<AppError>,
 }
@@ -1454,6 +1502,111 @@ impl KnowledgeService {
         )
     }
 
+    /// Copy every portable UTF-8 Markdown document from `source_path` into a
+    /// collision-free top-level folder in an existing base. Source I/O is
+    /// completed and bounded before the destination tree writer is acquired;
+    /// publication is then all-or-rollback from the app's point of view.
+    pub async fn import_markdown_folder(
+        &self,
+        id: &str,
+        source_path: &str,
+    ) -> Result<FolderImportSummary, AppError> {
+        let initial = self.require_base(id).await?;
+        let destination_root = PathBuf::from(&initial.root_path);
+        let source_path = PathBuf::from(source_path.trim());
+        let prepared_destination = destination_root.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            prepare_folder_import(&source_path, &prepared_destination)
+        })
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("folder import preparation task failed: {error}"))
+        })??;
+
+        let imported = prepared.files.len();
+        let skipped = prepared.skipped;
+        let total_size = prepared.total_size;
+        let _tree_guard = self.acquire_document_tree_write_lock(&initial).await?;
+        let _base_guard = self.acquire_base_lifecycle_write_lock(&initial).await?;
+        let mut current = self.require_base(id).await?;
+        if current.root_path != initial.root_path {
+            return Err(AppError::Conflict(
+                "knowledge base root changed while folder import was being prepared; retry".into(),
+            ));
+        }
+        validate_knowledge_root_bounded(destination_root.clone()).await?;
+
+        let preferred_name = prepared.source_name.clone();
+        let allocation_root = destination_root.clone();
+        let (target_directory, target_path) = tokio::task::spawn_blocking(move || {
+            create_unique_import_directory(&allocation_root, &preferred_name)
+        })
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("folder import allocation task failed: {error}"))
+        })??;
+
+        let mut published_paths = Vec::with_capacity(imported);
+        let publish_result: Result<(), AppError> = async {
+            for file in prepared.files {
+                let rel_path = join_tree_rel_path(&target_directory, &file.rel_path);
+                let path = safe_md_path_bounded(
+                    destination_root.clone(),
+                    rel_path.clone(),
+                )
+                .await?;
+                write_text_atomic(&path, &file.content).await?;
+                self.invalidate_search_cache_path(&path);
+                published_paths.push(rel_path);
+            }
+            Ok(())
+        }
+        .await;
+
+        if let Err(error) = publish_result {
+            let cleanup_path = target_path.clone();
+            let cleanup = tokio::task::spawn_blocking(move || {
+                remove_tree_dir_no_follow(&cleanup_path)
+            })
+            .await
+            .map_err(|join_error| join_error.to_string())
+            .and_then(|result| result.map_err(|cleanup_error| cleanup_error.to_string()));
+            return match cleanup {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(AppError::Internal(format!(
+                    "folder import failed ({error}); partial import remains at {} because rollback failed: {cleanup_error}",
+                    target_path.display()
+                ))),
+            };
+        }
+
+        // File content is the source of truth. A timestamp write is useful for
+        // lists and events but must not turn a completed import into a reported
+        // failure if only metadata persistence is temporarily unavailable.
+        let previous_updated_at = current.updated_at;
+        current.updated_at = now_ms();
+        if let Err(error) = self.repo.update_base(&current).await {
+            current.updated_at = previous_updated_at;
+            tracing::warn!(
+                kb_id = %current.knowledge_base_id,
+                %error,
+                "folder import completed but knowledge timestamp update failed"
+            );
+        }
+        drop(_base_guard);
+        drop(_tree_guard);
+        let info = self.row_to_info(current).await?;
+        self.emitter.emit_base_updated(&info);
+
+        Ok(FolderImportSummary {
+            target_directory,
+            imported,
+            skipped,
+            total_size,
+            first_file: published_paths.into_iter().next(),
+        })
+    }
+
     pub async fn create_folder(&self, id: &str, rel_path: &str) -> Result<KbTreeEntry, AppError> {
         let row = self.require_base(id).await?;
         let _tree_guard =
@@ -1569,6 +1722,50 @@ impl KnowledgeService {
             content,
         )
             .await
+    }
+
+    /// Create a Markdown document without replacing an existing portable path
+    /// alias. The legacy write endpoint remains overwrite-capable for editor
+    /// saves; explicit "new document" flows use this no-clobber contract.
+    pub async fn create_document(
+        &self,
+        id: &str,
+        rel_path: &str,
+        content: &str,
+    ) -> Result<String, AppError> {
+        let kb_id = KnowledgeBaseId::parse(id)
+            .map_err(|error| AppError::BadRequest(format!("invalid knowledge base id: {error}")))?;
+        let row = self.require_base(id).await?;
+        let _tree_guard = self.acquire_document_tree_read_lock(&row).await?;
+        let root = PathBuf::from(&row.root_path);
+        let resolved = resolve_portable_md_path(root.clone(), rel_path.to_owned()).await?;
+        let lock_path = portable_turn_writeback_lock_path(&deconfuse_rel_path(&resolved.rel_path));
+        let _target_guard = self
+            .acquire_turn_writeback_target_lock(&kb_id, &lock_path)
+            .await?;
+        let resolved = resolve_portable_md_path(root, resolved.rel_path).await?;
+        if resolved.exists {
+            return Err(AppError::Conflict(format!(
+                "knowledge document already exists: {}",
+                resolved.rel_path
+            )));
+        }
+        self.write_file_if_absent(
+            id,
+            &resolved.rel_path,
+            &resolved.rel_path,
+            content,
+        )
+        .await?;
+        drop(_target_guard);
+        drop(_tree_guard);
+
+        // Keep cards/detail headers fresh without making the already-created
+        // document disappear behind a secondary metadata failure.
+        if let Err(error) = self.update_base(id, None, None, None).await {
+            tracing::warn!(kb_id = id, %error, "document created but knowledge timestamp update failed");
+        }
+        Ok(resolved.rel_path)
     }
 
     /// Create a markdown file only when no portable path alias exists.
@@ -2562,6 +2759,130 @@ impl KnowledgeService {
         })
     }
 
+    /// Append URL entries to an existing base and snapshot only the newly
+    /// accepted entries. The source mutation and file publication share the
+    /// same optimistic source-state boundary as a regular refresh, so a
+    /// concurrent source edit wins with a retryable conflict instead of being
+    /// overwritten by stale UI state.
+    pub async fn append_url_entries(
+        &self,
+        kb_id: &str,
+        entries: Vec<KnowledgeSourceEntry>,
+    ) -> Result<AppendUrlSourceSummary, AppError> {
+        if entries.is_empty() {
+            return Err(AppError::BadRequest(
+                "at least one URL entry is required".into(),
+            ));
+        }
+        if entries.len() > MAX_SOURCE_ENTRIES {
+            return Err(AppError::BadRequest(format!(
+                "URL entry batch exceeds the limit of {MAX_SOURCE_ENTRIES}"
+            )));
+        }
+
+        let mut row = self.require_base(kb_id).await?;
+        let stored_source = source_from_extra(&row.extra)
+            .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?;
+        let mut source = match stored_source {
+            Some(source) => {
+                validate_source(&source)?;
+                source
+            }
+            None => KnowledgeSource {
+                kind: "url".into(),
+                mode: KnowledgeSourceMode::Snapshot,
+                entries: Vec::new(),
+                last_fetched_at: None,
+            },
+        };
+
+        let mut identities = HashSet::new();
+        for entry in &source.entries {
+            let parsed = Url::parse(entry.url.trim()).map_err(|error| {
+                AppError::Internal(format!(
+                    "stored knowledge source URL is invalid ({}): {error}",
+                    entry.url
+                ))
+            })?;
+            identities.insert(parsed.to_string());
+        }
+
+        let mut accepted = Vec::new();
+        let mut duplicates = 0usize;
+        for mut entry in entries {
+            entry.url = entry.url.trim().to_owned();
+            entry.title = entry
+                .title
+                .take()
+                .map(|title| title.trim().to_owned())
+                .filter(|title| !title.is_empty());
+            let parsed = Url::parse(&entry.url).map_err(|error| {
+                AppError::BadRequest(format!(
+                    "invalid source URL {}: {error}",
+                    entry.url
+                ))
+            })?;
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return Err(AppError::BadRequest(format!(
+                    "only http(s) source URLs are supported: {}",
+                    entry.url
+                )));
+            }
+            if !identities.insert(parsed.to_string()) {
+                duplicates += 1;
+                continue;
+            }
+            accepted.push(entry);
+        }
+
+        if accepted.is_empty() {
+            return Ok(AppendUrlSourceSummary {
+                added: 0,
+                duplicates,
+                fetched: 0,
+                failed: 0,
+                errors: Vec::new(),
+                last_fetched_at: source.last_fetched_at,
+                first_file: None,
+            });
+        }
+        if source.entries.len() + accepted.len() > MAX_SOURCE_ENTRIES {
+            return Err(AppError::BadRequest(format!(
+                "knowledge base URL sources are limited to {MAX_SOURCE_ENTRIES}; {} already configured, {} new after deduplication",
+                source.entries.len(),
+                accepted.len()
+            )));
+        }
+
+        let start_index = source.entries.len();
+        let added = accepted.len();
+        source.entries.extend(accepted);
+        validate_source(&source)?;
+
+        let (files, mut errors) = self
+            .prepare_source_snapshots_from(&mut source.entries, start_index)
+            .await;
+        let publication = self
+            .publish_prepared_url_source(&mut row, &mut source, files, false)
+            .await;
+        errors.extend(publication.errors);
+        if let Some(error) = publication.fatal_error {
+            return Err(error);
+        }
+
+        let info = self.row_to_info(row).await?;
+        self.emitter.emit_base_updated(&info);
+        Ok(AppendUrlSourceSummary {
+            added,
+            duplicates,
+            fetched: publication.fetched,
+            failed: errors.len(),
+            errors,
+            last_fetched_at: source.last_fetched_at,
+            first_file: publication.published_paths.into_iter().next(),
+        })
+    }
+
     /// Fetch every entry and prepare `{root}/snapshots/{slug}.md`
     /// (metadata header + markdown body) entirely in memory. Per-entry failures
     /// are collected, never fatal.
@@ -2577,7 +2898,21 @@ impl KnowledgeService {
         &self,
         entries: &mut [KnowledgeSourceEntry],
     ) -> (Vec<PreparedSourceFile>, Vec<String>) {
+        self.prepare_source_snapshots_from(entries, 0).await
+    }
+
+    /// Prepare only entries at and after `start_index`, while allocating
+    /// snapshot paths against the complete source list. This lets append
+    /// operations fetch only new URLs without changing any existing slug or
+    /// risking a same-slug overwrite.
+    async fn prepare_source_snapshots_from(
+        &self,
+        entries: &mut [KnowledgeSourceEntry],
+        start_index: usize,
+    ) -> (Vec<PreparedSourceFile>, Vec<String>) {
         let completer = self.completer();
+        let start_index = start_index.min(entries.len());
+        let snapshot_paths = source_snapshot_rel_paths(entries);
 
         // Phase 1 — fetch (and condense oversized pages) concurrently,
         // re-indexed by entry position. The futures own their URL (and are
@@ -2586,6 +2921,7 @@ impl KnowledgeService {
         let fetches: Vec<_> = entries
             .iter()
             .enumerate()
+            .skip(start_index)
             .map(|(idx, entry)| {
                 let url = entry.url.clone();
                 let rendered = entry.rendered;
@@ -2598,35 +2934,28 @@ impl KnowledgeService {
             .collect::<Vec<_>>()
             .await;
         let mut prepared: Vec<Option<Result<PreparedSnapshot, String>>> =
-            entries.iter().map(|_| None).collect();
+            std::iter::repeat_with(|| None).take(entries.len()).collect();
         for (idx, result) in results {
             prepared[idx] = Some(result);
         }
 
-        // Phase 2 — serial, in entry order.
-        let mut used_slugs: HashSet<String> = HashSet::new();
+        // Phase 2 — serial, in entry order. Slugs were reserved for every
+        // configured entry before any fetch completed, so a temporary failure
+        // cannot make later duplicate-slug paths shift between refreshes.
         let mut files = Vec::new();
         let mut errors: Vec<String> = Vec::new();
-        for (entry, result) in entries.iter_mut().zip(prepared) {
-            let page = match result.expect("every entry yields exactly one fetch result") {
+        for idx in start_index..entries.len() {
+            let entry = &mut entries[idx];
+            let page = match prepared[idx]
+                .take()
+                .expect("every selected entry yields exactly one fetch result")
+            {
                 Ok(page) => page,
                 Err(line) => {
                     errors.push(line);
                     continue;
                 }
             };
-
-            // Slug derives from the configured URL (stable across redirects);
-            // duplicate slugs within one batch get a numeric suffix.
-            let slug_base = Url::parse(entry.url.trim())
-                .map(|u| source_url::slug_for_url(&u))
-                .unwrap_or_else(|_| "page".into());
-            let mut slug = slug_base.clone();
-            let mut n = 2;
-            while !used_slugs.insert(slug.clone()) {
-                slug = format!("{slug_base}-{n}");
-                n += 1;
-            }
 
             if entry.title.as_deref().map(str::trim).filter(|t| !t.is_empty()).is_none()
                 && let Some(title) = &page.title
@@ -2636,10 +2965,8 @@ impl KnowledgeService {
 
             let fetched_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
             let content = source_url::snapshot_markdown(&entry.url, &fetched_at, entry.title.as_deref(), &page.body);
-            let rel_path =
-                format!("{}/{slug}.md", source_url::SNAPSHOT_REL_DIR);
             files.push(PreparedSourceFile {
-                rel_path,
+                rel_path: snapshot_paths[idx].clone(),
                 source_label: entry.url.clone(),
                 content,
             });
@@ -2785,6 +3112,7 @@ impl KnowledgeService {
         let mut outcome = SourcePublicationOutcome {
             fetched: 0,
             errors: Vec::new(),
+            published_paths: Vec::new(),
             persisted_stamp: previous_stamp,
             fatal_error: None,
         };
@@ -2819,6 +3147,7 @@ impl KnowledgeService {
         }
 
         for file in files {
+            let published_path = file.rel_path.clone();
             let path = match safe_md_path_bounded(
                 root.clone(),
                 file.rel_path.clone(),
@@ -2836,6 +3165,7 @@ impl KnowledgeService {
             match write_text_atomic(&path, &file.content).await {
                 Ok(()) => {
                     outcome.fetched += 1;
+                    outcome.published_paths.push(published_path);
                     self.invalidate_search_cache_path(&path);
                 }
                 Err(error) => {
@@ -4325,6 +4655,29 @@ fn validate_url_source(source: &KnowledgeSource) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Allocate deterministic snapshot paths for the complete ordered source.
+/// Reserve a slug even when that entry's current fetch fails; otherwise a
+/// later same-slug URL would move between `slug.md` and `slug-2.md` as network
+/// outcomes change, potentially overwriting the wrong page on an append.
+fn source_snapshot_rel_paths(entries: &[KnowledgeSourceEntry]) -> Vec<String> {
+    let mut used_slugs: HashSet<String> = HashSet::new();
+    entries
+        .iter()
+        .map(|entry| {
+            let slug_base = Url::parse(entry.url.trim())
+                .map(|url| source_url::slug_for_url(&url))
+                .unwrap_or_else(|_| "page".into());
+            let mut slug = slug_base.clone();
+            let mut suffix = 2;
+            while !used_slugs.insert(slug.clone()) {
+                slug = format!("{slug_base}-{suffix}");
+                suffix += 1;
+            }
+            format!("{}/{slug}.md", source_url::SNAPSHOT_REL_DIR)
+        })
+        .collect()
+}
+
 async fn ensure_snapshot_trash_dir(root: &Path) -> Result<PathBuf, AppError> {
     validate_knowledge_root_bounded(root.to_path_buf()).await?;
     let snapshots = root.join(source_url::SNAPSHOT_REL_DIR);
@@ -5678,6 +6031,249 @@ fn vault_walker(root: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
         .into_iter()
         .filter_entry(|e| !is_machinery_dir(e))
         .flatten()
+}
+
+fn prepare_folder_import(
+    requested_source: &Path,
+    destination_root: &Path,
+) -> Result<PreparedFolderImport, AppError> {
+    if !requested_source.is_absolute() {
+        return Err(AppError::BadRequest(
+            "folder import source_path must be absolute".into(),
+        ));
+    }
+    let requested_metadata = std::fs::symlink_metadata(requested_source).map_err(|error| {
+        AppError::BadRequest(format!(
+            "folder import source does not exist ({}): {error}",
+            requested_source.display()
+        ))
+    })?;
+    if !requested_metadata.is_dir()
+        || metadata_is_link_or_reparse(requested_source, &requested_metadata)
+    {
+        return Err(AppError::BadRequest(
+            "folder import source must be a real directory, not a symlink, junction, or reparse point"
+                .into(),
+        ));
+    }
+
+    let source_root = std::fs::canonicalize(requested_source)
+        .map(|path| nomifun_common::paths::simplified(&path))
+        .map_err(|error| {
+            AppError::BadRequest(format!(
+                "failed to resolve folder import source {}: {error}",
+                requested_source.display()
+            ))
+        })?;
+    validate_knowledge_root(&source_root)?;
+    let destination_root = std::fs::canonicalize(destination_root)
+        .map(|path| nomifun_common::paths::simplified(&path))
+        .map_err(|error| {
+            AppError::BadRequest(format!(
+                "failed to resolve knowledge destination {}: {error}",
+                destination_root.display()
+            ))
+        })?;
+    if root_identities_overlap(
+        &portable_absolute_path_identity(&source_root),
+        &portable_absolute_path_identity(&destination_root),
+    ) {
+        return Err(AppError::BadRequest(
+            "the imported folder and knowledge base root must not contain one another".into(),
+        ));
+    }
+
+    let raw_source_name = source_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            AppError::BadRequest("folder import source must have a Unicode name".into())
+        })?;
+    let source_name = sanitize_import_directory_name(raw_source_name);
+    let mut files = Vec::new();
+    let mut skipped = 0usize;
+    let mut total_size = 0u64;
+    let mut portable_paths = HashSet::new();
+
+    let walker = walkdir::WalkDir::new(&source_root)
+        .follow_links(false)
+        .follow_root_links(false)
+        .into_iter()
+        .filter_entry(|entry| !is_machinery_dir(entry));
+    for entry in walker {
+        let entry = entry.map_err(|error| {
+            AppError::BadRequest(format!(
+                "failed to scan imported folder {}: {error}",
+                source_root.display()
+            ))
+        })?;
+        if entry.depth() == 0 || entry.file_type().is_dir() {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
+            AppError::BadRequest(format!(
+                "failed to inspect imported entry {}: {error}",
+                entry.path().display()
+            ))
+        })?;
+        if metadata_is_link_or_reparse(entry.path(), &metadata)
+            || !metadata.is_file()
+            || !is_md(entry.path())
+        {
+            skipped += 1;
+            continue;
+        }
+        if files.len() >= MAX_FOLDER_IMPORT_FILES {
+            return Err(AppError::BadRequest(format!(
+                "folder import exceeds the limit of {MAX_FOLDER_IMPORT_FILES} Markdown files"
+            )));
+        }
+        if metadata.len() > MAX_FOLDER_IMPORT_FILE_BYTES {
+            return Err(AppError::BadRequest(format!(
+                "Markdown file exceeds the {} MB import limit: {}",
+                MAX_FOLDER_IMPORT_FILE_BYTES / 1024 / 1024,
+                entry.path().display()
+            )));
+        }
+        let relative = entry.path().strip_prefix(&source_root).map_err(|error| {
+            AppError::Internal(format!("failed to resolve imported Markdown path: {error}"))
+        })?;
+        let mut components = Vec::new();
+        for component in relative.components() {
+            let Component::Normal(component) = component else {
+                return Err(AppError::BadRequest(format!(
+                    "invalid imported Markdown path: {}",
+                    relative.display()
+                )));
+            };
+            let component = component.to_str().ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "imported Markdown path must be Unicode: {}",
+                    relative.display()
+                ))
+            })?;
+            validate_portable_path_component(component)?;
+            components.push(component.to_owned());
+        }
+        let rel_path = components.join("/");
+        let portable_identity = portable_writeback_path_identity(&rel_path);
+        if !portable_paths.insert(portable_identity) {
+            return Err(AppError::Conflict(format!(
+                "imported folder contains Markdown paths that alias across Windows, Linux, or macOS: {rel_path}"
+            )));
+        }
+        let bytes = std::fs::read(entry.path()).map_err(|error| {
+            AppError::BadRequest(format!(
+                "failed to read imported Markdown ({}): {error}",
+                entry.path().display()
+            ))
+        })?;
+        let actual_size = bytes.len() as u64;
+        if actual_size > MAX_FOLDER_IMPORT_FILE_BYTES {
+            return Err(AppError::BadRequest(format!(
+                "Markdown file grew beyond the {} MB import limit while being read: {}",
+                MAX_FOLDER_IMPORT_FILE_BYTES / 1024 / 1024,
+                entry.path().display()
+            )));
+        }
+        total_size = total_size
+            .checked_add(actual_size)
+            .ok_or_else(|| AppError::BadRequest("folder import size overflow".into()))?;
+        if total_size > MAX_FOLDER_IMPORT_TOTAL_BYTES {
+            return Err(AppError::BadRequest(format!(
+                "folder import exceeds the {} MB total limit",
+                MAX_FOLDER_IMPORT_TOTAL_BYTES / 1024 / 1024
+            )));
+        }
+        let content = String::from_utf8(bytes).map_err(|error| {
+            AppError::BadRequest(format!(
+                "imported Markdown must be valid UTF-8 ({}): {error}",
+                entry.path().display()
+            ))
+        })?;
+        files.push(PreparedFolderImportFile { rel_path, content });
+    }
+
+    files.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+    if files.is_empty() {
+        return Err(AppError::BadRequest(
+            "the selected folder contains no importable .md documents".into(),
+        ));
+    }
+    Ok(PreparedFolderImport {
+        source_name,
+        files,
+        skipped,
+        total_size,
+    })
+}
+
+fn sanitize_import_directory_name(raw_name: &str) -> String {
+    let cleaned = raw_name
+        .chars()
+        .map(|character| match character {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            character if character.is_control() => '_',
+            character => character,
+        })
+        .collect::<String>();
+    let cleaned = cleaned.trim().trim_end_matches('.').trim();
+    let mut bounded = String::new();
+    let mut utf16_len = 0usize;
+    for character in cleaned.chars() {
+        let next_bytes = bounded.len() + character.len_utf8();
+        let next_utf16 = utf16_len + character.len_utf16();
+        // Leave room for a human-readable collision suffix such as ` (128)`.
+        if next_bytes > 220 || next_utf16 > 220 {
+            break;
+        }
+        bounded.push(character);
+        utf16_len = next_utf16;
+    }
+    let bounded = bounded.trim().trim_end_matches('.').trim();
+    if bounded.is_empty()
+        || validate_portable_path_component(bounded).is_err()
+        || is_excluded_tree_dir_name(bounded)
+    {
+        "imported-notes".into()
+    } else {
+        bounded.to_owned()
+    }
+}
+
+fn create_unique_import_directory(
+    root: &Path,
+    preferred_name: &str,
+) -> Result<(String, PathBuf), AppError> {
+    validate_knowledge_root(root)?;
+    let base_name = sanitize_import_directory_name(preferred_name);
+    for sequence in 1..=10_000usize {
+        let candidate = if sequence == 1 {
+            base_name.clone()
+        } else {
+            format!("{base_name} ({sequence})")
+        };
+        validate_portable_path_component(&candidate)?;
+        if find_portable_tree_child(root, &candidate)?.is_some() {
+            continue;
+        }
+        let target = root.join(&candidate);
+        match std::fs::create_dir(&target) {
+            Ok(()) => return Ok((candidate, target)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                continue;
+            }
+            Err(error) => {
+                return Err(AppError::Internal(format!(
+                    "failed to create folder import destination {}: {error}",
+                    target.display()
+                )));
+            }
+        }
+    }
+    Err(AppError::Conflict(
+        "could not allocate a unique destination folder for the imported notes".into(),
+    ))
 }
 
 
@@ -8855,6 +9451,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn folder_import_preserves_tree_and_allocates_without_overwrite() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let service = make_service(&dir.path().join("data"));
+        let kb = service.create_base("notes", "", None, None).await.unwrap();
+        let source = dir.path().join("team-notes");
+        std::fs::create_dir_all(source.join("guides")).unwrap();
+        std::fs::write(source.join("README.md"), "# Team notes\n").unwrap();
+        std::fs::write(source.join("guides/setup.md"), "# Setup\n").unwrap();
+        std::fs::write(source.join("ignored.txt"), "not knowledge").unwrap();
+
+        let first = service
+            .import_markdown_folder(kb.knowledge_base_id.as_str(), source.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(first.target_directory, "team-notes");
+        assert_eq!(first.imported, 2);
+        assert_eq!(first.skipped, 1);
+        assert_eq!(first.first_file.as_deref(), Some("team-notes/README.md"));
+        assert_eq!(
+            std::fs::read_to_string(PathBuf::from(&kb.root_path).join("team-notes/guides/setup.md")).unwrap(),
+            "# Setup\n"
+        );
+
+        let second = service
+            .import_markdown_folder(kb.knowledge_base_id.as_str(), source.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(second.target_directory, "team-notes (2)");
+        assert_eq!(std::fs::read_to_string(source.join("README.md")).unwrap(), "# Team notes\n");
+
+        let overlap = service
+            .import_markdown_folder(kb.knowledge_base_id.as_str(), &kb.root_path)
+            .await
+            .unwrap_err();
+        assert!(matches!(overlap, AppError::BadRequest(_)), "{overlap:?}");
+    }
+
+    #[tokio::test]
+    async fn create_document_never_clobbers_an_existing_note() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let service = make_service(&dir.path().join("data"));
+        let kb = service.create_base("notes", "", None, None).await.unwrap();
+        let created = service
+            .create_document(kb.knowledge_base_id.as_str(), "Guide.md", "# First\n")
+            .await
+            .unwrap();
+        assert_eq!(created, "Guide.md");
+        let duplicate = service
+            .create_document(kb.knowledge_base_id.as_str(), "guide.MD", "# Replacement\n")
+            .await
+            .unwrap_err();
+        assert!(matches!(duplicate, AppError::Conflict(_)), "{duplicate:?}");
+        assert_eq!(
+            std::fs::read_to_string(PathBuf::from(&kb.root_path).join("Guide.md")).unwrap(),
+            "# First\n"
+        );
+    }
+
+    #[tokio::test]
     async fn create_validates_source_config() {
         let dir = tempfile::TempDir::new().unwrap();
         let (service, _repo) = service_with_repo(&dir.path().join("data"));
@@ -8912,6 +9567,100 @@ mod tests {
         assert_eq!(live.len(), 1, "{live:?}");
         assert_eq!(live[0].url, "https://example.com/api-docs");
         assert_eq!(live[0].title.as_deref(), Some("API docs"));
+    }
+
+    #[tokio::test]
+    async fn append_url_entries_fetches_only_new_urls_and_reports_duplicates() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/new"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("new snapshot body"))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let (service, repo) = service_with_repo(&dir.path().join("data"));
+        let old_url = format!("{}/old", server.uri());
+        let new_url = format!("{}/new", server.uri());
+        let kb = service
+            .create_base(
+                "mixed source",
+                "",
+                None,
+                Some(url_source(KnowledgeSourceMode::Live, &[&old_url])),
+            )
+            .await
+            .unwrap();
+
+        let summary = service
+            .append_url_entries(
+                kb.knowledge_base_id.as_str(),
+                vec![
+                    KnowledgeSourceEntry {
+                        url: old_url.clone(),
+                        title: None,
+                        rendered: false,
+                    },
+                    KnowledgeSourceEntry {
+                        url: new_url.clone(),
+                        title: Some("New page".into()),
+                        rendered: false,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(summary.added, 1);
+        assert_eq!(summary.duplicates, 1);
+        assert_eq!(summary.fetched, 1);
+        assert_eq!(summary.failed, 0, "{:?}", summary.errors);
+        assert!(summary.first_file.as_deref().is_some_and(|path| path.starts_with("snapshots/")));
+        let stored = extra_source(&repo, kb.knowledge_base_id.as_str()).unwrap();
+        assert_eq!(stored.mode, KnowledgeSourceMode::Live, "append must preserve existing realtime semantics");
+        assert_eq!(stored.entries.len(), 2);
+        assert_eq!(stored.entries[1].url, new_url);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "existing live URL must not be re-fetched");
+        assert_eq!(requests[0].url.path(), "/new");
+    }
+
+    #[tokio::test]
+    async fn append_url_entries_bootstraps_a_snapshot_source_on_blank_base() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("captured page"))
+            .mount(&server)
+            .await;
+        let dir = tempfile::TempDir::new().unwrap();
+        let (service, repo) = service_with_repo(&dir.path().join("data"));
+        let kb = service.create_base("blank", "", None, None).await.unwrap();
+        let url = format!("{}/docs", server.uri());
+
+        let summary = service
+            .append_url_entries(
+                kb.knowledge_base_id.as_str(),
+                vec![KnowledgeSourceEntry {
+                    url: url.clone(),
+                    title: None,
+                    rendered: false,
+                }],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(summary.added, 1);
+        assert_eq!(summary.fetched, 1);
+        let stored = extra_source(&repo, kb.knowledge_base_id.as_str()).unwrap();
+        assert_eq!(stored.mode, KnowledgeSourceMode::Snapshot);
+        assert_eq!(stored.entries.len(), 1);
+        assert_eq!(stored.entries[0].url, url);
     }
 
     /// `KnowledgeBaseInfo` must carry `extra.source` on get/list — the
