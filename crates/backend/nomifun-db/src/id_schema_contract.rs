@@ -85,7 +85,9 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "knowledge_bases",
     "knowledge_binding_bases",
     "knowledge_bindings",
+    "knowledge_entries",
     "knowledge_tags",
+    "knowledge_tree_operations",
     "mcp_servers",
     "message_correlations",
     "messages",
@@ -158,6 +160,8 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("idmm_interventions", "intervention_id"),
     ("knowledge_bases", "knowledge_base_id"),
     ("knowledge_bindings", "knowledge_binding_id"),
+    ("knowledge_entries", "knowledge_entry_id"),
+    ("knowledge_tree_operations", "operation_id"),
     ("mcp_servers", "mcp_server_id"),
     ("messages", "message_id"),
     ("miniapps", "miniapp_id"),
@@ -239,6 +243,9 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("idmm_interventions", "intervention_id"),
     ("knowledge_bases", "knowledge_base_id"),
     ("knowledge_bindings", "knowledge_binding_id"),
+    ("knowledge_entries", "knowledge_entry_id"),
+    ("knowledge_tree_operations", "operation_id"),
+    ("knowledge_tree_operations", "request_id"),
     ("mcp_servers", "mcp_server_id"),
     ("messages", "message_id"),
     ("miniapps", "miniapp_id"),
@@ -267,6 +274,18 @@ const PARTIAL_UNIQUE_INDEXES: &[PartialUniqueIndexContract] = &[
         table: "requirements",
         columns: &["owner_terminal_id"],
         predicate: "status = 'in_progress' AND owner_terminal_id IS NOT NULL",
+    },
+    PartialUniqueIndexContract {
+        index_name: "uq_knowledge_entries_live_rel_path",
+        table: "knowledge_entries",
+        columns: &["knowledge_base_id", "rel_path"],
+        predicate: "deleted_at IS NULL",
+    },
+    PartialUniqueIndexContract {
+        index_name: "uq_knowledge_entries_live_portable_path",
+        table: "knowledge_entries",
+        columns: &["knowledge_base_id", "portable_rel_path"],
+        predicate: "deleted_at IS NULL",
     },
     PartialUniqueIndexContract {
         index_name: "uq_knowledge_bindings_target_workpath",
@@ -762,6 +781,12 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
         .with_parent_predicate("parent.deleted_at IS NULL"),
     text_ref!("knowledge_binding_bases", "knowledge_binding_id" => "knowledge_bindings", "knowledge_binding_id", false, "idx_knowledge_binding_bases_knowledge_binding_id", Cascade),
     text_ref!("knowledge_binding_bases", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, "idx_knowledge_binding_bases_knowledge_base_id", Cascade),
+    text_ref!("knowledge_entries", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, "idx_knowledge_entries_knowledge_base_id", Cascade),
+    text_ref!("knowledge_entries", "parent_entry_id" => "knowledge_entries", "knowledge_entry_id", true, "idx_knowledge_entries_parent_entry_id", Cascade)
+        .with_child_predicate("child.deleted_at IS NULL")
+        .with_parent_predicate("parent.deleted_at IS NULL")
+        .with_aggregate_scope("parent.knowledge_base_id = child.knowledge_base_id AND parent.kind = 'directory'"),
+    text_ref!("knowledge_tree_operations", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, "idx_knowledge_tree_operations_knowledge_base_id", Cascade),
     text_ref!("message_correlations", "conversation_id" => "conversations", "conversation_id", false, "idx_message_correlations_conversation_id", Cascade),
     // `turn_message_id` is the wire-scoped owner token supplied by the
     // streaming protocol. A continuation can reserve a correlation before

@@ -161,7 +161,7 @@ async fn published_provider_output_limit_lineage_upgrades_in_place() {
         .fetch_one(upgraded.pool())
         .await
         .unwrap();
-    assert_eq!(latest, 46);
+    assert_eq!(latest, 54);
     let creative_studio_tables: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_schema \
          WHERE type = 'table' AND name IN (\

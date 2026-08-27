@@ -7,7 +7,7 @@ use crate::repository::knowledge::IKnowledgeRepository;
 
 #[derive(Clone, Debug)]
 pub struct SqliteKnowledgeRepository {
-    pool: SqlitePool,
+    pub(crate) pool: SqlitePool,
 }
 
 impl SqliteKnowledgeRepository {
@@ -215,6 +215,25 @@ impl IKnowledgeRepository for SqliteKnowledgeRepository {
         .bind(id)
         .execute(&mut *transaction)
         .await?;
+
+        // Mutation journal/outbox rows are operational children of the base.
+        // Remove them before the logical parent so a deleted base can never
+        // leave a publishable event or recovery task behind.
+        sqlx::query(
+            "DELETE FROM knowledge_tree_operations \
+             WHERE knowledge_base_id = ?",
+        )
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+
+        // Entry rows are a rebuildable projection owned by the base. The v3
+        // schema uses logical rather than physical foreign keys, so cleanup is
+        // explicit and transactionally precedes deletion of the parent row.
+        sqlx::query("DELETE FROM knowledge_entries WHERE knowledge_base_id = ?")
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
 
         sqlx::query("DELETE FROM knowledge_bases WHERE knowledge_base_id = ?")
             .bind(id)

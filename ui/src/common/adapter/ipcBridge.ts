@@ -126,6 +126,8 @@ import type {
   SaveProviderConnectionRequest,
 } from '../types/provider/providerConnection';
 import type { KnowledgeRetrievalConfig as ApiKnowledgeRetrievalConfig } from '../protocolBindings/KnowledgeRetrievalConfig';
+import type { RelocateKnowledgeEntryRequest as ApiRelocateKnowledgeEntryRequest } from '../protocolBindings/RelocateKnowledgeEntryRequest';
+import type { RelocateKnowledgeEntryResponse as ApiRelocateKnowledgeEntryResponse } from '../protocolBindings/RelocateKnowledgeEntryResponse';
 import type {
   TAdoptExecutionStepOutput,
   TAdjustAgentExecution,
@@ -201,6 +203,7 @@ import {
   parseFigureId,
   parseIdmmInterventionId,
   parseKnowledgeBaseId,
+  parseKnowledgeEntryId,
   parseMessageId,
   parseMcpServerId,
   parseOptionalEntityId,
@@ -243,6 +246,7 @@ import {
   type CsNoteId,
   type ChannelUserId,
   type KnowledgeBaseId,
+  type KnowledgeEntryId,
   type RequirementId,
   type SshHostId,
   type SkillPatternId,
@@ -5826,7 +5830,7 @@ export interface IKnowledgeSourceFetchSummary {
 /** Append-only inputs accepted by the unified knowledge-content endpoint. */
 export type IKnowledgeAddContentInput =
   | { type: 'document'; path: string; content: string }
-  | { type: 'local_folder'; source_path: string }
+  | { type: 'local_folder'; source_path: string; destination_parent_path?: string }
   | { type: 'web'; entries: IKnowledgeSourceEntry[] };
 
 /**
@@ -5841,6 +5845,7 @@ export interface IKnowledgeAddContentRequest {
   path?: string;
   content?: string;
   source_path?: string;
+  destination_parent_path?: string;
   entries?: IKnowledgeSourceEntry[];
 }
 
@@ -5880,6 +5885,8 @@ export interface IKnowledgeBase {
   root_path: string;
   /** true = directory provisioned under the backend data dir (purge allowed); false = user-referenced external dir. */
   managed: boolean;
+  /** Server-enforced mutation capability; external folders default to read-only. */
+  tree_access: 'read_only' | 'editable';
   created_at: number;
   updated_at: number;
   file_count: number;
@@ -5931,6 +5938,12 @@ export interface IKnowledgeFileEntry {
 }
 
 export interface IKnowledgeTreeEntry {
+  /** Stable identity projection; optional while legacy/path-only bases are reconciled. */
+  entry_id?: KnowledgeEntryId;
+  /** Optimistic-concurrency revision of the projected entry. */
+  revision?: number;
+  parent_entry_id?: KnowledgeEntryId;
+  origin?: 'user' | 'url_snapshot' | 'generated';
   name: string;
   rel_path: string;
   is_dir: boolean;
@@ -5940,11 +5953,48 @@ export interface IKnowledgeTreeEntry {
   children?: IKnowledgeTreeEntry[];
 }
 
+export type IKnowledgeRelocateRequest = Omit<
+  ApiRelocateKnowledgeEntryRequest,
+  'entry_id' | 'destination_parent_id'
+> & {
+  knowledge_base_id: KnowledgeBaseId;
+  /** Stable identity is authoritative; source_path remains the path-only fallback. */
+  entry_id?: KnowledgeEntryId;
+  /** Stable destination identity is authoritative; its path remains the fallback. */
+  destination_parent_id?: KnowledgeEntryId;
+};
+
+export type IKnowledgeRelocateResult = Omit<
+  ApiRelocateKnowledgeEntryResponse,
+  'entry_id'
+> & {
+  entry_id?: KnowledgeEntryId;
+};
+
+export interface IKnowledgeTreeChangedEvent {
+  knowledge_base_id: KnowledgeBaseId;
+  operation_id: string;
+  entry_id?: KnowledgeEntryId;
+  old_prefix: string;
+  new_prefix: string;
+  kind?: 'file' | 'directory';
+  moved_descendant_count?: number;
+  tree_revision: number;
+}
+
 export interface IKnowledgeFileContent {
   rel_path: string;
   content: string;
   size: number;
   modified_at: number | null;
+  entry_id?: KnowledgeEntryId;
+  revision?: number;
+}
+
+export interface IKnowledgeFileUpdateResult {
+  /** Authoritative current locator; may differ when entry_id followed a move. */
+  rel_path: string;
+  entry_id?: KnowledgeEntryId;
 }
 
 /** Per-target mount binding: which bases a session mounts + the write-back switch. */
@@ -6239,6 +6289,21 @@ const fromApiKnowledgeBase = (base: IKnowledgeBase): IKnowledgeBase => ({
   knowledge_base_id: parseKnowledgeBaseId(base.knowledge_base_id),
 });
 
+const fromApiKnowledgeTreeEntry = (entry: IKnowledgeTreeEntry): IKnowledgeTreeEntry => ({
+  ...entry,
+  entry_id: entry.entry_id == null ? undefined : parseKnowledgeEntryId(entry.entry_id),
+  parent_entry_id:
+    entry.parent_entry_id == null ? undefined : parseKnowledgeEntryId(entry.parent_entry_id),
+  children: entry.children?.map(fromApiKnowledgeTreeEntry),
+});
+
+const fromApiKnowledgeRelocateResult = (
+  result: ApiRelocateKnowledgeEntryResponse
+): IKnowledgeRelocateResult => ({
+  ...result,
+  entry_id: result.entry_id == null ? undefined : parseKnowledgeEntryId(result.entry_id),
+});
+
 const fromApiKnowledgeRetrievalStage = <T extends { mode: string }>(
   stage: T
 ): WithProviderEntityId<T> =>
@@ -6299,6 +6364,7 @@ export const knowledge = {
       name: string;
       description?: string;
       root_path?: string;
+      tree_access?: 'read_only' | 'editable';
       /** Optional URL source; mode 'snapshot' fetches every entry before the response returns (slow — see source_fetch). */
       source?: { kind: string; mode: KnowledgeSourceMode; entries?: IKnowledgeSourceEntry[] };
       /** Tag keys to assign at creation time. */
@@ -6306,9 +6372,9 @@ export const knowledge = {
     }
   >('/api/knowledge/bases'), fromApiKnowledgeBase),
   getBase: withResponseMap(httpGet<IKnowledgeBase, { knowledge_base_id: KnowledgeBaseId }>((p) => `/api/knowledge/bases/${p.knowledge_base_id}`, { timeoutMs: KB_READ_TIMEOUT_MS }), fromApiKnowledgeBase),
-  updateBase: withResponseMap(httpPut<IKnowledgeBase, { knowledge_base_id: KnowledgeBaseId; name?: string; description?: string; tags?: string[] }>(
+  updateBase: withResponseMap(httpPut<IKnowledgeBase, { knowledge_base_id: KnowledgeBaseId; name?: string; description?: string; tags?: string[]; tree_access?: 'read_only' | 'editable' }>(
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}`,
-    (p) => ({ name: p.name, description: p.description, tags: p.tags })
+    (p) => ({ name: p.name, description: p.description, tags: p.tags, tree_access: p.tree_access })
   ), fromApiKnowledgeBase),
   getRetrievalConfig: withResponseMap(
     httpGet<ApiKnowledgeRetrievalConfig, void>('/api/knowledge/retrieval'),
@@ -6362,9 +6428,12 @@ export const knowledge = {
       return body;
     }
   ),
-  listTree: httpGet<IKnowledgeTreeEntry[], { knowledge_base_id: KnowledgeBaseId; path?: string }>(
-    (p) => `/api/knowledge/bases/${p.knowledge_base_id}/tree${p.path ? `?path=${encodeURIComponent(p.path)}` : ''}`,
-    { timeoutMs: KB_READ_TIMEOUT_MS }
+  listTree: withResponseMap(
+    httpGet<IKnowledgeTreeEntry[], { knowledge_base_id: KnowledgeBaseId; path?: string }>(
+      (p) => `/api/knowledge/bases/${p.knowledge_base_id}/tree${p.path ? `?path=${encodeURIComponent(p.path)}` : ''}`,
+      { timeoutMs: KB_READ_TIMEOUT_MS }
+    ),
+    (entries) => entries.map(fromApiKnowledgeTreeEntry)
   ),
   createFolder: httpPost<IKnowledgeTreeEntry, { knowledge_base_id: KnowledgeBaseId; path: string }>(
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}/folder`,
@@ -6377,13 +6446,62 @@ export const knowledge = {
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}/tree/rename`,
     (p) => ({ path: p.path, new_name: p.newName })
   ),
-  readFile: httpGet<IKnowledgeFileContent, { knowledge_base_id: KnowledgeBaseId; path: string }>(
-    (p) => `/api/knowledge/bases/${p.knowledge_base_id}/file?path=${encodeURIComponent(p.path)}`,
-    { timeoutMs: KB_READ_TIMEOUT_MS }
+  /** Move or rename one existing file/directory without overwriting the destination. */
+  relocateTreeEntry: withResponseMap(
+    httpPost<ApiRelocateKnowledgeEntryResponse, IKnowledgeRelocateRequest>(
+      (p) => `/api/knowledge/bases/${p.knowledge_base_id}/tree/relocate`,
+      (p) => {
+        const { knowledge_base_id: _knowledgeBaseId, ...body } = p;
+        return body;
+      }
+    ),
+    fromApiKnowledgeRelocateResult
   ),
-  writeFile: httpPut<void, { knowledge_base_id: KnowledgeBaseId; path: string; content: string }>(
-    (p) => `/api/knowledge/bases/${p.knowledge_base_id}/file`,
-    (p) => ({ path: p.path, content: p.content })
+  undoRelocateTreeEntry: withResponseMap(
+    httpPost<
+      ApiRelocateKnowledgeEntryResponse,
+      { knowledge_base_id: KnowledgeBaseId; request_id: string; undo_token: string }
+    >(
+      (p) => `/api/knowledge/bases/${p.knowledge_base_id}/tree/relocate/undo`,
+      (p) => ({ request_id: p.request_id, undo_token: p.undo_token })
+    ),
+    fromApiKnowledgeRelocateResult
+  ),
+  readFile: withResponseMap(
+    httpGet<IKnowledgeFileContent, { knowledge_base_id: KnowledgeBaseId; path: string }>(
+      (p) => `/api/knowledge/bases/${p.knowledge_base_id}/file?path=${encodeURIComponent(p.path)}`,
+      { timeoutMs: KB_READ_TIMEOUT_MS }
+    ),
+    (file) => ({
+      ...file,
+      entry_id: file.entry_id == null ? undefined : parseKnowledgeEntryId(file.entry_id),
+    })
+  ),
+  writeFile: withResponseMap(
+    httpPut<
+      IKnowledgeFileUpdateResult,
+      {
+        knowledge_base_id: KnowledgeBaseId;
+        path: string;
+        content: string;
+        expected_content?: string;
+        entry_id?: KnowledgeEntryId;
+        expected_revision?: number;
+      }
+    >(
+      (p) => `/api/knowledge/bases/${p.knowledge_base_id}/file`,
+      (p) => ({
+        path: p.path,
+        content: p.content,
+        expected_content: p.expected_content,
+        entry_id: p.entry_id,
+        expected_revision: p.expected_revision,
+      })
+    ),
+    (result) => ({
+      ...result,
+      entry_id: result.entry_id == null ? undefined : parseKnowledgeEntryId(result.entry_id),
+    })
   ),
   deleteFile: httpDelete<void, { knowledge_base_id: KnowledgeBaseId; path: string }>(
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}/file?path=${encodeURIComponent(p.path)}`
@@ -6426,6 +6544,25 @@ export const knowledge = {
     'knowledge.base-deleted',
     (value) => ({ knowledge_base_id: parseKnowledgeBaseId(value.knowledge_base_id) })
   ),
+  onTreeChanged: wsMappedEmitter<
+    IKnowledgeTreeChangedEvent,
+    Omit<IKnowledgeTreeChangedEvent, 'knowledge_base_id'> & {
+      knowledge_base_id: string;
+      old_path?: string;
+      new_path?: string;
+      old_prefix?: string;
+      new_prefix?: string;
+    }
+  >('knowledge.tree-changed', (value) => ({
+    knowledge_base_id: parseKnowledgeBaseId(value.knowledge_base_id),
+    operation_id: value.operation_id,
+    entry_id: value.entry_id == null ? undefined : parseKnowledgeEntryId(value.entry_id),
+    old_prefix: value.old_prefix ?? value.old_path ?? '',
+    new_prefix: value.new_prefix ?? value.new_path ?? '',
+    kind: value.kind,
+    moved_descendant_count: value.moved_descendant_count,
+    tree_revision: value.tree_revision,
+  })),
   onBindingChanged: wsMappedEmitter<{ target_kind: KnowledgeBindingKind; target_id: string | ConversationId | TerminalId | CompanionId } & IKnowledgeBinding>(
     'knowledge.binding-changed',
     (value) => ({

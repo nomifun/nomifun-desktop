@@ -12,6 +12,7 @@ mod customer_service;
 mod cron_job_run;
 mod idmm_intervention;
 mod knowledge;
+mod knowledge_tree_operation;
 mod mcp_server;
 mod message;
 mod miniapp;
@@ -64,8 +65,17 @@ pub use idmm_intervention::{
     IdmmActionReservationRow, IdmmInterventionRow, NewIdmmInterventionRow,
 };
 pub use knowledge::{
-    CreateKnowledgeTagParams, KnowledgeBaseRow, KnowledgeBindingRow, KnowledgeTagRow,
-    UpdateKnowledgeTagParams,
+    CreateKnowledgeTagParams, KNOWLEDGE_ENTRY_KIND_DIRECTORY, KNOWLEDGE_ENTRY_KIND_FILE,
+    KNOWLEDGE_ENTRY_ORIGIN_GENERATED, KNOWLEDGE_ENTRY_ORIGIN_URL_SNAPSHOT,
+    KNOWLEDGE_ENTRY_ORIGIN_USER, KnowledgeBaseRow, KnowledgeBindingRow, KnowledgeEntryRow,
+    KnowledgeTagRow, UpdateKnowledgeTagParams,
+};
+pub use knowledge_tree_operation::{
+    KNOWLEDGE_TREE_EVENT_STATUS_NONE, KNOWLEDGE_TREE_EVENT_STATUS_PENDING,
+    KNOWLEDGE_TREE_EVENT_STATUS_PUBLISHED, KNOWLEDGE_TREE_OPERATION_STATE_COMMITTED,
+    KNOWLEDGE_TREE_OPERATION_STATE_FILESYSTEM_COMMITTED,
+    KNOWLEDGE_TREE_OPERATION_STATE_NEEDS_RECOVERY, KNOWLEDGE_TREE_OPERATION_STATE_PREPARED,
+    KnowledgeTreeEventStatus, KnowledgeTreeOperationRow, KnowledgeTreeOperationState,
 };
 pub use mcp_server::McpServerRow;
 pub use message::MessageRow;

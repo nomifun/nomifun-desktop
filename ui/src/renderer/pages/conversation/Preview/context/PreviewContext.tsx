@@ -5,10 +5,15 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { ConversationId } from '@/common/types/ids';
+import type { ConversationId, KnowledgeBaseId } from '@/common/types/ids';
 import type { PreviewContentType } from '@/common/types/office/preview';
 import { emitter } from '@/renderer/utils/emitter';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+
+import {
+  relocateKnowledgePreviewTabs,
+  type KnowledgePreviewResource,
+} from './knowledgePreviewRelocation';
 
 /** DOM 片段数据结构 / DOM snippet data structure */
 export interface DomSnippet {
@@ -37,6 +42,10 @@ export interface PreviewMetadata {
    * publish action looks up prior publishes by `source_conversation_id`).
    */
   conversation_id?: ConversationId;
+  /** Stable knowledge identity plus its current mutable filesystem locator. */
+  knowledge_resource?: KnowledgePreviewResource & {
+    knowledge_base_id: KnowledgeBaseId;
+  };
 }
 
 export interface PreviewTab {
@@ -358,6 +367,35 @@ export const PreviewProvider: React.FC<{
 
   // Track last-known mtime per file path for external change detection
   const fileMtimeRef = useRef<Map<string, number>>(new Map());
+
+  // Knowledge documents keep their tab/session identity when their filesystem
+  // locator changes. Every PreviewProvider listens because the same knowledge
+  // document can be open from a conversation, terminal, or another surface.
+  useEffect(() => {
+    return ipcBridge.knowledge.onTreeChanged.on((change) => {
+      if (!change.old_prefix || !change.new_prefix) return;
+      setTabs((previous) => {
+        const next = relocateKnowledgePreviewTabs(previous, change);
+        if (next === previous) return previous;
+
+        for (let index = 0; index < previous.length; index += 1) {
+          const oldPath = previous[index]?.metadata?.file_path;
+          const newPath = next[index]?.metadata?.file_path;
+          if (!oldPath || !newPath || oldPath === newPath) continue;
+
+          const knownMtime = fileMtimeRef.current.get(oldPath);
+          if (knownMtime != null) {
+            fileMtimeRef.current.delete(oldPath);
+            fileMtimeRef.current.set(newPath, knownMtime);
+          }
+          if (savingFilesRef.current.delete(oldPath)) {
+            savingFilesRef.current.add(newPath);
+          }
+        }
+        return next;
+      });
+    });
+  }, []);
 
   const closeTab = useCallback(
     (tabId: string) => {

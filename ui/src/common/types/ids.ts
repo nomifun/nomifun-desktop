@@ -24,6 +24,7 @@ export type EntityKind =
   | 'ssh-host'
   | 'webhook'
   | 'knowledge-base'
+  | 'knowledge-entry'
   | 'knowledge-binding'
   | 'provider'
   | 'agent'
@@ -77,6 +78,7 @@ export type RemoteAgentId = EntityId<'remote-agent'>;
 export type SshHostId = EntityId<'ssh-host'>;
 export type WebhookId = EntityId<'webhook'>;
 export type KnowledgeBaseId = EntityId<'knowledge-base'>;
+export type KnowledgeEntryId = EntityId<'knowledge-entry'>;
 export type KnowledgeBindingId = EntityId<'knowledge-binding'>;
 export type ProviderId = EntityId<'provider'>;
 export type AgentId = EntityId<'agent'>;
@@ -179,6 +181,8 @@ export const parseSshHostId = (value: unknown): SshHostId =>
 export const parseWebhookId = (value: unknown): WebhookId => parseEntityId('webhook', value);
 export const parseKnowledgeBaseId = (value: unknown): KnowledgeBaseId =>
   parseEntityId('knowledge-base', value);
+export const parseKnowledgeEntryId = (value: unknown): KnowledgeEntryId =>
+  parseEntityId('knowledge-entry', value);
 export const parseKnowledgeBindingId = (value: unknown): KnowledgeBindingId =>
   parseEntityId('knowledge-binding', value);
 export const parseProviderId = (value: unknown): ProviderId => parseEntityId('provider', value);

@@ -1,5 +1,6 @@
 use nomifun_common::{
-    CompanionId, ConversationId, KnowledgeBaseId, KnowledgeBindingId, TerminalId, TimestampMs,
+    CompanionId, ConversationId, KnowledgeBaseId, KnowledgeBindingId, KnowledgeEntryId,
+    TerminalId, TimestampMs,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, sqlite::SqliteRow};
@@ -44,6 +45,89 @@ impl<'row> sqlx::FromRow<'row, SqliteRow> for KnowledgeBaseRow {
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
             tags: row.try_get("tags")?,
+        })
+    }
+}
+
+pub const KNOWLEDGE_ENTRY_KIND_FILE: &str = "file";
+pub const KNOWLEDGE_ENTRY_KIND_DIRECTORY: &str = "directory";
+pub const KNOWLEDGE_ENTRY_ORIGIN_USER: &str = "user";
+pub const KNOWLEDGE_ENTRY_ORIGIN_URL_SNAPSHOT: &str = "url_snapshot";
+pub const KNOWLEDGE_ENTRY_ORIGIN_GENERATED: &str = "generated";
+
+/// Rebuildable identity/location projection for one filesystem-backed file or
+/// directory in a knowledge base.
+///
+/// The filesystem remains the content source of truth. `knowledge_entry_id`
+/// is stable across moves, while `rel_path` and `portable_rel_path` are
+/// derived location caches. The portable path is caller-normalized according
+/// to the cross-platform knowledge-path policy and is used for collision-safe
+/// lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeEntryRow {
+    /// SQLite-local technical row key; never crosses the repository boundary
+    /// as an entity identity.
+    pub id: i64,
+    pub knowledge_entry_id: KnowledgeEntryId,
+    pub knowledge_base_id: KnowledgeBaseId,
+    pub parent_entry_id: Option<KnowledgeEntryId>,
+    pub name: String,
+    pub kind: String,
+    pub origin: String,
+    pub rel_path: String,
+    pub portable_rel_path: String,
+    pub fs_identity: Option<String>,
+    pub content_hash: Option<String>,
+    pub revision: i64,
+    pub deleted_at: Option<TimestampMs>,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
+impl KnowledgeEntryRow {
+    pub fn is_directory(&self) -> bool {
+        self.kind == KNOWLEDGE_ENTRY_KIND_DIRECTORY
+    }
+
+    pub fn is_deleted(&self) -> bool {
+        self.deleted_at.is_some()
+    }
+}
+
+impl<'row> sqlx::FromRow<'row, SqliteRow> for KnowledgeEntryRow {
+    fn from_row(row: &'row SqliteRow) -> Result<Self, sqlx::Error> {
+        fn parse_required<T>(value: String) -> Result<T, sqlx::Error>
+        where
+            T: TryFrom<String>,
+            T::Error: std::error::Error + Send + Sync + 'static,
+        {
+            T::try_from(value).map_err(|error| sqlx::Error::Decode(Box::new(error)))
+        }
+
+        fn parse_optional<T>(value: Option<String>) -> Result<Option<T>, sqlx::Error>
+        where
+            T: TryFrom<String>,
+            T::Error: std::error::Error + Send + Sync + 'static,
+        {
+            value.map(parse_required).transpose()
+        }
+
+        Ok(Self {
+            id: row.try_get("id")?,
+            knowledge_entry_id: parse_required(row.try_get("knowledge_entry_id")?)?,
+            knowledge_base_id: parse_required(row.try_get("knowledge_base_id")?)?,
+            parent_entry_id: parse_optional(row.try_get("parent_entry_id")?)?,
+            name: row.try_get("name")?,
+            kind: row.try_get("kind")?,
+            origin: row.try_get("origin")?,
+            rel_path: row.try_get("rel_path")?,
+            portable_rel_path: row.try_get("portable_rel_path")?,
+            fs_identity: row.try_get("fs_identity")?,
+            content_hash: row.try_get("content_hash")?,
+            revision: row.try_get("revision")?,
+            deleted_at: row.try_get("deleted_at")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
         })
     }
 }
@@ -203,5 +287,29 @@ mod tests {
             back.target_id(),
             Some(conversation_id.into_string())
         );
+
+        let entry_id = KnowledgeEntryId::new();
+        let entry = KnowledgeEntryRow {
+            id: 7,
+            knowledge_entry_id: entry_id.clone(),
+            knowledge_base_id: base_id,
+            parent_entry_id: None,
+            name: "README.md".into(),
+            kind: KNOWLEDGE_ENTRY_KIND_FILE.into(),
+            origin: KNOWLEDGE_ENTRY_ORIGIN_USER.into(),
+            rel_path: "README.md".into(),
+            portable_rel_path: "readme.md".into(),
+            fs_identity: Some("dev=1;ino=2".into()),
+            content_hash: Some("abc".into()),
+            revision: 1,
+            deleted_at: None,
+            created_at: 1,
+            updated_at: 2,
+        };
+        let back: KnowledgeEntryRow =
+            serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+        assert_eq!(back.knowledge_entry_id, entry_id);
+        assert!(!back.is_directory());
+        assert!(!back.is_deleted());
     }
 }

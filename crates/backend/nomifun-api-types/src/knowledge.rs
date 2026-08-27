@@ -1,5 +1,131 @@
-use nomifun_common::KnowledgeBaseId;
+use nomifun_common::{KnowledgeBaseId, KnowledgeEntryId};
 use serde::{Deserialize, Serialize};
+
+/// Server-enforced mutation policy for a filesystem-backed knowledge base.
+/// External directories default to read-only and require explicit user consent
+/// before the application may edit or restructure them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeTreeAccess {
+    #[default]
+    ReadOnly,
+    Editable,
+}
+
+/// Stable projected kind of a knowledge entry. The file contents and
+/// directory structure remain filesystem-owned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeEntryKind {
+    File,
+    Directory,
+}
+
+/// Provenance controls product policy (for example, URL snapshots are
+/// source-managed even though they appear in the same tree).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeEntryOrigin {
+    User,
+    UrlSnapshot,
+    Generated,
+}
+
+/// File/directory identity projected from one knowledge base. `entry_id` is
+/// stable across rename/move; `rel_path` is its current filesystem locator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KnowledgeEntry {
+    #[ts(type = "string")]
+    pub entry_id: KnowledgeEntryId,
+    #[ts(type = "string")]
+    pub knowledge_base_id: KnowledgeBaseId,
+    #[ts(type = "string | null")]
+    pub parent_entry_id: Option<KnowledgeEntryId>,
+    pub name: String,
+    pub kind: KnowledgeEntryKind,
+    pub origin: KnowledgeEntryOrigin,
+    pub rel_path: String,
+    #[ts(type = "number")]
+    pub revision: i64,
+    #[ts(type = "number | null")]
+    pub deleted_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(rename_all = "snake_case")]
+pub enum RelocateKnowledgeEntryConflictPolicy {
+    Reject,
+}
+
+/// One idempotent move/rename command inside the knowledge base identified by
+/// the route. Stable IDs are authoritative when present; paths are required as
+/// locators for path-only clients and projection-degraded compatibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(deny_unknown_fields)]
+pub struct RelocateKnowledgeEntryRequest {
+    pub request_id: String,
+    pub source_path: String,
+    pub destination_parent_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string")]
+    pub entry_id: Option<KnowledgeEntryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string")]
+    pub destination_parent_id: Option<KnowledgeEntryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub new_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub expected_revision: Option<i64>,
+    pub conflict_policy: RelocateKnowledgeEntryConflictPolicy,
+}
+
+/// Durable receipt returned by drag/drop, "Move to…", and rename. One path
+/// prefix pair is sufficient to update all descendants in UI consumers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(deny_unknown_fields)]
+pub struct RelocateKnowledgeEntryResponse {
+    pub operation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string")]
+    pub entry_id: Option<KnowledgeEntryId>,
+    pub old_path: String,
+    pub new_path: String,
+    pub kind: KnowledgeEntryKind,
+    #[ts(type = "number")]
+    pub moved_descendant_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub revision: Option<i64>,
+    #[ts(type = "number")]
+    pub tree_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub undo_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub warnings: Option<Vec<String>>,
+}
+
+/// Idempotently reverse a previously committed relocate operation. The token
+/// is opaque to clients and remains valid across process restarts because it
+/// resolves through the durable mutation journal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
+#[serde(deny_unknown_fields)]
+pub struct UndoKnowledgeEntryRelocationRequest {
+    pub request_id: String,
+    pub undo_token: String,
+}
 
 /// Candidate-generation backend used by knowledge retrieval.
 ///
@@ -209,8 +335,86 @@ pub struct UpdateKnowledgeTagRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ts_rs::{Config, TS};
 
     const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+
+    #[test]
+    fn knowledge_entry_and_relocate_contracts_are_typed_and_snake_case() {
+        let entry_id = KnowledgeEntryId::new();
+        let destination_parent_id = KnowledgeEntryId::new();
+        let request_id = nomifun_common::generate_id();
+        let request: RelocateKnowledgeEntryRequest = serde_json::from_value(serde_json::json!({
+            "request_id": request_id,
+            "source_path": "drafts/topic.md",
+            "destination_parent_path": "archive",
+            "entry_id": entry_id,
+            "destination_parent_id": destination_parent_id,
+            "expected_revision": 3,
+            "conflict_policy": "reject"
+        }))
+        .unwrap();
+        assert_eq!(request.entry_id.as_ref(), Some(&entry_id));
+        assert_eq!(
+            request.destination_parent_id.as_ref(),
+            Some(&destination_parent_id)
+        );
+        assert_eq!(request.conflict_policy, RelocateKnowledgeEntryConflictPolicy::Reject);
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire["expected_revision"], 3);
+        assert!(wire.get("new_name").is_none());
+        assert!(wire.get("expectedRevision").is_none());
+
+        let unsupported_policy = serde_json::json!({
+            "request_id": "retry-me",
+            "source_path": "drafts/topic.md",
+            "destination_parent_path": "archive",
+            "conflict_policy": "keep_both"
+        });
+        assert!(
+            serde_json::from_value::<RelocateKnowledgeEntryRequest>(unsupported_policy).is_err(),
+            "the shared contract must not advertise an unimplemented conflict policy"
+        );
+
+        let unsupported_field = serde_json::json!({
+            "request_id": "retry-me",
+            "source_path": "drafts/topic.md",
+            "destination_parent_path": "archive",
+            "conflict_policy": "reject",
+            "update_links": true
+        });
+        assert!(
+            serde_json::from_value::<RelocateKnowledgeEntryRequest>(unsupported_field).is_err(),
+            "unsupported capabilities must be rejected instead of silently ignored"
+        );
+
+        let generated = RelocateKnowledgeEntryRequest::export_to_string(&Config::default())
+            .expect("relocate request must generate TypeScript");
+        assert!(generated.contains("source_path: string"), "got: {generated}");
+        assert!(generated.contains("entry_id?: string"), "got: {generated}");
+        assert!(
+            generated.contains("destination_parent_id?: string"),
+            "got: {generated}"
+        );
+        assert!(!generated.contains("keep_both"), "got: {generated}");
+        assert!(!generated.contains("update_links"), "got: {generated}");
+
+        let generated_response =
+            RelocateKnowledgeEntryResponse::export_to_string(&Config::default())
+                .expect("relocate response must generate TypeScript");
+        assert!(
+            generated_response.contains("entry_id?: string"),
+            "got: {generated_response}"
+        );
+        assert!(
+            generated_response.contains("tree_revision: number"),
+            "got: {generated_response}"
+        );
+        assert!(
+            !generated_response.contains("references_updated"),
+            "got: {generated_response}"
+        );
+    }
 
     #[test]
     fn retrieval_config_is_two_independent_tagged_stages() {

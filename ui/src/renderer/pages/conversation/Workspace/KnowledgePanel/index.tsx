@@ -23,9 +23,14 @@
 
 import { ipcBridge } from '@/common';
 import type { IKnowledgeBase, IKnowledgeTreeEntry } from '@/common/adapter/ipcBridge';
-import type { KnowledgeBaseId } from '@/common/types/ids';
+import type { KnowledgeBaseId, KnowledgeEntryId } from '@/common/types/ids';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
-import { mergeKnowledgeTreeChildren } from '@/renderer/pages/knowledge/KnowledgeDetailPage/treeModel';
+import {
+  mergeKnowledgeTreeChildren,
+  preserveKnowledgeTreeChildren,
+  relocateKnowledgeTreeNodes,
+  replaceKnowledgePathPrefix,
+} from '@/renderer/pages/knowledge/KnowledgeDetailPage/treeModel';
 import { knowledgeErrorText } from '@/renderer/pages/knowledge/useKnowledge';
 import { Button, Empty, Message, Tooltip, Tree } from '@arco-design/web-react';
 import { ExpandDown, ExpandUp, Right } from '@icon-park/react';
@@ -45,6 +50,7 @@ const nodeKeyOf = (id: KnowledgeBaseId, relPath: string): string => `${id}${KEY_
 
 type PanelNode = {
   key: string;
+  entryId?: KnowledgeEntryId;
   name: string;
   isLeaf: boolean;
   knowledgeBaseId: KnowledgeBaseId;
@@ -56,6 +62,7 @@ type PanelNode = {
 const toPanelNodes = (id: KnowledgeBaseId, entries: IKnowledgeTreeEntry[]): PanelNode[] =>
   entries.map((entry) => ({
     key: nodeKeyOf(id, entry.rel_path),
+    entryId: entry.entry_id,
     name: entry.name,
     isLeaf: entry.is_file,
     knowledgeBaseId: id,
@@ -114,13 +121,54 @@ const SessionKnowledgePanel: React.FC<{ bases: IKnowledgeBase[] }> = ({ bases })
         ...(relPath ? { path: relPath } : {}),
       });
       setChildrenByBase((previous) => {
-        if (!relPath) return { ...previous, [id]: children };
+        if (!relPath) {
+          return {
+            ...previous,
+            [id]: preserveKnowledgeTreeChildren(children, previous[id] ?? []),
+          };
+        }
         const current = previous[id] ?? [];
         return { ...previous, [id]: mergeKnowledgeTreeChildren(current, relPath, children) };
       });
     },
     []
   );
+
+  useEffect(() => {
+    return ipcBridge.knowledge.onTreeChanged.on((change) => {
+      if (!basesById.has(change.knowledge_base_id) || !change.old_prefix || !change.new_prefix) {
+        return;
+      }
+      const id = change.knowledge_base_id;
+      setChildrenByBase((previous) => {
+        const current = previous[id];
+        if (!current) return previous;
+        return {
+          ...previous,
+          [id]: relocateKnowledgeTreeNodes(current, change.old_prefix, change.new_prefix),
+        };
+      });
+
+      const remapKey = (key: string): string => {
+        const prefix = `${id}${KEY_SEP}`;
+        if (!key.startsWith(prefix)) return key;
+        const relPath = key.slice(prefix.length);
+        const nextPath = replaceKnowledgePathPrefix(
+          relPath || null,
+          change.old_prefix,
+          change.new_prefix,
+        );
+        return nextPath == null ? key : nodeKeyOf(id, nextPath);
+      };
+      setExpandedKeys((previous) => [...new Set(previous.map(remapKey))]);
+      setSelectedKey((previous) => (previous ? remapKey(previous) : previous));
+
+      // Reconcile the root after the exact optimistic remap. Loaded descendants
+      // are preserved by path, while out-of-band changes that arrived with the
+      // same event are picked up as well.
+      void loadLevel(id, '');
+    });
+  }, [basesById, loadLevel]);
 
   /**
    * Expand every mounted base one level. Deliberately NOT the detail page's
@@ -233,6 +281,12 @@ const SessionKnowledgePanel: React.FC<{ bases: IKnowledgeBase[] }> = ({ bases })
           file_name: node.name,
           file_path: `${base.root_path}/${node.relPath}`,
           workspace: base.root_path,
+          knowledge_resource: {
+            kind: 'knowledge-document',
+            knowledge_base_id: node.knowledgeBaseId,
+            entry_id: node.entryId,
+            rel_path: node.relPath,
+          },
           language: 'md',
           editable: false,
         });
