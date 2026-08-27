@@ -204,6 +204,8 @@ import {
   parseIdmmInterventionId,
   parseKnowledgeBaseId,
   parseKnowledgeEntryId,
+  parseKnowledgeSourceId,
+  parseKnowledgeSourceItemId,
   parseMessageId,
   parseMcpServerId,
   parseOptionalEntityId,
@@ -247,6 +249,8 @@ import {
   type ChannelUserId,
   type KnowledgeBaseId,
   type KnowledgeEntryId,
+  type KnowledgeSourceId,
+  type KnowledgeSourceItemId,
   type RequirementId,
   type SshHostId,
   type SkillPatternId,
@@ -5793,6 +5797,7 @@ export const browserLogin = {
 
 /** One URL entry of a knowledge-base URL source. */
 export interface IKnowledgeSourceEntry {
+  sourceItemId?: KnowledgeSourceItemId;
   url: string;
   title?: string;
   /**
@@ -5802,16 +5807,23 @@ export interface IKnowledgeSourceEntry {
    * no browser backend is wired the fetch gracefully falls back to HTTP.
    */
   rendered?: boolean;
+  snapshotEntryId?: KnowledgeEntryId;
+  syncStatus?: IKnowledgeEntrySource['sync_status'];
+  lastSuccessAt?: number;
+  lastError?: string;
 }
 
-/** 'snapshot' = fetched into snapshots/*.md at create/refresh time; 'live' = surfaced to agents as realtime sources. */
+/** 'snapshot' = fetched into managed Markdown entries; 'live' = surfaced to agents as realtime sources. */
 export type KnowledgeSourceMode = 'live' | 'snapshot';
 
 /** URL source config of a base (wire shape: camelCase, `lastFetchedAt` epoch-ms). */
 export interface IKnowledgeSource {
+  sourceId?: KnowledgeSourceId;
   /** Source kind discriminator; "url" is the only kind today. */
   kind: string;
   mode: KnowledgeSourceMode;
+  revision?: number;
+  defaultParentEntryId?: KnowledgeEntryId;
   entries: IKnowledgeSourceEntry[];
   /** Last successful snapshot fetch (epoch ms); absent until the first fetch. */
   lastFetchedAt?: number;
@@ -5827,11 +5839,56 @@ export interface IKnowledgeSourceFetchSummary {
   last_fetched_at?: number;
 }
 
+/**
+ * Server-authoritative, action-specific policy for one knowledge entry.
+ * `origin` explains provenance; callers must use these capabilities for UI and
+ * must not infer permissions from a path or source kind.
+ */
+export interface IKnowledgeEntryCapabilities {
+  read_content: boolean;
+  edit_content: boolean;
+  rename: boolean;
+  relocate: boolean;
+  accept_children: boolean;
+  delete_entry: boolean;
+  remove_source: boolean;
+  refresh_source: boolean;
+  detach_source: boolean;
+  copy_as_editable: boolean;
+  export_entry: boolean;
+  edit_metadata: boolean;
+  /** Human-readable explanation when body editing is restricted. */
+  read_only_reason?: string;
+}
+
+export interface IKnowledgeEntrySource {
+  source_id: KnowledgeSourceId;
+  source_item_id: KnowledgeSourceItemId;
+  source_url: string;
+  relationship: 'managed' | 'detached' | 'copy';
+  sync_status:
+    | 'pending'
+    | 'syncing'
+    | 'synced'
+    | 'failed'
+    | 'conflicted'
+    | 'missing'
+    | 'paused';
+  final_url?: string;
+  last_success_at?: number;
+  last_error?: string;
+}
+
 /** Append-only inputs accepted by the unified knowledge-content endpoint. */
 export type IKnowledgeAddContentInput =
   | { type: 'document'; path: string; content: string }
   | { type: 'local_folder'; source_path: string; destination_parent_path?: string }
-  | { type: 'web'; entries: IKnowledgeSourceEntry[] };
+  | {
+      type: 'web';
+      entries: IKnowledgeSourceEntry[];
+      destination_parent_path?: string;
+      destination_parent_id?: KnowledgeEntryId;
+    };
 
 /**
  * Bridge request shape. Fields stay optional here because the bridge's mapped
@@ -5846,6 +5903,7 @@ export interface IKnowledgeAddContentRequest {
   content?: string;
   source_path?: string;
   destination_parent_path?: string;
+  destination_parent_id?: KnowledgeEntryId;
   entries?: IKnowledgeSourceEntry[];
 }
 
@@ -5932,6 +5990,12 @@ export type IKnowledgeRetrievalConfig = {
 };
 
 export interface IKnowledgeFileEntry {
+  entry_id?: KnowledgeEntryId;
+  revision?: number;
+  parent_entry_id?: KnowledgeEntryId;
+  origin?: 'user' | 'url_snapshot' | 'generated';
+  capabilities?: IKnowledgeEntryCapabilities;
+  source?: IKnowledgeEntrySource;
   rel_path: string;
   size: number;
   modified_at: number | null;
@@ -5944,6 +6008,8 @@ export interface IKnowledgeTreeEntry {
   revision?: number;
   parent_entry_id?: KnowledgeEntryId;
   origin?: 'user' | 'url_snapshot' | 'generated';
+  capabilities?: IKnowledgeEntryCapabilities;
+  source?: IKnowledgeEntrySource;
   name: string;
   rel_path: string;
   is_dir: boolean;
@@ -5982,6 +6048,13 @@ export interface IKnowledgeTreeChangedEvent {
   tree_revision: number;
 }
 
+export interface IKnowledgeEntryContentUpdatedEvent {
+  knowledge_base_id: KnowledgeBaseId;
+  entry_id: KnowledgeEntryId;
+  rel_path: string;
+  revision?: number;
+}
+
 export interface IKnowledgeFileContent {
   rel_path: string;
   content: string;
@@ -5989,12 +6062,22 @@ export interface IKnowledgeFileContent {
   modified_at: number | null;
   entry_id?: KnowledgeEntryId;
   revision?: number;
+  origin?: 'user' | 'url_snapshot' | 'generated';
+  capabilities?: IKnowledgeEntryCapabilities;
+  source?: IKnowledgeEntrySource;
 }
 
 export interface IKnowledgeFileUpdateResult {
   /** Authoritative current locator; may differ when entry_id followed a move. */
   rel_path: string;
   entry_id?: KnowledgeEntryId;
+}
+
+/** Unified receipt for source-management actions on one stable entry. */
+export interface IKnowledgeEntrySourceActionResult {
+  entry?: IKnowledgeTreeEntry;
+  removed?: boolean;
+  source_fetch?: IKnowledgeSourceFetchSummary;
 }
 
 /** Per-target mount binding: which bases a session mounts + the write-back switch. */
@@ -6284,9 +6367,41 @@ export const customerService = {
  */
 const KB_READ_TIMEOUT_MS = 30_000;
 
+const fromApiKnowledgeEntrySource = (
+  source: IKnowledgeEntrySource
+): IKnowledgeEntrySource => ({
+  ...source,
+  source_id: parseKnowledgeSourceId(source.source_id),
+  source_item_id: parseKnowledgeSourceItemId(source.source_item_id),
+});
+
 const fromApiKnowledgeBase = (base: IKnowledgeBase): IKnowledgeBase => ({
   ...base,
   knowledge_base_id: parseKnowledgeBaseId(base.knowledge_base_id),
+  source: base.source
+    ? {
+        ...base.source,
+        sourceId:
+          base.source.sourceId == null
+            ? undefined
+            : parseKnowledgeSourceId(base.source.sourceId),
+        defaultParentEntryId:
+          base.source.defaultParentEntryId == null
+            ? undefined
+            : parseKnowledgeEntryId(base.source.defaultParentEntryId),
+        entries: base.source.entries.map((entry) => ({
+          ...entry,
+          sourceItemId:
+            entry.sourceItemId == null
+              ? undefined
+              : parseKnowledgeSourceItemId(entry.sourceItemId),
+          snapshotEntryId:
+            entry.snapshotEntryId == null
+              ? undefined
+              : parseKnowledgeEntryId(entry.snapshotEntryId),
+        })),
+      }
+    : undefined,
 });
 
 const fromApiKnowledgeTreeEntry = (entry: IKnowledgeTreeEntry): IKnowledgeTreeEntry => ({
@@ -6294,7 +6409,29 @@ const fromApiKnowledgeTreeEntry = (entry: IKnowledgeTreeEntry): IKnowledgeTreeEn
   entry_id: entry.entry_id == null ? undefined : parseKnowledgeEntryId(entry.entry_id),
   parent_entry_id:
     entry.parent_entry_id == null ? undefined : parseKnowledgeEntryId(entry.parent_entry_id),
+  source: entry.source ? fromApiKnowledgeEntrySource(entry.source) : undefined,
   children: entry.children?.map(fromApiKnowledgeTreeEntry),
+});
+
+const fromApiKnowledgeFileEntry = (entry: IKnowledgeFileEntry): IKnowledgeFileEntry => ({
+  ...entry,
+  entry_id: entry.entry_id == null ? undefined : parseKnowledgeEntryId(entry.entry_id),
+  parent_entry_id:
+    entry.parent_entry_id == null ? undefined : parseKnowledgeEntryId(entry.parent_entry_id),
+  source: entry.source ? fromApiKnowledgeEntrySource(entry.source) : undefined,
+});
+
+const fromApiKnowledgeFileContent = (file: IKnowledgeFileContent): IKnowledgeFileContent => ({
+  ...file,
+  entry_id: file.entry_id == null ? undefined : parseKnowledgeEntryId(file.entry_id),
+  source: file.source ? fromApiKnowledgeEntrySource(file.source) : undefined,
+});
+
+const fromApiKnowledgeEntrySourceActionResult = (
+  result: IKnowledgeEntrySourceActionResult
+): IKnowledgeEntrySourceActionResult => ({
+  ...result,
+  entry: result.entry ? fromApiKnowledgeTreeEntry(result.entry) : undefined,
 });
 
 const fromApiKnowledgeRelocateResult = (
@@ -6406,7 +6543,7 @@ export const knowledge = {
     '/api/knowledge/description/polish',
     (p) => ({ name: p.name, draft: p.draft, provider_id: p.provider_id, model: p.model })
   ),
-  /** Re-fetch every URL-source entry into snapshots/ (works for live-mode sources too); 400 when the base has no source. */
+  /** Re-fetch every URL-source entry at its current identity-backed location. */
   refreshSource: httpPost<IKnowledgeSourceFetchSummary, { knowledge_base_id: KnowledgeBaseId }>(
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}/refresh-source`,
     () => undefined
@@ -6419,8 +6556,14 @@ export const knowledge = {
   deleteBase: httpDelete<void, { knowledge_base_id: KnowledgeBaseId; purge?: boolean }>(
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}${p.purge ? '?purge=true' : ''}`
   ),
-  listFiles: httpGet<IKnowledgeFileEntry[], { knowledge_base_id: KnowledgeBaseId }>((p) => `/api/knowledge/bases/${p.knowledge_base_id}/files`, { timeoutMs: KB_READ_TIMEOUT_MS }),
-  /** Add a new document, copied Markdown folder, or web snapshots to an existing base. */
+  listFiles: withResponseMap(
+    httpGet<IKnowledgeFileEntry[], { knowledge_base_id: KnowledgeBaseId }>(
+      (p) => `/api/knowledge/bases/${p.knowledge_base_id}/files`,
+      { timeoutMs: KB_READ_TIMEOUT_MS }
+    ),
+    (entries) => entries.map(fromApiKnowledgeFileEntry)
+  ),
+  /** Add a new document, copied Markdown folder, or managed web entries to an existing base. */
   addContent: httpPost<IKnowledgeAddContentResult, IKnowledgeAddContentRequest>(
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}/content`,
     (p) => {
@@ -6439,8 +6582,20 @@ export const knowledge = {
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}/folder`,
     (p) => ({ path: p.path })
   ),
-  deleteFolder: httpDelete<void, { knowledge_base_id: KnowledgeBaseId; path: string }>(
-    (p) => `/api/knowledge/bases/${p.knowledge_base_id}/folder?path=${encodeURIComponent(p.path)}`
+  deleteFolder: httpDelete<
+    void,
+    {
+      knowledge_base_id: KnowledgeBaseId;
+      path: string;
+      entry_id?: KnowledgeEntryId;
+      expected_revision?: number;
+    }
+  >(
+    (p) =>
+      `/api/knowledge/bases/${p.knowledge_base_id}/folder?path=${encodeURIComponent(p.path)}` +
+      (p.entry_id && p.expected_revision != null
+        ? `&entry_id=${encodeURIComponent(p.entry_id)}&expected_revision=${p.expected_revision}`
+        : '')
   ),
   renameTreeEntry: httpPost<IKnowledgeTreeEntry, { knowledge_base_id: KnowledgeBaseId; path: string; newName: string }>(
     (p) => `/api/knowledge/bases/${p.knowledge_base_id}/tree/rename`,
@@ -6467,15 +6622,80 @@ export const knowledge = {
     ),
     fromApiKnowledgeRelocateResult
   ),
+  refreshEntrySource: withResponseMap(
+    httpPost<
+      IKnowledgeEntrySourceActionResult,
+      {
+        knowledge_base_id: KnowledgeBaseId;
+        entry_id: KnowledgeEntryId;
+        expected_revision?: number;
+      }
+    >(
+      (p) =>
+        `/api/knowledge/bases/${p.knowledge_base_id}/entries/${p.entry_id}/refresh-source`,
+      (p) => ({ expected_revision: p.expected_revision })
+    ),
+    fromApiKnowledgeEntrySourceActionResult
+  ),
+  copyEntryAsEditable: withResponseMap(
+    httpPost<
+      IKnowledgeEntrySourceActionResult,
+      {
+        knowledge_base_id: KnowledgeBaseId;
+        entry_id: KnowledgeEntryId;
+        expected_revision?: number;
+        destination_parent_path?: string;
+        destination_parent_id?: KnowledgeEntryId;
+        new_name?: string;
+      }
+    >(
+      (p) =>
+        `/api/knowledge/bases/${p.knowledge_base_id}/entries/${p.entry_id}/copy-as-editable`,
+      (p) => ({
+        expected_revision: p.expected_revision,
+        destination_parent_path: p.destination_parent_path,
+        destination_parent_id: p.destination_parent_id,
+        new_name: p.new_name,
+      })
+    ),
+    fromApiKnowledgeEntrySourceActionResult
+  ),
+  detachEntrySource: withResponseMap(
+    httpPost<
+      IKnowledgeEntrySourceActionResult,
+      {
+        knowledge_base_id: KnowledgeBaseId;
+        entry_id: KnowledgeEntryId;
+        expected_revision?: number;
+      }
+    >(
+      (p) =>
+        `/api/knowledge/bases/${p.knowledge_base_id}/entries/${p.entry_id}/detach-source`,
+      (p) => ({ expected_revision: p.expected_revision })
+    ),
+    fromApiKnowledgeEntrySourceActionResult
+  ),
+  removeEntrySource: withResponseMap(
+    httpPost<
+      IKnowledgeEntrySourceActionResult,
+      {
+        knowledge_base_id: KnowledgeBaseId;
+        entry_id: KnowledgeEntryId;
+        expected_revision?: number;
+      }
+    >(
+      (p) =>
+        `/api/knowledge/bases/${p.knowledge_base_id}/entries/${p.entry_id}/remove-source`,
+      (p) => ({ expected_revision: p.expected_revision })
+    ),
+    fromApiKnowledgeEntrySourceActionResult
+  ),
   readFile: withResponseMap(
     httpGet<IKnowledgeFileContent, { knowledge_base_id: KnowledgeBaseId; path: string }>(
       (p) => `/api/knowledge/bases/${p.knowledge_base_id}/file?path=${encodeURIComponent(p.path)}`,
       { timeoutMs: KB_READ_TIMEOUT_MS }
     ),
-    (file) => ({
-      ...file,
-      entry_id: file.entry_id == null ? undefined : parseKnowledgeEntryId(file.entry_id),
-    })
+    fromApiKnowledgeFileContent
   ),
   writeFile: withResponseMap(
     httpPut<
@@ -6503,8 +6723,20 @@ export const knowledge = {
       entry_id: result.entry_id == null ? undefined : parseKnowledgeEntryId(result.entry_id),
     })
   ),
-  deleteFile: httpDelete<void, { knowledge_base_id: KnowledgeBaseId; path: string }>(
-    (p) => `/api/knowledge/bases/${p.knowledge_base_id}/file?path=${encodeURIComponent(p.path)}`
+  deleteFile: httpDelete<
+    void,
+    {
+      knowledge_base_id: KnowledgeBaseId;
+      path: string;
+      entry_id?: KnowledgeEntryId;
+      expected_revision?: number;
+    }
+  >(
+    (p) =>
+      `/api/knowledge/bases/${p.knowledge_base_id}/file?path=${encodeURIComponent(p.path)}` +
+      (p.entry_id && p.expected_revision != null
+        ? `&entry_id=${encodeURIComponent(p.entry_id)}&expected_revision=${p.expected_revision}`
+        : '')
   ),
   getBinding: withResponseMap(httpGet<IKnowledgeBinding, KnowledgeBindingTargetInput>(
     // workpath target_id is a filesystem path containing `/`; encode so it
@@ -6562,6 +6794,18 @@ export const knowledge = {
     kind: value.kind,
     moved_descendant_count: value.moved_descendant_count,
     tree_revision: value.tree_revision,
+  })),
+  onEntryContentUpdated: wsMappedEmitter<
+    IKnowledgeEntryContentUpdatedEvent,
+    Omit<IKnowledgeEntryContentUpdatedEvent, 'knowledge_base_id' | 'entry_id'> & {
+      knowledge_base_id: string;
+      entry_id: string;
+    }
+  >('knowledge.entry-content-updated', (value) => ({
+    knowledge_base_id: parseKnowledgeBaseId(value.knowledge_base_id),
+    entry_id: parseKnowledgeEntryId(value.entry_id),
+    rel_path: value.rel_path,
+    revision: value.revision,
   })),
   onBindingChanged: wsMappedEmitter<{ target_kind: KnowledgeBindingKind; target_id: string | ConversationId | TerminalId | CompanionId } & IKnowledgeBinding>(
     'knowledge.binding-changed',

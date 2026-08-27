@@ -25,6 +25,15 @@ pub struct KnowledgeTreeChangedEvent {
     pub revision: Option<i64>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct KnowledgeEntryContentUpdatedEvent {
+    pub knowledge_base_id: KnowledgeBaseId,
+    pub entry_id: KnowledgeEntryId,
+    pub rel_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<i64>,
+}
+
 #[derive(Clone)]
 pub struct KnowledgeEventEmitter {
     sink: Arc<dyn UserEventSink>,
@@ -78,6 +87,10 @@ impl KnowledgeEventEmitter {
 
     pub fn emit_tree_changed(&self, change: &KnowledgeTreeChangedEvent) {
         self.broadcast("knowledge.tree-changed", change);
+    }
+
+    pub fn emit_entry_content_updated(&self, change: &KnowledgeEntryContentUpdatedEvent) {
+        self.broadcast("knowledge.entry-content-updated", change);
     }
 
     /// Publish one durable tree-outbox payload. Returning serialization

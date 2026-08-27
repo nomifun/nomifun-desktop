@@ -28,6 +28,8 @@ describe('adding content to an existing knowledge base', () => {
     expect(bridgeSource.includes('/content')).toBe(true);
     expect(controlSource.match(/addKnowledgeContent\(knowledgeBaseId,/g)?.length).toBe(3);
     expect(knowledgeHookSource.includes('ipcBridge.knowledge.addContent.invoke')).toBe(true);
+    expect(controlSource.includes('destination_parent_path: defaultFolderPath || undefined')).toBe(true);
+    expect(controlSource.includes('destination_parent_id: defaultFolderEntryId')).toBe(true);
   });
 
   test('reuses the URL-entry editor in create and post-create flows', () => {

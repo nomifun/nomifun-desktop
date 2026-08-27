@@ -7,15 +7,18 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
 use std::time::Duration;
 
 use futures_util::{StreamExt, stream};
 use nomifun_api_types::{
-    KnowledgeEmbeddingConfig, KnowledgeEntryKind, KnowledgeMountInfo,
+    KnowledgeEmbeddingConfig, KnowledgeEntryCapabilities, KnowledgeEntryKind,
+    KnowledgeEntrySourceInfo, KnowledgeEntrySourceRelationship, KnowledgeMountInfo,
     KnowledgeRerankConfig, KnowledgeRetrievalConfig, KnowledgeSource,
-    KnowledgeSourceEntry, KnowledgeSourceMode, KnowledgeTag, KnowledgeTreeAccess, ModelTask,
+    KnowledgeSourceEntry, KnowledgeSourceMode, KnowledgeSourceSyncStatus, KnowledgeTag,
+    KnowledgeTreeAccess, ModelTask,
     RelocateKnowledgeEntryConflictPolicy as RelocateConflictPolicy,
     RelocateKnowledgeEntryRequest as RelocateTreeEntryRequest,
     RelocateKnowledgeEntryResponse as RelocateTreeEntryResult,
@@ -23,22 +26,31 @@ use nomifun_api_types::{
 };
 use nomifun_common::{
     AppError, CompanionId, ConversationId, KnowledgeBaseId, KnowledgeEntryId,
-    KnowledgeTreeOperationId, ProviderWithModel, TerminalId, TimestampMs,
+    KnowledgeSourceId, KnowledgeSourceItemId, KnowledgeTreeOperationId, ProviderWithModel,
+    TerminalId, TimestampMs,
     UuidV7Error, generate_id, now_ms,
 };
 use nomifun_db::models::{
-    CreateKnowledgeTagParams, KnowledgeBaseRow, KnowledgeBindingRow, KnowledgeEntryRow,
-    KnowledgeTreeEventStatus, KnowledgeTreeOperationRow, KnowledgeTreeOperationState,
+    CreateKnowledgeTagParams, KnowledgeBaseRow, KnowledgeBindingRow,
+    KnowledgeEntryProvenanceRelationship, KnowledgeEntryProvenanceRow, KnowledgeEntryRow,
+    KnowledgeSourceItemRow, KnowledgeSourceItemSyncStatus, KnowledgeSourceKind,
+    KnowledgeSourceMode as PersistedKnowledgeSourceMode, KnowledgeSourceRow,
+    KnowledgeSourceState, KnowledgeTreeEventStatus, KnowledgeTreeOperationRow,
+    KnowledgeTreeOperationState,
 };
 use nomifun_db::{
-    CommitKnowledgeTreeOperationParams, IClientPreferenceRepository,
-    IKnowledgeEntryRepository, IKnowledgeRepository, IKnowledgeTreeOperationRepository,
-    KnowledgeTreeOperationPageCursor,
+    BindManagedKnowledgeEntryParams, CommitKnowledgeTreeOperationParams,
+    CreateKnowledgeSourceItemParams, EnsureKnowledgeSourceParams, IClientPreferenceRepository,
+    IKnowledgeEntryRepository, IKnowledgeRepository, IKnowledgeSourceRepository,
+    IKnowledgeTreeOperationRepository, KnowledgeTreeOperationPageCursor,
     KNOWLEDGE_ENTRY_KIND_DIRECTORY, KNOWLEDGE_ENTRY_KIND_FILE,
-    KNOWLEDGE_ENTRY_ORIGIN_URL_SNAPSHOT, KNOWLEDGE_ENTRY_ORIGIN_USER,
+    KNOWLEDGE_ENTRY_ORIGIN_GENERATED, KNOWLEDGE_ENTRY_ORIGIN_URL_SNAPSHOT,
+    KNOWLEDGE_ENTRY_ORIGIN_USER,
     KNOWLEDGE_RETRIEVAL_KEY,
-    PrepareKnowledgeTreeOperationParams, RelocateKnowledgeEntryProjectionParams,
-    UpsertKnowledgeEntryParams,
+    PrepareKnowledgeTreeOperationParams, RecordKnowledgeEntryCopyParams,
+    RecordKnowledgeSourceSyncFailureParams, RecordKnowledgeSourceSyncSuccessParams,
+    RelocateKnowledgeEntryProjectionParams, StageKnowledgeSourcePublicationParams,
+    UpdateKnowledgeSourceParams, UpsertKnowledgeEntryParams,
 };
 use nomifun_model_invoke::{
     EmbedRequest, ModelInvokeService, ModelRef, RerankRequest, TaskOutcome, TaskRequest,
@@ -55,7 +67,9 @@ use unicode_normalization::UnicodeNormalization;
 use url::Url;
 
 use crate::autogen::{self, KnowledgeCompleter};
-use crate::events::{KnowledgeEventEmitter, KnowledgeTreeChangedEvent};
+use crate::events::{
+    KnowledgeEntryContentUpdatedEvent, KnowledgeEventEmitter, KnowledgeTreeChangedEvent,
+};
 use crate::mount::{self, MountSpec};
 use crate::source_url::{self, HttpFetcher, PageFetcher};
 use crate::workpath::{WORKPATH_BINDING_KIND, workpath_key};
@@ -122,6 +136,7 @@ pub fn decode_doc_handle(handle: &str) -> Option<(KnowledgeBaseId, String)> {
 /// network fetch at create/refresh time, so an unbounded list would let one
 /// request fan out arbitrarily.
 pub const MAX_SOURCE_ENTRIES: usize = 16;
+const MAX_SOURCE_HISTORY_ENTRIES: usize = 256;
 
 /// How many source entries are fetched concurrently per batch.
 const SOURCE_FETCH_CONCURRENCY: usize = 4;
@@ -182,9 +197,20 @@ pub struct KnowledgeSearchHit {
 /// (forward slashes on every platform).
 #[derive(Debug, Clone, Serialize)]
 pub struct KbFileEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<KnowledgeEntryId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_entry_id: Option<KnowledgeEntryId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     pub rel_path: String,
     pub size: u64,
     pub modified_at: Option<TimestampMs>,
+    pub capabilities: KnowledgeEntryCapabilities,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<KnowledgeEntrySourceInfo>,
 }
 
 /// One immediate child in the knowledge-base document tree. Directories are
@@ -212,6 +238,9 @@ pub struct KbTreeEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
     pub modified_at: Option<TimestampMs>,
+    pub capabilities: KnowledgeEntryCapabilities,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<KnowledgeEntrySourceInfo>,
 }
 
 /// Content payload for a single file read.
@@ -225,6 +254,11 @@ pub struct KbFileContent {
     pub entry_id: Option<KnowledgeEntryId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    pub capabilities: KnowledgeEntryCapabilities,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<KnowledgeEntrySourceInfo>,
 }
 
 /// Result of one editor CAS update. A stable identity may resolve to a newer
@@ -588,6 +622,15 @@ pub struct AppendUrlSourceSummary {
     pub first_file: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct KnowledgeEntrySourceActionResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry: Option<KbTreeEntry>,
+    pub removed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_fetch: Option<RefreshSourceSummary>,
+}
+
 /// Per-file cached content for `search_bases`, keyed by absolute path + mtime.
 struct CachedDoc {
     mtime_ms: u64,
@@ -672,6 +715,10 @@ pub struct KnowledgeService {
     /// so lightweight/path-only test repositories remain valid and the
     /// filesystem stays usable if projection persistence is degraded.
     entry_repository: RwLock<Option<Arc<dyn IKnowledgeEntryRepository>>>,
+    /// Authoritative source aggregates and stable source-item ↔ entry
+    /// provenance. It is optional only for lightweight embedders/tests; the
+    /// production app wires the SQLite implementation from the same pool.
+    source_repository: RwLock<Option<Arc<dyn IKnowledgeSourceRepository>>>,
     /// Durable idempotency journal and transactional outbox for tree
     /// relocations. Like the entry projection this is late-wired so lightweight
     /// embedders and path-only unit tests retain their in-memory behaviour.
@@ -760,7 +807,17 @@ pub struct KnowledgeService {
 struct PreparedSnapshot {
     /// Page `<title>` (HTML responses only) — backfills an empty entry title.
     title: Option<String>,
+    final_url: String,
+    truncated: bool,
     body: String,
+}
+
+struct PreparedManagedSourceFile {
+    item: KnowledgeSourceItemRow,
+    content: String,
+    final_url: String,
+    title: Option<String>,
+    content_hash: String,
 }
 
 /// A fetched source snapshot that has not yet crossed the filesystem
@@ -798,6 +855,20 @@ struct ProjectionState {
     tree_revision: u64,
 }
 
+struct NormalizedSourceAggregate {
+    source: KnowledgeSourceRow,
+    items: Vec<KnowledgeSourceItemRow>,
+}
+
+type SourceMetadataByEntry = HashMap<KnowledgeEntryId, KnowledgeEntrySourceInfo>;
+
+struct ResolvedSourceEntry {
+    entry: KnowledgeEntryRow,
+    provenance: KnowledgeEntryProvenanceRow,
+    item: KnowledgeSourceItemRow,
+    source: KnowledgeSourceRow,
+}
+
 impl KnowledgeService {
     pub fn new(repo: Arc<dyn IKnowledgeRepository>, data_dir: &Path, emitter: KnowledgeEventEmitter) -> Self {
         if let Err(error) = std::fs::create_dir_all(data_dir) {
@@ -813,6 +884,7 @@ impl KnowledgeService {
         Self {
             repo,
             entry_repository: RwLock::new(None),
+            source_repository: RwLock::new(None),
             tree_operation_repository: RwLock::new(None),
             tree_operation_drain_lock: Arc::new(AsyncMutex::new(())),
             projection_reconciled: Arc::new(StdMutex::new(HashSet::new())),
@@ -856,6 +928,27 @@ impl KnowledgeService {
 
     fn entry_repository(&self) -> Option<Arc<dyn IKnowledgeEntryRepository>> {
         self.entry_repository
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn set_source_repository(
+        &self,
+        repository: Arc<dyn IKnowledgeSourceRepository>,
+    ) {
+        *self
+            .source_repository
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(repository);
+        self.projection_reconciled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    fn source_repository(&self) -> Option<Arc<dyn IKnowledgeSourceRepository>> {
+        self.source_repository
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
@@ -1931,7 +2024,8 @@ impl KnowledgeService {
     /// An optional URL `source` is persisted into the registry row's
     /// `extra.source`. `live` mode stores it without fetching (the URLs are
     /// surfaced to agents as realtime sources at mount time); `snapshot`
-    /// mode fetches every entry synchronously into `{root}/snapshots/` and
+    /// mode fetches every entry synchronously into a managed Markdown entry
+    /// (`snapshots/` is only the initial default folder) and
     /// then chains a best-effort AI overview run (silently skipped when no
     /// completer is wired).
     pub async fn create_base(
@@ -2030,7 +2124,19 @@ impl KnowledgeService {
         }
         let mut source = source;
         if let Some(src) = &mut source {
+            sanitize_source_entries(src);
+            src.source_id = Some(KnowledgeSourceId::new());
+            src.revision = 0;
+            src.default_parent_entry_id = None;
+            for item in &mut src.entries {
+                item.source_item_id = Some(KnowledgeSourceItemId::new());
+                item.snapshot_entry_id = None;
+                item.sync_status = KnowledgeSourceSyncStatus::Pending;
+                item.last_success_at = None;
+                item.last_error = None;
+            }
             validate_source(src)?;
+            validate_unique_source_urls(src)?;
             // Server-assigned; a client-sent value would lie until the first fetch.
             src.last_fetched_at = None;
         }
@@ -2194,8 +2300,10 @@ impl KnowledgeService {
     /// never started). Re-run the regular fetch+autogen pipeline for each —
     /// slugs derive from the configured URLs, so a re-run overwrites in place
     /// (idempotent). Live-mode sources and already-stamped bases are never
-    /// touched. Failures stay warn-only; the next boot or a manual refresh
-    /// can retry.
+    /// touched unless an explicit live-source refresh was interrupted. The
+    /// normalized state machine also resumes `syncing` items and managed
+    /// entries whose file disappeared between filesystem and database commit.
+    /// Failures stay warn-only; the next boot or a manual refresh can retry.
     pub async fn resume_pending_source_fetches(self: Arc<Self>) {
         let rows = match self.repo.list_bases().await {
             Ok(rows) => rows,
@@ -2205,8 +2313,8 @@ impl KnowledgeService {
             }
         };
         let mut pending: Vec<(KnowledgeBaseRow, KnowledgeSource)> = Vec::new();
-        for row in rows {
-            let source = match source_from_extra(&row.extra) {
+        for mut row in rows {
+            let mut source = match source_from_extra(&row.extra) {
                 Ok(source) => source,
                 Err(error) => {
                     tracing::warn!(
@@ -2217,10 +2325,100 @@ impl KnowledgeService {
                     continue;
                 }
             };
+            if self.source_repository().is_some()
+                && let Some(cached) = source.as_mut()
+            {
+                if let Err(error) = self
+                    .refresh_legacy_source_cache(&mut row, cached)
+                    .await
+                {
+                    tracing::warn!(
+                        knowledge_base_id = %row.knowledge_base_id,
+                        %error,
+                        "knowledge boot-resume: failed to repair source cache from normalized state"
+                    );
+                }
+                source = match source_from_extra(&row.extra) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        tracing::warn!(
+                            knowledge_base_id = %row.knowledge_base_id,
+                            %error,
+                            "knowledge boot-resume: repaired source cache is invalid"
+                        );
+                        continue;
+                    }
+                };
+            }
             let Some(src) = source else { continue };
-            if src.mode == KnowledgeSourceMode::Snapshot
-                && !src.entries.is_empty()
-                && src.last_fetched_at.is_none()
+            let normalized_pending = if self.source_repository().is_some() {
+                match self.ensure_normalized_source(&row).await {
+                    Ok(Some(normalized)) => {
+                        let mut needs_resume = false;
+                        let source_repository = self.source_repository();
+                        let entry_repository = self.entry_repository();
+                        for item in normalized
+                            .items
+                            .iter()
+                            .filter(|item| item.state == KnowledgeSourceState::Active)
+                        {
+                            if item.sync_status == KnowledgeSourceItemSyncStatus::Syncing
+                                || (normalized.source.mode
+                                    == PersistedKnowledgeSourceMode::Snapshot
+                                    && item.sync_status
+                                        == KnowledgeSourceItemSyncStatus::Pending)
+                            {
+                                needs_resume = true;
+                                break;
+                            }
+                            if let (Some(source_repository), Some(entry_repository)) =
+                                (source_repository.as_ref(), entry_repository.as_ref())
+                                && let Ok(Some(provenance)) = source_repository
+                                    .get_managed_entry_provenance(
+                                        &item.knowledge_source_item_id,
+                                    )
+                                    .await
+                            {
+                                let entry = entry_repository
+                                    .get_entry(
+                                        &normalized.source.knowledge_base_id,
+                                        &provenance.knowledge_entry_id,
+                                    )
+                                    .await
+                                    .ok()
+                                    .flatten();
+                                if entry.as_ref().is_none_or(|entry| {
+                                    entry.is_deleted()
+                                        || std::fs::symlink_metadata(
+                                            Path::new(&row.root_path).join(&entry.rel_path),
+                                        )
+                                        .is_err()
+                                }) {
+                                    needs_resume = true;
+                                    break;
+                                }
+                            }
+                        }
+                        needs_resume
+                    }
+                    Ok(None) => false,
+                    Err(error) => {
+                        tracing::warn!(
+                            knowledge_base_id = %row.knowledge_base_id,
+                            %error,
+                            "knowledge boot-resume: normalized source state is unavailable"
+                        );
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if normalized_pending
+                || (self.source_repository().is_none()
+                    && src.mode == KnowledgeSourceMode::Snapshot
+                    && !src.entries.is_empty()
+                    && src.last_fetched_at.is_none())
             {
                 pending.push((row, src));
             }
@@ -2242,7 +2440,7 @@ impl KnowledgeService {
 
     /// Create-time snapshot pipeline, shared by the synchronous REST create
     /// and the gateway's background dispatch: fetch every entry into
-    /// `{root}/snapshots/`, persist the (title-backfilled, stamped) source,
+    /// managed entries, persist the (title-backfilled, stamped) source,
     /// chain the best-effort autogen, then re-read + re-emit
     /// `knowledge.base-updated` so clients see the final stats/description.
     /// The returned info carries the per-entry `source_fetch` summary (the
@@ -2254,18 +2452,49 @@ impl KnowledgeService {
         mut row: KnowledgeBaseRow,
         mut src: KnowledgeSource,
     ) -> Result<KnowledgeBaseInfo, AppError> {
-        let (files, mut errors) =
-            self.prepare_source_snapshots(&mut src.entries).await;
-        let publication = self
-            .publish_prepared_url_source(
-                &mut row,
-                &mut src,
-                files,
-                false,
-            )
-            .await;
-        let fetched = publication.fetched;
-        errors.extend(publication.errors);
+        let (fetched, errors, persisted_stamp, fatal_error) =
+            if self.source_repository().is_some() && self.entry_repository().is_some() {
+                self.ensure_projection_reconciled(&row).await?;
+                self.recover_pending_source_publications(&row).await?;
+                let normalized = self
+                    .ensure_normalized_source(&row)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::Internal(
+                            "knowledge source normalization did not produce an aggregate".into(),
+                        )
+                    })?;
+                let (files, mut errors) = self
+                    .prepare_managed_source_items(&normalized.items)
+                    .await?;
+                let publication = self
+                    .publish_managed_source_items(&mut row, &normalized.source, files)
+                    .await;
+                errors.extend(publication.errors);
+                if publication.fatal_error.is_none() {
+                    self.refresh_legacy_source_cache(&mut row, &mut src)
+                        .await?;
+                }
+                (
+                    publication.fetched,
+                    errors,
+                    publication.persisted_stamp,
+                    publication.fatal_error,
+                )
+            } else {
+                let (files, mut errors) =
+                    self.prepare_source_snapshots(&mut src.entries).await;
+                let publication = self
+                    .publish_prepared_url_source(&mut row, &mut src, files, false)
+                    .await;
+                errors.extend(publication.errors);
+                (
+                    publication.fetched,
+                    errors,
+                    publication.persisted_stamp,
+                    publication.fatal_error,
+                )
+            };
         if !errors.is_empty() {
             tracing::warn!(kb_id = %row.knowledge_base_id, ?errors, "some URL sources failed to fetch at create time");
         }
@@ -2273,8 +2502,7 @@ impl KnowledgeService {
         // counts. When persisting fails, the registry still holds the old
         // value — reporting the aspirational new stamp would lie to the
         // client about freshness state.
-        let persisted_stamp = publication.persisted_stamp;
-        if let Some(error) = publication.fatal_error {
+        if let Some(error) = fatal_error {
             tracing::warn!(
                 kb_id = %row.knowledge_base_id,
                 %error,
@@ -2475,19 +2703,55 @@ impl KnowledgeService {
 
     pub async fn list_files(&self, id: &str) -> Result<Vec<KbFileEntry>, AppError> {
         let row = self.require_base(id).await?;
+        if let Err(error) = self.ensure_projection_reconciled(&row).await {
+            tracing::warn!(
+                kb_id = %row.knowledge_base_id,
+                %error,
+                "knowledge file listing is continuing without a reconciled entry projection"
+            );
+        }
+        let _tree_guard = self.acquire_document_tree_read_lock(&row).await?;
+        let _base_guard = self.acquire_base_lifecycle_lock(&row).await?;
+        let current = self.require_base(id).await?;
+        if current.root_path != row.root_path {
+            return Err(AppError::Conflict(
+                "knowledge base root changed while its files were being listed; retry".into(),
+            ));
+        }
         let root = PathBuf::from(&row.root_path);
         let lock_root = root.clone();
         // Bounded so a slow/stale NAS root degrades to an empty listing instead
         // of hanging the detail view (and the agent write-path collision check).
-        Ok(
-            bounded_root_blocking(
+        let mut files = bounded_root_blocking(
                 &lock_root,
                 BASE_WALK_BUDGET,
                 Vec::new(),
                 move || list_md_files(&root),
             )
-            .await,
-        )
+            .await;
+        if let Some(repository) = self.entry_repository() {
+            let knowledge_base_id = KnowledgeBaseId::parse(&current.knowledge_base_id).map_err(
+                |error| {
+                    AppError::Internal(format!(
+                        "stored knowledge base id '{}' is invalid: {error}",
+                        current.knowledge_base_id
+                    ))
+                },
+            )?;
+            if let Ok(projected) = repository
+                .list_entries_for_base(&knowledge_base_id, false)
+                .await
+            {
+                let source_by_entry = self.source_metadata_by_entry(&current).await?;
+                hydrate_file_entries(
+                    &mut files,
+                    &projected,
+                    knowledge_tree_access(&current)?,
+                    &source_by_entry,
+                );
+            }
+        }
+        Ok(files)
     }
 
     fn projection_is_reconciled(&self, row: &KnowledgeBaseRow) -> bool {
@@ -2509,6 +2773,503 @@ impl KnowledgeService {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&row.knowledge_base_id);
+    }
+
+    /// Lazily migrate the legacy `extra.source` aggregate into normalized,
+    /// queryable source identities. The operation is idempotent and never
+    /// rewrites an existing source/item from stale JSON; explicit source APIs
+    /// own subsequent mutations.
+    async fn ensure_normalized_source(
+        &self,
+        row: &KnowledgeBaseRow,
+    ) -> Result<Option<NormalizedSourceAggregate>, AppError> {
+        let Some(repository) = self.source_repository() else {
+            return Ok(None);
+        };
+        let Some(legacy) = source_from_extra(&row.extra)
+            .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?
+        else {
+            return Ok(None);
+        };
+        validate_source(&legacy)?;
+        let knowledge_base_id = KnowledgeBaseId::parse(&row.knowledge_base_id).map_err(
+            |error| {
+                AppError::Internal(format!(
+                    "stored knowledge base id '{}' is invalid: {error}",
+                    row.knowledge_base_id
+                ))
+            },
+        )?;
+        let requested_source_id = legacy
+            .source_id
+            .clone()
+            .unwrap_or_else(KnowledgeSourceId::new);
+        let source = if let Some(existing) = repository
+            .get_source(&requested_source_id)
+            .await?
+        {
+            existing
+        } else {
+            repository
+                .ensure_source(&EnsureKnowledgeSourceParams {
+                    knowledge_source_id: requested_source_id,
+                    knowledge_base_id,
+                    kind: KnowledgeSourceKind::Url,
+                    mode: persisted_source_mode(legacy.mode),
+                    default_parent_entry_id: legacy.default_parent_entry_id.clone(),
+                    created_at: row.created_at.max(0),
+                })
+                .await?
+                .source
+        };
+        let mut all_items = repository
+            .list_source_items(&source.knowledge_source_id, true)
+            .await?;
+        if source.state == KnowledgeSourceState::Removed {
+            return Ok(Some(NormalizedSourceAggregate {
+                source,
+                items: all_items,
+            }));
+        }
+        let mut items = all_items
+            .iter()
+            .filter(|item| !item.is_removed())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut occupied_ordinals = items
+            .iter()
+            .map(|item| item.ordinal)
+            .collect::<HashSet<_>>();
+        let mut next_ordinal = occupied_ordinals
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(-1)
+            .saturating_add(1);
+        for (index, legacy_item) in legacy.entries.iter().enumerate() {
+            let normalized_url = normalize_source_url(&legacy_item.url).map_err(|error| {
+                AppError::Internal(format!(
+                    "stored knowledge source URL '{}' is invalid: {error}",
+                    legacy_item.url
+                ))
+            })?;
+            let existing = repository
+                .get_live_source_item_by_url(
+                    &source.knowledge_source_id,
+                    &normalized_url,
+                )
+                .await?;
+            let removed_item = all_items.iter().find(|item| {
+                item.normalized_url == normalized_url && item.is_removed()
+            });
+            let explicit_readd = removed_item.is_some_and(|removed| {
+                legacy_item.source_item_id.as_ref()
+                    != Some(&removed.knowledge_source_item_id)
+                    && legacy_item.source_item_id.is_some()
+            });
+            let item = if let Some(item) = existing {
+                item
+            } else if removed_item.is_some() && !explicit_readd {
+                continue;
+            } else {
+                let desired = i64::try_from(index).unwrap_or(i64::MAX);
+                let ordinal = if occupied_ordinals.insert(desired) {
+                    desired
+                } else {
+                    while !occupied_ordinals.insert(next_ordinal) {
+                        next_ordinal = next_ordinal.saturating_add(1);
+                    }
+                    let allocated = next_ordinal;
+                    next_ordinal = next_ordinal.saturating_add(1);
+                    allocated
+                };
+                let migrated_state = if legacy_item.sync_status
+                    == KnowledgeSourceSyncStatus::Paused
+                {
+                    KnowledgeSourceState::Paused
+                } else {
+                    KnowledgeSourceState::Active
+                };
+                let migrated_status = if matches!(
+                    legacy_item.sync_status,
+                    KnowledgeSourceSyncStatus::Paused | KnowledgeSourceSyncStatus::Syncing
+                ) {
+                    KnowledgeSourceItemSyncStatus::Pending
+                } else {
+                    persisted_sync_status(legacy_item.sync_status)
+                };
+                let created = repository
+                    .create_source_item(&CreateKnowledgeSourceItemParams {
+                        knowledge_source_item_id: legacy_item
+                            .source_item_id
+                            .clone()
+                            .unwrap_or_else(KnowledgeSourceItemId::new),
+                        knowledge_source_id: source.knowledge_source_id.clone(),
+                        requested_url: legacy_item.url.trim().to_owned(),
+                        normalized_url,
+                        final_url: None,
+                        rendered: legacy_item.rendered,
+                        title: legacy_item.title.clone(),
+                        ordinal,
+                        state: migrated_state,
+                        sync_status: migrated_status,
+                        etag: None,
+                        http_last_modified: None,
+                        last_attempt_at: legacy_item.last_success_at,
+                        last_success_at: legacy_item.last_success_at,
+                        last_error: legacy_item.last_error.clone(),
+                        last_published_hash: None,
+                        pending_published_hash: None,
+                        pending_final_url: None,
+                        pending_title: None,
+                        pending_publication_at: None,
+                        removed_at: None,
+                        created_at: row.created_at.max(0),
+                    })
+                    .await?;
+                all_items.push(created.clone());
+                created
+            };
+            if item.state == KnowledgeSourceState::Active
+                && let Some(entry_id) = legacy_item.snapshot_entry_id.clone()
+                && repository
+                    .get_entry_provenance(&entry_id)
+                    .await?
+                    .is_none()
+            {
+                repository
+                    .bind_managed_entry(&BindManagedKnowledgeEntryParams {
+                        knowledge_entry_id: entry_id,
+                        knowledge_source_item_id: item.knowledge_source_item_id.clone(),
+                        created_at: item.created_at,
+                    })
+                    .await?;
+            }
+        }
+        items = repository
+            .list_source_items(&source.knowledge_source_id, false)
+            .await?;
+        Ok(Some(NormalizedSourceAggregate { source, items }))
+    }
+
+    async fn source_projection_hints(
+        &self,
+        row: &KnowledgeBaseRow,
+    ) -> Result<SourceProjectionHints, AppError> {
+        let mut hints = SourceProjectionHints::default();
+        if let Some(repository) = self.source_repository() {
+            let _ = self.ensure_normalized_source(row).await?;
+            let knowledge_base_id = KnowledgeBaseId::parse(&row.knowledge_base_id).map_err(
+                |error| {
+                    AppError::Internal(format!(
+                        "stored knowledge base id '{}' is invalid: {error}",
+                        row.knowledge_base_id
+                    ))
+                },
+            )?;
+            for source in repository
+                .list_sources_for_base(&knowledge_base_id, true)
+                .await?
+            {
+                for provenance in repository
+                    .list_entry_provenance_for_source(&source.knowledge_source_id)
+                    .await?
+                {
+                    hints
+                        .web_provenance_entry_ids
+                        .insert(provenance.knowledge_entry_id);
+                }
+                if source.state != KnowledgeSourceState::Active {
+                    continue;
+                }
+                for item in repository
+                    .list_source_items(&source.knowledge_source_id, false)
+                    .await?
+                    .into_iter()
+                    .filter(|item| item.state == KnowledgeSourceState::Active)
+                {
+                    let provenance = repository
+                        .get_managed_entry_provenance(&item.knowledge_source_item_id)
+                        .await?;
+                    if source.mode == PersistedKnowledgeSourceMode::Snapshot
+                        || provenance.is_some()
+                    {
+                        hints
+                            .managed_item_ids
+                            .insert(item.knowledge_source_item_id.clone());
+                    }
+                    if source.mode == PersistedKnowledgeSourceMode::Snapshot {
+                        hints.managed_urls.insert(item.normalized_url.clone());
+                    }
+                    if let Some(provenance) = provenance {
+                        hints.entry_ids_by_item.insert(
+                            item.knowledge_source_item_id,
+                            provenance.knowledge_entry_id.clone(),
+                        );
+                        hints.entry_ids_by_url.insert(
+                            item.normalized_url,
+                            provenance.knowledge_entry_id,
+                        );
+                    }
+                }
+            }
+            return Ok(hints);
+        }
+        let Some(source) = source_from_extra(&row.extra)
+            .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?
+        else {
+            return Ok(hints);
+        };
+        for item in source.entries {
+            let normalized_url = normalize_source_url(&item.url).map_err(|error| {
+                AppError::Internal(format!(
+                    "stored knowledge source URL '{}' is invalid: {error}",
+                    item.url
+                ))
+            })?;
+            hints.managed_urls.insert(normalized_url.clone());
+            if let Some(source_item_id) = item.source_item_id {
+                hints.managed_item_ids.insert(source_item_id.clone());
+                if let Some(entry_id) = item.snapshot_entry_id.clone() {
+                    hints
+                        .entry_ids_by_item
+                        .insert(source_item_id, entry_id.clone());
+                    hints.entry_ids_by_url.insert(normalized_url, entry_id);
+                }
+            } else if let Some(entry_id) = item.snapshot_entry_id {
+                hints.entry_ids_by_url.insert(normalized_url, entry_id);
+            }
+        }
+        Ok(hints)
+    }
+
+    async fn source_metadata_by_entry(
+        &self,
+        row: &KnowledgeBaseRow,
+    ) -> Result<SourceMetadataByEntry, AppError> {
+        let Some(repository) = self.source_repository() else {
+            return Ok(HashMap::new());
+        };
+        let _ = self.ensure_normalized_source(row).await?;
+        let knowledge_base_id = KnowledgeBaseId::parse(&row.knowledge_base_id).map_err(
+            |error| {
+                AppError::Internal(format!(
+                    "stored knowledge base id '{}' is invalid: {error}",
+                    row.knowledge_base_id
+                ))
+            },
+        )?;
+        let mut by_entry = HashMap::new();
+        for source in repository
+            .list_sources_for_base(&knowledge_base_id, true)
+            .await?
+        {
+            let items = repository
+                .list_source_items(&source.knowledge_source_id, true)
+                .await?
+                .into_iter()
+                .map(|item| (item.knowledge_source_item_id.clone(), item))
+                .collect::<HashMap<_, _>>();
+            for relation in repository
+                .list_entry_provenance_for_source(&source.knowledge_source_id)
+                .await?
+            {
+                let Some(item) = items.get(&relation.knowledge_source_item_id) else {
+                    continue;
+                };
+                by_entry.insert(
+                    relation.knowledge_entry_id,
+                    KnowledgeEntrySourceInfo {
+                        source_id: source.knowledge_source_id.clone(),
+                        source_item_id: item.knowledge_source_item_id.clone(),
+                        source_url: item.requested_url.clone(),
+                        relationship: api_source_relationship(relation.relationship),
+                        sync_status: api_sync_status(item.state, item.sync_status),
+                        final_url: item.final_url.clone(),
+                        last_success_at: item.last_success_at,
+                        last_error: item.last_error.clone(),
+                    },
+                );
+            }
+        }
+        Ok(by_entry)
+    }
+
+    async fn validate_content_write_target(
+        &self,
+        row: &KnowledgeBaseRow,
+        rel_path: &str,
+    ) -> Result<(), AppError> {
+        let canonical = normalize_tree_rel_path(rel_path)?;
+        if canonical.is_empty() {
+            return Err(AppError::BadRequest("file path must not be empty".into()));
+        }
+        if let (Some(entry_repository), Some(source_repository)) =
+            (self.entry_repository(), self.source_repository())
+        {
+            let knowledge_base_id = KnowledgeBaseId::parse(&row.knowledge_base_id).map_err(
+                |error| {
+                    AppError::Internal(format!(
+                        "stored knowledge base id '{}' is invalid: {error}",
+                        row.knowledge_base_id
+                    ))
+                },
+            )?;
+            if let Some(entry) = entry_repository
+                .get_entry_by_path(
+                    &knowledge_base_id,
+                    &portable_writeback_path_identity(&canonical),
+                )
+                .await?
+                && let Some(provenance) = source_repository
+                    .get_entry_provenance(&entry.knowledge_entry_id)
+                    .await?
+                && provenance.relationship == KnowledgeEntryProvenanceRelationship::Managed
+            {
+                return Err(AppError::Forbidden(
+                    "this document body is managed by its web source; detach it or copy it as an editable note before editing"
+                        .into(),
+                ));
+            }
+        }
+
+        // Fail closed during projection degradation or legacy migration by
+        // inspecting the managed header itself. A user-authored file merely
+        // placed in a directory named `snapshots` remains editable.
+        let path = PathBuf::from(&row.root_path).join(&canonical);
+        if std::fs::symlink_metadata(&path).is_ok_and(|metadata| {
+            metadata.is_file() && !metadata_is_link_or_reparse(&path, &metadata)
+        }) {
+            let (source_item_id, source_url, relationship) =
+                read_snapshot_projection_identity(&path);
+            let hints = self.source_projection_hints(row).await?;
+            let managed = relationship
+                .as_deref()
+                .is_none_or(|relationship| relationship == "managed");
+            if managed
+                && (source_item_id
+                    .as_ref()
+                    .is_some_and(|id| hints.managed_item_ids.contains(id))
+                    || source_url
+                        .as_ref()
+                        .is_some_and(|url| hints.managed_urls.contains(url)))
+            {
+                return Err(AppError::Forbidden(
+                    "this document body is managed by its web source; detach it or copy it as an editable note before editing"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn resolve_source_entry(
+        &self,
+        row: &KnowledgeBaseRow,
+        entry_id: &KnowledgeEntryId,
+        expected_revision: i64,
+    ) -> Result<ResolvedSourceEntry, AppError> {
+        if expected_revision < 0 {
+            return Err(AppError::BadRequest(
+                "expected_revision must be non-negative".into(),
+            ));
+        }
+        let entry_repository = self.entry_repository().ok_or_else(|| {
+            AppError::Conflict("stable knowledge entry validation is unavailable".into())
+        })?;
+        let source_repository = self.source_repository().ok_or_else(|| {
+            AppError::Conflict("knowledge source identity validation is unavailable".into())
+        })?;
+        let knowledge_base_id = KnowledgeBaseId::parse(&row.knowledge_base_id).map_err(
+            |error| {
+                AppError::Internal(format!(
+                    "stored knowledge base id '{}' is invalid: {error}",
+                    row.knowledge_base_id
+                ))
+            },
+        )?;
+        let entry = entry_repository
+            .get_entry(&knowledge_base_id, entry_id)
+            .await?
+            .filter(|entry| !entry.is_deleted())
+            .ok_or_else(|| {
+                AppError::Conflict(format!(
+                    "knowledge entry identity no longer resolves in this knowledge base: {entry_id}"
+                ))
+            })?;
+        if entry.revision != expected_revision {
+            return Err(AppError::Conflict(format!(
+                "knowledge entry revision conflict: expected {expected_revision}, current {}",
+                entry.revision
+            )));
+        }
+        if entry.kind != KNOWLEDGE_ENTRY_KIND_FILE || entry.is_directory() {
+            return Err(AppError::BadRequest(
+                "source action requires a document entry".into(),
+            ));
+        }
+        let provenance = source_repository
+            .get_entry_provenance(entry_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::BadRequest("knowledge entry is not related to a web source".into())
+            })?;
+        let item = source_repository
+            .get_source_item(&provenance.knowledge_source_item_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::Internal("knowledge source item referenced by the entry is missing".into())
+            })?;
+        let source = source_repository
+            .get_source(&item.knowledge_source_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::Internal("knowledge source aggregate referenced by the item is missing".into())
+            })?;
+        if source.knowledge_base_id != knowledge_base_id {
+            return Err(AppError::Conflict(
+                "knowledge source entry belongs to another knowledge base".into(),
+            ));
+        }
+        Ok(ResolvedSourceEntry {
+            entry,
+            provenance,
+            item,
+            source,
+        })
+    }
+
+    async fn list_entry_by_id(
+        &self,
+        knowledge_base_id: &str,
+        entry_id: &KnowledgeEntryId,
+    ) -> Result<KbTreeEntry, AppError> {
+        let row = self.require_base(knowledge_base_id).await?;
+        self.ensure_projection_reconciled(&row).await?;
+        let repository = self.entry_repository().ok_or_else(|| {
+            AppError::Conflict("stable knowledge entry validation is unavailable".into())
+        })?;
+        let kb_id = KnowledgeBaseId::parse(&row.knowledge_base_id).map_err(|error| {
+            AppError::Internal(format!(
+                "stored knowledge base id '{}' is invalid: {error}",
+                row.knowledge_base_id
+            ))
+        })?;
+        let entry = repository
+            .get_entry(&kb_id, entry_id)
+            .await?
+            .filter(|entry| !entry.is_deleted())
+            .ok_or_else(|| AppError::NotFound(format!("knowledge entry not found: {entry_id}")))?;
+        let parent = tree_parent_rel_path(&entry.rel_path).to_owned();
+        self.list_tree(knowledge_base_id, &parent)
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.entry_id.as_ref() == Some(entry_id))
+            .ok_or_else(|| {
+                AppError::Internal(format!(
+                    "knowledge entry {entry_id} could not be listed at its current path"
+                ))
+            })
     }
 
     /// Reconcile once per process before serving projected identities. This
@@ -2560,9 +3321,7 @@ impl KnowledgeService {
             .list_entries_for_base(&knowledge_base_id, true)
             .await?;
         let expected_tree_revision = repository.tree_revision(&knowledge_base_id).await?;
-        let has_source = source_from_extra(&row.extra)
-            .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?
-            .is_some();
+        let source_hints = self.source_projection_hints(row).await?;
         let root = PathBuf::from(&row.root_path);
         let scan_root = root.clone();
         let scan_knowledge_base_id = knowledge_base_id.clone();
@@ -2578,7 +3337,7 @@ impl KnowledgeService {
                     &scan_root,
                     &scan_knowledge_base_id,
                     &existing,
-                    has_source,
+                    source_hints,
                     &forced_ids,
                 )
             },
@@ -2603,11 +3362,218 @@ impl KnowledgeService {
         let entries = repository
             .list_entries_for_base(&knowledge_base_id, false)
             .await?;
+        self.reconcile_source_provenance_locked(row, &entries).await?;
         self.mark_projection_reconciled(row);
         Ok(Some(ProjectionState {
             entries,
             tree_revision: non_negative_tree_revision(tree_revision)?,
         }))
+    }
+
+    async fn reconcile_source_provenance_locked(
+        &self,
+        row: &KnowledgeBaseRow,
+        entries: &[KnowledgeEntryRow],
+    ) -> Result<(), AppError> {
+        let Some(repository) = self.source_repository() else {
+            return Ok(());
+        };
+        let Some(normalized) = self.ensure_normalized_source(row).await? else {
+            return Ok(());
+        };
+        let active_items = normalized
+            .items
+            .into_iter()
+            .filter(|item| item.state == KnowledgeSourceState::Active)
+            .collect::<Vec<_>>();
+        if active_items.is_empty() {
+            return Ok(());
+        }
+
+        let root = PathBuf::from(&row.root_path);
+        let scan_root = root.clone();
+        let files = entries
+            .iter()
+            .filter(|entry| entry.kind == KNOWLEDGE_ENTRY_KIND_FILE)
+            .map(|entry| (entry.knowledge_entry_id.clone(), entry.rel_path.clone()))
+            .collect::<Vec<_>>();
+        let identities = bounded_root_blocking(
+            &root,
+            BASE_WALK_BUDGET,
+            Err(AppError::Timeout(format!(
+                "knowledge source identity scan timed out: {}",
+                root.display()
+            ))),
+            move || {
+                Ok::<_, AppError>(
+                    files
+                        .into_iter()
+                        .map(|(entry_id, rel_path)| {
+                            let (source_item_id, source_url, relationship) =
+                                read_snapshot_projection_identity(&scan_root.join(&rel_path));
+                            (entry_id, rel_path, source_item_id, source_url, relationship)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            },
+        )
+        .await?;
+
+        for mut item in active_items {
+            let existing_provenance = repository
+                .get_managed_entry_provenance(&item.knowledge_source_item_id)
+                .await?;
+            let marker_matches = identities
+                .iter()
+                .filter(|(_, _, source_item_id, _, relationship)| {
+                    relationship
+                        .as_deref()
+                        .is_none_or(|relationship| relationship == "managed")
+                        && source_item_id.as_ref() == Some(&item.knowledge_source_item_id)
+                })
+                .map(|(entry_id, rel_path, _, _, _)| {
+                    (entry_id.clone(), rel_path.clone())
+                })
+                .collect::<Vec<_>>();
+            let matches = if marker_matches.is_empty()
+                && normalized.source.mode == PersistedKnowledgeSourceMode::Snapshot
+            {
+                identities
+                    .iter()
+                    .filter(|(_, _, source_item_id, source_url, relationship)| {
+                        relationship
+                            .as_deref()
+                            .is_none_or(|relationship| relationship == "managed")
+                            &&
+                        source_item_id.is_none()
+                            && source_url.as_deref() == Some(item.normalized_url.as_str())
+                    })
+                    .map(|(entry_id, rel_path, _, _, _)| {
+                        (entry_id.clone(), rel_path.clone())
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                marker_matches
+            };
+            let ambiguous = matches.len() > 1
+                || matches.first().is_some_and(|(entry_id, _)| {
+                    existing_provenance.as_ref().is_some_and(|provenance| {
+                        provenance.knowledge_entry_id != *entry_id
+                    })
+                });
+            if ambiguous {
+                let attempted = repository
+                    .record_sync_attempt(
+                        &item.knowledge_source_item_id,
+                        item.revision,
+                        now_ms(),
+                    )
+                    .await?;
+                repository
+                    .record_sync_failure(&RecordKnowledgeSourceSyncFailureParams {
+                        knowledge_source_item_id: item.knowledge_source_item_id.clone(),
+                        expected_revision: attempted.revision,
+                        status: KnowledgeSourceItemSyncStatus::Conflicted,
+                        error: "multiple documents claim the same managed source identity; refresh was disabled to prevent an overwrite".into(),
+                        failed_at: now_ms(),
+                    })
+                    .await?;
+                continue;
+            }
+            if let Some(existing_provenance) = existing_provenance {
+                if item.last_published_hash.is_none()
+                    && item.pending_published_hash.is_none()
+                    && let Some(rel_path) = matches
+                        .first()
+                        .map(|(_, rel_path)| rel_path.as_str())
+                        .or_else(|| {
+                            entries
+                                .iter()
+                                .find(|entry| {
+                                    entry.knowledge_entry_id
+                                        == existing_provenance.knowledge_entry_id
+                                })
+                                .map(|entry| entry.rel_path.as_str())
+                        })
+                {
+                    let content = tokio::fs::read_to_string(root.join(rel_path))
+                        .await
+                        .map_err(|error| {
+                            AppError::Conflict(format!(
+                                "failed to establish a safe baseline for legacy source document {rel_path}: {error}"
+                            ))
+                        })?;
+                    let attempted = repository
+                        .record_sync_attempt(
+                            &item.knowledge_source_item_id,
+                            item.revision,
+                            now_ms(),
+                        )
+                        .await?;
+                    repository
+                        .record_sync_success(&RecordKnowledgeSourceSyncSuccessParams {
+                            knowledge_source_item_id: item
+                                .knowledge_source_item_id
+                                .clone(),
+                            expected_revision: attempted.revision,
+                            final_url: item.final_url.clone(),
+                            title: item.title.clone(),
+                            etag: item.etag.clone(),
+                            http_last_modified: item.http_last_modified.clone(),
+                            last_published_hash: sha256_text(&content),
+                            succeeded_at: now_ms(),
+                        })
+                        .await?;
+                }
+                continue;
+            }
+            match matches.as_slice() {
+                [(entry_id, rel_path)] => {
+                    if item.last_published_hash.is_none()
+                        && item.pending_published_hash.is_none()
+                    {
+                        let content = tokio::fs::read_to_string(root.join(rel_path))
+                            .await
+                            .map_err(|error| {
+                                AppError::Conflict(format!(
+                                    "failed to establish a safe baseline for legacy source document {rel_path}: {error}"
+                                ))
+                            })?;
+                        let attempted = repository
+                            .record_sync_attempt(
+                                &item.knowledge_source_item_id,
+                                item.revision,
+                                now_ms(),
+                            )
+                            .await?;
+                        item = repository
+                            .record_sync_success(&RecordKnowledgeSourceSyncSuccessParams {
+                                knowledge_source_item_id: item
+                                    .knowledge_source_item_id
+                                    .clone(),
+                                expected_revision: attempted.revision,
+                                final_url: item.final_url.clone(),
+                                title: item.title.clone(),
+                                etag: item.etag.clone(),
+                                http_last_modified: item.http_last_modified.clone(),
+                                last_published_hash: sha256_text(&content),
+                                succeeded_at: now_ms(),
+                            })
+                            .await?;
+                    }
+                    repository
+                        .bind_managed_entry(&BindManagedKnowledgeEntryParams {
+                            knowledge_entry_id: entry_id.clone(),
+                            knowledge_source_item_id: item.knowledge_source_item_id.clone(),
+                            created_at: now_ms(),
+                        })
+                        .await?;
+                }
+                [] => {}
+                _ => unreachable!("ambiguous source identities returned above"),
+            }
+        }
+        Ok(())
     }
 
     /// Serialize a projection refresh after a tree-level mismatch. The caller
@@ -2701,7 +3667,13 @@ impl KnowledgeService {
                 &entries,
                 &projected,
             ) {
-                hydrate_tree_entries(&mut entries, &projected);
+                let source_by_entry = self.source_metadata_by_entry(&current).await?;
+                hydrate_tree_entries(
+                    &mut entries,
+                    &projected,
+                    knowledge_tree_access(&current)?,
+                    &source_by_entry,
+                );
                 return Ok(entries);
             }
 
@@ -2782,11 +3754,6 @@ impl KnowledgeService {
         validate_knowledge_root_bounded(destination_root.clone()).await?;
 
         let preferred_name = prepared.source_name.clone();
-        let preferred_target = join_tree_rel_path(&destination_parent_path, &preferred_name);
-        validate_source_managed_tree_mutation(
-            &current,
-            [&destination_parent_path, &preferred_target],
-        )?;
         let allocation_root = destination_root.clone();
         let allocation_parent_path = destination_parent_path.clone();
         let (allocated_name, target_path) = tokio::task::spawn_blocking(move || {
@@ -2888,7 +3855,6 @@ impl KnowledgeService {
         if rel_path.is_empty() {
             return Err(AppError::BadRequest("folder path must not be empty".into()));
         }
-        validate_source_managed_tree_mutation(&current, [&rel_path])?;
         let created = tokio::task::spawn_blocking(move || create_tree_folder(&root, &rel_path))
             .await
             .map_err(|e| AppError::Internal(format!("folder create task join error: {e}")))??;
@@ -2897,23 +3863,120 @@ impl KnowledgeService {
     }
 
     pub async fn delete_folder(&self, id: &str, rel_path: &str) -> Result<(), AppError> {
+        self.delete_folder_entry(id, rel_path, None, None).await
+    }
+
+    pub async fn delete_folder_entry(
+        &self,
+        id: &str,
+        rel_path: &str,
+        entry_id: Option<&KnowledgeEntryId>,
+        expected_revision: Option<i64>,
+    ) -> Result<(), AppError> {
+        if entry_id.is_some() != expected_revision.is_some() {
+            return Err(AppError::BadRequest(
+                "entry_id and expected_revision must be supplied together for delete".into(),
+            ));
+        }
         let row = self.require_base(id).await?;
+        if entry_id.is_some() && self.entry_repository().is_none() {
+            return Err(AppError::Conflict(
+                "stable knowledge entry validation is unavailable".into(),
+            ));
+        }
         require_editable_knowledge_tree(&row)?;
+        self.ensure_projection_reconciled(&row).await?;
         let _tree_guard =
             self.acquire_document_tree_write_lock(&row).await?;
         let _base_guard = self.acquire_base_lifecycle_lock(&row).await?;
         let current = self.require_base(id).await?;
         require_editable_knowledge_tree(&current)?;
         let root = PathBuf::from(&row.root_path);
-        let rel_path = normalize_tree_rel_path(rel_path)?;
+        let mut rel_path = normalize_tree_rel_path(rel_path)?;
         if rel_path.is_empty() {
             return Err(AppError::BadRequest("folder path must not be empty".into()));
         }
-        validate_source_managed_tree_mutation(&current, [&rel_path])?;
+        let mut projected_target = None;
+        if let Some(repository) = self.entry_repository() {
+            let knowledge_base_id = KnowledgeBaseId::parse(&current.knowledge_base_id).map_err(
+                |error| {
+                    AppError::Internal(format!(
+                        "stored knowledge base id '{}' is invalid: {error}",
+                        current.knowledge_base_id
+                    ))
+                },
+            )?;
+            let projected = repository
+                .list_entries_for_base(&knowledge_base_id, false)
+                .await?;
+            if let (Some(entry_id), Some(expected_revision)) = (entry_id, expected_revision) {
+                let entry = projected
+                    .iter()
+                    .find(|entry| &entry.knowledge_entry_id == entry_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        AppError::Conflict(
+                            "the folder moved or disappeared before delete".into(),
+                        )
+                    })?;
+                if entry.revision != expected_revision {
+                    return Err(AppError::Conflict(format!(
+                        "knowledge entry revision conflict: expected {expected_revision}, current {}",
+                        entry.revision
+                    )));
+                }
+                if !entry.is_directory() {
+                    return Err(AppError::BadRequest(
+                        "delete-folder identity does not refer to a directory".into(),
+                    ));
+                }
+                rel_path = entry.rel_path.clone();
+                projected_target = Some((repository.clone(), knowledge_base_id.clone(), entry));
+            }
+            let source_by_entry = self.source_metadata_by_entry(&current).await?;
+            let prefix = format!("{rel_path}/");
+            let managed_count = projected
+                .iter()
+                .filter(|entry| {
+                    entry.rel_path.starts_with(&prefix)
+                        && source_by_entry
+                            .get(&entry.knowledge_entry_id)
+                            .is_some_and(|source| {
+                                source.relationship
+                                    == KnowledgeEntrySourceRelationship::Managed
+                            })
+                })
+                .count();
+            if managed_count > 0 {
+                return Err(AppError::Conflict(format!(
+                    "folder contains {managed_count} managed web source document(s); detach or remove those sources before deleting the folder"
+                )));
+            }
+        }
         tokio::task::spawn_blocking(move || delete_tree_folder(&root, &rel_path))
             .await
             .map_err(|e| AppError::Internal(format!("folder delete task join error: {e}")))??;
-        self.mark_projection_dirty(&row);
+        if let Some((repository, knowledge_base_id, entry)) = projected_target {
+            if let Err(error) = repository
+                .soft_delete_entry_subtree(
+                    &knowledge_base_id,
+                    &entry.knowledge_entry_id,
+                    entry.revision,
+                    now_ms(),
+                )
+                .await
+            {
+                tracing::warn!(
+                    kb_id = %current.knowledge_base_id,
+                    entry_id = %entry.knowledge_entry_id,
+                    %error,
+                    "folder delete committed but subtree tombstone CAS failed; reconciliation will repair it"
+                );
+                self.mark_projection_dirty(&row);
+            }
+        } else {
+            self.mark_projection_dirty(&row);
+        }
         Ok(())
     }
 
@@ -3131,12 +4194,6 @@ impl KnowledgeService {
                     destination_parent.rel_path
                 )));
             }
-            if destination_parent.origin == KNOWLEDGE_ENTRY_ORIGIN_URL_SNAPSHOT {
-                return Err(AppError::Forbidden(
-                    "source-managed web snapshots are read-only and cannot receive moved content"
-                        .into(),
-                ));
-            }
         }
         let destination_parent_path = if let Some(destination_parent_id) =
             request.destination_parent_id.as_ref()
@@ -3155,20 +4212,6 @@ impl KnowledgeService {
         let projected_destination_parent_id = projected_destination_parent
             .as_ref()
             .map(|entry| entry.knowledge_entry_id.clone());
-
-        let requested_name = new_name.clone().unwrap_or_else(|| {
-            source_path
-                .rsplit('/')
-                .next()
-                .expect("non-empty normalized source has a final component")
-                .to_owned()
-        });
-        let requested_target =
-            join_tree_rel_path(&destination_parent_path, &requested_name);
-        validate_source_managed_tree_mutation(
-            &current,
-            [&source_path, &requested_target],
-        )?;
 
         if let Some(repository) = tree_operation_repository.as_ref() {
             let plan_root = root.clone();
@@ -3190,10 +4233,6 @@ impl KnowledgeService {
                         "tree relocation planning task failed: {error}"
                     ))
                 })??;
-            validate_source_managed_tree_mutation(
-                &current,
-                [&journal_source_path, &journal_destination_path],
-            )?;
 
             // Exact no-ops do not create a durable mutation/outbox row: the
             // schema intentionally couples every committed operation to a real
@@ -3655,6 +4694,23 @@ impl KnowledgeService {
         } else {
             None
         };
+        let source_by_entry = self.source_metadata_by_entry(&row).await?;
+        let source = projected
+            .as_ref()
+            .and_then(|entry| source_by_entry.get(&entry.knowledge_entry_id))
+            .cloned();
+        let tree_access = knowledge_tree_access(&row)?;
+        let capabilities = projected.as_ref().map_or_else(
+            KnowledgeEntryCapabilities::default,
+            |_| {
+                resolve_entry_capabilities(
+                    tree_access,
+                    false,
+                    source.as_ref(),
+                    false,
+                )
+            },
+        );
         Ok(KbFileContent {
             rel_path: actual_rel_path,
             content,
@@ -3664,6 +4720,9 @@ impl KnowledgeService {
                 .as_ref()
                 .map(|entry| entry.knowledge_entry_id.clone()),
             revision: projected.as_ref().map(|entry| entry.revision),
+            origin: projected.as_ref().map(|entry| entry.origin.clone()),
+            capabilities,
+            source,
         })
     }
 
@@ -3956,7 +5015,8 @@ impl KnowledgeService {
         }
         require_editable_knowledge_tree(&current)?;
         if let Some(logical_rel_path) = logical_rel_path {
-            validate_source_owned_write_target(&current, logical_rel_path)?;
+            self.validate_content_write_target(&current, logical_rel_path)
+                .await?;
         }
         let path = safe_md_path_bounded(
             PathBuf::from(&row.root_path),
@@ -3994,7 +5054,8 @@ impl KnowledgeService {
             ));
         }
         require_editable_knowledge_tree(&current)?;
-        validate_source_owned_write_target(&current, logical_rel_path)?;
+        self.validate_content_write_target(&current, logical_rel_path)
+            .await?;
         let path = safe_md_path_bounded(
             PathBuf::from(&row.root_path),
             storage_rel_path.to_owned(),
@@ -4022,7 +5083,8 @@ impl KnowledgeService {
             ));
         }
         require_editable_knowledge_tree(&current)?;
-        validate_source_owned_write_target(&current, logical_rel_path)?;
+        self.validate_content_write_target(&current, logical_rel_path)
+            .await?;
         let path = safe_md_path_bounded(
             PathBuf::from(&row.root_path),
             storage_rel_path.to_owned(),
@@ -4174,7 +5236,7 @@ impl KnowledgeService {
                 }
                 validate_canonical_write_target(&rel_path)?;
                 let row = self.require_base(kb_id.as_str()).await?;
-                validate_source_owned_write_target(&row, &rel_path)?;
+                self.validate_content_write_target(&row, &rel_path).await?;
                 let abs = safe_md_path_bounded(PathBuf::from(&row.root_path), rel_path.clone())
                     .await?;
                 let exists = tokio::time::timeout(
@@ -4205,7 +5267,7 @@ impl KnowledgeService {
                 let canonical = deconfuse_rel_path(rel_path);
                 validate_canonical_write_target(&canonical)?;
                 let row = self.require_base(kb_id.as_str()).await?;
-                validate_source_owned_write_target(&row, &canonical)?;
+                self.validate_content_write_target(&row, &canonical).await?;
                 let root = PathBuf::from(&row.root_path);
                 // Validate traversal/portable components up front, including
                 // missing parents that the eventual create may need.
@@ -4278,10 +5340,8 @@ impl KnowledgeService {
                     .into(),
             ));
         }
-        validate_source_owned_write_target(
-            &current,
-            &res.canonical_rel_path,
-        )?;
+        self.validate_content_write_target(&current, &res.canonical_rel_path)
+            .await?;
         drop(_base_guard);
         if res.op == WriteOp::Create && !req.policy.allow_create {
             return Err(AppError::Forbidden("creating new knowledge documents is not allowed for this session".into()));
@@ -4751,14 +5811,72 @@ impl KnowledgeService {
     }
 
     pub async fn delete_file(&self, id: &str, rel_path: &str) -> Result<(), AppError> {
+        self.delete_file_entry(id, rel_path, None, None).await
+    }
+
+    pub async fn delete_file_entry(
+        &self,
+        id: &str,
+        rel_path: &str,
+        entry_id: Option<&KnowledgeEntryId>,
+        expected_revision: Option<i64>,
+    ) -> Result<(), AppError> {
+        if entry_id.is_some() != expected_revision.is_some() {
+            return Err(AppError::BadRequest(
+                "entry_id and expected_revision must be supplied together for delete".into(),
+            ));
+        }
         let row = self.require_base(id).await?;
+        if entry_id.is_some() && self.entry_repository().is_none() {
+            return Err(AppError::Conflict(
+                "stable knowledge entry validation is unavailable".into(),
+            ));
+        }
+        if entry_id.is_some() {
+            self.ensure_projection_reconciled(&row).await?;
+        }
         let _tree_guard =
             self.acquire_document_tree_write_lock(&row).await?;
         let _base_guard = self.acquire_base_lifecycle_lock(&row).await?;
         let current = self.require_base(id).await?;
         require_editable_knowledge_tree(&current)?;
-        let rel_path = normalize_tree_rel_path(rel_path)?;
-        validate_source_managed_tree_mutation(&current, [&rel_path])?;
+        let mut rel_path = normalize_tree_rel_path(rel_path)?;
+        let mut projected = None;
+        if let (Some(entry_id), Some(expected_revision), Some(repository)) =
+            (entry_id, expected_revision, self.entry_repository())
+        {
+            let knowledge_base_id = KnowledgeBaseId::parse(&current.knowledge_base_id).map_err(
+                |error| {
+                    AppError::Internal(format!(
+                        "stored knowledge base id '{}' is invalid: {error}",
+                        current.knowledge_base_id
+                    ))
+                },
+            )?;
+            let entry = repository
+                .get_entry(&knowledge_base_id, entry_id)
+                .await?
+                .filter(|entry| !entry.is_deleted())
+                .ok_or_else(|| {
+                    AppError::Conflict(
+                        "the document moved or disappeared before delete".into(),
+                    )
+                })?;
+            if entry.revision != expected_revision {
+                return Err(AppError::Conflict(format!(
+                    "knowledge entry revision conflict: expected {expected_revision}, current {}",
+                    entry.revision
+                )));
+            }
+            if entry.kind != KNOWLEDGE_ENTRY_KIND_FILE {
+                return Err(AppError::BadRequest(
+                    "delete-file identity does not refer to a file".into(),
+                ));
+            }
+            rel_path = entry.rel_path.clone();
+            projected = Some((repository, knowledge_base_id, entry));
+        }
+        self.validate_content_write_target(&current, &rel_path).await?;
         let path = safe_md_path_bounded(
             PathBuf::from(&row.root_path),
             rel_path.clone(),
@@ -4768,7 +5886,27 @@ impl KnowledgeService {
             .await
             .map_err(|_| AppError::NotFound(format!("file not found: {rel_path}")))?;
         self.invalidate_search_cache_path(&path);
-        self.mark_projection_dirty(&current);
+        if let Some((repository, knowledge_base_id, entry)) = projected {
+            if let Err(error) = repository
+                .soft_delete_entry_subtree(
+                    &knowledge_base_id,
+                    &entry.knowledge_entry_id,
+                    entry.revision,
+                    now_ms(),
+                )
+                .await
+            {
+                tracing::warn!(
+                    kb_id = %current.knowledge_base_id,
+                    entry_id = %entry.knowledge_entry_id,
+                    %error,
+                    "file delete committed but entry tombstone CAS failed; reconciliation will repair it"
+                );
+                self.mark_projection_dirty(&current);
+            }
+        } else {
+            self.mark_projection_dirty(&current);
+        }
         Ok(())
     }
 
@@ -4943,8 +6081,8 @@ impl KnowledgeService {
         .await
     }
 
-    /// Re-fetch every URL-source entry into `{root}/snapshots/` (overwriting
-    /// older snapshots) and stamp `extra.source.last_fetched_at` when at
+    /// Re-fetch every actively managed URL-source entry at its current stable
+    /// entry location and stamp `extra.source.last_fetched_at` when at
     /// least one entry was fetched. Works for both snapshot- and live-mode
     /// sources (a live base gains/refreshes its point-in-time snapshots
     /// without changing its realtime contract).
@@ -4956,6 +6094,48 @@ impl KnowledgeService {
             .ok_or_else(|| AppError::BadRequest("knowledge base has no URL source to refresh".into()))?;
         if source.entries.is_empty() {
             return Err(AppError::BadRequest("URL source has no entries".into()));
+        }
+
+        if self.source_repository().is_some() && self.entry_repository().is_some() {
+            self.ensure_projection_reconciled(&row).await?;
+            self.recover_pending_source_publications(&row).await?;
+            let normalized = self
+                .ensure_normalized_source(&row)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Internal(
+                        "knowledge source normalization did not produce an aggregate".into(),
+                    )
+                })?;
+            if !normalized
+                .items
+                .iter()
+                .any(|item| item.state == KnowledgeSourceState::Active)
+            {
+                return Err(AppError::BadRequest(
+                    "knowledge source has no actively managed entries to refresh".into(),
+                ));
+            }
+            let (files, mut errors) = self
+                .prepare_managed_source_items(&normalized.items)
+                .await?;
+            let publication = self
+                .publish_managed_source_items(&mut row, &normalized.source, files)
+                .await;
+            errors.extend(publication.errors);
+            if let Some(error) = publication.fatal_error {
+                return Err(error);
+            }
+            self.refresh_legacy_source_cache(&mut row, &mut source)
+                .await?;
+            let info = self.row_to_info(row).await?;
+            self.emitter.emit_base_updated(&info);
+            return Ok(RefreshSourceSummary {
+                fetched: publication.fetched,
+                failed: errors.len(),
+                errors,
+                last_fetched_at: source.last_fetched_at,
+            });
         }
 
         let (files, mut errors) =
@@ -4984,6 +6164,477 @@ impl KnowledgeService {
         })
     }
 
+    pub async fn refresh_entry_source(
+        &self,
+        kb_id: &str,
+        entry_id: &KnowledgeEntryId,
+        expected_revision: i64,
+    ) -> Result<KnowledgeEntrySourceActionResult, AppError> {
+        let mut row = self.require_base(kb_id).await?;
+        require_editable_knowledge_tree(&row)?;
+        self.ensure_projection_reconciled(&row).await?;
+        self.recover_pending_source_publications(&row).await?;
+        let resolved = self
+            .resolve_source_entry(&row, entry_id, expected_revision)
+            .await?;
+        if resolved.provenance.relationship != KnowledgeEntryProvenanceRelationship::Managed
+            || resolved.item.state != KnowledgeSourceState::Active
+        {
+            return Err(AppError::Conflict(
+                "only an actively managed web document can be refreshed".into(),
+            ));
+        }
+        let (files, mut errors) = self
+            .prepare_managed_source_items(std::slice::from_ref(&resolved.item))
+            .await?;
+        let publication = self
+            .publish_managed_source_items(&mut row, &resolved.source, files)
+            .await;
+        errors.extend(publication.errors);
+        if let Some(error) = publication.fatal_error {
+            return Err(error);
+        }
+        let mut source = source_from_extra(&row.extra)
+            .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?
+            .ok_or_else(|| AppError::Internal("legacy source cache is missing".into()))?;
+        self.refresh_legacy_source_cache(&mut row, &mut source)
+            .await?;
+        let info = self.row_to_info(row.clone()).await?;
+        self.emitter.emit_base_updated(&info);
+        let entry = self.list_entry_by_id(kb_id, entry_id).await?;
+        let summary = RefreshSourceSummary {
+            fetched: publication.fetched,
+            failed: errors.len(),
+            errors,
+            last_fetched_at: source.last_fetched_at,
+        };
+        Ok(KnowledgeEntrySourceActionResult {
+            entry: Some(entry),
+            removed: false,
+            source_fetch: Some(summary),
+        })
+    }
+
+    pub async fn detach_entry_source(
+        &self,
+        kb_id: &str,
+        entry_id: &KnowledgeEntryId,
+        expected_revision: i64,
+    ) -> Result<KnowledgeEntrySourceActionResult, AppError> {
+        let row = self.require_base(kb_id).await?;
+        require_editable_knowledge_tree(&row)?;
+        self.ensure_projection_reconciled(&row).await?;
+        let _tree_guard = self.acquire_document_tree_write_lock(&row).await?;
+        let _base_guard = self.acquire_base_lifecycle_write_lock(&row).await?;
+        let mut current = self.require_base(kb_id).await?;
+        require_editable_knowledge_tree(&current)?;
+        let resolved = self
+            .resolve_source_entry(&current, entry_id, expected_revision)
+            .await?;
+        if resolved.provenance.relationship != KnowledgeEntryProvenanceRelationship::Managed {
+            return Err(AppError::Conflict(
+                "this web document is already detached from source management".into(),
+            ));
+        }
+        let root = PathBuf::from(&current.root_path);
+        let path = safe_md_path_bounded(root, resolved.entry.rel_path.clone()).await?;
+        let original = tokio::fs::read_to_string(&path).await.map_err(|error| {
+            AppError::Conflict(format!(
+                "failed to read managed document before detaching: {error}"
+            ))
+        })?;
+        let detached = rewrite_snapshot_relationship(
+            &original,
+            &resolved.item.knowledge_source_item_id,
+            "detached",
+        )?;
+        write_text_atomic_if_unchanged(&path, &original, &detached).await?;
+        let source_repository = self.source_repository().ok_or_else(|| {
+            AppError::Conflict("knowledge source identity validation is unavailable".into())
+        })?;
+        if let Err(error) = source_repository
+            .detach_managed_entry(
+                entry_id,
+                resolved.provenance.revision,
+                now_ms(),
+            )
+            .await
+        {
+            if let Err(restore_error) =
+                write_text_atomic_if_unchanged(&path, &detached, &original).await
+            {
+                return Err(AppError::Internal(format!(
+                    "source detach metadata failed ({error}); the document header could not be restored ({restore_error})"
+                )));
+            }
+            return Err(error.into());
+        }
+        self.invalidate_search_cache_path(&path);
+        self.mark_projection_dirty(&current);
+        let mut forced_ids = HashMap::new();
+        forced_ids.insert(
+            portable_writeback_path_identity(&resolved.entry.rel_path),
+            entry_id.clone(),
+        );
+        if let Err(error) = self
+            .reconcile_projection_locked(&current, forced_ids)
+            .await
+        {
+            tracing::warn!(
+                kb_id,
+                %entry_id,
+                %error,
+                "source detached but entry projection refresh is pending"
+            );
+        }
+        current.updated_at = now_ms();
+        if let Err(error) = self.repo.update_base(&current).await {
+            tracing::warn!(kb_id, %error, "source detached but base timestamp update failed");
+        }
+        drop(_base_guard);
+        drop(_tree_guard);
+        let mut source = source_from_extra(&current.extra)
+            .map_err(|error| knowledge_row_json_error(&current.knowledge_base_id, error))?
+            .ok_or_else(|| AppError::Internal("legacy source cache is missing".into()))?;
+        self.refresh_legacy_source_cache(&mut current, &mut source)
+            .await?;
+        let info = self.row_to_info(current.clone()).await?;
+        self.emitter.emit_base_updated(&info);
+        let entry = self.list_entry_by_id(kb_id, entry_id).await?;
+        self.emitter.emit_entry_content_updated(
+            &KnowledgeEntryContentUpdatedEvent {
+                knowledge_base_id: KnowledgeBaseId::parse(kb_id).map_err(|error| {
+                    AppError::Internal(format!("invalid knowledge base id after detach: {error}"))
+                })?,
+                entry_id: entry_id.clone(),
+                rel_path: entry.rel_path.clone(),
+                revision: entry.revision,
+            },
+        );
+        Ok(KnowledgeEntrySourceActionResult {
+            entry: Some(entry),
+            removed: false,
+            source_fetch: None,
+        })
+    }
+
+    pub async fn copy_entry_as_editable(
+        &self,
+        kb_id: &str,
+        entry_id: &KnowledgeEntryId,
+        expected_revision: i64,
+        destination_parent_path: &str,
+        destination_parent_id: Option<KnowledgeEntryId>,
+        new_name: Option<&str>,
+    ) -> Result<KnowledgeEntrySourceActionResult, AppError> {
+        let row = self.require_base(kb_id).await?;
+        require_editable_knowledge_tree(&row)?;
+        self.ensure_projection_reconciled(&row).await?;
+        let _tree_guard = self.acquire_document_tree_write_lock(&row).await?;
+        let _base_guard = self.acquire_base_lifecycle_write_lock(&row).await?;
+        let mut current = self.require_base(kb_id).await?;
+        require_editable_knowledge_tree(&current)?;
+        let resolved = self
+            .resolve_source_entry(&current, entry_id, expected_revision)
+            .await?;
+        let knowledge_base_id = KnowledgeBaseId::parse(&current.knowledge_base_id).map_err(
+            |error| {
+                AppError::Internal(format!(
+                    "stored knowledge base id '{}' is invalid: {error}",
+                    current.knowledge_base_id
+                ))
+            },
+        )?;
+        let entry_repository = self.entry_repository().ok_or_else(|| {
+            AppError::Conflict("stable knowledge entry validation is unavailable".into())
+        })?;
+        let requested_parent = normalize_tree_rel_path(destination_parent_path)?;
+        let parent_path = match destination_parent_id {
+            Some(parent_id) => {
+                let parent = entry_repository
+                    .get_entry(&knowledge_base_id, &parent_id)
+                    .await?
+                    .filter(|entry| !entry.is_deleted())
+                    .ok_or_else(|| {
+                        AppError::Conflict("copy destination moved or disappeared".into())
+                    })?;
+                if !parent.is_directory() {
+                    return Err(AppError::BadRequest(
+                        "copy destination must be a directory".into(),
+                    ));
+                }
+                parent.rel_path
+            }
+            None if requested_parent.is_empty() => {
+                tree_parent_rel_path(&resolved.entry.rel_path).to_owned()
+            }
+            None => {
+                let parent = entry_repository
+                    .get_entry_by_path(
+                        &knowledge_base_id,
+                        &portable_writeback_path_identity(&requested_parent),
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::NotFound(format!(
+                            "copy destination not found: {requested_parent}"
+                        ))
+                    })?;
+                if !parent.is_directory() {
+                    return Err(AppError::BadRequest(
+                        "copy destination must be a directory".into(),
+                    ));
+                }
+                parent.rel_path
+            }
+        };
+        let original_name = resolved.entry.name.as_str();
+        let default_name = format!(
+            "{} copy.md",
+            original_name.strip_suffix(".md").unwrap_or(original_name)
+        );
+        let preferred_name = new_name.unwrap_or(&default_name);
+        let root = PathBuf::from(&current.root_path);
+        let allocation_root = root.clone();
+        let allocation_parent = parent_path.clone();
+        let allocation_name = preferred_name.to_owned();
+        let target_rel_path = tokio::task::spawn_blocking(move || {
+            allocate_copy_rel_path(
+                &allocation_root,
+                &allocation_parent,
+                &allocation_name,
+            )
+        })
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("editable-copy allocation task failed: {error}"))
+        })??;
+        let source_path = safe_md_path_bounded(root.clone(), resolved.entry.rel_path.clone()).await?;
+        let original = tokio::fs::read_to_string(&source_path).await.map_err(|error| {
+            AppError::Conflict(format!(
+                "failed to read source document before copying: {error}"
+            ))
+        })?;
+        let copy_content = rewrite_snapshot_relationship(
+            &original,
+            &resolved.item.knowledge_source_item_id,
+            "copy",
+        )?;
+        let target_path = safe_md_path_bounded(root.clone(), target_rel_path.clone()).await?;
+        write_text_atomic_if_absent(&target_path, &copy_content).await?;
+        self.invalidate_search_cache_path(&target_path);
+        self.mark_projection_dirty(&current);
+        let projection = self
+            .reconcile_projection_locked(&current, HashMap::new())
+            .await?
+            .ok_or_else(|| {
+                AppError::Internal(
+                    "knowledge entry identity projection is unavailable after copy".into(),
+                )
+            })?;
+        let portable_target = portable_writeback_path_identity(&target_rel_path);
+        let copied_entry = projection
+            .entries
+            .iter()
+            .find(|entry| entry.portable_rel_path == portable_target)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::Internal("editable copy has no stable entry identity".into())
+            })?;
+        let source_repository = self.source_repository().ok_or_else(|| {
+            AppError::Conflict("knowledge source identity validation is unavailable".into())
+        })?;
+        if let Err(error) = source_repository
+            .record_entry_copy(&RecordKnowledgeEntryCopyParams {
+                knowledge_entry_id: copied_entry.knowledge_entry_id.clone(),
+                knowledge_source_item_id: resolved.item.knowledge_source_item_id,
+                derived_from_entry_id: entry_id.clone(),
+                created_at: now_ms(),
+            })
+            .await
+        {
+            if let Err(remove_error) = tokio::fs::remove_file(&target_path).await {
+                return Err(AppError::Internal(format!(
+                    "copy provenance persistence failed ({error}); copied file rollback failed ({remove_error})"
+                )));
+            }
+            self.mark_projection_dirty(&current);
+            let _ = self
+                .reconcile_projection_locked(&current, HashMap::new())
+                .await;
+            return Err(error.into());
+        }
+        current.updated_at = now_ms();
+        if let Err(error) = self.repo.update_base(&current).await {
+            tracing::warn!(kb_id, %error, "editable copy created but base timestamp update failed");
+        }
+        let copied_entry_id = copied_entry.knowledge_entry_id;
+        drop(_base_guard);
+        drop(_tree_guard);
+        let info = self.row_to_info(current).await?;
+        self.emitter.emit_base_updated(&info);
+        let entry = self.list_entry_by_id(kb_id, &copied_entry_id).await?;
+        Ok(KnowledgeEntrySourceActionResult {
+            entry: Some(entry),
+            removed: false,
+            source_fetch: None,
+        })
+    }
+
+    pub async fn remove_entry_source(
+        &self,
+        kb_id: &str,
+        entry_id: &KnowledgeEntryId,
+        expected_revision: i64,
+    ) -> Result<KnowledgeEntrySourceActionResult, AppError> {
+        let row = self.require_base(kb_id).await?;
+        require_editable_knowledge_tree(&row)?;
+        self.ensure_projection_reconciled(&row).await?;
+        let _tree_guard = self.acquire_document_tree_write_lock(&row).await?;
+        let _base_guard = self.acquire_base_lifecycle_write_lock(&row).await?;
+        let mut current = self.require_base(kb_id).await?;
+        require_editable_knowledge_tree(&current)?;
+        let resolved = self
+            .resolve_source_entry(&current, entry_id, expected_revision)
+            .await?;
+        if resolved.provenance.relationship != KnowledgeEntryProvenanceRelationship::Managed {
+            return Err(AppError::Conflict(
+                "only an actively managed document can be removed with its web source".into(),
+            ));
+        }
+        if resolved.item.sync_status == KnowledgeSourceItemSyncStatus::Syncing {
+            return Err(AppError::Conflict(
+                "the web source is currently refreshing; wait for it to finish before removing it"
+                    .into(),
+            ));
+        }
+        let root = PathBuf::from(&current.root_path);
+        let source_path = safe_md_path_bounded(root.clone(), resolved.entry.rel_path.clone()).await?;
+        let allocation_root = root.clone();
+        let original_name = resolved.entry.name.clone();
+        let source_item_id = resolved.item.knowledge_source_item_id.clone();
+        let trash_path = tokio::task::spawn_blocking(move || {
+            allocate_source_trash_path(&allocation_root, &source_item_id, &original_name)
+        })
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("source trash allocation task failed: {error}"))
+        })??;
+        let rename_source = source_path.clone();
+        let rename_trash = trash_path.clone();
+        tokio::task::spawn_blocking(move || {
+            rename_path_no_replace(&rename_source, &rename_trash).map_err(|error| {
+                AppError::Internal(format!(
+                    "failed to move managed document into recoverable trash: {error}"
+                ))
+            })
+        })
+        .await
+        .map_err(|error| AppError::Internal(format!("source trash task failed: {error}")))??;
+
+        let source_repository = self.source_repository().ok_or_else(|| {
+            AppError::Conflict("knowledge source identity validation is unavailable".into())
+        })?;
+        if let Err(error) = source_repository
+            .remove_managed_source_item(
+                entry_id,
+                resolved.provenance.revision,
+                resolved.item.revision,
+                now_ms(),
+            )
+            .await
+        {
+            let restore_source = source_path.clone();
+            let restore_trash = trash_path.clone();
+            let restore = tokio::task::spawn_blocking(move || {
+                rename_path_no_replace(&restore_trash, &restore_source)
+            })
+            .await;
+            match restore {
+                Ok(Ok(())) => return Err(error.into()),
+                Ok(Err(restore_error)) => {
+                    return Err(AppError::Internal(format!(
+                        "source removal metadata failed ({error}); trashed document could not be restored ({restore_error})"
+                    )));
+                }
+                Err(restore_error) => {
+                    return Err(AppError::Internal(format!(
+                        "source removal metadata failed ({error}); restore task failed ({restore_error})"
+                    )));
+                }
+            }
+        }
+        let remaining_items = source_repository
+            .list_source_items(&resolved.source.knowledge_source_id, false)
+            .await?;
+        let source_removed = remaining_items.is_empty();
+        if source_removed {
+            if let Err(error) = source_repository
+                .update_source(&UpdateKnowledgeSourceParams {
+                    knowledge_source_id: resolved.source.knowledge_source_id.clone(),
+                    expected_revision: resolved.source.revision,
+                    mode: resolved.source.mode,
+                    state: KnowledgeSourceState::Removed,
+                    default_parent_entry_id: None,
+                    removed_at: Some(now_ms()),
+                    updated_at: now_ms(),
+                })
+                .await
+            {
+                tracing::warn!(
+                    source_id = %resolved.source.knowledge_source_id,
+                    %error,
+                    "last source item was removed but aggregate tombstoning is pending"
+                );
+            }
+            let mut extra: serde_json::Value = serde_json::from_str(&current.extra).map_err(
+                |error| {
+                    AppError::Internal(format!(
+                        "knowledge base {} has invalid extra JSON: {error}",
+                        current.knowledge_base_id
+                    ))
+                },
+            )?;
+            if let Some(object) = extra.as_object_mut() {
+                object.remove("source");
+            }
+            current.extra = extra.to_string();
+        }
+        self.invalidate_search_cache_path(&source_path);
+        self.mark_projection_dirty(&current);
+        if let Err(error) = self
+            .reconcile_projection_locked(&current, HashMap::new())
+            .await
+        {
+            tracing::warn!(
+                kb_id,
+                %entry_id,
+                %error,
+                "source document removed but entry projection cleanup is pending"
+            );
+        }
+        current.updated_at = now_ms();
+        if let Err(error) = self.repo.update_base(&current).await {
+            tracing::warn!(kb_id, %error, "source removed but base timestamp update failed");
+        }
+        drop(_base_guard);
+        drop(_tree_guard);
+        if !source_removed {
+            let mut source = source_from_extra(&current.extra)
+                .map_err(|error| knowledge_row_json_error(&current.knowledge_base_id, error))?
+                .ok_or_else(|| AppError::Internal("legacy source cache is missing".into()))?;
+            self.refresh_legacy_source_cache(&mut current, &mut source)
+                .await?;
+        }
+        let info = self.row_to_info(current).await?;
+        self.emitter.emit_base_updated(&info);
+        Ok(KnowledgeEntrySourceActionResult {
+            entry: None,
+            removed: true,
+            source_fetch: None,
+        })
+    }
+
     /// Append URL entries to an existing base and snapshot only the newly
     /// accepted entries. The source mutation and file publication share the
     /// same optimistic source-state boundary as a regular refresh, so a
@@ -4993,6 +6644,17 @@ impl KnowledgeService {
         &self,
         kb_id: &str,
         entries: Vec<KnowledgeSourceEntry>,
+    ) -> Result<AppendUrlSourceSummary, AppError> {
+        self.append_url_entries_into(kb_id, entries, "", None)
+            .await
+    }
+
+    pub async fn append_url_entries_into(
+        &self,
+        kb_id: &str,
+        entries: Vec<KnowledgeSourceEntry>,
+        destination_parent_path: &str,
+        destination_parent_id: Option<KnowledgeEntryId>,
     ) -> Result<AppendUrlSourceSummary, AppError> {
         if entries.is_empty() {
             return Err(AppError::BadRequest(
@@ -5015,27 +6677,89 @@ impl KnowledgeService {
                 source
             }
             None => KnowledgeSource {
+                source_id: None,
                 kind: "url".into(),
                 mode: KnowledgeSourceMode::Snapshot,
+                revision: 0,
+                default_parent_entry_id: None,
                 entries: Vec::new(),
                 last_fetched_at: None,
             },
         };
 
+        let destination_parent_path = normalize_tree_rel_path(destination_parent_path)?;
+        let resolved_destination_parent_id = if destination_parent_path.is_empty()
+            && destination_parent_id.is_none()
+        {
+            None
+        } else {
+            self.ensure_projection_reconciled(&row).await?;
+            let repository = self.entry_repository().ok_or_else(|| {
+                AppError::Conflict(
+                    "stable knowledge entry validation is unavailable for the selected web-capture destination"
+                        .into(),
+                )
+            })?;
+            let knowledge_base_id = KnowledgeBaseId::parse(&row.knowledge_base_id).map_err(
+                |error| {
+                    AppError::Internal(format!(
+                        "stored knowledge base id '{}' is invalid: {error}",
+                        row.knowledge_base_id
+                    ))
+                },
+            )?;
+            let entry = match destination_parent_id {
+                Some(entry_id) => repository
+                    .get_entry(&knowledge_base_id, &entry_id)
+                    .await?
+                    .filter(|entry| !entry.is_deleted())
+                    .ok_or_else(|| {
+                        AppError::Conflict(
+                            "the selected web-capture destination moved or disappeared".into(),
+                        )
+                    })?,
+                None => repository
+                    .get_entry_by_path(
+                        &knowledge_base_id,
+                        &portable_writeback_path_identity(&destination_parent_path),
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::NotFound(format!(
+                            "web-capture destination not found: {destination_parent_path}"
+                        ))
+                    })?,
+            };
+            if !entry.is_directory() {
+                return Err(AppError::BadRequest(
+                    "web-capture destination must be a directory".into(),
+                ));
+            }
+            Some(entry.knowledge_entry_id)
+        };
+        // `append_url_entries_into` always carries a placement decision. An
+        // empty destination explicitly resets a stale/deleted default to the
+        // root/default capture folder.
+        source.default_parent_entry_id = resolved_destination_parent_id;
+
         let mut identities = HashSet::new();
         for entry in &source.entries {
-            let parsed = Url::parse(entry.url.trim()).map_err(|error| {
+            identities.insert(normalize_source_url(&entry.url).map_err(|error| {
                 AppError::Internal(format!(
                     "stored knowledge source URL is invalid ({}): {error}",
                     entry.url
                 ))
-            })?;
-            identities.insert(parsed.to_string());
+            })?);
         }
 
         let mut accepted = Vec::new();
         let mut duplicates = 0usize;
         for mut entry in entries {
+            entry.source_item_id = None;
+            entry.snapshot_entry_id = None;
+            entry.sync_status = KnowledgeSourceSyncStatus::Pending;
+            entry.last_success_at = None;
+            entry.last_error = None;
             entry.url = entry.url.trim().to_owned();
             entry.title = entry
                 .title
@@ -5054,10 +6778,14 @@ impl KnowledgeService {
                     entry.url
                 )));
             }
-            if !identities.insert(parsed.to_string()) {
+            let normalized_url = normalize_source_url(&entry.url)?;
+            if !identities.insert(normalized_url) {
                 duplicates += 1;
                 continue;
             }
+            // A present fresh ID distinguishes an explicit re-add from stale
+            // legacy extra that still names a removed tombstone.
+            entry.source_item_id = Some(KnowledgeSourceItemId::new());
             accepted.push(entry);
         }
 
@@ -5072,18 +6800,89 @@ impl KnowledgeService {
                 first_file: None,
             });
         }
-        if source.entries.len() + accepted.len() > MAX_SOURCE_ENTRIES {
+        let active_source_entries = source
+            .entries
+            .iter()
+            .filter(|entry| entry.sync_status != KnowledgeSourceSyncStatus::Paused)
+            .count();
+        if active_source_entries + accepted.len() > MAX_SOURCE_ENTRIES {
             return Err(AppError::BadRequest(format!(
                 "knowledge base URL sources are limited to {MAX_SOURCE_ENTRIES}; {} already configured, {} new after deduplication",
-                source.entries.len(),
+                active_source_entries,
                 accepted.len()
             )));
         }
 
         let start_index = source.entries.len();
         let added = accepted.len();
+        let accepted_urls = accepted
+            .iter()
+            .map(|entry| normalize_source_url(&entry.url))
+            .collect::<Result<HashSet<_>, _>>()?;
         source.entries.extend(accepted);
         validate_source(&source)?;
+
+        if self.source_repository().is_some() && self.entry_repository().is_some() {
+            // Persist configuration before network work. A failed fetch remains
+            // a visible, retryable source item instead of disappearing from
+            // the product after the request returns.
+            self.persist_source(&mut row, &source).await?;
+            let mut normalized = self
+                .ensure_normalized_source(&row)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Internal(
+                        "knowledge source normalization did not produce an aggregate".into(),
+                    )
+                })?;
+            if normalized.source.default_parent_entry_id
+                != source.default_parent_entry_id
+            {
+                let repository = self.source_repository().ok_or_else(|| {
+                    AppError::Internal(
+                        "knowledge source identity repository is unavailable".into(),
+                    )
+                })?;
+                normalized.source = repository
+                    .update_source(&UpdateKnowledgeSourceParams {
+                        knowledge_source_id: normalized.source.knowledge_source_id.clone(),
+                        expected_revision: normalized.source.revision,
+                        mode: normalized.source.mode,
+                        state: normalized.source.state,
+                        default_parent_entry_id: source.default_parent_entry_id.clone(),
+                        removed_at: normalized.source.removed_at,
+                        updated_at: now_ms(),
+                    })
+                    .await?;
+            }
+            let new_items = normalized
+                .items
+                .iter()
+                .filter(|item| accepted_urls.contains(&item.normalized_url))
+                .cloned()
+                .collect::<Vec<_>>();
+            let (files, mut errors) = self.prepare_managed_source_items(&new_items).await?;
+            let publication = self
+                .publish_managed_source_items(&mut row, &normalized.source, files)
+                .await;
+            errors.extend(publication.errors);
+            if let Some(error) = publication.fatal_error {
+                return Err(error);
+            }
+            self.refresh_legacy_source_cache(&mut row, &mut source)
+                .await?;
+            let info = self.row_to_info(row).await?;
+            self.emitter.emit_base_updated(&info);
+            return Ok(AppendUrlSourceSummary {
+                added,
+                duplicates,
+                fetched: publication.fetched,
+                failed: errors.len(),
+                errors,
+                last_fetched_at: source.last_fetched_at,
+                first_file: publication.published_paths.into_iter().next(),
+            });
+        }
 
         let (files, mut errors) = self
             .prepare_source_snapshots_from(&mut source.entries, start_index)
@@ -5200,6 +6999,265 @@ impl KnowledgeService {
         (files, errors)
     }
 
+    async fn prepare_managed_source_items(
+        &self,
+        items: &[KnowledgeSourceItemRow],
+    ) -> Result<(Vec<PreparedManagedSourceFile>, Vec<String>), AppError> {
+        let repository = self.source_repository().ok_or_else(|| {
+            AppError::Internal("knowledge source identity repository is unavailable".into())
+        })?;
+        let completer = self.completer();
+        let mut attempted_items = Vec::new();
+        for item in items
+            .iter()
+            .filter(|item| item.state == KnowledgeSourceState::Active)
+        {
+            attempted_items.push(
+                repository
+                    .record_sync_attempt(
+                        &item.knowledge_source_item_id,
+                        item.revision,
+                        now_ms(),
+                    )
+                    .await?,
+            );
+        }
+
+        let fetches = attempted_items.into_iter().map(|item| {
+            let completer = completer.clone();
+            async move {
+                let result = self
+                    .prepare_snapshot_body(
+                        &item.requested_url,
+                        item.rendered,
+                        completer.as_deref(),
+                    )
+                    .await;
+                (item, result)
+            }
+        });
+        let results = stream::iter(fetches)
+            .buffer_unordered(SOURCE_FETCH_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        let mut prepared = Vec::new();
+        let mut errors = Vec::new();
+        for (item, result) in results {
+            match result {
+                Ok(page) => {
+                    let title = item.title.clone().or(page.title);
+                    let fetched_at = chrono::Utc::now()
+                        .format("%Y-%m-%dT%H:%M:%SZ")
+                        .to_string();
+                    let content = source_url::managed_snapshot_markdown(
+                        &item.knowledge_source_item_id,
+                        &item.requested_url,
+                        Some(&page.final_url),
+                        &fetched_at,
+                        title.as_deref(),
+                        page.truncated,
+                        &page.body,
+                    );
+                    let content_hash = sha256_text(&content);
+                    let staged_item = repository
+                        .stage_sync_publication(&StageKnowledgeSourcePublicationParams {
+                            knowledge_source_item_id: item
+                                .knowledge_source_item_id
+                                .clone(),
+                            expected_revision: item.revision,
+                            pending_published_hash: content_hash.clone(),
+                            pending_final_url: Some(page.final_url.clone()),
+                            pending_title: title.clone(),
+                            staged_at: now_ms(),
+                        })
+                        .await?;
+                    prepared.push(PreparedManagedSourceFile {
+                        item: staged_item,
+                        content,
+                        final_url: page.final_url,
+                        title,
+                        content_hash,
+                    });
+                }
+                Err(error) => {
+                    repository
+                        .record_sync_failure(&RecordKnowledgeSourceSyncFailureParams {
+                            knowledge_source_item_id: item.knowledge_source_item_id.clone(),
+                            expected_revision: item.revision,
+                            status: KnowledgeSourceItemSyncStatus::Failed,
+                            error: error.clone(),
+                            failed_at: now_ms(),
+                        })
+                        .await?;
+                    errors.push(error);
+                }
+            }
+        }
+        prepared.sort_by(|left, right| left.item.ordinal.cmp(&right.item.ordinal));
+        Ok((prepared, errors))
+    }
+
+    async fn recover_pending_source_publications(
+        &self,
+        row: &KnowledgeBaseRow,
+    ) -> Result<usize, AppError> {
+        let (Some(source_repository), Some(entry_repository)) =
+            (self.source_repository(), self.entry_repository())
+        else {
+            return Ok(0);
+        };
+        let _tree_guard = self.acquire_document_tree_write_lock(row).await?;
+        let _base_guard = self.acquire_base_lifecycle_write_lock(row).await?;
+        let current = self.require_base(&row.knowledge_base_id).await?;
+        if current.root_path != row.root_path {
+            return Err(AppError::Conflict(
+                "knowledge base root changed while source publication was recovering; retry"
+                    .into(),
+            ));
+        }
+        self.reconcile_projection_locked(&current, HashMap::new())
+            .await?;
+        let knowledge_base_id = KnowledgeBaseId::parse(&current.knowledge_base_id).map_err(
+            |error| {
+                AppError::Internal(format!(
+                    "stored knowledge base id '{}' is invalid: {error}",
+                    current.knowledge_base_id
+                ))
+            },
+        )?;
+        let root = PathBuf::from(&current.root_path);
+        let mut recovered = 0usize;
+        for source in source_repository
+            .list_sources_for_base(&knowledge_base_id, false)
+            .await?
+            .into_iter()
+            .filter(|source| source.state == KnowledgeSourceState::Active)
+        {
+            for item in source_repository
+                .list_source_items(&source.knowledge_source_id, false)
+                .await?
+                .into_iter()
+                .filter(|item| {
+                    item.state == KnowledgeSourceState::Active
+                        && item.sync_status == KnowledgeSourceItemSyncStatus::Syncing
+                        && item.pending_published_hash.is_some()
+                })
+            {
+                let pending_hash = item
+                    .pending_published_hash
+                    .as_deref()
+                    .expect("filtered above");
+                let entry = match source_repository
+                    .get_managed_entry_provenance(&item.knowledge_source_item_id)
+                    .await?
+                {
+                    Some(provenance) => entry_repository
+                        .get_entry(&knowledge_base_id, &provenance.knowledge_entry_id)
+                        .await?
+                        .filter(|entry| !entry.is_deleted()),
+                    None => None,
+                };
+                let current_content = if let Some(entry) = entry.as_ref() {
+                    let path = safe_md_path_bounded(root.clone(), entry.rel_path.clone()).await?;
+                    match tokio::fs::metadata(&path).await {
+                        Ok(metadata) if metadata.len() <= MAX_FOLDER_IMPORT_FILE_BYTES => {
+                            tokio::fs::read_to_string(&path).await.ok()
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let current_hash = current_content.as_deref().map(sha256_text);
+                if current_hash.as_deref() == Some(pending_hash) {
+                    let completed = source_repository
+                        .record_sync_success(&RecordKnowledgeSourceSyncSuccessParams {
+                            knowledge_source_item_id: item
+                                .knowledge_source_item_id
+                                .clone(),
+                            expected_revision: item.revision,
+                            final_url: item.pending_final_url.clone(),
+                            title: item.pending_title.clone(),
+                            etag: item.etag.clone(),
+                            http_last_modified: item.http_last_modified.clone(),
+                            last_published_hash: pending_hash.to_owned(),
+                            succeeded_at: now_ms(),
+                        })
+                        .await?;
+                    if let Some(entry) = entry {
+                        self.invalidate_search_cache_path(&root.join(&entry.rel_path));
+                        self.emitter.emit_entry_content_updated(
+                            &KnowledgeEntryContentUpdatedEvent {
+                                knowledge_base_id: knowledge_base_id.clone(),
+                                entry_id: entry.knowledge_entry_id,
+                                rel_path: entry.rel_path,
+                                revision: Some(entry.revision),
+                            },
+                        );
+                    }
+                    debug_assert_eq!(
+                        completed.last_published_hash.as_deref(),
+                        Some(pending_hash)
+                    );
+                    recovered += 1;
+                    continue;
+                }
+
+                let (status, error) = if current_hash.is_none()
+                    || current_hash.as_deref() == item.last_published_hash.as_deref()
+                {
+                    (
+                        KnowledgeSourceItemSyncStatus::Failed,
+                        "source refresh was interrupted before filesystem publication; retry",
+                    )
+                } else {
+                    (
+                        KnowledgeSourceItemSyncStatus::Conflicted,
+                        "managed document changed after a staged refresh; recovery preserved it for review",
+                    )
+                };
+                source_repository
+                    .record_sync_failure(&RecordKnowledgeSourceSyncFailureParams {
+                        knowledge_source_item_id: item.knowledge_source_item_id,
+                        expected_revision: item.revision,
+                        status,
+                        error: error.into(),
+                        failed_at: now_ms(),
+                    })
+                    .await?;
+            }
+        }
+        Ok(recovered)
+    }
+
+    async fn fail_prepared_source_attempts(
+        &self,
+        files: &[PreparedManagedSourceFile],
+        message: &str,
+    ) {
+        let Some(repository) = self.source_repository() else {
+            return;
+        };
+        for file in files {
+            if let Err(error) = repository
+                .record_sync_failure(&RecordKnowledgeSourceSyncFailureParams {
+                    knowledge_source_item_id: file.item.knowledge_source_item_id.clone(),
+                    expected_revision: file.item.revision,
+                    status: KnowledgeSourceItemSyncStatus::Failed,
+                    error: message.to_owned(),
+                    failed_at: now_ms(),
+                })
+                .await
+            {
+                tracing::debug!(
+                    source_item_id = %file.item.knowledge_source_item_id,
+                    %error,
+                    "source attempt changed before publication failure could be recorded"
+                );
+            }
+        }
+    }
+
     /// Fetch one source URL and condense/truncate the body to snapshot size.
     /// Errors come back as the ready-to-aggregate `"{url}: {error}"` line.
     ///
@@ -5223,9 +7281,14 @@ impl KnowledgeService {
             format!("{url}: {e}")
         })?;
 
+        let final_url = normalize_source_url(&page.final_url).map_err(|error| {
+            format!("{url}: fetcher returned an invalid final URL: {error}")
+        })?;
         let body = condense_snapshot_body(page.markdown, completer).await;
         Ok(PreparedSnapshot {
             title: page.title,
+            final_url,
+            truncated: page.truncated,
             body,
         })
     }
@@ -5320,6 +7383,93 @@ impl KnowledgeService {
         self.persist_source_in_current_row(&mut registered, source)
             .await?;
         *row = registered;
+        Ok(())
+    }
+
+    async fn refresh_legacy_source_cache(
+        &self,
+        row: &mut KnowledgeBaseRow,
+        source: &mut KnowledgeSource,
+    ) -> Result<(), AppError> {
+        let Some(repository) = self.source_repository() else {
+            return Ok(());
+        };
+        let normalized = self
+            .ensure_normalized_source(row)
+            .await?
+            .ok_or_else(|| AppError::Internal("normalized knowledge source is missing".into()))?;
+        let mut items = repository
+            .list_source_items(&normalized.source.knowledge_source_id, false)
+            .await?;
+        if items.is_empty() || normalized.source.state == KnowledgeSourceState::Removed {
+            return self.clear_legacy_source_cache(row).await;
+        }
+        items.sort_by(|left, right| {
+            left.ordinal
+                .cmp(&right.ordinal)
+                .then_with(|| left.knowledge_source_item_id.cmp(&right.knowledge_source_item_id))
+        });
+        let mut entries = Vec::with_capacity(items.len());
+        for item in items {
+            let snapshot_entry_id = repository
+                .get_managed_entry_provenance(&item.knowledge_source_item_id)
+                .await?
+                .map(|provenance| provenance.knowledge_entry_id);
+            entries.push(KnowledgeSourceEntry {
+                source_item_id: Some(item.knowledge_source_item_id),
+                url: item.requested_url,
+                title: item.title,
+                rendered: item.rendered,
+                snapshot_entry_id,
+                sync_status: api_sync_status(item.state, item.sync_status),
+                last_success_at: item.last_success_at,
+                last_error: item.last_error,
+            });
+        }
+        source.source_id = Some(normalized.source.knowledge_source_id);
+        source.mode = api_source_mode(normalized.source.mode);
+        source.revision = normalized.source.revision;
+        source.default_parent_entry_id = normalized.source.default_parent_entry_id;
+        source.last_fetched_at = entries.iter().filter_map(|item| item.last_success_at).max();
+        source.entries = entries;
+        let current_cache = source_from_extra(&row.extra)
+            .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?;
+        if let Some(current) = current_cache {
+            let current_value = serde_json::to_value(current).map_err(|error| {
+                AppError::Internal(format!("failed to compare source cache: {error}"))
+            })?;
+            let rebuilt_value = serde_json::to_value(&*source).map_err(|error| {
+                AppError::Internal(format!("failed to compare rebuilt source cache: {error}"))
+            })?;
+            if current_value == rebuilt_value {
+                return Ok(());
+            }
+        }
+        self.persist_source(row, source).await
+    }
+
+    async fn clear_legacy_source_cache(
+        &self,
+        row: &mut KnowledgeBaseRow,
+    ) -> Result<(), AppError> {
+        let registered = self.require_base(&row.knowledge_base_id).await?;
+        let _base_guard = self.acquire_base_lifecycle_write_lock(&registered).await?;
+        let mut current = self.current_source_publication_row(row).await?;
+        let mut extra: serde_json::Value = serde_json::from_str(&current.extra).map_err(
+            |error| {
+                AppError::Internal(format!(
+                    "knowledge base {} has invalid extra JSON: {error}",
+                    current.knowledge_base_id
+                ))
+            },
+        )?;
+        if let Some(object) = extra.as_object_mut() {
+            object.remove("source");
+        }
+        current.extra = extra.to_string();
+        current.updated_at = now_ms();
+        self.repo.update_base(&current).await?;
+        *row = current;
         Ok(())
     }
 
@@ -5437,6 +7587,550 @@ impl KnowledgeService {
         outcome
     }
 
+    async fn publish_managed_source_items(
+        &self,
+        row: &mut KnowledgeBaseRow,
+        source: &KnowledgeSourceRow,
+        files: Vec<PreparedManagedSourceFile>,
+    ) -> SourcePublicationOutcome {
+        let mut outcome = SourcePublicationOutcome {
+            fetched: 0,
+            errors: Vec::new(),
+            published_paths: Vec::new(),
+            persisted_stamp: None,
+            fatal_error: None,
+        };
+        let Some(source_repository) = self.source_repository() else {
+            outcome.fatal_error = Some(AppError::Internal(
+                "knowledge source identity repository is unavailable".into(),
+            ));
+            return outcome;
+        };
+        let Some(entry_repository) = self.entry_repository() else {
+            outcome.fatal_error = Some(AppError::Internal(
+                "knowledge entry identity repository is unavailable".into(),
+            ));
+            return outcome;
+        };
+        let _tree_guard = match self.acquire_document_tree_write_lock(row).await {
+            Ok(guard) => guard,
+            Err(error) => {
+                self.fail_prepared_source_attempts(&files, &error.to_string())
+                    .await;
+                outcome.fatal_error = Some(error);
+                return outcome;
+            }
+        };
+        let _base_guard = match self.acquire_base_lifecycle_write_lock(row).await {
+            Ok(guard) => guard,
+            Err(error) => {
+                self.fail_prepared_source_attempts(&files, &error.to_string())
+                    .await;
+                outcome.fatal_error = Some(error);
+                return outcome;
+            }
+        };
+        let mut current = match self.require_base(&row.knowledge_base_id).await {
+            Ok(current) => current,
+            Err(error) => {
+                self.fail_prepared_source_attempts(&files, &error.to_string())
+                    .await;
+                outcome.fatal_error = Some(error);
+                return outcome;
+            }
+        };
+        if current.root_path != row.root_path {
+            let error = AppError::Conflict(
+                "knowledge base root changed while source refresh was running; retry".into(),
+            );
+            self.fail_prepared_source_attempts(&files, &error.to_string())
+                .await;
+            outcome.fatal_error = Some(error);
+            return outcome;
+        }
+        if let Err(error) = require_editable_knowledge_tree(&current) {
+            self.fail_prepared_source_attempts(&files, &error.to_string())
+                .await;
+            outcome.fatal_error = Some(error);
+            return outcome;
+        }
+        match source_repository
+            .get_source(&source.knowledge_source_id)
+            .await
+        {
+            Ok(Some(current_source))
+                if current_source.state == KnowledgeSourceState::Active
+                    && current_source.revision == source.revision => {}
+            Ok(Some(_)) => {
+                let error = AppError::Conflict(
+                    "knowledge source configuration changed while refresh was running; retry"
+                        .into(),
+                );
+                self.fail_prepared_source_attempts(&files, &error.to_string())
+                    .await;
+                outcome.fatal_error = Some(error);
+                return outcome;
+            }
+            Ok(None) => {
+                let error = AppError::Conflict(
+                    "knowledge source was removed while refresh was running".into(),
+                );
+                self.fail_prepared_source_attempts(&files, &error.to_string())
+                    .await;
+                outcome.fatal_error = Some(error);
+                return outcome;
+            }
+            Err(error) => {
+                outcome.fatal_error = Some(error.into());
+                return outcome;
+            }
+        }
+        let knowledge_base_id = match KnowledgeBaseId::parse(&current.knowledge_base_id) {
+            Ok(id) => id,
+            Err(error) => {
+                outcome.fatal_error = Some(AppError::Internal(format!(
+                    "stored knowledge base id '{}' is invalid: {error}",
+                    current.knowledge_base_id
+                )));
+                return outcome;
+            }
+        };
+        if let Err(error) = self
+            .reconcile_projection_locked(&current, HashMap::new())
+            .await
+        {
+            self.fail_prepared_source_attempts(&files, &error.to_string())
+                .await;
+            outcome.fatal_error = Some(error);
+            return outcome;
+        }
+        let current_source = match source_repository
+            .get_source(&source.knowledge_source_id)
+            .await
+        {
+            Ok(Some(source)) if source.state == KnowledgeSourceState::Active => source,
+            Ok(_) => {
+                let error = AppError::Conflict(
+                    "knowledge source changed while its document tree was reconciling; retry"
+                        .into(),
+                );
+                self.fail_prepared_source_attempts(&files, &error.to_string())
+                    .await;
+                outcome.fatal_error = Some(error);
+                return outcome;
+            }
+            Err(error) => {
+                outcome.fatal_error = Some(error.into());
+                return outcome;
+            }
+        };
+        let root = PathBuf::from(&current.root_path);
+        let mut published = Vec::new();
+        let mut forced_ids = HashMap::new();
+
+        for prepared in files {
+            let item = match source_repository
+                .get_source_item(&prepared.item.knowledge_source_item_id)
+                .await
+            {
+                Ok(Some(item))
+                    if item.state == KnowledgeSourceState::Active
+                        && item.revision == prepared.item.revision
+                        && item.sync_status == KnowledgeSourceItemSyncStatus::Syncing => item,
+                Ok(Some(_)) => {
+                    outcome.errors.push(format!(
+                        "{}: source configuration changed while the page was being fetched; retry",
+                        prepared.item.requested_url
+                    ));
+                    continue;
+                }
+                Ok(None) => {
+                    outcome.errors.push(format!(
+                        "{}: source item was removed while the page was being fetched",
+                        prepared.item.requested_url
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    outcome.fatal_error = Some(error.into());
+                    return outcome;
+                }
+            };
+            let provenance = match source_repository
+                .get_managed_entry_provenance(&item.knowledge_source_item_id)
+                .await
+            {
+                Ok(provenance) => provenance,
+                Err(error) => {
+                    outcome.fatal_error = Some(error.into());
+                    return outcome;
+                }
+            };
+            let (target_rel_path, stable_entry_id) = if let Some(provenance) = provenance {
+                match entry_repository
+                    .get_entry(&knowledge_base_id, &provenance.knowledge_entry_id)
+                    .await
+                {
+                    Ok(Some(entry)) => (entry.rel_path, Some(entry.knowledge_entry_id)),
+                    Ok(None) => {
+                        let error = "managed document identity is missing; refresh was stopped to avoid creating a duplicate";
+                        if let Err(db_error) = source_repository
+                            .record_sync_failure(&RecordKnowledgeSourceSyncFailureParams {
+                                knowledge_source_item_id: item.knowledge_source_item_id.clone(),
+                                expected_revision: item.revision,
+                                status: KnowledgeSourceItemSyncStatus::Missing,
+                                error: error.into(),
+                                failed_at: now_ms(),
+                            })
+                            .await
+                        {
+                            outcome.fatal_error = Some(db_error.into());
+                            return outcome;
+                        }
+                        outcome
+                            .errors
+                            .push(format!("{}: {error}", item.requested_url));
+                        continue;
+                    }
+                    Err(error) => {
+                        outcome.fatal_error = Some(error.into());
+                        return outcome;
+                    }
+                }
+            } else {
+                let destination_parent_path = if let Some(parent_entry_id) =
+                    current_source.default_parent_entry_id.as_ref()
+                {
+                    match entry_repository
+                        .get_entry(&knowledge_base_id, parent_entry_id)
+                        .await
+                    {
+                        Ok(Some(parent)) if !parent.is_deleted() && parent.is_directory() => {
+                            parent.rel_path
+                        }
+                        _ => {
+                            let error = "the selected web-capture destination no longer exists";
+                            if let Err(db_error) = source_repository
+                                .record_sync_failure(&RecordKnowledgeSourceSyncFailureParams {
+                                    knowledge_source_item_id: item
+                                        .knowledge_source_item_id
+                                        .clone(),
+                                    expected_revision: item.revision,
+                                    status: KnowledgeSourceItemSyncStatus::Missing,
+                                    error: error.into(),
+                                    failed_at: now_ms(),
+                                })
+                                .await
+                            {
+                                outcome.fatal_error = Some(db_error.into());
+                                return outcome;
+                            }
+                            outcome
+                                .errors
+                                .push(format!("{}: {error}", item.requested_url));
+                            continue;
+                        }
+                    }
+                } else {
+                    String::new()
+                };
+                let allocation_root = root.clone();
+                let allocation_parent = destination_parent_path.clone();
+                let requested_url = item.requested_url.clone();
+                match tokio::task::spawn_blocking(move || {
+                    allocate_managed_source_rel_path(
+                        &allocation_root,
+                        &allocation_parent,
+                        &requested_url,
+                    )
+                })
+                .await
+                {
+                    Ok(Ok(path)) => (path, None),
+                    Ok(Err(error)) => {
+                        if let Err(db_error) = source_repository
+                            .record_sync_failure(&RecordKnowledgeSourceSyncFailureParams {
+                                knowledge_source_item_id: item
+                                    .knowledge_source_item_id
+                                    .clone(),
+                                expected_revision: item.revision,
+                                status: KnowledgeSourceItemSyncStatus::Failed,
+                                error: error.to_string(),
+                                failed_at: now_ms(),
+                            })
+                            .await
+                        {
+                            outcome.fatal_error = Some(db_error.into());
+                            return outcome;
+                        }
+                        outcome
+                            .errors
+                            .push(format!("{}: {error}", item.requested_url));
+                        continue;
+                    }
+                    Err(error) => {
+                        let message = format!(
+                            "web-capture path allocation task failed: {error}"
+                        );
+                        if let Err(db_error) = source_repository
+                            .record_sync_failure(&RecordKnowledgeSourceSyncFailureParams {
+                                knowledge_source_item_id: item
+                                    .knowledge_source_item_id
+                                    .clone(),
+                                expected_revision: item.revision,
+                                status: KnowledgeSourceItemSyncStatus::Failed,
+                                error: message.clone(),
+                                failed_at: now_ms(),
+                            })
+                            .await
+                        {
+                            tracing::debug!(%db_error, "failed to record source allocation task failure");
+                        }
+                        outcome.fatal_error = Some(AppError::Internal(message));
+                        return outcome;
+                    }
+                }
+            };
+            let path = match safe_md_path_bounded(root.clone(), target_rel_path.clone()).await {
+                Ok(path) => path,
+                Err(error) => {
+                    if let Err(db_error) = source_repository
+                        .record_sync_failure(&RecordKnowledgeSourceSyncFailureParams {
+                            knowledge_source_item_id: item.knowledge_source_item_id.clone(),
+                            expected_revision: item.revision,
+                            status: KnowledgeSourceItemSyncStatus::Failed,
+                            error: error.to_string(),
+                            failed_at: now_ms(),
+                        })
+                        .await
+                    {
+                        outcome.fatal_error = Some(db_error.into());
+                        return outcome;
+                    }
+                    outcome
+                        .errors
+                        .push(format!("{}: {error}", item.requested_url));
+                    continue;
+                }
+            };
+            if let Ok(metadata) = tokio::fs::metadata(&path).await
+                && metadata.len() > MAX_FOLDER_IMPORT_FILE_BYTES
+            {
+                let error = "the managed document is unexpectedly large after an external change; refresh did not read or overwrite it";
+                if let Err(db_error) = source_repository
+                    .record_sync_failure(&RecordKnowledgeSourceSyncFailureParams {
+                        knowledge_source_item_id: item.knowledge_source_item_id.clone(),
+                        expected_revision: item.revision,
+                        status: KnowledgeSourceItemSyncStatus::Conflicted,
+                        error: error.into(),
+                        failed_at: now_ms(),
+                    })
+                    .await
+                {
+                    outcome.fatal_error = Some(db_error.into());
+                    return outcome;
+                }
+                outcome
+                    .errors
+                    .push(format!("{}: {error}", item.requested_url));
+                continue;
+            }
+            let existing = match tokio::fs::read_to_string(&path).await {
+                Ok(content) => Some(content),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    let message = format!(
+                        "failed to read the current managed document before refresh: {error}"
+                    );
+                    if let Err(db_error) = source_repository
+                        .record_sync_failure(&RecordKnowledgeSourceSyncFailureParams {
+                            knowledge_source_item_id: item.knowledge_source_item_id.clone(),
+                            expected_revision: item.revision,
+                            status: KnowledgeSourceItemSyncStatus::Failed,
+                            error: message.clone(),
+                            failed_at: now_ms(),
+                        })
+                        .await
+                    {
+                        outcome.fatal_error = Some(db_error.into());
+                        return outcome;
+                    }
+                    outcome.errors.push(format!(
+                        "{}: {message}",
+                        item.requested_url
+                    ));
+                    continue;
+                }
+            };
+            let mut already_published = false;
+            if let Some(existing) = existing.as_ref() {
+                let existing_hash = sha256_text(existing);
+                let marker_matches = source_url::snapshot_source_item_id(existing)
+                    .as_ref()
+                    == Some(&item.knowledge_source_item_id)
+                    && source_url::snapshot_source_relationship(existing)
+                        .is_none_or(|relationship| relationship == "managed");
+                let baseline_matches = item
+                    .last_published_hash
+                    .as_deref()
+                    .map_or(marker_matches, |hash| hash == existing_hash);
+                let pending_matches = item
+                    .pending_published_hash
+                    .as_deref()
+                    == Some(existing_hash.as_str());
+                if pending_matches {
+                    already_published = true;
+                } else if !baseline_matches {
+                    let error = "the managed document was modified outside NomiFun; refresh did not overwrite those changes";
+                    if let Err(db_error) = source_repository
+                        .record_sync_failure(&RecordKnowledgeSourceSyncFailureParams {
+                            knowledge_source_item_id: item.knowledge_source_item_id.clone(),
+                            expected_revision: item.revision,
+                            status: KnowledgeSourceItemSyncStatus::Conflicted,
+                            error: error.into(),
+                            failed_at: now_ms(),
+                        })
+                        .await
+                    {
+                        outcome.fatal_error = Some(db_error.into());
+                        return outcome;
+                    }
+                    outcome
+                        .errors
+                        .push(format!("{}: {error}", item.requested_url));
+                    continue;
+                }
+            }
+            let write_result = if already_published {
+                Ok(())
+            } else {
+                match existing.as_deref() {
+                    Some(expected) => {
+                        write_text_atomic_if_unchanged(&path, expected, &prepared.content).await
+                    }
+                    None => write_text_atomic_if_absent(&path, &prepared.content).await,
+                }
+            };
+            if let Err(error) = write_result {
+                let message = format!(
+                    "the managed document changed while refresh was publishing: {error}"
+                );
+                if let Err(db_error) = source_repository
+                    .record_sync_failure(&RecordKnowledgeSourceSyncFailureParams {
+                        knowledge_source_item_id: item.knowledge_source_item_id.clone(),
+                        expected_revision: item.revision,
+                        status: KnowledgeSourceItemSyncStatus::Conflicted,
+                        error: message.clone(),
+                        failed_at: now_ms(),
+                    })
+                    .await
+                {
+                    outcome.fatal_error = Some(db_error.into());
+                    return outcome;
+                }
+                outcome
+                    .errors
+                    .push(format!("{}: {message}", item.requested_url));
+                continue;
+            }
+            if let Some(entry_id) = stable_entry_id.clone() {
+                forced_ids.insert(
+                    portable_writeback_path_identity(&target_rel_path),
+                    entry_id,
+                );
+            }
+            self.invalidate_search_cache_path(&path);
+            self.mark_projection_dirty(&current);
+            if let Err(error) = source_repository
+                .record_sync_success(&RecordKnowledgeSourceSyncSuccessParams {
+                    knowledge_source_item_id: prepared.item.knowledge_source_item_id.clone(),
+                    expected_revision: prepared.item.revision,
+                    final_url: Some(prepared.final_url.clone()),
+                    title: prepared.title.clone(),
+                    etag: None,
+                    http_last_modified: None,
+                    last_published_hash: prepared.content_hash.clone(),
+                    succeeded_at: now_ms(),
+                })
+                .await
+            {
+                outcome.fatal_error = Some(error.into());
+                return outcome;
+            }
+            published.push((prepared, target_rel_path));
+        }
+
+        if !published.is_empty() {
+            let projection = match self
+                .reconcile_projection_locked(&current, forced_ids)
+                .await
+            {
+                Ok(Some(projection)) => projection,
+                Ok(None) => {
+                    outcome.fatal_error = Some(AppError::Internal(
+                        "knowledge entry identity projection is unavailable after source publication"
+                            .into(),
+                    ));
+                    return outcome;
+                }
+                Err(error) => {
+                    outcome.fatal_error = Some(error);
+                    return outcome;
+                }
+            };
+            for (prepared, target_rel_path) in published {
+                let portable = portable_writeback_path_identity(&target_rel_path);
+                let Some(entry) = projection
+                    .entries
+                    .iter()
+                    .find(|entry| entry.portable_rel_path == portable)
+                else {
+                    outcome.fatal_error = Some(AppError::Internal(format!(
+                        "published source document has no stable entry at {target_rel_path}"
+                    )));
+                    return outcome;
+                };
+                if let Err(error) = source_repository
+                    .bind_managed_entry(&BindManagedKnowledgeEntryParams {
+                        knowledge_entry_id: entry.knowledge_entry_id.clone(),
+                        knowledge_source_item_id: prepared
+                            .item
+                            .knowledge_source_item_id
+                            .clone(),
+                        created_at: now_ms(),
+                    })
+                    .await
+                {
+                    outcome.fatal_error = Some(error.into());
+                    return outcome;
+                }
+                self.emitter.emit_entry_content_updated(
+                    &KnowledgeEntryContentUpdatedEvent {
+                        knowledge_base_id: knowledge_base_id.clone(),
+                        entry_id: entry.knowledge_entry_id.clone(),
+                        rel_path: target_rel_path.clone(),
+                        revision: Some(entry.revision),
+                    },
+                );
+                outcome.fetched += 1;
+                outcome.published_paths.push(target_rel_path);
+            }
+        }
+        if outcome.fetched > 0 {
+            current.updated_at = now_ms();
+            if let Err(error) = self.repo.update_base(&current).await {
+                tracing::warn!(
+                    kb_id = %current.knowledge_base_id,
+                    %error,
+                    "managed source refresh completed but the base timestamp update failed"
+                );
+            }
+            outcome.persisted_stamp = Some(now_ms());
+        }
+        *row = current;
+        outcome
+    }
+
     /// Attach, replace, or clear a base's source config (`extra.source`).
     /// `Some(src)` validates + persists it (server clears any client-sent
     /// `last_fetched_at`); `None` removes the source. Emits `base-updated`.
@@ -5449,11 +8143,78 @@ impl KnowledgeService {
         let mut row = self.require_base(kb_id).await?;
         match source {
             Some(mut src) => {
+                if source_from_extra(&row.extra)
+                    .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?
+                    .is_some()
+                    && self.source_repository().is_some()
+                {
+                    return Err(AppError::BadRequest(
+                        "whole-source replacement is no longer supported; add, refresh, detach, or remove individual web sources so managed documents cannot be orphaned"
+                            .into(),
+                    ));
+                }
+                require_editable_knowledge_tree(&row)?;
+                sanitize_source_entries(&mut src);
+                src.source_id = Some(KnowledgeSourceId::new());
+                src.revision = 0;
+                src.default_parent_entry_id = None;
+                for item in &mut src.entries {
+                    item.source_item_id = Some(KnowledgeSourceItemId::new());
+                    item.snapshot_entry_id = None;
+                    item.sync_status = KnowledgeSourceSyncStatus::Pending;
+                    item.last_success_at = None;
+                    item.last_error = None;
+                }
                 validate_source(&src)?;
+                validate_unique_source_urls(&src)?;
                 src.last_fetched_at = None;
                 self.persist_source(&mut row, &src).await?;
+                let _ = self.ensure_normalized_source(&row).await?;
             }
             None => {
+                if let (Some(repository), Some(normalized)) =
+                    (self.source_repository(), self.ensure_normalized_source(&row).await?)
+                {
+                    let provenance = repository
+                        .list_entry_provenance_for_source(
+                            &normalized.source.knowledge_source_id,
+                        )
+                        .await?;
+                    let managed = provenance
+                        .iter()
+                        .filter(|provenance| {
+                            provenance.relationship
+                                == KnowledgeEntryProvenanceRelationship::Managed
+                        })
+                        .count();
+                    if managed > 0 {
+                        return Err(AppError::BadRequest(format!(
+                            "source has {managed} managed document(s); explicitly detach or remove each document instead of clearing the source implicitly"
+                        )));
+                    }
+                    for item in normalized.items {
+                        if !item.is_removed() {
+                            repository
+                                .remove_source_item(
+                                    &item.knowledge_source_item_id,
+                                    item.revision,
+                                    now_ms(),
+                                )
+                                .await?;
+                        }
+                    }
+                    repository
+                        .update_source(&UpdateKnowledgeSourceParams {
+                            knowledge_source_id: normalized.source.knowledge_source_id,
+                            expected_revision: normalized.source.revision,
+                            mode: normalized.source.mode,
+                            state: KnowledgeSourceState::Removed,
+                            default_parent_entry_id: None,
+                            removed_at: Some(now_ms()),
+                            updated_at: now_ms(),
+                        })
+                        .await?;
+                }
                 let registered = self.require_base(kb_id).await?;
                 let _base_guard =
                     self.acquire_base_lifecycle_write_lock(&registered).await?;
@@ -5693,7 +8454,11 @@ impl KnowledgeService {
                 ))
             })?;
             let live_sources = match source_from_extra(&row.extra) {
-                Ok(Some(source)) if source.mode == KnowledgeSourceMode::Live => source.entries,
+                Ok(Some(source)) if source.mode == KnowledgeSourceMode::Live => source
+                    .entries
+                    .into_iter()
+                    .filter(|entry| entry.sync_status != KnowledgeSourceSyncStatus::Paused)
+                    .collect(),
                 Ok(_) => Vec::new(),
                 Err(error) => {
                     return Err(knowledge_row_json_error(&row.knowledge_base_id, error));
@@ -5840,7 +8605,11 @@ impl KnowledgeService {
             // skip the base and leave an explicit diagnostic.
             let live_sources = match source_from_extra(&row.extra) {
                 Ok(Some(source)) if source.mode == KnowledgeSourceMode::Live => {
-                    source.entries
+                    source
+                        .entries
+                        .into_iter()
+                        .filter(|entry| entry.sync_status != KnowledgeSourceSyncStatus::Paused)
+                        .collect()
                 }
                 Ok(_) => Vec::new(),
                 Err(error) => {
@@ -6908,27 +9677,157 @@ fn validate_source(source: &KnowledgeSource) -> Result<(), AppError> {
     validate_url_source(source)
 }
 
-fn validate_url_source(source: &KnowledgeSource) -> Result<(), AppError> {
-    if source.entries.is_empty() {
-        return Err(AppError::BadRequest("source.entries must not be empty".into()));
+fn sanitize_source_entries(source: &mut KnowledgeSource) {
+    for entry in &mut source.entries {
+        entry.url = entry.url.trim().to_owned();
+        entry.title = entry
+            .title
+            .take()
+            .map(|title| title.trim().to_owned())
+            .filter(|title| !title.is_empty());
     }
-    if source.entries.len() > MAX_SOURCE_ENTRIES {
-        return Err(AppError::BadRequest(format!(
-            "source.entries exceeds the limit of {MAX_SOURCE_ENTRIES} (got {})",
-            source.entries.len()
-        )));
-    }
+}
+
+fn validate_unique_source_urls(source: &KnowledgeSource) -> Result<(), AppError> {
+    let mut identities = HashSet::with_capacity(source.entries.len());
     for entry in &source.entries {
-        let url = Url::parse(entry.url.trim())
-            .map_err(|e| AppError::BadRequest(format!("invalid source URL {}: {e}", entry.url)))?;
-        if !matches!(url.scheme(), "http" | "https") {
+        let identity = normalize_source_url(&entry.url)?;
+        if !identities.insert(identity) {
             return Err(AppError::BadRequest(format!(
-                "only http(s) source URLs are supported: {}",
+                "duplicate source URL: {}",
                 entry.url
             )));
         }
     }
     Ok(())
+}
+
+fn persisted_source_mode(mode: KnowledgeSourceMode) -> PersistedKnowledgeSourceMode {
+    match mode {
+        KnowledgeSourceMode::Live => PersistedKnowledgeSourceMode::Live,
+        KnowledgeSourceMode::Snapshot => PersistedKnowledgeSourceMode::Snapshot,
+    }
+}
+
+fn api_source_mode(mode: PersistedKnowledgeSourceMode) -> KnowledgeSourceMode {
+    match mode {
+        PersistedKnowledgeSourceMode::Live => KnowledgeSourceMode::Live,
+        PersistedKnowledgeSourceMode::Snapshot => KnowledgeSourceMode::Snapshot,
+    }
+}
+
+fn persisted_sync_status(status: KnowledgeSourceSyncStatus) -> KnowledgeSourceItemSyncStatus {
+    match status {
+        KnowledgeSourceSyncStatus::Pending => KnowledgeSourceItemSyncStatus::Pending,
+        KnowledgeSourceSyncStatus::Syncing => KnowledgeSourceItemSyncStatus::Syncing,
+        KnowledgeSourceSyncStatus::Synced => KnowledgeSourceItemSyncStatus::Synced,
+        KnowledgeSourceSyncStatus::Failed => KnowledgeSourceItemSyncStatus::Failed,
+        KnowledgeSourceSyncStatus::Conflicted => KnowledgeSourceItemSyncStatus::Conflicted,
+        KnowledgeSourceSyncStatus::Missing => KnowledgeSourceItemSyncStatus::Missing,
+        KnowledgeSourceSyncStatus::Paused => KnowledgeSourceItemSyncStatus::Pending,
+    }
+}
+
+fn api_sync_status(
+    state: KnowledgeSourceState,
+    status: KnowledgeSourceItemSyncStatus,
+) -> KnowledgeSourceSyncStatus {
+    if state != KnowledgeSourceState::Active {
+        return KnowledgeSourceSyncStatus::Paused;
+    }
+    match status {
+        KnowledgeSourceItemSyncStatus::Pending => KnowledgeSourceSyncStatus::Pending,
+        KnowledgeSourceItemSyncStatus::Syncing => KnowledgeSourceSyncStatus::Syncing,
+        KnowledgeSourceItemSyncStatus::Synced => KnowledgeSourceSyncStatus::Synced,
+        KnowledgeSourceItemSyncStatus::Failed => KnowledgeSourceSyncStatus::Failed,
+        KnowledgeSourceItemSyncStatus::Conflicted => KnowledgeSourceSyncStatus::Conflicted,
+        KnowledgeSourceItemSyncStatus::Missing => KnowledgeSourceSyncStatus::Missing,
+    }
+}
+
+fn api_source_relationship(
+    relationship: KnowledgeEntryProvenanceRelationship,
+) -> KnowledgeEntrySourceRelationship {
+    match relationship {
+        KnowledgeEntryProvenanceRelationship::Managed => {
+            KnowledgeEntrySourceRelationship::Managed
+        }
+        KnowledgeEntryProvenanceRelationship::Detached => {
+            KnowledgeEntrySourceRelationship::Detached
+        }
+        KnowledgeEntryProvenanceRelationship::Copy => KnowledgeEntrySourceRelationship::Copy,
+    }
+}
+
+fn validate_url_source(source: &KnowledgeSource) -> Result<(), AppError> {
+    if source.entries.is_empty() {
+        return Err(AppError::BadRequest("source.entries must not be empty".into()));
+    }
+    if source.entries.len() > MAX_SOURCE_HISTORY_ENTRIES {
+        return Err(AppError::BadRequest(format!(
+            "source history exceeds the limit of {MAX_SOURCE_HISTORY_ENTRIES} entries"
+        )));
+    }
+    let active_entries = source
+        .entries
+        .iter()
+        .filter(|entry| entry.sync_status != KnowledgeSourceSyncStatus::Paused)
+        .count();
+    if active_entries > MAX_SOURCE_ENTRIES {
+        return Err(AppError::BadRequest(format!(
+            "active source.entries exceeds the limit of {MAX_SOURCE_ENTRIES} (got {active_entries})"
+        )));
+    }
+    for entry in &source.entries {
+        if entry.url.len() > 8192 || entry.url.contains('\0') {
+            return Err(AppError::BadRequest(
+                "source URL must be at most 8192 bytes and contain no NUL".into(),
+            ));
+        }
+        if entry
+            .title
+            .as_ref()
+            .is_some_and(|title| title.len() > 1024 || title.contains('\0'))
+        {
+            return Err(AppError::BadRequest(
+                "source title must be at most 1024 bytes and contain no NUL".into(),
+            ));
+        }
+        let url = Url::parse(entry.url.trim())
+            .map_err(|e| AppError::BadRequest(format!("invalid source URL {}: {e}", entry.url)))?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return Err(AppError::BadRequest(format!(
+                "only http(s) source URLs are supported: {}",
+                entry.url
+            )));
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(AppError::BadRequest(
+                "source URLs must not contain embedded credentials".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_source_url(raw: &str) -> Result<String, AppError> {
+    let mut url = Url::parse(raw.trim())
+        .map_err(|error| AppError::BadRequest(format!("invalid source URL {raw}: {error}")))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(AppError::BadRequest(format!(
+            "only http(s) source URLs are supported: {raw}"
+        )));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(AppError::BadRequest(
+            "source URLs must not contain embedded credentials".into(),
+        ));
+    }
+    // URL fragments are client-side navigation and never reach the fetcher;
+    // treating them as source identity would create duplicate captures of the
+    // same network resource.
+    url.set_fragment(None);
+    Ok(url.to_string())
 }
 
 /// Allocate deterministic snapshot paths for the complete ordered source.
@@ -6952,6 +9851,151 @@ fn source_snapshot_rel_paths(entries: &[KnowledgeSourceEntry]) -> Vec<String> {
             format!("{}/{slug}.md", source_url::SNAPSHOT_REL_DIR)
         })
         .collect()
+}
+
+fn allocate_managed_source_rel_path(
+    root: &Path,
+    destination_parent_rel_path: &str,
+    requested_url: &str,
+) -> Result<String, AppError> {
+    validate_knowledge_root(root)?;
+    let (parent, parent_rel_path) = if destination_parent_rel_path.is_empty() {
+        let directory_name = source_url::SNAPSHOT_REL_DIR;
+        let directory = match find_portable_tree_child(root, directory_name)? {
+            Some(existing) => {
+                if metadata_is_link_or_reparse(&existing.path, &existing.metadata)
+                    || !existing.metadata.is_dir()
+                {
+                    return Err(AppError::Conflict(
+                        "the default web-capture destination is not a real directory".into(),
+                    ));
+                }
+                existing.path
+            }
+            None => {
+                let path = root.join(directory_name);
+                std::fs::create_dir(&path).map_err(|error| {
+                    AppError::Internal(format!(
+                        "failed to create default web-capture directory: {error}"
+                    ))
+                })?;
+                path
+            }
+        };
+        (directory, directory_name.to_owned())
+    } else {
+        let (path, metadata) = resolve_tree_existing_path(root, destination_parent_rel_path)?;
+        if !metadata.is_dir() {
+            return Err(AppError::BadRequest(format!(
+                "web-capture destination is not a directory: {destination_parent_rel_path}"
+            )));
+        }
+        (path, destination_parent_rel_path.to_owned())
+    };
+    let parsed = Url::parse(requested_url).map_err(|error| {
+        AppError::Internal(format!(
+            "stored knowledge source URL is invalid ({requested_url}): {error}"
+        ))
+    })?;
+    let base = source_url::slug_for_url(&parsed);
+    for sequence in 1..=10_000usize {
+        let name = if sequence == 1 {
+            format!("{base}.md")
+        } else {
+            format!("{base}-{sequence}.md")
+        };
+        validate_portable_path_component(&name)?;
+        if find_portable_tree_child(&parent, &name)?.is_none() {
+            return Ok(join_tree_rel_path(&parent_rel_path, &name));
+        }
+    }
+    Err(AppError::Conflict(
+        "could not allocate a unique file name for the captured web page".into(),
+    ))
+}
+
+fn allocate_copy_rel_path(
+    root: &Path,
+    destination_parent_rel_path: &str,
+    preferred_name: &str,
+) -> Result<String, AppError> {
+    validate_knowledge_root(root)?;
+    let (parent, parent_rel_path) = if destination_parent_rel_path.is_empty() {
+        (root.to_path_buf(), String::new())
+    } else {
+        let (path, metadata) = resolve_tree_existing_path(root, destination_parent_rel_path)?;
+        if !metadata.is_dir() {
+            return Err(AppError::BadRequest(
+                "copy destination must be a directory".into(),
+            ));
+        }
+        (path, destination_parent_rel_path.to_owned())
+    };
+    let preferred = validate_tree_entry_name(preferred_name)?;
+    if !is_md(Path::new(&preferred)) {
+        return Err(AppError::BadRequest(
+            "editable knowledge copies must use a .md file name".into(),
+        ));
+    }
+    let stem = preferred.strip_suffix(".md").unwrap_or(&preferred);
+    for sequence in 1..=10_000usize {
+        let name = if sequence == 1 {
+            preferred.clone()
+        } else {
+            format!("{stem} ({sequence}).md")
+        };
+        if find_portable_tree_child(&parent, &name)?.is_none() {
+            return Ok(join_tree_rel_path(&parent_rel_path, &name));
+        }
+    }
+    Err(AppError::Conflict(
+        "could not allocate a unique editable-copy file name".into(),
+    ))
+}
+
+fn allocate_source_trash_path(
+    root: &Path,
+    source_item_id: &KnowledgeSourceItemId,
+    original_name: &str,
+) -> Result<PathBuf, AppError> {
+    validate_knowledge_root(root)?;
+    let trash = root.join(".nomifun-trash");
+    match std::fs::symlink_metadata(&trash) {
+        Ok(metadata) => {
+            if metadata_is_link_or_reparse(&trash, &metadata) || !metadata.is_dir() {
+                return Err(AppError::Conflict(
+                    "knowledge trash must be a real directory".into(),
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&trash).map_err(|error| {
+                AppError::Internal(format!("failed to create knowledge trash: {error}"))
+            })?;
+        }
+        Err(error) => {
+            return Err(AppError::Internal(format!(
+                "failed to inspect knowledge trash: {error}"
+            )));
+        }
+    }
+    let safe_name = original_name.replace(['/', '\\'], "-");
+    let safe_name = source_url::truncate_to_bytes(&safe_name, 160)
+        .trim_end_matches([' ', '.']);
+    let safe_name = if safe_name.is_empty() {
+        "document.md"
+    } else {
+        safe_name
+    };
+    for _ in 0..128 {
+        let candidate = trash.join(format!("source-{source_item_id}-{}-{safe_name}", generate_id()));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(AppError::Conflict(
+        "could not allocate a recoverable trash path for the source document".into(),
+    ))
 }
 
 async fn ensure_snapshot_trash_dir(root: &Path) -> Result<PathBuf, AppError> {
@@ -8269,7 +11313,7 @@ fn markdown_identity(content: &str) -> String {
 /// dwarf the note count, and descending into it issues one `readdir`/`stat`
 /// network round-trip per entry — on a slow NAS mount that is what pushes the
 /// per-base walk past the client request timeout and surfaces as "加载失败".
-fn is_machinery_dir(entry: &walkdir::DirEntry) -> bool {
+pub(crate) fn is_machinery_dir(entry: &walkdir::DirEntry) -> bool {
     if entry.depth() == 0 {
         return false;
     }
@@ -8838,54 +11882,6 @@ fn validate_canonical_write_target(rel_path: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_source_owned_write_target(
-    row: &KnowledgeBaseRow,
-    rel_path: &str,
-) -> Result<(), AppError> {
-    let has_source = source_from_extra(&row.extra)
-        .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?
-        .is_some();
-    if has_source
-        && rel_path
-            .split('/')
-            .next()
-            .is_some_and(|component| {
-                portable_path_component_identity(component)
-                    == portable_path_component_identity(source_url::SNAPSHOT_REL_DIR)
-            })
-    {
-        return Err(AppError::Forbidden(
-            "source snapshots are managed by refresh/sync and cannot be changed by knowledge write-back"
-                .into(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_source_managed_tree_mutation<'a>(
-    row: &KnowledgeBaseRow,
-    rel_paths: impl IntoIterator<Item = &'a String>,
-) -> Result<(), AppError> {
-    let has_source = source_from_extra(&row.extra)
-        .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?
-        .is_some();
-    if !has_source {
-        return Ok(());
-    }
-    for rel_path in rel_paths {
-        if rel_path.split('/').next().is_some_and(|component| {
-            portable_path_component_identity(component)
-                == portable_path_component_identity(source_url::SNAPSHOT_REL_DIR)
-        }) {
-            return Err(AppError::Forbidden(
-                "source snapshots are managed by refresh/sync and cannot be moved or renamed"
-                    .into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn validate_relocate_request_id(request_id: &str) -> Result<(), AppError> {
     if request_id.is_empty()
         || request_id.len() > 128
@@ -8912,6 +11908,68 @@ fn relocate_request_sha256(
     digest.update(b"knowledge-tree-relocate-v1\0");
     digest.update(canonical);
     Ok(hex::encode(digest.finalize()))
+}
+
+fn sha256_text(content: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(content.as_bytes());
+    hex::encode(digest.finalize())
+}
+
+fn rewrite_snapshot_relationship(
+    content: &str,
+    source_item_id: &KnowledgeSourceItemId,
+    relationship: &str,
+) -> Result<String, AppError> {
+    if !matches!(relationship, "managed" | "detached" | "copy")
+        || source_url::snapshot_source_url(content).is_none()
+    {
+        return Err(AppError::Conflict(
+            "the document no longer has a valid managed-source header".into(),
+        ));
+    }
+    let mut lines = content.lines().map(str::to_owned).collect::<Vec<_>>();
+    let yaml_frontmatter = lines.first().is_some_and(|line| line.trim() == "---");
+    let separator = lines
+        .iter()
+        .enumerate()
+        .skip(usize::from(yaml_frontmatter))
+        .find_map(|(index, line)| (line.trim() == "---").then_some(index))
+        .ok_or_else(|| {
+            AppError::Conflict("the managed-source header is incomplete".into())
+        })?;
+    lines.retain(|line| {
+        let trimmed = line.trim();
+        !trimmed.starts_with("> **nomifun_source_item_id**:")
+            && !trimmed.starts_with("> **nomifun_source_relationship**:")
+            && !trimmed.starts_with("nomifun_source_item_id:")
+            && !trimmed.starts_with("nomifun_source_relationship:")
+    });
+    let separator = lines
+        .iter()
+        .enumerate()
+        .skip(usize::from(yaml_frontmatter))
+        .find_map(|(index, line)| (line.trim() == "---").then_some(index))
+        .unwrap_or(separator.min(lines.len()));
+    lines.insert(
+        separator,
+        if yaml_frontmatter {
+            format!("nomifun_source_item_id: {source_item_id}")
+        } else {
+            format!("> **nomifun_source_item_id**: {source_item_id}")
+        },
+    );
+    lines.insert(
+        separator + 1,
+        if yaml_frontmatter {
+            format!("nomifun_source_relationship: {relationship}")
+        } else {
+            format!("> **nomifun_source_relationship**: {relationship}")
+        },
+    );
+    let mut rewritten = lines.join("\n");
+    rewritten.push('\n');
+    Ok(rewritten)
 }
 
 fn validate_write_request(req: &WriteRequest) -> Result<(), AppError> {
@@ -9348,13 +12406,25 @@ struct ScannedProjectionEntry {
     portable_rel_path: String,
     kind: String,
     fs_identity: Option<String>,
+    source_item_id: Option<KnowledgeSourceItemId>,
+    source_url: Option<String>,
+    source_relationship: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct SourceProjectionHints {
+    managed_item_ids: HashSet<KnowledgeSourceItemId>,
+    managed_urls: HashSet<String>,
+    entry_ids_by_item: HashMap<KnowledgeSourceItemId, KnowledgeEntryId>,
+    entry_ids_by_url: HashMap<String, KnowledgeEntryId>,
+    web_provenance_entry_ids: HashSet<KnowledgeEntryId>,
 }
 
 fn scan_knowledge_entry_projection(
     root: &Path,
     knowledge_base_id: &KnowledgeBaseId,
     existing: &[KnowledgeEntryRow],
-    has_source: bool,
+    source_hints: SourceProjectionHints,
     forced_ids: &HashMap<String, KnowledgeEntryId>,
 ) -> Result<Vec<UpsertKnowledgeEntryParams>, AppError> {
     validate_knowledge_root(root)?;
@@ -9408,15 +12478,26 @@ fn scan_knowledge_entry_projection(
                     portable_rel_path,
                     kind: KNOWLEDGE_ENTRY_KIND_DIRECTORY.into(),
                     fs_identity: filesystem_entry_identity(&metadata),
+                    source_item_id: None,
+                    source_url: None,
+                    source_relationship: None,
                 });
                 directories.push((rel_path, path));
             } else if metadata.is_file() {
+                let (source_item_id, source_url, source_relationship) = if is_md(&path) {
+                    read_snapshot_projection_identity(&path)
+                } else {
+                    (None, None, None)
+                };
                 scanned.push(ScannedProjectionEntry {
                     name,
                     rel_path,
                     portable_rel_path,
                     kind: KNOWLEDGE_ENTRY_KIND_FILE.into(),
                     fs_identity: filesystem_entry_identity(&metadata),
+                    source_item_id,
+                    source_url,
+                    source_relationship,
                 });
             }
         }
@@ -9451,15 +12532,36 @@ fn scan_knowledge_entry_projection(
     let mut assigned = Vec::with_capacity(scanned.len());
     for scanned_entry in scanned {
         let forced_id = forced_ids.get(&scanned_entry.portable_rel_path).cloned();
+        let source_is_managed = scanned_entry
+            .source_relationship
+            .as_deref()
+            .is_none_or(|relationship| relationship == "managed");
         let candidate_index = forced_id
             .as_ref()
             .and_then(|id| existing_by_id.get(id).copied())
+            .or_else(|| source_is_managed.then(|| {
+                scanned_entry
+                    .source_item_id
+                    .as_ref()
+                    .and_then(|source_item_id| {
+                        source_hints.entry_ids_by_item.get(source_item_id)
+                    })
+                    .and_then(|id| existing_by_id.get(id).copied())
+            }).flatten())
+            .or_else(|| source_is_managed.then(|| {
+                scanned_entry
+                    .source_url
+                    .as_ref()
+                    .and_then(|url| source_hints.entry_ids_by_url.get(url))
+                    .and_then(|id| existing_by_id.get(id).copied())
+            }).flatten())
             .or_else(|| {
                 select_projection_identity_candidate(
                     existing_by_path.get(&scanned_entry.portable_rel_path),
                     existing,
                     &used_ids,
                     &scanned_entry.kind,
+                    false,
                 )
             })
             .or_else(|| {
@@ -9469,6 +12571,7 @@ fn scan_knowledge_entry_projection(
                         existing,
                         &used_ids,
                         &scanned_entry.kind,
+                        true,
                     )
                 })
             });
@@ -9493,7 +12596,6 @@ fn scan_knowledge_entry_projection(
         .map(|(entry, id, _)| (entry.portable_rel_path.clone(), id.clone()))
         .collect::<HashMap<_, _>>();
     let timestamp = now_ms();
-    let snapshot_prefix = portable_path_component_identity(source_url::SNAPSHOT_REL_DIR);
     let mut projected = Vec::with_capacity(assigned.len());
     for (entry, knowledge_entry_id, prior) in assigned {
         let parent_portable_path = entry
@@ -9503,21 +12605,37 @@ fn scan_knowledge_entry_projection(
         let parent_entry_id = parent_portable_path
             .and_then(|parent| ids_by_path.get(parent))
             .cloned();
-        let inferred_origin = if has_source
-            && entry
-                .portable_rel_path
-                .split('/')
-                .next()
-                .is_some_and(|component| component == snapshot_prefix)
+        let source_is_managed = entry
+            .source_relationship
+            .as_deref()
+            .is_none_or(|relationship| relationship == "managed");
+        let inferred_origin = if source_hints
+            .web_provenance_entry_ids
+            .contains(&knowledge_entry_id)
+            || entry.source_relationship.is_some()
+            || (source_is_managed
+                && (entry
+                    .source_item_id
+                    .as_ref()
+                    .is_some_and(|source_item_id| {
+                        source_hints.managed_item_ids.contains(source_item_id)
+                    })
+                    || entry
+                        .source_url
+                        .as_ref()
+                        .is_some_and(|url| source_hints.managed_urls.contains(url))))
         {
             KNOWLEDGE_ENTRY_ORIGIN_URL_SNAPSHOT
         } else {
             KNOWLEDGE_ENTRY_ORIGIN_USER
         };
-        let origin = prior
-            .as_ref()
-            .map(|prior| prior.origin.clone())
-            .unwrap_or_else(|| inferred_origin.into());
+        let origin = if prior.as_ref().is_some_and(|prior| {
+            prior.origin == KNOWLEDGE_ENTRY_ORIGIN_GENERATED
+        }) {
+            KNOWLEDGE_ENTRY_ORIGIN_GENERATED.into()
+        } else {
+            inferred_origin.into()
+        };
         let unchanged = prior.as_ref().is_some_and(|prior| {
             prior.parent_entry_id == parent_entry_id
                 && prior.name == entry.name
@@ -9569,14 +12687,40 @@ fn scan_knowledge_entry_projection(
     Ok(projected)
 }
 
+/// Read only the bounded leading metadata region used by managed snapshots.
+/// Ownership recovery never needs the document body and must not turn a tree
+/// reconciliation into an unbounded content scan.
+fn read_snapshot_projection_identity(
+    path: &Path,
+) -> (Option<KnowledgeSourceItemId>, Option<String>, Option<String>) {
+    const HEADER_LIMIT: u64 = 32 * 1024;
+    let Ok(file) = std::fs::File::open(path) else {
+        return (None, None, None);
+    };
+    let mut bytes = Vec::new();
+    if file.take(HEADER_LIMIT).read_to_end(&mut bytes).is_err() {
+        return (None, None, None);
+    }
+    let Ok(header) = std::str::from_utf8(&bytes) else {
+        return (None, None, None);
+    };
+    let source_item_id = source_url::snapshot_source_item_id(header);
+    let source_url = source_url::snapshot_source_url(header)
+        .and_then(|raw| normalize_source_url(raw).ok());
+    let source_relationship = source_url::snapshot_source_relationship(header).map(str::to_owned);
+    (source_item_id, source_url, source_relationship)
+}
+
 fn select_projection_identity_candidate(
     candidates: Option<&Vec<usize>>,
     existing: &[KnowledgeEntryRow],
     used_ids: &HashSet<KnowledgeEntryId>,
     kind: &str,
+    include_deleted: bool,
 ) -> Option<usize> {
     candidates?.iter().copied().filter(|index| {
         !used_ids.contains(&existing[*index].knowledge_entry_id)
+            && (include_deleted || existing[*index].deleted_at.is_none())
     }).min_by_key(|index| {
         let entry = &existing[*index];
         (
@@ -9685,20 +12829,121 @@ fn projection_tree_level_matches(
     })
 }
 
-fn hydrate_tree_entries(entries: &mut [KbTreeEntry], projected: &[KnowledgeEntryRow]) {
+fn hydrate_tree_entries(
+    entries: &mut [KbTreeEntry],
+    projected: &[KnowledgeEntryRow],
+    tree_access: KnowledgeTreeAccess,
+    source_by_entry: &SourceMetadataByEntry,
+) {
     let by_path = projected
         .iter()
         .map(|entry| (entry.portable_rel_path.as_str(), entry))
         .collect::<HashMap<_, _>>();
     for entry in entries {
         let portable_path = portable_writeback_path_identity(&entry.rel_path);
-        let Some(projected) = by_path.get(portable_path.as_str()) else {
+        let Some(projected_entry) = by_path.get(portable_path.as_str()) else {
             continue;
         };
-        entry.entry_id = Some(projected.knowledge_entry_id.clone());
-        entry.revision = Some(projected.revision);
-        entry.parent_entry_id = projected.parent_entry_id.clone();
-        entry.origin = Some(projected.origin.clone());
+        entry.entry_id = Some(projected_entry.knowledge_entry_id.clone());
+        entry.revision = Some(projected_entry.revision);
+        entry.parent_entry_id = projected_entry.parent_entry_id.clone();
+        entry.parent_entry_id = projected_entry.parent_entry_id.clone();
+        entry.origin = Some(projected_entry.origin.clone());
+        entry.source = source_by_entry
+            .get(&projected_entry.knowledge_entry_id)
+            .cloned();
+        let has_managed_descendant = entry.is_dir
+            && projected.iter().any(|candidate| {
+                candidate
+                    .rel_path
+                    .strip_prefix(&format!("{}/", entry.rel_path))
+                    .is_some()
+                    && source_by_entry
+                        .get(&candidate.knowledge_entry_id)
+                        .is_some_and(|source| {
+                            source.relationship == KnowledgeEntrySourceRelationship::Managed
+                        })
+            });
+        entry.capabilities = resolve_entry_capabilities(
+            tree_access,
+            entry.is_dir,
+            entry.source.as_ref(),
+            has_managed_descendant,
+        );
+    }
+}
+
+fn hydrate_file_entries(
+    entries: &mut [KbFileEntry],
+    projected: &[KnowledgeEntryRow],
+    tree_access: KnowledgeTreeAccess,
+    source_by_entry: &SourceMetadataByEntry,
+) {
+    let by_path = projected
+        .iter()
+        .map(|entry| (entry.portable_rel_path.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    for entry in entries {
+        let portable_path = portable_writeback_path_identity(&entry.rel_path);
+        let Some(projected_entry) = by_path.get(portable_path.as_str()) else {
+            continue;
+        };
+        entry.entry_id = Some(projected_entry.knowledge_entry_id.clone());
+        entry.revision = Some(projected_entry.revision);
+        entry.origin = Some(projected_entry.origin.clone());
+        entry.source = source_by_entry
+            .get(&projected_entry.knowledge_entry_id)
+            .cloned();
+        entry.capabilities = resolve_entry_capabilities(
+            tree_access,
+            false,
+            entry.source.as_ref(),
+            false,
+        );
+    }
+}
+
+fn resolve_entry_capabilities(
+    tree_access: KnowledgeTreeAccess,
+    is_dir: bool,
+    source: Option<&KnowledgeEntrySourceInfo>,
+    has_managed_descendant: bool,
+) -> KnowledgeEntryCapabilities {
+    let tree_editable = tree_access == KnowledgeTreeAccess::Editable;
+    let managed = source.is_some_and(|source| {
+        source.relationship == KnowledgeEntrySourceRelationship::Managed
+    });
+    KnowledgeEntryCapabilities {
+        read_content: !is_dir,
+        edit_content: tree_editable && !is_dir && !managed,
+        rename: tree_editable,
+        relocate: tree_editable,
+        accept_children: tree_editable && is_dir,
+        delete_entry: tree_editable && !managed && !has_managed_descendant,
+        remove_source: tree_editable && managed,
+        refresh_source: tree_editable && managed,
+        detach_source: tree_editable && managed,
+        copy_as_editable: tree_editable && !is_dir && managed,
+        export_entry: true,
+        edit_metadata: tree_editable,
+        read_only_reason: if !tree_editable {
+            Some(
+                "This knowledge directory is read-only. Grant folder edit access to modify it."
+                    .into(),
+            )
+        } else if managed {
+            Some(
+                "This document body is managed by its web source. Move, rename, refresh, detach, or copy it instead."
+                    .into(),
+            )
+        } else if has_managed_descendant {
+            Some(
+                "This folder contains managed web documents; remove or detach those sources before deleting the folder."
+                    .into(),
+            )
+        } else {
+            None
+        },
     }
 }
 
@@ -9760,6 +13005,8 @@ fn list_tree_level(root: &Path, rel_path: &str) -> Result<Vec<KbTreeEntry>, AppE
                 is_file: false,
                 size: None,
                 modified_at: None,
+                capabilities: KnowledgeEntryCapabilities::default(),
+                source: None,
             });
             continue;
         }
@@ -9775,6 +13022,8 @@ fn list_tree_level(root: &Path, rel_path: &str) -> Result<Vec<KbTreeEntry>, AppE
                 is_file: true,
                 size: Some(metadata.len()),
                 modified_at: modified_ms(&metadata),
+                capabilities: KnowledgeEntryCapabilities::default(),
+                source: None,
             });
         }
     }
@@ -9854,6 +13103,8 @@ fn create_tree_folder(root: &Path, rel_path: &str) -> Result<KbTreeEntry, AppErr
         is_file: false,
         size: None,
         modified_at: meta.as_ref().and_then(modified_ms),
+        capabilities: KnowledgeEntryCapabilities::default(),
+        source: None,
     })
 }
 
@@ -10299,6 +13550,8 @@ fn tree_entry_from_metadata(
         is_file: !is_dir,
         size: (!is_dir).then(|| metadata.len()),
         modified_at: modified_ms(metadata),
+        capabilities: KnowledgeEntryCapabilities::default(),
+        source: None,
     }
 }
 
@@ -10699,9 +13952,15 @@ fn list_md_files_strict(root: &Path) -> Result<Vec<KbFileEntry>, AppError> {
             ))
         })?;
         entries.push(KbFileEntry {
+            entry_id: None,
+            revision: None,
+            parent_entry_id: None,
+            origin: None,
             rel_path: rel_str,
             size: meta.len(),
             modified_at: modified_ms(&meta),
+            capabilities: KnowledgeEntryCapabilities::default(),
+            source: None,
         });
     }
     entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
@@ -11045,8 +14304,64 @@ mod tests {
             KnowledgeEventEmitter::new(events, Arc::from(TEST_OWNER_ID)),
         );
         service.set_entry_repository(knowledge_repository.clone());
+        service.set_source_repository(knowledge_repository.clone());
         service.set_tree_operation_repository(operation_repository.clone());
         (service, knowledge_repository, operation_repository)
+    }
+
+    #[derive(Clone)]
+    struct MutableSourceFetcher {
+        body: Arc<StdMutex<String>>,
+    }
+
+    impl MutableSourceFetcher {
+        fn new(body: &str) -> (Self, Arc<StdMutex<String>>) {
+            let body = Arc::new(StdMutex::new(body.to_owned()));
+            (Self { body: body.clone() }, body)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PageFetcher for MutableSourceFetcher {
+        async fn fetch_page(
+            &self,
+            raw_url: &str,
+        ) -> Result<source_url::FetchedPage, AppError> {
+            Ok(source_url::FetchedPage {
+                final_url: raw_url.to_owned(),
+                title: Some("Managed page".into()),
+                markdown: self.body.lock().unwrap().clone(),
+                truncated: false,
+            })
+        }
+    }
+
+    fn managed_source_sqlite_service(
+        database: &nomifun_db::Database,
+        data_dir: &Path,
+        fetcher: MutableSourceFetcher,
+    ) -> KnowledgeService {
+        let repository = Arc::new(nomifun_db::SqliteKnowledgeRepository::new(
+            database.pool().clone(),
+        ));
+        let base_repository: Arc<dyn IKnowledgeRepository> = repository.clone();
+        let service = KnowledgeService::new(
+            base_repository,
+            data_dir,
+            KnowledgeEventEmitter::new(
+                Arc::new(RecordingBroadcaster::default()),
+                Arc::from(TEST_OWNER_ID),
+            ),
+        )
+        .with_url_fetcher(fetcher);
+        service.set_entry_repository(repository.clone());
+        service.set_source_repository(repository);
+        service.set_tree_operation_repository(Arc::new(
+            nomifun_db::SqliteKnowledgeTreeOperationRepository::new(
+                database.pool().clone(),
+            ),
+        ));
+        service
     }
 
     fn test_relocation_fingerprint(
@@ -13136,6 +16451,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleting_and_recreating_the_same_path_mints_a_new_entry_identity() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (service, _, _) = durable_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            Arc::new(NoopBroadcaster),
+        );
+        let info = service.create_base("identity", "", None, None).await.unwrap();
+        service
+            .create_document(info.knowledge_base_id.as_str(), "same.md", "first")
+            .await
+            .unwrap();
+        let first = service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.name == "same.md")
+            .unwrap();
+        service
+            .delete_file_entry(
+                info.knowledge_base_id.as_str(),
+                &first.rel_path,
+                first.entry_id.as_ref(),
+                first.revision,
+            )
+            .await
+            .unwrap();
+        service
+            .create_document(info.knowledge_base_id.as_str(), "same.md", "second")
+            .await
+            .unwrap();
+        let second = service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.name == "same.md")
+            .unwrap();
+        assert_ne!(first.entry_id, second.entry_id);
+    }
+
+    #[tokio::test]
     async fn projection_reconcile_repairs_a_committed_move_after_cas_failure() {
         let dir = tempfile::TempDir::new().unwrap();
         let database = nomifun_db::init_database_memory().await.unwrap();
@@ -13386,7 +16745,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn source_managed_snapshots_reject_every_general_tree_mutator() {
+    async fn managed_snapshot_can_be_organized_but_body_remains_read_only() {
         let dir = tempfile::TempDir::new().unwrap();
         let service = make_service(&dir.path().join("data"));
         let info = service
@@ -13403,9 +16762,18 @@ mod tests {
             .unwrap();
         let root = PathBuf::from(&info.root_path);
         std::fs::create_dir_all(root.join("snapshots")).unwrap();
-        std::fs::write(root.join("snapshots/page.md"), "managed").unwrap();
+        std::fs::write(
+            root.join("snapshots/page.md"),
+            source_url::snapshot_markdown(
+                "https://example.com/docs",
+                "2026-01-01T00:00:00Z",
+                Some("Docs"),
+                "managed",
+            ),
+        )
+        .unwrap();
 
-        let error = service
+        let moved = service
             .relocate_tree_entry(
                 &info.knowledge_base_id,
                 RelocateTreeEntryRequest {
@@ -13420,17 +16788,17 @@ mod tests {
                 },
             )
             .await
-            .unwrap_err();
-        assert!(matches!(error, AppError::Forbidden(_)), "{error:?}");
+            .unwrap();
+        assert_eq!(moved.new_path, "page.md");
 
         let overwrite = service
-            .write_file(&info.knowledge_base_id, "snapshots/page.md", "replacement")
+            .write_file(&info.knowledge_base_id, "page.md", "replacement")
             .await
             .unwrap_err();
         assert!(matches!(overwrite, AppError::Forbidden(_)), "{overwrite:?}");
 
         let delete_file = service
-            .delete_file(&info.knowledge_base_id, "snapshots/page.md")
+            .delete_file(&info.knowledge_base_id, "page.md")
             .await
             .unwrap_err();
         assert!(matches!(delete_file, AppError::Forbidden(_)), "{delete_file:?}");
@@ -13438,8 +16806,8 @@ mod tests {
         let create_folder = service
             .create_folder(&info.knowledge_base_id, "snapshots/manual")
             .await
-            .unwrap_err();
-        assert!(matches!(create_folder, AppError::Forbidden(_)), "{create_folder:?}");
+            .unwrap();
+        assert_eq!(create_folder.rel_path, "snapshots/manual");
 
         let import_source = dir.path().join("import-source");
         std::fs::create_dir_all(&import_source).unwrap();
@@ -13451,20 +16819,17 @@ mod tests {
                 "snapshots",
             )
             .await
-            .unwrap_err();
-        assert!(matches!(import, AppError::Forbidden(_)), "{import:?}");
-        assert!(!root.join("snapshots/import-source").exists());
+            .unwrap();
+        assert_eq!(import.imported, 1);
+        assert!(root.join("snapshots/import-source").exists());
 
-        let delete_folder = service
+        service
             .delete_folder(&info.knowledge_base_id, "snapshots")
             .await
-            .unwrap_err();
-        assert!(matches!(delete_folder, AppError::Forbidden(_)), "{delete_folder:?}");
-        assert_eq!(
-            std::fs::read_to_string(root.join("snapshots/page.md")).unwrap(),
-            "managed"
-        );
-        assert!(root.join("snapshots/page.md").is_file());
+            .unwrap();
+        let content = std::fs::read_to_string(root.join("page.md")).unwrap();
+        assert!(content.contains("managed"));
+        assert!(root.join("page.md").is_file());
 
     }
 
@@ -14017,11 +17382,925 @@ mod tests {
                     url: (*u).to_owned(),
                     title: None,
                     rendered: false,
+                    ..Default::default()
                 })
                 .collect(),
             // A client-sent value must be discarded by create.
             last_fetched_at: Some(42),
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn source_identity_ignores_url_fragments() {
+        assert_eq!(
+            normalize_source_url("https://example.com/docs#intro").unwrap(),
+            normalize_source_url("https://example.com/docs#api").unwrap()
+        );
+    }
+
+    #[test]
+    fn source_relationship_rewrite_preserves_legacy_yaml_frontmatter() {
+        let source_item_id = KnowledgeSourceItemId::new();
+        let legacy = "---\nsource_url: https://example.com/docs\nfetched_at: now\n---\n\nbody\n";
+        let detached = rewrite_snapshot_relationship(legacy, &source_item_id, "detached")
+            .unwrap();
+        assert!(detached.starts_with("---\nsource_url:"));
+        assert!(detached.contains(&format!(
+            "nomifun_source_item_id: {source_item_id}\nnomifun_source_relationship: detached\n---"
+        )));
+        assert_eq!(
+            source_url::snapshot_source_item_id(&detached).as_ref(),
+            Some(&source_item_id)
+        );
+        assert_eq!(
+            source_url::snapshot_source_relationship(&detached),
+            Some("detached")
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_web_document_moves_with_its_parent_and_refreshes_in_place() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (fetcher, body) = MutableSourceFetcher::new("# Version one");
+        let service = managed_source_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            fetcher,
+        );
+        let info = service
+            .create_base(
+                "managed-web",
+                "",
+                None,
+                Some(url_source(
+                    KnowledgeSourceMode::Snapshot,
+                    &["https://example.com/docs"],
+                )),
+            )
+            .await
+            .unwrap();
+        let snapshots = service
+            .list_tree(info.knowledge_base_id.as_str(), "snapshots")
+            .await
+            .unwrap();
+        let managed = snapshots.into_iter().find(|entry| entry.is_file).unwrap();
+        assert_eq!(
+            managed.source.as_ref().map(|source| source.relationship),
+            Some(KnowledgeEntrySourceRelationship::Managed)
+        );
+        assert!(!managed.capabilities.edit_content);
+        assert!(managed.capabilities.relocate);
+
+        service
+            .create_folder(info.knowledge_base_id.as_str(), "category")
+            .await
+            .unwrap();
+        let moved = service
+            .relocate_tree_entry(
+                info.knowledge_base_id.as_str(),
+                RelocateTreeEntryRequest {
+                    request_id: generate_id(),
+                    source_path: managed.rel_path.clone(),
+                    destination_parent_path: "category".into(),
+                    entry_id: managed.entry_id.clone(),
+                    destination_parent_id: None,
+                    new_name: None,
+                    expected_revision: managed.revision,
+                    conflict_policy: RelocateConflictPolicy::Reject,
+                },
+            )
+            .await
+            .unwrap();
+        service
+            .create_folder(info.knowledge_base_id.as_str(), "archive")
+            .await
+            .unwrap();
+        service
+            .relocate_tree_entry(
+                info.knowledge_base_id.as_str(),
+                RelocateTreeEntryRequest {
+                    request_id: generate_id(),
+                    source_path: "category".into(),
+                    destination_parent_path: "archive".into(),
+                    entry_id: None,
+                    destination_parent_id: None,
+                    new_name: None,
+                    expected_revision: None,
+                    conflict_policy: RelocateConflictPolicy::Reject,
+                },
+            )
+            .await
+            .unwrap();
+        let current = service
+            .list_tree(info.knowledge_base_id.as_str(), "archive/category")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.entry_id == managed.entry_id)
+            .unwrap();
+        *body.lock().unwrap() = "# Version two".into();
+        let refreshed = service
+            .refresh_entry_source(
+                info.knowledge_base_id.as_str(),
+                current.entry_id.as_ref().unwrap(),
+                current.revision.unwrap(),
+            )
+            .await
+            .unwrap();
+        let refreshed_entry = refreshed.entry.unwrap();
+        assert_eq!(refreshed_entry.rel_path, format!("archive/{}", moved.new_path));
+        let root = PathBuf::from(&info.root_path);
+        let content = std::fs::read_to_string(root.join(&refreshed_entry.rel_path)).unwrap();
+        assert!(content.contains("Version two"));
+        assert!(!root.join(&managed.rel_path).exists());
+        let write_error = service
+            .write_file(
+                info.knowledge_base_id.as_str(),
+                &refreshed_entry.rel_path,
+                "user overwrite",
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(write_error, AppError::Forbidden(_)));
+
+        service
+            .write_file(
+                info.knowledge_base_id.as_str(),
+                "snapshots/manual.md",
+                "user note",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("snapshots/manual.md")).unwrap(),
+            "user note"
+        );
+        let manual = service
+            .list_tree(info.knowledge_base_id.as_str(), "snapshots")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.name == "manual.md")
+            .unwrap();
+        assert_eq!(manual.origin.as_deref(), Some(KNOWLEDGE_ENTRY_ORIGIN_USER));
+        assert!(manual.source.is_none());
+        assert!(manual.capabilities.edit_content);
+    }
+
+    #[tokio::test]
+    async fn managed_web_copy_and_detach_are_editable_and_independent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (fetcher, body) = MutableSourceFetcher::new("original body");
+        let service = managed_source_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            fetcher,
+        );
+        let info = service
+            .create_base(
+                "copy-detach",
+                "",
+                None,
+                Some(url_source(
+                    KnowledgeSourceMode::Snapshot,
+                    &["https://example.com/copy"],
+                )),
+            )
+            .await
+            .unwrap();
+        let managed = service
+            .list_tree(info.knowledge_base_id.as_str(), "snapshots")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.is_file)
+            .unwrap();
+        let copied = service
+            .copy_entry_as_editable(
+                info.knowledge_base_id.as_str(),
+                managed.entry_id.as_ref().unwrap(),
+                managed.revision.unwrap(),
+                "",
+                None,
+                Some("editable-copy.md"),
+            )
+            .await
+            .unwrap()
+            .entry
+            .unwrap();
+        assert!(copied.capabilities.edit_content);
+        assert_eq!(
+            copied.source.as_ref().map(|source| source.relationship),
+            Some(KnowledgeEntrySourceRelationship::Copy)
+        );
+        service
+            .write_file(
+                info.knowledge_base_id.as_str(),
+                &copied.rel_path,
+                "my independent edits",
+            )
+            .await
+            .unwrap();
+        *body.lock().unwrap() = "refreshed original".into();
+        let refreshed = service
+            .refresh_entry_source(
+                info.knowledge_base_id.as_str(),
+                managed.entry_id.as_ref().unwrap(),
+                managed.revision.unwrap(),
+            )
+            .await
+            .unwrap()
+            .entry
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(PathBuf::from(&info.root_path).join(&copied.rel_path))
+                .unwrap(),
+            "my independent edits"
+        );
+        let detached = service
+            .detach_entry_source(
+                info.knowledge_base_id.as_str(),
+                refreshed.entry_id.as_ref().unwrap(),
+                refreshed.revision.unwrap(),
+            )
+            .await
+            .unwrap()
+            .entry
+            .unwrap();
+        assert!(detached.capabilities.edit_content);
+        assert_eq!(
+            detached.source.as_ref().map(|source| source.relationship),
+            Some(KnowledgeEntrySourceRelationship::Detached)
+        );
+        service
+            .write_file(
+                info.knowledge_base_id.as_str(),
+                &detached.rel_path,
+                "detached edits",
+            )
+            .await
+            .unwrap();
+        let refresh_error = service
+            .refresh_entry_source(
+                info.knowledge_base_id.as_str(),
+                detached.entry_id.as_ref().unwrap(),
+                detached.revision.unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(refresh_error, AppError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn managed_web_refresh_preserves_external_edits_as_a_conflict() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (fetcher, body) = MutableSourceFetcher::new("baseline");
+        let service = managed_source_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            fetcher,
+        );
+        let info = service
+            .create_base(
+                "conflict",
+                "",
+                None,
+                Some(url_source(
+                    KnowledgeSourceMode::Snapshot,
+                    &["https://example.com/conflict"],
+                )),
+            )
+            .await
+            .unwrap();
+        let managed = service
+            .list_tree(info.knowledge_base_id.as_str(), "snapshots")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.is_file)
+            .unwrap();
+        let path = PathBuf::from(&info.root_path).join(&managed.rel_path);
+        let mut edited = std::fs::read_to_string(&path).unwrap();
+        edited.push_str("\nUSER EXTERNAL EDIT\n");
+        std::fs::write(&path, &edited).unwrap();
+        *body.lock().unwrap() = "network changed".into();
+        let result = service
+            .refresh_entry_source(
+                info.knowledge_base_id.as_str(),
+                managed.entry_id.as_ref().unwrap(),
+                managed.revision.unwrap(),
+            )
+            .await
+            .unwrap();
+        let summary = result.source_fetch.unwrap();
+        assert_eq!(summary.fetched, 0);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+        assert_eq!(
+            result
+                .entry
+                .unwrap()
+                .source
+                .unwrap()
+                .sync_status,
+            KnowledgeSourceSyncStatus::Conflicted
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_managed_source_markers_fail_closed_without_overwriting_either_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (fetcher, body) = MutableSourceFetcher::new("baseline");
+        let service = managed_source_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            fetcher,
+        );
+        let info = service
+            .create_base(
+                "duplicate-marker",
+                "",
+                None,
+                Some(url_source(
+                    KnowledgeSourceMode::Snapshot,
+                    &["https://example.com/duplicate"],
+                )),
+            )
+            .await
+            .unwrap();
+        let managed = service
+            .list_tree(info.knowledge_base_id.as_str(), "snapshots")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.is_file)
+            .unwrap();
+        let root = PathBuf::from(&info.root_path);
+        std::fs::copy(root.join(&managed.rel_path), root.join("duplicate.md")).unwrap();
+        service.mark_projection_dirty(&service.require_base(info.knowledge_base_id.as_str()).await.unwrap());
+        let _ = service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap();
+        let current = service
+            .list_entry_by_id(
+                info.knowledge_base_id.as_str(),
+                managed.entry_id.as_ref().unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            current.source.as_ref().unwrap().sync_status,
+            KnowledgeSourceSyncStatus::Conflicted
+        );
+        let original_before = std::fs::read_to_string(root.join(&current.rel_path)).unwrap();
+        let duplicate_before = std::fs::read_to_string(root.join("duplicate.md")).unwrap();
+        *body.lock().unwrap() = "network replacement".into();
+        let result = service
+            .refresh_entry_source(
+                info.knowledge_base_id.as_str(),
+                current.entry_id.as_ref().unwrap(),
+                current.revision.unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.source_fetch.unwrap().fetched, 0);
+        assert_eq!(
+            std::fs::read_to_string(root.join(&current.rel_path)).unwrap(),
+            original_before
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("duplicate.md")).unwrap(),
+            duplicate_before
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_source_hash_recovers_crash_after_file_write_without_false_conflict() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (fetcher, _) = MutableSourceFetcher::new("baseline");
+        let service = managed_source_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            fetcher,
+        );
+        let info = service
+            .create_base(
+                "pending-hash",
+                "",
+                None,
+                Some(url_source(
+                    KnowledgeSourceMode::Snapshot,
+                    &["https://example.com/pending"],
+                )),
+            )
+            .await
+            .unwrap();
+        let managed = service
+            .list_tree(info.knowledge_base_id.as_str(), "snapshots")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.is_file)
+            .unwrap();
+        let source = managed.source.as_ref().unwrap();
+        let repository = nomifun_db::SqliteKnowledgeRepository::new(database.pool().clone());
+        let item = repository
+            .get_source_item(&source.source_item_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let attempted = repository
+            .record_sync_attempt(&item.knowledge_source_item_id, item.revision, now_ms())
+            .await
+            .unwrap();
+        let content = source_url::managed_snapshot_markdown(
+            &item.knowledge_source_item_id,
+            &item.requested_url,
+            Some(&item.requested_url),
+            "2026-01-01T00:00:00Z",
+            Some("Recovered"),
+            false,
+            "body published before crash",
+        );
+        let pending_hash = sha256_text(&content);
+        let staged = repository
+            .stage_sync_publication(&StageKnowledgeSourcePublicationParams {
+                knowledge_source_item_id: item.knowledge_source_item_id.clone(),
+                expected_revision: attempted.revision,
+                pending_published_hash: pending_hash.clone(),
+                pending_final_url: Some(item.requested_url.clone()),
+                pending_title: Some("Recovered".into()),
+                staged_at: now_ms(),
+            })
+            .await
+            .unwrap();
+        let path = PathBuf::from(&info.root_path).join(&managed.rel_path);
+        write_text_atomic(&path, &content).await.unwrap();
+
+        assert_eq!(service.recover_pending_source_publications(
+            &service.require_base(info.knowledge_base_id.as_str()).await.unwrap()
+        ).await.unwrap(), 1);
+        let recovered = repository
+            .get_source_item(&item.knowledge_source_item_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.revision, staged.revision + 1);
+        assert_eq!(recovered.sync_status, KnowledgeSourceItemSyncStatus::Synced);
+        assert_eq!(recovered.last_published_hash.as_deref(), Some(pending_hash.as_str()));
+        assert!(recovered.pending_published_hash.is_none());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn removing_last_managed_web_source_trashes_document_and_clears_web_kind() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (fetcher, _) = MutableSourceFetcher::new("remove me");
+        let service = managed_source_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            fetcher,
+        );
+        let info = service
+            .create_base(
+                "remove-source",
+                "",
+                None,
+                Some(url_source(
+                    KnowledgeSourceMode::Snapshot,
+                    &["https://example.com/remove"],
+                )),
+            )
+            .await
+            .unwrap();
+        let managed = service
+            .list_tree(info.knowledge_base_id.as_str(), "snapshots")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.is_file)
+            .unwrap();
+        let copy = service
+            .copy_entry_as_editable(
+                info.knowledge_base_id.as_str(),
+                managed.entry_id.as_ref().unwrap(),
+                managed.revision.unwrap(),
+                "",
+                None,
+                Some("kept-copy.md"),
+            )
+            .await
+            .unwrap()
+            .entry
+            .unwrap();
+        let result = service
+            .remove_entry_source(
+                info.knowledge_base_id.as_str(),
+                managed.entry_id.as_ref().unwrap(),
+                managed.revision.unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(result.removed);
+        assert!(!PathBuf::from(&info.root_path).join(&managed.rel_path).exists());
+        let updated = service
+            .get_base_info(info.knowledge_base_id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(updated.kind, "blank");
+        assert!(updated.source.is_none());
+        assert!(PathBuf::from(&info.root_path).join(".nomifun-trash").is_dir());
+        let retained_copy = service
+            .list_entry_by_id(
+                info.knowledge_base_id.as_str(),
+                copy.entry_id.as_ref().unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(retained_copy.capabilities.edit_content);
+        assert_eq!(
+            retained_copy.source.unwrap().relationship,
+            KnowledgeEntrySourceRelationship::Copy
+        );
+    }
+
+    #[tokio::test]
+    async fn adding_web_content_reuses_the_selected_destination_folder() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (fetcher, _) = MutableSourceFetcher::new("captured in category");
+        let service = managed_source_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            fetcher,
+        );
+        let info = service.create_base("blank", "", None, None).await.unwrap();
+        service
+            .create_folder(info.knowledge_base_id.as_str(), "research")
+            .await
+            .unwrap();
+        let folder = service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.rel_path == "research")
+            .unwrap();
+        let summary = service
+            .append_url_entries_into(
+                info.knowledge_base_id.as_str(),
+                vec![KnowledgeSourceEntry {
+                    url: "https://example.com/research".into(),
+                    ..Default::default()
+                }],
+                "research",
+                folder.entry_id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary.fetched, 1);
+        assert!(
+            summary
+                .first_file
+                .as_deref()
+                .is_some_and(|path| path.starts_with("research/"))
+        );
+        let captured = service
+            .list_tree(info.knowledge_base_id.as_str(), "research")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.is_file)
+            .unwrap();
+        assert_eq!(
+            captured.source.unwrap().relationship,
+            KnowledgeEntrySourceRelationship::Managed
+        );
+    }
+
+    #[tokio::test]
+    async fn explicitly_readding_a_removed_url_creates_a_fresh_source_item() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (fetcher, _) = MutableSourceFetcher::new("captured");
+        let service = managed_source_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            fetcher,
+        );
+        let removed_url = "https://example.com/readd";
+        let info = service
+            .create_base(
+                "readd",
+                "",
+                None,
+                Some(url_source(
+                    KnowledgeSourceMode::Snapshot,
+                    &[removed_url, "https://example.com/keep"],
+                )),
+            )
+            .await
+            .unwrap();
+        let removed_entry = service
+            .list_tree(info.knowledge_base_id.as_str(), "snapshots")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.source.as_ref().is_some_and(|source| source.source_url == removed_url))
+            .unwrap();
+        let old_source_item_id = removed_entry.source.as_ref().unwrap().source_item_id.clone();
+        service
+            .remove_entry_source(
+                info.knowledge_base_id.as_str(),
+                removed_entry.entry_id.as_ref().unwrap(),
+                removed_entry.revision.unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let summary = service
+            .append_url_entries_into(
+                info.knowledge_base_id.as_str(),
+                vec![KnowledgeSourceEntry {
+                    url: removed_url.into(),
+                    ..Default::default()
+                }],
+                "",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary.added, 1);
+        assert_eq!(summary.fetched, 1);
+        let readded = service
+            .list_tree(info.knowledge_base_id.as_str(), "snapshots")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.source.as_ref().is_some_and(|source| source.source_url == removed_url))
+            .unwrap();
+        assert_ne!(readded.source.unwrap().source_item_id, old_source_item_id);
+    }
+
+    #[tokio::test]
+    async fn root_web_add_clears_a_deleted_default_parent_from_db_and_extra() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (fetcher, _) = MutableSourceFetcher::new("captured");
+        let service = managed_source_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            fetcher,
+        );
+        let info = service.create_base("default-parent", "", None, None).await.unwrap();
+        service
+            .create_folder(info.knowledge_base_id.as_str(), "destination")
+            .await
+            .unwrap();
+        let destination = service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.rel_path == "destination")
+            .unwrap();
+        service
+            .append_url_entries_into(
+                info.knowledge_base_id.as_str(),
+                vec![KnowledgeSourceEntry {
+                    url: "https://example.com/first".into(),
+                    ..Default::default()
+                }],
+                "destination",
+                destination.entry_id.clone(),
+            )
+            .await
+            .unwrap();
+        let captured = service
+            .list_tree(info.knowledge_base_id.as_str(), "destination")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.is_file)
+            .unwrap();
+        service
+            .relocate_tree_entry(
+                info.knowledge_base_id.as_str(),
+                RelocateTreeEntryRequest {
+                    request_id: generate_id(),
+                    source_path: captured.rel_path,
+                    destination_parent_path: String::new(),
+                    entry_id: captured.entry_id,
+                    destination_parent_id: None,
+                    new_name: None,
+                    expected_revision: captured.revision,
+                    conflict_policy: RelocateConflictPolicy::Reject,
+                },
+            )
+            .await
+            .unwrap();
+        let destination = service
+            .list_tree(info.knowledge_base_id.as_str(), "")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.rel_path == "destination")
+            .unwrap();
+        service
+            .delete_folder_entry(
+                info.knowledge_base_id.as_str(),
+                "destination",
+                destination.entry_id.as_ref(),
+                destination.revision,
+            )
+            .await
+            .unwrap();
+        let summary = service
+            .append_url_entries_into(
+                info.knowledge_base_id.as_str(),
+                vec![KnowledgeSourceEntry {
+                    url: "https://example.com/second".into(),
+                    ..Default::default()
+                }],
+                "",
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(summary.first_file.as_deref().is_some_and(|path| path.starts_with("snapshots/")));
+        let repository = nomifun_db::SqliteKnowledgeRepository::new(database.pool().clone());
+        let normalized = repository
+            .list_sources_for_base(&info.knowledge_base_id, false)
+            .await
+            .unwrap()
+            .remove(0);
+        assert!(normalized.default_parent_entry_id.is_none());
+        let cached = source_from_extra(
+            &service
+                .require_base(info.knowledge_base_id.as_str())
+                .await
+                .unwrap()
+                .extra,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(cached.default_parent_entry_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn boot_repairs_ghost_extra_after_source_item_removal_commit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (fetcher, _) = MutableSourceFetcher::new("captured");
+        let service = Arc::new(managed_source_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            fetcher,
+        ));
+        let info = service
+            .create_base(
+                "ghost-cache",
+                "",
+                None,
+                Some(url_source(
+                    KnowledgeSourceMode::Snapshot,
+                    &["https://example.com/ghost"],
+                )),
+            )
+            .await
+            .unwrap();
+        let managed = service
+            .list_tree(info.knowledge_base_id.as_str(), "snapshots")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.is_file)
+            .unwrap();
+        let repository = nomifun_db::SqliteKnowledgeRepository::new(database.pool().clone());
+        let provenance = repository
+            .get_entry_provenance(managed.entry_id.as_ref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let item = repository
+            .get_source_item(&provenance.knowledge_source_item_id)
+            .await
+            .unwrap()
+            .unwrap();
+        repository
+            .remove_managed_source_item(
+                managed.entry_id.as_ref().unwrap(),
+                provenance.revision,
+                item.revision,
+                now_ms(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            source_from_extra(
+                &service
+                    .require_base(info.knowledge_base_id.as_str())
+                    .await
+                    .unwrap()
+                    .extra,
+            )
+            .unwrap()
+            .is_some()
+        );
+        service.clone().resume_pending_source_fetches().await;
+        let repaired = service
+            .get_base_info(info.knowledge_base_id.as_str())
+            .await
+            .unwrap();
+        assert_eq!(repaired.kind, "blank");
+        assert!(repaired.source.is_none());
+        let detached = service
+            .list_entry_by_id(
+                info.knowledge_base_id.as_str(),
+                managed.entry_id.as_ref().unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(detached.capabilities.edit_content);
+        assert_eq!(
+            detached.source.unwrap().relationship,
+            KnowledgeEntrySourceRelationship::Detached
+        );
+    }
+
+    #[tokio::test]
+    async fn boot_resume_recovers_normalized_syncing_items_even_with_an_old_global_stamp() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let (fetcher, body) = MutableSourceFetcher::new("before restart");
+        let service = Arc::new(managed_source_sqlite_service(
+            &database,
+            &dir.path().join("data"),
+            fetcher,
+        ));
+        let info = service
+            .create_base(
+                "resume-normalized",
+                "",
+                None,
+                Some(url_source(
+                    KnowledgeSourceMode::Snapshot,
+                    &["https://example.com/resume"],
+                )),
+            )
+            .await
+            .unwrap();
+        let repository = nomifun_db::SqliteKnowledgeRepository::new(database.pool().clone());
+        let source = repository
+            .list_sources_for_base(&info.knowledge_base_id, false)
+            .await
+            .unwrap()
+            .remove(0);
+        let item = repository
+            .list_source_items(&source.knowledge_source_id, false)
+            .await
+            .unwrap()
+            .remove(0);
+        repository
+            .record_sync_attempt(
+                &item.knowledge_source_item_id,
+                item.revision,
+                now_ms(),
+            )
+            .await
+            .unwrap();
+        *body.lock().unwrap() = "after restart".into();
+        service.clone().resume_pending_source_fetches().await;
+
+        let refreshed_item = repository
+            .get_source_item(&item.knowledge_source_item_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            refreshed_item.sync_status,
+            KnowledgeSourceItemSyncStatus::Synced
+        );
+        let managed = service
+            .list_tree(info.knowledge_base_id.as_str(), "snapshots")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.is_file)
+            .unwrap();
+        assert!(
+            std::fs::read_to_string(PathBuf::from(info.root_path).join(managed.rel_path))
+                .unwrap()
+                .contains("after restart")
+        );
     }
 
     fn service_with_repo(dir: &Path) -> (KnowledgeService, Arc<MemRepo>) {
@@ -14375,6 +18654,31 @@ mod tests {
         let ftp = url_source(KnowledgeSourceMode::Live, &["ftp://e.com/x"]);
         assert!(service.create_base("x", "", None, Some(ftp)).await.is_err());
 
+        let credentials = url_source(
+            KnowledgeSourceMode::Live,
+            &["https://user:secret@example.com/docs"],
+        );
+        assert!(
+            service
+                .create_base("x", "", None, Some(credentials))
+                .await
+                .is_err()
+        );
+
+        let duplicate = url_source(
+            KnowledgeSourceMode::Live,
+            &[
+                "https://example.com/docs#intro",
+                "https://example.com/docs#api",
+            ],
+        );
+        assert!(
+            service
+                .create_base("x", "", None, Some(duplicate))
+                .await
+                .is_err()
+        );
+
         assert!(service.list_bases().await.unwrap().is_empty(), "rejected creates must not register");
     }
 
@@ -14454,11 +18758,13 @@ mod tests {
                         url: old_url.clone(),
                         title: None,
                         rendered: false,
+                        ..Default::default()
                     },
                     KnowledgeSourceEntry {
                         url: new_url.clone(),
                         title: Some("New page".into()),
                         rendered: false,
+                        ..Default::default()
                     },
                 ],
             )
@@ -14501,6 +18807,7 @@ mod tests {
                     url: url.clone(),
                     title: None,
                     rendered: false,
+                    ..Default::default()
                 }],
             )
             .await
@@ -14629,7 +18936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_snapshot_without_completer_is_silent_and_dedupes_slugs() {
+    async fn create_snapshot_without_completer_is_silent_and_dedupes_same_slug_urls() {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -14643,12 +18950,16 @@ mod tests {
         let (service, repo) = service_with_repo(&dir.path().join("data"));
         // No completer wired: snapshots still land, autogen silently skipped.
         let url = format!("{}/page", server.uri());
+        let same_slug_url = format!("{url}?view=2");
         let kb = service
             .create_base(
                 "双份库",
                 "",
                 None,
-                Some(url_source(KnowledgeSourceMode::Snapshot, &[&url, &url])),
+                Some(url_source(
+                    KnowledgeSourceMode::Snapshot,
+                    &[&url, &same_slug_url],
+                )),
             )
             .await
             .unwrap();
@@ -14660,7 +18971,7 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
-        assert_eq!(names.len(), 2, "same-slug entries must suffix, not overwrite: {names:?}");
+        assert_eq!(names.len(), 2, "different same-slug URLs must suffix, not overwrite: {names:?}");
         assert!(names.iter().any(|n| n.ends_with("-2.md")), "{names:?}");
         assert!(!PathBuf::from(&kb.root_path).join("README.md").exists(), "no completer → no README");
         assert_eq!(kb.description, "");
@@ -14742,10 +19053,11 @@ mod tests {
             kind: "url".into(),
             mode: KnowledgeSourceMode::Snapshot,
             entries: vec![
-                KnowledgeSourceEntry { url: plain_url.clone(), title: None, rendered: false },
-                KnowledgeSourceEntry { url: rendered_url.clone(), title: None, rendered: true },
+                KnowledgeSourceEntry { url: plain_url.clone(), title: None, rendered: false, ..Default::default() },
+                KnowledgeSourceEntry { url: rendered_url.clone(), title: None, rendered: true, ..Default::default() },
             ],
             last_fetched_at: None,
+            ..Default::default()
         };
         let kb = service.create_base("混合库", "", None, Some(source)).await.unwrap();
 
@@ -14789,8 +19101,9 @@ mod tests {
         let source = KnowledgeSource {
             kind: "url".into(),
             mode: KnowledgeSourceMode::Snapshot,
-            entries: vec![KnowledgeSourceEntry { url: url.clone(), title: None, rendered: true }],
+            entries: vec![KnowledgeSourceEntry { url: url.clone(), title: None, rendered: true, ..Default::default() }],
             last_fetched_at: None,
+            ..Default::default()
         };
         let kb = service.create_base("回退库", "", None, Some(source)).await.unwrap();
 
@@ -15259,8 +19572,10 @@ mod tests {
                     url: url.clone(),
                     title: None,
                     rendered: false,
+                    ..Default::default()
                 }],
                 last_fetched_at: stamp,
+                ..Default::default()
             };
             repo.bases.lock().unwrap().push(KnowledgeBaseRow {
                 id: 0,
@@ -16236,7 +20551,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn portable_writeback_source_snapshot_paths_are_read_only() {
+    async fn portable_writeback_named_snapshots_user_paths_remain_editable() {
         let dir = tempfile::TempDir::new().unwrap();
         let service = make_service(&dir.path().join("data"));
         let kb = service
@@ -16252,7 +20567,7 @@ mod tests {
             .await
             .unwrap();
 
-        let error = service
+        let written = service
             .write_document(WriteRequest {
                 spec: WriteTargetSpec::Path {
                     kb_id: kb.knowledge_base_id.clone(),
@@ -16267,13 +20582,42 @@ mod tests {
                 bound_kb_ids: vec![kb.knowledge_base_id.clone()],
             })
             .await
+            .unwrap();
+        assert_eq!(written.op, WriteOp::Create);
+
+        let root = PathBuf::from(&kb.root_path);
+        std::fs::write(
+            root.join("snapshots/captured.md"),
+            source_url::snapshot_markdown(
+                "https://example.com/docs",
+                "2026-01-01T00:00:00Z",
+                None,
+                "managed",
+            ),
+        )
+        .unwrap();
+        let error = service
+            .write_document(WriteRequest {
+                spec: WriteTargetSpec::Path {
+                    kb_id: kb.knowledge_base_id.clone(),
+                    rel_path: "snapshots/captured.md".into(),
+                },
+                content: "# attempted overwrite\n".into(),
+                policy: WritePolicy {
+                    mode: WriteMode::Direct,
+                    allow_create: true,
+                    surface: WriteSurface::RegularChat,
+                },
+                bound_kb_ids: vec![kb.knowledge_base_id.clone()],
+            })
+            .await
             .unwrap_err();
 
         assert!(matches!(error, AppError::Forbidden(_)), "{error:?}");
     }
 
     #[tokio::test]
-    async fn portable_writeback_publication_revalidates_source_after_resolution() {
+    async fn portable_writeback_source_attachment_does_not_reserve_a_directory_name() {
         let (service, kb_id, _dir) =
             test_service_with_file("terms.md", "x").await;
         let direct_spec = WriteTargetSpec::Path {
@@ -16299,7 +20643,7 @@ mod tests {
             .await
             .unwrap();
 
-        let direct_error = service
+        service
             .write_resolved_document_under_target_lock(
                 WriteRequest {
                     spec: direct_spec,
@@ -16314,14 +20658,13 @@ mod tests {
                 direct_resolution,
             )
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(matches!(direct_error, AppError::Forbidden(_)));
         assert!(
             service
                 .read_file(kb_id.as_str(), "snapshots/direct.md")
                 .await
-                .is_err()
+                .is_ok()
         );
     }
 
@@ -17649,6 +21992,7 @@ mod tests {
             mode: KnowledgeSourceMode::Live,
             entries: vec![],
             last_fetched_at: None,
+            ..Default::default()
         };
         assert_eq!(derive_kind(true, Some(&url)), "web");
         assert_eq!(derive_kind(false, Some(&url)), "web");
@@ -17726,6 +22070,7 @@ mod tests {
             mode: KnowledgeSourceMode::Snapshot,
             entries: vec![],
             last_fetched_at: None,
+            ..Default::default()
         };
         assert!(service.create_base("x", "", None, Some(source)).await.is_err());
         assert!(service.list_bases().await.unwrap().is_empty(), "rejected base must not persist");

@@ -10,7 +10,7 @@ import { FolderOpen, Info, LinkCloud, Plus, Upload } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { IKnowledgeAddContentResult } from '@/common/adapter/ipcBridge';
-import type { KnowledgeBaseId } from '@/common/types/ids';
+import type { KnowledgeBaseId, KnowledgeEntryId } from '@/common/types/ids';
 import { isDesktopShell } from '@renderer/utils/platform';
 import KnowledgeUrlEntriesEditor from '../KnowledgeUrlEntriesEditor';
 import {
@@ -28,6 +28,7 @@ interface KnowledgeAddContentControlProps {
   knowledgeBaseId: KnowledgeBaseId;
   baseRootPath: string;
   defaultFolderPath: string;
+  defaultFolderEntryId?: KnowledgeEntryId;
   existingUrlCount: number;
   onAdded: (result: IKnowledgeAddContentResult) => Promise<void>;
 }
@@ -116,7 +117,7 @@ const AddKnowledgeMenuPanel: React.FC<AddKnowledgeMenuPanelProps> = ({
 const KnowledgeAddContentControl = forwardRef<
   KnowledgeAddContentControlHandle,
   KnowledgeAddContentControlProps
->(({ knowledgeBaseId, baseRootPath, defaultFolderPath, existingUrlCount, onAdded }, ref) => {
+>(({ knowledgeBaseId, baseRootPath, defaultFolderPath, defaultFolderEntryId, existingUrlCount, onAdded }, ref) => {
   const { t } = useTranslation();
   const desktop = isDesktopShell();
   const [menuVisible, setMenuVisible] = useState(false);
@@ -274,6 +275,8 @@ const KnowledgeAddContentControl = forwardRef<
       const result = await addKnowledgeContent(knowledgeBaseId, {
         type: 'web',
         entries: parsed.entries,
+        destination_parent_path: defaultFolderPath || undefined,
+        destination_parent_id: defaultFolderEntryId,
       });
       if (result.type !== 'web') throw new Error('Unexpected knowledge content response');
       setWebImportVisible(false);

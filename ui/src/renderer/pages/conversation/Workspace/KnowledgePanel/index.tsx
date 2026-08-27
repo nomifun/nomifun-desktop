@@ -289,6 +289,7 @@ const SessionKnowledgePanel: React.FC<{ bases: IKnowledgeBase[] }> = ({ bases })
           },
           language: 'md',
           editable: false,
+          allow_open_in_system: file.source?.relationship !== 'managed',
         });
       } catch (error) {
         Message.error(knowledgeErrorText(error));

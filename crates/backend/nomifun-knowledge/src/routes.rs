@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use crate::export::{self, ExportSummary};
 use crate::service::{
     AppendUrlSourceSummary, AutogenOutcome, ConsumerInfo, FolderImportSummary, KbFileContent,
-    KbFileEntry, KbFileUpdateResult, KbTreeEntry, KnowledgeBaseInfo, KnowledgeBinding, KnowledgeSearchHit,
-    RefreshSourceSummary,
+    KbFileEntry, KbFileUpdateResult, KbTreeEntry, KnowledgeBaseInfo, KnowledgeBinding,
+    KnowledgeEntrySourceActionResult, KnowledgeSearchHit, RefreshSourceSummary,
 };
 use crate::state::KnowledgeRouterState;
 
@@ -84,6 +84,22 @@ pub fn knowledge_routes(state: KnowledgeRouterState) -> Router {
         .route(
             "/api/knowledge/bases/{knowledge_base_id}/tree/relocate/undo",
             post(undo_tree_relocation),
+        )
+        .route(
+            "/api/knowledge/bases/{knowledge_base_id}/entries/{entry_id}/refresh-source",
+            post(refresh_entry_source),
+        )
+        .route(
+            "/api/knowledge/bases/{knowledge_base_id}/entries/{entry_id}/copy-as-editable",
+            post(copy_entry_as_editable),
+        )
+        .route(
+            "/api/knowledge/bases/{knowledge_base_id}/entries/{entry_id}/detach-source",
+            post(detach_entry_source),
+        )
+        .route(
+            "/api/knowledge/bases/{knowledge_base_id}/entries/{entry_id}/remove-source",
+            post(remove_entry_source),
         )
         .route(
             "/api/knowledge/bases/{knowledge_base_id}/consumers",
@@ -153,7 +169,8 @@ struct CreateBaseRequest {
     tree_access: Option<KnowledgeTreeAccess>,
     /// Optional URL source, stored in `extra.source`. `mode=live` stores it
     /// without fetching; `mode=snapshot` fetches every entry into
-    /// `snapshots/` before the response returns (and chains a best-effort
+    /// managed Markdown entries before the response returns (using
+    /// `snapshots/` only as the initial default, and chaining a best-effort
     /// AI overview run) — the per-entry fetch outcome is reported in the
     /// response's `source_fetch` field.
     #[serde(default)]
@@ -283,7 +300,13 @@ enum AddContentRequest {
         #[serde(default)]
         destination_parent_path: String,
     },
-    Web { entries: Vec<KnowledgeSourceEntry> },
+    Web {
+        entries: Vec<KnowledgeSourceEntry>,
+        #[serde(default)]
+        destination_parent_path: String,
+        #[serde(default)]
+        destination_parent_id: Option<KnowledgeEntryId>,
+    },
 }
 
 #[derive(Serialize)]
@@ -354,7 +377,11 @@ async fn add_content(
                 first_file,
             }
         }
-        AddContentRequest::Web { entries } => {
+        AddContentRequest::Web {
+            entries,
+            destination_parent_path,
+            destination_parent_id,
+        } => {
             let AppendUrlSourceSummary {
                 added,
                 duplicates,
@@ -365,7 +392,12 @@ async fn add_content(
                 first_file,
             } = state
                 .service
-                .append_url_entries(knowledge_base_id.as_str(), entries)
+                .append_url_entries_into(
+                    knowledge_base_id.as_str(),
+                    entries,
+                    &destination_parent_path,
+                    destination_parent_id,
+                )
                 .await?;
             AddContentResponse::Web {
                 added,
@@ -385,6 +417,15 @@ async fn add_content(
 struct TreeQuery {
     #[serde(default)]
     path: String,
+}
+
+#[derive(Deserialize)]
+struct DeleteTreeQuery {
+    path: String,
+    #[serde(default)]
+    entry_id: Option<KnowledgeEntryId>,
+    #[serde(default)]
+    expected_revision: Option<i64>,
 }
 
 async fn list_tree(
@@ -425,11 +466,16 @@ async fn delete_folder(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
     Path(knowledge_base_id): Path<KnowledgeBaseId>,
-    Query(query): Query<TreeQuery>,
+    Query(query): Query<DeleteTreeQuery>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state
         .service
-        .delete_folder(knowledge_base_id.as_str(), &query.path)
+        .delete_folder_entry(
+            knowledge_base_id.as_str(),
+            &query.path,
+            query.entry_id.as_ref(),
+            query.expected_revision,
+        )
         .await?;
     Ok(Json(ApiResponse::ok(())))
 }
@@ -481,6 +527,111 @@ async fn undo_tree_relocation(
         state
             .service
             .undo_tree_relocation(knowledge_base_id.as_str(), req)
+            .await?,
+    )))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EntrySourceActionRequest {
+    expected_revision: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CopyEntryAsEditableRequest {
+    expected_revision: Option<i64>,
+    #[serde(default)]
+    destination_parent_path: String,
+    #[serde(default)]
+    destination_parent_id: Option<KnowledgeEntryId>,
+    #[serde(default)]
+    new_name: Option<String>,
+}
+
+fn required_entry_revision(expected_revision: Option<i64>) -> Result<i64, AppError> {
+    expected_revision.ok_or_else(|| {
+        AppError::BadRequest(
+            "expected_revision is required for a source-managed entry action".into(),
+        )
+    })
+}
+
+async fn refresh_entry_source(
+    State(state): State<KnowledgeRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path((knowledge_base_id, entry_id)): Path<(KnowledgeBaseId, KnowledgeEntryId)>,
+    body: Result<Json<EntrySourceActionRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<KnowledgeEntrySourceActionResult>>, AppError> {
+    let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .refresh_entry_source(
+                knowledge_base_id.as_str(),
+                &entry_id,
+                required_entry_revision(req.expected_revision)?,
+            )
+            .await?,
+    )))
+}
+
+async fn copy_entry_as_editable(
+    State(state): State<KnowledgeRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path((knowledge_base_id, entry_id)): Path<(KnowledgeBaseId, KnowledgeEntryId)>,
+    body: Result<Json<CopyEntryAsEditableRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<KnowledgeEntrySourceActionResult>>, AppError> {
+    let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .copy_entry_as_editable(
+                knowledge_base_id.as_str(),
+                &entry_id,
+                required_entry_revision(req.expected_revision)?,
+                &req.destination_parent_path,
+                req.destination_parent_id,
+                req.new_name.as_deref(),
+            )
+            .await?,
+    )))
+}
+
+async fn detach_entry_source(
+    State(state): State<KnowledgeRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path((knowledge_base_id, entry_id)): Path<(KnowledgeBaseId, KnowledgeEntryId)>,
+    body: Result<Json<EntrySourceActionRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<KnowledgeEntrySourceActionResult>>, AppError> {
+    let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .detach_entry_source(
+                knowledge_base_id.as_str(),
+                &entry_id,
+                required_entry_revision(req.expected_revision)?,
+            )
+            .await?,
+    )))
+}
+
+async fn remove_entry_source(
+    State(state): State<KnowledgeRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path((knowledge_base_id, entry_id)): Path<(KnowledgeBaseId, KnowledgeEntryId)>,
+    body: Result<Json<EntrySourceActionRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<KnowledgeEntrySourceActionResult>>, AppError> {
+    let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .remove_entry_source(
+                knowledge_base_id.as_str(),
+                &entry_id,
+                required_entry_revision(req.expected_revision)?,
+            )
             .await?,
     )))
 }
@@ -775,6 +926,10 @@ async fn list_consumers(
 #[derive(Deserialize)]
 struct FilePathQuery {
     path: String,
+    #[serde(default)]
+    entry_id: Option<KnowledgeEntryId>,
+    #[serde(default)]
+    expected_revision: Option<i64>,
 }
 
 async fn read_file(
@@ -853,7 +1008,12 @@ async fn delete_file(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state
         .service
-        .delete_file(knowledge_base_id.as_str(), &query.path)
+        .delete_file_entry(
+            knowledge_base_id.as_str(),
+            &query.path,
+            query.entry_id.as_ref(),
+            query.expected_revision,
+        )
         .await?;
     Ok(Json(ApiResponse::ok(())))
 }

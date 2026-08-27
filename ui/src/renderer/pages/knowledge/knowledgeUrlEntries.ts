@@ -44,6 +44,10 @@ export function parseKnowledgeUrlDrafts(
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       return { ok: false, reason: 'invalid', url: rawUrl };
     }
+    if (parsed.username || parsed.password) {
+      return { ok: false, reason: 'invalid', url: rawUrl };
+    }
+    parsed.hash = '';
     const identity = parsed.toString();
     if (identities.has(identity)) {
       return { ok: false, reason: 'duplicate', url: rawUrl };

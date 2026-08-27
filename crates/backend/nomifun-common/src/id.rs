@@ -246,6 +246,20 @@ define_entity_id!(
     KnowledgeEntryId
 );
 define_entity_id!(
+    /// Globally unique identity of one normalized knowledge-source aggregate.
+    ///
+    /// Source identity is independent of both its knowledge base's registry row
+    /// and any filesystem path used by a projected document.
+    KnowledgeSourceId
+);
+define_entity_id!(
+    /// Globally unique identity of one independently refreshable source item.
+    ///
+    /// For URL sources this identifies the configured URL across renames,
+    /// refreshes, detach/copy transitions, and source-list reordering.
+    KnowledgeSourceItemId
+);
+define_entity_id!(
     /// Globally unique identity of one durable knowledge-tree mutation.
     ///
     /// A client request key is scoped to a knowledge base and may be replayed;
@@ -515,6 +529,22 @@ mod tests {
         )
         .is_err());
         assert!(serde_json::from_str::<ConversationId>("42").is_err());
+    }
+
+    #[test]
+    fn knowledge_source_ids_are_distinct_validating_uuidv7_domains() {
+        let source = KnowledgeSourceId::new();
+        let item = KnowledgeSourceItemId::new();
+        assert_eq!(
+            KnowledgeSourceId::parse(source.to_string()).unwrap(),
+            source
+        );
+        assert_eq!(
+            KnowledgeSourceItemId::parse(item.to_string()).unwrap(),
+            item
+        );
+        assert!(KnowledgeSourceId::parse("knowledge-source-1").is_err());
+        assert!(KnowledgeSourceItemId::parse("knowledge-source-item-1").is_err());
     }
 
     #[test]

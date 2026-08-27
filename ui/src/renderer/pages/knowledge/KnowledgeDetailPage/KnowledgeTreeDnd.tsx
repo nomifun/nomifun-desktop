@@ -30,6 +30,7 @@ import {
 import { FileFocus, FolderOpen } from '@icon-park/react';
 import type { IKnowledgeTreeEntry } from '@/common/adapter/ipcBridge';
 import type { KnowledgeRelocationIssue } from './treeModel';
+import { hasKnowledgeEntryCapability } from './entryCapabilities';
 import {
   KNOWLEDGE_ROOT_DROP_ID,
   knowledgeDragData,
@@ -138,14 +139,16 @@ export const KnowledgeTreeDndRow: React.FC<{
   const drag = useDraggable({
     id: knowledgeTreeDragId(item),
     data: knowledgeDragData(item),
-    disabled: disabled || item.origin === 'url_snapshot',
+    disabled: disabled || !hasKnowledgeEntryCapability(item, 'relocate'),
   });
   // Files deliberately register as non-accepting droppables. Otherwise the
   // encompassing root area wins while the pointer is visibly over a file row.
   const drop = useDroppable({
     id: knowledgeTreeDropId(item),
     data: knowledgeDropData(item),
-    disabled: disabled || item.origin === 'url_snapshot',
+    // Keep non-accepting rows registered so dropping over a file or restricted
+    // directory cannot accidentally fall through to the encompassing root.
+    disabled,
   });
   const setNodeRef = useCallback(
     (node: HTMLElement | null) => {

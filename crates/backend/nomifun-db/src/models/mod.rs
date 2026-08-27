@@ -12,6 +12,7 @@ mod customer_service;
 mod cron_job_run;
 mod idmm_intervention;
 mod knowledge;
+mod knowledge_source;
 mod knowledge_tree_operation;
 mod mcp_server;
 mod message;
@@ -69,6 +70,11 @@ pub use knowledge::{
     KNOWLEDGE_ENTRY_ORIGIN_GENERATED, KNOWLEDGE_ENTRY_ORIGIN_URL_SNAPSHOT,
     KNOWLEDGE_ENTRY_ORIGIN_USER, KnowledgeBaseRow, KnowledgeBindingRow, KnowledgeEntryRow,
     KnowledgeTagRow, UpdateKnowledgeTagParams,
+};
+pub use knowledge_source::{
+    InvalidKnowledgeSourceValue, KnowledgeEntryProvenanceRelationship,
+    KnowledgeEntryProvenanceRow, KnowledgeSourceItemRow, KnowledgeSourceItemSyncStatus,
+    KnowledgeSourceKind, KnowledgeSourceMode, KnowledgeSourceRow, KnowledgeSourceState,
 };
 pub use knowledge_tree_operation::{
     KNOWLEDGE_TREE_EVENT_STATUS_NONE, KNOWLEDGE_TREE_EVENT_STATUS_PENDING,

@@ -132,8 +132,10 @@ pub use idmm::{
 };
 pub use knowledge::{
     CreateKnowledgeTagRequest, KnowledgeEmbeddingConfig, KnowledgeEntry, KnowledgeEntryKind,
-    KnowledgeEntryOrigin, KnowledgeMountInfo, KnowledgeRerankConfig, KnowledgeRetrievalConfig,
-    KnowledgeSource, KnowledgeSourceEntry, KnowledgeSourceMode, KnowledgeTag, KnowledgeTreeAccess,
+    KnowledgeEntryCapabilities, KnowledgeEntryOrigin, KnowledgeEntrySourceInfo,
+    KnowledgeEntrySourceRelationship, KnowledgeMountInfo, KnowledgeRerankConfig,
+    KnowledgeRetrievalConfig, KnowledgeSource, KnowledgeSourceEntry, KnowledgeSourceMode,
+    KnowledgeSourceSyncStatus, KnowledgeTag, KnowledgeTreeAccess,
     RelocateKnowledgeEntryConflictPolicy, RelocateKnowledgeEntryRequest,
     RelocateKnowledgeEntryResponse, UndoKnowledgeEntryRelocationRequest,
     UpdateKnowledgeTagRequest,

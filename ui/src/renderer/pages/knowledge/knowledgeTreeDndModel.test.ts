@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import type { IKnowledgeTreeEntry } from '@/common/adapter/ipcBridge';
+import type {
+  IKnowledgeEntryCapabilities,
+  IKnowledgeTreeEntry,
+} from '@/common/adapter/ipcBridge';
 import { parseKnowledgeEntryId } from '@/common/types/ids';
 import {
   knowledgeDragData,
@@ -12,6 +15,21 @@ import {
   resolveKnowledgeDrop,
 } from './KnowledgeDetailPage/knowledgeTreeDndModel';
 
+const capabilities: IKnowledgeEntryCapabilities = {
+  read_content: true,
+  edit_content: true,
+  rename: true,
+  relocate: true,
+  accept_children: true,
+  delete_entry: true,
+  remove_source: false,
+  refresh_source: false,
+  detach_source: false,
+  copy_as_editable: false,
+  export_entry: true,
+  edit_metadata: true,
+};
+
 const entry = (
   name: string,
   rel_path: string,
@@ -23,6 +41,7 @@ const entry = (
   is_dir,
   is_file: !is_dir,
   modified_at: null,
+  capabilities,
   ...(entry_id ? { entry_id } : {}),
 });
 
@@ -74,5 +93,26 @@ describe('knowledge tree drag-and-drop model', () => {
         knowledgeDropData(entry('nested', 'docs/nested', true))
       )
     ).toEqual({ accepted: false, issue: 'descendant' });
+  });
+
+  test('uses accept_children capability instead of provenance for drop targets', () => {
+    const source = {
+      ...entry('snapshot.md', 'snapshots/snapshot.md', false),
+      origin: 'url_snapshot' as const,
+      capabilities: { ...capabilities, edit_content: false, relocate: true },
+    };
+    const restrictedDirectory = {
+      ...entry('locked', 'locked', true),
+      capabilities: { ...capabilities, accept_children: false },
+    };
+
+    expect(resolveKnowledgeDrop(source, knowledgeRootDropData())).toEqual({
+      accepted: true,
+      destinationParentPath: '',
+    });
+    expect(resolveKnowledgeDrop(source, knowledgeDropData(restrictedDirectory))).toEqual({
+      accepted: false,
+      issue: 'invalid-target',
+    });
   });
 });

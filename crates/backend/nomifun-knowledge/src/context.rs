@@ -640,11 +640,13 @@ mod tests {
                 url: "https://example.com/api-docs".into(),
                 title: Some("API docs".into()),
                 rendered: false,
+                ..Default::default()
             },
             KnowledgeSourceEntry {
                 url: "https://example.com/changelog".into(),
                 title: None,
                 rendered: false,
+                ..Default::default()
             },
         ];
         let plain = mount("普通库", ".nomi/knowledge/普通库");
@@ -857,6 +859,7 @@ mod tests {
             url: "https://e.com".into(),
             title: None,
             rendered: false,
+            ..Default::default()
         }];
         let v = serde_json::to_value(&rich).unwrap();
         let back: KnowledgeMountInfo = serde_json::from_value(v).unwrap();

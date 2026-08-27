@@ -66,7 +66,7 @@ pub use id::{
     CsAgentId, CsNoteId,
     EntityId, FigureId,
     IdmmInterventionId, KnowledgeBaseId, KnowledgeBindingId, KnowledgeEntryId,
-    KnowledgeTreeOperationId, McpServerId,
+    KnowledgeSourceId, KnowledgeSourceItemId, KnowledgeTreeOperationId, McpServerId,
     MessageId,
     MiniAppId,
     PersistedArtifactId, PresetId, PresetTagId, PreviewSnapshotId, ProviderId,

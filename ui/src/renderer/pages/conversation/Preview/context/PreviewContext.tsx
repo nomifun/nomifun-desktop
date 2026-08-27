@@ -33,6 +33,8 @@ export interface PreviewMetadata {
   file_path?: string; // 工作空间文件的绝对路径 / Absolute file path in workspace
   workspace?: string; // 工作空间根目录 / Workspace root directory
   editable?: boolean; // 是否可编辑 / Whether editable
+  /** Managed knowledge snapshots must be exported, not opened in an external editor. */
+  allow_open_in_system?: boolean;
   truncated?: boolean; // 预览内容是否被截断 / Whether preview content was truncated
   /**
    * 打开该预览的会话。预览面板挂在 ConversationProvider 之外，因此需要打开方
@@ -394,6 +396,49 @@ export const PreviewProvider: React.FC<{
         }
         return next;
       });
+    });
+  }, []);
+
+  useEffect(() => {
+    return ipcBridge.knowledge.onEntryContentUpdated.on((change) => {
+      void ipcBridge.knowledge.readFile
+        .invoke({
+          knowledge_base_id: change.knowledge_base_id,
+          path: change.rel_path,
+        })
+        .then((file) => {
+          setTabs((previous) =>
+            previous.map((tab) => {
+              const resource = tab.metadata?.knowledge_resource;
+              if (
+                tab.isDirty ||
+                resource?.knowledge_base_id !== change.knowledge_base_id ||
+                resource.entry_id !== change.entry_id
+              ) {
+                return tab;
+              }
+              return {
+                ...tab,
+                content: file.content,
+                originalContent: file.content,
+                metadata: {
+                  ...tab.metadata,
+                  file_path: tab.metadata?.workspace
+                    ? `${tab.metadata.workspace}/${file.rel_path}`
+                    : tab.metadata?.file_path,
+                  knowledge_resource: {
+                    ...resource,
+                    rel_path: file.rel_path,
+                  },
+                },
+              };
+            })
+          );
+        })
+        .catch(() => {
+          // The entry may have been removed immediately after the event; the
+          // regular close/delete event path owns that case.
+        });
     });
   }, []);
 
