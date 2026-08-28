@@ -1,5 +1,5 @@
-//! Skill market integration: live ranking sync across seven public
-//! marketplaces, MCP config resolution, and SkillHub expert-package install.
+//! Skill market integration: live ranking sync across six public
+//! marketplaces and MCP config resolution.
 //!
 //! Route handlers in [`crate::skill_routes`] stay thin and delegate here.
 //! Submodules:
@@ -7,15 +7,12 @@
 //!   size-capped body readers.
 //! - [`parse`] — per-source ranking parsers and shared text/JSON helpers.
 //! - [`mcp`] — market MCP entry → importable `mcpServers` JSON.
-//! - [`package`] — SkillHub expert package resolution + child skill install.
 
 mod client;
 mod mcp;
-mod package;
 mod parse;
 
 pub use mcp::resolve_market_mcp_config;
-pub use package::install_market_package;
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -24,10 +21,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use nomifun_api_types::{SkillMarketItemResponse, SkillMarketSyncResponse};
 use nomifun_common::AppError;
 
-use client::{build_market_client, read_market_body, read_market_body_with_timeout, read_market_json_post};
+use client::{build_market_client, read_market_body, read_market_json_post};
 use parse::{
     parse_clawhub_plugins, parse_clawhub_rankings, parse_loophub_rankings, parse_mcpworld_rankings,
-    parse_skillhub_mcp_rankings, parse_skillhub_packages, parse_skillhub_rankings,
+    parse_skillhub_mcp_rankings, parse_skillhub_rankings,
 };
 
 // ---------------------------------------------------------------------------
@@ -40,7 +37,6 @@ const LOOPHUB_SOURCE: &str = "loophub";
 const SKILLHUB_MCP_SOURCE: &str = "skillhub_mcp";
 const MCPWORLD_SOURCE: &str = "mcpworld";
 const CLAWHUB_PLUGINS_SOURCE: &str = "clawhub_plugins";
-const SKILLHUB_PACKAGES_SOURCE: &str = "skillhub_packages";
 
 const CLAWHUB_RANKING_URL: &str = "https://clawhub.ai/skills?tab=new";
 const CLAWHUB_CONVEX_QUERY_URL: &str = "https://wry-manatee-359.convex.cloud/api/query";
@@ -54,12 +50,6 @@ const MCPWORLD_RANKING_URL: &str =
     "https://www.mcpworld.com/api/mcp-market/servers?wd=most_popular&type=tag&pn=0&lg=zh&pl=100";
 const CLAWHUB_PLUGINS_API_URL: &str = "https://clawhub.ai/api/v1/plugins?limit=100&sort=recommended";
 const CLAWHUB_PLUGINS_URL: &str = "https://clawhub.ai/plugins";
-const SKILLHUB_PACKAGES_URL: &str = "https://api.skillhub.cn/api/v1/skillsets?page=1&pageSize=200";
-
-/// The expert-package ranking is a much larger JSON document than the other
-/// market feeds (currently hundreds of KiB). Give only this request enough
-/// time to finish reading the body while staying inside the 30s source budget.
-const SKILLHUB_PACKAGES_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Ranking cap applied per source after parsing.
 const MAX_MARKET_ITEMS_PER_SOURCE: usize = 200;
@@ -128,7 +118,6 @@ fn normalize_market_sources(sources: Vec<String>) -> Result<Vec<&'static str>, A
             SKILLHUB_MCP_SOURCE,
             MCPWORLD_SOURCE,
             CLAWHUB_PLUGINS_SOURCE,
-            SKILLHUB_PACKAGES_SOURCE,
         ]);
     }
 
@@ -143,7 +132,6 @@ fn normalize_market_sources(sources: Vec<String>) -> Result<Vec<&'static str>, A
             SKILLHUB_MCP_SOURCE => SKILLHUB_MCP_SOURCE,
             MCPWORLD_SOURCE => MCPWORLD_SOURCE,
             CLAWHUB_PLUGINS_SOURCE => CLAWHUB_PLUGINS_SOURCE,
-            SKILLHUB_PACKAGES_SOURCE => SKILLHUB_PACKAGES_SOURCE,
             other => return Err(AppError::BadRequest(format!("unsupported skill market source: {other}"))),
         };
         if seen.insert(source) {
@@ -166,14 +154,6 @@ async fn fetch_market_source(
             &read_market_body(client, SKILLHUB_MCP_RANKING_URL).await?,
         )),
         MCPWORLD_SOURCE => Ok(parse_mcpworld_rankings(&read_market_body(client, MCPWORLD_RANKING_URL).await?)),
-        SKILLHUB_PACKAGES_SOURCE => Ok(parse_skillhub_packages(
-            &read_market_body_with_timeout(
-                client,
-                SKILLHUB_PACKAGES_URL,
-                SKILLHUB_PACKAGES_REQUEST_TIMEOUT,
-            )
-            .await?,
-        )),
         other => Err(AppError::BadRequest(format!("unsupported skill market source: {other}"))),
     }
 }
@@ -283,7 +263,6 @@ mod tests {
             SKILLHUB_MCP_SOURCE.into(),
             MCPWORLD_SOURCE.into(),
             CLAWHUB_PLUGINS_SOURCE.into(),
-            SKILLHUB_PACKAGES_SOURCE.into(),
         ])
         .unwrap();
         assert_eq!(
@@ -293,15 +272,14 @@ mod tests {
                 SKILLHUB_MCP_SOURCE,
                 MCPWORLD_SOURCE,
                 CLAWHUB_PLUGINS_SOURCE,
-                SKILLHUB_PACKAGES_SOURCE,
             ]
         );
     }
 
     #[test]
-    fn normalize_market_sources_defaults_to_all_seven() {
+    fn normalize_market_sources_defaults_to_all_six() {
         let sources = normalize_market_sources(Vec::new()).unwrap();
-        assert_eq!(sources.len(), 7);
+        assert_eq!(sources.len(), 6);
     }
 
     #[test]
@@ -410,7 +388,7 @@ mod tests {
         }));
     }
 
-    /// Manual contract smoke test for the five newer sources. Ignored for the
+    /// Manual contract smoke test for the four newer sources. Ignored for the
     /// same public-network reason as above.
     #[tokio::test]
     #[ignore = "requires public LoopHub, SkillHub, and MCPWorld access"]
@@ -420,7 +398,6 @@ mod tests {
             SKILLHUB_MCP_SOURCE.into(),
             MCPWORLD_SOURCE.into(),
             CLAWHUB_PLUGINS_SOURCE.into(),
-            SKILLHUB_PACKAGES_SOURCE.into(),
         ])
         .await
         .unwrap();
@@ -435,22 +412,4 @@ mod tests {
         );
     }
 
-    /// Manual smoke test for the larger SkillHub package feed and its
-    /// source-specific response-body timeout.
-    #[tokio::test]
-    #[ignore = "requires public SkillHub access"]
-    async fn live_skillhub_package_ranking_contract() {
-        let response = fetch_skill_market_rankings(vec![SKILLHUB_PACKAGES_SOURCE.into()])
-            .await
-            .unwrap();
-
-        assert!(response.errors.is_empty(), "live fetch errors: {:?}", response.errors);
-        assert!(!response.items.is_empty());
-        assert!(
-            response
-                .items
-                .iter()
-                .all(|item| item.source == SKILLHUB_PACKAGES_SOURCE && item.rank >= 1)
-        );
-    }
 }

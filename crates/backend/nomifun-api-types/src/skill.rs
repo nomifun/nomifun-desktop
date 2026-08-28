@@ -317,44 +317,6 @@ pub struct SkillMarketMcpConfigResponse {
     pub config_json: serde_json::Value,
 }
 
-/// Request body for resolving a SkillHub expert package entry.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct SkillMarketPackageRequest {
-    pub source: String,
-    pub id: String,
-    pub url: String,
-}
-
-/// Response for a resolved expert package that can be imported as a user preset.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SkillMarketPackageResponse {
-    pub name: String,
-    pub description: String,
-    pub instructions: String,
-    #[serde(default)]
-    pub skill_slugs: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub avatar: Option<String>,
-}
-
-/// One failed child skill install while importing a SkillHub expert package.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SkillMarketPackageInstallError {
-    pub skill_slug: String,
-    pub error: String,
-}
-
-/// Response for installing the skills behind a SkillHub expert package.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SkillMarketPackageInstallResponse {
-    pub package: SkillMarketPackageResponse,
-    #[serde(default)]
-    pub installed_skill_names: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub errors: Vec<SkillMarketPackageInstallError>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,29 +805,4 @@ mod tests {
         assert!(json.get("configJson").is_none());
     }
 
-    #[test]
-    fn test_skill_market_package_install_response_serializes_snake_case() {
-        let resp = SkillMarketPackageInstallResponse {
-            package: SkillMarketPackageResponse {
-                name: "Test Automation".into(),
-                description: "Testing workflow package".into(),
-                instructions: "# Test Automation".into(),
-                skill_slugs: vec!["superpowers-tdd".into()],
-                avatar: None,
-            },
-            installed_skill_names: vec!["superpowers-tdd".into(), "test-case-generator".into()],
-            errors: vec![SkillMarketPackageInstallError {
-                skill_slug: "missing-skill".into(),
-                error: "download failed".into(),
-            }],
-        };
-
-        let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(
-            json["installed_skill_names"],
-            serde_json::json!(["superpowers-tdd", "test-case-generator"])
-        );
-        assert!(json.get("installedSkillNames").is_none());
-        assert_eq!(json["errors"][0]["skill_slug"], "missing-skill");
-    }
 }
