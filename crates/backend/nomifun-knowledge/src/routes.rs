@@ -1329,6 +1329,7 @@ mod tests {
         assert_eq!(allowed["data"]["tree_access"], "editable");
 
         let created_folder = app
+            .clone()
             .oneshot(
                 Request::post(format!("/api/knowledge/bases/{kb_id}/folder"))
                     .header("content-type", "application/json")
@@ -1339,6 +1340,71 @@ mod tests {
             .unwrap();
         assert_eq!(created_folder.status(), StatusCode::OK);
         assert!(external.join("allowed").is_dir());
+
+        let write = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/api/knowledge/bases/{kb_id}/file"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "path": "allowed/note.md",
+                            "content": "# Local folder CRUD\n"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(write.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read_to_string(external.join("allowed/note.md")).unwrap(),
+            "# Local folder CRUD\n"
+        );
+
+        let rename = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/knowledge/bases/{kb_id}/tree/rename"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"path":"allowed/note.md","new_name":"renamed.md"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rename.status(), StatusCode::OK);
+        assert!(!external.join("allowed/note.md").exists());
+        assert!(external.join("allowed/renamed.md").is_file());
+
+        let delete_file = app
+            .clone()
+            .oneshot(
+                Request::delete(format!(
+                    "/api/knowledge/bases/{kb_id}/file?path=allowed%2Frenamed.md"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete_file.status(), StatusCode::OK);
+        assert!(!external.join("allowed/renamed.md").exists());
+
+        let delete_folder = app
+            .oneshot(
+                Request::delete(format!(
+                    "/api/knowledge/bases/{kb_id}/folder?path=allowed"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete_folder.status(), StatusCode::OK);
+        assert!(!external.join("allowed").exists());
     }
 
     /// An unknown binding kind stays a 400 — `workpath` is now accepted,

@@ -5943,7 +5943,7 @@ export interface IKnowledgeBase {
   root_path: string;
   /** true = directory provisioned under the backend data dir (purge allowed); false = user-referenced external dir. */
   managed: boolean;
-  /** Server-enforced mutation capability; external folders default to read-only. */
+  /** Server-enforced mutation capability chosen explicitly by the local-folder flow. */
   tree_access: 'read_only' | 'editable';
   created_at: number;
   updated_at: number;

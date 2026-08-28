@@ -110,6 +110,8 @@
       "detachSourceOk": "已脱离同步，现在可以编辑正文",
       "detachSourceTitle": "脱离网页同步？",
       "edit": "编辑",
+      "enableFileOperations": "启用文件操作",
+      "enableFileOperationsOk": "已恢复新建、编辑、移动、重命名和删除操作",
       "entryReadOnlyReason": "当前文档不可编辑。",
       "expandAll": "全部展开",
       "importNotes": "上传笔记",
@@ -128,6 +130,7 @@
       "importWebDescription": "网页会转换为 Markdown 快照并加入文档树，之后可随时刷新。",
       "importWebHint": "将网页保存为可刷新的 Markdown 快照",
       "importWebOk": "已添加并抓取 {{count}} 个网页",
+      "localFolderReadOnlyReason": "当前本地文件夹仅作只读索引；启用文件操作后可编辑。",
       "moveChooseDestination": "选择目标文件夹",
       "moveDropHint": "拖到文件夹以移动",
       "moveFileInvalidTarget": "文件不能作为目标位置",
@@ -403,7 +406,7 @@
     "localFolderRequired": "请先选择本地文件夹",
     "localReadonlyNote": "应用以只读引用方式接入，绝不改动你的目录结构。目录里 .md 的增删会自动反映到库里。",
     "localEditableLabel": "允许 NomiFun 修改此文件夹",
-    "localEditableHint": "开启后可在知识库中拖拽、重命名、编辑和删除；默认保持只读。",
+    "localEditableHint": "默认开启，可在知识库中新建、拖拽、重命名、编辑和删除；关闭后仅作只读索引。",
     "localEditableNote": "已授权 NomiFun 新建、编辑、移动和删除此文件夹中的知识内容。",
     "lowBarrier": "低门槛",
     "nameLabel": "名称",
@@ -469,7 +472,7 @@
   "renameTitle": "重命名",
   "tree": {
     "deleteFolderTitle": "确认删除目录？",
-    "deleteFolderWarning": "删除目录“{{name}}”会一并清空其下所有文档和子目录，无法撤销。"
+    "deleteFolderWarning": "删除目录“{{name}}”会永久删除其下所有文件和子目录，包括知识库树中未显示的非 Markdown 文件，无法撤销。"
   },
   "title": "知识库",
   "siderTitle": "知识库"

@@ -23,6 +23,7 @@ import { isAutogenNoProviderError, knowledgeErrorText, notifySourceFetchResult }
 import { useKnowledgeTags } from '../useKnowledgeTags';
 import KnowledgeModelSelector, { useKnowledgeAutogenModel } from '../KnowledgeModelSelector';
 import { parseKnowledgeUrlDrafts } from '../knowledgeUrlEntries';
+import { resolveLocalFolderTreeAccess } from '../knowledgeTreeAccess';
 import SourceConfig from './SourceConfig';
 import type { SourceConfigValue } from './SourceConfig';
 import TeachingCard from './TeachingCard';
@@ -276,8 +277,8 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
         description: desc,
         root_path: rootPath,
         tree_access:
-          sourceType === 'local' && !sourceConfigValue.allowLocalEdits
-            ? 'read_only'
+          sourceType === 'local'
+            ? resolveLocalFolderTreeAccess(sourceConfigValue.localTreeAccess)
             : 'editable',
         source,
         tags: tagKeys,
