@@ -4338,6 +4338,7 @@ mod tests {
                 description: "test base".into(),
                 root_path: kb_root.to_string_lossy().into_owned(),
                 managed: true,
+                tree_access: "editable".into(),
                 extra: "{}".into(),
                 created_at: 1,
                 updated_at: 1,

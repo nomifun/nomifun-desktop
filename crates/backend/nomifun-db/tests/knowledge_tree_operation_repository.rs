@@ -36,6 +36,7 @@ fn base(knowledge_base_id: &KnowledgeBaseId) -> KnowledgeBaseRow {
         description: String::new(),
         root_path: format!("/tmp/{knowledge_base_id}"),
         managed: true,
+        tree_access: "editable".into(),
         extra: "{}".into(),
         created_at: 1,
         updated_at: 1,

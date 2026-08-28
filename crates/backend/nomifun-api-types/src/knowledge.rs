@@ -4,8 +4,9 @@ use nomifun_common::{
 use serde::{Deserialize, Serialize};
 
 /// Server-enforced mutation policy for a filesystem-backed knowledge base.
-/// External directories default to read-only and require explicit user consent
-/// before the application may edit or restructure them.
+/// The desktop local-folder flow makes an explicit choice (editable by product
+/// default); lower-level API callers that omit a choice retain the conservative
+/// external-folder read-only default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export_to = "../../../../ui/src/common/protocolBindings/")]
 #[serde(rename_all = "snake_case")]

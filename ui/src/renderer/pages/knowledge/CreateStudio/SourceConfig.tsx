@@ -27,6 +27,10 @@ import {
   MAX_KNOWLEDGE_SOURCE_ENTRIES,
   type KnowledgeUrlDraft,
 } from '../knowledgeUrlEntries';
+import {
+  resolveLocalFolderTreeAccess,
+  type KnowledgeTreeAccess,
+} from '../knowledgeTreeAccess';
 import type { StudioSourceType } from './sourceTypes';
 
 // ─── Value Shape ────────────────────────────────────────────────────────────
@@ -38,8 +42,8 @@ export type UrlEntry = KnowledgeUrlDraft;
 export interface SourceConfigValue {
   /** local */
   rootPath?: string;
-  /** Explicit consent for NomiFun to mutate an externally owned folder. */
-  allowLocalEdits?: boolean;
+  /** Explicit local-folder management mode; omitted form state resolves to editable. */
+  localTreeAccess?: KnowledgeTreeAccess;
   /** web */
   urlMode?: UrlMode;
   urlEntries?: UrlEntry[];
@@ -120,6 +124,8 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
   // ─── Local ────────────────────────────────────────────────────────────────
 
   if (sourceType === 'local') {
+    const localTreeAccess = resolveLocalFolderTreeAccess(value.localTreeAccess);
+    const localFolderEditable = localTreeAccess === 'editable';
     const handleBrowseFolder = async () => {
       if (!isDesktop) return;
       try {
@@ -160,7 +166,7 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
         <div className={sourceNoteClass}>
           <Info theme='outline' size='14' className='mt-2px flex-none text-[var(--color-text-3)]' />
           <div>
-            {value.allowLocalEdits
+            {localFolderEditable
               ? t('knowledge.studio.localEditableNote', {
                   defaultValue: '已授权 NomiFun 新建、编辑、移动和删除此文件夹中的知识内容。',
                 })
@@ -179,14 +185,16 @@ const SourceConfig: React.FC<SourceConfigProps> = ({ sourceType, value, onChange
             </div>
             <div className='mt-2px text-10px leading-16px text-[var(--color-text-3)]'>
               {t('knowledge.studio.localEditableHint', {
-                defaultValue: '开启后可在知识库中拖拽、重命名、编辑和删除；默认保持只读。',
+                defaultValue: '默认开启，可在知识库中新建、拖拽、重命名、编辑和删除；关闭后仅作只读索引。',
               })}
             </div>
           </div>
           <Switch
             size='small'
-            checked={value.allowLocalEdits ?? false}
-            onChange={(checked) => update({ allowLocalEdits: checked })}
+            checked={localFolderEditable}
+            onChange={(checked) =>
+              update({ localTreeAccess: checked ? 'editable' : 'read_only' })
+            }
           />
         </div>
       </div>

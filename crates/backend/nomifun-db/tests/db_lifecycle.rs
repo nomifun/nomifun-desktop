@@ -147,7 +147,7 @@ fn published_knowledge_source_identity_checksum_is_immutable() {
 }
 
 #[tokio::test]
-async fn v55_prefix_is_read_only_supported_then_file_init_applies_v56() {
+async fn v55_prefix_is_read_only_supported_then_file_init_applies_latest_suffix() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("v55-prefix.db");
     create_v55_database(&path).await;
@@ -198,7 +198,7 @@ async fn v55_prefix_is_read_only_supported_then_file_init_applies_v56() {
         .fetch_one(upgraded.pool())
         .await
         .unwrap();
-    assert_eq!(latest, 56);
+    assert_eq!(latest, 57);
     let checksum_after_upgrade: Vec<u8> =
         sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 55")
             .fetch_one(upgraded.pool())
@@ -216,7 +216,166 @@ async fn v55_prefix_is_read_only_supported_then_file_init_applies_v56() {
     .await
     .unwrap();
     assert_eq!(pending_after, 4);
+    let tree_access_column: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('knowledge_bases') \
+         WHERE name = 'tree_access' AND type = 'TEXT' AND \"notnull\" = 1",
+    )
+    .fetch_one(upgraded.pool())
+    .await
+    .unwrap();
+    assert_eq!(tree_access_column, 1);
     upgraded.close().await;
+}
+
+#[tokio::test]
+async fn v57_promotes_tree_access_without_losing_other_extra_metadata() {
+    const MISSING: &str = "019abcde-f012-7abc-8abc-0123456789a1";
+    const READ_ONLY: &str = "019abcde-f012-7abc-8abc-0123456789a2";
+    const EDITABLE: &str = "019abcde-f012-7abc-8abc-0123456789a3";
+    const INVALID_VALUE: &str = "019abcde-f012-7abc-8abc-0123456789a4";
+    const EXPLICIT_NULL: &str = "019abcde-f012-7abc-8abc-0123456789a5";
+    const NON_OBJECT: &str = "019abcde-f012-7abc-8abc-0123456789a6";
+    const INVALID_JSON: &str = "019abcde-f012-7abc-8abc-0123456789a7";
+
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    migrate_through(&pool, 56).await;
+
+    for (knowledge_base_id, extra) in [
+        (
+            MISSING,
+            serde_json::json!({
+                "source": {"kind": "url", "mode": "snapshot"},
+                "custom": {"retained": true}
+            })
+            .to_string(),
+        ),
+        (
+            READ_ONLY,
+            serde_json::json!({
+                "tree_access": "read_only",
+                "source": {"kind": "url", "mode": "live"},
+                "custom": [1, 2, 3]
+            })
+            .to_string(),
+        ),
+        (
+            EDITABLE,
+            serde_json::json!({
+                "tree_access": "editable",
+                "custom": "kept"
+            })
+            .to_string(),
+        ),
+        (
+            INVALID_VALUE,
+            serde_json::json!({
+                "tree_access": "owner",
+                "custom": "still-kept"
+            })
+            .to_string(),
+        ),
+        (
+            EXPLICIT_NULL,
+            serde_json::json!({
+                "tree_access": null,
+                "custom": "null-is-explicit"
+            })
+            .to_string(),
+        ),
+        (NON_OBJECT, serde_json::json!(["legacy"]).to_string()),
+        (INVALID_JSON, "{invalid".into()),
+    ] {
+        sqlx::query(
+            "INSERT INTO knowledge_bases (\
+                knowledge_base_id, name, description, root_path, managed, extra, created_at, updated_at\
+             ) VALUES (?, 'legacy', '', '/tmp/legacy', 0, ?, 1, 1)",
+        )
+        .bind(knowledge_base_id)
+        .bind(extra)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    migrate_through(&pool, 57).await;
+
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT knowledge_base_id, tree_access, extra \
+         FROM knowledge_bases ORDER BY knowledge_base_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 7);
+    assert_eq!(rows[0].0, MISSING);
+    assert_eq!(rows[0].1, "editable", "historical bases regain file CRUD");
+    assert_eq!(rows[1].0, READ_ONLY);
+    assert_eq!(rows[1].1, "read_only", "explicit read-only authority is retained");
+    assert_eq!(rows[2].0, EDITABLE);
+    assert_eq!(rows[2].1, "editable", "explicit editable authority is retained");
+    assert_eq!(rows[3].0, INVALID_VALUE);
+    assert_eq!(rows[3].1, "read_only", "unknown explicit modes fail closed");
+    assert_eq!(rows[4].0, EXPLICIT_NULL);
+    assert_eq!(rows[4].1, "read_only", "explicit null fails closed");
+    assert_eq!(rows[5].0, NON_OBJECT);
+    assert_eq!(rows[5].1, "read_only", "non-object metadata fails closed");
+    assert_eq!(rows[6].0, INVALID_JSON);
+    assert_eq!(rows[6].1, "read_only", "malformed metadata fails closed");
+
+    let missing_extra: serde_json::Value = serde_json::from_str(&rows[0].2).unwrap();
+    assert_eq!(
+        missing_extra,
+        serde_json::json!({
+            "source": {"kind": "url", "mode": "snapshot"},
+            "custom": {"retained": true}
+        })
+    );
+    let read_only_extra: serde_json::Value = serde_json::from_str(&rows[1].2).unwrap();
+    assert_eq!(
+        read_only_extra,
+        serde_json::json!({
+            "source": {"kind": "url", "mode": "live"},
+            "custom": [1, 2, 3]
+        })
+    );
+    let editable_extra: serde_json::Value = serde_json::from_str(&rows[2].2).unwrap();
+    assert_eq!(editable_extra, serde_json::json!({"custom": "kept"}));
+    let invalid_value_extra: serde_json::Value = serde_json::from_str(&rows[3].2).unwrap();
+    assert_eq!(
+        invalid_value_extra,
+        serde_json::json!({"custom": "still-kept"})
+    );
+    let explicit_null_extra: serde_json::Value = serde_json::from_str(&rows[4].2).unwrap();
+    assert_eq!(
+        explicit_null_extra,
+        serde_json::json!({"custom": "null-is-explicit"})
+    );
+    assert_eq!(rows[5].2, r#"["legacy"]"#);
+    assert_eq!(rows[6].2, "{invalid");
+    assert!(
+        rows[..5]
+            .iter()
+            .all(|(_, _, extra)| !extra.contains("tree_access")),
+        "the migrated authority must have one canonical storage location"
+    );
+
+    let invalid = sqlx::query(
+        "UPDATE knowledge_bases SET tree_access = 'invalid' WHERE knowledge_base_id = ?",
+    )
+    .bind(MISSING)
+    .execute(&pool)
+    .await;
+    assert!(invalid.is_err(), "the database must reject unknown access modes");
+
+    let latest: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(latest, 57);
 }
 
 #[tokio::test]
@@ -397,7 +556,7 @@ async fn published_provider_output_limit_lineage_upgrades_in_place() {
         .fetch_one(upgraded.pool())
         .await
         .unwrap();
-    assert_eq!(latest, 56);
+    assert_eq!(latest, 57);
     let creative_studio_tables: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_schema \
          WHERE type = 'table' AND name IN (\

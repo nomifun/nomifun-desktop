@@ -133,14 +133,15 @@ impl IKnowledgeRepository for SqliteKnowledgeRepository {
     async fn insert_base(&self, row: &KnowledgeBaseRow) -> Result<(), DbError> {
         sqlx::query(
             "INSERT INTO knowledge_bases (\
-                knowledge_base_id, name, description, root_path, managed, extra, created_at, updated_at, tags\
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                knowledge_base_id, name, description, root_path, managed, tree_access, extra, created_at, updated_at, tags\
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.knowledge_base_id)
         .bind(&row.name)
         .bind(&row.description)
         .bind(&row.root_path)
         .bind(row.managed)
+        .bind(&row.tree_access)
         .bind(&row.extra)
         .bind(row.created_at)
         .bind(row.updated_at)
@@ -152,11 +153,12 @@ impl IKnowledgeRepository for SqliteKnowledgeRepository {
 
     async fn update_base(&self, row: &KnowledgeBaseRow) -> Result<(), DbError> {
         let result = sqlx::query(
-            "UPDATE knowledge_bases SET name = ?, description = ?, extra = ?, tags = ?, updated_at = ? \
+            "UPDATE knowledge_bases SET name = ?, description = ?, tree_access = ?, extra = ?, tags = ?, updated_at = ? \
              WHERE knowledge_base_id = ?",
         )
         .bind(&row.name)
         .bind(&row.description)
+        .bind(&row.tree_access)
         .bind(&row.extra)
         .bind(&row.tags)
         .bind(row.updated_at)
@@ -596,6 +598,7 @@ mod tests {
             description: String::new(),
             root_path: format!("/tmp/{id}"),
             managed: true,
+            tree_access: "editable".into(),
             extra: "{}".into(),
             created_at: 1,
             updated_at: 1,
@@ -614,13 +617,18 @@ mod tests {
 
         let mut row = repo.get_base(KB_A).await.unwrap().unwrap();
         row.name = "renamed".into();
+        row.tree_access = "read_only".into();
         // `extra` is mutable through update (URL-source config lives there).
         row.extra = r#"{"source":{"kind":"url","mode":"live"}}"#.into();
         row.updated_at = 2;
         repo.update_base(&row).await.unwrap();
         let got = repo.get_base(KB_A).await.unwrap().unwrap();
         assert_eq!(got.name, "renamed");
+        assert_eq!(got.tree_access, "read_only");
         assert_eq!(got.extra, r#"{"source":{"kind":"url","mode":"live"}}"#);
+
+        row.tree_access = "invalid".into();
+        assert!(matches!(repo.update_base(&row).await, Err(DbError::Query(_))));
 
         repo.delete_base(KB_A).await.unwrap();
         assert!(repo.get_base(KB_A).await.unwrap().is_none());

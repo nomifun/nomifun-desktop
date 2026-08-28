@@ -2018,8 +2018,9 @@ impl KnowledgeService {
 
     /// Create a base. With `root_path = None` the directory is provisioned
     /// under `{data_dir}/knowledge/{id}/` (managed); otherwise the given
-    /// existing directory is registered as-is (external reference — never
-    /// structurally modified by us).
+    /// existing directory is registered as an external reference. External
+    /// content is mutated only when its first-class `tree_access` policy is
+    /// explicitly `editable`.
     ///
     /// An optional URL `source` is persisted into the registry row's
     /// `extra.source`. `live` mode stores it without fetching (the URLs are
@@ -2258,11 +2259,6 @@ impl KnowledgeService {
             ));
         }
         let mut extra = serde_json::Map::new();
-        extra.insert(
-            "tree_access".into(),
-            serde_json::to_value(tree_access)
-                .map_err(|error| AppError::Internal(format!("failed to serialize knowledge tree access: {error}")))?,
-        );
         if let Some(source) = &source {
             extra.insert(
                 "source".into(),
@@ -2279,6 +2275,7 @@ impl KnowledgeService {
             description: description.trim().to_owned(),
             root_path,
             managed,
+            tree_access: persisted_knowledge_tree_access(tree_access).into(),
             extra,
             created_at: now,
             updated_at: now,
@@ -2582,25 +2579,7 @@ impl KnowledgeService {
             };
         }
         if let Some(tree_access) = tree_access {
-            let mut extra: serde_json::Value = serde_json::from_str(&row.extra).map_err(|error| {
-                AppError::Internal(format!(
-                    "knowledge base {} has invalid extra JSON: {error}",
-                    row.knowledge_base_id
-                ))
-            })?;
-            let object = extra.as_object_mut().ok_or_else(|| {
-                AppError::Internal(format!(
-                    "knowledge base {} extra must be a JSON object",
-                    row.knowledge_base_id
-                ))
-            })?;
-            object.insert(
-                "tree_access".into(),
-                serde_json::to_value(tree_access).map_err(|error| {
-                    AppError::Internal(format!("failed to serialize knowledge tree access: {error}"))
-                })?,
-            );
-            row.extra = extra.to_string();
+            row.tree_access = persisted_knowledge_tree_access(tree_access).into();
         }
         row.updated_at = now_ms();
         self.repo.update_base(&row).await?;
@@ -9554,7 +9533,6 @@ enum KnowledgeExtraError {
     InvalidJson(serde_json::Error),
     NotObject,
     InvalidSource(serde_json::Error),
-    InvalidTreeAccess(serde_json::Error),
 }
 
 impl std::fmt::Display for KnowledgeExtraError {
@@ -9564,9 +9542,6 @@ impl std::fmt::Display for KnowledgeExtraError {
             Self::NotObject => formatter.write_str("extra must be a JSON object"),
             Self::InvalidSource(error) => {
                 write!(formatter, "extra.source is invalid: {error}")
-            }
-            Self::InvalidTreeAccess(error) => {
-                write!(formatter, "extra.tree_access is invalid: {error}")
             }
         }
     }
@@ -9596,27 +9571,21 @@ fn source_from_extra(extra: &str) -> Result<Option<KnowledgeSource>, KnowledgeEx
 }
 
 fn knowledge_tree_access(row: &KnowledgeBaseRow) -> Result<KnowledgeTreeAccess, AppError> {
-    let value: serde_json::Value = serde_json::from_str(&row.extra)
-        .map_err(KnowledgeExtraError::InvalidJson)
-        .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?;
-    let object = value
-        .as_object()
-        .ok_or(KnowledgeExtraError::NotObject)
-        .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))?;
-    object
-        .get("tree_access")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(KnowledgeExtraError::InvalidTreeAccess)
-        .map_err(|error| knowledge_row_json_error(&row.knowledge_base_id, error))
-        .map(|access| {
-            access.unwrap_or(if row.managed {
-                KnowledgeTreeAccess::Editable
-            } else {
-                KnowledgeTreeAccess::ReadOnly
-            })
-        })
+    match row.tree_access.as_str() {
+        "editable" => Ok(KnowledgeTreeAccess::Editable),
+        "read_only" => Ok(KnowledgeTreeAccess::ReadOnly),
+        value => Err(AppError::Internal(format!(
+            "knowledge base {} has invalid tree_access value: {value}",
+            row.knowledge_base_id
+        ))),
+    }
+}
+
+fn persisted_knowledge_tree_access(access: KnowledgeTreeAccess) -> &'static str {
+    match access {
+        KnowledgeTreeAccess::Editable => "editable",
+        KnowledgeTreeAccess::ReadOnly => "read_only",
+    }
 }
 
 fn require_editable_knowledge_tree(row: &KnowledgeBaseRow) -> Result<(), AppError> {
@@ -14972,6 +14941,7 @@ mod tests {
             description: String::new(),
             root_path: String::new(),
             managed: true,
+            tree_access: "editable".into(),
             extra: "{}".into(),
             created_at: 0,
             updated_at: 0,
@@ -15026,6 +14996,7 @@ mod tests {
                 description: String::new(),
                 root_path: String::new(),
                 managed: true,
+                tree_access: "editable".into(),
                 extra: "{}".into(),
                 created_at: 0,
                 updated_at: 0,
@@ -19584,6 +19555,7 @@ mod tests {
                 description: String::new(),
                 root_path: root.to_string_lossy().into_owned(),
                 managed: true,
+                tree_access: "editable".into(),
                 extra: serde_json::json!({ "source": source }).to_string(),
                 created_at: 0,
                 updated_at: 0,
@@ -20874,6 +20846,7 @@ mod tests {
                 .unwrap()
                 .to_owned(),
             managed: false,
+            tree_access: "editable".into(),
             extra: "{}".into(),
             created_at: 0,
             updated_at: 0,

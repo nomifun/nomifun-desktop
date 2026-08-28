@@ -58,6 +58,13 @@ describe('Knowledge detail document action bar', () => {
     expect(trailingGroupIndex).toBeLessThan(searchIndex);
   });
 
+  test('keeps an explicit recovery action visible for intentionally read-only local folders', () => {
+    expect(detailSource.includes("base?.kind === 'local' && !canMutateTree")).toBe(true);
+    expect(detailSource.includes('knowledge-local-folder-enable-editing')).toBe(true);
+    expect(detailSource.includes('handleEnableLocalFolderEdits')).toBe(true);
+    expect(detailSource.includes("tree_access: 'editable'")).toBe(true);
+  });
+
   test('uses compact per-node menus instead of inline delete text in the document tree', () => {
     expect(detailSource.includes('knowledge-tree-node-row')).toBe(true);
     expect(detailSource.includes('knowledge-tree-node-name')).toBe(true);
@@ -69,6 +76,7 @@ describe('Knowledge detail document action bar', () => {
     expect(detailSource.includes("key='rename'")).toBe(true);
     expect(detailSource.includes("key='delete'")).toBe(true);
     expect(detailSource.includes('deleteFolderWarning')).toBe(true);
+    expect(detailSource.includes('知识库树中未显示的非 Markdown 文件')).toBe(true);
     expect(detailSource.includes("className='!hidden group-hover:!inline-flex shrink-0'")).toBe(false);
   });
 

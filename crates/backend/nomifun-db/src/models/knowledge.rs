@@ -18,8 +18,11 @@ pub struct KnowledgeBaseRow {
     pub root_path: String,
     /// `true` when the directory lives under `{data_dir}/knowledge/{id}` and
     /// is owned by us (purge-on-delete allowed); `false` for user-referenced
-    /// external directories which we never modify structurally.
+    /// external directories. Mutation authority is independent in
+    /// [`Self::tree_access`].
     pub managed: bool,
+    /// Filesystem mutation authority: `editable` or `read_only`.
+    pub tree_access: String,
     pub extra: String,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
@@ -41,6 +44,7 @@ impl<'row> sqlx::FromRow<'row, SqliteRow> for KnowledgeBaseRow {
             description: row.try_get("description")?,
             root_path: row.try_get("root_path")?,
             managed: row.try_get("managed")?,
+            tree_access: row.try_get("tree_access")?,
             extra: row.try_get("extra")?,
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
@@ -256,6 +260,7 @@ mod tests {
             description: "测试".into(),
             root_path: format!("C:/data/knowledge/{base_id}"),
             managed: true,
+            tree_access: "editable".into(),
             extra: "{}".into(),
             created_at: 1,
             updated_at: 2,

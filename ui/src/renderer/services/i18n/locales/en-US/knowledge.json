@@ -110,6 +110,8 @@
       "detachSourceOk": "Detached from the source; the content is now editable",
       "detachSourceTitle": "Detach from web source?",
       "edit": "Edit",
+      "enableFileOperations": "Enable file operations",
+      "enableFileOperationsOk": "Create, edit, move, rename, and delete operations are now available",
       "entryReadOnlyReason": "This document cannot be edited.",
       "expandAll": "Expand all",
       "importNotes": "Upload notes",
@@ -128,6 +130,7 @@
       "importWebDescription": "Pages are converted to Markdown snapshots in the document tree and can be refreshed later.",
       "importWebHint": "Save web pages as refreshable Markdown snapshots",
       "importWebOk": "Added and captured {{count}} web page(s)",
+      "localFolderReadOnlyReason": "This local folder is indexed read-only. Enable file operations to edit it.",
       "moveChooseDestination": "Choose a destination folder",
       "moveDropHint": "Drop on a folder to move",
       "moveFileInvalidTarget": "A file cannot be used as a destination",
@@ -403,7 +406,7 @@
     "localFolderRequired": "Select a local folder first",
     "localReadonlyNote": "The folder is attached read-only and its structure is never modified. Changes to .md files are reflected automatically.",
     "localEditableLabel": "Allow NomiFun to modify this folder",
-    "localEditableHint": "Enables drag, rename, edit, and delete inside Knowledge. Read-only is the default.",
+    "localEditableHint": "Enabled by default for create, drag, rename, edit, and delete. Turn it off for read-only indexing.",
     "localEditableNote": "NomiFun may create, edit, move, and delete knowledge content in this folder.",
     "lowBarrier": "Low barrier",
     "nameLabel": "Name",
@@ -469,7 +472,7 @@
   "renameTitle": "Rename",
   "tree": {
     "deleteFolderTitle": "Delete folder?",
-    "deleteFolderWarning": "Deleting “{{name}}” will remove all documents and subfolders inside it. This cannot be undone."
+    "deleteFolderWarning": "Deleting “{{name}}” permanently removes every file and subfolder inside it, including non-Markdown files hidden from the knowledge tree. This cannot be undone."
   },
   "title": "Knowledge",
   "siderTitle": "Knowledge"

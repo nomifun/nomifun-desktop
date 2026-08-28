@@ -57,6 +57,7 @@ import {
   Right,
   Search,
   SettingTwo,
+  Unlock,
   Unlink,
 } from '@icon-park/react';
 import type {
@@ -579,6 +580,7 @@ const KnowledgeDetailPage: React.FC = () => {
   const [renameName, setRenameName] = useState('');
   const [autogenLoading, setAutogenLoading] = useState(false);
   const [refreshingSource, setRefreshingSource] = useState(false);
+  const [enablingLocalFolderEdits, setEnablingLocalFolderEdits] = useState(false);
   const [fileSearch, setFileSearch] = useState('');
   const [treeAction, setTreeAction] = useState<'reveal' | 'expand' | null>(null);
   const [movingPath, setMovingPath] = useState<string | null>(null);
@@ -611,16 +613,21 @@ const KnowledgeDetailPage: React.FC = () => {
     canMutateTree &&
     loadedDocument?.rel_path === selectedPath &&
     hasKnowledgeEntryCapability(loadedDocument, 'edit_content');
-  const selectedDocumentReadOnlyReason = knowledgeEntryRestrictionReason(
-    loadedDocument,
-    isManagedKnowledgeEntry(loadedDocument)
-      ? t('knowledge.detail.docs.managedReadOnlyReason', {
-          defaultValue: '正文由来源管理；仍可移动、重命名或复制为可编辑笔记。',
+  const selectedDocumentReadOnlyReason =
+    base?.kind === 'local' && !canMutateTree
+      ? t('knowledge.detail.docs.localFolderReadOnlyReason', {
+          defaultValue: '当前本地文件夹仅作只读索引；启用文件操作后可编辑。',
         })
-      : t('knowledge.detail.docs.entryReadOnlyReason', {
-          defaultValue: '当前文档不可编辑。',
-        })
-  );
+      : knowledgeEntryRestrictionReason(
+          loadedDocument,
+          isManagedKnowledgeEntry(loadedDocument)
+            ? t('knowledge.detail.docs.managedReadOnlyReason', {
+                defaultValue: '正文由来源管理；仍可移动、重命名或复制为可编辑笔记。',
+              })
+            : t('knowledge.detail.docs.entryReadOnlyReason', {
+                defaultValue: '当前文档不可编辑。',
+              })
+        );
   const selectedDocumentEntry = loadedDocument
     ? knowledgeTreeEntryFromFile(loadedDocument)
     : null;
@@ -1243,7 +1250,8 @@ const KnowledgeDetailPage: React.FC = () => {
           <div className='text-13px leading-20px text-[var(--color-text-2)]'>
             <div>
               {t('knowledge.tree.deleteFolderWarning', {
-                defaultValue: '删除目录“{{name}}”会一并清空其下所有文档和子目录，无法撤销。',
+                defaultValue:
+                  '删除目录“{{name}}”会永久删除其下所有文件和子目录，包括知识库树中未显示的非 Markdown 文件，无法撤销。',
                 name: item.name,
               })}
             </div>
@@ -1613,6 +1621,32 @@ const KnowledgeDetailPage: React.FC = () => {
     }
   };
 
+  const handleEnableLocalFolderEdits = async () => {
+    if (
+      !id ||
+      base?.kind !== 'local' ||
+      canMutateTree ||
+      enablingLocalFolderEdits
+    ) return;
+    setEnablingLocalFolderEdits(true);
+    try {
+      await ipcBridge.knowledge.updateBase.invoke({
+        knowledge_base_id: id,
+        tree_access: 'editable',
+      });
+      await refresh();
+      Message.success(
+        t('knowledge.detail.docs.enableFileOperationsOk', {
+          defaultValue: '已恢复新建、编辑、移动、重命名和删除操作',
+        })
+      );
+    } catch (error) {
+      Message.error(knowledgeErrorText(error));
+    } finally {
+      setEnablingLocalFolderEdits(false);
+    }
+  };
+
   const handleAutogen = async () => {
     if (!id || autogenLoading) return;
     setAutogenLoading(true);
@@ -1871,6 +1905,20 @@ const KnowledgeDetailPage: React.FC = () => {
               >
                 {/* Compact document toolbar: icon-first, labels are shown in small hover bubbles. */}
                 <div className='knowledge-doc-divider-bottom knowledge-doc-toolbar flex h-42px shrink-0 items-center gap-2px bg-transparent px-9px'>
+                  {base?.kind === 'local' && !canMutateTree && (
+                    <Button
+                      type='text'
+                      size='mini'
+                      className='knowledge-local-folder-enable-editing'
+                      icon={<Unlock theme='outline' size='14' />}
+                      loading={enablingLocalFolderEdits}
+                      onClick={() => void handleEnableLocalFolderEdits()}
+                    >
+                      {t('knowledge.detail.docs.enableFileOperations', {
+                        defaultValue: '启用文件操作',
+                      })}
+                    </Button>
+                  )}
                   {id && base && canMutateTree && (
                     <KnowledgeAddContentControl
                       key={id}
