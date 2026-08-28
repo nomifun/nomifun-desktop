@@ -106,25 +106,6 @@
     "requiresApi": "Needs API",
     "noApi": "No API"
   },
-  "presetsPage": {
-    "libraryTab": "Installed Presets",
-    "marketTab": "Preset Market"
-  },
-  "presetMarket": {
-    "title": "Preset Market",
-    "description": "Browse SkillHub expert packages and add them as reusable Nomi presets.",
-    "addSuccess": "Expert package and skills added.",
-    "addSkipped": "Expert package already exists.",
-    "addFailed": "Failed to add expert package.",
-    "timeout": "SkillHub took too long to respond. Please try again.",
-    "upstreamUnavailable": "SkillHub is temporarily unavailable. Please try again later.",
-    "notFound": "This expert package is no longer available. Refresh the market and try again.",
-    "skillInstallFailed": "Failed to install {{count}} expert package skill(s): {{skills}}.",
-    "partialSkillInstall": "Expert package added, but {{count}} skill(s) failed to install: {{skills}}.",
-    "stateUpdateFailed": "Expert package added, but automatic selection could not be enabled.",
-    "searchPlaceholder": "Search expert packages...",
-    "empty": "Refresh to load expert packages."
-  },
   "mcpMarket": {
     "title": "MCP Market",
     "description": "Browse SkillHub MCP and MCP World popular servers, then import their MCP JSON directly.",

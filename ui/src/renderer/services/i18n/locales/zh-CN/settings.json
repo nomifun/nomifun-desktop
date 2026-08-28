@@ -106,25 +106,6 @@
     "requiresApi": "需 API",
     "noApi": "免 API"
   },
-  "presetsPage": {
-    "libraryTab": "已安装设定",
-    "marketTab": "设定市场"
-  },
-  "presetMarket": {
-    "title": "设定市场",
-    "description": "浏览 SkillHub 专家包，并一键添加为可复用的 Nomi 设定。",
-    "addSuccess": "专家包与技能已添加。",
-    "addSkipped": "专家包已存在。",
-    "addFailed": "添加专家包失败。",
-    "timeout": "SkillHub 响应超时，请稍后重试。",
-    "upstreamUnavailable": "SkillHub 暂时不可用，请稍后重试。",
-    "notFound": "该专家包已下架或不存在，请刷新市场后重试。",
-    "skillInstallFailed": "专家包的 {{count}} 个技能均安装失败：{{skills}}。",
-    "partialSkillInstall": "专家包已添加，但 {{count}} 个技能安装失败：{{skills}}。",
-    "stateUpdateFailed": "专家包已添加，但未能启用自动选择。",
-    "searchPlaceholder": "搜索专家包...",
-    "empty": "点击刷新获取专家包列表。"
-  },
   "mcpMarket": {
     "title": "MCP 市场",
     "description": "浏览 SkillHub MCP 与 MCP World 热门服务，并直接导入 MCP 配置。",

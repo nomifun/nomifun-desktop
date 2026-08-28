@@ -8,6 +8,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 const panelSource = readFileSync(new URL('./PresetListPanel.tsx', import.meta.url), 'utf8');
+const pageSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
 const presetCardSource = readFileSync(new URL('./PresetCard.tsx', import.meta.url), 'utf8');
 const filterSource = readFileSync(new URL('./PresetTagFilterBar.tsx', import.meta.url), 'utf8');
 const skillsSource = readFileSync(new URL('../SkillsHubSettings.tsx', import.meta.url), 'utf8');
@@ -20,6 +21,11 @@ const mcpInstalledSource = readFileSync(
 const layoutSource = readFileSync(new URL('../enhancedToolsLayout.ts', import.meta.url), 'utf8');
 
 describe('Preset library compact toolbar', () => {
+  test('renders the preset library directly without a market product surface', () => {
+    expect(pageSource.includes('<PresetListPanel')).toBe(true);
+    expect(pageSource.includes('<Tabs')).toBe(false);
+  });
+
   test('keeps search, tag management, and creation in the filter action row', () => {
     expect(panelSource.includes("data-testid='input-search-preset'")).toBe(true);
     expect(panelSource.includes("data-testid='btn-manage-tags'")).toBe(true);

@@ -13,9 +13,8 @@ use nomifun_api_types::{
     NamedPathResponse, ReadPresetRuleRequest, ReadBuiltinResourceRequest, ReadSkillInfoRequest,
     ReadSkillInfoResponse, RemoveExternalPathRequest, ScanForSkillsRequest, ScanForSkillsResponse,
     ScannedSkillResponse, SetSkillTagsRequest, SkillListItemResponse, SkillMarketMcpConfigRequest,
-    SkillMarketMcpConfigResponse, SkillMarketPackageInstallResponse, SkillMarketPackageRequest,
-    SkillMarketSyncRequest, SkillMarketSyncResponse, SkillPathsResponse, SkillSourceResponse,
-    WritePresetRuleRequest,
+    SkillMarketMcpConfigResponse, SkillMarketSyncRequest, SkillMarketSyncResponse,
+    SkillPathsResponse, SkillSourceResponse, WritePresetRuleRequest,
 };
 use nomifun_common::AppError;
 use nomifun_db::ISkillTagRepository;
@@ -107,10 +106,6 @@ pub fn skill_routes(state: SkillRouterState) -> Router {
         .route(
             "/api/skills/market/mcp/config",
             post(resolve_skill_market_mcp_config),
-        )
-        .route(
-            "/api/skills/market/package/install",
-            post(install_skill_market_package),
         )
         .with_state(state)
 }
@@ -569,17 +564,6 @@ async fn resolve_skill_market_mcp_config(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let config_json = crate::market::resolve_market_mcp_config(req).await?;
     Ok(Json(ApiResponse::ok(SkillMarketMcpConfigResponse { config_json })))
-}
-
-/// `POST /api/skills/market/package/install` — resolve a SkillHub expert
-/// package and install its child skills.
-async fn install_skill_market_package(
-    State(state): State<SkillRouterState>,
-    body: Result<Json<SkillMarketPackageRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<SkillMarketPackageInstallResponse>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let resp = crate::market::install_market_package(&state.skill_paths, req).await?;
-    Ok(Json(ApiResponse::ok(resp)))
 }
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,6 @@ import type { SkillTagFilterState } from './skillFilter';
 export const SKILL_MARKET_SOURCES: SkillMarketSource[] = ['clawhub', 'loophub', 'skillhub'];
 export const MCP_MARKET_SOURCES: SkillMarketSource[] = ['skillhub_mcp', 'mcpworld'];
 export const PLUGIN_MARKET_SOURCES: SkillMarketSource[] = ['clawhub_plugins'];
-export const PRESET_MARKET_SOURCES: SkillMarketSource[] = ['skillhub_packages'];
 
 const MARKET_SOURCE_LABELS: Record<SkillMarketSource, string> = {
   clawhub: 'ClawHub',
@@ -13,7 +12,6 @@ const MARKET_SOURCE_LABELS: Record<SkillMarketSource, string> = {
   skillhub_mcp: 'SkillHub MCP',
   mcpworld: 'MCP World',
   clawhub_plugins: 'ClawHub Plugins',
-  skillhub_packages: 'SkillHub Packages',
 };
 
 const MARKET_SOURCE_URLS: Record<SkillMarketSource, string> = {
@@ -23,7 +21,6 @@ const MARKET_SOURCE_URLS: Record<SkillMarketSource, string> = {
   skillhub_mcp: 'https://skillhub.cn/mcp',
   mcpworld: 'https://www.mcpworld.com/?category=most_popular',
   clawhub_plugins: 'https://clawhub.ai/plugins',
-  skillhub_packages: 'https://skillhub.cn/skillspackage',
 };
 
 export const marketSourceLabel = (source: SkillMarketSource): string => MARKET_SOURCE_LABELS[source];
@@ -63,8 +60,7 @@ export const isSkillMarketSource = (value: unknown): value is SkillMarketSource 
   value === 'loophub' ||
   value === 'skillhub_mcp' ||
   value === 'mcpworld' ||
-  value === 'clawhub_plugins' ||
-  value === 'skillhub_packages';
+  value === 'clawhub_plugins';
 
 export const cleanMarketText = (value: unknown, maxLength = MAX_DESCRIPTION_LENGTH): string => {
   if (typeof value !== 'string') return '';
@@ -84,7 +80,7 @@ const isSafeMarketUrl = (source: SkillMarketSource, url: string): boolean => {
       return parsed.hostname === 'skillhub.cn' || parsed.hostname === 'www.skills.sh' || parsed.hostname === 'skills.sh';
     }
     if (source === 'loophub') return parsed.hostname === 'hub.cocoloop.cn';
-    if (source === 'skillhub_mcp' || source === 'skillhub_packages') return parsed.hostname === 'skillhub.cn';
+    if (source === 'skillhub_mcp') return parsed.hostname === 'skillhub.cn';
     if (source === 'mcpworld') return parsed.hostname === 'www.mcpworld.com';
     return false;
   } catch {
@@ -101,7 +97,6 @@ const isSafeInstallCommand = (source: SkillMarketSource, value: string): boolean
   if (source === 'skillhub_mcp') return /^mcp market add skillhub:[a-z0-9._-]+$/i.test(value);
   if (source === 'mcpworld') return /^mcp market add mcpworld:[a-z0-9._-]+$/i.test(value);
   if (source === 'clawhub_plugins') return value.startsWith('openclaw plugins install clawhub:@');
-  if (source === 'skillhub_packages') return /^skillhub package add [a-z0-9._-]+$/i.test(value);
   return false;
 };
 

@@ -12,7 +12,7 @@ use regex::Regex;
 
 use super::{
     CLAWHUB_PLUGINS_SOURCE, CLAWHUB_SOURCE, LOOPHUB_SOURCE, MAX_MARKET_ITEMS_PER_SOURCE, MCPWORLD_SOURCE,
-    SKILLHUB_MCP_SOURCE, SKILLHUB_PACKAGES_SOURCE, SKILLHUB_SOURCE,
+    SKILLHUB_MCP_SOURCE, SKILLHUB_SOURCE,
 };
 
 static ANCHOR_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -508,58 +508,6 @@ fn parse_clawhub_plugins_html(html: &str) -> Vec<SkillMarketItemResponse> {
 }
 
 // ---------------------------------------------------------------------------
-// SkillHub expert packages
-// ---------------------------------------------------------------------------
-
-pub(super) fn parse_skillhub_packages(body: &str) -> Vec<SkillMarketItemResponse> {
-    let Ok(root) = serde_json::from_str::<serde_json::Value>(body) else {
-        return Vec::new();
-    };
-    let Some(items) = root.get("skillSets").and_then(serde_json::Value::as_array) else {
-        return Vec::new();
-    };
-
-    ranked(items.iter().filter_map(parse_skillhub_package_item))
-}
-
-fn parse_skillhub_package_item(item: &serde_json::Value) -> Option<SkillMarketItemResponse> {
-    let slug = item.get("slug")?.as_str()?.trim().to_string();
-    if !is_market_slug(&slug) {
-        return None;
-    }
-    let name = json_text(item, "displayName", 96)
-        .or_else(|| json_text(item, "displayNameEn", 96))
-        .unwrap_or_else(|| title_from_slug(&slug));
-    let description = json_text(item, "summary", 220)
-        .or_else(|| json_text(item, "summaryEn", 220))
-        .unwrap_or_else(|| "SkillHub expert package.".into());
-    let skill_slugs = json_string_array(item.get("skillSlugs"), 40);
-    let mut tags = skill_slugs.clone();
-    tags.extend(json_text(item, "scene", 40));
-    tags.extend(json_text(item, "subScene", 40));
-    let (inferred_tags, audience_tags, scenario_tags) = infer_market_tags(&format!("{name} {description}"));
-    tags.extend(inferred_tags);
-    dedup_strings(&mut tags);
-    let skill_count = item
-        .get("skillCount")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(skill_slugs.len() as u64);
-    Some(SkillMarketItemResponse {
-        id: format!("{SKILLHUB_PACKAGES_SOURCE}:{slug}"),
-        source: SKILLHUB_PACKAGES_SOURCE.into(),
-        rank: 0,
-        name,
-        description,
-        url: format!("https://skillhub.cn/skillspackage/{slug}"),
-        install_command: format!("skillhub package add {slug}"),
-        tags,
-        audience_tags,
-        scenario_tags,
-        stats: Some(format!("{skill_count} skills")),
-    })
-}
-
-// ---------------------------------------------------------------------------
 // HTML anchor & URL helpers
 // ---------------------------------------------------------------------------
 
@@ -590,7 +538,7 @@ fn market_url(source: &str, href: &str) -> Option<String> {
             CLAWHUB_SOURCE | CLAWHUB_PLUGINS_SOURCE => format!("https://clawhub.ai{href}"),
             SKILLHUB_SOURCE => format!("https://www.skills.sh{href}"),
             LOOPHUB_SOURCE => format!("https://hub.cocoloop.cn{href}"),
-            SKILLHUB_MCP_SOURCE | SKILLHUB_PACKAGES_SOURCE => format!("https://skillhub.cn{href}"),
+            SKILLHUB_MCP_SOURCE => format!("https://skillhub.cn{href}"),
             MCPWORLD_SOURCE => format!("https://www.mcpworld.com{href}"),
             _ => return None,
         }
@@ -605,7 +553,7 @@ fn market_url(source: &str, href: &str) -> Option<String> {
             Some(url.replacen("https://skills.sh/", "https://www.skills.sh/", 1))
         }
         LOOPHUB_SOURCE if url.starts_with("https://hub.cocoloop.cn/") => Some(url),
-        SKILLHUB_MCP_SOURCE | SKILLHUB_PACKAGES_SOURCE if url.starts_with("https://skillhub.cn/") => Some(url),
+        SKILLHUB_MCP_SOURCE if url.starts_with("https://skillhub.cn/") => Some(url),
         MCPWORLD_SOURCE if url.starts_with("https://www.mcpworld.com/") => Some(url),
         _ => None,
     }
@@ -721,26 +669,6 @@ pub(crate) fn json_text(item: &serde_json::Value, key: &str, max_chars: usize) -
         .and_then(serde_json::Value::as_str)
         .map(|value| clean_market_text(value, max_chars))
         .filter(|value| !value.is_empty())
-}
-
-/// Read a string field verbatim (whitespace preserved), capped at
-/// `max_chars`. Logs a warning when the cap actually truncates — package
-/// instructions silently losing their tail would be hard to diagnose.
-pub(crate) fn json_text_preserve(item: &serde_json::Value, key: &str, max_chars: usize) -> Option<String> {
-    let value = item.get(key)?.as_str()?.trim();
-    if value.is_empty() {
-        return None;
-    }
-    let truncated: String = value.chars().take(max_chars).collect();
-    if truncated.chars().count() < value.chars().count() {
-        tracing::warn!(
-            key,
-            max_chars,
-            original_chars = value.chars().count(),
-            "market text field truncated to the char cap"
-        );
-    }
-    Some(truncated)
 }
 
 pub(crate) fn json_string_array(value: Option<&serde_json::Value>, max_chars: usize) -> Vec<String> {
@@ -1180,38 +1108,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_skillhub_packages_extracts_expert_package() {
-        let body = r#"{
-          "skillSets": [{
-            "slug": "tech-test-automation",
-            "displayName": "Test Automation",
-            "summary": "End-to-end automated testing workflow.",
-            "skillCount": 6,
-            "skillSlugs": ["superpowers-tdd", "test-case-generator"]
-          }],
-          "total": 1
-        }"#;
-        let items = parse_skillhub_packages(body);
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].source, SKILLHUB_PACKAGES_SOURCE);
-        assert_eq!(items[0].install_command, "skillhub package add tech-test-automation");
-        assert!(items[0].stats.as_deref().unwrap_or_default().contains("6 skills"));
-    }
-
-    #[test]
-    fn parse_skillhub_packages_rejects_overlong_slug_without_truncating_it() {
-        let body = serde_json::json!({
-            "skillSets": [{
-                "slug": "a".repeat(97),
-                "displayName": "Overlong package"
-            }]
-        })
-        .to_string();
-
-        assert!(parse_skillhub_packages(&body).is_empty());
-    }
-
-    #[test]
     fn is_market_slug_requires_alphanumeric_bounds() {
         // Valid slugs: internal separators are fine.
         for good in ["superpowers-tdd", "a.b-c_d", "a", "x1", "playwright", "user_ec205dbb"] {
@@ -1231,18 +1127,4 @@ mod tests {
         assert!(!is_market_slug(&over));
     }
 
-    #[test]
-    fn json_text_preserve_keeps_whitespace_and_caps_chars() {
-        let value = serde_json::json!({ "content": "line one\n\nline two" });
-        assert_eq!(
-            json_text_preserve(&value, "content", 1000).as_deref(),
-            Some("line one\n\nline two")
-        );
-        // Truncation applies the char cap (and logs a warning).
-        assert_eq!(json_text_preserve(&value, "content", 4).as_deref(), Some("line"));
-        // Missing / empty fields yield None.
-        assert!(json_text_preserve(&value, "missing", 10).is_none());
-        let blank = serde_json::json!({ "content": "   " });
-        assert!(json_text_preserve(&blank, "content", 10).is_none());
-    }
 }

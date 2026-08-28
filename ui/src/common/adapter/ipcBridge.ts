@@ -1135,8 +1135,7 @@ export type SkillMarketSource =
   | 'loophub'
   | 'skillhub_mcp'
   | 'mcpworld'
-  | 'clawhub_plugins'
-  | 'skillhub_packages';
+  | 'clawhub_plugins';
 
 export interface ISkillMarketItem {
   id: string;
@@ -1160,20 +1159,6 @@ export interface ISkillMarketSyncResponse {
 
 export interface ISkillMarketMcpConfigResponse {
   config_json: unknown;
-}
-
-export interface ISkillMarketPackageResponse {
-  name: string;
-  description: string;
-  instructions: string;
-  skill_slugs: string[];
-  avatar?: string;
-}
-
-export interface ISkillMarketPackageInstallResponse {
-  package: ISkillMarketPackageResponse;
-  installed_skill_names: string[];
-  errors?: Array<{ skill_slug: string; error: string }>;
 }
 
 export const fs = {
@@ -1274,10 +1259,6 @@ export const fs = {
     ISkillMarketMcpConfigResponse,
     { source: SkillMarketSource; id: string; url: string }
   >('/api/skills/market/mcp/config'),
-  installSkillMarketPackage: httpPost<
-    ISkillMarketPackageInstallResponse,
-    { source: SkillMarketSource; id: string; url: string }
-  >('/api/skills/market/package/install'),
 };
 
 // Workspace Office file watch
