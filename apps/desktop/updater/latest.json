@@ -1,7 +1,7 @@
 {
   "version": "0.7.4",
   "notes": "# NomiFun v0.7.4\n\n## 中文\n\n- **Mac 首发产物。** 本次先发布 macOS 安装包、Tauri updater 签名包和自动更新清单；Windows / Linux 可按同一版本后续补充。\n- **桌面更新切换为 CrabNebula Cloud 优先。** 新版本会先从 CrabNebula Cloud 检查和下载更新，GitHub Releases 继续作为兜底与归档来源；如果 Cloud 下载或签名校验失败，会从 GitHub 重试同一个已签名版本。\n- **发布流程支持 CrabNebula Cloud。** 新增草稿、平台上传、正式发布和端点验证流程，沿用现有 Tauri updater 信任密钥，方便多平台逐步补包。\n- **Gemini schema 兼容性修复。** 结构化输出和工具调用的 schema 引用名现在会避免冲突，减少因重复 ref 名称导致的请求失败。\n\n## English\n\n- **Mac-first artifacts.** This release starts with the macOS installer, the signed Tauri updater package, and the automatic-update manifest; Windows and Linux artifacts can be appended under the same version later.\n- **Desktop updates now prefer CrabNebula Cloud.** New builds check and download updates from CrabNebula Cloud first, while GitHub Releases remains the fallback and archive; if a Cloud package download or signature verification fails, the app retries the same signed version from GitHub.\n- **Release tooling now supports CrabNebula Cloud.** Maintainers can create drafts, upload platform-specific signed artifacts, publish releases, and verify update endpoints while keeping the existing Tauri updater trust key.\n- **Gemini schema compatibility is improved.** Structured-output and tool-call schemas now avoid duplicate reference names, reducing request failures caused by colliding schema refs.",
-  "pub_date": "2026-08-27T17:22:02.776Z",
+  "pub_date": "2026-08-28T02:18:50.539Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOC80MlZ1bkE2TFU0RTZ6TlQ1Y2lNYW9naFFlMG1PaGEzQmt4MXlORkIzQngrYjFYb05wenlWKy9JdmdhNGEwTEFZVUdLYWJGRFdBRGFBN3FNQ01SdWdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3ODQ3NDMzCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnF3NkhNRkxrQzhOajNBVDcrRGsrVUxzd0VmeVFMaWFRSUFFWjNldkE2UW1JZUlyR294dW95NTlGK3IwdGV2a2NEVFRDTTgzTTZNb203UmJPUE10SEFnPT0K",
@@ -10,6 +10,10 @@
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODRCUmE4b0wxSWl3SFlYOW1RODNCcHZyY0gxc0RLSlRCdC95Qzd2bXpDQ3dVWlBZWC9jUWNmNVFiV2lqdTNUbDYrY0dYYVIwSWxKai9oNXppdEJ1N1FVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3ODUxMzIyCWZpbGU6Tm9taUZ1bl8wLjcuNF94NjQtc2V0dXAuZXhlCmduV1lQNys4SWZIeHhpUnpPamlSSm5HcWw3TXRPWDBWZlRBTlJqNE9JTFQ2eitWRFJWVG51RjhqbXN3OHZ3bFZ0M3BlTjhnLzRLUGhveVBWaytlcEN3PT0K",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.4/NomiFun_0.7.4_x64-setup.exe"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODVVdWt5WTZQMnFGUE9DOUhINXlmclE0ZjhNSlNpTHdRVyt2YzNpR3dNT3lRTGIzMGhMM3p2WXRlNG9LRzQzRTVOTnhQU1pSVmorS1pYS0RUbzVEcFFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3ODgzNTk3CWZpbGU6Tm9taUZ1bl8wLjcuNF94NjQuYXBwLnRhci5negpHR1lrS1Z6Z1pRd3JKSDdvU0p6NkpwOEFpNExuOVJGZmxmTUZ1SmVGSW9MNkIzY3VuNGdUbWFMUWtkWUNsK1ZwcDI4N1RlM2dWZEprek5oK0grM0RDZz09Cg==",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.4/NomiFun_0.7.4_x64.app.tar.gz"
     }
   }
 }
