@@ -9,6 +9,7 @@ use wiremock::MockServer;
 
 use nomifun_ai_agent::{AgentRuntimeHandle, AgentRuntimeControl, MockAgentRuntime, InMemoryAgentRuntimeRegistry};
 use nomifun_app::{AppConfig, AppServices, build_module_states, create_router, create_router_with_states};
+use nomifun_auth::AuthPolicy;
 use nomifun_extension::{ExternalPathsManager, SkillPaths, SkillRouterState};
 use nomifun_file::FileService;
 use nomifun_system::VersionCheckService;
@@ -25,6 +26,29 @@ pub async fn build_app() -> (axum::Router, AppServices) {
         &AppConfig {
             data_dir: root.join("data"),
             work_dir: root.join("work"),
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    let router = create_router(&services).await;
+    (router, services)
+}
+
+pub async fn build_local_trust_app(secret: &str) -> (axum::Router, AppServices) {
+    let root = tempfile::Builder::new()
+        .prefix("nomifun-app-local-trust-e2e-")
+        .tempdir()
+        .unwrap()
+        .keep();
+    let db = nomifun_db::init_database_memory().await.unwrap();
+    let services = AppServices::from_config(
+        db,
+        &AppConfig {
+            data_dir: root.join("data"),
+            work_dir: root.join("work"),
+            auth_policy: AuthPolicy::TrustLocalToken,
+            local_trust_secret: Some(std::sync::Arc::from(secret)),
             ..AppConfig::default()
         },
     )

@@ -1,16 +1,15 @@
 //! End-to-end smoke test for the Remote capability front door (`/mcp`).
 //!
 //! Proves the integration P0 delivers: the MCP endpoint is mounted in the FULL
-//! app router, is gated by the per-companion access token, and projects the
+//! app router, is gated by the installation access token, and projects the
 //! gateway Registry's Remote surface. MCP protocol correctness itself is covered
 //! by rmcp's own tests; here we verify wiring + auth + the surface projection.
 //!
-//! The full rmcp Parts→companion_id round-trip (resolved companion_id flowing
-//! through the MCP `tools/call` dispatch) is proven below by
-//! `mcp_tools_call_binds_companion`, which drives a real Streamable-HTTP
+//! The full rmcp Parts→installation-owner round-trip is proven below by
+//! `mcp_tools_call_binds_instance_owner`, which drives a real Streamable-HTTP
 //! handshake (initialize → notifications/initialized → tools/call for
-//! `nomi_whoami`) and asserts the resolved companion_id appears in the JSON-RPC
-//! result. The REST test additionally proves the same binding via the `/v1`
+//! `nomi_whoami`) and asserts the owner principal appears in the JSON-RPC
+//! result. The REST test additionally proves the same identity via the `/v1`
 //! adapter (same dispatch + CallerCtx path).
 
 mod common;
@@ -20,16 +19,8 @@ use axum::http::{Request, StatusCode, header};
 use tower::ServiceExt;
 
 use nomifun_gateway::{Registry, Surface};
-use nomifun_common::CompanionId;
-
-const TEST_COMPANION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678951";
-
-fn test_companion_id() -> CompanionId {
-    CompanionId::parse(TEST_COMPANION_ID).unwrap()
-}
-
 /// `/mcp` is mounted in the full app and rejects callers without a valid
-/// per-companion token; a minted token passes the gate and reaches the MCP service.
+/// installation token; a minted token passes the gate and reaches the MCP service.
 #[tokio::test]
 async fn mcp_endpoint_is_mounted_and_token_gated() {
     let (app, services) = common::build_app().await;
@@ -56,8 +47,7 @@ async fn mcp_endpoint_is_mounted_and_token_gated() {
         b.body(Body::from(serde_json::to_vec(&init_body).unwrap())).unwrap()
     };
 
-    let companion_id = test_companion_id();
-    let token = "smoke-companion-token";
+    let token = "smoke-instance-token";
 
     // No token → 401 (the front door is closed before reaching the MCP service).
     let resp = app.clone().oneshot(make_req(None)).await.unwrap();
@@ -67,43 +57,42 @@ async fn mcp_endpoint_is_mounted_and_token_gated() {
     let resp = app.clone().oneshot(make_req(Some("not-the-token"))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "/mcp must reject a bad token");
 
-    // Mint a per-companion token via the shared validator (same Arc the router
+    // Mint the installation token via the shared validator (same Arc the router
     // holds) and the request now passes the gate and reaches the MCP service (NOT 401).
     services
-        .companion_token_validator
-        .insert_token(companion_id.clone(), nomifun_auth::token_sha256_hex(token));
+        .instance_token_validator
+        .set_token(nomifun_auth::token_sha256_hex(token));
     let resp = app.clone().oneshot(make_req(Some(token))).await.unwrap();
     assert_ne!(
         resp.status(),
         StatusCode::UNAUTHORIZED,
-        "a valid per-companion token must pass the gate (got {})",
+        "a valid installation token must pass the gate (got {})",
         resp.status()
     );
 
     // Revocation closes it again.
-    services.companion_token_validator.remove_token(&companion_id);
+    services.instance_token_validator.clear_token();
     let resp = app.oneshot(make_req(Some(token))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "revoked token must be rejected");
 }
 
-/// LOAD-BEARING companion-binding proof over the real MCP transport: drive a
+/// LOAD-BEARING installation-owner proof over the real MCP transport: drive a
 /// full Streamable-HTTP handshake through the mounted `/mcp` service
 /// (initialize → notifications/initialized → tools/call for `nomi_whoami`) and
-/// assert the resolved companion_id (TEST_COMPANION_ID) appears in the JSON-RPC
-/// result. This converts the source-verified rmcp `Parts`→`RemoteCompanion`→
-/// `CallerCtx.companion_id` path into a permanent regression guard: if an
+/// assert the `nomifun_desktop` principal appears while `companion_id` is null.
+/// This converts the source-verified Parts→RemoteInstanceOwner→CallerCtx path
+/// into a permanent regression guard: if an
 /// rmcp/transport change ever broke the `http::request::Parts` downcast in
 /// `handler.rs::call_tool`, this test would catch it (the result would show a
-/// null companion_id instead of TEST_COMPANION_ID).
+/// unauthenticated identity).
 #[tokio::test]
-async fn mcp_tools_call_binds_companion() {
+async fn mcp_tools_call_binds_instance_owner() {
     let (app, services) = common::build_app().await;
 
-    let companion_id = test_companion_id();
-    let token = "smoke-companion-token";
+    let token = "smoke-instance-token";
     services
-        .companion_token_validator
-        .insert_token(companion_id.clone(), nomifun_auth::token_sha256_hex(token));
+        .instance_token_validator
+        .set_token(nomifun_auth::token_sha256_hex(token));
 
     // rmcp Streamable-HTTP requires the POST Accept header to advertise BOTH
     // application/json and text/event-stream; responses come back as SSE.
@@ -179,7 +168,7 @@ async fn mcp_tools_call_binds_companion() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED, "initialized notification should be accepted");
 
-    // 3) tools/call nomi_whoami → the result must echo the bound companion_id.
+    // 3) tools/call nomi_whoami → installation owner, no companion binding.
     let call = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 2,
@@ -195,9 +184,10 @@ async fn mcp_tools_call_binds_companion() {
     let rpc = read_sse_json(resp).await;
     let payload = serde_json::to_string(&rpc).unwrap();
     assert!(
-        payload.contains(companion_id.as_str()),
-        "nomi_whoami result over /mcp must echo the bound companion_id '{companion_id}'; \
-         this proves Parts→RemoteCompanion→CallerCtx.companion_id reached MCP dispatch. Got: {payload}"
+        payload.contains("nomifun_desktop")
+            && payload.contains("companion_id")
+            && payload.contains("null"),
+        "nomi_whoami over /mcp must report the desktop principal without a companion binding. Got: {payload}"
     );
 
     // A mutating conversation send derives its business identity from the
@@ -267,11 +257,10 @@ async fn rest_v1_endpoint_is_mounted_and_gated() {
     let resp = app.clone().oneshot(no_tok).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "/v1 must reject missing token");
 
-    let companion_id = test_companion_id();
-    let token = "smoke-companion-token";
+    let token = "smoke-instance-token";
     services
-        .companion_token_validator
-        .insert_token(companion_id.clone(), nomifun_auth::token_sha256_hex(token));
+        .instance_token_validator
+        .set_token(nomifun_auth::token_sha256_hex(token));
 
     let with_tok = |method: &str, uri: &str| {
         Request::builder()
@@ -362,11 +351,8 @@ async fn rest_v1_endpoint_is_mounted_and_gated() {
         "Remote REST send must reject duplicate operation headers"
     );
 
-    // LOAD-BEARING companion-binding proof: the per-companion token resolves to
-    // `smoke-companion`, and that companion_id must reach dispatch. `nomi_whoami`
-    // (Read cap) echoes the resolved companion_id back, so the response body must
-    // contain TEST_COMPANION_ID — proving the token → companion_id → CallerCtx →
-    // tool dispatch round-trip end-to-end through the mounted /v1 adapter.
+    // LOAD-BEARING installation-owner proof: whoami must report the desktop
+    // principal and no implicit companion through the mounted /v1 adapter.
     let whoami = Request::builder()
         .method("POST")
         .uri("/v1/tools/nomi_whoami")
@@ -379,8 +365,8 @@ async fn rest_v1_endpoint_is_mounted_and_gated() {
     let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
     let text = String::from_utf8_lossy(&body);
     assert!(
-        text.contains(companion_id.as_str()),
-        "nomi_whoami response must echo the resolved companion_id '{companion_id}' (got: {text})"
+        text.contains("nomifun_desktop") && text.contains("\"companion_id\":null"),
+        "nomi_whoami must report the desktop principal without a companion binding (got: {text})"
     );
 }
 
@@ -390,10 +376,10 @@ async fn rest_v1_endpoint_is_mounted_and_gated() {
 #[tokio::test]
 async fn rest_v1_stream_endpoint_emits_result_frame() {
     let (app, services) = common::build_app().await;
-    let token = "smoke-companion-token";
+    let token = "smoke-instance-token";
     services
-        .companion_token_validator
-        .insert_token(test_companion_id(), nomifun_auth::token_sha256_hex(token));
+        .instance_token_validator
+        .set_token(nomifun_auth::token_sha256_hex(token));
 
     let req = Request::builder()
         .method("POST")
@@ -467,4 +453,38 @@ fn remote_surface_projection_is_correct() {
 
     // `nomi_execution_update` stays visible because most operations are Write;
     // its cancel variant applies the Destructive matrix inside dispatch.
+}
+
+#[tokio::test]
+async fn local_owner_mints_one_instance_token_without_a_companion() {
+    const LOCAL_SECRET: &str = "local-trust-instance-token-test";
+    let (app, services) = common::build_local_trust_app(LOCAL_SECRET).await;
+
+    let request = |method: &str| {
+        Request::builder()
+            .method(method)
+            .uri("/api/webui/access-token")
+            .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_SECRET)
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let response = app.clone().oneshot(request("POST")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let minted: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let token = minted["data"]["token"]
+        .as_str()
+        .expect("mint returns the plaintext token once");
+    assert!(services.instance_token_validator.validate(token));
+    assert!(minted["data"].get("companion_id").is_none());
+
+    let response = app.clone().oneshot(request("GET")).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status["data"]["configured"], true);
+
+    let response = app.oneshot(request("DELETE")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!services.instance_token_validator.validate(token));
 }

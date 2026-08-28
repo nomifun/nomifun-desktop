@@ -243,14 +243,17 @@ pub(crate) async fn resolve_explicit_model(
 }
 
 /// The calling companion's configured profile model `(provider_id, model)`.
-/// `ctx.companion_id` first; a missing/unconfigured bound companion degrades to the
-/// default companion (mirrors `CompanionChannelAgentProfile`).
+/// An installation-owner Remote caller deliberately has no companion and must
+/// resolve from explicit input or the instance provider catalog instead.
 async fn companion_profile_model(deps: &GatewayDeps, ctx: &CallerCtx) -> Option<(String, String)> {
     if let Some(id) = &ctx.companion_id
         && let Ok(p) = deps.companion_service.get_companion(id.as_str()).await
         && let Some(model) = p.model
     {
         return Some((model.provider_id, model.model));
+    }
+    if ctx.remote {
+        return None;
     }
     let default_id = deps.companion_service.default_companion_id().await?;
     let p = deps.companion_service.get_companion(&default_id).await.ok()?;

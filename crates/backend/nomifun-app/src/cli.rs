@@ -174,7 +174,7 @@ pub enum Command {
     Tools,
     /// Invoke a capability on a RUNNING NomiFun instance via its REST `/v1` API.
     /// Endpoint/token from `--url`/`--token` or `NOMIFUN_URL` /
-    /// `NOMIFUN_COMPANION_TOKEN`.
+    /// `NOMIFUN_ACCESS_TOKEN`.
     Call {
         /// Capability name, e.g. `nomi_cron_list` (see `nomicore tools`).
         name: String,
@@ -183,7 +183,7 @@ pub enum Command {
         /// Instance base URL (default `$NOMIFUN_URL` or http://127.0.0.1:25808).
         #[arg(long)]
         url: Option<String>,
-        /// Per-companion access token (default `$NOMIFUN_COMPANION_TOKEN`).
+        /// NomiFun Desktop installation access token (default `$NOMIFUN_ACCESS_TOKEN`).
         #[arg(long)]
         token: Option<String>,
     },

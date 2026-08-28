@@ -4,22 +4,22 @@ description: >-
   Use to connect to and drive a NomiFun instance from an external agent
   (Claude Code / Cursor / any MCP client). Drive its browser / computer /
   knowledge base / files and manage the platform over MCP or REST, with a
-  per-companion access token (you run AS the bound companion). Use this whenever
+  NomiFun Desktop installation access token. The token authenticates the owner
+  and never binds or impersonates a companion. Use this whenever
   the user asks to control,
   automate, or hand work off to "NomiFun", "their NomiFun", "the desktop
   companion", or a running NomiFun server.
 ---
 
-# Drive NomiFun (external companion)
+# Drive NomiFun Desktop
 
 NomiFun exposes its Remote-safe platform capability set — browser automation,
 computer control, knowledge bases, files, terminals, conversations, and platform
 management — to external callers through one **MCP** endpoint and an equivalent
-**REST** API, authenticated by a **per-companion access token**. Each token is
-bound to one specific companion: calling with it runs you **as that companion**,
-inheriting its profile model / persona / knowledge bases. Connecting makes you
-an "external companion": you drive the platform exactly as its built-in desktop
-companion does.
+**REST** API, authenticated by one **installation access token**. Calling with
+it runs under the NomiFun Desktop installation owner. It never selects a
+companion and does not inherit a companion profile, persona, knowledge binding,
+active thread, or workspace.
 
 ## 1. Connect (MCP, recommended)
 
@@ -43,11 +43,11 @@ Configure NomiFun as a Streamable-HTTP MCP server:
   (browser, computer, knowledge, files, conversations). Use **`/mcp`** instead
   for the full platform-control surface (~140 tools incl. channels, companions,
   cron, providers, …).
-- `<token>` is a **per-companion access token** — it binds you to one companion.
+- `<token>` is the **NomiFun Desktop installation access token**.
   Get it from the NomiFun operator: in the desktop WebUI/remote panel, or by
-  minting one (see "Minting a token" below). Model-backed capabilities require
-  the bound companion to have a configured model; otherwise minting returns a
-  `warning` and those calls fail until a model is set in Model Management.
+  minting it (see "Minting a token" below). Model-backed capabilities use an
+  explicit model or an enabled instance provider; minting returns a `warning`
+  when the instance has no enabled provider.
 
 REST equivalent (for scripts): `POST http://<host>:25808/v1/tools/<name>` with the
 same Bearer token; `GET /v1/tools?profile=agent` lists tools; `GET
@@ -56,31 +56,26 @@ same Bearer token; `GET /v1/tools?profile=agent` lists tools; `GET
 ### Minting a token (operator, local-trust only)
 
 The mint/query/revoke endpoints are **local-trust gated** (reachable only from
-the desktop client / loopback, not from a remote browser). `{id}` is the
-companion id you want the token bound to:
+the desktop client / loopback, not from a remote browser):
 
 ```bash
-# Mint — returns the plaintext token ONCE, bound to that companion.
-curl -X POST http://127.0.0.1:<port>/api/webui/companions/<id>/access-token
-# => { "token": "<64-hex token>", "companion_id": "<id>" }
-#    If that companion has no usable model yet, the body also carries
-#    "warning": "…" (the token is still minted, but model-backed capabilities
-#    will fail until you configure a model).
+# Mint — returns the plaintext token ONCE.
+curl -X POST http://127.0.0.1:<port>/api/webui/access-token
+# => { "token": "<64-hex token>" }
 
 # Query whether one is configured (does NOT return the token):
-curl http://127.0.0.1:<port>/api/webui/companions/<id>/access-token
+curl http://127.0.0.1:<port>/api/webui/access-token
 # => { "configured": true }
 
 # Revoke:
-curl -X DELETE http://127.0.0.1:<port>/api/webui/companions/<id>/access-token
+curl -X DELETE http://127.0.0.1:<port>/api/webui/access-token
 ```
 
 For a **headless** server, seed a token at startup via the
-`NOMIFUN_COMPANION_TOKEN` env var — it binds to the **default companion** (only
-if no token is configured yet; it won't overwrite an existing one):
+`NOMIFUN_ACCESS_TOKEN` env var. This does not require a companion:
 
 ```bash
-NOMIFUN_COMPANION_TOKEN="$(openssl rand -hex 32)" nomicore   # or nomifun-web
+NOMIFUN_ACCESS_TOKEN="$(openssl rand -hex 32)" nomicore   # or nomifun-web
 ```
 
 ## 2. Respect the Agent collaboration boundary
@@ -88,15 +83,15 @@ NOMIFUN_COMPANION_TOKEN="$(openssl rand -hex 32)" nomicore   # or nomifun-web
 Persistent Agent collaboration uses one contract: `nomi_delegate` creates an
 execution, `nomi_execution_get` reads it, and `nomi_execution_update` changes
 its plan or lifecycle. Desktop and Channel callers derive execution ownership
-from the active calling Conversation. An owner-bound companion token can also
-receive the three tools on the Remote surface: delegation records that
-companion as creator, and later reads or updates are restricted to that
-companion's executions. Secondary users receive none of the three tools.
+from the active calling Conversation. The installation token can also receive
+the three tools on the Remote surface and uses the same installation-owner
+boundary as Desktop. It does not create a companion identity or scope
+executions by companion. Secondary users receive none of the three tools.
 
 Use the three tools only when they are advertised by the live catalog. A Remote
 client must call the capabilities returned by `tools/list` directly and protect
 its token as a high-privilege delegation of installation-owner authority;
-never invent execution ids or try to access another companion's execution.
+never invent execution ids or try to bypass the installation-owner boundary.
 
 ## 3. Or drive capabilities directly
 
@@ -112,11 +107,10 @@ authoritative catalog with JSON Schemas.
   "restate": "..." }`. Restate the exact action to the user, get agreement, then
   re-call the same tool with `"confirm": true`.
 - **Sensitive actions** (secrets, factory reset) are **denied** on this surface.
-- **Trust model:** holding a per-companion access token grants full,
-  RCE-equivalent control of that NomiFun instance (as the bound companion). Treat
+- **Trust model:** holding the installation access token grants full,
+  RCE-equivalent control of that NomiFun instance. Treat
   the token as a high-value secret; only connect to instances you are authorized
-  to drive. Revoking a token affects only its companion; other companions' tokens
-  are unaffected.
+  to drive. Rotating or revoking it affects every Remote client of that installation.
 
 ## 5. Failure handling
 

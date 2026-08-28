@@ -161,12 +161,8 @@ fn error_value(e: AppError) -> Value {
     json!({ "error": e.to_string() })
 }
 
-fn require_companion_creator(ctx: &CallerCtx) -> Result<(), Value> {
-    if ctx
-        .companion_id
-        .as_ref()
-        .is_some()
-    {
+fn require_conversation_creator(ctx: &CallerCtx) -> Result<(), Value> {
+    if ctx.companion_id.is_some() || ctx.remote {
         Ok(())
     } else {
         Err(json!({
@@ -444,7 +440,7 @@ fn validated_agent_type(raw: Option<&str>) -> Result<AgentType, String> {
 }
 
 async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationParams) -> Value {
-    if let Err(error) = require_companion_creator(&ctx) {
+    if let Err(error) = require_conversation_creator(&ctx) {
         return error;
     }
     let user_id = ctx.user_id.as_str().to_owned();
@@ -506,14 +502,14 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationPar
     }
 }
 
-/// Reflect the calling session's identity: which companion it is bound to, the
-/// surface it arrived on, and the user scope. For an external partner this
-/// answers "who am I acting as?"; for tests it proves companion binding reached
-/// dispatch.
+/// Reflect the calling session's authenticated identity and surface. Remote
+/// installation tokens report `principal = nomifun_desktop` and deliberately
+/// keep `companion_id = null`.
 async fn whoami(_deps: Arc<GatewayDeps>, ctx: CallerCtx, _p: WhoamiParams) -> Value {
     ok(json!({
         "user_id": ctx.user_id,
         "companion_id": ctx.companion_id,
+        "principal": if ctx.remote { "nomifun_desktop" } else { "session" },
         "surface": format!("{:?}", ctx.surface()),
         "remote": ctx.remote,
         "channel_platform": ctx.channel_platform,
@@ -715,7 +711,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_whoami",
             "conversation",
-            "Identity of the calling session: the bound companion id, surface (Desktop/Channel/Remote), and user. Lets an external partner confirm which companion it is acting as.",
+            "Identity of the calling session: installation user, optional companion id, and surface. Remote installation-token callers report principal=nomifun_desktop and companion_id=null.",
             DangerTier::Read,
         ),
         whoami,

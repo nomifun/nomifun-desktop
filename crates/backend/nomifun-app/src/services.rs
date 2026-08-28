@@ -11,7 +11,7 @@ use nomifun_ai_agent::{
 };
 use nomifun_api_types::{GatewayMcpConfig, RequirementMcpConfig};
 use nomifun_auth::{
-    AuthPolicy, CompanionTokenValidator, CookieConfig, JwtService, QrTokenStore, resolve_jwt_secret,
+    AuthPolicy, CookieConfig, InstanceTokenValidator, JwtService, QrTokenStore, resolve_jwt_secret,
 };
 use nomifun_common::OnConversationDelete;
 use nomifun_conversation::runtime_state::ConversationRuntimeStateService;
@@ -19,11 +19,11 @@ use nomifun_conversation::{
     ExecutionConversationBoundary, RepositoryExecutionConversationBoundary,
 };
 use nomifun_db::{
-    Database, IAgentMetadataRepository, ICompanionTokenRepository,
+    Database, IAgentMetadataRepository, IInstanceTokenRepository,
     IConversationRepository, IMcpServerRepository, IProviderModelCapabilityRepository,
     IProviderModelRepository, IProviderRepository,
     IUserRepository, SqliteAgentMetadataRepository,
-    SqliteCompanionTokenRepository, SqliteConversationRepository, SqliteMcpServerRepository,
+    SqliteConversationRepository, SqliteInstanceTokenRepository, SqliteMcpServerRepository,
     SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
     SqliteProviderRepository,
     SqliteTerminalRepository, SqliteUserRepository,
@@ -1566,10 +1566,10 @@ pub struct AppServices {
     pub authoritative_user_id: Arc<str>,
     pub jwt_service: Arc<JwtService>,
     pub user_repo: Arc<dyn IUserRepository>,
-    /// Per-companion Remote front-door token store (SHA-256 hashes).
-    pub companion_token_repo: Arc<dyn ICompanionTokenRepository>,
-    /// In-memory validator mapping token -> companion_id (hot-swapped on mint/revoke).
-    pub companion_token_validator: Arc<CompanionTokenValidator>,
+    /// Installation-scoped Remote front-door token store (SHA-256 hash only).
+    pub instance_token_repo: Arc<dyn IInstanceTokenRepository>,
+    /// In-memory validator for the single installation token.
+    pub instance_token_validator: Arc<InstanceTokenValidator>,
     /// Provider repository (exposed for the mint-time model-availability guard).
     pub provider_repo: Arc<dyn IProviderRepository>,
     /// Unified loopback supply for NomiFun's managed free models.
@@ -2338,17 +2338,17 @@ impl AppServices {
         let user_repo: Arc<dyn IUserRepository> =
             Arc::new(SqliteUserRepository::new(database.pool().clone()));
 
-        // Per-companion Remote front-door tokens: the repo persists each
-        // companion's token hash; the validator caches `token -> companion_id`
-        // in memory, hydrated from the DB at boot. An empty map means the front
-        // door stays closed until a token is minted.
-        let companion_token_repo: Arc<dyn ICompanionTokenRepository> =
-            Arc::new(SqliteCompanionTokenRepository::new(database.pool().clone()));
-        let initial_tokens = companion_token_repo.list_all().await.unwrap_or_else(|e| {
-            tracing::warn!("failed to load companion access tokens at boot (Remote front door stays closed until a token is minted): {e}");
-            Vec::new()
+        // The Remote front door belongs to this installation. It has one token
+        // hash and never resolves a token to a companion identity.
+        let instance_token_repo: Arc<dyn IInstanceTokenRepository> =
+            Arc::new(SqliteInstanceTokenRepository::new(database.pool().clone()));
+        let initial_token = instance_token_repo.get().await.unwrap_or_else(|error| {
+            tracing::warn!(
+                "failed to load the installation access token at boot (Remote front door stays closed until a token is minted): {error}"
+            );
+            None
         });
-        let companion_token_validator = Arc::new(CompanionTokenValidator::new(initial_tokens));
+        let instance_token_validator = Arc::new(InstanceTokenValidator::new(initial_token));
 
         // Resolve JWT secret: env var → installation-owner DB field → random generation
         let env_secret = std::env::var("JWT_SECRET").ok();
@@ -2898,31 +2898,19 @@ impl AppServices {
                 )
             })?;
 
-        // Headless seed: bind a Remote access token to the default companion so an
-        // operator can configure the front door via env on a headless server.
-        // (Desktop mints per-companion tokens via /api/webui/companions/{id}/access-token.)
-        if let Ok(seed) = std::env::var("NOMIFUN_COMPANION_TOKEN") {
+        // Headless seed for the installation-scoped Remote front door. It is
+        // independent of companion creation and model/profile configuration.
+        if let Ok(seed) = std::env::var("NOMIFUN_ACCESS_TOKEN") {
             let seed = seed.trim();
-            if !seed.is_empty() && companion_token_validator.resolve(seed).is_none() {
-                match companion_service.default_companion_id().await {
-                    Some(default_id) => {
-                        let default_id = nomifun_common::CompanionId::parse(default_id)
-                            .map_err(|error| anyhow::anyhow!("default companion has invalid id: {error}"))?;
-                        let hash = nomifun_auth::token_sha256_hex(seed);
-                        if let Err(e) = companion_token_repo
-                            .upsert_for_companion(&default_id, &hash)
-                            .await
-                        {
-                            tracing::warn!("failed to persist NOMIFUN_COMPANION_TOKEN seed: {e}");
-                        }
-                        companion_token_validator.insert_token(default_id.clone(), hash);
-                        tracing::info!(
-                            "Remote access token seeded from NOMIFUN_COMPANION_TOKEN, bound to default companion {default_id}"
-                        );
-                    }
-                    None => tracing::warn!(
-                        "NOMIFUN_COMPANION_TOKEN set but no companion exists to bind it to; create a companion first"
-                    ),
+            if !seed.is_empty() && !instance_token_validator.validate(seed) {
+                let hash = nomifun_auth::token_sha256_hex(seed);
+                if let Err(error) = instance_token_repo.set(&hash).await {
+                    tracing::warn!("failed to persist NOMIFUN_ACCESS_TOKEN seed: {error}");
+                } else {
+                    instance_token_validator.set_token(hash);
+                    tracing::info!(
+                        "Remote access token seeded from NOMIFUN_ACCESS_TOKEN for this NomiFun Desktop installation"
+                    );
                 }
             }
         }
@@ -3084,8 +3072,8 @@ impl AppServices {
             authoritative_user_id,
             jwt_service: Arc::new(JwtService::new(secret.clone())),
             user_repo,
-            companion_token_repo,
-            companion_token_validator,
+            instance_token_repo,
+            instance_token_validator,
             provider_repo: provider_repo_for_services,
             managed_model_service,
             _managed_model_server: managed_model_server,

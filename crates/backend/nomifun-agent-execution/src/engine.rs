@@ -254,7 +254,7 @@ impl AgentExecutionEngine {
     }
 
     /// Create an execution for an authenticated Agent identity that does not
-    /// have a Conversation boundary (for example a Remote companion token).
+    /// have a Conversation boundary (for example a Remote installation token).
     /// The optional frozen preset enriches the immutable lead Participant; no
     /// synthetic Conversation is created and terminal reporting therefore
     /// cannot trigger an extra model turn.

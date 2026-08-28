@@ -5,7 +5,12 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
-No unreleased changes yet.
+- **Remote MCP and REST access is now installation-scoped.** NomiFun Desktop
+  issues one high-privilege access token at `/api/webui/access-token`; it no
+  longer binds to, impersonates, or inherits configuration from a companion.
+  Migration 058 invalidates legacy companion tokens instead of silently
+  widening their authority. Headless deployments and `nomicore call` now use
+  `NOMIFUN_ACCESS_TOKEN`.
 
 ## v0.7.4 - 2026-08-28
 

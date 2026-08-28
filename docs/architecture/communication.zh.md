@@ -148,26 +148,26 @@ MCP 服务器对外暴露引擎可调用的工具与资源。当前 `nomifun-app
 - Requirement 与 Knowledge 服务器是有作用域的内部 MCP 服务器；
 - 平台 Gateway 工具通过 `nomifun-gateway` 传输；
 - Browser / Computer 桥按 feature gate 启用；
-- 公开 `/mcp` 与 `/mcp-agent` 由 `nomifun-public` 提供，并使用 companion token 认证。
+- 公开 `/mcp` 与 `/mcp-agent` 由 `nomifun-public` 提供，并使用安装令牌认证。
 
 内部 stdio bridge 不信任调用方提交的 user id 或 Conversation 持久标记。宿主在
 服务端派生精确作用域，只向子进程签发带作用域、有效期和签名的能力声明。签名根
 始终留在父进程内，不序列化进运行时 DTO、数据库行或子进程配置。公开能力入口使用
-独立的 companion token 边界，不继承内部宿主能力声明。
+独立的安装令牌边界，不继承内部宿主能力声明。
 
 针对 HTTP MCP 服务器的 OAuth 流程由 `nomifun-mcp::oauth_service` 处理（PKCE、回调 URI、token 存储）。加密后的 token 通过 AES-GCM 落入 SQLite 的 `oauth_tokens` 仓库（参见 `nomifun-common::crypto::{encrypt_string, decrypt_string}`）。
 
 ## 公开能力入口
 
-完整 app router 在普通 `/api` browser-auth 树之外挂载三类 companion-token
+完整 app router 在普通 `/api` browser-auth 树之外挂载三类安装令牌
 认证入口：
 
-- `/mcp`：面向 companion 身份的通用 MCP profile；
+- `/mcp`：面向安装 owner 的通用 MCP profile；
 - `/mcp-agent`：策划过的 agent profile；
 - `/v1`：REST 能力适配器，可选择 agent profile。
 
-Token 按 companion 发放。调用方以该 companion 身份行动，并继承它关联的
-profile、模型 / 人格选择与作用域能力。
+每个安装只有一枚有效 Token。调用方以安装 owner 身份行动，不隐式绑定伙伴，
+也不继承伙伴 profile、模型 / 人格、知识绑定或活动会话。
 
 ## 快速查表：事件 / 传输
 

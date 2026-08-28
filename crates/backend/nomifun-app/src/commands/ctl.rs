@@ -4,8 +4,8 @@
 //! `call` is a thin HTTP client to a RUNNING instance's REST `/v1`
 //! adapter (they do NOT boot a second backend — the exclusive `server.lock`
 //! forbids that). Endpoint + token come from `--url`/`--token` or the
-//! `NOMIFUN_URL` / `NOMIFUN_COMPANION_TOKEN` env vars (the token is a
-//! per-companion access token; the caller runs as the bound companion).
+//! `NOMIFUN_URL` / `NOMIFUN_ACCESS_TOKEN` env vars. The token authenticates
+//! the NomiFun Desktop installation owner and never selects a companion.
 
 use std::process::ExitCode;
 
@@ -34,11 +34,11 @@ fn resolve_endpoint(url: Option<String>, token: Option<String>) -> Result<(Strin
         .filter(|u| !u.is_empty())
         .unwrap_or_else(|| DEFAULT_URL.to_owned());
     let token = token
-        .or_else(|| std::env::var("NOMIFUN_COMPANION_TOKEN").ok())
+        .or_else(|| std::env::var("NOMIFUN_ACCESS_TOKEN").ok())
         .filter(|t| !t.trim().is_empty())
         .ok_or_else(|| {
-            "no access token: pass --token or set NOMIFUN_COMPANION_TOKEN (mint one in the \
-             desktop app per companion via POST /api/webui/companions/{id}/access-token)"
+            "no access token: pass --token or set NOMIFUN_ACCESS_TOKEN (mint the installation \
+             token in NomiFun Desktop via POST /api/webui/access-token)"
                 .to_owned()
         })?;
     Ok((base, token))

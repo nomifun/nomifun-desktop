@@ -1,5 +1,5 @@
 //! JWT authentication, password hashing, CSRF protection, rate limiting, and auth middleware.
-mod companion_token;
+mod instance_token;
 mod cookie;
 mod csrf;
 mod error;
@@ -23,8 +23,8 @@ pub use jwt::{
     resolve_jwt_secret,
 };
 
-// Per-companion API token (Remote front door)
-pub use companion_token::{CompanionTokenValidator, token_sha256_hex};
+// Installation-scoped API token (Remote front door)
+pub use instance_token::{InstanceTokenValidator, token_sha256_hex};
 
 // Password service
 pub use password::{

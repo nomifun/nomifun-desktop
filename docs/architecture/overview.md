@@ -168,7 +168,7 @@ same boot helpers (`init_environment`, `init_data_layer`, `AppServices::from_con
 `create_router`) and adds the SPA fallback plus first-run admin provisioning
 (`ensure_admin_credentials`).
 
-The full app router also exposes companion-token authenticated public fronts at
+The full app router also exposes installation-token authenticated public fronts at
 `/mcp`, `/mcp-agent`, and `/v1`. These are intentionally separate from the
 normal `/api` browser-auth tree and are mounted in
 [`crates/backend/nomifun-app/src/router/routes.rs`](../../crates/backend/nomifun-app/src/router/routes.rs).

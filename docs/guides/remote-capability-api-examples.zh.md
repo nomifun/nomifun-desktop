@@ -1,10 +1,10 @@
 # Remote 能力 API · 对接示例
 
-本文配套 [Remote 能力 API](./remote-capability-api.zh.md)。所有远程示例使用一枚绑定到具体伙伴的访问令牌；调用方只应使用实时发现到的 Remote 工具。
+本文配套 [Remote 能力 API](./remote-capability-api.zh.md)。所有示例使用当前 NomiFun Desktop 安装直接签发的访问令牌；令牌不绑定伙伴，调用方只应使用实时发现到的 Remote 工具。
 
 ```bash
 export HOST=127.0.0.1:25808
-export TOKEN=<伙伴访问令牌>
+export TOKEN=<NomiFun Desktop 访问令牌>
 ```
 
 ## MCP 客户端
@@ -18,7 +18,7 @@ Claude Code、Cursor 或其他支持 Streamable HTTP 的 MCP 客户端可以配�
       "type": "streamable-http",
       "url": "http://127.0.0.1:25808/mcp-agent",
       "headers": {
-        "Authorization": "Bearer <伙伴访问令牌>"
+        "Authorization": "Bearer <NomiFun Desktop 访问令牌>"
       }
     }
   }
@@ -107,7 +107,7 @@ print(response.json())
 
 ```bash
 export NOMIFUN_URL=http://$HOST
-export NOMIFUN_COMPANION_TOKEN=$TOKEN
+export NOMIFUN_ACCESS_TOKEN=$TOKEN
 
 nomicore tools
 nomicore call <tool_name> '{"argument":"value"}'
@@ -126,13 +126,13 @@ n8n、Zapier、Make 等自动化平台可直接调用 `POST /v1/tools/{name}`。
 
 ## Agent 协作契约的边界
 
-持久化 Agent 协作只有一套按权限收敛的契约：`nomi_delegate` 创建 execution，`nomi_execution_get` 读取 execution，`nomi_execution_update` 修改计划或生命周期。可信本地所有者可以铸造安装所有者绑定的伙伴令牌，其 Remote 工具列表会包含这三项能力；Remote 委派会把伙伴记录为创建者，后续读取和修改只能访问该伙伴创建的 execution。次级用户在任何 surface 上都看不到这三项能力。
+持久化 Agent 协作只有一套按权限收敛的契约：`nomi_delegate` 创建 execution，`nomi_execution_get` 读取 execution，`nomi_execution_update` 修改计划或生命周期。可信本地所有者可以签发安装令牌，其 Remote 工具列表会包含这三项能力；Remote 委派使用与 Desktop 相同的安装所有者边界，不再记录或推断伙伴创建者。次级用户在任何 surface 上都看不到这三项能力。
 
-远程客户端应以 `tools/list` 的实际发现结果为准。伙伴令牌是安装所有者权限的高权限委派，不能交给不可信客户端，也不能借它访问其他伙伴或其他用户的 execution。
+远程客户端应以 `tools/list` 的实际发现结果为准。安装令牌是安装所有者权限的高权限凭据，不能交给不可信客户端；伙伴的创建、删除或切换不会改变令牌身份。
 
 ## 安全提醒
 
-- 持有伙伴令牌近似拥有该实例的远程代码执行权限，只能交给可信客户端。
+- 持有安装令牌近似拥有该 NomiFun Desktop 的远程代码执行权限，只能交给可信客户端。
 - 公网暴露时必须使用 TLS、网络访问控制和速率限制。
 - 敏感能力默认不在 Remote surface 暴露。
 - 令牌只能从可信本地上下文吊销或轮换；明文只在创建时显示一次。

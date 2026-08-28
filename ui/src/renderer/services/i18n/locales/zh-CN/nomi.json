@@ -267,16 +267,6 @@
     "merged": "已合并",
     "source_merge": "合并产生"
   },
-  "remote": {
-    "accessTitle": "远程访问",
-    "accessHint": "桌面应用之外接入 {{companionName}}：外部 MCP / REST 客户端凭访问令牌以它的身份连接。",
-    "accessTokenRow": "访问令牌",
-    "accessTokenGrant": "持有令牌者会以 {{companionName}} 的身份接入远程接口：读写它的记忆、调用它的技能、代它发起对话，以及远程接口开放的其他能力 —— 等同于交出这只伙伴的完整操作权限。请当作密码保管，泄露后立即吊销。",
-    "accessRegenerateTitle": "重新生成访问令牌",
-    "accessRegenerateConfirm": "重新生成会立即使旧令牌失效，正在使用它的外部客户端会断开连接。确定继续吗？",
-    "accessRegenerateUnknownConfirm": "暂时无法确认这只伙伴是否已有访问令牌。如果已有，生成新令牌会立即使旧令牌失效，正在使用它的外部客户端会断开连接。确定继续吗？",
-    "accessRevokeTitle": "吊销访问令牌"
-  },
   "evolution": {
     "loadFailed": "暂时读不到学习与进化设置。",
     "learningDesc": "这个伙伴会按下面的节奏回顾你的工作记录，把提炼出的记忆记在自己名下。",

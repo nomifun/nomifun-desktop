@@ -9,22 +9,21 @@ import React, { useEffect, useRef, useState } from 'react';
 
 import RemoteConnectSection from './RemoteConnectSection';
 import type { WorkspaceTabProps } from '../../types';
-import AccessTokenSection from './AccessTokenSection';
 import RobotConnectSection from './RobotConnectSection';
 import { usePairingAttention } from './usePairingAttention';
 
 /**
- * 远程控制 tab：从桌面应用之外触达这只伙伴的三条路径 —— IM 渠道（谁来接待）、
- * 实体机器人（硬件设备用它的人格说话）与远程访问令牌（外部客户端以它的身份接入）。
+ * 远程控制 tab：从桌面应用之外触达这只伙伴的两条路径 —— IM 渠道（谁来接待）
+ * 与实体机器人（硬件设备用它的人格说话）。开发能力令牌属于桌面安装，不属于伙伴。
  *
- * Remote control tab. Three sections, one idea each: the IM channel bots this
- * companion greets on, the physical robots bound to it, and the per-companion
- * access token for external MCP / REST clients. Attention (the strip dot) means
+ * Remote control tab. The IM channel bots and physical robots are companion
+ * bindings. Remote MCP / REST credentials live only in Open Capabilities at
+ * installation scope. Attention (the strip dot) means
  * a pairing request is waiting for approval, or a bound robot cannot reach this
  * machine because LAN access is off.
  */
 const RemoteTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAttentionChange }) => {
-  const { profile, status } = companion;
+  const { profile } = companion;
 
   const pendingPairings = usePairingAttention(profile ? companionId : null);
   const [robotAttention, setRobotAttention] = useState(false);
@@ -54,11 +53,6 @@ const RemoteTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAtte
         companionId={profile.companion_id}
         companionName={profile.name}
         onAttentionChange={setRobotAttention}
-      />
-      <AccessTokenSection
-        companionId={profile.companion_id}
-        companionName={profile.name}
-        modelConfigured={status?.model_configured ?? null}
       />
     </div>
   );

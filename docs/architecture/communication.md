@@ -92,7 +92,7 @@ MCP injection differs by session and by caller:
 - requirement and knowledge servers are scoped internal MCP servers,
 - platform Gateway tools are transported through `nomifun-gateway`,
 - browser/computer bridges are feature-gated,
-- public `/mcp` and `/mcp-agent` are companion-token authenticated fronts from
+- public `/mcp` and `/mcp-agent` are installation-token authenticated fronts from
   `nomifun-public`.
 
 Internal stdio bridges do not trust caller-supplied user ids or persisted
@@ -100,19 +100,19 @@ Conversation flags. The host derives an exact server-side scope and gives a
 child process only a scoped, expiring, signed capability claim. Claim roots stay
 inside the parent process; they are not serialized into runtime DTOs, database
 rows, or child configuration. Public capability fronts use their own
-companion-token boundary and do not inherit the internal host claim.
+installation-token boundary and do not inherit the internal host claim.
 
 ## Public Capability Fronts
 
-The full app router mounts three companion-token authenticated surfaces outside
+The full app router mounts three installation-token authenticated surfaces outside
 the normal `/api` browser-auth tree:
 
-- `/mcp`: general MCP profile for a companion identity,
+- `/mcp`: general MCP profile for the installation owner,
 - `/mcp-agent`: curated agent profile,
 - `/v1`: REST capability adapter, with optional agent profile selection.
 
-Tokens are per companion. A caller acts as that companion and inherits the
-associated profile, model/persona choices, and scoped capabilities.
+Each installation has one token. A caller acts as the installation owner with
+no implicit companion, profile, persona, knowledge binding, or active thread.
 
 ## Quick Lookup
 

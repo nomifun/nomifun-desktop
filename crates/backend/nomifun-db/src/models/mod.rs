@@ -4,7 +4,7 @@ mod agent_execution_template;
 mod attachment;
 mod channel;
 mod client_preference;
-mod companion_token;
+mod instance_token;
 mod conversation;
 mod conversation_artifact;
 mod cron_job;
@@ -50,7 +50,7 @@ pub use channel::{
     default_owner_domain,
 };
 pub use client_preference::ClientPreference;
-pub use companion_token::CompanionApiTokenRow;
+pub use instance_token::InstanceApiTokenRow;
 pub use conversation::{
     ConversationDeliveryNotifyRow, ConversationDeliveryReceiptRow, ConversationRow,
     CreativeStudioAgentSessionBindingRow,

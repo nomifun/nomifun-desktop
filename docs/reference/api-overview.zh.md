@@ -94,7 +94,7 @@ NomiFun 启动时进入三种鉴权策略之一：
 | 小程序 | `GET/POST /api/miniapps`、`POST /api/miniapps/validate`、`POST /api/miniapps/import`、`GET/PUT/DELETE /api/miniapps/{miniapp_id}`、`POST /api/miniapps/{miniapp_id}/publish`、`POST /api/miniapps/{miniapp_id}/workspace`（幂等物化工作副本并返回其绝对源码路径；不创建任何会话） | 仅实例主人 | [`nomifun-miniapp/src/routes.rs`](../../crates/backend/nomifun-miniapp/src/routes.rs) |
 | 小程序运行（直出已发布快照） | `GET /api/miniapps/{miniapp_id}/serve` | 公共 —— 有意免鉴权：iframe 子资源请求不携带信任头，鉴权之下运行页与会话内预览根本渲染不出来；防护依赖不可猜测的 UUIDv7（与 `GET /api/creative-studio/files/{asset_id}` 使用同一 capability-URL 模式） | 同上 |
 | 伙伴 | `/api/companion/*` | 已鉴权 | [`nomifun-companion/src/routes.rs`](../../crates/backend/nomifun-companion/src/routes.rs) |
-| WebUI/public 能力 companion token | `/api/webui/companions/{id}/access-token` | 已鉴权 / 本地 WebUI admin 流 | [`router/companion_token_routes.rs`](../../crates/backend/nomifun-app/src/router/companion_token_routes.rs) |
+| NomiFun Desktop 访问令牌 | `/api/webui/access-token` | 本地信任 / 安装 owner 流 | [`router/instance_token_routes.rs`](../../crates/backend/nomifun-app/src/router/instance_token_routes.rs) |
 | 浏览器平台管理（Agent-only 受管浏览器） | `/api/browser/*` | 已鉴权；改变状态的 HTTP 请求受 CSRF 保护；仅安装 owner 可用的路由另有权限门禁 | [`router/browser_management.rs`](../../crates/backend/nomifun-app/src/router/browser_management.rs)、[`router/browser_login.rs`](../../crates/backend/nomifun-app/src/router/browser_login.rs) |
 | 文件系统 | `/api/fs/*` | 已鉴权 | [`nomifun-file/src/routes.rs`](../../crates/backend/nomifun-file/src/routes.rs) |
 | Office 预览 | `/api/word-preview/*`、`/api/excel-preview/*`、`/api/ppt-preview/*`、`/api/preview-history/*` | 已鉴权 | [`nomifun-office/src/routes.rs`](../../crates/backend/nomifun-office/src/routes.rs) |
@@ -104,9 +104,9 @@ NomiFun 启动时进入三种鉴权策略之一：
 | 连接探测（Bedrock 等） | `/api/bedrock/test-connection` | 已鉴权 | [`nomifun-system/src/bedrock_probe/routes.rs`](../../crates/backend/nomifun-system/src/bedrock_probe/routes.rs) |
 | Shell 辅助 + STT | `/api/shell/*`、`/api/stt` | 已鉴权 | [`nomifun-shell/src/routes.rs`](../../crates/backend/nomifun-shell/src/routes.rs) |
 | 公共资源（logo） | `/api/assets/logos/*` | 公共 | [`nomifun-assets/src/routes.rs`](../../crates/backend/nomifun-assets/src/routes.rs) |
-| Public MCP front door | `/mcp/*` | companion-token / 已配置 public auth | [`nomifun-public/src/router.rs`](../../crates/backend/nomifun-public/src/router.rs) |
-| Public MCP agent front door | `/mcp-agent/*` | companion-token / 已配置 public auth | [`nomifun-public/src/router.rs`](../../crates/backend/nomifun-public/src/router.rs) |
-| Remote capability REST API | `/v1/*` | companion-token | [`nomifun-public/src/rest.rs`](../../crates/backend/nomifun-public/src/rest.rs) |
+| Public MCP front door | `/mcp/*` | 安装令牌 | [`nomifun-public/src/router.rs`](../../crates/backend/nomifun-public/src/router.rs) |
+| Public MCP agent front door | `/mcp-agent/*` | 安装令牌 | [`nomifun-public/src/router.rs`](../../crates/backend/nomifun-public/src/router.rs) |
+| Remote capability REST API | `/v1/*` | 安装令牌 | [`nomifun-public/src/rest.rs`](../../crates/backend/nomifun-public/src/rest.rs) |
 | 实时 WebSocket | `/ws` | 已鉴权（token 通过 `Sec-WebSocket-Protocol` 或查询串传递） | [`nomifun-realtime/src/handler.rs`](../../crates/backend/nomifun-realtime/src/handler.rs) |
 
 如需各路由具体支持的方法，请阅读对应的 `routes.rs` 文件——每个 router

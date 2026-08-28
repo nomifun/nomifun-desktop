@@ -30,8 +30,8 @@ a release branch explicitly says it is supported.
 - Do not expose the embedded desktop backend port directly. Use WebUI Remote
   Access or `nomifun-web`, both of which provide authenticated surfaces.
 - Use TLS when exposing `nomifun-web` or remote capability APIs over a network.
-- Treat companion access tokens as full-control credentials for the scoped
-  companion and its enabled capabilities.
+- Treat the NomiFun Desktop access token as a full-control installation-owner
+  credential. It is not scoped to any companion.
 - Prefer least-privilege provider keys, MCP servers, and workspace paths.
 - Review full-auto terminal permissions before binding them to AutoWork.
 
