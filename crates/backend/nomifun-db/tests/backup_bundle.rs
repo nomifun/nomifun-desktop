@@ -1305,69 +1305,6 @@ async fn restore_rejects_noncanonical_row_ids_after_checksum_rewrite() {
 }
 
 #[tokio::test]
-async fn restore_rejects_noncanonical_external_owner_ids_after_checksum_rewrite() {
-    let dir = tempfile::tempdir().unwrap();
-    let bundle = dir.path().join("backup.nomifun");
-    let database = init_database(&dir.path().join("source.db")).await.unwrap();
-    sqlx::query(
-        "INSERT INTO companion_access_token (companion_id, token_hash, created_at) \
-         VALUES (?, 'hash', 1)",
-    )
-    .bind(nomifun_common::generate_id())
-    .execute(database.pool())
-    .await
-    .unwrap();
-    create_backup_bundle(
-        &database,
-        &bundle,
-        &uuid::Uuid::now_v7().to_string(),
-        BackupObjectGraph::full_database(),
-    )
-    .await
-    .unwrap();
-    database.close().await;
-
-    let bundle_pool = SqlitePool::connect_with(
-        SqliteConnectOptions::new()
-            .filename(bundle.join(DATABASE_FILE))
-            .create_if_missing(false),
-    )
-    .await
-    .unwrap();
-    let mut connection = bundle_pool.acquire().await.unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = ON")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE companion_access_token SET companion_id = 'companion_bad'")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("PRAGMA ignore_check_constraints = OFF")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    drop(connection);
-    bundle_pool.close().await;
-    rewrite_database_manifest_entry(&bundle);
-
-    let destination = dir.path().join("must-stay-absent");
-    let error = restore_backup_data_dir(&bundle, &destination)
-    .await
-    .unwrap_err();
-    assert!(
-        format!("{error}").contains("companion_access_token.companion_id")
-            || format!("{error}").contains("canonical")
-            || format!("{error}").contains("CHECK constraint failed"),
-        "unexpected validation failure: {error}"
-    );
-    assert!(
-        !destination.exists(),
-        "ExternalOwner must skip only parent existence, never UUID format"
-    );
-}
-
-#[tokio::test]
 async fn traversal_and_undeclared_payloads_fail_closed() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.db");

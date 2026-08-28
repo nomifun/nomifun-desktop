@@ -135,7 +135,7 @@ pub struct CallerCtx {
     /// Resolved approval mode for the calling agent session.
     pub session_mode: Option<String>,
     /// `true` when the caller is an external network consumer reaching the
-    /// platform through the Remote front door (the "外部伙伴" surface). Takes
+    /// platform through the installation-owner Remote front door. Takes
     /// precedence over `channel_platform` in [`CallerCtx::surface`]. Defaults
     /// `false` so every existing (desktop/channel) construction site is
     /// unaffected.
@@ -172,15 +172,14 @@ impl Default for CallerCtx {
 impl CallerCtx {
     /// Build the identity context for an authenticated Remote caller.
     ///
-    /// Both values cross process/network boundaries as strings, so they are
-    /// validated here before any capability can observe them.
-    pub fn try_remote(user_id: &str, companion_id: &str) -> Result<Self, String> {
+    /// The installation owner id crosses the process/network boundary as a
+    /// string, so it is validated here before any capability can observe it.
+    /// Remote authentication never selects or impersonates a companion.
+    pub fn try_remote_owner(user_id: &str) -> Result<Self, String> {
         Ok(Self {
             conversation_id: None,
             user_id: UserId::parse(user_id).map_err(|error| error.to_string())?,
-            companion_id: Some(
-                CompanionId::parse(companion_id).map_err(|error| error.to_string())?,
-            ),
+            companion_id: None,
             channel_platform: None,
             session_mode: None,
             remote: true,

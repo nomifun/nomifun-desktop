@@ -11,7 +11,7 @@ pub mod cron;
 pub mod customer_service;
 pub mod customer_service_search;
 pub mod idmm_intervention;
-pub mod companion_token;
+pub mod instance_token;
 pub mod knowledge;
 pub mod knowledge_entry;
 pub mod knowledge_source;
@@ -39,7 +39,7 @@ mod sqlite_creation_task;
 mod sqlite_cron;
 mod sqlite_customer_service;
 mod sqlite_idmm_intervention;
-mod sqlite_companion_token;
+mod sqlite_instance_token;
 mod sqlite_knowledge;
 mod sqlite_knowledge_entry;
 mod sqlite_knowledge_source;
@@ -96,7 +96,7 @@ pub use idmm_intervention::{
     MAX_IDMM_ACTION_FAILURE_REASON_CHARS, PER_TARGET_CAP, PER_USER_ACTIVITY_CAP,
     ReserveIdmmActionParams, TTL_MS,
 };
-pub use companion_token::ICompanionTokenRepository;
+pub use instance_token::IInstanceTokenRepository;
 pub use knowledge::IKnowledgeRepository;
 pub use knowledge_entry::{
     IKnowledgeEntryRepository, KnowledgeEntryMutation, KnowledgeProjectionReplacement,
@@ -141,7 +141,7 @@ pub use sqlite_creation_task::SqliteCreationTaskRepository;
 pub use sqlite_cron::SqliteCronRepository;
 pub use sqlite_customer_service::SqliteCustomerServiceRepository;
 pub use sqlite_idmm_intervention::SqliteIdmmInterventionRepository;
-pub use sqlite_companion_token::SqliteCompanionTokenRepository;
+pub use sqlite_instance_token::SqliteInstanceTokenRepository;
 pub use sqlite_knowledge::SqliteKnowledgeRepository;
 pub use sqlite_knowledge_tree_operation::SqliteKnowledgeTreeOperationRepository;
 pub use sqlite_mcp_server::SqliteMcpServerRepository;

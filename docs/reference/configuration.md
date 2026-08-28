@@ -69,7 +69,7 @@ These are read by the backend regardless of which host embeds it.
 | `NOMIFUN_HTTPS` | `nomifun-auth::CookieConfig` | When truthy, session and CSRF cookies get the `Secure` flag and `SameSite=Strict`. Set it whenever the app is reached over HTTPS (TLS reverse proxy, etc.). Default is `false` → no `Secure` flag, `SameSite=Lax`. |
 | `SHELL` | agent engine (Linux/macOS) | Shell used when the agent engine spawns child processes. On Linux servers under systemd, set this explicitly (the system account often has no `$SHELL`). |
 | `NOMIFUN_URL` | `nomicore call` | Base URL for a running instance when invoking Remote capabilities. |
-| `NOMIFUN_COMPANION_TOKEN` | `nomicore call` | Companion access token used against `/v1` Remote capability routes. |
+| `NOMIFUN_ACCESS_TOKEN` | `nomifun-app`, `nomicore call` | Installation-scoped access token for `/mcp`, `/mcp-agent`, and `/v1`; never companion-bound. |
 
 There is no `SENTRY_DSN` integration: the codebase does not read that environment variable.
 

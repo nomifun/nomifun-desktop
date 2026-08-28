@@ -6,7 +6,7 @@
 //!
 //! DangerTier: observe/screenshot/cursor_position/list_windows/wait are `Read`;
 //! input-synthesis actions (click/type/key/scroll/launch/…) are `Write` — which
-//! is Allowed on every surface incl. Remote, so an external "外部伙伴" can drive
+//! is Allowed on every surface incl. Remote, so an authenticated installation owner can drive
 //! the desktop (same posture as the browser `act` tools).
 
 use std::sync::Arc;

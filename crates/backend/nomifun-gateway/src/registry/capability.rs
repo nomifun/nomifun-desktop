@@ -79,14 +79,14 @@ pub enum AccessScope {
 
 /// Which kind of session is calling. Derived from [`CallerCtx`]: a channel
 /// platform marks an external IM session; otherwise it is a local desktop
-/// session. `Remote` is a companion-token-authenticated network caller.
+/// session. `Remote` is an installation-token-authenticated network caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Surface {
     /// Local desktop session (companion thread or a plain local conversation).
     Desktop,
     /// External IM channel Agent session (telegram / lark / …).
     Channel,
-    /// Remote REST/MCP companion session.
+    /// Remote REST/MCP installation-owner session.
     Remote,
 }
 

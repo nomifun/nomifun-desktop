@@ -72,7 +72,7 @@ Two things that are *not* conversation engines but are often confused with one:
   backend does not interpret their protocol or own their turn state; it owns the
   pseudo-terminal. See [`../guides/terminal.md`](../guides/terminal.md).
 - **Public capability fronts.** External agents and scripts call *into* NomiFun
-  through companion-token authenticated `/mcp`, `/mcp-agent`, or `/v1`. That is
+  through installation-token authenticated `/mcp`, `/mcp-agent`, or `/v1`. That is
   the inbound direction: NomiFun is the tool provider, not the engine host.
 
 ## MCP And Tool Injection

@@ -6,7 +6,7 @@
 //! - `POST /v1/tools/{name}`     — invoke a capability (body = its JSON args)
 //! - `GET  /v1/openapi.json`     — OpenAPI 3.1 doc generated from the schemas
 //!
-//! Token-gated by the same companion-token middleware as `/mcp`. Mount with
+//! Token-gated by the same installation-token middleware as `/mcp`. Mount with
 //! `.nest("/v1", ..)` (never `.merge`, same reason as the MCP router).
 
 use std::sync::Arc;
@@ -20,7 +20,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use nomifun_auth::CompanionTokenValidator;
+use nomifun_auth::InstanceTokenValidator;
+use nomifun_common::UserId;
 use nomifun_gateway::{CallerCtx, GatewayDeps, Registry, Surface, ToolSpec};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -28,7 +29,7 @@ use std::convert::Infallible;
 
 use crate::idempotency::{CONVERSATION_SEND_TOOL, remote_operation_id};
 use crate::router::{
-    PublicMcpState, RemoteCompanion, companion_token_middleware,
+    PublicMcpState, RemoteInstanceOwner, instance_token_middleware,
 };
 
 #[derive(Clone)]
@@ -83,13 +84,11 @@ fn specs_for_query(q: &ProfileQuery) -> Vec<ToolSpec> {
 }
 
 fn remote_caller(
-    state: &RestState,
-    companion_id: &nomifun_common::CompanionId,
+    owner_user_id: &UserId,
     tool_name: &str,
     headers: &HeaderMap,
 ) -> Result<CallerCtx, Response> {
-    let mut caller =
-        CallerCtx::try_remote(&state.deps.authoritative_user_id, companion_id.as_str())
+    let mut caller = CallerCtx::try_remote_owner(owner_user_id.as_str())
             .map_err(|error| {
                 (
                     StatusCode::UNAUTHORIZED,
@@ -101,7 +100,7 @@ fn remote_caller(
             })?;
     if tool_name == CONVERSATION_SEND_TOOL {
         caller.operation_id = Some(
-            remote_operation_id(headers, companion_id.as_str(), tool_name).map_err(
+            remote_operation_id(headers, owner_user_id.as_str(), tool_name).map_err(
                 |error| {
                     (
                         StatusCode::BAD_REQUEST,
@@ -136,7 +135,7 @@ async fn call_tool(
     State(state): State<RestState>,
     Path(name): Path<String>,
     Query(q): Query<ProfileQuery>,
-    Extension(RemoteCompanion(companion_id)): Extension<RemoteCompanion>,
+    Extension(RemoteInstanceOwner(owner_user_id)): Extension<RemoteInstanceOwner>,
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
@@ -153,7 +152,7 @@ async fn call_tool(
         )
             .into_response();
     }
-    let ctx = match remote_caller(&state, &companion_id, &name, &headers) {
+    let ctx = match remote_caller(&owner_user_id, &name, &headers) {
         Ok(ctx) => ctx,
         Err(response) => return response,
     };
@@ -189,7 +188,7 @@ async fn stream_tool(
     State(state): State<RestState>,
     Path(name): Path<String>,
     Query(q): Query<ProfileQuery>,
-    Extension(RemoteCompanion(companion_id)): Extension<RemoteCompanion>,
+    Extension(RemoteInstanceOwner(owner_user_id)): Extension<RemoteInstanceOwner>,
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
@@ -208,7 +207,7 @@ async fn stream_tool(
         )
             .into_response();
     }
-    let ctx = match remote_caller(&state, &companion_id, &name, &headers) {
+    let ctx = match remote_caller(&owner_user_id, &name, &headers) {
         Ok(ctx) => ctx,
         Err(response) => return response,
     };
@@ -272,7 +271,7 @@ async fn openapi(Query(q): Query<ProfileQuery>) -> Json<Value> {
         "info": {
             "title": "NomiFun Remote Capability API",
             "version": "v1",
-            "description": "External-companion access to NomiFun platform capabilities. All operations require Authorization: Bearer <companion access token>."
+            "description": "Installation-owner access to NomiFun Desktop platform capabilities. All operations require Authorization: Bearer <instance access token>."
         },
         "paths": paths,
         "components": {
@@ -281,12 +280,14 @@ async fn openapi(Query(q): Query<ProfileQuery>) -> Json<Value> {
     }))
 }
 
-/// Build the REST sub-router. Mount with `.nest("/v1", ..)`; the companion-token
+/// Build the REST sub-router. Mount with `.nest("/v1", ..)`; the installation-token
 /// layer + this router's routes are then scoped to `/v1`.
 pub fn public_rest_router(
     deps: Arc<GatewayDeps>,
-    validator: Arc<CompanionTokenValidator>,
+    validator: Arc<InstanceTokenValidator>,
 ) -> Router {
+    let authoritative_user_id = UserId::parse(deps.authoritative_user_id.as_ref())
+        .expect("GatewayDeps authoritative user id must be canonical");
     Router::new()
         .route("/tools", get(list_tools))
         .route("/tools/{name}", post(call_tool))
@@ -294,8 +295,11 @@ pub fn public_rest_router(
         .route("/openapi.json", get(openapi))
         .with_state(RestState { deps })
         .layer(from_fn_with_state(
-            PublicMcpState { validator },
-            companion_token_middleware,
+            PublicMcpState {
+                validator,
+                authoritative_user_id,
+            },
+            instance_token_middleware,
         ))
 }
 

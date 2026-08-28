@@ -10,7 +10,7 @@ import { Button, Checkbox, Message, Tabs } from '@arco-design/web-react';
 import { ApiApp, Terminal, WebPage } from '@icon-park/react';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
-import CompanionAccessTokenPanel from '@/renderer/components/layout/Sider/CompanionAccessTokenPanel';
+import InstanceAccessTokenPanel from '@/renderer/components/layout/Sider/InstanceAccessTokenPanel';
 import WebuiControlPanel from '@/renderer/components/layout/Sider/WebuiControlPanel';
 import { WorkspaceFolderSelect } from '@/renderer/components/workspace';
 import { useWebuiServer } from '@/renderer/hooks/context/WebuiServerContext';
@@ -168,7 +168,7 @@ const MCP_DOMAIN_OPTIONS: McpDomainOption[] = [
     titleKey: 'settings.openCapabilities.domainCompanionTitle',
     defaultTitle: '伙伴',
     descKey: 'settings.openCapabilities.domainCompanionDesc',
-    defaultDesc: '管理伙伴、绑定、远程访问令牌和伙伴资料。',
+    defaultDesc: '管理伙伴、设备绑定和伙伴资料；访问令牌始终属于桌面安装。',
   },
   {
     id: 'channel',
@@ -219,14 +219,14 @@ const OpenCapabilitiesPage: React.FC = () => {
         type: 'streamable-http',
         url: selectedMcpUrl,
         headers: {
-          Authorization: 'Bearer <companion-access-token>',
+          Authorization: 'Bearer <nomifun-desktop-access-token>',
         },
       },
     },
   });
   const restCurl = [
     `curl ${restToolsUrl}`,
-    '  -H "Authorization: Bearer <companion-access-token>"',
+    '  -H "Authorization: Bearer <nomifun-desktop-access-token>"',
   ].join(' \\\n');
 
   const selectedDomainCount = selectedMcpDomains.length;
@@ -363,7 +363,7 @@ const OpenCapabilitiesPage: React.FC = () => {
                 />
                 {lifecycleSupported && (
                   <div className='rd-12px border border-solid border-arco-2 bg-fill-0 p-14px'>
-                    <CompanionAccessTokenPanel />
+                    <InstanceAccessTokenPanel />
                   </div>
                 )}
               </div>

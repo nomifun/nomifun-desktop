@@ -1,7 +1,7 @@
 //! Transport + auth wiring for the Remote front door.
 //!
 //! Mounts rmcp's official `StreamableHttpService` at `/mcp` and wraps it with a
-//! companion-token middleware. The host MUST mount this with `.nest("/mcp", ..)`
+//! installation-token middleware. The host MUST mount this with `.nest("/mcp", ..)`
 //! (NEVER `.merge` — see [`public_mcp_router`] for why); it then rides both the
 //! desktop loopback/LAN listeners and the headless web host, sharing service
 //! state with the SPA.
@@ -16,8 +16,8 @@ use axum::{
     middleware::{Next, from_fn, from_fn_with_state},
     response::{IntoResponse, Response},
 };
-use nomifun_auth::CompanionTokenValidator;
-use nomifun_common::CompanionId;
+use nomifun_auth::InstanceTokenValidator;
+use nomifun_common::UserId;
 use nomifun_gateway::GatewayDeps;
 use http_body_util::BodyExt;
 use rmcp::transport::streamable_http_server::{
@@ -36,26 +36,26 @@ const REMOTE_MCP_BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const REMOTE_MCP_BODY_READ_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// The companion a validated Remote token is bound to, stashed in the request
-/// extensions by [`companion_token_middleware`] and read by both adapters
+/// The installation owner authenticated by the Remote token, stashed in the
+/// request extensions by [`instance_token_middleware`] and read by both adapters
 /// (MCP via `RequestContext.extensions`→`http::request::Parts`; REST via
-/// `Extension<RemoteCompanion>`).
-#[derive(Clone, Debug)]
-pub struct RemoteCompanion(pub CompanionId);
+/// `Extension<RemoteInstanceOwner>`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteInstanceOwner(pub UserId);
 
-/// State for the companion-token middleware.
+/// State for the installation-token middleware.
 #[derive(Clone)]
 pub struct PublicMcpState {
-    pub validator: Arc<CompanionTokenValidator>,
+    pub validator: Arc<InstanceTokenValidator>,
+    pub authoritative_user_id: UserId,
 }
 
 /// Reject any request to the Remote surface that does not carry a valid
-/// per-companion API token in `Authorization: Bearer <token>`. A valid token
-/// resolves to the companion it is bound to; the resolved companion id is
-/// stashed in the request extensions as [`RemoteCompanion`] so both adapters
-/// can thread it into `CallerCtx.companion_id`. Anything else is 401. Shared by
+/// installation API token in `Authorization: Bearer <token>`. A valid token
+/// authenticates the NomiFun Desktop installation owner; it never resolves or
+/// binds a companion. The owner is stashed as [`RemoteInstanceOwner`]. Shared by
 /// the `/mcp` and `/v1` (REST) adapters.
-pub(crate) async fn companion_token_middleware(
+pub(crate) async fn instance_token_middleware(
     State(state): State<PublicMcpState>,
     request: Request,
     next: Next,
@@ -66,14 +66,14 @@ pub(crate) async fn companion_token_middleware(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
-    match state.validator.resolve(presented) {
-        Some(companion_id) => {
-            let mut request = request;
-            request.extensions_mut().insert(RemoteCompanion(companion_id));
-            next.run(request).await
-        }
-        None => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+    if !state.validator.validate(presented) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
+    let mut request = request;
+    request
+        .extensions_mut()
+        .insert(RemoteInstanceOwner(state.authoritative_user_id));
+    next.run(request).await
 }
 
 #[derive(Clone)]
@@ -173,7 +173,7 @@ pub(crate) fn response_with_request_permit(
     Response::from_parts(parts, Body::new(guarded))
 }
 
-async fn mcp_companion_token_middleware(
+async fn mcp_instance_token_middleware(
     State(state): State<McpAuthState>,
     request: Request,
     next: Next,
@@ -184,9 +184,10 @@ async fn mcp_companion_token_middleware(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
-    let Some(companion_id) = state.public.validator.resolve(presented) else {
+    if !state.public.validator.validate(presented) {
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
-    };
+    }
+    let owner_user_id = state.public.authoritative_user_id.clone();
 
     let presented_session_id = match presented_mcp_session_id(request.headers()) {
         Ok(value) => value,
@@ -203,7 +204,7 @@ async fn mcp_companion_token_middleware(
         .sessions
         .acquire_http_request_permit(
             session_id.as_ref(),
-            &companion_id,
+            &owner_user_id,
             session_id.is_none()
                 && request.method() == axum::http::Method::POST,
             request.method() == axum::http::Method::DELETE,
@@ -214,7 +215,7 @@ async fn mcp_companion_token_middleware(
         Err(RemoteHttpRequestAdmissionError::IdentityMismatch) => {
             return (
                 StatusCode::UNAUTHORIZED,
-                "session is bound to a different companion",
+                "session is bound to a different installation owner",
             )
                 .into_response();
         }
@@ -228,7 +229,9 @@ async fn mcp_companion_token_middleware(
     };
 
     let mut request = request;
-    request.extensions_mut().insert(RemoteCompanion(companion_id));
+    request
+        .extensions_mut()
+        .insert(RemoteInstanceOwner(owner_user_id));
     let response = next.run(request).await;
     match permit {
         Some(permit) => response_with_request_permit(response, permit),
@@ -237,7 +240,7 @@ async fn mcp_companion_token_middleware(
 }
 
 /// Build the Remote front-door sub-router (MCP Streamable-HTTP) gated by the
-/// companion token. The caller MUST mount it with `.nest("/mcp", ..)` (NOT
+/// installation token. The caller MUST mount it with `.nest("/mcp", ..)` (NOT
 /// `.merge`): `nest` scopes both the token-auth layer and this router's
 /// fallback service to the `/mcp` prefix, so it cannot hijack the host app's
 /// global 404 fallback (merging a layered router would route every unmatched
@@ -247,7 +250,7 @@ async fn mcp_companion_token_middleware(
 /// advertises a curated profile (e.g. `AGENT_PROFILE_DOMAINS`).
 pub fn public_mcp_router(
     deps: Arc<GatewayDeps>,
-    validator: Arc<CompanionTokenValidator>,
+    validator: Arc<InstanceTokenValidator>,
     domains: Option<&'static [&'static str]>,
 ) -> Router {
     let admission =
@@ -260,11 +263,11 @@ pub fn public_mcp_router(
 /// cannot be multiplied by switching endpoint paths.
 pub fn public_mcp_router_with_admission(
     deps: Arc<GatewayDeps>,
-    validator: Arc<CompanionTokenValidator>,
+    validator: Arc<InstanceTokenValidator>,
     domains: Option<&'static [&'static str]>,
     admission: RemoteMcpSessionAdmissionAuthority,
 ) -> Router {
-    // The companion token (a 256-bit Bearer in the Authorization header, NOT a
+    // The installation token (a 256-bit Bearer in the Authorization header, NOT a
     // cookie) is the real gate — it is non-ambient, so a DNS-rebinding browser
     // page cannot read it or have it auto-attached, and any rebound request is
     // rejected 401 before reaching a tool. rmcp's own Host check defaults to
@@ -273,6 +276,8 @@ pub fn public_mcp_router_with_admission(
     // — the headless web host relies on the token + your TLS/reverse proxy.
     let config = StreamableHttpServerConfig::default().disable_allowed_hosts();
 
+    let authoritative_user_id = UserId::parse(deps.authoritative_user_id.as_ref())
+        .expect("GatewayDeps authoritative user id must be canonical");
     let session_manager = Arc::new(
         RemoteSessionManager::with_admission_authority(
             deps.clone(),
@@ -307,10 +312,13 @@ pub fn public_mcp_router_with_admission(
         .layer(from_fn(initialize_preflight_middleware))
         .layer(from_fn_with_state(
             McpAuthState {
-                public: PublicMcpState { validator },
+                public: PublicMcpState {
+                    validator,
+                    authoritative_user_id,
+                },
                 sessions: session_manager,
             },
-            mcp_companion_token_middleware,
+            mcp_instance_token_middleware,
         ))
 }
 
@@ -463,20 +471,22 @@ mod tests {
     }
 
     // A request with no Authorization header (or an unknown token) is rejected
-    // before reaching the MCP service; a valid token resolves to its companion.
+    // before reaching the MCP service; a valid token authenticates the owner.
     #[tokio::test]
     async fn missing_token_is_unauthorized() {
-        let companion_id = CompanionId::new();
-        let validator = Arc::new(CompanionTokenValidator::new(vec![(
-            companion_id.clone(),
+        let owner_user_id = UserId::new();
+        let validator = Arc::new(InstanceTokenValidator::new(Some(
             token_sha256_hex("secret-token"),
-        )]));
+        )));
         // We can't easily build GatewayDeps in a unit test, so exercise the
         // middleware in isolation over a trivial inner router.
-        let state = PublicMcpState { validator: validator.clone() };
+        let state = PublicMcpState {
+            validator: validator.clone(),
+            authoritative_user_id: owner_user_id.clone(),
+        };
         let app = Router::new()
             .route("/mcp", axum::routing::post(|| async { "ok" }))
-            .layer(from_fn_with_state(state, companion_token_middleware));
+            .layer(from_fn_with_state(state, instance_token_middleware));
 
         let res = app
             .clone()
@@ -497,10 +507,16 @@ mod tests {
         assert_eq!(ok.status(), StatusCode::OK);
 
         // Revocation closes it.
-        validator.remove_token(&companion_id);
+        validator.clear_token();
         let res2 = Router::new()
             .route("/mcp", axum::routing::post(|| async { "ok" }))
-            .layer(from_fn_with_state(PublicMcpState { validator }, companion_token_middleware))
+            .layer(from_fn_with_state(
+                PublicMcpState {
+                    validator,
+                    authoritative_user_id: owner_user_id,
+                },
+                instance_token_middleware,
+            ))
             .oneshot(
                 HttpRequest::post("/mcp")
                     .header(header::AUTHORIZATION, "Bearer secret-token")
@@ -513,30 +529,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn valid_token_inserts_remote_companion_extension() {
+    async fn valid_token_inserts_remote_instance_owner_extension() {
         use axum::routing::get;
         use nomifun_auth::token_sha256_hex;
 
-        let companion_id = CompanionId::new();
-        let validator = std::sync::Arc::new(nomifun_auth::CompanionTokenValidator::new(vec![(
-            companion_id.clone(),
+        let owner_user_id = UserId::new();
+        let validator = std::sync::Arc::new(nomifun_auth::InstanceTokenValidator::new(Some(
             token_sha256_hex("secret-tok"),
-        )]));
+        )));
         // A probe handler that echoes whether the extension is present + its value.
-        async fn probe(ext: Option<axum::Extension<RemoteCompanion>>) -> String {
+        async fn probe(ext: Option<axum::Extension<RemoteInstanceOwner>>) -> String {
             match ext {
-                Some(axum::Extension(RemoteCompanion(c))) => format!("companion={c}"),
+                Some(axum::Extension(RemoteInstanceOwner(owner))) => format!("owner={owner}"),
                 None => "none".into(),
             }
         }
         let app = axum::Router::new()
             .route("/probe", get(probe))
             .layer(axum::middleware::from_fn_with_state(
-                PublicMcpState { validator },
-                companion_token_middleware,
+                PublicMcpState {
+                    validator,
+                    authoritative_user_id: owner_user_id.clone(),
+                },
+                instance_token_middleware,
             ));
 
-        // Valid token → 200 + companion echoed.
+        // Valid token → 200 + installation owner echoed.
         let resp = app
             .clone()
             .oneshot(
@@ -550,7 +568,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        let expected = format!("companion={companion_id}");
+        let expected = format!("owner={owner_user_id}");
         assert_eq!(body.as_ref(), expected.as_bytes());
 
         // Bad token → 401.

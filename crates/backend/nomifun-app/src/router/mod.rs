@@ -1,6 +1,6 @@
 //! HTTP router assembly for the application.
 
-pub mod companion_token_routes;
+pub mod instance_token_routes;
 #[cfg(feature = "browser-use")]
 pub(crate) mod browser_management;
 #[cfg(feature = "browser-use")]

@@ -93,11 +93,11 @@ describe('Open Capabilities WebUI entry', () => {
     expect(pageSource.includes('LinkCloud')).toBe(false);
   });
 
-  test('keeps companion access tokens in the MCP capability tab instead of the WebUI panel', () => {
+  test('keeps the installation access token in the MCP capability tab instead of the WebUI panel', () => {
     const webuiPanelSource = readSource(new URL('./WebuiControlPanel.tsx', import.meta.url));
     const pageSource = readSource(new URL('../../../pages/openCapabilities/index.tsx', import.meta.url));
 
-    expect(webuiPanelSource.includes('CompanionAccessTokenPanel')).toBe(false);
-    expect(pageSource.includes('CompanionAccessTokenPanel')).toBe(true);
+    expect(webuiPanelSource.includes('InstanceAccessTokenPanel')).toBe(false);
+    expect(pageSource.includes('InstanceAccessTokenPanel')).toBe(true);
   });
 });

@@ -1,10 +1,9 @@
-//! `nomifun-public` — the **Remote 前门** (external companion surface).
+//! `nomifun-public` — the installation-owner **Remote front door**.
 //!
 //! Projects the platform's single capability source of truth
-//! (`nomifun_gateway::Registry`) onto a network-reachable, companion-token-
-//! authenticated **MCP Streamable-HTTP** endpoint, so an external AI agent
-//! (Claude Code / Cursor / a custom LLM agent) — i.e. an "外部伙伴" — can drive
-//! the platform exactly as the desktop companion does, over `Surface::Remote`.
+//! (`nomifun_gateway::Registry`) onto network-reachable MCP and REST endpoints
+//! authenticated by one installation token. A validated token authenticates
+//! the NomiFun Desktop owner and never selects or impersonates a companion.
 //!
 //! This crate is deliberately thin: it owns transport + auth + identity only.
 //! Every capability, its schema, its danger tier and its surface gate already

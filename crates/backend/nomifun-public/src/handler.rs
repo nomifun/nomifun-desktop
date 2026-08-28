@@ -1,5 +1,5 @@
 //! `RemoteMcpHandler` — the rmcp `ServerHandler` that projects the gateway
-//! `Registry` onto the Remote (external companion) surface.
+//! `Registry` onto the installation-owner Remote surface.
 //!
 //! `list_tools` → `Registry::tool_specs(Surface::Remote)` (Deny-gated tools are
 //! invisible). `call_tool` → `Registry::dispatch_opt` with a `CallerCtx` whose
@@ -181,7 +181,7 @@ impl ServerHandler for RemoteMcpHandler {
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
-            "NomiFun external companion. These tools drive the NomiFun platform \
+            "NomiFun Desktop Remote capabilities. These tools drive the NomiFun platform \
              (agent / browser / computer / knowledge / files / and platform control). \
              Destructive actions require re-calling with `confirm: true`; some sensitive \
              actions are disabled on this surface."
@@ -238,30 +238,30 @@ impl ServerHandler for RemoteMcpHandler {
                 "error": format!("Tool '{tool_name}' is outside the configured Remote MCP capability scope")
             })));
         }
-        // External caller == the Remote surface, bound to one companion (外部伙伴).
+        // External caller == the installation-owner Remote surface.
         // rmcp injects the originating HTTP `Parts` into the request extensions;
-        // our companion_token_middleware stashed the resolved companion there.
+        // our instance-token middleware stashed the authenticated owner there.
         let request_parts = ctx
             .extensions
             .get::<axum::http::request::Parts>();
-        let request_companion_id = request_parts
+        let request_owner_user_id = request_parts
             .and_then(|parts| {
                 parts
                     .extensions
-                    .get::<crate::router::RemoteCompanion>()
+                    .get::<crate::router::RemoteInstanceOwner>()
             })
-            .map(|rc| rc.0.clone());
+            .map(|owner| owner.0.clone());
         let Some(session_identity) = ctx.extensions.get::<RemoteMcpSessionIdentity>() else {
             return Ok(crate::result::build_tool_result(serde_json::json!({
                 "error": "authenticated Remote MCP request has no server-pinned session identity"
             })));
         };
-        if request_companion_id.as_ref() != Some(&session_identity.companion_id) {
+        if request_owner_user_id.as_ref() != Some(&session_identity.owner_user_id) {
             return Ok(crate::result::build_tool_result(serde_json::json!({
-                "error": "authenticated Remote MCP request companion does not match its pinned session identity"
+                "error": "authenticated Remote MCP request owner does not match its pinned session identity"
             })));
         }
-        let companion_id = session_identity.companion_id.clone();
+        let owner_user_id = session_identity.owner_user_id.clone();
         let Some(session_id_marker) = ctx.extensions.get::<RemoteMcpSessionId>() else {
             return Ok(crate::result::build_tool_result(serde_json::json!({
                 "error": "authenticated Remote MCP request has no validated logical session identity"
@@ -272,10 +272,7 @@ impl ServerHandler for RemoteMcpHandler {
                 "error": "authenticated Remote MCP request has inconsistent session identity"
             })));
         }
-        let mut caller = match CallerCtx::try_remote(
-            &self.deps.authoritative_user_id,
-            companion_id.as_str(),
-        ) {
+        let mut caller = match CallerCtx::try_remote_owner(owner_user_id.as_str()) {
             Ok(caller) => caller,
             Err(error) => {
                 return Ok(crate::result::build_tool_result(serde_json::json!({
@@ -335,7 +332,7 @@ impl ServerHandler for RemoteMcpHandler {
             caller.operation_id = Some(
                 remote_operation_id(
                     &parts.headers,
-                    companion_id.as_str(),
+                    owner_user_id.as_str(),
                     &tool_name,
                 )
                 .map_err(|error| {
@@ -610,9 +607,8 @@ mod tests {
             clock.clone(),
         );
         let registry = nomifun_gateway::browser_registry::BrowserRegistry::from_hub(hub);
-        let caller = CallerCtx::try_remote(
+        let caller = CallerCtx::try_remote_owner(
             "0190f5fe-7c00-7a00-8000-000000000001",
-            "0190f5fe-7c00-7a00-8000-000000000002",
         )
         .expect("test Remote caller identity");
         let allowed_operations =
@@ -715,9 +711,8 @@ mod tests {
             HubConfig::default(),
         );
         let registry = nomifun_gateway::browser_registry::BrowserRegistry::from_hub(hub);
-        let caller = CallerCtx::try_remote(
+        let caller = CallerCtx::try_remote_owner(
             "0190f5fe-7c00-7a00-8000-000000000001",
-            "0190f5fe-7c00-7a00-8000-000000000002",
         )
         .expect("test Remote caller identity");
         let allowed_operations =

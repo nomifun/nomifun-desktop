@@ -2,18 +2,19 @@
 
 NomiFun can expose its platform capabilities through a network-reachable,
 token-authenticated MCP and REST front door. A trusted external agent or MCP
-client can connect with a URL plus a companion access token and then call the
+client can connect with a URL plus the NomiFun Desktop access token and call the
 same capability registry used by the desktop app.
 
-Each token is bound to one companion. Calls made with that token run as that
-companion and inherit its profile model, persona, and knowledge context.
+The installation has one token. It authenticates the installation owner and
+never binds, selects, or impersonates a companion. Remote calls use explicit
+tool arguments and installation-level provider/model authority.
 
 For copy-ready integrations, see
 [Remote Capability API Examples](./remote-capability-api-examples.md).
 
 ## Security Model
 
-A companion access token is high privilege. It can call exposed platform
+The NomiFun Desktop access token is high privilege. It can call exposed platform
 capabilities, read and write files, and in desktop builds may operate browser or
 computer-use capabilities. Treat it like remote code execution authority:
 
@@ -43,7 +44,7 @@ The network front door is mounted by the same backend process as the Web UI.
 Authenticate every request with:
 
 ```http
-Authorization: Bearer <companion-access-token>
+Authorization: Bearer <nomifun-desktop-access-token>
 ```
 
 Common base URLs:
@@ -52,7 +53,7 @@ Common base URLs:
 - Standalone server: `http://<host>:8787` unless you changed the port
 - Local development or embedded desktop backend: `http://127.0.0.1:<port>`
 
-## Creating A Companion Token
+## Creating The NomiFun Desktop Token
 
 Tokens are stored hashed. The plaintext token is shown only once.
 
@@ -63,7 +64,7 @@ from the desktop WebView context:
 
 ```bash
 curl -X POST \
-  http://127.0.0.1:<loopback-port>/api/webui/companions/<companion-id>/access-token
+  http://127.0.0.1:<loopback-port>/api/webui/access-token
 ```
 
 The response returns the plaintext token once:
@@ -72,8 +73,7 @@ The response returns the plaintext token once:
 {
   "success": true,
   "data": {
-    "token": "<64-character-hex-token>",
-    "companion_id": "<companion-id>"
+    "token": "<64-character-hex-token>"
   }
 }
 ```
@@ -81,10 +81,10 @@ The response returns the plaintext token once:
 Status and revoke use the same path:
 
 ```bash
-curl http://127.0.0.1:<loopback-port>/api/webui/companions/<companion-id>/access-token
+curl http://127.0.0.1:<loopback-port>/api/webui/access-token
 
 curl -X DELETE \
-  http://127.0.0.1:<loopback-port>/api/webui/companions/<companion-id>/access-token
+  http://127.0.0.1:<loopback-port>/api/webui/access-token
 ```
 
 These token-management endpoints require local trust. A remote browser or plain
@@ -92,11 +92,11 @@ curl client cannot mint tokens.
 
 ### Headless `nomifun-web`
 
-Seed a token at startup with `NOMIFUN_COMPANION_TOKEN`. The value binds to the
-default companion when no token is already configured:
+Seed the installation token at startup with `NOMIFUN_ACCESS_TOKEN`. This does
+not require a companion to exist:
 
 ```bash
-NOMIFUN_COMPANION_TOKEN="$(openssl rand -hex 32)" \
+NOMIFUN_ACCESS_TOKEN="$(openssl rand -hex 32)" \
   nomifun-web --host 127.0.0.1 --port 8787
 ```
 
@@ -114,7 +114,7 @@ Example Streamable-HTTP MCP configuration:
       "type": "streamable-http",
       "url": "http://127.0.0.1:25808/mcp-agent",
       "headers": {
-        "Authorization": "Bearer <companion-access-token>"
+        "Authorization": "Bearer <nomifun-desktop-access-token>"
       }
     }
   }
@@ -171,20 +171,21 @@ Persistent single- and multi-Agent work uses one execution contract:
 
 Availability is authority-bound, not transport-bound. Desktop and Channel
 callers derive authority from their calling Conversation and execution link.
-An owner-bound companion token may also use the three tools through Remote
-MCP/REST: `nomi_delegate` records that companion as the immutable creator, and
-subsequent reads or updates are limited to that exact companion's executions.
-Secondary users see none of the three tools on any surface. Because minting a
-companion token delegates installation-owner authority, it is restricted to a
-trusted local owner context; discover the effective Remote catalog through
-`/v1/tools` and protect the token as a high-privilege credential.
+The installation token may also use the three tools through Remote MCP/REST.
+It acts as the same installation owner as Desktop, so execution reads and
+updates use the ordinary owner boundary instead of a synthetic companion
+creator. Secondary users see none of the three tools on any surface. Minting
+or revoking the token is restricted to a trusted local owner context; discover
+the effective Remote catalog through `/v1/tools` and protect the token as a
+high-privilege credential.
 
-## Companion Context
+## Identity And Model Context
 
-Every Remote call runs as the companion bound to the token. Model-backed tools
-can therefore use that companion's configured provider/model where their
-schema supports it. Configure a usable model before relying on such tools;
-token creation may warn when the companion has none.
+Remote calls run as the NomiFun Desktop installation owner with
+`companion_id = null`. Model-backed tools use an explicit model when their
+schema accepts one, otherwise they resolve from the enabled instance provider
+catalog. No default companion profile, persona, knowledge binding, active
+thread, or workspace is inherited.
 
 ## Related Docs
 

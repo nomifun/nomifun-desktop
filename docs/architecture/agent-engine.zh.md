@@ -63,7 +63,7 @@ Factory 行为的源码真相来源：
   普通子进程运行在 `nomifun-terminal` 的 PTY session 里。后端不解析它们的
   协议、也不持有它们的回合状态，只持有伪终端。见
   [`../guides/terminal.zh.md`](../guides/terminal.zh.md)。
-- **公开能力入口。** 外部 agent 与脚本经 companion-token 认证的 `/mcp`、
+- **公开能力入口。** 外部 agent 与脚本经安装令牌认证的 `/mcp`、
   `/mcp-agent` 或 `/v1` 调用**进入** NomiFun。那是入站方向：NomiFun 是工具
   提供方，不是引擎宿主。
 

@@ -79,7 +79,7 @@ Each group is owned by a specific crate. The base path is the actual URL prefix 
 | Mini-apps | `GET/POST /api/miniapps`, `POST /api/miniapps/validate`, `POST /api/miniapps/import`, `GET/PUT/DELETE /api/miniapps/{miniapp_id}`, `POST /api/miniapps/{miniapp_id}/publish`, `POST /api/miniapps/{miniapp_id}/workspace` (idempotently materialises the working copy and returns its absolute source path; creates no conversation) | instance owner only | [`nomifun-miniapp/src/routes.rs`](../../crates/backend/nomifun-miniapp/src/routes.rs) |
 | Mini-app runtime (serve the published snapshot) | `GET /api/miniapps/{miniapp_id}/serve` | public — auth-exempt on purpose: an iframe subresource load carries no trust header, so the runner and the in-conversation preview could not render at all behind auth; the guard is the unguessable UUIDv7 (the same capability-URL pattern as `GET /api/creative-studio/files/{asset_id}`) | same as above |
 | Companion | `/api/companion/*` | authenticated | [`nomifun-companion/src/routes.rs`](../../crates/backend/nomifun-companion/src/routes.rs) |
-| Companion access tokens for WebUI/public capability use | `/api/webui/companions/{id}/access-token` | authenticated/local WebUI admin flow | [`router/companion_token_routes.rs`](../../crates/backend/nomifun-app/src/router/companion_token_routes.rs) |
+| NomiFun Desktop access token | `/api/webui/access-token` | local-trust installation-owner flow | [`router/instance_token_routes.rs`](../../crates/backend/nomifun-app/src/router/instance_token_routes.rs) |
 | Browser platform management (Agent-only managed browser) | `/api/browser/*` | authenticated; state-changing HTTP requests are CSRF-protected; installation-owner-only routes are separately gated | [`router/browser_management.rs`](../../crates/backend/nomifun-app/src/router/browser_management.rs), [`router/browser_login.rs`](../../crates/backend/nomifun-app/src/router/browser_login.rs) |
 | Filesystem | `/api/fs/*` | authenticated | [`nomifun-file/src/routes.rs`](../../crates/backend/nomifun-file/src/routes.rs) |
 | Office preview | `/api/word-preview/*`, `/api/excel-preview/*`, `/api/ppt-preview/*`, `/api/preview-history/*` | authenticated | [`nomifun-office/src/routes.rs`](../../crates/backend/nomifun-office/src/routes.rs) |
@@ -89,9 +89,9 @@ Each group is owned by a specific crate. The base path is the actual URL prefix 
 | Connection probes (Bedrock, …) | `/api/bedrock/test-connection` | authenticated | [`nomifun-system/src/bedrock_probe/routes.rs`](../../crates/backend/nomifun-system/src/bedrock_probe/routes.rs) |
 | Shell helpers + STT | `/api/shell/*`, `/api/stt` | authenticated | [`nomifun-shell/src/routes.rs`](../../crates/backend/nomifun-shell/src/routes.rs) |
 | Public assets (logos) | `/api/assets/logos/*` | public | [`nomifun-assets/src/routes.rs`](../../crates/backend/nomifun-assets/src/routes.rs) |
-| Public MCP front door | `/mcp/*` | companion-token / configured public auth | [`nomifun-public/src/router.rs`](../../crates/backend/nomifun-public/src/router.rs) |
-| Public MCP agent front door | `/mcp-agent/*` | companion-token / configured public auth | [`nomifun-public/src/router.rs`](../../crates/backend/nomifun-public/src/router.rs) |
-| Remote capability REST API | `/v1/*` | companion-token | [`nomifun-public/src/rest.rs`](../../crates/backend/nomifun-public/src/rest.rs) |
+| Public MCP front door | `/mcp/*` | installation token | [`nomifun-public/src/router.rs`](../../crates/backend/nomifun-public/src/router.rs) |
+| Public MCP agent front door | `/mcp-agent/*` | installation token | [`nomifun-public/src/router.rs`](../../crates/backend/nomifun-public/src/router.rs) |
+| Remote capability REST API | `/v1/*` | installation token | [`nomifun-public/src/rest.rs`](../../crates/backend/nomifun-public/src/rest.rs) |
 | Realtime WebSocket | `/ws` | authenticated (token in `Sec-WebSocket-Protocol` or query) | [`nomifun-realtime/src/handler.rs`](../../crates/backend/nomifun-realtime/src/handler.rs) |
 
 For the exact set of methods on each route, read the corresponding `routes.rs` file — every router declares its routes inline.

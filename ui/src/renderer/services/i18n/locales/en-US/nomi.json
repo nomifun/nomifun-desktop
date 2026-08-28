@@ -267,16 +267,6 @@
     "merged": "Merged",
     "source_merge": "From merge"
   },
-  "remote": {
-    "accessTitle": "Remote access",
-    "accessHint": "Reach {{companionName}} from outside the desktop app: external MCP / REST clients connect as it with an access token.",
-    "accessTokenRow": "Access token",
-    "accessTokenGrant": "Anyone holding this token acts as {{companionName}} on the remote API: reading and writing its memories, invoking its skills, starting conversations on its behalf, and anything else the remote API exposes — effectively full control of this companion. Treat it like a password and revoke it the moment it leaks.",
-    "accessRegenerateTitle": "Regenerate access token",
-    "accessRegenerateConfirm": "Regenerating invalidates the old token immediately and disconnects any external client still using it. Continue?",
-    "accessRegenerateUnknownConfirm": "We can't tell right now whether this companion already has an access token. If it does, generating a new one invalidates the old token immediately and disconnects any external client still using it. Continue?",
-    "accessRevokeTitle": "Revoke access token"
-  },
   "evolution": {
     "loadFailed": "Learning and evolution settings are temporarily unavailable.",
     "learningDesc": "This companion reviews your work records on the schedule below and files what it distills under its own name.",

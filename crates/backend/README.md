@@ -23,7 +23,7 @@ are:
 | `nomifun-knowledge` | Knowledge bases and scoped knowledge MCP server. |
 | `nomifun-companion` | Desktop companions and companion memory/persona state. |
 | `nomifun-gateway` | Platform Gateway MCP tools exposed through scoped session claims. |
-| `nomifun-public` | Companion-token authenticated `/mcp`, `/mcp-agent`, and `/v1` public front doors. |
+| `nomifun-public` | Installation-token authenticated `/mcp`, `/mcp-agent`, and `/v1` public front doors. |
 
 See `docs/architecture/backend-crates.md` for the maintained map.
 

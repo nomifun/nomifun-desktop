@@ -2614,26 +2614,14 @@ export const webui = {
   },
   generateQRToken: httpPost<{ token: string; expires_at_ms: number }, void>('/api/webui/generate-qr-token'),
   /**
-   * Per-companion Remote access tokens (local-trust-gated; desktop shell only).
-   * Mint returns the plaintext exactly ONCE (`token`) — it is never persisted nor
-   * re-emitted; the backend stores only a hash. `warning` is present when the
-   * companion has no resolvable model (the token still mints, but model-dependent
-   * capabilities will fail until a provider/model is set).
-  */
-  companionAccessToken: {
-    status: httpGet<{ configured: boolean }, { companionId: CompanionId }>(
-      (p) => `/api/webui/companions/${encodeURIComponent(p.companionId)}/access-token`
-    ),
-    mint: withResponseMap(
-      httpPost<{ token: string; companion_id: CompanionId; warning?: string }, { companionId: CompanionId }>(
-        (p) => `/api/webui/companions/${encodeURIComponent(p.companionId)}/access-token`,
-        () => undefined
-      ),
-      (result) => ({ ...result, companion_id: parseCompanionId(result.companion_id) })
-    ),
-    revoke: httpDelete<{ configured: boolean }, { companionId: CompanionId }>(
-      (p) => `/api/webui/companions/${encodeURIComponent(p.companionId)}/access-token`
-    ),
+   * Installation-scoped Remote access token (local-trust-gated; desktop only).
+   * Mint returns plaintext exactly once; the backend persists only its hash.
+   * The credential authenticates NomiFun Desktop and never selects a companion.
+   */
+  instanceAccessToken: {
+    status: httpGet<{ configured: boolean }, void>('/api/webui/access-token'),
+    mint: httpPost<{ token: string; warning?: string }, void>('/api/webui/access-token'),
+    revoke: httpDelete<{ configured: boolean }, void>('/api/webui/access-token'),
   },
 };
 

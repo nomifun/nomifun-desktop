@@ -163,7 +163,6 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "channel_sessions",
     "channel_users",
     "client_preferences",
-    "companion_access_token",
     "conversation_artifacts",
     "conversation_creation_keys",
     "conversation_delivery_notify",
@@ -194,6 +193,7 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "idmm_action_reservations",
     "idmm_interventions",
     "installation_identity",
+    "instance_access_token",
     "knowledge_bases",
     "knowledge_binding_bases",
     "knowledge_bindings",
@@ -1378,7 +1378,6 @@ async fn external_owner_columns_enforce_uuidv7_without_requiring_local_parents()
     let companion_id = nomifun_common::generate_id();
     let binding_companion_id = nomifun_common::generate_id();
     let knowledge_binding_id = nomifun_common::KnowledgeBindingId::new();
-    let token_companion_id = nomifun_common::generate_id();
 
     sqlx::query(
         "INSERT INTO channel_plugins \
@@ -1400,15 +1399,6 @@ async fn external_owner_columns_enforce_uuidv7_without_requiring_local_parents()
     .execute(pool)
     .await
     .expect("external knowledge companion ID does not require a local parent");
-    sqlx::query(
-        "INSERT INTO companion_access_token (companion_id, token_hash, created_at) \
-         VALUES (?, 'hash', 1)",
-    )
-    .bind(&token_companion_id)
-    .execute(pool)
-    .await
-    .expect("external companion token ID does not require a local parent");
-
     for statement in [
         "UPDATE channel_plugins SET companion_id = 'companion_bad' WHERE channel_plugin_id = ?",
     ] {
@@ -1433,16 +1423,6 @@ async fn external_owner_columns_enforce_uuidv7_without_requiring_local_parents()
         .is_err(),
         "knowledge companion IDs must remain bare UUIDv7"
     );
-    assert!(
-        sqlx::query(
-            "INSERT INTO companion_access_token (companion_id, token_hash, created_at) \
-             VALUES ('companion_bad', 'hash', 1)",
-        )
-        .execute(pool)
-        .await
-        .is_err(),
-        "companion token IDs must remain bare UUIDv7"
-    );
 }
 
 #[tokio::test]
@@ -1464,14 +1444,6 @@ async fn scalar_external_business_ids_require_uuidv7_without_parent_existence() 
     .await
     .expect("external companion need not have a SQLite parent");
     sqlx::query(
-        "INSERT INTO companion_access_token (companion_id, token_hash, created_at) \
-         VALUES (?, 'hash', 1)",
-    )
-    .bind(companion_id.as_str())
-    .execute(pool)
-    .await
-    .expect("external token owner need not have a SQLite parent");
-    sqlx::query(
         "INSERT INTO knowledge_bindings \
          (knowledge_binding_id, target_kind, target_companion_id, enabled, writeback, \
           writeback_eagerness, updated_at, channel_write_enabled) \
@@ -1488,8 +1460,6 @@ async fn scalar_external_business_ids_require_uuidv7_without_parent_existence() 
          (channel_plugin_id, type, name, enabled, config, companion_id, created_at, updated_at) \
          VALUES ('0190f5fe-7c00-7a00-8000-000000000201', 'invalid-companion', \
                  'invalid companion', 1, '{}', '1', 1, 1)",
-        "INSERT INTO companion_access_token (companion_id, token_hash, created_at) \
-         VALUES ('1', 'invalid', 1)",
         // Every column here must exist, so this statement can only fail for the
         // reason under test: `target_companion_id = '1'` is not a UUIDv7. A
         // reference to a dropped column would turn this assertion green for the

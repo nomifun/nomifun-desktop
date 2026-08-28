@@ -17,7 +17,7 @@ use std::{
 use std::collections::HashSet;
 
 use futures::{FutureExt, Stream};
-use nomifun_common::CompanionId;
+use nomifun_common::UserId;
 use nomifun_gateway::{GatewayDeps, Registry, Surface};
 use rmcp::model::{ClientJsonRpcMessage, GetExtensions, ServerJsonRpcMessage};
 use rmcp::transport::streamable_http_server::session::{
@@ -41,12 +41,12 @@ pub(crate) struct RemoteMcpSessionId(pub SessionId);
 /// The server-pinned identity for one logical Remote MCP session.
 ///
 /// This is deliberately copied into every message by [`RemoteSessionManager`].
-/// The HTTP bearer token is checked on every request, but a later request must
-/// still resolve to the same companion that authenticated `initialize`.
+/// The HTTP bearer token is checked on every request, and every later request
+/// must still authenticate the installation owner that initialized the session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RemoteMcpSessionIdentity {
     pub session_id: SessionId,
-    pub companion_id: CompanionId,
+    pub owner_user_id: UserId,
     /// The capability-domain scope selected during `initialize`.
     ///
     /// `None` means the full Remote catalog. This is server-pinned and is
@@ -56,19 +56,19 @@ pub(crate) struct RemoteMcpSessionIdentity {
 
 #[derive(Clone, Debug)]
 struct RemoteMcpSessionBinding {
-    companion_id: CompanionId,
+    owner_user_id: UserId,
     scope: Option<Vec<String>>,
     request_budget: Arc<RemoteHttpRequestBudget>,
 }
 
 impl RemoteMcpSessionBinding {
     fn new(
-        companion_id: CompanionId,
+        owner_user_id: UserId,
         scope: Option<Vec<String>>,
         request_limit: usize,
     ) -> Self {
         Self {
-            companion_id,
+            owner_user_id,
             scope,
             request_budget: RemoteHttpRequestBudget::new(request_limit),
         }
@@ -255,7 +255,7 @@ impl RemoteSessionLimits {
                 .saturating_mul(MAX_REMOTE_BINDING_RETAINED_BYTES),
             // Inactive rate buckets are short-lived and hard bounded too. The
             // ceiling scales with machine capacity instead of becoming an
-            // attacker-controlled companion-id map.
+            // attacker-controlled principal-id map.
             max_rate_tenants_global: max_active_global.saturating_mul(2),
             max_binding_retained_bytes: MAX_REMOTE_BINDING_RETAINED_BYTES,
             initialize_burst_per_tenant,
@@ -274,7 +274,7 @@ impl RemoteSessionLimits {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct RemoteSessionTenantKey {
     authoritative_user_id: Arc<str>,
-    companion_id: CompanionId,
+    principal_user_id: UserId,
 }
 
 #[derive(Clone, Debug)]
@@ -363,21 +363,21 @@ impl RemoteSessionAdmission {
 
     fn tenant_key(
         &self,
-        companion_id: &CompanionId,
+        principal_user_id: &UserId,
     ) -> RemoteSessionTenantKey {
         RemoteSessionTenantKey {
             authoritative_user_id: Arc::clone(&self.authoritative_user_id),
-            companion_id: companion_id.clone(),
+            principal_user_id: principal_user_id.clone(),
         }
     }
 
     fn acquire_headerless_request(
         &mut self,
-        companion_id: &CompanionId,
+        principal_user_id: &UserId,
         now: Instant,
     ) -> Result<RemoteHttpRequestPermit, RemoteHttpRequestAdmissionError> {
         self.prune_idle_rate_buckets(now);
-        let tenant_key = self.tenant_key(companion_id);
+        let tenant_key = self.tenant_key(principal_user_id);
         if !self.tenants.contains_key(&tenant_key)
             && self.tenants.len() >= self.limits.max_rate_tenants_global
         {
@@ -414,12 +414,12 @@ impl RemoteSessionAdmission {
         &mut self,
         session_id: &SessionId,
         manager_id: u64,
-        companion_id: &CompanionId,
+        principal_user_id: &UserId,
         retained_bytes: usize,
         now: Instant,
     ) -> Result<(), std::io::Error> {
         if let Some(existing) = self.reservations.get(session_id) {
-            let expected_tenant = self.tenant_key(companion_id);
+            let expected_tenant = self.tenant_key(principal_user_id);
             if existing.manager_id == manager_id
                 && existing.tenant == expected_tenant
                 && existing.retained_bytes == retained_bytes
@@ -449,7 +449,7 @@ impl RemoteSessionAdmission {
         }
 
         self.prune_idle_rate_buckets(now);
-        let tenant_key = self.tenant_key(companion_id);
+        let tenant_key = self.tenant_key(principal_user_id);
         if !self.tenants.contains_key(&tenant_key)
             && self.tenants.len() >= self.limits.max_rate_tenants_global
         {
@@ -649,7 +649,7 @@ fn remote_session_admission_error(message: &'static str) -> std::io::Error {
 fn binding_retained_bytes(
     session_id: &SessionId,
     authoritative_user_id: &str,
-    companion_id: &CompanionId,
+    owner_user_id: &UserId,
     scope: Option<&[String]>,
 ) -> Option<usize> {
     const HASH_ENTRY_OVERHEAD: usize = 64;
@@ -662,7 +662,7 @@ fn binding_retained_bytes(
     for retained in [
         session_id.as_ref(),
         authoritative_user_id,
-        companion_id.as_str(),
+        owner_user_id.as_str(),
     ] {
         total = total
             .checked_add(retained.len())?
@@ -904,11 +904,11 @@ fn bounded_scope_from_query(
 
 fn binding_accepts_request(
     binding: &RemoteMcpSessionBinding,
-    companion_id: &CompanionId,
+    owner_user_id: &UserId,
     requested_scope: Option<&[String]>,
     explicit_scope: bool,
 ) -> bool {
-    binding.companion_id == *companion_id
+    binding.owner_user_id == *owner_user_id
         && (!explicit_scope || binding.scope.as_deref() == requested_scope)
 }
 
@@ -1248,7 +1248,7 @@ pub(crate) enum RemoteSessionManagerError {
 /// Shared control-plane admission authority for all Remote MCP endpoints that
 /// belong to one authoritative user. It bounds sessions and initialize churn
 /// across `/mcp`, curated profiles, and any future sibling endpoint without
-/// treating a companion as the browser task-family identity.
+/// treating the installation owner as the browser task-family identity.
 #[derive(Clone)]
 pub struct RemoteMcpSessionAdmissionAuthority {
     authoritative_user_id: Arc<str>,
@@ -1364,9 +1364,9 @@ impl RemoteSessionManager {
         Ok((bounded_scope_from_query(parts.uri.query())?, explicit))
     }
 
-    fn companion_from_message(
+    fn owner_from_message(
         message: &ClientJsonRpcMessage,
-    ) -> Result<CompanionId, std::io::Error> {
+    ) -> Result<UserId, std::io::Error> {
         let parts = match message {
             ClientJsonRpcMessage::Request(request) => request
                 .request
@@ -1385,11 +1385,11 @@ impl RemoteSessionManager {
             })?;
         parts
             .extensions
-            .get::<crate::router::RemoteCompanion>()
-            .map(|companion| companion.0.clone())
+            .get::<crate::router::RemoteInstanceOwner>()
+            .map(|owner| owner.0.clone())
             .ok_or_else(|| {
                 std::io::Error::other(
-                    "authenticated Remote MCP request has no canonical companion identity",
+                    "authenticated Remote MCP request has no canonical installation owner identity",
                 )
             })
     }
@@ -1400,7 +1400,7 @@ impl RemoteSessionManager {
         message: &mut ClientJsonRpcMessage,
         pin_if_missing: bool,
     ) -> Result<(), std::io::Error> {
-        let companion = Self::companion_from_message(message)?;
+        let owner_user_id = Self::owner_from_message(message)?;
         let (requested_scope, explicit_scope) = self.scope_from_message(message)?;
         // Admission reservation and binding publication share one lock order
         // and have no await/cancellation point between them. A session can
@@ -1411,13 +1411,13 @@ impl RemoteSessionManager {
             Some(binding)
                 if !binding_accepts_request(
                     binding,
-                    &companion,
+                    &owner_user_id,
                     requested_scope.as_deref(),
                     explicit_scope,
                 ) =>
             {
-                let message = if binding.companion_id != companion {
-                    "Remote MCP session is bound to a different companion"
+                let message = if binding.owner_user_id != owner_user_id {
+                    "Remote MCP session is bound to a different installation owner"
                 } else {
                     "Remote MCP session is bound to a different capability scope"
                 };
@@ -1430,7 +1430,7 @@ impl RemoteSessionManager {
                 let retained_bytes = binding_retained_bytes(
                     id,
                     admission.authoritative_user_id.as_ref(),
-                    &companion,
+                    &owner_user_id,
                     requested_scope.as_deref(),
                 )
                 .ok_or_else(|| {
@@ -1441,14 +1441,14 @@ impl RemoteSessionManager {
                 admission.reserve(
                     id,
                     self.manager_id,
-                    &companion,
+                    &owner_user_id,
                     retained_bytes,
                     Instant::now(),
                 )?;
                 bindings.insert(
                     id.clone(),
                     RemoteMcpSessionBinding::new(
-                        companion.clone(),
+                        owner_user_id.clone(),
                         requested_scope.clone(),
                         admission.limits.max_inflight_requests_per_session,
                     ),
@@ -1477,11 +1477,11 @@ impl RemoteSessionManager {
         drop(admission);
         message.insert_extension(RemoteMcpSessionIdentity {
             session_id: id.clone(),
-            companion_id: binding.companion_id,
+            owner_user_id: binding.owner_user_id,
             scope: binding.scope,
         });
         // Keep the narrower marker for code/tests that only need the logical
-        // session id. The identity above is the authoritative companion pin.
+        // session id. The identity above is the authoritative owner pin.
         message.insert_extension(RemoteMcpSessionId(id.clone()));
         Ok(())
     }
@@ -1555,7 +1555,7 @@ impl RemoteSessionManager {
     pub(crate) async fn acquire_http_request_permit(
         &self,
         id: Option<&SessionId>,
-        companion_id: &CompanionId,
+        owner_user_id: &UserId,
         headerless_post: bool,
         teardown: bool,
     ) -> Result<Option<RemoteHttpRequestPermit>, RemoteHttpRequestAdmissionError>
@@ -1567,7 +1567,7 @@ impl RemoteSessionManager {
                     RemoteHttpRequestAdmissionError::IdentityMismatch,
                 );
             };
-            if binding.companion_id != *companion_id {
+            if binding.owner_user_id != *owner_user_id {
                 return Err(
                     RemoteHttpRequestAdmissionError::IdentityMismatch,
                 );
@@ -1586,7 +1586,7 @@ impl RemoteSessionManager {
                 .admission
                 .lock()
                 .await
-                .acquire_headerless_request(companion_id, Instant::now())
+                .acquire_headerless_request(owner_user_id, Instant::now())
                 .map(Some);
         }
         Ok(None)
@@ -1723,7 +1723,7 @@ impl SessionManager for RemoteSessionManager {
         // accepts the caller-supplied id when restoring, which would weaken
         // the invariant that session ids are server-generated and validated by
         // `has_session`.  This front door has no persisted, authenticated
-        // companion/scope binding to restore, so fail closed instead.
+        // owner/scope binding to restore, so fail closed instead.
         Ok(RestoreOutcome::NotSupported)
     }
 }
@@ -1741,8 +1741,8 @@ mod tests {
         BrowserErrorCode, BrowserPlatformError,
     };
 
-    fn companion() -> CompanionId {
-        CompanionId::new()
+    fn owner() -> UserId {
+        UserId::new()
     }
 
     fn session_id(value: &str) -> SessionId {
@@ -1772,21 +1772,21 @@ mod tests {
         admission: &mut RemoteSessionAdmission,
         id: &SessionId,
         manager_id: u64,
-        companion_id: &CompanionId,
+        owner_user_id: &UserId,
         now: Instant,
     ) -> Result<(), std::io::Error> {
         admission.reserve_provisional(id, manager_id, now)?;
         let retained_bytes = binding_retained_bytes(
             id,
             admission.authoritative_user_id.as_ref(),
-            companion_id,
+            owner_user_id,
             Some(&canonical_scope(["agent"])),
         )
         .expect("bounded test binding size");
         admission.reserve(
             id,
             manager_id,
-            companion_id,
+            owner_user_id,
             retained_bytes,
             now,
         )
@@ -1795,7 +1795,7 @@ mod tests {
     #[cfg(feature = "browser-use")]
     fn binding() -> RemoteMcpSessionBinding {
         RemoteMcpSessionBinding::new(
-            companion(),
+            owner(),
             Some(canonical_scope(["browser"])),
             MAX_REMOTE_INFLIGHT_REQUESTS_PER_SESSION,
         )
@@ -2016,7 +2016,7 @@ mod tests {
                 .await
                 .authoritative_user_id
                 .as_ref(),
-            &binding.companion_id,
+            &binding.owner_user_id,
             binding.scope.as_deref(),
         )
         .unwrap();
@@ -2026,7 +2026,7 @@ mod tests {
             .reserve(
                 &id,
                 manager.manager_id,
-                &binding.companion_id,
+                &binding.owner_user_id,
                 retained_bytes,
                 Instant::now(),
             )
@@ -2060,9 +2060,9 @@ mod tests {
     }
 
     #[test]
-    fn session_binding_pins_companion_and_scope() {
-        let first = companion();
-        let second = companion();
+    fn session_binding_pins_owner_and_scope() {
+        let first = owner();
+        let second = owner();
         let binding = RemoteMcpSessionBinding::new(
             first.clone(),
             Some(canonical_scope(["files", "agent"])),
@@ -2200,8 +2200,8 @@ mod tests {
             Arc::<str>::from("test-user"),
             limits,
         );
-        let first = companion();
-        let second = companion();
+        let first = owner();
+        let second = owner();
         let now = Instant::now();
 
         let first_a = admission
@@ -2255,7 +2255,7 @@ mod tests {
         let user = Arc::<str>::from("test-user");
         let limits = constrained_limits(12, 3, 12);
         let mut admission = RemoteSessionAdmission::new(user, limits);
-        let companion = companion();
+        let owner = owner();
         let now = Instant::now();
         let mut accepted = 0;
         for index in 0..12 {
@@ -2264,7 +2264,7 @@ mod tests {
                 &mut admission,
                 &id,
                 7,
-                &companion,
+                &owner,
                 now,
             ) {
                 Ok(()) => accepted += 1,
@@ -2276,7 +2276,7 @@ mod tests {
         assert!(admission.provisionals.is_empty());
         let usage = admission
             .tenants
-            .get(&admission.tenant_key(&companion))
+            .get(&admission.tenant_key(&owner))
             .expect("tenant rate/usage record");
         assert_eq!(usage.active_sessions, 3);
         assert!(
@@ -2289,19 +2289,19 @@ mod tests {
         let limits = constrained_limits(8, 4, 8);
         let mut admission =
             RemoteSessionAdmission::new(Arc::<str>::from("test-user"), limits);
-        let first_companion = companion();
-        let second_companion = companion();
+        let first_owner = owner();
+        let second_owner = owner();
         let now = Instant::now();
-        for (id, manager_id, companion_id) in [
-            ("task-a", 1, &first_companion),
-            ("task-b", 1, &first_companion),
-            ("task-c", 2, &second_companion),
+        for (id, manager_id, owner_user_id) in [
+            ("task-a", 1, &first_owner),
+            ("task-b", 1, &first_owner),
+            ("task-c", 2, &second_owner),
         ] {
             admit_test_session(
                 &mut admission,
                 &session_id(id),
                 manager_id,
-                companion_id,
+                owner_user_id,
                 now,
             )
             .unwrap();
@@ -2319,10 +2319,10 @@ mod tests {
         let limits = constrained_limits(2, 1, 4);
         let mut admission =
             RemoteSessionAdmission::new(Arc::<str>::from("test-user"), limits);
-        let companion = companion();
+        let owner = owner();
         let now = Instant::now();
         let first = session_id("refund-first");
-        admit_test_session(&mut admission, &first, 1, &companion, now)
+        admit_test_session(&mut admission, &first, 1, &owner, now)
             .unwrap();
         admission.release(&first, 1, now);
         assert!(admission.reservations.is_empty());
@@ -2333,7 +2333,7 @@ mod tests {
             &mut admission,
             &replacement,
             1,
-            &companion,
+            &owner,
             now,
         )
         .unwrap();
@@ -2345,14 +2345,14 @@ mod tests {
         let limits = constrained_limits(8, 8, 2);
         let mut admission =
             RemoteSessionAdmission::new(Arc::<str>::from("test-user"), limits);
-        let companion = companion();
+        let owner = owner();
         let now = Instant::now();
         for index in 0..2 {
             admit_test_session(
                 &mut admission,
                 &session_id(&format!("rate-{index}")),
                 1,
-                &companion,
+                &owner,
                 now,
             )
             .unwrap();
@@ -2363,7 +2363,7 @@ mod tests {
                 &mut admission,
                 &rejected,
                 1,
-                &companion,
+                &owner,
                 now,
             )
             .is_err()
@@ -2562,7 +2562,7 @@ mod tests {
                 .header("host", "localhost")
                 .header("content-type", "application/json")
                 .header("accept", "application/json, text/event-stream")
-                .extension(crate::router::RemoteCompanion(companion()))
+                .extension(crate::router::RemoteInstanceOwner(owner()))
                 .body(axum::body::Body::from(
                     r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}"#,
                 ))
@@ -2622,7 +2622,7 @@ mod tests {
             .into_parts();
         parts
             .extensions
-            .insert(crate::router::RemoteCompanion(companion()));
+            .insert(crate::router::RemoteInstanceOwner(owner()));
         request.request.extensions_mut().insert(parts);
 
         let result = manager.initialize_session(&id, message).await;
@@ -2688,7 +2688,7 @@ mod tests {
             let retained_bytes = binding_retained_bytes(
                 &id,
                 admission_guard.authoritative_user_id.as_ref(),
-                &binding.companion_id,
+                &binding.owner_user_id,
                 binding.scope.as_deref(),
             )
             .unwrap();
@@ -2696,7 +2696,7 @@ mod tests {
                 .reserve(
                     &id,
                     manager_id,
-                    &binding.companion_id,
+                    &binding.owner_user_id,
                     retained_bytes,
                     Instant::now(),
                 )

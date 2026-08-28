@@ -1,12 +1,12 @@
 # Remote Capability API Examples
 
-These examples use one companion access token bound to one companion. Replace
+These examples use the access token issued by one NomiFun Desktop installation. Replace
 `$HOST` with your NomiFun host and `$TOKEN` with the token shown when it was
 created.
 
 ```bash
 export HOST=127.0.0.1:25808
-export TOKEN=<companion-access-token>
+export TOKEN=<nomifun-desktop-access-token>
 ```
 
 ## MCP Client
@@ -118,7 +118,7 @@ async def main():
 For a local headless server:
 
 ```bash
-export NOMIFUN_COMPANION_TOKEN="$(openssl rand -hex 32)"
+export NOMIFUN_ACCESS_TOKEN="$(openssl rand -hex 32)"
 nomifun-web --host 127.0.0.1 --port 8787
 ```
 
@@ -143,17 +143,17 @@ curl -s "http://$HOST/v1/openapi.json?profile=agent" \
 - MCP clients should prefer `/mcp-agent`.
 - Scripts and automation systems can use `/v1/tools/{name}` directly.
 - Use `/v1/tools/{name}/stream` when live progress matters.
-- Tokens can be revoked with
-  `DELETE /api/webui/companions/{id}/access-token` from a trusted local
+- The token can be revoked with
+  `DELETE /api/webui/access-token` from a trusted local
   desktop context.
 
 ## Persistent Agent Collaboration
 
 Agent collaboration has one authority-bound contract: `nomi_delegate` creates
 an execution, `nomi_execution_get` reads it, and `nomi_execution_update`
-changes its plan or lifecycle. A trusted local owner may mint an owner-bound
-companion token whose Remote catalog includes these tools. Remote delegation
-records the companion as creator, and later reads or updates are restricted to
-that companion's executions; secondary users receive none of the three tools.
-Always discover the effective catalog and treat the token as a high-privilege
-delegation of installation-owner authority.
+changes its plan or lifecycle. A trusted local owner may mint the installation
+token whose Remote catalog includes these tools. Remote delegation uses the
+same installation-owner boundary as Desktop; it does not create a companion
+identity or restrict executions by companion. Secondary users receive none of
+the three tools. Always discover the effective catalog and protect the token as
+a high-privilege installation-owner credential.

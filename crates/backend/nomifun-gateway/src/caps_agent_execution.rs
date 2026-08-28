@@ -16,8 +16,8 @@ use nomifun_api_types::{
     VersionedAgentExecutionCommand,
 };
 use nomifun_common::{
-    AdaptationPolicy, AgentDelegationTask, AgentExecutionActor, AgentExecutionActorType,
-    AgentExecutionEventKind, AgentExecutionId, AgentExecutionReceipt, AgentExecutionStatus,
+    AdaptationPolicy, AgentDelegationTask, AgentExecutionActor, AgentExecutionId,
+    AgentExecutionReceipt, AgentExecutionStatus,
     AgentStepMode, AgentToolPolicy, DecisionPolicy, DelegationPolicy, ExecutionStepKind, PlanGate,
     StepFailurePolicy,
 };
@@ -594,86 +594,51 @@ async fn create_context(
     })
 }
 
-/// A Remote companion is already a stable Agent principal. Preserve its model,
-/// preset and current collaboration policy as immutable execution input rather
-/// than fabricating a Conversation (which would trigger an unnecessary model
-/// turn when terminal reporting posts back to that Conversation).
+/// An installation-owner Remote caller has no live Conversation. Build a
+/// top-level execution directly from instance model authority; no companion
+/// profile, preset, active thread, or workspace is consulted.
 async fn remote_create_context(
     deps: &GatewayDeps,
     ctx: &CallerCtx,
     explicit_pool: Option<ModelPoolParam>,
 ) -> Result<CreateContext, String> {
-    let companion_id = ctx
-        .companion_id
-        .as_ref()
-        .map(|id| id.as_str())
-        .ok_or_else(|| "Remote delegation requires a companion-bound token".to_owned())?;
-    let profile = deps
-        .companion_service
-        .get_companion(companion_id)
-        .await
-        .map_err(|error| error.to_string())?;
-    let existing = match deps
-        .companion_service
-        .companion_active_thread(companion_id)
-        .await
-        .map_err(|error| error.to_string())?
+    let model_pool = narrow_model_pool(
+        ExecutionModelPool::Automatic,
+        explicit_pool.map(Into::into),
+    )?;
+    let lead_model = if let Some(model) = finite_pool_models(&model_pool)
+        .and_then(|models| models.into_iter().next())
     {
-        Some(id) => deps.conversation_service.get(ctx.user_id.as_str(), &id).await.ok(),
-        None => None,
+        model
+    } else {
+        let (model, _) = provider_support::resolve_nomi_model(deps, ctx, None)
+            .await
+            .map_err(|error| {
+                error
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no model is available for Remote delegation")
+                    .to_owned()
+            })?;
+        ExecutionModelRef {
+            provider_id: model.provider_id,
+            model: model.use_model.unwrap_or(model.model),
+        }
     };
-    let (model, _) = provider_support::resolve_nomi_model(deps, ctx, None)
-        .await
-        .map_err(|error| {
-            error
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("no model is available for Remote delegation")
-                .to_owned()
-        })?;
-    let delegation_policy = existing
-        .as_ref()
-        .map(|conversation| conversation.delegation_policy)
-        .unwrap_or(DelegationPolicy::Automatic);
-    if delegation_policy == DelegationPolicy::Disabled {
-        return Err("delegation is disabled for this companion".to_owned());
-    }
-    let lead_model = ExecutionModelRef {
-        provider_id: model.provider_id.clone(),
-        model: model.use_model.clone().unwrap_or_else(|| model.model.clone()),
-    };
-    let inherited_model_pool = existing
-        .as_ref()
-        .and_then(|conversation| conversation.execution_model_pool.clone())
-        .unwrap_or_else(|| ExecutionModelPool::Single {
-            model: lead_model.clone(),
-        });
-    let model_pool = narrow_model_pool(inherited_model_pool, explicit_pool.map(Into::into))?;
-    let decision_policy = existing
-        .as_ref()
-        .map(|conversation| conversation.decision_policy)
-        .unwrap_or(DecisionPolicy::Automatic);
-    let inherited_work_dir = existing
-        .as_ref()
-        .and_then(|conversation| conversation.extra.get("workspace"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned);
     Ok(CreateContext {
         conversation: None,
-        lead_preset: profile.applied_preset,
+        lead_preset: None,
         lead_conversation_id: None,
         current_execution_id: None,
         template_id: None,
         model_pool,
         lead_model: Some(lead_model),
-        delegation_policy,
+        delegation_policy: DelegationPolicy::Automatic,
         plan_gate: PlanGate::Automatic,
         adaptation_policy: AdaptationPolicy::Fixed,
-        decision_policy,
-        inherited_work_dir,
-        actor: AgentExecutionActor::external_agent(companion_id),
+        decision_policy: DecisionPolicy::Automatic,
+        inherited_work_dir: None,
+        actor: AgentExecutionActor::user(ctx.user_id.as_str()),
     })
 }
 
@@ -927,44 +892,18 @@ async fn delegate(deps: Arc<GatewayDeps>, ctx: CallerCtx, params: DelegateParams
     }
 }
 
-/// Remote callers have no live attempt Conversation. A top-level execution's
-/// immutable Created event records the companion Agent id in the same SQLite
-/// transaction, so exact-aggregate authorization needs no parent lineage.
+/// The installation token authenticates the same installation owner used by
+/// Desktop. Owner scoping in the execution engine is therefore the complete
+/// authorization boundary; no companion-created subset is inferred.
 async fn authorize_remote_execution(
     deps: &GatewayDeps,
     ctx: &CallerCtx,
     execution_id: &str,
 ) -> Result<AgentExecutionActor, nomifun_common::AppError> {
-    let companion_id = ctx
-        .companion_id
-        .as_ref()
-        .map(|id| id.as_str())
-        .ok_or_else(|| {
-            nomifun_common::AppError::NotFound(format!("Agent Execution {execution_id}"))
-        })?;
     deps.agent_execution_engine
         .get(ctx.user_id.as_str(), execution_id)
         .await?;
-    let created = deps
-        .agent_execution_engine
-        .events(ctx.user_id.as_str(), execution_id, None, Some(1))
-        .await
-        .map_err(|_| nomifun_common::AppError::NotFound(format!("Agent Execution {execution_id}")))?
-        .into_iter()
-        .next();
-    if !created.is_some_and(|event| {
-        event.sequence == 1
-            && event.event_type == AgentExecutionEventKind::Created
-            && event.actor_type == AgentExecutionActorType::Agent
-            && event.actor_id.as_deref() == Some(companion_id)
-            && event.actor_conversation_id.is_none()
-            && event.actor_attempt_id.is_none()
-    }) {
-        return Err(nomifun_common::AppError::NotFound(format!(
-            "Agent Execution {execution_id}"
-        )));
-    }
-    Ok(AgentExecutionActor::external_agent(companion_id))
+    Ok(AgentExecutionActor::user(ctx.user_id.as_str()))
 }
 
 async fn authorize_execution_caller(

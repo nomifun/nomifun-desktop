@@ -41,7 +41,7 @@
 | --- | --- |
 | [`nomifun-common`](../../crates/backend/nomifun-common/) | `AppError`、错误链、各类枚举（`AgentType`、`ConversationStatus`、`MessageType`、`McpServerStatus` 等）、稳定业务 ID 的裸 UUIDv7 生成/校验、数据集 reset 辅助、AES-GCM `encrypt_string` / `decrypt_string`、`TimestampMs`、分页辅助、`constants::DEFAULT_HOST/DEFAULT_PORT/BODY_LIMIT/CSRF_*`。 |
 | [`nomifun-api-types`](../../crates/backend/nomifun-api-types/) | 每个 HTTP 请求 / 响应 DTO，`WebSocketMessage` 信封，以及 Nomi build-extras。前端 TypeScript 类型镜像该 crate。 |
-| [`nomifun-db`](../../crates/backend/nomifun-db/) | 通过 `sqlx` 操作 v3 SQLite baseline，维护 schema contract 与逻辑关联 registry，并为用户、会话、MCP、需求、cron、设定、终端会话、伙伴令牌、知识库、渠道、连接器凭据、IDMM 介入、webhook 等提供仓储 trait 与 Sqlite 实现。持有 `Database` 句柄并负责 v3 baseline 初始化。 |
+| [`nomifun-db`](../../crates/backend/nomifun-db/) | 通过 `sqlx` 操作 v3 SQLite baseline，维护 schema contract 与逻辑关联 registry，并为用户、会话、MCP、需求、cron、设定、终端会话、安装访问令牌、知识库、渠道、连接器凭据、IDMM 介入、webhook 等提供仓储 trait 与 Sqlite 实现。持有 `Database` 句柄并负责 v3 baseline 初始化。 |
 | [`nomifun-realtime`](../../crates/backend/nomifun-realtime/) | `WebSocketManager`、`BroadcastEventBus`，带 token 校验的 `/ws` 升级处理器，消息路由 trait，心跳计时，每连接缓冲常量。 |
 | [`nomifun-runtime`](../../crates/backend/nomifun-runtime/) | 内嵌 Bun 的解压、缓存、命令发现与启动期 `PATH` 增强。子进程所有权统一属于 shared 层的 `nomi-process-runtime`。 |
 | [`nomifun-assets`](../../crates/backend/nomifun-assets/) | 随服务器一同发布的内嵌静态资源（`include_dir!`）。 |
@@ -73,13 +73,13 @@
 | [`nomifun-idmm`](../../crates/backend/nomifun-idmm/) | 智能决策模式（IDMM）：一个按会话的监督器，在提供商故障与决策停滞中保活智能体 / 终端会话（规则层 + 旁路模型）。详见[智能决策](../guides/intelligent-decision.zh.md)。 |
 | [`nomifun-webhook`](../../crates/backend/nomifun-webhook/) | 外发飞书消息发送器，以及 Agent 工作完成时的 `CompletionNotifier`。 |
 | [`nomifun-preset`](../../crates/backend/nomifun-preset/) | 面向 Conversation、Execution 参与者、伙伴和定时任务的可复用启动配置：合并 builtin/user/extension 目录、关系化 CRUD、按目标解析、不可变快照与导入。 |
-| [`nomifun-companion`](../../crates/backend/nomifun-companion/) | 桌面伙伴状态、形象 / 图片资源、记忆 / 人格数据、伙伴公开图片服务，以及伙伴绑定令牌集成。 |
+| [`nomifun-companion`](../../crates/backend/nomifun-companion/) | 桌面伙伴状态、形象 / 图片资源、记忆 / 人格数据、伙伴公开图片服务，以及机器人 / 设备绑定集成。 |
 | [`nomifun-knowledge`](../../crates/backend/nomifun-knowledge/) | 知识库、来源摄取、绑定库挂载状态，以及作用域只读的知识 MCP 服务器。 |
 | [`nomifun-workshop`](../../crates/backend/nomifun-workshop/) | Canonical 创意工坊域：持有带版本项目文档、素材、提示词、模板/运行、严格 one-shot 模板草稿、Director-aware 项目 ZIP 归档，以及大部分 owner-only `/api/creative-studio/*` 路由。项目文档、模板状态与素材 metadata 在 SQLite；二进制原件/缩略图在 `{data_dir}/workshop/assets/`。唯一公开面是供浏览器媒体元素使用的只读 `GET /api/creative-studio/files/{asset_id}`。 |
 | [`nomifun-miniapp`](../../crates/backend/nomifun-miniapp/) | 小程序域：单文件网页小工具，可由 AI 生成，也可从用户自己写的页面导入。持有两层存储 —— `miniapps` 表里内联的 HTML 是**已发布快照**，由免认证的 `GET /api/miniapps/{id}/serve` 路由供 iframe 渲染；`{work_dir}/miniapps/{id}/miniapp.html` 是**工作副本**，由当下正在改这个小程序的会话就地写入，只经 `POST .../publish` 提升回快照。同时持有属主隔离的 `/api/miniapps` CRUD 路由面、`validate`/`import` 导入对，以及 `POST /api/miniapps/{id}/workspace`（幂等物化工作副本并返回其绝对路径）。本 crate **不认识会话**：既不依赖 `nomifun-conversation`，也不创建任何会话 —— 小程序相关会话就是客户端新建的普通会话。 |
 | [`nomifun-creation`](../../crates/backend/nomifun-creation/) | 创意工坊画布节点、独立工作台与模板 step 背后的媒体生成引擎。持有 canonical owner-only `/api/creative-studio/tasks*` 队列（`queued → running → succeeded/failed/canceled`）、exact Provider/model/task/输入身份、Provider 级与全局并发、取消与启动对账；模型执行委托 `nomifun-model-invoke`，产物字节交给 Workshop `AssetSink`。 |
 | [`nomifun-customer-service`](../../crates/backend/nomifun-customer-service/) | 客服独立域：面向 IM 渠道陌生人的独立服务域，与伙伴 / 会话体系不共享概念——对话是本域自己的聚合，回复由一次性引擎会话产出，工具注册表固定为只读三件套。 |
-| [`nomifun-public`](../../crates/backend/nomifun-public/) | 由伙伴令牌鉴权的公开对外入口：`/mcp`、`/mcp-agent` 与 `/v1`。 |
+| [`nomifun-public`](../../crates/backend/nomifun-public/) | 由安装令牌鉴权的公开对外入口：`/mcp`、`/mcp-agent` 与 `/v1`。 |
 ## 基础设施特性
 
 | Crate | 职责 |

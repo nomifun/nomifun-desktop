@@ -444,10 +444,10 @@ pub async fn create_router(services: &AppServices) -> Router {
         "startup: route tree build started"
     );
     let router = create_router_with_states(services, states);
-    // Remote capability front door (/mcp): per-companion-token-authenticated MCP,
+    // Remote capability front door (/mcp): installation-token-authenticated MCP,
     // projecting the SAME Registry/GatewayDeps as the inward stdio bridge. The
-    // presented bearer token resolves to a single companion_id (threaded into
-    // CallerCtx), so every external connection acts as exactly one companion.
+    // bearer token authenticates the installation owner and never selects a
+    // companion; CallerCtx.companion_id remains None.
     // `nest` (NOT `merge`) scopes its token-auth layer + fallback to `/mcp` so
     // it can't hijack the app's global 404 fallback. Mounted only here (the full
     // app), not in `create_router_with_states`, so test harnesses that call that
@@ -461,7 +461,7 @@ pub async fn create_router(services: &AppServices) -> Router {
         "/mcp",
         nomifun_public::public_mcp_router_with_admission(
             gateway_deps.clone(),
-            services.companion_token_validator.clone(),
+            services.instance_token_validator.clone(),
             None,
             remote_mcp_admission.clone(),
         ),
@@ -472,7 +472,7 @@ pub async fn create_router(services: &AppServices) -> Router {
         "/mcp-agent",
         nomifun_public::public_mcp_router_with_admission(
             gateway_deps.clone(),
-            services.companion_token_validator.clone(),
+            services.instance_token_validator.clone(),
             Some(nomifun_public::AGENT_PROFILE_DOMAINS),
             remote_mcp_admission,
         ),
@@ -483,7 +483,7 @@ pub async fn create_router(services: &AppServices) -> Router {
         "/v1",
         nomifun_public::public_rest_router(
             gateway_deps,
-            services.companion_token_validator.clone(),
+            services.instance_token_validator.clone(),
         ),
     );
     tracing::info!(
@@ -719,14 +719,12 @@ pub fn create_router_with_all_state(
         )
     });
 
-    // Per-companion Remote access-token mint/revoke/status endpoints. Local-trust
-    // gated (the desktop webview's own per-boot secret) — merged into the pre-CSRF
-    // section alongside the auth routes so it never falls under cookie-CSRF.
-    let companion_token_state = crate::router::companion_token_routes::CompanionTokenRouterState {
-        companion_service: services.companion_service.clone(),
+    // Installation-scoped Remote access-token mint/revoke/status endpoints.
+    // Local-trust gated and independent of every companion lifecycle.
+    let instance_token_state = crate::router::instance_token_routes::InstanceTokenRouterState {
         provider_repo: services.provider_repo.clone(),
-        token_repo: services.companion_token_repo.clone(),
-        token_validator: services.companion_token_validator.clone(),
+        token_repo: services.instance_token_repo.clone(),
+        token_validator: services.instance_token_validator.clone(),
     };
 
     // System routes protected by auth middleware
@@ -1097,7 +1095,7 @@ pub fn create_router_with_all_state(
     let router = Router::new()
         .route("/health", get(health_check))
         .merge(auth_routes(auth_state))
-        .merge(crate::router::companion_token_routes::companion_token_routes(companion_token_state))
+        .merge(crate::router::instance_token_routes::instance_token_routes(instance_token_state))
         .merge(system_authenticated)
         .merge(computer_permissions_authenticated)
         .merge(knowledge_registration_read_authenticated)
