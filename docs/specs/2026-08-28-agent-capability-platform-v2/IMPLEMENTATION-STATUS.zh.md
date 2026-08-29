@@ -12,7 +12,7 @@
 - base SHA：`7a2ade3c49374add25a35565265399c57729a8b9`
 - current SHA：`SELF`（包含本文件的 C0 implementation commit；检出后用
   `git rev-parse HEAD` 解析）
-- last verified remote SHA：`7a2ade3c49374add25a35565265399c57729a8b9`
+- last verified remote SHA：`84da71b7377967726552b7f80ce54ff1e4433feb`
 - origin：`https://github.com/nomifun/nomifun-tauri.git`
 - worktree：clean；启动时无用户未提交改动
 - Git identity：`colir0 <colir0@qq.com>`
@@ -176,9 +176,9 @@ C0 contract/golden digests：
 
 - C0 六个 contract slices：closed
 - 设计基线 commit：`7a2ade3c49374add25a35565265399c57729a8b9`
-- C0 implementation commit：`SELF`
+- C0 implementation commit：`84da71b7377967726552b7f80ce54ff1e4433feb`
 - C0 evidence：
-  `build.noindex/agent-capability-v2/7a2ade3c49374add25a35565265399c57729a8b9/contract-closure/summary.json`
+  `build.noindex/agent-capability-v2/84da71b7377967726552b7f80ce54ff1e4433feb/contract-closure/summary.json`
 - C0 generated ledger：
   `crates/backend/nomifun-agent-contracts/contracts/generated/contract-digest-ledger.envelope.json`
 
