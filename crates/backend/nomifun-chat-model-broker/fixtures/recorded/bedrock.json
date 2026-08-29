@@ -1,0 +1,204 @@
+{
+  "fixture_version": "chat-model-recorded-v1",
+  "scenario_id": "bedrock-stream-tool-reasoning-image",
+  "protocol": "bedrock",
+  "route": {
+    "model_route_id": "route-bedrock-primary",
+    "model_route_revision": 4,
+    "provider_id": "provider-bedrock",
+    "model": "anthropic.recorded-bedrock",
+    "protocol": "bedrock",
+    "connection_config_ref": "connection-bedrock",
+    "config_revision_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "credential_ref": "credential-ref-bedrock",
+    "features": [
+      "text_input",
+      "image_input",
+      "text_output",
+      "tool_calls",
+      "reasoning",
+      "reasoning_signature",
+      "prompt_cache"
+    ]
+  },
+  "request": {
+    "contract_version": "chat-model-v1",
+    "causality": {
+      "agent_session_id": "0190f5fe-7c00-7a00-8000-000000001005",
+      "turn_operation_id": "turn-bedrock-0001",
+      "causation_event_id": "event-bedrock-0001",
+      "resolved_snapshot_ref": {
+        "snapshot_id": "snapshot-bedrock",
+        "snapshot_digest": "5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      "model_route_revision": 4,
+      "operation_id": "model-bedrock-0001"
+    },
+    "route": {
+      "model_route_id": "route-bedrock-primary",
+      "model_route_revision": 4,
+      "task": "agent_chat"
+    },
+    "input": {
+      "instructions": ["Use the recorded Bedrock route."],
+      "messages": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_call",
+              "call_id": "call-history-bedrock",
+              "name": "lookup",
+              "arguments": {"query": "previous"}
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": [
+            {
+              "type": "tool_result",
+              "call_id": "call-history-bedrock",
+              "output": [{"type": "text", "text": "previous result"}],
+              "is_error": false
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {"type": "text", "text": "Inspect the diagram."},
+            {
+              "type": "image",
+              "media_type": "image/png",
+              "data_base64": "iVBORw0KGgoAAAANSUhEUg=="
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Look up one item.",
+          "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": false
+          },
+          "deferred": false
+        }
+      ],
+      "tool_choice": {"mode": "auto"},
+      "max_output_tokens": 512,
+      "reasoning": {
+        "effort": "medium",
+        "summary": "auto",
+        "max_reasoning_tokens": 128
+      },
+      "prompt_cache": "ephemeral",
+      "response_format": {"type": "text"},
+      "requested_output_modalities": ["text"],
+      "preserve_native_responses_items": false,
+      "metadata": {"fixture": "bedrock"}
+    }
+  },
+  "coverage": {
+    "streaming": true,
+    "tool_round": true,
+    "reasoning": true,
+    "prompt_cache": true,
+    "image_input": true,
+    "audio_input": false,
+    "structured_output": false,
+    "compaction_history": true,
+    "native_responses_items": false
+  },
+  "wire_events": [
+    {"event": "message_start", "data": {"message": {"id": "bedrock-message-1"}}},
+    {
+      "event": "thinking.delta",
+      "data": {"text": "The diagram references a lookup target."}
+    },
+    {
+      "event": "thinking.signature",
+      "data": {"signature": "sig-bedrock-recorded"}
+    },
+    {
+      "event": "text.delta",
+      "data": {"text": "I found a matching diagram node."}
+    },
+    {
+      "event": "tool_call.delta",
+      "data": {
+        "call_id": "call-bedrock-1",
+        "name": "lookup",
+        "arguments_delta": "{\"query\":\"diagram"
+      }
+    },
+    {
+      "event": "tool_call.completed",
+      "data": {
+        "call_id": "call-bedrock-1",
+        "name": "lookup",
+        "arguments": {"query": "diagram node"}
+      }
+    },
+    {
+      "event": "usage",
+      "data": {
+        "input_tokens": 150,
+        "output_tokens": 30,
+        "reasoning_tokens": 10,
+        "cache_read_tokens": 90,
+        "cache_write_tokens": 60
+      }
+    },
+    {"event": "message_stop", "data": {"stop_reason": "tool_use"}}
+  ],
+  "expected_events": [
+    {
+      "type": "response_started",
+      "provider_response_id": "bedrock-message-1"
+    },
+    {
+      "type": "reasoning_delta",
+      "text": "The diagram references a lookup target."
+    },
+    {
+      "type": "reasoning_signature",
+      "signature": "sig-bedrock-recorded"
+    },
+    {
+      "type": "output_text_delta",
+      "text": "I found a matching diagram node."
+    },
+    {
+      "type": "tool_call_delta",
+      "call_id": "call-bedrock-1",
+      "name": "lookup",
+      "arguments_delta": "{\"query\":\"diagram"
+    },
+    {
+      "type": "tool_call_completed",
+      "call": {
+        "call_id": "call-bedrock-1",
+        "name": "lookup",
+        "arguments": {"query": "diagram node"}
+      }
+    },
+    {
+      "type": "usage",
+      "usage": {
+        "input_tokens": 150,
+        "output_tokens": 30,
+        "reasoning_tokens": 10,
+        "cache_write_tokens": 60,
+        "cache_read_tokens": 90,
+        "audio_input_tokens": 0,
+        "audio_output_tokens": 0
+      }
+    },
+    {"type": "completed", "finish_reason": "tool_calls"}
+  ]
+}

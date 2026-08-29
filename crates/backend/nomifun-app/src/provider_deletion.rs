@@ -115,7 +115,7 @@ mod tests {
     use super::*;
     use nomifun_common::{
         AdaptationPolicy, AgentExecutionEventKind, AgentExecutionStatus, DecisionPolicy,
-        DelegationPolicy, PlanGate, ProviderUsageFeature,
+        DelegationPolicy, ProviderUsageFeature,
     };
     use nomifun_db::{
         IAgentExecutionRepository, IAgentExecutionTemplateRepository,
@@ -237,7 +237,6 @@ mod tests {
                 &nomifun_db::CreateAgentExecutionParams {
                     goal: "正在使用受保护模型".into(),
                     status: AgentExecutionStatus::Paused,
-                    plan_gate: PlanGate::Automatic,
                     adaptation_policy: AdaptationPolicy::Fixed,
                     decision_policy: DecisionPolicy::Automatic,
                     delegation_policy: DelegationPolicy::Automatic,

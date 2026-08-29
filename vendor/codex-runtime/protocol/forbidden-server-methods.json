@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "disposition": "fatal_conformance_failure",
+  "methods": [
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+    "item/tool/requestUserInput",
+    "mcpServer/elicitation/request",
+    "applyPatchApproval",
+    "execCommandApproval",
+    "item/autoApprovalReview/started",
+    "item/autoApprovalReview/completed"
+  ],
+  "unknown_server_request": "reject",
+  "unknown_server_notification": "reject"
+}

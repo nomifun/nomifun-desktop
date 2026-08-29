@@ -15,7 +15,8 @@ use nomifun_agent_contracts::{
     PlatformHandoffBundle, PlatformValidationLedgerMatrix, PlatformValidationManifestPayload,
     PluginRegistrationMetadata, RemoteBinding, ResolvedSnapshotContent, RuntimeCommand,
     RuntimeHelloPayload, SessionEventRegistryPayload, TargetPackageInventoryPayload, VersionString,
-    digest_bytes, digest_payload,
+    FreshV4ParentOperationMarker, FreshV4ReadyMarker, FreshV4SchemaMetadata, digest_bytes,
+    digest_payload,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
@@ -659,6 +660,9 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
         &mut schemas,
         "runtime_feature_inventory",
     )?;
+    add_schema::<FreshV4ParentOperationMarker>(&mut schemas, "fresh_v4_parent_marker")?;
+    add_schema::<FreshV4SchemaMetadata>(&mut schemas, "fresh_v4_schema_metadata")?;
+    add_schema::<FreshV4ReadyMarker>(&mut schemas, "fresh_v4_ready_marker")?;
     add_schema::<DeletionManifest>(&mut schemas, "deletion_manifest")?;
     add_schema::<PlatformValidationManifestPayload>(
         &mut schemas,

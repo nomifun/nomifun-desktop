@@ -117,12 +117,20 @@ impl WorkRootLock {
     }
 }
 
-/// Layer 1: Logging + config resolution.
+/// Layer 1: Fresh-v4 validation/recovery + logging + config resolution.
 ///
-/// Cheap, synchronous, no IO beyond creating the log directory.
-/// All subcommands that need logging and config should call this first.
+/// The Fresh-v4 check runs before service construction. All subcommands that
+/// need logging and config should call this first.
 pub fn init_environment(cli: &Cli, merged_path: &str) -> Result<ServerEnvironment> {
-    let log_dir = cli.log_dir.clone().unwrap_or_else(|| cli.data_dir.join("logs"));
+    let startup_data_dir =
+        super::data_root::normalize_requested_startup_data_root(
+            cli.data_dir.clone(),
+        );
+    super::v4_root::recover_or_validate_if_present(&startup_data_dir)?;
+    let log_dir = cli
+        .log_dir
+        .clone()
+        .unwrap_or_else(|| startup_data_dir.join("logs"));
     // Export the *actual* log dir so `nomifun_system::sysinfo::resolve_log_dir`
     // (which the settings UI reads via GET /api/system/info) reports where logs
     // truly land instead of its own independent default — otherwise the UI shows
@@ -153,7 +161,7 @@ pub fn init_environment(cli: &Cli, merged_path: &str) -> Result<ServerEnvironmen
 
     // Take data-dir authority before resolving any pending reset or legacy
     // work-root recovery hint from its control files.
-    let server_lock = Arc::new(acquire_server_lock(&cli.data_dir)?);
+    let server_lock = Arc::new(acquire_server_lock(&startup_data_dir)?);
     let data_dir = server_lock.protected_data_dir().to_path_buf();
     let data_root_work_lock = acquire_work_root_lock(&data_dir)?;
     nomifun_common::factory_reset::require_data_root_not_owned_as_external_work(
@@ -660,6 +668,10 @@ impl ServerEnvironment {
     /// create/finalize a replacement dataset without the server's complete
     /// service/side-store bootstrap.
     pub async fn init_doctor_data_layer(&self) -> Result<Database> {
+        super::v4_root::reject_legacy_v3_data_layer(
+            &self.config.data_dir,
+            "doctor database initialization",
+        )?;
         if prepare_v3_data_layer(&self.config).await?
             != V3DataLayerState::FinalizedCurrent
         {
@@ -684,6 +696,10 @@ impl ServerEnvironment {
 /// Requires only `data_dir`. Subcommands that need persistent state
 /// (database, skill files) should call this after `init_environment`.
 pub async fn init_data_layer(config: &AppConfig) -> Result<Database> {
+    super::v4_root::reject_legacy_v3_data_layer(
+        &config.data_dir,
+        "legacy v3 data-layer initialization",
+    )?;
     let boot = Instant::now();
 
     let preparation = prepare_v3_data_layer(config).await?;
@@ -730,6 +746,10 @@ pub async fn init_data_layer(config: &AppConfig) -> Result<Database> {
 /// assembly fails, the pending reset plan remains durable and the next boot
 /// resumes instead of accepting a half-initialized dataset.
 pub fn finalize_data_layer(config: &AppConfig) -> Result<()> {
+    super::v4_root::reject_legacy_v3_data_layer(
+        &config.data_dir,
+        "legacy v3 data-layer finalization",
+    )?;
     let storage_generation = load_or_create_storage_generation(&config.data_dir)?;
     nomifun_common::factory_reset::write_v3_dataset_receipt_for_work_dir(
         &config.data_dir,

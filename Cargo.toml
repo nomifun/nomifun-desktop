@@ -45,6 +45,13 @@ nomifun-creation = { path = "crates/backend/nomifun-creation" }
 nomifun-app = { path = "crates/backend/nomifun-app" }
 nomifun-robot = { path = "crates/backend/nomifun-robot" }
 nomifun-browser-platform = { path = "crates/backend/nomifun-browser-platform" }
+nomifun-agent-contracts = { path = "crates/backend/nomifun-agent-contracts" }
+nomifun-v4-root = { path = "crates/backend/nomifun-v4-root" }
+nomifun-agent-session = { path = "crates/backend/nomifun-agent-session" }
+nomifun-agent-kernel = { path = "crates/backend/nomifun-agent-kernel" }
+nomifun-codex-runtime = { path = "crates/backend/nomifun-codex-runtime" }
+nomifun-chat-model-broker = { path = "crates/backend/nomifun-chat-model-broker" }
+nomifun-agent-control-plane = { path = "crates/backend/nomifun-agent-control-plane" }
 
 # --- Internal crates: shared ---
 nomifun-net = { path = "crates/shared/nomifun-net" }

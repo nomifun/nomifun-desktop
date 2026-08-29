@@ -17,7 +17,7 @@ use common::{
 };
 use nomifun_common::{
     AdaptationPolicy, AgentExecutionEventKind, AgentExecutionStatus, DecisionPolicy,
-    DelegationPolicy, PlanGate,
+    DelegationPolicy,
 };
 use nomifun_db::{
     CreateAgentExecutionParams, IAgentExecutionRepository, NewAgentExecutionEvent,
@@ -96,7 +96,6 @@ async fn repository_execution_round_trips_through_the_app_engine() {
             &CreateAgentExecutionParams {
                 goal: "验证统一执行边界".to_owned(),
                 status: AgentExecutionStatus::Paused,
-                plan_gate: PlanGate::Automatic,
                 adaptation_policy: AdaptationPolicy::Fixed,
                 decision_policy: DecisionPolicy::Automatic,
                 delegation_policy: DelegationPolicy::Automatic,

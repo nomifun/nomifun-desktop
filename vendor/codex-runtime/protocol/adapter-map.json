@@ -1,0 +1,63 @@
+{
+  "schema_version": "1.0.0",
+  "stable_hello_method": "runtime/hello",
+  "stable_rpc_allowlist": [
+    {
+      "method": "create",
+      "pinned_upstream_method": "thread/start"
+    },
+    {
+      "method": "resume",
+      "pinned_upstream_method": "thread/resume"
+    },
+    {
+      "method": "fork",
+      "pinned_upstream_method": "thread/fork"
+    },
+    {
+      "method": "start_turn",
+      "pinned_upstream_method": "turn/start"
+    },
+    {
+      "method": "steer",
+      "pinned_upstream_method": "turn/steer"
+    },
+    {
+      "method": "follow_up",
+      "pinned_upstream_method": "turn/start"
+    },
+    {
+      "method": "cancel",
+      "pinned_upstream_method": "turn/interrupt"
+    },
+    {
+      "method": "session_dispose",
+      "pinned_upstream_method": "runtime/session/dispose"
+    }
+  ],
+  "experimental_methods": [],
+  "internal_upstream_methods": [
+    "initialize",
+    "initialized",
+    "thread/compact/start"
+  ],
+  "fixed_thread_policy": {
+    "approvalPolicy": "never",
+    "sandbox": "danger-full-access"
+  },
+  "fixed_turn_policy": {
+    "approvalPolicy": "never",
+    "sandboxPolicy": {
+      "type": "dangerFullAccess"
+    }
+  },
+  "server_request_allowlist": [
+    "runtime/event",
+    "native_action/start"
+  ],
+  "transport": {
+    "kind": "stdio",
+    "framing": "newline-delimited-json",
+    "websocket": "unsupported"
+  }
+}

@@ -1,0 +1,243 @@
+{
+  "fixture_version": "chat-model-recorded-v1",
+  "scenario_id": "openai-responses-native-items-audio-cache",
+  "protocol": "openai_responses",
+  "route": {
+    "model_route_id": "route-openai-responses-native",
+    "model_route_revision": 11,
+    "provider_id": "provider-openai-responses",
+    "model": "responses-recorded",
+    "protocol": "openai_responses",
+    "connection_config_ref": "connection-openai-responses",
+    "config_revision_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "credential_ref": "credential-ref-openai-responses",
+    "features": [
+      "text_input",
+      "audio_input",
+      "text_output",
+      "tool_calls",
+      "reasoning",
+      "prompt_cache",
+      "structured_output",
+      "provider_round_state",
+      "native_responses_items"
+    ]
+  },
+  "request": {
+    "contract_version": "chat-model-v1",
+    "causality": {
+      "agent_session_id": "0190f5fe-7c00-7a00-8000-000000001003",
+      "turn_operation_id": "turn-openai-responses-0001",
+      "causation_event_id": "event-openai-responses-0001",
+      "resolved_snapshot_ref": {
+        "snapshot_id": "snapshot-openai-responses",
+        "snapshot_digest": "3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      "model_route_revision": 11,
+      "operation_id": "model-openai-responses-0001"
+    },
+    "route": {
+      "model_route_id": "route-openai-responses-native",
+      "model_route_revision": 11,
+      "task": "agent_chat"
+    },
+    "input": {
+      "instructions": ["Preserve native Responses items."],
+      "messages": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_call",
+              "call_id": "call-history-openai-responses",
+              "name": "lookup",
+              "arguments": {"query": "previous"}
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": [
+            {
+              "type": "tool_result",
+              "call_id": "call-history-openai-responses",
+              "output": [{"type": "text", "text": "previous result"}],
+              "is_error": false
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {"type": "text", "text": "Transcribe and continue."},
+            {
+              "type": "audio",
+              "media_type": "audio/wav",
+              "data_base64": "UklGRgAAAABXQVZF"
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Look up one item.",
+          "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": false
+          },
+          "deferred": false
+        }
+      ],
+      "tool_choice": {"mode": "auto"},
+      "max_output_tokens": 640,
+      "reasoning": {
+        "effort": "high",
+        "summary": "detailed"
+      },
+      "prompt_cache": "automatic",
+      "response_format": {
+        "type": "json_schema",
+        "name": "transcript_result",
+        "schema": {
+          "type": "object",
+          "properties": {"transcript": {"type": "string"}},
+          "required": ["transcript"],
+          "additionalProperties": false
+        },
+        "strict": true
+      },
+      "requested_output_modalities": ["text"],
+      "provider_round_parent": "resp_previous_recorded",
+      "preserve_native_responses_items": true,
+      "metadata": {"fixture": "openai-responses"}
+    }
+  },
+  "coverage": {
+    "streaming": true,
+    "tool_round": true,
+    "reasoning": true,
+    "prompt_cache": true,
+    "image_input": false,
+    "audio_input": true,
+    "structured_output": true,
+    "compaction_history": true,
+    "native_responses_items": true
+  },
+  "wire_events": [
+    {
+      "event": "response.created",
+      "data": {"response": {"id": "resp_recorded_native_1"}}
+    },
+    {
+      "event": "response.output_item.added",
+      "data": {
+        "item": {
+          "type": "reasoning",
+          "id": "reasoning_recorded_1",
+          "encrypted_content": "opaque-recorded-reasoning"
+        }
+      }
+    },
+    {
+      "event": "response.reasoning_summary_text.delta",
+      "data": {"delta": "The audio asks for a lookup."}
+    },
+    {
+      "event": "response.output_text.delta",
+      "data": {"delta": "{\"transcript\":\"lookup request\"}"}
+    },
+    {
+      "event": "response.function_call_arguments.delta",
+      "data": {
+        "call_id": "call-openai-responses-1",
+        "name": "lookup",
+        "arguments_delta": "{\"query\":\"audio"
+      }
+    },
+    {
+      "event": "response.function_call.done",
+      "data": {
+        "call_id": "call-openai-responses-1",
+        "name": "lookup",
+        "arguments": {"query": "audio request"}
+      }
+    },
+    {
+      "event": "provider.round",
+      "data": {"round_id": "resp_recorded_native_1"}
+    },
+    {
+      "event": "response.usage",
+      "data": {
+        "usage": {
+          "input_tokens": 140,
+          "output_tokens": 36,
+          "reasoning_tokens": 12,
+          "cache_read_tokens": 100,
+          "audio_input_tokens": 22
+        }
+      }
+    },
+    {
+      "event": "response.completed",
+      "data": {"response": {"status": "completed"}, "finish_reason": "tool_calls"}
+    }
+  ],
+  "expected_events": [
+    {
+      "type": "response_started",
+      "provider_response_id": "resp_recorded_native_1"
+    },
+    {
+      "type": "native_responses_item",
+      "item_type": "reasoning",
+      "item": {
+        "type": "reasoning",
+        "id": "reasoning_recorded_1",
+        "encrypted_content": "opaque-recorded-reasoning"
+      }
+    },
+    {
+      "type": "reasoning_delta",
+      "text": "The audio asks for a lookup."
+    },
+    {
+      "type": "output_text_delta",
+      "text": "{\"transcript\":\"lookup request\"}"
+    },
+    {
+      "type": "tool_call_delta",
+      "call_id": "call-openai-responses-1",
+      "name": "lookup",
+      "arguments_delta": "{\"query\":\"audio"
+    },
+    {
+      "type": "tool_call_completed",
+      "call": {
+        "call_id": "call-openai-responses-1",
+        "name": "lookup",
+        "arguments": {"query": "audio request"}
+      }
+    },
+    {
+      "type": "provider_round_id",
+      "round_id": "resp_recorded_native_1"
+    },
+    {
+      "type": "usage",
+      "usage": {
+        "input_tokens": 140,
+        "output_tokens": 36,
+        "reasoning_tokens": 12,
+        "cache_write_tokens": 0,
+        "cache_read_tokens": 100,
+        "audio_input_tokens": 22,
+        "audio_output_tokens": 0
+      }
+    },
+    {"type": "completed", "finish_reason": "tool_calls"}
+  ]
+}

@@ -1,6 +1,6 @@
 use nomifun_common::{
     AdaptationPolicy, AgentExecutionActor, AgentExecutionEventKind, AgentExecutionStatus,
-    ConversationId, DecisionPolicy, DelegationPolicy, PlanGate,
+    ConversationId, DecisionPolicy, DelegationPolicy,
 };
 use nomifun_db::models::ConversationRow;
 use nomifun_db::{
@@ -359,7 +359,6 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
             &CreateAgentExecutionParams {
                 goal: "hard execution".to_owned(),
                 status: AgentExecutionStatus::Planning,
-                plan_gate: PlanGate::Automatic,
                 adaptation_policy: AdaptationPolicy::Fixed,
                 decision_policy: DecisionPolicy::Automatic,
                 delegation_policy: DelegationPolicy::Automatic,
@@ -425,7 +424,6 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
             &CreateAgentExecutionParams {
                 goal: "missing provider".to_owned(),
                 status: AgentExecutionStatus::Planning,
-                plan_gate: PlanGate::Automatic,
                 adaptation_policy: AdaptationPolicy::Fixed,
                 decision_policy: DecisionPolicy::Automatic,
                 delegation_policy: DelegationPolicy::Automatic,

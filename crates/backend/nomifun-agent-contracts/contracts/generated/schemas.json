@@ -1599,6 +1599,141 @@
     "title": "EvidenceSummary",
     "type": "object"
   },
+  "fresh_v4_parent_marker": {
+    "$defs": {
+      "FreshV4OperationKind": {
+        "enum": [
+          "fresh",
+          "cutover"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "canonical_normalized_relative_basename": {
+        "type": "string"
+      },
+      "canonical_schema_manifest_digest": {
+        "type": "string"
+      },
+      "cutover_archive_sibling_relative_basename": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "operation_id": {
+        "type": "string"
+      },
+      "operation_kind": {
+        "$ref": "#/$defs/FreshV4OperationKind"
+      },
+      "target_data_generation": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "operation_id",
+      "operation_kind",
+      "canonical_normalized_relative_basename",
+      "target_data_generation",
+      "canonical_schema_manifest_digest"
+    ],
+    "title": "FreshV4ParentOperationMarker",
+    "type": "object"
+  },
+  "fresh_v4_ready_marker": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "application_build_digest": {
+        "type": "string"
+      },
+      "canonical_schema_manifest_digest": {
+        "type": "string"
+      },
+      "data_generation": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "migration_head": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "projection_schema_version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "root_instance_id": {
+        "type": "string"
+      },
+      "seed_manifest_digest": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "data_generation",
+      "root_instance_id",
+      "migration_head",
+      "seed_manifest_digest",
+      "canonical_schema_manifest_digest",
+      "projection_schema_version",
+      "application_build_digest"
+    ],
+    "title": "FreshV4ReadyMarker",
+    "type": "object"
+  },
+  "fresh_v4_schema_metadata": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "canonical_schema_manifest_digest": {
+        "type": "string"
+      },
+      "data_generation": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "migration_head": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "projection_schema_version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "root_instance_id": {
+        "type": "string"
+      },
+      "seed_manifest_digest": {
+        "type": "string"
+      },
+      "singleton_key": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "singleton_key",
+      "data_generation",
+      "root_instance_id",
+      "migration_head",
+      "seed_manifest_digest",
+      "canonical_schema_manifest_digest",
+      "projection_schema_version"
+    ],
+    "title": "FreshV4SchemaMetadata",
+    "type": "object"
+  },
   "official_preset_seed": {
     "$defs": {
       "ExactVersionRef": {

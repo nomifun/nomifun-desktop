@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0.0",
+  "cases": [
+    {
+      "case_id": "ack_then_tree_proof",
+      "rpc_outcome": "acked",
+      "ordered_steps": [
+        "session_dispose_request",
+        "session_dispose_ack",
+        "close_protocol",
+        "terminate_process_tree",
+        "prove_tree_empty"
+      ],
+      "repeat_result": "same_report"
+    },
+    {
+      "case_id": "ack_timeout_forced_tree_cleanup",
+      "rpc_outcome": "timed_out",
+      "ordered_steps": [
+        "session_dispose_request",
+        "ack_deadline",
+        "close_protocol",
+        "terminate_process_tree",
+        "prove_tree_empty"
+      ],
+      "repeat_result": "same_report"
+    },
+    {
+      "case_id": "sidecar_crash_tree_cleanup",
+      "rpc_outcome": "failed",
+      "ordered_steps": [
+        "observe_protocol_failure",
+        "terminate_process_tree",
+        "prove_tree_empty"
+      ],
+      "repeat_result": "same_report"
+    }
+  ],
+  "required_descendants": [
+    "terminal",
+    "pty",
+    "browser",
+    "subagent"
+  ]
+}

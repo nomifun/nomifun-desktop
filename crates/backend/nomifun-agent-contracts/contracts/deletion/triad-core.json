@@ -842,6 +842,7 @@
     "notes": [
       "C1 FullAuto physical deletion is complete on the Windows development host.",
       "The C1 gate passed after removing agent modes, tool approval and confirmation chains, plan approval/waiting states, Browser Agent approval/takeover settings, Remote/Gateway confirmation retry fields, and IDMM permission decisions.",
+      "C2-C5 foundations are implemented: Fresh-v4 cutover/seed ownership, canonical AgentSession storage, thin Kernel/plugin/compiler, pinned Codex Runtime, ChatModelBroker, and Agent Preset control plane/UI. C6 final-stack integration remains required before the canonical producer or direct consumers are marked ready.",
       "The C1 gate evidence is targeted deletion evidence only; fresh-v4 persistence, thin-kernel composition, Codex runtime replacement, product migration, triad reachability, and D-027 drain remain open for C2-C7/C9.",
       "The D-004 allowlist is the only non-empty residual policy and must only shrink."
     ]

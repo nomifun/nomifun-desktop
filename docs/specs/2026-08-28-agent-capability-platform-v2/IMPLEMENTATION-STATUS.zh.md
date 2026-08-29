@@ -30,8 +30,10 @@
 
 ## 当前阶段
 
-- 当前 boundary：`C1 FullAuto physical deletion`（CLOSED）
-- 下一 boundary：`C2 Fresh-v4 || C3 Kernel/Plugin || C4 Runtime/Model || C5 Preset Product`
+- 当前 boundary：
+  `C2 Fresh-v4 || C3 Kernel/Plugin || C4 Runtime/Model || C5 Preset Product`
+  （CLOSED）
+- 下一 boundary：`C6 Chat + Coding + sample.echo Triad`
 - Review A：
   - Decision Closure：PASS，D-001～D-028（含 D-019）均已确认
   - Contract Closure：PASS
@@ -98,6 +100,22 @@
 保留项：Coding review、OS permission、Channel pairing authorization、普通产品确认。
 删除项：Agent mode/tool approval/plan approval/wait/confirmation 主链。
 
+## Closed C2～C5 Disjoint Write Sets
+
+机器可读清单：
+`docs/specs/2026-08-28-agent-capability-platform-v2/C2-C5-WRITE-MANIFESTS.json`
+
+- `C2-W1-FRESH-V4-ROOT`：closed
+- `C3-W1-SESSION-STORE`：closed
+- `C3-W1-KERNEL-PLUGIN`：closed
+- `C4-W2-CODEX-RUNTIME`：closed
+- `C4-W2-MODEL-BROKER`：closed
+- `C5-W3-CONTROL-PLANE`：closed
+- `C5-W3-AGENT-SETTINGS-UI`：closed
+
+C2～C5 只建立最终 foundation/control-plane；业务域 composition demolition
+仍等待 C6 三联 Gate 后的 C7 owning slice。
+
 ## Closed C0 Disjoint Write Sets
 
 机器可读清单：
@@ -142,11 +160,11 @@ C0 尚未生成原生候选；以下字段均为 not-applicable，而不是 pass
 C0 contract/golden digests：
 
 - canonical v4 schema manifest：
-  `5df80b2cc4ce25b53c01e85a1ede7c4f088a70fdf218d7d1ddebe3d008aa47ac`
+  `f0a1c03696ed180db6786f781282d3a2b81dbea91ac286972b710dd7fe842ed7`
 - contract digest ledger：
-  `6600538e134aa885d89113055decc333facb16e854bbf73c65b52e0cd8a932fa`
+  `e26006ad01cd4918ce53ca430fc95aaaf36a04a160467c7432631617145e294a`
 - deletion manifest set：
-  `dd050984ddf0ddce3df7b86263f3124c592c773bfcdf101604f75ef7c8be4139`
+  `13431f76e07398c06dc9e42ccb5b70c701297451551c2fcf907c78fcab8f41ad`
 - official preset seed manifest：
   `c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8`
 - runtime protocol：
@@ -156,9 +174,9 @@ C0 contract/golden digests：
 - platform validation contract：
   `78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9`
 - runtime release fixture：
-  `5a9823e6860e9f39192a0cfb9c46281f4d8ec68b1277a7e3119ab5d9366fb416`
+  `0c029dd60f53c761bce3451de66c678e95314b354e229e84fde632c70dd8b55f`
 - platform validation fixture：
-  `fa0cad0da05fbdfad8b8004f1b3c240a1400973f1612286676de6153be593782`
+  `e89a51d0e11f9e9080cd1cfd860eeea4016f998b0c31eead0096257811e1a284`
 
 ## Platform Verification
 
@@ -189,6 +207,13 @@ C0 contract/golden digests：
 - C1 Agent Core focused tests：662 passed；Browser/Config/MCP/Skills checks 全绿
 - C1 targeted UI cohort：52 passed；`bun run check:i18n` PASS
 - `bun run gate:agent-v2 -- c1-fullauto`：PASS
+- C2～C5 foundation Rust tests：76 passed
+  - Fresh-v4 10、AgentSession 9、Kernel/Plugin 12
+  - Codex Runtime 31、ChatModelBroker 9、Control Plane 5
+- C5 Agent Settings UI：15 passed；i18n 7050 keys / 33 modules
+- `bun run typecheck`：C2～C5 changed-line diagnostics=0；repository baseline
+  仍有 unrelated Arco/React typing debt
+- `bun run gate:agent-v2 -- c2-c5-foundations`：PASS
 
 ## 未运行验证
 
@@ -214,12 +239,16 @@ C0 contract/golden digests：
   `build.noindex/agent-capability-v2/ab6166e2c33758a560e2cd7f98f6e7bc0a39aeb1/contract-closure/summary.json`
 - C1 FullAuto evidence：
   `build.noindex/agent-capability-v2/ab6166e2c33758a560e2cd7f98f6e7bc0a39aeb1/c1-fullauto/summary.json`
+- C2～C5 implementation：working-tree closure pending commit/push
+- C2～C5 foundation evidence：
+  `build.noindex/agent-capability-v2/253e850b44bce83fa9b785dc6805c431201f6c91/c2-c5-foundations/summary.json`
 
 ## 下一批可直接执行
 
-1. 冻结 C2～C5 disjoint write manifests。
-2. 并行进入 C2 Fresh-v4、C3 Kernel/Plugin、C4 Runtime/Model、C5 Preset Product。
-3. 在 C6 汇合前保持 C1 FullAuto residual gate 与 published migrations 不变。
+1. 形成 C2～C5 implementation commit/push并核对 local/origin/`git ls-remote` SHA。
+2. 冻结 C6 triad disjoint write manifests。
+3. 合流 Chat/Coding/`sample.echo` 最终数据、UI、Runtime、Event/Effect 与 D-024 delete。
+4. C6 执行第一次 workspace `cargo test` 与 UI check/build；未通过不得进入 C7。
 
 ## 真实 Blocker
 

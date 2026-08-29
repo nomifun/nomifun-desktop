@@ -4,6 +4,7 @@ mod agent_discovery;
 mod agent_error;
 mod agent_execution;
 mod agent_execution_template;
+mod agent_platform;
 mod auth;
 mod channel;
 mod connection_test;
@@ -69,6 +70,7 @@ pub use agent_execution_template::{
     AgentExecutionTemplateParticipantInput, CreateAgentExecutionTemplateRequest,
     CreateExecutionFromTemplateRequest, UpdateAgentExecutionTemplateRequest,
 };
+pub use agent_platform::*;
 pub use auth::{
     AuthStatusResponse, ChangePasswordRequest, ChangeUsernameRequest, ChangeUsernameResponse,
     LoginRequest, LoginResponse, PublicUser, QrLoginRequest, RefreshResponse, RefreshTokenRequest,

@@ -1,0 +1,17 @@
+{
+  "thread_open": {
+    "approvalPolicy": "never",
+    "sandbox": "danger-full-access"
+  },
+  "turn_start": {
+    "approvalPolicy": "never",
+    "sandboxPolicy": {
+      "type": "dangerFullAccess"
+    }
+  },
+  "forbidden_overrides": [
+    "approvalsReviewer",
+    "permissions",
+    "permissionProfile"
+  ]
+}

@@ -9,8 +9,10 @@
       },
       "runtime_bound_event_id": "runtime-bound-event-old",
       "protocol_version": "1.0.0",
-      "snapshot_id": "snapshot-0001",
-      "snapshot_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+      "resolved_snapshot_ref": {
+        "snapshot_id": "snapshot-0001",
+        "snapshot_digest": "6666666666666666666666666666666666666666666666666666666666666666"
+      },
       "through_seq": 40
     },
     "referenced_runtime_build_digest": "7777777777777777777777777777777777777777777777777777777777777777",

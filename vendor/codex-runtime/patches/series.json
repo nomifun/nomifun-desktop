@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0.0",
+  "pinned_commit": "dc2ccc6843abb09c9d297862dc10b6bd12a3935d",
+  "patches": [
+    {
+      "patch_id": "0001-runtime-hello",
+      "owns": [
+        "runtime/hello",
+        "release identity",
+        "protocol and native feature evidence"
+      ]
+    },
+    {
+      "patch_id": "0002-stable-rpc-adapter",
+      "owns": [
+        "logical eight-method allowlist",
+        "pinned thread and turn method mapping",
+        "unknown method rejection"
+      ]
+    },
+    {
+      "patch_id": "0003-full-auto-only",
+      "owns": [
+        "approvalPolicy=never",
+        "dangerFullAccess",
+        "interactive request rejection"
+      ]
+    },
+    {
+      "patch_id": "0004-native-action-ack-gate",
+      "owns": [
+        "native_action/start",
+        "durable effect-start ACK",
+        "no execution before ACK"
+      ]
+    },
+    {
+      "patch_id": "0005-inherited-credential-handle",
+      "owns": [
+        "one-shot inherited anonymous pipe",
+        "Windows duplicated child handle",
+        "credential handle close after bootstrap"
+      ]
+    },
+    {
+      "patch_id": "0006-session-dispose",
+      "owns": [
+        "runtime/session/dispose",
+        "idempotent ACK",
+        "terminal, PTY, browser, and subagent teardown"
+      ]
+    }
+  ],
+  "upstream_source_files_in_vendor": []
+}
