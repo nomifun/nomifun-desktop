@@ -5,7 +5,7 @@
   "checkpoint_mismatch_fixture": {
     "artifact_id": "runtime_checkpoint_mismatch_fixture",
     "normalized_relative_path": "contracts/runtime/checkpoint-mismatch.json",
-    "digest": "e8426ef50a1fc570eaf0105c915c5ae5555eef222740adc07dee13f88ae56c34"
+    "digest": "9de97419f102e5e6305573e5b49778b180a627ce5897b25b112bb76a886e2302"
   },
   "required_cases": [
     {

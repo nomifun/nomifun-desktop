@@ -7,8 +7,10 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const gateName = args[0];
 
-if (!['contract-closure', 'c1-fullauto'].includes(gateName)) {
-  console.error('usage: bun run gate:agent-v2 -- <contract-closure|c1-fullauto>');
+if (!['contract-closure', 'c1-fullauto', 'c2-c5-foundations'].includes(gateName)) {
+  console.error(
+    'usage: bun run gate:agent-v2 -- <contract-closure|c1-fullauto|c2-c5-foundations>'
+  );
   process.exit(2);
 }
 
@@ -18,6 +20,7 @@ const requiredFiles = [
   'crates/backend/nomifun-agent-contracts/src/package.rs',
   'crates/backend/nomifun-agent-contracts/src/preset.rs',
   'crates/backend/nomifun-agent-contracts/src/remote.rs',
+  'crates/backend/nomifun-agent-contracts/src/root.rs',
   'crates/backend/nomifun-agent-contracts/src/runtime.rs',
   'crates/backend/nomifun-agent-contracts/src/session.rs',
   'crates/backend/nomifun-agent-contracts/src/event.rs',
@@ -87,6 +90,12 @@ if (gateName === 'c1-fullauto') {
   runC1Gate();
   writeGateReport('c1-fullauto');
   finishGate('c1-fullauto');
+}
+
+if (gateName === 'c2-c5-foundations') {
+  runC2C5Gate();
+  writeGateReport('c2-c5-foundations');
+  finishGate('c2-c5-foundations');
 }
 
 for (const file of requiredFiles) {
@@ -382,6 +391,224 @@ function runC1Gate() {
     'ui/src/renderer/pages/conversation/platforms/nomi/useNomiMessage.test.ts',
     'ui/src/renderer/pages/conversation/components/IdmmControl.structure.test.ts',
   ]);
+  run('bun', ['run', 'check:i18n']);
+  run('git', ['diff', '--check']);
+}
+
+function runC2C5Gate() {
+  const manifestPath =
+    'docs/specs/2026-08-28-agent-capability-platform-v2/C2-C5-WRITE-MANIFESTS.json';
+  if (!statSafe(join(repoRoot, manifestPath))?.isFile()) {
+    failures.push(`missing C2-C5 write manifest: ${manifestPath}`);
+    return;
+  }
+
+  const foundationCrates = [
+    'nomifun-v4-root',
+    'nomifun-agent-session',
+    'nomifun-agent-kernel',
+    'nomifun-codex-runtime',
+    'nomifun-chat-model-broker',
+    'nomifun-agent-control-plane',
+  ];
+  const foundationRoots = foundationCrates.map(
+    (name) => `crates/backend/${name}`
+  );
+  const requiredFoundationFiles = foundationRoots.flatMap((root) => [
+    `${root}/Cargo.toml`,
+    `${root}/src/lib.rs`,
+  ]);
+  for (const file of [manifestPath, ...requiredFoundationFiles]) {
+    if (!statSafe(join(repoRoot, file))?.isFile()) {
+      failures.push(`missing C2-C5 foundation artifact: ${file}`);
+    }
+  }
+
+  const forbiddenManifestDependencies = new Map([
+    [
+      'nomifun-v4-root',
+      [
+        'nomifun-db',
+        'nomifun-app',
+        'nomifun-conversation',
+        'nomifun-ai-agent',
+        'nomifun-preset',
+      ],
+    ],
+    [
+      'nomifun-agent-session',
+      [
+        'nomifun-db',
+        'nomifun-app',
+        'nomifun-conversation',
+        'nomifun-ai-agent',
+        'nomifun-gateway',
+      ],
+    ],
+    [
+      'nomifun-agent-kernel',
+      [
+        'nomifun-db',
+        'nomifun-app',
+        'nomifun-conversation',
+        'nomifun-ai-agent',
+        'nomifun-gateway',
+        'nomifun-extension',
+        'nomifun-preset',
+      ],
+    ],
+    [
+      'nomifun-codex-runtime',
+      [
+        'nomi-agent',
+        'nomifun-ai-agent',
+        'nomifun-app',
+        'nomifun-conversation',
+        'nomifun-gateway',
+      ],
+    ],
+    [
+      'nomifun-chat-model-broker',
+      [
+        'nomifun-ai-agent',
+        'nomifun-app',
+        'nomifun-conversation',
+        'nomifun-model-invoke',
+      ],
+    ],
+    [
+      'nomifun-agent-control-plane',
+      [
+        'nomifun-app',
+        'nomifun-conversation',
+        'nomifun-ai-agent',
+        'nomifun-gateway',
+        'nomifun-extension',
+        'nomifun-preset',
+      ],
+    ],
+  ]);
+  for (const [crateName, dependencies] of forbiddenManifestDependencies) {
+    const source = readFileSync(
+      join(repoRoot, `crates/backend/${crateName}/Cargo.toml`),
+      'utf8'
+    );
+    for (const dependency of dependencies) {
+      if (source.includes(dependency)) {
+        failures.push(
+          `${crateName} foundation manifest depends on forbidden legacy/product crate ${dependency}`
+        );
+      }
+    }
+  }
+
+  const coreRoots = [
+    'crates/backend/nomifun-agent-session/src',
+    'crates/backend/nomifun-agent-kernel/src',
+    'crates/backend/nomifun-codex-runtime/src',
+    'crates/backend/nomifun-chat-model-broker/src',
+    'crates/backend/nomifun-agent-control-plane/src',
+    'ui/src/common/types/agentPlatform',
+    'ui/src/renderer/pages/agentSettings',
+  ];
+  const forbiddenCorePatterns = [
+    [/\bAppServices\b/, 'AppServices escape hatch'],
+    [/\bGatewayDeps\b/, 'GatewayDeps escape hatch'],
+    [/\bConversationService\b/, 'legacy Conversation service dependency'],
+    [/\bNomiAgentManager\b/, 'legacy Nomi runtime dependency'],
+    [/\bNomiBuildExtra\b/, 'legacy Nomi build-extra dependency'],
+    [/\bPresetService\b/, 'legacy preset service dependency'],
+    [/\bExtensionRegistry\b/, 'legacy extension registry dependency'],
+    [/\/api\/conversations\b/, 'legacy conversation route'],
+    [/\/api\/presets\b/, 'legacy preset route'],
+    [/\bDraftSnapshot\b/, 'test-only draft snapshot'],
+    [/\bSessionMode\b/, 'legacy session mode'],
+    [/\bToolApprovalManager\b/, 'legacy approval manager'],
+    [/\bneeds_confirmation\b/, 'legacy confirmation protocol'],
+  ];
+  for (const root of coreRoots) {
+    for (const file of collectFiles(join(repoRoot, root), '')) {
+      if (!/\.(rs|ts|tsx|json|toml)$/.test(file)) continue;
+      const normalized = relative(repoRoot, file).replaceAll('\\', '/');
+      const source = readFileSync(file, 'utf8');
+      for (const [pattern, label] of forbiddenCorePatterns) {
+        if (pattern.test(source)) {
+          failures.push(
+            `${normalized}: C2-C5 forbidden foundation edge (${label})`
+          );
+        }
+      }
+    }
+  }
+
+  const migrationDiff = spawnSync(
+    'git',
+    [
+      'diff',
+      '--quiet',
+      '253e850b44bce83fa9b785dc6805c431201f6c91',
+      '--',
+      'crates/backend/nomifun-db/migrations',
+    ],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      shell: process.platform === 'win32',
+      stdio: 'pipe',
+    }
+  );
+  if (migrationDiff.status !== 0) {
+    failures.push('published legacy migrations changed after the C1 checkpoint');
+  }
+
+  runC1Gate();
+  run('cargo', [
+    'run',
+    '-p',
+    'nomifun-agent-contracts',
+    '--bin',
+    'agent-v2-contract',
+    '--',
+    'check',
+  ]);
+  run('cargo', [
+    'check',
+    '-p',
+    'nomifun-v4-root',
+    '-p',
+    'nomifun-agent-session',
+    '-p',
+    'nomifun-agent-kernel',
+    '-p',
+    'nomifun-codex-runtime',
+    '-p',
+    'nomifun-chat-model-broker',
+    '-p',
+    'nomifun-agent-control-plane',
+  ]);
+  run('cargo', [
+    'test',
+    '-p',
+    'nomifun-v4-root',
+    '-p',
+    'nomifun-agent-session',
+    '-p',
+    'nomifun-agent-kernel',
+    '-p',
+    'nomifun-codex-runtime',
+    '-p',
+    'nomifun-chat-model-broker',
+    '-p',
+    'nomifun-agent-control-plane',
+  ]);
+
+  const uiFoundationPaths = [
+    'ui/src/common/types/agentPlatform',
+    'ui/src/renderer/pages/agentSettings',
+  ].filter((path) => statSafe(join(repoRoot, path))?.isDirectory());
+  if (uiFoundationPaths.length > 0) {
+    run('bun', ['test', ...uiFoundationPaths]);
+  }
   run('bun', ['run', 'check:i18n']);
   run('git', ['diff', '--check']);
 }

@@ -3,7 +3,7 @@
   "payload": {
     "manifest_version": "1.0.0",
     "database_schema_digest": "119799593803e73998dd9bf06428b93035258534ef3afa3b9cc75d2d745cd2a0",
-    "rust_contract_schema_digest": "e90ae2942fdb6e0dd79f0780a0a17e2c9e0eb9e1dfd88745b85872fa1384e47c",
+    "rust_contract_schema_digest": "6acad26c93e762fbb248ccf505edcdf5f0ad8519b84f81130cd1b17a4471b5fe",
     "package_schema_digest": "dfebcb3e60931c8f511b061ce7ed8a0d05cbd1997119e2b7bc268926cb74471d",
     "official_preset_seed_manifest_digest": "c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8",
     "canonical_api_inventory_digest": "ec516189fa29064e7cba25cd219de9d88389a15a29d8aefc2587016cdf148a55",
@@ -11,9 +11,9 @@
     "error_registry_digest": "6a3856947bb9e861bd4d6f7a1d88f9dc5c04b5b8b18b2b320446385025eec3b5",
     "runtime_protocol_digest": "f1c0422f04c9de923e18c7df40d814d3c9f5b2db5f1c5fef2745e77e6d62590f",
     "runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
-    "deletion_manifest_set_digest": "dd050984ddf0ddce3df7b86263f3124c592c773bfcdf101604f75ef7c8be4139",
+    "deletion_manifest_set_digest": "13431f76e07398c06dc9e42ccb5b70c701297451551c2fcf907c78fcab8f41ad",
     "platform_validation_contract_digest": "78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9",
     "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5"
   },
-  "payload_digest": "5df80b2cc4ce25b53c01e85a1ede7c4f088a70fdf218d7d1ddebe3d008aa47ac"
+  "payload_digest": "f0a1c03696ed180db6786f781282d3a2b81dbea91ac286972b710dd7fe842ed7"
 }

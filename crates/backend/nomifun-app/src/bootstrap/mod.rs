@@ -13,6 +13,7 @@ mod environment;
 mod relocation;
 mod server_lock;
 mod tracing_init;
+mod v4_root;
 mod webui_dist;
 mod work_dir;
 

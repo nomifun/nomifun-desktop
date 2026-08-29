@@ -1,0 +1,24 @@
+[package]
+name = "nomifun-agent-control-plane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nomifun-agent-contracts.workspace = true
+nomifun-agent-kernel.workspace = true
+nomifun-agent-session.workspace = true
+nomifun-api-types.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }

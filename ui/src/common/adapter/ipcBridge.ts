@@ -158,6 +158,44 @@ import type {
   TAgentExecutionLeadThinkingEvent,
 } from '../types/agentExecution/agentExecutionEvents';
 import type {
+  AgentBindingRecord,
+  AgentPresetEditorResponse,
+  AgentPresetLibraryResponse,
+  AgentPresetRevision,
+  AgentSessionEventsResponse,
+  CapabilityCatalogItem,
+  CreateAgentPresetFromTemplateRequest,
+  CreateAgentPresetRequest,
+  CreateAgentSessionRequest,
+  CreateAgentSessionResponse,
+  CreateAgentSessionTurnRequest,
+  CreateAgentSessionTurnResponse,
+  CreateRemoteBindingRequest,
+  ForkAgentSessionRequest,
+  ForkAgentSessionResponse,
+  InstallationTokenStateResponse,
+  McpToolCatalogItem,
+  OfficialPresetKey,
+  PutAgentBindingRequest,
+  RemoteBinding,
+  RemoteCancelRequest,
+  RemoteCredentialContinuation,
+  RemoteMutationResponse,
+  RemoteObserveRequest,
+  RemoteObserveResponse,
+  RemoteOpenRequest,
+  RemoteOpenResponse,
+  RemoteTurnRequest,
+  ResolveAgentPresetPreviewRequest,
+  ResolveAgentPresetPreviewResponse,
+  RevokeInstallationTokenResponse,
+  RotateInstallationTokenResponse,
+  SaveAgentPresetRevisionRequest,
+  SaveAgentPresetRevisionResponse,
+  SkillCatalogItem,
+  UpdateRemoteBindingRequest,
+} from '../types/agentPlatform';
+import type {
   TAgentExecutionTemplate,
   TAgentExecutionTemplateDetail,
   TAgentExecutionTemplateParticipant,
@@ -403,6 +441,207 @@ export const presetTags = {
   delete: httpDelete<void, { preset_tag_id: PresetTag['preset_tag_id'] }>(
     (p) => `/api/preset-tags/${encodeURIComponent(p.preset_tag_id)}`
   ),
+};
+
+// ---------------------------------------------------------------------------
+// Agent Capability Platform v4 control plane
+// ---------------------------------------------------------------------------
+
+const remoteCredentialContinuation = (): RemoteCredentialContinuation => ({
+  requires_same_owner: true,
+  requires_explicit_agent_session_id: true,
+  implicit_session_lookup: false,
+  auth_error_code: 'REMOTE_AUTH_REQUIRED',
+  rest_status: 401,
+});
+
+const fromInstallationTokenState = (raw: unknown): InstallationTokenStateResponse => {
+  const value = raw as { configured?: unknown; status?: unknown };
+  const status =
+    value.status === 'active' || value.status === 'revoked' || value.status === 'unconfigured'
+      ? value.status
+      : value.configured === true
+        ? 'active'
+        : 'unconfigured';
+  return {
+    status,
+    configured: status === 'active',
+    continuation: remoteCredentialContinuation(),
+  };
+};
+
+const fromRotatedInstallationToken = (raw: unknown): RotateInstallationTokenResponse => {
+  const value = raw as { access_token?: unknown; token?: unknown };
+  const accessToken =
+    typeof value.access_token === 'string'
+      ? value.access_token
+      : typeof value.token === 'string'
+        ? value.token
+        : '';
+  return {
+    access_token: accessToken,
+    status: 'active',
+    shown_once: true,
+    existing_sessions_unchanged: true,
+    continuation: remoteCredentialContinuation(),
+  };
+};
+
+const fromRevokedInstallationToken = (): RevokeInstallationTokenResponse => ({
+  status: 'revoked',
+  existing_sessions_unchanged: true,
+  admitted_operations_continue_to_finite_boundary: true,
+  continuation: remoteCredentialContinuation(),
+});
+
+export const agentPlatform = {
+  library: httpGet<AgentPresetLibraryResponse, void>(
+    '/api/agent-preset-templates?source=official'
+  ),
+  capabilities: httpGet<CapabilityCatalogItem[], void>('/api/capabilities'),
+  skills: httpGet<SkillCatalogItem[], void>('/api/skills'),
+  mcpTools: httpGet<McpToolCatalogItem[], void>('/api/mcp-tool-mappings'),
+  createPreset: httpPost<AgentPresetEditorResponse, CreateAgentPresetRequest>(
+    '/api/agent-presets'
+  ),
+  createFromTemplate: httpPost<
+    AgentPresetEditorResponse,
+    { template_id: OfficialPresetKey; request: CreateAgentPresetFromTemplateRequest }
+  >(
+    (params) =>
+      `/api/agent-presets/from-template/${encodeURIComponent(params.template_id)}`,
+    (params) => params.request
+  ),
+  getEditor: httpGet<
+    AgentPresetEditorResponse,
+    { preset_id: string; revision?: number }
+  >((params) => {
+    const query = params.revision == null ? '' : `?revision=${params.revision}`;
+    return `/api/agent-presets/${encodeURIComponent(params.preset_id)}/editor${query}`;
+  }),
+  resolvePreview: httpPost<
+    ResolveAgentPresetPreviewResponse,
+    { preset_id: string; request: ResolveAgentPresetPreviewRequest }
+  >(
+    (params) =>
+      `/api/agent-presets/${encodeURIComponent(params.preset_id)}/resolve-preview`,
+    (params) => params.request
+  ),
+  saveRevision: httpPost<
+    SaveAgentPresetRevisionResponse,
+    { preset_id: string; request: SaveAgentPresetRevisionRequest }
+  >(
+    (params) => `/api/agent-presets/${encodeURIComponent(params.preset_id)}/revisions`,
+    (params) => params.request
+  ),
+  getRevision: httpGet<
+    AgentPresetRevision,
+    { preset_id: string; revision: number }
+  >(
+    (params) =>
+      `/api/agent-presets/${encodeURIComponent(params.preset_id)}/revisions/${params.revision}`
+  ),
+  resolveRevisionPreview: httpPost<
+    ResolveAgentPresetPreviewResponse,
+    {
+      preset_id: string;
+      revision: number;
+      scene: string;
+      surface: string;
+      audience: string;
+    }
+  >(
+    (params) =>
+      `/api/agent-presets/${encodeURIComponent(params.preset_id)}/revisions/${params.revision}/resolve-preview`,
+    ({ scene, surface, audience }) => ({ scene, surface, audience })
+  ),
+  getBinding: httpGet<
+    AgentBindingRecord | null,
+    { target_kind: string; target_id: string }
+  >(
+    (params) =>
+      `/api/agent-bindings/${encodeURIComponent(params.target_kind)}/${encodeURIComponent(params.target_id)}`
+  ),
+  putBinding: httpPut<
+    AgentBindingRecord,
+    { target_kind: string; target_id: string; request: PutAgentBindingRequest }
+  >(
+    (params) =>
+      `/api/agent-bindings/${encodeURIComponent(params.target_kind)}/${encodeURIComponent(params.target_id)}`,
+    (params) => params.request
+  ),
+  remoteBindings: {
+    list: httpGet<RemoteBinding[], void>('/api/remote-bindings'),
+    create: httpPost<RemoteBinding, CreateRemoteBindingRequest>('/api/remote-bindings'),
+    update: httpPut<
+      RemoteBinding,
+      { remote_binding_id: string; request: UpdateRemoteBindingRequest }
+    >(
+      (params) =>
+        `/api/remote-bindings/${encodeURIComponent(params.remote_binding_id)}`,
+      (params) => params.request
+    ),
+    delete: httpDelete<void, { remote_binding_id: string }>(
+      (params) => `/api/remote-bindings/${encodeURIComponent(params.remote_binding_id)}`
+    ),
+  },
+  remote: {
+    open: httpPost<RemoteOpenResponse, RemoteOpenRequest>('/api/remote/open'),
+    turn: httpPost<RemoteMutationResponse, RemoteTurnRequest>('/api/remote/turn'),
+    observe: httpGet<RemoteObserveResponse, RemoteObserveRequest>(
+      (params) =>
+        `/api/remote/observe?agent_session_id=${encodeURIComponent(params.agent_session_id)}&after_seq=${params.after_cursor.seq}&limit=${params.limit}`
+    ),
+    cancel: httpPost<RemoteMutationResponse, RemoteCancelRequest>('/api/remote/cancel'),
+  },
+  sessions: {
+    create: httpPost<CreateAgentSessionResponse, CreateAgentSessionRequest>(
+      '/api/agent-sessions'
+    ),
+    createTurn: httpPost<
+      CreateAgentSessionTurnResponse,
+      {
+        agent_session_id: string;
+        request: CreateAgentSessionTurnRequest;
+      }
+    >(
+      (params) =>
+        `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/turns`,
+      (params) => params.request
+    ),
+    events: httpGet<
+      AgentSessionEventsResponse,
+      { agent_session_id: string; after_seq: number; limit: number }
+    >(
+      (params) =>
+        `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/events?after_seq=${params.after_seq}&limit=${params.limit}`
+    ),
+    fork: httpPost<
+      ForkAgentSessionResponse,
+      { agent_session_id: string; request: ForkAgentSessionRequest }
+    >(
+      (params) =>
+        `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/forks`,
+      (params) => params.request
+    ),
+    delete: httpDelete<void, { agent_session_id: string }>(
+      (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}`
+    ),
+  },
+  installationToken: {
+    status: withResponseMap(
+      httpGet<unknown, void>('/api/webui/access-token'),
+      fromInstallationTokenState
+    ),
+    rotate: withResponseMap(
+      httpPost<unknown, void>('/api/webui/access-token'),
+      fromRotatedInstallationToken
+    ),
+    revoke: withResponseMap(
+      httpDelete<unknown, void>('/api/webui/access-token'),
+      fromRevokedInstallationToken
+    ),
+  },
 };
 
 // ---------------------------------------------------------------------------

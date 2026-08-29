@@ -1,0 +1,208 @@
+{
+  "title": "Agent 设定",
+  "subtitle": "使用能力、Skills、MCP 物化、模型路由和 typed resources 构建不可变 AgentPreset Revision。",
+  "loading": "正在加载 Agent 设定…",
+  "loadingEditor": "正在加载所选 AgentPreset…",
+  "freshStart": {
+    "title": "全新 v4 工作区",
+    "body": "本代从 {{count}} 个官方模板和空的个人列表开始。旧设定不会导入；请在这里 fork 模板或新建 AgentPreset。"
+  },
+  "actions": {
+    "create": "新建",
+    "fork": "Fork",
+    "remove": "移除",
+    "retry": "重试",
+    "preview": "Preview",
+    "test": "Test",
+    "saveRevision": "保存 Revision"
+  },
+  "defaults": {
+    "untitledName": "未命名 Agent",
+    "forkName": "{{name}} 副本"
+  },
+  "library": {
+    "ariaLabel": "AgentPreset 列表",
+    "title": "AgentPreset 列表",
+    "subtitle": "官方模板与你的不可变 Revision 线",
+    "official": "官方模板",
+    "mine": "我的 AgentPreset",
+    "empty": "还没有个人 AgentPreset。",
+    "capabilityCount": "{{count}} 项能力",
+    "revision": "Revision {{revision}}",
+    "unsaved": "尚无已保存 Revision",
+    "bindingCount": "{{count}} 个绑定"
+  },
+  "template": {
+    "readOnly": "官方只读模板",
+    "capabilityHint": "冻结 seed 定义了 exact initial/on-demand 能力版本。Fork 后才能编辑。",
+    "resourceHint": "模板只声明 typed resource slot，不保存任何用户的具体资源 ID。",
+    "zeroToolTitle": "精确零工具 Profile",
+    "zeroToolBody": "不会构造 Capability、Skill、MCP、Workspace、Coding Context 或隐藏的能力搜索。",
+    "chat": {
+      "minimal": {
+        "name": "最简问答",
+        "description": "没有工具或隐藏能力初始化的最轻普通会话 Profile。"
+      }
+    },
+    "assistant": {
+      "general": {
+        "name": "通用助理",
+        "description": "覆盖附件、Knowledge、项目记忆、文件和 Web 调研的通用助理。"
+      }
+    },
+    "coding": {
+      "codex": {
+        "name": "Codex Coding",
+        "description": "完整 Codex-native Workspace、文件、Shell、进程、VCS、Skills、MCP、Review 和多 Agent 能力面。"
+      }
+    },
+    "companion": {
+      "default": {
+        "name": "伙伴",
+        "description": "覆盖 Persona、伙伴记忆、Knowledge、学习演进与 IM 连接工作流。"
+      }
+    },
+    "robot": {
+      "default": {
+        "name": "机器人",
+        "description": "覆盖设备连接、音频、显示、感知、运动、伙伴 Context 与 Knowledge。"
+      }
+    },
+    "customerService": {
+      "default": {
+        "name": "客户服务",
+        "description": "覆盖客户对话、笔记、Knowledge、Channel 收发回复与转接。"
+      }
+    },
+    "creativeStudio": {
+      "default": {
+        "name": "创意工坊",
+        "description": "覆盖 Canvas、素材、模板、Director、生成模型和 MiniApp 工作流。"
+      }
+    }
+  },
+  "sections": {
+    "basic": "身份与模型",
+    "basicHint": "命名 AgentPreset，选择 Chat 模型路由，并编写稳定 Persona 与 instructions。",
+    "capabilities": "能力",
+    "capabilitiesHint": "Initial 能力在 Session 创建时激活；on-demand 能力已预解析，只在完成 Turn 的边界激活。",
+    "skillsMcp": "Skills 与 MCP",
+    "skillsMcpHint": "Skill 只贡献 instructions；MCP Tool 通过已物化 Capability 进入 AgentPreset。",
+    "skills": "Skills",
+    "mcp": "MCP 物化",
+    "resources": "Typed resources",
+    "resourcesHint": "只渐进显示当前能力所需的资源类型；资源 owner 会同步校验。",
+    "advanced": "高级预算与执行约束",
+    "previewInspector": "Preview 与 Inspector",
+    "previewInspectorHint": "解析 exact initial/on-demand ceiling、Tool/Context 投影、资源、RuntimeProfile 与 Revision diff。",
+    "test": "使用真实 Session 测试",
+    "testHint": "Dirty draft 先保存普通不可变 Revision；clean draft 复用当前 Revision。"
+  },
+  "fields": {
+    "name": "名称",
+    "description": "用途",
+    "chatModelRoute": "Chat 模型路由",
+    "chatModelRoutePlaceholder": "Exact model route ID",
+    "persona": "Persona",
+    "instructions": "Instructions"
+  },
+  "status": {
+    "dirty": "未保存 Draft",
+    "saved": "已保存 Revision",
+    "currentRevision": "当前不可变 Revision {{revision}}",
+    "noRevision": "该 Draft 尚无已保存 Revision。",
+    "boundTargets": "{{count}} 个已绑定目标",
+    "unsavedChanges": "该 Draft 已变化，保存或测试前会重新 Preview。",
+    "revisionImmutable": "已保存 Revision 不可变；继续编辑会创建下一个 Revision。"
+  },
+  "capabilities": {
+    "search": "搜索能力和来源 Package",
+    "initial": "Initial 能力",
+    "onDemand": "On-demand 能力",
+    "initialShort": "Initial",
+    "onDemandShort": "On-demand",
+    "notSelected": "关闭",
+    "emptySelection": "该集合暂无能力。",
+    "emptyCatalog": "没有匹配的已物化能力。",
+    "source": "来源",
+    "tools": "{{count}} 个 action",
+    "contexts": "{{count}} 个 Context contributor"
+  },
+  "skills": {
+    "missingCapabilities": "缺少已选择能力：{{capabilities}}",
+    "empty": "暂无已物化 Skill。"
+  },
+  "mcp": {
+    "empty": "暂无 MCP Tool 物化。"
+  },
+  "resources": {
+    "noneRequired": "当前能力选择不需要 typed resource。",
+    "required": "必需",
+    "optional": "可选",
+    "resourceId": "资源 ID",
+    "operations": "操作",
+    "connectionRef": "连接引用"
+  },
+  "advanced": {
+    "systemTokens": "系统 Context tokens",
+    "dynamicTokens": "动态 Context tokens",
+    "activeCapabilities": "最大 active capabilities",
+    "toolCalls": "每 Turn 最大 Tool 调用"
+  },
+  "preview": {
+    "emptyTitle": "尚未 Preview",
+    "emptyBody": "Preview 只解析 Draft，不写 Preset、Revision、Session 或外部 Effect。",
+    "ready": "Preview 已就绪",
+    "blocked": "Preview 被阻止",
+    "candidateRevision": "候选 Revision {{revision}}",
+    "metrics": {
+      "initial_count": "Initial",
+      "on_demand_count": "On-demand",
+      "active_at_start_count": "启动时 active",
+      "model_tool_count": "Tool schema",
+      "context_contributor_count": "Context 来源",
+      "skill_count": "Skills",
+      "mcp_count": "MCP mapping",
+      "resource_binding_count": "资源"
+    }
+  },
+  "inspector": {
+    "revisionDiff": "Revision diff",
+    "snapshot": "Snapshot 与 RuntimeProfile",
+    "snapshotDigest": "Snapshot digest",
+    "runtimeProfile": "RuntimeProfile",
+    "protocol": "Runtime 协议",
+    "tools": "Tool schema 引用",
+    "context": "Context schema 引用",
+    "continuation": "D-025 continuation",
+    "remoteToken": "D-026 Remote token 边界"
+  },
+  "continuation": {
+    "title": "Exact 兼容或显式 fork",
+    "body": "冻结 Snapshot 兼容时继续同一 Session；executor 不可用时历史只读，必须显式 fork 新 ID 和自包含语义 base，绝不迁移 Runtime 私有 handle 或重放 Effect。"
+  },
+  "remoteToken": {
+    "status": {
+      "active": "Installation token 已启用",
+      "revoked": "Installation token 已撤销",
+      "unconfigured": "Installation token 未配置",
+      "unavailable": "无法读取 Installation token 状态"
+    },
+    "continuation": "Rotate/revoke 只阻止新的 Remote 请求 admission。既有 Session 不变；replacement token 必须属于同一 owner，并显式提交原 AgentSession ID。"
+  },
+  "test": {
+    "realEffectWarning": "Test 会在需要时自动保存当前修改，创建普通持久 Session，并以 FullAuto 对当前绑定的真实资源执行。Tool 与外部 Effect 不会模拟。",
+    "inputPlaceholder": "输入该 AgentPreset 的第一个普通 Turn…",
+    "session": "AgentSession",
+    "turn": "Turn 状态",
+    "revision": "Revision"
+  },
+  "common": {
+    "none": "无",
+    "noChanges": "无变化",
+    "unavailable": "不可用"
+  },
+  "errors": {
+    "title": "Agent 设定操作未完成"
+  }
+}

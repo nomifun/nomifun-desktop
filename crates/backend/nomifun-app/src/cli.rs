@@ -24,9 +24,10 @@ use clap::{Parser, Subcommand};
 /// Concurrent use of one dir is prevented by the exclusive server lock (see
 /// `bootstrap::server_lock`).
 ///
-/// Installs created before this layout used `NomiFun/Nomi<channel-suffix>`
-/// (see [`legacy_default_data_dir`]); `bootstrap::data_root` migrates them
-/// forward on boot.
+/// Historical self-export locations are recognized by
+/// `bootstrap::data_root`, but Fresh-v4 never migrates their entries. The
+/// existing canonical root is isolated only by the one-time whole-root
+/// cutover before a new v4 root is created.
 ///
 /// This is only the *unset* default — it does NOT consult `NOMIFUN_DATA_DIR`
 /// itself (clap's `env` binding and the desktop shell resolve the env).
@@ -42,9 +43,9 @@ pub fn default_data_dir() -> PathBuf {
 
 /// The pre-0.3.4 default data directory for the active channel:
 /// `<app-data>/NomiFun/Nomi<channel-suffix>` (or the historic temp fallback
-/// `<system temp>/nomifun-data/Nomi<channel-suffix>`). Used only as the
-/// migration *source* by `bootstrap::data_root` and by the inherited-env
-/// sanitizer; never used for new datasets.
+/// `<system temp>/nomifun-data/Nomi<channel-suffix>`). Retained only for
+/// inherited self-export normalization; Fresh-v4 does not open or migrate
+/// entries from this path.
 pub fn legacy_default_data_dir() -> PathBuf {
     let leaf = legacy_nomi_leaf(&crate::channel::dir_suffix());
     dirs::data_local_dir()
@@ -68,7 +69,7 @@ fn fallback_leaf(suffix: &str) -> String {
 }
 
 /// The pre-0.3.4 leaf under the `NomiFun` vendor directory (`Nomi`,
-/// `Nomi-dev`, …). Retained only so the migration can find old datasets.
+/// `Nomi-dev`, …). Retained only for inherited-path normalization.
 fn legacy_nomi_leaf(suffix: &str) -> String {
     format!("Nomi{suffix}")
 }
@@ -260,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_default_keeps_the_historic_nomi_leaf_for_migration() {
+    fn legacy_default_keeps_the_historic_nomi_leaf_for_normalization() {
         let legacy = super::legacy_default_data_dir();
         let leaf = super::legacy_nomi_leaf(&crate::channel::dir_suffix());
         assert!(
@@ -271,7 +272,7 @@ mod tests {
         assert_ne!(
             legacy,
             super::default_data_dir(),
-            "legacy and current defaults must differ so migration has a direction"
+            "legacy and current defaults must remain distinguishable"
         );
     }
 

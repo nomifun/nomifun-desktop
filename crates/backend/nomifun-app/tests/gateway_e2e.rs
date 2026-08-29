@@ -61,7 +61,7 @@ impl Gateway {
     ) -> Value {
         let child = self
             .config
-            .issue_for_conversation(user_id, caller_conv, companion_id, None, None, &[])
+            .issue_for_conversation(user_id, caller_conv, companion_id, None, &[])
             .expect("valid Gateway child capability");
         let access = &child.bootstrap.access;
         let resp = self
@@ -236,7 +236,7 @@ async fn gw_issuer_rejects_missing_user_identity_before_bridge_spawn() {
     let gw = Gateway::from_services(&services);
     assert_eq!(
         gw.config
-            .issue_for_conversation("", TEST_CONV_1, None, None, None, &[])
+            .issue_for_conversation("", TEST_CONV_1, None, None, &[])
             .unwrap_err(),
         nomifun_common::LoopbackCapabilityError::InvalidIdentity
     );

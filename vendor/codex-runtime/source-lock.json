@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0.0",
+  "reviewed_on": "2026-08-29",
+  "repository_alias": "../codex",
+  "pinned_commit": "dc2ccc6843abb09c9d297862dc10b6bd12a3935d",
+  "tracked_upstream_commit": "dc2ccc6843abb09c9d297862dc10b6bd12a3935d",
+  "vendored_upstream_source": false,
+  "reviewed_paths": [
+    "codex-rs/app-server/README.md",
+    "codex-rs/app-server/src",
+    "codex-rs/app-server-transport/src/transport/stdio.rs",
+    "codex-rs/app-server-protocol/src/protocol/common.rs",
+    "codex-rs/app-server-protocol/src/protocol/v1.rs",
+    "codex-rs/app-server-protocol/src/protocol/v2/thread.rs",
+    "codex-rs/app-server-protocol/src/protocol/v2/turn.rs",
+    "codex-rs/app-server-protocol/src/protocol/v2/permissions.rs"
+  ],
+  "upstream_transport": {
+    "kind": "stdio",
+    "framing": "newline-delimited-json",
+    "jsonrpc_header": "omitted",
+    "websocket_supported_by_nomifun": false
+  }
+}

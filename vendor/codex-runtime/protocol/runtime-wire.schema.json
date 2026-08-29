@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "nomifun-codex-runtime-wire-1.0.0",
+  "title": "NomiFun Codex Runtime Stable JSONL Envelope",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "id": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "method": {
+          "enum": [
+            "runtime/hello",
+            "create",
+            "resume",
+            "fork",
+            "start_turn",
+            "steer",
+            "follow_up",
+            "cancel",
+            "session_dispose",
+            "runtime/event",
+            "native_action/start"
+          ]
+        },
+        "params": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "result"
+      ],
+      "properties": {
+        "id": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "result": true
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "error",
+        "id"
+      ],
+      "properties": {
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message"
+          ],
+          "properties": {
+            "code": {
+              "type": "integer"
+            },
+            "message": {
+              "type": "string"
+            },
+            "data": true
+          }
+        },
+        "id": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

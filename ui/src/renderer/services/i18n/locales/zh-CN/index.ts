@@ -35,6 +35,7 @@ import creativeStudio from './creativeStudio.json';
 import browser from './browser.json';
 import ssh from './ssh.json';
 import miniApps from './miniApps.json';
+import agentSettings from './agentSettings.json';
 
 export default {
   common,
@@ -69,4 +70,5 @@ export default {
   browser,
   ssh,
   miniApps,
+  agentSettings,
 };

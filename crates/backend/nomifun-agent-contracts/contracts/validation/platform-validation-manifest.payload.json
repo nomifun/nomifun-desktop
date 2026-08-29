@@ -2,9 +2,9 @@
   "manifest_version": "1.0.0",
   "candidate_source_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
   "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
-  "runtime_release_digest": "5a9823e6860e9f39192a0cfb9c46281f4d8ec68b1277a7e3119ab5d9366fb416",
-  "canonical_schema_manifest_digest": "5df80b2cc4ce25b53c01e85a1ede7c4f088a70fdf218d7d1ddebe3d008aa47ac",
-  "cargo_lock_digest": "e69f30bc9def4a1306c75620242c57bdbcb063e4efc56a8ef16348a23d48a845",
+  "runtime_release_digest": "0c029dd60f53c761bce3451de66c678e95314b354e229e84fde632c70dd8b55f",
+  "canonical_schema_manifest_digest": "f0a1c03696ed180db6786f781282d3a2b81dbea91ac286972b710dd7fe842ed7",
+  "cargo_lock_digest": "a5bb66c60c10cb63df3115214240cb3ae425dd8794d537dc02468b37c00df9d7",
   "official_preset_seed_manifest_digest": "c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8",
   "capability_availability_manifest_digest": "8fb55c4765eefc59e67e686dfcc1858898c75893b64f353249a2e3d5e705cb68",
   "coding_codex_native_contract_digest": "f699f376a9414b7830b90a68c890d39010687499e6d16ee1687f5c370cd0127a",
@@ -287,7 +287,7 @@
       "fixture_envelope": {
         "artifact_id": "d025_compatibility_fixture_reference",
         "normalized_relative_path": "contracts/validation/d025-compatibility-fixture-reference.envelope.json",
-        "digest": "74f440925150310a2be4d6577edda2eaafba0988e81e5947fc7664df75bf52fd"
+        "digest": "d2cc6a0a88cd89fac5e407306ae41b03747fba7a7a78c745398a8aea96dfe780"
       },
       "compatible_exact_case_id": "compatible_exact_full_ceiling",
       "executor_unavailable_case_id": "executor_unavailable_read_only_explicit_fork"

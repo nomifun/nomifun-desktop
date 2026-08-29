@@ -1,0 +1,218 @@
+{
+  "schema_version": "1.0.0",
+  "boundary": "C2-C5",
+  "base_sha": "253e850b44bce83fa9b785dc6805c431201f6c91",
+  "branch": "rf/agent-capability-platform-v2",
+  "status": "closed",
+  "closed_at": "2026-08-29",
+  "gate_evidence": "build.noindex/agent-capability-v2/253e850b44bce83fa9b785dc6805c431201f6c91/c2-c5-foundations/summary.json",
+  "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+  "shared_cargo_policy": "agents-must-not-run-cargo-or-edit-root-lockfiles; central-validation-owner-only",
+  "preserve_exact": [
+    "C1 FullAuto residual gate",
+    "published legacy migration bytes and checksums",
+    "Coding native review/diff workflow",
+    "OS/TCC/Tauri permissions and Channel pairing",
+    "ordinary product confirmations outside Agent execution"
+  ],
+  "tasks": [
+    {
+      "task_id": "C2-W1-FRESH-V4-ROOT",
+      "owner": "Aquinas",
+      "status": "closed",
+      "write_paths": [
+        "crates/backend/nomifun-v4-root/",
+        "crates/backend/nomifun-app/src/bootstrap/v4_root.rs",
+        "crates/backend/nomifun-app/src/bootstrap/data_root.rs",
+        "crates/backend/nomifun-app/src/bootstrap/mod.rs",
+        "crates/backend/nomifun-app/src/bootstrap/environment.rs",
+        "crates/backend/nomifun-app/src/cli.rs",
+        "crates/backend/nomifun-app/Cargo.toml"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/backend/nomifun-db/migrations/",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "deliverable": "Immutable parent-marker fresh/cutover coordinator, same-parent atomic whole-root rename, v4 schema_metadata/ready recovery, archive no-access trap, and pre-service bootstrap wiring",
+      "required_local_checks": [
+        "rustfmt on changed Rust files",
+        "git diff --check",
+        "exact owned-path residual scan"
+      ]
+    },
+    {
+      "task_id": "C3-W1-SESSION-STORE",
+      "owner": "Dirac",
+      "status": "closed",
+      "write_paths": [
+        "crates/backend/nomifun-agent-session/"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/backend/nomifun-db/",
+        "crates/backend/nomifun-app/",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "deliverable": "Five-table AgentSession store, transactional append/projection/last_seq, cursor/idempotency, effect lifecycle, rebuild, D-025 checkpoint admission, and D-024 four-field tombstone deletion closure",
+      "required_local_checks": [
+        "rustfmt on changed Rust files",
+        "git diff --check",
+        "exact owned-path residual scan"
+      ]
+    },
+    {
+      "task_id": "C3-W1-KERNEL-PLUGIN",
+      "owner": "Schrodinger",
+      "status": "closed",
+      "write_paths": [
+        "crates/backend/nomifun-agent-kernel/"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/backend/nomifun-app/",
+        "crates/backend/nomifun-extension/",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "deliverable": "Core-only capability/package/plugin/compiler registry, typed ServiceKey wiring, mandatory PluginState CAS host API, deterministic materialization and compact on-demand activation, plus sample.echo same-chain fixture",
+      "required_local_checks": [
+        "rustfmt on changed Rust files",
+        "git diff --check",
+        "exact owned-path residual scan"
+      ]
+    },
+    {
+      "task_id": "C4-W2-CODEX-RUNTIME",
+      "owner": "Dewey",
+      "status": "closed",
+      "write_paths": [
+        "crates/backend/nomifun-codex-runtime/",
+        "vendor/codex-runtime/"
+      ],
+      "read_only_refs": [
+        "../codex@dc2ccc6843abb09c9d297862dc10b6bd12a3935d",
+        "crates/backend/nomifun-agent-contracts/contracts/runtime/"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/backend/nomifun-app/",
+        "crates/agent/",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "deliverable": "Pinned app-server stdio protocol/client/supervisor, exact hello/RPC allowlist, FullAuto runtime profiles, native-action ACK-before-effect, checkpoint compatibility, inherited handle credential, and idempotent process-tree dispose",
+      "required_local_checks": [
+        "rustfmt on changed Rust files",
+        "git diff --check",
+        "exact owned-path residual scan"
+      ]
+    },
+    {
+      "task_id": "C4-W2-MODEL-BROKER",
+      "owner": "Bernoulli",
+      "status": "closed",
+      "write_paths": [
+        "crates/backend/nomifun-chat-model-broker/"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/backend/nomifun-app/",
+        "crates/agent/nomi-providers/",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "deliverable": "Provider-neutral ChatModelBroker and stateless local Responses bridge with credential references, six protocol adapters, sole pre-semantic-output retry/failover, and recorded wire conformance",
+      "required_local_checks": [
+        "rustfmt on changed Rust files",
+        "git diff --check",
+        "exact owned-path residual scan"
+      ]
+    },
+    {
+      "task_id": "C5-W3-CONTROL-PLANE",
+      "owner": "Halley",
+      "status": "closed",
+      "write_paths": [
+        "crates/backend/nomifun-agent-control-plane/",
+        "crates/backend/nomifun-api-types/src/agent_platform.rs",
+        "crates/backend/nomifun-api-types/src/lib.rs"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/backend/nomifun-app/",
+        "crates/backend/nomifun-preset/",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "deliverable": "Canonical AgentPreset revision/catalog/preview/save/fork/Test orchestration, AgentBinding and RemoteBinding APIs, D-025 continuation and D-026 token UX contracts, and generic seven-template API",
+      "required_local_checks": [
+        "rustfmt on changed Rust files",
+        "git diff --check",
+        "exact owned-path residual scan"
+      ]
+    },
+    {
+      "task_id": "C5-W3-AGENT-SETTINGS-UI",
+      "owner": "Halley",
+      "status": "closed",
+      "write_paths": [
+        "ui/src/common/types/agentPlatform/",
+        "ui/src/common/adapter/ipcBridge.ts",
+        "ui/src/renderer/pages/agentSettings/",
+        "ui/src/renderer/services/i18n/locales/en-US/agentSettings.json",
+        "ui/src/renderer/services/i18n/locales/zh-CN/agentSettings.json",
+        "ui/src/renderer/services/i18n/locales/en-US/index.ts",
+        "ui/src/renderer/services/i18n/locales/zh-CN/index.ts",
+        "ui/src/common/config/i18n-config.json",
+        "ui/src/renderer/services/i18n/i18n-keys.d.ts"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "deliverable": "Single-page Agent Settings editor with seven templates, progressive Capability/Skill/MCP/resource controls, exact Preview/Revision/Test/Inspector UX, real-effect warning, and fresh-start presentation",
+      "required_local_checks": [
+        "targeted Bun tests",
+        "i18n generation/check",
+        "git diff --check",
+        "exact owned-path residual scan"
+      ]
+    }
+  ],
+  "central_owner": {
+    "owner": "main-agent",
+    "write_paths": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "package.json",
+      "scripts/gate-agent-v2.mjs",
+      "docs/specs/2026-08-28-agent-capability-platform-v2/",
+      "crates/backend/nomifun-agent-contracts/src/root.rs",
+      "crates/backend/nomifun-agent-contracts/src/lib.rs",
+      "crates/backend/nomifun-agent-contracts/src/bin/agent-v2-contract.rs",
+      "crates/backend/nomifun-agent-contracts/contracts/runtime/checkpoint-mismatch.json",
+      "crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json",
+      "crates/backend/nomifun-agent-contracts/contracts/validation/d025-compatibility-fixture-reference.envelope.json",
+      "crates/backend/nomifun-agent-contracts/contracts/validation/d025-compatibility-fixture-reference.payload.json",
+      "crates/backend/nomifun-agent-contracts/contracts/validation/d025-fixture-envelope-reference.json",
+      "crates/backend/nomifun-agent-contracts/contracts/deletion/triad-core.json",
+      "crates/backend/nomifun-agent-contracts/contracts/generated/",
+      "crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json",
+      "crates/backend/nomifun-app/src/provider_deletion.rs",
+      "crates/backend/nomifun-app/tests/agent_execution_e2e.rs",
+      "crates/backend/nomifun-app/tests/gateway_e2e.rs",
+      "crates/backend/nomifun-db/tests/provider_binding_invariants.rs"
+    ]
+  }
+}

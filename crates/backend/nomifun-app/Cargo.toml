@@ -201,6 +201,7 @@ browser-use = [
 
 [dependencies]
 nomifun-common.workspace = true
+nomifun-v4-root.workspace = true
 nomifun-assets.workspace = true
 nomifun-db.workspace = true
 nomifun-api-types.workspace = true

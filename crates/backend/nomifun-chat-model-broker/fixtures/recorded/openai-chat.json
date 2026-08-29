@@ -1,0 +1,202 @@
+{
+  "fixture_version": "chat-model-recorded-v1",
+  "scenario_id": "openai-chat-stream-tool-structured-image",
+  "protocol": "openai_chat",
+  "route": {
+    "model_route_id": "route-openai-chat-primary",
+    "model_route_revision": 3,
+    "provider_id": "provider-openai-chat",
+    "model": "chat-recorded",
+    "protocol": "openai_chat",
+    "connection_config_ref": "connection-openai-chat",
+    "config_revision_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "credential_ref": "credential-ref-openai-chat",
+    "features": [
+      "text_input",
+      "image_input",
+      "text_output",
+      "tool_calls",
+      "reasoning",
+      "structured_output"
+    ]
+  },
+  "request": {
+    "contract_version": "chat-model-v1",
+    "causality": {
+      "agent_session_id": "0190f5fe-7c00-7a00-8000-000000001002",
+      "turn_operation_id": "turn-openai-chat-0001",
+      "causation_event_id": "event-openai-chat-0001",
+      "resolved_snapshot_ref": {
+        "snapshot_id": "snapshot-openai-chat",
+        "snapshot_digest": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "model_route_revision": 3,
+      "operation_id": "model-openai-chat-0001"
+    },
+    "route": {
+      "model_route_id": "route-openai-chat-primary",
+      "model_route_revision": 3,
+      "task": "agent_chat"
+    },
+    "input": {
+      "instructions": ["Return valid structured output."],
+      "messages": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_call",
+              "call_id": "call-history-openai-chat",
+              "name": "lookup",
+              "arguments": {"query": "previous"}
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": [
+            {
+              "type": "tool_result",
+              "call_id": "call-history-openai-chat",
+              "output": [{"type": "text", "text": "previous result"}],
+              "is_error": false
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {"type": "text", "text": "Classify the image."},
+            {
+              "type": "image",
+              "media_type": "image/jpeg",
+              "data_base64": "/9j/4AAQSkZJRg=="
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Look up one item.",
+          "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": false
+          },
+          "deferred": false
+        }
+      ],
+      "tool_choice": {"mode": "auto"},
+      "max_output_tokens": 512,
+      "reasoning": {
+        "effort": "low",
+        "summary": "concise"
+      },
+      "prompt_cache": "disabled",
+      "response_format": {
+        "type": "json_schema",
+        "name": "classification",
+        "schema": {
+          "type": "object",
+          "properties": {"label": {"type": "string"}},
+          "required": ["label"],
+          "additionalProperties": false
+        },
+        "strict": true
+      },
+      "requested_output_modalities": ["text"],
+      "preserve_native_responses_items": false,
+      "metadata": {"fixture": "openai-chat"}
+    }
+  },
+  "coverage": {
+    "streaming": true,
+    "tool_round": true,
+    "reasoning": true,
+    "prompt_cache": false,
+    "image_input": true,
+    "audio_input": false,
+    "structured_output": true,
+    "compaction_history": true,
+    "native_responses_items": false
+  },
+  "wire_events": [
+    {"event": "response.start", "data": {"id": "chatcmpl_recorded_1"}},
+    {
+      "event": "reasoning.delta",
+      "data": {"text": "The prior tool result narrows the classification."}
+    },
+    {
+      "event": "output_text.delta",
+      "data": {"text": "{\"label\":\"document\"}"}
+    },
+    {
+      "event": "function_call.delta",
+      "data": {
+        "call_id": "call-openai-chat-1",
+        "name": "lookup",
+        "arguments_delta": "{\"query\":\"document"
+      }
+    },
+    {
+      "event": "function_call.completed",
+      "data": {
+        "call_id": "call-openai-chat-1",
+        "name": "lookup",
+        "arguments": {"query": "document"}
+      }
+    },
+    {
+      "event": "usage",
+      "data": {
+        "prompt_tokens": 90,
+        "completion_tokens": 18,
+        "reasoning_tokens": 4
+      }
+    },
+    {"event": "finish", "data": {"finish_reason": "tool_calls"}}
+  ],
+  "expected_events": [
+    {
+      "type": "response_started",
+      "provider_response_id": "chatcmpl_recorded_1"
+    },
+    {
+      "type": "reasoning_delta",
+      "text": "The prior tool result narrows the classification."
+    },
+    {
+      "type": "output_text_delta",
+      "text": "{\"label\":\"document\"}"
+    },
+    {
+      "type": "tool_call_delta",
+      "call_id": "call-openai-chat-1",
+      "name": "lookup",
+      "arguments_delta": "{\"query\":\"document"
+    },
+    {
+      "type": "tool_call_completed",
+      "call": {
+        "call_id": "call-openai-chat-1",
+        "name": "lookup",
+        "arguments": {"query": "document"}
+      }
+    },
+    {
+      "type": "usage",
+      "usage": {
+        "input_tokens": 90,
+        "output_tokens": 18,
+        "reasoning_tokens": 4,
+        "cache_write_tokens": 0,
+        "cache_read_tokens": 0,
+        "audio_input_tokens": 0,
+        "audio_output_tokens": 0
+      }
+    },
+    {"type": "completed", "finish_reason": "tool_calls"}
+  ]
+}

@@ -13,6 +13,7 @@ pub mod package;
 pub mod preset;
 pub mod primitives;
 pub mod remote;
+pub mod root;
 pub mod runtime;
 pub mod schema;
 pub mod session;
@@ -29,6 +30,7 @@ pub use package::*;
 pub use preset::*;
 pub use primitives::*;
 pub use remote::*;
+pub use root::*;
 pub use runtime::*;
 pub use schema::{
     FRESH_V4_BASELINE_SQL, FRESH_V4_DATA_GENERATION, FRESH_V4_MIGRATION_HEAD,

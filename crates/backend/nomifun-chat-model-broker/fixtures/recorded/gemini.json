@@ -1,0 +1,210 @@
+{
+  "fixture_version": "chat-model-recorded-v1",
+  "scenario_id": "gemini-stream-tool-reasoning-multimodal",
+  "protocol": "gemini",
+  "route": {
+    "model_route_id": "route-gemini-primary",
+    "model_route_revision": 5,
+    "provider_id": "provider-gemini",
+    "model": "gemini-recorded",
+    "protocol": "gemini",
+    "connection_config_ref": "connection-gemini",
+    "config_revision_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "credential_ref": "credential-ref-gemini",
+    "features": [
+      "text_input",
+      "image_input",
+      "audio_input",
+      "text_output",
+      "tool_calls",
+      "reasoning",
+      "reasoning_signature",
+      "prompt_cache",
+      "structured_output"
+    ]
+  },
+  "request": {
+    "contract_version": "chat-model-v1",
+    "causality": {
+      "agent_session_id": "0190f5fe-7c00-7a00-8000-000000001004",
+      "turn_operation_id": "turn-gemini-0001",
+      "causation_event_id": "event-gemini-0001",
+      "resolved_snapshot_ref": {
+        "snapshot_id": "snapshot-gemini",
+        "snapshot_digest": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "model_route_revision": 5,
+      "operation_id": "model-gemini-0001"
+    },
+    "route": {
+      "model_route_id": "route-gemini-primary",
+      "model_route_revision": 5,
+      "task": "agent_chat"
+    },
+    "input": {
+      "instructions": ["Use multimodal evidence."],
+      "messages": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_call",
+              "call_id": "call-history-gemini",
+              "name": "lookup",
+              "arguments": {"query": "previous"}
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": [
+            {
+              "type": "tool_result",
+              "call_id": "call-history-gemini",
+              "output": [{"type": "text", "text": "previous result"}],
+              "is_error": false
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {"type": "text", "text": "Compare the image and audio."},
+            {
+              "type": "image",
+              "media_type": "image/webp",
+              "data_base64": "UklGRiIAAABXRUJQ"
+            },
+            {
+              "type": "audio",
+              "media_type": "audio/ogg",
+              "data_base64": "T2dnUwACAAAAAAAA"
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "name": "lookup",
+          "description": "Look up one item.",
+          "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": false
+          },
+          "deferred": false
+        }
+      ],
+      "tool_choice": {"mode": "auto"},
+      "max_output_tokens": 512,
+      "reasoning": {
+        "effort": "medium",
+        "summary": "auto"
+      },
+      "prompt_cache": "automatic",
+      "response_format": {
+        "type": "json_object"
+      },
+      "requested_output_modalities": ["text"],
+      "preserve_native_responses_items": false,
+      "metadata": {"fixture": "gemini"}
+    }
+  },
+  "coverage": {
+    "streaming": true,
+    "tool_round": true,
+    "reasoning": true,
+    "prompt_cache": true,
+    "image_input": true,
+    "audio_input": true,
+    "structured_output": true,
+    "compaction_history": true,
+    "native_responses_items": false
+  },
+  "wire_events": [
+    {"event": "stream.start", "data": {"id": "gemini-response-1"}},
+    {
+      "event": "thinking.delta",
+      "data": {"text": "Both inputs identify the same subject."}
+    },
+    {
+      "event": "thinking.signature",
+      "data": {"signature": "sig-gemini-recorded"}
+    },
+    {
+      "event": "text.delta",
+      "data": {"text": "{\"match\":true}"}
+    },
+    {
+      "event": "tool_call.delta",
+      "data": {
+        "call_id": "call-gemini-1",
+        "name": "lookup",
+        "arguments_delta": "{\"query\":\"subject"
+      }
+    },
+    {
+      "event": "tool_call.completed",
+      "data": {
+        "call_id": "call-gemini-1",
+        "name": "lookup",
+        "arguments": {"query": "subject"}
+      }
+    },
+    {
+      "event": "usage",
+      "data": {
+        "promptTokenCount": 130,
+        "candidatesTokenCount": 28,
+        "thoughtsTokenCount": 9
+      }
+    },
+    {"event": "finish", "data": {"finishReason": "STOP"}}
+  ],
+  "expected_events": [
+    {
+      "type": "response_started",
+      "provider_response_id": "gemini-response-1"
+    },
+    {
+      "type": "reasoning_delta",
+      "text": "Both inputs identify the same subject."
+    },
+    {
+      "type": "reasoning_signature",
+      "signature": "sig-gemini-recorded"
+    },
+    {
+      "type": "output_text_delta",
+      "text": "{\"match\":true}"
+    },
+    {
+      "type": "tool_call_delta",
+      "call_id": "call-gemini-1",
+      "name": "lookup",
+      "arguments_delta": "{\"query\":\"subject"
+    },
+    {
+      "type": "tool_call_completed",
+      "call": {
+        "call_id": "call-gemini-1",
+        "name": "lookup",
+        "arguments": {"query": "subject"}
+      }
+    },
+    {
+      "type": "usage",
+      "usage": {
+        "input_tokens": 130,
+        "output_tokens": 28,
+        "reasoning_tokens": 9,
+        "cache_write_tokens": 0,
+        "cache_read_tokens": 0,
+        "audio_input_tokens": 0,
+        "audio_output_tokens": 0
+      }
+    },
+    {"type": "completed", "finish_reason": "completed"}
+  ]
+}

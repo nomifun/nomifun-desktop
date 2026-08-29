@@ -1,0 +1,208 @@
+{
+  "title": "Agent Settings",
+  "subtitle": "Build immutable AgentPreset revisions from capabilities, Skills, MCP materializations, model routes, and typed resources.",
+  "loading": "Loading Agent Settings…",
+  "loadingEditor": "Loading the selected AgentPreset…",
+  "freshStart": {
+    "title": "Fresh v4 workspace",
+    "body": "This generation starts with {{count}} official templates and an empty personal library. Previous settings are not imported; fork a template or create a new AgentPreset here."
+  },
+  "actions": {
+    "create": "Create",
+    "fork": "Fork",
+    "remove": "Remove",
+    "retry": "Retry",
+    "preview": "Preview",
+    "test": "Test",
+    "saveRevision": "Save Revision"
+  },
+  "defaults": {
+    "untitledName": "Untitled Agent",
+    "forkName": "{{name}} Copy"
+  },
+  "library": {
+    "ariaLabel": "AgentPreset library",
+    "title": "AgentPreset library",
+    "subtitle": "Official templates and your immutable revision lines",
+    "official": "Official templates",
+    "mine": "My AgentPresets",
+    "empty": "No personal AgentPresets yet.",
+    "capabilityCount": "{{count}} capabilities",
+    "revision": "Revision {{revision}}",
+    "unsaved": "No saved revision",
+    "bindingCount": "{{count}} bindings"
+  },
+  "template": {
+    "readOnly": "Official read-only template",
+    "capabilityHint": "The frozen seed defines exact initial and on-demand capability versions. Fork it to edit.",
+    "resourceHint": "Templates declare typed resource slots, never a specific user's resource IDs.",
+    "zeroToolTitle": "Exact zero-tool profile",
+    "zeroToolBody": "No capability, Skill, MCP, workspace, Coding context, or hidden capability search is constructed.",
+    "chat": {
+      "minimal": {
+        "name": "Minimal Chat",
+        "description": "The smallest ordinary Chat profile with no tools or hidden capability initialization."
+      }
+    },
+    "assistant": {
+      "general": {
+        "name": "General Assistant",
+        "description": "General-purpose attachments, Knowledge, project memory, files, and web research."
+      }
+    },
+    "coding": {
+      "codex": {
+        "name": "Codex Coding",
+        "description": "Complete Codex-native workspace, file, shell, process, VCS, Skills, MCP, review, and multi-agent surface."
+      }
+    },
+    "companion": {
+      "default": {
+        "name": "Companion",
+        "description": "Persona, companion memory, Knowledge, learning, and IM connection workflows."
+      }
+    },
+    "robot": {
+      "default": {
+        "name": "Robot",
+        "description": "Robot link, audio, display, perception, motion, companion context, and Knowledge."
+      }
+    },
+    "customerService": {
+      "default": {
+        "name": "Customer Service",
+        "description": "Customer dialogue, notes, Knowledge, Channel receive/reply/send, and handoff."
+      }
+    },
+    "creativeStudio": {
+      "default": {
+        "name": "Creative Studio",
+        "description": "Canvas, assets, templates, director, generation models, and MiniApp workflows."
+      }
+    }
+  },
+  "sections": {
+    "basic": "Identity and model",
+    "basicHint": "Name the AgentPreset, select a Chat model route, and write the stable persona and instructions.",
+    "capabilities": "Capabilities",
+    "capabilitiesHint": "Initial capabilities are active at Session start. On-demand capabilities are pre-resolved and activate only at a completed-turn boundary.",
+    "skillsMcp": "Skills and MCP",
+    "skillsMcpHint": "Skills contribute instructions only. MCP tools enter the AgentPreset through their materialized Capability.",
+    "skills": "Skills",
+    "mcp": "MCP materializations",
+    "resources": "Typed resources",
+    "resourcesHint": "Only resource kinds required by selected capabilities are shown. Resource ownership is validated synchronously.",
+    "advanced": "Advanced budgets and execution constraints",
+    "previewInspector": "Preview and Inspector",
+    "previewInspectorHint": "Resolve the exact initial/on-demand ceiling, Tool/Context projection, resources, RuntimeProfile, and revision diff.",
+    "test": "Test with a real Session",
+    "testHint": "Dirty drafts save an ordinary immutable Revision first. Clean drafts reuse the current Revision."
+  },
+  "fields": {
+    "name": "Name",
+    "description": "Purpose",
+    "chatModelRoute": "Chat model route",
+    "chatModelRoutePlaceholder": "Exact model route ID",
+    "persona": "Persona",
+    "instructions": "Instructions"
+  },
+  "status": {
+    "dirty": "Unsaved draft",
+    "saved": "Saved revision",
+    "currentRevision": "Current immutable Revision {{revision}}",
+    "noRevision": "This draft has no saved Revision yet.",
+    "boundTargets": "{{count}} bound targets",
+    "unsavedChanges": "Preview again before saving or testing this changed draft.",
+    "revisionImmutable": "Saved revisions are immutable; edits create the next Revision."
+  },
+  "capabilities": {
+    "search": "Search capabilities and source Packages",
+    "initial": "Initial capabilities",
+    "onDemand": "On-demand capabilities",
+    "initialShort": "Initial",
+    "onDemandShort": "On-demand",
+    "notSelected": "Off",
+    "emptySelection": "No capabilities in this set.",
+    "emptyCatalog": "No matching materialized capabilities.",
+    "source": "Source",
+    "tools": "{{count}} actions",
+    "contexts": "{{count}} context contributors"
+  },
+  "skills": {
+    "missingCapabilities": "Missing selected capabilities: {{capabilities}}",
+    "empty": "No materialized Skills."
+  },
+  "mcp": {
+    "empty": "No MCP tool materializations."
+  },
+  "resources": {
+    "noneRequired": "The current capability selection requires no typed resources.",
+    "required": "Required",
+    "optional": "Optional",
+    "resourceId": "Resource ID",
+    "operations": "Operations",
+    "connectionRef": "Connection reference"
+  },
+  "advanced": {
+    "systemTokens": "System context tokens",
+    "dynamicTokens": "Dynamic context tokens",
+    "activeCapabilities": "Maximum active capabilities",
+    "toolCalls": "Maximum Tool calls per Turn"
+  },
+  "preview": {
+    "emptyTitle": "No Preview yet",
+    "emptyBody": "Preview resolves the draft without writing a Preset, Revision, Session, or external Effect.",
+    "ready": "Preview ready",
+    "blocked": "Preview blocked",
+    "candidateRevision": "Candidate Revision {{revision}}",
+    "metrics": {
+      "initial_count": "Initial",
+      "on_demand_count": "On-demand",
+      "active_at_start_count": "Active at start",
+      "model_tool_count": "Tool schemas",
+      "context_contributor_count": "Context sources",
+      "skill_count": "Skills",
+      "mcp_count": "MCP mappings",
+      "resource_binding_count": "Resources"
+    }
+  },
+  "inspector": {
+    "revisionDiff": "Revision diff",
+    "snapshot": "Snapshot and RuntimeProfile",
+    "snapshotDigest": "Snapshot digest",
+    "runtimeProfile": "RuntimeProfile",
+    "protocol": "Runtime protocol",
+    "tools": "Tool schema references",
+    "context": "Context schema references",
+    "continuation": "D-025 continuation",
+    "remoteToken": "D-026 Remote token boundary"
+  },
+  "continuation": {
+    "title": "Exact compatibility or explicit fork",
+    "body": "A compatible frozen Snapshot continues the same Session. An unavailable executor leaves history read-only and requires an explicit new-ID fork with a self-contained semantic base; Runtime-private handles and Effects are never replayed."
+  },
+  "remoteToken": {
+    "status": {
+      "active": "Installation token active",
+      "revoked": "Installation token revoked",
+      "unconfigured": "Installation token not configured",
+      "unavailable": "Installation token status unavailable"
+    },
+    "continuation": "Rotate or revoke fences only new Remote request admission. Existing Sessions remain unchanged; a replacement token must resolve to the same owner and explicitly submit the original AgentSession ID."
+  },
+  "test": {
+    "realEffectWarning": "Test will automatically save current changes when needed, create an ordinary persistent Session, and execute FullAuto against the currently bound real resources. Tool and external Effects are not simulated.",
+    "inputPlaceholder": "Enter the first ordinary Turn for this AgentPreset…",
+    "session": "AgentSession",
+    "turn": "Turn status",
+    "revision": "Revision"
+  },
+  "common": {
+    "none": "None",
+    "noChanges": "No changes",
+    "unavailable": "Unavailable"
+  },
+  "errors": {
+    "title": "Agent Settings could not complete the operation"
+  }
+}
