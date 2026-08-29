@@ -398,8 +398,9 @@ async fn rest_v1_stream_endpoint_emits_result_frame() {
 }
 
 /// The Remote surface projects a non-empty, correctly-gated subset of the
-/// registry: Destructive tools are visible (Confirm) but Channel hides them,
-/// and Remote is a subset of the all-permissive Desktop surface.
+/// registry. Transport surface is context only after the FullAuto cutover;
+/// authentication, ownership, Snapshot allowlists, and resource bindings
+/// enforce access without a Confirm/Deny permission state machine.
 #[test]
 fn remote_surface_projection_is_correct() {
     let remote: Vec<&str> = Registry::global().tool_specs(Surface::Remote).iter().map(|s| s.name).collect();
@@ -440,16 +441,15 @@ fn remote_surface_projection_is_correct() {
         assert!(desktop.contains(name), "Remote tool '{name}' must also be visible on Desktop");
     }
 
-    // A Destructive tool: listed on Remote (Confirm) and Desktop, hidden on Channel (Deny).
+    // Destructive tools retain one canonical capability identity on every
+    // transport surface; dispatch still applies the centralized synchronous
+    // ownership and Snapshot checks.
     assert!(desktop.contains(&"nomi_delete_conversation"));
     assert!(
         remote.contains(&"nomi_delete_conversation"),
-        "Destructive tools are Confirm (visible) on the Remote surface"
+        "Destructive tools remain visible as canonical capabilities on Remote"
     );
-    assert!(
-        !channel.contains(&"nomi_delete_conversation"),
-        "Destructive tools are hard-denied (hidden) on the Channel surface"
-    );
+    assert!(channel.contains(&"nomi_delete_conversation"));
 
     // `nomi_execution_update` stays visible because most operations are Write;
     // its cancel variant applies the Destructive matrix inside dispatch.
