@@ -14,6 +14,19 @@ use nomifun_extension::{ExternalPathsManager, SkillPaths, SkillRouterState};
 use nomifun_file::FileService;
 use nomifun_system::VersionCheckService;
 
+fn isolated_config(prefix: &str) -> AppConfig {
+    let root = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .unwrap()
+        .keep();
+    AppConfig {
+        data_dir: root.join("data"),
+        work_dir: root.join("work"),
+        ..AppConfig::default()
+    }
+}
+
 pub async fn build_app() -> (axum::Router, AppServices) {
     let root = tempfile::Builder::new()
         .prefix("nomifun-app-e2e-")
@@ -118,7 +131,16 @@ pub fn nomi_extra_with_workspace(workspace: impl Into<String>) -> serde_json::Va
 #[allow(dead_code)]
 pub async fn build_app_with_skill_paths(root: &std::path::Path) -> (axum::Router, AppServices, SkillPaths) {
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(
+        db,
+        &AppConfig {
+            data_dir: root.join("data"),
+            work_dir: root.join("work"),
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .unwrap();
     let (mut states, _) = build_module_states(&services).await;
 
     let builtin_dir = root.join("builtin-skills");
@@ -158,7 +180,10 @@ pub async fn build_app_with_skill_paths(root: &std::path::Path) -> (axum::Router
 
 pub async fn build_app_with_noop_opener() -> (axum::Router, AppServices) {
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services =
+        AppServices::from_config(db, &isolated_config("nomifun-noop-opener-e2e-"))
+            .await
+            .unwrap();
     let (mut states, _) = build_module_states(&services).await;
     states.shell.shell_service = std::sync::Arc::new(nomifun_shell::ShellService::new(std::sync::Arc::new(
         nomifun_shell::NoopSystemOpener,
@@ -169,7 +194,10 @@ pub async fn build_app_with_noop_opener() -> (axum::Router, AppServices) {
 
 pub async fn build_app_with_file_roots(allowed_roots: Vec<std::path::PathBuf>) -> (axum::Router, AppServices) {
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services =
+        AppServices::from_config(db, &isolated_config("nomifun-file-roots-e2e-"))
+            .await
+            .unwrap();
     let (mut states, _) = build_module_states(&services).await;
     states.file.file_service = std::sync::Arc::new(FileService::new(services.event_bus.clone(), allowed_roots));
     let router = create_router_with_states(&services, states);
@@ -181,7 +209,10 @@ pub async fn build_app_with_mock_version(
     mock_server: &MockServer,
 ) -> (axum::Router, AppServices) {
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services =
+        AppServices::from_config(db, &isolated_config("nomifun-version-e2e-"))
+            .await
+            .unwrap();
     let (mut states, _) = build_module_states(&services).await;
     let http_client = reqwest::Client::builder().no_proxy().build().unwrap();
     states.system.version_check_service =
@@ -195,7 +226,7 @@ pub async fn build_app_with_mock_version(
 /// Use for tests that exercise session warmup and send-message paths where
 /// spawning a real CLI process is not feasible.
 pub async fn build_app_with_mock_agents() -> (axum::Router, AppServices) {
-    build_app_with_mock_agents_config(AppConfig::default()).await
+    build_app_with_mock_agents_config(isolated_config("nomifun-mock-agent-e2e-")).await
 }
 
 pub async fn build_isolated_app_with_mock_agents(

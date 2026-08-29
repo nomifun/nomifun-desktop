@@ -2,12 +2,25 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
+fn isolated_config(prefix: &str) -> nomifun_app::AppConfig {
+    let root = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .unwrap()
+        .keep();
+    nomifun_app::AppConfig {
+        data_dir: root.join("data"),
+        work_dir: root.join("work"),
+        ..Default::default()
+    }
+}
+
 #[tokio::test]
 async fn test_local_mode_skips_auth() {
     let db = nomifun_db::init_database_memory().await.unwrap();
     let config = nomifun_app::AppConfig {
         auth_policy: nomifun_app::AuthPolicy::NoAuth,
-        ..Default::default()
+        ..isolated_config("nomifun-local-mode-e2e-")
     };
     let services = nomifun_app::AppServices::from_config(db, &config).await.unwrap();
 
@@ -34,9 +47,12 @@ async fn test_local_mode_skips_auth() {
 #[tokio::test]
 async fn test_non_local_mode_requires_auth() {
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = nomifun_app::AppServices::from_config(db, &nomifun_app::AppConfig::default())
-        .await
-        .unwrap();
+    let services = nomifun_app::AppServices::from_config(
+        db,
+        &isolated_config("nomifun-auth-required-e2e-"),
+    )
+    .await
+    .unwrap();
 
     let router = nomifun_app::create_router(&services).await;
 
