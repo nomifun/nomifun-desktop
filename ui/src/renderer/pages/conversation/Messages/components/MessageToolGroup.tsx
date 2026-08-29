@@ -4,34 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ipcBridge } from '@/common';
-import { parseConfirmationCorrelationId, type IMessageToolGroup } from '@/common/chat/chatLib';
+import type { IMessageToolGroup } from '@/common/chat/chatLib';
 import { optionalDisplayText, toDisplayText } from '@/common/chat/displayText';
 import { iconColors } from '@/renderer/styles/colors';
-import { Alert, Button, Radio, Tag } from '@arco-design/web-react';
+import { Alert, Tag } from '@arco-design/web-react';
 import { LoadingOne } from '@icon-park/react';
-import React, { useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import FeedbackButton from '@/renderer/components/base/FeedbackButton';
-import FileChangesPanel from '@/renderer/components/base/FileChangesPanel';
-import { useDiffPreviewHandlers } from '@/renderer/hooks/file/useDiffPreviewHandlers';
-import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
-import { parseDiff } from '@/renderer/utils/file/diffUtils';
 import MessageFileChanges from '../MessageFileChanges';
 import CollapsibleContent from '@renderer/components/chat/CollapsibleContent';
 import LocalImageView from '@renderer/components/media/LocalImageView';
-import MarkdownView from '@renderer/components/Markdown';
-import { ToolConfirmationOutcome } from '@renderer/utils/common';
 import { COLLAPSE_CONFIG, TEXT_CONFIG } from '../constants';
-import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
 import type { WriteFileResult } from '../types';
 import {
   enforceToolGroupArtifactTrust,
   getSuccessfulLegacyImage,
   isSuccessfulWriteFileResult,
 } from './toolGroupArtifactVisibility';
-
-const CODE_STYLE = { marginTop: 4, marginBottom: 4 };
 
 // Alert 组件样式常量 Alert component style constant
 // 顶部对齐图标与内容，避免多行文本时图标垂直居中
@@ -44,202 +34,6 @@ const RESULT_MAX_HEIGHT = COLLAPSE_CONFIG.MAX_HEIGHT;
 interface IMessageToolGroupProps {
   message: IMessageToolGroup;
 }
-
-const useConfirmationButtons = (
-  confirmationDetails: IMessageToolGroupProps['message']['content'][number]['confirmationDetails'],
-  t: (key: string, options?: any) => string
-) => {
-  return useMemo(() => {
-    if (!confirmationDetails) return {};
-    let question: string;
-    const options: Array<{ label: string; value: ToolConfirmationOutcome }> = [];
-    switch (confirmationDetails.type) {
-      case 'edit':
-        {
-          question = t('messages.confirmation.applyChange');
-          options.push(
-            {
-              label: t('messages.confirmation.yesAllowOnce'),
-              value: ToolConfirmationOutcome.ProceedOnce,
-            },
-            {
-              label: t('messages.confirmation.yesAllowAlways'),
-              value: ToolConfirmationOutcome.ProceedAlways,
-            },
-            { label: t('messages.confirmation.no'), value: ToolConfirmationOutcome.Cancel }
-          );
-        }
-        break;
-      case 'exec':
-        {
-          question = t('messages.confirmation.allowExecution');
-          options.push(
-            {
-              label: t('messages.confirmation.yesAllowOnce'),
-              value: ToolConfirmationOutcome.ProceedOnce,
-            },
-            {
-              label: t('messages.confirmation.yesAllowAlways'),
-              value: ToolConfirmationOutcome.ProceedAlways,
-            },
-            { label: t('messages.confirmation.no'), value: ToolConfirmationOutcome.Cancel }
-          );
-        }
-        break;
-      case 'info':
-        {
-          question = t('messages.confirmation.proceed');
-          options.push(
-            {
-              label: t('messages.confirmation.yesAllowOnce'),
-              value: ToolConfirmationOutcome.ProceedOnce,
-            },
-            {
-              label: t('messages.confirmation.yesAllowAlways'),
-              value: ToolConfirmationOutcome.ProceedAlways,
-            },
-            { label: t('messages.confirmation.no'), value: ToolConfirmationOutcome.Cancel }
-          );
-        }
-        break;
-      default: {
-        const mcpProps = confirmationDetails;
-        question = t('messages.confirmation.allowMCPTool', {
-          toolName: toDisplayText(mcpProps.tool_name),
-          serverName: toDisplayText(mcpProps.server_name),
-        });
-        options.push(
-          {
-            label: t('messages.confirmation.yesAllowOnce'),
-            value: ToolConfirmationOutcome.ProceedOnce,
-          },
-          {
-            label: t('messages.confirmation.yesAlwaysAllowTool', {
-              toolName: toDisplayText(mcpProps.tool_name),
-              serverName: toDisplayText(mcpProps.server_name),
-            }),
-            value: ToolConfirmationOutcome.ProceedAlwaysTool,
-          },
-          {
-            label: t('messages.confirmation.yesAlwaysAllowServer', {
-              serverName: toDisplayText(mcpProps.server_name),
-            }),
-            value: ToolConfirmationOutcome.ProceedAlwaysServer,
-          },
-          { label: t('messages.confirmation.no'), value: ToolConfirmationOutcome.Cancel }
-        );
-      }
-    }
-    return {
-      question,
-      options,
-    };
-  }, [confirmationDetails, t]);
-};
-
-const EditConfirmationDiff: React.FC<{ diff: string; file_name: string; title: string }> = ({
-  diff,
-  file_name,
-  title,
-}) => {
-  const fileInfo = useMemo(() => parseDiff(diff, file_name), [diff, file_name]);
-  const display_name = file_name.split(/[/\\]/).pop() || file_name;
-  const { handleFileClick, handleDiffClick } = useDiffPreviewHandlers({
-    diffText: diff,
-    display_name,
-    file_path: file_name,
-    title,
-  });
-
-  return (
-    <FileChangesPanel
-      title={title}
-      files={[fileInfo]}
-      onFileClick={handleFileClick}
-      onDiffClick={handleDiffClick}
-      defaultExpanded={true}
-    />
-  );
-};
-
-const ConfirmationDetails: React.FC<{
-  content: IMessageToolGroupProps['message']['content'][number];
-  onConfirm: (outcome: ToolConfirmationOutcome) => void;
-  readOnly?: boolean;
-}> = ({ content, onConfirm, readOnly }) => {
-  const { t } = useTranslation();
-  const { confirmationDetails } = content;
-  if (!confirmationDetails) return;
-  const node = useMemo(() => {
-    if (!confirmationDetails) return null;
-    switch (confirmationDetails.type) {
-      case 'edit':
-        return null; // Rendered separately below with hooks support
-      case 'exec': {
-        const bashSnippet = `\`\`\`bash\n${toDisplayText(confirmationDetails.command)}\n\`\`\``;
-        return (
-          <div className='w-full max-w-100% min-w-0'>
-            <MarkdownView codeStyle={CODE_STYLE} fontSize={MESSAGE_BODY_FONT_SIZE} lineHeight={MESSAGE_BODY_LINE_HEIGHT}>
-              {bashSnippet}
-            </MarkdownView>
-          </div>
-        );
-      }
-      case 'info':
-        return <span className='text-t-primary'>{toDisplayText(confirmationDetails.prompt)}</span>;
-      case 'mcp':
-        return <span className='text-t-primary'>{toDisplayText(confirmationDetails.tool_display_name)}</span>;
-    }
-  }, [confirmationDetails]);
-
-  const { question = '', options = [] } = useConfirmationButtons(confirmationDetails, t);
-
-  const [selected, setSelected] = useState<ToolConfirmationOutcome | null>(null);
-
-  const isConfirm = content.status === 'Confirming';
-
-  return (
-    <div>
-      {confirmationDetails.type === 'edit' ? (
-        <EditConfirmationDiff
-          diff={toDisplayText(confirmationDetails?.file_diff)}
-          file_name={toDisplayText(confirmationDetails.file_name)}
-          title={isConfirm ? toDisplayText(confirmationDetails.title) : toDisplayText(content.description)}
-        />
-      ) : (
-        node
-      )}
-      {!readOnly && content.status === 'Confirming' && (
-        <>
-          <div className='mt-10px text-t-primary'>{question}</div>
-          <Radio.Group direction='vertical' size='mini' value={selected} onChange={setSelected}>
-            {options.map((item) => {
-              return (
-                <Radio key={item.value} value={item.value}>
-                  {item.label}
-                </Radio>
-              );
-            })}
-          </Radio.Group>
-          <div className='flex justify-start pl-20px'>
-            <Button
-              type='primary'
-              size='mini'
-              disabled={!selected}
-              onClick={() => {
-                // The button is disabled while `selected` is null, so this guard
-                // never blocks a real click — it only narrows the type for onConfirm.
-                if (selected) onConfirm(selected);
-              }}
-            >
-              {t('messages.confirm')}
-            </Button>
-          </div>
-        </>
-      )}
-    </div>
-  );
-};
 
 // Legacy tool-group image display. LocalImageView owns source-generation
 // cancellation and stale/error clearing for local, remote, data and blob URLs.
@@ -293,7 +87,6 @@ const ToolResultDisplay: React.FC<{
 
 const MessageToolGroup: React.FC<IMessageToolGroupProps> = ({ message }) => {
   const { t } = useTranslation();
-  const readOnly = useConversationContextSafe()?.readOnly === true;
   const toolContent = useMemo(
     () =>
       Array.isArray(message.content)
@@ -327,39 +120,12 @@ const MessageToolGroup: React.FC<IMessageToolGroupProps> = ({ message }) => {
   return (
     <div>
       {toolContent.map((content, index) => {
-        const { status, call_id, name, description, result_display, confirmationDetails } = content;
+        const { status, call_id, name, description, result_display } = content;
         const statusText = toDisplayText(status);
         const callIdText = toDisplayText(call_id, `tool-${index}`);
         const nameText = toDisplayText(name, 'Tool');
         const descriptionText = optionalDisplayText(description);
         const isLoading = statusText !== 'Success' && statusText !== 'Error' && statusText !== 'Canceled';
-        // status === "Confirming" &&
-        if (confirmationDetails) {
-          return (
-            <ConfirmationDetails
-              key={callIdText}
-              content={content}
-              readOnly={readOnly}
-              onConfirm={(outcome) => {
-                if (readOnly) return;
-                ipcBridge.conversation.confirmMessage
-                  .invoke({
-                    confirm_key: outcome,
-                    msg_id: message.msg_id ?? parseConfirmationCorrelationId(callIdText),
-                    call_id: callIdText,
-                    conversation_id: message.conversation_id,
-                  })
-                  .then(() => {
-                    // confirmation sent successfully
-                  })
-                  .catch((error) => {
-                    console.error('Failed to confirm message:', error);
-                  });
-              }}
-            ></ConfirmationDetails>
-          );
-        }
-
         // WriteFile 特殊处理：使用 MessageFileChanges 汇总显示 / WriteFile special handling: use MessageFileChanges for summary display
         if (statusText === 'Success' && nameText === 'WriteFile' && typeof result_display !== 'string') {
           if (result_display && typeof result_display === 'object' && 'file_diff' in result_display) {

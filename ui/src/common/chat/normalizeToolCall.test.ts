@@ -227,29 +227,7 @@ describe('normalizeToolCall', () => {
 });
 
 describe('normalizeToolGroup', () => {
-  it('marks failed confirmed shell commands as non-fatal process outcomes', () => {
-    const [result] = normalizeToolGroup({
-      type: 'tool_group',
-      content: [
-        {
-          call_id: 'call-shell',
-          name: 'Bash',
-          status: 'Error',
-          description: 'Run a validation command',
-          confirmationDetails: {
-            type: 'exec',
-            title: 'Run command',
-            command: 'node test.js',
-          },
-        },
-      ],
-    } as any);
-
-    expect(result.status).toBe('error');
-    expect(result.nonFatalFailure).toBe(true);
-  });
-
-  it('keeps failed edit groups fatal', () => {
+  it('keeps failed tool groups fatal', () => {
     const [result] = normalizeToolGroup({
       type: 'tool_group',
       content: [
@@ -257,16 +235,12 @@ describe('normalizeToolGroup', () => {
           call_id: 'call-edit',
           name: 'Edit',
           status: 'Error',
-          confirmationDetails: {
-            type: 'edit',
-            title: 'Apply edit',
-            file_name: 'app.ts',
-            file_diff: '',
-          },
+          description: 'app.ts',
         },
       ],
     } as any);
 
+    expect(result.status).toBe('error');
     expect(result.nonFatalFailure).toBeUndefined();
   });
 });

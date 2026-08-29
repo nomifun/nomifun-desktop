@@ -17,7 +17,6 @@ type ProcessStateItem =
   | { type: 'artifact' };
 
 export const mergeProcessStates = (states: TurnDisclosureProcessState[]): TurnDisclosureProcessState => {
-  if (states.includes('waiting')) return 'waiting';
   if (states.includes('running')) return 'running';
   if (states.includes('failed')) return 'failed';
   if (states.includes('canceled')) return 'canceled';
@@ -29,9 +28,8 @@ export const getToolMessagesProcessState = (messages: ToolProcessMessage[]): Tur
     if (message.type !== 'tool_group') return [];
     if (!Array.isArray(message.content)) return [];
     return message.content.map((tool) => {
-      if (tool.status === 'Confirming') return 'waiting';
       if (tool.status === 'Executing' || tool.status === 'Pending') return 'running';
-      if (tool.status === 'Error') return tool.confirmationDetails?.type === 'exec' ? 'completed' : 'failed';
+      if (tool.status === 'Error') return 'failed';
       if (tool.status === 'Canceled') return 'canceled';
       return 'completed';
     });
@@ -67,8 +65,6 @@ export const getProcessItemState = (item: ProcessStateItem): TurnDisclosureProce
       return getToolMessagesProcessState([item]);
     case 'tool_group':
       return getToolMessagesProcessState([item]);
-    case 'permission':
-      return 'waiting';
     case 'agent_status':
       if (item.content.status === 'error') return 'failed';
       if (item.content.status === 'connecting' || item.content.status === 'preparing') return 'running';

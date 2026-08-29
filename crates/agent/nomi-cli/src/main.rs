@@ -17,7 +17,6 @@ use nomi_protocol::commands::ProtocolCommand;
 use nomi_protocol::events::{ErrorInfo, ProtocolEvent, Usage};
 use nomi_protocol::reader::spawn_stdin_reader;
 use nomi_protocol::writer::{ProtocolEmitter, ProtocolWriter};
-use nomi_protocol::{ToolApprovalManager, ToolApprovalResult};
 
 #[derive(Default)]
 struct ConnectedMcpServerNames {
@@ -216,10 +215,6 @@ struct Cli {
     #[arg(long)]
     profile: Option<String>,
 
-    /// Auto-approve all tool executions (skip confirmation)
-    #[arg(long)]
-    auto_approve: bool,
-
     /// Project directory to load .nomi.toml from (defaults to CWD)
     #[arg(long)]
     project_dir: Option<std::path::PathBuf>,
@@ -315,7 +310,6 @@ async fn main() -> anyhow::Result<()> {
         max_turns: cli.max_turns,
         system_prompt: cli.system_prompt,
         profile: cli.profile,
-        auto_approve: cli.auto_approve,
         project_dir: cli.project_dir,
     };
 
@@ -796,17 +790,12 @@ async fn run_json_stream_mode(
 ) -> anyhow::Result<()> {
     let writer = Arc::new(ProtocolWriter::new());
     let protocol_sink = Arc::new(ProtocolSink::new(writer.clone()));
-    let approval_manager = Arc::new(ToolApprovalManager::new());
     let output: Arc<dyn OutputSink> = protocol_sink.clone();
 
     let provider_name = config.provider_label.clone();
 
-    // Bootstrap engine with full feature initialization
-    // P3-X1: pass the same approval manager into bootstrap so the native BrowserTool's redline
-    // gate reads the LIVE runtime session mode (a SetMode command flips it immediately) instead
-    // of the construction-time auto_approve snapshot.
-    let mut bootstrap =
-        AgentBootstrap::new(config, cwd, output.clone()).approval_manager(approval_manager.clone());
+    // Bootstrap engine with full feature initialization.
+    let mut bootstrap = AgentBootstrap::new(config, cwd, output.clone());
     if let Some(resume_id) = &resume {
         let cfg = bootstrap.config();
         let session_mgr = session::SessionManager::new(
@@ -832,14 +821,8 @@ async fn run_json_stream_mode(
     }
 
     let sid = engine.current_session_id();
-    protocol_sink.emit_ready(
-        engine.compat(),
-        initial_has_mcp,
-        sid,
-        &approval_manager.current_mode(),
-    );
+    protocol_sink.emit_ready(engine.compat(), initial_has_mcp, sid);
 
-    engine.set_approval_manager(approval_manager.clone());
     engine.set_protocol_writer(writer.clone());
 
     let mut cmd_rx = spawn_stdin_reader();
@@ -969,7 +952,6 @@ async fn run_json_stream_mode(
             ProtocolCommand::Message { msg_id, content } => {
                 let mut stopped = false;
                 let mut pending_config: Option<PendingConfig> = None;
-                let mut mode_changed = false;
 
                 {
                     let turn_execution = engine.execute_turn(&content, &msg_id);
@@ -998,14 +980,6 @@ async fn run_json_stream_mode(
                             }
                             Some(sub_cmd) = cmd_rx.recv() => {
                                 match sub_cmd {
-                                    ProtocolCommand::ToolApprove { call_id, scope } => {
-                                        // approve() records ApprovalScope::Always as a per-category grant
-                                        // before resolving; resolve() alone would drop the scope.
-                                        approval_manager.approve(&call_id, scope);
-                                    }
-                                    ProtocolCommand::ToolDeny { call_id, reason } => {
-                                        approval_manager.resolve(&call_id, ToolApprovalResult::Denied { reason });
-                                    }
                                     ProtocolCommand::Stop => {
                                         stopped = true;
                                         break;
@@ -1015,14 +989,6 @@ async fn run_json_stream_mode(
                                         let _ = writer.emit(&nomi_protocol::events::ProtocolEvent::Info {
                                             msg_id: String::new(),
                                             message: "set_config: queued, will apply after current response".to_string(),
-                                        });
-                                    }
-                                    ProtocolCommand::SetMode { mode } => {
-                                        approval_manager.set_mode(mode);
-                                        mode_changed = true;
-                                        let _ = writer.emit(&nomi_protocol::events::ProtocolEvent::Info {
-                                            msg_id: String::new(),
-                                            message: format!("mode updated: {}", approval_manager.current_mode()),
                                         });
                                     }
                                     ProtocolCommand::Ping => {
@@ -1056,13 +1022,6 @@ async fn run_json_stream_mode(
                     protocol_sink.emit_config_changed(
                         engine.compat(),
                         has_mcp,
-                        &approval_manager.current_mode(),
-                    );
-                } else if mode_changed {
-                    protocol_sink.emit_config_changed(
-                        engine.compat(),
-                        has_mcp,
-                        &approval_manager.current_mode(),
                     );
                 }
                 if stopped {
@@ -1072,30 +1031,8 @@ async fn run_json_stream_mode(
             ProtocolCommand::Stop => {
                 break;
             }
-            ProtocolCommand::ToolApprove { call_id, scope } => {
-                // approve() records ApprovalScope::Always as a per-category grant
-                // before resolving; resolve() alone would drop the scope.
-                approval_manager.approve(&call_id, scope);
-            }
-            ProtocolCommand::ToolDeny { call_id, reason } => {
-                approval_manager.resolve(&call_id, ToolApprovalResult::Denied { reason });
-            }
             ProtocolCommand::InitHistory { text } => {
                 tracing::debug!(target: "nomi_protocol", chars = text.len(), "InitHistory received");
-            }
-            ProtocolCommand::SetMode { mode } => {
-                let mode_str = format!("{mode:?}").to_lowercase();
-                approval_manager.set_mode(mode);
-                let _ = writer.emit(&nomi_protocol::events::ProtocolEvent::Info {
-                    msg_id: String::new(),
-                    message: format!("mode updated: {}", approval_manager.current_mode()),
-                });
-                protocol_sink.emit_config_changed(
-                    engine.compat(),
-                    has_mcp,
-                    &approval_manager.current_mode(),
-                );
-                tracing::debug!(target: "nomi_protocol", mode = %mode_str, "SetMode applied");
             }
             ProtocolCommand::SetConfig {
                 model,
@@ -1120,11 +1057,7 @@ async fn run_json_stream_mode(
                     msg_id: String::new(),
                     message,
                 });
-                protocol_sink.emit_config_changed(
-                    engine.compat(),
-                    has_mcp,
-                    &approval_manager.current_mode(),
-                );
+                protocol_sink.emit_config_changed(engine.compat(), has_mcp);
             }
             ProtocolCommand::AddMcpServer { name, .. } => {
                 output.emit_error(&format!(

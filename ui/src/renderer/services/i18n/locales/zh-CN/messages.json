@@ -8,7 +8,6 @@
   "toolDetailLoadFailed": "加载完整输出失败",
   "toolSummary": {
     "running": "正在运行 {{target}}",
-    "waiting": "等待确认 {{target}}",
     "completed": "已运行 {{target}}",
     "failed": "运行失败 {{target}}",
     "canceled": "已取消 {{target}}",
@@ -40,20 +39,17 @@
     "fileRead": "已读取 {{target}}",
     "fileChanged": "已编辑 {{target}} {{stats}}",
     "thinkingRunning": "正在思考",
-    "thinkingWaiting": "正在等待模型开始输出",
     "thinkingCompleted": "已思考",
     "thinkingCompletedDuration": "已思考 {{duration}}",
     "preparingAction": "正在准备下一步操作",
     "preparedAction": "已准备下一步操作",
     "contextCompressed": "上下文已自动压缩",
     "searchedTarget": "已搜索 {{target}}",
-    "waitingPermission": "等待确认 {{target}}",
     "agentConnecting": "正在连接 {{target}}",
     "agentFailed": "{{target}} 失败",
     "status": "{{target}}"
   },
   "turnProcessed": "已处理 {{duration}}",
-  "turnWaiting": "等待确认 {{duration}}",
   "turnCanceled": "你在 {{duration}} 后停止了",
   "turnProcess": {
     "expandAllThinkingProcess": "展开全部思考过程",
@@ -101,10 +97,8 @@
     "viewDiff": "查看改动"
   },
   "conversationInProgress": "当前正在进行对话中...",
-  "confirm": "确认",
   "canceledExecution": "已取消执行",
   "openLinkFailed": "打开链接失败",
-  "auto_handling_permissions": "自动处理权限请求：{{request}}",
   "copy": "复制",
   "copySuccess": "复制成功",
   "copyFailed": "复制失败",
@@ -146,24 +140,6 @@
   "export.prepareFailed": "准备导出对话失败",
   "export.unavailable": "当前无法导出对话",
   "unknownMessageType": "未知消息类型：{{type}}",
-  "permissionRequest": "权限请求",
-  "browserApprovalPreview": "当前页面预览",
-  "agentRequestingPermission": "代理正在请求权限。",
   "command": "命令：",
-  "chooseAction": "选择一个操作：",
-  "option": "选项",
-  "noOptionsAvailable": "无可用选项",
-  "processing": "处理中...",
-  "responseSentSuccessfully": "响应已成功发送",
-  "confirmation": {
-    "applyChange": "应用此更改？",
-    "allowExecution": "允许执行？",
-    "proceed": "您想要继续吗？",
-    "allowMCPTool": "允许执行来自服务器 \"{{serverName}}\" 的 MCP 工具 \"{{toolName}}\"？",
-    "yesAllowOnce": "是，允许一次",
-    "yesAllowAlways": "是，始终允许",
-    "yesAlwaysAllowTool": "是，始终允许来自服务器 \"{{serverName}}\" 的工具 \"{{toolName}}\"",
-    "yesAlwaysAllowServer": "是，始终允许来自服务器 \"{{serverName}}\" 的所有工具",
-    "no": "否 (esc)"
-  }
+  "processing": "处理中..."
 }

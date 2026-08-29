@@ -624,9 +624,6 @@ impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
             // The companion persona already carries the frozen preset
             // instructions; without this the generic path appends them twice.
             "preset_instructions_embedded": true,
-            // No approval UI exists on a robot: a tool call under the default
-            // mode would park forever and the device would wait in silence.
-            "session_mode": "yolo",
         });
         if let Some(servers) = &session_mcp {
             extra["selected_session_mcp_servers"] = serde_json::to_value(servers)?;
@@ -934,8 +931,7 @@ impl SpokenReplyReducer {
             }
             AgentStreamEvent::Plan(_)
             | AgentStreamEvent::ToolCall(_)
-            | AgentStreamEvent::ToolGroup(_)
-            | AgentStreamEvent::Permission(_) => {
+            | AgentStreamEvent::ToolGroup(_) => {
                 self.candidate.clear();
                 if self.output_checkpoint.is_some() {
                     self.output_checkpoint = Some(0);

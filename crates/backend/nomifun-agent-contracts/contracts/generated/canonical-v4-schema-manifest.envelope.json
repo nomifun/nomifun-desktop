@@ -11,9 +11,9 @@
     "error_registry_digest": "6a3856947bb9e861bd4d6f7a1d88f9dc5c04b5b8b18b2b320446385025eec3b5",
     "runtime_protocol_digest": "f1c0422f04c9de923e18c7df40d814d3c9f5b2db5f1c5fef2745e77e6d62590f",
     "runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
-    "deletion_manifest_set_digest": "3fbfc727cd0f9335f94ccbd713042bcc1a4aa059fd8604994e2226327df02556",
+    "deletion_manifest_set_digest": "dd050984ddf0ddce3df7b86263f3124c592c773bfcdf101604f75ef7c8be4139",
     "platform_validation_contract_digest": "78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9",
     "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5"
   },
-  "payload_digest": "d744f3e97d894bb2fe40a109f4e31e38c51401d42de93c9c27424eaf5dedf8fc"
+  "payload_digest": "5df80b2cc4ce25b53c01e85a1ede7c4f088a70fdf218d7d1ddebe3d008aa47ac"
 }

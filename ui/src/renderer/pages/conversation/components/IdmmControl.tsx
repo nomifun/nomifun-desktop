@@ -106,7 +106,6 @@ export const defaultIdmmConfig = (): IIdmmConfig => ({
           never_destructive: true,
         },
         open_question: { mode: 'auto', max_answer_chars: 600 },
-        permission: { mode: 'auto', only_safe_value: true, escalate_risky: true },
       },
       freeform_policy: null,
     },
@@ -878,62 +877,6 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
                         </div>
                       )}
 
-                      {categoryBlock(
-                        t('idmm.category.permission'),
-                        cats.permission.mode,
-                        (m) =>
-                          commitDecision((w) => ({
-                            ...w,
-                            strategy: {
-                              ...w.strategy,
-                              categories: {
-                                ...w.strategy.categories,
-                                permission: { ...w.strategy.categories.permission, mode: m },
-                              },
-                            },
-                          })),
-                        decisionLocked,
-                        <>
-                          {boolRow(
-                            t('idmm.category.onlySafeValue'),
-                            cats.permission.only_safe_value,
-                            (v) =>
-                              commitDecision((w) => ({
-                                ...w,
-                                strategy: {
-                                  ...w.strategy,
-                                  categories: {
-                                    ...w.strategy.categories,
-                                    permission: {
-                                      ...w.strategy.categories.permission,
-                                      only_safe_value: v,
-                                    },
-                                  },
-                                },
-                              })),
-                            decisionLocked
-                          )}
-                          {boolRow(
-                            t('idmm.category.escalateRisky'),
-                            cats.permission.escalate_risky,
-                            (v) =>
-                              commitDecision((w) => ({
-                                ...w,
-                                strategy: {
-                                  ...w.strategy,
-                                  categories: {
-                                    ...w.strategy.categories,
-                                    permission: {
-                                      ...w.strategy.categories.permission,
-                                      escalate_risky: v,
-                                    },
-                                  },
-                                },
-                              })),
-                            decisionLocked
-                          )}
-                        </>
-                      )}
                     </div>
 
                     <div className={fieldStackClass}>

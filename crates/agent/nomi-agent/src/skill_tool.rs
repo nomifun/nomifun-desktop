@@ -157,18 +157,6 @@ impl SkillTool {
                     images: Vec::new(),
                 };
             }
-            SkillPermission::Ask { reason } => {
-                return ToolResult {
-                    content: format!(
-                        "Skill '{}' requires user approval before execution. \
-                         {} \
-                         Please ask the user to approve this skill in their configuration.",
-                        skill.name, reason
-                    ),
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            }
             SkillPermission::Allow => {}
         }
 
@@ -388,7 +376,7 @@ mod tests {
         SkillTool::new(
             Arc::new(skills),
             "/tmp".to_string(),
-            SkillPermissionChecker::new(vec![], vec![], false),
+            SkillPermissionChecker::new(vec![]),
         )
     }
 
@@ -445,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn fork_side_effect_evidence_is_orthogonal_to_approval_category() {
+    fn fork_side_effect_evidence_is_orthogonal_to_effect_category() {
         let inline = make_skill("inline", "body");
         let mut fork = make_skill("fork", "body");
         fork.execution_context = ExecutionContext::Fork;
@@ -531,7 +519,7 @@ mod supplemental_tests {
         SkillTool::new(
             Arc::new(skills),
             "/tmp".to_string(),
-            SkillPermissionChecker::new(vec![], vec![], false),
+            SkillPermissionChecker::new(vec![]),
         )
     }
 
@@ -769,7 +757,7 @@ mod supplemental_tests_p6 {
         SkillTool::new(
             Arc::new(skills),
             "/tmp".to_string(),
-            SkillPermissionChecker::new(vec![], vec![], false),
+            SkillPermissionChecker::new(vec![]),
         )
     }
 
@@ -831,15 +819,13 @@ mod supplemental_tests_p6 {
 
     // TC-6.19: skill has allowed_tools override → Some with correct tools
     #[test]
-    fn tc_6_19_skill_with_allowed_tools_returns_some() {
+    fn tc_6_19_skill_with_allowed_tools_returns_none() {
         let mut skill = base_skill("tools-skill");
         skill.allowed_tools = vec!["Bash".to_string(), "Read".to_string()];
         let tool = tool_with(vec![skill]);
 
         let modifier = tool.context_modifier_for(&json!({"skill": "tools-skill"}));
-        assert!(modifier.is_some());
-        let m = modifier.unwrap();
-        assert_eq!(m.allowed_tools, vec!["Bash", "Read"]);
+        assert!(modifier.is_none());
     }
 
     // TC-6.19b: leading slash is stripped before lookup
@@ -863,7 +849,7 @@ mod supplemental_tests_p6 {
         let tool_no_session = SkillTool::new(
             skills.clone(),
             "/tmp".to_string(),
-            SkillPermissionChecker::new(vec![], vec![], false),
+            SkillPermissionChecker::new(vec![]),
         );
         assert!(tool_no_session.session_id.is_none());
 
@@ -871,7 +857,7 @@ mod supplemental_tests_p6 {
         let tool_with_session = SkillTool::with_session_id(
             skills,
             "/tmp".to_string(),
-            SkillPermissionChecker::new(vec![], vec![], false),
+            SkillPermissionChecker::new(vec![]),
             Some("sess-abc".to_string()),
         );
         assert_eq!(tool_with_session.session_id.as_deref(), Some("sess-abc"));
@@ -883,7 +869,7 @@ mod supplemental_tests_p6 {
         let tool = SkillTool::with_session_id(
             Arc::new(vec![]),
             "/tmp".to_string(),
-            SkillPermissionChecker::new(vec![], vec![], false),
+            SkillPermissionChecker::new(vec![]),
             None,
         );
         assert!(tool.session_id.is_none());
@@ -949,7 +935,7 @@ mod permission_tests {
     // P5-11: SkillTool returns error for a denied skill.
     #[tokio::test]
     async fn p5_11_denied_skill_returns_error() {
-        let checker = SkillPermissionChecker::new(vec!["dangerous".to_string()], vec![], false);
+        let checker = SkillPermissionChecker::new(vec!["dangerous".to_string()]);
         let tool = SkillTool::new(
             Arc::new(vec![make_skill("dangerous", "rm -rf /")]),
             "/tmp".to_string(),
@@ -964,20 +950,15 @@ mod permission_tests {
         );
     }
 
-    // P5-12: SkillTool returns informative message for a skill that needs approval.
     #[tokio::test]
-    async fn p5_12_ask_skill_returns_approval_prompt() {
-        let checker = SkillPermissionChecker::new(vec![], vec![], false);
+    async fn p5_12_hooked_skill_executes_full_auto() {
+        let checker = SkillPermissionChecker::new(vec![]);
         let mut skill = make_skill("hooked", "body");
         skill.hooks_raw = Some(serde_json::json!({ "pre": "echo hi" }));
         let tool = SkillTool::new(Arc::new(vec![skill]), "/tmp".to_string(), checker);
         let result = tool.execute(json!({"skill": "hooked"})).await;
-        assert!(result.is_error);
-        assert!(
-            result.content.contains("approval") || result.content.contains("approve"),
-            "content should mention approval: {}",
-            result.content
-        );
+        assert!(!result.is_error);
+        assert_eq!(result.content, "body");
     }
 }
 
@@ -1122,7 +1103,7 @@ mod phase7_tests {
         SkillTool::with_invocation_runner(
             Arc::new(skills),
             "/tmp".to_string(),
-            SkillPermissionChecker::new(vec![], vec![], false),
+            SkillPermissionChecker::new(vec![]),
             None,
             invocation_runner,
         )
@@ -1238,8 +1219,8 @@ mod phase7_tests {
         let tool = SkillTool::with_invocation_runner(
             Arc::new(vec![make_fork_skill("fork-allowed", "content")]),
             "/tmp".to_string(),
-            // deny_list empty, allow_list empty = allow all
-            SkillPermissionChecker::new(vec![], vec![], false),
+            // No deny rules means the selected skill may run.
+            SkillPermissionChecker::new(vec![]),
             None,
             Some(invocation_runner as Arc<dyn AgentInvocationRunner>),
         );
@@ -1260,7 +1241,7 @@ mod phase7_tests {
             Arc::new(vec![make_fork_skill("fork-denied", "content")]),
             "/tmp".to_string(),
             // deny "fork-denied"
-            SkillPermissionChecker::new(vec!["fork-denied".to_string()], vec![], false),
+            SkillPermissionChecker::new(vec!["fork-denied".to_string()]),
             None,
             Some(invocation_runner.clone() as Arc<dyn AgentInvocationRunner>),
         );
@@ -1286,7 +1267,7 @@ mod phase7_tests {
         let tool = SkillTool::with_invocation_runner(
             Arc::new(vec![]),
             "/tmp".to_string(),
-            SkillPermissionChecker::new(vec![], vec![], false),
+            SkillPermissionChecker::new(vec![]),
             Some("sess-1".to_string()),
             Some(invocation_runner),
         );
@@ -1301,7 +1282,7 @@ mod phase7_tests {
         let tool = SkillTool::new(
             Arc::new(vec![]),
             "/tmp".to_string(),
-            SkillPermissionChecker::new(vec![], vec![], false),
+            SkillPermissionChecker::new(vec![]),
         );
         assert!(tool.invocation_runner.is_none());
     }
@@ -1358,7 +1339,7 @@ mod phase11_tests {
         SkillTool::new(
             Arc::new(skills),
             "/tmp".to_string(),
-            SkillPermissionChecker::new(vec![], vec![], false),
+            SkillPermissionChecker::new(vec![]),
         )
     }
 

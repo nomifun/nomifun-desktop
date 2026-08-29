@@ -516,7 +516,6 @@
       "download": "{{name}} is downloading a file…",
       "busy": "{{name}} is browsing the web…"
     },
-    "needsConfirm": "Action needs confirmation — open the chat tab",
     "done": "Done!",
     "menuOpenChat": "Open chat",
     "expand": "Expand input",

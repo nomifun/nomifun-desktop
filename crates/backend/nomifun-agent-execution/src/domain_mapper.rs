@@ -93,7 +93,6 @@ pub(crate) fn execution(
         lead_conversation_id,
         work_dir: row.work_dir,
         delegation_policy: parse_enum("delegation_policy", &row.delegation_policy)?,
-        plan_gate: parse_enum("plan_gate", &row.plan_gate)?,
         adaptation_policy: parse_enum("adaptation_policy", &row.adaptation_policy)?,
         decision_policy: parse_enum("decision_policy", &row.decision_policy)?,
         max_parallel: row.max_parallel,

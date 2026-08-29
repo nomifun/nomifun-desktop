@@ -277,7 +277,6 @@ pub async fn resolve_provider_config(
         max_turns: None,
         system_prompt: None,
         profile: None,
-        auto_approve: false,
         project_dir: Some(workspace.to_path_buf()),
     };
 

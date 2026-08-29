@@ -6,7 +6,6 @@ mod agent_execution;
 mod agent_execution_template;
 mod auth;
 mod channel;
-mod confirmation;
 mod connection_test;
 mod conversation;
 mod cron;
@@ -39,9 +38,8 @@ mod webhook;
 mod websocket;
 
 pub use session_ops::{
-    AgentModeResponse, GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, SetModeRequest,
-    SetModelRequest, SideQuestionRequest, SideQuestionResponse, WorkspaceBrowseQuery,
-    WorkspaceEntry,
+    GetModelInfoResponse, ModelInfoEntry, ModelInfoPayload, SetModelRequest, SideQuestionRequest,
+    SideQuestionResponse, WorkspaceBrowseQuery, WorkspaceEntry,
 };
 pub use agent_build_extra::{
     NomiBuildExtra, NomiGoalSpec, SessionMcpServer, SessionMcpTransport, SlashCommandItem,
@@ -86,9 +84,6 @@ pub use channel::{
     RejectPairingRequest, RevokeUserRequest, SetGroupAccessRequest, SyncChannelSettingsRequest,
     TestPluginExtraConfig, TestPluginRequest, TestPluginResponse, UserAuthorizedPayload,
 };
-pub use confirmation::{
-    ApprovalCheckQuery, ApprovalCheckResponse, ConfirmRequest, ConfirmationListResponse,
-};
 pub use connection_test::TestBedrockConnectionRequest;
 pub use conversation::{
     ActiveCountResponse, CloneConversationRequest, ConversationArtifactKind,
@@ -127,8 +122,8 @@ pub use file::{
 pub use idmm::{
     BlockedBehavior, BudgetConfig, BypassModelRef, CategoryMode, CategoryRules, DecisionStrategy,
     DecisionWatchConfig, FaultWatchConfig, IdmmConfig, IdmmRunState, IdmmState, IdmmTargetKind,
-    InterventionRecord, ModelFailoverConfig, OpenQuestionRule, OptionRule, PermissionRule,
-    ScanScope, SetIdmmRequest, Tendency, WakeStrategy, WatchBase, WatchTier,
+    InterventionRecord, ModelFailoverConfig, OpenQuestionRule, OptionRule, ScanScope,
+    SetIdmmRequest, Tendency, WakeStrategy, WatchBase, WatchTier,
 };
 pub use knowledge::{
     CreateKnowledgeTagRequest, KnowledgeEmbeddingConfig, KnowledgeEntry, KnowledgeEntryKind,

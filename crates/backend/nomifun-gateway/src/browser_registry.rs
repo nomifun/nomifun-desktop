@@ -11,21 +11,16 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use futures::{StreamExt, stream};
-use nomi_browser::{
-    ActionContext, ApprovalTier, ManagedBrowserFacade, TRUSTED_OWNER_INPUT_FIELDS,
-    classify_action,
-};
+use nomi_browser::{ManagedBrowserFacade, TRUSTED_OWNER_INPUT_FIELDS};
 use nomi_types::tool::ToolResult;
 use nomifun_browser_platform::{
     BrowserErrorCode, BrowserIdentityMode, BrowserLaneClient, BrowserLaneId,
     BrowserLaneSnapshot,
     BrowserOperation, BrowserOperationKind, BrowserOperationResult,
     BrowserPlatformError, BrowserSessionHub, BrowserSurface, CallerIdentity,
-    CloseResult, LaneKey, OpenLaneOutcome, OwnerLeaseId,
-    TaskResourceFamilyKey, normalize_lane_name,
+    CloseResult, LaneKey, OpenLaneOutcome, OwnerLeaseId, normalize_lane_name,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex as AsyncMutex;
@@ -172,228 +167,6 @@ impl TrustedBrowserIdentityResolver for CallerCtxBrowserIdentityResolver {
     }
 }
 
-/// The immutable ownership key stored with a pending out-of-band approval.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PendingOwner {
-    user_id: String,
-    lane_key: LaneKey,
-    owner_lease_id: OwnerLeaseId,
-}
-
-/// A browser action held awaiting out-of-band approval.
-#[derive(Debug)]
-pub struct PendingBrowserAction {
-    pub input: Value,
-    pub lane_name: String,
-    runtime_instance_id: String,
-    owner_lease_id: OwnerLeaseId,
-    user_id: String,
-    /// Trusted user-visible task family. This is accounting identity only;
-    /// exact approval ownership and cleanup remain runtime/lease scoped.
-    task_family_key: TaskResourceFamilyKey,
-    retained_bytes: usize,
-    expires_at: Instant,
-}
-
-impl PendingBrowserAction {
-    fn owner(&self) -> PendingOwner {
-        PendingOwner {
-            user_id: self.user_id.clone(),
-            lane_key: LaneKey {
-                runtime_instance_id: self.runtime_instance_id.clone(),
-                lane_name: self.lane_name.clone(),
-            },
-            owner_lease_id: self.owner_lease_id.clone(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct PendingTaskUsage {
-    count: usize,
-    retained_bytes: usize,
-}
-
-/// Structural bounds for Gateway approvals retained outside the Browser Hub.
-///
-/// Per-task limits are deliberately fixed and small. The aggregate capacity is
-/// elastic with logical CPU count, so a larger machine can serve more tasks
-/// without allowing one task to rotate runtimes and monopolize the store.
-#[derive(Clone, Copy, Debug)]
-struct PendingApprovalLimits {
-    global_count: usize,
-    per_task_count: usize,
-    global_retained_bytes: usize,
-    per_task_retained_bytes: usize,
-    item_retained_bytes: usize,
-    ttl: Duration,
-}
-
-impl PendingApprovalLimits {
-    const MIN_GLOBAL_COUNT: usize = 64;
-    const MAX_GLOBAL_COUNT: usize = 512;
-    const COUNT_PER_LOGICAL_CPU: usize = 16;
-    const PER_TASK_COUNT: usize = 8;
-    const ITEM_RETAINED_BYTES: usize = 256 * 1024;
-    const PER_TASK_RETAINED_BYTES: usize = 1024 * 1024;
-    const TTL: Duration = Duration::from_secs(5 * 60);
-
-    fn for_machine() -> Self {
-        let logical_cpus = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1);
-        Self::for_logical_cpus(logical_cpus)
-    }
-
-    fn for_logical_cpus(logical_cpus: usize) -> Self {
-        let global_count = logical_cpus
-            .max(1)
-            .saturating_mul(Self::COUNT_PER_LOGICAL_CPU)
-            .clamp(Self::MIN_GLOBAL_COUNT, Self::MAX_GLOBAL_COUNT);
-        Self {
-            global_count,
-            per_task_count: Self::PER_TASK_COUNT.min(global_count / 2).max(1),
-            // Every retained entry has the same item cap. Deriving the
-            // aggregate byte ceiling from the machine-adaptive slot count
-            // makes the total bounded without imposing a fixed 1 GiB ceiling
-            // on legitimate cross-task concurrency.
-            global_retained_bytes: global_count
-                .saturating_mul(Self::ITEM_RETAINED_BYTES),
-            per_task_retained_bytes: Self::PER_TASK_RETAINED_BYTES,
-            item_retained_bytes: Self::ITEM_RETAINED_BYTES,
-            ttl: Self::TTL,
-        }
-    }
-}
-
-struct PendingApprovalStore {
-    entries: HashMap<String, PendingBrowserAction>,
-    task_usage: HashMap<TaskResourceFamilyKey, PendingTaskUsage>,
-    total_retained_bytes: usize,
-    limits: PendingApprovalLimits,
-}
-
-impl PendingApprovalStore {
-    fn new(limits: PendingApprovalLimits) -> Self {
-        Self {
-            entries: HashMap::new(),
-            task_usage: HashMap::new(),
-            total_retained_bytes: 0,
-            limits,
-        }
-    }
-
-    fn for_machine() -> Self {
-        Self::new(PendingApprovalLimits::for_machine())
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    #[cfg(test)]
-    fn values(
-        &self,
-    ) -> impl Iterator<Item = &PendingBrowserAction> {
-        self.entries.values()
-    }
-
-    fn usage_for(
-        &self,
-        task_family_key: &TaskResourceFamilyKey,
-    ) -> PendingTaskUsage {
-        self.task_usage
-            .get(task_family_key)
-            .copied()
-            .unwrap_or_default()
-    }
-
-    fn can_reserve(
-        &self,
-        task_family_key: &TaskResourceFamilyKey,
-        retained_bytes: usize,
-    ) -> bool {
-        let task_usage = self.usage_for(task_family_key);
-        self.entries.len() < self.limits.global_count
-            && task_usage.count < self.limits.per_task_count
-            && self
-                .total_retained_bytes
-                .checked_add(retained_bytes)
-                .is_some_and(|bytes| bytes <= self.limits.global_retained_bytes)
-            && task_usage
-                .retained_bytes
-                .checked_add(retained_bytes)
-                .is_some_and(|bytes| bytes <= self.limits.per_task_retained_bytes)
-    }
-
-    fn insert(
-        &mut self,
-        call_id: String,
-        action: PendingBrowserAction,
-    ) -> bool {
-        if self.entries.contains_key(&call_id)
-            || !self.can_reserve(&action.task_family_key, action.retained_bytes)
-        {
-            return false;
-        }
-        let usage = self
-            .task_usage
-            .entry(action.task_family_key.clone())
-            .or_default();
-        usage.count += 1;
-        usage.retained_bytes += action.retained_bytes;
-        self.total_retained_bytes += action.retained_bytes;
-        self.entries.insert(call_id, action);
-        true
-    }
-
-    fn remove(&mut self, call_id: &str) -> Option<PendingBrowserAction> {
-        let action = self.entries.remove(call_id)?;
-        self.release(&action);
-        Some(action)
-    }
-
-    fn release(&mut self, action: &PendingBrowserAction) {
-        self.total_retained_bytes = self
-            .total_retained_bytes
-            .saturating_sub(action.retained_bytes);
-        let remove_usage = if let Some(usage) =
-            self.task_usage.get_mut(&action.task_family_key)
-        {
-            usage.count = usage.count.saturating_sub(1);
-            usage.retained_bytes = usage
-                .retained_bytes
-                .saturating_sub(action.retained_bytes);
-            usage.count == 0
-        } else {
-            false
-        };
-        if remove_usage {
-            self.task_usage.remove(&action.task_family_key);
-        }
-    }
-
-    fn prune_expired(&mut self, now: Instant) {
-        self.remove_where(|action| now >= action.expires_at);
-    }
-
-    fn remove_where(
-        &mut self,
-        mut should_remove: impl FnMut(&PendingBrowserAction) -> bool,
-    ) {
-        let expired = self
-            .entries
-            .iter()
-            .filter_map(|(call_id, action)| {
-                should_remove(action).then(|| call_id.clone())
-            })
-            .collect::<Vec<_>>();
-        for call_id in expired {
-            let _ = self.remove(&call_id);
-        }
-    }
-}
-
 /// One gateway browser call used by [`BrowserRegistry::execute_parallel`].
 #[derive(Clone, Debug)]
 pub struct GatewayBrowserCall {
@@ -402,166 +175,6 @@ pub struct GatewayBrowserCall {
     pub input: Value,
 }
 
-const PENDING_JSON_MAX_DEPTH: usize = 128;
-const PENDING_ALLOCATION_OVERHEAD_BYTES: usize = 16;
-const PENDING_OBJECT_ENTRY_OVERHEAD_BYTES: usize = 64;
-/// A retained accessibility snapshot is classifier context, not the
-/// authoritative Browser result. Refuse to duplicate arbitrarily large page
-/// output into this cache. The small rejection marker makes ref-based clicks
-/// fail closed without retaining the hostile text.
-const MAX_OBSERVATION_BYTES: usize = 256 * 1024;
-/// Bound classifier state by trusted user-visible task family. There is no
-/// fixed process-wide observation byte cap: unrelated tasks remain elastic,
-/// while runtime rotation within one conversation cannot rotate this quota.
-const MAX_OBSERVATIONS_PER_TASK_FAMILY: usize = 16;
-const MAX_OBSERVATION_BYTES_PER_TASK_FAMILY: usize = 4 * 1024 * 1024;
-
-fn checked_pending_bytes(
-    total: &mut usize,
-    additional: usize,
-    limit: usize,
-) -> bool {
-    let Some(next) = total.checked_add(additional) else {
-        return false;
-    };
-    if next > limit {
-        return false;
-    }
-    *total = next;
-    true
-}
-
-/// Estimate the retained clone without serializing or cloning attacker-sized
-/// input first. Container/node overhead is intentionally conservative and the
-/// traversal has a hard depth bound, so both wide and deeply nested JSON are
-/// rejected before they enter the pending store.
-fn add_pending_json_retained_bytes(
-    value: &Value,
-    depth: usize,
-    total: &mut usize,
-    limit: usize,
-) -> bool {
-    if depth > PENDING_JSON_MAX_DEPTH
-        || !checked_pending_bytes(
-            total,
-            std::mem::size_of::<Value>(),
-            limit,
-        )
-    {
-        return false;
-    }
-    match value {
-        Value::Null | Value::Bool(_) | Value::Number(_) => true,
-        Value::String(value) => checked_pending_bytes(
-            total,
-            value
-                .len()
-                .saturating_add(PENDING_ALLOCATION_OVERHEAD_BYTES),
-            limit,
-        ),
-        Value::Array(values) => {
-            if !checked_pending_bytes(
-                total,
-                PENDING_ALLOCATION_OVERHEAD_BYTES,
-                limit,
-            ) {
-                return false;
-            }
-            values.iter().all(|value| {
-                add_pending_json_retained_bytes(
-                    value,
-                    depth + 1,
-                    total,
-                    limit,
-                )
-            })
-        }
-        Value::Object(values) => {
-            if !checked_pending_bytes(
-                total,
-                PENDING_ALLOCATION_OVERHEAD_BYTES,
-                limit,
-            ) {
-                return false;
-            }
-            values.iter().all(|(key, value)| {
-                checked_pending_bytes(
-                    total,
-                    std::mem::size_of::<String>()
-                        .saturating_add(key.len())
-                        .saturating_add(
-                            PENDING_OBJECT_ENTRY_OVERHEAD_BYTES,
-                        ),
-                    limit,
-                ) && add_pending_json_retained_bytes(
-                    value,
-                    depth + 1,
-                    total,
-                    limit,
-                )
-            })
-        }
-    }
-}
-
-fn pending_action_retained_bytes(
-    call_id: &str,
-    input: &Value,
-    owner: &PendingOwner,
-    task_family_key: &TaskResourceFamilyKey,
-    limit: usize,
-) -> Option<usize> {
-    let action = input
-        .get("action")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let metadata_strings = [
-        call_id,
-        owner.user_id.as_str(),
-        owner.lane_key.runtime_instance_id.as_str(),
-        owner.lane_key.lane_name.as_str(),
-        owner.owner_lease_id.as_str(),
-        // One clone is retained by the action and another by the per-task
-        // usage index while this is the first live item for that family.
-        // Charging every item for both is deliberately conservative.
-        task_family_key.as_str(),
-        task_family_key.as_str(),
-        // The action is present inside `input`, but counting it separately is
-        // intentional: approval rendering/classification also treats it as a
-        // retained lookup key, and double accounting is safer than byte
-        // under-attribution at this trust boundary.
-        action,
-    ];
-    let mut total = std::mem::size_of::<PendingBrowserAction>()
-        .saturating_add(std::mem::size_of::<PendingTaskUsage>())
-        .saturating_add(PENDING_OBJECT_ENTRY_OVERHEAD_BYTES);
-    for value in metadata_strings {
-        if !checked_pending_bytes(
-            &mut total,
-            value
-                .len()
-                .saturating_add(PENDING_ALLOCATION_OVERHEAD_BYTES),
-            limit,
-        ) {
-            return None;
-        }
-    }
-    add_pending_json_retained_bytes(input, 0, &mut total, limit)
-        .then_some(total)
-}
-
-fn pending_item_too_large_error(limit: usize) -> BrowserPlatformError {
-    BrowserPlatformError::new(
-        BrowserErrorCode::BrowserCapacityQueued,
-        "The browser approval payload exceeds its per-item retained-memory limit.",
-        false,
-        "Reduce the browser action payload and retry.",
-    )
-    .with_metadata(json!({
-        "reason_code": "pending_approval_item_too_large",
-        "max_retained_bytes": limit,
-    }))
-}
 /// Upper bound on retained revoked-runtime tombstones. Lease/session ids are
 /// never legitimately reused, so the tombstone only has to outlive the short
 /// attach-vs-close race window; the oldest entries are evicted in insertion
@@ -631,187 +244,11 @@ impl RevokedRuntimeTombstones {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum CachedObservationText {
-    Retained(String),
-    /// The Browser result was returned to its caller, but its classifier copy
-    /// exceeded [`MAX_OBSERVATION_BYTES`] and was deliberately not retained.
-    OversizedRejected,
-}
-
-impl CachedObservationText {
-    fn retained_bytes(&self) -> usize {
-        match self {
-            Self::Retained(text) => text.len(),
-            Self::OversizedRejected => 0,
-        }
-    }
-
-    fn as_str(&self) -> Option<&str> {
-        match self {
-            Self::Retained(text) => Some(text),
-            Self::OversizedRejected => None,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct CachedObservation {
-    task_family_key: TaskResourceFamilyKey,
-    text: CachedObservationText,
-}
-
-#[derive(Default)]
-struct ObservationFamilyUsage {
-    retained_bytes: usize,
-    /// At most [`MAX_OBSERVATIONS_PER_TASK_FAMILY`] entries, ordered by latest
-    /// observation refresh. Eviction stays local to one trusted task family,
-    /// so one task cannot evict another task's classifier state.
-    order: VecDeque<LaneKey>,
-}
-
-#[derive(Default)]
-struct ObservationCache {
-    entries: HashMap<LaneKey, CachedObservation>,
-    families: HashMap<TaskResourceFamilyKey, ObservationFamilyUsage>,
-}
-
-enum ManagedObservationCleanup {
-    Lane(LaneKey),
-    Runtime(String),
-}
-
-impl ObservationCache {
-    fn insert(
-        &mut self,
-        lane_key: LaneKey,
-        task_family_key: TaskResourceFamilyKey,
-        text: &str,
-    ) {
-        self.remove_lane(&lane_key);
-
-        // Inspect the borrowed result before cloning it. Oversized page text
-        // therefore cannot create an oversized second retained allocation.
-        let text = if text.len() > MAX_OBSERVATION_BYTES {
-            CachedObservationText::OversizedRejected
-        } else {
-            CachedObservationText::Retained(text.to_owned())
-        };
-        let retained_bytes = text.retained_bytes();
-
-        while self
-            .families
-            .get(&task_family_key)
-            .is_some_and(|usage| {
-                usage.order.len() >= MAX_OBSERVATIONS_PER_TASK_FAMILY
-                    || usage.retained_bytes.saturating_add(retained_bytes)
-                        > MAX_OBSERVATION_BYTES_PER_TASK_FAMILY
-            })
-        {
-            let Some(oldest) = self
-                .families
-                .get(&task_family_key)
-                .and_then(|usage| usage.order.front().cloned())
-            else {
-                break;
-            };
-            self.remove_lane(&oldest);
-        }
-
-        let usage = self
-            .families
-            .entry(task_family_key.clone())
-            .or_default();
-        usage.retained_bytes =
-            usage.retained_bytes.saturating_add(retained_bytes);
-        usage.order.push_back(lane_key.clone());
-        self.entries.insert(
-            lane_key,
-            CachedObservation {
-                task_family_key,
-                text,
-            },
-        );
-    }
-
-    fn remove_lane(&mut self, lane_key: &LaneKey) {
-        let Some(removed) = self.entries.remove(lane_key) else {
-            return;
-        };
-        let remove_family = if let Some(usage) =
-            self.families.get_mut(&removed.task_family_key)
-        {
-            usage.retained_bytes = usage
-                .retained_bytes
-                .saturating_sub(removed.text.retained_bytes());
-            usage.order.retain(|key| key != lane_key);
-            usage.order.is_empty()
-        } else {
-            false
-        };
-        if remove_family {
-            self.families.remove(&removed.task_family_key);
-        }
-        self.release_excess_capacity();
-    }
-
-    fn remove_runtime(&mut self, runtime_instance_id: &str) {
-        let lane_keys = self
-            .entries
-            .keys()
-            .filter(|key| key.runtime_instance_id == runtime_instance_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        for lane_key in lane_keys {
-            self.remove_lane(&lane_key);
-        }
-    }
-
-    fn get(&self, lane_key: &LaneKey) -> Option<&CachedObservation> {
-        self.entries.get(lane_key)
-    }
-
-    fn release_excess_capacity(&mut self) {
-        if self.entries.is_empty() {
-            self.entries.shrink_to_fit();
-        } else if self.entries.capacity()
-            > self.entries.len().saturating_mul(4).max(64)
-        {
-            self.entries
-                .shrink_to(self.entries.len().saturating_mul(2));
-        }
-        if self.families.is_empty() {
-            self.families.shrink_to_fit();
-        } else if self.families.capacity()
-            > self.families.len().saturating_mul(4).max(64)
-        {
-            self.families
-                .shrink_to(self.families.len().saturating_mul(2));
-        }
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    #[cfg(test)]
-    fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    #[cfg(test)]
-    fn keys(&self) -> impl Iterator<Item = &LaneKey> {
-        self.entries.keys()
-    }
-}
-
 /// Clone-cheap bridge to the application-owned browser hub.
 #[derive(Clone)]
 pub struct BrowserRegistry {
     hub: Option<BrowserSessionHub>,
     identity_resolver: Arc<dyn TrustedBrowserIdentityResolver>,
-    pending: Arc<std::sync::Mutex<PendingApprovalStore>>,
     /// Stable owner capability per server-validated runtime attachment.
     identities: Arc<std::sync::Mutex<HashMap<String, CachedBrowserIdentity>>>,
     /// Runtime ids are never reusable after an authoritative revoke. Keeping
@@ -826,10 +263,6 @@ pub struct BrowserRegistry {
             HashMap<String, Arc<AsyncMutex<()>>>,
         >,
     >,
-    /// Bounded classifier context per exact Lane, accounted by trusted task
-    /// family. This keeps the existing GW2 semantic-name check without owning
-    /// a BrowserTool. Browser execution state remains in the hub/driver.
-    observations: Arc<std::sync::Mutex<ObservationCache>>,
 }
 
 impl BrowserRegistry {
@@ -841,18 +274,12 @@ impl BrowserRegistry {
         Self {
             hub: Some(hub),
             identity_resolver,
-            pending: Arc::new(std::sync::Mutex::new(
-                PendingApprovalStore::for_machine(),
-            )),
             identities: Arc::new(std::sync::Mutex::new(HashMap::new())),
             revoked_runtime_ids: Arc::new(std::sync::Mutex::new(
                 RevokedRuntimeTombstones::default(),
             )),
             runtime_lifecycle_slots: Arc::new(std::sync::Mutex::new(
                 HashMap::new(),
-            )),
-            observations: Arc::new(std::sync::Mutex::new(
-                ObservationCache::default(),
             )),
         }
     }
@@ -869,18 +296,12 @@ impl BrowserRegistry {
         Self {
             hub: None,
             identity_resolver: Arc::new(CallerCtxBrowserIdentityResolver),
-            pending: Arc::new(std::sync::Mutex::new(
-                PendingApprovalStore::for_machine(),
-            )),
             identities: Arc::new(std::sync::Mutex::new(HashMap::new())),
             revoked_runtime_ids: Arc::new(std::sync::Mutex::new(
                 RevokedRuntimeTombstones::default(),
             )),
             runtime_lifecycle_slots: Arc::new(std::sync::Mutex::new(
                 HashMap::new(),
-            )),
-            observations: Arc::new(std::sync::Mutex::new(
-                ObservationCache::default(),
             )),
         }
     }
@@ -1153,7 +574,6 @@ impl BrowserRegistry {
                     // a second replacement into existence.
                     let old_owner_lease_id =
                         existing.identity.owner_lease_id.clone();
-                    self.clear_owner_lease_caches(&old_owner_lease_id);
                     if let Err(error) =
                         hub.revoke_owner_lease(&old_owner_lease_id).await
                     {
@@ -1329,10 +749,6 @@ impl BrowserRegistry {
             .lock()
             .expect("gateway browser revoked-runtime store poisoned")
             .insert(&effective_runtime_id, authority);
-        self.clear_runtime_caches(
-            &effective_runtime_id,
-            Some(&owner_lease_id),
-        );
 
         let hub = self.hub.clone().ok_or_else(|| {
             BrowserPlatformError::new(
@@ -1412,32 +828,6 @@ impl BrowserRegistry {
         })
     }
 
-    fn clear_runtime_caches(
-        &self,
-        runtime_instance_id: &str,
-        owner_lease_id: Option<&OwnerLeaseId>,
-    ) {
-        self.pending
-            .lock()
-            .expect("gateway browser pending store poisoned")
-            .remove_where(|pending| {
-                pending.runtime_instance_id == runtime_instance_id
-                    || owner_lease_id
-                        .is_some_and(|lease_id| &pending.owner_lease_id == lease_id)
-            });
-        self.observations
-            .lock()
-            .expect("gateway browser observation cache poisoned")
-            .remove_runtime(runtime_instance_id);
-    }
-
-    fn clear_owner_lease_caches(&self, owner_lease_id: &OwnerLeaseId) {
-        self.pending
-            .lock()
-            .expect("gateway browser pending store poisoned")
-            .remove_where(|pending| &pending.owner_lease_id == owner_lease_id);
-    }
-
     async fn retry_owner_cleanup(
         &self,
         runtime_instance_id: &str,
@@ -1449,7 +839,7 @@ impl BrowserRegistry {
         let mut cleanup_error = None;
         if let Some(owner_lease_id) = pending_owner_cleanup {
             match hub.revoke_owner_lease(&owner_lease_id).await {
-                Ok(_) => self.clear_owner_lease_caches(&owner_lease_id),
+                Ok(_) => {}
                 Err(error) => {
                     remaining = Some(owner_lease_id);
                     cleanup_error = Some(error);
@@ -1690,7 +1080,7 @@ impl BrowserRegistry {
     /// Revoke the Hub owner capability associated with one successfully
     /// revoked, signed Gateway child lease.
     ///
-    /// Cached identity, approvals, and observations are removed before this
+    /// Cached identity and Hub-owned Lane state are removed before this
     /// returns. A repeated revoke is a successful no-op and never affects
     /// another child runtime.
     pub async fn revoke_signed_child_lease(
@@ -1750,7 +1140,7 @@ impl BrowserRegistry {
         let outcome = resolved
             .client
             .open(
-                Some(&resolved.owner.lane_key.lane_name),
+                Some(&resolved.lane_key.lane_name),
                 BrowserIdentityMode::Primary,
                 None,
             )
@@ -1787,21 +1177,7 @@ impl BrowserRegistry {
         let lane = self.open(caller, lane_name).await?;
         let resolved = self.resolve(caller, Some(&lane.lane_key.lane_name))?;
         let operation = operation_from_input(&input)?;
-        let kind = operation.kind;
-        let result = resolved.client.execute(&lane.lane_id, operation).await?;
-        if kind == BrowserOperationKind::Observe
-            && let Some(text) = result_text(&result.output)
-        {
-            self.observations
-                .lock()
-                .expect("gateway browser observation cache poisoned")
-                .insert(
-                    resolved.owner.lane_key,
-                    resolved.task_family_key,
-                    text,
-                );
-        }
-        Ok(result)
+        resolved.client.execute(&lane.lane_id, operation).await
     }
 
     /// Validate the semantic browser selectors without attaching or renewing
@@ -1909,145 +1285,10 @@ impl BrowserRegistry {
             })?
             .to_owned();
         let resolved = self.resolve(caller, None)?;
-        let observation_cleanup = if matches!(
-            action.as_str(),
-            "close" | "browser_close"
-        ) {
-            let lane_key = if let Some(lane_name) = legacy_lane_name {
-                LaneKey::new(
-                    resolved.owner.lane_key.runtime_instance_id.clone(),
-                    Some(lane_name),
-                )
-                .ok()
-            } else if let Some(lane_id) = input
-                .get("lane_id")
-                .and_then(Value::as_str)
-                .and_then(|lane_id| BrowserLaneId::parse(lane_id.to_owned()).ok())
-            {
-                // Resolve the owner-scoped handle before close. A successful
-                // close then removes exactly this Lane's classifier state.
-                resolved
-                    .client
-                    .status(&lane_id)
-                    .await
-                    .ok()
-                    .map(|lane| lane.lane_key)
-            } else {
-                Some(resolved.owner.lane_key.clone())
-            };
-            lane_key.map(ManagedObservationCleanup::Lane)
-        } else if matches!(
-            action.as_str(),
-            "close_all" | "browser_close_all"
-        ) {
-            Some(ManagedObservationCleanup::Runtime(
-                resolved.owner.lane_key.runtime_instance_id.clone(),
-            ))
-        } else {
-            None
-        };
         let result = ManagedBrowserFacade::new(resolved.client, None)
             .execute(&action, &input)
             .await;
-        if !result.is_error
-            && let Some(observation_cleanup) = observation_cleanup
-        {
-            let mut observations = self
-                .observations
-                .lock()
-                .expect("gateway browser observation cache poisoned");
-            match observation_cleanup {
-                ManagedObservationCleanup::Lane(lane_key) => {
-                    observations.remove_lane(&lane_key);
-                }
-                ManagedObservationCleanup::Runtime(runtime_id) => {
-                    observations.remove_runtime(&runtime_id);
-                }
-            }
-        }
-        if action == "observe" && !result.is_error {
-            self.cache_managed_observation(caller, legacy_lane_name, &input, &result);
-        }
         Ok(result)
-    }
-
-    /// Populate the GW2 observation cache from the shared managed dispatch
-    /// path so [`Self::classify`] resolves submit-control accnames against the
-    /// same snapshot the model received. Best-effort: a snapshot that cannot
-    /// be attributed to an exact owned lane is dropped, never mis-filed.
-    fn cache_managed_observation(
-        &self,
-        caller: &CallerCtx,
-        legacy_lane_name: Option<&str>,
-        input: &Value,
-        result: &ToolResult,
-    ) {
-        let Ok(envelope) = serde_json::from_str::<Value>(&result.content) else {
-            return;
-        };
-        let Some(text) = envelope
-            .get("output")
-            .and_then(result_text)
-            .or_else(|| result_text(&envelope))
-        else {
-            return;
-        };
-        let lane_name = match envelope
-            .pointer("/lane/lane_name")
-            .and_then(Value::as_str)
-            .or(legacy_lane_name)
-        {
-            Some(lane_name) => Some(lane_name),
-            // Without an authoritative lane name a lane_id-addressed snapshot
-            // must not be attributed to the default lane.
-            None if input.get("lane_id").is_some_and(|v| !v.is_null()) => return,
-            None => None,
-        };
-        let Ok(identity) = self.identity_resolver.resolve(caller) else {
-            return;
-        };
-        let task_family_key = identity.task_resource_family_key();
-        let Ok(lane_key) = LaneKey::new(identity.runtime_instance_id, lane_name)
-        else {
-            return;
-        };
-        self.observations
-            .lock()
-            .expect("gateway browser observation cache poisoned")
-            .insert(lane_key, task_family_key, text);
-    }
-
-    /// Resolve a caller-provided selector to this trusted runtime's logical
-    /// Lane name for GW2 approval ownership. An unowned lane_id fails at the
-    /// bound Hub authorization check.
-    pub async fn resolve_lane_selector(
-        &self,
-        caller: &CallerCtx,
-        legacy_lane_name: Option<&str>,
-        lane_id: Option<&str>,
-    ) -> Result<String, BrowserPlatformError> {
-        if legacy_lane_name.is_some() && lane_id.is_some() {
-            return Err(BrowserPlatformError::new(
-                BrowserErrorCode::OperationNotAllowed,
-                "Use either legacy `lane` or `lane_id`, not both.",
-                false,
-                "Keep lane_id and remove the legacy lane name.",
-            ));
-        }
-        if let Some(lane_id) = lane_id {
-            let lane_id = BrowserLaneId::parse(lane_id.to_owned())?;
-            let resolved = self.resolve(caller, None)?;
-            return resolved
-                .client
-                .status(&lane_id)
-                .await
-                .map(|lane| lane.lane_key.lane_name);
-        }
-        Ok(self
-            .resolve(caller, legacy_lane_name)?
-            .owner
-            .lane_key
-            .lane_name)
     }
 
     /// Run multiple calls concurrently while preserving input order. The hub
@@ -2068,170 +1309,6 @@ impl BrowserRegistry {
         futures::future::join_all(futures).await
     }
 
-    /// Classify for GW2 without creating an engine. Runtime semantics from the
-    /// last observation are reconstructed from the hub result text.
-    pub fn classify(
-        &self,
-        caller: &CallerCtx,
-        lane_name: Option<&str>,
-        action: &str,
-        input: &Value,
-    ) -> Result<ApprovalTier, BrowserPlatformError> {
-        reject_untrusted_caller_fields(input)?;
-        let resolved = self.resolve(caller, lane_name)?;
-        let observations = self
-            .observations
-            .lock()
-            .expect("gateway browser observation cache poisoned");
-        let observation = observations.get(&resolved.owner.lane_key);
-        if observation.is_some_and(|observation| {
-            observation.text == CachedObservationText::OversizedRejected
-        }) && action == "click"
-            && input.get("ref").and_then(Value::as_str).is_some()
-        {
-            // The retained classifier copy was explicitly rejected for size.
-            // Unknown ref semantics must not silently downgrade a potentially
-            // irreversible control to an ordinary click.
-            return Ok(ApprovalTier::Irreversible);
-        }
-        Ok(classify_with_observation(
-            action,
-            input,
-            observation.and_then(|observation| observation.text.as_str()),
-        ))
-    }
-
-    /// Stash a sanitized irreversible action. Ownership is the trusted runtime,
-    /// lane, user, and lease — never a companion id.
-    pub fn stash_pending(
-        &self,
-        caller: &CallerCtx,
-        lane_name: Option<&str>,
-        input: &Value,
-    ) -> Result<Option<String>, BrowserPlatformError> {
-        reject_untrusted_caller_fields(input)?;
-        let resolved = self.resolve(caller, lane_name)?;
-        let call_id = nomifun_common::generate_id();
-        let now = Instant::now();
-        let mut pending = self
-            .pending
-            .lock()
-            .expect("gateway browser pending store poisoned");
-        pending.prune_expired(now);
-        let Some(retained_bytes) = pending_action_retained_bytes(
-            &call_id,
-            input,
-            &resolved.owner,
-            &resolved.task_family_key,
-            pending.limits.item_retained_bytes,
-        ) else {
-            return Err(pending_item_too_large_error(
-                pending.limits.item_retained_bytes,
-            ));
-        };
-        if !pending.can_reserve(&resolved.task_family_key, retained_bytes) {
-            return Ok(None);
-        }
-        let action = PendingBrowserAction {
-            input: input.clone(),
-            lane_name: resolved.owner.lane_key.lane_name,
-            runtime_instance_id: resolved.owner.lane_key.runtime_instance_id,
-            owner_lease_id: resolved.owner.owner_lease_id,
-            user_id: resolved.owner.user_id,
-            task_family_key: resolved.task_family_key,
-            retained_bytes,
-            expires_at: now.checked_add(pending.limits.ttl).unwrap_or(now),
-        };
-        if !pending.insert(call_id.clone(), action) {
-            return Ok(None);
-        }
-        Ok(Some(call_id))
-    }
-
-    /// Atomically consume a pending decision only if the current trusted caller
-    /// owns it. A mismatched caller cannot consume another runtime's decision.
-    pub fn take_pending_for(
-        &self,
-        caller: &CallerCtx,
-        call_id: &str,
-    ) -> Result<Option<PendingBrowserAction>, BrowserPlatformError> {
-        let pending_authority = {
-            let mut pending = self
-                .pending
-                .lock()
-                .expect("gateway browser pending store poisoned");
-            pending.prune_expired(Instant::now());
-            pending.entries.get(call_id).map(|pending| {
-                (pending.owner(), pending.task_family_key.clone())
-            })
-        };
-        let Some((pending_owner, pending_task_family_key)) = pending_authority
-        else {
-            return Ok(None);
-        };
-        let resolved =
-            self.resolve(caller, Some(&pending_owner.lane_key.lane_name))?;
-        if resolved.owner != pending_owner
-            || resolved.task_family_key != pending_task_family_key
-        {
-            return Err(BrowserPlatformError::new(
-                BrowserErrorCode::OperationNotAllowed,
-                "This browser approval belongs to another runtime.",
-                false,
-                "Resolve it from the runtime that requested the action.",
-            ));
-        }
-        let mut pending = self
-            .pending
-            .lock()
-            .expect("gateway browser pending store poisoned");
-        pending.prune_expired(Instant::now());
-        let still_owned = pending.entries.get(call_id).is_some_and(|action| {
-            action.owner() == resolved.owner
-                && action.task_family_key == resolved.task_family_key
-        });
-        Ok(still_owned.then(|| pending.remove(call_id)).flatten())
-    }
-
-    pub fn pending_count(&self) -> usize {
-        let mut pending = self
-            .pending
-            .lock()
-            .expect("gateway browser pending store poisoned");
-        pending.prune_expired(Instant::now());
-        pending.len()
-    }
-
-    /// Execute an approved action through the Hub's Rust-only confirmation
-    /// seam. No confirmation bit is ever copied from model JSON.
-    pub async fn execute_confirmed(
-        &self,
-        caller: &CallerCtx,
-        pending: PendingBrowserAction,
-    ) -> Result<BrowserOperationResult, BrowserPlatformError> {
-        let resolved = self.resolve(caller, Some(&pending.lane_name))?;
-        if resolved.owner != pending.owner()
-            || resolved.task_family_key != pending.task_family_key
-        {
-            return Err(BrowserPlatformError::new(
-                BrowserErrorCode::OperationNotAllowed,
-                "This browser approval belongs to another runtime.",
-                false,
-                "Resolve it from the runtime that requested the action.",
-            ));
-        }
-        reject_untrusted_caller_fields(&pending.input)?;
-        let lane = self
-            .open(caller, Some(&pending.lane_name))
-            .await?;
-        let resolved = self.resolve(caller, Some(&pending.lane_name))?;
-        let operation = operation_from_input(&pending.input)?;
-        resolved
-            .client
-            .execute_confirmed(&lane.lane_id, operation)
-            .await
-    }
-
     fn resolve(
         &self,
         caller: &CallerCtx,
@@ -2247,29 +1324,15 @@ impl BrowserRegistry {
         })?;
         let identity = self.identity_resolver.resolve(caller)?;
         validate_identity_binding(caller, &identity)?;
-        let task_family_key = identity.task_resource_family_key();
-        let lane_key = LaneKey::new(
-            identity.runtime_instance_id.clone(),
-            lane_name,
-        )?;
-        let owner = PendingOwner {
-            user_id: identity.user_id.clone(),
-            lane_key,
-            owner_lease_id: identity.owner_lease_id.clone(),
-        };
+        let lane_key = LaneKey::new(identity.runtime_instance_id.clone(), lane_name)?;
         let client = hub.bind(identity)?;
-        Ok(ResolvedBrowserCaller {
-            client,
-            owner,
-            task_family_key,
-        })
+        Ok(ResolvedBrowserCaller { client, lane_key })
     }
 }
 
 struct ResolvedBrowserCaller {
     client: BrowserLaneClient,
-    owner: PendingOwner,
-    task_family_key: TaskResourceFamilyKey,
+    lane_key: LaneKey,
 }
 
 fn validate_identity_binding(
@@ -2535,60 +1598,6 @@ fn input_declares_stateful_request(input: &Value) -> bool {
             .unwrap_or(false)
 }
 
-fn classify_with_observation(
-    action: &str,
-    input: &Value,
-    observation: Option<&str>,
-) -> ApprovalTier {
-    let mut context = ActionContext::default();
-    if input
-        .get("method")
-        .and_then(Value::as_str)
-        .is_some_and(|method| method.eq_ignore_ascii_case("post"))
-    {
-        context.is_cross_origin_post = true;
-    }
-    if action == "press_key"
-        && input
-            .get("keys")
-            .or_else(|| input.get("key"))
-            .and_then(Value::as_str)
-            .is_some_and(|keys| {
-                keys.split('+')
-                    .any(|key| key.trim().eq_ignore_ascii_case("enter"))
-            })
-    {
-        // The gateway cannot synchronously inspect focus. Holding Enter for
-        // explicit approval is the safe compatibility behavior.
-        context.enter_submits_form = true;
-    }
-    if action == "click"
-        && let Some(reference) = input.get("ref").and_then(Value::as_str)
-        && let Some(line) = observation.and_then(|text| observation_line(text, reference))
-    {
-        context.element_accname = Some(line.to_owned());
-        let lower = line.to_ascii_lowercase();
-        context.is_submit_control = lower.contains("submit")
-            && (lower.contains("button") || lower.contains("input"));
-    }
-    classify_action(action, &context)
-}
-
-fn observation_line<'a>(text: &'a str, reference: &str) -> Option<&'a str> {
-    let marker = format!("[ref={reference}]");
-    text.lines().find(|line| line.contains(&marker))
-}
-
-fn result_text(output: &Value) -> Option<&str> {
-    output
-        .as_str()
-        .or_else(|| output.get("text").and_then(Value::as_str))
-        .or_else(|| output.get("yaml").and_then(Value::as_str))
-        .or_else(|| output.get("message").and_then(Value::as_str))
-        .or_else(|| output.pointer("/result/text").and_then(Value::as_str))
-        .or_else(|| output.get("content").and_then(Value::as_str))
-}
-
 /// Render a platform operation result into the Gateway's established envelope.
 pub fn browser_result_to_value(
     result: Result<BrowserOperationResult, BrowserPlatformError>,
@@ -2688,7 +1697,6 @@ mod tests {
         active: AtomicUsize,
         maximum: AtomicUsize,
         entered: AtomicUsize,
-        confirmed: AtomicUsize,
         lane_closes: AtomicUsize,
         lane_close_failures_remaining: AtomicUsize,
         block_lane_close: AtomicBool,
@@ -2704,7 +1712,6 @@ mod tests {
                 active: AtomicUsize::new(0),
                 maximum: AtomicUsize::new(0),
                 entered: AtomicUsize::new(0),
-                confirmed: AtomicUsize::new(0),
                 lane_closes: AtomicUsize::new(0),
                 lane_close_failures_remaining: AtomicUsize::new(0),
                 block_lane_close: AtomicBool::new(false),
@@ -2744,11 +1751,8 @@ mod tests {
         async fn execute(
             &self,
             operation: BrowserOperation,
-            context: DriverOperationContext,
+            _context: DriverOperationContext,
         ) -> Result<BrowserOperationResult, BrowserPlatformError> {
-            if context.trusted_out_of_band_confirmation {
-                self.probe.confirmed.fetch_add(1, Ordering::AcqRel);
-            }
             let active = self.probe.active.fetch_add(1, Ordering::AcqRel) + 1;
             self.probe.maximum.fetch_max(active, Ordering::AcqRel);
             self.probe.entered.fetch_add(1, Ordering::AcqRel);
@@ -3188,31 +2192,6 @@ mod tests {
         );
     }
 
-    fn assert_pending_store_consistent(registry: &BrowserRegistry) {
-        let pending = registry
-            .pending
-            .lock()
-            .expect("gateway browser pending store poisoned");
-        let entry_bytes = pending
-            .entries
-            .values()
-            .map(|action| action.retained_bytes)
-            .sum::<usize>();
-        let usage_count = pending
-            .task_usage
-            .values()
-            .map(|usage| usage.count)
-            .sum::<usize>();
-        let usage_bytes = pending
-            .task_usage
-            .values()
-            .map(|usage| usage.retained_bytes)
-            .sum::<usize>();
-        assert_eq!(pending.entries.len(), usage_count);
-        assert_eq!(entry_bytes, pending.total_retained_bytes);
-        assert_eq!(entry_bytes, usage_bytes);
-    }
-
     #[tokio::test]
     async fn different_attempt_runtimes_get_distinct_lanes_even_for_same_companion() {
         let harness = harness();
@@ -3474,7 +2453,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_owner_replacement_cannot_broaden_scope_or_inherit_pending_approval() {
+    async fn expired_owner_replacement_cannot_broaden_scope() {
         let harness = harness_with_owner_ttl(10);
         let mut first = gateway_caller_without_browser_identity();
         first.remote = true;
@@ -3495,15 +2474,6 @@ mod tests {
             .unwrap();
         let old_identity = first.browser_identity.clone().unwrap();
         let old_lane = harness.registry.open(&first, None).await.unwrap();
-        let call_id = harness
-            .registry
-            .stash_pending(
-                &first,
-                None,
-                &json!({ "action": "press_key", "keys": "Enter" }),
-            )
-            .unwrap()
-            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -3538,18 +2508,6 @@ mod tests {
         assert_ne!(
             replacement_identity.owner_lease_id,
             old_identity.owner_lease_id
-        );
-        assert_eq!(
-            harness.registry.pending_count(),
-            0,
-            "pending approval from the superseded owner lease must be discarded"
-        );
-        assert!(
-            harness
-                .registry
-                .take_pending_for(&replacement, &call_id)
-                .unwrap()
-                .is_none()
         );
         let replacement_lane = harness.registry.open(&replacement, None).await.unwrap();
         assert_ne!(replacement_lane.lane_id, old_lane.lane_id);
@@ -4740,24 +3698,6 @@ mod tests {
             .execute(&second, None, json!({ "action": "observe" }))
             .await
             .unwrap();
-        harness
-            .registry
-            .stash_pending(
-                &first,
-                None,
-                &json!({ "action": "press_key", "keys": "Enter" }),
-            )
-            .unwrap()
-            .unwrap();
-        harness
-            .registry
-            .stash_pending(
-                &second,
-                None,
-                &json!({ "action": "press_key", "keys": "Enter" }),
-            )
-            .unwrap()
-            .unwrap();
 
         let revoked = harness
             .registry
@@ -4782,27 +3722,6 @@ mod tests {
         assert!(!identities.contains_key("signed-child-lease-a"));
         assert!(identities.contains_key("signed-child-lease-b"));
         drop(identities);
-        let pending = harness
-            .registry
-            .pending
-            .lock()
-            .expect("gateway browser pending store poisoned");
-        assert_eq!(pending.len(), 1);
-        assert!(pending
-            .values()
-            .all(|action| action.runtime_instance_id == "signed-child-lease-b"));
-        drop(pending);
-        let observations = harness
-            .registry
-            .observations
-            .lock()
-            .expect("gateway browser observation cache poisoned");
-        assert_eq!(observations.len(), 1);
-        assert!(observations
-            .keys()
-            .all(|key| key.runtime_instance_id == "signed-child-lease-b"));
-        drop(observations);
-
         let repeated = harness
             .registry
             .revoke_signed_child_lease("signed-child-lease-a")
@@ -5143,33 +4062,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_observe_feeds_gw2_classification_for_submit_clicks() {
-        let harness = harness();
-        let caller = caller(&harness.hub, "runtime-observe-cache", "attempt-a");
-        let observed = harness
-            .registry
-            .dispatch_managed(&caller, None, json!({ "action": "observe" }))
-            .await
-            .unwrap();
-        assert!(!observed.is_error, "{}", observed.content);
-
-        let dangerous = harness
-            .registry
-            .classify(&caller, None, "click", &json!({ "ref": "f0e7" }))
-            .unwrap();
-        assert_eq!(
-            dangerous,
-            ApprovalTier::Irreversible,
-            "a click on an observed Pay button must be held for approval"
-        );
-        let benign = harness
-            .registry
-            .classify(&caller, None, "click", &json!({ "ref": "f0a1" }))
-            .unwrap();
-        assert_ne!(benign, ApprovalTier::Irreversible);
-    }
-
-    #[tokio::test]
     async fn revoked_runtime_tombstones_are_bounded_with_insertion_order_eviction() {
         let harness = harness();
         for index in 0..=REVOKED_RUNTIME_TOMBSTONE_CAPACITY {
@@ -5279,394 +4171,6 @@ mod tests {
     }
 
     #[test]
-    fn pending_approval_aggregate_capacity_scales_but_one_task_stays_bounded() {
-        let four_cpu = PendingApprovalLimits::for_logical_cpus(4);
-        let thirty_two_cpu = PendingApprovalLimits::for_logical_cpus(32);
-        assert_eq!(four_cpu.global_count, 64);
-        assert_eq!(thirty_two_cpu.global_count, 512);
-        assert!(
-            thirty_two_cpu.global_retained_bytes
-                > four_cpu.global_retained_bytes
-        );
-        assert_eq!(four_cpu.per_task_count, thirty_two_cpu.per_task_count);
-        assert_eq!(
-            four_cpu.per_task_retained_bytes,
-            thirty_two_cpu.per_task_retained_bytes
-        );
-        assert!(four_cpu.per_task_count < four_cpu.global_count);
-        assert!(
-            four_cpu.per_task_retained_bytes
-                < four_cpu.global_retained_bytes
-        );
-    }
-
-    #[test]
-    fn one_task_cannot_retain_sixty_four_large_pending_json_values() {
-        let harness = harness();
-        let caller = caller(&harness.hub, "pending-large-runtime", "attempt-a");
-        let family = caller
-            .browser_identity
-            .as_ref()
-            .unwrap()
-            .task_resource_family_key();
-        let input = json!({
-            "action": "press_key",
-            "keys": "Enter",
-            "hostile_padding": "x".repeat(192 * 1024),
-        });
-        let mut accepted = 0;
-        for _ in 0..64 {
-            if harness
-                .registry
-                .stash_pending(&caller, None, &input)
-                .unwrap()
-                .is_some()
-            {
-                accepted += 1;
-            }
-        }
-        let pending = harness
-            .registry
-            .pending
-            .lock()
-            .expect("gateway browser pending store poisoned");
-        let usage = pending.usage_for(&family);
-        assert!(accepted > 0);
-        assert!(accepted < 64);
-        assert!(accepted <= pending.limits.per_task_count);
-        assert_eq!(usage.count, accepted);
-        assert!(
-            usage.retained_bytes <= pending.limits.per_task_retained_bytes
-        );
-        assert!(pending.total_retained_bytes <= pending.limits.global_retained_bytes);
-        drop(pending);
-        assert_pending_store_consistent(&harness.registry);
-    }
-
-    #[test]
-    fn oversized_or_excessively_deep_pending_json_is_rejected_before_retention() {
-        let harness = harness();
-        let caller = caller(&harness.hub, "pending-oversized-runtime", "attempt-a");
-        let oversized = json!({
-            "action": "press_key",
-            "keys": "Enter",
-            "hostile_padding": "x".repeat(
-                PendingApprovalLimits::ITEM_RETAINED_BYTES
-            ),
-        });
-        let error = harness
-            .registry
-            .stash_pending(&caller, None, &oversized)
-            .unwrap_err();
-        assert_eq!(error.code, BrowserErrorCode::BrowserCapacityQueued);
-        assert_eq!(
-            error.metadata["reason_code"],
-            "pending_approval_item_too_large"
-        );
-
-        let mut deep = Value::String("leaf".to_owned());
-        for _ in 0..=PENDING_JSON_MAX_DEPTH {
-            deep = Value::Array(vec![deep]);
-        }
-        let deep = json!({ "action": "press_key", "payload": deep });
-        let error = harness
-            .registry
-            .stash_pending(&caller, None, &deep)
-            .unwrap_err();
-        assert_eq!(error.code, BrowserErrorCode::BrowserCapacityQueued);
-        assert_eq!(harness.registry.pending_count(), 0);
-        assert_pending_store_consistent(&harness.registry);
-    }
-
-    #[test]
-    fn pending_approval_ttl_lazily_releases_count_and_bytes() {
-        let harness = harness();
-        let caller = caller(&harness.hub, "pending-ttl-runtime", "attempt-a");
-        {
-            let mut pending = harness
-                .registry
-                .pending
-                .lock()
-                .expect("gateway browser pending store poisoned");
-            pending.limits.ttl = Duration::from_millis(1);
-        }
-        let call_id = harness
-            .registry
-            .stash_pending(
-                &caller,
-                None,
-                &json!({ "action": "press_key", "keys": "Enter" }),
-            )
-            .unwrap()
-            .unwrap();
-        std::thread::sleep(Duration::from_millis(5));
-        assert_eq!(harness.registry.pending_count(), 0);
-        assert!(harness
-            .registry
-            .take_pending_for(&caller, &call_id)
-            .unwrap()
-            .is_none());
-        let pending = harness
-            .registry
-            .pending
-            .lock()
-            .expect("gateway browser pending store poisoned");
-        assert_eq!(pending.total_retained_bytes, 0);
-        assert!(pending.task_usage.is_empty());
-    }
-
-    #[tokio::test]
-    async fn cancel_and_confirm_atomically_release_pending_task_usage() {
-        let harness = harness();
-        let caller = caller(&harness.hub, "pending-release-runtime", "attempt-a");
-        let family = caller
-            .browser_identity
-            .as_ref()
-            .unwrap()
-            .task_resource_family_key();
-        let input = json!({ "action": "press_key", "keys": "Enter" });
-        let cancelled = harness
-            .registry
-            .stash_pending(&caller, None, &input)
-            .unwrap()
-            .unwrap();
-        let confirmed = harness
-            .registry
-            .stash_pending(&caller, None, &input)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            harness
-                .registry
-                .pending
-                .lock()
-                .unwrap()
-                .usage_for(&family)
-                .count,
-            2
-        );
-
-        drop(
-            harness
-                .registry
-                .take_pending_for(&caller, &cancelled)
-                .unwrap()
-                .unwrap(),
-        );
-        assert_eq!(
-            harness
-                .registry
-                .pending
-                .lock()
-                .unwrap()
-                .usage_for(&family)
-                .count,
-            1
-        );
-        let confirmed = harness
-            .registry
-            .take_pending_for(&caller, &confirmed)
-            .unwrap()
-            .unwrap();
-        {
-            let pending = harness.registry.pending.lock().unwrap();
-            assert_eq!(pending.usage_for(&family), PendingTaskUsage::default());
-            assert_eq!(pending.total_retained_bytes, 0);
-        }
-        harness
-            .registry
-            .execute_confirmed(&caller, confirmed)
-            .await
-            .unwrap();
-        assert_eq!(harness.probe.confirmed.load(Ordering::Acquire), 1);
-        assert_pending_store_consistent(&harness.registry);
-    }
-
-    #[test]
-    fn exact_runtime_cleanup_releases_only_its_share_of_family_usage() {
-        let harness = harness();
-        let first = caller(&harness.hub, "pending-cleanup-a", "attempt-a");
-        let sibling = caller(&harness.hub, "pending-cleanup-b", "attempt-b");
-        let input = json!({ "action": "press_key", "keys": "Enter" });
-        harness
-            .registry
-            .stash_pending(&first, None, &input)
-            .unwrap()
-            .unwrap();
-        harness
-            .registry
-            .stash_pending(&sibling, None, &input)
-            .unwrap()
-            .unwrap();
-        let family = first
-            .browser_identity
-            .as_ref()
-            .unwrap()
-            .task_resource_family_key();
-        assert_eq!(
-            harness.registry.pending.lock().unwrap().usage_for(&family).count,
-            2
-        );
-
-        let first_identity = first.browser_identity.as_ref().unwrap();
-        harness.registry.clear_runtime_caches(
-            &first_identity.runtime_instance_id,
-            Some(&first_identity.owner_lease_id),
-        );
-        {
-            let pending = harness.registry.pending.lock().unwrap();
-            assert_eq!(pending.usage_for(&family).count, 1);
-            assert!(pending.entries.values().all(|action| {
-                action.runtime_instance_id == "pending-cleanup-b"
-            }));
-        }
-        let sibling_identity = sibling.browser_identity.as_ref().unwrap();
-        harness.registry.clear_runtime_caches(
-            &sibling_identity.runtime_instance_id,
-            Some(&sibling_identity.owner_lease_id),
-        );
-        assert_pending_store_consistent(&harness.registry);
-        let pending = harness.registry.pending.lock().unwrap();
-        assert!(pending.entries.is_empty());
-        assert!(pending.task_usage.is_empty());
-        assert_eq!(pending.total_retained_bytes, 0);
-    }
-
-    #[test]
-    fn task_family_quota_survives_runtime_rotation_and_preserves_cross_task_fairness() {
-        let harness = harness();
-        let first = caller(&harness.hub, "pending-family-a", "attempt-a");
-        let sibling = caller(&harness.hub, "pending-family-b", "attempt-b");
-        let other = caller_for_conversation(
-            &harness.hub,
-            "pending-other-task",
-            "attempt-c",
-            "0190f5fe-7c00-7a00-8abc-012345678903",
-        );
-        let input = json!({ "action": "press_key", "keys": "Enter" });
-        let per_task_count = harness
-            .registry
-            .pending
-            .lock()
-            .unwrap()
-            .limits
-            .per_task_count;
-        for _ in 0..per_task_count {
-            assert!(harness
-                .registry
-                .stash_pending(&first, None, &input)
-                .unwrap()
-                .is_some());
-        }
-        assert!(harness
-            .registry
-            .stash_pending(&sibling, None, &input)
-            .unwrap()
-            .is_none());
-        assert!(harness
-            .registry
-            .stash_pending(&other, None, &input)
-            .unwrap()
-            .is_some());
-        assert_pending_store_consistent(&harness.registry);
-    }
-
-    #[test]
-    fn model_cannot_forge_pending_task_family_accounting_key() {
-        let harness = harness();
-        let caller = caller(&harness.hub, "pending-forged-family", "attempt-a");
-        let error = harness
-            .registry
-            .stash_pending(
-                &caller,
-                None,
-                &json!({
-                    "action": "press_key",
-                    "keys": "Enter",
-                    "task_resource_family_key": "forged-unlimited-task",
-                }),
-            )
-            .unwrap_err();
-        assert_eq!(error.code, BrowserErrorCode::InvalidCallerIdentity);
-        assert_eq!(harness.registry.pending_count(), 0);
-    }
-
-    #[test]
-    fn pending_approval_is_bound_to_runtime_not_companion() {
-        let harness = harness();
-        let first = caller(&harness.hub, "runtime-owner-a", "attempt-a");
-        let second = caller(&harness.hub, "runtime-owner-b", "attempt-b");
-        let call_id = harness
-            .registry
-            .stash_pending(
-                &first,
-                None,
-                &json!({ "action": "press_key", "keys": "Enter" }),
-            )
-            .unwrap()
-            .unwrap();
-        let error = harness
-            .registry
-            .take_pending_for(&second, &call_id)
-            .unwrap_err();
-        assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
-        assert_eq!(harness.registry.pending_count(), 1);
-        assert!(harness
-            .registry
-            .take_pending_for(&first, &call_id)
-            .unwrap()
-            .is_some());
-    }
-
-    #[tokio::test]
-    async fn approved_action_uses_only_the_hub_trusted_confirmation_seam() {
-        let harness = harness();
-        let caller = caller(&harness.hub, "runtime-confirmed", "attempt-a");
-        let call_id = harness
-            .registry
-            .stash_pending(
-                &caller,
-                None,
-                &json!({ "action": "press_key", "keys": "Enter" }),
-            )
-            .unwrap()
-            .unwrap();
-        let pending = harness
-            .registry
-            .take_pending_for(&caller, &call_id)
-            .unwrap()
-            .unwrap();
-        harness
-            .registry
-            .execute_confirmed(&caller, pending)
-            .await
-            .unwrap();
-        assert_eq!(harness.probe.confirmed.load(Ordering::Acquire), 1);
-    }
-
-    #[test]
-    fn classifier_preserves_enter_and_observed_dangerous_ref_behavior() {
-        assert_eq!(
-            classify_with_observation(
-                "press_key",
-                &json!({ "keys": "Enter" }),
-                None,
-            ),
-            ApprovalTier::Irreversible
-        );
-        let observation = "- button \"Pay now\" [ref=f0e7]";
-        assert!(nomi_browser::accname_is_irreversible(observation));
-        assert_eq!(
-            classify_with_observation(
-                "click",
-                &json!({ "ref": "f0e7" }),
-                Some(observation),
-            ),
-            ApprovalTier::Irreversible
-        );
-    }
-
-    #[test]
     fn model_input_cannot_supply_trusted_caller_fields() {
         let error = reject_untrusted_caller_fields(&json!({
             "action": "navigate",
@@ -5712,241 +4216,6 @@ mod tests {
             .is_ok(),
             "lane_id is an owner-scoped selector authorized by the bound client"
         );
-    }
-
-    #[tokio::test]
-    async fn unattributable_lane_id_observation_is_dropped_not_misfiled() {
-        let harness = harness();
-        let caller = caller(&harness.hub, "runtime-observe-guard", "attempt-guard");
-        // An observe result that lost its authoritative lane attribution,
-        // e.g. because the post-operation status refresh failed and the
-        // facade serialized `"lane": null`.
-        let orphaned = ToolResult::text(
-            json!({
-                "ok": true,
-                "action": "observe",
-                "lane_id": "lane-unattributable",
-                "lane": null,
-                "output": { "text": "- button \"Pay now\" [ref=f0e7]" },
-            })
-            .to_string(),
-        );
-
-        harness.registry.cache_managed_observation(
-            &caller,
-            None,
-            &json!({ "action": "observe", "lane_id": "lane-unattributable" }),
-            &orphaned,
-        );
-        {
-            let observations = harness
-                .registry
-                .observations
-                .lock()
-                .expect("gateway browser observation cache poisoned");
-            assert!(
-                observations.is_empty(),
-                "a lane_id-addressed snapshot without authoritative lane \
-                 attribution must be dropped, not filed under another lane"
-            );
-        }
-
-        // Control: without the caller-supplied lane_id the identical result
-        // legitimately attributes to the default lane, so the drop above is
-        // the mis-attribution guard and not an unrelated parse failure.
-        harness.registry.cache_managed_observation(
-            &caller,
-            None,
-            &json!({ "action": "observe" }),
-            &orphaned,
-        );
-        let observations = harness
-            .registry
-            .observations
-            .lock()
-            .expect("gateway browser observation cache poisoned");
-        let default_lane = LaneKey::new("runtime-observe-guard", None).unwrap();
-        assert_eq!(observations.len(), 1);
-        assert_eq!(
-            observations
-                .get(&default_lane)
-                .and_then(|observation| observation.text.as_str()),
-            Some("- button \"Pay now\" [ref=f0e7]")
-        );
-    }
-
-    #[tokio::test]
-    async fn unique_lane_observe_then_close_does_not_retain_history() {
-        let harness = harness();
-        let caller = caller(
-            &harness.hub,
-            "runtime-observation-close-loop",
-            "attempt-observation-close-loop",
-        );
-
-        for index in 0..64 {
-            let lane_name = format!("observe-{index}");
-            harness
-                .registry
-                .execute(
-                    &caller,
-                    Some(&lane_name),
-                    json!({ "action": "observe" }),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                harness
-                    .registry
-                    .observations
-                    .lock()
-                    .expect("gateway browser observation cache poisoned")
-                    .len(),
-                1,
-                "only the live Lane's observation should be retained"
-            );
-
-            let closed = harness
-                .registry
-                .dispatch_managed(
-                    &caller,
-                    Some(&lane_name),
-                    json!({ "action": "browser_close" }),
-                )
-                .await
-                .unwrap();
-            assert!(!closed.is_error);
-            let observations = harness
-                .registry
-                .observations
-                .lock()
-                .expect("gateway browser observation cache poisoned");
-            assert!(observations.is_empty());
-            assert!(observations.families.is_empty());
-        }
-    }
-
-    #[test]
-    fn oversized_observation_rejects_text_and_ref_click_fails_closed() {
-        let harness = harness();
-        let caller = caller(
-            &harness.hub,
-            "runtime-oversized-observation",
-            "attempt-oversized-observation",
-        );
-        let identity = caller.browser_identity.as_ref().unwrap();
-        let lane_key = LaneKey::new(&identity.runtime_instance_id, None).unwrap();
-        let oversized = "x".repeat(MAX_OBSERVATION_BYTES + 1);
-        harness
-            .registry
-            .observations
-            .lock()
-            .expect("gateway browser observation cache poisoned")
-            .insert(
-                lane_key.clone(),
-                identity.task_resource_family_key(),
-                &oversized,
-            );
-
-        let observations = harness
-            .registry
-            .observations
-            .lock()
-            .expect("gateway browser observation cache poisoned");
-        let cached = observations.get(&lane_key).unwrap();
-        assert_eq!(cached.text, CachedObservationText::OversizedRejected);
-        assert_eq!(cached.text.retained_bytes(), 0);
-        drop(observations);
-        assert_eq!(
-            harness
-                .registry
-                .classify(
-                    &caller,
-                    None,
-                    "click",
-                    &json!({ "ref": "f0e7" }),
-                )
-                .unwrap(),
-            ApprovalTier::Irreversible,
-            "rejecting an oversized classifier copy must not downgrade a ref click"
-        );
-    }
-
-    #[test]
-    fn observation_eviction_is_isolated_by_trusted_task_family() {
-        let family_a = TaskResourceFamilyKey::from_trusted_parts(
-            "user",
-            Some("conversation-a"),
-            "runtime-a",
-            None,
-            None,
-            BrowserSurface::Gateway,
-        );
-        let family_b = TaskResourceFamilyKey::from_trusted_parts(
-            "user",
-            Some("conversation-b"),
-            "runtime-b",
-            None,
-            None,
-            BrowserSurface::Gateway,
-        );
-        let family_b_lane = LaneKey::new("runtime-b", Some("survivor")).unwrap();
-        let mut observations = ObservationCache::default();
-        observations.insert(
-            family_b_lane.clone(),
-            family_b.clone(),
-            "- button \"Pay now\" [ref=f0e7]",
-        );
-        let maximum_retained_text = "x".repeat(MAX_OBSERVATION_BYTES);
-
-        for index in 0..(MAX_OBSERVATIONS_PER_TASK_FAMILY * 4) {
-            let lane = LaneKey::new(
-                if index % 2 == 0 {
-                    "runtime-a"
-                } else {
-                    "runtime-a-sibling"
-                },
-                Some(&format!("lane-{index}")),
-            )
-            .unwrap();
-            observations.insert(
-                lane,
-                family_a.clone(),
-                &maximum_retained_text,
-            );
-        }
-
-        let usage_a = observations.families.get(&family_a).unwrap();
-        assert_eq!(usage_a.order.len(), MAX_OBSERVATIONS_PER_TASK_FAMILY);
-        assert_eq!(
-            usage_a.retained_bytes,
-            MAX_OBSERVATION_BYTES_PER_TASK_FAMILY,
-            "the task-family byte ceiling must remain exact under eviction"
-        );
-        let usage_b = observations.families.get(&family_b).unwrap();
-        assert_eq!(usage_b.order.len(), 1);
-        assert!(observations.get(&family_b_lane).is_some());
-
-        observations.remove_runtime("runtime-a");
-        assert_eq!(
-            observations
-                .families
-                .get(&family_a)
-                .unwrap()
-                .order
-                .len(),
-            MAX_OBSERVATIONS_PER_TASK_FAMILY / 2,
-            "runtime cleanup must preserve a sibling runtime in the same task family"
-        );
-        assert_eq!(
-            observations
-                .families
-                .get(&family_a)
-                .unwrap()
-                .retained_bytes,
-            MAX_OBSERVATION_BYTES_PER_TASK_FAMILY / 2,
-        );
-        assert!(observations.get(&family_b_lane).is_some());
     }
 
     #[test]

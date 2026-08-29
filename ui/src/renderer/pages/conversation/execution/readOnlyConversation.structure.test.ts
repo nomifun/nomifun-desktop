@@ -20,13 +20,7 @@ describe('execution transcript capability boundary', () => {
   });
 
   test('disables Nomi persistence and local command side effects', () => {
-    const chatSource = readSource(new URL('../platforms/nomi/NomiChat.tsx', import.meta.url));
     const messageSource = readSource(new URL('../platforms/nomi/useNomiMessage.ts', import.meta.url));
-    const recoverySource = readSource(new URL('../Messages/usePendingConfirmationsRecovery.ts', import.meta.url));
-
-    expect(chatSource.includes('usePendingConfirmationsRecovery(conversation_id, { enabled: !readOnly })')).toBe(true);
-    expect(chatSource.includes('readOnly,')).toBe(true);
-    expect(recoverySource.includes('if (!enabled || !conversation_id) return;')).toBe(true);
 
     // These assert the SHAPE of the read-only guards rather than a verbatim
     // source line: pinning the exact expression drifted once already, when
@@ -40,17 +34,5 @@ describe('execution transcript capability boundary', () => {
     expect(postProcessGuard.slice(0, 400).includes('readOnly')).toBe(true);
     expect(messageSource.includes('if (!readOnly) {')).toBe(true);
     expect(messageSource.includes('ipcBridge.conversation.update.invoke')).toBe(true);
-  });
-
-  test('removes every confirmation action from transcript rendering', () => {
-    const permissionSource = readSource(new URL('../Messages/components/MessagePermission.tsx', import.meta.url));
-    const toolGroupSource = readSource(new URL('../Messages/components/MessageToolGroup.tsx', import.meta.url));
-
-    expect(permissionSource.includes('useConversationContextSafe()?.readOnly === true')).toBe(true);
-    expect(permissionSource.includes('if (readOnly || hasResponded || !selected) return;')).toBe(true);
-    expect(permissionSource.includes('!readOnly && !hasResponded')).toBe(true);
-
-    expect(toolGroupSource.includes("!readOnly && content.status === 'Confirming'")).toBe(true);
-    expect(toolGroupSource.includes('if (readOnly) return;')).toBe(true);
   });
 });

@@ -423,7 +423,6 @@
     "apiErrorNoCli": "API error occurred. No CLI agent available for fallback.",
     "apiErrorSwitchFailed": "Failed to create fallback conversation.",
     "apiErrorSwitched": "API error, auto-switched to {{cli}} CLI",
-    "confirmationLoadError": "Failed to load confirmation dialog",
     "tryAnotherAgent": "Try another agent:",
     "switchedToAgent": "Switched to {{agent}}",
     "switchAgentFailed": "Failed to switch agent",
@@ -554,8 +553,7 @@
     "runtime": {
       "idle": "Idle",
       "starting": "Starting",
-      "running": "Running",
-      "waiting_confirmation": "Waiting Confirmation"
+      "running": "Running"
     },
     "statusLabels": {
       "pending": "Pending",

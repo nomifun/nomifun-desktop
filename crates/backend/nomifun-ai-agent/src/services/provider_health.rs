@@ -180,7 +180,6 @@ impl ProviderHealthCheckService {
             context_limit: fields.context_limit.map(|value| value as u64),
             compat_overrides: fields.compat_overrides,
             session_directory: self.data_dir.join("nomi-health-check-sessions"),
-            session_mode: None,
             extra_mcp_servers: HashMap::new(),
             loopback_capability_leases: Default::default(),
             bedrock_config: fields.bedrock_config,
@@ -190,8 +189,6 @@ impl ProviderHealthCheckService {
             browser_full_power: false,
             browser_persistent_login: false,
             browser_site_memory: false,
-            browser_takeover: false,
-            browser_unrestricted_approval: false,
             browser_visual_fallback: false,
             goal: None,
             persistent_login_key: None,
@@ -472,7 +469,6 @@ async fn build_probe_engine(config_extra: NomiResolvedConfig) -> Result<AgentEng
         max_turns: config_extra.max_turns,
         system_prompt: config_extra.system_prompt,
         profile: None,
-        auto_approve: false,
         project_dir: Some(PathBuf::from(&workspace)),
     };
     let mut config = Config::resolve(&cli_args)

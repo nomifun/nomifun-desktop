@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::deps::GatewayDeps;
-use crate::registry::{Capability, CapabilityMeta, DangerTier};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
 // ── param structs (single source: schema + runtime) ──────────────────────
@@ -375,7 +375,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_system_get_settings",
             "system",
             "Read the desktop's system settings (language, notification toggles, etc.).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| get_settings(deps, p),
     ));
@@ -386,7 +386,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_system_update_settings",
             "system",
             "Partially update system settings (language, notification toggles, command queue, workspace upload). Only provided fields are changed.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| update_settings(deps, p),
     ));
@@ -397,7 +397,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_system_get_preferences",
             "system",
             "Read client preferences (theme, zoom, keep-awake, companion size, feature toggles, etc.). Omit keys to get all.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| get_preferences(deps, p),
     ));
@@ -408,7 +408,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_system_update_preferences",
             "system",
             "Batch set/delete client preferences (theme, ui.zoomFactor, system.closeToTray, system.keepAwake, companion.size, feature toggles). Pass null value to delete a key.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| update_preferences(deps, p),
     ));
@@ -419,7 +419,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_system_create_provider",
             "system",
             "Register a model provider with one fully configured model. Credentials are typed according to auth_scheme, validated, and encrypted at rest.",
-            DangerTier::Sensitive,
+            EffectClass::Sensitive,
         ),
         |deps, _ctx, p| create_provider(deps, p),
     ));
@@ -430,7 +430,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_system_update_provider",
             "system",
             "Partially update an existing model provider (name, URL, authentication, credentials, enabled). Only provided fields are changed.",
-            DangerTier::Sensitive,
+            EffectClass::Sensitive,
         ),
         |deps, _ctx, p| update_provider(deps, p),
     ));
@@ -441,7 +441,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_system_delete_provider",
             "system",
             "Permanently delete a model provider and all its stored credentials.",
-            DangerTier::Destructive,
+            EffectClass::Destructive,
         ),
         |deps, _ctx, p| delete_provider(deps, p),
     ));
@@ -452,7 +452,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_system_fetch_models",
             "system",
             "Fetch the model list from a provider's remote API (by provider id). Use after creating a provider without specifying models.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| fetch_models(deps, p),
     ));
@@ -463,7 +463,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_system_get_info",
             "system",
             "Read system info: data/cache/log directories, OS platform, and CPU architecture.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| get_info(deps, p),
     ));
@@ -476,7 +476,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 //     Method: `version_check_service.check_update(&UpdateCheckRequest { .. })`
 //     Not wired because VersionCheckService is not in the assumed GatewayDeps.
 //
-// 11. `nomi_system_factory_reset` (Destructive, deny_on Channel+Remote)
+// 11. `nomi_system_factory_reset` (Destructive)
 //     Needs: `deps.data_dir: PathBuf`
 //     Method: `nomifun_common::factory_reset::request_v3_dataset_reset(&data_dir, &work_dir)`
 //     Not wired because data_dir is not in the assumed GatewayDeps.

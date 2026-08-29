@@ -3,7 +3,7 @@ use nomifun_common::{
     AdaptationPolicy, AgentExecutionActor, AgentExecutionEventKind, AgentExecutionStatus,
     AgentStepMode, AgentToolPolicy, DecisionPolicy, DelegationPolicy, ExecutionAttemptStatus,
     ExecutionStepKind,
-    ExecutionStepStatus, ParticipantAssignmentSource, PlanGate, StepFailurePolicy,
+    ExecutionStepStatus, ParticipantAssignmentSource, StepFailurePolicy,
 };
 
 use crate::error::DbError;
@@ -147,7 +147,6 @@ pub struct AgentExecutionAttemptRecoveryResult {
 pub struct CreateAgentExecutionParams {
     pub goal: String,
     pub status: AgentExecutionStatus,
-    pub plan_gate: PlanGate,
     pub adaptation_policy: AdaptationPolicy,
     pub decision_policy: DecisionPolicy,
     pub delegation_policy: DelegationPolicy,
@@ -255,7 +254,6 @@ pub struct AppendAgentExecutionStepsParams {
 #[derive(Debug, Clone)]
 pub struct ReconcileAgentExecutionPlanParams {
     pub goal: Option<String>,
-    pub plan_gate: Option<PlanGate>,
     pub adaptation_policy: Option<AdaptationPolicy>,
     pub decision_policy: Option<DecisionPolicy>,
     pub delegation_policy: Option<DelegationPolicy>,
@@ -500,9 +498,9 @@ pub trait IAgentExecutionRepository: Send + Sync {
         event: &NewAgentExecutionEvent,
     ) -> Result<AppendAgentExecutionStepsFromAttemptResult, DbError>;
 
-    /// Versioned user/lead append. It supports approval-gated, running,
-    /// paused, and waiting aggregates, and reopens a settled non-cancelled
-    /// result to Running. Existing Steps/dependencies are append-only history.
+    /// Versioned user/lead append. It supports running, paused, and waiting
+    /// aggregates, and reopens a settled non-cancelled result to Running.
+    /// Existing Steps/dependencies are append-only history.
     async fn append_steps(
         &self,
         user_id: &str,

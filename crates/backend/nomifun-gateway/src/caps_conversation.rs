@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use crate::deps::{CallerCtx, GatewayDeps};
 use crate::id_schema::ModelRefParam;
 use crate::provider_support;
-use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
 const DEFAULT_LIST_LIMIT: u32 = 50;
@@ -138,8 +138,6 @@ struct UpdateConversationParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct DeleteConversationParams {
-    /// The id of the conversation to delete. Confirm the target with the user
-    /// before calling — deletion also kills its agent and cron bindings.
     #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
     conversation_id: ConversationId,
 }
@@ -206,7 +204,6 @@ async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListConversationsParams
             "agent_type": conv.r#type,
             "status": conv.status,
             "runtime_state": runtime.state,
-            "pending_confirmations": runtime.pending_confirmations,
             "source": conv.source,
             "pinned": conv.pinned,
             "is_companion_companion": conv.extra.get("companion_session").and_then(Value::as_bool).unwrap_or(false),
@@ -648,7 +645,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_list_conversations",
             "conversation",
             "List the desktop's conversations with their live runtime state.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         list,
     ));
@@ -657,7 +654,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_conversation_status",
             "conversation",
             "Runtime summary + the tail of a conversation's transcript (live progress snapshot).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         status,
     ));
@@ -666,7 +663,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_send_to_conversation",
             "conversation",
             "Inject a message (or a hidden task prompt) into another session. Set notify_back=true to automatically receive a completion receipt in your own conversation when the target finishes.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         send,
     ));
@@ -675,7 +672,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_create_conversation",
             "conversation",
             "Open a fresh desktop session on behalf of the calling companion. Every conversation runs on the native nomi executor, so there is no engine or vendor to choose — just pass model to pin an exact provider/model pair, or omit it to inherit your own companion model. Pass workpath when the user gave a project path (creates a project session in that directory), and summon to load your own skills + hand-picked memories (read-only) into the new session — pre-select memory_ids with recall_memories. For a terminal or agent-CLI session use nomi_create_terminal; for multi-Agent work inside the current conversation, use nomi_delegate.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         create,
     ));
@@ -684,7 +681,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_update_conversation",
             "conversation",
             "Rename / pin / change model of a conversation (not your own model).",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         update,
     ));
@@ -692,10 +689,9 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_delete_conversation",
             "conversation",
-            "Delete a conversation (cascades: agent kill, cron unbind, knowledge unmount). Confirm first.",
-            DangerTier::Destructive,
-        )
-        .deny_on(&[Surface::Channel]),
+            "Delete a conversation (cascades: agent kill, cron unbind, knowledge unmount).",
+            EffectClass::Destructive,
+        ),
         delete,
     ));
     out.push(Capability::new::<StopConversationParams, _, _>(
@@ -703,7 +699,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_stop_conversation",
             "conversation",
             "Stop a conversation's current turn — including one left protectively suspended (stuck) by a backend restart. Same safe path as the desktop stop button.",
-            DangerTier::Destructive,
+            EffectClass::Destructive,
         ),
         stop,
     ));
@@ -712,7 +708,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_whoami",
             "conversation",
             "Identity of the calling session: installation user, optional companion id, and surface. Remote installation-token callers report principal=nomifun_desktop and companion_id=null.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         whoami,
     ));
@@ -873,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_conversation_is_a_registered_destructive_capability() {
+    fn stop_conversation_is_registered_with_strict_typed_arguments() {
         let mut caps = Vec::new();
         register(&mut caps);
         let cap = caps
@@ -881,35 +877,13 @@ mod tests {
             .find(|cap| cap.meta.name == "nomi_stop_conversation")
             .expect("nomi_stop_conversation must be registered");
         assert_eq!(cap.meta.domain, "conversation");
-        assert_eq!(cap.meta.danger, DangerTier::Destructive);
+        assert_eq!(cap.meta.effect_class, EffectClass::Destructive);
         let properties = cap.input_schema["properties"].as_object().unwrap();
         assert!(properties.contains_key("conversation_id"));
-        assert!(
-            properties.contains_key("confirm"),
-            "a Destructive capability must expose the confirm gate field"
-        );
+        assert!(!properties.contains_key("unexpected"));
         assert_eq!(
             cap.input_schema.get("additionalProperties"),
             Some(&json!(false))
-        );
-    }
-
-    #[test]
-    fn stop_conversation_requires_confirm_on_remote_surface() {
-        let mut caps = Vec::new();
-        register(&mut caps);
-        let cap = caps
-            .iter()
-            .find(|cap| cap.meta.name == "nomi_stop_conversation")
-            .expect("nomi_stop_conversation must be registered");
-        assert_eq!(
-            crate::registry::decide(&cap.meta, Surface::Remote, false),
-            crate::registry::Decision::Confirm,
-            "Remote surface without confirm must be refused"
-        );
-        assert_eq!(
-            crate::registry::decide(&cap.meta, Surface::Remote, true),
-            crate::registry::Decision::Allow,
         );
     }
 
@@ -1057,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn top_level_creation_requires_a_companion_identity() {
+    fn top_level_creation_requires_a_companion_or_remote_identity() {
         let plain = CallerCtx {
             conversation_id: Some(
                 ConversationId::parse("0190f5fe-7c00-7a00-8abc-012345678901")
@@ -1067,7 +1041,7 @@ mod tests {
                 .unwrap(),
             ..Default::default()
         };
-        let error = require_companion_creator(&plain).unwrap_err();
+        let error = require_conversation_creator(&plain).unwrap_err();
         assert!(error["error"]
             .as_str()
             .is_some_and(|message| message.contains("conversation_creation_forbidden")));
@@ -1079,6 +1053,6 @@ mod tests {
             ),
             ..plain
         };
-        assert!(require_companion_creator(&companion).is_ok());
+        assert!(require_conversation_creator(&companion).is_ok());
     }
 }

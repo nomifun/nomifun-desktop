@@ -254,16 +254,9 @@
       "category": "event_name_field_projection",
       "symbols_or_patterns": [
         "message.stream",
-        "WaitingConfirmation",
-        "permission"
+        "WaitingConfirmation"
       ],
       "current_refs": [
-        {
-          "path": "crates/backend/nomifun-ai-agent/src/protocol/events/permission.rs",
-          "symbols": [
-            "permission events"
-          ]
-        },
         {
           "path": "crates/backend/nomifun-conversation/src/stream_relay.rs",
           "symbols": [
@@ -311,8 +304,7 @@
       "symbols_or_patterns": [
         "allowed_tools",
         "browser_use",
-        "computer_use",
-        "session_mode"
+        "computer_use"
       ],
       "current_refs": [
         {
@@ -320,8 +312,7 @@
           "symbols": [
             "allowed_tools",
             "browser_use",
-            "computer_use",
-            "session_mode"
+            "computer_use"
           ]
         }
       ],
@@ -337,23 +328,7 @@
         "confirmations",
         "session_mode"
       ],
-      "current_refs": [
-        {
-          "path": "crates/agent/nomi-protocol/src/lib.rs",
-          "symbols": [
-            "ToolApprovalManager"
-          ]
-        },
-        {
-          "path": "crates/backend/nomifun-ai-agent/src/manager/nomi/agent.rs",
-          "symbols": [
-            "ToolApprovalManager",
-            "confirmations"
-          ],
-          "line_start": 1203,
-          "line_end": 1253
-        }
-      ],
+      "current_refs": [],
       "disposition": "delete_without_replacement",
       "removal_boundary": "C1",
       "replacement_owner": "FullAuto invariant"
@@ -856,7 +831,7 @@
     "zero_required_before_legacy_delete": true
   },
   "closure_status": {
-    "state": "inventory_complete",
+    "state": "in_progress",
     "canonical_producer_ready": false,
     "direct_consumers_switched": false,
     "legacy_surfaces_deleted": false,
@@ -865,7 +840,9 @@
     "d027_zero_proven": false,
     "evidence_complete": false,
     "notes": [
-      "C0 inventory contract only; no production deletion has occurred.",
+      "C1 FullAuto physical deletion is complete on the Windows development host.",
+      "The C1 gate passed after removing agent modes, tool approval and confirmation chains, plan approval/waiting states, Browser Agent approval/takeover settings, Remote/Gateway confirmation retry fields, and IDMM permission decisions.",
+      "The C1 gate evidence is targeted deletion evidence only; fresh-v4 persistence, thin-kernel composition, Codex runtime replacement, product migration, triad reachability, and D-027 drain remain open for C2-C7/C9.",
       "The D-004 allowlist is the only non-empty residual policy and must only shrink."
     ]
   }

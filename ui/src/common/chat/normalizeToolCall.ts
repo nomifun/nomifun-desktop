@@ -70,7 +70,6 @@ function toNormalizedToolGroupStatus(status: unknown): NormalizedToolStatus {
     case 'Pending':
       return 'pending';
     case 'Executing':
-    case 'Confirming':
     default:
       return 'running';
   }
@@ -88,47 +87,16 @@ const getResultDisplayText = (
 
 export function normalizeToolGroup(message: IMessageToolGroup): NormalizedToolCall[] {
   if (!Array.isArray(message.content)) return [];
-  return message.content.map(({ name, call_id, description, confirmationDetails, status, result_display }) => {
+  return message.content.map(({ name, call_id, description, status, result_display }) => {
     const displayStatus = normalizeToolGroupStatus(status);
-    let desc = typeof description === 'string' ? description.slice(0, 100) : '';
-    // Guard on `confirmationDetails` so the discriminant `type` narrows the
-    // union directly off the object; previously `type` was aliased through
-    // optional chaining, which left `confirmationDetails` possibly-undefined.
-    // The branches only ran when it was present before, so behavior is unchanged.
-    if (confirmationDetails) {
-      const type = confirmationDetails.type;
-      if (type === 'edit') desc = toDisplayText(confirmationDetails.file_name);
-      if (type === 'exec') desc = toDisplayText(confirmationDetails.command);
-      if (type === 'info') {
-        desc =
-          confirmationDetails.urls?.map((url) => toDisplayText(url)).join(';') ||
-          toDisplayText(confirmationDetails.title);
-      }
-      if (type === 'mcp') {
-        desc = `${toDisplayText(confirmationDetails.server_name)}:${toDisplayText(confirmationDetails.tool_name)}`;
-      }
-    }
-
-    let input: string | undefined;
-    if (confirmationDetails) {
-      const { title: _title, type: _type, ...rest } = confirmationDetails;
-      if (Object.keys(rest).length) input = formatValue(rest);
-    } else if (description) {
-      input = description;
-    }
+    const desc = typeof description === 'string' ? description.slice(0, 100) : '';
 
     return {
       key: toDisplayText(call_id),
       name: toDisplayText(name, 'Tool'),
       status: toNormalizedToolGroupStatus(displayStatus),
-      ...(confirmationDetails?.type === 'exec'
-        ? { kind: 'execute' }
-        : confirmationDetails?.type === 'edit'
-          ? { kind: 'edit' }
-          : {}),
-      ...(displayStatus === 'Error' && confirmationDetails?.type === 'exec' ? { nonFatalFailure: true } : {}),
       description: desc,
-      input,
+      ...(description ? { input: description } : {}),
       output: getResultDisplayText(result_display),
     };
   });

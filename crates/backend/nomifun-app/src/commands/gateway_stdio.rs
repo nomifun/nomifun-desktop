@@ -344,7 +344,6 @@ mod tests {
             GatewayCapabilityScope {
                 companion_id: None,
                 channel_platform: None,
-                session_mode: None,
                 profile: GatewayMcpConfig::PROFILE_FULL.into(),
                 excluded_tools: Vec::new(),
                 instance_owner: true,

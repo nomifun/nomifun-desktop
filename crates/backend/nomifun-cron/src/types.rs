@@ -142,8 +142,6 @@ pub struct CronAgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_snapshot: Option<nomifun_api_types::ResolvedPresetSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Logical provider reference used by Nomi jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -498,7 +496,6 @@ pub fn cron_job_to_response(job: &CronJob) -> CronJobResponse {
         preset_id: c.preset_id.clone(),
         preset_revision: c.preset_revision,
         preset_snapshot: c.preset_snapshot.clone(),
-        mode: c.mode.clone(),
         model: c.model.clone(),
         provider_id: c.provider_id.clone(),
         config_options: c.config_options.clone(),
@@ -598,8 +595,11 @@ mod tests {
 
     #[test]
     fn execution_mode_as_str_roundtrip() {
-        for mode in [ExecutionMode::Existing, ExecutionMode::NewConversation] {
-            assert_eq!(ExecutionMode::from_str(mode.as_str()).unwrap(), mode);
+        for execution_mode in [ExecutionMode::Existing, ExecutionMode::NewConversation] {
+            assert_eq!(
+                ExecutionMode::from_str(execution_mode.as_str()).unwrap(),
+                execution_mode
+            );
         }
     }
 
@@ -786,7 +786,6 @@ mod tests {
                 preset_id: None,
                 preset_revision: None,
                 preset_snapshot: None,
-                mode: None,
                 model: Some("gpt-5".into()),
                 provider_id: Some(PROVIDER_ID.into()),
                 config_options: None,

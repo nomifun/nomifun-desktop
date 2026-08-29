@@ -10,7 +10,6 @@ use nomifun_ai_agent::manager::nomi::NomiAgentManager;
 use nomifun_ai_agent::types::NomiResolvedConfig;
 use nomifun_ai_agent::*;
 use nomifun_common::{AgentKillReason, AgentType, ConversationStatus};
-use serde_json::json;
 
 const NOMI_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000221";
 
@@ -30,7 +29,6 @@ fn make_nomi_config() -> NomiResolvedConfig {
         context_limit: None,
         compat_overrides: Default::default(),
         session_directory: std::env::temp_dir().join("nomi-test-sessions"),
-        session_mode: None,
         extra_mcp_servers: Default::default(),
         loopback_capability_leases: Default::default(),
         bedrock_config: None,
@@ -40,8 +38,6 @@ fn make_nomi_config() -> NomiResolvedConfig {
         browser_full_power: false,
         browser_persistent_login: false,
         browser_site_memory: false,
-        browser_takeover: false,
-        browser_unrestricted_approval: false,
         browser_visual_fallback: false,
         goal: None,
         persistent_login_key: None,
@@ -62,18 +58,6 @@ async fn nomi_agent_kill_succeeds() {
 }
 
 #[tokio::test]
-async fn nomi_agent_confirm_succeeds() {
-    let agent = NomiAgentManager::new(NOMI_CONVERSATION_ID.into(), "/proj".into(), make_nomi_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
-        .await
-        .unwrap();
-    // `confirm` is an inherent method on `NomiAgentManager` (reached via
-    // `AgentRuntimeHandle::Nomi(..)` in production); the test calls it
-    // directly on the concrete manager.
-    let result = agent.confirm("msg", "call", json!({}), false);
-    assert!(result.is_ok());
-}
-
-#[tokio::test]
 async fn nomi_agent_metadata() {
     let agent = NomiAgentManager::new(NOMI_CONVERSATION_ID.into(), "/work".into(), make_nomi_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
         .await
@@ -82,8 +66,6 @@ async fn nomi_agent_metadata() {
     assert_eq!(agent.workspace(), "/work");
     assert_eq!(agent.conversation_id(), NOMI_CONVERSATION_ID);
     assert_eq!(agent.status(), Some(ConversationStatus::Pending));
-    assert!(agent.get_confirmations().is_empty());
-    assert!(!agent.check_approval("any", None));
 }
 
 // ---------------------------------------------------------------------------

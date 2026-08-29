@@ -183,11 +183,7 @@ async fn tc_e2e_3_shell_command_execution() {
 
 #[test]
 fn tc_e2e_4a_permission_deny_priority() {
-    let checker = SkillPermissionChecker::new(
-        vec!["dangerous-skill".to_string()],
-        vec!["dangerous-skill".to_string()],
-        false,
-    );
+    let checker = SkillPermissionChecker::new(vec!["dangerous-skill".to_string()]);
     let skill = make_skill("dangerous-skill", "body");
     let result = checker.check(&skill);
     assert_eq!(
@@ -203,8 +199,8 @@ fn tc_e2e_4a_permission_deny_priority() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tc_e2e_4b_permission_allow_grants_access() {
-    let checker = SkillPermissionChecker::new(vec![], vec!["safe-skill".to_string()], false);
+fn tc_e2e_4b_non_denied_skill_with_hooks_is_allowed() {
+    let checker = SkillPermissionChecker::new(vec![]);
     let mut skill = make_skill("safe-skill", "body");
     // Give it hooks so it would otherwise need Ask
     skill.hooks_raw = Some(serde_json::json!({"PreToolUse": []}));
@@ -213,7 +209,7 @@ fn tc_e2e_4b_permission_allow_grants_access() {
     assert_eq!(
         result,
         SkillPermission::Allow,
-        "allow rule should grant access"
+        "hooks do not create an interactive execution gate"
     );
 }
 
@@ -224,7 +220,7 @@ fn tc_e2e_4b_permission_allow_grants_access() {
 
 #[test]
 fn tc_e2e_4c_permission_safe_properties() {
-    let checker = SkillPermissionChecker::new(vec![], vec![], false);
+    let checker = SkillPermissionChecker::new(vec![]);
     // Skill has no hooks_raw and no allowed_tools → safe-properties path
     let skill = make_skill("safe-prop-skill", "body");
     assert!(skill.hooks_raw.is_none());
@@ -244,8 +240,8 @@ fn tc_e2e_4c_permission_safe_properties() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tc_e2e_4d_permission_ask_fallback() {
-    let checker = SkillPermissionChecker::new(vec![], vec![], false);
+fn tc_e2e_4d_permission_hooks_remain_full_auto() {
+    let checker = SkillPermissionChecker::new(vec![]);
     let mut skill = make_skill("ask-skill", "body");
     // Add hooks so safe-properties check fails
     skill.hooks_raw = Some(
@@ -253,10 +249,7 @@ fn tc_e2e_4d_permission_ask_fallback() {
     );
 
     let result = checker.check(&skill);
-    assert!(
-        matches!(result, SkillPermission::Ask { .. }),
-        "should fall through to Ask, got: {result:?}"
-    );
+    assert_eq!(result, SkillPermission::Allow);
 }
 
 // ---------------------------------------------------------------------------
@@ -285,11 +278,7 @@ fn tc_e2e_6_context_modifier_overrides() {
         Some(EffortLevel::High),
         "effort override should match"
     );
-    assert_eq!(
-        modifier.allowed_tools,
-        vec!["Bash", "Read"],
-        "allowedTools override should match"
-    );
+    assert!(modifier.allowed_tools.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -763,13 +752,13 @@ fn wb_1f_frontmatter_user_specified_description_flag() {
 }
 
 // ---------------------------------------------------------------------------
-// WB-2: permissions — auto_approve branch [白盒]
+// WB-2: FullAuto Skill policy [white-box]
 // ---------------------------------------------------------------------------
 
 #[test]
-fn wb_2a_auto_approve_converts_ask_to_allow() {
-    // With auto_approve=true, Ask → Allow (but Deny remains Deny)
-    let checker = SkillPermissionChecker::new(vec![], vec![], true);
+fn wb_2a_non_denied_skill_with_hooks_is_allowed() {
+    // Hooks do not create an interactive execution state.
+    let checker = SkillPermissionChecker::new(vec![]);
     let mut skill = make_skill("auto-skill", "body");
     // Attach hooks to prevent safe-properties path
     skill.hooks_raw = Some(
@@ -779,24 +768,20 @@ fn wb_2a_auto_approve_converts_ask_to_allow() {
     assert_eq!(
         result,
         SkillPermission::Allow,
-        "auto_approve should convert Ask to Allow"
+        "selected non-denied Skill should run directly"
     );
 }
 
 #[test]
-fn wb_2b_auto_approve_does_not_bypass_deny() {
-    // Deny wins even when auto_approve=true
-    let checker = SkillPermissionChecker::new(
-        vec!["blocked".to_string()],
-        vec![],
-        true, // auto_approve
-    );
+fn wb_2b_full_auto_does_not_bypass_deny() {
+    // Explicit deny remains authoritative.
+    let checker = SkillPermissionChecker::new(vec!["blocked".to_string()]);
     let skill = make_skill("blocked", "body");
     let result = checker.check(&skill);
     assert_eq!(
         result,
         SkillPermission::Deny,
-        "Deny should not be overridden by auto_approve"
+        "Deny should remain authoritative"
     );
 }
 
@@ -942,14 +927,10 @@ fn wb_7b_context_modifier_is_empty_default() {
 }
 
 #[test]
-fn wb_7c_context_modifier_allowed_tools_only() {
+fn wb_7c_allowed_tools_only_does_not_modify_parent_context() {
     let mut skill = make_skill("tools", "body");
     skill.allowed_tools = vec!["Write".to_string()];
-    let m = crate::context_modifier::from_skill(&skill).expect("should have modifier");
-    assert!(m.model.is_none());
-    assert!(m.effort.is_none());
-    assert_eq!(m.allowed_tools, vec!["Write"]);
-    assert!(!m.is_empty());
+    assert!(crate::context_modifier::from_skill(&skill).is_none());
 }
 
 // ---------------------------------------------------------------------------

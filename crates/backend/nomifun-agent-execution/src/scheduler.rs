@@ -878,7 +878,6 @@ impl ExecutionScheduler {
                 match detail.execution.status {
                     AgentExecutionStatus::Running | AgentExecutionStatus::WaitingInput => {}
                     AgentExecutionStatus::Planning
-                    | AgentExecutionStatus::AwaitingApproval
                     | AgentExecutionStatus::Paused
                     | AgentExecutionStatus::Completed
                     | AgentExecutionStatus::CompletedWithFailures
@@ -3448,7 +3447,6 @@ mod tests {
         ));
         for inactive in [
             AgentExecutionStatus::Planning,
-            AgentExecutionStatus::AwaitingApproval,
             AgentExecutionStatus::Paused,
             AgentExecutionStatus::Completed,
             AgentExecutionStatus::CompletedWithFailures,
@@ -3916,7 +3914,6 @@ mod tests {
                 &CreateAgentExecutionParams {
                     goal: "deterministic scheduler integration".to_owned(),
                     status: AgentExecutionStatus::Planning,
-                    plan_gate: nomifun_common::PlanGate::Automatic,
                     adaptation_policy,
                     decision_policy: nomifun_common::DecisionPolicy::Automatic,
                     delegation_policy: DelegationPolicy::Automatic,
@@ -3958,7 +3955,6 @@ mod tests {
                 created.version,
                 &ReconcileAgentExecutionPlanParams {
                     goal: None,
-                    plan_gate: None,
                     adaptation_policy: None,
                     decision_policy: None,
                     delegation_policy: None,

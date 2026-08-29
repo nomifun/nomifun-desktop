@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::deps::{CallerCtx, GatewayDeps};
 use crate::id_schema::{CanonicalEntityId, SessionTargetKind};
-use crate::registry::{Capability, CapabilityMeta, DangerTier};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
 #[derive(Deserialize, JsonSchema)]
@@ -165,7 +165,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_set_autowork",
             "autowork",
             "Enable/disable AutoWork (autonomous requirement execution) on a conversation or terminal and bind a requirement tag.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         set,
     ));
@@ -174,7 +174,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_get_autowork",
             "autowork",
             "Read the current AutoWork binding + live run state for a conversation or terminal.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         get,
     ));

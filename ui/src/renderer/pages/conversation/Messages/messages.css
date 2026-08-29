@@ -381,10 +381,6 @@
   color: var(--color-text-3, #86909c);
 }
 
-.turn-process-disclosure--waiting {
-  color: var(--color-warning-6, #ff7d00);
-}
-
 .turn-process-disclosure--canceled {
   color: var(--color-text-4, #c9cdd4);
 }
@@ -532,8 +528,7 @@
 .turn-process-disclosure__item--text + .turn-process-disclosure__item--text,
 .turn-process-disclosure__item--tool + .turn-process-disclosure__item--tool,
 .turn-process-disclosure__item--thinking + .turn-process-disclosure__item--thinking,
-.turn-process-disclosure__item--status + .turn-process-disclosure__item--status,
-.turn-process-disclosure__item--permission + .turn-process-disclosure__item--permission {
+.turn-process-disclosure__item--status + .turn-process-disclosure__item--status {
   margin-top: 4px;
 }
 
@@ -559,10 +554,6 @@
   color: var(--color-text-3, #86909c);
 }
 
-.turn-process-disclosure__body .turn-process-trace__row--waiting {
-  color: var(--color-warning-6, #ff7d00);
-}
-
 .turn-process-disclosure__body .turn-process-trace__row--failed {
   color: var(--color-danger-6, #f53f3f);
 }
@@ -571,8 +562,7 @@
   color: var(--color-text-4, #c9cdd4);
 }
 
-.turn-process-disclosure__item .message-error-note,
-.turn-process-disclosure__item [data-testid='message-permission-card'] {
+.turn-process-disclosure__item .message-error-note {
   margin-bottom: 0;
 }
 
@@ -670,8 +660,7 @@
   color: var(--color-text-2, #4e5969);
 }
 
-.turn-process-receipt__body .message-error-note,
-.turn-process-receipt__body [data-testid='message-permission-card'] {
+.turn-process-receipt__body .message-error-note {
   margin-bottom: 0;
 }
 
@@ -679,14 +668,6 @@
 
 .turn-live-step .turn-process-receipt__label {
   animation: turn-live-step-breathing 1.8s ease-in-out infinite;
-}
-
-.turn-live-step .turn-process-receipt--waiting {
-  color: var(--color-warning-6, #ff7d00);
-}
-
-.turn-live-step .turn-process-receipt--waiting .turn-process-receipt__label {
-  animation: none;
 }
 
 @keyframes turn-live-step-breathing {
@@ -758,10 +739,6 @@ button.turn-process-trace__row:focus-visible {
 
 .turn-process-trace__row--running {
   color: var(--color-text-3, #86909c);
-}
-
-.turn-process-trace__row--waiting {
-  color: var(--color-warning-6, #ff7d00);
 }
 
 .turn-process-trace__row--failed {

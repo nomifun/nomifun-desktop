@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use crate::deps::{CallerCtx, GatewayDeps};
 use crate::id_schema::{CanonicalEntityId, SessionTargetKind};
-use crate::registry::{Capability, CapabilityMeta, DangerTier};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
 // ─── Params ──────────────────────────────────────────────────────────────────
@@ -179,7 +179,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_set_idmm",
             "idmm",
             "Update IDMM supervision knobs (enabled / tier / steering prompt) and (re)arm the live supervisor for a conversation or terminal.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, ctx, p| set(deps, ctx, p),
     ));
@@ -188,7 +188,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_get_idmm",
             "idmm",
             "Read the current IDMM config and live supervision state for a conversation or terminal.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, ctx, p| get(deps, ctx, p),
     ));

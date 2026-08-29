@@ -2,7 +2,6 @@
 // Accepted-turn runtime authority — snapshot / restore regressions
 //
 // `AcceptedTurnRoot` restores the durable half of a rejected turn. These tests
-// cover the in-memory half: a turn that granted itself tool auto-approval,
 // hooks, a different model / effort, plan mode, or goal progress must not keep
 // any of it once the turn is retracted, and a clean success must keep all of it.
 // ---------------------------------------------------------------------------
@@ -102,8 +101,6 @@ impl LlmProvider for RaceTailProviderErrorProvider {
     }
 }
 
-/// `auto_approve` is deliberately off: the confirmer's allow list is the thing
-/// under test, and a blanket auto-approve would mask every grant.
 fn authority_test_config(workspace: &Path, session_directory: &Path) -> Config {
     let mut config = Config::resolve(&CliArgs {
         provider: Some("openai".to_owned()),
@@ -114,14 +111,12 @@ fn authority_test_config(workspace: &Path, session_directory: &Path) -> Config {
         max_turns: Some(1),
         system_prompt: None,
         profile: None,
-        auto_approve: false,
         project_dir: Some(workspace.to_path_buf()),
     })
     .unwrap();
     config.session.enabled = true;
     config.session.directory = session_directory.to_string_lossy().into_owned();
     config.compact.enabled = false;
-    config.tools.allow_list = vec!["Read".to_owned()];
     config.hooks = HooksConfig {
         pre_tool_use: vec![hook("baseline-guard")],
         ..Default::default()
@@ -235,12 +230,9 @@ fn grant_skill_authority(engine: &mut AgentEngine) {
 struct AuthoritySurface {
     model: String,
     effort: Option<String>,
-    allow_list: Vec<String>,
-    bash_allowed: bool,
     hook_names: Vec<String>,
     plan_active: bool,
     plan_flag: bool,
-    pre_plan_allow_list: Vec<String>,
     goal_status: GoalStatus,
     goal_auto_continuations: usize,
     compact_failures: u32,
@@ -252,12 +244,6 @@ fn surface(engine: &AgentEngine) -> AuthoritySurface {
     AuthoritySurface {
         model: engine.model.clone(),
         effort: engine.current_reasoning_effort.clone(),
-        allow_list: engine.allow_list.clone(),
-        bash_allowed: engine
-            .confirmer
-            .lock()
-            .unwrap()
-            .allows_without_prompt("Bash"),
         hook_names: hooks
             .pre_tool_use
             .iter()
@@ -271,7 +257,6 @@ fn surface(engine: &AgentEngine) -> AuthoritySurface {
             .as_ref()
             .unwrap()
             .load(Ordering::Acquire),
-        pre_plan_allow_list: engine.plan_state.pre_plan_allow_list.clone(),
         goal_status: engine.goal.as_ref().unwrap().snapshot_state().status,
         goal_auto_continuations: engine
             .goal
@@ -544,40 +529,6 @@ async fn goal_progress_is_restored_on_rejection_and_kept_on_success() {
     }
 }
 
-#[tokio::test]
-async fn an_operator_always_grant_survives_a_rejected_turn() {
-    let workspace = tempfile::tempdir().unwrap();
-    let sessions = tempfile::tempdir().unwrap();
-    let mut engine = authority_engine(
-        workspace.path(),
-        sessions.path(),
-        "authority-operator",
-        Arc::new(RaceTailFalseCompletionProvider::new()),
-    );
-
-    let context = run_first_pass(&mut engine, "source-root").await;
-    // A human answered "always" at the prompt during the turn that is about to
-    // be rejected; a skill granted itself Bash in the same turn.
-    engine
-        .confirmer
-        .lock()
-        .unwrap()
-        .grant_user_always("WebFetch");
-    grant_skill_authority(&mut engine);
-
-    assert!(engine.restore_uncommitted_completion_turn(&context));
-
-    let confirmer = engine.confirmer.lock().unwrap();
-    assert!(
-        confirmer.allows_without_prompt("WebFetch"),
-        "rejecting the model's turn must not revoke the operator's own decision"
-    );
-    assert!(
-        !confirmer.allows_without_prompt("Bash"),
-        "the skill's self-granted approval must be revoked"
-    );
-    assert!(confirmer.allows_without_prompt("Read"), "the config baseline stays");
-}
 
 #[tokio::test]
 async fn the_hook_rollback_preserves_the_supervised_shell() {

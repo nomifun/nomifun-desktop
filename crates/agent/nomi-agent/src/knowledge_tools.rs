@@ -262,7 +262,7 @@ pub struct WriteRequest {
     pub bound_kb_ids: Vec<KnowledgeBaseId>,
 }
 
-/// What actually happened, for the tool's confirmation message.
+/// What actually happened, for the tool's result message.
 #[derive(Debug, Clone)]
 pub struct WriteReceipt {
     pub final_rel_path: String,
@@ -285,10 +285,8 @@ pub trait KnowledgeWritebackSink: Send + Sync {
 /// generic file `Write` tool cannot do this reliably in a nomi chat session:
 /// it has no workspace cwd (so the relative mount path the prompt advertises
 /// resolves against the process cwd, missing the base) AND it sits behind the
-/// approval gate. This tool resolves the base by name within the bound set,
 /// applies the session's staged/direct placement, and writes through the
 /// backend service directly — the backend adds it to the allow-list so it
-/// bypasses the per-call approval prompt (same posture as companion memory
 /// tools and `knowledge_search`).
 pub struct KnowledgeWriteTool {
     sink: Arc<dyn KnowledgeWritebackSink>,

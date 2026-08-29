@@ -28,8 +28,7 @@ use crate::terminal_proof::{
     OrphanProofRequirement, TerminalProofDecision, TurnTerminalProofProvider,
 };
 use nomifun_api_types::{
-    ApprovalCheckResponse, CloneConversationRequest, ConfirmRequest, ConfirmationListResponse,
-    ConversationArtifactListResponse, ConversationArtifactResponse, ConversationListResponse,
+    CloneConversationRequest, ConversationArtifactListResponse, ConversationArtifactResponse, ConversationListResponse,
     ConversationMcpStatus, ConversationMcpStatusKind,
     ConversationResponse, ConversationRuntimeSummary, CreateConversationRequest, KnowledgeMountInfo, ListConversationsQuery,
     ListMessagesQuery, McpServerId, MessageListResponse, MessageResponse, MessageSearchResponse, SearchMessagesQuery,
@@ -248,7 +247,6 @@ pub trait BackgroundTurnPreSendHook: Send + Sync {
 
 pub struct BackgroundTurnRuntimePreparation {
     pub runtime_options: AgentRuntimeBuildOptions,
-    pub desired_mode: Option<String>,
     pub clear_context: bool,
     pub pre_send_hook: Option<Arc<dyn BackgroundTurnPreSendHook>>,
 }
@@ -291,9 +289,9 @@ pub enum BackgroundTurnReconciliationDisposition {
 /// Stable identity of the exact live turn observed by IDMM.
 ///
 /// The durable IDMM action reservation stores this scope and must present it
-/// again when delivering a continuation or confirmation. A newer turn on the
-/// same Conversation has a different generation and/or root wire identity, so
-/// a delayed action can never be misdelivered to that replacement.
+/// again when delivering a continuation. A newer turn on the same Conversation
+/// has a different generation and/or root wire identity, so a delayed action
+/// can never be misdelivered to that replacement.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdmmTurnScope {
@@ -3179,10 +3177,9 @@ impl ConversationService {
         let agent = self.runtime_registry.get_runtime(conversation_id);
         let has_runtime = agent.is_some();
         let runtime_status = agent.as_ref().and_then(|agent| agent.status());
-        let pending_confirmations = agent.as_ref().map(|agent| agent.get_confirmations().len()).unwrap_or(0);
 
         self.runtime_state
-            .summary_from_parts(conversation_id, runtime_status, has_runtime, pending_confirmations)
+            .summary_from_parts(conversation_id, runtime_status, has_runtime)
     }
 
     /// The most recent completed `turn` receipt for one owned Conversation.
@@ -3245,7 +3242,6 @@ impl ConversationService {
             has_runtime: agent.is_some(),
             runtime_status: agent.as_ref().and_then(|agent| agent.status()),
             is_processing: false,
-            pending_confirmations: 0,
             active_turn_id: None,
             processing_started_at: None,
         }
@@ -6642,95 +6638,6 @@ impl ConversationService {
     }
 }
 
-// ── Confirmation System ─────────────────────────────────────────────
-
-impl ConversationService {
-    /// Get the list of pending confirmations for a conversation.
-    pub async fn list_confirmations(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
-    ) -> Result<ConfirmationListResponse, AppError> {
-        self.conversation_repo
-            .get(parse_conv_id(conversation_id)?)
-            .await?
-            .filter(|r| r.user_id == user_id)
-            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
-
-        let agent = match runtime_registry.get_runtime(conversation_id) {
-            Some(a) => a,
-            None => return Ok(Vec::new()),
-        };
-
-        Ok(agent.get_confirmations())
-    }
-
-    /// Confirm a pending tool call.
-    ///
-    /// Sends the confirmation result to the agent and broadcasts a
-    /// `confirmation.remove` WebSocket event.
-    pub async fn confirm(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        call_id: &str,
-        req: ConfirmRequest,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
-    ) -> Result<(), AppError> {
-        self.conversation_repo
-            .get(parse_conv_id(conversation_id)?)
-            .await?
-            .filter(|r| r.user_id == user_id)
-            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
-
-        let agent = runtime_registry
-            .get_runtime(conversation_id)
-            .ok_or_else(|| AppError::NotFound("No active agent for this conversation".into()))?;
-
-        let confirmations = agent.get_confirmations();
-        let conf_id = confirmations
-            .iter()
-            .find(|c| c.call_id == call_id)
-            .map(|c| c.id.clone());
-
-        agent.confirm(&req.msg_id, call_id, req.data, req.always_allow)?;
-
-        if let Some(conf_id) = conf_id {
-            let payload = serde_json::json!({
-                "conversation_id": conversation_id,
-                "id": conf_id,
-            });
-            let msg = WebSocketMessage::new("confirmation.remove", payload);
-            self.user_events.send_to_user(user_id, msg);
-        }
-
-        Ok(())
-    }
-
-    /// Check whether an action has been auto-approved in the current session.
-    pub async fn check_approval(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        action: &str,
-        command_type: Option<&str>,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
-    ) -> Result<ApprovalCheckResponse, AppError> {
-        self.conversation_repo
-            .get(parse_conv_id(conversation_id)?)
-            .await?
-            .filter(|r| r.user_id == user_id)
-            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
-
-        let approved = runtime_registry
-            .get_runtime(conversation_id)
-            .is_some_and(|agent| agent.check_approval(action, command_type));
-
-        Ok(ApprovalCheckResponse { approved })
-    }
-}
-
 // ── Message Flow (send / stop / warmup) ─────────────────────────────
 
 impl ConversationService {
@@ -8519,12 +8426,8 @@ impl ConversationService {
             row.updated_at = row.updated_at.max(updated_at);
         }
 
-        let (
-            mut runtime_options,
-            background_desired_mode,
-            background_clear_context,
-            background_pre_send_hook,
-        ) = match runtime_preparation {
+        let (mut runtime_options, background_clear_context, background_pre_send_hook) =
+            match runtime_preparation {
             Some(preparation) => {
                 if preparation.runtime_options.conversation_id != conversation_key {
                     return Err(AppError::Conflict(
@@ -8538,7 +8441,6 @@ impl ConversationService {
                 }
                 (
                     preparation.runtime_options,
-                    preparation.desired_mode,
                     preparation.clear_context,
                     preparation.pre_send_hook,
                 )
@@ -8587,7 +8489,7 @@ impl ConversationService {
                         return Err(err);
                     }
                 };
-                (options, None, false, None)
+                (options, false, None)
             }
         };
         // Background callers may provide pre-built type-specific options.
@@ -9101,16 +9003,6 @@ impl ConversationService {
             }
 
             let background_runtime_preparation: Result<(), AppError> = async {
-                if let Some(desired_mode) = background_desired_mode
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|mode| !mode.is_empty())
-                {
-                    let current_mode = agent.get_mode().await?;
-                    if current_mode.mode != desired_mode {
-                        agent.set_mode(desired_mode).await?;
-                    }
-                }
                 if background_clear_context {
                     agent.clear_context().await?;
                 }
@@ -9139,7 +9031,7 @@ impl ConversationService {
                     false,
                     None,
                     Some(&receipt_error),
-                    // Preparation touches the agent (resume/set_mode/clear):
+                    // Preparation touches the agent (resume/clear):
                     // carry the classified code when one applies.
                     relay_error_code::classified_preparation_failure(&err),
                 );
@@ -10561,69 +10453,6 @@ impl ConversationService {
             ),
         );
         Ok(message_id)
-    }
-
-    /// Confirm one pending tool call on the exact IDMM-reserved turn.
-    ///
-    /// There is no fallback to the public confirmation path and no runtime
-    /// creation. The call ID must still be pending on the same generation and
-    /// root wire turn that was reserved.
-    #[tracing::instrument(skip_all, fields(user_id = %user_id, conversation_id = %conversation_id, call_id = %call_id))]
-    pub async fn idmm_confirm_active_turn(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        expected_scope: &IdmmTurnScope,
-        call_id: &str,
-        req: ConfirmRequest,
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
-    ) -> Result<(), AppError> {
-        if call_id.trim().is_empty() {
-            return Err(AppError::BadRequest(
-                "IDMM confirmation call_id must not be empty".to_owned(),
-            ));
-        }
-        let authority = self
-            .acquire_idmm_active_turn_authority(
-                user_id,
-                conversation_id,
-                Some(expected_scope),
-                ExactActiveTurnAccess::OrdinaryConversation,
-                runtime_registry,
-            )
-            .await?;
-        let confirmation_id = authority
-            .runtime
-            .get_confirmations()
-            .into_iter()
-            .find(|confirmation| confirmation.call_id == call_id)
-            .map(|confirmation| confirmation.id)
-            .ok_or_else(|| {
-                AppError::Conflict(
-                    "IDMM confirmation is no longer pending on the reserved turn"
-                        .to_owned(),
-                )
-            })?;
-        authority._lease.ensure_active()?;
-        if authority.active_turn.is_cancelled() {
-            return Err(AppError::Conflict(
-                "IDMM confirmation lost its active turn before delivery".to_owned(),
-            ));
-        }
-        authority
-            .runtime
-            .confirm(&req.msg_id, call_id, req.data, req.always_allow)?;
-        self.user_events.send_to_user(
-            user_id,
-            WebSocketMessage::new(
-                "confirmation.remove",
-                serde_json::json!({
-                    "conversation_id": conversation_id,
-                    "id": confirmation_id,
-                }),
-            ),
-        );
-        Ok(())
     }
 
     /// Public, durable at-most-once steering boundary.
@@ -14124,7 +13953,6 @@ struct PresetLineage<'a> {
     agent_name: &'a str,
     backend: &'a str,
     current_model_id: &'a str,
-    session_mode: &'a str,
 }
 
 impl<'a> PresetLineage<'a> {
@@ -14143,7 +13971,6 @@ impl<'a> PresetLineage<'a> {
             agent_name: s(extra, "agent_name"),
             backend: s(extra, "backend"),
             current_model_id: s(extra, "current_model_id"),
-            session_mode: s(extra, "session_mode"),
         }
     }
 
@@ -14167,7 +13994,6 @@ fn log_conversation_created(response: &ConversationResponse, extra: &serde_json:
             agent_name = lineage.agent_name,
             backend = lineage.backend,
             current_model_id = lineage.current_model_id,
-            session_mode = lineage.session_mode,
             "Conversation created from preset"
         );
     } else {
@@ -14819,7 +14645,6 @@ mod tests {
             "agent_name": "Claude Code",
             "backend": "claude",
             "current_model_id": "opus",
-            "session_mode": "default",
         });
         let lineage = PresetLineage::from_response_and_extra(&response, &extra);
         assert_eq!(lineage.agent_type, "nomi");
@@ -14830,7 +14655,6 @@ mod tests {
         assert_eq!(lineage.agent_name, "Claude Code");
         assert_eq!(lineage.backend, "claude");
         assert_eq!(lineage.current_model_id, "opus");
-        assert_eq!(lineage.session_mode, "default");
         assert_eq!(lineage.preset_id, "");
         assert_eq!(lineage.custom_agent_id, "");
         assert!(lineage.has_any_identity());

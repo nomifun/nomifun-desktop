@@ -16,12 +16,10 @@ import {
   MessageListProvider,
   useMessageLstCache,
 } from '@renderer/pages/conversation/Messages/hooks';
-import { usePendingConfirmationsRecovery } from '@renderer/pages/conversation/Messages/usePendingConfirmationsRecovery';
 import HOC from '@renderer/utils/ui/HOC';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import LocalImageView from '@renderer/components/media/LocalImageView';
 import NomiSendBox from './NomiSendBox';
-import { mergeWithCapabilities, type AgentModeOption } from '@/renderer/utils/model/agentModes';
 import { useNomiMessage } from './useNomiMessage';
 import type { NomiModelSelection } from './useNomiModelSelection';
 
@@ -29,7 +27,6 @@ const NomiChat: React.FC<{
   conversation_id: ConversationId;
   workspace: string;
   modelSelection: NomiModelSelection;
-  session_mode?: string;
   cron_job_id?: CronJobId;
   hideSendBox?: boolean;
   readOnly?: boolean;
@@ -38,8 +35,8 @@ const NomiChat: React.FC<{
   loadedMcpStatuses?: IConversationMcpStatus[];
   agent_name?: string;
   isProcessing?: boolean;
-  /** Hide the permission/agent-mode selector in the send box (locked surfaces). */
-  hideModeSelector?: boolean;
+  /** Hide model and other editable controls on locked surfaces. */
+  hideAdvancedControls?: boolean;
   /** Conversation collaborator-model control rendered after the main model. */
   collaboratorSelectorNode?: React.ReactNode;
   /** Extra right-side tools used by projected task transcripts. */
@@ -48,7 +45,6 @@ const NomiChat: React.FC<{
   conversation_id,
   workspace,
   modelSelection,
-  session_mode,
   cron_job_id,
   hideSendBox,
   readOnly,
@@ -57,7 +53,7 @@ const NomiChat: React.FC<{
   loadedMcpStatuses,
   agent_name,
   isProcessing,
-  hideModeSelector,
+  hideAdvancedControls,
   collaboratorSelectorNode,
   extraRightTools,
 }) => {
@@ -66,17 +62,7 @@ const NomiChat: React.FC<{
   // companion's single session (which also absorbs every IM-channel turn and can
   // grow without bound), so a one-shot 10k fetch would crush the API/DOM.
   const historyPaging = useMessageLstCache(conversation_id, { windowed: true });
-  usePendingConfirmationsRecovery(conversation_id, { enabled: !readOnly });
-  const [dynamicModes, setDynamicModes] = useState<AgentModeOption[]>([]);
-  const turnActivity = useNomiMessage(conversation_id, {
-    readOnly,
-    onConfigChanged: (capabilities) => {
-      const modes = (capabilities as { modes?: string[] })?.modes;
-      if (modes && modes.length > 0) {
-        setDynamicModes(mergeWithCapabilities('nomi', modes));
-      }
-    },
-  });
+  const turnActivity = useNomiMessage(conversation_id, { readOnly });
   const updateLocalImage = LocalImageView.useUpdateLocalImage();
   useEffect(() => {
     updateLocalImage({ root: workspace });
@@ -126,12 +112,10 @@ const NomiChat: React.FC<{
             <NomiSendBox
               conversation_id={conversation_id}
               modelSelection={modelSelection}
-              session_mode={session_mode}
               agent_name={agent_name}
-              hideModeSelector={hideModeSelector}
+              hideAdvancedControls={hideAdvancedControls}
               collaboratorSelectorNode={collaboratorSelectorNode}
               extraRightTools={extraRightTools}
-              dynamicModes={dynamicModes}
               turnActivity={turnActivity}
             />
           )}

@@ -19,7 +19,7 @@ describe('display text normalization', () => {
 
   test('omits nullish optional values but keeps serializable values', () => {
     expect(optionalDisplayText(null)).toBeUndefined();
-    expect(optionalDisplayText({ description: 'needs confirmation' })).toBe('{\n  "description": "needs confirmation"\n}');
+    expect(optionalDisplayText({ description: 'needs attention' })).toBe('{\n  "description": "needs attention"\n}');
   });
 
   test('extracts text chunks from rich stream payloads without returning objects', () => {

@@ -30,7 +30,6 @@ const STORED_MESSAGE_TYPES = new Set<TMessage['type']>([
   'tool_call',
   'tool_group',
   'agent_status',
-  'permission',
   'plan',
   'thinking',
   'available_commands',

@@ -923,11 +923,6 @@ const CompanionPage: React.FC = () => {
           armBubbleDismiss(STREAM_STALL_MS, () => endTurn(''));
           break;
         }
-        case 'permission':
-          // The bubble has no confirmation UI — route the user to the full
-          // chat surface where MessagePermission renders.
-          endTurn(t('nomi.companion.needsConfirm'));
-          break;
         case 'finish': {
           // The engine emits exactly one finish per turn; close even when the
           // turn produced no prose (tool-only turn → friendly fallback). Keep

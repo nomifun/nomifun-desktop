@@ -8,7 +8,6 @@
   "status": {
     "execution": {
       "planning": "Planning",
-      "awaiting_approval": "Awaiting approval",
       "running": "In progress",
       "paused": "Paused",
       "waiting_input": "Waiting for your decision",
@@ -31,9 +30,6 @@
     "replan": "Replan",
     "replanOk": "Collaboration plan updated",
     "replanError": "Failed to replan: {{error}}",
-    "approve": "Approve and start",
-    "approveOk": "Approved; collaboration started",
-    "approveError": "Approval failed: {{error}}",
     "planning": "Planning…",
     "pause": "Pause",
     "pauseOk": "Collaborative task paused",
@@ -54,13 +50,6 @@
     "placeholder": "Describe what should change while keeping useful completed work…",
     "summary": "Plan adjusted · {{kept}} kept · {{added}} added · {{removed}} removed",
     "error": "Failed to adjust the plan: {{error}}"
-  },
-  "approval": {
-    "eyebrow": "Awaiting approval",
-    "text": "The collaboration plan is ready. You can still adjust it before approving.",
-    "button": "Approve and start",
-    "ok": "Approved; collaboration started",
-    "error": "Approval failed: {{error}}"
   },
   "progress": {
     "title": "Collaboration progress",
@@ -98,13 +87,6 @@
       "rangePlaceholder": "Select models",
       "automaticHint": "The system selects among {{count}} available models for each task.",
       "required": "Select an available model"
-    },
-    "planGateLabel": "Start behavior",
-    "planGate": {
-      "automatic": "Start automatically",
-      "automaticHint": "Start collaboration as soon as the plan is ready; you can still intervene.",
-      "require_approval": "Wait for approval",
-      "require_approvalHint": "Pause after planning and wait for your approval."
     }
   },
   "step": {

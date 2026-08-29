@@ -547,11 +547,10 @@ async fn handle_dispatched(
         return None;
     }
 
-    // Decision interception (Bug 1, Case A): when the bound conversation is
-    // waiting on a relayed numbered decision, a reply is the user's *answer*,
-    // not a new prompt. Map a valid number onto an option and resolve it via
-    // `confirm`; re-show the list on any other reply. Runs before the busy
-    // guard because the conversation is intentionally blocked on the decision.
+    // Channel-owned stop interception: when the bound conversation is waiting
+    // on a numbered stop decision, a reply is the user's answer rather than a
+    // new prompt. Re-show the list on any invalid reply. This runs before the
+    // busy guard so a running conversation can still be stopped remotely.
     if let Some(cid) = conversation_id
         && let Some(pending) = msg_svc.pending_decisions().peek(cid)
     {
@@ -607,39 +606,6 @@ async fn handle_dispatched(
                     let _ = sender
                         .send_message(plugin_id, chat_id, plain_text_message(reply))
                         .await;
-                }
-                crate::pending_decision::PendingDecisionKind::AgentConfirm => {
-                    let option = &pending.options[idx];
-                    match msg_svc.submit_decision(cid, &pending.call_id, &option.option_id).await {
-                        Ok(()) => {
-                            msg_svc.pending_decisions().take(cid);
-                            info!(conversation_id = %cid, option_id = %option.option_id, "channel decision resolved");
-                            let _ = sender
-                                .send_message(
-                                    plugin_id,
-                                    chat_id,
-                                    plain_text_message(format!("\u{2705} 已选择：{}", option.label)),
-                                )
-                                .await;
-                        }
-                        Err(e) => {
-                            // The decision can no longer be submitted — most often it
-                            // was already answered from the desktop UI, or the turn
-                            // ended. Clear the stale entry so the user's next message
-                            // dispatches normally instead of being trapped on it.
-                            msg_svc.pending_decisions().take(cid);
-                            error!(error = %e, conversation_id = %cid, "channel decision submit failed; cleared stale pending");
-                            let _ = sender
-                                .send_message(
-                                    plugin_id,
-                                    chat_id,
-                                    plain_text_message(format!(
-                                        "\u{274c} 该决策已无法提交（可能已在桌面处理）：{e}。已清除等待，请重新发送你的指令。"
-                                    )),
-                                )
-                                .await;
-                        }
-                    }
                 }
             },
             None => {

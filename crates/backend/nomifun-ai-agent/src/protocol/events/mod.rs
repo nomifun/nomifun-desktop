@@ -1,4 +1,3 @@
-pub mod permission;
 pub mod session_updates;
 pub mod tool_call;
 
@@ -7,7 +6,6 @@ use ts_rs::TS;
 
 pub use nomifun_api_types::AgentStreamErrorData as ErrorEventData;
 
-pub use permission::PermissionEventData;
 pub use session_updates::{
     AgentStatusEventData, AvailableCommandsEventData, CronTriggerEventData, PlanEventData, SkillSuggestEventData,
     ThinkingEventData,
@@ -33,7 +31,6 @@ pub enum AgentStreamEvent {
     AgentStatus(AgentStatusEventData),
     Thinking(ThinkingEventData),
     Plan(PlanEventData),
-    Permission(PermissionEventData),
     SkillSuggest(SkillSuggestEventData),
     CronTrigger(CronTriggerEventData),
     SlashCommandsUpdated(serde_json::Value),

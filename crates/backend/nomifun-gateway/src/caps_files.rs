@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::deps::{CallerCtx, GatewayDeps};
-use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
+use crate::registry::{Capability, CapabilityMeta, EffectClass, Surface};
 use crate::server::ok;
 
 use nomifun_file::PathAuthority;
@@ -121,10 +121,9 @@ struct ShellOpenExternalParams {
 /// **Channel/Remote** sessions return `None`, keeping the file service's default
 /// `allowed_roots` confinement (unchanged, fail-safe for untrusted strangers).
 ///
-/// This governs only WHERE a file op may act. WHETHER it may run (the
-/// destructive/sensitive confirmation gate) stays with the DangerTier matrix in
-/// `registry::decide`, orthogonal to authority — a Desktop `remove` is still
-/// confirm-gated even though it is unrestricted in path.
+/// This is a typed resource boundary only. Once selected, the operation runs
+/// directly; the file service synchronously rejects paths outside the caller's
+/// authority.
 fn file_authority(ctx: &CallerCtx) -> Option<PathAuthority> {
     match ctx.surface() {
         Surface::Desktop => Some(PathAuthority::Unrestricted),
@@ -281,7 +280,7 @@ async fn shell_open_external(
 ) -> Value {
     // Every Gateway caller is an Agent surface. An http/https open here would
     // send web content to the operating-system browser, bypassing the managed
-    // Browser Hub's approval, egress and lifecycle policies — fail closed and
+    // Browser Hub's egress and lifecycle policies — fail closed and
     // steer the model to the Browser tool. The trusted UI link path
     // (`POST /api/shell/open-external`) does not route through this
     // capability and keeps its http/https support.
@@ -309,20 +308,19 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_fs_read_file",
             "files",
             "Read a file as UTF-8 text (output capped at ~64KB). Returns the content or an error if the path is outside the sandbox or does not exist.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, ctx, p| read_file(deps, ctx, p),
     ));
 
-    // 2. Write file (Write, deny_on Channel)
+    // 2. Write file
     out.push(Capability::new::<WriteFileParams, _, _>(
         CapabilityMeta::new(
             "nomi_fs_write_file",
             "files",
             "Write (create or overwrite) a file with the given UTF-8 content. On a local desktop session this can target any path the OS user can write; on external channel/remote sessions it is confined to the session's allowed roots.",
-            DangerTier::Write,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Write,
+        ),
         |deps, ctx, p| write_file(deps, ctx, p),
     ));
 
@@ -332,7 +330,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_fs_browse",
             "files",
             "List immediate children of a directory (one level). Returns name, full_path, relative_path, and is_dir for each entry.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, ctx, p| browse(deps, ctx, p),
     ));
@@ -343,7 +341,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_fs_list_workspace_files",
             "files",
             "Recursively list all files under a workspace root as a flat list (up to 20,000 entries). Useful for discovering project structure.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, ctx, p| list_workspace_files(deps, ctx, p),
     ));
@@ -354,45 +352,42 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_fs_get_metadata",
             "files",
             "Get metadata for a file or directory: name, path, size (bytes), MIME type, last_modified (unix timestamp), and whether it is a directory.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, ctx, p| get_metadata(deps, ctx, p),
     ));
 
-    // 6. Remove entry (Destructive, deny_on Channel)
+    // 6. Remove entry
     out.push(Capability::new::<RemoveParams, _, _>(
         CapabilityMeta::new(
             "nomi_fs_remove",
             "files",
             "Delete a file or directory (recursively). Irreversible — the snapshot system can restore if initialized, but the raw FS deletion cannot be undone.",
-            DangerTier::Destructive,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Destructive,
+        ),
         |deps, ctx, p| remove(deps, ctx, p),
     ));
 
-    // 7. Rename entry (Write, deny_on Channel)
+    // 7. Rename entry
     out.push(Capability::new::<RenameParams, _, _>(
         CapabilityMeta::new(
             "nomi_fs_rename",
             "files",
             "Rename a file or directory (same parent, new name). Returns the new absolute path on success.",
-            DangerTier::Write,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Write,
+        ),
         |deps, ctx, p| rename(deps, ctx, p),
     ));
 
-    // 8. Shell open external (Write, deny_on Channel). Mailto only: Agent web
+    // 8. Shell open external. Mailto only: Agent web
     //    opens fail closed toward the managed Browser tool.
     out.push(Capability::new::<ShellOpenExternalParams, _, _>(
         CapabilityMeta::new(
             "nomi_shell_open_external",
             "files",
             "Open a mailto: link in the user's default mail client. Web URLs (http/https) are rejected: read or interact with web pages through the managed Browser tool instead.",
-            DangerTier::Write,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Write,
+        ),
         |deps, ctx, p| shell_open_external(deps, ctx, p),
     ));
 }

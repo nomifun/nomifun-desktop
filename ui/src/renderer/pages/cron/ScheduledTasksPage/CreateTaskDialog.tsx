@@ -14,7 +14,6 @@ import { useConversationAgents } from '@renderer/pages/conversation/hooks/useCon
 import { presetSupportsTarget } from '@/common/types/agent/presetTypes';
 import { resolvePresetCatalogName } from '@renderer/utils/model/presetPresentation';
 import dayjs from 'dayjs';
-import { getFullAutoMode } from '@renderer/utils/model/agentModes';
 import type { TProviderWithModel } from '@/common/config/storage';
 import type { ConversationId, ProviderId } from '@/common/types/ids';
 import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
@@ -433,7 +432,6 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
         agent_config = {
           provider_id: providerId,
           name: geminiCurrentModel.name,
-          mode: getFullAutoMode('nomi'),
           model,
           workspace,
           clear_context_each_run: shouldClearContextEachRun,

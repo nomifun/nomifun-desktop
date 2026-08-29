@@ -422,8 +422,6 @@ pub struct GatewayCapabilityScope {
     pub companion_id: Option<CompanionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_platform: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_mode: Option<String>,
     pub profile: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_tools: Vec<String>,
@@ -440,7 +438,6 @@ impl GatewayCapabilityScope {
         }
 
         if !canonical_optional(self.channel_platform.as_deref())
-            || !canonical_optional(self.session_mode.as_deref())
             || !canonical(&self.profile)
             || !GatewayMcpConfig::is_known_profile(&self.profile)
             || self.excluded_tools.iter().any(|name| !canonical(name))
@@ -623,7 +620,6 @@ impl GatewayMcpConfig {
         conversation_id: &str,
         companion_id: Option<&str>,
         channel_platform: Option<&str>,
-        session_mode: Option<&str>,
         excluded_tools: &[String],
     ) -> Result<GatewayMcpChildConfig, LoopbackCapabilityError> {
         let channel_platform = channel_platform.map(str::to_owned);
@@ -638,7 +634,6 @@ impl GatewayMcpConfig {
                 .map_err(|_| LoopbackCapabilityError::InvalidIdentity)?,
             profile: Self::default_profile_for_session(channel_platform.as_deref()).to_owned(),
             channel_platform,
-            session_mode: session_mode.map(str::to_owned),
             excluded_tools,
             instance_owner: user_id == self.authoritative_user_id.as_ref(),
         };
@@ -979,7 +974,6 @@ mod tests {
                 "0190f5fe-7c00-7a00-8abc-012345678901",
                 Some(TEST_COMPANION_ID),
                 Some("lark"),
-                Some("yolo"),
                 &["nomi_delegate".into(), "nomi_delegate".into()],
             )
             .unwrap();
@@ -1042,7 +1036,6 @@ mod tests {
                 "0190f5fe-7c00-7a00-8abc-012345678901",
                 None,
                 None,
-                None,
                 &[],
             )
             .unwrap();
@@ -1060,7 +1053,6 @@ mod tests {
                 TEST_USER_ID,
                 "0190f5fe-7c00-7a00-8abc-012345678902",
                 Some(TEST_COMPANION_ID),
-                None,
                 None,
                 &[],
             )
@@ -1082,7 +1074,6 @@ mod tests {
             .issue_for_conversation(
                 TEST_USER_ID,
                 "0190f5fe-7c00-7a00-8abc-012345678901",
-                None,
                 None,
                 None,
                 &[],

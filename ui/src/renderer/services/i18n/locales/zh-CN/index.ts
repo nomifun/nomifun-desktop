@@ -4,7 +4,6 @@
  */
 
 import common from './common.json';
-import agentMode from './agentMode.json';
 import update from './update.json';
 import login from './login.json';
 import fileSelection from './fileSelection.json';
@@ -39,7 +38,6 @@ import miniApps from './miniApps.json';
 
 export default {
   common,
-  agentMode,
   update,
   login,
   fileSelection,

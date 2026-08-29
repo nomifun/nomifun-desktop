@@ -11,13 +11,11 @@ use async_trait::async_trait;
 use nomifun_ai_agent::{AgentStreamEvent, TurnStopReason};
 use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
 use nomifun_api_types::{
-    ConfirmRequest, ConversationRuntimeStateKind, ConversationRuntimeSummary, IdmmTargetKind,
-    SendMessageRequest,
+    ConversationRuntimeStateKind, ConversationRuntimeSummary, IdmmTargetKind, SendMessageRequest,
 };
-use nomifun_common::{
-    AppError, CompanionId, Confirmation, ConversationId, ConversationStatus,
-    TerminalId, UserId,
-};
+use nomifun_common::{AppError, ConversationId, ConversationStatus, TerminalId, UserId};
+#[cfg(test)]
+use nomifun_common::CompanionId;
 use nomifun_conversation::{ConversationService, IdmmTurnScope};
 use nomifun_db::{IConversationRepository, SortOrder};
 use nomifun_terminal::TerminalDriver;
@@ -26,7 +24,9 @@ use tokio::sync::mpsc;
 use crate::detector::{TerminalDetector, signal_from_agent_error};
 #[cfg(test)]
 use crate::detector::{detect_chat_open_question, has_open_intent};
-use crate::signal::{DecisionKind, DecisionPrompt, DecisionSource, PermissionConfirm, SessionSignal, WakeAction};
+#[cfg(test)]
+use crate::signal::{DecisionKind, DecisionPrompt, DecisionSource};
+use crate::signal::{SessionSignal, WakeAction};
 
 /// Lightweight session metadata for gating + ownership.
 #[derive(Debug, Clone)]
@@ -76,9 +76,8 @@ pub trait SessionProbe: Send + Sync {
     async fn fallback_model(&self) -> Option<(String, String)> {
         None
     }
-    /// On arm, the session's CURRENT live structured decision, if any.
-    /// Persisted assistant text is terminal history and must never be treated as
-    /// fresh execution authority.
+    /// Current live option/open-question authority, if the target can expose
+    /// one without replaying completed history.
     async fn pending_signal(&self) -> Option<SessionSignal> {
         None
     }
@@ -96,54 +95,8 @@ pub fn map_agent_event(ev: &AgentStreamEvent) -> Option<SessionSignal> {
         // truncated turn must not look clean either; `finish_signal` owns the
         // whole mapping so this lane and the turn-end lane cannot disagree.
         AgentStreamEvent::Finish(d) => Some(finish_signal(d.stop_reason, false)),
-        AgentStreamEvent::Permission(d) => Some(SessionSignal::Decision(
-            permission_decision_from_confirmation(d.confirmation()),
-        )),
         // All other events are activity → reset idle.
         _ => Some(SessionSignal::Working),
-    }
-}
-
-/// A `Confirmation.command_type` ("read"/"edit"/"execute") is auto-safe when
-/// read-only (or unknown).
-fn command_type_is_safe(command_type: Option<&str>) -> bool {
-    !matches!(command_type, Some("edit") | Some("execute"))
-}
-
-/// Build a structured permission decision from a `Confirmation` (nomi/openclaw
-/// path). The safe "proceed once" option is
-/// matched by its submit-value token (kind isn't carried on a `Confirmation`).
-fn permission_decision_from_confirmation(conf: &Confirmation) -> DecisionPrompt {
-    let safe_tool = command_type_is_safe(conf.command_type.as_deref());
-    let options: Vec<(String, String)> = conf
-        .options
-        .iter()
-        .map(|o| (o.label.clone(), o.value.as_str().unwrap_or_default().to_string()))
-        .collect();
-    let safe_value = if safe_tool {
-        options
-            .iter()
-            .map(|(_, v)| v.clone())
-            .find(|v| {
-                let low = v.to_lowercase();
-                (low.contains("once") || low.contains("proceed") || low == "allow" || low == "yes")
-                    && !low.contains("always")
-                    && !crate::config::is_cancel_option(v)
-            })
-    } else {
-        None
-    };
-    DecisionPrompt {
-        text: conf.title.clone().filter(|t| !t.is_empty()).unwrap_or_else(|| conf.description.clone()),
-        options: conf.options.iter().map(|o| o.label.clone()).collect(),
-        recommended: None,
-        source: DecisionSource::Permission,
-        kind: DecisionKind::Options,
-        permission: Some(PermissionConfirm {
-            call_id: conf.call_id.clone(),
-            options,
-            safe_value,
-        }),
     }
 }
 
@@ -166,38 +119,6 @@ fn idle_decision(saw_activity: bool, cancelled_since_work: bool) -> Option<Sessi
     }
 }
 
-/// Whether canonical companion/public-service markers identify a conversation
-/// whose numbered-option menus are routed to a remote human. IDMM must not
-/// auto-answer those menus: they are the human-in-the-loop wire contract for the
-/// channel relay or companion session.
-///
-/// Transport is determined separately from the row-level `channel_chat_id` in
-/// [`conversation_is_routed`]. Presentation metadata such as `channel_platform`
-/// is intentionally not routing state. Pure + unit-tested.
-fn extra_marks_routed_conversation(extra: &str) -> bool {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(extra) else {
-        return false;
-    };
-    let truthy_bool = |k: &str| v.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
-    truthy_bool("companion_session")
-        || v
-            .get("companion_id")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|id| CompanionId::parse(id).is_ok())
-}
-
-/// Whether a conversation routes its decisions to a REMOTE human, so IDMM must
-/// NOT auto-answer them. Combines the extra-marker check
-/// ([`extra_marks_routed_conversation`]) with the row-level `channel_chat_id`,
-/// which is set for every channel session — including non-Nomi channel sessions
-/// that carry no companion/public-service marker and would otherwise be
-/// indistinguishable from a plain desktop chat.
-/// A blank `channel_chat_id` does not count.
-fn conversation_is_routed(extra: &str, channel_chat_id: Option<&str>) -> bool {
-    extra_marks_routed_conversation(extra)
-        || channel_chat_id.map(|s| !s.trim().is_empty()).unwrap_or(false)
-}
-
 /// Decide the supervision signal for a chat-conversation turn-end (`Finish`).
 ///
 /// A user cancel stands the supervisor down. A turn the provider cut short
@@ -209,8 +130,7 @@ fn conversation_is_routed(extra: &str, channel_chat_id: Option<&str>) -> bool {
 ///
 /// Every other clean `Finish` is absorbing: assistant prose, option-looking
 /// text, and open questions are all terminal output and cannot create a new
-/// `Decision` after the turn completed. Only live structured events (for
-/// example `Permission`) may carry decision authority.
+/// `Decision` after the turn completed.
 fn finish_signal(stop_reason: Option<TurnStopReason>, cancelled_since_work: bool) -> SessionSignal {
     if matches!(stop_reason, Some(TurnStopReason::Cancelled)) || cancelled_since_work {
         return SessionSignal::Cancelled;
@@ -234,42 +154,33 @@ fn finish_signal(stop_reason: Option<TurnStopReason>, cancelled_since_work: bool
     }
 }
 
-/// On-arm recovery of a pending tool-permission CONFIRMATION (the agent is
-/// BLOCKED awaiting approval right now).
-///
-/// `observe()` subscribes only to FUTURE events, so a `Permission` event the
-/// agent emitted BEFORE the watch armed is invisible to the
-/// live lane. Persisted assistant text is deliberately not replayed; this live
-/// runtime list is the sole on-arm recovery lane.
-///
-/// Recover it from the live runtime's pending-confirmation list directly — the same
-/// `get_confirmations()` source `ConversationService::confirm`/`list_confirmations`
-/// read — and map the first to a `Decision` exactly as [`map_agent_event`] maps a
-/// live `Permission`. Queried via the runtime registry (mirroring `observe()`'s
-/// own `get_runtime`), NOT via `conversation_service`, so on-arm READ detection
-/// never couples to the row-owner check. Returns `None` when there is no live
-/// runtime or no pending confirmation. Pure given the runtime registry; the mapping is
-/// the unit-tested [`permission_decision_from_confirmation`].
-fn pending_confirmation_signal(
-    runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
-    conversation_id: &str,
-) -> Option<SessionSignal> {
-    let conf = runtime_registry
-        .get_runtime(conversation_id)?
-        .get_confirmations()
-        .into_iter()
-        .next()?;
-    Some(SessionSignal::Decision(permission_decision_from_confirmation(&conf)))
-}
-
-/// Persisted assistant rows are immutable terminal history, never a source of
-/// fresh decision authority. Kept as a pure regression seam for the tests.
 #[cfg(test)]
 fn pending_signal_from_page(
     _extra: &str,
     _messages: &[nomifun_db::models::MessageRow],
 ) -> Option<(SessionSignal, i64)> {
     None
+}
+
+#[cfg(test)]
+fn extra_marks_routed_conversation(extra: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(extra) else {
+        return false;
+    };
+    value
+        .get("companion_session")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        || value
+            .get("companion_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| CompanionId::parse(id).is_ok())
+}
+
+#[cfg(test)]
+fn conversation_is_routed(extra: &str, channel_chat_id: Option<&str>) -> bool {
+    extra_marks_routed_conversation(extra)
+        || channel_chat_id.is_some_and(|value| !value.trim().is_empty())
 }
 
 /// Whether both durable lifecycle state and the exact in-process turn owner
@@ -290,11 +201,7 @@ fn has_live_turn_authority(
         && runtime.is_processing
         && runtime.active_turn_id.is_some()
         && runtime.processing_started_at.is_some()
-        && matches!(
-            &runtime.state,
-            ConversationRuntimeStateKind::Running
-                | ConversationRuntimeStateKind::WaitingConfirmation
-        )
+        && runtime.state == ConversationRuntimeStateKind::Running
 }
 
 /// Supervises a chat conversation's Agent runtime.
@@ -457,33 +364,6 @@ impl SessionProbe for ConversationProbe {
             )
         })?;
         let owner_id = self.owner_id().await?;
-        // Structured tool-permission approval: resolve the agent's pending
-        // confirmation oneshot via `confirm` (a hidden chat message would never
-        // clear it). `data` carries the submit-value under BOTH keys so either
-        // backend resolves it (ACP reads `option_id`, nomi reads `value`).
-        if let WakeAction::Confirm {
-            call_id,
-            value,
-            always_allow,
-        } = action
-        {
-            let req = ConfirmRequest {
-                msg_id: String::new(),
-                data: serde_json::json!({ "option_id": value, "value": value }),
-                always_allow: *always_allow,
-            };
-            return self
-                .conversation_service
-                .idmm_confirm_active_turn(
-                    &owner_id,
-                    self.conversation_id.as_str(),
-                    expected_scope,
-                    call_id,
-                    req,
-                    &self.runtime_registry,
-                )
-                .await;
-        }
         // Only the send-loop owns the AgentTurnHandle/relay continuity needed
         // for a same-turn model failover. The external IDMM observer may ask the
         // service seam, but it must never degrade a refusal into a hidden Retry
@@ -509,7 +389,7 @@ impl SessionProbe for ConversationProbe {
             WakeAction::Retry => "Please continue.".to_string(),
             WakeAction::Failover => unreachable!("failover returns above"),
             WakeAction::SendText(s) | WakeAction::AnswerChoice(s) => s.clone(),
-            WakeAction::Wait(_) | WakeAction::Stop(_) | WakeAction::Confirm { .. } => return Ok(()),
+            WakeAction::Wait(_) | WakeAction::Stop(_) => return Ok(()),
         };
         let req = SendMessageRequest {
             content,
@@ -593,28 +473,6 @@ impl SessionProbe for ConversationProbe {
         Some((pm.provider_id, pm.model))
     }
 
-    async fn pending_signal(&self) -> Option<SessionSignal> {
-        // The row is still used for the routing gate: channel/companion
-        // confirmations belong to their remote human, never IDMM.
-        let row = self
-            .conversation_repo
-            .get(self.conversation_id.as_ref())
-            .await
-            .ok()??;
-        if conversation_is_routed(&row.extra, row.channel_chat_id.as_deref()) {
-            return None;
-        }
-        let runtime = self
-            .conversation_service
-            .runtime_summary_for(self.conversation_id.as_str())
-            .await;
-        if !has_live_turn_authority(row.status.as_deref(), &runtime) {
-            return None;
-        }
-        // The sole recovery source is a confirmation that is still live in the
-        // runtime. Completed assistant rows are not scanned or replayed.
-        pending_confirmation_signal(&self.runtime_registry, self.conversation_id.as_str())
-    }
 }
 
 // ──────────────────────────────── TerminalProbe ───────────────────────────
@@ -622,7 +480,7 @@ impl SessionProbe for ConversationProbe {
 /// Map a structured terminal lifecycle event to a supervision signal.
 /// TurnEnd is always Done. ToolUse/SessionStart→Working (activity, arms
 /// work-in-progress); Notification→Idle (claude's "agent is waiting for
-/// input/permission" hook — the precise wait signal replacing the unreliable
+/// input-needed hook — the precise wait signal replacing the unreliable
 /// byte-timeout idle; only claude registers it, so codex/unknown get no
 /// idle-nudge). Decision/ProviderError content for the OPTIONS path still comes
 /// from the byte-scan content channel, not lifecycle hooks.
@@ -943,12 +801,6 @@ impl SessionProbe for TerminalProbe {
         Ok(crate::util::tail_chars(&sb, max_chars))
     }
 
-    async fn pending_signal(&self) -> Option<SessionSignal> {
-        // Re-arm is not user intent. Scrollback may describe an already
-        // completed turn, so it can never be replayed into a fresh Decision.
-        None
-    }
-
     fn is_alive(&self) -> bool {
         self.driver.is_alive(self.terminal_id.as_str())
     }
@@ -1000,7 +852,6 @@ mod tests {
             has_runtime: true,
             runtime_status,
             is_processing,
-            pending_confirmations: 0,
             active_turn_id: processing_started_at
                 .map(|_| "0190f5fe-7c00-7a00-8000-000000000002".to_owned()),
             processing_started_at,
@@ -1063,16 +914,6 @@ mod tests {
     }
 
     #[test]
-    fn live_waiting_confirmation_retains_structured_confirm_authority() {
-        let waiting = runtime_summary(
-            ConversationRuntimeStateKind::WaitingConfirmation,
-            Some(ConversationStatus::Running),
-            Some(42),
-        );
-        assert!(has_live_turn_authority(Some("running"), &waiting));
-    }
-
-    #[test]
     fn map_agent_event_error_maps_to_provider_or_agent() {
         let ev = AgentStreamEvent::Error(AgentStreamErrorData::classified(
             "500",
@@ -1112,71 +953,6 @@ mod tests {
             stop_reason: Some(TurnStopReason::EndTurn),
         });
         assert_eq!(map_agent_event(&ev), Some(SessionSignal::Done));
-    }
-
-    #[test]
-    fn map_agent_event_permission_is_decision() {
-        let mut conf = confirmation("read");
-        conf.title = Some("allow write?".into());
-        let ev = AgentStreamEvent::Permission(conf.into());
-        match map_agent_event(&ev) {
-            Some(SessionSignal::Decision(d)) => {
-                assert_eq!(d.source, DecisionSource::Permission);
-                assert!(d.text.contains("allow write"));
-            }
-            other => panic!("expected decision, got {other:?}"),
-        }
-    }
-
-    fn confirmation(command_type: &str) -> Confirmation {
-        use nomifun_common::ConfirmationOption;
-        Confirmation {
-            id: "c1".into(),
-            call_id: "call-1".into(),
-            title: Some("tool permission".into()),
-            action: None,
-            description: command_type.into(),
-            command_type: Some(command_type.into()),
-            options: vec![
-                ConfirmationOption {
-                    label: "Allow once".into(),
-                    value: serde_json::json!("proceed_once"),
-                    params: None,
-                },
-                ConfirmationOption {
-                    label: "Always".into(),
-                    value: serde_json::json!("proceed_always"),
-                    params: None,
-                },
-                ConfirmationOption {
-                    label: "Reject".into(),
-                    value: serde_json::json!("cancel"),
-                    params: None,
-                },
-            ],
-            screenshot: None,
-        }
-    }
-
-    #[test]
-    fn permission_from_confirmation_read_is_auto_safe() {
-        // A read-only tool: call_id + structured options preserved, and the
-        // "proceed once" value is the conservatively-safe auto-approve value.
-        let dp = permission_decision_from_confirmation(&confirmation("read"));
-        let perm = dp.permission.expect("structured permission");
-        assert_eq!(perm.call_id, "call-1");
-        assert_eq!(perm.options.len(), 3);
-        assert_eq!(perm.safe_value.as_deref(), Some("proceed_once"));
-    }
-
-    #[test]
-    fn permission_from_confirmation_execute_has_no_safe_value() {
-        // A write/exec tool must NOT carry an auto-safe value — it escalates to
-        // the sidecar (model) or a human.
-        let dp = permission_decision_from_confirmation(&confirmation("execute"));
-        let perm = dp.permission.expect("structured permission");
-        assert!(perm.safe_value.is_none(), "execute must not be auto-safe");
-        assert_eq!(perm.call_id, "call-1");
     }
 
     #[test]
@@ -1297,17 +1073,6 @@ mod tests {
     }
 
     #[test]
-    fn map_agent_event_structured_permission_remains_decision() {
-        let mut conf = confirmation("edit");
-        conf.title = Some("Allow file write?".into());
-        let event = AgentStreamEvent::Permission(conf.into());
-        assert!(
-            matches!(map_agent_event(&event), Some(SessionSignal::Decision(_))),
-            "live structured permission events must retain decision authority"
-        );
-    }
-
-    #[test]
     fn map_lifecycle_event_maps_kinds_to_signals() {
         use nomifun_terminal::LifecycleKind;
         assert_eq!(map_lifecycle_event(LifecycleKind::TurnEnd), Some(SessionSignal::Done));
@@ -1423,7 +1188,6 @@ mod tests {
             recommended: None,
             source: DecisionSource::TerminalScan,
             kind: DecisionKind::OpenQuestion,
-            permission: None,
         };
         // First emission of a prompt passes the guard.
         assert!(dedupe_should_send(&SessionSignal::Decision(dp("要不要试试？")), &mut last));
@@ -1717,11 +1481,6 @@ mod tests {
             WakeAction::Retry,
             WakeAction::SendText("continue".into()),
             WakeAction::AnswerChoice("1".into()),
-            WakeAction::Confirm {
-                call_id: "call-1".into(),
-                value: "allow".into(),
-                always_allow: false,
-            },
             WakeAction::Wait(Duration::from_millis(1)),
             WakeAction::Stop("human review".into()),
         ] {
@@ -2067,8 +1826,7 @@ mod tests {
     }
 
     /// Drive the persisted-row portion of `ConversationProbe::pending_signal`.
-    /// Without a live runtime confirmation, every completed row is terminal and
-    /// therefore yields `None`.
+    /// Completed rows are terminal and therefore yield `None`.
     async fn pending_signal_with_repo_cancel(
         conversation_id: &str,
         repo: Arc<StubConvRepo>,

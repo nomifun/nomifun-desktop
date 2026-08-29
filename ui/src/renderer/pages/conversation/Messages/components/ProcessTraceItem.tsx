@@ -28,7 +28,6 @@ import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
 import type { MessageId } from '@/common/types/ids';
 import { getProcessItemState, mergeProcessStates } from '../turnProcessState';
 import MessageThinking from './MessageThinking';
-import MessagePermission from './MessagePermission';
 import {
   buildToolReceiptDetailRows,
   type ToolReceiptAction,
@@ -84,7 +83,6 @@ type ProcessTraceRow = {
 const defaultToolSummaryByState: Record<TurnDisclosureProcessState, string> = {
   completed: 'Ran {{target}}',
   running: 'Running {{target}}',
-  waiting: 'Waiting to confirm {{target}}',
   failed: 'Failed {{target}}',
   canceled: 'Canceled {{target}}',
 };
@@ -762,25 +760,6 @@ const ProcessTraceItem: React.FC<{
                       target: item.content.agent_name || item.content.backend,
                       defaultValue: 'Connecting {{target}}',
                     }),
-            },
-          ]}
-        />
-      );
-    case 'permission':
-      if (state === 'waiting') return <MessagePermission message={item} />;
-      return (
-        <ProcessTraceRows
-          rows={[
-            {
-              key: item.id,
-              state,
-              label: t('messages.processReceipt.waitingPermission', {
-                target: compactReceiptText(
-                  item.content.title || item.content.description,
-                  t('messages.permissionRequest')
-                ),
-                defaultValue: 'Waiting to confirm {{target}}',
-              }),
             },
           ]}
         />

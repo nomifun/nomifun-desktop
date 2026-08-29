@@ -1,6 +1,6 @@
 [package]
 name = "nomi-cli"
-description = "CLI binary for Nomi — a multi-provider AI agent with tool execution and delegation"
+description = "FullAuto CLI binary for Nomi with multi-provider tool execution and delegation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

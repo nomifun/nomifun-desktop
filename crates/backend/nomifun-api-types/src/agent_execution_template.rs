@@ -3,7 +3,7 @@
 //! A template is authoring data only. Instantiation copies its participants
 //! into an Agent Execution and never leaves a live template reference behind.
 
-use nomifun_common::{AdaptationPolicy, DecisionPolicy, DelegationPolicy, PlanGate};
+use nomifun_common::{AdaptationPolicy, DecisionPolicy, DelegationPolicy};
 use serde::{Deserialize, Serialize};
 
 use crate::webhook::double_option;
@@ -239,8 +239,6 @@ pub struct CreateExecutionFromTemplateRequest {
     #[serde(default)]
     pub delegation_policy: DelegationPolicy,
     #[serde(default)]
-    pub plan_gate: PlanGate,
-    #[serde(default)]
     pub adaptation_policy: AdaptationPolicy,
     #[serde(default)]
     pub decision_policy: DecisionPolicy,
@@ -311,6 +309,13 @@ mod tests {
             serde_json::from_value::<CreateExecutionFromTemplateRequest>(serde_json::json!({
                 "goal": "ship",
                 "lead_conversation_id": "conversation-1"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CreateExecutionFromTemplateRequest>(serde_json::json!({
+                "goal": "ship",
+                "plan_gate": "automatic"
             }))
             .is_err()
         );

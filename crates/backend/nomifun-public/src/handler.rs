@@ -1,10 +1,8 @@
 //! `RemoteMcpHandler` — the rmcp `ServerHandler` that projects the gateway
-//! `Registry` onto the installation-owner Remote surface.
+//! `Registry` onto the authenticated installation-owner Remote surface.
 //!
-//! `list_tools` → `Registry::tool_specs(Surface::Remote)` (Deny-gated tools are
-//! invisible). `call_tool` → `Registry::dispatch_opt` with a `CallerCtx` whose
-//! `remote` marker forces `Surface::Remote`, so the danger matrix (Read/Write
-//! Allow, Destructive Confirm, Sensitive Deny) is enforced centrally. The
+//! `list_tools` and `call_tool` use the shared Registry schemas and dispatch
+//! directly after transport/session/owner and typed resource checks. The
 //! handler is stateless apart from the shared `Arc<GatewayDeps>`; a fresh
 //! instance is produced per session by the transport's service factory.
 
@@ -183,8 +181,8 @@ impl ServerHandler for RemoteMcpHandler {
         info.instructions = Some(
             "NomiFun Desktop Remote capabilities. These tools drive the NomiFun platform \
              (agent / browser / computer / knowledge / files / and platform control). \
-             Destructive actions require re-calling with `confirm: true`; some sensitive \
-             actions are disabled on this surface."
+             Selected capabilities run directly after authenticated owner and typed \
+             resource validation."
                 .to_string(),
         );
         info

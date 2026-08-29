@@ -53,7 +53,6 @@ export type GuidSendDeps = {
   selectedAgent: string;
   selectedAgentKey: string;
   selectedAgentInfo: AvailableAgent | undefined;
-  selectedMode: string;
 
   current_model: TProviderWithModel | undefined;
 
@@ -124,7 +123,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selectedAgent,
     selectedAgentKey,
     selectedAgentInfo,
-    selectedMode,
     current_model,
     findAgentByKey,
     getEffectiveAgentType,
@@ -214,7 +212,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
             // Nomi consumes the authoritative session snapshot instead of
             // reloading only user servers from the global MCP repository.
             selected_session_mcp_servers: selectedAllSessionMcpServers,
-            session_mode: selectedMode,
           },
         });
 
@@ -284,7 +281,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         cli_path: resolvedAgentInfo?.cli_path,
         custom_workspace: isCustomWorkspace,
         is_preset,
-        session_mode: selectedMode,
         extra: {
           default_files: files,
           exclude_auto_inject_skills: excludeBuiltinSkills,
@@ -334,7 +330,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selectedAgent,
     selectedAgentKey,
     selectedAgentInfo,
-    selectedMode,
     current_model,
     findAgentByKey,
     getEffectiveAgentType,

@@ -3427,7 +3427,6 @@ impl StreamRelay {
             AgentStreamEvent::ToolGroup(_) => "ToolGroup",
             AgentStreamEvent::AgentStatus(_) => "AgentStatus",
             AgentStreamEvent::Plan(_) => "Plan",
-            AgentStreamEvent::Permission(_) => "Permission",
             AgentStreamEvent::SkillSuggest(_) => "SkillSuggest",
             AgentStreamEvent::CronTrigger(_) => "CronTrigger",
             AgentStreamEvent::SlashCommandsUpdated(_) => "SlashCommandsUpdated",

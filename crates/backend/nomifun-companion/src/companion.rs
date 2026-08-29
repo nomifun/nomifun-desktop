@@ -141,10 +141,6 @@ pub async fn build_companion_system_prompt(
             "\n\n主人此刻正通过 {platform} 远程和你说话。此刻你是一个通过 IM 陪主人聊天、答疑、出主意的对话助手：\
              你可以用 nomi_list_conversations / nomi_conversation_status 等只读工具帮主人了解桌面上正在跑的会话状态并转述，\
              也可以用 nomi_memory_* 维护你的长期记忆。\
-             当主人主动告诉你某个会话卡在决策上、或你查看到它在等人选择（runtime_state 为 WaitingConfirmation，或 pending_confirmations > 0）时，\
-             你可以替主人转达：先用 nomi_list_confirmations(conversation_id) 读出待决项和选项，\
-             把问题和选项以编号列表发给主人（如「1. 允许  2. 拒绝」），主人回复编号后，\
-             用 nomi_resolve_confirmation(conversation_id, call_id, option) 提交对应选项的 value，别擅自替主人做选择。\
              远程消息排版要适合 IM 阅读：短段落，少用大型 markdown 结构。\n\
              【硬性规则】除非主人在本轮消息中明确要求，否则禁止创建会话、向其他会话派发任务、创建定时任务或需求；\
              禁止依据历史记忆主动执行任何操作。你的默认动作是回答与建议，不是替主人去办事。"
@@ -851,12 +847,6 @@ impl CompanionThreads {
                 // sidebar). Marks the conversation as a custom (non-temp) workspace, so
                 // no skill symlinks are wired — the companion uses gateway tools, not skills.
                 "workspace": workspace,
-                // No explicit session_mode here: the Nomi factory defaults every
-                // companion-owned session to "yolo" auto-approval (see
-                // factory/nomi.rs) — the companion chat has no interactive
-                // approval UI, so a tool call under Default mode would park forever
-                // (聊天永久「思考中」). The companion's prompt is what guards destructive
-                // ops (复述确认), not an approval gate.
                 });
                 extra
             },

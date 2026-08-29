@@ -5,8 +5,8 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::routing::{get, patch, post, put};
 
 use nomifun_api_types::{
-    ActiveCountResponse, ApiResponse, ApprovalCheckQuery, ApprovalCheckResponse, CloneConversationRequest,
-    ConfirmRequest, ConfirmationListResponse, ConversationArtifactListResponse, ConversationArtifactResponse,
+    ActiveCountResponse, ApiResponse, CloneConversationRequest,
+    ConversationArtifactListResponse, ConversationArtifactResponse,
     ConversationListResponse, ConversationResponse, CreateConversationRequest, ListConversationsQuery,
     ListMessagesQuery, MessageListResponse, MessageResponse, MessageSearchResponse, SearchMessagesQuery,
     SendMessageRequest, SendMessageResponse, UpdateConversationArtifactRequest, UpdateConversationRequest,
@@ -25,7 +25,7 @@ use crate::service::{
 };
 use crate::state::ConversationRouterState;
 
-/// Build the conversation router (CRUD + message flow + confirmation + extended operations).
+/// Build the conversation router (CRUD + message flow + extended operations).
 ///
 /// All routes require authentication (applied by the caller).
 pub fn conversation_routes(state: ConversationRouterState) -> Router {
@@ -72,19 +72,6 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
         )
         .route("/api/conversations/{conversation_id}/steer", post(steer))
         .route("/api/conversations/{conversation_id}/warmup", post(warmup))
-        // Confirmation system
-        .route(
-            "/api/conversations/{conversation_id}/confirmations",
-            get(list_confirmations),
-        )
-        .route(
-            "/api/conversations/{conversation_id}/confirmations/{call_id}/confirm",
-            post(confirm),
-        )
-        .route(
-            "/api/conversations/{conversation_id}/approvals/check",
-            get(check_approval),
-        )
         .route("/api/conversations/active-count", get(active_runtime_count))
         .route("/api/conversations/clone", post(clone))
         .route("/api/messages/search", get(search_messages))
@@ -684,73 +671,6 @@ async fn search_messages(
     Query(query): Query<SearchMessagesQuery>,
 ) -> Result<Json<ApiResponse<MessageSearchResponse>>, AppError> {
     let result = state.service.search_messages(&user.id, query).await?;
-    Ok(Json(ApiResponse::ok(result)))
-}
-
-// ── Confirmation handlers ─────────────────────────────────────────
-
-async fn list_confirmations(
-    State(state): State<ConversationRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    Path(conversation_id): Path<ConversationId>,
-) -> Result<Json<ApiResponse<ConfirmationListResponse>>, AppError> {
-    let items = state
-        .service
-        .list_confirmations(
-            &user.id,
-            conversation_id.as_str(),
-            &state.runtime_registry,
-        )
-        .await?;
-    Ok(Json(ApiResponse::ok(items)))
-}
-
-#[derive(serde::Deserialize)]
-struct ConfirmPathParams {
-    conversation_id: ConversationId,
-    call_id: String,
-}
-
-async fn confirm(
-    State(state): State<ConversationRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    Path(params): Path<ConfirmPathParams>,
-    body: Result<Json<ConfirmRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<()>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state
-        .service
-        .confirm(
-            &user.id,
-            params.conversation_id.as_str(),
-            &params.call_id,
-            req,
-            &state.runtime_registry,
-        )
-        .await?;
-    Ok(Json(ApiResponse::success()))
-}
-
-async fn check_approval(
-    State(state): State<ConversationRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    Path(conversation_id): Path<ConversationId>,
-    Query(query): Query<ApprovalCheckQuery>,
-) -> Result<Json<ApiResponse<ApprovalCheckResponse>>, AppError> {
-    if query.action.trim().is_empty() {
-        return Err(AppError::BadRequest("action must not be empty".into()));
-    }
-
-    let result = state
-        .service
-        .check_approval(
-            &user.id,
-            conversation_id.as_str(),
-            &query.action,
-            query.command_type.as_deref(),
-            &state.runtime_registry,
-        )
-        .await?;
     Ok(Json(ApiResponse::ok(result)))
 }
 

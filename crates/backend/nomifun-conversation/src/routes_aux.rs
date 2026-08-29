@@ -4,7 +4,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, Query, State};
 use axum::routing::{get, post};
 use nomifun_api_types::{
-    AgentModeResponse, ApiResponse, GetModelInfoResponse, SetModeRequest, SetModelRequest, SideQuestionRequest,
+    ApiResponse, GetModelInfoResponse, SetModelRequest, SideQuestionRequest,
     SideQuestionResponse, SlashCommandItem, WorkspaceBrowseQuery, WorkspaceEntry,
 };
 use nomifun_auth::CurrentUser;
@@ -21,10 +21,6 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
         .route(
             "/api/conversations/{conversation_id}/slash-commands",
             get(get_slash_commands),
-        )
-        .route(
-            "/api/conversations/{conversation_id}/mode",
-            get(get_mode).put(set_mode),
         )
         .route(
             "/api/conversations/{conversation_id}/model",
@@ -46,30 +42,6 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
 }
 
 // ── Route handlers ─────────────────────────────────────────────────
-
-async fn get_mode(
-    State(state): State<ConversationRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    Path(conversation_id): Path<ConversationId>,
-) -> Result<Json<ApiResponse<AgentModeResponse>>, AppError> {
-    Ok(Json(ApiResponse::ok(
-        state.service.get_mode(&user.id, conversation_id.as_str()).await?,
-    )))
-}
-
-async fn set_mode(
-    State(state): State<ConversationRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    Path(conversation_id): Path<ConversationId>,
-    body: Result<Json<SetModeRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<()>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state
-        .service
-        .set_mode(&user.id, conversation_id.as_str(), req)
-        .await?;
-    Ok(Json(ApiResponse::success()))
-}
 
 /// Clear a conversation's agent context (release model context) while keeping
 /// the visible message history. See [`ConversationService::clear_context`].

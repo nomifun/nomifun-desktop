@@ -7,7 +7,7 @@
 import type { MessageId } from '@/common/types/ids';
 
 export type TurnDisclosureRole = 'user' | 'assistant' | 'process' | 'process_content' | 'other';
-export type TurnDisclosureProcessState = 'completed' | 'running' | 'waiting' | 'failed' | 'canceled';
+export type TurnDisclosureProcessState = 'completed' | 'running' | 'failed' | 'canceled';
 
 export interface TurnDisclosureInputItem {
   id: string;
@@ -142,7 +142,7 @@ const getEffectiveProcessState = (
   options: { isClosed: boolean }
 ): TurnDisclosureProcessState => {
   const state = getProcessState(entry);
-  if (options.isClosed && (state === 'running' || state === 'waiting')) {
+  if (options.isClosed && state === 'running') {
     return 'completed';
   }
   return state;
@@ -157,7 +157,6 @@ const resolveDisclosureState = (
   options: { isClosed: boolean }
 ): TurnDisclosureProcessState => {
   const states = processItems.map((entry) => getEffectiveProcessState(entry, options));
-  if (states.includes('waiting')) return 'waiting';
   if (states.includes('running')) return 'running';
   if (states.includes('failed')) return 'failed';
   if (states.includes('canceled')) return 'canceled';
@@ -250,9 +249,7 @@ function buildSegmentOutput(
     ? terminalProcessState === 'canceled'
       ? 'canceled'
       : 'completed'
-    : resolvedState === 'waiting'
-      ? 'waiting'
-      : 'running';
+    : 'running';
 
   const disclosure: TurnDisclosureOutputItem = {
     type: 'turn_disclosure',
@@ -273,8 +270,8 @@ function buildSegmentOutput(
     processItemStates: Object.fromEntries(
       processItems.map((entry) => [entry.id, getEffectiveProcessState(entry, stateOptions)])
     ),
-    running: state === 'running' || state === 'waiting',
-    defaultCollapsed: state !== 'running' && state !== 'waiting',
+    running: state === 'running',
+    defaultCollapsed: state !== 'running',
   };
 
   const output: TurnDisclosureOutputItem[] = [];
@@ -348,8 +345,8 @@ const coalesceTurnDisclosures = (
       endAt: Math.max(existing.endAt, item.endAt),
       state,
       processItemStates: { ...existing.processItemStates, ...item.processItemStates },
-      running: state === 'running' || state === 'waiting',
-      defaultCollapsed: state !== 'running' && state !== 'waiting',
+      running: state === 'running',
+      defaultCollapsed: state !== 'running',
     };
   }
 

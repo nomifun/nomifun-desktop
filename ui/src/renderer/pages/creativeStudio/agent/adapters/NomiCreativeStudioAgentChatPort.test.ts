@@ -107,7 +107,6 @@ const turnStarted = (): IConversationTurnStartedEvent => ({
     has_runtime: true,
     runtime_status: 'running',
     is_processing: true,
-    pending_confirmations: 0,
     active_turn_id: turnId,
   },
 });
@@ -127,7 +126,6 @@ const turnCompleted = (
     has_runtime: false,
     runtime_status: 'finished',
     is_processing: false,
-    pending_confirmations: 0,
   },
   workspace: '',
   model: { platform: 'test', name: 'Test', use_model: model.model },

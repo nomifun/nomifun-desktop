@@ -29,9 +29,8 @@ interface Props {
  *     —— 后端 `patch_companion` 已把会话行模型同步成 `profile.model`（唯一事实源），
  *     `onSelectModel` 空操作禁止 per-conversation 改写。模型配置入口仅保留头部
  *     CompanionModelControl（写 profile.model，全局跟随）。
- *  2) 锁定工作路径 + yolo：workspace = 后端固定的伙伴专属目录；session_mode 固定
- *     'yolo' 且 `hideModeSelector` 隐藏权限选择器
- *     （伙伴会话后端强制 yolo 无审批，详见 companion.rs）。
+ *  2) 锁定工作路径与编辑控件：workspace 使用伙伴专属目录，模型和高级
+ *     配置只能从伙伴资料页调整。
  *
  * 外层标准 ChatLayout、工作区、模型入口和 AgentExecution 投影统一由
  * CompanionChatPanel 持有，保证加载/异常/模型缺失状态也不会丢失执行画布。
@@ -52,8 +51,7 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion }) => 
       conversation_id={conversation.id}
       workspace={workspace}
       modelSelection={modelSelection}
-      session_mode='yolo'
-      hideModeSelector
+      hideAdvancedControls
       agent_name={companion.profile?.name}
     />
   );

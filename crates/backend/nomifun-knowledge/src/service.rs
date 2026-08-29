@@ -4855,7 +4855,8 @@ impl KnowledgeService {
                     ))
                 })?;
             if metadata_is_link_or_reparse(&resolved_path, &metadata)
-                || filesystem_entry_identity(&metadata).as_deref() != Some(expected_identity)
+                || filesystem_entry_identity(&resolved_path, &metadata).as_deref()
+                    != Some(expected_identity)
             {
                 return Err(AppError::Conflict(
                     "knowledge document was replaced by another filesystem entry before save"
@@ -12446,7 +12447,7 @@ fn scan_knowledge_entry_projection(
                     rel_path: rel_path.clone(),
                     portable_rel_path,
                     kind: KNOWLEDGE_ENTRY_KIND_DIRECTORY.into(),
-                    fs_identity: filesystem_entry_identity(&metadata),
+                    fs_identity: filesystem_entry_identity(&path, &metadata),
                     source_item_id: None,
                     source_url: None,
                     source_relationship: None,
@@ -12463,7 +12464,7 @@ fn scan_knowledge_entry_projection(
                     rel_path,
                     portable_rel_path,
                     kind: KNOWLEDGE_ENTRY_KIND_FILE.into(),
-                    fs_identity: filesystem_entry_identity(&metadata),
+                    fs_identity: filesystem_entry_identity(&path, &metadata),
                     source_item_id,
                     source_url,
                     source_relationship,
@@ -12701,23 +12702,56 @@ fn select_projection_identity_candidate(
 }
 
 #[cfg(unix)]
-fn filesystem_entry_identity(metadata: &std::fs::Metadata) -> Option<String> {
+fn filesystem_entry_identity(_path: &Path, metadata: &std::fs::Metadata) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
     Some(format!("unix:{}:{}", metadata.dev(), metadata.ino()))
 }
 
 #[cfg(windows)]
-fn filesystem_entry_identity(metadata: &std::fs::Metadata) -> Option<String> {
-    use std::os::windows::fs::MetadataExt;
+fn filesystem_entry_identity(path: &Path, _metadata: &std::fs::Metadata) -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        GetFileInformationByHandle, OPEN_EXISTING,
+    };
+
+    let path = windows_api_path(path);
+    // SAFETY: path is NUL-terminated; the checked handle is closed exactly once.
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the output points to the exact Win32 structure for a live handle.
+    let succeeded = unsafe { GetFileInformationByHandle(handle, &mut information) != 0 };
+    // SAFETY: handle was returned by CreateFileW above.
+    unsafe {
+        CloseHandle(handle);
+    }
+    if !succeeded {
+        return None;
+    }
+    let file_index = (u64::from(information.nFileIndexHigh) << 32)
+        | u64::from(information.nFileIndexLow);
     Some(format!(
         "windows:{}:{}",
-        metadata.volume_serial_number()?,
-        metadata.file_index()?
+        information.dwVolumeSerialNumber, file_index
     ))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn filesystem_entry_identity(_metadata: &std::fs::Metadata) -> Option<String> {
+fn filesystem_entry_identity(_path: &Path, _metadata: &std::fs::Metadata) -> Option<String> {
     None
 }
 
@@ -12794,7 +12828,7 @@ fn projection_tree_level_matches(
             return false;
         };
         !metadata_is_link_or_reparse(&path, &metadata)
-            && filesystem_entry_identity(&metadata) == projected.fs_identity
+            && filesystem_entry_identity(&path, &metadata) == projected.fs_identity
     })
 }
 
@@ -13354,7 +13388,7 @@ fn recovery_tree_path_identity(
             "durable relocation recovery refuses an unsafe destination: {rel_path}"
         )));
     }
-    Ok(filesystem_entry_identity(&metadata))
+    Ok(filesystem_entry_identity(&path, &metadata))
 }
 
 fn recovery_absolute_path_exists(root: &Path, path: &Path) -> Result<bool, AppError> {
@@ -13498,7 +13532,7 @@ fn plan_durable_relocation_paths(
     Ok((
         source_path,
         join_tree_rel_path(&destination_parent_path, &target_name),
-        filesystem_entry_identity(&source_metadata),
+        filesystem_entry_identity(&source, &source_metadata),
     ))
 }
 
@@ -15679,6 +15713,7 @@ mod tests {
                 source_rel_path: "docs/note.md".into(),
                 destination_rel_path: "archive/note.md".into(),
                 source_fs_identity: filesystem_entry_identity(
+                    &vault.join("docs/note.md"),
                     &std::fs::metadata(vault.join("docs/note.md")).unwrap(),
                 ),
                 created_at: now_ms(),
@@ -15898,6 +15933,7 @@ mod tests {
                 source_rel_path: "Note.md".into(),
                 destination_rel_path: "note.md".into(),
                 source_fs_identity: filesystem_entry_identity(
+                    &vault.join("Note.md"),
                     &std::fs::metadata(vault.join("Note.md")).unwrap(),
                 ),
                 created_at: now_ms(),
@@ -15973,6 +16009,7 @@ mod tests {
                 source_rel_path: "second.md".into(),
                 destination_rel_path: "archive/second.md".into(),
                 source_fs_identity: filesystem_entry_identity(
+                    &vault.join("second.md"),
                     &std::fs::metadata(vault.join("second.md")).unwrap(),
                 ),
                 created_at: now_ms(),
@@ -16033,6 +16070,7 @@ mod tests {
             .await
             .unwrap();
         let source_identity = filesystem_entry_identity(
+            &vault.join("note.md"),
             &std::fs::metadata(vault.join("note.md")).unwrap(),
         );
         let prepared = operations

@@ -17,7 +17,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::deps::GatewayDeps;
-use crate::registry::{Capability, CapabilityMeta, DangerTier};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
 /// How many requirements the duplicate guard inspects (same tag, newest pages
@@ -85,7 +85,7 @@ struct RequirementUpdateParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RequirementDeleteParams {
-    /// The stable business id of the requirement to delete. Confirm the target with the user first.
+    /// The stable business id of the requirement to delete.
     #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
     requirement_id: RequirementId,
 }
@@ -236,7 +236,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_requirement_list",
             "requirement",
             "List requirements (the desktop task board). Paginated; filter by tag / status / full-text query.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| list(deps, p),
     ));
@@ -245,7 +245,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_requirement_create",
             "requirement",
             "Create a new requirement. Refuses to create a duplicate of an open requirement with the same tag + title (returns the existing one instead).",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| create(deps, p),
     ));
@@ -254,7 +254,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_requirement_update",
             "requirement",
             "Update a requirement's title, content, tag, status, or completion note.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| update(deps, p),
     ));
@@ -262,8 +262,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_requirement_delete",
             "requirement",
-            "Permanently delete a requirement. Confirm the target with the user first.",
-            DangerTier::Destructive,
+            "Permanently delete a requirement.",
+            EffectClass::Destructive,
         ),
         |deps, _ctx, p| delete(deps, p),
     ));

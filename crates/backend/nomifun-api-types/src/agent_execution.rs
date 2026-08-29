@@ -8,8 +8,7 @@ use nomifun_common::{
     AdaptationPolicy, AgentExecutionActorType, AgentExecutionEventKind, AgentExecutionStatus,
     AgentStepMode, AgentToolPolicy, DecisionPolicy, DelegationPolicy, ExecutionAttemptStatus,
     ExecutionStepKind, ExecutionStepStatus, MAX_AGENT_EXECUTION_MODELS,
-    MAX_AGENT_EXECUTION_PARALLELISM, ParticipantAssignmentSource, PlanGate, ProviderId,
-    StepFailurePolicy,
+    MAX_AGENT_EXECUTION_PARALLELISM, ParticipantAssignmentSource, ProviderId, StepFailurePolicy,
 };
 use serde::{Deserialize, Serialize};
 
@@ -292,7 +291,6 @@ pub struct AgentExecution {
     pub lead_conversation_id: Option<String>,
     pub work_dir: Option<String>,
     pub delegation_policy: DelegationPolicy,
-    pub plan_gate: PlanGate,
     pub adaptation_policy: AdaptationPolicy,
     pub decision_policy: DecisionPolicy,
     pub max_parallel: i64,
@@ -550,8 +548,6 @@ pub struct CreateAgentExecutionRequest {
     pub model_pool: ExecutionModelPool,
     #[serde(default = "default_delegation_policy")]
     pub delegation_policy: DelegationPolicy,
-    #[serde(default = "default_plan_gate")]
-    pub plan_gate: PlanGate,
     #[serde(default = "default_adaptation_policy")]
     pub adaptation_policy: AdaptationPolicy,
     #[serde(default = "default_decision_policy")]
@@ -576,10 +572,6 @@ pub struct CreateAgentExecutionRequest {
 
 fn default_delegation_policy() -> DelegationPolicy {
     DelegationPolicy::Automatic
-}
-
-fn default_plan_gate() -> PlanGate {
-    PlanGate::Automatic
 }
 
 fn default_adaptation_policy() -> AdaptationPolicy {
@@ -652,8 +644,6 @@ pub struct ReplanAgentExecutionRequest {
     pub model_pool: Option<ExecutionModelPool>,
     #[serde(default)]
     pub delegation_policy: Option<DelegationPolicy>,
-    #[serde(default)]
-    pub plan_gate: Option<PlanGate>,
     #[serde(default)]
     pub adaptation_policy: Option<AdaptationPolicy>,
     #[serde(default)]
@@ -790,7 +780,6 @@ mod tests {
             "lead_conversation_id": CONVERSATION_ID,
             "work_dir": null,
             "delegation_policy": "automatic",
-            "plan_gate": "automatic",
             "adaptation_policy": "fixed",
             "decision_policy": "automatic",
             "max_parallel": 1,
@@ -820,6 +809,25 @@ mod tests {
         legacy["id"] = legacy["execution_id"].take();
         legacy.as_object_mut().unwrap().remove("execution_id");
         assert!(serde_json::from_value::<AgentExecution>(legacy).is_err());
+    }
+
+    #[test]
+    fn execution_commands_reject_removed_plan_gate() {
+        assert!(
+            serde_json::from_value::<CreateAgentExecutionRequest>(serde_json::json!({
+                "goal": "ship",
+                "model_pool": { "mode": "automatic" },
+                "plan_gate": "automatic"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ReplanAgentExecutionRequest>(serde_json::json!({
+                "expected_version": 1,
+                "plan_gate": "automatic"
+            }))
+            .is_err()
+        );
     }
 
     #[test]

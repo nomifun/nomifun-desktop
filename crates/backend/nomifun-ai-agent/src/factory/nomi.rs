@@ -45,7 +45,6 @@ fn apply_model_only_ceiling(overrides: &mut NomiBuildExtra) {
     overrides.knowledge_writeback = false;
     overrides.knowledge_channel_write_enabled = false;
     overrides.allowed_tools = vec!["update_plan".to_owned()];
-    overrides.session_mode = Some("default".to_owned());
     overrides.max_turns = Some(1);
     overrides.goal = None;
     overrides.delegation_policy = DelegationPolicy::Disabled;
@@ -588,7 +587,6 @@ pub(super) async fn build(
     // 的 `agent.browserUse.fullPower` 开关，每会话构造时 LIVE 读（read_bool_pref 范式，与上面的启用开关
     // 同源），灌进 BrowserConfig.full_power，由 Hub-backed Browser tool adapter 在进入
     // BrowserLaneClient 前执行 evaluate gate。默认 OFF（host_default=false）——evaluate 是最高危
-    // 逃生舱，无 opt-in 即封死。**绝不看 session_mode**（不变量⑧）。
     let browser_full_power_default = read_bool_pref(
         &deps,
         PREF_BROWSER_FULL_POWER,
@@ -602,12 +600,6 @@ pub(super) async fn build(
     // P7A: site-memory LIVE 值。host_default=false（OFF）——把站点交互持久化到磁盘是隐私相关行为，
     // 须用户在 System Settings 显式 opt-in。
     let browser_site_memory_default = read_bool_pref(&deps, PREF_BROWSER_SITE_MEMORY, false).await;
-    // Phase D: takeover/approval gate LIVE value. host_default=true (ON): install a gate by
-    // default. Non-yolo sessions can prompt for risky Browser actions / gated cross-origin
-    // POSTs; full-auto/yolo sessions still install the gate, but the gate approves directly.
-    let browser_takeover_default = read_bool_pref(&deps, PREF_BROWSER_TAKEOVER, true).await;
-    let browser_unrestricted_approval_default =
-        read_bool_pref(&deps, PREF_BROWSER_UNRESTRICTED_APPROVAL, false).await;
     // P7B: visual-fallback LIVE 值。host_default=false（OFF）——每次兜底都过一遍视觉模型，有额外 token
     // 成本，须用户在 System Settings 显式 opt-in。
     let browser_visual_fallback_default =
@@ -683,23 +675,6 @@ pub(super) async fn build(
         context_limit: fields.context_limit.map(|v| v as u64),
         compat_overrides: fields.compat_overrides,
         session_directory,
-        // 默认授权模式 = 全自动（yolo）。产品决策：所有 nomi 会话默认自动批准
-        // 标准工具类别（info/edit/exec/mcp —— 文件编辑 / Shell / 标准工具 & MCP），
-        // 不再反复弹授权框。理由：
-        //  - companion / IM Channel Agent 本就无审批 UI（其首个 gateway/file/bash
-        //    工具调用会 park 在 rx.await，turn 永不 finish → 聊天永久「思考中」），
-        //    所以它们历来必须 yolo；现在把这一默认推广到普通桌面会话。
-        //  - **显式 `extra.session_mode` 仍胜出**：用户在权限选择器里手动降级为
-        //    `default` / `auto_edit` 会写偏好并经 extra 传入，这里的 `.or_else` 让显式值
-        //    优先，降级正常生效。
-        //  - Full-power evaluate and desktop-control toggles remain separate System Settings
-        //    and are not granted by session_mode. Browser approval prompts are ordinary
-        //    permission friction: full-auto/yolo is honored by the Browser approval gate, so
-        //    gated Browser actions approve without UI.
-        session_mode: overrides
-            .session_mode
-            .clone()
-            .or_else(|| Some("yolo".to_owned())),
         extra_mcp_servers,
         loopback_capability_leases,
         bedrock_config: fields.bedrock_config,
@@ -713,9 +688,6 @@ pub(super) async fn build(
         browser_persistent_login: browser_persistent_login_default,
         // P7A: site-memory LIVE 值（默认 OFF，opt-in；无 per-session override）。
         browser_site_memory: browser_site_memory_default,
-        // Phase D: takeover/审批 gate LIVE 值（产品默认 ON；无 per-session override）。
-        browser_takeover: browser_takeover_default,
-        browser_unrestricted_approval: browser_unrestricted_approval_default,
         // P7B: visual-fallback LIVE 值（默认 OFF，opt-in；无 per-session override）。
         browser_visual_fallback: browser_visual_fallback_default,
         goal: overrides.goal.clone().map(|g| {
@@ -904,11 +876,6 @@ const PREF_BROWSER_PERSISTENT_LOGIN: &str = "agent.browserUse.persistentLogin";
 /// **P7A**: browser-use 站点记忆开关（opt-in，隐私相关）。`true` → 跨会话记住站点结构 + 注入 hints；
 /// 缺/`false`（host_default）→ OFF（不持久化、零行为变化）。前端 System Settings 写。
 const PREF_BROWSER_SITE_MEMORY: &str = "agent.browserUse.siteMemory";
-/// **Phase D**: browser-use 人机接管 + 跨域 POST 审批 gate。`true` → 注入审批 gate
-/// （默认会话浮给用户；full-auto/yolo 直接通过）；缺失时 host_default=true。前端 System Settings 写。
-const PREF_BROWSER_TAKEOVER: &str = "agent.browserUse.takeover";
-/// **Phase D**: browser-use 显式无限制审批开关。`true` → Browser approval gate 不再浮出确认。
-const PREF_BROWSER_UNRESTRICTED_APPROVAL: &str = "agent.browserUse.unrestrictedApproval";
 /// **P7B**: browser-use 视觉兜底点击（opt-in，有 token 成本）。`true` → DOM/aria 锚定失败时截图交视觉
 /// 模型定位再点；缺/`false`（host_default）→ OFF（不注入 locator、零行为变化）。前端 System Settings 写。
 const PREF_BROWSER_VISUAL_FALLBACK: &str = "agent.browserUse.visualFallback";
@@ -1546,16 +1513,6 @@ fn resolve_mcp_servers(
     (servers, leases)
 }
 
-fn resolved_session_mode(overrides: &NomiBuildExtra) -> String {
-    overrides
-        .session_mode
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("yolo")
-        .to_owned()
-}
-
 /// Platform Gateway MCP stdio bridge config for the Nomi engine. Caller
 /// conversation + user ids ride along for self-protection and data scoping; the
 /// companion binding (when present) rides along for attribution.
@@ -1564,7 +1521,6 @@ fn gateway_mcp_to_config(
     overrides: &NomiBuildExtra,
     conversation_id: &str,
 ) -> Option<(String, McpServerConfig, LoopbackCapabilityLease)> {
-    let session_mode = resolved_session_mode(overrides);
     let Some(user_id) = overrides.user_id.as_deref() else {
         warn!(conversation_id, "gateway MCP capability issuance requires a user ID");
         return None;
@@ -1574,7 +1530,6 @@ fn gateway_mcp_to_config(
         conversation_id,
         overrides.companion_id.as_deref(),
         overrides.channel_platform.as_deref(),
-        Some(&session_mode),
         &overrides.gateway_excluded_tools,
     ) {
         Ok(child) => child,
@@ -1697,7 +1652,6 @@ mod tests {
             "summon loads local companion memories/skills — owner only"
         );
         assert_eq!(overrides.allowed_tools, vec!["update_plan"]);
-        assert_eq!(overrides.session_mode.as_deref(), Some("default"));
         assert_eq!(overrides.max_turns, Some(1));
         assert_eq!(overrides.delegation_policy, DelegationPolicy::Disabled);
     }
@@ -2024,7 +1978,6 @@ mod tests {
         assert_eq!(claims.session.conversation_id.as_deref(), Some("0190f5fe-7c00-7a00-8abc-012345678963"));
         assert_eq!(claims.scope.companion_id.as_deref(), Some("0190f5fe-7c00-7a00-8abc-012345678965"));
         assert_eq!(claims.scope.profile, GatewayMcpConfig::PROFILE_WORK);
-        assert_eq!(claims.scope.session_mode.as_deref(), Some("yolo"));
         assert_eq!(claims.scope.excluded_tools, vec!["nomi_delegate"]);
         assert!(!claims.scope.instance_owner);
         assert!(!env[GatewayMcpConfig::ENV_CAPABILITY].contains("gw-root-secret"));
@@ -2321,30 +2274,30 @@ mod tests {
 
     #[test]
     fn knowledge_search_prompt_matches_the_effective_tool_surface() {
-        let unrestricted = Vec::<String>::new();
+        let all_tools = Vec::<String>::new();
         assert!(super::should_expose_knowledge_search(
             true,
             true,
             true,
-            &unrestricted,
+            &all_tools,
         ));
         assert!(!super::should_expose_knowledge_search(
             false,
             true,
             true,
-            &unrestricted,
+            &all_tools,
         ));
         assert!(!super::should_expose_knowledge_search(
             true,
             false,
             true,
-            &unrestricted,
+            &all_tools,
         ));
         assert!(!super::should_expose_knowledge_search(
             true,
             true,
             false,
-            &unrestricted,
+            &all_tools,
         ));
 
         let only_search = vec!["knowledge_search".to_owned()];
@@ -2504,7 +2457,7 @@ mod tests {
         .unwrap();
         assert!(on.knowledge_channel_write_enabled);
 
-        // Reconstruct the binding exactly as build_nomi does and confirm the
+        // Reconstruct the binding exactly as build_nomi does and verify the
         // opt-in is what flips an unattended channel from refusing writes to
         // making them. This switch is the only thing left standing between a
         // bot and the base body, so it must keep working end to end.

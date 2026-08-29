@@ -351,60 +351,6 @@ async fn slash_commands_no_active_task() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-// ── Confirmation routes (no active runtime → graceful defaults) ─────
-
-#[tokio::test]
-async fn list_confirmations_no_task() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_owner(&mut app, &services).await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Confirm Test").await;
-
-    let req = get_with_token(&format!("/api/conversations/{conv_id}/confirmations"), &token);
-    let resp = app.oneshot(req).await.unwrap();
-    // No active agent → returns empty list gracefully
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert!(json["data"].as_array().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn confirm_call_no_task() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_owner(&mut app, &services).await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Confirm Test").await;
-
-    let req = json_with_token(
-        "POST",
-        &format!("/api/conversations/{conv_id}/confirmations/call-1/confirm"),
-        json!({
-            "msg_id": "0190f5fe-7c00-7a00-8abc-012345678901",
-            "data": { "value": "allow" },
-            "always_allow": false
-        }),
-        &token,
-        &csrf,
-    );
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn check_approval_no_task() {
-    let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_owner(&mut app, &services).await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Approval Test").await;
-
-    let req = get_with_token(
-        &format!("/api/conversations/{conv_id}/approvals/check?action=edit_file"),
-        &token,
-    );
-    let resp = app.oneshot(req).await.unwrap();
-    // No active agent → returns approved=false gracefully
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(json["data"]["approved"], false);
-}
-
 // ── Stop + Warmup (no active runtime → idempotent success) ───────
 
 #[tokio::test]

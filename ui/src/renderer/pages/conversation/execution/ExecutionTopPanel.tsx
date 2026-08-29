@@ -350,7 +350,7 @@ const ExecutionTopPanel: React.FC = () => {
         </Suspense>
       </div>
 
-      {detail && ['running', 'paused', 'awaiting_approval'].includes(status) && (
+      {detail && ['running', 'paused'].includes(status) && (
         <ExecutionAdjustBox detail={detail} refetch={refetch} onApplied={returnToMain} />
       )}
 

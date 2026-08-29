@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 use crate::deps::{CallerCtx, GatewayDeps};
-use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 use crate::terminal_support::preset_launch;
 
@@ -44,11 +44,6 @@ struct CreateTerminalParams {
     /// paths are resolved from that workspace; omitted means the workspace root.
     #[serde(default)]
     cwd: Option<String>,
-    /// Permission level for agent presets: "default" (interactive approvals)
-    /// or "full-auto" (passes the CLI's skip-permissions flag — powerful,
-    /// confirm with the user first). Ignored for the shell preset.
-    #[serde(default)]
-    mode: Option<String>,
     /// Advanced: explicit program to launch, overriding the preset's command.
     #[serde(default)]
     command: Option<String>,
@@ -85,12 +80,7 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateTerminalParams)
     let user_id = ctx.user_id;
 
     let preset = p.preset.unwrap_or_else(|| "shell".to_owned());
-    let mode = p.mode.unwrap_or_else(|| "default".to_owned());
-    if mode != "default" && mode != "full-auto" {
-        return json!({"error": format!("unknown mode '{mode}' (expected default | full-auto)")});
-    }
-
-    let (mut command, mut cmd_args, backend) = match preset_launch(&preset, mode == "full-auto") {
+    let (mut command, mut cmd_args, backend) = match preset_launch(&preset) {
         Ok(v) => v,
         Err(e) => return json!({"error": e}),
     };
@@ -155,8 +145,9 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateTerminalParams)
         args: cmd_args,
         env: None,
         backend: backend.clone(),
-        // Permission mode only applies to agent CLI presets.
-        mode: backend.is_some().then(|| mode.clone()),
+        // Agent CLI presets are always launched with their fixed FullAuto
+        // flags; plain shells have no mode.
+        mode: backend.is_some().then(|| "full-auto".to_owned()),
         cols: DEFAULT_COLS,
         rows: DEFAULT_ROWS,
         defer_spawn: false,
@@ -347,9 +338,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_create_terminal",
             "terminal",
             "Spawn a conversation-owned PTY in the current conversation workspace (shell or agent CLI). It stays out of the global sidebar. Use preset to pick the program; close it with nomi_terminal_kill/delete when no longer needed.",
-            DangerTier::Write,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Write,
+        ),
         |deps, ctx, p| create(deps, ctx, p),
     ));
     out.push(Capability::new::<ListTerminalsParams, _, _>(
@@ -357,7 +347,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_list_terminals",
             "terminal",
             "List only terminal sessions owned by the current conversation (filter by status: running | exited). Use this to observe lifecycle changes, including terminals the user closed from the conversation panel.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, ctx, p| list(deps, ctx, p),
     ));
@@ -374,13 +364,11 @@ mod tests {
     #[test]
     fn presets_match_frontend_launch_presets() {
         assert_eq!(
-            preset_launch("shell", false).unwrap(),
+            preset_launch("shell").unwrap(),
             ("$SHELL".to_owned(), vec![], None)
         );
-        // shell ignores full-auto (no permission concept).
-        assert_eq!(preset_launch("shell", true).unwrap().1, Vec::<String>::new());
         assert_eq!(
-            preset_launch("claude", true).unwrap(),
+            preset_launch("claude").unwrap(),
             (
                 "claude".to_owned(),
                 vec!["--dangerously-skip-permissions".to_owned()],
@@ -388,7 +376,7 @@ mod tests {
             )
         );
         assert_eq!(
-            preset_launch("codex", true).unwrap(),
+            preset_launch("codex").unwrap(),
             (
                 "codex".to_owned(),
                 vec!["--dangerously-bypass-approvals-and-sandbox".to_owned()],
@@ -396,28 +384,15 @@ mod tests {
             )
         );
         assert_eq!(
-            preset_launch("gemini", true).unwrap(),
+            preset_launch("gemini").unwrap(),
             ("gemini".to_owned(), vec!["--yolo".to_owned()], Some("gemini".to_owned()))
         );
-        // default mode = no extra flags for agent presets.
-        assert_eq!(preset_launch("claude", false).unwrap().1, Vec::<String>::new());
     }
 
     #[test]
     fn unknown_preset_is_rejected() {
-        let err = preset_launch("bash", false).unwrap_err();
+        let err = preset_launch("bash").unwrap_err();
         assert!(err.contains("bash"), "{err}");
-    }
-
-    /// Mode validation rejects unknown strings.
-    #[test]
-    fn unknown_mode_is_rejected() {
-        // Simulate the check that would happen inside `create` before
-        // calling `preset_launch` — test the boundary inline since the
-        // handler is async and the validation is trivial.
-        let mode = "yolo";
-        let valid = mode == "default" || mode == "full-auto";
-        assert!(!valid);
     }
 
     #[test]

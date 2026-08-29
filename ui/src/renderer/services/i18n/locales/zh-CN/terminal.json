@@ -77,9 +77,6 @@
     "chooseFolder": "选择其他文件夹",
     "preset": "启动方式",
     "presetHint": "可选择使用 Claude / Codex / Gemini 等 CLI 作为启动方式",
-    "permission": "权限模式",
-    "permissionDefault": "需要确认",
-    "permissionFullAuto": "全自动（跳过确认）",
     "knowledge": "知识库",
     "knowledgePlaceholder": "可选——选择要挂载的知识库",
     "knowledgeHint": "挂载到工作目录下的 .nomi/knowledge/，会话将其作为扩展知识源读取。",
@@ -131,8 +128,7 @@
   "submitHint": "回车发送并执行",
   "autowork": {
     "requiresAgentCli": "自动工作需要 Agent CLI 终端（Claude / Codex，含 stepcode claude 等代理形式）",
-    "terminalExited": "终端已退出 —— 请重新启动后再使用自动工作",
-    "fullAutoHint": "当前不是 full-auto 模式：注入的需求可能卡在审批确认。"
+    "terminalExited": "终端已退出 —— 请重新启动后再使用自动工作"
   },
   "workspace": {
     "title": "项目",

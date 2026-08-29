@@ -73,7 +73,7 @@ pub struct SidecarOutcome {
 
 /// An open-question answer request (D6): the question text + its char cap. When
 /// present, [`SidecarClient::decide`] uses the free-text answer prompt instead
-/// of the option/permission prompt.
+/// of the option prompt.
 pub struct OpenQuestionAsk<'a> {
     pub question: &'a str,
     pub max_answer_chars: u32,

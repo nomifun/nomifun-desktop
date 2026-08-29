@@ -93,7 +93,6 @@ const NomiConversationLayout: React.FC<{
         conversation_id={conversation.id}
         workspace={conversation.extra.workspace}
         modelSelection={modelSelection}
-        session_mode={conversation.extra?.session_mode}
         cron_job_id={conversation.cron_job_id}
         loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
         loadedMcpStatuses={
@@ -458,7 +457,6 @@ const ChatConversation: React.FC<{
   }
 
   if (conversation && conversation.type === 'nomi') {
-    // 桌面伙伴的专属会话（单会话契约）走受限面板：保留锁定模型/隐藏高级控制/强制 yolo/
     // Companion sessions use a fixed workspace and restricted controls.
     // Configuration controls remain limited for companion sessions, while
     // linked execution progress and lifecycle state stay visible.

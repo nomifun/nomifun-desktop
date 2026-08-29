@@ -7,8 +7,6 @@
 import { ipcBridge } from '@/common';
 import type { IMcpServer } from '@/common/config/storage';
 import type { McpServerId } from '@/common/types/ids';
-import AgentModeSelector from '@/renderer/components/agent/AgentModeSelector';
-import { supportsModeSwitch, type AgentModeOption } from '@/renderer/utils/model/agentModes';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { getCleanFileNames, FileService } from '@/renderer/services/FileService';
 import { iconColors } from '@/renderer/styles/colors';
@@ -30,12 +28,6 @@ type GuidActionRowProps = {
   // Model selector node (rendered by parent)
   modelSelectorNode: React.ReactNode;
   collaboratorSelectorNode?: React.ReactNode;
-
-  // Agent mode
-  selectedAgent: string | 'custom';
-  effectiveModeAgent?: string;
-  selectedMode: string;
-  onModeSelect: (mode: string) => void;
 
   // Preset agent tag
   is_presetAgent: boolean;
@@ -73,10 +65,6 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   onFilesUploaded,
   modelSelectorNode,
   collaboratorSelectorNode,
-  selectedAgent,
-  effectiveModeAgent,
-  selectedMode,
-  onModeSelect,
   is_presetAgent,
   selectedAgentInfo,
   presets,
@@ -99,10 +87,7 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   const layout = useLayoutContext();
   const isMobile = layout?.isMobile ?? false;
   const [isPlusDropdownOpen, setIsPlusDropdownOpen] = useState(false);
-  const modeBackend = effectiveModeAgent || selectedAgent;
-  const showModeSwitch = supportsModeSwitch(modeBackend);
-  const configOptionCount =
-    (modelSelectorNode ? 1 : 0) + (collaboratorSelectorNode ? 1 : 0) + (showModeSwitch ? 1 : 0);
+  const configOptionCount = (modelSelectorNode ? 1 : 0) + (collaboratorSelectorNode ? 1 : 0);
 
   // Browser file picker ref (WebUI only)
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -128,9 +113,6 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
     },
     [onFilesUploaded, t]
   );
-
-  const getModeDisplayLabel = (mode: AgentModeOption): string =>
-    t(`agentMode.${mode.value}`, { defaultValue: mode.label });
 
   const isWebUI = !isDesktopShell();
 
@@ -268,17 +250,6 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
           >
             {modelSelectorNode}
             {collaboratorSelectorNode}
-
-            {showModeSwitch && (
-              <AgentModeSelector
-                backend={modeBackend}
-                compact
-                initialMode={selectedMode}
-                onModeSelect={onModeSelect}
-                compactLeadingIcon={<Shield theme='outline' size='14' fill={iconColors.secondary} />}
-                modeLabelFormatter={getModeDisplayLabel}
-              />
-            )}
           </div>
         )}
 

@@ -39,7 +39,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::deps::{CallerCtx, GatewayDeps};
-use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 use nomifun_api_types::McpServerId;
 use schemars::JsonSchema;
@@ -384,7 +384,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_mcp_list_servers",
             "mcp",
             "List all configured MCP servers (name, transport, enabled state, connection status).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, ctx, p| mcp_list_servers(deps, ctx, p),
     ));
@@ -394,7 +394,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_mcp_add_server",
             "mcp",
             "Add a new MCP server (stdio/sse/http). Upserts by name if one already exists. Headers may contain auth tokens.",
-            DangerTier::Sensitive,
+            EffectClass::Sensitive,
         ),
         |deps, ctx, p| mcp_add_server(deps, ctx, p),
     ));
@@ -404,7 +404,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_mcp_edit_server",
             "mcp",
             "Edit an existing MCP server's transport or description (by mcp_server_id).",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, ctx, p| mcp_edit_server(deps, ctx, p),
     ));
@@ -414,9 +414,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_mcp_delete_server",
             "mcp",
             "Permanently delete an MCP server configuration (by mcp_server_id).",
-            DangerTier::Destructive,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Destructive,
+        ),
         |deps, ctx, p| mcp_delete_server(deps, ctx, p),
     ));
 
@@ -425,7 +424,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_mcp_toggle_server",
             "mcp",
             "Toggle the enabled/disabled state of an MCP server (by mcp_server_id).",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, ctx, p| mcp_toggle_server(deps, ctx, p),
     ));
@@ -437,7 +436,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_extension_list",
             "extension",
             "List all loaded extensions (name, version, enabled state).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, ctx, p| extension_list(deps, ctx, p),
     ));
@@ -447,7 +446,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_extension_enable",
             "extension",
             "Enable a disabled extension by name.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, ctx, p| extension_enable(deps, ctx, p),
     ));
@@ -457,7 +456,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_extension_disable",
             "extension",
             "Disable an enabled extension by name (with optional reason).",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, ctx, p| extension_disable(deps, ctx, p),
     ));
@@ -469,7 +468,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_skill_list",
             "skill",
             "List all available skills (built-in and user-custom).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, ctx, p| skill_list(deps, ctx, p),
     ));
@@ -479,7 +478,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_skill_import",
             "skill",
             "Import a skill from a local directory (by absolute path). Copies the skill into the user skills folder.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, ctx, p| skill_import(deps, ctx, p),
     ));
@@ -489,9 +488,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_skill_delete",
             "skill",
             "Permanently delete a user-custom skill by name.",
-            DangerTier::Destructive,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Destructive,
+        ),
         |deps, ctx, p| skill_delete(deps, ctx, p),
     ));
 
@@ -502,7 +500,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_hub_list_extensions",
             "hub",
             "List extensions available in the Hub marketplace (name, version, install status).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, ctx, p| hub_list_extensions(deps, ctx, p),
     ));
@@ -512,7 +510,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_hub_install_extension",
             "hub",
             "Install an extension from the Hub by name. Downloads and registers it locally.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, ctx, p| hub_install_extension(deps, ctx, p),
     ));
@@ -538,7 +536,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::Registry;
+    use crate::registry::{Registry, Surface};
 
     const MCP_SERVER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000123";
 

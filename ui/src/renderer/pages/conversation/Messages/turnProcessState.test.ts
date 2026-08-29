@@ -8,17 +8,6 @@ import { describe, expect, test } from 'bun:test';
 import { getProcessItemState, getToolMessagesProcessState } from './turnProcessState';
 
 describe('turn process state', () => {
-  test('treats tool confirmations as waiting for user input', () => {
-    expect(
-      getToolMessagesProcessState([
-        {
-          type: 'tool_group',
-          content: [{ call_id: 'call-1', name: 'Edit', description: '', render_output_as_markdown: false, status: 'Confirming' }],
-        } as any,
-      ])
-    ).toBe('waiting');
-  });
-
   test('surfaces failed and canceled tool states', () => {
     expect(
       getToolMessagesProcessState([
@@ -160,31 +149,7 @@ describe('turn process state', () => {
     ).toBe('failed');
   });
 
-  test('does not let a failed confirmed shell command group fail the whole process receipt', () => {
-    expect(
-      getToolMessagesProcessState([
-        {
-          type: 'tool_group',
-          content: [
-            {
-              call_id: 'call-shell',
-              name: 'Bash',
-              status: 'Error',
-              description: 'Run a validation command',
-              confirmationDetails: {
-                type: 'exec',
-                title: 'Run command',
-                command: 'node test.js',
-              },
-            },
-          ],
-        } as any,
-      ])
-    ).toBe('completed');
-  });
-
-  test('keeps permission and active thinking steps open', () => {
-    expect(getProcessItemState({ type: 'permission' } as any)).toBe('waiting');
+  test('keeps active thinking steps open', () => {
     expect(getProcessItemState({ type: 'thinking', content: { status: 'thinking' } } as any)).toBe('running');
   });
 

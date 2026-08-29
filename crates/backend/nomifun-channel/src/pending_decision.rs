@@ -1,11 +1,9 @@
-//! Per-conversation store of the blocking decision currently awaiting a
-//! numbered reply from a channel user.
+//! Per-conversation store of a channel-owned stop decision awaiting a numbered
+//! reply from a channel user.
 //!
-//! When a remote-channel-driven conversation hits a blocking decision (the
-//! agent asks the user to choose / grant permission), the relay records the
-//! pending decision here and forwards a numbered text list to the channel.
-//! The message loop's inbound interception reads it back to map the user's
-//! numeric reply onto an option, then clears it.
+//! When a remote stop is denied by the Channel surface, the relay records the
+//! pending decision here and forwards a numbered text list to the channel. The
+//! message loop maps the user's numeric reply onto the stop or cancel option.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -15,9 +13,6 @@ use crate::types::DecisionOption;
 /// What resolving the pending decision means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingDecisionKind {
-    /// A blocking agent decision (permission / confirmation): the numbered
-    /// reply is submitted back through `ConversationService::confirm`.
-    AgentConfirm,
     /// Channel-owned remote-stop confirmation (batch-1 handover gap): the
     /// companion's `nomi_stop_conversation` was denied by the gateway matrix
     /// on the Channel surface, so the channel asks the user directly. On
@@ -29,14 +24,13 @@ pub enum PendingDecisionKind {
     },
 }
 
-/// A blocking decision awaiting the channel user's numbered reply.
+/// A channel-owned decision awaiting the channel user's numbered reply.
 ///
 /// `prompt` is retained so a non-numeric reply can re-render the same
 /// numbered list without re-deriving it from the agent stream.
 #[derive(Debug, Clone)]
 pub struct PendingDecision {
     pub conversation_id: String,
-    pub call_id: String,
     pub kind: PendingDecisionKind,
     pub prompt: String,
     pub options: Vec<DecisionOption>,
@@ -90,11 +84,12 @@ mod tests {
         }
     }
 
-    fn decision(conversation_id: &str, call_id: &str) -> PendingDecision {
+    fn decision(conversation_id: &str, target_conversation_id: &str) -> PendingDecision {
         PendingDecision {
             conversation_id: conversation_id.into(),
-            call_id: call_id.into(),
-            kind: PendingDecisionKind::AgentConfirm,
+            kind: PendingDecisionKind::StopConversation {
+                target_conversation_id: target_conversation_id.into(),
+            },
             prompt: "Proceed?".into(),
             options: vec![opt("a", "Allow"), opt("b", "Deny")],
         }
@@ -108,14 +103,24 @@ mod tests {
         store.put(decision("conv-1", "call-1"));
 
         let peeked = store.peek("conv-1").expect("peek should see the put");
-        assert_eq!(peeked.call_id, "call-1");
+        assert_eq!(
+            peeked.kind,
+            PendingDecisionKind::StopConversation {
+                target_conversation_id: "call-1".into(),
+            }
+        );
         assert_eq!(peeked.prompt, "Proceed?");
         assert_eq!(peeked.options.len(), 2);
         // peek does not consume.
         assert!(store.peek("conv-1").is_some());
 
         let taken = store.take("conv-1").expect("take should return the entry");
-        assert_eq!(taken.call_id, "call-1");
+        assert_eq!(
+            taken.kind,
+            PendingDecisionKind::StopConversation {
+                target_conversation_id: "call-1".into(),
+            }
+        );
         // take consumes.
         assert!(store.peek("conv-1").is_none());
         assert!(store.take("conv-1").is_none());
@@ -128,11 +133,27 @@ mod tests {
         store.put(decision("conv-1", "call-2"));
 
         let peeked = store.peek("conv-1").unwrap();
-        assert_eq!(peeked.call_id, "call-2", "latest put wins per conversation");
+        assert_eq!(
+            peeked.kind,
+            PendingDecisionKind::StopConversation {
+                target_conversation_id: "call-2".into(),
+            },
+            "latest put wins per conversation"
+        );
 
         // Distinct conversations are independent.
         store.put(decision("conv-2", "call-x"));
-        assert_eq!(store.peek("conv-1").unwrap().call_id, "call-2");
-        assert_eq!(store.peek("conv-2").unwrap().call_id, "call-x");
+        assert_eq!(
+            store.peek("conv-1").unwrap().kind,
+            PendingDecisionKind::StopConversation {
+                target_conversation_id: "call-2".into(),
+            }
+        );
+        assert_eq!(
+            store.peek("conv-2").unwrap().kind,
+            PendingDecisionKind::StopConversation {
+                target_conversation_id: "call-x".into(),
+            }
+        );
     }
 }

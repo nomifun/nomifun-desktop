@@ -77,9 +77,6 @@
     "chooseFolder": "Choose a different folder",
     "preset": "Launch",
     "presetHint": "Choose an agent CLI (Claude / Codex / Gemini …) as the launch method",
-    "permission": "Permission mode",
-    "permissionDefault": "Ask for approvals",
-    "permissionFullAuto": "Full auto (skip approvals)",
     "knowledge": "Knowledge bases",
     "knowledgePlaceholder": "Optional — pick knowledge bases to mount",
     "knowledgeHint": "Mounted into .nomi/knowledge/ under the working directory; the session reads them as an extended knowledge source.",
@@ -131,8 +128,7 @@
   "submitHint": "Press Enter to run",
   "autowork": {
     "requiresAgentCli": "AutoWork requires an agent CLI terminal (Claude / Codex, including wrappers like stepcode claude)",
-    "terminalExited": "Terminal has exited — relaunch to use AutoWork",
-    "fullAutoHint": "Not in full-auto mode: injected requirements may stall on approval prompts."
+    "terminalExited": "Terminal has exited — relaunch to use AutoWork"
   },
   "workspace": {
     "title": "Project",

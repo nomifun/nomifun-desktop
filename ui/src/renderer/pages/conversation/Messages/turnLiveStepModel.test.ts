@@ -9,7 +9,7 @@ import { planTurnLiveStep } from './turnLiveStepModel';
 
 const disclosure = (
   running: boolean,
-  processItems: Array<{ id: string; state: 'completed' | 'running' | 'waiting' | 'failed' | 'canceled' }>
+  processItems: Array<{ id: string; state: 'completed' | 'running' | 'failed' | 'canceled' }>
 ) => ({ running, processItems });
 
 describe('planTurnLiveStep', () => {
@@ -31,19 +31,6 @@ describe('planTurnLiveStep', () => {
         hasStreamingReplyText: false,
       })
     ).toBeNull();
-  });
-
-  test('waiting item wins over running item', () => {
-    expect(
-      planTurnLiveStep({
-        isProcessing: true,
-        disclosure: disclosure(true, [
-          { id: 'a', state: 'running' },
-          { id: 'b', state: 'waiting' },
-        ]),
-        hasStreamingReplyText: false,
-      })
-    ).toEqual({ kind: 'item', itemId: 'b', state: 'waiting' });
   });
 
   test('latest running item is the current step', () => {

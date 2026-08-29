@@ -12,7 +12,6 @@
  * native dialogs, auto-update, devtools, zoom, deep links) remain as IPC.
  */
 
-import type { ConfirmationCorrelationId, IConfirmation } from '@/common/chat/chatLib';
 import { bridge } from '@/platform';
 import type { McpConnectionTestRequest } from './mcpRequest';
 import {
@@ -545,7 +544,6 @@ export const fromApiTurnCompletedEvent = (raw: unknown): IConversationTurnComple
     // already-released turn. Lifecycle consumers fail closed on `true`.
     is_processing:
       typeof rawRuntime.is_processing === 'boolean' ? rawRuntime.is_processing : true,
-    pending_confirmations: (rawRuntime.pending_confirmations ?? 0) as number,
     ...(rawRuntime.active_turn_id == null
       ? {}
       : { active_turn_id: parseMessageId(rawRuntime.active_turn_id) }),
@@ -777,10 +775,6 @@ export const conversation = {
     (p) => `/api/conversations/${p.conversation_id}/side-question`,
     (p) => ({ question: p.question })
   ),
-  confirmMessage: httpPost<void, IConfirmMessageParams>(
-    (p) => `/api/conversations/${p.conversation_id}/confirmations/${encodeURIComponent(p.call_id)}/confirm`,
-    (p) => ({ msg_id: p.msg_id, data: p.confirm_key })
-  ),
   listArtifacts: withResponseMap(
     httpGet<ConversationArtifactResponse[], { conversation_id: ConversationId }>(
       (p) => `/api/conversations/${p.conversation_id}/artifacts`
@@ -844,7 +838,6 @@ export const conversation = {
         has_runtime: (rawRuntime.has_runtime ?? true) as boolean,
         runtime_status: rawRuntime.runtime_status as IConversationTurnStartedEvent['runtime']['runtime_status'],
         is_processing: (rawRuntime.is_processing ?? true) as boolean,
-        pending_confirmations: (rawRuntime.pending_confirmations ?? 0) as number,
         ...(rawRuntime.active_turn_id == null
           ? {}
           : { active_turn_id: parseMessageId(rawRuntime.active_turn_id) }),
@@ -874,37 +867,6 @@ export const conversation = {
     'responseSearchWorkSpace',
     undefined as unknown as void
   ),
-  confirmation: {
-    add: wsEmitter<IConfirmation<unknown> & { conversation_id: ConversationId }>('confirmation.add'),
-    update: wsEmitter<IConfirmation<unknown> & { conversation_id: ConversationId }>('confirmation.update'),
-    confirm: httpPost<
-      void,
-      {
-        conversation_id: ConversationId;
-        msg_id: MessageId | ConfirmationCorrelationId;
-        data: unknown;
-        call_id: string;
-        always_allow?: boolean;
-      }
-    >(
-      (p) => `/api/conversations/${p.conversation_id}/confirmations/${encodeURIComponent(p.call_id)}/confirm`,
-      (p) => ({
-        msg_id: p.msg_id,
-        data: p.data,
-        always_allow: p.always_allow ?? false,
-      })
-    ),
-    list: httpGet<IConfirmation<unknown>[], { conversation_id: ConversationId }>(
-      (p) => `/api/conversations/${p.conversation_id}/confirmations`
-    ),
-    remove: wsEmitter<{ conversation_id: ConversationId; id: string }>('confirmation.remove'),
-  },
-  approval: {
-    check: httpGet<{ approved: boolean }, { conversation_id: ConversationId; action: string; command_type?: string }>(
-      (p) =>
-        `/api/conversations/${p.conversation_id}/approvals/check?action=${encodeURIComponent(p.action)}${p.command_type ? `&command_type=${encodeURIComponent(p.command_type)}` : ''}`
-    ),
-  },
 };
 
 export interface IStartOnBootStatus {
@@ -1526,21 +1488,6 @@ export const agentConversation = {
       '/api/agents/provider-health-check'
     ),
     (response) => ({ ...response, provider_id: parseProviderId(response.provider_id) })
-  ),
-  setMode: httpPut<void, { conversation_id: ConversationId; mode: string }>(
-    (p) => `/api/conversations/${p.conversation_id}/mode`,
-    (p) => ({ mode: p.mode })
-  ),
-  // 404 is the expected pre-warmup response from `/api/conversations/:id/mode`
-  // — the agent has not attached yet, so we have nothing to read.
-  // AgentModeSelector falls back to handshake metadata in that case. Silence
-  // the bridge log so this ordinary state doesn't pollute Sentry breadcrumbs
-  // (ELECTRON-1BT).
-  getMode: httpGet<{ mode: string; initialized: boolean }, { conversation_id: ConversationId }>(
-    (p) => `/api/conversations/${p.conversation_id}/mode`,
-    {
-      silentStatuses: [404],
-    }
   ),
 };
 
@@ -2820,7 +2767,6 @@ export interface ICronAgentConfig {
   /** Frozen server-owned preset lineage returned by the API. */
   preset_revision?: number;
   preset_snapshot?: ResolvedPresetSnapshot;
-  mode?: string;
   model?: string;
   /** Nomi logical reference to the provider business entity. */
   provider_id?: ProviderId;
@@ -3094,13 +3040,6 @@ export interface ISendMessageResult {
   result_error_retryable: boolean | null;
 }
 
-export interface IConfirmMessageParams {
-  confirm_key: string;
-  msg_id: MessageId | ConfirmationCorrelationId;
-  conversation_id: ConversationId;
-  call_id: string;
-}
-
 export interface ICreateConversationParams {
   type: 'nomi';
   name?: string;
@@ -3145,7 +3084,6 @@ export interface ICreateConversationParams {
     /** Transient: session-scoped MCP server configs that are not stored in the
      *  backend catalog (currently built-in MCP servers). */
     selected_session_mcp_servers?: ISessionMcpServer[];
-    session_mode?: string;
     codex_model?: string;
     current_model_id?: string;
     pending_config_options?: Record<string, string>;
@@ -3329,11 +3267,10 @@ export interface IConversationTurnStartedEvent {
   conversation_id: ConversationId;
   turn_id: MessageId;
   status: 'pending' | 'running' | 'finished';
-  phase?: 'starting' | 'thinking' | 'streaming' | 'tooling' | 'waiting_permission' | string;
+  phase?: 'starting' | 'thinking' | 'streaming' | 'tooling' | string;
   state:
     | 'ai_generating'
     | 'ai_waiting_input'
-    | 'ai_waiting_confirmation'
     | 'initializing'
     | 'stopped'
     | 'error'
@@ -3342,12 +3279,11 @@ export interface IConversationTurnStartedEvent {
   detail: string;
   can_send_message: boolean;
   runtime: {
-    state: 'idle' | 'starting' | 'running' | 'waiting_confirmation';
+    state: 'idle' | 'starting' | 'running';
     can_send_message: boolean;
     has_runtime: boolean;
     runtime_status?: 'pending' | 'running' | 'finished';
     is_processing: boolean;
-    pending_confirmations: number;
     active_turn_id?: MessageId;
     processing_started_at?: number;
   };
@@ -3366,7 +3302,6 @@ export interface IConversationTurnCompletedEvent {
   state:
     | 'ai_generating'
     | 'ai_waiting_input'
-    | 'ai_waiting_confirmation'
     | 'initializing'
     | 'stopped'
     | 'error'
@@ -3374,12 +3309,11 @@ export interface IConversationTurnCompletedEvent {
   detail: string;
   can_send_message: boolean;
   runtime: {
-    state: 'idle' | 'starting' | 'running' | 'waiting_confirmation';
+    state: 'idle' | 'starting' | 'running';
     can_send_message: boolean;
     has_runtime: boolean;
     runtime_status?: 'pending' | 'running' | 'finished';
     is_processing: boolean;
-    pending_confirmations: number;
     active_turn_id?: MessageId;
     processing_started_at?: number;
   };
@@ -4113,15 +4047,9 @@ export interface IIdmmOpenQuestionRule {
   mode: IdmmCategoryMode;
   max_answer_chars: number;
 }
-export interface IIdmmPermissionRule {
-  mode: IdmmCategoryMode;
-  only_safe_value: boolean;
-  escalate_risky: boolean;
-}
 export interface IIdmmCategoryRules {
   option_decision: IIdmmOptionRule;
   open_question: IIdmmOpenQuestionRule;
-  permission: IIdmmPermissionRule;
 }
 export interface IIdmmDecisionStrategy {
   tendency: IdmmTendency;
@@ -4180,7 +4108,7 @@ export interface IIdmmIntervention {
   at: number;
   stall_class: string;
   tier_used: string;
-  /** option / open_question / permission / fault. */
+  /** option / open_question / fault. */
   category?: string;
   action: string;
   /** What was picked/answered (truncated server-side). */
@@ -4542,13 +4470,6 @@ export const agentExecution = {
       (p) => p.updates
     ),
     fromApiAgentExecutionDetail
-  ),
-  approve: withResponseMap(
-    httpPost<unknown, { execution_id: ExecutionId; updates: TVersionedAgentExecutionCommand }>(
-      (p) => `/api/agent-executions/${p.execution_id}/approve`,
-      (p) => p.updates
-    ),
-    fromApiAgentExecution
   ),
   pause: withResponseMap(
     httpPost<unknown, { execution_id: ExecutionId; updates: TVersionedAgentExecutionCommand }>(

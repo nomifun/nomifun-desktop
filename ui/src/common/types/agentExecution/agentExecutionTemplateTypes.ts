@@ -14,7 +14,6 @@ import type {
   TExecutionModelRef,
   TParticipantCapability,
   TParticipantConstraints,
-  TPlanGate,
   TPlannedExecutionStep,
 } from './agentExecutionTypes';
 
@@ -95,7 +94,6 @@ export type TCreateExecutionFromTemplate = {
   work_dir?: string;
   max_parallel?: number;
   delegation_policy?: TDelegationPolicy;
-  plan_gate?: TPlanGate;
   adaptation_policy?: TAdaptationPolicy;
   decision_policy?: TDecisionPolicy;
   lead_conversation_id?: ConversationId;

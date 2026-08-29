@@ -7,7 +7,6 @@ import ExecutionContentSwitcher from './ExecutionContentSwitcher';
 import { useExecution } from './ExecutionContext';
 import { EXECUTION_STATUS_META } from './executionStatusMeta';
 import ExecutionTopPanel from './ExecutionTopPanel';
-import PlanApprovalBanner from './PlanApprovalBanner';
 
 /**
  * Conversation-native shell for the one AgentExecution projection.
@@ -53,7 +52,6 @@ const ExecutionConversationLayout: React.FC<ChatLayoutProps> = ({ children, head
     >
       <div className='relative flex flex-row flex-1 min-h-0' data-testid='conversation-execution-layout'>
         <div className='flex-1 min-w-0 min-h-0 flex flex-col'>
-          <PlanApprovalBanner />
           <ExecutionContentSwitcher>{children}</ExecutionContentSwitcher>
         </div>
         <ExecutionTopPanel />

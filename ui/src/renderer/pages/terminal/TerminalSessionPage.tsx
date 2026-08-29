@@ -429,9 +429,6 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
     : isExited
       ? t('terminal.autowork.terminalExited')
       : undefined;
-  const autoWorkSafetyHint =
-    isAgentCli && session?.mode !== 'full-auto' ? t('terminal.autowork.fullAutoHint') : undefined;
-
   return (
     // The WHOLE page (both columns) is wrapped in the terminal-scoped
     // PreviewProvider — not just the right region. TerminalSendBox (left column)
@@ -514,7 +511,6 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
             <AutoWorkControl
               target={{ kind: 'terminal', id: sessionId }}
               disabledReason={autoWorkDisabledReason}
-              safetyHint={autoWorkSafetyHint}
             />
             <IdmmControl target={{ kind: 'terminal', id: sessionId }} />
             {/* Escape hatch for a wedged/garbled claude/codex TUI: always

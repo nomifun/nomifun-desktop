@@ -27,20 +27,6 @@ import { isAbsoluteLocalPath, isFileUri } from '../utils/localPath';
 
 export { joinLocalPath as joinPath } from '../utils/localPath';
 
-declare const confirmationCorrelationBrand: unique symbol;
-
-/** Confirmation correlation key; transient protocol identity, never a DB entity ID. */
-export type ConfirmationCorrelationId = string & {
-  readonly [confirmationCorrelationBrand]: true;
-};
-
-export const parseConfirmationCorrelationId = (value: unknown): ConfirmationCorrelationId => {
-  if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
-    throw new TypeError('confirmation correlation id must be non-empty canonical text');
-  }
-  return value as ConfirmationCorrelationId;
-};
-
 /**
  * @description 跟对话相关的消息类型申明 及相关处理
  */
@@ -51,7 +37,6 @@ type TMessageType =
   | 'tool_call'
   | 'tool_group'
   | 'agent_status'
-  | 'permission'
   | 'plan'
   | 'thinking'
   | 'available_commands';
@@ -273,11 +258,6 @@ export const mergeToolCallContent = (
   return merged;
 };
 
-type IMessageToolGroupConfirmationDetailsBase<Type, Extra extends Record<string, any>> = {
-  type: Type;
-  title: string;
-} & Extra;
-
 export type IMessageToolGroup = IMessage<
   'tool_group',
   Array<{
@@ -295,38 +275,7 @@ export type IMessageToolGroup = IMessage<
           img_url: string;
           relative_path: string;
         };
-    status: 'Executing' | 'Success' | 'Error' | 'Canceled' | 'Pending' | 'Confirming';
-    confirmationDetails?:
-      | IMessageToolGroupConfirmationDetailsBase<
-          'edit',
-          {
-            file_name: string;
-            file_diff: string;
-            isModifying?: boolean;
-          }
-        >
-      | IMessageToolGroupConfirmationDetailsBase<
-          'exec',
-          {
-            rootCommand: string;
-            command: string;
-          }
-        >
-      | IMessageToolGroupConfirmationDetailsBase<
-          'info',
-          {
-            urls?: string[];
-            prompt: string;
-          }
-        >
-      | IMessageToolGroupConfirmationDetailsBase<
-          'mcp',
-          {
-            tool_name: string;
-            tool_display_name: string;
-            server_name: string;
-          }
-        >;
+    status: 'Executing' | 'Success' | 'Error' | 'Canceled' | 'Pending';
   }>
 >;
 
@@ -352,8 +301,6 @@ export type IMessageAgentStatus = IMessage<
     has_active_session?: boolean;
   }
 >;
-
-export type IMessagePermission = IMessage<'permission', IConfirmation>;
 
 type ResponseTextData = {
   content: unknown;
@@ -655,36 +602,11 @@ export type TMessage =
   | IMessageToolCall
   | IMessageToolGroup
   | IMessageAgentStatus
-  | IMessagePermission
   | IMessagePlan
   | IMessageThinking
   | IMessageAvailableCommands;
 
 // 统一所有需要用户交互的用户类型
-export interface IConfirmation<Option extends any = any> {
-  title?: string;
-  id: string;
-  action?: string;
-  description: string;
-  call_id: string;
-  options: Array<{
-    label: string;
-    value: Option;
-    params?: Record<string, string>; // Translation interpolation parameters
-  }>;
-  /**
-   * Command type for exec confirmations (e.g., 'curl', 'npm', 'git')
-   * Used for "always allow" permission memory
-   */
-  command_type?: string;
-  /**
-   * Optional inline page preview (`data:image/png;base64,...`) for a browser
-   * takeover approval. Lets a silent (headless) session show the user the current
-   * page they're approving an irreversible action on. Absent for non-browser prompts.
-   */
-  screenshot?: string;
-}
-
 const AGENT_ERROR_OWNERSHIPS = new Set<AgentErrorOwnership>([
   'nomifun',
   'user_agent',
@@ -824,51 +746,6 @@ const normalizeToolGroupResultDisplay = (
   return toDisplayText(value);
 };
 
-const normalizeToolGroupConfirmationDetails = (
-  value: unknown
-): IMessageToolGroup['content'][number]['confirmationDetails'] | undefined => {
-  if (!isObject(value)) return undefined;
-  const type = value.type;
-  const title = toDisplayText(value.title);
-
-  if (type === 'edit') {
-    return {
-      type,
-      title,
-      file_name: toDisplayText(value.file_name),
-      file_diff: toDisplayText(value.file_diff),
-      ...(typeof value.isModifying === 'boolean' ? { isModifying: value.isModifying } : {}),
-    };
-  }
-  if (type === 'exec') {
-    return {
-      type,
-      title,
-      rootCommand: toDisplayText(value.rootCommand),
-      command: toDisplayText(value.command),
-    };
-  }
-  if (type === 'info') {
-    return {
-      type,
-      title,
-      prompt: toDisplayText(value.prompt),
-      ...(Array.isArray(value.urls) ? { urls: value.urls.map((url) => toDisplayText(url)) } : {}),
-    };
-  }
-  if (type === 'mcp') {
-    return {
-      type,
-      title,
-      tool_name: toDisplayText(value.tool_name),
-      tool_display_name: toDisplayText(value.tool_display_name),
-      server_name: toDisplayText(value.server_name),
-    };
-  }
-
-  return undefined;
-};
-
 const LEGACY_TOOL_GROUP_ARTIFACT_ERROR =
   'Legacy image result was not backed by a committed artifact receipt';
 
@@ -879,7 +756,6 @@ export const normalizeToolGroupContent = (value: unknown): IMessageToolGroup['co
     .filter(isObject)
     .map((item) => {
       const resultDisplay = normalizeToolGroupResultDisplay(item.result_display);
-      const confirmationDetails = normalizeToolGroupConfirmationDetails(item.confirmationDetails);
       const status = normalizeToolGroupStatus(item.status);
       const description = toDisplayText(item.description);
       // ToolGroupEntry has no receipt or 2PC-marker fields. Historical
@@ -905,39 +781,8 @@ export const normalizeToolGroupContent = (value: unknown): IMessageToolGroup['co
         ...(!unverifiedLegacyImage && resultDisplay !== undefined
           ? { result_display: resultDisplay }
           : {}),
-        ...(confirmationDetails ? { confirmationDetails } : {}),
       };
     });
-};
-
-const normalizePermissionParams = (params: unknown): Record<string, string> | undefined => {
-  if (!isObject(params)) return undefined;
-  return Object.fromEntries(Object.entries(params).map(([key, value]) => [key, toDisplayText(value)]));
-};
-
-const normalizePermissionContent = (value: unknown): IConfirmation => {
-  const data = isObject(value) ? value : {};
-  const options = Array.isArray(data.options)
-    ? data.options.filter(isObject).map((option, index) => {
-        const params = normalizePermissionParams(option.params);
-        return {
-          label: toDisplayText(option.label, `Option ${index + 1}`),
-          value: option.value,
-          ...(params ? { params } : {}),
-        };
-      })
-    : [];
-
-  return {
-    id: toDisplayText(data.id, uuid()),
-    description: toDisplayText(data.description ?? data.title, ''),
-    call_id: toDisplayText(data.call_id ?? data.id, ''),
-    options,
-    ...(data.title != null ? { title: toDisplayText(data.title) } : {}),
-    ...(data.action != null ? { action: toDisplayText(data.action) } : {}),
-    ...(data.command_type != null ? { command_type: toDisplayText(data.command_type) } : {}),
-    ...(data.screenshot != null ? { screenshot: toDisplayText(data.screenshot) } : {}),
-  };
 };
 
 const TOOL_ARTIFACT_KINDS = new Set<PersistedToolArtifact['kind']>([
@@ -1184,18 +1029,6 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         conversation_id: message.conversation_id,
         created_at,
         content: normalizeAgentStatusContent(message.data),
-      };
-    }
-    case 'permission': {
-      return {
-        id: uuid(),
-        type: 'permission',
-        msg_id: message.msg_id,
-        ...turnIdentity,
-        position: 'left',
-        conversation_id: message.conversation_id,
-        created_at,
-        content: normalizePermissionContent(message.data),
       };
     }
     case 'plan': {

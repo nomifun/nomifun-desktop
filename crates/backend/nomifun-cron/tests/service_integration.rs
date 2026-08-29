@@ -49,11 +49,11 @@ const CONV_6: &str = "0190f5fe-7c00-7a00-8abc-012345678906";
 const CONV_7: &str = "0190f5fe-7c00-7a00-8abc-012345678907";
 const CONV_8: &str = "0190f5fe-7c00-7a00-8abc-012345678908";
 const CONV_MISSING: &str = "0190f5fe-7c00-7a00-8abc-012345678909";
-const CONV_MODE: &str = "0190f5fe-7c00-7a00-8abc-012345678910";
-const CONV_MODE_DEFAULT: &str = "0190f5fe-7c00-7a00-8abc-012345678911";
-const CONV_MODE_CODEX: &str = "0190f5fe-7c00-7a00-8abc-012345678912";
-const CONV_MODE_CLAUDE: &str = "0190f5fe-7c00-7a00-8abc-012345678913";
-const CONV_MODE_NOMI: &str = "0190f5fe-7c00-7a00-8abc-012345678914";
+const CONV_GEMINI: &str = "0190f5fe-7c00-7a00-8abc-012345678910";
+const CONV_GEMINI_DEFAULT: &str = "0190f5fe-7c00-7a00-8abc-012345678911";
+const CONV_CODEX: &str = "0190f5fe-7c00-7a00-8abc-012345678912";
+const CONV_CLAUDE: &str = "0190f5fe-7c00-7a00-8abc-012345678913";
+const CONV_NOMI: &str = "0190f5fe-7c00-7a00-8abc-012345678914";
 const ARTIFACT_1: &str = "0190f5fe-7c00-7a00-8abc-012345678915";
 const MISSING_JOB_ID: &str = "0190f5fe-7c00-7a00-8abc-ffffffffffff";
 const SECONDARY_USER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000002";
@@ -294,8 +294,8 @@ impl IConversationRepository for StubConvRepo {
             return Ok(None);
         }
 
-        let row = if id == CONV_MODE {
-            // conv_mode
+        let row = if id == CONV_GEMINI {
+            // conv_gemini
             nomifun_db::models::ConversationRow {
                 id: 0,
                 conversation_id: id.to_owned(),
@@ -321,7 +321,6 @@ impl IConversationRepository for StubConvRepo {
                     "backend": "gemini",
                     "agent_name": "Gemini",
                     "workspace": "/tmp/gemini-workspace",
-                    "session_mode": "yolo",
                     "current_model_id": "gemini-2.5-pro"
                 })
                 .to_string(),
@@ -334,8 +333,8 @@ impl IConversationRepository for StubConvRepo {
                 created_at: 1000,
                 updated_at: 1000,
             }
-        } else if id == CONV_MODE_DEFAULT {
-            // conv_mode_default
+        } else if id == CONV_GEMINI_DEFAULT {
+            // conv_gemini_default
             nomifun_db::models::ConversationRow {
                 id: 0,
                 conversation_id: id.to_owned(),
@@ -361,7 +360,6 @@ impl IConversationRepository for StubConvRepo {
                     "backend": "gemini",
                     "agent_name": "Gemini",
                     "workspace": "/tmp/gemini-default-workspace",
-                    "session_mode": "default",
                     "current_model_id": "gemini-2.5-pro"
                 })
                 .to_string(),
@@ -374,8 +372,8 @@ impl IConversationRepository for StubConvRepo {
                 created_at: 1000,
                 updated_at: 1000,
             }
-        } else if id == CONV_MODE_CODEX {
-            // conv_mode_codex
+        } else if id == CONV_CODEX {
+            // conv_codex
             nomifun_db::models::ConversationRow {
                 id: 0,
                 conversation_id: id.to_owned(),
@@ -401,7 +399,6 @@ impl IConversationRepository for StubConvRepo {
                     "backend": "codex",
                     "agent_name": "Codex",
                     "workspace": "/tmp/codex-workspace",
-                    "session_mode": "default",
                     "current_model_id": "gpt-5-codex"
                 })
                 .to_string(),
@@ -414,8 +411,8 @@ impl IConversationRepository for StubConvRepo {
                 created_at: 1000,
                 updated_at: 1000,
             }
-        } else if id == CONV_MODE_CLAUDE {
-            // conv_mode_claude
+        } else if id == CONV_CLAUDE {
+            // conv_claude
             nomifun_db::models::ConversationRow {
                 id: 0,
                 conversation_id: id.to_owned(),
@@ -441,7 +438,6 @@ impl IConversationRepository for StubConvRepo {
                     "backend": "claude",
                     "agent_name": "Claude",
                     "workspace": "/tmp/claude-workspace",
-                    "session_mode": "default",
                     "current_model_id": "claude-sonnet-4-20250514"
                 })
                 .to_string(),
@@ -454,8 +450,8 @@ impl IConversationRepository for StubConvRepo {
                 created_at: 1000,
                 updated_at: 1000,
             }
-        } else if id == CONV_MODE_NOMI {
-            // conv_mode_nomi
+        } else if id == CONV_NOMI {
+            // conv_nomi
             nomifun_db::models::ConversationRow {
                 id: 0,
                 conversation_id: id.to_owned(),
@@ -481,7 +477,6 @@ impl IConversationRepository for StubConvRepo {
                     "backend": "anthropic",
                     "agent_name": "Nomi",
                     "workspace": "/tmp/nomi-workspace",
-                    "session_mode": "default",
                     "current_model_id": "claude-sonnet-4-20250514"
                 })
                 .to_string(),
@@ -879,11 +874,11 @@ async fn setup_with_conv_repo() -> (
             CONV_7,
             CONV_8,
             CONV_MISSING,
-            CONV_MODE,
-            CONV_MODE_DEFAULT,
-            CONV_MODE_CODEX,
-            CONV_MODE_CLAUDE,
-            CONV_MODE_NOMI,
+            CONV_GEMINI,
+            CONV_GEMINI_DEFAULT,
+            CONV_CODEX,
+            CONV_CLAUDE,
+            CONV_NOMI,
         ] {
             real_conv_repo
                 .create(&nomifun_db::models::ConversationRow {
@@ -1018,7 +1013,6 @@ fn make_create_req(name: &str, schedule: CronScheduleDto) -> CreateCronJobReques
             preset_id: None,
             preset_revision: None,
             preset_snapshot: None,
-            mode: None,
             model: Some("gemini-2.5-pro".into()),
             provider_id: Some(GEMINI_PROVIDER_ID.into()),
             config_options: None,
@@ -1049,7 +1043,6 @@ async fn create_boot_recovery_job(
         preset_id: None,
         preset_revision: None,
         preset_snapshot: None,
-        mode: None,
         model: Some("model-safe".into()),
         provider_id: Some(SAFE_PROVIDER_ID.into()),
         config_options: None,
@@ -1147,7 +1140,6 @@ async fn secondary_cron_keeps_model_selection_but_cannot_gain_host_configuration
                     preset_id: Some("owner-preset".into()),
                     preset_revision: Some(7),
                     preset_snapshot: None,
-                    mode: Some("yolo".into()),
                     model: Some("model-safe".into()),
                     provider_id: Some(SAFE_PROVIDER_ID.into()),
                     config_options: Some(HashMap::from([("host".into(), "true".into())])),
@@ -1168,7 +1160,6 @@ async fn secondary_cron_keeps_model_selection_but_cannot_gain_host_configuration
     assert!(config.custom_agent_id.is_none());
     assert!(config.preset_id.is_none());
     assert!(config.preset_snapshot.is_none());
-    assert!(config.mode.is_none());
     assert!(config.config_options.is_none());
     assert!(config.workspace.is_none());
 
@@ -1485,7 +1476,6 @@ async fn run_now_restart_replay_of_reserved_run_never_redrives_executor() {
         preset_id: None,
         preset_revision: None,
         preset_snapshot: None,
-        mode: None,
         model: Some("model-safe".into()),
         provider_id: Some(SAFE_PROVIDER_ID.into()),
         config_options: None,
@@ -1581,7 +1571,6 @@ async fn boot_settles_interrupted_reserved_occurrence_once_without_redrive() {
         preset_id: None,
         preset_revision: None,
         preset_snapshot: None,
-        mode: None,
         model: Some("model-safe".into()),
         provider_id: Some(SAFE_PROVIDER_ID.into()),
         config_options: None,
@@ -2697,7 +2686,7 @@ async fn icron_service_create_job() {
 }
 
 #[tokio::test]
-async fn icron_service_create_job_inherits_conversation_mode_and_backend() {
+async fn icron_service_create_job_inherits_conversation_provider_model_and_workspace() {
     let (svc, _, _) = setup().await;
 
     use nomifun_conversation::response_middleware::ICronService;
@@ -2709,12 +2698,12 @@ async fn icron_service_create_job_inherits_conversation_mode_and_backend() {
         message: "do agent work".into(),
     };
 
-    let result = ICronService::create_job(&svc, TEST_USER_ID, CONV_MODE, &params).await;
+    let result = ICronService::create_job(&svc, TEST_USER_ID, CONV_GEMINI, &params).await;
     assert!(result.success);
 
     let jobs = svc
         .list_jobs(TEST_USER_ID, &ListCronJobsQuery {
-            conversation_id: Some(CONV_MODE.to_owned()),
+            conversation_id: Some(CONV_GEMINI.to_owned()),
         })
         .await
         .unwrap();
@@ -2732,13 +2721,12 @@ async fn icron_service_create_job_inherits_conversation_mode_and_backend() {
     assert_eq!(config.backend, None);
     assert_eq!(config.provider_id.as_deref(), Some(GEMINI_PROVIDER_ID));
     assert_eq!(config.name, "Gemini");
-    assert_eq!(config.mode.as_deref(), Some("yolo"));
     assert_eq!(config.model.as_deref(), Some("gemini-2.5-pro"));
     assert_eq!(config.workspace.as_deref(), Some("/tmp/gemini-workspace"));
 }
 
 #[tokio::test]
-async fn icron_service_create_job_forces_full_auto_mode_for_generated_crons() {
+async fn icron_service_create_job_preserves_provider_model_and_workspace_for_generated_crons() {
     let (svc, _, _) = setup().await;
 
     use nomifun_conversation::response_middleware::ICronService;
@@ -2750,13 +2738,36 @@ async fn icron_service_create_job_forces_full_auto_mode_for_generated_crons() {
         message: "do agent work".into(),
     };
 
-    // An agent-generated cron runs unattended, so it must be pinned to the
-    // canonical full-auto mode rather than inheriting the conversation's
-    // interactive `session_mode` — every source row below carries
-    // `"session_mode": "default"`, which would stall waiting for approval.
-    // The mode is a single canonical id now that the engine set is one entry;
-    // the per-vendor mode table this test used to sweep is gone.
-    for conversation_id in [CONV_MODE_DEFAULT, CONV_MODE_CODEX, CONV_MODE_CLAUDE, CONV_MODE_NOMI] {
+    for (conversation_id, provider_id, model, workspace, name) in [
+        (
+            CONV_GEMINI_DEFAULT,
+            GEMINI_PROVIDER_ID,
+            "gemini-2.5-pro",
+            "/tmp/gemini-default-workspace",
+            "Gemini",
+        ),
+        (
+            CONV_CODEX,
+            CODEX_PROVIDER_ID,
+            "gpt-5-codex",
+            "/tmp/codex-workspace",
+            "Codex",
+        ),
+        (
+            CONV_CLAUDE,
+            CLAUDE_PROVIDER_ID,
+            "claude-sonnet-4-20250514",
+            "/tmp/claude-workspace",
+            "Claude",
+        ),
+        (
+            CONV_NOMI,
+            NOMI_PROVIDER_ID,
+            "claude-sonnet-4-20250514",
+            "/tmp/nomi-workspace",
+            "Nomi",
+        ),
+    ] {
         let created = ICronService::create_job(&svc, TEST_USER_ID, conversation_id, &params).await;
         assert!(created.success, "cron creation for {conversation_id}");
 
@@ -2766,14 +2777,15 @@ async fn icron_service_create_job_forces_full_auto_mode_for_generated_crons() {
             })
             .await
             .unwrap();
-        assert_eq!(
-            jobs[0]
-                .agent_config
-                .as_ref()
-                .and_then(|config| config.mode.as_deref()),
-            Some(nomifun_common::AgentType::Nomi.full_auto_mode_id()),
-            "generated cron for {conversation_id} must run full-auto"
-        );
+        let config = jobs[0]
+            .agent_config
+            .as_ref()
+            .expect("generated cron must retain agent config");
+        assert_eq!(config.backend, None);
+        assert_eq!(config.provider_id.as_deref(), Some(provider_id));
+        assert_eq!(config.model.as_deref(), Some(model));
+        assert_eq!(config.workspace.as_deref(), Some(workspace));
+        assert_eq!(config.name, name);
     }
 }
 
@@ -3280,7 +3292,7 @@ async fn cd4_conversation_transaction_hands_captured_job_ids_to_post_commit_clea
     let cron_service = Arc::new(cron_service);
 
     let mut req = make_create_req("Transactional Cascade", every_60s());
-    req.conversation_id = Some(CONV_MODE.to_owned());
+    req.conversation_id = Some(CONV_GEMINI.to_owned());
     let job = cron_service.add_job(TEST_USER_ID, req).await.unwrap();
     write_raw_skill_file(
         &data_dir,
@@ -3339,7 +3351,7 @@ async fn cd4_conversation_transaction_hands_captured_job_ids_to_post_commit_clea
     );
     conversation_service.with_delete_hook(cron_service.clone());
     conversation_service
-        .delete(TEST_USER_ID, CONV_MODE)
+        .delete(TEST_USER_ID, CONV_GEMINI)
         .await
         .unwrap();
 

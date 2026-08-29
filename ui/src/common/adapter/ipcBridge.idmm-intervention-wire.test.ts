@@ -17,4 +17,10 @@ describe('IDMM intervention wire ID contract', () => {
     ).toBe(true);
     expect(source.includes('id: parseIdmmInterventionId(record.id)')).toBe(false);
   });
+
+  test('does not expose the retired permission-confirmation decision category', () => {
+    expect(source.includes('IIdmm' + 'PermissionRule')).toBe(false);
+    expect(source.includes('permission: IIdmm' + 'PermissionRule')).toBe(false);
+    expect(source.includes('option / open_question / ' + 'permission / fault')).toBe(false);
+  });
 });

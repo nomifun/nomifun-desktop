@@ -6,7 +6,6 @@ pub mod cache_diagnostics;
 pub mod commands;
 pub mod compact;
 pub mod companion_tools;
-pub mod confirm;
 pub mod context;
 pub mod context_contributor;
 pub mod cron_tools;

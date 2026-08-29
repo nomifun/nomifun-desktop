@@ -6,7 +6,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Button, Input, Message, Radio, Select } from '@arco-design/web-react';
+import { Button, Input, Message, Select } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { IIdmmConfig, IKnowledgeBase } from '@/common/adapter/ipcBridge';
@@ -20,7 +20,6 @@ import {
   getPreset,
   parseCommandPreview,
   TERMINAL_PRESETS,
-  type PermissionLevel,
   type TerminalPresetId,
 } from './launchPresets';
 import ExtendedCapabilitiesPanel from './ExtendedCapabilitiesPanel';
@@ -33,7 +32,6 @@ const TerminalCreatePage: React.FC = () => {
   const location = useLocation();
   const { t } = useTranslation();
   const [presetId, setPresetId] = useState<TerminalPresetId>('shell');
-  const [permission, setPermission] = useState<PermissionLevel>('full-auto');
   const [cwd, setCwd] = useState('');
   const [commandPreview, setCommandPreview] = useState('');
   const [creating, setCreating] = useState(false);
@@ -72,10 +70,10 @@ const TerminalCreatePage: React.FC = () => {
 
   const preset = useMemo(() => getPreset(presetId), [presetId]);
 
-  // Keep the editable command preview in sync with preset + permission choices.
+  // Keep the editable command preview in sync with the selected preset.
   useEffect(() => {
-    setCommandPreview(formatCommandPreview(buildLaunchCommand(presetId, permission)));
-  }, [presetId, permission]);
+    setCommandPreview(formatCommandPreview(buildLaunchCommand(presetId)));
+  }, [presetId]);
 
   const handleLaunch = async () => {
     const { command, args } = parseCommandPreview(commandPreview);
@@ -90,7 +88,7 @@ const TerminalCreatePage: React.FC = () => {
         command,
         args,
         backend: preset.backend,
-        mode: preset.supportsPermission ? permission : undefined,
+        mode: preset.backend ? 'full-auto' : undefined,
         // Defer the PTY spawn until XtermView mounts and sends the first resize
         // with the real fitted size, so a full-screen TUI (claude) draws at the
         // correct dimensions from frame one — no garble-until-you-resize.
@@ -171,24 +169,6 @@ const TerminalCreatePage: React.FC = () => {
             </Select.Option>
           ))}
         </Select>
-
-        {/* Permission mode (agent presets only) */}
-        {preset.supportsPermission && (
-          <>
-            <label className='mb-6px block text-14px font-medium text-t-primary'>
-              {t('terminal.create.permission')}
-            </label>
-            <Radio.Group
-              className='mb-16px'
-              type='button'
-              value={permission}
-              onChange={(v) => setPermission(v as PermissionLevel)}
-            >
-              <Radio value='default'>{t('terminal.create.permissionDefault')}</Radio>
-              <Radio value='full-auto'>{t('terminal.create.permissionFullAuto')}</Radio>
-            </Radio.Group>
-          </>
-        )}
 
         {/* Editable launch command preview */}
         <LabelWithTip label={t('terminal.create.command')} tip={t('terminal.create.commandHint')} />

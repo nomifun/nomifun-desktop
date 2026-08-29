@@ -14,10 +14,9 @@ import {
   type AgentMetadata,
   type AgentSource,
 } from '@/renderer/utils/model/agentTypes';
-import { getAgentModes, getFullAutoMode } from '@/renderer/utils/model/agentModes';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import useSWR from 'swr';
-import { savePreferredMode, getAgentKey as getAgentKeyUtil } from './agentSelectionUtils';
+import { getAgentKey as getAgentKeyUtil } from './agentSelectionUtils';
 import { usePresetResolver } from './usePresetResolver';
 import { useAgentAvailability } from './useAgentAvailability';
 import { usePresetCatalogLoader } from './usePresetCatalogLoader';
@@ -34,8 +33,6 @@ export type GuidAgentSelectionResult = {
   presets: Preset[];
   /** User-defined engine rows (agent_source === 'custom') from the backend. */
   customAgents: AgentMetadata[];
-  selectedMode: string;
-  setSelectedMode: React.Dispatch<React.SetStateAction<string>>;
   currentEffectiveAgentInfo: EffectiveAgentInfo;
   getAgentKey: (agent: {
     agent_type: string;
@@ -54,25 +51,6 @@ export type GuidAgentSelectionResult = {
   refreshCustomAgents: () => Promise<void>;
   customAgentAvatarMap: Map<string, string | undefined>;
 };
-
-/**
- * Resolve the default session_mode for a given backend.
- *
- * Priority:
- *   1. First entry of the static `AGENT_MODES` table
- *   2. Literal `'default'`
- *
- * This mirrors the runtime fallback inside `AgentModeSelector` so the
- * parent-held `selectedMode` stays in sync with what the UI shows.
- */
-function resolveDefaultMode(backend: string | undefined): string {
-  if (!backend) return 'default';
-
-  const staticModes = getAgentModes(backend);
-  if (staticModes.length > 0) return staticModes[0].value;
-
-  return 'default';
-}
 
 type UseGuidAgentSelectionOptions = {
   modelList: IProvider[];
@@ -102,29 +80,11 @@ export const useGuidAgentSelection = ({
     }
   });
   const [availableAgents, setAvailableAgents] = useState<AvailableAgent[]>();
-  const [selectedMode, _setSelectedMode] = useState<string>('default');
-  // Track whether mode was loaded from preferences to avoid overwriting during initial load
-  const selectedAgentRef = useRef<string | null>(null);
-  // Guard: only run the initial restore once; user selections are never overwritten
-  const initialRestoreDoneRef = useRef(false);
   // Wrap setSelectedAgentKey to also save to storage
   const setSelectedAgentKey = useCallback((key: string) => {
-    initialRestoreDoneRef.current = true;
     _setSelectedAgentKey(key);
     configService.set('guid.lastSelectedAgent', key).catch((error) => {
       console.error('Failed to save selected agent:', error);
-    });
-  }, []);
-
-  // Wrap setSelectedMode to also save preferred mode to the agent's own config
-  const setSelectedMode = useCallback((mode: React.SetStateAction<string>) => {
-    _setSelectedMode((prev) => {
-      const newMode = typeof mode === 'function' ? mode(prev) : mode;
-      const agentKey = selectedAgentRef.current;
-      if (agentKey) {
-        void savePreferredMode(agentKey, newMode);
-      }
-      return newMode;
     });
   }, []);
 
@@ -288,8 +248,6 @@ export const useGuidAgentSelection = ({
     if (preselectAgentKey && availableAgents.some((a) => getAgentKey(a) === preselectAgentKey)) return;
 
     let cancelled = false;
-    initialRestoreDoneRef.current = true;
-
     const restoreSavedSelection = async () => {
       try {
         const savedKey = configService.get('guid.lastSelectedAgent');
@@ -345,43 +303,6 @@ export const useGuidAgentSelection = ({
     return getEffectiveAgentType(selectedAgentInfo);
   }, [is_presetAgent, selectedAgent, selectedAgentInfo, getEffectiveAgentType, isMainAgentAvailable]);
 
-  // Read the persisted preferred mode for the selected engine.
-  useEffect(() => {
-    // For preset agents, use the effective backend type for config lookup and mode saving
-    const configKey = is_presetAgent ? currentEffectiveAgentInfo.agent_type : selectedAgent;
-    selectedAgentRef.current = configKey;
-    // Default authorization mode = full-auto (产品决策:开箱即用全自动,不再反复弹授权).
-    // Use the backend's full-auto value (`getFullAutoMode`) when it is a mode the
-    // backend actually offers; otherwise fall back to the backend's natural
-    // default via `resolveDefaultMode`. A saved `preferredMode` (explicit user
-    // choice, incl. a downgrade) still wins below.
-    const fullAutoMode = getFullAutoMode(configKey);
-    const availableModeIds = getAgentModes(configKey).map((m) => m.value);
-    const fallbackMode = availableModeIds.includes(fullAutoMode) ? fullAutoMode : resolveDefaultMode(configKey);
-    _setSelectedMode(fallbackMode);
-    if (configKey !== 'nomi') return;
-
-    let cancelled = false;
-
-    const loadPreferredMode = async () => {
-      try {
-        const preferred = configService.get('nomi.config')?.preferredMode;
-        if (cancelled || !preferred) return;
-        if (getAgentModes(configKey).some((m) => m.value === preferred)) {
-          _setSelectedMode(preferred);
-        }
-      } catch {
-        /* silent */
-      }
-    };
-
-    void loadPreferredMode();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedAgent, is_presetAgent, currentEffectiveAgentInfo.agent_type]);
-
   // Key of the first non-preset CLI agent (used as fallback when leaving preset mode)
   const defaultAgentKey = useMemo(() => {
     const firstCliAgent = availableAgents?.find((a) => !a.is_preset);
@@ -398,8 +319,6 @@ export const useGuidAgentSelection = ({
     availableAgents,
     presets,
     customAgents,
-    selectedMode,
-    setSelectedMode,
     currentEffectiveAgentInfo,
     getAgentKey,
     findAgentByKey,

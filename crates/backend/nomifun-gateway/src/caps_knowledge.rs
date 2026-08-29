@@ -2,7 +2,7 @@
 //! file writes, AI overview autogen, server-side URL fetch, and the per-target
 //! knowledge binding. The intricate per-surface write policy is preserved
 //! verbatim from the legacy tool. The `channel_write_enabled` field — previously
-//! readable at runtime but ABSENT from the MCP schema (a confirmed drift) — is
+//! readable at runtime but ABSENT from the MCP schema (a known drift) — is
 //! now a declared param, so the single typed struct fixes the drift.
 
 use std::collections::HashSet;
@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 
 use crate::deps::{CallerCtx, GatewayDeps};
 use crate::id_schema::CanonicalEntityId;
-use crate::registry::{Capability, CapabilityMeta, DangerTier};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
 /// Response cap for `nomi_knowledge_fetch_url` markdown bodies.
@@ -466,31 +466,31 @@ async fn set_binding(deps: Arc<GatewayDeps>, p: SetBindingParams) -> Value {
 
 pub(crate) fn register(out: &mut Vec<Capability>) {
     out.push(Capability::new::<ListBasesParams, _, _>(
-        CapabilityMeta::new("nomi_knowledge_list_bases", "knowledge", "List knowledge bases (optionally filtered).", DangerTier::Read),
+        CapabilityMeta::new("nomi_knowledge_list_bases", "knowledge", "List knowledge bases (optionally filtered).", EffectClass::Read),
         |deps, _ctx, p| list_bases(deps, p),
     ));
     out.push(Capability::new::<CreateBaseParams, _, _>(
-        CapabilityMeta::new("nomi_knowledge_create_base", "knowledge", "Create a new managed knowledge base, optionally seeded with URL sources (fetched in the background).", DangerTier::Write),
+        CapabilityMeta::new("nomi_knowledge_create_base", "knowledge", "Create a new managed knowledge base, optionally seeded with URL sources (fetched in the background).", EffectClass::Write),
         |deps, _ctx, p| create_base(deps, p),
     ));
     out.push(Capability::new::<WriteFileParams, _, _>(
-        CapabilityMeta::new("nomi_knowledge_write_file", "knowledge", "Create/update one markdown document in a base (placement enforced by per-surface policy).", DangerTier::Write),
+        CapabilityMeta::new("nomi_knowledge_write_file", "knowledge", "Create/update one markdown document in a base (placement enforced by per-surface policy).", EffectClass::Write),
         write_file,
     ));
     out.push(Capability::new::<AutogenParams, _, _>(
-        CapabilityMeta::new("nomi_knowledge_autogen", "knowledge", "Generate the AI overview (description + root README) for a base.", DangerTier::Write),
+        CapabilityMeta::new("nomi_knowledge_autogen", "knowledge", "Generate the AI overview (description + root README) for a base.", EffectClass::Write),
         |deps, _ctx, p| autogen(deps, p),
     ));
     out.push(Capability::new::<FetchUrlParams, _, _>(
-        CapabilityMeta::new("nomi_knowledge_fetch_url", "knowledge", "Server-side fetch + HTML→markdown of a URL (SSRF-guarded).", DangerTier::Read),
+        CapabilityMeta::new("nomi_knowledge_fetch_url", "knowledge", "Server-side fetch + HTML→markdown of a URL (SSRF-guarded).", EffectClass::Read),
         |deps, _ctx, p| fetch_url(deps, p),
     ));
     out.push(Capability::new::<GetBindingParams, _, _>(
-        CapabilityMeta::new("nomi_knowledge_get_binding", "knowledge", "Read the knowledge binding for one target (conversation/terminal/companion).", DangerTier::Read),
+        CapabilityMeta::new("nomi_knowledge_get_binding", "knowledge", "Read the knowledge binding for one target (conversation/terminal/companion).", EffectClass::Read),
         |deps, _ctx, p| get_binding(deps, p),
     ));
     out.push(Capability::new::<SetBindingParams, _, _>(
-        CapabilityMeta::new("nomi_knowledge_set_binding", "knowledge", "Set the bound base list / toggle a target's knowledge binding and write-back knobs.", DangerTier::Write),
+        CapabilityMeta::new("nomi_knowledge_set_binding", "knowledge", "Set the bound base list / toggle a target's knowledge binding and write-back knobs.", EffectClass::Write),
         |deps, _ctx, p| set_binding(deps, p),
     ));
 }

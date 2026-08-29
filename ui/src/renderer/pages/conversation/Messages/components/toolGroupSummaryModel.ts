@@ -462,7 +462,7 @@ export const buildToolReceiptSummaryParts = (
 
 export const getToolReceiptIconFromSummaryParts = (parts: ToolReceiptSummaryPart[]): ToolReceiptIcon | undefined => {
   const focusedPart =
-    parts.findLast((part) => part.state === 'running' || part.state === 'waiting') ??
+    parts.findLast((part) => part.state === 'running') ??
     parts.findLast((part) => part.state === 'failed' || part.state === 'canceled') ??
     parts.at(-1);
   return focusedPart ? toolReceiptIconByAction[focusedPart.action] : undefined;

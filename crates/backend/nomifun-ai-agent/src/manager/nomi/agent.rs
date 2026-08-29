@@ -19,19 +19,14 @@ use nomi_agent::cron_tools::{CronCreateTool, CronDeleteTool, CronListTool, CronS
 use nomi_agent::session::Session;
 use nomi_config::config::{CliArgs, Config};
 use nomi_mcp::manager::McpManager;
-use nomi_protocol::commands::SessionMode;
-#[cfg(feature = "browser-use")]
-use nomi_protocol::events::ToolCategory;
-use nomi_protocol::{ToolApprovalManager, ToolApprovalResult};
 use nomi_types::message::ContentBlock;
 use nomifun_api_types::{
     AgentErrorCode, AgentErrorOwnership, AgentErrorResolution, AgentErrorResolutionKind,
-    AgentErrorResolutionTarget, AgentModeResponse, SlashCommandItem,
+    AgentErrorResolutionTarget, SlashCommandItem,
 };
 use nomifun_common::{
-    AgentKillReason, AgentType, AppError, Confirmation, ConversationStatus, ErrorChain, TimestampMs, now_ms,
+    AgentKillReason, AgentType, AppError, ConversationStatus, ErrorChain, TimestampMs, now_ms,
 };
-use serde_json::Value;
 use tokio::sync::{Mutex, Notify, broadcast};
 use tracing::{debug, error, info};
 
@@ -40,7 +35,6 @@ use crate::runtime_handle::SystemResourceNoticeDelivery;
 use crate::capability::backend_output_sink::{
     AsyncArtifactDeliveryOutcome, BackendOutputSink,
 };
-use crate::capability::backend_protocol_sink::BackendProtocolSink;
 use crate::image_generation::{
     IMAGE_GEN_TOOL_NAME, ImageGenerationIntent, ImageGenerationToolDiscovery,
     classify_image_generation_intent, classify_image_generation_intent_with_model,
@@ -246,8 +240,6 @@ pub struct NomiAgentManager {
     /// teardown; the link belongs to the conversation, which outlives every
     /// runtime the operator's model switches create and destroy.
     ssh_lease: Option<Arc<dyn crate::SshSessionLease>>,
-    approval_manager: Arc<ToolApprovalManager>,
-    confirmations: Arc<std::sync::RwLock<Vec<Confirmation>>>,
     /// Durable per-turn cancellation token. Unlike `Notify`, cancellation is
     /// retained when kill arrives before `send_message` reaches its select.
     turn_cancel: std::sync::Mutex<tokio_util::sync::CancellationToken>,
@@ -339,12 +331,6 @@ pub(crate) fn should_register_knowledge_write(
 ) -> bool {
     has_sink && !bases.is_empty()
 }
-
-/// Tool name of the native knowledge write-back tool. Allow-listed past the
-/// approval gate (DIRECT/STAGED writes go to the user's own managed base, and
-/// companion/channel sessions have no confirmation UI), mirroring the companion
-/// memory tools.
-pub(crate) const KNOWLEDGE_WRITE_TOOL_NAME: &str = "knowledge_write";
 
 /// Cap on race-tail re-runs within a single turn-claim. The race window is
 /// sub-millisecond, so a tiny bound guarantees termination even if a steerer
@@ -914,8 +900,7 @@ impl Default for NomiHostWiring {
 /// read-only recall over the summoned companion's memories plus the per-turn
 /// live memory-snapshot contributor. Every write path is deliberately absent:
 /// `save_memory` is never registered under summon, the memory sink refuses
-/// writes, and the confirmation-style `propose_companion_memory` tool retired
-/// with the 建议 feature.
+/// writes, and the retired `propose_companion_memory` tool remains absent.
 pub struct NomiSummonWiring {
     pub memory_sink: Arc<dyn CompanionMemorySink>,
     pub context_sink: Arc<dyn SummonContextSink>,
@@ -982,7 +967,6 @@ impl NomiAgentManager {
         #[cfg(feature = "browser-use")]
         let browser_lane_binding = host_wiring.browser_lane_binding;
         let ssh_lease = host_wiring.ssh_lease;
-        let image_generation_entitled = host_wiring.image_generation_entitled;
         let image_generation_discovery = host_wiring.image_generation_discovery;
         let image_generation_tool = host_wiring.image_generation_tool;
         let image_generation_availability = if image_generation_tool.is_some() {
@@ -1033,7 +1017,6 @@ impl NomiAgentManager {
             max_turns: config_extra.max_turns,
             system_prompt: config_extra.system_prompt.clone(),
             profile: None,
-            auto_approve: config_extra.session_mode.as_deref() == Some("yolo"),
             project_dir: Some(PathBuf::from(&workspace)),
         };
 
@@ -1113,84 +1096,34 @@ impl NomiAgentManager {
         // P7B: 把会话的 visual-fallback LIVE 值灌进 BrowserConfig.visual_fallback（默认 OFF，opt-in）。
         // bootstrap 据它给 Hub-backed Browser tool adapter 注入会话模型的 VisualLocator。
         config.tools.browser.visual_fallback = config_extra.browser_visual_fallback;
-        config.tools.browser.unrestricted_approval = config_extra.browser_unrestricted_approval;
         // Browser is status-only: Primary runs in the external managed window.
         // BrowserSessionHub owns every Host/profile; this runtime never
         // creates a private/headless one.
         config.tools.browser.headless = false;
         config.tools.browser.source = config_extra.browser_source.clone();
 
-        // Companion memory tools only touch the companion's own memory.db — never
-        // user files — so they skip the approval gate in every session mode
-        // (Default mode auto-approves nothing by category, which would park
-        // every save_memory call on a confirmation the companion bubble can't show).
-        if companion_sink.is_some() {
-            config.tools.allow_list.extend([
-                "recall_memories".to_owned(),
-                "save_memory".to_owned(),
-                "list_recent_events".to_owned(),
-            ]);
-        }
+        // Companion memory tools only touch the companion's own memory.db and
+        // are registered only when the host provides that scoped sink.
         // Summoned-companion work session (spec §设计 B): the read-only recall
-        // touches only the companion's own memory.db — never user files — so it
-        // skips the approval gate like the companion tools above. `save_memory`
-        // is intentionally NOT allow-listed and never registered under summon.
-        // Must be set BEFORE bootstrap; registration happens after build().
-        if summon_wiring.is_some() {
-            config.tools.allow_list.push("recall_memories".to_owned());
-        }
-        // Companion self-evolved skill invocation (yolo, no approval UI) — must be
-        // allow-listed BEFORE bootstrap or the call parks forever. Registration of
-        // the tool + the per-turn skill ContextContributor happens after build().
-        if companion_skill_sink.is_some() {
-            config.tools.allow_list.push("companion_skill".to_owned());
-        }
+        // touches only the companion's own memory.db. `save_memory` is not
+        // registered under summon. Companion self-evolved skill registration
+        // remains conditional on the scoped host sink.
 
-        // Read-only knowledge tools must bypass the approval lane whenever the
-        // same sink/base truth permits their later registration. Do this before
-        // bootstrap so the engine policy and the advertised prompt cannot drift.
+        // The same sink/base truth controls read-only knowledge registration
+        // and its advertised prompt so those surfaces cannot drift.
         let register_knowledge_search = should_register_knowledge_search(
             knowledge_retrieval_sink.is_some(),
             &knowledge_kb_ids,
         );
-        if register_knowledge_search {
-            for tool_name in ["knowledge_search", "knowledge_read"] {
-                if !config.tools.allow_list.iter().any(|name| name == tool_name) {
-                    config.tools.allow_list.push(tool_name.to_owned());
-                }
-            }
-        }
 
         // The native knowledge_write (回血) tool writes only into the user's own
         // bound knowledge base (DIRECT → base body; STAGED → review inbox) via
-        // the backend service. Allow-list it so it bypasses the per-call approval
-        // gate — under SessionMode::Default nothing is auto-approved, which would
-        // park every write-back on a confirmation many surfaces (channel /
-        // companion) cannot even show. Same posture as the companion memory
-        // tools above. Must be set BEFORE bootstrap so it reaches the engine's
-        // allow_list. Registration of the tool itself happens after build().
+        // the backend service. Registration remains conditional on a writable
+        // binding; placement and authorization stay in the service.
         let register_knowledge_write =
             should_register_knowledge_write(knowledge_writeback_sink.is_some(), &knowledge_write_bases);
-        if register_knowledge_write {
-            config.tools.allow_list.push(KNOWLEDGE_WRITE_TOOL_NAME.to_owned());
-        }
         // The native image tool writes only through the verified artifact
         // store and is the expected path for an ordinary generation request.
-        // Add it before bootstrap so the registry's persistent allow policy
-        // accepts the late registration and the turn never stalls on an
-        // approval UI while a provider request is already in flight.
-        if image_generation_entitled
-            && !config
-                .tools
-                .allow_list
-                .iter()
-                .any(|name| name == IMAGE_GEN_TOOL_NAME)
-        {
-            config
-                .tools
-                .allow_list
-                .push(IMAGE_GEN_TOOL_NAME.to_owned());
-        }
 
         let is_resume = resume_session.is_some();
         let provider_label = config.provider_label.clone();
@@ -1200,57 +1133,13 @@ impl NomiAgentManager {
         // (the engine consumes `config` next). Cheap one-time clone.
         let distill_cfg = Arc::new(config.clone());
 
-        // Create the session's shared approval manager before bootstrap. The
-        // Hub-backed Browser tool adapter and ordinary tool execution receive
-        // the same Arc, so a mid-session mode change updates the live redline
-        // gate instead of using a construction-time snapshot. This policy
-        // wiring does not own a Browser Host; all browser work still enters the
-        // main-process BrowserSessionHub through BrowserLaneClient.
-        let approval_manager = Arc::new(ToolApprovalManager::new());
-        if let Some(mode_str) = &config_extra.session_mode {
-            let mode = parse_session_mode(mode_str);
-            approval_manager.set_mode(mode);
-            info!(
-                conversation_id = %conversation_id,
-                session_mode = mode_str,
-                "Nomi initial session mode applied"
-            );
-        }
-
-        // Phase D: the session's confirmation store, created BEFORE bootstrap so the desktop
-        // approval gate can share the SAME Arc the `BackendProtocolSink` (below) uses. Holds
-        // pending tool-approvals + browser takeover/egress approvals; the frontend renders
-        // them (MessagePermission) and resolves via `confirm`.
-        let confirmations = Arc::new(std::sync::RwLock::new(Vec::new()));
-
         let mut bootstrap = AgentBootstrap::new(config, &workspace, sink)
             .goal(goal_spec)
             .install_embedded_agent_execution(
                 config_extra.install_embedded_agent_execution,
-            )
-            .approval_manager(approval_manager.clone());
+            );
         if let Some(key) = config_extra.persistent_login_key {
             bootstrap = bootstrap.persistent_login_key(key);
-        }
-        // Phase D: when the user opted into takeover/approval (`agent.browserUse.takeover`),
-        // give bootstrap a desktop approval gate sharing the session's confirmation store +
-        // approval manager — it surfaces irreversible actions / gated cross-origin POSTs
-        // (SD-5) to the user via the existing confirmation UI and awaits a decision. Absent →
-        // fail-closed (irreversible stays Blocked, gated egress fails). Threaded into the
-        // Hub-backed Browser tool adapter (no-op if browser-use is off).
-        #[cfg(feature = "browser-use")]
-        if should_install_browser_approval_gate(
-            config_extra.browser_takeover,
-            config_extra.browser_unrestricted_approval,
-            approval_manager.as_ref(),
-        ) {
-            let gate = crate::manager::nomi::browser_approval::DesktopApprovalGate::new(
-                runtime.event_sender(),
-                confirmations.clone(),
-                approval_manager.clone(),
-                config_extra.browser_unrestricted_approval,
-            );
-            bootstrap = bootstrap.approval_gate(Arc::new(gate));
         }
         #[cfg(feature = "browser-use")]
         if let Some(binding) = &browser_lane_binding {
@@ -1314,8 +1203,8 @@ impl NomiAgentManager {
             debug!(conversation_id = %conversation_id, "Registered companion memory tools");
         }
         // Summoned-companion session (spec §设计 B2/B3): read-only recall over
-        // the summoned companion's memories, confirmation-style propose, and
-        // the per-turn live memory-snapshot contributor. The factory gates this
+        // the summoned companion's memories and the per-turn live
+        // memory-snapshot contributor. The factory gates this
         // to owner-authority non-companion sessions, so it never collides with
         // the companion registration above (duplicate names would be refused
         // by the registry anyway).
@@ -1368,10 +1257,9 @@ impl NomiAgentManager {
         }
         // Native knowledge_write (回血): registered only when the binding has
         // write-back enabled (factory passes the sink) AND there are bound bases.
-        // The tool was already added to the engine allow_list above so it
-        // bypasses the approval gate. Where a write lands and whether it may
-        // land at all is enforced entirely in the service (write_document), so
-        // the tool carries no placement of its own.
+        // Where a write lands and whether it may land at all is enforced entirely
+        // in the service (write_document), so the tool carries no placement of
+        // its own.
         if let Some(sink) = knowledge_writeback_sink {
             if register_knowledge_write {
                 let bound_kb_ids: Vec<nomifun_common::KnowledgeBaseId> =
@@ -1408,9 +1296,6 @@ impl NomiAgentManager {
         // resumed session the factory already migrated, and for None (no token).
         engine.stamp_owner_token(config_extra.owner_token.clone());
 
-        let protocol_sink = BackendProtocolSink::new(runtime.event_sender(), confirmations.clone());
-        engine.set_approval_manager(approval_manager.clone());
-        engine.set_protocol_writer(Arc::new(protocol_sink));
         let slash_commands = engine
             .slash_command_list()
             .into_iter()
@@ -1432,8 +1317,6 @@ impl NomiAgentManager {
             #[cfg(feature = "browser-use")]
             browser_lane_binding,
             ssh_lease,
-            approval_manager,
-            confirmations,
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             active_turn: Arc::new(std::sync::Mutex::new(None)),
             lifecycle_gate: Arc::new(std::sync::Mutex::new(())),
@@ -1589,10 +1472,6 @@ impl NomiAgentManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
-
-        if let Ok(mut confs) = self.confirmations.write() {
-            confs.clear();
-        }
 
         if was_running {
             // The durable token above wakes the active turn's select branch.
@@ -3487,68 +3366,6 @@ impl NomiAgentManager {
         Ok(delivery)
     }
 
-    pub fn confirm(&self, _msg_id: &str, call_id: &str, data: Value, always_allow: bool) -> Result<(), AppError> {
-        if let Ok(mut confs) = self.confirmations.write() {
-            confs.retain(|c| c.call_id != call_id);
-        }
-
-        let value = data.get("value").and_then(|v| v.as_str()).unwrap_or("cancel");
-
-        let is_cancel = value == "cancel";
-
-        debug!(
-            conversation_id = %self.runtime.conversation_id(),
-            call_id,
-            value,
-            always_allow,
-            "Nomi confirm"
-        );
-
-        if is_cancel {
-            self.approval_manager.resolve(
-                call_id,
-                ToolApprovalResult::Denied {
-                    reason: "User denied the tool request".into(),
-                },
-            );
-        } else {
-            let scope = if always_allow {
-                nomi_protocol::commands::ApprovalScope::Always
-            } else {
-                nomi_protocol::commands::ApprovalScope::Once
-            };
-            self.approval_manager.approve(call_id, scope);
-        }
-        Ok(())
-    }
-
-    pub fn get_confirmations(&self) -> Vec<Confirmation> {
-        self.confirmations.read().map(|c| c.clone()).unwrap_or_default()
-    }
-
-    pub fn check_approval(&self, action: &str, _command_type: Option<&str>) -> bool {
-        self.approval_manager.is_auto_approved(action)
-    }
-
-    pub async fn mode(&self) -> Result<AgentModeResponse, AppError> {
-        Ok(AgentModeResponse {
-            mode: self.approval_manager.current_mode(),
-            initialized: true,
-        })
-    }
-
-    pub async fn set_mode(&self, mode: &str) -> Result<(), AppError> {
-        let prev = self.approval_manager.current_mode();
-        self.approval_manager.set_mode(parse_session_mode(mode));
-        info!(
-            conversation_id = %self.runtime.conversation_id(),
-            from = prev,
-            to = mode,
-            "Nomi session mode switched"
-        );
-        Ok(())
-    }
-
     pub async fn get_slash_commands(&self) -> Result<Vec<SlashCommandItem>, AppError> {
         Ok(self.slash_commands.clone())
     }
@@ -3624,25 +3441,6 @@ impl NomiAgentManager {
     pub(crate) fn distill_dir_for_test(&self) -> Option<&std::path::Path> {
         self.distill_dir.as_deref()
     }
-}
-
-fn parse_session_mode(s: &str) -> SessionMode {
-    match s {
-        "auto_edit" => SessionMode::AutoEdit,
-        "yolo" => SessionMode::Yolo,
-        _ => SessionMode::Default,
-    }
-}
-
-#[cfg(feature = "browser-use")]
-fn should_install_browser_approval_gate(
-    browser_takeover: bool,
-    browser_unrestricted_approval: bool,
-    approval_manager: &ToolApprovalManager,
-) -> bool {
-    browser_takeover
-        || browser_unrestricted_approval
-        || approval_manager.is_auto_approved(&ToolCategory::Irreversible.to_string())
 }
 
 fn nomi_engine_error_to_send_error(error_msg: String) -> AgentSendError {
@@ -4431,7 +4229,6 @@ mod tests {
             context_limit: None,
             compat_overrides: Default::default(),
             session_directory: std::env::temp_dir().join("nomi-test-sessions"),
-            session_mode: None,
             extra_mcp_servers: std::collections::HashMap::new(),
             loopback_capability_leases: Default::default(),
             bedrock_config: None,
@@ -4441,8 +4238,6 @@ mod tests {
             browser_full_power: false,
             browser_persistent_login: false,
             browser_site_memory: false,
-            browser_takeover: false,
-            browser_unrestricted_approval: false,
             browser_visual_fallback: false,
             goal: None,
             persistent_login_key: None,
@@ -4936,7 +4731,6 @@ mod tests {
             max_turns: Some(10),
             system_prompt: None,
             profile: None,
-            auto_approve: true,
             project_dir: Some(PathBuf::from("/project")),
         })
         .expect("test config should resolve");
@@ -5107,15 +4901,6 @@ mod tests {
             output,
             PathBuf::from("/project"),
         );
-        let approval_manager = Arc::new(ToolApprovalManager::new());
-        let confirmations = Arc::new(std::sync::RwLock::new(Vec::new()));
-        let protocol_sink = BackendProtocolSink::new(
-            runtime.event_sender(),
-            confirmations.clone(),
-        );
-        engine.set_approval_manager(approval_manager.clone());
-        engine.set_protocol_writer(Arc::new(protocol_sink));
-
         NomiAgentManager {
             runtime,
             backend_output_sink,
@@ -5128,8 +4913,6 @@ mod tests {
             #[cfg(feature = "browser-use")]
             browser_lane_binding: None,
             ssh_lease: None,
-            approval_manager,
-            confirmations,
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             active_turn: Arc::new(std::sync::Mutex::new(None)),
             lifecycle_gate: Arc::new(std::sync::Mutex::new(())),
@@ -5414,8 +5197,6 @@ mod tests {
             output,
             PathBuf::from("/project"),
         );
-        let approval_manager = Arc::new(ToolApprovalManager::new());
-        engine.set_approval_manager(approval_manager.clone());
         let agent = NomiAgentManager {
             runtime,
             backend_output_sink,
@@ -5428,8 +5209,6 @@ mod tests {
             #[cfg(feature = "browser-use")]
             browser_lane_binding: None,
             ssh_lease: None,
-            approval_manager,
-            confirmations: Arc::new(std::sync::RwLock::new(Vec::new())),
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
             active_turn: Arc::new(std::sync::Mutex::new(None)),
             lifecycle_gate: Arc::new(std::sync::Mutex::new(())),
@@ -7108,29 +6887,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "browser-use")]
-    #[test]
-    fn yolo_session_installs_browser_approval_gate_without_takeover_pref() {
-        let mgr = ToolApprovalManager::new();
-        mgr.set_mode(SessionMode::Yolo);
-
-        assert!(
-            should_install_browser_approval_gate(false, false, &mgr),
-            "full-auto/yolo sessions need the Browser gate so gated egress can approve without UI"
-        );
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[test]
-    fn default_session_without_browser_approval_pref_does_not_install_browser_gate() {
-        let mgr = ToolApprovalManager::new();
-
-        assert!(
-            !should_install_browser_approval_gate(false, false, &mgr),
-            "default sessions without Browser approval prefs should keep the old fail-closed path"
-        );
-    }
-
     #[tokio::test]
     async fn nomi_agent_returns_correct_type() {
         let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
@@ -7482,14 +7238,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nomi_agent_confirmations_initially_empty() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
-            .await
-            .unwrap();
-        assert!(agent.get_confirmations().is_empty());
-    }
-
-    #[tokio::test]
     async fn nomi_agent_get_slash_commands_does_not_wait_for_engine_lock() {
         let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
             .await
@@ -7502,14 +7250,6 @@ mod tests {
             .unwrap();
 
         assert!(!commands.is_empty());
-    }
-
-    #[tokio::test]
-    async fn nomi_agent_check_approval_returns_false_by_default() {
-        let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), None)
-            .await
-            .unwrap();
-        assert!(!agent.check_approval("any_action", None));
     }
 
     #[tokio::test]

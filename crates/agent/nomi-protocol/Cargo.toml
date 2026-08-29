@@ -1,6 +1,6 @@
 [package]
 name = "nomi-protocol"
-description = "JSON stream protocol (events, commands, approval manager) for Nomi host integration"
+description = "FullAuto JSON stream protocol for Nomi host integration"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

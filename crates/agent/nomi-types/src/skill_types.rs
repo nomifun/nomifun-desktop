@@ -40,7 +40,8 @@ pub struct ContextModifier {
     /// Override reasoning effort for subsequent LLM requests.
     pub effort: Option<EffortLevel>,
 
-    /// Additional tools to auto-approve (added to allow_list).
+    /// Legacy metadata projection. Runtime engines must ignore this field; Skill
+    /// tool lists may only narrow a forked invocation's exact tool set.
     pub allowed_tools: Vec<String>,
 
     /// Signal a plan-mode state transition (enter or exit).

@@ -90,7 +90,7 @@ fn make_tool(skills: Vec<SkillMetadata>, cwd: &str) -> SkillTool {
     SkillTool::new(
         Arc::new(skills),
         cwd.to_string(),
-        SkillPermissionChecker::new(vec![], vec![], false),
+        SkillPermissionChecker::new(vec![]),
     )
 }
 

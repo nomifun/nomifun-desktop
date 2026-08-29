@@ -3,9 +3,8 @@
 //! `AgentRuntimeControl` captures **only** the operations that every agent type
 //! implements identically and that the generic runtime registry, idle scanner,
 //! message-flow code actually needs. Anything that is type-specific
-//! (session modes, session keys, model switching, config options, pending
-//! confirmation lists, approval memory, etc.) lives as **inherent** methods on
-//! each concrete `XxxAgentManager`
+//! (session keys, model switching, config options, etc.) lives as **inherent**
+//! methods on each concrete `XxxAgentManager`
 //! and is reached through the `AgentRuntimeHandle` enum — forcing every callsite
 //! to say out loud which agent type it is addressing.
 //!
@@ -36,9 +35,6 @@ pub enum SystemResourceNoticeDelivery {
     ActiveTurn,
     NextModelCall,
 }
-
-#[cfg(any(test, feature = "test-support"))]
-use nomifun_common::Confirmation;
 
 /// Minimal public surface every agent type implements identically.
 ///
@@ -97,8 +93,7 @@ pub trait AgentRuntimeControl: Send + Sync {
 }
 
 /// Extended trait used exclusively by the `AgentRuntimeHandle::Mock` variant so
-/// tests can inject richer fake behaviour (pending confirmations, approval
-/// memory, fake session keys, etc.) without polluting the production
+/// tests can inject richer fake behavior without polluting the production
 /// `AgentRuntimeControl` contract with trait-level defaults that would be lies for
 /// at least one concrete manager.
 ///
@@ -115,13 +110,7 @@ pub trait MockAgentRuntime: AgentRuntimeControl {
         Box::pin(std::future::ready(self.kill(reason)))
     }
 
-    fn get_confirmations(&self) -> Vec<Confirmation> {
-        Vec::new()
-    }
     fn requires_turn_boundary_recycle(&self) -> bool {
-        false
-    }
-    fn check_approval(&self, _action: &str, _command_type: Option<&str>) -> bool {
         false
     }
     /// Mid-turn steering. Mirrors `AgentRuntimeHandle::steer`: `Ok(true)` = queued
@@ -137,26 +126,6 @@ pub trait MockAgentRuntime: AgentRuntimeControl {
     ) -> Result<SystemResourceNoticeDelivery, AppError> {
         Err(AppError::BadRequest(
             "System resource notifications are not supported for this mock".into(),
-        ))
-    }
-    fn confirm(
-        &self,
-        _msg_id: &str,
-        _call_id: &str,
-        _data: serde_json::Value,
-        _always_allow: bool,
-    ) -> Result<(), AppError> {
-        Ok(())
-    }
-    async fn mode(&self) -> Result<nomifun_api_types::AgentModeResponse, AppError> {
-        Ok(nomifun_api_types::AgentModeResponse {
-            mode: "default".into(),
-            initialized: false,
-        })
-    }
-    async fn set_mode(&self, _mode: &str) -> Result<(), AppError> {
-        Err(AppError::BadRequest(
-            "Mode switching is not supported for this mock".into(),
         ))
     }
     async fn get_model(&self) -> Result<GetModelInfoResponse, AppError> {
@@ -196,9 +165,8 @@ pub enum AgentRuntimeHandle {
     /// `#[cfg(any(test, feature = "test-support"))]`: production builds
     /// never see this variant, so every `match` in release code can
     /// rely on the closed set of real runtime variants. The trait object is
-    /// [`MockAgentRuntime`] (extends `AgentRuntimeControl`) so mocks can also override
-    /// the enum-level helpers — `get_confirmations`, `check_approval`,
-    /// `confirm`, `get_session_key`, `get_mode`, `set_mode`.
+    /// [`MockAgentRuntime`] (extends `AgentRuntimeControl`) so mocks can override
+    /// test-only behavior without widening the production control contract.
     #[cfg(any(test, feature = "test-support"))]
     Mock(Arc<dyn MockAgentRuntime>),
 }
@@ -300,63 +268,7 @@ impl AgentRuntimeHandle {
 
     // ── Cross-variant semi-specific helpers ──────────────────────────
     //
-    // These fan out to inherent methods on concrete managers. Variants
-    // that don't support the operation return a sensible zero-value
-    // rather than an error: "no pending confirmations" and "no session
-    // key" are honest statements about those variants.
-
-    /// Pending confirmation items for this runtime.
-    ///
-    /// Nomi maintains an inline confirmation list.
-    pub fn get_confirmations(&self) -> Vec<nomifun_common::Confirmation> {
-        match self {
-            Self::Nomi(m) => m.get_confirmations(),
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Mock(m) => m.get_confirmations(),
-        }
-    }
-
-    /// Submit a confirmation response for a pending tool call.
-    pub fn confirm(
-        &self,
-        msg_id: &str,
-        call_id: &str,
-        data: serde_json::Value,
-        always_allow: bool,
-    ) -> Result<(), AppError> {
-        match self {
-            Self::Nomi(m) => m.confirm(msg_id, call_id, data, always_allow),
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Mock(m) => m.confirm(msg_id, call_id, data, always_allow),
-        }
-    }
-
-    /// Check whether an action is auto-approved in this session.
-    pub fn check_approval(&self, action: &str, command_type: Option<&str>) -> bool {
-        match self {
-            Self::Nomi(m) => m.check_approval(action, command_type),
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Mock(m) => m.check_approval(action, command_type),
-        }
-    }
-
-    /// Get the current session mode.
-    pub async fn get_mode(&self) -> Result<nomifun_api_types::AgentModeResponse, AppError> {
-        match self {
-            Self::Nomi(m) => m.mode().await,
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Mock(m) => m.mode().await,
-        }
-    }
-
-    /// Set the session mode.
-    pub async fn set_mode(&self, mode: &str) -> Result<(), AppError> {
-        match self {
-            Self::Nomi(m) => m.set_mode(mode).await,
-            #[cfg(any(test, feature = "test-support"))]
-            Self::Mock(m) => m.set_mode(mode).await,
-        }
-    }
+    // These fan out to inherent methods on concrete managers.
 
     /// Clear the conversation context ("release model context") in place,
     /// keeping the agent/process alive. Nomi empties its engine history.

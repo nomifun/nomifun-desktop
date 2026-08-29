@@ -138,8 +138,6 @@ describe('Browser Use settings contract', () => {
     expect(source.includes("t('settings.browserDisplayModeHeadless')")).toBe(true);
     expect(source.includes("t('settings.browserDisplayModeExternal')")).toBe(true);
     expect(source.includes("t('settings.browserDisplayModeDesc')")).toBe(true);
-    expect(source.includes("persistBoolean('agent.browserUse.takeover'")).toBe(true);
-    expect(source.includes("configService.get('agent.browserUse.takeover')")).toBe(true);
     expect(source.includes('displayModeStatus !== \'ready\'')).toBe(true);
   });
 
@@ -179,7 +177,6 @@ describe('Browser Use settings contract', () => {
     expect(source.includes('{canManageBrowserSettings && (')).toBe(true);
     expect(source.includes("label={t('settings.browserPersistentLogin')}")).toBe(true);
     expect(source.includes("label={t('settings.browserFullPower')}")).toBe(true);
-    expect(source.includes("label={t('settings.browserTakeover')}")).toBe(true);
   });
 
   test('recovers Browser capabilities after a bounded delayed overview retry', async () => {

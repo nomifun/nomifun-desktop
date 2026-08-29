@@ -41,7 +41,7 @@ mod permissions_supplemental_tests {
     // but safe skills whose names lack the colon-prefix are still allowed.
     #[test]
     fn tc_p5_21_prefix_deny_blocks_namespace_but_not_bare_names() {
-        let checker = SkillPermissionChecker::new(vec!["admin:*".to_string()], vec![], false);
+        let checker = SkillPermissionChecker::new(vec!["admin:*".to_string()]);
 
         // "admin:create-user" matches "admin:*" → Deny
         let create_user = make_skill("admin:create-user");

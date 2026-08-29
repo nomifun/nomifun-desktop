@@ -1467,7 +1467,6 @@ impl ConversationRuntimeStateService {
         conversation_id: &str,
         runtime_status: Option<ConversationStatus>,
         has_runtime: bool,
-        pending_confirmations: usize,
     ) -> ConversationRuntimeSummary {
         // Snapshot the turn timestamp and public identity under one lock.
         // Reading them separately would permit a fast A -> B handoff to pair
@@ -1530,8 +1529,6 @@ impl ConversationRuntimeStateService {
             || runtime_build_in_progress
         {
             ConversationRuntimeStateKind::Starting
-        } else if pending_confirmations > 0 {
-            ConversationRuntimeStateKind::WaitingConfirmation
         } else if turn_is_active && runtime_status != Some(ConversationStatus::Running) {
             ConversationRuntimeStateKind::Starting
         } else if turn_is_active {
@@ -1548,7 +1545,6 @@ impl ConversationRuntimeStateService {
             has_runtime,
             runtime_status,
             is_processing,
-            pending_confirmations,
             active_turn_id,
             // Only the authoritative active-turn/fence state drives
             // processing. A manager's stale `Running` status remains visible
@@ -2239,14 +2235,13 @@ mod tests {
             "conv-reset-generation",
             None,
             false,
-            0,
         );
         assert_eq!(resetting.state, ConversationRuntimeStateKind::Starting);
         assert!(resetting.is_processing);
         assert!(!resetting.can_send_message);
 
         drop(reset);
-        let idle = state.summary_from_parts("conv-reset-generation", None, false, 0);
+        let idle = state.summary_from_parts("conv-reset-generation", None, false);
         assert_eq!(idle.state, ConversationRuntimeStateKind::Idle);
         assert!(!idle.is_processing);
         assert!(idle.can_send_message);
@@ -2452,7 +2447,7 @@ mod tests {
         assert!(lingering.is_cancelled());
         drop(stop);
 
-        let summary = state.summary_from_parts("conv-build-linger", None, false, 0);
+        let summary = state.summary_from_parts("conv-build-linger", None, false);
         assert_eq!(summary.state, ConversationRuntimeStateKind::Idle);
         assert!(summary.can_send_message);
         drop(lingering);
@@ -2463,7 +2458,7 @@ mod tests {
         let state = Arc::new(ConversationRuntimeStateService::default());
         let build = state.begin_runtime_build("conv-build-summary").expect("build lease");
 
-        let building = state.summary_from_parts("conv-build-summary", None, false, 0);
+        let building = state.summary_from_parts("conv-build-summary", None, false);
         assert_eq!(building.state, ConversationRuntimeStateKind::Starting);
         assert!(building.is_processing);
         assert!(!building.can_send_message);
@@ -2473,7 +2468,7 @@ mod tests {
         );
 
         drop(build);
-        let idle = state.summary_from_parts("conv-build-summary", None, false, 0);
+        let idle = state.summary_from_parts("conv-build-summary", None, false);
         assert_eq!(idle.state, ConversationRuntimeStateKind::Idle);
         assert!(!idle.is_processing);
         assert!(idle.can_send_message);
@@ -2490,7 +2485,7 @@ mod tests {
             )
             .expect("preparation lease");
 
-        let summary = state.summary_from_parts("conv-preparation-summary", None, false, 0);
+        let summary = state.summary_from_parts("conv-preparation-summary", None, false);
         assert_eq!(summary.state, ConversationRuntimeStateKind::Idle);
         assert!(!summary.is_processing);
         assert!(summary.can_send_message);
@@ -2520,19 +2515,19 @@ mod tests {
             )
             .expect("preparation lease");
 
-        let before = state.summary_from_parts("conv-preparation-promotion", None, false, 0);
+        let before = state.summary_from_parts("conv-preparation-promotion", None, false);
         assert_eq!(before.state, ConversationRuntimeStateKind::Idle);
         assert!(!before.is_processing);
 
         preparation
             .promote_to_turn_execution()
             .expect("receipt owner may promote its preparation fence");
-        let promoted = state.summary_from_parts("conv-preparation-promotion", None, false, 0);
+        let promoted = state.summary_from_parts("conv-preparation-promotion", None, false);
         assert_eq!(promoted.state, ConversationRuntimeStateKind::Starting);
         assert!(promoted.is_processing);
 
         drop(preparation);
-        let after = state.summary_from_parts("conv-preparation-promotion", None, false, 0);
+        let after = state.summary_from_parts("conv-preparation-promotion", None, false);
         assert_eq!(after.state, ConversationRuntimeStateKind::Idle);
         assert!(!after.is_processing);
     }
@@ -2554,7 +2549,7 @@ mod tests {
 
         assert!(preparation.promote_to_turn_execution().is_err());
         drop(stop);
-        let summary = state.summary_from_parts("conv-cancelled-promotion", None, false, 0);
+        let summary = state.summary_from_parts("conv-cancelled-promotion", None, false);
         assert_eq!(summary.state, ConversationRuntimeStateKind::Idle);
         assert!(!summary.is_processing);
     }
@@ -2801,7 +2796,7 @@ mod tests {
             .expect("completion owner");
         assert!(turn.release());
 
-        let summary = state.summary_from_parts("conv-completion", None, false, 0);
+        let summary = state.summary_from_parts("conv-completion", None, false);
         assert!(summary.is_processing);
         assert!(!summary.can_send_message);
         assert!(
@@ -2811,7 +2806,7 @@ mod tests {
                 .is_none()
         );
         drop(completion);
-        let idle = state.summary_from_parts("conv-completion", None, false, 0);
+        let idle = state.summary_from_parts("conv-completion", None, false);
         assert!(!idle.is_processing);
         assert!(idle.can_send_message);
         assert!(state.try_acquire_turn("conv-completion").is_ok());
@@ -2889,7 +2884,7 @@ mod tests {
         let state = Arc::new(ConversationRuntimeStateService::default());
         let _turn_handle = state.try_acquire_turn("conv-1").expect("turn handle should be acquired");
 
-        let summary = state.summary_from_parts("conv-1", None, false, 0);
+        let summary = state.summary_from_parts("conv-1", None, false);
 
         assert_eq!(summary.state, ConversationRuntimeStateKind::Starting);
         assert!(summary.is_processing);
@@ -2907,7 +2902,6 @@ mod tests {
             "conv-stale-runtime",
             Some(ConversationStatus::Running),
             true,
-            0,
         );
 
         assert_eq!(summary.state, ConversationRuntimeStateKind::Idle);
@@ -2928,7 +2922,7 @@ mod tests {
         }));
         assert!(poisoned.is_err());
 
-        let summary = state.summary_from_parts("conv-poisoned", None, false, 0);
+        let summary = state.summary_from_parts("conv-poisoned", None, false);
         assert_eq!(summary.state, ConversationRuntimeStateKind::Starting);
         assert!(summary.is_processing);
         assert!(!summary.can_send_message);
@@ -2941,7 +2935,7 @@ mod tests {
         let state = Arc::new(ConversationRuntimeStateService::default());
 
         // Idle: no active turn, no start time.
-        let idle = state.summary_from_parts("conv-1", None, false, 0);
+        let idle = state.summary_from_parts("conv-1", None, false);
         assert_eq!(idle.state, ConversationRuntimeStateKind::Idle);
         assert!(!idle.is_processing);
         assert_eq!(idle.active_turn_id, None);
@@ -2954,14 +2948,14 @@ mod tests {
         let expected = state.active_turn_started_at("conv-1");
         assert!(expected.is_some());
 
-        let running = state.summary_from_parts("conv-1", None, false, 0);
+        let running = state.summary_from_parts("conv-1", None, false);
         assert!(running.is_processing);
         assert_eq!(running.active_turn_id.as_deref(), Some("turn-root"));
         assert_eq!(running.processing_started_at, expected);
 
         // Released: back to idle, exact identity and start time both gone.
         drop(turn_handle);
-        let after = state.summary_from_parts("conv-1", None, false, 0);
+        let after = state.summary_from_parts("conv-1", None, false);
         assert!(!after.is_processing);
         assert_eq!(after.active_turn_id, None);
         assert_eq!(after.processing_started_at, None);

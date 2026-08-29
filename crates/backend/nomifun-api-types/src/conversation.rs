@@ -175,7 +175,6 @@ pub enum ConversationRuntimeStateKind {
     Idle,
     Starting,
     Running,
-    WaitingConfirmation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -185,7 +184,6 @@ pub struct ConversationRuntimeSummary {
     pub has_runtime: bool,
     pub runtime_status: Option<ConversationStatus>,
     pub is_processing: bool,
-    pub pending_confirmations: usize,
     /// Stable public identity of the exact process-local turn admission.
     ///
     /// This is lifecycle authority, not a display timestamp: clients must

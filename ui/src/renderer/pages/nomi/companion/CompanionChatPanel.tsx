@@ -30,7 +30,7 @@ interface Props {
  * 取代旧的 /nomi 配置中心「聊天」Tab（ChatTab）：迁移后伙伴聊天统一从会话列表的
  * 「桌面伙伴」分组进入标准 `/conversation/:id`。ChatConversation 见到
  * `type==='nomi' && extra.companion_session` 即渲染本面板（而非全功能 NomiConversationPanel），
- * 从而保留伙伴专属约束（锁定模型 / 隐藏高级控制 / 强制 yolo / 固定工作区，详见
+ * 从而保留伙伴专属约束（锁定模型 / 隐藏高级控制 / 固定工作区，详见
  * CompanionConversation）。
  *
  * 与 ChatTab 的差别：会话对象已由会话页 SWR 载入并传入，故无需再 ensureCompanionSession /

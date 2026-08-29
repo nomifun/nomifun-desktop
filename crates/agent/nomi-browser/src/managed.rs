@@ -20,7 +20,6 @@ use nomifun_browser_platform::{
 };
 use serde_json::{Value, json};
 
-use crate::OUT_OF_BAND_CONFIRMED_KEY;
 /// Fields whose authority belongs to the main process.  A caller may select an
 /// owner-scoped `lane_id`, but it may never construct or override identity,
 /// target ownership, epochs, cancellation, or resource routing. One shared
@@ -410,8 +409,8 @@ pub(crate) fn parse_presentation_intent(
         | "foreground" => Err(format!(
             "Browser input field `presentation` selects trusted host visibility policy \
              and does not accept `{text}`. Declare the intent instead: \"attended\" when \
-             the user may need to see or take over (a sign-in wall, a challenge, a \
-             consequential confirmation), otherwise \"unattended\"."
+             the user may need to see or interact directly (a sign-in wall, a challenge, \
+             or a CAPTCHA), otherwise \"unattended\"."
         )),
         other => Err(format!(
             "Unsupported `presentation` value `{other}`. Use \"attended\" or \"unattended\"."
@@ -2506,7 +2505,6 @@ pub(crate) fn sanitize_operation_input(input: &Value) -> Value {
     for field in KEEP_ALIVE_INPUT_FIELDS {
         sanitized.remove(*field);
     }
-    sanitized.remove(OUT_OF_BAND_CONFIRMED_KEY);
     for field in TRUSTED_OWNER_INPUT_FIELDS {
         sanitized.remove(*field);
     }

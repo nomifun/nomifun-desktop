@@ -5,19 +5,15 @@
  */
 
 /**
- * Terminal launch presets: map a chosen preset (plain shell or an agent CLI)
- * plus a permission level to a concrete launch command + args. The result is
- * shown in an editable command preview before launch, so users can adjust it
- * freely. The backend resolves the `$SHELL` sentinel to the platform shell.
+ * Terminal launch presets map a chosen preset (plain shell or an agent CLI) to
+ * a concrete launch command + args. Agent CLIs always start in FullAuto. The
+ * result remains editable before launch, and the backend resolves `$SHELL`.
  */
 
 /** Sentinel meaning "the platform login shell" — resolved server-side. */
 export const SHELL_SENTINEL = '$SHELL';
 
 export type TerminalPresetId = 'shell' | 'claude' | 'codex' | 'gemini';
-
-/** Permission level the user picks for an agent preset. */
-export type PermissionLevel = 'default' | 'full-auto';
 
 export type LaunchCommand = { command: string; args: string[] };
 
@@ -29,15 +25,13 @@ export type TerminalPreset = {
   backend?: string;
   /** The program to launch (the shell sentinel for `shell`). */
   command: string;
-  /** Whether a permission level applies (false for plain shell). */
-  supportsPermission: boolean;
 };
 
 export const TERMINAL_PRESETS: TerminalPreset[] = [
-  { id: 'shell', labelKey: 'terminal.preset.shell', command: SHELL_SENTINEL, supportsPermission: false },
-  { id: 'claude', labelKey: 'terminal.preset.claude', backend: 'claude', command: 'claude', supportsPermission: true },
-  { id: 'codex', labelKey: 'terminal.preset.codex', backend: 'codex', command: 'codex', supportsPermission: true },
-  { id: 'gemini', labelKey: 'terminal.preset.gemini', backend: 'gemini', command: 'gemini', supportsPermission: true },
+  { id: 'shell', labelKey: 'terminal.preset.shell', command: SHELL_SENTINEL },
+  { id: 'claude', labelKey: 'terminal.preset.claude', backend: 'claude', command: 'claude' },
+  { id: 'codex', labelKey: 'terminal.preset.codex', backend: 'codex', command: 'codex' },
+  { id: 'gemini', labelKey: 'terminal.preset.gemini', backend: 'gemini', command: 'gemini' },
 ];
 
 /**
@@ -56,14 +50,13 @@ export function getPreset(id: TerminalPresetId): TerminalPreset {
   return preset;
 }
 
-/** Build the launch (command, args) for a preset + permission level. */
-export function buildLaunchCommand(id: TerminalPresetId, permission: PermissionLevel): LaunchCommand {
+/** Build the fixed FullAuto launch for an Agent CLI, or a plain shell. */
+export function buildLaunchCommand(id: TerminalPresetId): LaunchCommand {
   const preset = getPreset(id);
   if (id === 'shell') {
     return { command: SHELL_SENTINEL, args: [] };
   }
-  const args = permission === 'full-auto' ? (FULL_AUTO_FLAGS[id] ?? []) : [];
-  return { command: preset.command, args };
+  return { command: preset.command, args: FULL_AUTO_FLAGS[id] ?? [] };
 }
 
 /**

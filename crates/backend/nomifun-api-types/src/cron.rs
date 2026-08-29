@@ -64,8 +64,6 @@ pub struct CronAgentConfigDto {
     /// drift when a reusable preset is edited later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_snapshot: Option<crate::ResolvedPresetSnapshot>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
     /// Natural model key. This is not an entity ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -427,7 +425,6 @@ mod tests {
             "custom_agent_id": "agent-1",
             "preset_id": "0190f5fe-7c00-7a00-8000-000000000001",
             "preset_revision": 3,
-            "mode": "auto",
             "model": "claude-sonnet-4-6",
             "config_options": {"key": "value"},
             "workspace": "/tmp/ws"
@@ -487,7 +484,6 @@ mod tests {
             preset_id: None,
             preset_revision: None,
             preset_snapshot: None,
-            mode: None,
             model: None,
             provider_id: None,
             config_options: None,
@@ -510,7 +506,6 @@ mod tests {
             preset_id: Some("0190f5fe-7c00-7a00-8000-000000000001".into()),
             preset_revision: Some(7),
             preset_snapshot: None,
-            mode: Some("plan".into()),
             model: Some("m1".into()),
             provider_id: None,
             config_options: Some(HashMap::from([("a".into(), "b".into())])),
@@ -552,7 +547,6 @@ mod tests {
                     preset_id: None,
                     preset_revision: None,
                     preset_snapshot: None,
-                    mode: None,
                     model: None,
                     provider_id: None,
                     config_options: None,

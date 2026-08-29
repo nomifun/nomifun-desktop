@@ -1776,7 +1776,6 @@ async fn inject_and_wait(
     let authority_probe = authority.clone();
     let runtime_preparation = BackgroundTurnRuntimePreparation {
         runtime_options: options,
-        desired_mode: None,
         clear_context: false,
         pre_send_hook: Some(Arc::new(AutoWorkAttachmentActivation {
             service: Arc::clone(&deps.service),

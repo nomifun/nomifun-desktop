@@ -10,7 +10,7 @@ import { Attention, Brain, CheckOne, Edit, FolderOpen, Right, Terminal } from '@
 import classNames from 'classnames';
 import React, { useEffect, useRef, useState } from 'react';
 
-export type TurnProcessReceiptIcon = 'tool' | 'file' | 'edit' | 'thinking' | 'permission' | 'status';
+export type TurnProcessReceiptIcon = 'tool' | 'file' | 'edit' | 'thinking' | 'status';
 
 export interface TurnProcessReceiptView<T> {
   id: string;
@@ -42,7 +42,6 @@ const receiptIconMarkerByIcon: Record<TurnProcessReceiptIcon, string> = {
   file: 'file',
   edit: 'edit',
   thinking: 'thinking',
-  permission: 'permission',
   status: 'status',
 };
 
@@ -64,7 +63,6 @@ const ReceiptIcon: React.FC<{
   if (icon === 'file') return <FolderOpen theme='outline' size='15' fill='currentColor' />;
   if (icon === 'edit') return <Edit theme='outline' size='15' fill='currentColor' />;
   if (icon === 'thinking') return <Brain theme='outline' size='15' fill='currentColor' />;
-  if (icon === 'permission') return <Attention theme='outline' size='15' fill='currentColor' />;
   if (icon === 'status') return <CheckOne theme='outline' size='15' fill='currentColor' />;
   return <Terminal theme='outline' size='15' fill='currentColor' />;
 };

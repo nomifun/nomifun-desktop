@@ -6,9 +6,9 @@
 //! the NomiFun Desktop owner and never selects or impersonates a companion.
 //!
 //! This crate is deliberately thin: it owns transport + auth + identity only.
-//! Every capability, its schema, its danger tier and its surface gate already
-//! live in `nomifun-gateway`; adding a capability there makes it appear here
-//! automatically (the inheritance guarantee — see the design spec §2.1). It MUST
+//! Every capability and its schema already live in `nomifun-gateway`; adding a
+//! capability there makes it appear here automatically (the inheritance
+//! guarantee — see the design spec §2.1). It MUST
 //! be mounted in-process by `nomifun-app` (the `server.lock` data-dir is
 //! single-writer; a sidecar is impossible).
 
@@ -31,7 +31,8 @@ pub use session::RemoteMcpSessionAdmissionAuthority;
 /// domains an external task-delegation agent typically needs, excluding
 /// platform-management domains (channel/companion/cron/system/team/…). Keeps a
 /// remote MCP client's tool list tight (better tool-selection) without changing
-/// permissions — dispatch is still gated by the Remote surface, not the profile.
+/// execution authority — dispatch still enforces authenticated owner and typed
+/// resource boundaries independently of the profile.
 /// (`computer` lights up when the computer-use caps land.)
 pub const AGENT_PROFILE_DOMAINS: &[&str] =
     &[

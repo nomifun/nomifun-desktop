@@ -4,21 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { configService } from '@/common/config/configService';
 import type { AgentSource } from '@/renderer/utils/model/agentTypes';
 import type { ProviderId } from '@/common/types/ids';
-
-/** Save preferred mode to the agent's own config key */
-export async function savePreferredMode(agentKey: string, mode: string): Promise<void> {
-  try {
-    if (agentKey === 'nomi') {
-      const config = configService.get('nomi.config');
-      await configService.set('nomi.config', { ...config, preferredMode: mode });
-    }
-  } catch {
-    /* silent */
-  }
-}
+import { configService } from '@/common/config/configService';
 
 /** Save default nomi provider/model so the Guid page restores it next session. */
 export async function saveNomiDefaultModel(provider_id: ProviderId, use_model: string): Promise<void> {

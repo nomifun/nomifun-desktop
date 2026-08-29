@@ -21,8 +21,7 @@
       "executingTool": "Agent is executing a tool",
       "processingToolResult": "Agent is processing tool results",
       "started": "Agent has started",
-      "thinking": "Agent is thinking",
-      "waitingConfirmation": "Agent is waiting for confirmation"
+      "thinking": "Agent is thinking"
     },
     "applyUnconfirmed": "The application result could not be confirmed. Check the page notice and review the remote canvas.",
     "backToChat": "Back to conversation",
@@ -31,9 +30,9 @@
     "connecting": "Connecting to NomiFun Agent.",
     "contextItemTitle": "{{type}} · {{id}}",
     "contextLabel": "Canvas context",
-      "emptyDescription": "Describe a story, commercial, or existing assets, then develop the idea with the Agent using NomiFun models",
-      "errorWithoutDetails": "NomiFun Agent returned an error event without details.",
-      "emptyTitle": "Start with an idea",
+    "emptyDescription": "Describe a story, commercial, or existing assets, then develop the idea with the Agent using NomiFun models",
+    "errorWithoutDetails": "NomiFun Agent returned an error event without details.",
+    "emptyTitle": "Start with an idea",
     "history": "History",
     "historyEmpty": "No conversation history",
     "historyTitle": "History",
@@ -827,7 +826,7 @@
       "propertiesTitle": "Loading properties",
       "timelineTitle": "Loading Director timeline"
     },
-  "loadingTitle": "Loading canvas…",
+    "loadingTitle": "Loading canvas…",
     "minimap": {
       "label": "Canvas minimap"
     },

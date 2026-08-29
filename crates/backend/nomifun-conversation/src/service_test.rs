@@ -19,17 +19,17 @@ use nomifun_ai_agent::{
 use crate::response_middleware::{CronCommandResult, CronCreateParams, CronUpdateParams, ICronService};
 use nomifun_api_types::AgentErrorCode;
 use nomifun_api_types::{
-    CloneConversationRequest, ConfirmRequest, CreateConversationRequest, ListConversationsQuery,
+    CloneConversationRequest, CreateConversationRequest, ListConversationsQuery,
     ExecutionModelPool, ExecutionModelRef, ListMessagesQuery, ModelPreference,
     PresetKnowledgePolicy, PresetTarget, ResolvedPresetSnapshot, SearchMessagesQuery,
     SendMessageRequest, UpdateConversationRequest, WebSocketMessage,
 };
 use nomifun_common::{
     AdaptationPolicy, AgentExecutionEventKind, AgentExecutionStatus, AgentKillReason,
-    AgentStepMode, AgentToolPolicy, AgentType, AppError, Confirmation, ConversationSource,
+    AgentStepMode, AgentToolPolicy, AgentType, AppError, ConversationSource,
     ConversationId, ConversationStatus,
     DecisionPolicy, DelegationPolicy, ExecutionAttemptStatus, ExecutionStepKind,
-    ExecutionStepStatus, MessageId, PaginatedResult, ParticipantAssignmentSource, PlanGate,
+    ExecutionStepStatus, MessageId, PaginatedResult, ParticipantAssignmentSource,
     StepFailurePolicy, TimestampMs, now_ms,
 };
 use nomifun_db::models::{
@@ -1425,11 +1425,9 @@ fn test_acp_agent_metadata() -> AgentMetadataRow {
         env: Some("[]".to_owned()),
         native_skills_dirs: Some(r#"[".claude/skills"]"#.to_owned()),
         behavior_policy: None,
-        yolo_id: Some("bypassPermissions".to_owned()),
         agent_capabilities: None,
         auth_methods: None,
         config_options: None,
-        available_modes: None,
         available_models: None,
         available_commands: None,
         sort_order: 0,
@@ -2854,7 +2852,6 @@ async fn delete_rejects_soft_deleted_execution_attempt_transcript() {
             &CreateAgentExecutionParams {
                 goal: "retain attempt transcript".to_owned(),
                 status: AgentExecutionStatus::Planning,
-                plan_gate: PlanGate::Automatic,
                 adaptation_policy: AdaptationPolicy::Fixed,
                 decision_policy: DecisionPolicy::Automatic,
                 delegation_policy: DelegationPolicy::Automatic,
@@ -2875,7 +2872,6 @@ async fn delete_rejects_soft_deleted_execution_attempt_transcript() {
             0,
             &ReconcileAgentExecutionPlanParams {
                 goal: None,
-                plan_gate: None,
                 adaptation_policy: None,
                 decision_policy: None,
                 delegation_policy: None,
@@ -3082,17 +3078,6 @@ async fn delete_rejects_soft_deleted_execution_attempt_transcript() {
             .len(),
         1,
         "only the trusted Agent Execution port may deliver an Attempt turn"
-    );
-    assert!(
-        svc.list_confirmations(
-            USER_ID,
-            &attempt_conversation.conversation_id,
-            &runtime_registry,
-        )
-        .await
-        .unwrap()
-        .is_empty(),
-        "read-only confirmation inspection remains available"
     );
     let projected_lead = svc.get(USER_ID, &lead.conversation_id).await.unwrap();
     assert_eq!(
@@ -4660,9 +4645,6 @@ struct MockAgent {
     conversation_id: String,
     event_tx: broadcast::Sender<AgentStreamEvent>,
     stopped: Mutex<bool>,
-    confirmations: Mutex<Vec<Confirmation>>,
-    approval_memory: Mutex<std::collections::HashMap<String, bool>>,
-    allow_direct_confirm: bool,
     /// Optional workspace override. Simple mocks fall back to the host's real
     /// temporary directory so workspace canonicalization behaves identically
     /// on Windows, Linux, and macOS.
@@ -4676,35 +4658,6 @@ impl MockAgent {
             conversation_id: conversation_id.to_owned(),
             event_tx,
             stopped: Mutex::new(false),
-            confirmations: Mutex::new(vec![]),
-            approval_memory: Mutex::new(std::collections::HashMap::new()),
-            allow_direct_confirm: false,
-            workspace_override: None,
-        }
-    }
-
-    fn with_confirmations(conversation_id: &str, confirmations: Vec<Confirmation>) -> Self {
-        let (event_tx, _) = broadcast::channel(64);
-        Self {
-            conversation_id: conversation_id.to_owned(),
-            event_tx,
-            stopped: Mutex::new(false),
-            confirmations: Mutex::new(confirmations),
-            approval_memory: Mutex::new(std::collections::HashMap::new()),
-            allow_direct_confirm: false,
-            workspace_override: None,
-        }
-    }
-
-    fn with_direct_confirm(conversation_id: &str) -> Self {
-        let (event_tx, _) = broadcast::channel(64);
-        Self {
-            conversation_id: conversation_id.to_owned(),
-            event_tx,
-            stopped: Mutex::new(false),
-            confirmations: Mutex::new(vec![]),
-            approval_memory: Mutex::new(std::collections::HashMap::new()),
-            allow_direct_confirm: true,
             workspace_override: None,
         }
     }
@@ -4754,39 +4707,6 @@ impl AgentRuntimeControl for MockAgent {
 
 #[async_trait::async_trait]
 impl MockAgentRuntime for MockAgent {
-    fn get_confirmations(&self) -> Vec<Confirmation> {
-        self.confirmations.lock().unwrap().clone()
-    }
-    fn check_approval(&self, action: &str, command_type: Option<&str>) -> bool {
-        let key = match command_type {
-            Some(ct) => format!("{action}:{ct}"),
-            None => action.to_owned(),
-        };
-        self.approval_memory.lock().unwrap().get(&key).copied().unwrap_or(false)
-    }
-    fn confirm(
-        &self,
-        _msg_id: &str,
-        call_id: &str,
-        _data: serde_json::Value,
-        always_allow: bool,
-    ) -> Result<(), AppError> {
-        let mut confs = self.confirmations.lock().unwrap();
-        let existed = confs.iter().any(|c| c.call_id == call_id);
-        if !existed && !self.allow_direct_confirm {
-            return Err(AppError::NotFound(format!("Confirmation {call_id} not found")));
-        }
-        if always_allow && let Some(conf) = confs.iter().find(|c| c.call_id == call_id) {
-            let key = match (conf.action.as_deref(), conf.command_type.as_deref()) {
-                (Some(a), Some(ct)) => format!("{a}:{ct}"),
-                (Some(a), None) => a.to_owned(),
-                _ => String::new(),
-            };
-            self.approval_memory.lock().unwrap().insert(key, true);
-        }
-        confs.retain(|c| c.call_id != call_id);
-        Ok(())
-    }
 }
 
 // ── Mock AgentRuntimeRegistry ──────────────────────────────────────
@@ -5382,8 +5302,6 @@ struct SteerableAgent {
     steer_err: bool,
     steered: Mutex<Vec<String>>,
     sent_contents: Mutex<Vec<String>>,
-    confirmations: Mutex<Vec<Confirmation>>,
-    confirmed_call_ids: Mutex<Vec<String>>,
 }
 
 impl SteerableAgent {
@@ -5397,8 +5315,6 @@ impl SteerableAgent {
             steer_err: false,
             steered: Mutex::new(vec![]),
             sent_contents: Mutex::new(vec![]),
-            confirmations: Mutex::new(vec![]),
-            confirmed_call_ids: Mutex::new(vec![]),
         }
     }
 
@@ -5414,15 +5330,6 @@ impl SteerableAgent {
 
     fn steered(&self) -> Vec<String> {
         self.steered.lock().unwrap().clone()
-    }
-
-    fn with_confirmation(self, confirmation: Confirmation) -> Self {
-        self.confirmations.lock().unwrap().push(confirmation);
-        self
-    }
-
-    fn confirmed_call_ids(&self) -> Vec<String> {
-        self.confirmed_call_ids.lock().unwrap().clone()
     }
 
     fn sent_contents(&self) -> Vec<String> {
@@ -5470,10 +5377,6 @@ impl AgentRuntimeControl for SteerableAgent {
 
 #[async_trait::async_trait]
 impl MockAgentRuntime for SteerableAgent {
-    fn get_confirmations(&self) -> Vec<Confirmation> {
-        self.confirmations.lock().unwrap().clone()
-    }
-
     fn steer(&self, text: String) -> Result<bool, AppError> {
         self.steered.lock().unwrap().push(text);
         if self.steer_err {
@@ -5482,29 +5385,6 @@ impl MockAgentRuntime for SteerableAgent {
         Ok(self.steer_result)
     }
 
-    fn confirm(
-        &self,
-        _msg_id: &str,
-        call_id: &str,
-        _data: serde_json::Value,
-        _always_allow: bool,
-    ) -> Result<(), AppError> {
-        let mut confirmations = self.confirmations.lock().unwrap();
-        if !confirmations
-            .iter()
-            .any(|confirmation| confirmation.call_id == call_id)
-        {
-            return Err(AppError::NotFound(format!(
-                "Confirmation {call_id} not found"
-            )));
-        }
-        confirmations.retain(|confirmation| confirmation.call_id != call_id);
-        self.confirmed_call_ids
-            .lock()
-            .unwrap()
-            .push(call_id.to_owned());
-        Ok(())
-    }
 }
 
 struct MockCronContinuationService;
@@ -7852,7 +7732,6 @@ async fn agent_execution_admission_cutpoint_fixture(
             &CreateAgentExecutionParams {
                 goal: "exercise exact admission custodian".to_owned(),
                 status: AgentExecutionStatus::Planning,
-                plan_gate: PlanGate::Automatic,
                 adaptation_policy: AdaptationPolicy::Fixed,
                 decision_policy: DecisionPolicy::Automatic,
                 delegation_policy: DelegationPolicy::Automatic,
@@ -7889,7 +7768,6 @@ async fn agent_execution_admission_cutpoint_fixture(
             execution.version,
             &ReconcileAgentExecutionPlanParams {
                 goal: None,
-                plan_gate: None,
                 adaptation_policy: None,
                 decision_policy: None,
                 delegation_policy: None,
@@ -12570,113 +12448,6 @@ async fn idmm_scope_reserved_for_turn_a_cannot_steer_turn_b() {
 }
 
 #[tokio::test]
-async fn idmm_confirm_requires_pending_call_on_exact_reserved_turn() {
-    let (svc, broadcaster, repo, _default_runtime_registry) = make_service();
-    let registry = Arc::new(MockAgentRuntimeRegistry::new());
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = registry.clone();
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-    repo.update(
-        &conv.conversation_id,
-        &ConversationRowUpdate {
-            status: Some("running".to_owned()),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    let turn = svc
-        .runtime_state()
-        .try_acquire_turn_with_wire_context_at_epoch_and_owner(
-            &conv.conversation_id,
-            Some(MessageId::new().into_string()),
-            crate::runtime_state::TurnWireContext::default(),
-            None,
-            Some(TEST_USER_1.to_owned()),
-            true,
-            None,
-        )
-        .unwrap();
-    let agent = Arc::new(
-        SteerableAgent::new(
-            &conv.conversation_id,
-            Some(ConversationStatus::Running),
-            true,
-        )
-        .with_confirmation(Confirmation {
-            id: "confirmation-idmm-exact".to_owned(),
-            call_id: "call-idmm-exact".to_owned(),
-            title: Some("Allow exact action?".to_owned()),
-            action: Some("edit_file".to_owned()),
-            description: "exact scoped confirmation".to_owned(),
-            command_type: None,
-            options: vec![],
-            screenshot: None,
-        }),
-    );
-    registry.insert_agent(
-        &conv.conversation_id,
-        AgentRuntimeHandle::Mock(agent.clone()),
-    );
-    let scope = svc
-        .idmm_active_turn_scope(
-            TEST_USER_1,
-            &conv.conversation_id,
-            &runtime_registry,
-        )
-        .await
-        .unwrap();
-    broadcaster.take_events();
-    let req: ConfirmRequest = serde_json::from_value(json!({
-        "msg_id": MessageId::new().into_string(),
-        "data": { "value": "allow" },
-        "always_allow": false
-    }))
-    .unwrap();
-
-    svc.idmm_confirm_active_turn(
-        TEST_USER_1,
-        &conv.conversation_id,
-        &scope,
-        "call-idmm-exact",
-        req,
-        &runtime_registry,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        agent.confirmed_call_ids(),
-        vec!["call-idmm-exact".to_owned()]
-    );
-    let removed = broadcaster
-        .take_events()
-        .into_iter()
-        .filter(|event| event.name == "confirmation.remove")
-        .collect::<Vec<_>>();
-    assert_eq!(removed.len(), 1);
-    assert_eq!(removed[0].data["id"], "confirmation-idmm-exact");
-
-    let missing_req: ConfirmRequest = serde_json::from_value(json!({
-        "msg_id": MessageId::new().into_string(),
-        "data": { "value": "allow" }
-    }))
-    .unwrap();
-    assert!(matches!(
-        svc.idmm_confirm_active_turn(
-            TEST_USER_1,
-            &conv.conversation_id,
-            &scope,
-            "call-idmm-exact",
-            missing_req,
-            &runtime_registry,
-        )
-        .await,
-        Err(AppError::Conflict(_))
-    ));
-    assert_eq!(agent.confirmed_call_ids().len(), 1);
-    drop(turn);
-}
-
-#[tokio::test]
 async fn completed_public_steer_replay_is_absorbing_without_finishing_its_parent_turn() {
     const CLIENT_KEY: &str = "public-steer-response-loss-v1";
     const PARENT_OPERATION_ID: &str = "test:public-steer-parent-turn";
@@ -15352,318 +15123,6 @@ async fn warmup_rejects_pathological_workspace_with_runtime_error_code() {
     ));
 }
 
-// ── Confirmation system tests ────────────────────────────────────
-
-fn make_test_confirmations() -> Vec<Confirmation> {
-    vec![
-        Confirmation {
-            id: "c1".into(),
-            call_id: "call-1".into(),
-            title: Some("Allow file edit".into()),
-            action: Some("edit_file".into()),
-            description: "Edit main.rs".into(),
-            command_type: Some("bash".into()),
-            options: vec![],
-            screenshot: None,
-        },
-        Confirmation {
-            id: "c2".into(),
-            call_id: "call-2".into(),
-            title: Some("Read file".into()),
-            action: Some("read_file".into()),
-            description: "Read config.toml".into(),
-            command_type: None,
-            options: vec![],
-            screenshot: None,
-        },
-    ]
-}
-
-#[tokio::test]
-async fn list_confirmations_empty_when_no_agent() {
-    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
-
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-    let result = svc.list_confirmations(TEST_USER_1, &conv.conversation_id, &runtime_registry).await.unwrap();
-    assert!(result.is_empty());
-}
-
-#[tokio::test]
-async fn list_confirmations_returns_items() {
-    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
-    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
-
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-
-    let agent = AgentRuntimeHandle::Mock(Arc::new(MockAgent::with_confirmations(
-        &conv.conversation_id,
-        make_test_confirmations(),
-    )));
-    runtime_registry.insert_agent(&conv.conversation_id, agent);
-
-    let result = svc
-        .list_confirmations(TEST_USER_1, &conv.conversation_id, &(runtime_registry as Arc<dyn AgentRuntimeRegistry>))
-        .await
-        .unwrap();
-    assert_eq!(result.len(), 2);
-    assert_eq!(result[0].call_id, "call-1");
-    assert_eq!(result[1].call_id, "call-2");
-}
-
-#[tokio::test]
-async fn list_confirmations_not_found() {
-    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
-
-    let err = svc
-        .list_confirmations(TEST_USER_1, "no-such-id", &runtime_registry)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, AppError::NotFound(_)));
-}
-
-#[tokio::test]
-async fn list_confirmations_wrong_user() {
-    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
-
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-    let err = svc.list_confirmations(TEST_USER_2, &conv.conversation_id, &runtime_registry).await.unwrap_err();
-    assert!(matches!(err, AppError::NotFound(_)));
-}
-
-#[tokio::test]
-async fn confirm_removes_confirmation_and_broadcasts() {
-    let (svc, broadcaster, _repo, _runtime_registry) = make_service();
-    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
-
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-    broadcaster.take_events(); // clear create event
-
-    let agent = AgentRuntimeHandle::Mock(Arc::new(MockAgent::with_confirmations(
-        &conv.conversation_id,
-        make_test_confirmations(),
-    )));
-    runtime_registry.insert_agent(&conv.conversation_id, agent);
-
-    let req = nomifun_api_types::ConfirmRequest {
-        msg_id: "msg-1".into(),
-        data: json!({ "value": "allow" }),
-        always_allow: false,
-    };
-    svc.confirm(
-        TEST_USER_1,
-        &conv.conversation_id,
-        "call-1",
-        req,
-        &(runtime_registry.clone() as Arc<dyn AgentRuntimeRegistry>),
-    )
-    .await
-    .unwrap();
-
-    // Confirmation should be removed from the agent
-    let remaining = runtime_registry.get_runtime(&conv.conversation_id).unwrap().get_confirmations();
-    assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].call_id, "call-2");
-
-    // Should broadcast confirmation.remove event
-    let events = broadcaster.take_events();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].name, "confirmation.remove");
-    assert_eq!(events[0].data["conversation_id"], conv.conversation_id);
-    assert_eq!(events[0].data["id"], "c1");
-}
-
-#[tokio::test]
-async fn confirm_with_always_allow_stores_approval() {
-    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
-    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
-
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-
-    let agent = AgentRuntimeHandle::Mock(Arc::new(MockAgent::with_confirmations(
-        &conv.conversation_id,
-        make_test_confirmations(),
-    )));
-    runtime_registry.insert_agent(&conv.conversation_id, agent);
-
-    let req = nomifun_api_types::ConfirmRequest {
-        msg_id: "msg-1".into(),
-        data: json!({ "value": "allow" }),
-        always_allow: true,
-    };
-    let runtime_registry_arc: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
-    svc.confirm(TEST_USER_1, &conv.conversation_id, "call-1", req, &runtime_registry_arc)
-        .await
-        .unwrap();
-
-    // check_approval should now return true for edit_file:bash
-    let agent = runtime_registry.get_runtime(&conv.conversation_id).unwrap();
-    assert!(agent.check_approval("edit_file", Some("bash")));
-    assert!(!agent.check_approval("delete_file", None));
-}
-
-#[tokio::test]
-async fn confirm_nonexistent_call_id_returns_not_found() {
-    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
-    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
-
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-
-    let agent = AgentRuntimeHandle::Mock(Arc::new(MockAgent::with_confirmations(
-        &conv.conversation_id,
-        make_test_confirmations(),
-    )));
-    runtime_registry.insert_agent(&conv.conversation_id, agent);
-
-    let req = nomifun_api_types::ConfirmRequest {
-        msg_id: "msg-1".into(),
-        data: json!({ "value": "allow" }),
-        always_allow: false,
-    };
-    let err = svc
-        .confirm(
-            TEST_USER_1,
-            &conv.conversation_id,
-            "nonexistent-call",
-            req,
-            &(runtime_registry as Arc<dyn AgentRuntimeRegistry>),
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(err, AppError::NotFound(_)));
-}
-
-#[tokio::test]
-async fn confirm_without_confirmation_state_still_calls_agent() {
-    let (svc, broadcaster, _repo, _runtime_registry) = make_service();
-    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
-
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-    broadcaster.take_events();
-
-    let agent = AgentRuntimeHandle::Mock(Arc::new(MockAgent::with_direct_confirm(&conv.conversation_id)));
-    runtime_registry.insert_agent(&conv.conversation_id, agent);
-
-    let req = nomifun_api_types::ConfirmRequest {
-        msg_id: "msg-1".into(),
-        data: json!("allow_once"),
-        always_allow: false,
-    };
-    svc.confirm(
-        TEST_USER_1,
-        &conv.conversation_id,
-        "call-1",
-        req,
-        &(runtime_registry.clone() as Arc<dyn AgentRuntimeRegistry>),
-    )
-    .await
-    .unwrap();
-
-    assert!(broadcaster.take_events().is_empty());
-}
-
-#[tokio::test]
-async fn confirm_no_agent_returns_not_found() {
-    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
-
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-
-    let req = nomifun_api_types::ConfirmRequest {
-        msg_id: "msg-1".into(),
-        data: json!({ "value": "allow" }),
-        always_allow: false,
-    };
-    let err = svc
-        .confirm(TEST_USER_1, &conv.conversation_id, "call-1", req, &runtime_registry)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, AppError::NotFound(_)));
-}
-
-#[tokio::test]
-async fn check_approval_returns_false_when_not_set() {
-    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
-    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
-
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-
-    let agent = AgentRuntimeHandle::Mock(Arc::new(MockAgent::new(&conv.conversation_id)));
-    runtime_registry.insert_agent(&conv.conversation_id, agent);
-
-    let result = svc
-        .check_approval(
-            TEST_USER_1,
-            &conv.conversation_id,
-            "edit_file",
-            None,
-            &(runtime_registry as Arc<dyn AgentRuntimeRegistry>),
-        )
-        .await
-        .unwrap();
-    assert!(!result.approved);
-}
-
-#[tokio::test]
-async fn check_approval_returns_true_after_always_allow() {
-    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
-    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
-
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-
-    let agent = AgentRuntimeHandle::Mock(Arc::new(MockAgent::with_confirmations(
-        &conv.conversation_id,
-        make_test_confirmations(),
-    )));
-    runtime_registry.insert_agent(&conv.conversation_id, agent);
-
-    // Confirm with always_allow
-    let req = nomifun_api_types::ConfirmRequest {
-        msg_id: "msg-1".into(),
-        data: json!({ "value": "allow" }),
-        always_allow: true,
-    };
-    let runtime_registry_arc: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
-    svc.confirm(TEST_USER_1, &conv.conversation_id, "call-1", req, &runtime_registry_arc)
-        .await
-        .unwrap();
-
-    // Now check_approval should return true
-    let result = svc
-        .check_approval(TEST_USER_1, &conv.conversation_id, "edit_file", Some("bash"), &runtime_registry_arc)
-        .await
-        .unwrap();
-    assert!(result.approved);
-}
-
-#[tokio::test]
-async fn check_approval_returns_false_when_no_agent() {
-    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
-
-    let conv = svc.create(TEST_USER_1, make_create_req()).await.unwrap();
-
-    let result = svc
-        .check_approval(TEST_USER_1, &conv.conversation_id, "edit_file", None, &runtime_registry)
-        .await
-        .unwrap();
-    assert!(!result.approved);
-}
-
-#[tokio::test]
-async fn check_approval_not_found() {
-    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
-    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
-
-    let err = svc
-        .check_approval(TEST_USER_1, "no-such-id", "edit_file", None, &runtime_registry)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, AppError::NotFound(_)));
-}
-
 // ── Skill snapshot tests ───────────────────────────────────────────
 
 #[tokio::test]
@@ -16569,7 +16028,7 @@ fn pwm(provider_id: &str, model: &str) -> ProviderWithModel {
 ///
 /// Also returns the [`MockBroadcaster`] handle so a test can assert which WS
 /// events were (or were NOT) emitted for the turn — the suppressed-error
-/// failover invariant (gap #8) needs to confirm no error event reaches the wire.
+/// failover invariant (gap #8) needs to verify no error event reaches the wire.
 fn make_failover_service(
     providers: Vec<(Provider, Vec<nomifun_db::ProviderModelRow>)>,
 ) -> (

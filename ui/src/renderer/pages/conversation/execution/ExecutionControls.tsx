@@ -8,7 +8,7 @@ import React, { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
 import { Popconfirm } from '@arco-design/web-react';
-import { CheckOne, Loading, Pause, PauseOne, PlayOne, Refresh } from '@icon-park/react';
+import { Loading, Pause, PauseOne, PlayOne, Refresh } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { refreshOnVersionConflict } from './refreshOnVersionConflict';
@@ -100,16 +100,6 @@ export const ExecutionControls: React.FC<{
     [message, refetch, t],
   );
 
-  const onApprove = () =>
-    void executeAction(
-      () =>
-        ipcBridge.agentExecution.approve.invoke({
-          execution_id: executionId,
-          updates: { expected_version: executionVersion },
-        }),
-      'agentExecution.controls.approveOk',
-      'agentExecution.controls.approveError',
-    );
   const onPause = () =>
     void executeAction(
       () =>
@@ -147,11 +137,6 @@ export const ExecutionControls: React.FC<{
       {status !== '' && !isBusyPlaceholder && !isTerminal && (
         <HeaderControl label={t('agentExecution.controls.replan')} onClick={onReplan} busy={busy}>
           <Refresh theme='outline' size='14' strokeWidth={3} />
-        </HeaderControl>
-      )}
-      {status === 'awaiting_approval' && (
-        <HeaderControl label={t('agentExecution.controls.approve')} onClick={onApprove} busy={busy} tone='primary'>
-          <CheckOne theme='outline' size='14' strokeWidth={3} />
         </HeaderControl>
       )}
       {isBusyPlaceholder && (

@@ -188,7 +188,7 @@ pub(crate) fn resolve_model_chain(
         });
     }
 
-    Err("no model available: no provider is configured/enabled on this desktop. Call nomi_list_providers to confirm, then ask the owner to configure one in Settings → Providers — do NOT create nomi sessions or cron jobs without a model.".to_owned())
+    Err("no model available: no provider is configured/enabled on this desktop. Call nomi_list_providers to verify, then ask the owner to configure one in Settings → Providers — do NOT create nomi sessions or cron jobs without a model.".to_owned())
 }
 
 /// Async wrapper around [`resolve_model_chain`]: loads the provider rows and

@@ -1,19 +1,8 @@
-//! Capability descriptor: the single source of truth for one operable platform
-//! capability — its MCP tool name, LLM-facing description, JSON Schema, danger
-//! tier, per-surface permission policy, and async handler.
+//! Canonical Gateway capability descriptor and typed dispatch adapter.
 //!
-//! The design rule that kills the historical "three definitions per tool" drift
-//! (schemars Param struct in the bridge ↔ hand-parser in `tools_*.rs` ↔ service
-//! request type): a capability owns ONE typed `Request` struct `P`. Its JSON
-//! Schema is generated from `P` (`schemars`), its runtime arguments are
-//! deserialized into the SAME `P`, and the handler receives a typed `P`. Schema,
-//! validation, and execution can no longer disagree.
-//!
-//! The registry is **deps-free**: a handler receives `Arc<GatewayDeps>` as an
-//! argument at dispatch time, so `Registry::build()` constructs no services. The
-//! identical registry therefore serves both processes — the in-process server
-//! (which dispatches with real deps) and the `mcp-gateway-stdio` bridge (which
-//! only reads `tool_specs()` to answer `tools/list`).
+//! C1 removes the legacy surface/effect execution matrix. `EffectClass` is
+//! descriptive metadata only; it never changes dispatch. The only
+//! central pre-dispatch boundary retained here is installation ownership.
 
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -26,72 +15,43 @@ use serde_json::{Map, Value, json};
 
 use crate::deps::{CallerCtx, GatewayDeps};
 
-/// Boxed handler future. `Value` is the tool result (the `{"result": …}` /
-/// `{"error": …}` envelope the existing tools already produce).
 pub type BoxFut = Pin<Box<dyn Future<Output = Value> + Send>>;
-
-/// Type-erased capability handler: `(deps, caller, raw_args) -> result`.
 pub type Handler = Arc<dyn Fn(Arc<GatewayDeps>, CallerCtx, Value) -> BoxFut + Send + Sync>;
-
-/// A streaming capability emits intermediate progress `Value`s through this sink
-/// while it runs (e.g. a delegated agent's text/tool-call deltas), then returns
-/// its final `Value`. Adapters that don't stream (MCP `tools/call`, REST
-/// `/v1/tools/{name}`, CLI) just run the buffered [`Handler`] instead and get
-/// the final value only — so adding a streaming variant never breaks them.
 pub type ProgressSink = tokio::sync::mpsc::Sender<Value>;
-
-/// Type-erased streaming handler: like [`Handler`] but also handed a
-/// [`ProgressSink`] for incremental output. Returns the final `Value`.
 pub type StreamingHandler =
     Arc<dyn Fn(Arc<GatewayDeps>, CallerCtx, Value, ProgressSink) -> BoxFut + Send + Sync>;
 
-/// Build the registry's tool-error envelope for typed argument failures.
-/// Transport adapters key off the top-level `error` member and map it to their
-/// native error marker (MCP `CallToolResult.isError`, REST error handling, etc.).
 fn invalid_arguments_error(error: serde_json::Error) -> Value {
-    json!({ "error": format!("invalid arguments for this tool: {error}") })
+    json!({
+        "error": "invalid_tool_arguments",
+        "message": error.to_string(),
+    })
 }
 
-/// How dangerous an operation is. Drives the default per-surface permission
-/// decision (see [`default_decision`]). Promoted from IDMM's regex-on-command
-/// heuristic to a first-class, per-capability annotation.
+/// Descriptive effect metadata for diagnostics and later canonical mapping.
+/// It is not an execution-policy input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DangerTier {
-    /// No side effects, no secrets. Always allowed.
+pub enum EffectClass {
     Read,
-    /// Creates / modifies state, reversible.
     Write,
-    /// Irreversible deletion / reset.
     Destructive,
-    /// Reads or writes secrets / credentials.
     Sensitive,
 }
 
-/// Data-ownership boundary independent from operation danger and transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AccessScope {
-    /// The handler owns its user scoping (Conversation, Terminal, Cron, etc.).
+pub enum OwnershipScope {
     User,
-    /// The capability controls installation-wide state and is available only
-    /// to the canonical installation owner.
     InstanceOwner,
 }
 
-/// Which kind of session is calling. Derived from [`CallerCtx`]: a channel
-/// platform marks an external IM session; otherwise it is a local desktop
-/// session. `Remote` is an installation-token-authenticated network caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Surface {
-    /// Local desktop session (companion thread or a plain local conversation).
     Desktop,
-    /// External IM channel Agent session (telegram / lark / …).
     Channel,
-    /// Remote REST/MCP installation-owner session.
     Remote,
 }
 
 impl CallerCtx {
-    /// The permission surface this caller acts on.
     pub fn surface(&self) -> Surface {
         if self.remote {
             Surface::Remote
@@ -103,178 +63,66 @@ impl CallerCtx {
     }
 }
 
-/// The pre-dispatch gate outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Decision {
-    /// Execute the handler.
-    Allow,
-    /// Refuse until the agent restates the action and re-calls with `confirm=true`.
-    Confirm,
-    /// Hard-refuse on this surface regardless of confirmation.
-    Deny,
-}
-
-/// The default decision for a `(surface, danger)` pair — the policy matrix from
-/// the design spec §4. Capability-level `deny_on` / `confirm_on` overrides
-/// refine this in [`decide`].
-///
-/// | Surface | Read | Write | Destructive | Sensitive |
-/// |---------|------|-------|-------------|-----------|
-/// | Desktop | Allow | Allow | Confirm | Confirm |
-/// | Channel | Allow | Allow | Deny  | Deny  |
-/// | Remote  | Allow | Allow | Confirm | Deny  |
-pub fn default_decision(surface: Surface, danger: DangerTier) -> Decision {
-    use DangerTier::*;
-    use Surface::*;
-    match (surface, danger) {
-        (_, Read) | (_, Write) => Decision::Allow,
-        (Desktop, Destructive) | (Desktop, Sensitive) => Decision::Confirm,
-        (Channel, Destructive) | (Channel, Sensitive) => Decision::Deny,
-        (Remote, Destructive) => Decision::Confirm,
-        (Remote, Sensitive) => Decision::Deny,
-    }
-}
-
-/// Resolve the final gate decision for a capability on a surface, honoring the
-/// capability's explicit `deny_on` / `confirm_on` overrides and whether the
-/// caller already passed `confirm=true`.
-pub fn decide(meta: &CapabilityMeta, surface: Surface, confirmed: bool) -> Decision {
-    if meta.deny_on.contains(&surface) {
-        return Decision::Deny;
-    }
-    let base = default_decision(surface, meta.danger);
-    if base == Decision::Deny {
-        return Decision::Deny;
-    }
-    let needs_confirm = base == Decision::Confirm || meta.confirm_on.contains(&surface);
-    if needs_confirm && !confirmed {
-        Decision::Confirm
-    } else {
-        Decision::Allow
-    }
-}
-
-/// Static metadata for one capability. All `&'static` so the registry is cheap
-/// to build and the bridge can list tools with zero allocation beyond the schema.
 pub struct CapabilityMeta {
-    /// MCP tool name. Convention: `nomi_<domain>_<verb_object>`, lower_snake,
-    /// kept concise. The fully-namespaced wire name is `mcp__nomifun-desktop__<name>`
-    /// (22-char prefix); Anthropic caps that at 64 chars, so the tool name has a
-    /// 42-char hard budget. The registry self-test enforces both the hard limit
-    /// and a tighter style budget so names cannot creep toward the ceiling.
     pub name: &'static str,
-    /// Coarse domain label (for diagnostics / grouping).
     pub domain: &'static str,
-    /// LLM-facing one-line description.
     pub summary: &'static str,
-    /// Danger tier — drives the default permission decision.
-    pub danger: DangerTier,
-    /// Ownership gate evaluated centrally before the capability handler.
-    pub access_scope: AccessScope,
-    /// Surfaces where this capability is hard-denied regardless of confirmation
-    /// (escape hatch beyond the danger matrix, e.g. a `Write` too risky for IM).
-    pub deny_on: &'static [Surface],
-    /// Surfaces where this capability additionally requires confirmation
-    /// (escape hatch to force confirm on an otherwise-allowed surface).
-    pub confirm_on: &'static [Surface],
+    pub effect_class: EffectClass,
+    pub ownership_scope: OwnershipScope,
 }
 
 impl CapabilityMeta {
-    /// Construct metadata with no surface overrides (the danger matrix applies as-is).
     pub const fn new(
         name: &'static str,
         domain: &'static str,
         summary: &'static str,
-        danger: DangerTier,
+        effect_class: EffectClass,
     ) -> Self {
         Self {
             name,
             domain,
             summary,
-            danger,
-            access_scope: AccessScope::User,
-            deny_on: &[],
-            confirm_on: &[],
+            effect_class,
+            ownership_scope: OwnershipScope::User,
         }
     }
 
-    /// Restrict this installation-scoped capability to the canonical owner.
     pub const fn instance_owner(mut self) -> Self {
-        self.access_scope = AccessScope::InstanceOwner;
+        self.ownership_scope = OwnershipScope::InstanceOwner;
         self
-    }
-
-    /// Hard-deny this capability on the given surfaces (beyond the danger matrix).
-    pub const fn deny_on(mut self, surfaces: &'static [Surface]) -> Self {
-        self.deny_on = surfaces;
-        self
-    }
-
-    /// Force confirmation for this capability on the given surfaces.
-    pub const fn confirm_on(mut self, surfaces: &'static [Surface]) -> Self {
-        self.confirm_on = surfaces;
-        self
-    }
-
-    /// Whether this capability can require a `confirm=true` on ANY surface — used
-    /// to decide whether to inject the `confirm` property into its schema.
-    fn confirmable(&self) -> bool {
-        matches!(self.danger, DangerTier::Destructive | DangerTier::Sensitive)
-            || !self.confirm_on.is_empty()
     }
 }
 
-/// One operable capability: metadata + generated schema + typed handler.
 pub struct Capability {
     pub meta: CapabilityMeta,
-    /// JSON Schema object for the tool's arguments (MCP `inputSchema`).
     pub input_schema: Map<String, Value>,
     pub handler: Handler,
-    /// Side-effect-free typed argument preflight. This is built from the same
-    /// request type `P` and `strip_confirm` path as the handler so transports
-    /// can validate before attaching any capability-scoped resources.
     argument_validator: Arc<dyn Fn(Value) -> Result<(), serde_json::Error> + Send + Sync>,
-    /// Optional streaming handler. `Some` for capabilities that can emit
-    /// incremental progress; consumed by
-    /// [`Registry::dispatch_stream`]. The buffered [`handler`](Self::handler) is
-    /// always present, so non-streaming adapters are unaffected.
     pub stream: Option<StreamingHandler>,
 }
 
 impl Capability {
-    /// Build a capability from a typed request `P` and an async handler.
-    ///
-    /// `P` is the single source: its `JsonSchema` becomes the MCP `inputSchema`,
-    /// and incoming arguments are deserialized into `P` before the handler runs.
-    /// A deserialization failure returns a structured `{"error": …}` the agent
-    /// can self-correct from — it never reaches the handler.
     pub fn new<P, F, Fut>(meta: CapabilityMeta, f: F) -> Self
     where
         P: DeserializeOwned + JsonSchema + Send + 'static,
         F: Fn(Arc<GatewayDeps>, CallerCtx, P) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Value> + Send + 'static,
     {
-        let mut input_schema = schema_for_params::<P>();
-        if meta.confirmable() {
-            inject_confirm_property(&mut input_schema);
-        }
+        let input_schema = schema_for_params::<P>();
         let f = Arc::new(f);
         let argument_validator: Arc<
             dyn Fn(Value) -> Result<(), serde_json::Error> + Send + Sync,
-        > = Arc::new(|args| deserialize_params::<P>(args).map(|_| ()));
-        let handler: Handler = Arc::new(move |deps, ctx, args: Value| {
+        > = Arc::new(|args| serde_json::from_value::<P>(args).map(|_| ()));
+        let handler: Handler = Arc::new(move |deps, ctx, args| {
             let f = f.clone();
             Box::pin(async move {
-                // `confirm` is a cross-cutting gate field injected into the schema,
-                // not part of `P`; drop it before typed deserialization so an
-                // `deny_unknown_fields` request type would not choke on it.
-                match deserialize_params::<P>(args) {
-                    Ok(p) => f(deps, ctx, p).await,
-                    Err(e) => invalid_arguments_error(e),
+                match serde_json::from_value::<P>(args) {
+                    Ok(params) => f(deps, ctx, params).await,
+                    Err(error) => invalid_arguments_error(error),
                 }
             })
         });
-        Capability {
+        Self {
             meta,
             input_schema,
             handler,
@@ -283,58 +131,45 @@ impl Capability {
         }
     }
 
-    /// Build a STREAMING capability: `f` receives a [`ProgressSink`] for
-    /// incremental output and returns the final `Value`. A buffered
-    /// [`Handler`](Self::handler) is synthesized automatically (it runs `f` with
-    /// a draining sink and returns only the final value), so MCP `tools/call`,
-    /// REST `/v1/tools/{name}`, and CLI keep working unchanged; streaming
-    /// adapters use [`Registry::dispatch_stream`] to see the progress events.
     pub fn new_streaming<P, F, Fut>(meta: CapabilityMeta, f: F) -> Self
     where
         P: DeserializeOwned + JsonSchema + Send + 'static,
         F: Fn(Arc<GatewayDeps>, CallerCtx, P, ProgressSink) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Value> + Send + 'static,
     {
-        let mut input_schema = schema_for_params::<P>();
-        if meta.confirmable() {
-            inject_confirm_property(&mut input_schema);
-        }
+        let input_schema = schema_for_params::<P>();
         let f = Arc::new(f);
         let argument_validator: Arc<
             dyn Fn(Value) -> Result<(), serde_json::Error> + Send + Sync,
-        > = Arc::new(|args| deserialize_params::<P>(args).map(|_| ()));
+        > = Arc::new(|args| serde_json::from_value::<P>(args).map(|_| ()));
 
-        // Streaming path: deserialize P, run f feeding the caller's sink.
-        let stream_f = f.clone();
-        let stream: StreamingHandler =
-            Arc::new(move |deps, ctx, args: Value, sink: ProgressSink| {
-                let f = stream_f.clone();
-                Box::pin(async move {
-                    match deserialize_params::<P>(args) {
-                        Ok(p) => f(deps, ctx, p, sink).await,
-                        Err(e) => invalid_arguments_error(e),
-                    }
-                })
-            });
+        let streaming = f.clone();
+        let stream: StreamingHandler = Arc::new(move |deps, ctx, args, sink| {
+            let f = streaming.clone();
+            Box::pin(async move {
+                match serde_json::from_value::<P>(args) {
+                    Ok(params) => f(deps, ctx, params, sink).await,
+                    Err(error) => invalid_arguments_error(error),
+                }
+            })
+        });
 
-        // Buffered path: run the same handler with a sink whose receiver is
-        // drained-and-discarded, returning only the final value.
-        let handler: Handler = Arc::new(move |deps, ctx, args: Value| {
+        let handler: Handler = Arc::new(move |deps, ctx, args| {
             let f = f.clone();
             Box::pin(async move {
-                let p = match deserialize_params::<P>(args) {
-                    Ok(p) => p,
-                    Err(e) => return invalid_arguments_error(e),
+                let params = match serde_json::from_value::<P>(args) {
+                    Ok(params) => params,
+                    Err(error) => return invalid_arguments_error(error),
                 };
-                let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(64);
+                let (tx, mut rx) = tokio::sync::mpsc::channel(64);
                 let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-                let result = f(deps, ctx, p, tx).await;
+                let result = f(deps, ctx, params, tx).await;
                 drain.abort();
                 result
             })
         });
 
-        Capability {
+        Self {
             meta,
             input_schema,
             handler,
@@ -343,56 +178,40 @@ impl Capability {
         }
     }
 
-    /// Validate arguments without invoking the handler or performing any
-    /// capability-specific side effect.
     pub fn validate_arguments(&self, args: &Value) -> Result<(), Value> {
-        (self.argument_validator)(args.clone())
-            .map_err(invalid_arguments_error)
+        (self.argument_validator)(args.clone()).map_err(invalid_arguments_error)
     }
 }
 
-/// Generate the MCP-facing JSON Schema object for a request type `P`, stripped
-/// of the meta keys schemars adds (`$schema`, `title`) that MCP clients ignore.
 fn schema_for_params<P: JsonSchema>() -> Map<String, Value> {
     let schema = schemars::schema_for!(P);
     let value = serde_json::to_value(schema).unwrap_or_else(|_| json!({ "type": "object" }));
     let mut map = match value {
-        Value::Object(m) => m,
+        Value::Object(map) => map,
         _ => Map::new(),
     };
     map.remove("$schema");
     map.remove("title");
     map.entry("type").or_insert_with(|| json!("object"));
-    let is_composed = ["allOf", "anyOf", "oneOf"]
+    let composed = ["allOf", "anyOf", "oneOf"]
         .iter()
         .any(|keyword| map.contains_key(*keyword))
         || map.contains_key("$ref");
-    if is_composed {
+    if composed {
         project_composed_root_properties(&mut map);
     } else {
         map.entry("additionalProperties")
             .or_insert_with(|| json!(false));
     }
-    // Provider-facing clients require a root `properties` object. For composed
-    // schemas this is only a discoverability projection; the original
-    // oneOf/anyOf/allOf/$ref branches remain authoritative for validation.
     map.entry("properties").or_insert_with(|| json!({}));
     map
 }
 
-/// Project fields reachable through a composed root into its root
-/// `properties` object without removing or weakening the original schema.
 fn project_composed_root_properties(schema: &mut Map<String, Value>) {
     let root = Value::Object(schema.clone());
     let mut object_paths = BTreeSet::new();
     let mut visited_paths = BTreeSet::new();
-    collect_composed_object_paths(
-        &root,
-        &root,
-        "",
-        &mut object_paths,
-        &mut visited_paths,
-    );
+    collect_composed_object_paths(&root, &root, "", &mut object_paths, &mut visited_paths);
 
     let mut properties = schema
         .get("properties")
@@ -415,11 +234,7 @@ fn project_composed_root_properties(schema: &mut Map<String, Value>) {
     schema.insert("properties".to_owned(), Value::Object(properties));
 }
 
-fn merge_projected_property(
-    properties: &mut Map<String, Value>,
-    name: &str,
-    incoming: &Value,
-) {
+fn merge_projected_property(properties: &mut Map<String, Value>, name: &str, incoming: &Value) {
     let Some(existing) = properties.get(name) else {
         properties.insert(name.to_owned(), incoming.clone());
         return;
@@ -427,7 +242,6 @@ fn merge_projected_property(
     if existing == incoming {
         return;
     }
-
     let mut alternatives = Vec::new();
     append_unique_schema_alternatives(&mut alternatives, existing);
     append_unique_schema_alternatives(&mut alternatives, incoming);
@@ -447,47 +261,6 @@ fn append_unique_schema_alternatives(alternatives: &mut Vec<Value>, schema: &Val
     }
 }
 
-/// Add the cross-cutting `confirm` argument to a confirm-gated tool's schema so
-/// the LLM can discover it.
-///
-/// A composed root (`oneOf` / `anyOf` / `allOf`) can contain strict object
-/// branches with `additionalProperties: false`. Adding `confirm` only to the
-/// root does not make it legal in those branches, so walk the top-level
-/// composition graph (including local `$ref`s) and add it to every reachable
-/// object schema. Deliberately do not descend through `properties`: `confirm`
-/// belongs to the tool call, not to nested request objects.
-fn inject_confirm_property(schema: &mut Map<String, Value>) {
-    let mut root = Value::Object(std::mem::take(schema));
-    let mut object_paths = BTreeSet::new();
-    let mut visited_paths = BTreeSet::new();
-    collect_composed_object_paths(
-        &root,
-        &root,
-        "",
-        &mut object_paths,
-        &mut visited_paths,
-    );
-
-    let confirm_schema = json!({
-        "type": "boolean",
-        "description": "Set true ONLY after restating the exact destructive/sensitive action and its target to the user and getting explicit agreement. Required to execute confirm-gated actions."
-    });
-    for path in object_paths {
-        let Some(object) = root.pointer_mut(&path).and_then(Value::as_object_mut) else {
-            continue;
-        };
-        let properties = object.entry("properties").or_insert_with(|| json!({}));
-        if let Some(properties) = properties.as_object_mut() {
-            properties.insert("confirm".into(), confirm_schema.clone());
-        }
-    }
-
-    let Value::Object(root) = root else {
-        unreachable!("the schema root was constructed as an object")
-    };
-    *schema = root;
-}
-
 fn collect_composed_object_paths(
     root: &Value,
     node: &Value,
@@ -501,41 +274,26 @@ fn collect_composed_object_paths(
     let Some(object) = node.as_object() else {
         return;
     };
-
     if schema_describes_object(object) {
         object_paths.insert(path.to_owned());
     }
-
-    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-        if let Some(pointer) = reference.strip_prefix('#') {
-            if let Some(target) = (pointer.is_empty() || pointer.starts_with('/'))
-                .then(|| root.pointer(pointer))
-                .flatten()
-            {
-                // Use the JSON pointer from the schema itself as the canonical
-                // path, so cycles and duplicate references are naturally
-                // deduplicated by `visited_paths`.
-                collect_composed_object_paths(
-                    root,
-                    target,
-                    pointer,
-                    object_paths,
-                    visited_paths,
-                );
-            }
-        }
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str)
+        && let Some(pointer) = reference.strip_prefix('#')
+        && let Some(target) = (pointer.is_empty() || pointer.starts_with('/'))
+            .then(|| root.pointer(pointer))
+            .flatten()
+    {
+        collect_composed_object_paths(root, target, pointer, object_paths, visited_paths);
     }
-
     for keyword in ["allOf", "anyOf", "oneOf"] {
         let Some(branches) = object.get(keyword).and_then(Value::as_array) else {
             continue;
         };
         for (index, branch) in branches.iter().enumerate() {
-            let branch_path = format!("{path}/{keyword}/{index}");
             collect_composed_object_paths(
                 root,
                 branch,
-                &branch_path,
+                &format!("{path}/{keyword}/{index}"),
                 object_paths,
                 visited_paths,
             );
@@ -555,447 +313,35 @@ fn schema_describes_object(schema: &Map<String, Value>) -> bool {
         || schema.contains_key("additionalProperties")
 }
 
-/// Remove the gate-only `confirm` key before typed deserialization.
-fn strip_confirm(mut args: Value) -> Value {
-    if let Value::Object(ref mut m) = args {
-        m.remove("confirm");
-    }
-    args
-}
-
-/// Deserialize one capability's request using the exact path shared by
-/// handler dispatch and side-effect-free preflight.
-fn deserialize_params<P: DeserializeOwned>(args: Value) -> Result<P, serde_json::Error> {
-    serde_json::from_value::<P>(strip_confirm(args))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde::Deserialize;
 
-    #[test]
-    fn matrix_allows_reads_and_writes_everywhere() {
-        for s in [Surface::Desktop, Surface::Channel, Surface::Remote] {
-            assert_eq!(default_decision(s, DangerTier::Read), Decision::Allow);
-            assert_eq!(default_decision(s, DangerTier::Write), Decision::Allow);
-        }
-    }
-
-    #[test]
-    fn matrix_gates_destructive_and_sensitive() {
-        assert_eq!(
-            default_decision(Surface::Desktop, DangerTier::Destructive),
-            Decision::Confirm
-        );
-        assert_eq!(
-            default_decision(Surface::Desktop, DangerTier::Sensitive),
-            Decision::Confirm
-        );
-        assert_eq!(
-            default_decision(Surface::Channel, DangerTier::Destructive),
-            Decision::Deny
-        );
-        assert_eq!(
-            default_decision(Surface::Channel, DangerTier::Sensitive),
-            Decision::Deny
-        );
-        assert_eq!(
-            default_decision(Surface::Remote, DangerTier::Destructive),
-            Decision::Confirm
-        );
-        assert_eq!(
-            default_decision(Surface::Remote, DangerTier::Sensitive),
-            Decision::Deny
-        );
-    }
-
-    #[test]
-    fn remote_caller_resolves_remote_surface() {
-        // The Remote front door sets `remote: true`; surface() must yield Remote.
-        let ctx = CallerCtx {
-            remote: true,
-            ..Default::default()
-        };
-        assert_eq!(ctx.surface(), Surface::Remote);
-        // `remote` takes precedence over a stray channel_platform value.
-        let ctx2 = CallerCtx {
-            remote: true,
-            channel_platform: Some("lark".into()),
-            ..Default::default()
-        };
-        assert_eq!(ctx2.surface(), Surface::Remote);
-        // Without the marker, behaviour is unchanged (desktop / channel).
-        assert_eq!(CallerCtx::default().surface(), Surface::Desktop);
-        assert_eq!(
-            CallerCtx {
-                channel_platform: Some("lark".into()),
-                ..Default::default()
-            }
-            .surface(),
-            Surface::Channel
-        );
-    }
-
-    const META_DESTRUCTIVE: CapabilityMeta = CapabilityMeta {
-        name: "t_del",
-        domain: "test",
-        summary: "delete a thing",
-        danger: DangerTier::Destructive,
-        access_scope: AccessScope::User,
-        deny_on: &[],
-        confirm_on: &[],
-    };
-
-    #[test]
-    fn destructive_needs_confirm_on_desktop_until_confirmed() {
-        assert_eq!(
-            decide(&META_DESTRUCTIVE, Surface::Desktop, false),
-            Decision::Confirm
-        );
-        assert_eq!(
-            decide(&META_DESTRUCTIVE, Surface::Desktop, true),
-            Decision::Allow
-        );
-        // External channels hard-deny destructive ops even with confirm=true.
-        assert_eq!(
-            decide(&META_DESTRUCTIVE, Surface::Channel, true),
-            Decision::Deny
-        );
-    }
-
-    const META_WRITE_DENY_CHANNEL: CapabilityMeta = CapabilityMeta {
-        name: "t_write",
-        domain: "test",
-        summary: "write a thing",
-        danger: DangerTier::Write,
-        access_scope: AccessScope::User,
-        deny_on: &[Surface::Channel],
-        confirm_on: &[],
-    };
-
-    #[test]
-    fn deny_on_override_hard_denies_even_writes() {
-        assert_eq!(
-            decide(&META_WRITE_DENY_CHANNEL, Surface::Channel, true),
-            Decision::Deny
-        );
-        assert_eq!(
-            decide(&META_WRITE_DENY_CHANNEL, Surface::Desktop, false),
-            Decision::Allow
-        );
-    }
-
-    #[test]
-    fn confirmable_drives_schema_injection() {
-        assert!(META_DESTRUCTIVE.confirmable());
-        assert!(!META_WRITE_DENY_CHANNEL.confirmable());
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct RequiredKbId {
-        #[allow(dead_code)]
-        kb_id: String,
-    }
-
-    #[test]
-    fn typed_argument_failure_is_a_top_level_error_envelope() {
-        let error = serde_json::from_value::<RequiredKbId>(json!({})).unwrap_err();
-        let value = invalid_arguments_error(error);
-        assert!(
-            value
-                .get("error")
-                .and_then(Value::as_str)
-                .is_some_and(|text| text.contains("kb_id"))
-        );
-        assert!(value.get("result").is_none());
-    }
-
-    #[derive(Debug, Deserialize, JsonSchema, PartialEq)]
+    #[derive(Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
-    struct FixedShapeParams {
-        id: i64,
-        limit: Option<u32>,
-        wait_secs: Option<f64>,
-        confirm: Option<bool>,
-        tasks: Vec<String>,
+    struct StrictParams {
+        value: String,
     }
 
     #[test]
-    fn typed_arguments_reject_stringified_native_values() {
-        for args in [
-            json!({
-                "id": "8",
-                "limit": 50,
-                "wait_secs": 1.5,
-                "confirm": true,
-                "tasks": ["research"]
-            }),
-            json!({
-                "id": 8,
-                "limit": "50",
-                "wait_secs": 1.5,
-                "confirm": true,
-                "tasks": ["research"]
-            }),
-            json!({
-                "id": 8,
-                "limit": 50,
-                "wait_secs": "1.5",
-                "confirm": true,
-                "tasks": ["research"]
-            }),
-            json!({
-                "id": 8,
-                "limit": 50,
-                "wait_secs": 1.5,
-                "confirm": "true",
-                "tasks": ["research"]
-            }),
-            json!({
-                "id": 8,
-                "limit": 50,
-                "wait_secs": 1.5,
-                "confirm": true,
-                "tasks": "[\"research\"]"
-            }),
-        ] {
-            assert!(serde_json::from_value::<FixedShapeParams>(args).is_err());
-        }
-    }
-
-    #[test]
-    fn typed_arguments_accept_native_json_values() {
-        let parsed: FixedShapeParams = serde_json::from_value(json!({
-            "id": 8,
-            "limit": 50,
-            "wait_secs": 1.5,
-            "confirm": true,
-            "tasks": ["research"]
-        }))
-        .unwrap();
-        assert_eq!(
-            parsed,
-            FixedShapeParams {
-                id: 8,
-                limit: Some(50),
-                wait_secs: Some(1.5),
-                confirm: Some(true),
-                tasks: vec!["research".into()],
-            }
+    fn generated_schema_and_runtime_use_the_same_strict_request() {
+        let capability = Capability::new::<StrictParams, _, _>(
+            CapabilityMeta::new("test", "test", "test", EffectClass::Write),
+            |_deps, _ctx, params| async move { json!({"result": params.value}) },
         );
-    }
-
-    #[test]
-    fn typed_arguments_reject_unknown_fields() {
+        assert!(capability.validate_arguments(&json!({"value": "ok"})).is_ok());
         assert!(
-            serde_json::from_value::<FixedShapeParams>(json!({
-                "id": 8,
-                "limit": 50,
-                "wait_secs": 1.5,
-                "confirm": true,
-                "tasks": ["research"],
-                "legacy_id": "8"
-            }))
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn capability_preflight_and_handler_deserialization_have_parity() {
-        let capability = Capability::new::<FixedShapeParams, _, _>(
-            CapabilityMeta::new(
-                "t_fixed_shape",
-                "test",
-                "typed test capability",
-                DangerTier::Read,
-            ),
-            |_deps, _ctx, _params| async { json!({"result": "ok"}) },
-        );
-
-        for args in [
-            json!({
-                "id": 8,
-                "limit": 50,
-                "wait_secs": 1.5,
-                "confirm": true,
-                "tasks": ["research"]
-            }),
-            json!({
-                "id": "8",
-                "limit": 50,
-                "wait_secs": 1.5,
-                "confirm": true,
-                "tasks": ["research"]
-            }),
-            json!({
-                "id": 8,
-                "limit": 50,
-                "wait_secs": 1.5,
-                "confirm": true,
-                "tasks": ["research"],
-                "legacy_id": "8"
-            }),
-            Value::Null,
-        ] {
-            let preflight_ok = capability.validate_arguments(&args).is_ok();
-            let handler_deserialization_ok =
-                deserialize_params::<FixedShapeParams>(strip_confirm(args)).is_ok();
-            assert_eq!(
-                preflight_ok, handler_deserialization_ok,
-                "preflight and handler must accept/reject the same arguments"
-            );
-        }
-    }
-
-    #[test]
-    fn generated_capability_schema_is_closed_by_default() {
-        let schema = schema_for_params::<FixedShapeParams>();
-        assert_eq!(schema.get("additionalProperties"), Some(&json!(false)));
-    }
-
-    #[derive(Debug, Deserialize, JsonSchema)]
-    #[serde(tag = "strategy", rename_all = "snake_case", deny_unknown_fields)]
-    #[allow(dead_code)]
-    enum TaggedUnionParams {
-        Planned { goal: String },
-        Parallel { tasks: Vec<String> },
-    }
-
-    #[test]
-    fn generated_tagged_union_schema_does_not_close_the_composed_root() {
-        let schema = schema_for_params::<TaggedUnionParams>();
-        assert!(
-            schema.contains_key("oneOf") || schema.contains_key("anyOf"),
-            "schemars should represent a tagged enum as a composed root schema"
-        );
-        assert_ne!(
-            schema.get("additionalProperties"),
-            Some(&json!(false)),
-            "closing an empty composed root rejects every property declared by its variants"
-        );
-
-        // The typed execution contract still rejects fields outside the chosen
-        // variant; root closure is unnecessary because each generated branch is
-        // already strict through `deny_unknown_fields`.
-        assert!(
-            serde_json::from_value::<TaggedUnionParams>(json!({
-                "strategy": "parallel",
-                "tasks": ["research"]
-            }))
-            .is_ok()
+            capability
+                .validate_arguments(&json!({"value": "ok", "unexpected": true}))
+                .is_err()
         );
         assert!(
-            serde_json::from_value::<TaggedUnionParams>(json!({
-                "strategy": "parallel",
-                "tasks": ["research"],
-                "goal": "must not mix variants"
-            }))
-            .is_err()
+            !capability
+                .input_schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(|properties| properties.contains_key("unexpected"))
         );
-    }
-
-    #[test]
-    fn confirm_is_injected_into_strict_composed_branches_and_local_refs() {
-        let mut schema = json!({
-            "type": "object",
-            "oneOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "strategy": { "const": "planned" },
-                        "goal": { "type": "string" }
-                    },
-                    "additionalProperties": false
-                },
-                { "$ref": "#/$defs/parallel" }
-            ],
-            "$defs": {
-                "parallel": {
-                    "type": "object",
-                    "properties": {
-                        "strategy": { "const": "parallel" },
-                        "tasks": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "prompt": { "type": "string" }
-                                },
-                                "additionalProperties": false
-                            }
-                        }
-                    },
-                    "additionalProperties": false
-                },
-                "unreferenced": {
-                    "type": "object",
-                    "properties": {
-                        "value": { "type": "string" }
-                    },
-                    "additionalProperties": false
-                }
-            }
-        })
-        .as_object()
-        .expect("test schema is an object")
-        .clone();
-
-        inject_confirm_property(&mut schema);
-        let schema = Value::Object(schema);
-
-        for pointer in [
-            "/properties/confirm/type",
-            "/oneOf/0/properties/confirm/type",
-            "/$defs/parallel/properties/confirm/type",
-        ] {
-            assert_eq!(
-                schema.pointer(pointer),
-                Some(&json!("boolean")),
-                "confirm must be accepted by every strict top-level branch: {pointer}"
-            );
-        }
-        assert!(
-            schema
-                .pointer("/$defs/parallel/properties/tasks/items/properties/confirm")
-                .is_none(),
-            "confirm must not leak into nested request objects"
-        );
-        assert!(
-            schema
-                .pointer("/$defs/unreferenced/properties/confirm")
-                .is_none(),
-            "unreferenced definitions are not part of the top-level composition"
-        );
-    }
-
-    #[test]
-    fn confirm_is_injected_into_generated_tagged_union_variants() {
-        let mut schema = schema_for_params::<TaggedUnionParams>();
-        inject_confirm_property(&mut schema);
-        let schema = Value::Object(schema);
-
-        assert_eq!(
-            schema.pointer("/properties/confirm/type"),
-            Some(&json!("boolean"))
-        );
-        let alternatives = schema
-            .get("oneOf")
-            .or_else(|| schema.get("anyOf"))
-            .and_then(Value::as_array)
-            .expect("tagged union must expose alternatives");
-        for alternative in alternatives {
-            let variant = alternative
-                .get("$ref")
-                .and_then(Value::as_str)
-                .and_then(|reference| reference.strip_prefix('#'))
-                .and_then(|pointer| schema.pointer(pointer))
-                .unwrap_or(alternative);
-            assert_eq!(
-                variant.pointer("/properties/confirm/type"),
-                Some(&json!("boolean")),
-                "each strict tagged-union variant must accept confirm"
-            );
-        }
     }
 }

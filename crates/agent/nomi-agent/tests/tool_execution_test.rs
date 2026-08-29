@@ -2,9 +2,9 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{MockTool, auto_approve_confirmer};
+use common::MockTool;
 use nomi_agent::tool_execution::{
-    ProviderToolAuthority, execute_tool_calls_scoped, execute_tool_calls_with_approval,
+    ProviderToolAuthority, execute_tool_calls_scoped, execute_tool_calls_with_protocol,
 };
 use nomi_compact::CompactionLevel;
 use nomi_config::hooks::{HookDef, HookEngine, HooksConfig};
@@ -87,18 +87,8 @@ async fn test_execute_single_tool_call() {
     registry.register(Box::new(MockTool::new("echo", "hello", false)));
 
     let tool_calls = vec![make_tool_use("call-1", "echo")];
-    let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls_scoped(
-        &registry,
-        &tool_calls,
-        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-        "",
-        &confirmer,
-        None,
-        CompactionLevel::Off,
-        false,
-    )
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
     .await
     .expect("execution should succeed");
 
@@ -129,18 +119,8 @@ async fn test_execute_concurrent_safe_tools() {
         make_tool_use("id-a", "tool_a"),
         make_tool_use("id-b", "tool_b"),
     ];
-    let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls_scoped(
-        &registry,
-        &tool_calls,
-        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-        "",
-        &confirmer,
-        None,
-        CompactionLevel::Off,
-        false,
-    )
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
     .await
     .expect("execution should succeed");
 
@@ -174,18 +154,8 @@ async fn test_execute_non_concurrent_tools_sequential() {
         make_tool_use("id-a", "seq_a"),
         make_tool_use("id-b", "seq_b"),
     ];
-    let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls_scoped(
-        &registry,
-        &tool_calls,
-        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-        "",
-        &confirmer,
-        None,
-        CompactionLevel::Off,
-        false,
-    )
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
     .await
     .expect("execution should succeed");
 
@@ -220,18 +190,8 @@ async fn test_execute_non_concurrent_tools_stops_after_error() {
         make_tool_use("id-fail", "seq_fail"),
         make_tool_use("id-later", "seq_later"),
     ];
-    let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls_scoped(
-        &registry,
-        &tool_calls,
-        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-        "",
-        &confirmer,
-        None,
-        CompactionLevel::Off,
-        false,
-    )
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
     .await
     .expect("execution should succeed");
 
@@ -261,23 +221,10 @@ async fn test_protocol_execution_stops_after_sequential_error() {
         make_tool_use("id-fail", "seq_fail"),
         make_tool_use("id-later", "seq_later"),
     ];
-    let approval_manager = Arc::new(nomi_protocol::ToolApprovalManager::new());
     let writer_capture = Arc::new(CapturingEmitter::default());
     let writer: Arc<dyn ProtocolEmitter> = writer_capture.clone();
 
-    let outcome = execute_tool_calls_with_approval(
-        &registry,
-        &tool_calls,
-        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-        &approval_manager,
-        &writer,
-        "msg-sequential-error",
-        true,
-        &[],
-        None,
-        CompactionLevel::Off,
-        false,
-    )
+    let outcome = execute_tool_calls_with_protocol(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), &writer, "msg-sequential-error", None, CompactionLevel::Off, false)
     .await
     .expect("execution should succeed");
 
@@ -310,18 +257,8 @@ async fn test_unknown_tool_returns_error() {
     let registry = ToolRegistry::new(); // empty registry
 
     let tool_calls = vec![make_tool_use("id-x", "nonexistent_tool")];
-    let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls_scoped(
-        &registry,
-        &tool_calls,
-        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-        "",
-        &confirmer,
-        None,
-        CompactionLevel::Off,
-        false,
-    )
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
     .await
     .expect("execute_tool_calls itself should not fail");
 
@@ -348,18 +285,8 @@ async fn test_tool_error_returns_error_result() {
     registry.register(Box::new(MockTool::new("fail_tool", "error message", true)));
 
     let tool_calls = vec![make_tool_use("id-fail", "fail_tool")];
-    let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls_scoped(
-        &registry,
-        &tool_calls,
-        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-        "",
-        &confirmer,
-        None,
-        CompactionLevel::Off,
-        false,
-    )
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
     .await
     .expect("execution should succeed");
 
@@ -389,18 +316,8 @@ async fn test_pre_hook_blocks_tool() {
     registry.register(Box::new(MockTool::new("echo", "should not appear", false)));
 
     let tool_calls = vec![make_tool_use("id-blocked", "echo")];
-    let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls_scoped(
-        &registry,
-        &tool_calls,
-        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-        "",
-        &confirmer,
-        Some(&mut hook_engine),
-        CompactionLevel::Off,
-        false,
-    )
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", Some(&mut hook_engine), CompactionLevel::Off, false)
     .await
     .expect("execute_tool_calls itself should not fail");
 
@@ -437,18 +354,8 @@ async fn test_post_hook_runs_after_tool() {
     registry.register(Box::new(MockTool::new("echo", "result", false)));
 
     let tool_calls = vec![make_tool_use("id-post", "echo")];
-    let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls_scoped(
-        &registry,
-        &tool_calls,
-        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-        "",
-        &confirmer,
-        Some(&mut hook_engine),
-        CompactionLevel::Off,
-        false,
-    )
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", Some(&mut hook_engine), CompactionLevel::Off, false)
     .await
     .expect("execution should succeed");
 
@@ -475,18 +382,8 @@ async fn test_tool_result_truncation() {
     registry.register(Box::new(MockTool::new("big_tool", &long_result, false)));
 
     let tool_calls = vec![make_tool_use("id-big", "big_tool")];
-    let confirmer = auto_approve_confirmer();
 
-    let results = execute_tool_calls_scoped(
-        &registry,
-        &tool_calls,
-        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-        "",
-        &confirmer,
-        None,
-        CompactionLevel::Off,
-        false,
-    )
+    let results = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
     .await
     .expect("execution should succeed");
 

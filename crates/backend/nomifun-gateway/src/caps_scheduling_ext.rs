@@ -21,7 +21,7 @@ use crate::caps_idmm::{
 };
 use crate::deps::{CallerCtx, GatewayDeps};
 use crate::id_schema::{CanonicalEntityId, SessionTargetKind};
-use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
 // CRON DOMAIN (extensions)
@@ -295,7 +295,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_cron_get_job",
             "cron",
             "Get a single cron job by id (full detail including schedule, next/last run, error).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         cron_get_job,
     ));
@@ -304,7 +304,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_cron_run_now",
             "cron",
             "Trigger a cron job to execute immediately (out-of-schedule one-shot run).",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         cron_run_now,
     ));
@@ -315,7 +315,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_requirement_get",
             "requirement",
             "Fetch a single requirement by requirement_id (full detail including attachments, timestamps, status).",
-            DangerTier::Read,
+            EffectClass::Read,
         )
         .instance_owner(),
         |deps, _ctx, p| requirement_get(deps, p),
@@ -325,7 +325,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_requirement_list_tags",
             "requirement",
             "List all AutoWork tags with per-status counts, paused state, and totals.",
-            DangerTier::Read,
+            EffectClass::Read,
         )
         .instance_owner(),
         |deps, _ctx, p| requirement_list_tags(deps, p),
@@ -335,7 +335,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_requirement_get_board",
             "requirement",
             "Get the kanban board view for a tag (requirements grouped by status column).",
-            DangerTier::Read,
+            EffectClass::Read,
         )
         .instance_owner(),
         |deps, _ctx, p| requirement_get_board(deps, p),
@@ -345,7 +345,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_requirement_resume_tag",
             "requirement",
             "Resume a paused AutoWork tag and optionally re-queue failed requirements back to pending.",
-            DangerTier::Write,
+            EffectClass::Write,
         )
         .instance_owner(),
         |deps, _ctx, p| requirement_resume_tag(deps, p),
@@ -357,7 +357,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_idmm_get_log",
             "idmm",
             "Read the persisted intervention log for a conversation or terminal (most-recent-first).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         idmm_get_log,
     ));
@@ -366,7 +366,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_idmm_get_activity",
             "idmm",
             "Read the caller's cross-session intervention feed (their targets only, most-recent-first).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         idmm_get_activity,
     ));
@@ -375,7 +375,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_idmm_intervene",
             "idmm",
             "Force one IDMM supervision pass now (manual 'act now') and return the resulting state.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         idmm_intervene,
     ));
@@ -384,9 +384,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_idmm_clear_log",
             "idmm",
             "Clear all persisted intervention records for a conversation or terminal. Irreversible.",
-            DangerTier::Destructive,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Destructive,
+        ),
         idmm_clear_log,
     ));
 }

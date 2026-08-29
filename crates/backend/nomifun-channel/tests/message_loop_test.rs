@@ -777,32 +777,11 @@ async fn chat_regenerate_without_history_replies_with_notice() {
 use nomifun_channel::pending_decision::{PendingDecision, PendingDecisionKind};
 use nomifun_channel::types::DecisionOption;
 
-/// Seeds a two-option pending decision for `conversation_id`.
-fn seed_decision(harness: &Harness, conversation_id: &str) {
-    harness.pending_decisions.put(PendingDecision {
-        conversation_id: conversation_id.to_owned(),
-        call_id: "call-dec".into(),
-        kind: PendingDecisionKind::AgentConfirm,
-        prompt: "Proceed?".into(),
-        options: vec![
-            DecisionOption {
-                option_id: "allow".into(),
-                label: "Allow".into(),
-            },
-            DecisionOption {
-                option_id: "reject".into(),
-                label: "Reject".into(),
-            },
-        ],
-    });
-}
-
 /// Seeds the channel-owned remote-stop confirmation (batch-1 handover gap),
 /// exactly the entry the relay records when nomi_stop_conversation is denied.
 fn seed_stop_decision(harness: &Harness, conversation_id: &str, target: &str) {
     harness.pending_decisions.put(PendingDecision {
         conversation_id: conversation_id.to_owned(),
-        call_id: format!("channel-stop:{target}"),
         kind: PendingDecisionKind::StopConversation {
             target_conversation_id: target.to_owned(),
         },
@@ -818,105 +797,6 @@ fn seed_stop_decision(harness: &Harness, conversation_id: &str, target: &str) {
             },
         ],
     });
-}
-
-/// A numeric reply to a pending decision resolves it (ack + cleared store)
-/// and is NOT dispatched as a new user prompt.
-#[tokio::test]
-async fn decision_numeric_reply_resolves_and_does_not_dispatch() {
-    let harness = build_harness().await;
-
-    // Establish a bound conversation with exactly one user message.
-    harness
-        .message_tx
-        .send(incoming(
-            &harness.channel_plugin_id,
-            make_text_message("tg_42", "chat_1", "hello world"),
-        ))
-        .await
-        .unwrap();
-    let cid = wait_for_bound_conversation(&harness.channel_repo, &harness.recorder).await;
-    wait_until_idle(&harness.conversation_svc, &cid).await;
-
-    // The conversation is now blocked on a decision.
-    seed_decision(&harness, &cid);
-
-    harness
-        .message_tx
-        .send(incoming(
-            &harness.channel_plugin_id,
-            make_text_message("tg_42", "chat_1", "2"),
-        ))
-        .await
-        .unwrap();
-
-    // Ack confirms the chosen label.
-    wait_for_send_containing(&harness.recorder, "已选择：Reject").await;
-
-    // Pending entry cleared.
-    for _ in 0..500 {
-        if harness.pending_decisions.peek(&cid).is_none() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert!(harness.pending_decisions.peek(&cid).is_none(), "pending decision must be cleared");
-
-    // No second user message was dispatched — the reply was consumed.
-    let messages = user_messages(
-        &harness.conversation_svc,
-        &harness.installation_owner,
-        &cid,
-    )
-    .await;
-    assert_eq!(messages, vec!["hello world".to_string()]);
-}
-
-/// A non-numeric reply while a decision is pending re-shows the numbered list
-/// and is NOT dispatched.
-#[tokio::test]
-async fn decision_non_numeric_reply_reshows_list_and_does_not_dispatch() {
-    let harness = build_harness().await;
-
-    harness
-        .message_tx
-        .send(incoming(
-            &harness.channel_plugin_id,
-            make_text_message("tg_42", "chat_1", "hello world"),
-        ))
-        .await
-        .unwrap();
-    let cid = wait_for_bound_conversation(&harness.channel_repo, &harness.recorder).await;
-    wait_until_idle(&harness.conversation_svc, &cid).await;
-
-    seed_decision(&harness, &cid);
-
-    harness
-        .message_tx
-        .send(incoming(
-            &harness.channel_plugin_id,
-            make_text_message("tg_42", "chat_1", "what?"),
-        ))
-        .await
-        .unwrap();
-
-    // The numbered list is re-shown.
-    let reshow = wait_for_send_containing(&harness.recorder, "需要你的决策").await;
-    let text = reshow.text.unwrap();
-    assert!(text.contains("1. Allow"), "re-shown list numbered: {text}");
-    assert!(text.contains("2. Reject"), "re-shown list numbered: {text}");
-
-    // Pending entry survives (the user still has to answer).
-    assert!(harness.pending_decisions.peek(&cid).is_some(), "pending decision must survive a bad reply");
-
-    // No new user message dispatched.
-    let messages = user_messages(
-        &harness.conversation_svc,
-        &harness.installation_owner,
-        &cid,
-    )
-    .await;
-    assert_eq!(messages, vec!["hello world".to_string()]);
 }
 
 // =====================================================================
