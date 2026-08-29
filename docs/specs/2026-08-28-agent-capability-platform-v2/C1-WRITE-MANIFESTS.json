@@ -3,6 +3,10 @@
   "boundary": "C1",
   "base_sha": "a0e807e02eae246a41ecc64fb59ac4b210fb7a29",
   "branch": "rf/agent-capability-platform-v2",
+  "status": "closed",
+  "closed_at": "2026-08-29",
+  "implementation_commit": "ab6166e2c33758a560e2cd7f98f6e7bc0a39aeb1",
+  "gate_evidence": "build.noindex/agent-capability-v2/ab6166e2c33758a560e2cd7f98f6e7bc0a39aeb1/c1-fullauto/summary.json",
   "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
   "shared_cargo_policy": "agents-must-not-run-cargo; central-validation-owner-only",
   "preserve_exact": [
