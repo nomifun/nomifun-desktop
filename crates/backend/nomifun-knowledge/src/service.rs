@@ -4855,7 +4855,8 @@ impl KnowledgeService {
                     ))
                 })?;
             if metadata_is_link_or_reparse(&resolved_path, &metadata)
-                || filesystem_entry_identity(&metadata).as_deref() != Some(expected_identity)
+                || filesystem_entry_identity(&resolved_path, &metadata).as_deref()
+                    != Some(expected_identity)
             {
                 return Err(AppError::Conflict(
                     "knowledge document was replaced by another filesystem entry before save"
@@ -12446,7 +12447,7 @@ fn scan_knowledge_entry_projection(
                     rel_path: rel_path.clone(),
                     portable_rel_path,
                     kind: KNOWLEDGE_ENTRY_KIND_DIRECTORY.into(),
-                    fs_identity: filesystem_entry_identity(&metadata),
+                    fs_identity: filesystem_entry_identity(&path, &metadata),
                     source_item_id: None,
                     source_url: None,
                     source_relationship: None,
@@ -12463,7 +12464,7 @@ fn scan_knowledge_entry_projection(
                     rel_path,
                     portable_rel_path,
                     kind: KNOWLEDGE_ENTRY_KIND_FILE.into(),
-                    fs_identity: filesystem_entry_identity(&metadata),
+                    fs_identity: filesystem_entry_identity(&path, &metadata),
                     source_item_id,
                     source_url,
                     source_relationship,
@@ -12701,23 +12702,47 @@ fn select_projection_identity_candidate(
 }
 
 #[cfg(unix)]
-fn filesystem_entry_identity(metadata: &std::fs::Metadata) -> Option<String> {
+fn filesystem_entry_identity(_path: &Path, metadata: &std::fs::Metadata) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
     Some(format!("unix:{}:{}", metadata.dev(), metadata.ino()))
 }
 
 #[cfg(windows)]
-fn filesystem_entry_identity(metadata: &std::fs::Metadata) -> Option<String> {
-    use std::os::windows::fs::MetadataExt;
+fn filesystem_entry_identity(path: &Path, _metadata: &std::fs::Metadata) -> Option<String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, GetFileInformationByHandle,
+    };
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        // Directories need FILE_FLAG_BACKUP_SEMANTICS. Opening the reparse
+        // point itself keeps this helper aligned with the caller's
+        // symlink/reparse safety check instead of following a late swap.
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()?;
+    let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    let ok = unsafe {
+        GetFileInformationByHandle(file.as_raw_handle().cast(), info.as_mut_ptr())
+    };
+    if ok == 0 {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    let file_index = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
     Some(format!(
         "windows:{}:{}",
-        metadata.volume_serial_number()?,
-        metadata.file_index()?
+        info.dwVolumeSerialNumber, file_index
     ))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn filesystem_entry_identity(_metadata: &std::fs::Metadata) -> Option<String> {
+fn filesystem_entry_identity(_path: &Path, _metadata: &std::fs::Metadata) -> Option<String> {
     None
 }
 
@@ -12794,7 +12819,7 @@ fn projection_tree_level_matches(
             return false;
         };
         !metadata_is_link_or_reparse(&path, &metadata)
-            && filesystem_entry_identity(&metadata) == projected.fs_identity
+            && filesystem_entry_identity(&path, &metadata) == projected.fs_identity
     })
 }
 
@@ -13354,7 +13379,7 @@ fn recovery_tree_path_identity(
             "durable relocation recovery refuses an unsafe destination: {rel_path}"
         )));
     }
-    Ok(filesystem_entry_identity(&metadata))
+    Ok(filesystem_entry_identity(&path, &metadata))
 }
 
 fn recovery_absolute_path_exists(root: &Path, path: &Path) -> Result<bool, AppError> {
@@ -13498,7 +13523,7 @@ fn plan_durable_relocation_paths(
     Ok((
         source_path,
         join_tree_rel_path(&destination_parent_path, &target_name),
-        filesystem_entry_identity(&source_metadata),
+        filesystem_entry_identity(&source, &source_metadata),
     ))
 }
 
@@ -15679,6 +15704,7 @@ mod tests {
                 source_rel_path: "docs/note.md".into(),
                 destination_rel_path: "archive/note.md".into(),
                 source_fs_identity: filesystem_entry_identity(
+                    &vault.join("docs/note.md"),
                     &std::fs::metadata(vault.join("docs/note.md")).unwrap(),
                 ),
                 created_at: now_ms(),
@@ -15898,6 +15924,7 @@ mod tests {
                 source_rel_path: "Note.md".into(),
                 destination_rel_path: "note.md".into(),
                 source_fs_identity: filesystem_entry_identity(
+                    &vault.join("Note.md"),
                     &std::fs::metadata(vault.join("Note.md")).unwrap(),
                 ),
                 created_at: now_ms(),
@@ -16033,6 +16060,7 @@ mod tests {
             .await
             .unwrap();
         let source_identity = filesystem_entry_identity(
+            &vault.join("note.md"),
             &std::fs::metadata(vault.join("note.md")).unwrap(),
         );
         let prepared = operations
