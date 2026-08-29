@@ -4240,29 +4240,44 @@ mod tests {
             .map(|step| (step.step_id.clone(), step.version))
             .expect("retry step exists");
         drop(pending);
-        repository
-            .reset_steps_for_retry(
-                &owner_id,
-                &execution_id,
-                repository
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let execution_version = repository
                     .get_execution(&owner_id, &execution_id)
                     .await
                     .expect("reload retry execution")
                     .expect("retry execution exists")
-                    .version,
-                &[RetryAgentExecutionStep {
-                    step_id: retry_step.0,
-                    expected_step_version: retry_step.1,
-                }],
-                &system_event(
-                    AgentExecutionEventKind::StepChanged,
-                    None,
-                    None,
-                    json!({"change":"manual_retry"}),
-                ),
-            )
-            .await
-            .expect("clear retry backoff");
+                    .version;
+                match repository
+                    .reset_steps_for_retry(
+                        &owner_id,
+                        &execution_id,
+                        execution_version,
+                        &[RetryAgentExecutionStep {
+                            step_id: retry_step.0.clone(),
+                            expected_step_version: retry_step.1,
+                        }],
+                        &system_event(
+                            AgentExecutionEventKind::StepChanged,
+                            None,
+                            None,
+                            json!({"change":"manual_retry"}),
+                        ),
+                    )
+                    .await
+                {
+                    Ok(_) => break,
+                    Err(nomifun_db::DbError::Query(error))
+                        if error.to_string().contains("database is locked") =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    Err(error) => panic!("clear retry backoff: {error:?}"),
+                }
+            }
+        })
+        .await
+        .expect("clear retry backoff before the scheduler deadline");
 
         let wake_requested_at = StdInstant::now();
         scheduler.start(owner_id.clone(), execution_id.clone());
