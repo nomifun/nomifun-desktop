@@ -365,7 +365,7 @@ async fn gw_delete_own_conversation_is_refused_but_other_succeeds() {
             "nomi_delete_conversation",
             TEST_CONV_1,
             TEST_USER_GATEWAY,
-            json!({"conversation_id": TEST_CONV_1, "confirm": true}),
+            json!({"conversation_id": TEST_CONV_1}),
         )
         .await;
     assert!(error_of(&body).contains("self_deletion_forbidden"));
@@ -375,7 +375,7 @@ async fn gw_delete_own_conversation_is_refused_but_other_succeeds() {
             "nomi_delete_conversation",
             TEST_CONV_1,
             TEST_USER_GATEWAY,
-            json!({"conversation_id": TEST_CONV_2, "confirm": true}),
+            json!({"conversation_id": TEST_CONV_2}),
         )
         .await;
     // `delete` echoes the canonical conversation ID.
@@ -426,7 +426,7 @@ async fn gw_user_isolation_hides_other_users_conversations() {
             "nomi_delete_conversation",
             TEST_CONV_2,
             TEST_USER_B,
-            json!({"conversation_id": TEST_CONV_1, "confirm": true}),
+            json!({"conversation_id": TEST_CONV_1}),
         )
         .await;
     assert!(error_of(&body).contains("not found"), "got {body}");
@@ -479,7 +479,7 @@ async fn gw_cron_create_list_update_delete_roundtrip() {
     assert!(result_of(&body).as_str().unwrap().contains("晚报"));
 
     let body = gw
-        .call("nomi_cron_delete", TEST_CONV_1, TEST_USER_GATEWAY, json!({"cron_job_id": cron_job_id, "confirm": true}))
+        .call("nomi_cron_delete", TEST_CONV_1, TEST_USER_GATEWAY, json!({"cron_job_id": cron_job_id}))
         .await;
     assert!(result_of(&body).as_str().unwrap().contains("Deleted"));
 
@@ -551,7 +551,7 @@ async fn gw_memory_save_list_update_delete_roundtrip() {
             "nomi_memory_delete",
             TEST_OWNER_CALLER,
             services.authoritative_user_id.as_ref(),
-            json!({"memory_id": memory_id, "confirm": true}),
+            json!({"memory_id": memory_id}),
         )
         .await;
     assert!(result_of(&body).as_str().unwrap().contains("deleted"));
@@ -659,7 +659,7 @@ async fn gw_requirement_create_list_update_delete_roundtrip() {
             "nomi_requirement_delete",
             TEST_OWNER_CALLER,
             services.authoritative_user_id.as_ref(),
-            json!({"requirement_id": req_id, "confirm": true}),
+            json!({"requirement_id": req_id}),
         )
         .await;
     assert!(result_of(&body).as_str().unwrap().contains("deleted"));
