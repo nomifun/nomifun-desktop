@@ -2411,7 +2411,7 @@ mod tests {
             invalid
                 .get("error")
                 .and_then(Value::as_str)
-                .is_some_and(|error| error.contains("invalid arguments")),
+                == Some("invalid_tool_arguments"),
             "invalid args must be rejected by typed preflight: {invalid}"
         );
         assert_eq!(
@@ -2450,7 +2450,7 @@ mod tests {
             invalid
                 .get("error")
                 .and_then(Value::as_str)
-                .is_some_and(|error| error.contains("invalid arguments")),
+                == Some("invalid_tool_arguments"),
             "invalid renewal must be rejected before Browser owner renewal: {invalid}"
         );
         assert_eq!(
