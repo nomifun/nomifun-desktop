@@ -10,10 +10,10 @@
 
 - branch：`rf/agent-capability-platform-v2`
 - base SHA：`7a2ade3c49374add25a35565265399c57729a8b9`
-- current implementation SHA / C2～C5 code base：
-  `ab6166e2c33758a560e2cd7f98f6e7bc0a39aeb1`
+- current implementation SHA / C6 code base：
+  `6e1b7338ae3c3181d14366cc3d52d30f64b45285`
 - last verified remote implementation SHA：
-  `ab6166e2c33758a560e2cd7f98f6e7bc0a39aeb1`
+  `6e1b7338ae3c3181d14366cc3d52d30f64b45285`
 - origin：`https://github.com/nomifun/nomifun-tauri.git`
 - worktree：clean；启动时无用户未提交改动
 - Git identity：`colir0 <colir0@qq.com>`
@@ -239,16 +239,18 @@ C0 contract/golden digests：
   `build.noindex/agent-capability-v2/ab6166e2c33758a560e2cd7f98f6e7bc0a39aeb1/contract-closure/summary.json`
 - C1 FullAuto evidence：
   `build.noindex/agent-capability-v2/ab6166e2c33758a560e2cd7f98f6e7bc0a39aeb1/c1-fullauto/summary.json`
-- C2～C5 implementation：working-tree closure pending commit/push
+- C2～C5 implementation commit：
+  `6e1b7338ae3c3181d14366cc3d52d30f64b45285`
 - C2～C5 foundation evidence：
-  `build.noindex/agent-capability-v2/253e850b44bce83fa9b785dc6805c431201f6c91/c2-c5-foundations/summary.json`
+  `build.noindex/agent-capability-v2/6e1b7338ae3c3181d14366cc3d52d30f64b45285/c2-c5-foundations/summary.json`
+- C2～C5 Contract Closure evidence：
+  `build.noindex/agent-capability-v2/6e1b7338ae3c3181d14366cc3d52d30f64b45285/contract-closure/summary.json`
 
 ## 下一批可直接执行
 
-1. 形成 C2～C5 implementation commit/push并核对 local/origin/`git ls-remote` SHA。
-2. 冻结 C6 triad disjoint write manifests。
-3. 合流 Chat/Coding/`sample.echo` 最终数据、UI、Runtime、Event/Effect 与 D-024 delete。
-4. C6 执行第一次 workspace `cargo test` 与 UI check/build；未通过不得进入 C7。
+1. 冻结 C6 triad disjoint write manifests。
+2. 合流 Chat/Coding/`sample.echo` 最终数据、UI、Runtime、Event/Effect 与 D-024 delete。
+3. C6 执行第一次 workspace `cargo test` 与 UI check/build；未通过不得进入 C7。
 
 ## 真实 Blocker
 

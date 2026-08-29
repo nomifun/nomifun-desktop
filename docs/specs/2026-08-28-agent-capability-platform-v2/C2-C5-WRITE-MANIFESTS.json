@@ -5,7 +5,8 @@
   "branch": "rf/agent-capability-platform-v2",
   "status": "closed",
   "closed_at": "2026-08-29",
-  "gate_evidence": "build.noindex/agent-capability-v2/253e850b44bce83fa9b785dc6805c431201f6c91/c2-c5-foundations/summary.json",
+  "implementation_commit": "6e1b7338ae3c3181d14366cc3d52d30f64b45285",
+  "gate_evidence": "build.noindex/agent-capability-v2/6e1b7338ae3c3181d14366cc3d52d30f64b45285/c2-c5-foundations/summary.json",
   "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
   "shared_cargo_policy": "agents-must-not-run-cargo-or-edit-root-lockfiles; central-validation-owner-only",
   "preserve_exact": [
