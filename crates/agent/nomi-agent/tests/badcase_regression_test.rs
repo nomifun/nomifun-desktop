@@ -70,8 +70,6 @@ fn config(base_url: &str, cwd: &str) -> Config {
         prompt_caching: false,
         compat: ProviderCompat::openai_defaults(),
         tools: ToolsConfig {
-            auto_approve: true,
-            allow_list: vec![],
             ..ToolsConfig::default()
         },
         session: SessionConfig {

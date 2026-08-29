@@ -17,7 +17,7 @@
 export interface NomiTurnState {
   /** The model stream is active (text/thinking/tool output flowing). */
   streamRunning: boolean;
-  /** One or more tools are executing / confirming / pending. */
+  /** One or more tools are executing or pending. */
   hasActiveTools: boolean;
   /** Between a tool batch finishing and the next model request — the backend
    * will send another turn, so the UI must keep showing activity. */
@@ -38,7 +38,7 @@ export type NomiTurnEvent =
   /** External setter (the send box raises this on submit). */
   | { type: 'setWaiting'; value: boolean }
   /** Any stream activity that should (re)assert the running state without
-   * touching `waitingResponse`: start, thinking, permission prompt, or other
+   * touching `waitingResponse`: start, thinking, tool activity, or other
    * non-content output. Subsumes the old "auto-recover streamRunning" hacks. */
   | { type: 'activity' }
   /** Assistant text/content: running, and no longer waiting for the model.

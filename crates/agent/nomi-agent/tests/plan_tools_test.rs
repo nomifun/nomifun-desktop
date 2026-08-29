@@ -23,12 +23,6 @@ fn tc_3_3_01_plan_state_default_is_inactive() {
     assert!(!state.is_active);
 }
 
-#[test]
-fn tc_3_3_01_plan_state_default_allow_list_empty() {
-    let state = PlanState::default();
-    assert!(state.pre_plan_allow_list.is_empty());
-}
-
 // ---------------------------------------------------------------------------
 // TC-3.3-02  EnterPlanMode normal execution
 // ---------------------------------------------------------------------------
@@ -43,7 +37,7 @@ async fn tc_3_3_02_enter_plan_mode_succeeds_when_not_active() {
     assert!(!result.is_error, "should succeed when not in plan mode");
     assert!(
         result.content.contains("plan mode"),
-        "confirmation message should mention plan mode"
+        "result message should mention plan mode"
     );
 }
 
@@ -79,7 +73,7 @@ async fn tc_3_3_04_exit_plan_mode_succeeds_when_active() {
     assert!(!result.is_error, "should succeed when in plan mode");
     assert!(
         result.content.contains("Exited plan mode"),
-        "confirmation message should mention exiting"
+        "result message should mention exiting"
     );
 }
 

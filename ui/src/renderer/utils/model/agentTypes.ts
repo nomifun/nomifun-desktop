@@ -53,7 +53,6 @@ export type AgentHandshake = {
   agent_capabilities?: unknown;
   auth_methods?: unknown;
   config_options?: unknown;
-  available_modes?: unknown;
   available_models?: unknown;
   available_commands?: unknown;
 };
@@ -95,11 +94,6 @@ export type AgentMetadata = {
   native_skills_dirs?: string[];
 
   behavior_policy?: BehaviorPolicy;
-
-  /** Native mode id that Nomi's legacy `yolo` / `yoloNoSandbox`
-   *  aliases resolve to before calling `session/set_mode`. Absent
-   *  when the backend has no yolo equivalent. */
-  yolo_id?: string;
 
   handshake?: AgentHandshake;
 };

@@ -202,12 +202,6 @@ const activityFromResponse = (event: IResponseMessage): string | null => {
       'Agent has started'
     );
   }
-  if (event.type === 'permission') {
-    return activityCopy(
-      'creativeStudio.agent.activity.waitingConfirmation',
-      'Agent is waiting for confirmation'
-    );
-  }
   if (event.type === 'finish') {
     return activityCopy(
       'creativeStudio.agent.activity.completing',
@@ -221,7 +215,7 @@ const activityFromResponse = (event: IResponseMessage): string | null => {
         Boolean(tool) &&
         typeof tool === 'object' &&
         !Array.isArray(tool) &&
-        ['Executing', 'Confirming', 'Pending'].includes(String((tool as Record<string, unknown>).status))
+        ['Executing', 'Pending'].includes(String((tool as Record<string, unknown>).status))
     );
     if (active) {
       return (

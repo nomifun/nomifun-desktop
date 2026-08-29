@@ -291,7 +291,6 @@ fn persistent_test_config(workspace: &Path, session_directory: &Path) -> Config 
         max_turns: Some(1),
         system_prompt: None,
         profile: None,
-        auto_approve: true,
         project_dir: Some(workspace.to_path_buf()),
     })
     .unwrap();

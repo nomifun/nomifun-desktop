@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::deps::GatewayDeps;
-use crate::registry::{Capability, CapabilityMeta, DangerTier};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
 const DEFAULT_LIST_LIMIT: i64 = 50;
@@ -161,7 +161,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_memory_list",
             "memory",
             "List the desktop's long-term memories (active by default; filter by kind/query; include_archived to see archived).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| list(deps, p),
     ));
@@ -170,7 +170,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_memory_save",
             "memory",
             "Persist a new long-term memory (one self-contained fact).",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| save(deps, p),
     ));
@@ -179,7 +179,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_memory_update",
             "memory",
             "Edit a memory's content, pin/unpin it, or archive/reactivate it.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| update(deps, p),
     ));
@@ -188,7 +188,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_memory_delete",
             "memory",
             "Permanently delete a memory. Prefer archiving via nomi_memory_update unless the user asked to delete.",
-            DangerTier::Destructive,
+            EffectClass::Destructive,
         ),
         |deps, _ctx, p| delete(deps, p),
     ));

@@ -55,9 +55,6 @@ nomi-redact.workspace = true
 # the application-owned Browser Session Hub while the knowledge crate remains
 # independent of the browser platform.
 nomifun-browser-platform = { workspace = true, optional = true }
-# Phase D: the facade `BrowserApprovalGate` trait — the desktop `DesktopApprovalGate`
-# impl (Confirmation + ToolApprovalManager) lives in this crate and is threaded into
-# the native BrowserTool via `AgentBootstrap::approval_gate`. Optional (browser-use only).
 nomi-browser = { workspace = true, optional = true }
 chrono.workspace = true
 uuid.workspace = true

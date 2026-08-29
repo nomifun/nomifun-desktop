@@ -7,11 +7,10 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Dropdown, Input } from '@arco-design/web-react';
-import { ArrowUp, Brain, Down, Send, Shield } from '@icon-park/react';
+import { ArrowUp, Brain, Down, Send } from '@icon-park/react';
 import {
   MAX_AGENT_EXECUTION_MODELS,
   type TExecutionModelRef,
-  type TPlanGate,
 } from '@/common/types/agentExecution/agentExecutionTypes';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
 import { useInputFocusRing } from '@/renderer/hooks/chat/useInputFocusRing';
@@ -52,10 +51,6 @@ export interface ExecutionPlanEditorProps {
   showModelPool?: boolean;
   modelPool?: ExecutionModelPoolSelection;
   onModelPoolChange?: (next: ExecutionModelPoolSelection) => void;
-  /** Show the plan-gate pill. */
-  showPlanGate?: boolean;
-  planGate?: TPlanGate;
-  onPlanGateChange?: (next: TPlanGate) => void;
 }
 
 /** Case-insensitive substring match against an option's text label. */
@@ -78,9 +73,6 @@ const ExecutionPlanEditor: React.FC<ExecutionPlanEditorProps> = ({
   showModelPool = false,
   modelPool,
   onModelPoolChange,
-  showPlanGate = false,
-  planGate = 'require_approval',
-  onPlanGateChange,
 }) => {
   const { t } = useTranslation();
   const { activeBorderColor, inactiveBorderColor, activeShadow } = useInputFocusRing();
@@ -90,7 +82,6 @@ const ExecutionPlanEditor: React.FC<ExecutionPlanEditorProps> = ({
 
   const [isFocused, setIsFocused] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
-  const [planGateOpen, setPlanGateOpen] = useState(false);
 
   const trimmed = value.trim();
   const canSubmit = trimmed.length > 0 && !submitting;
@@ -267,76 +258,6 @@ const ExecutionPlanEditor: React.FC<ExecutionPlanEditorProps> = ({
     </div>
   );
 
-  // ── Autonomy pill ────────────────────────────────────────────────────────────
-  const planGateItems: { key: TPlanGate; label: string; hint: string }[] = useMemo(
-    () => [
-      {
-        key: 'require_approval',
-        label: t('agentExecution.editor.planGate.require_approval'),
-        hint: t('agentExecution.editor.planGate.require_approvalHint'),
-      },
-      {
-        key: 'automatic',
-        label: t('agentExecution.editor.planGate.automatic'),
-        hint: t('agentExecution.editor.planGate.automaticHint'),
-      },
-    ],
-    [t],
-  );
-
-  const planGatePanel = (
-    <div className={styles.composerPopover}>
-      <div className='flex flex-col gap-10px'>
-        <div className='flex items-center gap-8px'>
-          <Shield theme='outline' size='14' fill='rgb(var(--primary-6))' className='shrink-0' />
-          <span className={styles.composerPopoverTitle}>{t('agentExecution.editor.planGateLabel')}</span>
-        </div>
-        <div className='flex flex-col gap-6px'>
-          {planGateItems.map((item) => {
-            const active = planGate === item.key;
-            return (
-              <div
-                key={item.key}
-                role='button'
-                tabIndex={0}
-                aria-pressed={active}
-                onClick={() => {
-                  onPlanGateChange?.(item.key);
-                  setPlanGateOpen(false);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    onPlanGateChange?.(item.key);
-                    setPlanGateOpen(false);
-                  }
-                }}
-                className='flex cursor-pointer flex-col gap-2px rd-8px px-10px py-8px transition-colors'
-                style={{
-                  background: active ? 'color-mix(in srgb, rgb(var(--primary-6)) 10%, transparent)' : 'transparent',
-                  border: `1px solid ${active ? 'color-mix(in srgb, rgb(var(--primary-6)) 26%, transparent)' : 'var(--color-border-2)'}`,
-                }}
-              >
-                <span
-                  className='text-12px font-600 leading-none'
-                  style={{
-                    color: active ? 'rgb(var(--primary-6))' : 'var(--color-text-1)',
-                  }}
-                >
-                  {item.label}
-                </span>
-                <span className='text-11px leading-15px text-t-secondary'>{item.hint}</span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-
-  const planGateLabel =
-    planGate === 'automatic' ? t('agentExecution.editor.planGate.automatic') : t('agentExecution.editor.planGate.require_approval');
-
   return (
     <div className={`${styles.composerLayout} ${fluid ? styles.composerLayoutFluid : ''}`}>
       {/* Outer `--bg-2` shell wrapping the inner rd-24 card (mirrors GuidInputCard). */}
@@ -375,24 +296,6 @@ const ExecutionPlanEditor: React.FC<ExecutionPlanEditorProps> = ({
                   <span className='flex items-center gap-6px min-w-0'>
                     <Brain theme='outline' size='14' fill={iconColors.secondary} className='shrink-0' />
                     <span className='truncate'>{modelLabel}</span>
-                    <Down theme='outline' size='12' fill={iconColors.secondary} className='shrink-0' />
-                  </span>
-                </Button>
-              </Dropdown>
-            )}
-
-            {showPlanGate && (
-              <Dropdown
-                trigger='click'
-                popupVisible={planGateOpen}
-                onVisibleChange={setPlanGateOpen}
-                droplist={planGatePanel}
-                position='tr'
-              >
-                <Button className='sendbox-model-btn' shape='round' size='small' data-testid='execution-planGate-pill'>
-                  <span className='flex items-center gap-6px min-w-0'>
-                    <Shield theme='outline' size='14' fill={iconColors.secondary} className='shrink-0' />
-                    <span className='truncate'>{planGateLabel}</span>
                     <Down theme='outline' size='12' fill={iconColors.secondary} className='shrink-0' />
                   </span>
                 </Button>

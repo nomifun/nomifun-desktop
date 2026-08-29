@@ -132,8 +132,6 @@ pub struct CallerCtx {
     /// `None` for plain companion/desktop sessions. Used to resolve the write
     /// surface (channel → write-disabled in P1).
     pub channel_platform: Option<String>,
-    /// Resolved approval mode for the calling agent session.
-    pub session_mode: Option<String>,
     /// `true` when the caller is an external network consumer reaching the
     /// platform through the installation-owner Remote front door. Takes
     /// precedence over `channel_platform` in [`CallerCtx::surface`]. Defaults
@@ -160,7 +158,6 @@ impl Default for CallerCtx {
             user_id: UserId::new(),
             companion_id: None,
             channel_platform: None,
-            session_mode: None,
             remote: false,
             operation_id: None,
             #[cfg(feature = "browser-use")]
@@ -181,7 +178,6 @@ impl CallerCtx {
             user_id: UserId::parse(user_id).map_err(|error| error.to_string())?,
             companion_id: None,
             channel_platform: None,
-            session_mode: None,
             remote: true,
             operation_id: None,
             #[cfg(feature = "browser-use")]

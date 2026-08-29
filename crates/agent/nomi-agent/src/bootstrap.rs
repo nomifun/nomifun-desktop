@@ -387,24 +387,9 @@ pub struct AgentBootstrap {
     /// explicitly disable it when Platform Gateway owns persistent execution
     /// or the caller is outside the trusted local-owner boundary.
     install_embedded_agent_execution: bool,
-    /// **P3-X1: the session's shared runtime approval-mode handle** (the same
-    /// `Arc<ToolApprovalManager>` the host later installs on the engine via
-    /// `set_approval_manager`). When present it is threaded into the native
-    /// `BrowserTool` so its fail-closed redline gate reads the *runtime* session mode
-    /// LIVE — a mid-session `set_mode` to yolo arms the gate immediately, instead of
-    /// being pinned to the construction-time `auto_approve` snapshot. Hosts that have
-    /// no protocol approval manager (e.g. the interactive REPL) leave it `None` and the
-    /// facade falls back to the construction-time snapshot (unchanged behavior).
-    approval_manager: Option<Arc<nomi_protocol::ToolApprovalManager>>,
     /// Machine-bound key for encrypted persistent-browser-login snapshots.
     #[cfg_attr(not(feature = "browser-use"), allow(dead_code))]
     persistent_login_key: Option<[u8; 32]>,
-    /// **Phase D: the session's browser approval gate** (human takeover + SD-5 cross-origin
-    /// egress). Threaded into the native `BrowserTool` so an irreversible action in a bypass
-    /// session — and a gated cross-origin POST — is surfaced to the user and awaited. `None`
-    /// (default) → fail-closed (current behavior). Feature-gated: the trait is in `nomi_browser`.
-    #[cfg(feature = "browser-use")]
-    approval_gate: Option<Arc<dyn nomi_browser::BrowserApprovalGate>>,
     /// Trusted main-process Browser Platform capability for this runtime.
     /// The embedded host resolves/signs caller identity before constructing
     /// this client; neither the model nor tool input can populate those fields.
@@ -431,10 +416,7 @@ impl AgentBootstrap {
             extra_skill_dirs: Vec::new(),
             goal: None,
             install_embedded_agent_execution: true,
-            approval_manager: None,
             persistent_login_key: None,
-            #[cfg(feature = "browser-use")]
-            approval_gate: None,
             #[cfg(feature = "browser-use")]
             browser_lane_client: None,
             ssh_session: None,
@@ -462,33 +444,14 @@ impl AgentBootstrap {
         self
     }
 
-    /// **P3-X1: provide the session's shared `Arc<ToolApprovalManager>`** so the native
-    /// `BrowserTool`'s redline gate reads the *runtime* approval mode LIVE (a mid-session
-    /// `set_mode` to yolo arms the gate immediately). Pass the *same* Arc that is later
-    /// installed on the engine via `set_approval_manager`, so the facade and tool-execution
     /// observe one mode cell with zero drift. Omit it (the default) to keep the
-    /// construction-time `auto_approve` snapshot as the (fail-closed) source of truth.
-    pub fn approval_manager(mut self, mgr: Arc<nomi_protocol::ToolApprovalManager>) -> Self {
-        self.approval_manager = Some(mgr);
-        self
-    }
-
     /// Provide the application data key used to encrypt persistent-browser-login snapshots.
     pub fn persistent_login_key(mut self, key: [u8; 32]) -> Self {
         self.persistent_login_key = Some(key);
         self
     }
 
-    /// **Phase D: provide the browser approval gate** (host impl raises a `Confirmation`
-    /// and awaits the shared `ToolApprovalManager`). Threaded into the native `BrowserTool`,
-    /// enabling human takeover of irreversible actions + SD-5 cross-origin egress approval.
     /// Omit it (the default) → fail-closed (irreversible stays Blocked, gated egress fails).
-    #[cfg(feature = "browser-use")]
-    pub fn approval_gate(mut self, gate: Arc<dyn nomi_browser::BrowserApprovalGate>) -> Self {
-        self.approval_gate = Some(gate);
-        self
-    }
-
     /// Bind the native Agent Browser tool to the process-wide Browser Session
     /// Hub. The supplied client already carries trusted caller identity,
     /// capability expiry, owner lease, and allowed operations; no corresponding
@@ -739,11 +702,7 @@ impl AgentBootstrap {
         self.config.system_prompt = Some(system_prompt);
 
         let skills_arc = Arc::new(skills);
-        let skill_checker = nomi_skills::permissions::SkillPermissionChecker::new(
-            self.config.tools.skills.deny.clone(),
-            self.config.tools.skills.allow.clone(),
-            self.config.tools.auto_approve,
-        );
+        let skill_checker = nomi_skills::permissions::SkillPermissionChecker::new(self.config.tools.skills.deny.clone());
         // No-gateway CLI/embedded engines share one Agent invocation runner
         // between fork-mode skills and embedded `nomi_delegate`. Platform
         // Gateway sessions disable the embedded deployment and expose the same
@@ -846,14 +805,9 @@ impl AgentBootstrap {
                      The Browser tool will fail closed; private Chromium fallback is disabled."
                 );
             }
-            // F1-sec: thread the session-bypass policy + evaluate full-power into the
-            // facade so its independent fail-closed redline gate (裁决⑧) actually fires
-            // and the evaluate gate (裁决⑨) reflects the user's opt-in. `auto_approve`
-            // is `true` iff tool-execution approval is bypassed (yolo / companion-forced-yolo
-            // / --auto-approve — see BrowserTool::session_bypasses_approval doc); the
-            // `browser.full_power` flag carries the LIVE `agent.browserUse.fullPower` pref
-            // (set by the backend factory per session). Constructed here where the full
-            // Config is in scope.
+            // Thread host-resolved Browser security settings into the facade.
+            // `browser.full_power` carries the current
+            // `agent.browserUse.fullPower` preference.
             //
             // P3-G2: pass the session working directory `cwd` (= self.workspace) as the
             // per-session/per-pet workspace. It's the natural isolation point — for a
@@ -866,19 +820,12 @@ impl AgentBootstrap {
             // upper manager/factory) — the cwd is already per-conversation isolated, so we
             // pass it directly (simplest correct) and leave the finer browser-profiles
             // layout to W4/deployment wiring (the field signature already supports it).
-            // P3-X1: thread the session's shared runtime approval-mode handle (the same
-            // Arc<ToolApprovalManager> the host installs via set_approval_manager) so the
-            // facade's redline gate reads the LIVE session mode — a mid-session set_mode to
-            // yolo arms it immediately, instead of being pinned to the auto_approve snapshot
-            // above. `None` (e.g. the interactive REPL, which has no protocol approval
             // manager) → the facade falls back to the construction-time snapshot (unchanged).
             let mut browser_tool = nomi_browser::BrowserTool::new_managed(
                 &self.config.tools.browser,
-                self.config.tools.auto_approve,
                 self.config.tools.browser.full_power,
                 self.config.tools.browser.persistent_login,
                 Some(PathBuf::from(cwd)),
-                self.approval_manager.clone(),
                 self.persistent_login_key,
             );
             if let Some(client) = self.browser_lane_client.clone() {
@@ -925,12 +872,6 @@ impl AgentBootstrap {
                 browser_tool = browser_tool
                     .with_visual_locator(locator)
                     .with_visual_fallback_enabled(true);
-            }
-            // Phase D: thread the host approval gate (human takeover + SD-5 egress). When the
-            // gate is present it surfaces irreversible actions / gated cross-origin POSTs to the
-            // user and awaits a decision; absent → fail-closed (current behavior).
-            if let Some(gate) = self.approval_gate.clone() {
-                browser_tool = browser_tool.with_approval_gate(gate);
             }
             registry.register(Box::new(browser_tool));
         }

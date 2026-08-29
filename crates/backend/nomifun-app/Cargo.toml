@@ -101,10 +101,6 @@ name = "idmm_e2e"
 path = "tests/idmm_e2e.rs"
 
 [[test]]
-name = "idmm_intervention_e2e"
-path = "tests/idmm_intervention_e2e.rs"
-
-[[test]]
 name = "message_e2e"
 path = "tests/message_e2e.rs"
 

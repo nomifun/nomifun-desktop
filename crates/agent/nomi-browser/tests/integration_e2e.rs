@@ -1,27 +1,7 @@
-//! **P2 F3：多步 e2e（facade 端到端）+ 安全门生效证据**（`#[ignore]`，本机/打包 chrome）。
+//! Browser facade integration coverage.
 //!
-//! 这是 P2 收官的端到端验证：**经 `BrowserTool` facade（`Tool::execute`）**串起完整真实流程，证明
-//! P2 的各组件（navigate settle / observe ref 表 / actionability 五检查 + 三级兜底 / verify-after-act /
-//! 不可逆分类器 + facade 独立 fail-closed 门）在真 Chrome 上**协同工作**。
-//!
-//! 与 engine 层集成测试（`nomi-browser-engine/tests/integration_act.rs` 的 `c1_*`/`c2_*`）的区别：
-//! 那些直接驱动 `engine.act(&ActSpec, &Progress)`（引擎契约）；本测试走**更高层**——经 facade 的
-//! `execute(json!{...})`（LLM 真正调用的入口），故同时覆盖：①facade 的 dispatch/参数解析；②facade 的
-//! redline 独立门（在 dispatch 前拦审批旁路会话的不可逆动作）。
-//!
-//! ## 覆盖的 P2 DoD 验收点
-//! - **多步协同**：navigate → observe → type username → type password → select_option Pro → click submit
-//!   （普通会话 submit 真提交 → onsubmit 标记 `submitted:<user>:<plan>`，经再 observe 读回证实）。
-//! - **安全门生效（红线）**：
-//!   1. **yolo/审批旁路会话** click submit（accname="Submit order" → 分类 Irreversible）→ facade redline
-//!      门 **hard-deny Blocked**（设计裁决⑧：不靠被旁路的 approval pipeline，靠 facade 独立 fail-closed 门）；
-//!   2. **普通会话** 同一 submit → 门**不拦**（交 approval pipeline），动作真执行。
-//!
-//! 手动跑（本机 Windows 有系统 Chrome）：
-//!   set NOMIFUN_CHROME_BINARY=C:\Program Files\Google\Chrome\Application\chrome.exe
-//!   cargo nextest run -p nomi-browser --run-ignored all -E 'test(e2e)'
-//! 跑完核对任务管理器无残留 chrome（engine 的 Builder kill_on_drop 应自动清；tool Drop 即释放）。
-
+//! Selected actions execute directly while ordinary URL, ownership, resource,
+//! browser-engine, and data-handling checks remain synchronous.
 use std::path::PathBuf;
 
 use nomi_browser::BrowserTool;
@@ -100,8 +80,7 @@ async fn concurrent_first_calls_on_one_facade_launch_single_engine() {
 /// 且普通会话的 Irreversible submit **未被 facade 门拦**——门方向正确：只拦审批旁路会话）。
 #[tokio::test]
 #[ignore = "需本机/打包 chrome：set NOMIFUN_CHROME_BINARY 后 --run-ignored all"]
-async fn e2e_multistep_form_flow_through_facade_normal_session() {
-    // 普通会话（session_bypasses_approval=false）：facade redline 门不拦不可逆动作（交 approval pipeline）。
+async fn e2e_multistep_form_flow_full_auto() {
     let tool = BrowserTool::with_data_dir(isolated_data_dir("normal"), false);
 
     // ── 1. navigate ────────────────────────────────────────────────────────────
@@ -156,7 +135,7 @@ async fn e2e_multistep_form_flow_through_facade_normal_session() {
     assert_eq!(
         tool.category_for(&json!({"action": "click", "ref": submit_ref})),
         nomi_protocol::events::ToolCategory::Irreversible,
-        "submit-order click must classify as Irreversible (so approval pipeline prompts in a normal session)"
+        "submit-order click must retain the Irreversible effect classification"
     );
     let submit = tool
         .execute(json!({"action": "click", "ref": submit_ref}))
@@ -166,7 +145,7 @@ async fn e2e_multistep_form_flow_through_facade_normal_session() {
     let lower = submit.content.to_lowercase();
     assert!(
         !(submit.is_error && (lower.contains("blocked") || lower.contains("irreversible"))),
-        "normal-session irreversible submit must NOT be hard-denied by the facade gate: {}",
+        "selected irreversible submit must execute directly: {}",
         submit.content
     );
 
@@ -188,62 +167,11 @@ async fn e2e_multistep_form_flow_through_facade_normal_session() {
          type user    = changed=true\n\
          type pass    = changed=true\n\
          select Pro   = changed=true (value 'pro')\n\
-         submit       = NOT blocked in normal session (classified Irreversible → approval pipeline)\n\
+         submit       = executed directly (classified Irreversible for effect accounting)\n\
          form-status  = submitted:e2e-user:pro (onsubmit fired)"
     );
 }
 
-/// **安全门生效证据（红线）：审批旁路（yolo/companion）会话里的不可逆 submit → facade hard-deny Blocked。**
-///
-/// 这是设计裁决⑧的端到端证明：不靠被旁路的 tool-execution 审批闸，靠 facade 的独立 fail-closed 门。
-/// 经 `with_policy(.., session_bypasses_approval=true, ..)` 构造一个审批旁路会话的 tool（= yolo / companion
-/// 强制 yolo / --auto-approve 的等价 test seam），navigate + observe 真页拿到真 submit ref（accname
-/// "Submit order" → 分类 Irreversible），然后 `execute(click submit)` → **Blocked**（门在 dispatch 之前拦）。
-#[tokio::test]
-#[ignore = "需本机/打包 chrome：set NOMIFUN_CHROME_BINARY 后 --run-ignored all"]
-async fn e2e_security_gate_blocks_irreversible_submit_in_bypassing_session() {
-    // 审批旁路会话（with_policy 第二参 = config.tools.auto_approve = true）→ redline 门武装。
-    // 注意：with_policy 用 app_config_dir 的 browser-data；为隔离，先 with_data_dir 再... 但 with_data_dir
-    // 不带 policy。这里直接用 with_policy（headless）——它的 data_dir 是 app browser-data；本测试只 navigate
-    // 一个 file:// fixture（不落数据），且 chrome user-data-dir 由 engine 专属管理，争用风险低。
-    let tool = BrowserTool::with_policy(&headless_config(), /* session_bypasses_approval */ true, false, false, None, None, None);
-
-    let nav = tool
-        .execute(json!({"action": "navigate", "url": fixture_url("e2e-form.html")}))
-        .await;
-    assert!(!nav.is_error, "navigate must succeed: {}", nav.content);
-
-    let obs = tool.execute(json!({"action": "observe"})).await;
-    assert!(!obs.is_error, "observe must succeed: {}", obs.content);
-    let submit_ref = find_ref(&obs.content, "button", "Submit order");
-    eprintln!("yolo session submit ref = {submit_ref}");
-
-    // 旁路会话 + 不可逆 submit → facade redline 门 hard-deny（dispatch 前拦）。
-    let blocked = tool
-        .execute(json!({"action": "click", "ref": submit_ref}))
-        .await;
-    eprintln!("yolo click submit -> is_error={} content={:?}", blocked.is_error, blocked.content);
-    assert!(
-        blocked.is_error,
-        "irreversible submit in an approval-bypassing session MUST be hard-denied: {}",
-        blocked.content
-    );
-    let lower = blocked.content.to_lowercase();
-    assert!(
-        lower.contains("blocked") || lower.contains("irreversible"),
-        "block message should explain the redline (blocked/irreversible): {}",
-        blocked.content
-    );
-
-    eprintln!(
-        "=== F3 SECURITY GATE EVIDENCE ===\n\
-         session      = approval-bypassing (yolo/companion/auto_approve)\n\
-         action       = click submit [ref={submit_ref}] (accname 'Submit order' → Irreversible)\n\
-         result       = HARD-DENY Blocked (facade fail-closed gate, NOT approval pipeline)\n\
-         message      = {:?}",
-        blocked.content
-    );
-}
 
 // ─── P3 Structured Extract (real Chrome + stub model) ───────────────────────
 
@@ -350,81 +278,6 @@ async fn e2e_extract_without_model_returns_deterministic_payload() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
-///
-/// Proves the full takeover flow end-to-end against a real browser:
-/// 1. Opens a headful window with a bypass session + takeover enabled.
-/// 2. Navigates to a form, observes to get refs.
-/// 3. Clicks the "Submit order" button (irreversible).
-/// 4. With force_resolution=Confirmed, the redline gate releases the action.
-/// 5. The submit actually executes (verify via re-observe).
-///
-/// Manual run:
-///   NOMIFUN_CHROME_BINARY="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-///     cargo nextest run -p nomi-browser --run-ignored all -E 'test(takeover_smoke)'
-#[tokio::test]
-#[ignore = "requires NOMIFUN_CHROME_BINARY + display (headful takeover smoke)"]
-async fn takeover_smoke_confirmed_releases_irreversible_through_facade() {
-    use nomi_browser::takeover::TakeoverResolution;
-
-    let data_dir = isolated_data_dir("takeover-smoke");
-    // Bypass session (yolo) + takeover enabled with forced Confirmed.
-    let mut tool = BrowserTool::with_policy(
-        &BrowserConfig { headless: true, ..Default::default() },
-        true,  // session_bypasses_approval
-        false, // evaluate_full_power
-        false, // evaluate_persistent_login
-        None,
-        None,
-        None,
-    );
-    tool.takeover_controller_mut().enabled = true;
-    tool.takeover_controller_mut().force_resolution = Some(TakeoverResolution::Confirmed);
-
-    // Navigate.
-    let nav = tool
-        .execute(json!({"action": "navigate", "url": fixture_url("e2e-form.html")}))
-        .await;
-    eprintln!("takeover smoke: navigate -> {}", nav.content);
-    assert!(!nav.is_error, "navigate: {}", nav.content);
-
-    // Observe.
-    let obs = tool.execute(json!({"action": "observe"})).await;
-    assert!(!obs.is_error, "observe: {}", obs.content);
-    let submit_ref = find_ref(&obs.content, "button", "Submit order");
-    eprintln!("takeover smoke: submit_ref={submit_ref}");
-
-    // Click submit (irreversible in bypass session → takeover → Confirmed → proceeds).
-    let click = tool
-        .execute(json!({"action": "click", "ref": submit_ref}))
-        .await;
-    eprintln!(
-        "takeover smoke: click submit -> is_error={} content={}",
-        click.is_error,
-        &click.content[..click.content.len().min(200)]
-    );
-    // With Confirmed takeover, the action should proceed past the redline gate.
-    assert!(
-        !click.content.to_lowercase().contains("blocked"),
-        "Confirmed takeover must release the submit past the redline gate: {}",
-        click.content
-    );
-
-    // must_re_observe should be set after the Confirmed takeover.
-    assert!(
-        tool.needs_re_observe(),
-        "must_re_observe should be set after Confirmed takeover"
-    );
-
-    // Re-observe to clear the flag and verify the submit went through.
-    let obs2 = tool.execute(json!({"action": "observe"})).await;
-    assert!(!obs2.is_error, "re-observe: {}", obs2.content);
-    assert!(
-        !tool.needs_re_observe(),
-        "must_re_observe should be cleared after observe"
-    );
-
-    let _ = std::fs::remove_dir_all(&data_dir);
-}
 
 /// **Task 6 P7B: visual-fallback canvas smoke** (`#[ignore]`, needs `NOMIFUN_CHROME_BINARY`).
 ///

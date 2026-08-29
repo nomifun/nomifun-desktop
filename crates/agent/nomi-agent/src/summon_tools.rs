@@ -3,7 +3,7 @@
 //! A summon loads one companion's memories **read-only** into an ordinary work
 //! conversation: the session reuses `RecallMemoriesTool` (companion_tools.rs)
 //! over a read-only sink. There is no write-back path — `save_memory` is never
-//! registered in a summoned session, and the confirmation-style
+//! registered in a summoned session, and the proposal-style
 //! `propose_companion_memory` tool retired together with the 建议 feature that
 //! stored and reviewed its proposal cards.
 //!

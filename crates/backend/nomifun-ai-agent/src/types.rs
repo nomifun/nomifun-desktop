@@ -135,8 +135,6 @@ pub struct NomiResolvedConfig {
     pub compat_overrides: NomiCompatOverrides,
     /// Directory for nomi session persistence files.
     pub session_directory: PathBuf,
-    /// Session mode (default, auto_edit, yolo).
-    pub session_mode: Option<String>,
     /// Session-scoped MCP servers to inject.
     pub extra_mcp_servers: HashMap<String, nomi_config::config::McpServerConfig>,
     /// Process-local guards for renewable loopback MCP capabilities. These are
@@ -157,8 +155,7 @@ pub struct NomiResolvedConfig {
     pub browser_source: String,
     /// **F1-sec: browser-use evaluate「全权模式」LIVE 值**（裁决⑨，default-deny）。`true` 当且仅当
     /// 用户在 System Settings 显式 opt-in（`client_preferences` `agent.browserUse.fullPower`，工厂经
-    /// `read_bool_pref` 范式 LIVE 读）。`false`（默认）→ 引擎 `evaluate` 动作返 `Unsupported`。**绝不看
-    /// session_mode**（yolo/companion 无从豁免，不变量⑧）。
+    /// `read_bool_pref` 范式 LIVE 读）。`false`（默认）→ 引擎 `evaluate` 动作返 `Unsupported`。
     pub browser_full_power: bool,
     /// **SD-6: browser-use 持久登录 LIVE 值**（DESIGN §16/§27 互斥约束）。`true`（产品默认）→ 与全权
     /// 互斥（evaluate 在两者皆 true 时 Blocked）。工厂经 `read_bool_pref` 范式 LIVE 读
@@ -170,14 +167,6 @@ pub struct NomiResolvedConfig {
     /// 注入 hints）。工厂经 `read_bool_pref` 范式 LIVE 读 `agent.browserUse.siteMemory`
     /// （host_default=**false**=OFF）。`false`（默认）→ 不挂 sink，零行为变化。
     pub browser_site_memory: bool,
-    /// **Phase D takeover/审批 LIVE 值**（opt-in，安全）。`true` → 桌面会话构造期注入
-    /// `DesktopApprovalGate`：不可逆动作（bypass 会话）+ 被门控跨域 POST（SD-5）浮给用户审批后
-    /// 才放行（否则 fail-closed 硬挡）。工厂经 `read_bool_pref` LIVE 读 `agent.browserUse.takeover`
-    /// （host_default=**false**=OFF）。`false`（默认）→ 不注入 gate，维持 fail-closed 零回归。
-    pub browser_takeover: bool,
-    /// Explicit Browser Use approval bypass. Default false. When true, Browser-specific
-    /// irreversible and egress approval prompts approve immediately.
-    pub browser_unrestricted_approval: bool,
     /// **P7B visual-fallback LIVE 值**（opt-in，有 token 成本）。`true` → bootstrap 给
     /// Hub-backed Browser tool adapter 注入会话模型的 `VisualLocator`：DOM/aria 锚定失败
     /// （ref stale/detached）时截图交视觉模型按描述定位再点。工厂经 `read_bool_pref` 范式

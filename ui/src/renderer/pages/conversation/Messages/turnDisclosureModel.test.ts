@@ -255,10 +255,10 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.processItemIds).toEqual(['progress-note', 'scan']);
   });
 
-  test('keeps waiting confirmation steps visible in the live disclosure', () => {
+  test('keeps active process steps visible in the live disclosure', () => {
     const result = buildTurnDisclosureItems([
       item('user', 'user', { createdAt: 1000 }),
-      item('permission', 'process', { createdAt: 2000, processState: 'waiting' }),
+      item('active-process', 'process', { createdAt: 2000, processState: 'running' }),
       item('partial-answer', 'assistant', { createdAt: 3000 }),
     ]);
 
@@ -270,10 +270,10 @@ describe('buildTurnDisclosureItems', () => {
     const disclosure = result[1];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
-    expect(disclosure.state).toBe('waiting');
+    expect(disclosure.state).toBe('running');
     expect(disclosure.running).toBe(true);
     expect(disclosure.defaultCollapsed).toBe(false);
-    expect(disclosure.processItemIds).toEqual(['permission']);
+    expect(disclosure.processItemIds).toEqual(['active-process']);
   });
 
   test('keeps an intermediate failure in details but marks a closed answered turn as processed', () => {
@@ -562,14 +562,14 @@ describe('buildTurnDisclosureItems', () => {
     });
   });
 
-  test('uses the latest fragment state when a waiting turn resumes running', () => {
+  test('uses the latest fragment state when an active turn resumes running', () => {
     const result = buildTurnDisclosureItems(
       [
         item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
-        item('permission-1', 'process', {
+        item('active-1', 'process', {
           turnId: TURN_1,
           createdAt: 2000,
-          processState: 'waiting',
+          processState: 'running',
         }),
         item('delayed-turn-2', 'process', { turnId: TURN_2, createdAt: 2500 }),
         item('running-1', 'process', {

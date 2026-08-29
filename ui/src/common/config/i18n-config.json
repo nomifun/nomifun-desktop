@@ -4,7 +4,6 @@
   "supportedLanguages": ["zh-CN", "en-US"],
   "modules": [
     "common",
-    "agentMode",
     "update",
     "login",
     "fileSelection",

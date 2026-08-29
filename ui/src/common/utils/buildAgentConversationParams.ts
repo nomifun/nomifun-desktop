@@ -19,7 +19,6 @@ export type BuildAgentConversationInput = {
   cli_path?: string;
   custom_workspace?: boolean;
   is_preset?: boolean;
-  session_mode?: string;
   current_model_id?: string;
   extra?: Partial<ICreateConversationParams['extra']>;
 };
@@ -36,7 +35,6 @@ export function buildAgentConversationParams(input: BuildAgentConversationInput)
     cli_path,
     custom_workspace = true,
     is_preset = false,
-    session_mode,
     current_model_id,
     extra: extraOverrides,
   } = input;
@@ -59,7 +57,6 @@ export function buildAgentConversationParams(input: BuildAgentConversationInput)
     if (cli_path) extra.cli_path = cli_path;
   }
 
-  if (session_mode) extra.session_mode = session_mode;
   if (current_model_id) extra.current_model_id = current_model_id;
 
   return {

@@ -59,7 +59,6 @@ pub fn agent_execution_routes(engine: Arc<AgentExecutionEngine>) -> Router {
         .route("/api/agent-executions/{execution_id}/rename", patch(rename_execution))
         .route("/api/agent-executions/{execution_id}/replan", post(replan_execution))
         .route("/api/agent-executions/{execution_id}/adjust", post(adjust_execution))
-        .route("/api/agent-executions/{execution_id}/approve", post(approve_execution))
         .route("/api/agent-executions/{execution_id}/pause", post(pause_execution))
         .route("/api/agent-executions/{execution_id}/resume", post(resume_execution))
         .route("/api/agent-executions/{execution_id}/cancel", post(cancel_execution))
@@ -191,20 +190,6 @@ async fn adjust_execution(
     Ok(Json(ApiResponse::ok(
         engine
             .adjust(&user.id, &user_actor(&user), execution_id.as_str(), request)
-            .await?,
-    )))
-}
-
-async fn approve_execution(
-    State(engine): State<Arc<AgentExecutionEngine>>,
-    Extension(user): Extension<CurrentUser>,
-    Path(execution_id): Path<AgentExecutionId>,
-    body: Result<Json<VersionedAgentExecutionCommand>, JsonRejection>,
-) -> Result<Json<ApiResponse<AgentExecution>>, AppError> {
-    let Json(command) = json_body(body)?;
-    Ok(Json(ApiResponse::ok(
-        engine
-            .approve(&user.id, &user_actor(&user), execution_id.as_str(), command)
             .await?,
     )))
 }

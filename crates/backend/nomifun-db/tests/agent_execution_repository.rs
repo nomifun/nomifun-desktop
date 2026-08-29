@@ -1,7 +1,7 @@
 use nomifun_common::{
     AdaptationPolicy, AgentExecutionEventKind, AgentExecutionStatus, AgentToolPolicy,
     ConversationId, DecisionPolicy, DelegationPolicy, ExecutionStepKind,
-    ExecutionStepStatus, PlanGate, StepFailurePolicy,
+    ExecutionStepStatus, StepFailurePolicy,
 };
 use nomifun_db::models::ConversationRow;
 use nomifun_db::{
@@ -101,7 +101,6 @@ fn execution_params() -> CreateAgentExecutionParams {
     CreateAgentExecutionParams {
         goal: "verify v3 row identity separation".to_owned(),
         status: AgentExecutionStatus::Planning,
-        plan_gate: PlanGate::Automatic,
         adaptation_policy: AdaptationPolicy::Fixed,
         decision_policy: DecisionPolicy::Automatic,
         delegation_policy: DelegationPolicy::Automatic,
@@ -191,7 +190,6 @@ async fn running_attempt_fixture() -> RunningAttemptFixture {
             created.version,
             &ReconcileAgentExecutionPlanParams {
                 goal: None,
-                plan_gate: None,
                 adaptation_policy: None,
                 decision_policy: None,
                 delegation_policy: None,
@@ -353,11 +351,19 @@ async fn agent_execution_rows_expose_business_uuidv7_identity() {
 }
 
 #[tokio::test]
-async fn agent_execution_from_row_models_match_every_baseline_column() {
+async fn agent_execution_row_model_excludes_retired_plan_gate_mapping() {
     let db = database().await;
     let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
     let conversations = SqliteConversationRepository::new(db.pool().clone());
     let created = create_execution(&repository).await;
+    let legacy_plan_gate: String = nomifun_db::sqlx::query_scalar(
+        "SELECT plan_gate FROM agent_executions WHERE execution_id = ?",
+    )
+    .bind(&created.execution_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(legacy_plan_gate, "automatic");
     let participant_id = repository
         .get_execution_detail(OWNER_ID, &created.execution_id)
         .await
@@ -377,7 +383,6 @@ async fn agent_execution_from_row_models_match_every_baseline_column() {
             created.version,
             &ReconcileAgentExecutionPlanParams {
                 goal: None,
-                plan_gate: None,
                 adaptation_policy: None,
                 decision_policy: None,
                 delegation_policy: None,
@@ -522,7 +527,6 @@ async fn agent_execution_business_ids_are_uuidv7_and_dependencies_use_them() {
             created.version,
             &ReconcileAgentExecutionPlanParams {
                 goal: None,
-                plan_gate: None,
                 adaptation_policy: None,
                 decision_policy: None,
                 delegation_policy: None,

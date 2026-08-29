@@ -65,8 +65,7 @@ pub trait ChannelSender: Send + Sync {
 pub struct ChannelStreamRelay {
     config: RelayConfig,
     sender: Arc<dyn ChannelSender>,
-    /// Shared store: a relayed decision is recorded here so the inbound
-    /// numeric reply can be mapped back to the right `call_id`/option.
+    /// Shared store for the channel-owned remote-stop confirmation.
     pending: Arc<PendingDecisionStore>,
     /// Resolves workshop asset UUIDv7 ids to bytes for outbound media. `None`
     /// disables sending.
@@ -485,12 +484,6 @@ impl ChannelStreamRelay {
                     // required tool/artifact fails. Keep every assistant chunk
                     // buffered until the authoritative successful Finish.
                     Some(StreamAction::ToolCall { .. }) => {}
-                    // A blocking decision: record it and forward a numbered
-                    // list as a new message. WeChat cannot edit, so this is a
-                    // fresh send_message either way.
-                    Some(StreamAction::Decision { call_id, prompt, options }) => {
-                        self.record_and_send_decision(call_id, prompt, options).await;
-                    }
                     // Denied remote stop: the channel owns the confirmation.
                     Some(StreamAction::StopDenied { target_conversation_id }) => {
                         self.record_and_send_stop_confirmation(target_conversation_id).await;
@@ -649,11 +642,9 @@ impl ChannelStreamRelay {
         let mut accepted_turn_text_checkpoint: Option<usize> = None;
         let mut attempt_text_checkpoint: Option<usize> = None;
         let mut last_edit = Instant::now() - throttle;
-        // Whether a blocking decision was forwarded during this turn. When a
-        // decision is pending, the thinking/streaming card is deliberately left
-        // intact so the turn stays live (see `record_and_send_decision`); we
-        // must not replace it with a terminal "(no text output)" card on Finish.
-        let mut decision_forwarded = false;
+        // A pending channel-owned stop confirmation keeps the live card intact
+        // until the user answers it.
+        let mut stop_confirmation_forwarded = false;
         let mut media_ids: Vec<String> = Vec::new();
         let mut media_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut artifacts = Vec::new();
@@ -768,16 +759,9 @@ impl ChannelStreamRelay {
                             .edit_message(&self.config.plugin_id, &self.config.chat_id, &thinking_msg_id, msg)
                             .await;
                     }
-                    // A blocking decision: record it and forward a numbered
-                    // list as a new message; the thinking/streaming card is
-                    // left intact and the turn stays live.
-                    Some(StreamAction::Decision { call_id, prompt, options }) => {
-                        decision_forwarded = true;
-                        self.record_and_send_decision(call_id, prompt, options).await;
-                    }
                     // Denied remote stop: the channel owns the confirmation.
                     Some(StreamAction::StopDenied { target_conversation_id }) => {
-                        decision_forwarded = true;
+                        stop_confirmation_forwarded = true;
                         self.record_and_send_stop_confirmation(target_conversation_id).await;
                     }
                     Some(StreamAction::Finish) => {
@@ -815,7 +799,11 @@ impl ChannelStreamRelay {
                                 .await;
                             break;
                         }
-                        self.send_final_edit(&text_buffer, decision_forwarded, &thinking_msg_id)
+                        self.send_final_edit(
+                            &text_buffer,
+                            stop_confirmation_forwarded,
+                            &thinking_msg_id,
+                        )
                             .await;
                         info!(
                             plugin_id = %self.config.plugin_id,
@@ -901,16 +889,22 @@ impl ChannelStreamRelay {
     /// turn that produced only inline `<think>` reasoning counts as no-text.
     ///
     /// - With visible text: render the formatted final card.
-    /// - Without visible text but a decision was forwarded: leave the card intact
-    ///   — the decision flow owns the live UX and the turn stays interactive.
-    /// - Without visible text and no decision (tool-only / pure-thinking / empty
-    ///   completion): the agent reported a finished turn that produced no visible
+    /// - Without visible text but a stop confirmation was forwarded: leave the
+    ///   card intact while the channel-owned stop flow is interactive.
+    /// - Without visible text and no stop confirmation (tool-only /
+    ///   pure-thinking / empty completion): the agent reported a finished turn
+    ///   that produced no visible
     ///   `Text`. The placeholder must still be replaced with a terminal card,
     ///   otherwise the user is left staring at "Thinking..." forever on an
     ///   already-completed turn (the silent-empty-reply failure class). Emit a
     ///   neutral "(no text output)" final card so the action buttons are
     ///   delivered and the card is终态.
-    async fn send_final_edit(&self, text_buffer: &str, decision_forwarded: bool, msg_id: &str) {
+    async fn send_final_edit(
+        &self,
+        text_buffer: &str,
+        stop_confirmation_forwarded: bool,
+        msg_id: &str,
+    ) {
         let visible = strip_reasoning(text_buffer, Stage::Final);
         if !visible.trim().is_empty() {
             let formatted = format_text_for_platform(&visible, self.config.platform);
@@ -920,7 +914,7 @@ impl ChannelStreamRelay {
                 .sender
                 .edit_message(&self.config.plugin_id, &self.config.chat_id, msg_id, final_msg)
                 .await;
-        } else if !decision_forwarded {
+        } else if !stop_confirmation_forwarded {
             // Plain text — no formatter output here, so no parse mode.
             let final_msg = ChannelMessageService::build_final_message("（无文本输出）");
             let _ = self
@@ -928,30 +922,6 @@ impl ChannelStreamRelay {
                 .edit_message(&self.config.plugin_id, &self.config.chat_id, msg_id, final_msg)
                 .await;
         }
-    }
-
-    /// Records a blocking decision against its conversation and forwards the
-    /// numbered choice list as a new message. The streaming/thinking card is
-    /// untouched and the turn stays live until the user answers (the inbound
-    /// numeric reply resolves it via `ConversationService::confirm`).
-    async fn record_and_send_decision(
-        &self,
-        call_id: String,
-        prompt: String,
-        options: Vec<crate::types::DecisionOption>,
-    ) {
-        self.pending.put(PendingDecision {
-            conversation_id: self.config.conversation_id.clone(),
-            call_id,
-            kind: crate::pending_decision::PendingDecisionKind::AgentConfirm,
-            prompt: prompt.clone(),
-            options: options.clone(),
-        });
-        let msg = ChannelMessageService::build_decision_message(&prompt, &options);
-        let _ = self
-            .sender
-            .send_message(&self.config.plugin_id, &self.config.chat_id, msg)
-            .await;
     }
 
     /// Records the channel-owned remote-stop confirmation (batch-1 handover
@@ -973,7 +943,6 @@ impl ChannelStreamRelay {
         ];
         self.pending.put(PendingDecision {
             conversation_id: self.config.conversation_id.clone(),
-            call_id: format!("channel-stop:{target_conversation_id}"),
             kind: crate::pending_decision::PendingDecisionKind::StopConversation {
                 target_conversation_id,
             },

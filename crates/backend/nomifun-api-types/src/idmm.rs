@@ -352,30 +352,7 @@ impl Default for OpenQuestionRule {
     }
 }
 
-/// 权限确认规则。`only_safe_value` + `escalate_risky` 对应 Phase-1 安全闸
-/// (只读工具自动 confirm,风险升级)——**安全闸不可破**(plan D5,默认 true)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PermissionRule {
-    #[serde(default)]
-    pub mode: CategoryMode,
-    #[serde(default = "default_true")]
-    pub only_safe_value: bool,
-    #[serde(default = "default_true")]
-    pub escalate_risky: bool,
-}
-
-impl Default for PermissionRule {
-    fn default() -> Self {
-        Self {
-            mode: CategoryMode::Auto,
-            only_safe_value: true,
-            escalate_risky: true,
-        }
-    }
-}
-
-/// 三类分类规则(spec §5.2)。
+/// 两类分类规则(spec §5.2)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct CategoryRules {
@@ -383,11 +360,9 @@ pub struct CategoryRules {
     pub option_decision: OptionRule,
     #[serde(default)]
     pub open_question: OpenQuestionRule,
-    #[serde(default)]
-    pub permission: PermissionRule,
 }
 
-/// 结构化决策策略(spec §5.2):倾向 + 阻塞行为 + 三类分类规则 + 自由文本兜底。
+/// 结构化决策策略(spec §5.2):倾向 + 阻塞行为 + 两类分类规则 + 自由文本兜底。
 /// 结构化字段驱动规则档、约束模型档;`freeform_policy` 仅在模型档拼进 sidecar
 /// 提示词(prompt.rs),不参与规则档。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -572,7 +547,7 @@ pub struct InterventionRecord {
     pub stall_class: String,
     /// "rule" | "sidecar" | "rule_fallback".
     pub tier_used: String,
-    /// "option" | "open_question" | "permission" | "fault"。
+    /// "option" | "open_question" | "fault"。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
     /// "retry" | "send_text" | "answer_choice" | "wait" | "stop".
@@ -780,7 +755,7 @@ mod tests {
         assert!(cfg.decision_watch.answer_open_questions);
     }
 
-    /// D5:决策策略默认值必须等价 Phase-1 行为(开箱即用且安全)。
+    /// 决策策略默认值保持选项决策与纯问答的既有行为。
     #[test]
     fn decision_strategy_defaults_match_phase1_behavior() {
         let s = DecisionStrategy::default();
@@ -794,11 +769,6 @@ mod tests {
         assert!(opt.prefer_recommended);
         assert!(opt.allow_unmarked_pick);
         assert!(opt.never_destructive);
-        // 权限:只读放行 + 风险升级(安全闸不可破)
-        let perm = &s.categories.permission;
-        assert_eq!(perm.mode, CategoryMode::Auto);
-        assert!(perm.only_safe_value);
-        assert!(perm.escalate_risky);
         // 纯问答默认 600 字符上限
         assert_eq!(s.categories.open_question.mode, CategoryMode::Auto);
         assert_eq!(s.categories.open_question.max_answer_chars, 600);
@@ -823,7 +793,6 @@ mod tests {
                 "provider_id": "openrouter",
                 "model": "gpt-x",
                 "read_history": true,
-                "session_mode": "continuous",
                 "max_context_chars": 12000,
                 "confidence_floor": 0.4,
                 "scheduled_check": {"enabled": true, "every_secs": 300}
@@ -878,7 +847,6 @@ mod tests {
                             mode: CategoryMode::Off,
                             max_answer_chars: 1200,
                         },
-                        permission: PermissionRule::default(),
                     },
                     freeform_policy: Some("stay on task, never touch prod".into()),
                 },

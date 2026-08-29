@@ -26,7 +26,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::deps::GatewayDeps;
-use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
 // ── param structs ────────────────────────────────────────────────────────
@@ -548,7 +548,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_channel_list_plugins",
             "channel",
             "List all configured IM channel bots (telegram, discord, slack, lark, etc.) with their connection status, companion binding, and authorized user count.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| list_plugins(deps, p),
     ));
@@ -559,9 +559,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_channel_enable_plugin",
             "channel",
             "Enable or reconfigure an IM bot channel with platform-specific credentials. Creates a new bot if plugin_id is omitted, updates existing if provided. Optionally binds to a companion.",
-            DangerTier::Sensitive,
-        )
-        .deny_on(&[Surface::Channel, Surface::Remote]),
+            EffectClass::Sensitive,
+        ),
         |deps, _ctx, p| enable_plugin(deps, p),
     ));
 
@@ -571,7 +570,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_channel_disable_plugin",
             "channel",
             "Disable an IM bot channel. The bot is stopped but configuration is retained for re-enabling later.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| disable_plugin(deps, p),
     ));
@@ -582,9 +581,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_channel_delete_plugin",
             "channel",
             "Permanently delete a bot channel: stops the bot, removes all its sessions, and deletes the database row. Conversations created through this bot survive.",
-            DangerTier::Destructive,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Destructive,
+        ),
         |deps, _ctx, p| delete_plugin(deps, p),
     ));
 
@@ -594,7 +592,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_channel_test_plugin",
             "channel",
             "Test IM bot credentials by probing the remote platform API. Returns the resolved bot_username on success. Does NOT persist any config changes.",
-            DangerTier::Sensitive,
+            EffectClass::Sensitive,
         ),
         |deps, _ctx, p| test_plugin(deps, p),
     ));
@@ -605,7 +603,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_channel_list_pairings",
             "channel",
             "List pending pairing requests from IM users waiting to be authorized to interact with the bot.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| list_pairings(deps, p),
     ));
@@ -616,7 +614,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_channel_approve_pairing",
             "channel",
             "Approve a pending pairing request, granting the IM user authorization to interact with the bot.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| approve_pairing(deps, p),
     ));
@@ -627,7 +625,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_channel_reject_pairing",
             "channel",
             "Reject a pending pairing request, denying the IM user access to the bot.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| reject_pairing(deps, p),
     ));
@@ -638,7 +636,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_channel_list_users",
             "channel",
             "List all authorized IM users across all channel bots, including their platform info and last activity.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| list_users(deps, p),
     ));
@@ -649,7 +647,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_channel_revoke_user",
             "channel",
             "Revoke an authorized user's access: cleans up all their sessions and deletes the authorization record.",
-            DangerTier::Destructive,
+            EffectClass::Destructive,
         ),
         |deps, _ctx, p| revoke_user(deps, p),
     ));
@@ -660,7 +658,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_channel_set_companion",
             "channel",
             "Bind (or clear) the companion that handles one channel bot's conversations, addressed by its stable plugin_id. Clears that bot's sessions so the next message uses the new companion.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| set_companion(deps, p),
     ));
@@ -671,7 +669,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_channel_send_file",
             "channel",
             "Send a local file or image to the user you are chatting with, through their IM channel (WeChat/Telegram/etc.). Give an absolute file path; images are delivered as photos, other files as documents. Use THIS when the user asks you to send/deliver a file or picture to them — do NOT try to browse the web, download, or paste a file path as text. Only delivers when the current conversation arrived over an IM channel.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| send_file(deps, p),
     ));

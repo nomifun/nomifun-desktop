@@ -1788,13 +1788,12 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                 delegation_policy, max_parallel, work_dir, initial_plan_input, \
                 version, plan_revision, event_sequence, \
                 created_at, updated_at\
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?)",
+             ) VALUES (?, ?, ?, ?, 'automatic', ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?)",
         )
         .bind(&execution_id)
         .bind(user_id)
         .bind(&params.goal)
         .bind(params.status.as_str())
-        .bind(params.plan_gate.as_str())
         .bind(params.adaptation_policy.as_str())
         .bind(params.decision_policy.as_str())
         .bind(params.delegation_policy.as_str())
@@ -2513,7 +2512,6 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         let new_revision: Option<i64> = sqlx::query_scalar(
             "UPDATE agent_executions SET \
                 goal = COALESCE(?, goal), \
-                plan_gate = COALESCE(?, plan_gate), \
                 adaptation_policy = COALESCE(?, adaptation_policy), \
                 decision_policy = COALESCE(?, decision_policy), \
                 delegation_policy = COALESCE(?, delegation_policy), \
@@ -2527,7 +2525,6 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
              RETURNING plan_revision",
         )
         .bind(&params.goal)
-        .bind(params.plan_gate.map(|value| value.as_str()))
         .bind(params.adaptation_policy.map(|value| value.as_str()))
         .bind(params.decision_policy.map(|value| value.as_str()))
         .bind(params.delegation_policy.map(|value| value.as_str()))
@@ -3066,8 +3063,8 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
             "UPDATE agent_executions SET version = version \
              WHERE execution_id = ? AND user_id = ? AND version = ? AND deleted_at IS NULL \
                AND status IN (\
-                   'awaiting_approval', 'running', 'paused', 'waiting_input', \
-                   'completed', 'completed_with_failures', 'failed'\
+                   'running', 'paused', 'waiting_input', 'completed', \
+                   'completed_with_failures', 'failed'\
                )",
         )
         .bind(execution_id)
@@ -3148,8 +3145,8 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
              WHERE execution_id = ? AND user_id = ? AND version = ? AND plan_revision = ? \
                AND deleted_at IS NULL \
                AND status IN (\
-                   'awaiting_approval', 'running', 'paused', 'waiting_input', \
-                   'completed', 'completed_with_failures', 'failed'\
+                   'running', 'paused', 'waiting_input', 'completed', \
+                   'completed_with_failures', 'failed'\
                ) \
              RETURNING plan_revision",
         )

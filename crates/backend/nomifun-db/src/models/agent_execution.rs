@@ -7,7 +7,6 @@ pub struct AgentExecutionRow {
     pub user_id: String,
     pub goal: String,
     pub status: String,
-    pub plan_gate: String,
     pub adaptation_policy: String,
     pub decision_policy: String,
     pub delegation_policy: String,

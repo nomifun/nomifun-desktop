@@ -3,8 +3,7 @@ use serde::{Deserialize, Serialize};
 /// Configuration for Plan Mode.
 ///
 /// Plan Mode restricts the agent to read-only tools while it builds
-/// an implementation plan.  After the user approves the plan the agent
-/// exits plan mode and regains full tool access.
+/// an implementation plan. Exiting plan mode returns to the ordinary workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanConfig {
     /// Whether Plan Mode tools (EnterPlanMode / ExitPlanMode) are registered.

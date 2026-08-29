@@ -367,7 +367,6 @@ impl CronService {
             preset_id: c.preset_id,
             preset_revision: c.preset_revision,
             preset_snapshot: c.preset_snapshot,
-            mode: c.mode,
             model: c.model,
             provider_id: c.provider_id,
             config_options: c.config_options,
@@ -497,7 +496,6 @@ impl CronService {
                 preset_id: config_dto.preset_id.clone(),
                 preset_revision: config_dto.preset_revision,
                 preset_snapshot: config_dto.preset_snapshot.clone(),
-                mode: config_dto.mode.clone(),
                 model: config_dto.model.clone(),
                 provider_id: config_dto.provider_id.clone(),
                 config_options: config_dto.config_options.clone(),
@@ -2953,14 +2951,14 @@ fn build_agent_config_from_conversation(
     // The agent type is parsed first: serde accepts only the native engine, so
     // a row naming anything else is rejected before any field is derived from
     // it.
-    let agent_type_enum =
-        serde_json::from_value::<AgentType>(serde_json::Value::String(row.r#type.clone()))
-            .map_err(|_| {
-                nomifun_common::AppError::Internal(format!(
-                    "conversation {} has unknown agent type '{}'",
-                    row.conversation_id, row.r#type
-                ))
-            })?;
+    serde_json::from_value::<AgentType>(serde_json::Value::String(row.r#type.clone())).map_err(
+        |_| {
+            nomifun_common::AppError::Internal(format!(
+                "conversation {} has unknown agent type '{}'",
+                row.conversation_id, row.r#type
+            ))
+        },
+    )?;
     let model_resolved =
         nomifun_conversation::runtime_options::provider_model_from_conversation_row(row)?;
     let model = model_resolved.as_ref();
@@ -2989,7 +2987,6 @@ fn build_agent_config_from_conversation(
             ))
         })?;
 
-    let full_auto_mode = agent_type_enum.full_auto_mode_id().to_owned();
     let agent_config = nomifun_api_types::CronAgentConfigDto {
         // Reserved for a host runtime selector that no longer exists; a nomi
         // job must leave it unset so `validate_nomi_agent_selection` passes.
@@ -3006,7 +3003,6 @@ fn build_agent_config_from_conversation(
         preset_id,
         preset_revision,
         preset_snapshot,
-        mode: Some(full_auto_mode),
         model: Some(
             model
                 .and_then(|value| {
@@ -3164,15 +3160,14 @@ fn nomi_model_check(
 
 /// Reduce the incoming cron config bag to the only fields a model-only Nomi
 /// schedule needs. Provider/model selection remains available; every field
-/// that can select a host runtime, path, preset, skill, approval mode or custom
-/// process is discarded before validation and persistence.
+/// that can select a host runtime, path, preset, skill, or custom process is
+/// discarded before validation and persistence.
 fn clamp_model_only_cron_config(config: &mut nomifun_api_types::CronAgentConfigDto) {
     config.cli_path = None;
     config.custom_agent_id = None;
     config.preset_id = None;
     config.preset_revision = None;
     config.preset_snapshot = None;
-    config.mode = None;
     config.config_options = None;
     config.workspace = None;
 }
@@ -3262,7 +3257,6 @@ fn build_update_params(
                 preset_id: c.preset_id.clone(),
                 preset_revision: c.preset_revision,
                 preset_snapshot: c.preset_snapshot.clone(),
-                mode: c.mode.clone(),
                 model: c.model.clone(),
                 provider_id: c.provider_id.clone(),
                 config_options: c.config_options.clone(),
@@ -3537,7 +3531,6 @@ mod tests {
             preset_id: None,
             preset_revision: None,
             preset_snapshot: None,
-            mode: None,
             model: Some("gpt-4o".into()),
             provider_id: provider_id.map(ToOwned::to_owned),
             config_options: None,
@@ -3688,12 +3681,12 @@ mod tests {
     // -- parse_execution_mode -------------------------------------------------
 
     #[test]
-    fn parse_mode_none_defaults_to_existing() {
+    fn parse_execution_mode_none_defaults_to_existing() {
         assert_eq!(parse_execution_mode(None).unwrap(), ExecutionMode::Existing);
     }
 
     #[test]
-    fn parse_mode_existing() {
+    fn parse_execution_mode_existing() {
         assert_eq!(
             parse_execution_mode(Some("existing")).unwrap(),
             ExecutionMode::Existing
@@ -3701,7 +3694,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_mode_new_conversation() {
+    fn parse_execution_mode_new_conversation() {
         assert_eq!(
             parse_execution_mode(Some("new_conversation")).unwrap(),
             ExecutionMode::NewConversation
@@ -3709,7 +3702,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_mode_invalid() {
+    fn parse_execution_mode_invalid() {
         let err = parse_execution_mode(Some("parallel")).unwrap_err();
         assert!(matches!(err, CronError::InvalidExecutionMode(_)));
     }

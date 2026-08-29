@@ -73,7 +73,6 @@ const STEP_TEXT_BYTES: usize = 200;
 /// would only add a branch that never fires.
 ///
 /// This is NOT "the tool had no side effect" — in this codebase `Info` means
-/// "no approval gate", and several `Info` tools (companion memory writes,
 /// knowledge and skill tools) persist data. It is specifically "the kind of
 /// effect a coding turn is asked to produce".
 pub(crate) fn is_state_changing(category: ToolCategory) -> bool {

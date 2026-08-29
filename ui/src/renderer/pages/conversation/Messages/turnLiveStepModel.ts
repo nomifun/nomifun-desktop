@@ -12,7 +12,7 @@ import type { TurnDisclosureProcessState } from './turnDisclosureModel';
  * turn lifecycle; it disappears as soon as the turn settles.
  */
 export type TurnLiveStepPlan =
-  | { kind: 'item'; itemId: string; state: 'running' | 'waiting' }
+  | { kind: 'item'; itemId: string; state: 'running' }
   | { kind: 'composing'; state: 'running' }
   | { kind: 'analyzing'; state: 'running' }
   | { kind: 'preparing'; state: 'running' };
@@ -32,9 +32,6 @@ export function planTurnLiveStep(input: TurnLiveStepInput): TurnLiveStepPlan | n
   if (!input.isProcessing) return null;
   const disclosure = input.disclosure;
   if (!disclosure || !disclosure.running) return null;
-
-  const waitingItem = disclosure.processItems.findLast((entry) => entry.state === 'waiting');
-  if (waitingItem) return { kind: 'item', itemId: waitingItem.id, state: 'waiting' };
 
   const runningItem = disclosure.processItems.findLast((entry) => entry.state === 'running');
   if (runningItem) return { kind: 'item', itemId: runningItem.id, state: 'running' };

@@ -25,4 +25,13 @@ describe('IdmmControl structure', () => {
     expect(source.includes('const decisionLocked = cfg.decision_watch.enabled;')).toBe(true);
     expect(source.includes('watchEnabled && !isDraft')).toBe(false);
   });
+
+  test('exposes option and open-question supervision without a permission category', () => {
+    const source = readSource(new URL('./IdmmControl.tsx', import.meta.url));
+
+    expect(source.includes('cats.option_decision.mode')).toBe(true);
+    expect(source.includes('cats.open_question.mode')).toBe(true);
+    expect(source.includes('cats.' + 'permission')).toBe(false);
+    expect(source.includes('idmm.category.' + 'permission')).toBe(false);
+  });
 });

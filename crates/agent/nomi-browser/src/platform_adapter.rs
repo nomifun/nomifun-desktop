@@ -68,7 +68,6 @@ type ManagedHostLauncher = Arc<
 >;
 
 /// Trusted composition-root hook for adding the existing BrowserTool policy
-/// services (approval gate, extract model, site memory, visual
 /// locator) to each managed Lane. Model input never reaches this hook.
 pub type ManagedLanePolicyDecorator =
     Arc<dyn Fn(BrowserTool) -> BrowserTool + Send + Sync>;
@@ -212,9 +211,8 @@ impl ManagedEngineHostFactory {
         }
     }
 
-    /// Decorate the fail-closed managed policy with trusted application
-    /// services. For example, the desktop composition root can add a
-    /// `BrowserApprovalGate` here.
+    /// Decorate the managed policy with trusted application-owned services.
+    /// The decorator cannot be supplied by model input.
     pub fn with_lane_policy(
         mut self,
         decorator: ManagedLanePolicyDecorator,
@@ -1273,11 +1271,7 @@ impl ManagedEngineLaneDriver {
     ) -> Result<BrowserOperationResult, BrowserPlatformError> {
         let spec = self
             .policy
-            .prepare_managed_act(
-                action,
-                input,
-                context.trusted_out_of_band_confirmation,
-            )
+            .prepare_managed_act(action, input)
             .await
             .map_err(|_rejection| {
                 BrowserPlatformError::new(
@@ -1928,7 +1922,6 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::OUT_OF_BAND_CONFIRMED_KEY;
 
     #[test]
     fn profile_footprint_is_bounded_and_treats_equality_as_limit() {
@@ -2637,77 +2630,8 @@ mod tests {
         assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
     }
 
-    #[tokio::test]
-    async fn observation_generation_is_preserved_and_dangerous_click_fails_closed() {
-        let engine = Arc::new(FakeEngine::new());
-        let driver = test_driver(engine.clone());
-        let observed = driver
-            .execute(
-                operation(
-                    BrowserOperationKind::Observe,
-                    "observe",
-                    Value::Object(Map::new()),
-                ),
-                context(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(observed.ref_generation, Some(7));
-        assert_eq!(observed.output["entries"][0]["name"], "Pay now");
-
-        let error = driver
-            .execute(
-                operation(
-                    BrowserOperationKind::Act,
-                    "click",
-                    json!({"ref": "f0e1", OUT_OF_BAND_CONFIRMED_KEY: true}),
-                ),
-                context(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
-        assert_eq!(engine.act_calls.load(Ordering::SeqCst), 0);
-    }
 
 
-    /// A policy rejection that is NOT the secret-egress class keeps the
-    /// deliberately generic managed-policy message (no internal details).
-    #[tokio::test]
-    async fn other_policy_rejections_keep_the_generic_managed_hint() {
-        let engine = Arc::new(FakeEngine::new());
-        let driver = test_driver(engine.clone());
-        driver
-            .execute(
-                operation(
-                    BrowserOperationKind::Observe,
-                    "observe",
-                    Value::Object(Map::new()),
-                ),
-                context(),
-            )
-            .await
-            .unwrap();
-
-        let error = driver
-            .execute(
-                operation(
-                    BrowserOperationKind::Act,
-                    "click",
-                    json!({"ref": "f0e1", OUT_OF_BAND_CONFIRMED_KEY: true}),
-                ),
-                context(),
-            )
-            .await
-            .unwrap_err();
-
-        assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
-        assert_eq!(
-            error.message,
-            "The browser action was rejected by the managed browser policy."
-        );
-        assert_eq!(engine.act_calls.load(Ordering::SeqCst), 0);
-    }
 
     #[tokio::test]
     async fn oversized_platform_observation_returns_no_output_and_clears_cache() {
@@ -2741,7 +2665,6 @@ mod tests {
 
         assert_eq!(error.code, BrowserErrorCode::OperationNotAllowed);
         assert!(driver.policy.last_snapshot.lock().unwrap().is_none());
-        assert!(driver.policy.needs_re_observe());
     }
 
     #[tokio::test]

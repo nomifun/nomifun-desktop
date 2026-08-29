@@ -4,7 +4,7 @@
 //! `mcp-computer-stdio` bridge (same 14 discrete tools, same action mapping,
 //! zero duplicated logic). Only compiled with the `computer-use` feature.
 //!
-//! DangerTier: observe/screenshot/cursor_position/list_windows/wait are `Read`;
+//! EffectClass: observe/screenshot/cursor_position/list_windows/wait are `Read`;
 //! input-synthesis actions (click/type/key/scroll/launch/…) are `Write` — which
 //! is Allowed on every surface incl. Remote, so an authenticated installation owner can drive
 //! the desktop (same posture as the browser `act` tools).
@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use crate::computer_registry::{ComputerRegistry, tool_result_to_value};
 use crate::deps::{CallerCtx, GatewayDeps};
-use crate::registry::{Capability, CapabilityMeta, DangerTier};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 
 fn registry(deps: &GatewayDeps) -> Result<&ComputerRegistry, Value> {
     deps.computer_registry
@@ -175,7 +175,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_computer_snapshot",
             "computer",
             "Read the desktop accessibility tree (windows → controls, numbered [ref] + Set-of-Marks overlay). Do this first, then act on a [ref]. Re-run after any UI change. Read-only.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         snapshot,
     ));
@@ -184,7 +184,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_computer_screenshot",
             "computer",
             "Capture the screen as a PNG (optional `display` index).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         screenshot,
     ));
@@ -193,7 +193,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_computer_click",
             "computer",
             "Activate the element with the given `ref` from the latest snapshot.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         click,
     ));
@@ -202,7 +202,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_computer_right_click",
             "computer",
             "Right-click the element with the given `ref` (opens its context menu).",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         right_click,
     ));
@@ -211,7 +211,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_computer_double_click",
             "computer",
             "Double-click the element with the given `ref`.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         double_click,
     ));
@@ -220,7 +220,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_computer_set_value",
             "computer",
             "Set the `text` value of the element with the given `ref` (good for text fields).",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         set_value,
     ));
@@ -229,7 +229,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_computer_click_xy",
             "computer",
             "Left-click at pixel coordinates (`x`, `y`) of the most recent screenshot. Prefer click-by-ref when possible.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         click_xy,
     ));
@@ -238,7 +238,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_computer_type",
             "computer",
             "Type the `text` string into the focused control.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         type_text,
     ));
@@ -247,7 +247,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_computer_key",
             "computer",
             "Press a key or combo, e.g. \"enter\" or \"ctrl+a\".",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         key,
     ));
@@ -256,7 +256,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_computer_scroll",
             "computer",
             "Scroll in `direction` (up/down/left/right) by `amount` wheel clicks, optionally at (`x`, `y`).",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         scroll,
     ));
@@ -265,7 +265,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_computer_launch",
             "computer",
             "Open an application, file, or folder via the OS shell. Always use this instead of shell `start`/`Start-Process`. Web URLs (http/https) are rejected: use the managed Browser tools for web pages.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         launch,
     ));
@@ -274,7 +274,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_computer_list_windows",
             "computer",
             "List open windows with ids, titles, positions and sizes.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         list_windows,
     ));
@@ -283,7 +283,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_computer_cursor_position",
             "computer",
             "Report the mouse cursor position in screenshot coordinates.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         cursor_position,
     ));
@@ -292,7 +292,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_computer_wait",
             "computer",
             "Pause for `seconds` (max 5) to let the UI settle.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         wait,
     ));

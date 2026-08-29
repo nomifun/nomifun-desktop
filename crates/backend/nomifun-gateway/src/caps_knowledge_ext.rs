@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::deps::GatewayDeps;
-use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
 /// Hard cap on `read_file` content returned to the model (256 KiB). Larger
@@ -264,7 +264,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_knowledge_get_base",
             "knowledge",
             "Get full detail of one knowledge base (id, name, description, source, tags, file count, etc.).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| get_base(deps, p),
     ));
@@ -273,7 +273,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_knowledge_update_base",
             "knowledge",
             "Update a knowledge base's name, description, or assigned tags.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| update_base(deps, p),
     ));
@@ -282,9 +282,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_knowledge_delete_base",
             "knowledge",
             "Delete a knowledge base registration (optionally purge its managed directory).",
-            DangerTier::Destructive,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Destructive,
+        ),
         |deps, _ctx, p| delete_base(deps, p),
     ));
 
@@ -294,7 +293,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_knowledge_list_files",
             "knowledge",
             "List all markdown files in a knowledge base (paths, sizes, modification times).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| list_files(deps, p),
     ));
@@ -303,7 +302,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_knowledge_read_file",
             "knowledge",
             "Read one markdown document from a knowledge base (truncated at 256 KiB).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| read_file(deps, p),
     ));
@@ -312,9 +311,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_knowledge_delete_file",
             "knowledge",
             "Delete one markdown file from a knowledge base.",
-            DangerTier::Destructive,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Destructive,
+        ),
         |deps, _ctx, p| delete_file(deps, p),
     ));
 
@@ -324,7 +322,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_knowledge_search",
             "knowledge",
             "Full-text search across one or more knowledge bases (ranked by relevance).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| search(deps, p),
     ));
@@ -335,7 +333,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_knowledge_list_tags",
             "knowledge",
             "List all user-defined knowledge tags (key, label, color, sort order).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| list_tags(deps, p),
     ));
@@ -344,7 +342,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_knowledge_create_tag",
             "knowledge",
             "Create a new user-defined tag for categorizing knowledge bases.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| create_tag(deps, p),
     ));
@@ -353,9 +351,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_knowledge_delete_tag",
             "knowledge",
             "Delete a user tag (also strips it from all bases that reference it).",
-            DangerTier::Destructive,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Destructive,
+        ),
         |deps, _ctx, p| delete_tag(deps, p),
     ));
 }

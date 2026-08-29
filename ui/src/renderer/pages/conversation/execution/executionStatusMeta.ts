@@ -20,7 +20,6 @@ export function isTerminalExecutionStatus(status: string | undefined): boolean {
 
 export const EXECUTION_STATUS_META: Record<TAgentExecutionStatus, { color: string }> = {
   planning: { color: 'var(--warning)' },
-  awaiting_approval: { color: 'rgb(var(--primary-6))' },
   running: { color: 'rgb(var(--primary-6))' },
   paused: { color: 'var(--warning)' },
   waiting_input: { color: 'var(--warning)' },

@@ -976,7 +976,6 @@ async fn handle_tool_request(
         user_id,
         companion_id,
         channel_platform: claims.scope.channel_platform.clone(),
-        session_mode: claims.scope.session_mode.clone(),
         operation_id: Some(operation_id),
         // This in-process server is the INWARD path (bundled agents on loopback);
         // never the external Remote surface.
@@ -1045,9 +1044,9 @@ async fn handle_tool_request(
 
     info!(tool, caller = ?ctx.conversation_id, "Gateway MCP: dispatching tool");
 
-    // The capability registry is the single authority: it owns every tool,
-    // generates its schema, and enforces the danger-tier × surface permission
-    // gate. An unknown name returns a structured error the agent can recover from.
+    // The capability registry owns every tool and its typed schema. The
+    // authenticated session scope is checked above; selected tools execute
+    // directly, and unknown names return a structured error.
     let response_body = match registry
         .dispatch_opt(deps.clone(), ctx.clone(), &tool, &args)
         .await
@@ -1409,7 +1408,6 @@ mod tests {
                 TEST_CONVERSATION_ID,
                 None,
                 None,
-                None,
                 &[],
             )
             .unwrap();
@@ -1488,7 +1486,6 @@ mod tests {
             .issue_for_conversation(
                 TEST_OWNER_ID,
                 TEST_CONVERSATION_ID,
-                None,
                 None,
                 None,
                 &[],
@@ -1732,7 +1729,7 @@ mod tests {
     ) -> nomifun_api_types::GatewayMcpChildConfig {
         server
             .issuer_config("/bin/nomicore".into(), TEST_OWNER_ID)
-            .issue_for_conversation(user_id, conversation_id, None, None, None, &[])
+            .issue_for_conversation(user_id, conversation_id, None, None, &[])
             .unwrap()
     }
 

@@ -516,7 +516,6 @@
       "download": "{{name}} 正在下载文件…",
       "busy": "{{name}} 正在浏览网页…"
     },
-    "needsConfirm": "需要确认操作，去聊天页看看吧",
     "done": "搞定啦～",
     "menuOpenChat": "打开聊天",
     "expand": "展开输入框",

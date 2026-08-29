@@ -1,16 +1,13 @@
 use std::collections::BTreeSet;
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::FutureExt;
 
-use crate::confirm::{ConfirmResult, ToolConfirmer};
-use crate::output::truncate_display;
 use nomi_config::hooks::HookEngine;
-use nomi_protocol::events::{OutputType, ProtocolEvent, ToolCategory, ToolInfo, ToolStatus};
+use nomi_protocol::events::{OutputType, ProtocolEvent, ToolStatus};
 use nomi_protocol::writer::ProtocolEmitter;
-use nomi_protocol::{ToolApprovalManager, ToolApprovalResult};
 use nomi_types::message::ContentBlock;
 use nomi_types::skill_types::ContextModifier;
 use nomi_types::tool::{ToolDef, ToolResult};
@@ -20,18 +17,13 @@ use nomi_tools::{ToolExecutionContext, registry::ToolRegistry};
 pub(crate) const SKIPPED_AFTER_PRIOR_ERROR: &str = "\
 Skipped because a previous tool call in this assistant turn failed. Inspect the failed result first, then decide whether to retry with a larger timeout, use exec_command/write_stdin for long-running commands, or choose a different next step. Do not assume this step ran.";
 
-/// A tool approval prompt must not hold an Agent turn forever when the
-/// renderer disappears or a confirmation event is lost.  The browser
-/// approval facade uses the same bound.
-pub(crate) const TOOL_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
-
 /// The combined output of a tool execution batch: protocol content blocks
 /// paired with per-call context modifiers (None for non-skill tools).
 pub struct ToolCallOutcome {
     pub results: Vec<ContentBlock>,
     pub modifiers: Vec<Option<ContextModifier>>,
     /// Machine-observed state-changing effects completed by nested Agents,
-    /// paired by index with `results`. This never participates in approval.
+    /// paired by index with `results`.
     pub delegated_effects: Vec<Vec<String>>,
 }
 
@@ -148,32 +140,30 @@ impl std::ops::DerefMut for ToolCallOutcome {
     }
 }
 
-/// Production entry point that partitions tool calls and executes them with
-/// optional confirmation and hooks, namespacing provider tool-call ids by the
-/// durable turn/message id. This prevents providers that reuse `call_0` in
-/// later turns from aliasing a prior operation receipt. `authority` must be
-/// the snapshot captured from the request that produced `tool_calls`; there is
-/// deliberately no live-registry convenience overload. Pass an empty
-/// `execution_scope` only when call-id aliasing across turns is acceptable
-/// (e.g. single-shot test harnesses).
+/// Execute provider-advertised tool calls directly under the selected request
+/// snapshot, namespacing provider tool-call ids by the durable turn/message id.
+/// This prevents providers that reuse `call_0` in later turns from aliasing a
+/// prior operation receipt. `authority` must be the snapshot captured from the
+/// request that produced `tool_calls`; there is deliberately no live-registry
+/// convenience overload. Pass an empty `execution_scope` only when call-id
+/// aliasing across turns is acceptable (for example, single-shot test harnesses).
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_tool_calls_scoped(
     registry: &ToolRegistry,
     tool_calls: &[ContentBlock],
     authority: &ProviderToolAuthority,
     execution_scope: &str,
-    confirmer: &Arc<Mutex<ToolConfirmer>>,
     mut hooks: Option<&mut HookEngine>,
     compaction_level: nomi_compact::CompactionLevel,
     toon_enabled: bool,
-) -> Result<ToolCallOutcome, ExecutionControl> {
+) -> Result<ToolCallOutcome, std::convert::Infallible> {
     let mut results = Vec::new();
     let mut modifiers = Vec::new();
     let mut delegated_effects = Vec::new();
     let mut halt_after_error = false;
     // Engine-produced calls are already canonical. Preparing again here keeps
     // direct/internal execution paths on the same boundary and guarantees that
-    // confirmation, hooks, category checks, and dispatch all receive one value.
+    // validation, hooks, category checks, and dispatch all receive one value.
     let prepared_tool_calls = tool_calls
         .iter()
         .map(|call| prepare_call_for_execution(registry, call, authority))
@@ -190,10 +180,10 @@ pub async fn execute_tool_calls_scoped(
         }
 
         if batch.is_concurrent {
-            // Preflight the entire concurrent batch before any confirmation.
+            // Preflight the entire concurrent batch before any dispatch.
             // This preserves the provider-turn snapshot even when ToolSearch
             // and its target are emitted together, and guarantees deferred or
-            // schema-invalid tools cannot trigger an interactive prompt.
+            // schema-invalid tools cannot run.
             let mut completed: Vec<
                 Option<(ContentBlock, Option<ContextModifier>, Vec<String>)>,
             > =
@@ -210,24 +200,19 @@ pub async fn execute_tool_calls_scoped(
                 }
             }
 
-            // For the remaining calls, confirm all first, then execute approved ones.
-            // Concurrent tools are never SkillTool (is_concurrency_safe=false for Skill),
-            // so no skill hooks merging is needed here.
-            let mut approved = Vec::new();
+            // Concurrent tools are never SkillTool
+            // (`is_concurrency_safe=false` for Skill), so no skill hook merge
+            // is needed here.
+            let mut runnable = Vec::new();
             for (idx, call) in batch.calls.iter().enumerate() {
                 if completed[idx].is_some() {
                     continue;
                 }
-                match confirm_call(confirmer, call)? {
-                    Some(denied) => {
-                        completed[idx] = Some((denied, None, Vec::new()));
-                    }
-                    None => approved.push((idx, *call)),
-                }
+                runnable.push((idx, *call));
             }
             // Reborrow as shared for concurrent execution.
             let hooks_shared: Option<&HookEngine> = hooks.as_deref();
-            let futures: Vec<_> = approved
+            let futures: Vec<_> = runnable
                 .iter()
                 .map(|(_, call)| {
                     execute_single_with_authority(
@@ -242,7 +227,7 @@ pub async fn execute_tool_calls_scoped(
                 })
                 .collect();
             let batch_results = futures::future::join_all(futures).await;
-            for ((idx, _), outcome) in approved.into_iter().zip(batch_results) {
+            for ((idx, _), outcome) in runnable.into_iter().zip(batch_results) {
                 completed[idx] = Some(outcome);
             }
             for outcome in completed {
@@ -274,42 +259,32 @@ pub async fn execute_tool_calls_scoped(
                     delegated_effects.push(Vec::new());
                     continue;
                 }
-                match confirm_call(confirmer, call)? {
-                    Some(denied) => {
-                        halt_after_error = true;
-                        results.push(denied);
-                        modifiers.push(None);
-                        delegated_effects.push(Vec::new());
-                    }
-                    None => {
-                        // Reborrow as shared for execute_single, then reclaim mut for merge.
-                        let block;
-                        let modifier;
-                        let nested_effects;
-                        {
-                            let hooks_shared: Option<&HookEngine> = hooks.as_deref();
-                            (block, modifier, nested_effects) = execute_single_with_authority(
-                                registry,
-                                call,
-                                authority,
-                                execution_scope,
-                                hooks_shared,
-                                compaction_level,
-                                toon_enabled,
-)
-                            .await;
-                        }
-                        // Merge skill hooks after a successful sequential execution.
-                        if !block_is_error(&block) {
-                            maybe_merge_skill_hooks(registry, call, hooks.as_deref_mut());
-                        } else {
-                            halt_after_error = true;
-                        }
-                        results.push(block);
-                        modifiers.push(modifier);
-                        delegated_effects.push(nested_effects);
-                    }
+                // Reborrow as shared for execute_single, then reclaim mut for merge.
+                let block;
+                let modifier;
+                let nested_effects;
+                {
+                    let hooks_shared: Option<&HookEngine> = hooks.as_deref();
+                    (block, modifier, nested_effects) = execute_single_with_authority(
+                        registry,
+                        call,
+                        authority,
+                        execution_scope,
+                        hooks_shared,
+                        compaction_level,
+                        toon_enabled,
+                    )
+                    .await;
                 }
+                // Merge skill hooks after a successful sequential execution.
+                if !block_is_error(&block) {
+                    maybe_merge_skill_hooks(registry, call, hooks.as_deref_mut());
+                } else {
+                    halt_after_error = true;
+                }
+                results.push(block);
+                modifiers.push(modifier);
+                delegated_effects.push(nested_effects);
             }
         }
     }
@@ -349,45 +324,9 @@ fn prepare_call_for_execution(
     }
 }
 
-/// Signal that the user wants to abort
-#[derive(Debug)]
-pub enum ExecutionControl {
-    Quit,
-}
-
-/// Confirm a single tool call. Returns Ok(Some(result)) if denied, Ok(None) if approved, Err if quit.
-fn confirm_call(
-    confirmer: &Arc<Mutex<ToolConfirmer>>,
-    call: &ContentBlock,
-) -> Result<Option<ContentBlock>, ExecutionControl> {
-    let ContentBlock::ToolUse {
-        id, name, input, ..
-    } = call
-    else {
-        return Ok(None);
-    };
-
-    let input_display = serde_json::to_string(input).unwrap_or_default();
-    let result = confirmer
-        .lock()
-        .unwrap()
-        .check(name, &truncate_display(&input_display, 200));
-
-    match result {
-        ConfirmResult::Approved => Ok(None),
-        ConfirmResult::Denied => Ok(Some(ContentBlock::ToolResult {
-            tool_use_id: id.clone(),
-            content: "Tool execution denied by user".to_string(),
-            is_error: true,
-            images: Vec::new(),
-        })),
-        ConfirmResult::Quit => Err(ExecutionControl::Quit),
-    }
-}
-
 /// Build the fail-closed local result for a tool whose full schema was not
 /// active when this provider turn began. Callers invoke this before any
-/// confirmation, approval request, hook, running event, or tool dispatch.
+/// hook, running event, or tool dispatch.
 fn deferred_gate_result(
     call: &ContentBlock,
     authority: &ProviderToolAuthority,
@@ -411,8 +350,8 @@ fn deferred_gate_result(
     })
 }
 
-/// Validate an invocation before any tool-specific policy method, approval UI,
-/// hook, running event, or dispatch. Deferred authority is checked first so a
+/// Validate an invocation before any tool-specific policy method, hook, running
+/// event, or dispatch. Deferred authority is checked first so a
 /// provider that only saw a schema stub is told to activate it instead of being
 /// asked to guess required parameters it was never shown.
 fn invocation_gate_result(
@@ -616,7 +555,6 @@ async fn execute_single_without_deadline(
         Some(tool) => {
             let max_size = tool.max_result_size();
             // `input` passed the strict object/schema preflight before
-            // partitioning or approval. Hooks, policy, context modifiers, and
             // dispatch all see the exact provider-supplied value.
             // Catch a panic inside the tool so it becomes an error ToolResult
             // fed back to the model, instead of unwinding out of the agent loop
@@ -751,14 +689,20 @@ fn emit_tool_result_event(
 ) {
     if let (
         ContentBlock::ToolUse { id, name, .. },
-        ContentBlock::ToolResult { content, .. },
+        ContentBlock::ToolResult {
+            content, is_error, ..
+        },
     ) = (call, &block)
     {
         let _ = writer.emit(&ProtocolEvent::ToolResult {
             msg_id: msg_id.to_string(),
             call_id: id.clone(),
             tool_name: name.clone(),
-            status: ToolStatus::Error,
+            status: if *is_error {
+                ToolStatus::Error
+            } else {
+                ToolStatus::Success
+            },
             output: content.clone(),
             output_type: OutputType::Text,
             metadata: None,
@@ -766,68 +710,35 @@ fn emit_tool_result_event(
     }
 }
 
-/// Execute tool calls with JSON stream protocol approval flow
+/// Execute provider-advertised tool calls directly while emitting JSON stream
+/// running/result lifecycle events.
 #[allow(clippy::too_many_arguments)]
-pub async fn execute_tool_calls_with_approval(
+pub async fn execute_tool_calls_with_protocol(
     registry: &ToolRegistry,
     tool_calls: &[ContentBlock],
     authority: &ProviderToolAuthority,
-    approval_manager: &Arc<ToolApprovalManager>,
     writer: &Arc<dyn ProtocolEmitter>,
     msg_id: &str,
-    auto_approve: bool,
-    allow_list: &[String],
-    hooks: Option<&mut HookEngine>,
-    compaction_level: nomi_compact::CompactionLevel,
-    toon_enabled: bool,
-) -> Result<ToolCallOutcome, ExecutionControl> {
-    execute_tool_calls_with_approval_timeout(
-        registry,
-        tool_calls,
-        authority,
-        approval_manager,
-        writer,
-        msg_id,
-        auto_approve,
-        allow_list,
-        hooks,
-        compaction_level,
-        toon_enabled,
-        TOOL_APPROVAL_TIMEOUT,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn execute_tool_calls_with_approval_timeout(
-    registry: &ToolRegistry,
-    tool_calls: &[ContentBlock],
-    authority: &ProviderToolAuthority,
-    approval_manager: &Arc<ToolApprovalManager>,
-    writer: &Arc<dyn ProtocolEmitter>,
-    msg_id: &str,
-    auto_approve: bool,
-    allow_list: &[String],
     mut hooks: Option<&mut HookEngine>,
     compaction_level: nomi_compact::CompactionLevel,
     toon_enabled: bool,
-    approval_timeout: Duration,
-) -> Result<ToolCallOutcome, ExecutionControl> {
+) -> Result<ToolCallOutcome, std::convert::Infallible> {
     let mut results = Vec::new();
     let mut modifiers = Vec::new();
     let mut delegated_effects = Vec::new();
     let mut halt_after_error = false;
     // Keep direct protocol callers on the same canonical boundary as the
-    // engine and REPL path. Every later decision, approval payload, hook, and
-    // dispatch below observes this one schema-validated value.
+    // engine and terminal path. Every later hook and dispatch below observes
+    // this one schema-validated value.
     let prepared_tool_calls = tool_calls
         .iter()
         .map(|call| prepare_call_for_execution(registry, call, authority))
         .collect::<Vec<_>>();
     let tool_calls = prepared_tool_calls.as_slice();
 
-    // Decide which calls can run concurrently (concurrency-safe AND needing no
-    // interactive approval); the rest keep their serial approval+execution flow.
+    // Consecutive concurrency-safe calls run together. Gated calls remain
+    // serial so they can emit only their paired error result, never a running
+    // event.
     let batchable: Vec<bool> = tool_calls
         .iter()
         .map(|call| {
@@ -835,24 +746,13 @@ async fn execute_tool_calls_with_approval_timeout(
                 return false;
             };
             // Blocked calls must be routed through the serial preflight gate,
-            // never into a concurrent group that emits ToolRunning first or
-            // evaluates tool-specific approval/category policy.
+            // never into a concurrent group that emits ToolRunning first.
             if invocation_gate_result(registry, call, authority).is_some() {
                 return false;
             }
-            let Some(tool) = registry.get(name) else {
-                return false;
-            };
-            if !tool.is_concurrency_safe(input) {
-                return false;
-            }
-            let category = tool.category_for(input);
-            let tool_auto_approve = tool.auto_approve_invocation(input, category);
-            let needs_approval = !auto_approve
-                && !tool_auto_approve
-                && !allow_list.contains(&name.to_string())
-                && !approval_manager.is_auto_approved(&category.to_string());
-            !needs_approval
+            registry
+                .get(name)
+                .is_some_and(|tool| tool.is_concurrency_safe(input))
         })
         .collect();
 
@@ -867,7 +767,6 @@ async fn execute_tool_calls_with_approval_timeout(
             continue;
         }
 
-        // Concurrent batch: concurrency-safe, pre-approved, non-skill tools. Emit
         // running for all, execute in parallel (join_all preserves submission
         // order so tool_use/tool_result pairing stays intact), emit results in
         // order. This brings the production/protocol path to parity with the REPL
@@ -934,17 +833,15 @@ async fn execute_tool_calls_with_approval_timeout(
             continue;
         }
 
-        // --- Serial path (single call): preserves the interactive approval flow ---
+        // Serial path for stateful or non-concurrent tools.
         let call = &tool_calls[group.start];
-        let ContentBlock::ToolUse {
-            id, name, input, ..
-        } = call
+        let ContentBlock::ToolUse { id, name, .. } = call
         else {
             continue;
         };
 
-        // Fail closed before category/approval evaluation and before emitting
-        // ToolRequest or ToolRunning. Emit only the paired error ToolResult.
+        // Fail synchronously before ToolRunning. Emit only the paired error
+        // ToolResult.
         if let Some(gated) = invocation_gate_result(registry, call, authority) {
             emit_tool_result_event(writer, msg_id, call, &gated);
             halt_after_error = true;
@@ -954,97 +851,6 @@ async fn execute_tool_calls_with_approval_timeout(
             continue;
         }
 
-        let tool = registry.get(name);
-        let category = tool
-            .map(|t| t.category_for(input))
-            .unwrap_or(ToolCategory::Exec);
-        let description = tool.map(|t| t.describe(input)).unwrap_or_default();
-        let tool_auto_approve = tool
-            .map(|t| t.auto_approve_invocation(input, category))
-            .unwrap_or(false);
-
-        // Check if approval is needed
-        let needs_approval = !auto_approve
-            && !tool_auto_approve
-            && !allow_list.contains(&name.to_string())
-            && !approval_manager.is_auto_approved(&category.to_string());
-
-        if needs_approval {
-            // Emit tool_request and wait for approval
-            let (rx, approval_token) =
-                approval_manager.request_approval_with_token(id, &category);
-            let _ = writer.emit(&ProtocolEvent::ToolRequest {
-                msg_id: msg_id.to_string(),
-                call_id: id.clone(),
-                tool: ToolInfo {
-                    name: name.clone(),
-                    category,
-                    args: input.clone(),
-                    description,
-                },
-            });
-
-            match wait_for_tool_approval(
-                approval_manager,
-                id,
-                rx,
-                approval_token,
-                approval_timeout,
-            )
-            .await
-            {
-                Ok(ToolApprovalResult::Approved) => { /* continue to execute */ }
-                Ok(ToolApprovalResult::Denied { reason }) => {
-                    let _ = writer.emit(&ProtocolEvent::ToolCancelled {
-                        msg_id: msg_id.to_string(),
-                        call_id: id.clone(),
-                        reason: reason.clone(),
-                    });
-                    halt_after_error = true;
-                    results.push(ContentBlock::ToolResult {
-                        tool_use_id: id.clone(),
-                        content: format!("Tool denied: {reason}"),
-                        is_error: true,
-                        images: Vec::new(),
-                    });
-                    modifiers.push(None);
-                    delegated_effects.push(Vec::new());
-                    continue;
-                }
-                Err(ApprovalWaitError::Disconnected) => {
-                    // Channel dropped — client disconnected
-                    return Err(ExecutionControl::Quit);
-                }
-                Err(ApprovalWaitError::TimedOut) => {
-                    let reason = format!(
-                        "Tool approval timed out after {} seconds; the tool was not executed",
-                        approval_timeout.as_secs()
-                    );
-                    let _ = writer.emit(&ProtocolEvent::ToolCancelled {
-                        msg_id: msg_id.to_string(),
-                        call_id: id.clone(),
-                        reason: reason.clone(),
-                    });
-                    halt_after_error = true;
-                    let result = ContentBlock::ToolResult {
-                        tool_use_id: id.clone(),
-                        content: format!(
-                            "{reason}. Do not assume any side effects completed; \
-                             inspect the current state before retrying."
-                        ),
-                        is_error: true,
-                        images: Vec::new(),
-                    };
-                    emit_tool_result_event(writer, msg_id, call, &result);
-                    results.push(result);
-                    modifiers.push(None);
-                    delegated_effects.push(Vec::new());
-                    continue;
-                }
-            }
-        }
-
-        // Emit tool_running
         let _ = writer.emit(&ProtocolEvent::ToolRunning {
             msg_id: msg_id.to_string(),
             call_id: id.clone(),
@@ -1069,26 +875,7 @@ async fn execute_tool_calls_with_approval_timeout(
             .await;
         }
 
-        // Emit tool_result event
-        if let ContentBlock::ToolResult {
-            content, is_error, ..
-        } = &result
-        {
-            let status = if *is_error {
-                ToolStatus::Error
-            } else {
-                ToolStatus::Success
-            };
-            let _ = writer.emit(&ProtocolEvent::ToolResult {
-                msg_id: msg_id.to_string(),
-                call_id: id.clone(),
-                tool_name: name.clone(),
-                status,
-                output: content.clone(),
-                output_type: OutputType::Text,
-                metadata: None,
-            });
-        }
+        emit_tool_result_event(writer, msg_id, call, &result);
 
         // Merge skill hooks after a successful execution.
         if !block_is_error(&result) {
@@ -1107,29 +894,6 @@ async fn execute_tool_calls_with_approval_timeout(
         modifiers,
         delegated_effects,
     })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ApprovalWaitError {
-    TimedOut,
-    Disconnected,
-}
-
-async fn wait_for_tool_approval(
-    approval_manager: &ToolApprovalManager,
-    call_id: &str,
-    rx: tokio::sync::oneshot::Receiver<ToolApprovalResult>,
-    approval_token: nomi_protocol::ToolApprovalToken,
-    timeout: Duration,
-) -> Result<ToolApprovalResult, ApprovalWaitError> {
-    match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(result)) => Ok(result),
-        Ok(Err(_)) => Err(ApprovalWaitError::Disconnected),
-        Err(_) => {
-            approval_manager.drop_pending_if(call_id, approval_token);
-            Err(ApprovalWaitError::TimedOut)
-        }
-    }
 }
 
 /// If `call` is a Skill tool call that returned successfully, parse and merge
@@ -1231,9 +995,7 @@ fn partition<'a>(
 }
 
 /// Group call indices for the protocol path: consecutive `batchable` calls
-/// (concurrency-safe AND needing no interactive approval) form one range that
 /// can execute in parallel; every other call is its own singleton range so its
-/// approval prompt + serial execution are preserved. Order is preserved, which
 /// keeps tool_use/tool_result pairing intact for the model. (Phase 2 tool-call)
 fn group_batches(batchable: &[bool]) -> Vec<std::ops::Range<usize>> {
     let mut groups = Vec::new();
@@ -1256,6 +1018,7 @@ fn group_batches(batchable: &[bool]) -> Vec<std::ops::Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[derive(Clone)]
     struct LogWriter(Arc<Mutex<Vec<u8>>>);
@@ -1560,82 +1323,6 @@ mod tests {
         }
     }
 
-    struct BrowserLikeApprovalTool;
-
-    #[async_trait::async_trait]
-    impl Tool for BrowserLikeApprovalTool {
-        fn name(&self) -> &str {
-            "BrowserLike"
-        }
-        fn description(&self) -> &str {
-            "Browser-like approval policy test tool"
-        }
-        fn input_schema(&self) -> serde_json::Value {
-            json!({ "type": "object" })
-        }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
-            false
-        }
-        async fn execute(&self, _input: serde_json::Value) -> nomi_types::tool::ToolResult {
-            nomi_types::tool::ToolResult {
-                content: "ok".to_string(),
-                is_error: false,
-                images: Vec::new(),
-            }
-        }
-        fn category(&self) -> nomi_protocol::events::ToolCategory {
-            nomi_protocol::events::ToolCategory::Exec
-        }
-        fn category_for(&self, input: &serde_json::Value) -> nomi_protocol::events::ToolCategory {
-            if input
-                .get("irreversible")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-            {
-                nomi_protocol::events::ToolCategory::Irreversible
-            } else {
-                nomi_protocol::events::ToolCategory::Exec
-            }
-        }
-        fn auto_approve_invocation(
-            &self,
-            _input: &serde_json::Value,
-            category: nomi_protocol::events::ToolCategory,
-        ) -> bool {
-            category != nomi_protocol::events::ToolCategory::Irreversible
-        }
-    }
-
-    struct CanonicalMcpApprovalTool;
-
-    #[async_trait::async_trait]
-    impl Tool for CanonicalMcpApprovalTool {
-        fn name(&self) -> &str {
-            "mcp__gateway__search__abcdefghijklmnop"
-        }
-        fn reserved_provider_name_prefix(&self) -> Option<&'static str> {
-            Some("mcp__")
-        }
-        fn activation_identity(&self) -> &str {
-            "mcp:7:gateway:6:search"
-        }
-        fn description(&self) -> &str {
-            "MCP-like approval identity fixture"
-        }
-        fn input_schema(&self) -> serde_json::Value {
-            json!({ "type": "object" })
-        }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
-            false
-        }
-        async fn execute(&self, _input: serde_json::Value) -> nomi_types::tool::ToolResult {
-            nomi_types::tool::ToolResult::text("ok")
-        }
-        fn category(&self) -> nomi_protocol::events::ToolCategory {
-            nomi_protocol::events::ToolCategory::Exec
-        }
-    }
-
     struct SchemaValidatedKnowledgeTool {
         dispatches: Arc<std::sync::atomic::AtomicUsize>,
         policy_calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -1726,10 +1413,6 @@ mod tests {
     }
 
     impl CapturingEmitter {
-        fn has_tool_request(&self) -> bool {
-            self.has_event_type("tool_request")
-        }
-
         fn has_event_type(&self, event_type: &str) -> bool {
             let event_type = format!(r#""type":"{event_type}""#);
             self.events
@@ -1769,144 +1452,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn missing_kb_id_fails_before_approval_running_policy_or_dispatch() {
-        let (registry, dispatches, policy_calls, _seen_inputs) =
-            schema_validated_knowledge_registry();
-        let calls = vec![ContentBlock::ToolUse {
-            id: "missing-kb-id".into(),
-            name: "mcp__knowledge__search__schemafixture".into(),
-            input: json!({}),
-            extra: None,
-        }];
-        let authority = ProviderToolAuthority::from_request_tools(&registry.to_tool_defs());
-        let approval_manager = Arc::new(nomi_protocol::ToolApprovalManager::new());
-        let writer_capture = Arc::new(CapturingEmitter::default());
-        let writer: Arc<dyn nomi_protocol::writer::ProtocolEmitter> = writer_capture.clone();
 
-        // Nobody resolves an approval. Returning immediately proves schema
-        // validation happens before an approval request can be awaited.
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            execute_tool_calls_with_approval(
-                &registry,
-                &calls,
-                &authority,
-                &approval_manager,
-                &writer,
-                "msg-schema-invalid",
-                false,
-                &[],
-                None,
-                nomi_compact::CompactionLevel::Off,
-                false,
-            ),
-        )
-        .await
-        .expect("invalid input must not wait for approval")
-        .unwrap();
-
-        assert!(matches!(
-            &outcome.results[0],
-            ContentBlock::ToolResult { content, is_error: true, .. }
-                if content.contains("kb_id")
-                    && content.contains("JSON Schema")
-                    && content.contains("not executed")
-        ));
-        assert!(!writer_capture.has_event_for("tool_request", "missing-kb-id"));
-        assert!(!writer_capture.has_event_for("tool_running", "missing-kb-id"));
-        assert!(writer_capture.has_event_for("tool_result", "missing-kb-id"));
-        assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert_eq!(policy_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn protocol_approval_and_dispatch_share_prepared_nested_input() {
-        let (registry, dispatches, _policy_calls, seen_inputs) =
-            schema_validated_knowledge_registry();
-        let calls = vec![ContentBlock::ToolUse {
-            id: "stringified-options".into(),
-            name: "mcp__knowledge__search__schemafixture".into(),
-            input: json!({
-                "kb_id": "kb-1",
-                "options": "{\"limit\":5,\"mode\":\"semantic\"}",
-                "scope": {"document_id": "doc-1"}
-            }),
-            extra: None,
-        }];
-        let authority = ProviderToolAuthority::from_request_tools(&registry.to_tool_defs());
-        let approval_manager = Arc::new(nomi_protocol::ToolApprovalManager::new());
-        let writer_capture = Arc::new(CapturingEmitter::default());
-        let writer: Arc<dyn nomi_protocol::writer::ProtocolEmitter> = writer_capture.clone();
-        let resolver_manager = approval_manager.clone();
-        let resolver_writer = writer_capture.clone();
-        let resolver = tokio::spawn(async move {
-            loop {
-                if resolver_writer.has_tool_request() {
-                    resolver_manager.resolve(
-                        "stringified-options",
-                        nomi_protocol::ToolApprovalResult::Approved,
-                    );
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-            }
-        });
-
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            execute_tool_calls_with_approval(
-                &registry,
-                &calls,
-                &authority,
-                &approval_manager,
-                &writer,
-                "msg-stringified-options",
-                false,
-                &[],
-                None,
-                nomi_compact::CompactionLevel::Off,
-                false,
-            ),
-        )
-        .await
-        .expect("prepared input should reach approval without blocking")
-        .unwrap();
-        resolver.await.unwrap();
-
-        assert!(matches!(
-            &outcome.results[0],
-            ContentBlock::ToolResult { content, is_error: false, .. }
-                if content == "knowledge result"
-        ));
-        let approval_event = writer_capture
-            .events
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|event| event.contains(r#""type":"tool_request""#))
-            .cloned()
-            .expect("approval event");
-        let approval_event: serde_json::Value = serde_json::from_str(&approval_event).unwrap();
-        assert_eq!(
-            approval_event["tool"]["args"]["options"],
-            json!({"limit": 5, "mode": "semantic"})
-        );
-        assert_eq!(dispatches.load(std::sync::atomic::Ordering::SeqCst), 1);
-        let seen_inputs = seen_inputs.lock().unwrap();
-        assert_eq!(seen_inputs.len(), 1);
-        assert_eq!(
-            seen_inputs[0]["options"],
-            json!({"limit": 5, "mode": "semantic"})
-        );
-    }
 
     #[tokio::test]
     async fn nested_type_enum_and_one_of_errors_are_local_and_valid_input_dispatches() {
         let (registry, dispatches, policy_calls, _seen_inputs) =
             schema_validated_knowledge_registry();
         let authority = ProviderToolAuthority::from_request_tools(&registry.to_tool_defs());
-        let confirmer = Arc::new(Mutex::new(ToolConfirmer::new(true, vec![])));
         let invalid = vec![ContentBlock::ToolUse {
             id: "nested-invalid".into(),
             name: "mcp__knowledge__search__schemafixture".into(),
@@ -1923,7 +1475,6 @@ mod tests {
             &invalid,
             &authority,
             "",
-            &confirmer,
             None,
             nomi_compact::CompactionLevel::Off,
             false,
@@ -1955,7 +1506,6 @@ mod tests {
             &valid,
             &authority,
             "",
-            &confirmer,
             None,
             nomi_compact::CompactionLevel::Off,
             false,
@@ -2002,151 +1552,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn raw_mcp_tool_name_does_not_auto_approve_a_canonical_provider_route() {
-        const CANONICAL: &str = "mcp__gateway__search__abcdefghijklmnop";
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(CanonicalMcpApprovalTool));
-        let calls = vec![ContentBlock::ToolUse {
-            id: "canonical-mcp-call".into(),
-            name: CANONICAL.into(),
-            input: json!({}),
-            extra: None,
-        }];
-        let approval_manager = std::sync::Arc::new(nomi_protocol::ToolApprovalManager::new());
-        let writer_capture = std::sync::Arc::new(CapturingEmitter::default());
-        let writer: std::sync::Arc<dyn nomi_protocol::writer::ProtocolEmitter> =
-            writer_capture.clone();
-        let am = approval_manager.clone();
-        let writer_for_task = writer_capture.clone();
-        let resolver = tokio::spawn(async move {
-            loop {
-                if writer_for_task.has_tool_request() {
-                    am.resolve(
-                        "canonical-mcp-call",
-                        nomi_protocol::ToolApprovalResult::Approved,
-                    );
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-            }
-        });
 
-        let outcome = execute_tool_calls_with_approval(
-            &registry,
-            &calls,
-            &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-            &approval_manager,
-            &writer,
-            "msg-canonical-mcp",
-            false,
-            &["search".to_owned()],
-            None,
-            nomi_compact::CompactionLevel::Off,
-            false,
-        )
-        .await
-        .unwrap();
-        resolver.abort();
 
-        assert_eq!(outcome.results.len(), 1);
-        assert!(
-            writer_capture.has_tool_request(),
-            "an ambiguous naked original name must not authorize the canonical MCP route"
-        );
-        assert!(writer_capture
-            .events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|event| event.contains(&format!(r#""name":"{CANONICAL}""#))));
-    }
-
-    #[tokio::test]
-    async fn tool_level_auto_approval_skips_prompt_for_safe_invocation() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(BrowserLikeApprovalTool));
-        let calls = vec![ContentBlock::ToolUse {
-            id: "safe-browser-call".into(),
-            name: "BrowserLike".into(),
-            input: json!({ "action": "scroll" }),
-            extra: None,
-        }];
-        let approval_manager = std::sync::Arc::new(nomi_protocol::ToolApprovalManager::new());
-        let writer_capture = std::sync::Arc::new(CapturingEmitter::default());
-        let writer: std::sync::Arc<dyn nomi_protocol::writer::ProtocolEmitter> = writer_capture.clone();
-
-        let outcome = execute_tool_calls_with_approval(
-            &registry,
-            &calls,
-            &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-            &approval_manager,
-            &writer,
-            "msg-safe",
-            false,
-            &[],
-            None,
-            nomi_compact::CompactionLevel::Off,
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(outcome.results.len(), 1);
-        assert!(
-            !writer_capture.has_tool_request(),
-            "safe Browser-like calls should not emit approval prompts"
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_level_auto_approval_still_prompts_for_irreversible_invocation() {
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(BrowserLikeApprovalTool));
-        let calls = vec![ContentBlock::ToolUse {
-            id: "danger-browser-call".into(),
-            name: "BrowserLike".into(),
-            input: json!({ "action": "click", "irreversible": true }),
-            extra: None,
-        }];
-        let approval_manager = std::sync::Arc::new(nomi_protocol::ToolApprovalManager::new());
-        let writer_capture = std::sync::Arc::new(CapturingEmitter::default());
-        let writer: std::sync::Arc<dyn nomi_protocol::writer::ProtocolEmitter> = writer_capture.clone();
-        let am = approval_manager.clone();
-        let writer_for_task = writer_capture.clone();
-
-        tokio::spawn(async move {
-            loop {
-                if writer_for_task.has_tool_request() {
-                    am.resolve("danger-browser-call", nomi_protocol::ToolApprovalResult::Approved);
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-            }
-        });
-
-        let outcome = execute_tool_calls_with_approval(
-            &registry,
-            &calls,
-            &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-            &approval_manager,
-            &writer,
-            "msg-danger",
-            false,
-            &[],
-            None,
-            nomi_compact::CompactionLevel::Off,
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(outcome.results.len(), 1);
-        assert!(
-            writer_capture.has_tool_request(),
-            "irreversible Browser-like calls must still prompt"
-        );
-    }
 
     struct MockSecretTool;
     #[async_trait::async_trait]
@@ -2290,96 +1697,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn protocol_approval_timeout_cancels_without_dispatch_and_halts_following_calls() {
-        let dispatches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut registry = ToolRegistry::new();
-        registry.register(Box::new(DeadlineTool {
-            name: "ApprovalExec",
-            timeout: Duration::from_secs(1),
-            delay: Duration::from_millis(1),
-            concurrent_safe: false,
-            dispatches: dispatches.clone(),
-        }));
-        registry.register(Box::new(DeadlineTool {
-            name: "NeverAfterApprovalError",
-            timeout: Duration::from_secs(1),
-            delay: Duration::from_millis(1),
-            concurrent_safe: false,
-            dispatches: dispatches.clone(),
-        }));
-        let calls = vec![
-            ContentBlock::ToolUse {
-                id: "approval-timeout".into(),
-                name: "ApprovalExec".into(),
-                input: json!({}),
-                extra: None,
-            },
-            ContentBlock::ToolUse {
-                id: "after-timeout".into(),
-                name: "NeverAfterApprovalError".into(),
-                input: json!({}),
-                extra: None,
-            },
-        ];
-        let authority = ProviderToolAuthority::from_request_tools(&registry.to_tool_defs());
-        let approval_manager = Arc::new(ToolApprovalManager::new());
-        let emitter = Arc::new(CapturingEmitter::default());
-        let writer: Arc<dyn ProtocolEmitter> = emitter.clone();
-
-        let outcome = execute_tool_calls_with_approval_timeout(
-            &registry,
-            &calls,
-            &authority,
-            &approval_manager,
-            &writer,
-            "approval-timeout-message",
-            false,
-            &[],
-            None,
-            nomi_compact::CompactionLevel::Off,
-            false,
-            Duration::from_millis(10),
-        );
-        let outcome = tokio::time::timeout(Duration::from_secs(1), outcome)
-            .await
-            .expect("approval timeout task should finish")
-            .unwrap();
-
-        assert_eq!(outcome.results.len(), 2);
-        assert!(matches!(
-            &outcome.results[0],
-            ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error: true,
-                ..
-            } if tool_use_id == "approval-timeout"
-                && content.contains("approval timed out")
-                && content.contains("not executed")
-        ));
-        assert!(matches!(
-            &outcome.results[1],
-            ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error: true,
-                ..
-            } if tool_use_id == "after-timeout"
-                && tool_use_id == "after-timeout"
-                && content.contains("Skipped because a previous tool call")
-        ));
-        assert_eq!(
-            dispatches.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "approval timeout and its following skipped call must never dispatch"
-        );
-        assert!(emitter.has_event_for("tool_request", "approval-timeout"));
-        assert!(emitter.has_event_for("tool_cancelled", "approval-timeout"));
-        assert!(emitter.has_event_for("tool_result", "approval-timeout"));
-        assert!(!emitter.has_event_for("tool_running", "approval-timeout"));
-        assert!(emitter.has_event_for("tool_result", "after-timeout"));
-    }
 
     #[tokio::test]
     async fn execute_single_redacts_secrets_in_output() {
@@ -2447,74 +1764,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn repl_serial_deferred_gate_runs_before_confirmation() {
-        let (registry, calls) = make_registry_with_deferred_safety(false);
-        let confirmer = Arc::new(Mutex::new(ToolConfirmer::new(true, vec![])));
 
-        let outcome = execute_tool_calls_scoped(
-            &registry,
-            &[deferred_call("serial-deferred")],
-            &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-            "",
-            &confirmer,
-            None,
-            nomi_compact::CompactionLevel::Off,
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(outcome.results.len(), 1);
-        assert!(matches!(
-            &outcome.results[0],
-            ContentBlock::ToolResult { content, is_error: true, .. }
-                if content.contains("ToolSearch") && content.contains("not executed")
-        ));
-        assert_eq!(confirmer.lock().unwrap().check_count(), 0);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn repl_multiple_deferred_calls_gate_before_confirmation_and_halt() {
-        let (registry, calls) = make_registry_with_deferred();
-        let confirmer = Arc::new(Mutex::new(ToolConfirmer::new(true, vec![])));
-        let tool_calls = vec![
-            deferred_call("concurrent-deferred-1"),
-            deferred_call("concurrent-deferred-2"),
-        ];
-
-        let outcome = execute_tool_calls_scoped(
-            &registry,
-            &tool_calls,
-            &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-            "",
-            &confirmer,
-            None,
-            nomi_compact::CompactionLevel::Off,
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(outcome.results.len(), 2);
-        assert!(matches!(
-            &outcome.results[0],
-            ContentBlock::ToolResult { tool_use_id, content, is_error: true, .. }
-                if tool_use_id == "concurrent-deferred-1"
-                    && content.contains("ToolSearch")
-                    && content.contains("not executed")
-        ));
-        assert!(matches!(
-            &outcome.results[1],
-            ContentBlock::ToolResult { tool_use_id, content, is_error: true, .. }
-                if tool_use_id == "concurrent-deferred-2"
-                    && content == SKIPPED_AFTER_PRIOR_ERROR
-        ));
-        assert!(outcome.modifiers.iter().all(Option::is_none));
-        assert_eq!(confirmer.lock().unwrap().check_count(), 0);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-    }
 
     #[tokio::test]
     async fn unactivated_deferred_tool_is_blocked_before_dispatch() {
@@ -2568,14 +1818,11 @@ mod tests {
                 extra: None,
             },
         ];
-        let confirmer = Arc::new(Mutex::new(ToolConfirmer::new(true, vec![])));
-
         let outcome = execute_tool_calls_scoped(
             &registry,
             &tool_calls,
             &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
             "",
-            &confirmer,
             None,
             nomi_compact::CompactionLevel::Off,
             false,
@@ -2599,56 +1846,10 @@ mod tests {
             .contains("MockDeferred"));
     }
 
-    #[tokio::test]
-    async fn protocol_serial_deferred_gate_does_not_wait_for_approval_or_emit_running() {
-        let (registry, calls) = make_registry_with_deferred_safety(false);
-        let approval_manager = Arc::new(nomi_protocol::ToolApprovalManager::new());
-        let writer_capture = Arc::new(CapturingEmitter::default());
-        let writer: Arc<dyn nomi_protocol::writer::ProtocolEmitter> = writer_capture.clone();
-        let tool_calls = vec![deferred_call("protocol-serial-deferred")];
-
-        // No one resolves the approval. Completion inside the timeout proves
-        // the deferred preflight returned before request_approval().await.
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            execute_tool_calls_with_approval(
-                &registry,
-                &tool_calls,
-                &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-                &approval_manager,
-                &writer,
-                "msg-protocol-serial",
-                false,
-                &[],
-                None,
-                nomi_compact::CompactionLevel::Off,
-                false,
-            ),
-        )
-        .await
-        .expect("deferred gate must not wait for approval")
-        .unwrap();
-
-        assert_eq!(outcome.results.len(), 1);
-        assert!(matches!(
-            &outcome.results[0],
-            ContentBlock::ToolResult { content, is_error: true, .. }
-                if content.contains("ToolSearch") && content.contains("not executed")
-        ));
-        assert!(!writer_capture.has_event_type("tool_request"));
-        assert!(!writer_capture.has_event_type("tool_running"));
-        assert!(writer_capture.has_event_for(
-            "tool_result",
-            "protocol-serial-deferred"
-        ));
-        assert_eq!(writer_capture.event_count("tool_result"), 1);
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
-    }
 
     #[tokio::test]
     async fn protocol_concurrent_safe_deferred_calls_never_emit_running() {
         let (registry, calls) = make_registry_with_deferred();
-        let approval_manager = Arc::new(nomi_protocol::ToolApprovalManager::new());
         let writer_capture = Arc::new(CapturingEmitter::default());
         let writer: Arc<dyn nomi_protocol::writer::ProtocolEmitter> = writer_capture.clone();
         let tool_calls = vec![
@@ -2658,24 +1859,11 @@ mod tests {
 
         // With no deferred preflight these two concurrency-safe calls would be
         // grouped and ToolRunning would be emitted before execute_single.
-        let outcome = execute_tool_calls_with_approval(
-            &registry,
-            &tool_calls,
-            &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-            &approval_manager,
-            &writer,
-            "msg-protocol-concurrent",
-            true,
-            &[],
-            None,
-            nomi_compact::CompactionLevel::Off,
-            false,
-        )
+        let outcome = execute_tool_calls_with_protocol(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), &writer, "msg-protocol-concurrent", None, nomi_compact::CompactionLevel::Off, false)
         .await
         .unwrap();
 
         assert_eq!(outcome.results.len(), 2);
-        assert!(!writer_capture.has_event_type("tool_request"));
         assert!(!writer_capture.has_event_type("tool_running"));
         assert_eq!(writer_capture.event_count("tool_result"), 2);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -2688,7 +1876,6 @@ mod tests {
         registry.register(Box::new(nomi_tools::tool_search::ToolSearchTool::new(
             state,
         )));
-        let approval_manager = Arc::new(nomi_protocol::ToolApprovalManager::new());
         let writer_capture = Arc::new(CapturingEmitter::default());
         let writer: Arc<dyn nomi_protocol::writer::ProtocolEmitter> = writer_capture.clone();
         let tool_calls = vec![
@@ -2701,19 +1888,7 @@ mod tests {
             deferred_call("protocol-target"),
         ];
 
-        let outcome = execute_tool_calls_with_approval(
-            &registry,
-            &tool_calls,
-            &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-            &approval_manager,
-            &writer,
-            "msg-protocol-frozen-gate",
-            true,
-            &[],
-            None,
-            nomi_compact::CompactionLevel::Off,
-            false,
-        )
+        let outcome = execute_tool_calls_with_protocol(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), &writer, "msg-protocol-frozen-gate", None, nomi_compact::CompactionLevel::Off, false)
         .await
         .unwrap();
 
@@ -2729,7 +1904,6 @@ mod tests {
         ));
         assert!(writer_capture.has_event_for("tool_running", "protocol-search"));
         assert!(!writer_capture.has_event_for("tool_running", "protocol-target"));
-        assert!(!writer_capture.has_event_for("tool_request", "protocol-target"));
         assert!(writer_capture.has_event_for("tool_result", "protocol-target"));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(!registry

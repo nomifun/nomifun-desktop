@@ -25,7 +25,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::deps::{CallerCtx, GatewayDeps};
-use crate::registry::{Capability, CapabilityMeta, DangerTier};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
 const SUMMARY_TEXT_MAX: usize = 160;
@@ -660,7 +660,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_creative_studio_list_canvases",
             "creative_studio",
             "List Creative Studio Canvases with revision, node count, and connection count.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, params| list_canvases(deps, params),
     ));
@@ -669,7 +669,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_creative_studio_get_canvas",
             "creative_studio",
             "Read a bounded Creative Studio Canvas graph summary and its revision CAS token.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, params| get_canvas(deps, params),
     ));
@@ -678,7 +678,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_creative_studio_list_assets",
             "creative_studio",
             "List Creative Studio assets by title or kind without returning binary bytes.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, params| list_assets(deps, params),
     ));
@@ -687,7 +687,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_creative_studio_apply_ops",
             "creative_studio",
             "Apply an all-or-nothing Canvas graph mutation batch using the expected Canvas revision.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         apply_operations,
     ));
@@ -696,7 +696,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_creative_studio_generate",
             "creative_studio",
             "Fence and submit an idempotent generation task from a persisted Canvas config node using the Canvas revision.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         generate,
     ));
@@ -705,7 +705,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_creative_studio_get_task",
             "creative_studio",
             "Inspect a Creative Studio generation task and its produced asset ids.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, params| get_task(deps, params),
     ));
@@ -714,7 +714,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_creative_studio_list_projects",
             "creative_studio",
             "DEPRECATED legacy alias: list project-named Canvas rows. Use nomi_creative_studio_list_canvases.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, params| list_projects(deps, params),
     ));
@@ -723,7 +723,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_creative_studio_get_project",
             "creative_studio",
             "DEPRECATED legacy alias: read a project-named Canvas graph. Use nomi_creative_studio_get_canvas.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, params| get_project(deps, params),
     ));

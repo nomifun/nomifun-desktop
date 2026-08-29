@@ -7,13 +7,13 @@ use nomifun_api_types::{DecisionStrategy, Tendency};
 use crate::signal::StallClass;
 
 /// System prompt establishing the sidecar's role and strict output contract.
-/// `action` covers both the option/permission path (`answer_choice`) and the
+/// `action` covers both the option path (`answer_choice`) and the
 /// open-question free-text path (`answer_text`).
 pub const SIDECAR_SYSTEM: &str = "You are a supervisory co-pilot. Your ONLY job is to unblock and steer a stalled \
 agent session. Respond with STRICT JSON only — no prose, no code fences:\n\
 {\"action\":\"retry|send_text|answer_choice|answer_text|wait|stop\",\"text\":\"\",\"wait_secs\":0,\"confidence\":0.0,\"reason\":\"\"}\n\
 Field meanings: retry = re-run/continue the current step; send_text = inject the given text as a nudge or \
-instruction; answer_choice = answer a pending option/permission decision with the given option/value; answer_text = \
+instruction; answer_choice = answer a pending option decision with the given option/value; answer_text = \
 answer an OPEN-ENDED question with a concise free-text reply; wait = do nothing for wait_secs; stop = give up and ask \
 the human (reason required). confidence is 0..1.\n\
 Hard rules: obey the DECISION POLICY exactly. Never propose destructive actions unless the SAFETY block allows them. \
@@ -40,7 +40,7 @@ fn policy_block(strat: &DecisionStrategy) -> String {
     )
 }
 
-/// Build the user message for an OPTION / PERMISSION decision or a fault/idle
+/// Build the user message for an option decision or a fault/idle
 /// stall: policy + safety + stall + context blocks.
 pub fn build_user_prompt(strat: &DecisionStrategy, class: StallClass, detail: &str, context: &str) -> String {
     let never_destructive = strat.categories.option_decision.never_destructive;

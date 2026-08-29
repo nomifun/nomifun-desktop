@@ -87,10 +87,10 @@ the diff, which is easier to review.
  - Always Read a file before editing it.
  - When ApplyPatch is available, prefer one ApplyPatch call when one logical edit spans multiple files.
  - When exec_command script mode is available, use it for a deterministic, homogeneous, local, non-interactive batch \
-that needs no intermediate result, approval, or model decision. A script must validate \
+ that needs no intermediate result or model decision. A script must validate \
 preconditions, stop with a non-zero exit on dependent-operation failure, bound its output, and \
 print a concise summary. Keep separate calls for state-dependent work and for browser, UI, MCP, \
-external-system, destructive, or approval-sensitive actions. Never use a script to bypass a \
+ external-system, destructive, or resource-bound actions. Never use a script to bypass a \
 dedicated tool or read-before-edit protection.
  - Some tools are deferred — only their names are visible. Before calling \
 a deferred tool, call ToolSearch, wait for its result, then invoke the tool in a subsequent \

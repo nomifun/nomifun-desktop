@@ -237,24 +237,15 @@ pub struct ProfileConfig {
     pub compat: Option<ProviderCompat>,
 }
 
-/// Per-skill deny/allow rule lists loaded from `[tools.skills]` in config.toml.
+/// Per-skill deny rules loaded from `[tools.skills]` in config.toml.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SkillsPermissionConfig {
     #[serde(default)]
     pub deny: Vec<String>,
-    #[serde(default)]
-    pub allow: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ToolsConfig {
-    #[serde(default)]
-    pub auto_approve: bool,
-    /// Exact provider-visible tool names that bypass per-call confirmation.
-    /// MCP entries must use their canonical `mcp__...__<hash>` names; an
-    /// original server-local tool name is informational and grants no authority.
-    #[serde(default = "default_allow_list")]
-    pub allow_list: Vec<String>,
     /// Skill-level deny/allow rules. Merged by concatenation across global + project configs.
     #[serde(default)]
     pub skills: SkillsPermissionConfig,
@@ -311,8 +302,6 @@ pub struct LspServerConfig {
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
-            auto_approve: false,
-            allow_list: default_allow_list(),
             skills: SkillsPermissionConfig::default(),
             max_recent_images: default_max_recent_images(),
             computer: ComputerConfig::default(),
@@ -364,7 +353,7 @@ pub struct BrowserConfig {
     /// `client_preferences` `agent.browserUse.fullPower` LIVE 值写到这里（与 `computer_use`/`browser_use`
     /// 启用开关同范式，每会话构造时读最新值），bootstrap 将该策略交给 Hub-backed Browser
     /// tool adapter；最终操作仍通过 `BrowserLaneClient` 进入主进程 Hub。
-    /// **绝不看 session_mode**——yolo/companion 无从豁免（不变量⑧）。
+    /// This browser security setting is independent of Agent execution policy.
     #[serde(default)]
     pub full_power: bool,
     /// **SD-6: 持久登录开关**（DESIGN §16/§27 互斥约束）。`true`（产品默认）→ 与全权互斥（evaluate
@@ -392,10 +381,6 @@ pub struct BrowserConfig {
     /// 同范式，host_default=false=OFF——视觉兜底每次都过一遍视觉模型，有额外 token 成本，须用户显式 opt-in）。
     #[serde(default)]
     pub visual_fallback: bool,
-    /// Explicit Browser Use approval bypass. Default false; host settings may set
-    /// this from `agent.browserUse.unrestrictedApproval`.
-    #[serde(default)]
-    pub unrestricted_approval: bool,
     /// **浏览器来源**（Browser Host 可执行文件偏好，与 `headless` 正交）。`"managed"`（默认）=
     /// 内置/下载的 Chrome for Testing；`"system"` = 系统安装的 Chrome/Edge 本体优先
     /// （未探到回退 managed）。该值不会授予 runtime 浏览器所有权：主进程唯一
@@ -415,7 +400,6 @@ impl Default for BrowserConfig {
             persistent_login: false,
             site_memory: false,
             visual_fallback: false,
-            unrestricted_approval: false,
             source: default_browser_source(),
         }
     }
@@ -445,9 +429,6 @@ impl Default for SessionConfig {
 
 fn default_provider() -> String {
     "anthropic".to_string()
-}
-fn default_allow_list() -> Vec<String> {
-    vec!["Read".into(), "Grep".into(), "Glob".into()]
 }
 fn default_max_recent_images() -> usize {
     3
@@ -567,7 +548,6 @@ pub struct CliArgs {
     pub max_turns: Option<usize>,
     pub system_prompt: Option<String>,
     pub profile: Option<String>,
-    pub auto_approve: bool,
     pub project_dir: Option<PathBuf>,
 }
 
@@ -630,11 +610,8 @@ impl Config {
             provider,
         )?;
 
-        // 7. Apply auto_approve from CLI
-        let mut tools = merged.tools;
-        if cli.auto_approve {
-            tools.auto_approve = true;
-        }
+        // 7. Resolve the merged tool configuration.
+        let tools = merged.tools;
 
         // Resolve prompt_caching: default true for Anthropic
         let prompt_caching = provider_config
@@ -1103,8 +1080,6 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         // P7B visual-fallback——任一层开启即开（与 full_power 同 OR 合并语义）。运行时由 backend factory 经
         // client_preferences LIVE 覆写（host_default=false），这里只是 toml 合并。
         visual_fallback: global.tools.browser.visual_fallback || project.tools.browser.visual_fallback,
-        unrestricted_approval: global.tools.browser.unrestricted_approval
-            || project.tools.browser.unrestricted_approval,
         // 浏览器来源——project 非默认（显式设了 "system"/其它）则覆盖 global，否则用 global（与
         // write_root 同「project 非默认优先」语义）。运行时由 backend factory 经 client_preferences
         // LIVE 覆写（config.tools.browser.source），这里只是 toml 合并。
@@ -1119,58 +1094,30 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
     } else {
         global.tools.max_recent_images
     };
-    let tools = if project.tools.allow_list != default_allow_list() || project.tools.auto_approve {
-        ToolsConfig {
-            auto_approve: global.tools.auto_approve || project.tools.auto_approve,
-            allow_list: project.tools.allow_list,
-            skills: SkillsPermissionConfig {
-                deny: [global.tools.skills.deny, project.tools.skills.deny].concat(),
-                allow: [global.tools.skills.allow, project.tools.skills.allow].concat(),
-            },
-            max_recent_images,
-            computer,
-            browser,
-            write_root: if !project.tools.write_root.is_empty() {
-                project.tools.write_root
-            } else {
-                global.tools.write_root
-            },
-            lsp_servers: [global.tools.lsp_servers, project.tools.lsp_servers].concat(),
-            delegation_token_budget: project.tools.delegation_token_budget.or(global.tools.delegation_token_budget),
-            bash_sandbox: global.tools.bash_sandbox || project.tools.bash_sandbox,
-            // 项目层非空则覆盖全局（与 write_root 同模式）。
-            builtin_allowlist: if !project.tools.builtin_allowlist.is_empty() {
-                project.tools.builtin_allowlist
-            } else {
-                global.tools.builtin_allowlist
-            },
-        }
-    } else {
-        ToolsConfig {
-            auto_approve: global.tools.auto_approve || project.tools.auto_approve,
-            allow_list: global.tools.allow_list,
-            skills: SkillsPermissionConfig {
-                deny: [global.tools.skills.deny, project.tools.skills.deny].concat(),
-                allow: [global.tools.skills.allow, project.tools.skills.allow].concat(),
-            },
-            max_recent_images,
-            computer,
-            browser,
-            write_root: if !project.tools.write_root.is_empty() {
-                project.tools.write_root
-            } else {
-                global.tools.write_root
-            },
-            lsp_servers: [global.tools.lsp_servers, project.tools.lsp_servers].concat(),
-            delegation_token_budget: project.tools.delegation_token_budget.or(global.tools.delegation_token_budget),
-            bash_sandbox: global.tools.bash_sandbox || project.tools.bash_sandbox,
-            // 项目层非空则覆盖全局（与 write_root 同模式）。
-            builtin_allowlist: if !project.tools.builtin_allowlist.is_empty() {
-                project.tools.builtin_allowlist
-            } else {
-                global.tools.builtin_allowlist
-            },
-        }
+    let tools = ToolsConfig {
+        skills: SkillsPermissionConfig {
+            deny: [global.tools.skills.deny, project.tools.skills.deny].concat(),
+        },
+        max_recent_images,
+        computer,
+        browser,
+        write_root: if !project.tools.write_root.is_empty() {
+            project.tools.write_root
+        } else {
+            global.tools.write_root
+        },
+        lsp_servers: [global.tools.lsp_servers, project.tools.lsp_servers].concat(),
+        delegation_token_budget: project
+            .tools
+            .delegation_token_budget
+            .or(global.tools.delegation_token_budget),
+        bash_sandbox: global.tools.bash_sandbox || project.tools.bash_sandbox,
+        // 项目层非空则覆盖全局（与 write_root 同模式）。
+        builtin_allowlist: if !project.tools.builtin_allowlist.is_empty() {
+            project.tools.builtin_allowlist
+        } else {
+            global.tools.builtin_allowlist
+        },
     };
 
     // Session: project overrides global
@@ -1439,12 +1386,6 @@ provider = "anthropic"            # built-in provider or custom alias from [prov
 # [profiles.vertex-claude]
 # provider = "vertex"
 # model = "claude-sonnet-4@20250514"
-
-# Tool confirmation settings
-[tools]
-auto_approve = false             # --auto-approve overrides
-# Tools that skip confirmation even when auto_approve = false
-allow_list = ["Read", "Grep", "Glob"]
 
 # Context compaction settings
 # [compact]
@@ -1963,60 +1904,23 @@ project_root_markers = [".git", ".hg"]
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_merge_config_global_auto_approve_preserved_with_project_allow_list() {
-        let global = ConfigFile {
-            tools: ToolsConfig {
-                auto_approve: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let project = ConfigFile {
-            tools: ToolsConfig {
-                allow_list: vec!["Bash".into()], // non-default, triggers if branch
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let merged = merge_config_files(global, project);
-        assert!(
-            merged.tools.auto_approve,
-            "global auto_approve=true should be preserved"
-        );
-    }
-
-    #[test]
-    fn p5_14_skills_deny_allow_deserialized() {
+    fn p5_14_skills_deny_deserialized() {
         let toml_str = r#"
-[tools]
-auto_approve = false
-allow_list = ["Read"]
-
 [tools.skills]
 deny = ["dangerous-skill", "admin:*"]
-allow = ["commit", "review-pr", "db:*"]
 "#;
         let config: ConfigFile = toml::from_str(toml_str).unwrap();
         assert_eq!(
             config.tools.skills.deny,
             vec!["dangerous-skill".to_string(), "admin:*".to_string()]
         );
-        assert_eq!(
-            config.tools.skills.allow,
-            vec![
-                "commit".to_string(),
-                "review-pr".to_string(),
-                "db:*".to_string()
-            ]
-        );
     }
 
     #[test]
     fn p5_14_skills_defaults_to_empty() {
-        // When [tools.skills] is absent, deny and allow default to empty vecs.
+        // When [tools.skills] is absent, deny defaults to an empty vec.
         let config: ConfigFile = toml::from_str("").unwrap();
         assert!(config.tools.skills.deny.is_empty());
-        assert!(config.tools.skills.allow.is_empty());
     }
 
     #[test]
@@ -2026,7 +1930,6 @@ allow = ["commit", "review-pr", "db:*"]
             tools: ToolsConfig {
                 skills: SkillsPermissionConfig {
                     deny: vec!["global-deny".to_string()],
-                    allow: vec!["global-allow".to_string()],
                 },
                 ..Default::default()
             },
@@ -2036,7 +1939,6 @@ allow = ["commit", "review-pr", "db:*"]
             tools: ToolsConfig {
                 skills: SkillsPermissionConfig {
                     deny: vec!["project-deny".to_string()],
-                    allow: vec!["project-allow".to_string()],
                 },
                 ..Default::default()
             },
@@ -2047,10 +1949,6 @@ allow = ["commit", "review-pr", "db:*"]
         assert_eq!(
             merged.tools.skills.deny,
             vec!["global-deny".to_string(), "project-deny".to_string()]
-        );
-        assert_eq!(
-            merged.tools.skills.allow,
-            vec!["global-allow".to_string(), "project-allow".to_string()]
         );
     }
 
@@ -2580,7 +2478,6 @@ max_tokens = 1234
             max_turns: None,
             system_prompt: None,
             profile: None,
-            auto_approve: false,
             project_dir: Some(tmp.path().to_path_buf()),
         };
 
@@ -2608,7 +2505,6 @@ max_tokens = 1234
             max_turns: None,
             system_prompt: None,
             profile: None,
-            auto_approve: false,
             project_dir: None,
         };
 

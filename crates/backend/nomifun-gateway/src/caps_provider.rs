@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::deps::GatewayDeps;
-use crate::registry::{Capability, CapabilityMeta, DangerTier};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 use crate::provider_support::load_provider_summaries;
 
@@ -64,7 +64,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_list_providers",
             "provider",
             "Read-only catalog of configured model providers and their enabled models (no API keys), for guiding a model choice before creating sessions / cron jobs.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| list(deps, p),
     ));

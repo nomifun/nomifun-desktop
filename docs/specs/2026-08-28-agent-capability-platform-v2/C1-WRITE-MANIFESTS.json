@@ -1,0 +1,211 @@
+{
+  "schema_version": "1.0.0",
+  "boundary": "C1",
+  "base_sha": "a0e807e02eae246a41ecc64fb59ac4b210fb7a29",
+  "branch": "rf/agent-capability-platform-v2",
+  "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+  "shared_cargo_policy": "agents-must-not-run-cargo; central-validation-owner-only",
+  "preserve_exact": [
+    "Coding code review, diff review, review comments, and review workflow",
+    "operating-system permissions such as microphone, TCC, and Tauri capabilities",
+    "Channel/IM pairing authorization and owner admission",
+    "ordinary product delete/reset/unsaved-change confirmations",
+    "typed ownership and resource-binding checks"
+  ],
+  "delete_exact": [
+    "SessionMode Default/AutoEdit/Yolo and session/set_mode",
+    "ToolApprovalManager, ToolConfirmer, pending tool approval and always-allow grants",
+    "Agent tool confirmation API, events, projections, recovery, UI, and i18n",
+    "AgentExecution require_approval and awaiting_approval states",
+    "Remote/Gateway needs_confirmation and confirm retry protocol",
+    "Browser Agent approval/takeover/unrestricted-approval product settings"
+  ],
+  "tasks": [
+    {
+      "task_id": "C1-W2-PROTOCOL-CLI",
+      "owner": "Aquinas",
+      "workstream": "W2",
+      "write_paths": [
+        "crates/agent/nomi-protocol/",
+        "crates/agent/nomi-cli/"
+      ],
+      "forbidden_paths": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "scripts/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "ui/",
+        "crates/backend/"
+      ],
+      "deliverable": "FullAuto-only JSON protocol and CLI with no mode/tool-approval command, event, manager, wait, or grant surface",
+      "required_local_checks": [
+        "rustfmt on changed Rust files",
+        "git diff --check",
+        "exact residual scan under owned paths"
+      ]
+    },
+    {
+      "task_id": "C1-W2-AGENT-CORE",
+      "owner": "Schrodinger",
+      "workstream": "W2",
+      "write_paths": [
+        "crates/agent/nomi-agent/",
+        "crates/agent/nomi-browser/",
+        "crates/agent/nomi-config/",
+        "crates/agent/nomi-mcp/",
+        "crates/agent/nomi-skills/",
+        "crates/agent/nomi-tools/",
+        "crates/agent/nomi-types/src/agent.rs",
+        "crates/agent/nomi-types/src/skill_types.rs"
+      ],
+      "forbidden_paths": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "scripts/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "ui/",
+        "crates/backend/"
+      ],
+      "deliverable": "Agent core executes selected tools directly in FullAuto and removes tool confirmation, mode switching, Browser Agent approval gate, and waiting state while retaining Coding review",
+      "required_local_checks": [
+        "rustfmt on changed Rust files",
+        "git diff --check",
+        "exact residual scan under owned paths"
+      ]
+    },
+    {
+      "task_id": "C1-W1-EXECUTION-CONTRACTS-DB",
+      "owner": "Dirac",
+      "workstream": "W1",
+      "write_paths": [
+        "crates/backend/nomifun-common/src/agent_execution.rs",
+        "crates/backend/nomifun-common/src/types.rs",
+        "crates/backend/nomifun-common/src/enums.rs",
+        "crates/backend/nomifun-common/src/lib.rs",
+        "crates/backend/nomifun-common/src/case_convert.rs",
+        "crates/backend/nomifun-api-types/",
+        "crates/backend/nomifun-agent-execution/",
+        "crates/backend/nomifun-db/src/models/agent_execution.rs",
+        "crates/backend/nomifun-db/src/models/agent_metadata.rs",
+        "crates/backend/nomifun-db/src/repository/agent_execution.rs",
+        "crates/backend/nomifun-db/src/repository/sqlite_agent_execution.rs",
+        "crates/backend/nomifun-db/src/repository/sqlite_agent_metadata.rs",
+        "crates/backend/nomifun-db/src/repository/mod.rs",
+        "crates/backend/nomifun-db/src/lib.rs",
+        "crates/backend/nomifun-db/src/id_schema_contract.rs",
+        "crates/backend/nomifun-db/tests/agent_execution_event_contract.rs",
+        "crates/backend/nomifun-db/tests/agent_execution_repository.rs",
+        "crates/backend/nomifun-db/tests/id_schema_contract.rs"
+      ],
+      "forbidden_paths": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "scripts/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "ui/",
+        "crates/agent/",
+        "crates/backend/nomifun-ai-agent/",
+        "crates/backend/nomifun-conversation/"
+      ],
+      "deliverable": "Remove Agent approval DTO/state/plan gate/yolo metadata and active v3 mappings without modifying published legacy migrations; AgentExecution plans run automatically",
+      "required_local_checks": [
+        "rustfmt on changed Rust files",
+        "git diff --check",
+        "exact residual scan excluding published legacy migrations"
+      ]
+    },
+    {
+      "task_id": "C1-W4-BACKEND-RUNTIME-CONSUMERS",
+      "owner": "Dewey",
+      "workstream": "W4",
+      "write_paths": [
+        "crates/backend/nomifun-ai-agent/",
+        "crates/backend/nomifun-conversation/",
+        "crates/backend/nomifun-cron/",
+        "crates/backend/nomifun-idmm/",
+        "crates/backend/nomifun-channel/",
+        "crates/backend/nomifun-app/",
+        "crates/backend/nomifun-companion/",
+        "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+        "crates/backend/nomifun-robot/"
+      ],
+      "forbidden_paths": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "scripts/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "ui/",
+        "crates/agent/",
+        "crates/backend/nomifun-common/",
+        "crates/backend/nomifun-api-types/",
+        "crates/backend/nomifun-agent-execution/",
+        "crates/backend/nomifun-db/"
+      ],
+      "deliverable": "Switch existing backend consumers to fixed FullAuto, delete conversation confirmation/approval routes and waiting projections, and remove Cron/Robot/IDMM mode mutations while preserving Channel pairing authorization",
+      "required_local_checks": [
+        "rustfmt on changed Rust files",
+        "git diff --check",
+        "exact residual scan under owned paths with pairing authorization allowlist"
+      ]
+    },
+    {
+      "task_id": "C1-W4-GATEWAY-REMOTE",
+      "owner": "Bernoulli",
+      "workstream": "W4",
+      "write_paths": [
+        "crates/backend/nomifun-gateway/",
+        "crates/backend/nomifun-public/"
+      ],
+      "forbidden_paths": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "scripts/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "ui/",
+        "crates/agent/",
+        "crates/backend/nomifun-app/"
+      ],
+      "deliverable": "Remove confirmation capability/domain, needs_confirmation responses, confirm retry, permission scopes tied to Agent execution, and Full Registry danger gates; retain transport authentication and Coding review semantics",
+      "required_local_checks": [
+        "rustfmt on changed Rust files",
+        "git diff --check",
+        "exact residual scan under owned paths"
+      ]
+    },
+    {
+      "task_id": "C1-W3-UI-I18N",
+      "owner": "Halley",
+      "workstream": "W3",
+      "write_paths": [
+        "ui/"
+      ],
+      "forbidden_paths": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "scripts/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "crates/"
+      ],
+      "deliverable": "Remove Agent mode selectors, tool permission/confirmation messages and recovery, AgentExecution approval banner/gate/status, Browser Agent approval settings, confirmation queue, clients and i18n; preserve OS permissions, pairing authorization, ordinary product confirmations, and Coding review UI",
+      "required_local_checks": [
+        "format changed UI files with repository formatter",
+        "git diff --check",
+        "exact residual scan under owned paths"
+      ]
+    }
+  ],
+  "central_owner": {
+    "owner": "main-agent",
+    "write_paths": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "package.json",
+      "scripts/gate-agent-v2.mjs",
+      "crates/backend/nomifun-agent-contracts/contracts/deletion/triad-core.json",
+      "crates/backend/nomifun-agent-contracts/contracts/generated/",
+      "crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json",
+      "crates/backend/nomifun-knowledge/src/service.rs",
+      "docs/specs/2026-08-28-agent-capability-platform-v2/"
+    ]
+  }
+}

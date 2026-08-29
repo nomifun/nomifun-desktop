@@ -7,8 +7,8 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const gateName = args[0];
 
-if (gateName !== 'contract-closure') {
-  console.error('usage: bun run gate:agent-v2 -- contract-closure');
+if (!['contract-closure', 'c1-fullauto'].includes(gateName)) {
+  console.error('usage: bun run gate:agent-v2 -- <contract-closure|c1-fullauto>');
   process.exit(2);
 }
 
@@ -81,6 +81,12 @@ function statSafe(path) {
   } catch {
     return null;
   }
+}
+
+if (gateName === 'c1-fullauto') {
+  runC1Gate();
+  writeGateReport('c1-fullauto');
+  finishGate('c1-fullauto');
 }
 
 for (const file of requiredFiles) {
@@ -222,3 +228,198 @@ if (failures.length > 0) {
 }
 
 console.log(`agent-v2 contract closure passed (${jsonFiles.length} JSON payloads)`);
+
+function runC1Gate() {
+  const manifestPath =
+    'docs/specs/2026-08-28-agent-capability-platform-v2/C1-WRITE-MANIFESTS.json';
+  if (!statSafe(join(repoRoot, manifestPath))?.isFile()) {
+    failures.push(`missing C1 write manifest: ${manifestPath}`);
+    return;
+  }
+
+  const productionRoots = [
+    'crates/agent/nomi-protocol/src',
+    'crates/agent/nomi-protocol/tests',
+    'crates/agent/nomi-cli/src',
+    'crates/agent/nomi-agent/src',
+    'crates/agent/nomi-agent/tests',
+    'crates/agent/nomi-browser/src',
+    'crates/agent/nomi-browser/tests',
+    'crates/agent/nomi-config/src',
+    'crates/agent/nomi-mcp/src',
+    'crates/agent/nomi-skills/src',
+    'crates/agent/nomi-tools/src',
+    'crates/agent/nomi-types/src',
+    'crates/backend/nomifun-common/src',
+    'crates/backend/nomifun-api-types/src',
+    'crates/backend/nomifun-agent-execution/src',
+    'crates/backend/nomifun-agent-execution/tests',
+    'crates/backend/nomifun-ai-agent/src',
+    'crates/backend/nomifun-ai-agent/tests',
+    'crates/backend/nomifun-conversation/src',
+    'crates/backend/nomifun-cron/src',
+    'crates/backend/nomifun-cron/tests',
+    'crates/backend/nomifun-channel/src',
+    'crates/backend/nomifun-channel/tests',
+    'crates/backend/nomifun-db/src',
+    'crates/backend/nomifun-db/tests',
+    'crates/backend/nomifun-idmm/src',
+    'crates/backend/nomifun-gateway/src',
+    'crates/backend/nomifun-public/src',
+    'crates/backend/nomifun-requirement/src',
+    'crates/backend/nomifun-requirement/tests',
+    'crates/backend/nomifun-app/src',
+    'crates/backend/nomifun-app/tests',
+    'crates/backend/nomifun-companion/src',
+    'crates/backend/nomifun-robot/src',
+    'ui/src',
+  ];
+  const forbiddenPatterns = [
+    [/\bSessionMode\b/, 'legacy execution mode type'],
+    [/\bApprovalScope\b/, 'agent tool approval scope'],
+    [/\bToolApprovalManager\b/, 'agent tool approval manager'],
+    [/\bToolConfirmer\b/, 'agent tool confirmer'],
+    [/session\/set_mode\b/, 'runtime mode command'],
+    [/\bneeds_confirmation\b/, 'agent confirmation response field'],
+    [/\bawaiting_approval\b/, 'agent approval lifecycle state'],
+    [/\bwaiting_confirmation\b/, 'agent confirmation lifecycle state'],
+    [/\brequire_approval\b/, 'plan approval policy'],
+    [/\bagentMode(?!l)/, 'agent mode product surface'],
+    [/\bpermission-review\b/, 'agent permission review surface'],
+    [/\bConfirmRequest\b/, 'agent confirmation request DTO'],
+    [/AgentStreamEvent::Permission\b/, 'agent permission stream event'],
+    [/\bPermissionConfirm\b/, 'IDMM permission confirmation payload'],
+    [/WakeAction::Confirm\b/, 'IDMM confirmation action'],
+    [/DecisionSource::Permission\b/, 'IDMM permission decision source'],
+    [/\bauto_approve_invocation\b/, 'per-invocation approval bypass'],
+    [/\bauto_approve\b/, 'global agent approval bypass'],
+  ];
+  for (const root of productionRoots) {
+    const files = collectFiles(join(repoRoot, root), '');
+    for (const file of files) {
+      if (!/\.(rs|ts|tsx|json|toml)$/.test(file)) continue;
+      const normalized = relative(repoRoot, file).replaceAll('\\', '/');
+      const source = readFileSync(file, 'utf8');
+      for (const [pattern, label] of forbiddenPatterns) {
+        if (!pattern.test(source)) continue;
+        failures.push(`${normalized}: ${label} residual (${pattern.source})`);
+      }
+    }
+  }
+
+  const deletedRoutes = [
+    '/confirmations',
+    '/approvals/check',
+    '\\bsession_mode\\b',
+    'auto_edit',
+    'permissionDefault',
+    'permissionFullAuto',
+  ];
+  for (const route of deletedRoutes) {
+    const result = spawnSync('rg', ['-n', '--hidden', '-g', '!target/**', '-g', '!node_modules/**', route, ...productionRoots], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      shell: process.platform === 'win32',
+      stdio: 'pipe',
+    });
+    if (result.status === 0 && result.stdout.trim()) {
+      failures.push(`C1 deleted surface remains reachable: ${route}`);
+    }
+  }
+
+  run('cargo', [
+    'check',
+    '-p',
+    'nomi-protocol',
+    '-p',
+    'nomi-agent',
+    '-p',
+    'nomi-browser',
+    '-p',
+    'nomi-cli',
+    '-p',
+    'nomi-config',
+    '-p',
+    'nomi-mcp',
+    '-p',
+    'nomi-skills',
+    '-p',
+    'nomi-tools',
+    '-p',
+    'nomi-types',
+    '-p',
+    'nomifun-common',
+    '-p',
+    'nomifun-api-types',
+    '-p',
+    'nomifun-agent-execution',
+    '-p',
+    'nomifun-ai-agent',
+    '-p',
+    'nomifun-conversation',
+    '-p',
+    'nomifun-cron',
+    '-p',
+    'nomifun-channel',
+    '-p',
+    'nomifun-idmm',
+    '-p',
+    'nomifun-gateway',
+    '-p',
+    'nomifun-public',
+    '-p',
+    'nomifun-requirement',
+    '-p',
+    'nomifun-app',
+  ]);
+  run('bun', [
+    'test',
+    'ui/src/common/adapter/ipcBridge.idmm-intervention-wire.test.ts',
+    'ui/src/renderer/components/settings/SettingsModal/contents/BrowserUseSettingsContent.test.ts',
+    'ui/src/renderer/pages/conversation/Messages/turnProcessState.test.ts',
+    'ui/src/renderer/pages/conversation/execution/readOnlyConversation.structure.test.ts',
+    'ui/src/renderer/pages/conversation/platforms/nomi/NomiSendBoxLayout.structure.test.ts',
+    'ui/src/renderer/pages/conversation/platforms/nomi/useNomiMessage.test.ts',
+    'ui/src/renderer/pages/conversation/components/IdmmControl.structure.test.ts',
+  ]);
+  run('bun', ['run', 'check:i18n']);
+  run('git', ['diff', '--check']);
+}
+
+function writeGateReport(name) {
+  const shaResult = spawnSync('git', ['rev-parse', 'HEAD'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+  });
+  const sourceSha = shaResult.status === 0 ? shaResult.stdout.trim() : 'unknown-source';
+  const reportDir = join(
+    repoRoot,
+    'build.noindex/agent-capability-v2',
+    sourceSha,
+    name
+  );
+  mkdirSync(reportDir, { recursive: true });
+  const report = {
+    schema_version: '1.0.0',
+    gate_name: name,
+    source_sha: sourceSha,
+    evidence_kind: 'informational',
+    status: failures.length === 0 ? 'pass' : 'fail',
+    commands,
+    failures,
+  };
+  writeFileSync(join(reportDir, 'summary.json'), `${JSON.stringify(report, null, 2)}\n`);
+}
+
+function finishGate(name) {
+  if (failures.length > 0) {
+    console.error(`agent-v2 ${name} failed (${failures.length} issue(s))`);
+    for (const failure of failures) {
+      console.error(`- ${failure}`);
+    }
+    process.exit(1);
+  }
+  console.log(`agent-v2 ${name} passed`);
+  process.exit(0);
+}

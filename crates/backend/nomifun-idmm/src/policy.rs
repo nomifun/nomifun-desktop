@@ -333,51 +333,11 @@ impl PolicyState {
         }
     }
 
-    /// Decision-watch handling of a discrete-options / permission decision (D5).
+    /// Decision-watch handling of a discrete-options decision.
     fn on_decision(&mut self, lane: WatchLane, dp: &crate::signal::DecisionPrompt) -> PolicyStep {
         let class = StallClass::Decision;
         let strat = &self.decision_watch.strategy;
         let opt = &strat.categories.option_decision;
-        let perm_rule = &strat.categories.permission;
-
-        // Structured tool-permission decision → resolved via the agent's confirm
-        // channel (WakeAction::Confirm), governed by the `permission` rule.
-        if let Some(perm) = &dp.permission {
-            if perm_rule.mode != CategoryMode::Auto {
-                return PolicyStep::Halt("permission_mode_not_auto".into());
-            }
-            // Rule tier auto-approves ONLY the conservatively-safe case (a
-            // read-only tool's "allow once"); risky writes/execs have no
-            // `safe_value`, so they escalate to the model or halt to a human —
-            // never a blanket auto-approve. `only_safe_value` (default true) is
-            // the safety gate; `escalate_risky` (default true) routes the rest.
-            if perm_rule.only_safe_value
-                && let Some(value) = &perm.safe_value
-            {
-                return PolicyStep::Rule(WakeAction::Confirm {
-                    call_id: perm.call_id.clone(),
-                    value: value.clone(),
-                    always_allow: false,
-                });
-            }
-            return if perm_rule.escalate_risky && self.has_sidecar(lane) {
-                PolicyStep::Sidecar {
-                    class,
-                    detail: format!(
-                        "tool permission: {} | options (label => value): {}",
-                        dp.text,
-                        perm.options
-                            .iter()
-                            .map(|(l, v)| format!("{l} => {v}"))
-                            .collect::<Vec<_>>()
-                            .join(" || ")
-                    ),
-                }
-            } else {
-                PolicyStep::Halt("permission_decision_no_sidecar".into())
-            };
-        }
-
         // Numbered/text option decision. The `option_decision` rule mode gates it.
         if opt.mode != CategoryMode::Auto {
             // AskFirst / Off both stand down to a human this phase (no async ask
@@ -553,16 +513,6 @@ impl PolicyState {
                 if dp.kind == DecisionKind::OpenQuestion {
                     return WakeAction::Stop("open_question_unanswerable_fallback".into());
                 }
-                if let Some(perm) = &dp.permission {
-                    return match &perm.safe_value {
-                        Some(v) => WakeAction::Confirm {
-                            call_id: perm.call_id.clone(),
-                            value: v.clone(),
-                            always_allow: false,
-                        },
-                        None => WakeAction::Stop("permission_unanswerable_fallback".into()),
-                    };
-                }
                 if let Some(rec) = &dp.recommended {
                     return WakeAction::AnswerChoice(rec.clone());
                 }
@@ -598,7 +548,7 @@ fn first_safe_option(options: &[String], allow_destructive: bool) -> Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signal::{DecisionPrompt, DecisionSource, PermissionConfirm};
+    use crate::signal::{DecisionPrompt, DecisionSource};
     use nomifun_api_types::{CategoryMode, IdmmConfig, WatchTier};
 
     // ── Config builders mirroring Phase-1 rule_cfg / sidecar_cfg intent ──
@@ -937,7 +887,6 @@ mod tests {
             recommended: recommended.map(|s| s.to_string()),
             source: DecisionSource::TerminalScan,
             kind: DecisionKind::Options,
-            permission: None,
         })
     }
 
@@ -1045,7 +994,6 @@ mod tests {
             recommended: recommended.map(|s| s.to_string()),
             source: DecisionSource::TextScan,
             kind: DecisionKind::Options,
-            permission: None,
         })
     }
 
@@ -1151,69 +1099,6 @@ mod tests {
         ));
     }
 
-    // ── Structured tool-permission decisions (safety gate) ──
-
-    fn permission_decision(call_id: &str, safe: bool) -> SessionSignal {
-        SessionSignal::Decision(DecisionPrompt {
-            text: "tool permission".into(),
-            options: vec!["Allow once".into(), "Reject".into()],
-            recommended: None,
-            source: DecisionSource::Permission,
-            kind: DecisionKind::Options,
-            permission: Some(PermissionConfirm {
-                call_id: call_id.into(),
-                options: vec![
-                    ("Allow once".into(), "proceed_once".into()),
-                    ("Reject".into(), "cancel".into()),
-                ],
-                safe_value: if safe { Some("proceed_once".into()) } else { None },
-            }),
-        })
-    }
-
-    #[test]
-    fn permission_safe_rule_tier_auto_confirms() {
-        let mut p = PolicyState::new(rule_cfg());
-        assert_eq!(
-            p.on_stall(Instant::now(), &permission_decision("call-1", true)),
-            PolicyStep::Rule(WakeAction::Confirm {
-                call_id: "call-1".into(),
-                value: "proceed_once".into(),
-                always_allow: false,
-            })
-        );
-    }
-
-    #[test]
-    fn permission_risky_rule_only_halts() {
-        let mut p = PolicyState::new(rule_cfg());
-        assert_eq!(
-            p.on_stall(Instant::now(), &permission_decision("call-1", false)),
-            PolicyStep::Halt("permission_decision_no_sidecar".into())
-        );
-    }
-
-    #[test]
-    fn permission_risky_with_sidecar_escalates() {
-        let mut p = PolicyState::new(sidecar_cfg());
-        assert!(matches!(
-            p.on_stall(Instant::now(), &permission_decision("call-1", false)),
-            PolicyStep::Sidecar { .. }
-        ));
-    }
-
-    #[test]
-    fn conservative_fallback_permission_safe_confirms() {
-        assert_eq!(
-            PolicyState::conservative_fallback(&permission_decision("call-9", true)),
-            WakeAction::Confirm {
-                call_id: "call-9".into(),
-                value: "proceed_once".into(),
-                always_allow: false,
-            }
-        );
-    }
-
     #[test]
     fn conservative_fallback_decision_never_retries() {
         assert_eq!(
@@ -1235,7 +1120,6 @@ mod tests {
             recommended: None,
             source: DecisionSource::TextScan,
             kind: DecisionKind::OpenQuestion,
-            permission: None,
         })
     }
 

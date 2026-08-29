@@ -14,7 +14,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 use crate::deps::{CallerCtx, GatewayDeps};
-use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
 // 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋?Params 闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾闁冲厜鍋撻柍鍏夊亾
@@ -396,7 +396,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_terminal_get",
             "terminal",
             "Get a single terminal session's detail and current status (running/exited, exit code, dimensions, etc.).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, ctx, p| get_terminal(deps, ctx, p),
     ));
@@ -405,9 +405,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_terminal_write_input",
             "terminal",
             "Write base64-encoded bytes/keystrokes to a terminal's PTY stdin. Powerful: can execute arbitrary commands in the running shell. For sending a command/prompt to run, prefer nomi_terminal_send (handles Enter + agent-CLI paste); use this for raw control bytes like Ctrl-C.",
-            DangerTier::Write,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Write,
+        ),
         |deps, ctx, p| write_input(deps, ctx, p),
     ));
     out.push(Capability::new::<SubmitTerminalParams, _, _>(
@@ -415,9 +414,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_terminal_send",
             "terminal",
             "Type text/a command into a terminal and RUN it (plain text, no base64, no manual newline 闁?Enter and the agent-CLI paste sequence are handled). Optional wait=true returns settle_reason + output_tail. Preferred over nomi_terminal_write_input for sending commands.",
-            DangerTier::Write,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Write,
+        ),
         |deps, ctx, p| submit_terminal(deps, ctx, p),
     ));
     out.push(Capability::new::<ReadTerminalOutputParams, _, _>(
@@ -425,7 +423,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_terminal_read_output",
             "terminal",
             "Read a terminal's recent output (ANSI-stripped scrollback tail) to see a command's result or diagnose. The terminal analogue of nomi_conversation_status.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         // Intentionally no Channel deny: this is a read-only status/output view
         // and follows the registry's default Read policy, unlike send/write and
@@ -437,9 +435,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_terminal_kill",
             "terminal",
             "Send SIGKILL to terminate the terminal's running process. The session remains (status becomes 'exited'); use relaunch to restart or delete to remove entirely.",
-            DangerTier::Destructive,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Destructive,
+        ),
         |deps, ctx, p| kill_terminal(deps, ctx, p),
     ));
     out.push(Capability::new::<DeleteTerminalParams, _, _>(
@@ -447,9 +444,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_terminal_delete",
             "terminal",
             "Permanently delete a terminal session (kills the process if running, removes the row and all associated data).",
-            DangerTier::Destructive,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Destructive,
+        ),
         |deps, ctx, p| delete_terminal(deps, ctx, p),
     ));
     out.push(Capability::new::<ResizeTerminalParams, _, _>(
@@ -457,7 +453,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_terminal_resize",
             "terminal",
             "Resize a terminal's PTY to the given cols x rows (triggers deferred spawn if the session was created with defer_spawn).",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, ctx, p| resize_terminal(deps, ctx, p),
     ));
@@ -466,9 +462,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_terminal_relaunch",
             "terminal",
             "Relaunch a terminal's process in place: kills the old child and spawns a fresh one reusing the same terminal_id, command, and cwd.",
-            DangerTier::Write,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Write,
+        ),
         |deps, ctx, p| relaunch_terminal(deps, ctx, p),
     ));
     out.push(Capability::new::<UpdateTerminalParams, _, _>(
@@ -476,7 +471,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_terminal_update",
             "terminal",
             "Update a terminal session's metadata: rename it and/or pin/unpin it.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, ctx, p| update_terminal(deps, ctx, p),
     ));
@@ -549,14 +544,14 @@ mod tests {
     }
 
     #[test]
-    fn send_and_read_are_registered_and_desktop_visible_but_channel_denied() {
+    fn send_and_read_are_registered_on_every_transport_surface() {
         use crate::registry::Registry;
         let reg = Registry::global();
         for name in ["nomi_terminal_send", "nomi_terminal_read_output"] {
             assert!(reg.contains(name));
             assert!(reg.tool_visible(crate::registry::Surface::Desktop, name));
+            assert!(reg.tool_visible(crate::registry::Surface::Channel, name));
+            assert!(reg.tool_visible(crate::registry::Surface::Remote, name));
         }
-        assert!(!reg.tool_visible(crate::registry::Surface::Channel, "nomi_terminal_send"));
-        assert!(reg.tool_visible(crate::registry::Surface::Channel, "nomi_terminal_read_output"));
     }
 }

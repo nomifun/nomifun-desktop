@@ -60,10 +60,7 @@
     "allowUnmarkedPick": "Auto-pick unmarked options",
     "neverDestructive": "Never pick destructive",
     "openQuestion": "Open questions",
-    "maxAnswerChars": "Max answer chars",
-    "permission": "Permission prompts",
-    "onlySafeValue": "Only confirm read-only",
-    "escalateRisky": "Escalate risky to model"
+    "maxAnswerChars": "Max answer chars"
   },
   "sessionBackupHint": "Leave empty to prefer the global default backup provider (Settings → Intelligent Decision-Making), then fall back to this session's own model. Pick a complete provider and model here before turning the watch on; after it is on, turn it off before editing.",
   "backupRequired": "Backup-model mode needs a usable model: pick one here, set a global default in Settings → Intelligent Decision-Making, or enable it on a session that already has a model (its model is reused automatically).",
@@ -108,14 +105,12 @@
     "categoryValue": {
       "option": "Option",
       "open_question": "Open question",
-      "permission": "Permission",
       "fault": "Fault"
     },
     "actionValue": {
       "retry": "Retry",
       "answer_choice": "Pick option",
       "send_text": "Send reply",
-      "confirm": "Confirm",
       "wait": "Wait",
       "stop": "Stop"
     },

@@ -32,7 +32,6 @@ const finishedSnapshot = {
     has_runtime: false,
     runtime_status: 'finished',
     is_processing: false,
-    pending_confirmations: 0,
   },
 } as TChatConversation;
 

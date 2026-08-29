@@ -1,7 +1,7 @@
 //! E2E integration tests with mock Agent runtimes.
 //!
-//! Tests the message flow, confirmation system, and auxiliary routes
-//! with a mock AgentRuntimeRegistry that provides in-memory agents.
+//! Tests the message flow and auxiliary routes with a mock
+//! AgentRuntimeRegistry that provides in-memory agents.
 
 mod common;
 
@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::http::StatusCode;
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::sync::broadcast;
 use tower::ServiceExt;
 
@@ -18,11 +18,10 @@ use nomifun_ai_agent::runtime_handle::{AgentRuntimeHandle, AgentRuntimeControl, 
 use nomifun_ai_agent::protocol::events::TextEventData;
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
 use nomifun_ai_agent::{AgentStreamEvent, AgentRuntimeRegistry};
-use nomifun_common::{AgentKillReason, AgentType, AppError, Confirmation, ConversationStatus, TimestampMs, now_ms};
+use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationStatus, TimestampMs, now_ms};
 
 use common::{body_json, get_with_token, json_with_token, setup_and_login};
 
-const MESSAGE_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
 const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679987";
 const MODEL: &str = "mock-agent-model";
 
@@ -32,8 +31,6 @@ struct MockAgent {
     conversation_id: String,
     workspace: String,
     event_tx: broadcast::Sender<AgentStreamEvent>,
-    confirmations: Mutex<Vec<Confirmation>>,
-    approvals: Mutex<std::collections::HashMap<String, bool>>,
     last_activity: AtomicI64,
 }
 
@@ -44,8 +41,6 @@ impl MockAgent {
             conversation_id: conversation_id.to_owned(),
             workspace: workspace.to_owned(),
             event_tx,
-            confirmations: Mutex::new(vec![]),
-            approvals: Mutex::new(std::collections::HashMap::new()),
             last_activity: AtomicI64::new(now_ms()),
         }
     }
@@ -103,24 +98,7 @@ impl AgentRuntimeControl for MockAgent {
 }
 
 #[async_trait]
-impl MockAgentRuntime for MockAgent {
-    fn get_confirmations(&self) -> Vec<Confirmation> {
-        self.confirmations.lock().unwrap().clone()
-    }
-
-    fn check_approval(&self, action: &str, _command_type: Option<&str>) -> bool {
-        self.approvals.lock().unwrap().get(action).copied().unwrap_or(false)
-    }
-
-    fn confirm(&self, _msg_id: &str, call_id: &str, _data: Value, always_allow: bool) -> Result<(), AppError> {
-        let mut confs = self.confirmations.lock().unwrap();
-        confs.retain(|c| c.call_id != call_id);
-        if always_allow {
-            self.approvals.lock().unwrap().insert("test_action".to_owned(), true);
-        }
-        Ok(())
-    }
-}
+impl MockAgentRuntime for MockAgent {}
 
 // ── Mock Agent Runtime Registry ────────────────────────────────────
 
@@ -319,87 +297,6 @@ async fn warmup_with_mock_agent() {
     let status = resp.status();
     let json = body_json(resp).await;
     assert_eq!(status, StatusCode::OK, "warmup failed: {json}");
-}
-
-// ── Confirmation system with mock agent ─────────────────────────
-
-#[tokio::test]
-async fn list_confirmations_empty() {
-    let (mut app, services, runtime_registry) = build_app_with_mock_runtime_registry().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Confirm Test").await;
-    runtime_registry.insert(&conv_id, "/mock-workspace");
-
-    let req = get_with_token(&format!("/api/conversations/{conv_id}/confirmations"), &token);
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert!(json["data"].as_array().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn confirm_and_check_approval() {
-    let (mut app, services, runtime_registry) = build_app_with_mock_runtime_registry().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Approval Test").await;
-    let agent = runtime_registry.insert(&conv_id, "/mock-workspace");
-
-    // Pre-populate a pending confirmation so the confirm endpoint can find it
-    agent.confirmations.lock().unwrap().push(Confirmation {
-        id: "conf-1".into(),
-        call_id: "call-42".into(),
-        title: Some("Allow file edit".into()),
-        action: Some("test_action".into()),
-        description: String::new(),
-        command_type: None,
-        options: vec![],
-        screenshot: None,
-    });
-
-    // Confirm a call with alwaysAllow=true
-    let req = json_with_token(
-        "POST",
-        &format!("/api/conversations/{conv_id}/confirmations/call-42/confirm"),
-        json!({ "msg_id": MESSAGE_ID, "data": { "value": "allow" }, "always_allow": true }),
-        &token,
-        &csrf,
-    );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let status = resp.status();
-    let json = body_json(resp).await;
-    assert_eq!(status, StatusCode::OK, "confirm failed: {json}");
-
-    // Check approval — should be approved for "test_action"
-    let req = get_with_token(
-        &format!("/api/conversations/{conv_id}/approvals/check?action=test_action"),
-        &token,
-    );
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["success"], true);
-    assert_eq!(json["data"]["approved"], true);
-}
-
-#[tokio::test]
-async fn check_approval_not_set() {
-    let (mut app, services, runtime_registry) = build_app_with_mock_runtime_registry().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
-    let conv_id = create_conversation(&mut app, &token, &csrf, "Approval NotSet").await;
-    runtime_registry.insert(&conv_id, "/mock-workspace");
-
-    let req = get_with_token(
-        &format!("/api/conversations/{conv_id}/approvals/check?action=unknown_action"),
-        &token,
-    );
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let json = body_json(resp).await;
-    assert_eq!(json["data"]["approved"], false);
 }
 
 // ── Auxiliary routes with mock agent ────────────────────────────

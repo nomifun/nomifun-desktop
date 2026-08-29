@@ -247,12 +247,9 @@ async fn run_supervisor_for_owner(
     let mut rx = probe.observe(idle);
     let mut policy = PolicyState::with_kind(cfg.clone(), kind);
 
-    // On-arm recovery is restricted to CURRENT live decision authority: for a
-    // conversation, a structured confirmation still present in the active
-    // runtime; for a terminal, a prompt still visible in the live PTY. Finished
-    // conversation text is never replayed. Evaluate that live decision once,
-    // gated on the decision watch; resolving it clears the underlying pending
-    // confirmation/prompt so a later re-arm cannot re-fire it.
+    // A target may expose a current option/open-question decision that became live
+    // before the event subscription. Revalidate the exact turn scope before
+    // applying it; completed conversation text is never replayed.
     if cfg.decision_watch.base.enabled && !cancel.load(Ordering::SeqCst) {
         if let Some(sig) = probe.pending_signal().await {
             if let Err(reason) = revalidate_action_scope(&probe, &observed_scope).await {
@@ -342,12 +339,8 @@ async fn run_supervisor_for_owner(
             _ => {}
         }
 
-        // Mid-turn-arm recovery: an Idle can mean the agent is blocked on a live
-        // structured confirmation emitted before `observe()` subscribed (or a
-        // terminal is still showing a live prompt). Re-check that current live
-        // authority before using a generic nudge. A clean Done remains absorbing:
-        // even a recovered signal is stopped by `peek_standby` until fresh
-        // Working proves a new turn.
+        // A terminal or other non-conversation target may surface a current
+        // option/open-question decision after the observer was armed.
         if matches!(sig, SessionSignal::Idle)
             && cfg.decision_watch.base.enabled
             && let Some(recovered) = probe.pending_signal().await
@@ -621,7 +614,7 @@ async fn run_sidecar(
     // configured (so "全托管" needs zero extra setup on a plain chat).
     let fallback = probe.fallback_model().await;
     // D6: an open question takes the free-text answer prompt; everything else the
-    // option/permission/fault prompt.
+    // option/fault prompt.
     let open_question = match sig {
         SessionSignal::Decision(dp) if dp.kind == DecisionKind::OpenQuestion => Some(OpenQuestionAsk {
             question: &dp.text,
@@ -656,7 +649,7 @@ async fn run_sidecar(
 
     if outcome.provider_failed || outcome.decision.is_none() {
         // Conservative rule fallback. For a Decision this answers a safe option
-        // / confirms a safe permission / stops — never injects "continue".
+        // / answers a safe option / stops — never injects "continue".
         let fb = PolicyState::conservative_fallback(sig);
         let reason = if outcome.provider_failed {
             "sidecar_provider_unavailable"
@@ -702,9 +695,6 @@ async fn run_sidecar(
     let dec = outcome.decision.unwrap();
     match policy.on_sidecar(&dec) {
         SidecarStep::Apply(action) => {
-            // A permission decision is resolved via confirm, so a model
-            // answer_choice/send_text must be remapped to a structured Confirm.
-            let action = finalize_action(sig, action);
             let application = apply_action(
                 probe,
                 deps,
@@ -1091,39 +1081,6 @@ async fn emit_action_application(
     }
 }
 
-/// Translate a sidecar-chosen action against the stall it answers. A
-/// tool-permission decision is resolved via the agent's confirm channel, so a
-/// model `answer_choice`/`send_text` must become a structured `Confirm` (matched
-/// to an option's submit-value, falling back to the safe value, else `Stop` —
-/// never an unresolved chat reply). Non-permission stalls pass through.
-fn finalize_action(sig: &SessionSignal, action: WakeAction) -> WakeAction {
-    let SessionSignal::Decision(dp) = sig else {
-        return action;
-    };
-    let Some(perm) = &dp.permission else {
-        return action;
-    };
-    match action {
-        WakeAction::AnswerChoice(text) | WakeAction::SendText(text) => {
-            let value = perm
-                .options
-                .iter()
-                .find(|(label, val)| val == &text || label == &text)
-                .map(|(_, val)| val.clone())
-                .or_else(|| perm.safe_value.clone());
-            match value {
-                Some(v) => WakeAction::Confirm {
-                    call_id: perm.call_id.clone(),
-                    value: v,
-                    always_allow: false,
-                },
-                None => WakeAction::Stop("sidecar_permission_unmatched".into()),
-            }
-        }
-        other => other,
-    }
-}
-
 fn set_intervening(
     shared: &Arc<SupervisorShared>,
     deps: &Arc<LoopDeps>,
@@ -1152,7 +1109,7 @@ struct EmitExtra {
     /// Durable reservation UUID for a Conversation action. Non-mutating and
     /// terminal actions mint a normal audit UUID at insertion time.
     intervention_id: Option<String>,
-    /// "option" | "open_question" | "permission" | "fault" — the decision
+    /// "option" | "open_question" | "fault" — the decision
     /// category, when the stall was a decision.
     category: Option<String>,
     /// What was chosen / answered (option text, free-text reply). Truncated.
@@ -1236,19 +1193,13 @@ fn canonical_action_identity(sig: &SessionSignal, action: &WakeAction) -> String
         SessionSignal::Decision(prompt) => {
             identity_field(&mut hasher, "signal", "decision");
             identity_field(&mut hasher, "kind", &format!("{:?}", prompt.kind));
-            if let Some(permission) = &prompt.permission {
-                // The call id is the backend's stable identity across the live
-                // event and on-arm pending-confirmation recovery paths.
-                identity_field(&mut hasher, "permission_call_id", &permission.call_id);
-            } else {
-                identity_field(
-                    &mut hasher,
-                    "prompt",
-                    &prompt.text.split_whitespace().collect::<Vec<_>>().join(" "),
-                );
-                for option in &prompt.options {
-                    identity_field(&mut hasher, "option", option);
-                }
+            identity_field(
+                &mut hasher,
+                "prompt",
+                &prompt.text.split_whitespace().collect::<Vec<_>>().join(" "),
+            );
+            for option in &prompt.options {
+                identity_field(&mut hasher, "option", option);
             }
         }
         SessionSignal::Done => identity_field(&mut hasher, "signal", "done"),
@@ -1264,16 +1215,6 @@ fn canonical_action_identity(sig: &SessionSignal, action: &WakeAction) -> String
         WakeAction::AnswerChoice(text) => {
             identity_field(&mut hasher, "action", "answer_choice");
             identity_field(&mut hasher, "text", text);
-        }
-        WakeAction::Confirm {
-            call_id,
-            value,
-            always_allow,
-        } => {
-            identity_field(&mut hasher, "action", "confirm");
-            identity_field(&mut hasher, "call_id", call_id);
-            identity_field(&mut hasher, "value", value);
-            identity_field(&mut hasher, "always_allow", &always_allow.to_string());
         }
         WakeAction::Failover => identity_field(&mut hasher, "action", "failover"),
         WakeAction::Wait(delay) => {
@@ -1300,14 +1241,12 @@ fn canonical_action_identity(sig: &SessionSignal, action: &WakeAction) -> String
 fn rule_detail(action: &WakeAction) -> Option<String> {
     match action {
         WakeAction::AnswerChoice(t) | WakeAction::SendText(t) => Some(t.clone()),
-        WakeAction::Confirm { value, .. } => Some(value.clone()),
         _ => None,
     }
 }
 
 /// Category of a rule/decision-tier decision (only set when the stall is a
-/// decision): an open-ended question, a structured tool permission, or a
-/// numbered/text option prompt.
+/// decision): an open-ended question or a numbered/text option prompt.
 fn rule_category(sig: &SessionSignal) -> Option<String> {
     let SessionSignal::Decision(dp) = sig else {
         return None;
@@ -1315,8 +1254,6 @@ fn rule_category(sig: &SessionSignal) -> Option<String> {
     Some(
         if dp.kind == DecisionKind::OpenQuestion {
             "open_question"
-        } else if dp.permission.is_some() {
-            "permission"
         } else {
             "option"
         }
@@ -1815,9 +1752,7 @@ mod tests {
     use super::*;
     use crate::probe::{SessionDescription, SessionProbe};
     use crate::sidecar::{Completer, SidecarClient};
-    use crate::signal::{
-        DecisionKind, DecisionPrompt, DecisionSource, PermissionConfirm, WakeAction,
-    };
+    use crate::signal::{DecisionKind, DecisionPrompt, DecisionSource, WakeAction};
     use async_trait::async_trait;
     use nomifun_api_types::{IdmmConfig, WatchTier};
     use nomifun_db::DbError;
@@ -1860,51 +1795,6 @@ mod tests {
                 &WakeAction::SendText("Please continue.".into())
             ),
             "the final action is part of durable idempotency"
-        );
-    }
-
-    #[test]
-    fn action_identity_uses_structured_permission_call_identity() {
-        let decision = |call_id: &str, text: &str| {
-            SessionSignal::Decision(DecisionPrompt {
-                text: text.into(),
-                options: vec!["Allow once".into(), "Reject".into()],
-                recommended: None,
-                source: DecisionSource::Permission,
-                kind: DecisionKind::Options,
-                permission: Some(PermissionConfirm {
-                    call_id: call_id.into(),
-                    options: vec![
-                        ("Allow once".into(), "proceed_once".into()),
-                        ("Reject".into(), "cancel".into()),
-                    ],
-                    safe_value: Some("proceed_once".into()),
-                }),
-            })
-        };
-        let action = WakeAction::Confirm {
-            call_id: "call-1".into(),
-            value: "proceed_once".into(),
-            always_allow: false,
-        };
-        assert_eq!(
-            canonical_action_identity(&decision("call-1", "Allow read?"), &action),
-            canonical_action_identity(
-                &decision("call-1", "Localized display text changed"),
-                &action
-            ),
-            "live and recovered forms of the same confirmation must dedupe"
-        );
-        assert_ne!(
-            canonical_action_identity(&decision("call-1", "Allow read?"), &action),
-            canonical_action_identity(
-                &decision("call-2", "Allow read?"),
-                &WakeAction::Confirm {
-                    call_id: "call-2".into(),
-                    value: "proceed_once".into(),
-                    always_allow: false,
-                }
-            )
         );
     }
 
@@ -2574,9 +2464,8 @@ mod tests {
             text: "Choose one".into(),
             options: vec!["A".into(), "B".into()],
             recommended: Some("A".into()),
-            source: DecisionSource::Permission,
+            source: DecisionSource::TextScan,
             kind: DecisionKind::Options,
-            permission: None,
         });
         let (probe, tx, injected, revalidation_entered, release_revalidation) =
             ScopeBarrierProbe::new(Some(pending));
@@ -2624,9 +2513,8 @@ mod tests {
             text: "Choose one".into(),
             options: vec!["A".into(), "B".into()],
             recommended: Some("A".into()),
-            source: DecisionSource::Permission,
+            source: DecisionSource::TextScan,
             kind: DecisionKind::Options,
-            permission: None,
         });
 
         for old_signal in [provider_err(), old_decision] {
@@ -2787,7 +2675,6 @@ mod tests {
             recommended: Some("1) 方案A".into()),
             source: DecisionSource::TextScan,
             kind: DecisionKind::Options,
-            permission: None,
         });
         let (probe, injected) = MockProbe::new(vec![SessionSignal::Working, SessionSignal::Idle]);
         let probe = probe.with_pending_seq(vec![None, Some(decision)]);
@@ -2838,7 +2725,6 @@ mod tests {
             recommended: Some("1) A".into()),
             source: DecisionSource::TextScan,
             kind: DecisionKind::Options,
-            permission: None,
         });
         let (probe, injected) =
             MockProbe::new(vec![SessionSignal::Working, SessionSignal::Done, SessionSignal::Idle]);
@@ -2914,11 +2800,6 @@ mod tests {
             WakeAction::Retry,
             WakeAction::SendText("continue".into()),
             WakeAction::AnswerChoice("1".into()),
-            WakeAction::Confirm {
-                call_id: "call-1".into(),
-                value: "allow".into(),
-                always_allow: false,
-            },
         ] {
             let result = apply_action(
                 &probe,
@@ -3084,7 +2965,6 @@ mod tests {
             recommended: None,
             source: DecisionSource::TextScan,
             kind: DecisionKind::Options,
-            permission: None,
         })
     }
 

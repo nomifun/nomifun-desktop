@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use nomi_providers::{LlmProvider, ProviderError};
 use nomi_tools::registry::ToolRegistry;
@@ -6,7 +6,6 @@ use nomi_types::llm::{LlmEvent, LlmRequest};
 use nomi_types::message::{ContentBlock, Message, Role};
 
 use crate::compact::state::CompactState;
-use crate::confirm::ToolConfirmer;
 use crate::output::null_sink::NullSink;
 
 struct NullProvider;
@@ -35,15 +34,12 @@ fn make_engine() -> super::AgentEngine {
         total_usage: Default::default(),
         thinking: None,
         compat: nomi_config::compat::ProviderCompat::anthropic_defaults(),
-        confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
         hooks: None,
         session_manager: None,
         current_session: None,
         output: Arc::new(NullSink),
         current_msg_id: String::new(),
-        approval_manager: None,
         protocol_writer: None,
-        allow_list: vec![],
         current_reasoning_effort: None,
         compact_config: nomi_config::compact::CompactConfig::default(),
         compact_state: CompactState::new(),

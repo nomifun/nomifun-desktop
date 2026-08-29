@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 
 use crate::deps::GatewayDeps;
 use crate::id_schema::ModelRefParam;
-use crate::registry::{Capability, CapabilityMeta, DangerTier};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
 // ── param structs (single source: schema + runtime) ──────────────────────
@@ -134,7 +134,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_agent_list",
             "agent",
             "List all installed agent backends with their availability status, type, and configuration.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| agent_list(deps, p),
     ));
@@ -145,7 +145,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_agent_provider_health_check",
             "agent",
             "Test model reachability through a specific provider (verify API key, model availability, latency).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| agent_provider_health_check(deps, p),
     ));
@@ -158,7 +158,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_model_failover_get",
             "agent",
             "Read the global model-failover configuration (enabled flag, ordered queue of fallback provider+model pairs, max switches).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| model_failover_get(deps, p),
     ));
@@ -169,7 +169,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_model_failover_set",
             "agent",
             "Set the global model-failover configuration. Controls automatic fallback to alternative models when the primary provider fails.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| model_failover_set(deps, p),
     ));

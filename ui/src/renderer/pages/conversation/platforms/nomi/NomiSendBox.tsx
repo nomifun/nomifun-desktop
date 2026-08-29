@@ -8,7 +8,6 @@ import { conversationTarget, type ConversationId, type MessageId } from '@/commo
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { ipcBridge } from '@/common';
 import { uuid, uuidv7 } from '@/common/utils';
-import AgentModeSelector from '@/renderer/components/agent/AgentModeSelector';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
 import MobileActionSheet, {
   type MobileActionSheetEntry,
@@ -35,7 +34,6 @@ import {
   useRemoveMessageByMsgId,
   useRemoveMessagesByLocalIds,
 } from '@/renderer/pages/conversation/Messages/hooks';
-import { savePreferredMode } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
 import {
   shouldEnqueueConversationCommand,
   useConversationCommandQueue,
@@ -60,17 +58,12 @@ import {
 } from '@/renderer/pages/conversation/platforms/useConversationStopAttemptGuard';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import { getConversationRuntimeWorkspaceErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
-import {
-  warmupConversation,
-  warmupConversationForPassiveMount,
-} from '@/renderer/pages/conversation/utils/warmupConversation';
+import { warmupConversationForPassiveMount } from '@/renderer/pages/conversation/utils/warmupConversation';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
 import { allSupportedExts } from '@/renderer/services/FileService';
-import { iconColors } from '@/renderer/styles/colors';
 import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
 import { mergeFileSelectionItems } from '@/renderer/utils/file/fileSelection';
 import { buildDisplayMessage, collectSelectedFiles } from '@/renderer/utils/file/messageFiles';
-import type { AgentModeOption } from '@/renderer/utils/model/agentModes';
 import { Message, Tag } from '@arco-design/web-react';
 import { Brain, MagicHat, Shield } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -129,37 +122,28 @@ const useSendBoxDraft = (conversation_id: ConversationId) => {
 const NomiSendBox: React.FC<{
   conversation_id: ConversationId;
   modelSelection: NomiModelSelection;
-  session_mode?: string;
   agent_name?: string;
-  dynamicModes: AgentModeOption[];
   turnActivity: NomiMessageRuntime;
-  /**
-   * Hide the permission/agent-mode selector (and the mobile action-sheet
-   * model + permission entries). Used by locked surfaces like the desktop
-   * companion chat, which runs in a fixed yolo mode with a locked model.
-   */
-  hideModeSelector?: boolean;
+  /** Hide model and other editable controls on locked surfaces. */
+  hideAdvancedControls?: boolean;
   /** Conversation collaborator-model control, rendered after the main model. */
   collaboratorSelectorNode?: React.ReactNode;
   /**
-   * Extra node(s) rendered in the right-tools group, after the collaborator
-   * selector and before the permission selector. A projected task uses this to
-   * surface its task-requirement control inside the participant conversation.
+   * Extra node(s) rendered in the right-tools group after the collaborator
+   * selector. A projected task uses this to surface its task-requirement
+   * control inside the participant conversation.
    */
   extraRightTools?: React.ReactNode;
 }> = ({
   conversation_id,
   modelSelection,
-  session_mode,
   agent_name,
-  dynamicModes,
   turnActivity,
-  hideModeSelector,
+  hideAdvancedControls,
   collaboratorSelectorNode,
   extraRightTools,
 }) => {
   const [workspacePath, setWorkspacePath] = useState('');
-  const [currentMode, setCurrentMode] = useState<string | undefined>(session_mode);
   const [isMobileSheetOpen, setIsMobileSheetOpen] = useState(false);
   const layout = useLayoutContext();
   const isMobile = Boolean(layout?.isMobile);
@@ -235,13 +219,6 @@ const NomiSendBox: React.FC<{
   );
 
   const [agentWarmed, setAgentWarmed] = useState(false);
-  const prepareRuntimeSync = useCallback(async () => {
-    await warmupConversation(conversation_id);
-  }, [conversation_id]);
-  const prepareRuntimeForRead = useCallback(async () => {
-    await warmupConversationForPassiveMount(conversation_id);
-  }, [conversation_id]);
-
   useEffect(() => {
     void getConversationOrNull(conversation_id).then((res) => {
       if (!res?.extra?.workspace) return;
@@ -708,44 +685,6 @@ const NomiSendBox: React.FC<{
     dividerBefore: true,
   });
 
-  // Mode switching for the mobile action sheet — mirrors AgentModeSelector's
-  // setMode call so the bottom-sheet path stays in lockstep with the desktop dropdown.
-  const handleSheetModeChange = useCallback(
-    async (mode: string) => {
-      if (mode === currentMode) return;
-      try {
-        await prepareRuntimeSync();
-        await ipcBridge.agentConversation.setMode.invoke({ conversation_id, mode });
-        setCurrentMode(mode);
-        void savePreferredMode('nomi', mode);
-        Message.success(t('agentMode.switchSuccess'));
-      } catch (error) {
-        console.error('[NomiSendBox] Failed to switch mode via sheet:', error);
-        Message.error(t('agentMode.switchFailed'));
-      }
-    },
-    [conversation_id, currentMode, prepareRuntimeSync, t]
-  );
-
-  // Sync currentMode from backend when the sheet first opens / conversation switches
-  useEffect(() => {
-    if (!isMobile || !isMobileSheetOpen) return;
-    if (!conversation_id) return;
-    let cancelled = false;
-    void prepareRuntimeSync()
-      .then(() => ipcBridge.agentConversation.getMode.invoke({ conversation_id }))
-      .then((result) => {
-        if (cancelled || !result) return;
-        if (result.initialized !== false) {
-          setCurrentMode(result.mode);
-        }
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [conversation_id, isMobile, isMobileSheetOpen, prepareRuntimeSync]);
-
   const handleSheetModelSelect = useCallback(
     (value: string) => {
       // value format: `${providerId}::${modelName}`
@@ -760,21 +699,6 @@ const NomiSendBox: React.FC<{
   const sheetEntries = useMemo<MobileActionSheetEntry[]>(() => {
     if (!isMobile) return [];
 
-    const availableModes: AgentModeOption[] =
-      dynamicModes.length > 0
-        ? dynamicModes
-        : [
-            { value: 'default', label: 'Default' },
-            { value: 'auto_edit', label: 'Auto-Accept Edits' },
-            { value: 'yolo', label: 'YOLO' },
-          ];
-    const modeOptions: MobileActionSheetOption[] = availableModes.map((mode) => ({
-      key: mode.value,
-      label: t(`agentMode.${mode.value}`, { defaultValue: mode.label }),
-      description: mode.description,
-      active: currentMode === mode.value,
-    }));
-
     const modelOptions: MobileActionSheetOption[] = modelSelection.providers.flatMap((provider) =>
       modelSelection.getAvailableModels(provider).map((modelName) => ({
         key: `${provider.id}::${modelName}`,
@@ -785,14 +709,11 @@ const NomiSendBox: React.FC<{
       }))
     );
 
-    const currentModeLabel =
-      modeOptions.find((opt) => opt.active)?.label ?? t('agentMode.default', { defaultValue: 'Default' });
     const currentModelLabel = modelSelection.current_model?.use_model || t('conversation.welcome.selectModel');
 
     const entries: MobileActionSheetEntry[] = [
-      // Locked surfaces (companion) hide the model + permission entries: model is
-      // pinned to the companion profile and permission is fixed to yolo.
-      ...(hideModeSelector
+      // Locked surfaces keep their model pinned to the owning profile.
+      ...(hideAdvancedControls
         ? []
         : [
             {
@@ -805,17 +726,6 @@ const NomiSendBox: React.FC<{
                 options: modelOptions,
                 onSelect: handleSheetModelSelect,
                 emptyText: t('conversation.welcome.selectModel'),
-              },
-            },
-            {
-              key: 'permission',
-              icon: <Shield theme='outline' size='16' />,
-              label: t('agentMode.permission', { defaultValue: 'Permission' }),
-              meta: currentModeLabel,
-              submenu: {
-                title: t('agentMode.permission', { defaultValue: 'Permission' }),
-                options: modeOptions,
-                onSelect: (key: string) => void handleSheetModeChange(key),
               },
             },
           ]),
@@ -871,11 +781,8 @@ const NomiSendBox: React.FC<{
     return entries;
   }, [
     attachEntries,
-    currentMode,
-    dynamicModes,
-    handleSheetModeChange,
     handleSheetModelSelect,
-    hideModeSelector,
+    hideAdvancedControls,
     isMobile,
     loadedMcpStatuses,
     loadedSkills,
@@ -1013,7 +920,7 @@ const NomiSendBox: React.FC<{
           />
         }
         rightTools={
-          hideModeSelector ? undefined : (
+          hideAdvancedControls ? undefined : (
             <div
               className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0'
               data-testid='nomi-sendbox-config-group'
@@ -1028,24 +935,10 @@ const NomiSendBox: React.FC<{
                 />
               )}
               <NomiModelSelector selection={modelSelection} className='nomi-sendbox-model-btn' />
-              {/* 召唤伙伴（设计 B5）：仅普通工作会话可见 —— 伙伴/客服等锁定面
-                  通过 hideModeSelector 隐藏整个配置组，天然不渲染。 */}
+              {/* 召唤伙伴仅在普通工作会话显示；锁定面隐藏整个编辑组。 */}
               <SummonControl conversationId={conversation_id} />
               {collaboratorSelectorNode}
               {extraRightTools}
-              <AgentModeSelector
-                backend='nomi'
-                conversation_id={conversation_id}
-                compact
-                initialMode={session_mode}
-                dynamicModes={dynamicModes}
-                compactLeadingIcon={<Shield theme='outline' size='14' fill={iconColors.secondary} />}
-                modeLabelFormatter={(mode) => t(`agentMode.${mode.value}`, { defaultValue: mode.label })}
-                compactLabelPrefix={t('agentMode.permission')}
-                hideCompactLabelPrefixOnMobile
-                beforeRuntimeSync={prepareRuntimeForRead}
-                beforeRuntimeMutation={prepareRuntimeSync}
-              />
             </div>
           )
         }

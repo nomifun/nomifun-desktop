@@ -33,8 +33,6 @@ fn anthropic_config(api_key: &str) -> Config {
         prompt_caching: false,
         compat: ProviderCompat::anthropic_defaults(),
         tools: ToolsConfig {
-            auto_approve: true,
-            allow_list: vec![],
             ..ToolsConfig::default()
         },
         session: SessionConfig {

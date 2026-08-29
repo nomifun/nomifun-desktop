@@ -27,8 +27,8 @@ use nomifun_common::{
     AgentExecutionTemplateId, AgentId, AppError, ConversationId, DecisionPolicy, EntityId,
     ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus, MAX_AGENT_EXECUTION_MODELS,
     MAX_AGENT_EXECUTION_PARALLELISM, MAX_AGENT_EXECUTION_PARTICIPANTS,
-    MAX_AGENT_EXECUTION_STEPS, NOMI_AGENT_ID, ParticipantAssignmentSource, PlanGate,
-    ProviderId, generate_id, now_ms,
+    MAX_AGENT_EXECUTION_STEPS, NOMI_AGENT_ID, ParticipantAssignmentSource, ProviderId,
+    generate_id, now_ms,
 };
 use nomifun_db::{
     AdoptAgentExecutionStepOutputParams, AppendAgentExecutionStepsFromAttemptParams,
@@ -363,7 +363,6 @@ impl AgentExecutionEngine {
             // only because ordinary creation accepts unresolved model input.
             model_pool: ExecutionModelPool::Automatic,
             delegation_policy: request.delegation_policy,
-            plan_gate: request.plan_gate,
             adaptation_policy: request.adaptation_policy,
             decision_policy: request.decision_policy,
             max_parallel,
@@ -454,7 +453,6 @@ impl AgentExecutionEngine {
                 &CreateAgentExecutionParams {
                     goal,
                     status: AgentExecutionStatus::Planning,
-                    plan_gate: request.plan_gate,
                     adaptation_policy: request.adaptation_policy,
                     decision_policy: request.decision_policy,
                     delegation_policy: request.delegation_policy,
@@ -1204,41 +1202,6 @@ impl AgentExecutionEngine {
         nomifun_file::list_workspace_level(std::path::Path::new(root), path, search)
     }
 
-    pub async fn approve(
-        &self,
-        owner_id: &str,
-        actor: &AgentExecutionActor,
-        execution_id: &str,
-        command: VersionedAgentExecutionCommand,
-    ) -> Result<AgentExecution, AppError> {
-        let current = self.require_execution(owner_id, execution_id).await?;
-        require_status(current.status, &[AgentExecutionStatus::AwaitingApproval])?;
-        let row = self
-            .repository
-            .update_execution(
-                owner_id,
-                execution_id,
-                command.expected_version,
-                None,
-                &UpdateAgentExecutionParams {
-                    status: Some(AgentExecutionStatus::Running),
-                    ..Default::default()
-                },
-                &actor_event(
-                    actor,
-                    AgentExecutionEventKind::StatusChanged,
-                    None,
-                    None,
-                    json!({"status":"running","reason":"plan_approved"}),
-                ),
-            )
-            .await?;
-        self.publish().await;
-        self.scheduler
-            .start(owner_id.to_owned(), execution_id.to_owned());
-        domain_mapper::execution(row, current.lead_conversation_id)
-    }
-
     pub async fn pause(
         &self,
         owner_id: &str,
@@ -1485,8 +1448,6 @@ impl AgentExecutionEngine {
             .produce_plan(owner_id, execution_id, &goal, &planning_participants)
             .await?;
         let materialized = plan_materializer::materialize(plan, &planning_participants)?;
-        let target_gate = request.plan_gate.unwrap_or(before.execution.plan_gate);
-        let status = planned_status(target_gate);
         let retire_participant_ids = if new_participants.is_empty() {
             Vec::new()
         } else {
@@ -1505,7 +1466,6 @@ impl AgentExecutionEngine {
                 request.expected_version,
                 &ReconcileAgentExecutionPlanParams {
                     goal: goal_update,
-                    plan_gate: request.plan_gate,
                     adaptation_policy: request.adaptation_policy,
                     decision_policy: request.decision_policy,
                     delegation_policy: request.delegation_policy,
@@ -1514,7 +1474,7 @@ impl AgentExecutionEngine {
                     retire_participant_ids,
                     new_steps: materialized.steps,
                     new_dependencies: materialized.dependencies,
-                    execution_status: status,
+                    execution_status: AgentExecutionStatus::Running,
                 },
                 &actor_event(
                     actor,
@@ -1529,10 +1489,8 @@ impl AgentExecutionEngine {
         self.scheduler.cancel_conversations(owner_id, &before).await;
         self.publish().await;
         let detail = domain_mapper::detail(rows)?;
-        if detail.execution.status == AgentExecutionStatus::Running {
-            self.scheduler
-                .start(owner_id.to_owned(), execution_id.to_owned());
-        }
+        self.scheduler
+            .start(owner_id.to_owned(), execution_id.to_owned());
         Ok(detail)
     }
 
@@ -1547,12 +1505,10 @@ impl AgentExecutionEngine {
         let before = self.detail(owner_id, execution_id).await?;
         if !matches!(
             before.execution.status,
-            AgentExecutionStatus::Running
-                | AgentExecutionStatus::Paused
-                | AgentExecutionStatus::AwaitingApproval
+            AgentExecutionStatus::Running | AgentExecutionStatus::Paused
         ) {
             return Err(AppError::Conflict(
-                "only a running, paused, or approval-gated execution can be adjusted".to_owned(),
+                "only a running or paused execution can be adjusted".to_owned(),
             ));
         }
         let adjusted = self
@@ -1563,7 +1519,6 @@ impl AgentExecutionEngine {
         validate_final_step_count(keep_step_ids.len(), materialized.steps.len())?;
         let status = match before.execution.status {
             AgentExecutionStatus::Paused => AgentExecutionStatus::Paused,
-            AgentExecutionStatus::AwaitingApproval => AgentExecutionStatus::AwaitingApproval,
             _ => AgentExecutionStatus::Running,
         };
         let superseded: HashSet<String> = before
@@ -1581,7 +1536,6 @@ impl AgentExecutionEngine {
                 request.expected_version,
                 &ReconcileAgentExecutionPlanParams {
                     goal: None,
-                    plan_gate: None,
                     adaptation_policy: None,
                     decision_policy: None,
                     delegation_policy: None,
@@ -1959,7 +1913,6 @@ impl AgentExecutionEngine {
                 expected_execution_version,
                 &ReconcileAgentExecutionPlanParams {
                     goal: None,
-                    plan_gate: None,
                     adaptation_policy: None,
                     decision_policy: None,
                     delegation_policy: None,
@@ -2592,41 +2545,37 @@ impl AgentExecutionEngine {
                 }
             };
             let materialized = plan_materializer::materialize(plan, &participants)?;
-            let status = planned_status(detail.execution.plan_gate);
             let result = self
                 .repository
                 .reconcile_plan(
-                owner_id,
-                execution_id,
-                detail.execution.version,
-                &ReconcileAgentExecutionPlanParams {
-                    goal: None,
-                    plan_gate: None,
-                    adaptation_policy: None,
-                    decision_policy: None,
-                    delegation_policy: None,
-                    keep_step_ids: Vec::new(),
-                    new_participants: Vec::new(),
-                    retire_participant_ids: Vec::new(),
-                    new_steps: materialized.steps,
-                    new_dependencies: materialized.dependencies,
-                    execution_status: status,
-                },
-                &system_event(
-                    AgentExecutionEventKind::PlanChanged,
-                    None,
-                    None,
-                    json!({"status":status,"change":"initial_plan"}),
-                ),
-            )
+                    owner_id,
+                    execution_id,
+                    detail.execution.version,
+                    &ReconcileAgentExecutionPlanParams {
+                        goal: None,
+                        adaptation_policy: None,
+                        decision_policy: None,
+                        delegation_policy: None,
+                        keep_step_ids: Vec::new(),
+                        new_participants: Vec::new(),
+                        retire_participant_ids: Vec::new(),
+                        new_steps: materialized.steps,
+                        new_dependencies: materialized.dependencies,
+                        execution_status: AgentExecutionStatus::Running,
+                    },
+                    &system_event(
+                        AgentExecutionEventKind::PlanChanged,
+                        None,
+                        None,
+                        json!({"status":"running","change":"initial_plan"}),
+                    ),
+                )
                 .await;
             match result {
                 Ok(_) => {
                     self.publish().await;
-                    if status == AgentExecutionStatus::Running {
-                        self.scheduler
-                            .start(owner_id.to_owned(), execution_id.to_owned());
-                    }
+                    self.scheduler
+                        .start(owner_id.to_owned(), execution_id.to_owned());
                     return Ok(());
                 }
                 Err(nomifun_db::DbError::Conflict(_)) => {
@@ -2775,13 +2724,6 @@ impl AgentExecutionEngine {
 
     async fn publish(&self) {
         self.publisher.drain(self.repository.clone()).await;
-    }
-}
-
-fn planned_status(gate: PlanGate) -> AgentExecutionStatus {
-    match gate {
-        PlanGate::Automatic => AgentExecutionStatus::Running,
-        PlanGate::RequireApproval => AgentExecutionStatus::AwaitingApproval,
     }
 }
 
@@ -3095,7 +3037,10 @@ fn validate_final_step_count(kept: usize, introduced: usize) -> Result<(), AppEr
     Ok(())
 }
 
-fn require_status(current: AgentExecutionStatus, allowed: &[AgentExecutionStatus]) -> Result<(), AppError> {
+fn require_status(
+    current: AgentExecutionStatus,
+    allowed: &[AgentExecutionStatus],
+) -> Result<(), AppError> {
     if allowed.contains(&current) {
         Ok(())
     } else {

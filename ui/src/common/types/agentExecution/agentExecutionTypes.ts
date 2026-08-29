@@ -15,13 +15,11 @@ import type {
 export const MAX_AGENT_EXECUTION_MODELS = 16;
 
 export type TDelegationPolicy = 'disabled' | 'automatic' | 'prefer_parallel';
-export type TPlanGate = 'automatic' | 'require_approval';
 export type TAdaptationPolicy = 'fixed' | 'adaptive';
 export type TDecisionPolicy = 'automatic' | 'ask_user';
 
 export type TAgentExecutionStatus =
   | 'planning'
-  | 'awaiting_approval'
   | 'running'
   | 'paused'
   | 'waiting_input'
@@ -89,7 +87,6 @@ export type TAgentExecution = {
   lead_conversation_id: ConversationId | null;
   work_dir: string | null;
   delegation_policy: TDelegationPolicy;
-  plan_gate: TPlanGate;
   adaptation_policy: TAdaptationPolicy;
   decision_policy: TDecisionPolicy;
   max_parallel: number;
@@ -228,7 +225,6 @@ export type TCreateAgentExecution = {
   work_dir?: string;
   model_pool: TExecutionModelPool;
   delegation_policy?: TDelegationPolicy;
-  plan_gate?: TPlanGate;
   adaptation_policy?: TAdaptationPolicy;
   decision_policy?: TDecisionPolicy;
   max_parallel?: number;
@@ -238,7 +234,7 @@ export type TCreateAgentExecution = {
 };
 
 export type TReplanAgentExecution = Partial<
-  Pick<TCreateAgentExecution, 'goal' | 'model_pool' | 'delegation_policy' | 'plan_gate' | 'adaptation_policy' | 'decision_policy'>
+  Pick<TCreateAgentExecution, 'goal' | 'model_pool' | 'delegation_policy' | 'adaptation_policy' | 'decision_policy'>
 > & { expected_version: number };
 export type TAdjustAgentExecution = {
   intent: string;

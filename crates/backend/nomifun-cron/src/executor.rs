@@ -773,10 +773,6 @@ impl JobExecutor {
             workspace_binding_lease: None,
         };
         let skill_suggest_workspace = options.workspace.clone();
-        let desired_mode = job
-            .agent_config
-            .as_ref()
-            .and_then(|config| config.mode.clone());
         let clear_context = matches!(job.execution_mode, ExecutionMode::Existing)
             && job
                 .agent_config
@@ -784,7 +780,6 @@ impl JobExecutor {
                 .is_some_and(|config| config.clear_context_each_run);
         let runtime_preparation = BackgroundTurnRuntimePreparation {
             runtime_options: options,
-            desired_mode,
             clear_context,
             pre_send_hook: None,
         };
@@ -1490,12 +1485,6 @@ fn build_task_extra(job: &CronJob, skills: &[String]) -> serde_json::Value {
                 extra.insert("preset_snapshot".to_owned(), value);
             }
         }
-        if let Some(mode) = &config.mode {
-            extra.insert(
-                "session_mode".to_owned(),
-                serde_json::Value::String(mode.clone()),
-            );
-        }
     }
 
     serde_json::Value::Object(extra)
@@ -1626,12 +1615,6 @@ fn build_conversation_extra(
                 extra.insert("preset_snapshot".to_owned(), value);
             }
         }
-        if let Some(mode) = &config.mode {
-            extra.insert(
-                "session_mode".to_owned(),
-                serde_json::Value::String(mode.clone()),
-            );
-        }
         if let Some(workspace) = &config.workspace
             && !workspace.trim().is_empty()
         {
@@ -1697,7 +1680,7 @@ mod tests {
     use crate::types::{CreatedBy, CronAgentConfig, CronSchedule};
     use nomifun_ai_agent::runtime_handle::{AgentRuntimeHandle, AgentRuntimeControl, MockAgentRuntime};
     use nomifun_ai_agent::protocol::events::{FinishEventData, TextEventData};
-    use nomifun_api_types::{AgentModeResponse, WebSocketMessage};
+    use nomifun_api_types::WebSocketMessage;
     use nomifun_common::{AgentKillReason, ConversationStatus, PaginatedResult, TimestampMs};
     use nomifun_db::{
         ConversationArtifactRow, ConversationDeliveryReceiptClaim, ConversationFilters,
@@ -1736,7 +1719,6 @@ mod tests {
                 preset_id: None,
                 preset_revision: None,
                 preset_snapshot: None,
-                mode: None,
                 model: Some("claude-sonnet-4".into()),
                 provider_id: None,
                 config_options: None,
@@ -2114,7 +2096,6 @@ mod tests {
                 preset_id: None,
                 preset_revision: None,
                 preset_snapshot: None,
-                mode: None,
                 model: Some("gpt-5".into()),
                 provider_id: Some(PROVIDER_ID.into()),
                 config_options: None,
@@ -2140,7 +2121,6 @@ mod tests {
                 preset_id: None,
                 preset_revision: None,
                 preset_snapshot: None,
-                mode: None,
                 model: None,
                 provider_id: Some(PROVIDER_ID.into()),
                 config_options: None,
@@ -2176,7 +2156,6 @@ mod tests {
                 preset_id: None,
                 preset_revision: None,
                 preset_snapshot: None,
-                mode: None,
                 model: Some("gpt-5".into()),
                 provider_id: None,
                 config_options: None,
@@ -2238,7 +2217,6 @@ mod tests {
                 preset_id: None,
                 preset_revision: None,
                 preset_snapshot: None,
-                mode: None,
                 model: Some("gpt-5".into()),
                 provider_id: Some(PROVIDER_ID.into()),
                 config_options: None,
@@ -2322,7 +2300,6 @@ mod tests {
                 preset_id: None,
                 preset_revision: None,
                 preset_snapshot: None,
-                mode: None,
                 model: Some("gpt-5".into()),
                 provider_id: Some(PROVIDER_ID.into()),
                 config_options: None,
@@ -2378,37 +2355,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_inner_applies_desired_session_mode_before_sending() {
-        let agent = Arc::new(RecordingAgent::new("0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
-        let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(agent.clone()));
-        let mut job = sample_job();
-        job.agent_config.as_mut().unwrap().mode = Some("yolo".into());
-
-        let result = executor.execute_inner(&job, "0190f5fe-7c00-7a00-8abc-012345678901", None).await;
-
-        assert_eq!(
-            result,
-            ExecutionResult::Success {
-                conversation_id: "0190f5fe-7c00-7a00-8abc-012345678901".into()
-            }
-        );
-        wait_for_agent_send(&agent, 1).await;
-        assert_eq!(agent.mode().await, "yolo");
-        assert_eq!(agent.set_mode_calls(), 1);
-        assert_eq!(agent.send_calls(), 1);
-    }
-
-    #[tokio::test]
     async fn execute_inner_completed_replay_is_absorbing_before_runtime_preparation() {
         const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
         const COMPLETED_RUN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000021";
-        let agent = Arc::new(RecordingAgent::new(CONVERSATION_ID, "default", true));
+        let agent = Arc::new(RecordingAgent::new(CONVERSATION_ID));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(
             AgentRuntimeHandle::Mock(agent.clone()),
         ));
         let mut job = sample_job();
         let config = job.agent_config.as_mut().expect("sample agent config");
-        config.mode = Some("yolo".into());
         config.clear_context_each_run = true;
         let request_payload = serde_json::json!({
             "content": build_prompt(&job, None, true),
@@ -2469,7 +2424,6 @@ mod tests {
             runtime_registry.recorded_options().is_empty(),
             "completed replay must not build a runtime or mount prepared knowledge"
         );
-        assert_eq!(agent.set_mode_calls(), 0);
         assert_eq!(agent.send_calls(), 0, "completed replay must not redeliver");
         assert!(repo.inserted_messages().is_empty());
         assert!(repo.artifacts().is_empty());
@@ -2479,7 +2433,7 @@ mod tests {
     async fn accepted_local_restart_orphan_is_quarantined_without_redelivery() {
         const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
         const RUN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000020";
-        let agent = Arc::new(RecordingAgent::new(CONVERSATION_ID, "default", true));
+        let agent = Arc::new(RecordingAgent::new(CONVERSATION_ID));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(
             AgentRuntimeHandle::Mock(agent.clone()),
         ));
@@ -2542,7 +2496,6 @@ mod tests {
             "restart cannot prove local process-tree quiescence, so the exact receipt must stay quarantined"
         );
         assert!(runtime_registry.recorded_options().is_empty());
-        assert_eq!(agent.set_mode_calls(), 0);
         assert_eq!(agent.send_calls(), 0, "orphan recovery must never redeliver");
         assert!(repo.inserted_messages().is_empty());
         let settled = repo
@@ -2563,7 +2516,7 @@ mod tests {
     async fn accepted_external_turn_is_quarantined_without_cron_terminalization() {
         const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
         const RUN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000024";
-        let agent = Arc::new(RecordingAgent::new(CONVERSATION_ID, "default", true));
+        let agent = Arc::new(RecordingAgent::new(CONVERSATION_ID));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(
             AgentRuntimeHandle::Mock(agent.clone()),
         ));
@@ -2688,11 +2641,7 @@ mod tests {
             .with_delivery_receipt(receipt),
         );
         repo.fail_next_receipt_probes(3);
-        let agent = Arc::new(RecordingAgent::new(
-            CONVERSATION_ID,
-            "default",
-            true,
-        ));
+        let agent = Arc::new(RecordingAgent::new(CONVERSATION_ID));
         let executor = make_executor_with_runtime_registry_and_repo(
             Arc::new(RecordingAgentRuntimeRegistry::new(
                 AgentRuntimeHandle::Mock(agent),
@@ -2730,11 +2679,7 @@ mod tests {
     async fn concurrent_duplicate_cron_run_waits_for_one_durable_turn() {
         const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
         const RUN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000030";
-        let agent = Arc::new(RecordingAgent::without_auto_finish(
-            CONVERSATION_ID,
-            "default",
-            true,
-        ));
+        let agent = Arc::new(RecordingAgent::without_auto_finish(CONVERSATION_ID));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(
             AgentRuntimeHandle::Mock(agent.clone()),
         ));
@@ -2796,11 +2741,7 @@ mod tests {
     async fn cron_and_interactive_turn_race_have_one_execution_owner() {
         const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
         const RUN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000031";
-        let agent = Arc::new(RecordingAgent::without_auto_finish(
-            CONVERSATION_ID,
-            "default",
-            true,
-        ));
+        let agent = Arc::new(RecordingAgent::without_auto_finish(CONVERSATION_ID));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(
             AgentRuntimeHandle::Mock(agent.clone()),
         ));
@@ -2868,50 +2809,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_inner_applies_mode_even_for_uninitialized_agent() {
-        let agent = Arc::new(RecordingAgent::new("0190f5fe-7c00-7a00-8abc-012345678901", "default", false));
-        let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(agent.clone()));
-        let mut job = sample_job();
-        job.agent_config.as_mut().unwrap().mode = Some("yolo".into());
-
-        let result = executor.execute_inner(&job, "0190f5fe-7c00-7a00-8abc-012345678901", None).await;
-
-        assert_eq!(
-            result,
-            ExecutionResult::Success {
-                conversation_id: "0190f5fe-7c00-7a00-8abc-012345678901".into()
-            }
-        );
-        wait_for_agent_send(&agent, 1).await;
-        assert_eq!(agent.mode().await, "yolo");
-        assert_eq!(agent.set_mode_calls(), 1);
-        assert_eq!(agent.send_calls(), 1);
-    }
-
-    #[tokio::test]
-    async fn execute_inner_skips_mode_update_when_already_matching() {
-        let agent = Arc::new(RecordingAgent::new("0190f5fe-7c00-7a00-8abc-012345678901", "yolo", true));
-        let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(agent.clone()));
-        let mut job = sample_job();
-        job.agent_config.as_mut().unwrap().mode = Some("yolo".into());
-
-        let result = executor.execute_inner(&job, "0190f5fe-7c00-7a00-8abc-012345678901", None).await;
-
-        assert_eq!(
-            result,
-            ExecutionResult::Success {
-                conversation_id: "0190f5fe-7c00-7a00-8abc-012345678901".into()
-            }
-        );
-        wait_for_agent_send(&agent, 1).await;
-        assert_eq!(agent.mode().await, "yolo");
-        assert_eq!(agent.set_mode_calls(), 0);
-        assert_eq!(agent.send_calls(), 1);
-    }
-
-    #[tokio::test]
     async fn execute_inner_new_conversation_without_saved_skill_requests_skill_suggest() {
-        let agent = Arc::new(RecordingAgent::new("0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
+        let agent = Arc::new(RecordingAgent::new(
+            "0190f5fe-7c00-7a00-8abc-012345678901",
+        ));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
@@ -2953,7 +2854,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_inner_new_conversation_with_saved_skill_injects_saved_skill() {
-        let agent = Arc::new(RecordingAgent::new("0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
+        let agent = Arc::new(RecordingAgent::new(
+            "0190f5fe-7c00-7a00-8abc-012345678901",
+        ));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
@@ -3002,7 +2905,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_inner_existing_with_saved_skill_keeps_saved_skill_out_of_prompt_and_turn() {
-        let agent = Arc::new(RecordingAgent::new("0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
+        let agent = Arc::new(RecordingAgent::new(
+            "0190f5fe-7c00-7a00-8abc-012345678901",
+        ));
         let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(agent.clone()));
         let job = sample_job();
         let saved_skill = SavedSkillContext {
@@ -3028,7 +2933,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_inner_existing_without_saved_skill_does_not_send_skill_suggest_follow_up() {
-        let agent = Arc::new(RecordingAgent::new("0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
+        let agent = Arc::new(RecordingAgent::new(
+            "0190f5fe-7c00-7a00-8abc-012345678901",
+        ));
         let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(agent.clone()));
         let job = sample_job();
 
@@ -3058,7 +2965,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_inner_uses_conversation_workspace_when_job_workspace_missing() {
-        let agent = Arc::new(RecordingAgent::new("0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
+        let agent = Arc::new(RecordingAgent::new(
+            "0190f5fe-7c00-7a00-8abc-012345678901",
+        ));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
@@ -3089,7 +2998,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_inner_missing_workspace_identity_fails_closed() {
-        let agent = Arc::new(RecordingAgent::new("0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
+        let agent = Arc::new(RecordingAgent::new(
+            "0190f5fe-7c00-7a00-8abc-012345678901",
+        ));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
@@ -3126,8 +3037,6 @@ mod tests {
             .expect("create managed conversation workspace fixture");
         let agent = Arc::new(RecordingAgent::new(
             "0190f5fe-7c00-7a00-8abc-012345678901",
-            "default",
-            true,
         ));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(
             AgentRuntimeHandle::Mock(agent.clone()),
@@ -3174,7 +3083,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_inner_inserts_right_side_user_message_for_cron_prompt() {
-        let agent = Arc::new(RecordingAgent::new("0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
+        let agent = Arc::new(RecordingAgent::new(
+            "0190f5fe-7c00-7a00-8abc-012345678901",
+        ));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
@@ -3217,7 +3128,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_inner_upserts_cron_trigger_artifact_and_broadcasts_event() {
-        let agent = Arc::new(RecordingAgent::new("0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
+        let agent = Arc::new(RecordingAgent::new(
+            "0190f5fe-7c00-7a00-8abc-012345678901",
+        ));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
@@ -3506,43 +3419,28 @@ mod tests {
         conversation_id: String,
         workspace: String,
         event_tx: broadcast::Sender<AgentStreamEvent>,
-        mode: RwLock<String>,
         sent_messages: RwLock<Vec<SendMessageData>>,
-        initialized: bool,
         auto_finish: bool,
-        set_mode_calls: AtomicUsize,
         send_calls: AtomicUsize,
     }
 
     impl RecordingAgent {
-        fn new(conversation_id: &str, mode: &str, initialized: bool) -> Self {
-            Self::with_auto_finish(conversation_id, mode, initialized, true)
+        fn new(conversation_id: &str) -> Self {
+            Self::with_auto_finish(conversation_id, true)
         }
 
-        fn without_auto_finish(
-            conversation_id: &str,
-            mode: &str,
-            initialized: bool,
-        ) -> Self {
-            Self::with_auto_finish(conversation_id, mode, initialized, false)
+        fn without_auto_finish(conversation_id: &str) -> Self {
+            Self::with_auto_finish(conversation_id, false)
         }
 
-        fn with_auto_finish(
-            conversation_id: &str,
-            mode: &str,
-            initialized: bool,
-            auto_finish: bool,
-        ) -> Self {
+        fn with_auto_finish(conversation_id: &str, auto_finish: bool) -> Self {
             let (event_tx, _) = broadcast::channel(16);
             Self {
                 conversation_id: conversation_id.to_owned(),
                 workspace: "/tmp/cron-test".to_owned(),
                 event_tx,
-                mode: RwLock::new(mode.to_owned()),
                 sent_messages: RwLock::new(Vec::new()),
-                initialized,
                 auto_finish,
-                set_mode_calls: AtomicUsize::new(0),
                 send_calls: AtomicUsize::new(0),
             }
         }
@@ -3554,14 +3452,6 @@ mod tests {
             let _ = self
                 .event_tx
                 .send(AgentStreamEvent::Finish(FinishEventData::default()));
-        }
-
-        async fn mode(&self) -> String {
-            self.mode.read().await.clone()
-        }
-
-        fn set_mode_calls(&self) -> usize {
-            self.set_mode_calls.load(Ordering::Relaxed)
         }
 
         fn send_calls(&self) -> usize {
@@ -3624,22 +3514,7 @@ mod tests {
         }
     }
 
-    #[async_trait::async_trait]
-    impl MockAgentRuntime for RecordingAgent {
-        async fn mode(&self) -> Result<AgentModeResponse, nomifun_common::AppError> {
-            Ok(AgentModeResponse {
-                mode: self.mode().await,
-                initialized: self.initialized,
-            })
-        }
-
-        async fn set_mode(&self, mode: &str) -> Result<(), nomifun_common::AppError> {
-            self.set_mode_calls.fetch_add(1, Ordering::Relaxed);
-            let mut guard = self.mode.write().await;
-            *guard = mode.to_owned();
-            Ok(())
-        }
-    }
+    impl MockAgentRuntime for RecordingAgent {}
 
     struct FixedAgentRuntimeRegistry {
         agent: AgentRuntimeHandle,

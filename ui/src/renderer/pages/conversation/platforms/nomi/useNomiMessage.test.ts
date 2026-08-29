@@ -15,7 +15,6 @@ describe('getNomiToolGroupRuntimeState', () => {
       tools: [],
       hasActive: false,
       hasAny: false,
-      confirmingDescription: undefined,
       executingDescription: undefined,
     });
   });
@@ -24,7 +23,7 @@ describe('getNomiToolGroupRuntimeState', () => {
     expect(
       getNomiToolGroupRuntimeState([
         {
-          status: 'Confirming',
+          status: 'Executing',
           name: { label: 'Edit' },
           description: { file_path: 'src/App.tsx' },
         },
@@ -32,15 +31,14 @@ describe('getNomiToolGroupRuntimeState', () => {
     ).toEqual({
       tools: [
         {
-          status: 'Confirming',
+          status: 'Executing',
           name: '{\n  "label": "Edit"\n}',
           description: '{\n  "file_path": "src/App.tsx"\n}',
         },
       ],
       hasActive: true,
       hasAny: true,
-      confirmingDescription: '{\n  "file_path": "src/App.tsx"\n}',
-      executingDescription: undefined,
+      executingDescription: '{\n  "file_path": "src/App.tsx"\n}',
     });
   });
 });

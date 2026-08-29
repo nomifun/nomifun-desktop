@@ -301,7 +301,6 @@ const GuidPage: React.FC = () => {
     selectedAgent: agentSelection.selectedAgent,
     selectedAgentKey: agentSelection.selectedAgentKey,
     selectedAgentInfo: agentSelection.selectedAgentInfo,
-    selectedMode: agentSelection.selectedMode,
     current_model: modelSelection.current_model,
 
     // Agent helpers
@@ -826,10 +825,6 @@ const GuidPage: React.FC = () => {
       collaboratorSelectorNode={
         effectiveAgentType === 'nomi' && delegationPolicy !== 'disabled' ? collaboratorSelectorNode : undefined
       }
-      selectedAgent={agentSelection.selectedAgent}
-      effectiveModeAgent={agentSelection.currentEffectiveAgentInfo.agent_type}
-      selectedMode={agentSelection.selectedMode}
-      onModeSelect={agentSelection.setSelectedMode}
       is_presetAgent={agentSelection.is_presetAgent}
       selectedAgentInfo={agentSelection.selectedAgentInfo}
       presets={agentSelection.presets}

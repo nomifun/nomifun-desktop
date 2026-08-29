@@ -2,18 +2,14 @@
 //! lane in the application-owned browser hub. Ownership is the trusted runtime
 //! plus logical lane name; companions are attribution only.
 //!
-//! The GW2 out-of-band approval state machine still gates irreversible browser
-//! actions for default callers, while full-auto/yolo callers bypass that hold to
-//! keep browser use low-friction. Browser tools are NOT denied on the Channel
-//! surface: remote browser driving is the entire point.
+//! Selected Browser capabilities execute FullAuto after typed owner/lane
+//! validation, with no model-visible intermediate decision state.
 //!
 //! Only compiled when the `browser-use` feature is on.
 
 use std::sync::Arc;
 
-use nomi_browser::{
-    ApprovalTier, OUT_OF_BAND_CONFIRMED_KEY, managed_result_envelope,
-};
+use nomi_browser::managed_result_envelope;
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -23,7 +19,7 @@ use crate::browser_registry::{
     BrowserRegistry, browser_result_to_value, platform_error_to_value,
 };
 use crate::deps::{CallerCtx, GatewayDeps};
-use crate::registry::{Capability, CapabilityMeta, DangerTier};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 
 // ── params ────────────────────────────────────────────────────────────────
 
@@ -73,16 +69,6 @@ struct ActParams {
     /// verbatim to the browser facade.
     #[serde(flatten)]
     rest: Map<String, Value>,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ConfirmParams {
-    /// The call_id from an `approval_required` envelope.
-    call_id: String,
-    /// "proceed_once" to approve the held irreversible action, "cancel" to deny.
-    #[serde(default)]
-    option: Option<String>,
 }
 
 #[derive(Default, Deserialize, JsonSchema)]
@@ -224,86 +210,6 @@ fn managed_envelope(
     }
 }
 
-/// Strip any caller-supplied out-of-band sentinel before classify/forward (trust boundary).
-fn sanitize_out_of_band(mut input: Value) -> Value {
-    if let Some(obj) = input.as_object_mut() {
-        obj.remove(OUT_OF_BAND_CONFIRMED_KEY);
-    }
-    input
-}
-
-fn approval_required_value(call_id: &str, action: &str, args: &Value) -> Value {
-    json!({
-        "result": {
-            "approval_required": {
-                "call_id": call_id,
-                "title": format!("Approve irreversible browser action: {action}"),
-                "description": describe_pending(action, args),
-                "how_to": "This action is irreversible (submit / payment / delete / send) and the \
-                           caller does not auto-approve Browser approval. Relay this to the user; \
-                           once they approve, call nomi_browser_confirm with this call_id and option \
-                           \"proceed_once\" (or \"cancel\" to deny).",
-                "options": [
-                    {"label": "Approve once", "value": "proceed_once"},
-                    {"label": "Deny", "value": "cancel"},
-                ],
-            }
-        }
-    })
-}
-
-fn describe_pending(action: &str, args: &Value) -> String {
-    let detail = match action {
-        "navigate" => args.get("url").and_then(Value::as_str).map(|u| format!("navigate to {u}")),
-        "click" => args.get("ref").and_then(Value::as_str).map(|r| format!("click [ref={r}]")),
-        "press_key" => args.get("keys").and_then(Value::as_str).map(|k| format!("press {k}")),
-        "reload" => Some("reload the page".to_string()),
-        _ => None,
-    };
-    match detail {
-        Some(d) => format!("Will {d} — irreversible (may submit / pay / delete / send)."),
-        None => format!("Will run irreversible action `{action}` (may submit / pay / delete / send)."),
-    }
-}
-
-/// Gate an outbound action through out-of-band approval. `input` MUST already be
-/// sanitized. Returns `Some(json)` to short-circuit, `None` to proceed.
-fn caller_bypasses_browser_approval(ctx: &CallerCtx) -> bool {
-    matches!(
-        ctx.session_mode.as_deref().map(str::trim),
-        // `agent-full-access` = codex bridge (@agentclientprotocol) native id;
-        // `full-access` = its pre-022 predecessor, kept for persisted sessions.
-        Some("yolo" | "yoloNoSandbox" | "full-access" | "agent-full-access" | "bypassPermissions")
-    )
-}
-
-fn gw2_gate(
-    ctx: &CallerCtx,
-    registry: &BrowserRegistry,
-    lane: Option<&str>,
-    action: &str,
-    input: &Value,
-) -> Option<Value> {
-    if caller_bypasses_browser_approval(ctx) {
-        return None;
-    }
-    match registry.classify(ctx, lane, action, input) {
-        Ok(tier) if tier != ApprovalTier::Irreversible => return None,
-        Ok(_) => {}
-        Err(error) => return Some(platform_error_to_value(error)),
-    }
-    match registry.stash_pending(ctx, lane, input) {
-        Ok(Some(call_id)) => {
-            Some(approval_required_value(&call_id, action, input))
-        }
-        Ok(None) => Some(json!({
-            "error": "too many browser actions are awaiting approval; resolve or cancel some via \
-                      nomi_browser_confirm before issuing more irreversible actions"
-        })),
-        Err(error) => Some(platform_error_to_value(error)),
-    }
-}
-
 // ── handlers ────────────────────────────────────────────────────────────────
 
 async fn navigate(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: NavigateParams) -> Value {
@@ -311,24 +217,12 @@ async fn navigate(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: NavigateParams) -> 
         Ok(registry) => registry,
         Err(e) => return e,
     };
-    let lane_name = match registry
-        .resolve_lane_selector(&ctx, p.lane.as_deref(), p.lane_id.as_deref())
-        .await
-    {
-        Ok(lane_name) => lane_name,
-        Err(error) => return platform_error_to_value(error),
-    };
     let input = json!({
         "action": "navigate",
         "url": p.url,
         "new_tab": p.new_tab.unwrap_or(false),
         "lane_id": p.lane_id,
     });
-    if let Some(short_circuit) =
-        gw2_gate(&ctx, registry, Some(&lane_name), "navigate", &input)
-    {
-        return short_circuit;
-    }
     managed_envelope(
         registry
             .dispatch_managed(&ctx, p.lane.as_deref(), input)
@@ -341,21 +235,9 @@ async fn observe(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ObserveParams) -> Va
         Ok(registry) => registry,
         Err(e) => return e,
     };
-    let lane_name = match registry
-        .resolve_lane_selector(&ctx, p.lane.as_deref(), p.lane_id.as_deref())
-        .await
-    {
-        Ok(lane_name) => lane_name,
-        Err(error) => return platform_error_to_value(error),
-    };
     let mut input = json!({"action": "observe", "lane_id": p.lane_id});
     if let Some(d) = p.max_depth {
         input["max_depth"] = json!(d);
-    }
-    if let Some(short_circuit) =
-        gw2_gate(&ctx, registry, Some(&lane_name), "observe", &input)
-    {
-        return short_circuit;
     }
     managed_envelope(
         registry
@@ -369,27 +251,13 @@ async fn act(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ActParams) -> Value {
         Ok(registry) => registry,
         Err(e) => return e,
     };
-    // Reconstruct the facade input from the passthrough params, strip any
-    // caller-supplied sentinel (trust boundary), then set the validated action.
-    let mut input = sanitize_out_of_band(Value::Object(p.rest));
+    let mut input = Value::Object(p.rest);
     input["action"] = json!(p.action);
     input["lane_id"] = p
         .lane_id
         .as_ref()
         .map(|lane_id| Value::String(lane_id.clone()))
         .unwrap_or(Value::Null);
-    let lane_name = match registry
-        .resolve_lane_selector(&ctx, p.lane.as_deref(), p.lane_id.as_deref())
-        .await
-    {
-        Ok(lane_name) => lane_name,
-        Err(error) => return platform_error_to_value(error),
-    };
-    if let Some(short_circuit) =
-        gw2_gate(&ctx, registry, Some(&lane_name), &p.action, &input)
-    {
-        return short_circuit;
-    }
     managed_envelope(
         registry
             .dispatch_managed(&ctx, p.lane.as_deref(), input)
@@ -497,157 +365,52 @@ async fn browser_crawl_many(
     dispatch_management(deps, ctx, input).await
 }
 
-async fn confirm(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ConfirmParams) -> Value {
-    let registry = match registry(&deps) {
-        Ok(registry) => registry,
-        Err(e) => return e,
-    };
-    let option = p.option.as_deref().map(str::trim).unwrap_or("cancel");
-    let approve = matches!(option, "proceed_once" | "proceed_always" | "approve" | "yes");
-
-    let pending = match registry.take_pending_for(&ctx, &p.call_id) {
-        Ok(Some(pending)) => pending,
-        Ok(None) => {
-            return json!({"error": format!("no pending browser approval with call_id {} (already resolved, expired, or never existed)", p.call_id)});
-        }
-        Err(error) => return platform_error_to_value(error),
-    };
-    if !approve {
-        return json!({
-            "result": {
-                "resolved": p.call_id,
-                "approved": false,
-                "text": "Denied. The irreversible browser action was not run."
-            }
-        });
-    }
-    let mut envelope = browser_result_to_value(
-        registry.execute_confirmed(&ctx, pending).await,
-    );
-    if let Some(result) = envelope.get_mut("result").and_then(Value::as_object_mut) {
-        result.insert("resolved".to_string(), json!(p.call_id));
-        result.insert("approved".to_string(), json!(true));
-    }
-    envelope
-}
-
 pub(crate) fn register(out: &mut Vec<Capability>) {
     out.push(Capability::new::<OpenParams, _, _>(
-        CapabilityMeta::new("nomi_browser_open", "browser", "Idempotently open the caller's default or named managed Browser Lane using the trusted host-selected interactive identity.", DangerTier::Write),
+        CapabilityMeta::new("nomi_browser_open", "browser", "Idempotently open the caller's default or named managed Browser Lane using the trusted host-selected interactive identity.", EffectClass::Write),
         browser_open,
     ));
     out.push(Capability::new::<OpenParams, _, _>(
-        CapabilityMeta::new("nomi_browser_fork", "browser", "Create or open an additional managed Browser Lane using the trusted host-selected interactive identity and return its owner-scoped handle.", DangerTier::Write),
+        CapabilityMeta::new("nomi_browser_fork", "browser", "Create or open an additional managed Browser Lane using the trusted host-selected interactive identity and return its owner-scoped handle.", EffectClass::Write),
         browser_fork,
     ));
     out.push(Capability::new::<EmptyParams, _, _>(
-        CapabilityMeta::new("nomi_browser_list", "browser", "List the managed Browser Lanes owned by this runtime, including queue, capacity, identity, epoch, and recovery state.", DangerTier::Read),
+        CapabilityMeta::new("nomi_browser_list", "browser", "List the managed Browser Lanes owned by this runtime, including queue, capacity, identity, epoch, and recovery state.", EffectClass::Read),
         browser_list,
     ));
     out.push(Capability::new::<LaneIdParams, _, _>(
-        CapabilityMeta::new("nomi_browser_status", "browser", "Read one owner-scoped managed Browser Lane status, defaulting to the default Lane.", DangerTier::Read),
+        CapabilityMeta::new("nomi_browser_status", "browser", "Read one owner-scoped managed Browser Lane status, defaulting to the default Lane.", EffectClass::Read),
         browser_status,
     ));
     out.push(Capability::new::<LaneIdParams, _, _>(
-        CapabilityMeta::new("nomi_browser_close", "browser", "Close one owner-scoped managed Browser Lane.", DangerTier::Write),
+        CapabilityMeta::new("nomi_browser_close", "browser", "Close one owner-scoped managed Browser Lane.", EffectClass::Write),
         browser_close,
     ));
     out.push(Capability::new::<EmptyParams, _, _>(
-        CapabilityMeta::new("nomi_browser_close_all", "browser", "Close every managed Browser Lane owned by this runtime and no other runtime.", DangerTier::Write),
+        CapabilityMeta::new("nomi_browser_close_all", "browser", "Close every managed Browser Lane owned by this runtime and no other runtime.", EffectClass::Write),
         browser_close_all,
     ));
     out.push(Capability::new::<CrawlManyParams, _, _>(
-        CapabilityMeta::new("nomi_browser_crawl_many", "browser", "Read or extract an ordered bounded URL batch using Hub-managed Lanes with cleanup; the trusted host selects the crawl identity policy.", DangerTier::Read),
+        CapabilityMeta::new("nomi_browser_crawl_many", "browser", "Read or extract an ordered bounded URL batch using Hub-managed Lanes with cleanup; the trusted host selects the crawl identity policy.", EffectClass::Read),
         browser_crawl_many,
     ));
     out.push(Capability::new::<NavigateParams, _, _>(
-        CapabilityMeta::new("nomi_browser_navigate", "browser", "Load a URL in the caller's browser (optionally a new tab).", DangerTier::Write),
+        CapabilityMeta::new("nomi_browser_navigate", "browser", "Load a URL in the caller's browser (optionally a new tab).", EffectClass::Write),
         navigate,
     ));
     out.push(Capability::new::<ObserveParams, _, _>(
-        CapabilityMeta::new("nomi_browser_observe", "browser", "Read the page's accessibility tree (aria snapshot + ref table) to target later. Read-only.", DangerTier::Read),
+        CapabilityMeta::new("nomi_browser_observe", "browser", "Read the page's accessibility tree (aria snapshot + ref table) to target later. Read-only.", EffectClass::Read),
         observe,
     ));
     out.push(Capability::new::<ActParams, _, _>(
-        CapabilityMeta::new("nomi_browser_act", "browser", "Run any browser action (click/type/scroll/screenshot/...); irreversible actions are held for out-of-band approval.", DangerTier::Write),
+        CapabilityMeta::new("nomi_browser_act", "browser", "Run a browser action (click/type/scroll/screenshot/...) through the caller's owner-scoped Lane.", EffectClass::Write),
         act,
-    ));
-    out.push(Capability::new::<ConfirmParams, _, _>(
-        CapabilityMeta::new("nomi_browser_confirm", "browser", "Resolve a pending out-of-band browser approval (proceed_once / cancel).", DangerTier::Write),
-        confirm,
     ));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sanitize_strips_caller_supplied_out_of_band_sentinel() {
-        let dirty = json!({"action": "click", "ref": "f0e1", OUT_OF_BAND_CONFIRMED_KEY: true});
-        let clean = sanitize_out_of_band(dirty);
-        assert!(clean.get(OUT_OF_BAND_CONFIRMED_KEY).is_none());
-        assert_eq!(clean.get("action").and_then(Value::as_str), Some("click"));
-    }
-
-    #[test]
-    fn describe_pending_surfaces_action_detail_without_secrets() {
-        assert!(describe_pending("navigate", &json!({"url": "https://shop.test/pay"})).contains("shop.test/pay"));
-        assert!(describe_pending("click", &json!({"ref": "f0e9"})).contains("f0e9"));
-        let d = describe_pending("type", &json!({"text": "secret:CARD"}));
-        assert!(!d.contains("secret:CARD"), "preview must not echo a secret reference: {d}");
-    }
-
-    #[test]
-    fn approval_required_value_mirrors_confirmation_shape() {
-        let v = approval_required_value(
-            "019f6672-ed10-7193-8a86-7981f6c6feae",
-            "click",
-            &json!({"ref": "f0e3"}),
-        );
-        let ar = v
-            .pointer("/result/approval_required")
-            .expect("approval_required result");
-        assert_eq!(
-            ar.get("call_id").and_then(Value::as_str),
-            Some("019f6672-ed10-7193-8a86-7981f6c6feae")
-        );
-        let opts = ar.get("options").and_then(Value::as_array).expect("options");
-        let values: Vec<&str> = opts.iter().filter_map(|o| o.get("value").and_then(Value::as_str)).collect();
-        assert!(values.contains(&"proceed_once") && values.contains(&"cancel"));
-    }
-
-    #[test]
-    fn gw2_gate_fails_closed_without_an_injected_hub_and_identity() {
-        let registry = BrowserRegistry::default_for_browser_use();
-        let input = json!({"action": "press_key", "keys": "Enter"});
-
-        let ctx = CallerCtx::default();
-        let result = gw2_gate(&ctx, &registry, None, "press_key", &input)
-            .expect("missing trusted browser authority must short-circuit");
-
-        assert_eq!(
-            result.get("code").and_then(Value::as_str),
-            Some("browser_unavailable")
-        );
-    }
-
-    #[test]
-    fn gw2_gate_skips_irreversible_prompt_for_yolo_context() {
-        let ctx = CallerCtx {
-            session_mode: Some("yolo".to_owned()),
-            ..Default::default()
-        };
-        let registry = BrowserRegistry::default_for_browser_use();
-        let input = json!({"action": "press_key", "keys": "Enter"});
-
-        let result = gw2_gate(&ctx, &registry, None, "press_key", &input);
-
-        assert!(
-            result.is_none(),
-            "yolo gateway browser context should not return approval_required"
-        );
-    }
 
     #[test]
     fn act_flatten_captures_passthrough_params() {
@@ -686,7 +449,6 @@ mod tests {
             "nomi_browser_navigate",
             "nomi_browser_observe",
             "nomi_browser_act",
-            "nomi_browser_confirm",
         ] {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
         }

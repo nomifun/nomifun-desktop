@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::deps::GatewayDeps;
 use crate::id_schema::ModelRefParam;
-use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
 // ── param structs (single source: schema + runtime) ──────────────────────
@@ -808,7 +808,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_companion_list",
             "companion",
             "List all digital companions (id, name, character, model, appearance).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| list(deps, p),
     ));
@@ -819,7 +819,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_companion_get",
             "companion",
             "Get a single companion's full profile and configuration by companion_id.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| get(deps, p),
     ));
@@ -830,7 +830,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_companion_create",
             "companion",
             "Create a new digital companion with a name and character description. The model must be configured separately via nomi_companion_update.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| create(deps, p),
     ));
@@ -841,7 +841,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_companion_update",
             "companion",
             "Partially update a companion's profile (name, character, persona, model, appearance). Pass an RFC 7396 merge-patch object.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| update(deps, p),
     ));
@@ -852,9 +852,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_companion_delete",
             "companion",
             "Permanently delete a companion and all its associated data (thread, figure binding). Irreversible.",
-            DangerTier::Destructive,
-        )
-        .deny_on(&[Surface::Channel]),
+            EffectClass::Destructive,
+        ),
         |deps, _ctx, p| delete(deps, p),
     ));
 
@@ -864,7 +863,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_companion_status",
             "companion",
             "Get a companion's runtime status (XP, level, mood, memory counts, model readiness). Omit companion_id for the default companion.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| status(deps, p),
     ));
@@ -875,7 +874,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_companion_get_config",
             "companion",
             "Read the machine-level companion configuration (collection toggles, session archiving, default companion_id). Learning and evolution settings are per companion — read them with nomi_companion_get.",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         |deps, _ctx, p| get_config(deps, p),
     ));
@@ -886,7 +885,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_companion_update_config",
             "companion",
             "Partially update the machine-level companion configuration (collection toggles, session archiving, default companion, memory bridge). Learning and evolution are per companion — patch them with nomi_companion_update. RFC 7396 merge-patch.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         |deps, _ctx, p| update_config(deps, p),
     ));

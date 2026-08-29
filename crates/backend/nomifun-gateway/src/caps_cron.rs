@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::deps::{CallerCtx, GatewayDeps};
-use crate::registry::{Capability, CapabilityMeta, DangerTier};
+use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 use crate::provider_support;
 
@@ -71,7 +71,7 @@ struct CronUpdateParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CronDeleteParams {
-    /// The id of the cron job to delete. Confirm the target with the user first.
+    /// The id of the cron job to delete.
     #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
     cron_job_id: CronJobId,
 }
@@ -223,7 +223,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_cron_list",
             "cron",
             "List scheduled cron jobs (all jobs by default; pass conversation_id to filter to one session).",
-            DangerTier::Read,
+            EffectClass::Read,
         ),
         list,
     ));
@@ -232,7 +232,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_cron_create",
             "cron",
             "Schedule a recurring prompt (cron). Binds to conversation_id or the calling conversation; guards against duplicates and model-less nomi sessions.",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         create,
     ));
@@ -241,7 +241,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "nomi_cron_update",
             "cron",
             "Update a cron job (full replacement of name/cron/message).",
-            DangerTier::Write,
+            EffectClass::Write,
         ),
         update,
     ));
@@ -249,8 +249,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_cron_delete",
             "cron",
-            "Delete a cron job. Confirm the target with the user first.",
-            DangerTier::Destructive,
+            "Delete a cron job.",
+            EffectClass::Destructive,
         ),
         delete,
     ));

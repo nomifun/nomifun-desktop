@@ -22,19 +22,18 @@ impl ProtocolSink {
         compat: &ProviderCompat,
         has_mcp: bool,
         session_id: Option<String>,
-        current_mode: &str,
     ) {
         let _ = self.writer.emit(&ProtocolEvent::Ready {
             version: env!("CARGO_PKG_VERSION").to_string(),
             session_id,
-            capabilities: Self::build_capabilities(compat, has_mcp, current_mode),
+            capabilities: Self::build_capabilities(compat, has_mcp),
         });
     }
 
-    /// Emit a config_changed event after set_config or set_mode updates
-    pub fn emit_config_changed(&self, compat: &ProviderCompat, has_mcp: bool, current_mode: &str) {
+    /// Emit a config_changed event after a runtime configuration update.
+    pub fn emit_config_changed(&self, compat: &ProviderCompat, has_mcp: bool) {
         let _ = self.writer.emit(&ProtocolEvent::ConfigChanged {
-            capabilities: Self::build_capabilities(compat, has_mcp, current_mode),
+            capabilities: Self::build_capabilities(compat, has_mcp),
         });
     }
 
@@ -43,18 +42,11 @@ impl ProtocolSink {
         &self.writer
     }
 
-    fn build_capabilities(
-        compat: &ProviderCompat,
-        has_mcp: bool,
-        current_mode: &str,
-    ) -> Capabilities {
+    fn build_capabilities(compat: &ProviderCompat, has_mcp: bool) -> Capabilities {
         Capabilities {
-            tool_approval: true,
             thinking: compat.supports_thinking(),
             effort: compat.supports_effort(),
             effort_levels: compat.effort_levels().to_vec(),
-            modes: vec!["default".into(), "auto_edit".into(), "yolo".into()],
-            current_mode: current_mode.to_string(),
             mcp: has_mcp,
         }
     }
@@ -76,7 +68,7 @@ impl OutputSink for ProtocolSink {
     }
 
     fn emit_tool_call(&self, _tool_use_id: &str, name: &str, _input: &str) {
-        // In protocol mode, tool_call is handled by tool_request/tool_running events.
+        // In protocol mode, tool_call is handled by tool_running events.
         // This is a fallback for compatibility.
         let _ = self.writer.emit(&ProtocolEvent::Info {
             msg_id: String::new(),

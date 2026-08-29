@@ -5,8 +5,7 @@ pub use nomi_types::skill_types::{ContextModifier, effort_to_string};
 
 /// Build a ContextModifier from skill metadata. Returns None if no overrides are specified.
 pub fn from_skill(skill: &SkillMetadata) -> Option<ContextModifier> {
-    let has_overrides =
-        skill.model.is_some() || skill.effort.is_some() || !skill.allowed_tools.is_empty();
+    let has_overrides = skill.model.is_some() || skill.effort.is_some();
 
     if !has_overrides {
         return None;
@@ -15,7 +14,6 @@ pub fn from_skill(skill: &SkillMetadata) -> Option<ContextModifier> {
     Some(ContextModifier {
         model: skill.model.clone(),
         effort: skill.effort,
-        allowed_tools: skill.allowed_tools.clone(),
         ..Default::default()
     })
 }
@@ -81,10 +79,9 @@ mod tests {
     }
 
     #[test]
-    fn test_from_skill_allowed_tools_override() {
+    fn allowed_tools_alone_do_not_create_parent_modifier() {
         let skill = make_skill(None, None, vec!["Bash".to_string(), "Read".to_string()]);
-        let m = from_skill(&skill).unwrap();
-        assert_eq!(m.allowed_tools, vec!["Bash", "Read"]);
+        assert!(from_skill(&skill).is_none());
     }
 
     #[test]
@@ -97,7 +94,7 @@ mod tests {
         let m = from_skill(&skill).unwrap();
         assert_eq!(m.model.as_deref(), Some("gpt-4o"));
         assert_eq!(m.effort, Some(EffortLevel::Low));
-        assert_eq!(m.allowed_tools, vec!["Write"]);
+        assert!(m.allowed_tools.is_empty());
     }
 
     #[test]

@@ -26,7 +26,7 @@ import {
 } from '@/common/browser/browserTypes';
 import { ipcBridge } from '@/common';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
-import { Alert, Button, Collapse, InputNumber, Message, Modal, Radio, Switch } from '@arco-design/web-react';
+import { Alert, Button, Collapse, InputNumber, Message, Radio, Switch } from '@arco-design/web-react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -564,8 +564,6 @@ const BrowserUseSettingsContent: React.FC = () => {
   const [persistentLogin, setPersistentLogin] = useState(true);
   const [fullPower, setFullPower] = useState(false);
   const [siteMemory, setSiteMemory] = useState(false);
-  const [takeover, setTakeover] = useState(true);
-  const [unrestrictedApproval, setUnrestrictedApproval] = useState(false);
   const [visualFallback, setVisualFallback] = useState(false);
   const [resourcePolicy, setResourcePolicy] = useState<BrowserResourcePolicy>({ preset: 'automatic' });
   const [persistedResourcePolicy, setPersistedResourcePolicy] = useState<BrowserResourcePolicy>({
@@ -609,10 +607,6 @@ const BrowserUseSettingsContent: React.FC = () => {
     setPersistentLogin(storedPersistentLogin);
     setFullPower(storedPersistentLogin ? false : storedFullPower);
     setSiteMemory(configService.get('agent.browserUse.siteMemory') ?? false);
-    // This setting controls approval for irreversible Agent actions. It is not
-    // the removed Browser viewer's user-input takeover capability.
-    setTakeover(configService.get('agent.browserUse.takeover') ?? true);
-    setUnrestrictedApproval(configService.get('agent.browserUse.unrestrictedApproval') ?? false);
     setVisualFallback(configService.get('agent.browserUse.visualFallback') ?? false);
 
     if (storedPersistentLogin && storedFullPower) {
@@ -853,8 +847,7 @@ const BrowserUseSettingsContent: React.FC = () => {
 
   // The display mode is a trusted user preference for the application-level
   // default visibility policy. It is enforced by the backend Host launch
-  // policy; Agent tool JSON has no path into it, and neither option restores
-  // the removed embedded viewer or user takeover.
+  // policy; Agent tool JSON has no path into it.
   const handleDisplayModeChange = useCallback(
     async (value: string) => {
       if (
@@ -1059,35 +1052,6 @@ const BrowserUseSettingsContent: React.FC = () => {
     [persistBoolean]
   );
 
-  const handleTakeoverChange = useCallback(
-    (checked: boolean) => {
-      setTakeover(checked);
-      persistBoolean('agent.browserUse.takeover', checked, () => setTakeover(!checked));
-    },
-    [persistBoolean]
-  );
-
-  const handleUnrestrictedApprovalChange = useCallback(
-    (checked: boolean) => {
-      if (!checked) {
-        setUnrestrictedApproval(false);
-        persistBoolean('agent.browserUse.unrestrictedApproval', false, () => setUnrestrictedApproval(true));
-        return;
-      }
-
-      Modal.confirm({
-        title: t('settings.browserUnrestrictedApprovalConfirmTitle'),
-        content: t('settings.browserUnrestrictedApprovalConfirmContent'),
-        okText: t('settings.browserUnrestrictedApprovalConfirmOk'),
-        onOk: () => {
-          setUnrestrictedApproval(true);
-          persistBoolean('agent.browserUse.unrestrictedApproval', true, () => setUnrestrictedApproval(false));
-        },
-      });
-    },
-    [persistBoolean, t]
-  );
-
   const handleVisualFallbackChange = useCallback(
     (checked: boolean) => {
       setVisualFallback(checked);
@@ -1203,19 +1167,6 @@ const BrowserUseSettingsContent: React.FC = () => {
               </PreferenceRow>
               <PreferenceRow label={t('settings.browserSiteMemory')} description={t('settings.browserSiteMemoryDesc')}>
                 <Switch checked={siteMemory} disabled={!browserUse} onChange={handleSiteMemoryChange} />
-              </PreferenceRow>
-              <PreferenceRow label={t('settings.browserTakeover')} description={t('settings.browserTakeoverDesc')}>
-                <Switch checked={takeover} disabled={!browserUse} onChange={handleTakeoverChange} />
-              </PreferenceRow>
-              <PreferenceRow
-                label={t('settings.browserUnrestrictedApproval')}
-                description={t('settings.browserUnrestrictedApprovalDesc')}
-              >
-                <Switch
-                  checked={unrestrictedApproval}
-                  disabled={!browserUse}
-                  onChange={handleUnrestrictedApprovalChange}
-                />
               </PreferenceRow>
               <PreferenceRow
                 label={t('settings.browserVisualFallback')}

@@ -92,7 +92,6 @@ pub trait AssetResolver: Send + Sync {
 /// - Sending user messages to the AI agent
 /// - Receiving stream events and converting them to outgoing messages
 /// - Throttling editMessage calls for streaming responses
-/// - Handling tool confirmation with timeout
 pub struct ChannelMessageService {
     conversation_svc: Arc<ConversationService>,
     runtime_registry: Arc<dyn AgentRuntimeRegistry>,
@@ -288,29 +287,6 @@ impl ChannelMessageService {
     pub async fn stop_conversation(&self, conversation_id: &str) -> Result<(), ChannelError> {
         self.conversation_svc
             .cancel(&self.owner_user_id, conversation_id, &self.runtime_registry)
-            .await
-            .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))
-    }
-
-    /// Submits a numbered-decision choice back through the confirm chain.
-    ///
-    /// `option_id` is sent as the bare `data` string accepted by
-    /// `ConversationService::confirm` for ACP (`msg_id` is ignored there).
-    /// `always_allow` is `false` — a numbered reply approves this one decision
-    /// only, never a standing grant.
-    pub async fn submit_decision(
-        &self,
-        conversation_id: &str,
-        call_id: &str,
-        option_id: &str,
-    ) -> Result<(), ChannelError> {
-        let req = nomifun_api_types::ConfirmRequest {
-            msg_id: String::new(),
-            data: serde_json::Value::String(option_id.to_owned()),
-            always_allow: false,
-        };
-        self.conversation_svc
-            .confirm(&self.owner_user_id, conversation_id, call_id, req, &self.runtime_registry)
             .await
             .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))
     }
@@ -838,9 +814,6 @@ impl ChannelMessageService {
                     status: format!("{:?}", data.status),
                 })
             }
-            // Blocking decisions: forward as a numbered text choice. A decision
-            // with no options is unanswerable, so it is dropped (None).
-            AgentStreamEvent::Permission(data) => confirmation_to_decision(data.confirmation()),
             // Events that don't produce user-facing messages
             AgentStreamEvent::Tips(_)
             | AgentStreamEvent::ToolGroup(_)
@@ -915,7 +888,7 @@ impl ChannelMessageService {
         }
     }
 
-    /// Builds the numbered-text rendering of a blocking decision.
+    /// Builds the numbered-text rendering of a channel-owned decision.
     ///
     /// Portable across channels (no card-button dependency): the prompt, a
     /// numbered list of option labels, and an instruction to reply with the
@@ -943,13 +916,8 @@ impl ChannelMessageService {
     }
 
     /// Build the `extra` JSON for channel conversations.
-    ///
-    /// Sets `session_mode` to `"yolo"` so the agent auto-approves tool calls —
-    /// channel users have no interactive UI for confirmations.
     pub fn build_channel_extra(backend: Option<&str>) -> serde_json::Value {
-        let mut extra = serde_json::json!({
-            "session_mode": "yolo",
-        });
+        let mut extra = serde_json::json!({});
         if let Some(b) = backend {
             extra["backend"] = serde_json::Value::String(b.to_owned());
         }
@@ -1026,14 +994,6 @@ pub enum StreamAction {
     Thinking(String),
     /// Tool call status update.
     ToolCall { name: String, status: String },
-    /// A blocking decision (permission / confirmation) the channel user must
-    /// answer. Carried so the relay can forward a numbered list and the
-    /// message loop can map a numeric reply back to `confirm`.
-    Decision {
-        call_id: String,
-        prompt: String,
-        options: Vec<crate::types::DecisionOption>,
-    },
     /// The companion's `nomi_stop_conversation` was denied by the gateway
     /// matrix on the Channel surface (batch-1 handover gap). The relay
     /// forwards the channel-owned numbered stop confirmation; on "确认" the
@@ -1111,39 +1071,6 @@ fn stop_denied_target(
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
     })
-}
-
-/// Maps a `nomifun_common::Confirmation` to a `Decision` action.
-///
-/// Option values become option ids (ACP `confirm` accepts a bare option-id
-/// string). A confirmation with no options is unanswerable and yields `None`.
-fn confirmation_to_decision(conf: &nomifun_common::Confirmation) -> Option<StreamAction> {
-    let options: Vec<crate::types::DecisionOption> = conf
-        .options
-        .iter()
-        .map(|o| crate::types::DecisionOption {
-            option_id: option_value_to_string(&o.value),
-            label: o.label.clone(),
-        })
-        .collect();
-    if options.is_empty() {
-        return None;
-    }
-    Some(StreamAction::Decision {
-        call_id: conf.call_id.clone(),
-        prompt: conf.title.clone().unwrap_or_else(|| conf.description.clone()),
-        options,
-    })
-}
-
-/// Renders a confirmation option value as the option id string to submit
-/// back through `confirm`. String values pass through verbatim; other JSON
-/// values fall back to their compact serialization.
-fn option_value_to_string(value: &serde_json::Value) -> String {
-    value
-        .as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| value.to_string())
 }
 
 /// Picks the newest visible user-authored text from a newest-first message
@@ -1375,8 +1302,6 @@ mod tests {
         assert_eq!(extra["companion_session"], serde_json::json!(true));
         assert_eq!(extra["channel_platform"], serde_json::json!("telegram"));
         assert_eq!(extra["companion_id"], serde_json::json!("companion_1"));
-        // Existing channel semantics survive.
-        assert_eq!(extra["session_mode"], serde_json::json!("yolo"));
     }
 
     #[test]
@@ -1749,63 +1674,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn permission_confirmation_produces_decision() {
-        let value = serde_json::json!({
-            "id": "conf-1",
-            "call_id": "call-9",
-            "title": "Edit file?",
-            "action": null,
-            "description": "edits main.rs",
-            "command_type": "edit",
-            "options": [
-                { "label": "Yes", "value": "yes" },
-                { "label": "No", "value": "no" },
-            ],
-        });
-        let conf: nomifun_common::Confirmation = serde_json::from_value(value).unwrap();
-        let event = AgentStreamEvent::Permission(conf.into());
-
-        match ChannelMessageService::process_stream_event(&event) {
-            Some(StreamAction::Decision { call_id, prompt, options }) => {
-                assert_eq!(call_id, "call-9");
-                assert_eq!(prompt, "Edit file?");
-                assert_eq!(
-                    options,
-                    vec![
-                        crate::types::DecisionOption {
-                            option_id: "yes".into(),
-                            label: "Yes".into()
-                        },
-                        crate::types::DecisionOption {
-                            option_id: "no".into(),
-                            label: "No".into()
-                        },
-                    ]
-                );
-            }
-            other => panic!("expected Decision, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn permission_with_empty_options_produces_none() {
-        let value = serde_json::json!({
-            "id": "conf-2",
-            "call_id": "call-10",
-            "title": "No choices",
-            "description": "",
-            "options": [],
-        });
-        let conf: nomifun_common::Confirmation = serde_json::from_value(value).unwrap();
-        let event = AgentStreamEvent::Permission(conf.into());
-        assert!(
-            ChannelMessageService::process_stream_event(&event).is_none(),
-            "an unanswerable decision (no options) must not surface"
-        );
-    }
-
-
     // ── build_thinking_message ─────────────────────────────────────────
 
     #[test]
@@ -1866,16 +1734,15 @@ mod tests {
     // ── build_channel_extra ───────────────────────────────────────────
 
     #[test]
-    fn yolo_extra_contains_session_mode() {
+    fn channel_extra_without_backend_is_empty() {
         let extra = ChannelMessageService::build_channel_extra(None);
-        assert_eq!(extra["session_mode"], "yolo");
+        assert_eq!(extra, serde_json::json!({}));
         assert!(extra.get("backend").is_none());
     }
 
     #[test]
-    fn yolo_extra_with_backend() {
+    fn channel_extra_with_backend() {
         let extra = ChannelMessageService::build_channel_extra(Some("claude"));
-        assert_eq!(extra["session_mode"], "yolo");
         assert_eq!(extra["backend"], "claude");
     }
 

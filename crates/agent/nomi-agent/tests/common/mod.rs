@@ -1,13 +1,12 @@
 // Shared test utilities for integration tests.
 #![allow(dead_code)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use nomi_agent::confirm::ToolConfirmer;
 use nomi_config::config::{Config, ProviderType, SessionConfig, ToolsConfig};
 use nomi_config::hooks::HooksConfig;
 use nomi_mcp::config::McpConfig;
@@ -184,7 +183,7 @@ impl Tool for MockTool {
 }
 
 // ---------------------------------------------------------------------------
-// ExecMockTool — mock tool with Exec category (requires approval)
+// ExecMockTool - mock tool with Exec effect category
 // ---------------------------------------------------------------------------
 
 /// A mock tool that returns a pre-configured result, with Exec category.
@@ -252,8 +251,6 @@ pub fn test_config() -> Config {
         prompt_caching: false,
         compat: nomi_config::compat::ProviderCompat::anthropic_defaults(),
         tools: ToolsConfig {
-            auto_approve: true,
-            allow_list: vec![],
             ..ToolsConfig::default()
         },
         session: SessionConfig {
@@ -270,9 +267,4 @@ pub fn test_config() -> Config {
         mcp: McpConfig::default(),
         logging: nomi_config::logging::LoggingConfig::default(),
     }
-}
-
-/// Create a ToolConfirmer that auto-approves everything.
-pub fn auto_approve_confirmer() -> Arc<Mutex<ToolConfirmer>> {
-    Arc::new(Mutex::new(ToolConfirmer::new(true, vec![])))
 }

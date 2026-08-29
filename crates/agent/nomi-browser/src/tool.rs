@@ -2,7 +2,6 @@
 //! (`nomi-browser-engine`). Mirrors `nomi-computer::ComputerTool`: an honest
 //! capability note baked into the (cacheable) description, a lazily-initialized
 //! engine whose construction error is cached (an unavailable backend is reported
-//! without retrying), per-action approval categories, and non-panicking
 //! `ToolResult` errors the model routes around.
 //!
 //! P0 exposed navigate/screenshot/capabilities. P1 added the read-only `observe`
@@ -14,7 +13,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -27,7 +28,6 @@ use nomi_browser_engine::{ActSpec, BrowserEngine, BrowserError, Capabilities, Ef
 use nomi_browser_engine::{ChromeSource, EngineConfig, Observation, create_engine};
 use nomi_browser_engine::{load_storage_state, save_storage_state, shared_storage_state_path};
 use nomi_config::config::BrowserConfig;
-use nomi_protocol::ToolApprovalManager;
 use nomi_protocol::events::ToolCategory;
 use nomi_tools::Tool;
 use nomi_types::tool::{JsonSchema, ToolResult};
@@ -45,7 +45,7 @@ use crate::managed::{
     first_model_identity_field, first_trusted_owner_field, is_existing_browser_action,
     lane_status, list_lanes, managed_lane_id, open_lane, platform_error_result, pretty_json,
 };
-use crate::redline::{self, ActionContext, ApprovalTier};
+use crate::redline::{self, ActionContext, ActionEffect};
 
 /// **P7B SoM cap**: max clickable elements to label on a Set-of-Marks overlay. Beyond this,
 /// numbered boxes clutter the screenshot and degrade vision-model selection accuracy, so the
@@ -136,19 +136,6 @@ enum PersistLoginOutcome {
     SaveFailed,
 }
 
-/// **P3-GW2: 带外确认 sentinel key**（裁决④）。`Tool::execute(&self, input)` 的签名不携带会话上下文，
-/// 故「这次不可逆动作已获带外确认」这一事实只能经 `input` 传进 facade。本 reserved key 是那条路径：
-/// `out_of_band_confirmed` 当且仅当 `input[OUT_OF_BAND_CONFIRMED_KEY] == true` 时返 `true`，让
-/// [`redline::enforce_redline`] 的第三参为真 → 旁路会话里的不可逆动作放行。
-///
-/// **信任边界（关键不变量）**：本 key 的唯一合法置位者是**网关 dispatch 层**——它在带外审批通道（手机/
-/// 前端）拿到用户批准后才注入。LLM 给的 `act` 参数里若带这个 key 必须被**剥除**（网关
-/// `tools_browser::sanitize_out_of_band` 在分类前剥除），否则模型能自我授权不可逆动作、绕过红线门。
-/// facade 这侧只**读**它（不剥）：因为 P0-P2 的引擎内 nomi 会话从不注入此 key（恒缺 = false = 现行
-/// fail-closed 行为不变），而网关侧的注入已过信任边界。`__` 前缀标记其为内部协议字段（非用户/模型可见
-/// 动作参数）。
-pub const OUT_OF_BAND_CONFIRMED_KEY: &str = "__out_of_band_confirmed";
-
 /// 单次 `act` 的动作级超时预算（F1 给 [`Progress::new`] 的 deadline）。导航/动作各自有更细的内部
 /// settle/退避；这是 facade 给整个动作的外层上限——比 nav 的 30s 略宽，覆盖「点击触发慢导航」的情形。
 /// abort（page.close/frame.detach）由引擎内部订阅，优先于本 deadline（progress.rs biased race）。
@@ -189,10 +176,9 @@ structured, redacted representation of the page (aria snapshot + visible text) t
 from against a JSON `schema`. switch_frame: enter an iframe `ref`. switch_tab / close_tab / \
 open_link_new_tab / back / forward / reload: navigation and tab control.\n\n\
 IRREVERSIBLE actions need care: clicking a Pay / Buy / Checkout / Submit / Delete / Send / \
-Confirm button, pressing Enter inside a form, or reloading a page that submitted a form can \
-charge money, delete data, or send a message — these cannot be undone. In an auto-approving \
-(yolo/companion) session such actions are blocked outright; otherwise they require explicit \
-approval.\n\n\
+Confirm button, pressing Enter inside a form, or reloading a submitted form can charge money, \
+delete data, or send a message. Selected Browser actions execute directly, so verify the target \
+and inputs before invoking them.\n\n\
 Usage notes:\n\
 - A `[ref]` is only valid for the snapshot it came from — re-run `observe` after any navigation \
 or UI change rather than reusing an old ref.\n\
@@ -257,10 +243,9 @@ pub struct BrowserTool {
     ///   私有目录）写进会话 extra；该路径经 manager/nomi/agent.rs 落成 bootstrap 的 `workspace`。
     /// - 非伙伴会话：会话自己的工作目录（临时或用户自定目录），同样 per-conversation 隔离。
     ///
-    /// bootstrap 据此在构造 `BrowserTool` 时把会话 workspace 经 [`Self::with_policy`] 灌进这里
-    /// （沿 `auto_approve`/`full_power` 同范式，构造期注入）。`None`（仅有 `BrowserConfig` 的
-    /// 调用方 / 测试默认）→ 引擎兜底落 `<data_dir>/downloads`（仍是隔离目录，非用户 Downloads，
-    /// 红线已守住）。
+    /// bootstrap 据此在构造 `BrowserTool` 时把会话 workspace 经 [`Self::with_policy`] 灌进这里。
+    /// `None`（仅有 `BrowserConfig` 的调用方 / 测试默认）时，引擎兜底落
+    /// `<data_dir>/downloads`（仍是隔离目录，非用户 Downloads）。
     ///
     /// **非伙伴 `{data_dir}/browser-profiles/{conversation_id}` 细分（默认④）的取舍**：
     /// bootstrap 在构造期既拿不到 `conversation_id` 也拿不到后端 `data_dir`（它们在更上层的
@@ -327,58 +312,10 @@ pub struct BrowserTool {
     /// resolving `[ref=f<seq>e<n>]` actions against the generation they were
     /// produced for.
     pub(crate) last_snapshot: Mutex<Option<Observation>>,
-    /// **F1-sec: 本会话的 tool-execution 审批闸是否被旁路**（`yolo || companion-forced-yolo ||
-    /// auto_approve`，裁决⑧）。这是 redline 门 [`redline::enforce_redline`] 的关键入参——决定
-    /// 「审批旁路会话里的不可逆动作」是否 hard-deny。
-    ///
-    /// **怎么拿到的（架构）**：`Tool::execute(&self, input: Value)` 的签名不携带 `session_mode`
-    /// （ComputerTool 同样如此），故在执行点拿不到会话模式。但**构造期**拿得到：bootstrap
-    /// （`AgentBootstrap::build`）持有完整 `Config`，而 `config.tools.auto_approve` **恰好**当且仅当
-    /// tool-execution 审批被旁路时为 `true`——
-    /// - yolo 会话：`session_mode == "yolo"` → `CliArgs.auto_approve = true`（manager/nomi/agent.rs）
-    ///   → `Config::resolve` 置 `config.tools.auto_approve = true`（config.rs §7）；
-    /// - companion-forced-yolo / process-issued Gateway 会话：工厂（factory/nomi.rs）把 `session_mode` pin
-    ///   成 `"yolo"`，同样落到上面这条链；
-    /// - `--auto-approve` CLI：直接置 `config.tools.auto_approve = true`。
-    /// - 而 `AutoEdit` 模式**不**置它（只自动批 info/edit 类别，从不批 Irreversible），故 AutoEdit
-    ///   会话的不可逆动作仍交 approval pipeline（门不拦），符合红线方向。
-    ///
-    /// bootstrap 据此在构造 `BrowserTool` 时把 `config.tools.auto_approve` 灌进这里（构造期快照）。
-    ///
-    /// **P3-X1 — 这是初值/兜底，不再是唯一真值**：本字段仍是构造期快照（与 `auto_approve` 同源），
-    /// 但当 [`Self::runtime_mode`] 被注入（bootstrap 把会话的 `Arc<ToolApprovalManager>` 穿透进来）时，
-    /// [`Self::session_bypasses_approval`] **优先 LIVE 读运行时模式**，本快照仅作运行时句柄缺失时的兜底
-    /// （CLI REPL / 仅有 `BrowserConfig` 的调用方 / 测试）。运行时句柄在时 → 用户会话中途 `set_mode` 翻
-    /// yolo 即时反映到红线门（缺口已闭，见 `runtime_mode` 文档）。
-    session_bypasses_approval: bool,
-    /// **P3-X1: 运行时审批模式的共享句柄**（闭合 set_mode 运行时翻转缺口）。
-    ///
-    /// `Some(mgr)` 时 [`Self::session_bypasses_approval`] **LIVE 读** `mgr.session_bypasses_approval()`
-    /// （= 当且仅当当前 `session_mode == Yolo`，权威映射在 [`ToolApprovalManager::session_bypasses_approval`]）
-    /// —— 故用户在会话**中途**经 `set_mode` 把模式翻成 yolo / 翻回 default，红线门即时随之武装 / 解除，
-    /// 不再被构造期快照钉死。`None`（CLI REPL / 仅 `BrowserConfig` 的调用方 / 测试）→ 回退到构造期
-    /// [`Self::session_bypasses_approval`] 快照（现行 fail-closed 行为不变）。
-    ///
-    /// **怎么拿到的（架构）**：会话的 `Arc<ToolApprovalManager>` 由后端（`manager/nomi/agent.rs`）/ CLI
-    /// （`nomi-cli` json-stream）创建并经 `engine.set_approval_manager` 安到引擎；`set_mode`（前端/网关切
-    /// yolo 的入口）改的就是这同一个 manager 的 `session_mode`。bootstrap 在构造 `BrowserTool` **之前**
-    /// 拿到这个 Arc（经 `AgentBootstrap::approval_manager` builder 注入），把它经 [`Self::with_policy`]
-    /// 的 `runtime_mode` 参穿透进本字段——facade 与 approval pipeline 看的是**同一个**运行时模式 cell，零漂移。
-    ///
-    /// **F1-sec bypass 映射方向保持不变**：只有 `Yolo` 算 bypass；`AutoEdit`（只自动批 info/edit，从不批
-    /// Irreversible）**不**算 bypass → 不武装红线门（不可逆动作仍交 approval pipeline）。该映射的唯一权威是
-    /// [`ToolApprovalManager::session_bypasses_approval`]，facade 不复制它。`nomi-browser` 本就依赖
-    /// `nomi-protocol`，故此句柄零新增跨 crate 依赖。
-    runtime_mode: Option<Arc<ToolApprovalManager>>,
-    /// Explicit Browser Use approval bypass. When true, Browser-specific approval
-    /// prompts approve immediately. This does not affect shell/file/native tools.
-    unrestricted_approval: bool,
-    /// **F1-sec: evaluate「全权模式」LIVE 值**（裁决⑨，E3 门控的 opt-in 开关）。`true` 当且仅当用户在
-    /// System Settings 显式 opt-in 了 browser-use 全权模式（`client_preferences` 形如
-    /// `agent.browserUse.fullPower`，由 bootstrap 经 `read_bool_pref` 范式读后经 [`Self::with_policy`]
-    /// 灌入）。默认 `false`（default-deny → evaluate 返 `Unsupported`）。本值在 [`Self::engine`] 构造
-    /// 引擎时灌进 [`nomi_browser_engine::EngineConfig::evaluate_full_power`]，由引擎层 evaluate 门
-    /// 消费——**绝不看 session_mode**（yolo/companion 无从豁免，不变量⑧）。
+    /// Construction-time browser `evaluate` policy from
+    /// `agent.browserUse.fullPower`. `false` keeps script evaluation disabled.
+    /// The engine also enforces its persistent-login incompatibility. This
+    /// browser security setting is independent of Agent execution policy.
     ///
     /// **LIVE 语义**：与 `computer_use`/`browser_use` 启用开关同范式——每次**会话构造**时由 bootstrap
     /// 从 client_preferences 读最新值，故用户切换全权开关对**新会话**即时生效（无需重启）。会话内的引擎
@@ -405,28 +342,6 @@ pub struct BrowserTool {
     extract_model: ExtractModelRef,
     /// Exact-blackout registry shared with the engine's debug serializers.
     known_secret_values: nomi_browser_engine::KnownSecretValues,
-    /// **Takeover: must-re-observe flag**. Set to `true` after a takeover resolves
-    /// (the user may have navigated during the takeover — pre-takeover `f<seq>e<n>` refs
-    /// are invalid). Checked before any ref-based action; cleared by `observe`.
-    /// Fail-closed: if set, ref-based actions return an error telling the model to
-    /// re-observe.
-    must_re_observe: AtomicBool,
-    /// **Takeover controller**: handles out-of-band human approval for irreversible
-    /// actions. Default: disabled (fail-closed — irreversible stays Blocked without
-    /// a client-pref opt-in). When enabled, irreversible actions in bypass sessions
-    /// trigger a takeover request instead of immediately blocking.
-    /// Wired by bootstrap: the LIVE `agent.browserUse.takeover` pref gates injection of the host
-    /// approval gate (`with_approval_gate`), which flips `controller.enabled`. Absent the gate
-    /// (pref OFF / hosts without one), defaults OFF (fail-closed).
-    takeover_controller: crate::takeover::TakeoverController,
-    /// **Phase D: out-of-band approval gate** (human takeover + SD-5 cross-origin POST
-    /// egress). When `Some`, an irreversible action in a bypass session — and a gated
-    /// cross-origin POST (via [`crate::approval::GateEgressApprover`] injected into the
-    /// engine) — is surfaced to the user for approval and awaited. `None` (default) →
-    /// **fail-closed** (irreversible stays Blocked; egress fails closed = pre-Phase-D
-    /// behavior). Injected by bootstrap (desktop: event + `ToolApprovalManager`) / gateway
-    /// (GW2 `nomi_browser_confirm` channel) via [`Self::with_approval_gate`].
-    approval_gate: crate::approval::BrowserApprovalGateRef,
     /// **P7A: site memory** (cross-session site structure memory). When `Some`, every
     /// successful non-secret `do_act` records a [`crate::site_memory::SiteMemoryEntry`]
     /// keyed by eTLD+1; `do_observe` attaches remembered hints as untrusted suggestions.
@@ -476,13 +391,6 @@ impl BrowserTool {
     /// `headful`) and derives the engine data directory; does NOT launch a
     /// browser. The data directory is the app config dir when available,
     /// otherwise the engine's temp-dir default.
-    ///
-    /// **F1-sec**: this signature keeps `config: &BrowserConfig` only — the
-    /// session-bypass policy is NOT in `BrowserConfig`. Bootstrap holds the full
-    /// `Config` and knows `tools.auto_approve`, so it must use [`Self::with_policy`]
-    /// to wire the redline gate. `new` defaults the policy to `false` (a normal
-    /// session) for callers that only have a `BrowserConfig` (the redline gate then
-    /// never hard-denies — equivalent to leaving approval to approval pipeline).
     pub fn new(config: &BrowserConfig) -> Self {
         Self::new_standalone(config)
     }
@@ -501,49 +409,28 @@ impl BrowserTool {
         // 浏览器来源（「我的浏览器」）：从 BrowserConfig.source 解析（坏值静默退回 Managed）。
         // 与 headful 正交；`with_policy` 无需带参——两开关都经 config.tools.browser.* 流入。
         t.chrome_source = ChromeSource::from_source_str(&config.source);
-        t.unrestricted_approval = config.unrestricted_approval;
         t
     }
 
-    /// **F1-sec: construct from the browser config + the session-bypass policy +
-    /// the evaluate full-power LIVE value.**
+    /// Construct from browser configuration plus host-resolved browser policy.
     ///
-    /// - `session_bypasses_approval` MUST be `config.tools.auto_approve` (the
-    ///   construction-time snapshot that is `true` iff tool-execution approval is
-    ///   bypassed — yolo / companion-forced-yolo / `--auto-approve`; see the field
-    ///   doc). This is the wiring point the bootstrap uses so the facade redline gate
-    ///   (裁决⑧) actually fires in auto-approving sessions instead of failing open.
-    /// - `evaluate_full_power` MUST be the LIVE `client_preferences`
+    /// - `evaluate_full_power` is the current `client_preferences`
     ///   `agent.browserUse.fullPower` value (read via the `read_bool_pref` pattern).
-    ///   `false` (default / not opted in) keeps evaluate OFF (E3 default-deny).
-    /// - `workspace_dir` (P3-G2) is the session's working directory — the natural
-    ///   per-session/per-pet isolation point (companion: `{companion_id}/workspace`;
-    ///   non-companion: the conversation's working dir). Downloads (E4) land in its
-    ///   `downloads/` subdir. `None` → the engine falls back to `<data_dir>/downloads`
-    ///   (still isolated, never the user's real Downloads). See the `workspace_dir`
-    ///   field doc for the full architecture.
-    /// - `runtime_mode` (P3-X1) is the session's shared `Arc<ToolApprovalManager>` — the
-    ///   *runtime-flippable* mode cell that `set_mode` mutates. When `Some`,
-    ///   [`Self::session_bypasses_approval`] reads it LIVE (yolo ⇒ bypass) so a mid-session
-    ///   `set_mode` to yolo arms the redline gate immediately; `None` falls back to the
-    ///   construction-time `session_bypasses_approval` snapshot. The two arguments stay
-    ///   consistent — the snapshot is the bootstrap's initial `auto_approve`, the handle is the
-    ///   same manager whose mode that snapshot was derived from. See the `runtime_mode` field doc.
+    /// - `evaluate_persistent_login` controls encrypted login-state reuse and
+    ///   remains mutually exclusive with script evaluation.
+    /// - `workspace_dir` is the session isolation point for downloads.
+    /// - `persistent_login_key` is host-provided and never model-controlled.
     pub fn with_policy(
         config: &BrowserConfig,
-        session_bypasses_approval: bool,
         evaluate_full_power: bool,
         evaluate_persistent_login: bool,
         workspace_dir: Option<PathBuf>,
-        runtime_mode: Option<Arc<ToolApprovalManager>>,
         persistent_login_key: Option<[u8; nomi_browser_engine::vault::KEY_SIZE]>,
     ) -> Self {
         let mut t = Self::new_standalone(config);
-        t.session_bypasses_approval = session_bypasses_approval;
         t.evaluate_full_power = evaluate_full_power;
         t.evaluate_persistent_login = evaluate_persistent_login;
         t.workspace_dir = workspace_dir;
-        t.runtime_mode = runtime_mode;
         t.persistent_login_key = persistent_login_key;
         t
     }
@@ -650,14 +537,6 @@ impl BrowserTool {
             // 并发隔离：per-facade 引擎构造锁（详见字段文档）。
             engine_build_gate: tokio::sync::Mutex::new(()),
             last_snapshot: Mutex::new(None),
-            // Default: a normal (non-bypassing) session. Bootstrap overrides this via
-            // `with_policy` with `config.tools.auto_approve`. Tests set it directly.
-            session_bypasses_approval: false,
-            // P3-X1: 默认无运行时模式句柄 → session_bypasses_approval() 回退到上面的构造期快照
-            // （现行 fail-closed 行为不变）。bootstrap 经 `with_policy` 的 runtime_mode 参注入会话的
-            // Arc<ToolApprovalManager>，届时门 LIVE 读运行时模式（set_mode 翻转即时生效）。
-            runtime_mode: None,
-            unrestricted_approval: false,
             // Default: evaluate full-power OFF (E3 default-deny). Bootstrap overrides via
             // `with_policy` with the LIVE `agent.browserUse.fullPower` pref.
             evaluate_full_power: false,
@@ -671,11 +550,6 @@ impl BrowserTool {
             extract_model: None,
             // Known-secret blackout: bounded shared registry; clone goes into EngineConfig.
             known_secret_values: nomi_browser_engine::KnownSecretValues::default(),
-            // Takeover: initially no re-observe needed.
-            must_re_observe: AtomicBool::new(false),
-            // Takeover controller: default OFF (fail-closed). Irreversible actions
-            // stay Blocked unless a client-pref enables takeover.
-            takeover_controller: crate::takeover::TakeoverController::new(),
             // P7A: no site memory by default (graceful degradation). Bootstrap/factory
             // injects a store via `.with_site_memory(...)`.
             site_memory: None,
@@ -685,9 +559,6 @@ impl BrowserTool {
             // P7B: no vision locator by default (graceful degradation). Bootstrap/factory
             // injects the real adapter via `.with_visual_locator(...)`.
             visual_locator: None,
-            // Phase D: no approval gate by default (fail-closed). Bootstrap/gateway injects
-            // it via `.with_approval_gate(...)` to enable takeover + egress approval.
-            approval_gate: None,
         }
     }
 
@@ -715,11 +586,9 @@ impl BrowserTool {
     /// must inject a trusted Lane client before actions can execute.
     pub fn new_managed(
         config: &BrowserConfig,
-        session_bypasses_approval: bool,
         evaluate_full_power: bool,
         evaluate_persistent_login: bool,
         workspace_dir: Option<PathBuf>,
-        runtime_mode: Option<Arc<ToolApprovalManager>>,
         persistent_login_key: Option<[u8; nomi_browser_engine::vault::KEY_SIZE]>,
     ) -> Self {
         Self {
@@ -745,31 +614,22 @@ impl BrowserTool {
             managed_lane_counter: AtomicU64::new(0),
             engine_build_gate: tokio::sync::Mutex::new(()),
             last_snapshot: Mutex::new(None),
-            session_bypasses_approval,
-            runtime_mode,
-            unrestricted_approval: config.unrestricted_approval,
             evaluate_full_power,
             evaluate_persistent_login,
             persistent_login_key,
             extract_model: None,
             known_secret_values: nomi_browser_engine::KnownSecretValues::default(),
-            must_re_observe: AtomicBool::new(false),
-            takeover_controller: crate::takeover::TakeoverController::new(),
             site_memory: None,
             visual_fallback_enabled: false,
             visual_locator: None,
-            approval_gate: None,
         }
     }
 
     /// Build the policy facade used by the shared Browser Platform adapter.
     ///
     /// The engine is supplied by `ManagedBrowserHost`, so this constructor must
-    /// never lazily launch a second Chromium process.  Platform calls do not run
-    /// through the generic tool-execution approval pipeline; consequently this
-    /// facade deliberately behaves like an approval-bypassing session.  The
-    /// independent redline gate then fail-closes irreversible actions unless a
-    /// future trusted platform approval seam confirms them out-of-band.
+    /// never lazily launch a second Chromium process. Platform ownership,
+    /// resource bounds, and engine policy remain authoritative.
     pub(crate) fn with_managed_engine(
         engine: Arc<dyn BrowserEngine>,
         _data_dir: PathBuf,
@@ -784,11 +644,9 @@ impl BrowserTool {
                 headless: !headful,
                 ..BrowserConfig::default()
             },
-            true,
             evaluate_full_power,
             evaluate_persistent_login,
             workspace_dir,
-            None,
             None,
         );
         tool.managed_engine_injected = true;
@@ -812,7 +670,6 @@ impl BrowserTool {
             return Err(error);
         }
         *self.last_snapshot.lock().expect("last_snapshot poisoned") = Some(observation);
-        self.clear_must_re_observe();
         Ok(())
     }
 
@@ -824,20 +681,15 @@ impl BrowserTool {
             .lock()
             .expect("last_snapshot poisoned")
             .take();
-        self.set_must_re_observe();
     }
 
-    /// Validate and classify an adapter action through the existing BrowserTool
-    /// security policy, then return the engine-level action specification.
-    ///
-    /// The confirmation sentinel is always removed from operation input because
-    /// it can originate with a model. It is reintroduced only from the separate
-    /// trusted driver context flag supplied by the main process.
+    /// Validate an adapter action and return the engine-level action
+    /// specification. Extract accepts only its bounded schema; other actions are
+    /// parsed by the same canonical builder as standalone execution.
     pub(crate) async fn prepare_managed_act(
         &self,
         action: &str,
         input: &Value,
-        trusted_out_of_band_confirmation: bool,
     ) -> Result<ActSpec, String> {
         // Extract retains only its schema. Validate that field before cloning
         // and deliberately omit unrelated model fields so a huge ignored value
@@ -856,17 +708,7 @@ impl BrowserTool {
             input.clone()
         };
         if let Some(object) = sanitized.as_object_mut() {
-            object.remove(OUT_OF_BAND_CONFIRMED_KEY);
-            if trusted_out_of_band_confirmation {
-                object.insert(OUT_OF_BAND_CONFIRMED_KEY.to_string(), Value::Bool(true));
-            }
             object.insert("action".to_string(), Value::String(action.to_string()));
-        }
-        if let Some(blocked) = self
-            .redline_gate_with_takeover(action, &sanitized)
-            .await
-        {
-            return Err(blocked.content);
         }
         self.build_act_spec(action, &sanitized)
             .map_err(|result| result.content)
@@ -952,47 +794,6 @@ impl BrowserTool {
     pub fn with_visual_fallback_enabled(mut self, enabled: bool) -> Self {
         self.visual_fallback_enabled = enabled;
         self
-    }
-
-    /// **Phase D builder**: inject the out-of-band approval gate (human takeover + SD-5
-    /// egress). When `Some`, irreversible actions in bypass sessions are surfaced to the
-    /// user for approval (instead of hard-denied), and a [`crate::approval::GateEgressApprover`]
-    /// backed by this gate is handed to the engine so gated cross-origin POSTs are
-    /// approved live (instead of fail-closed). `None` (default) → fail-closed.
-    /// Also flips `takeover_controller.enabled` so the redline gate takes the takeover path.
-    pub fn with_approval_gate(mut self, gate: Arc<dyn crate::approval::BrowserApprovalGate>) -> Self {
-        self.approval_gate = Some(gate);
-        self.takeover_controller.enabled = true;
-        self
-    }
-
-    // ── Takeover: must-re-observe ────────────────────────────────────────────
-
-    /// Mark that a re-observe is required before any ref-based action.
-    /// Called after a takeover resolves (the user may have navigated).
-    pub fn set_must_re_observe(&self) {
-        self.must_re_observe.store(true, Ordering::Release);
-    }
-
-    /// Clear the must-re-observe flag. Called when an `observe` is performed.
-    pub fn clear_must_re_observe(&self) {
-        self.must_re_observe.store(false, Ordering::Release);
-    }
-
-    /// Check if a re-observe is required. If true, ref-based actions must be
-    /// rejected until the model runs a fresh `observe`.
-    pub fn needs_re_observe(&self) -> bool {
-        self.must_re_observe.load(Ordering::Acquire)
-    }
-
-    /// Access the takeover controller (for test injection and configuration).
-    pub fn takeover_controller_mut(&mut self) -> &mut crate::takeover::TakeoverController {
-        &mut self.takeover_controller
-    }
-
-    /// Access the takeover controller (read-only).
-    pub fn takeover_controller(&self) -> &crate::takeover::TakeoverController {
-        &self.takeover_controller
     }
 
     /// **P7A: record a site-memory entry** after a successful non-secret action.
@@ -1174,23 +975,17 @@ impl BrowserTool {
             // Downloads，红线已守住）。非伙伴 {data_dir}/browser-profiles/{conversation_id} 细分见
             // workspace_dir 字段文档（会话工作目录已 per-conversation 隔离，子细分留 W4/部署）。
             workspace_dir: self.workspace_dir.clone(),
-            // F1-sec E3 evaluate 门控：把构造期灌入的全权 LIVE 值（默认 false=default-deny）传给引擎，
-            // 引擎据它武装 evaluate gate（仍受「与持久登录互斥」约束；绝不看 session_mode）。
+            // Pass the host-resolved evaluate setting to the engine. The engine
+            // keeps evaluation disabled by default and enforces its
+            // persistent-login incompatibility.
             evaluate_full_power: self.evaluate_full_power,
             // SD-6：持久登录 LIVE 值（默认 false=code-level default-deny；产品 ON 由 factory 灌入）。
             evaluate_persistent_login: self.evaluate_persistent_login,
             firewall: nomi_browser_engine::FirewallConfig::default(),
             storage_state,
-            // P3-D2 / SD-5 出口审批通道：被防火墙门控（GatePost）的跨域 POST / 未授权域出口在引擎层
-            // **悬挂等裁决**。**Phase D 接线**：当 facade 被注入 approval gate（`with_approval_gate`，
-            // 桌面=事件+ToolApprovalManager / 网关=GW2 confirm）时，交引擎一个 [`GateEgressApprover`]
-            // → 被门控的跨域 POST 经 gate 浮给用户、await 裁决（批准=continue 一次 / 拒绝·超时=fail-closed）。
-            // 无 gate → `None` → 引擎 **fail-closed**（拒绝被门控请求，闭合 P2 跨域 POST 泄漏窗口；
-            // 拒绝比放行安全 = pre-Phase-D 默认）。
-            egress_approver: self.approval_gate.as_ref().map(|g| {
-                Arc::new(crate::approval::GateEgressApprover::new(g.clone()))
-                    as Arc<dyn nomi_browser_engine::firewall::EgressApprover>
-            }),
+            // No interactive egress path is installed. The engine applies its
+            // configured firewall outcome synchronously.
+            egress_approver: None,
             // Known-secret blackout: share the facade's secret set with the engine so debug
             // serializers can exact-blackout resolved secrets.
             known_secret_values: self.known_secret_values.clone(),
@@ -1833,16 +1628,6 @@ impl BrowserTool {
     /// already `None` (suppressed engine-side in `act_type`/`act_set_value`), so
     /// surfacing the Effect here never leaks a credential.
     async fn do_act(&self, action: &str, input: &Value) -> ToolResult {
-        // Takeover guard: if must_re_observe is set and this action uses a ref,
-        // reject it — pre-takeover refs are invalid (user may have navigated).
-        if self.needs_re_observe() && input.get("ref").is_some() {
-            return ToolResult::error(
-                "refs from before the takeover are invalid — the user may have navigated. \
-                 Run `observe` first to get fresh refs, then retry the action."
-                    .to_string(),
-            );
-        }
-
         // Parse + validate BEFORE constructing the engine (no browser launch on a
         // parameter error or a blocked secret).
         let spec = match self.build_act_spec(action, input) {
@@ -1961,7 +1746,7 @@ impl BrowserTool {
     ///   要等请求真发出）。故保守留 `false`——**E5 网络层兜底**（不靠这个信号），勿强造。
     /// - **enter_submits_form**：press_key 的裸 Enter 是否落在 `<form>` 内——见
     ///   [`Self::enter_submits_form_signal`]，据动作名 + keys best-effort 判（facade 拿不到 focus 树，
-    ///   故对 Enter 类按键**保守升级**，由用户在普通会话确认 / yolo 下 hard-deny；非 Enter 不升级）。
+    ///   故对 Enter 类按键保守分类为不可逆 effect；非 Enter 不升级）。
     /// - **reload_resubmits_post**：reload 一个 POST 提交来的页——从 `last_snapshot` 的
     ///   `current_page_is_post` best-effort 读取（observe 时经 `Page.getNavigationHistory` +
     ///   [`nomi_browser_engine::nav::current_entry_is_post`] 填充）。snapshot 不存在或 observe 取不到
@@ -1986,7 +1771,7 @@ impl BrowserTool {
         }
 
         // press_key 的裸 Enter → 保守视作可能落 form（隐式提交）。facade 纯读路径拿不到 focus 树，故
-        // 对 Enter 类按键保守升级（普通会话弹审批 / yolo 下 hard-deny），非 Enter 不升级。
+        // 对 Enter 类按键分类为不可逆 effect，非 Enter 不升级。
         if let Some(action) = input.get("action").and_then(|v| v.as_str())
             && action == "press_key"
         {
@@ -2020,9 +1805,9 @@ impl BrowserTool {
         // **保守契约**：只有当 (a) 有缓存的当前 origin **且** (b) 本动作真带一个目的 URL **且** (c) 二者
         // 跨 eTLD+1 时，才把信号置 true（让 classifier 升级）。拿不到 origin / 动作不带目的 URL（绝大多数
         // click/type）→ **保守留 false**——facade classify 时点本就无从可靠判「这次 click 会不会触发跨域
-        // POST」（那要等请求真发出）。真实的跨域 POST 拦截由 **E5 出口防火墙 + D2 悬挂审批**在网络层兜底
-        // （`Fetch.requestPaused` → `firewall::decide` → GatePost 悬挂等裁决 / fail-closed），**不靠**这个
-        // facade 信号——故信号取不到只是少一层提前分类，绝不漏拦真正的跨域 POST。
+        // POST」（那要等请求真发出）。真实的跨域 POST 由 **E5 出口防火墙**在网络层同步处理
+        // （`Fetch.requestPaused` → `firewall::decide`；无外部决策器时 GatePost 直接失败），**不靠**
+        // 这个 facade 信号——故信号取不到只是少一层提前分类，绝不漏掉真正的跨域 POST。
         ctx.is_cross_origin_post = self.cross_origin_post_signal(input);
 
         ctx
@@ -2058,196 +1843,12 @@ impl BrowserTool {
         nomi_browser_engine::firewall::is_cross_origin(&current_origin, target_url)
     }
 
-    /// **E2/F1-sec: 本会话的 tool-execution 审批闸是否被旁路**（`yolo || companion-forced-yolo ||
-    /// auto_approve`）——[`redline::enforce_redline`] 的关键入参。
-    ///
-    /// **接线（P3-X1：LIVE 读运行时模式，非构造期快照）**：
-    /// - [`Self::runtime_mode`] 为 `Some(mgr)` → **LIVE 读** `mgr.session_bypasses_approval()`
-    ///   （权威映射：当且仅当当前 `session_mode == Yolo`；`AutoEdit`/`Default` 不 bypass）。故用户在会话
-    ///   **中途**经 `set_mode` 翻 yolo / 翻回，红线门即时随之武装 / 解除（set_mode 运行时翻转缺口已闭）。
-    /// - `None`（CLI REPL / 仅 `BrowserConfig` 的调用方 / 测试）→ 回退到构造期由 bootstrap 经
-    ///   [`Self::with_policy`] 灌入的 [`Self::session_bypasses_approval`] 快照（= `config.tools.auto_approve`，
-    ///   现行 fail-closed 行为不变）。
-    ///
-    /// 返 `true` 时 [`redline::enforce_redline`] 对不可逆动作 hard-deny；返 `false`（普通会话）时门
-    /// 不拦，交 approval pipeline 正常审批。**bypass 映射方向（F1-sec）勿改**：只有 yolo 算 bypass，AutoEdit
-    /// 不算（其只自动批 info/edit，从不批 Irreversible）——该方向的权威是
-    /// [`ToolApprovalManager::session_bypasses_approval`]，本方法不复制它。
-    fn session_bypasses_approval(&self) -> bool {
-        match &self.runtime_mode {
-            // P3-X1: 运行时句柄优先 → LIVE 读（set_mode 翻转即时反映）。映射方向（仅 yolo bypass）
-            // 由 ToolApprovalManager 权威定义，facade 不复制。
-            Some(mgr) => mgr.session_bypasses_approval(),
-            // 兜底：无运行时句柄 → 构造期快照（= auto_approve，现行行为不变）。
-            None => self.session_bypasses_approval,
-        }
-    }
-
-    /// **E2: 带外确认是否已获**（headful takeover 原生 dialog / 网关手机审批）——P3-GW2 机制。
-    ///
-    /// **P3-GW2 接线**：读 `input` 里的 [`OUT_OF_BAND_CONFIRMED_KEY`] sentinel。当且仅当它为
-    /// `true`（仅网关 dispatch 层在带外审批通过后注入，见 key 文档的信任边界）时返 `true`，让
-    /// [`redline::enforce_redline`] 对旁路会话的不可逆动作放行。
-    ///
-    /// **fail-closed 默认**：引擎内 nomi 会话从不注入此 key（恒缺）→ 返 `false` → 现行 P2 行为不变
-    /// （旁路会话不可逆动作仍 hard-deny）。带外放行仅经网关已确认的注入发生。facade 不剥此 key
-    /// （剥除是网关分类前的职责，过了信任边界）；这里只读。
-    fn out_of_band_confirmed(&self, input: &Value) -> bool {
-        input
-            .get(OUT_OF_BAND_CONFIRMED_KEY)
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    }
-
-    /// **P3-GW2: 用 facade 的完整运行时上下文分类一个动作的审批级**（供网关 dispatch 层在转发前判
-    /// 是否需带外审批）。
-    ///
-    /// 与 [`Self::redline_gate`] 同源走 [`Self::build_action_context`] → [`redline::classify_action`]，
-    /// 故它**复用 facade 缓存的 `last_snapshot`**：按 `ref` 查到的危险 accname（Pay/Submit/删除…）在
-    /// 这里被看见——这正是网关侧裸 `classify_action`（无 snapshot）看不到的信号。网关在一次 `observe`
-    /// 后调本方法即可拿到与 facade 红线门一致的权威分级，对 [`ApprovalTier::Irreversible`] 走带外审批，
-    /// 闭合「accname-only 可判但网关看不到」的缺口。
-    ///
-    /// 纯读（不进引擎、不启动浏览器）：只读 `input` + 已缓存 snapshot。
-    pub fn classify_action_tier(&self, action: &str, input: &Value) -> ApprovalTier {
+    /// Classify an action's observable effect from model input plus the latest
+    /// cached observation. This is descriptive metadata only: it does not gate,
+    /// defer, or wait before execution.
+    pub fn classify_action_effect(&self, action: &str, input: &Value) -> ActionEffect {
         let ctx = self.build_action_context(input);
         redline::classify_action(action, &ctx)
-    }
-
-    /// **E2: facade 独立 fail-closed 强制门**（设计裁决⑧关键，**不经 approval pipeline**）。
-    ///
-    /// 在 dispatch 到 engine **之前**调用：分类本次动作的审批级（[`redline::classify_action`]）→
-    /// 据会话是否旁路审批 + 是否带外确认，由 [`redline::enforce_redline`] 决定放行 / hard-deny。
-    ///
-    /// 方向（勿搞反）：**只**拦审批旁路会话（yolo/companion）里的不可逆动作；普通会话的不可逆动作
-    /// 放行（交 approval pipeline 正常审批，由 [`Self::category_for`] 返 [`ToolCategory::Irreversible`] 触发）。
-    ///
-    /// 返 `Some(ToolResult::error)` = 被拦（调用方直接返该错误，不 dispatch）；`None` = 放行。
-    fn redline_gate(&self, action: &str, input: &Value) -> Option<ToolResult> {
-        let ctx = self.build_action_context(input);
-        let tier = redline::classify_action(action, &ctx);
-        let bypass = self.session_bypasses_approval();
-        let confirmed = self.out_of_band_confirmed(input) || self.unrestricted_approval;
-        match redline::enforce_redline(tier, bypass, confirmed) {
-            Ok(()) => None,
-            Err(e) => {
-                tracing::warn!(
-                    target: "nomi_browser::redline",
-                    action = %action,
-                    tier = ?tier,
-                    "redline gate hard-denied an irreversible action in an approval-bypassing session"
-                );
-                Some(ToolResult::error(e.to_string()))
-            }
-        }
-    }
-
-    /// **P7D: redline gate with takeover integration** (async).
-    ///
-    /// When the redline gate would block (irreversible + bypass + not confirmed) AND
-    /// takeover is enabled, asks for out-of-band human approval:
-    /// 1. Requests approval via the injected [`crate::approval::BrowserApprovalGate`]
-    ///    (which owns notify + await + timeout + fail-closed). Without a gate,
-    ///    [`crate::takeover::TakeoverController::resolve_without_ui`] fail-closes
-    ///    immediately.
-    /// 2. Passes `resolution.to_confirmed()` to `enforce_redline`.
-    /// 3. If confirmed: sets `must_re_observe` (user may have navigated) and returns None (proceeds).
-    /// 4. Otherwise: returns the Blocked error (fail-closed).
-    ///
-    /// When takeover is disabled (default), falls through to the sync `redline_gate`.
-    async fn redline_gate_with_takeover(&self, action: &str, input: &Value) -> Option<ToolResult> {
-        let ctx = self.build_action_context(input);
-        let tier = redline::classify_action(action, &ctx);
-        let bypass = self.session_bypasses_approval();
-        let sentinel_confirmed = self.out_of_band_confirmed(input) || self.unrestricted_approval;
-
-        // Fast path: not irreversible, not bypass, or already sentinel-confirmed → use sync gate.
-        if tier != redline::ApprovalTier::Irreversible || !bypass || sentinel_confirmed {
-            return match redline::enforce_redline(tier, bypass, sentinel_confirmed) {
-                Ok(()) => None,
-                Err(e) => Some(ToolResult::error(e.to_string())),
-            };
-        }
-
-        // We're in the "irreversible + bypass + not sentinel-confirmed" path.
-        // Try takeover if enabled.
-        if !self.takeover_controller.enabled {
-            // Takeover disabled → hard-deny (existing fail-closed behavior).
-            tracing::warn!(
-                target: "nomi_browser::redline",
-                action = %action,
-                tier = ?tier,
-                "redline gate hard-denied (takeover disabled)"
-            );
-            let err = redline::enforce_redline(tier, bypass, false).unwrap_err();
-            return Some(ToolResult::error(err.to_string()));
-        }
-
-        // Takeover enabled — request human approval.
-        tracing::info!(
-            target: "nomi_browser::takeover",
-            action = %action,
-            "requesting human approval for irreversible action in bypass session"
-        );
-
-        let description = ctx
-            .element_accname
-            .clone()
-            .unwrap_or_else(|| action.to_string());
-
-        // Phase D: prefer the injected approval gate (desktop event + ToolApprovalManager,
-        // or gateway GW2 confirm). It owns notify + await + timeout + fail-closed. Without a
-        // gate there is no UI able to resolve a takeover, so fail closed IMMEDIATELY
-        // (same Blocked outcome as pre-Phase-D, without holding the action open for a
-        // timeout). Tests inject a predetermined outcome via the force_resolution seam.
-        let confirmed = if let Some(gate) = &self.approval_gate {
-            // Phase 3: attach a current-page preview so a SILENT (headless) session can still
-            // show the user what they're approving (no visible window needed). Best-effort:
-            // reuse the same redaction-aware `engine.screenshot()` `do_screenshot` uses; a
-            // capture failure MUST NOT block the ask (attach None, still surface the text) —
-            // the redline keystone (only explicit Approve releases) stays intact regardless.
-            let screenshot = match self.engine().await {
-                Ok(engine) => engine.screenshot().await.ok().map(|png| {
-                    format!(
-                        "data:image/png;base64,{}",
-                        base64::engine::general_purpose::STANDARD.encode(&png)
-                    )
-                }),
-                Err(_) => None,
-            };
-            let ask = crate::approval::ApprovalAsk {
-                kind: crate::approval::ApprovalKind::IrreversibleAction {
-                    action: action.to_string(),
-                    description,
-                },
-                screenshot,
-            };
-            gate.request_approval(ask).await.is_approved()
-        } else {
-            // No gate → no UI can resolve the request: immediate fail-closed
-            // (Unavailable), or the test seam's forced resolution.
-            self.takeover_controller.resolve_without_ui().to_confirmed()
-        };
-
-        tracing::info!(
-            target: "nomi_browser::takeover",
-            action = %action,
-            confirmed,
-            "takeover resolved"
-        );
-
-        // Feed the resolution back into enforce_redline.
-        match redline::enforce_redline(tier, bypass, confirmed) {
-            Ok(()) => {
-                // Confirmed! The user approved. Set must-re-observe (user may have navigated).
-                self.set_must_re_observe();
-                None
-            }
-            Err(e) => {
-                // Cancelled / TimedOut / Unavailable → still Blocked.
-                Some(ToolResult::error(e.to_string()))
-            }
-        }
     }
 
     // ── P7B: Visual Fallback helpers ────────────────────────────────────────
@@ -2273,14 +1874,11 @@ impl BrowserTool {
     ///    the snapshot).
     /// 3. Call the vision locator to find the target.
     /// 4. Convert pixel coords to CSS via DPR division (THE KEYSTONE).
-    /// 5. Run the redline gate (irreversible visual clicks still need approval).
     /// 6. Dispatch via `engine.click_at_css_point(x, y)`.
     ///
-    /// # Security
-    /// - The screenshot fed to the vision model is the engine's native screenshot (same
-    ///   as observe uses — secrets are browser-level masked in input fields).
-    /// - The redline gate STILL runs (visual clicks of "Pay" / "Delete" buttons are still
-    ///   subject to approval).
+    /// The screenshot fed to the vision model is the engine's native screenshot,
+    /// the same source used by observe. Browser-level secret masking and normal
+    /// engine validation remain in force.
     async fn attempt_visual_fallback(
         &self,
         engine: &Arc<dyn BrowserEngine>,
@@ -2339,12 +1937,7 @@ impl BrowserTool {
                 .map_err(|e| format!("visual locator failed: {e}"))?
         };
 
-        // 5. Redline gate — irreversible visual clicks STILL require approval.
-        if let Some(blocked) = self.redline_gate(action, input) {
-            return Ok(blocked);
-        }
-
-        // 6. Dispatch via the engine's point-click seam (CSS pixels, zero DPR).
+        // Dispatch via the engine's point-click seam (CSS pixels, zero DPR).
         engine
             .click_at_css_point(css_point.x, css_point.y)
             .await
@@ -2385,8 +1978,8 @@ impl BrowserTool {
     /// dodge the stale-ref paradox (the fallback fires precisely because the target ref went
     /// stale — re-querying geometry then would fail). If the layout shifted between observe and
     /// the fallback, the overlay can misalign and the model may pick a wrong label; the raw-bbox
-    /// fallback (fresh screenshot, free-form locate) plus the agent's re-observe-after-act loop
-    /// are the safety net, and the redline gate still guards any dangerous click.
+    /// fallback (fresh screenshot, free-form locate) plus the agent's
+    /// re-observe-after-act loop keep the result observable.
     fn som_rects_css(&self) -> Option<Vec<nomi_browser_engine::CssRect>> {
         let guard = self.last_snapshot.lock().expect("last_snapshot poisoned");
         let snap = guard.as_ref()?;
@@ -2749,7 +2342,7 @@ impl Tool for BrowserTool {
                 },
                 "lane_id": { "type": "string", "description": "Optional Lane handle returned by browser_open/browser_fork/browser_list. Existing actions use the caller's default Lane when omitted." },
                 "lane_name": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[A-Za-z0-9_-]+$", "description": "Short model-chosen Lane name for browser_open/browser_fork. Trusted owner identity is supplied by the host and cannot be set here." },
-                "presentation": { "type": "string", "enum": ["unattended", "attended"], "description": "Whether this work needs the user's eyes. Omit (or \"unattended\") for routine reading, searching and extraction — the browser stays silent. Use \"attended\" when the user may need to see the page or take over: a sign-in or verification wall, a CAPTCHA, or a consequential confirmation. This declares INTENT, not a window mode: the host decides whether to actually show a window based on the user's own setting, and may decline. Accepted on browser_open/browser_fork and on any existing-lane action." },
+                "presentation": { "type": "string", "enum": ["unattended", "attended"], "description": "Whether this work needs the user's eyes. Omit (or \"unattended\") for routine reading, searching and extraction — the browser stays silent. Use \"attended\" for a sign-in or verification wall, a CAPTCHA, or another moment requiring direct user interaction. This declares INTENT, not a window mode: the host decides whether to actually show a window based on the user's own setting, and may decline. Accepted on browser_open/browser_fork and on any existing-lane action." },
                 "keep_alive": { "type": "boolean", "description": "Optional long-lived Lane intent for browser_open/browser_fork. When true, ordinary Agent turn cleanup and idle expiry leave the Lane running for user-requested media/download work. Explicit browser_close, browser_close_all, owner/runtime teardown, and emergency resource reclamation may still close it. Omit for ordinary turn-scoped browsing." },
                 "urls": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string" }, "description": "HTTP(S) URLs for browser_crawl_many. One ordered result is returned per URL." },
                 "concurrency": {
@@ -2834,17 +2427,6 @@ impl Tool for BrowserTool {
             return self.execute_managed(action, &input).await;
         }
 
-        // E2: facade 独立 fail-closed 强制门（**不经 approval pipeline**，设计裁决⑧）。在 dispatch 前拦
-        // 审批旁路会话（yolo/companion）里的不可逆动作（submit/付款/删除/发送/跨域 POST/Enter 落 form/
-        // POST reload）→ hard-deny。普通会话不拦（交 approval pipeline 经 category_for 的 Irreversible 审批）。
-        //
-        // **P7D takeover integration**: when the gate would block AND takeover is enabled,
-        // attempt a human takeover first. The takeover resolution's `to_confirmed()` feeds
-        // back into `enforce_redline` — ONLY a genuine Confirmed releases the action.
-        if let Some(blocked) = self.redline_gate_with_takeover(action, &input).await {
-            return blocked;
-        }
-
         match action {
             // P0/P1 dedicated paths kept as-is: navigate/observe/screenshot have
             // richer messaging, and `observe` caches the snapshot (load-bearing for
@@ -2866,10 +2448,9 @@ impl Tool for BrowserTool {
     }
 
     fn category_for(&self, input: &Value) -> ToolCategory {
-        // E2: 据 classify_action 分级（含不可逆 → ToolCategory::Irreversible，让 approval pipeline 在
-        // **普通会话**能正常弹审批）。run-time 危险信号经 build_action_context best-effort 采集
-        // （accname 按 ref 查；submit/跨域POST/Enter-form/POST-reload 等 F1 接线后填实）。
-        // 缺 action 或未知动作 → classify_action 走 Exec 兜底分支（与旧行为一致）。
+        // Runtime effect signals come from build_action_context (accname by
+        // ref, Enter-form, and POST-reload). Missing or unknown actions use the
+        // conservative Exec category.
         match input.get("action").and_then(|v| v.as_str()) {
             Some(action) => {
                 let ctx = self.build_action_context(input);
@@ -2880,9 +2461,7 @@ impl Tool for BrowserTool {
         }
     }
 
-    fn auto_approve_invocation(&self, _input: &Value, category: ToolCategory) -> bool {
-        self.unrestricted_approval || category != ToolCategory::Irreversible
-    }
+
 
     fn describe(&self, input: &Value) -> String {
         let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("?");
@@ -2898,7 +2477,6 @@ impl Tool for BrowserTool {
             "click" => {
                 // IRREVERSIBLE hint: if the target ref resolves (via the latest
                 // observe) to a dangerous accname, spell out the consequence so the
-                // approver/model sees it. Best-effort — falls back to a plain note.
                 let warn = self.irreversible_hint(input);
                 format!("click [ref={ref}]{warn}")
             }
@@ -2999,9 +2577,8 @@ impl Tool for BrowserTool {
 
 /// **F1: an IRREVERSIBLE consequence note for `describe`**, derived from the
 /// per-action classifier (E2). When the action classifies as
-/// [`redline::ApprovalTier::Irreversible`] (a Pay/Buy/Submit/Delete/Send click, an
+/// [`redline::ActionEffect::Irreversible`] (a Pay/Buy/Submit/Delete/Send click, an
 /// Enter-in-form submit, a POST-page reload, …), append a short, blunt warning so
-/// the approver/model sees the stakes up front. Empty string otherwise. This is
 /// pure read of the cached snapshot signals — no I/O.
 impl BrowserTool {
     fn irreversible_hint(&self, input: &Value) -> String {
@@ -3009,7 +2586,7 @@ impl BrowserTool {
             return String::new();
         };
         let ctx = self.build_action_context(input);
-        if redline::classify_action(action, &ctx) == redline::ApprovalTier::Irreversible {
+        if redline::classify_action(action, &ctx) == redline::ActionEffect::Irreversible {
             " — IRREVERSIBLE (may submit a form / charge money / delete / send; cannot be undone)"
                 .to_string()
         } else {
@@ -3065,7 +2642,6 @@ pub(crate) mod tests {
             tool.last_snapshot.lock().unwrap().is_none(),
             "a rejected generation must not leave an older ref/origin snapshot authoritative"
         );
-        assert!(tool.needs_re_observe());
     }
 
 
@@ -3581,35 +3157,6 @@ pub(crate) mod tests {
         assert!(tool.engine.lock().unwrap().is_none());
     }
 
-    #[tokio::test]
-    async fn managed_default_lane_dispatch_strips_untrusted_confirmation() {
-        let client = Arc::new(FakeLaneClient::default());
-        let tool = managed_tool(Arc::clone(&client));
-        let result = tool
-            .execute(json!({
-                "action": "navigate",
-                "url": "https://example.test/",
-                (OUT_OF_BAND_CONFIRMED_KEY): true,
-            }))
-            .await;
-
-        assert!(!result.is_error, "{}", result.content);
-        let opens = client.opens.lock().unwrap();
-        assert_eq!(opens.len(), 1);
-        assert_eq!(opens[0].0, None, "missing lane_id must use the default Lane");
-        drop(opens);
-        let operations = client.operations.lock().unwrap();
-        assert_eq!(operations.len(), 1);
-        assert!(
-            operations[0]
-                .1
-                .input
-                .get(OUT_OF_BAND_CONFIRMED_KEY)
-                .is_none(),
-            "model-provided confirmation sentinel must never cross the managed boundary"
-        );
-        assert!(result.content.contains("\"lane_id\": \"lane-1\""));
-    }
 
     #[tokio::test]
     async fn managed_keep_alive_open_survives_turn_cleanup() {
@@ -4207,31 +3754,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// **F1-sec test seam**: a tool whose construction-time policy says the session
-    /// bypasses tool-execution approval (yolo / companion-forced-yolo / auto_approve).
-    /// Mirrors what bootstrap does via `with_policy(config, config.tools.auto_approve, …)`.
-    fn bypassing_tool() -> BrowserTool {
-        BrowserTool::with_policy(&BrowserConfig::default(), true, false, false, None, None, None)
-    }
 
-    fn unrestricted_bypassing_tool() -> BrowserTool {
-        let config = BrowserConfig {
-            unrestricted_approval: true,
-            ..BrowserConfig::default()
-        };
-        BrowserTool::with_policy(&config, true, false, false, None, None, None)
-    }
 
-    #[test]
-    fn unrestricted_approval_releases_irreversible_in_bypassing_session() {
-        let t = unrestricted_bypassing_tool();
-        seed_snapshot(&t, "f0e3", "button", "Pay now");
-
-        assert!(
-            t.redline_gate("click", &json!({"action": "click", "ref": "f0e3"})).is_none(),
-            "unrestricted browser approval should release irreversible browser actions"
-        );
-    }
 
     #[test]
     fn fatal_session_lost_evicts_cached_engine_and_tells_model_to_retry() {
@@ -4334,7 +3858,6 @@ pub(crate) mod tests {
         assert_eq!(t.category(), ToolCategory::Exec);
     }
 
-    // --- category_for (approval gating) ---
 
     #[test]
     fn category_for_info_and_exec_actions() {
@@ -4472,7 +3995,7 @@ pub(crate) mod tests {
         assert!(t.last_snapshot.lock().unwrap().is_some());
     }
 
-    // ── E2: 不可逆分类 + facade 独立 fail-closed 门（facade 级，纯逻辑核心已在 redline.rs 单测）──
+    // ── E2: action effect classification ────────────────────────────────────
 
     use nomi_browser_engine::{ElementEntry, Observation, SnapshotGen};
 
@@ -4498,7 +4021,6 @@ pub(crate) mod tests {
     #[test]
     fn category_for_click_dangerous_accname_is_irreversible() {
         // observe 后 click 一个 accname="Pay now" 的元素 → category_for 据 last_snapshot 按 ref 查到
-        // 危险 accname → ToolCategory::Irreversible（让普通会话的 approval pipeline 能正常弹审批）。
         let t = tool();
         seed_snapshot(&t, "f0e3", "button", "Pay now");
         assert_eq!(
@@ -4532,7 +4054,6 @@ pub(crate) mod tests {
 
     #[test]
     fn cross_origin_post_signal_false_when_navigate_target_is_cross_etld1() {
-        // Ordinary navigation is a browser-read action for approval purposes. Do
         // not pre-classify a cross-site GET navigation as a cross-origin POST.
         let t = tool();
         seed_snapshot(&t, "f0e1", "link", ""); // 仅为设当前 origin（shop.example.com）
@@ -4572,281 +4093,36 @@ pub(crate) mod tests {
         let ctx = t.build_action_context(&json!({"action": "navigate", "url": "https://evil.test/x"}));
         assert!(!ctx.is_cross_origin_post, "no cached origin → conservative false");
     }
-
-    #[tokio::test]
-    async fn execute_redline_gate_hard_denies_irreversible_in_bypassing_session() {
-        // facade 独立门：模拟 yolo/companion（审批旁路）会话 → click 危险 accname 的元素 →
-        // execute 在 dispatch 前 hard-deny（never launches a browser，门在 dispatch 之前）。
-        let t = bypassing_tool();
-        seed_snapshot(&t, "f0e3", "button", "Pay now");
-
-        let result = t
-            .execute(json!({"action": "click", "ref": "f0e3"}))
-            .await;
-        assert!(result.is_error, "irreversible click in a yolo session must be blocked");
-        let lower = result.content.to_lowercase();
-        assert!(
-            lower.contains("irreversible") || lower.contains("blocked"),
-            "block message should explain the redline: {}",
-            result.content
-        );
-        // 门拦在 dispatch 之前 → 引擎从未构造（未启动浏览器）。
-        assert!(
-            t.engine.lock().unwrap().is_none(),
-            "redline gate must deny BEFORE constructing/launching the engine"
-        );
-    }
-
-    // 「放行」用例直接验 `redline_gate` 返 None（= 放行），**不**驱动整条 execute——否则会真去
-    // 构造/启动浏览器（无 chrome 时一路超时到下载兜底，单测变 200s+）。门是否被 execute 调用由上面
-    // 的 hard-deny 用例端到端证明（它在 dispatch 前短路，引擎从未构造）。
-
     #[test]
-    fn redline_gate_allows_irreversible_in_normal_session() {
-        // 普通会话（审批未旁路）：facade 门**不拦**不可逆动作（交 approval pipeline 经 Irreversible 审批）。
-        let t = tool();
-        seed_snapshot(&t, "f0e3", "button", "Pay now");
-        // session_bypasses_approval() 默认 false（普通会话）→ 门放行。
-        assert!(
-            t.redline_gate("click", &json!({"action": "click", "ref": "f0e3"}))
-                .is_none(),
-            "normal-session irreversible must NOT be hard-denied by the facade gate"
-        );
-    }
-
-    #[test]
-    fn redline_gate_allows_benign_action_even_in_bypassing_session() {
-        // 边界：yolo 会话 + 良性只读动作（screenshot）→ 门放行（只拦不可逆，不拦良性/可逆）。
-        let t = bypassing_tool();
-        assert!(
-            t.redline_gate("screenshot", &json!({"action": "screenshot"}))
-                .is_none(),
-            "benign action must never be hard-denied by the redline gate"
-        );
-    }
-
-    #[test]
-    fn redline_gate_denies_irreversible_in_bypassing_session() {
-        // 纯 gate 视角（不经 execute）：yolo + 危险 accname → 门返 Some(error)（hard-deny）。
-        let t = bypassing_tool();
-        seed_snapshot(&t, "f0e3", "button", "删除账户");
-        let blocked = t.redline_gate("click", &json!({"action": "click", "ref": "f0e3"}));
-        assert!(blocked.is_some(), "irreversible in a bypassing session must be denied by the gate");
-        assert!(blocked.unwrap().is_error);
-    }
-
-    // ── P3-GW2: 带外确认 sentinel 放行（裁决④）──────────────────────────────────
-
-    #[test]
-    fn out_of_band_sentinel_releases_irreversible_in_bypassing_session() {
-        // GW2 核心：旁路会话（yolo/companion）+ 不可逆动作，但 input 带 OUT_OF_BAND_CONFIRMED_KEY=true
-        // （= 网关在手机/前端审批通过后注入）→ enforce_redline 第三参为真 → 门**放行**（非 hard-deny）。
-        let t = bypassing_tool();
-        seed_snapshot(&t, "f0e3", "button", "Pay now");
-        let input = json!({
-            "action": "click",
-            "ref": "f0e3",
-            OUT_OF_BAND_CONFIRMED_KEY: true,
-        });
-        assert!(
-            t.redline_gate("click", &input).is_none(),
-            "an out-of-band-confirmed irreversible action must be released (GW2 approval path)"
-        );
-        assert!(t.out_of_band_confirmed(&input), "sentinel=true must read as confirmed");
-    }
-
-    #[test]
-    fn out_of_band_sentinel_absent_or_false_keeps_fail_closed() {
-        // sentinel 缺失 / false / 非 bool → 不算确认（fail-closed，P2 行为不变）：旁路会话仍 hard-deny。
-        let t = bypassing_tool();
-        seed_snapshot(&t, "f0e3", "button", "Pay now");
-        // 缺失。
-        assert!(!t.out_of_band_confirmed(&json!({"action": "click", "ref": "f0e3"})));
-        assert!(t.redline_gate("click", &json!({"action": "click", "ref": "f0e3"})).is_some());
-        // 显式 false。
-        let f = json!({"action": "click", "ref": "f0e3", OUT_OF_BAND_CONFIRMED_KEY: false});
-        assert!(!t.out_of_band_confirmed(&f));
-        assert!(t.redline_gate("click", &f).is_some());
-        // 非 bool（字符串）不被当作确认（仅严格 true 放行）。
-        let s = json!({"action": "click", "ref": "f0e3", OUT_OF_BAND_CONFIRMED_KEY: "true"});
-        assert!(!t.out_of_band_confirmed(&s), "only a strict bool true counts as confirmed");
-        assert!(t.redline_gate("click", &s).is_some());
-    }
-
-    #[test]
-    fn classify_action_tier_uses_cached_snapshot_for_accname() {
-        // P3-GW2: 网关经此拿权威分级——按 ref 查到的危险 accname 在这里被看见（网关裸
-        // classify_action 无 snapshot 看不到）。
+    fn classify_action_effect_uses_cached_snapshot_for_accname() {
+        // Cached observations let the classifier resolve an accessible name by ref.
         let t = tool();
         seed_snapshot(&t, "f0e3", "button", "Pay now");
         assert_eq!(
-            t.classify_action_tier("click", &json!({"action": "click", "ref": "f0e3"})),
-            ApprovalTier::Irreversible,
+            t.classify_action_effect("click", &json!({"action": "click", "ref": "f0e3"})),
+            ActionEffect::Irreversible,
             "a Pay-now button (by ref) must classify Irreversible via the cached snapshot"
         );
         // 良性按钮 → Exec；无 snapshot 的只读 → Info。
         seed_snapshot(&t, "f0e4", "button", "Show more");
         assert_eq!(
-            t.classify_action_tier("click", &json!({"action": "click", "ref": "f0e4"})),
-            ApprovalTier::Exec
+            t.classify_action_effect("click", &json!({"action": "click", "ref": "f0e4"})),
+            ActionEffect::Exec
         );
         assert_eq!(
-            t.classify_action_tier("observe", &json!({"action": "observe"})),
-            ApprovalTier::Info
+            t.classify_action_effect("observe", &json!({"action": "observe"})),
+            ActionEffect::Info
         );
     }
 
-    // ── F1-sec: session_mode 穿透（with_policy）+ ActionContext 真信号（Enter-落-form 保守判定）──
-
-    #[test]
-    fn with_policy_threads_session_bypass_into_redline_gate() {
-        // F1-sec 关键：with_policy(true)（= 构造期 config.tools.auto_approve）让 session_bypasses_approval()
-        // 真返 true → redline 门对不可逆动作 hard-deny（fail-open 已闭）。with_policy(false)（普通会话）门不拦。
-        let bypass = BrowserTool::with_policy(&BrowserConfig::default(), true, false, false, None, None, None);
-        assert!(
-            bypass.session_bypasses_approval(),
-            "with_policy(true) must arm the redline gate (yolo/companion/auto_approve)"
-        );
-        seed_snapshot(&bypass, "f0e3", "button", "Pay now");
-        assert!(
-            bypass.redline_gate("click", &json!({"action": "click", "ref": "f0e3"})).is_some(),
-            "armed session must hard-deny an irreversible click"
-        );
-
-        let normal = BrowserTool::with_policy(&BrowserConfig::default(), false, false, false, None, None, None);
-        assert!(
-            !normal.session_bypasses_approval(),
-            "with_policy(false) is a normal session (gate not armed)"
-        );
-        seed_snapshot(&normal, "f0e3", "button", "Pay now");
-        assert!(
-            normal.redline_gate("click", &json!({"action": "click", "ref": "f0e3"})).is_none(),
-            "normal session must NOT hard-deny (approval pipeline approves)"
-        );
-    }
-
-    // ── P3-X1: set_mode 运行时翻转 → session_bypasses_approval LIVE 读（非构造期快照）────────────
-    use nomi_protocol::ToolApprovalManager;
-    use nomi_protocol::commands::SessionMode;
-
-    /// 用运行时模式句柄构造一个 tool（构造期快照 = `init_bypass`，运行时句柄 = `mgr`）。
-    fn tool_with_runtime_mode(init_bypass: bool, mgr: Arc<ToolApprovalManager>) -> BrowserTool {
-        BrowserTool::with_policy(&BrowserConfig::default(), init_bypass, false, false, None, Some(mgr), None)
-    }
-
-    #[test]
-    fn runtime_mode_handle_live_read_flips_bypass_with_set_mode() {
-        // 构造为普通会话（init_bypass=false），但带运行时句柄。会话**中途** set_mode → LIVE 读翻转。
-        let mgr = Arc::new(ToolApprovalManager::new()); // 起始 Default
-        let t = tool_with_runtime_mode(false, mgr.clone());
-
-        // 初始 default：不 bypass（门不武装）。
-        assert!(!t.session_bypasses_approval(), "default mode → not bypassed");
-
-        // 运行时翻 yolo → LIVE 读到 bypass=true（构造期快照说 false，但运行时句柄优先）。
-        mgr.set_mode(SessionMode::Yolo);
-        assert!(
-            t.session_bypasses_approval(),
-            "runtime set_mode(yolo) must LIVE-flip bypass to true (not pinned by construction snapshot)"
-        );
-
-        // 翻回 default → LIVE 读回 false（解除）。
-        mgr.set_mode(SessionMode::Default);
-        assert!(
-            !t.session_bypasses_approval(),
-            "runtime set_mode(default) must LIVE-flip bypass back to false"
-        );
-    }
-
-    #[test]
-    fn runtime_mode_auto_edit_is_not_bypass() {
-        // F1-sec 方向：AutoEdit（只自动批 info/edit，从不批 Irreversible）**不** bypass → 门不武装。
-        let mgr = Arc::new(ToolApprovalManager::new());
-        let t = tool_with_runtime_mode(false, mgr.clone());
-        mgr.set_mode(SessionMode::AutoEdit);
-        assert!(
-            !t.session_bypasses_approval(),
-            "AutoEdit must NOT be treated as approval-bypass (irreversible still gated)"
-        );
-    }
-
-    #[test]
-    fn runtime_mode_handle_takes_priority_over_construction_snapshot() {
-        // 句柄在 → 完全 LIVE 读，构造期快照被忽略（不再钉死）。
-        // 构造期快照 = true（曾武装），但运行时句柄是 default → 现读 false。
-        let mgr = Arc::new(ToolApprovalManager::new()); // Default
-        let t = tool_with_runtime_mode(/* init_bypass */ true, mgr.clone());
-        assert!(
-            !t.session_bypasses_approval(),
-            "runtime handle (default) must override the stale construction-time snapshot (true)"
-        );
-        // 翻 yolo → 真随之武装。
-        mgr.set_mode(SessionMode::Yolo);
-        assert!(t.session_bypasses_approval());
-    }
-
-    #[test]
-    fn no_runtime_mode_handle_falls_back_to_construction_snapshot() {
-        // 无运行时句柄（CLI REPL / 仅 BrowserConfig 调用方 / 测试）→ 回退构造期快照（现行行为不变）。
-        let armed = BrowserTool::with_policy(&BrowserConfig::default(), true, false, false, None, None, None);
-        assert!(armed.session_bypasses_approval(), "no handle → use construction snapshot (true)");
-        let normal = BrowserTool::with_policy(&BrowserConfig::default(), false, false, false, None, None, None);
-        assert!(!normal.session_bypasses_approval(), "no handle → use construction snapshot (false)");
-    }
-
-    #[test]
-    fn redline_gate_arms_on_runtime_yolo_and_disarms_on_flip_back() {
-        // 端到端门行为：构造普通会话 + 运行时句柄。中途翻 yolo → 不可逆 click 被门武装（hard-deny）；
-        // 翻回 default → 门解除（放行，交 approval pipeline）。AutoEdit → 不武装（不误判 bypass）。
-        let mgr = Arc::new(ToolApprovalManager::new());
-        let t = tool_with_runtime_mode(false, mgr.clone());
-        seed_snapshot(&t, "f0e3", "button", "Pay now"); // accname → Irreversible
-        let click = json!({"action": "click", "ref": "f0e3"});
-
-        // default：门不拦。
-        assert!(t.redline_gate("click", &click).is_none(), "default → gate not armed");
-
-        // AutoEdit：仍不拦（不可逆交 approval pipeline）。
-        mgr.set_mode(SessionMode::AutoEdit);
-        assert!(
-            t.redline_gate("click", &click).is_none(),
-            "AutoEdit → gate must NOT arm (F1-sec direction preserved)"
-        );
-
-        // 运行时翻 yolo：门武装 → 不可逆 click hard-deny。
-        mgr.set_mode(SessionMode::Yolo);
-        assert!(
-            t.redline_gate("click", &click).is_some(),
-            "runtime yolo → gate arms; irreversible click hard-denied"
-        );
-
-        // 翻回 default：门解除。
-        mgr.set_mode(SessionMode::Default);
-        assert!(
-            t.redline_gate("click", &click).is_none(),
-            "flip back to default → gate disarmed"
-        );
-    }
-
-    #[test]
-    fn runtime_yolo_does_not_arm_gate_for_benign_action() {
-        // 边界：运行时 yolo 但良性只读动作（screenshot）→ 门放行（只拦不可逆）。
-        let mgr = Arc::new(ToolApprovalManager::new());
-        let t = tool_with_runtime_mode(false, mgr.clone());
-        mgr.set_mode(SessionMode::Yolo);
-        assert!(
-            t.redline_gate("screenshot", &json!({"action": "screenshot"})).is_none(),
-            "benign action must never be hard-denied even under runtime yolo"
-        );
-    }
-
+    // ── Browser policy wiring + ActionContext signals ───────────────────────
     #[test]
     fn with_policy_threads_evaluate_full_power() {
         // F1-sec: with_policy 第三参（= LIVE agent.browserUse.fullPower）灌进 evaluate_full_power 字段，
         // engine() 构造时会把它传给 EngineConfig.evaluate_full_power（真生效靠 #[ignore] 集成验放行）。
-        let off = BrowserTool::with_policy(&BrowserConfig::default(), false, false, false, None, None, None);
+        let off = BrowserTool::with_policy(&BrowserConfig::default(), false, false, None, None);
         assert!(!off.evaluate_full_power, "default full_power must be OFF (E3 default-deny)");
-        let on = BrowserTool::with_policy(&BrowserConfig::default(), false, true, false, None, None, None);
+        let on = BrowserTool::with_policy(&BrowserConfig::default(), true, false, None, None);
         assert!(on.evaluate_full_power, "with_policy(.., true) must carry full_power into the tool");
     }
 
@@ -4854,17 +4130,12 @@ pub(crate) mod tests {
     fn with_policy_threads_evaluate_persistent_login() {
         // SD-6: with_policy 第四参（= LIVE agent.browserUse.persistentLogin）灌进
         // evaluate_persistent_login 字段，engine() 构造时传给 EngineConfig.evaluate_persistent_login。
-        let off = BrowserTool::with_policy(&BrowserConfig::default(), false, false, false, None, None, None);
+        let off = BrowserTool::with_policy(&BrowserConfig::default(), false, false, None, None);
         assert!(!off.evaluate_persistent_login, "default persistent_login must be OFF (code-level default-deny)");
-        let on = BrowserTool::with_policy(&BrowserConfig::default(), false, false, true, None, None, None);
+        let on = BrowserTool::with_policy(&BrowserConfig::default(), false, true, None, None);
         assert!(on.evaluate_persistent_login, "with_policy(.., persistent_login=true) must carry into the tool");
     }
 
-    #[test]
-    fn new_defaults_to_non_bypassing_normal_session() {
-        // `new`（只有 BrowserConfig 的调用方）默认普通会话——门不武装（不误拦）。
-        assert!(!tool().session_bypasses_approval());
-    }
 
     // ── 并发隔离：每个 facade 分配唯一 user-data-dir（根治 Chromium 进程单例碰撞）──
     #[test]
@@ -4956,15 +4227,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn managed_constructor_owns_no_profile_and_never_initializes_standalone_engine() {
         let workspace = std::env::temp_dir().join("bt-managed-workspace");
-        let tool = BrowserTool::new_managed(
-            &BrowserConfig::default(),
-            false,
-            false,
-            false,
-            Some(workspace.clone()),
-            None,
-            None,
-        );
+        let tool = BrowserTool::new_managed(&BrowserConfig::default(), false, false, Some(workspace.clone()), None);
 
         assert!(tool.managed_only);
         assert!(tool.data_dir.as_os_str().is_empty());
@@ -5000,14 +4263,14 @@ pub(crate) mod tests {
         // P3-G2 关键：bootstrap 经 with_policy 把会话工作目录（伙伴 {companion_id}/workspace /
         // 非伙伴会话工作目录）灌进 workspace_dir，引擎据它把下载落进 <workspace>/downloads。
         let ws = std::env::temp_dir().join("companions").join("companion_x").join("workspace");
-        let t = BrowserTool::with_policy(&BrowserConfig::default(), false, false, false, Some(ws.clone()), None, None);
+        let t = BrowserTool::with_policy(&BrowserConfig::default(), false, false, Some(ws.clone()), None);
         assert_eq!(
             t.workspace_dir.as_deref(),
             Some(ws.as_path()),
             "with_policy(.., Some(ws)) must carry the session workspace into the tool"
         );
         // None（无 workspace 上下文）保持 None（引擎兜底 <data_dir>/downloads）。
-        let none = BrowserTool::with_policy(&BrowserConfig::default(), false, false, false, None, None, None);
+        let none = BrowserTool::with_policy(&BrowserConfig::default(), false, false, None, None);
         assert!(none.workspace_dir.is_none(), "with_policy(.., None) must keep workspace_dir = None");
     }
 
@@ -5057,21 +4320,6 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn press_key_enter_hard_denied_in_bypassing_session() {
-        // 端到端（gate 视角）：yolo 会话 + press_key Enter → 门 hard-deny（fail-open 已闭，
-        // 证 ActionContext 真信号 + session_mode 穿透协同生效）。
-        let t = bypassing_tool();
-        assert!(
-            t.redline_gate("press_key", &json!({"action": "press_key", "keys": "Enter"})).is_some(),
-            "Enter (implicit submit) in a bypassing session must be hard-denied"
-        );
-        // 普通 Tab 键不拦（良性导航）。
-        assert!(
-            t.redline_gate("press_key", &json!({"action": "press_key", "keys": "Tab"})).is_none(),
-            "benign Tab must not be hard-denied"
-        );
-    }
 
     // ── SD-4: reload-POST → Irreversible 信号接线 ────────────────────────────
 
@@ -5094,8 +4342,8 @@ pub(crate) mod tests {
         let t = tool();
         seed_snapshot_post(&t, true);
         assert_eq!(
-            t.classify_action_tier("reload", &json!({"action": "reload"})),
-            redline::ApprovalTier::Irreversible,
+            t.classify_action_effect("reload", &json!({"action": "reload"})),
+            redline::ActionEffect::Irreversible,
             "reload on a POST page must classify Irreversible (re-submit risk)"
         );
     }
@@ -5106,8 +4354,8 @@ pub(crate) mod tests {
         let t = tool();
         seed_snapshot_post(&t, false);
         assert_eq!(
-            t.classify_action_tier("reload", &json!({"action": "reload"})),
-            redline::ApprovalTier::Exec,
+            t.classify_action_effect("reload", &json!({"action": "reload"})),
+            redline::ActionEffect::Exec,
             "reload on a non-POST page must classify Exec (no re-submit risk)"
         );
     }
@@ -5117,28 +4365,12 @@ pub(crate) mod tests {
         // 无 last_snapshot（首次动作前 observe 尚未执行）→ 保守 Exec（不误判）。
         let t = tool();
         assert_eq!(
-            t.classify_action_tier("reload", &json!({"action": "reload"})),
-            redline::ApprovalTier::Exec,
+            t.classify_action_effect("reload", &json!({"action": "reload"})),
+            redline::ActionEffect::Exec,
             "reload without any snapshot defaults to Exec (conservative)"
         );
     }
 
-    #[test]
-    fn reload_post_hard_denied_in_bypassing_session() {
-        // 端到端 gate 视角：yolo 会话 + reload POST 页 → 门 hard-deny。
-        let t = bypassing_tool();
-        seed_snapshot_post(&t, true);
-        assert!(
-            t.redline_gate("reload", &json!({"action": "reload"})).is_some(),
-            "reload on POST page in a bypassing session must be hard-denied"
-        );
-        // 非 POST 页面 reload 不拦。
-        seed_snapshot_post(&t, false);
-        assert!(
-            t.redline_gate("reload", &json!({"action": "reload"})).is_none(),
-            "reload on non-POST page must not be hard-denied"
-        );
-    }
 
     #[test]
     fn enter_in_form_and_reload_post_both_classify_irreversible() {
@@ -5147,14 +4379,14 @@ pub(crate) mod tests {
         // Case (a): press_key Enter → Irreversible（不受 current_page_is_post 影响）。
         seed_snapshot_post(&t, true); // POST 页 + Enter 同时
         assert_eq!(
-            t.classify_action_tier("press_key", &json!({"action": "press_key", "keys": "Enter"})),
-            redline::ApprovalTier::Irreversible,
+            t.classify_action_effect("press_key", &json!({"action": "press_key", "keys": "Enter"})),
+            redline::ActionEffect::Irreversible,
             "press_key Enter must stay Irreversible regardless of POST flag"
         );
         // Case (b): reload → Irreversible（据 POST 标志）。
         assert_eq!(
-            t.classify_action_tier("reload", &json!({"action": "reload"})),
-            redline::ApprovalTier::Irreversible,
+            t.classify_action_effect("reload", &json!({"action": "reload"})),
+            redline::ActionEffect::Irreversible,
             "reload on POST page must classify Irreversible"
         );
     }
@@ -5628,102 +4860,6 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&workspace);
         let _ = std::fs::remove_dir_all(&data_dir);
     }
-
-    // ════════════════════════════════════════════════════════════════════════
-    // F1-sec: #[ignore] 真 Chrome —— 证 enforcement 真生效（redline 门 yolo 下真 Blocked /
-    // 普通会话不被 facade 门误拦）。本机 Windows：set NOMIFUN_CHROME_BINARY 后
-    //   cargo nextest run -p nomi-browser --run-ignored all -E 'test(f1sec_)'
-    // ════════════════════════════════════════════════════════════════════════
-
-    /// 真页含一个危险 accname（"Pay now"）按钮，observe 拿其 ref。返回 (tool 已 navigate+observe, ref)。
-    /// 调用方传入 tool（bypassing / normal），共用这段「真页 + 拿到 Pay-now ref」的接线。
-    /// 用 `file://` fixture（非 data: URL，后者带空格/引号会致 chrome session lost）。
-    #[cfg(test)]
-    async fn nav_observe_find_pay_button_ref(t: &BrowserTool) -> String {
-        // file:// fixture（含 accname="Pay now" 按钮）。`CARGO_MANIFEST_DIR` 在 unix 是 `/abs`
-        // （已带前导斜杠）、在 windows 是 `C:/abs`（需补一个）——仅缺失时补，避免 unix 上产生四斜杠
-        // （`file:////...`）触发 chrome 把 url 归一成三斜杠 → navigate 误判 redirected。
-        let manifest = env!("CARGO_MANIFEST_DIR").replace('\\', "/");
-        let abs = if manifest.starts_with('/') {
-            manifest
-        } else {
-            format!("/{manifest}")
-        };
-        let url = format!("file://{abs}/tests/fixtures/redline_gate.html");
-        let nav = t.execute(json!({"action": "navigate", "url": url})).await;
-        assert!(!nav.is_error, "navigate failed: {}", nav.content);
-        let obs = t.execute(json!({"action": "observe"})).await;
-        assert!(!obs.is_error, "observe failed: {}", obs.content);
-        // 从 observation 找含 "Pay now" 的那行的 ref。aria-snapshot 形如 `- button "Pay now" [ref=f0e2]`。
-        obs.content
-            .lines()
-            .find(|l| l.contains("Pay now") && l.contains("[ref="))
-            .and_then(|l| l.split("[ref=").nth(1))
-            .and_then(|s| s.split(']').next())
-            .map(|s| s.to_string())
-            .expect("Pay-now button should appear in the observation with a [ref=]")
-    }
-
-    /// **F1-sec keystone**：yolo/companion（审批旁路）会话里点击一个不可逆（"Pay now"）按钮 →
-    /// facade 独立 fail-closed 门 **hard-deny Blocked**（证 fail-open 已闭：session_mode 真穿透）。
-    #[tokio::test]
-    #[ignore = "需本机/打包 chrome：set NOMIFUN_CHROME_BINARY 后 -- --run-ignored"]
-    async fn f1sec_redline_gate_hard_denies_irreversible_in_yolo_session_real() {
-        let t = bypassing_tool(); // = with_policy(.., session_bypasses_approval=true, ..)
-        let pay_ref = nav_observe_find_pay_button_ref(&t).await;
-
-        let clicked = t
-            .execute(json!({"action": "click", "ref": pay_ref}))
-            .await;
-        assert!(
-            clicked.is_error,
-            "irreversible click in a yolo session MUST be hard-denied by the facade gate, got: {}",
-            clicked.content
-        );
-        let lower = clicked.content.to_lowercase();
-        assert!(
-            lower.contains("irreversible") || lower.contains("blocked"),
-            "block message should explain the redline: {}",
-            clicked.content
-        );
-    }
-
-    /// **F1-sec 对照**：普通会话（审批未旁路）里点击同一个不可逆按钮 → facade 门**不拦**（交
-    /// approval pipeline 经 Irreversible 审批；本测在 facade 层只验「门未 hard-deny」，故点击会真去
-    /// dispatch——它可能成功/良性失败，但**绝不是** facade 门的 Blocked 错误）。证「普通会话不误拦」。
-    #[tokio::test]
-    #[ignore = "需本机/打包 chrome：set NOMIFUN_CHROME_BINARY 后 -- --run-ignored"]
-    async fn f1sec_redline_gate_does_not_block_irreversible_in_normal_session_real() {
-        let t = tool(); // 普通会话：session_bypasses_approval = false。
-        let pay_ref = nav_observe_find_pay_button_ref(&t).await;
-
-        let clicked = t
-            .execute(json!({"action": "click", "ref": pay_ref}))
-            .await;
-        // 关键断言：即便 click 真去 dispatch（可能成功/良性失败），它**不应**是 facade redline 门的
-        // hard-deny（那条错误含 "blocked in an auto-approving session"）。普通会话的不可逆动作交
-        // approval pipeline，不被 facade 门拦。
-        let lower = clicked.content.to_lowercase();
-        assert!(
-            !lower.contains("auto-approving session"),
-            "normal-session irreversible must NOT be hard-denied by the facade redline gate: {}",
-            clicked.content
-        );
-    }
-
-    /// **F1-sec 对照（gate 纯视角，无 chrome 也跑）**：bypassing 会话里点击**良性**按钮（"Show more"）
-    /// → 门放行（只拦不可逆，不误拦良性可逆动作）。这条不 #[ignore]（纯 gate 视角，已有覆盖，保留为
-    /// 边界守卫文档）。
-    #[test]
-    fn f1sec_redline_gate_allows_benign_click_in_yolo_session() {
-        let t = bypassing_tool();
-        seed_snapshot(&t, "f0e9", "button", "Show more");
-        assert!(
-            t.redline_gate("click", &json!({"action": "click", "ref": "f0e9"})).is_none(),
-            "benign click must not be hard-denied even in a yolo session"
-        );
-    }
-
     // ════════════════════════════════════════════════════════════════════════
     // P3-N2: 截图落 per-pet workspace/screenshots + ToolResult 图片引用（裁决⑨）。
     // [纯逻辑] 落盘路径解析（workspace/screenshots/shot-{ts}.png；无 workspace 兜底 data_dir）+
@@ -5747,7 +4883,7 @@ pub(crate) mod tests {
     fn screenshot_base_dir_prefers_workspace_then_falls_back_to_data_dir() {
         // 有 per-pet workspace → 用 workspace（截图落 <workspace>/screenshots）。
         let ws = std::env::temp_dir().join("bt-n2-ws");
-        let t = BrowserTool::with_policy(&BrowserConfig::default(), false, false, false, Some(ws.clone()), None, None);
+        let t = BrowserTool::with_policy(&BrowserConfig::default(), false, false, Some(ws.clone()), None);
         assert_eq!(t.screenshot_base_dir(), ws, "workspace present → base = workspace");
         // 无 workspace（仅 BrowserConfig / 测试）→ 兜底 data_dir（仍隔离，非用户 Pictures）。
         let t2 = tool();
@@ -5917,251 +5053,8 @@ pub(crate) mod tests {
 
     // ── Task 4: resume forces fresh observe ──────────────────────────────────
 
-    #[tokio::test]
-    async fn resume_invalidates_pre_takeover_refs() {
-        let data_dir = std::env::temp_dir().join("nomifun-test-re-observe-flag");
-        let t = BrowserTool::with_data_dir(data_dir.clone(), false);
 
-        // Initially: no re-observe needed.
-        assert!(!t.needs_re_observe());
 
-        // Simulate: a takeover just resolved → set the flag.
-        t.set_must_re_observe();
-        assert!(t.needs_re_observe());
-
-        // A ref-based action (click with a ref) must be rejected.
-        let result = t.execute(json!({"action": "click", "ref": "f0e1"})).await;
-        assert!(
-            result.is_error,
-            "ref-based action must be rejected when must_re_observe is set"
-        );
-        assert!(
-            result.content.contains("observe"),
-            "error should mention 'observe': {}",
-            result.content
-        );
-
-        // The flag is still set (the rejected action doesn't clear it).
-        assert!(t.needs_re_observe());
-
-        // clear_must_re_observe simulates what a successful observe does.
-        t.clear_must_re_observe();
-        assert!(!t.needs_re_observe());
-
-        // Now a ref-based action would no longer be rejected by the flag
-        // (it will fail for other reasons — no engine — but NOT with the
-        // "observe first" message).
-        let result2 = t.execute(json!({"action": "click", "ref": "f0e1"})).await;
-        assert!(
-            !result2.content.contains("refs from before the takeover"),
-            "after clearing must_re_observe, the takeover guard should not fire: {}",
-            result2.content
-        );
-
-        let _ = std::fs::remove_dir_all(&data_dir);
-    }
-
-    // ── Task 5: irreversible under bypass released only by confirmed takeover ──
-
-    #[tokio::test]
-    async fn irreversible_under_bypass_released_only_by_confirmed_takeover() {
-        use crate::takeover::TakeoverResolution;
-
-        let data_dir = std::env::temp_dir().join("nomifun-test-takeover-redline");
-
-        // -- Case 1: Cancelled → stays Blocked --
-        {
-            let mut t = BrowserTool::with_policy(
-                &BrowserConfig::default(),
-                true,  // session_bypasses_approval (yolo)
-                false, // evaluate_full_power
-                false, // evaluate_persistent_login
-                None,  // workspace_dir
-                None,  // runtime_mode
-                None,  // persistent_login_key
-            );
-            // Enable takeover + force Cancelled resolution.
-            t.takeover_controller.enabled = true;
-            t.takeover_controller.force_resolution = Some(TakeoverResolution::Cancelled);
-            // Seed an irreversible button.
-            seed_snapshot(&t, "f0e3", "button", "Pay now");
-
-            let result = t
-                .execute(json!({"action": "click", "ref": "f0e3"}))
-                .await;
-            assert!(
-                result.is_error,
-                "Cancelled takeover must keep the action Blocked: {}",
-                result.content
-            );
-            assert!(
-                result.content.to_lowercase().contains("blocked")
-                    || result.content.to_lowercase().contains("irreversible"),
-                "error should mention blocked/irreversible: {}",
-                result.content
-            );
-        }
-
-        // -- Case 2: Confirmed → proceeds (gate passes) --
-        {
-            let mut t = BrowserTool::with_policy(
-                &BrowserConfig::default(),
-                true,  // session_bypasses_approval (yolo)
-                false, // evaluate_full_power
-                false, // evaluate_persistent_login
-                None,  // workspace_dir
-                None,  // runtime_mode
-                None,  // persistent_login_key
-            );
-            // Enable takeover + force Confirmed resolution.
-            t.takeover_controller.enabled = true;
-            t.takeover_controller.force_resolution = Some(TakeoverResolution::Confirmed);
-            // Seed an irreversible button.
-            seed_snapshot(&t, "f0e3", "button", "Pay now");
-
-            let result = t
-                .execute(json!({"action": "click", "ref": "f0e3"}))
-                .await;
-            // With Confirmed, the redline gate passes. The action proceeds past the gate.
-            // It will fail at the engine level (no chrome launched) — but the important
-            // thing is it's NOT a "blocked" / "irreversible" error from the redline gate.
-            assert!(
-                !result.content.to_lowercase().contains("blocked"),
-                "Confirmed takeover must release the action past the redline gate, \
-                 but got a blocked error: {}",
-                result.content
-            );
-            // Also verify must_re_observe was set (user may have navigated during takeover).
-            assert!(
-                t.needs_re_observe(),
-                "after a Confirmed takeover, must_re_observe should be set"
-            );
-        }
-
-        // -- Case 3: TimedOut → stays Blocked (fail-closed) --
-        {
-            let mut t = BrowserTool::with_policy(
-                &BrowserConfig::default(),
-                true,
-                false,
-                false,
-                None,
-                None,
-                None,
-            );
-            t.takeover_controller.enabled = true;
-            t.takeover_controller.force_resolution = Some(TakeoverResolution::TimedOut);
-            seed_snapshot(&t, "f0e3", "button", "Pay now");
-
-            let result = t
-                .execute(json!({"action": "click", "ref": "f0e3"}))
-                .await;
-            assert!(
-                result.is_error,
-                "TimedOut takeover must keep the action Blocked: {}",
-                result.content
-            );
-        }
-
-        // -- Case 4: Unavailable → stays Blocked (fail-closed) --
-        {
-            let mut t = BrowserTool::with_policy(
-                &BrowserConfig::default(),
-                true,
-                false,
-                false,
-                None,
-                None,
-                None,
-            );
-            t.takeover_controller.enabled = true;
-            t.takeover_controller.force_resolution = Some(TakeoverResolution::Unavailable);
-            seed_snapshot(&t, "f0e3", "button", "Pay now");
-
-            let result = t
-                .execute(json!({"action": "click", "ref": "f0e3"}))
-                .await;
-            assert!(
-                result.is_error,
-                "Unavailable takeover must keep the action Blocked: {}",
-                result.content
-            );
-        }
-
-        let _ = std::fs::remove_dir_all(&data_dir);
-    }
-
-    /// Phase D: a fake approval gate returning a fixed decision.
-    struct FakeApprovalGate {
-        decision: crate::approval::ApprovalDecision,
-    }
-    #[async_trait::async_trait]
-    impl crate::approval::BrowserApprovalGate for FakeApprovalGate {
-        async fn request_approval(
-            &self,
-            _ask: crate::approval::ApprovalAsk,
-        ) -> crate::approval::ApprovalDecision {
-            self.decision
-        }
-    }
-
-    /// Phase D: an injected approval gate drives the redline takeover path — Approve
-    /// releases the irreversible action past the gate (+ sets must_re_observe), Deny
-    /// keeps it Blocked (fail-closed). `with_approval_gate` also enables the controller.
-    #[tokio::test]
-    async fn approval_gate_releases_on_approve_blocks_on_deny() {
-        use crate::approval::ApprovalDecision;
-
-        // -- Approve → released past the redline gate --
-        {
-            let gate = Arc::new(FakeApprovalGate { decision: ApprovalDecision::Approve });
-            let t = BrowserTool::with_policy(
-                &BrowserConfig::default(),
-                true, // bypass (yolo)
-                false,
-                false,
-                None,
-                None,
-                None,
-            )
-            .with_approval_gate(gate);
-            assert!(t.takeover_controller().enabled, "with_approval_gate must enable takeover");
-            seed_snapshot(&t, "f0e3", "button", "Pay now");
-            let result = t.execute(json!({"action": "click", "ref": "f0e3"})).await;
-            // Released past the gate (fails later at the engine since no chrome) — NOT a
-            // redline block.
-            assert!(
-                !result.content.to_lowercase().contains("blocked"),
-                "Approve must release the irreversible action past the redline gate: {}",
-                result.content
-            );
-            assert!(t.needs_re_observe(), "an approved takeover sets must_re_observe");
-        }
-
-        // -- Deny → stays Blocked (fail-closed) --
-        {
-            let gate = Arc::new(FakeApprovalGate { decision: ApprovalDecision::Deny });
-            let t = BrowserTool::with_policy(
-                &BrowserConfig::default(),
-                true,
-                false,
-                false,
-                None,
-                None,
-                None,
-            )
-            .with_approval_gate(gate);
-            seed_snapshot(&t, "f0e3", "button", "Pay now");
-            let result = t.execute(json!({"action": "click", "ref": "f0e3"})).await;
-            assert!(result.is_error, "Deny must keep the action Blocked: {}", result.content);
-            assert!(
-                result.content.to_lowercase().contains("blocked")
-                    || result.content.to_lowercase().contains("irreversible"),
-                "error should mention blocked/irreversible: {}",
-                result.content
-            );
-        }
-    }
 
     // ── Fake-engine fixture tests ───────────────────────────────────────────
 

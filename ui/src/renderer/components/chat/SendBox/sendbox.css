@@ -164,7 +164,7 @@
   transform: none !important;
 }
 
-/* Conversation sendbox model/permission pills: blend into background */
+/* Conversation sendbox model pills blend into the background. */
 .sendbox-tools .sendbox-model-btn,
 .sendbox-tools .sendbox-model-btn:hover,
 .sendbox-tools .sendbox-model-btn:active,
@@ -437,8 +437,7 @@
 
   .sendbox-responsive-config-group .nomi-sendbox-model-btn,
   .sendbox-responsive-config-group .nomi-sendbox-summon-btn,
-  .sendbox-responsive-config-group .nomi-sendbox-policy-btn,
-  .sendbox-actions .sendbox-responsive-config-group .agent-mode-compact-pill {
+  .sendbox-responsive-config-group .nomi-sendbox-policy-btn {
     width: auto !important;
     min-width: 28px !important;
     max-width: 28px !important;
@@ -455,8 +454,7 @@
 
   .sendbox-responsive-config-group .nomi-sendbox-model-btn .arco-btn-content,
   .sendbox-responsive-config-group .nomi-sendbox-summon-btn .arco-btn-content,
-  .sendbox-responsive-config-group .nomi-sendbox-policy-btn .arco-btn-content,
-  .sendbox-responsive-config-group .agent-mode-compact-pill .arco-btn-content {
+  .sendbox-responsive-config-group .nomi-sendbox-policy-btn .arco-btn-content {
     display: inline-flex !important;
     align-items: center !important;
     justify-content: center !important;
@@ -493,9 +491,7 @@
     .sendbox-responsive-config-group .nomi-sendbox-summon-btn:hover,
     .sendbox-responsive-config-group .nomi-sendbox-summon-btn:focus-visible,
     .sendbox-responsive-config-group .nomi-sendbox-policy-btn:hover,
-    .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible,
-    .sendbox-responsive-config-group .agent-mode-compact-pill:hover,
-    .sendbox-responsive-config-group .agent-mode-compact-pill:focus-visible {
+    .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible {
       width: auto !important;
       min-width: 28px !important;
       max-width: 200px !important;
@@ -512,11 +508,7 @@
     .sendbox-responsive-config-group .nomi-sendbox-summon-btn:hover .sendbox-responsive-label,
     .sendbox-responsive-config-group .nomi-sendbox-summon-btn:focus-visible .sendbox-responsive-label,
     .sendbox-responsive-config-group .nomi-sendbox-policy-btn:hover .sendbox-responsive-label,
-    .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible .sendbox-responsive-label,
-    .sendbox-responsive-config-group .agent-mode-compact-pill:hover .sendbox-responsive-label,
-    .sendbox-responsive-config-group .agent-mode-compact-pill:hover .sendbox-responsive-chevron,
-    .sendbox-responsive-config-group .agent-mode-compact-pill:focus-visible .sendbox-responsive-label,
-    .sendbox-responsive-config-group .agent-mode-compact-pill:focus-visible .sendbox-responsive-chevron {
+    .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible .sendbox-responsive-label {
       display: inline-flex !important;
     }
   }
@@ -525,25 +517,6 @@
 /* Circle / icon-only buttons must not shrink */
 .sendbox-tools .arco-btn-shape-circle {
   flex-shrink: 0 !important;
-}
-
-/* Only pill buttons shrink; file-attach / other fixed buttons stay rigid.
- * flex-basis:0 makes all pills share space equally when compressed,
- * max-width:max-content prevents short-text pills from stretching. */
-.sendbox-tools .agent-mode-compact-pill,
-.sendbox-actions .agent-mode-compact-pill {
-  min-width: 0 !important;
-  overflow: hidden !important;
-  flex-shrink: 1 !important;
-  flex-basis: 0 !important;
-  flex-grow: 1 !important;
-  max-width: max-content !important;
-}
-
-.sendbox-tools .agent-mode-compact-pill .arco-btn-content,
-.sendbox-actions .agent-mode-compact-pill .arco-btn-content {
-  min-width: 0 !important;
-  overflow: hidden !important;
 }
 
 /* Pill marquee animation for overflowing text */
@@ -640,7 +613,7 @@
   align-items: center;
 }
 
-/* Mobile: allow horizontal scrolling for sendbox tools (model/permission pills) */
+/* Mobile: allow horizontal scrolling for sendbox tools. */
 @media (max-width: 767px) {
   .sendbox-tools-scroll-mobile {
     display: flex;

@@ -121,9 +121,6 @@ pub struct NomiBuildExtra {
     /// Opt-in goal-driven continuation (see [`NomiGoalSpec`]).
     #[serde(default)]
     pub goal: Option<NomiGoalSpec>,
-    #[serde(default)]
-    pub session_mode: Option<String>,
-    #[serde(default)]
     /// Stable MCP server business IDs.
     pub mcp_server_ids: Option<Vec<McpServerId>>,
     #[serde(default)]

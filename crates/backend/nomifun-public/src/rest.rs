@@ -129,8 +129,8 @@ async fn list_tools(Query(q): Query<ProfileQuery>) -> Json<Value> {
 }
 
 /// `POST /v1/tools/{name}` — invoke a capability. Body is the capability's JSON
-/// args (empty body == `{}`). Dispatches under `Surface::Remote`, so the danger
-/// gate (Destructive→needs_confirmation, Sensitive→denied) applies identically.
+/// args (empty body == `{}`). Selected capabilities execute directly after
+/// Remote authentication, scope, ownership, and typed argument validation.
 async fn call_tool(
     State(state): State<RestState>,
     Path(name): Path<String>,
@@ -164,8 +164,6 @@ async fn call_tool(
             // Map the registry result envelope onto HTTP status codes.
             let status = if result.get("error").is_some() {
                 StatusCode::UNPROCESSABLE_ENTITY
-            } else if result.get("needs_confirmation").is_some() {
-                StatusCode::CONFLICT
             } else {
                 StatusCode::OK
             };
@@ -258,7 +256,6 @@ async fn openapi(Query(q): Query<ProfileQuery>) -> Json<Value> {
                     },
                     "responses": {
                         "200": { "description": "tool result", "content": { "application/json": { "schema": { "type": "object" } } } },
-                        "409": { "description": "needs confirmation (re-call with confirm=true)" },
                         "422": { "description": "tool returned an error" }
                     },
                     "security": [{ "bearerAuth": [] }]

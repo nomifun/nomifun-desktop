@@ -34,7 +34,7 @@ pub trait CompanionMemorySink: Send + Sync {
         limit: usize,
     ) -> Result<String, String>;
 
-    /// Persist one memory; implementations dedup. Returns a confirmation line.
+    /// Persist one memory; implementations dedup. Returns a status line.
     /// `conversation_id` identifies the session the save came from, so the
     /// backend can attribute per-companion rewards (XP) to the owning companion.
     async fn save(&self, conversation_id: &str, kind: &str, content: &str, tags: &[String]) -> Result<String, String>;
@@ -235,7 +235,6 @@ impl Tool for SaveMemoryTool {
 
     fn category(&self) -> ToolCategory {
         // Writes only to the companion's own memory.db (never user files) — treat
-        // as Info so default session mode doesn't gate it behind approval.
         ToolCategory::Info
     }
 }

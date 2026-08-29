@@ -8,7 +8,6 @@ const ACTIVE_EXECUTION_POLL_MS = 2_000;
 
 const ACTIVE_EXECUTION_STATUSES = new Set([
   'planning',
-  'awaiting_approval',
   'running',
   'waiting_input',
 ]);

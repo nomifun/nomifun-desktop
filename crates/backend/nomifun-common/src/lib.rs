@@ -35,7 +35,7 @@ pub use agent_execution::{
     AdaptationPolicy, AgentExecutionActor, AgentExecutionActorType, AgentExecutionEventKind,
     AgentExecutionReceipt, AgentExecutionStatus, AgentStepMode, AgentToolPolicy, ConversationExecutionRelation, DecisionPolicy,
     DelegationPolicy, ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus,
-    ParticipantAssignmentSource, PlanGate, StepFailurePolicy, UnknownAgentExecutionValue,
+    ParticipantAssignmentSource, StepFailurePolicy, UnknownAgentExecutionValue,
     MAX_AGENT_DELEGATION_DEPTH, MAX_AGENT_EXECUTION_MODELS,
     MAX_AGENT_EXECUTION_PARALLELISM, MAX_AGENT_EXECUTION_PARTICIPANTS,
     MAX_AGENT_EXECUTION_STEPS,
@@ -87,5 +87,5 @@ pub use pagination::PaginatedResult;
 pub use provider_lifecycle::{ProviderLifecycleBarrier, SharedProviderLifecycleBarrier};
 pub use provider_usage::{ProviderInUseDetails, ProviderUsage, ProviderUsageFeature};
 pub use timestamp::{TimestampMs, now_ms};
-pub use types::{CommandSpec, Confirmation, ConfirmationOption, EnvVar, ProviderWithModel};
+pub use types::{CommandSpec, EnvVar, ProviderWithModel};
 pub use vision_registry::VisionUnsupportedRegistry;

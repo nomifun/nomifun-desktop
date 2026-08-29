@@ -280,13 +280,6 @@ pub trait Tool: Send + Sync {
         )
     }
 
-    /// Whether this specific invocation can skip interactive approval even when
-    /// the session is not globally auto-approved. Defaults to false so existing
-    /// tools keep their current approval behavior.
-    fn auto_approve_invocation(&self, _input: &Value, _category: ToolCategory) -> bool {
-        false
-    }
-
     /// Whether an unchanged successful result can be a normal part of waiting
     /// for external progress. Polling invocations are excluded from the
     /// stagnation guard, but remain bounded by the engine's turn safety net.

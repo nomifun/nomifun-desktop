@@ -31,7 +31,7 @@ import type {
 export type ConversationSource = 'nomifun' | 'telegram' | 'lark' | 'dingtalk' | 'weixin' | 'wecom' | (string & {});
 
 export type TChatConversationStatus = 'pending' | 'running' | 'finished';
-export type TConversationRuntimeStateKind = 'idle' | 'starting' | 'running' | 'waiting_confirmation';
+export type TConversationRuntimeStateKind = 'idle' | 'starting' | 'running';
 
 export type TConversationRuntimeSummary = {
   state: TConversationRuntimeStateKind;
@@ -39,7 +39,6 @@ export type TConversationRuntimeSummary = {
   has_runtime: boolean;
   runtime_status?: TChatConversationStatus;
   is_processing: boolean;
-  pending_confirmations: number;
   /** Exact backend turn currently owning this runtime. This is lifecycle
    * authority; processing_started_at is display-only and may collide. */
   active_turn_id?: MessageId;
@@ -123,8 +122,6 @@ export type TChatConversation = IChatConversation<
     /** Max tokens per response */
     /** Max agentic turns */
     maxTurns?: number;
-    /** Persisted session mode for resume support */
-    session_mode?: string;
     /** Legacy marker for pre-provider-probe health-check conversations */
     is_health_check?: boolean;
     /** Last token usage stats */

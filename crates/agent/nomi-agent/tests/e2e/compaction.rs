@@ -1,6 +1,5 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use nomi_agent::confirm::ToolConfirmer;
 use nomi_agent::engine::AgentEngine;
 use nomi_agent::tool_execution::{ProviderToolAuthority, execute_tool_calls_scoped};
 use nomi_agent::output::OutputSink;
@@ -43,8 +42,6 @@ fn openai_config(api_key: &str) -> Config {
         prompt_caching: false,
         compat: ProviderCompat::openai_defaults(),
         tools: ToolsConfig {
-            auto_approve: true,
-            allow_list: vec![],
             ..ToolsConfig::default()
         },
         session: SessionConfig {
@@ -130,8 +127,6 @@ async fn case_9_off_vs_safe_content() {
 
     eprintln!("[e2e:compaction] === Case 9: Off vs Safe content comparison ===");
 
-    let confirmer = Arc::new(Mutex::new(ToolConfirmer::new(true, vec![])));
-
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(FixedOutputTool::new("check_tool", TEST_OUTPUT)));
     let tool_calls = vec![ContentBlock::ToolUse {
@@ -142,31 +137,13 @@ async fn case_9_off_vs_safe_content() {
     }];
 
     // Off
-    let outcome_off = execute_tool_calls_scoped(
-        &registry,
-        &tool_calls,
-        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-        "",
-        &confirmer,
-        None,
-        CompactionLevel::Off,
-        false,
-    )
+    let outcome_off = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Off, false)
     .await
     .expect("should succeed");
     let content_off = extract_tool_result_content(&outcome_off).unwrap();
 
     // Safe
-    let outcome_safe = execute_tool_calls_scoped(
-        &registry,
-        &tool_calls,
-        &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()),
-        "",
-        &confirmer,
-        None,
-        CompactionLevel::Safe,
-        false,
-    )
+    let outcome_safe = execute_tool_calls_scoped(&registry, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry.to_tool_defs()), "", None, CompactionLevel::Safe, false)
     .await
     .expect("should succeed");
     let content_safe = extract_tool_result_content(&outcome_safe).unwrap();
@@ -337,7 +314,6 @@ async fn case_11_toon_comprehension_and_system_prompt() {
     eprintln!("[e2e:compaction] === Case 11: TOON comprehension + system prompt ===");
 
     // Direct content check (deterministic)
-    let confirmer = Arc::new(Mutex::new(ToolConfirmer::new(true, vec![])));
     let mut registry_check = ToolRegistry::new();
     registry_check.register(Box::new(FixedOutputTool::new("data_tool", TOON_INPUT)));
     let tool_calls = vec![ContentBlock::ToolUse {
@@ -347,16 +323,7 @@ async fn case_11_toon_comprehension_and_system_prompt() {
         extra: None,
     }];
 
-    let outcome = execute_tool_calls_scoped(
-        &registry_check,
-        &tool_calls,
-        &ProviderToolAuthority::from_request_tools(&registry_check.to_tool_defs()),
-        "",
-        &confirmer,
-        None,
-        CompactionLevel::Full,
-        true,
-    )
+    let outcome = execute_tool_calls_scoped(&registry_check, &tool_calls, &ProviderToolAuthority::from_request_tools(&registry_check.to_tool_defs()), "", None, CompactionLevel::Full, true)
     .await
     .expect("should succeed");
     let content = extract_tool_result_content(&outcome).unwrap();

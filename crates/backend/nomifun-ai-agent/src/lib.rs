@@ -76,9 +76,7 @@ pub use nomi_session_persistence::{
 };
 pub use terminal_title_completer::LiveTerminalTitleCompleter;
 pub use nomifun_api_types::{NomiBuildExtra, SlashCommandItem};
-pub use protocol::events::{
-    AgentStreamEvent, FinishEventData, PermissionEventData, TurnStopReason,
-};
+pub use protocol::events::{AgentStreamEvent, FinishEventData, TurnStopReason};
 pub use protocol::send_error::AgentSendError;
 pub use registry::{AgentRegistry, UnavailableReason};
 pub use routes::{AgentRouterState, agent_routes};

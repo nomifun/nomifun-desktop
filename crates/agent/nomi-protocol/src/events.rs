@@ -29,11 +29,6 @@ pub enum ProtocolEvent {
         text: String,
         msg_id: String,
     },
-    ToolRequest {
-        msg_id: String,
-        call_id: String,
-        tool: ToolInfo,
-    },
     ToolRunning {
         msg_id: String,
         call_id: String,
@@ -83,21 +78,10 @@ pub enum ProtocolEvent {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Capabilities {
-    pub tool_approval: bool,
     pub thinking: bool,
     pub effort: bool,
     pub effort_levels: Vec<String>,
-    pub modes: Vec<String>,
-    pub current_mode: String,
     pub mcp: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ToolInfo {
-    pub name: String,
-    pub category: ToolCategory,
-    pub args: Value,
-    pub description: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -107,9 +91,7 @@ pub enum ToolCategory {
     Edit,
     Exec,
     Mcp,
-    /// Irreversible action (submit / payment / delete / send). Highest approval
-    /// severity: never silently auto-approved by AutoEdit mode; used by the
-    /// browser-use action facade for fail-closed approval gating.
+    /// Irreversible action such as submit, payment, delete, or send.
     Irreversible,
 }
 
@@ -160,7 +142,6 @@ pub struct ErrorInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn test_ready_event_serialization() {
@@ -168,12 +149,9 @@ mod tests {
             version: "0.1.0".to_string(),
             session_id: Some("abc123".to_string()),
             capabilities: Capabilities {
-                tool_approval: true,
                 thinking: true,
                 effort: false,
                 effort_levels: vec![],
-                modes: vec!["default".into(), "auto_edit".into(), "yolo".into()],
-                current_mode: "default".into(),
                 mcp: false,
             },
         };
@@ -181,19 +159,15 @@ mod tests {
         assert_eq!(json["type"], "ready");
         assert_eq!(json["version"], "0.1.0");
         assert_eq!(json["session_id"], "abc123");
-        assert_eq!(json["capabilities"]["tool_approval"], true);
 
         // session_id omitted when None
         let event_no_sid = ProtocolEvent::Ready {
             version: "0.1.0".to_string(),
             session_id: None,
             capabilities: Capabilities {
-                tool_approval: true,
                 thinking: true,
                 effort: false,
                 effort_levels: vec![],
-                modes: vec!["default".into(), "auto_edit".into(), "yolo".into()],
-                current_mode: "default".into(),
                 mcp: false,
             },
         };
@@ -223,23 +197,6 @@ mod tests {
         assert_eq!(json["type"], "output_discarded");
         assert_eq!(json["msg_id"], "m1");
         assert_eq!(json["restart_attempt"], 2);
-    }
-
-    #[test]
-    fn test_tool_request_event_serialization() {
-        let event = ProtocolEvent::ToolRequest {
-            msg_id: "m1".to_string(),
-            call_id: "c1".to_string(),
-            tool: ToolInfo {
-                name: "Bash".to_string(),
-                category: ToolCategory::Exec,
-                args: json!({"command": "ls"}),
-                description: "Execute: ls".to_string(),
-            },
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "tool_request");
-        assert_eq!(json["tool"]["category"], "exec");
     }
 
     #[test]
@@ -320,12 +277,9 @@ mod tests {
             version: "0.2.0".to_string(),
             session_id: Some("abc".to_string()),
             capabilities: Capabilities {
-                tool_approval: true,
                 thinking: true,
                 effort: true,
                 effort_levels: vec!["low".into(), "medium".into(), "high".into()],
-                modes: vec!["default".into(), "auto_edit".into(), "yolo".into()],
-                current_mode: "default".into(),
                 mcp: false,
             },
         };
@@ -333,7 +287,6 @@ mod tests {
         assert_eq!(json["capabilities"]["thinking"], true);
         assert_eq!(json["capabilities"]["effort"], true);
         assert_eq!(json["capabilities"]["effort_levels"][0], "low");
-        assert_eq!(json["capabilities"]["modes"][2], "yolo");
     }
 
     #[test]
@@ -376,12 +329,9 @@ mod tests {
     fn test_config_changed_event_serialization() {
         let event = ProtocolEvent::ConfigChanged {
             capabilities: Capabilities {
-                tool_approval: true,
                 thinking: false,
                 effort: true,
                 effort_levels: vec!["low".into(), "medium".into(), "high".into()],
-                modes: vec!["default".into(), "auto_edit".into(), "yolo".into()],
-                current_mode: "default".into(),
                 mcp: true,
             },
         };

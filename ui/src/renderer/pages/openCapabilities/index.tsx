@@ -177,13 +177,6 @@ const MCP_DOMAIN_OPTIONS: McpDomainOption[] = [
     descKey: 'settings.openCapabilities.domainChannelDesc',
     defaultDesc: '管理 IM 频道、配对、授权用户和伙伴绑定。',
   },
-  {
-    id: 'confirmation',
-    titleKey: 'settings.openCapabilities.domainConfirmationTitle',
-    defaultTitle: '确认队列',
-    descKey: 'settings.openCapabilities.domainConfirmationDesc',
-    defaultDesc: '读取和处理等待用户确认的动作。',
-  },
 ];
 
 const normalizeMcpDomains = (domains: string[]): string[] =>

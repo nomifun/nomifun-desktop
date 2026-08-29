@@ -60,10 +60,7 @@
     "allowUnmarkedPick": "自动选未标注项",
     "neverDestructive": "绝不选破坏性项",
     "openQuestion": "纯问答",
-    "maxAnswerChars": "回答字数上限",
-    "permission": "权限确认",
-    "onlySafeValue": "仅放行只读项",
-    "escalateRisky": "风险项升级到模型"
+    "maxAnswerChars": "回答字数上限"
   },
   "sessionBackupHint": "留空则优先使用全局默认旁路供应商（在「设置 → 智能决策」中配置），其次自动复用当前会话模型。开启前可在此选择完整供应商和模型；开启后配置锁定，需先关闭再修改。",
   "backupRequired": "旁路模型档需要一个可用模型：可在此选择，或在「设置 → 智能决策」配置全局默认；在已选模型的会话中开启时会自动复用当前会话模型。",
@@ -108,14 +105,12 @@
     "categoryValue": {
       "option": "选项",
       "open_question": "开放问答",
-      "permission": "权限",
       "fault": "故障"
     },
     "actionValue": {
       "retry": "重试",
       "answer_choice": "选定选项",
       "send_text": "发送回复",
-      "confirm": "确认",
       "wait": "等待",
       "stop": "停止"
     },

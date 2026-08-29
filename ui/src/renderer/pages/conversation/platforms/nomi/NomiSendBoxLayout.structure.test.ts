@@ -74,12 +74,10 @@ describe('Nomi sendbox control layout', () => {
     const contextRingIndex = sendBoxSource.indexOf('<ContextUsageRing', rightToolsIndex);
     const modelIndex = sendBoxSource.indexOf('<NomiModelSelector', rightToolsIndex);
     const collaboratorIndex = sendBoxSource.indexOf('{collaboratorSelectorNode}', rightToolsIndex);
-    const permissionIndex = sendBoxSource.indexOf('<AgentModeSelector', rightToolsIndex);
 
     expect(contextRingIndex).toBeGreaterThan(rightToolsIndex);
     expect(modelIndex).toBeGreaterThan(contextRingIndex);
     expect(collaboratorIndex).toBeGreaterThan(modelIndex);
-    expect(permissionIndex).toBeGreaterThan(collaboratorIndex);
   });
 
   test('reconciles conversation collaborators before rendering or persisting executable ranges', () => {
@@ -113,7 +111,6 @@ describe('Nomi sendbox control layout', () => {
     const modelSource = readSource(new URL('./NomiModelSelector.tsx', import.meta.url));
     const sendBoxCss = readSource(new URL('../../../../components/chat/SendBox/sendbox.css', import.meta.url));
     const collaboratorSource = readSource(new URL('../../../guid/components/GuidCollaboratorSelector.tsx', import.meta.url));
-    const modeSource = readSource(new URL('../../../../components/agent/AgentModeSelector.tsx', import.meta.url));
     const summonSource = readSource(new URL('../../components/SummonPanel/index.tsx', import.meta.url));
 
     expect(sendBoxSource.includes('sendbox-responsive-config-group')).toBe(true);
@@ -126,7 +123,7 @@ describe('Nomi sendbox control layout', () => {
     expect(sendBoxCss.includes('.nomi-sendbox-model-btn:hover')).toBe(true);
     expect(sendBoxCss.includes('display: inline-flex !important')).toBe(true);
 
-    for (const source of [modelSource, collaboratorSource, modeSource]) {
+    for (const source of [modelSource, collaboratorSource]) {
       expect(source.includes('<Tooltip')).toBe(false);
       expect(source.includes('sendbox-responsive-label')).toBe(true);
       expect(source.includes('aria-label=')).toBe(true);

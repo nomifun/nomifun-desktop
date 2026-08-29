@@ -26,17 +26,6 @@ impl AgentType {
             AgentType::Nomi => Some(&[".nomi/skills"]),
         }
     }
-
-    /// Canonical full-auto session mode id for this agent type.
-    ///
-    /// The per-vendor mode table this used to carry existed only for external
-    /// CLI agents, each of which named its permissive mode differently. The
-    /// native engine has one name for it.
-    pub fn full_auto_mode_id(&self) -> &'static str {
-        match self {
-            AgentType::Nomi => "yolo",
-        }
-    }
 }
 
 /// Runtime status of a conversation.
@@ -304,10 +293,5 @@ mod tests {
             let parsed: McpServerStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, variant, "deserialize {expected_json}");
         }
-    }
-
-    #[test]
-    fn agent_type_full_auto_mode_id() {
-        assert_eq!(AgentType::Nomi.full_auto_mode_id(), "yolo");
     }
 }

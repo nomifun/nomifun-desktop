@@ -16,7 +16,6 @@ use nomi_types::message::{ContentBlock, Role};
 use nomi_types::tool::ToolResult;
 use serde_json::Value;
 
-use crate::confirm::ToolConfirmer;
 use crate::output::null_sink::NullSink;
 use crate::output::{OutputSink, ToolMediaDelivery, artifact_contract};
 use crate::session::EditableTurnCheckpoint;
@@ -1102,15 +1101,12 @@ fn make_engine(model: &str) -> super::AgentEngine {
         total_usage: Default::default(),
         thinking: None,
         compat: nomi_config::compat::ProviderCompat::anthropic_defaults(),
-        confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
         hooks: None,
         session_manager: None,
         current_session: None,
         output: Arc::new(NullSink),
         current_msg_id: String::new(),
-        approval_manager: None,
         protocol_writer: None,
-        allow_list: vec![],
         current_reasoning_effort: None,
         compact_config: nomi_config::compact::CompactConfig::default(),
         compact_state: super::CompactState::new(),

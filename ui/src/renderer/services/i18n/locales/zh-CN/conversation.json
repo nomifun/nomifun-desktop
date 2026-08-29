@@ -423,7 +423,6 @@
     "apiErrorNoCli": "API 错误，没有可用的 CLI 代理进行回退。",
     "apiErrorSwitchFailed": "创建回退会话失败。",
     "apiErrorSwitched": "API 错误，已自动切换到 {{cli}} CLI",
-    "confirmationLoadError": "确认对话框加载失败",
     "tryAnotherAgent": "尝试其他 Agent：",
     "switchedToAgent": "已切换到 {{agent}}",
     "switchAgentFailed": "切换 Agent 失败",
@@ -554,8 +553,7 @@
     "runtime": {
       "idle": "空闲",
       "starting": "启动中",
-      "running": "运行中",
-      "waiting_confirmation": "等待确认"
+      "running": "运行中"
     },
     "statusLabels": {
       "pending": "等待中",

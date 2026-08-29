@@ -10,9 +10,8 @@
 
 - branch：`rf/agent-capability-platform-v2`
 - base SHA：`7a2ade3c49374add25a35565265399c57729a8b9`
-- current SHA：`SELF`（包含本文件的 C0 implementation commit；检出后用
-  `git rev-parse HEAD` 解析）
-- last verified remote SHA：`84da71b7377967726552b7f80ce54ff1e4433feb`
+- current SHA / C1 base SHA：`a0e807e02eae246a41ecc64fb59ac4b210fb7a29`
+- last verified remote SHA：`a0e807e02eae246a41ecc64fb59ac4b210fb7a29`
 - origin：`https://github.com/nomifun/nomifun-tauri.git`
 - worktree：clean；启动时无用户未提交改动
 - Git identity：`colir0 <colir0@qq.com>`
@@ -29,8 +28,8 @@
 
 ## 当前阶段
 
-- 当前 boundary：`C0 Contract Closure / G0` 已闭合；下一 boundary 为
-  `C1 FullAuto physical deletion`
+- 当前 boundary：`C1 FullAuto physical deletion`（CLOSED）
+- 下一 boundary：`C2 Fresh-v4 || C3 Kernel/Plugin || C4 Runtime/Model || C5 Preset Product`
 - Review A：
   - Decision Closure：PASS，D-001～D-028（含 D-019）均已确认
   - Contract Closure：PASS
@@ -38,8 +37,8 @@
   target first-party inventory、`OfficialPresetSeedManifest`、SessionEvent
   Registry、fresh-v4 schema contract、D-014/D-025～D-028 fixtures、generated
   schemas/envelopes 与 digest 已闭合
-- production behavior：未开始；C1 之前不得物理删除 mode/approval，也不得接入
-  production migration/seed/composition
+- production behavior：C1 FullAuto 删除已完成；fresh-v4 migration/seed/composition
+  仍未开始，按 C2～C5 并行波次推进
 
 ## Contract Closure 裁决
 
@@ -82,6 +81,21 @@
 - W5 Shared Integration, Hard Delete & Release：主 Agent（central integration）+
   `Bernoulli`（validation contracts）
 
+## Closed C1 Disjoint Write Sets
+
+机器可读清单：
+`docs/specs/2026-08-28-agent-capability-platform-v2/C1-WRITE-MANIFESTS.json`
+
+- `C1-W2-PROTOCOL-CLI`：closed
+- `C1-W2-AGENT-CORE`：closed
+- `C1-W1-EXECUTION-CONTRACTS-DB`：closed
+- `C1-W4-BACKEND-RUNTIME-CONSUMERS`：closed
+- `C1-W4-GATEWAY-REMOTE`：closed
+- `C1-W3-UI-I18N`：closed
+
+保留项：Coding review、OS permission、Channel pairing authorization、普通产品确认。
+删除项：Agent mode/tool approval/plan approval/wait/confirmation 主链。
+
 ## Closed C0 Disjoint Write Sets
 
 机器可读清单：
@@ -110,8 +124,8 @@
 - `scripts/gate-agent-v2.mjs`
 - 本规格目录中的 README/DECISIONS/01/02/03/04/START/STATUS/write manifests
 
-C0 central queue 已清空。C1 开工前必须创建新的 disjoint write manifest；不得沿用
-C0 路径授权。
+C0 central queue 已清空。C1 central queue 仅包含 root Cargo/lock、Gate、状态、
+`triad-core` deletion manifest 与跨 slice 冲突合流。
 
 ## Canonical Cohort Tuple
 
@@ -126,9 +140,11 @@ C0 尚未生成原生候选；以下字段均为 not-applicable，而不是 pass
 C0 contract/golden digests：
 
 - canonical v4 schema manifest：
-  `d744f3e97d894bb2fe40a109f4e31e38c51401d42de93c9c27424eaf5dedf8fc`
+  `5df80b2cc4ce25b53c01e85a1ede7c4f088a70fdf218d7d1ddebe3d008aa47ac`
 - contract digest ledger：
-  `a049c67f3ff18b9eb46abdea71f0994950a190b6414b1498c2f20945a18efcd1`
+  `6600538e134aa885d89113055decc333facb16e854bbf73c65b52e0cd8a932fa`
+- deletion manifest set：
+  `dd050984ddf0ddce3df7b86263f3124c592c773bfcdf101604f75ef7c8be4139`
 - official preset seed manifest：
   `c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8`
 - runtime protocol：
@@ -140,7 +156,7 @@ C0 contract/golden digests：
 - runtime release fixture：
   `5a9823e6860e9f39192a0cfb9c46281f4d8ec68b1277a7e3119ab5d9366fb416`
 - platform validation fixture：
-  `b4015cec8f8d88ca857bc3e98babdef1937be8b82564ec9002a8620426a2f113`
+  `fa0cad0da05fbdfad8b8004f1b3c240a1400973f1612286676de6153be593782`
 
 ## Platform Verification
 
@@ -165,12 +181,21 @@ C0 contract/golden digests：
 - `cargo test -p nomifun-agent-contracts`：15 passed
 - `bun run gate:agent-v2 -- contract-closure`：PASS；60 个 JSON payload；
   generator check、targeted crate tests、`git diff --check` 全绿
+- `cargo check --locked`（C1 affected Rust production cohort）：PASS
+- C1 targeted Rust tests：Gateway 124、Public 28、AgentExecution 86、
+  Conversation 537、IDMM 191、Cron/API/Channel targeted suites 全绿
+- C1 Agent Core focused tests：662 passed；Browser/Config/MCP/Skills checks 全绿
+- C1 targeted UI cohort：52 passed；`bun run check:i18n` PASS
+- `bun run gate:agent-v2 -- c1-fullauto`：PASS
 
 ## 未运行验证
 
 - workspace `cargo test`：C0 不属于允许的 C6/C8-WIN-PRE/C10-WIN 节点族
 - broad `bun run check`：C0 尚未触及 product/UI；只运行后续 contract 定向 Gate
 - macOS/Linux native checks：当前阶段无 native candidate，不能标 pass
+- broad `bun run check`：C1 affected UI lines have no new type errors, but the
+  repository baseline typecheck still reports unrelated Arco/React typing debt；
+  C1 uses the focused UI cohort and i18n gate
 
 ## Closed Slices / Commits / Evidence
 
@@ -181,14 +206,16 @@ C0 contract/golden digests：
   `build.noindex/agent-capability-v2/84da71b7377967726552b7f80ce54ff1e4433feb/contract-closure/summary.json`
 - C0 generated ledger：
   `crates/backend/nomifun-agent-contracts/contracts/generated/contract-digest-ledger.envelope.json`
+- C1 implementation：working-tree closure pending commit/push
+- C1 gate evidence：
+  `build.noindex/agent-capability-v2/a0e807e02eae246a41ecc64fb59ac4b210fb7a29/c1-fullauto/summary.json`
 
 ## 下一批可直接执行
 
-1. 提交并普通 push C0，核对 local/origin/`git ls-remote` SHA。
-2. 创建 C1 disjoint write manifests。
-3. 物理删除 FullAuto 之外的 mode/approval/confirmation Rust/API/UI/DB/Event/i18n/tests。
-4. 运行受影响 crate/UI 定向检查与 route/DTO/Event residual/reachability Gate。
-5. C1 闭合后按 disjoint paths进入 C2～C5。
+1. 形成 C1 commit/push并核对 local/origin/`git ls-remote` SHA。
+2. 冻结 C2～C5 disjoint write manifests。
+3. 并行进入 C2 Fresh-v4、C3 Kernel/Plugin、C4 Runtime/Model、C5 Preset Product。
+4. 在 C6 汇合前保持 C1 FullAuto residual gate 与 published migrations 不变。
 
 ## 真实 Blocker
 

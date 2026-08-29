@@ -200,7 +200,7 @@ mod tests {
     use super::*;
     use nomifun_common::{
         AdaptationPolicy, AgentExecutionActor, AgentExecutionEventKind,
-        AgentExecutionStatus, DecisionPolicy, DelegationPolicy, PlanGate,
+        AgentExecutionStatus, DecisionPolicy, DelegationPolicy,
     };
     use nomifun_db::{
         CreateAgentExecutionParams, IAgentExecutionRepository, NewAgentExecutionEvent,
@@ -287,7 +287,6 @@ mod tests {
         CreateAgentExecutionParams {
             goal: "test".to_owned(),
             status: AgentExecutionStatus::Planning,
-            plan_gate: PlanGate::Automatic,
             adaptation_policy: AdaptationPolicy::Fixed,
             decision_policy: DecisionPolicy::Automatic,
             delegation_policy: DelegationPolicy::Automatic,

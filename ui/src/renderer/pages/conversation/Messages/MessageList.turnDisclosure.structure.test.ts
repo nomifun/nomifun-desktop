@@ -50,14 +50,12 @@ describe('MessageList turn completion disclosure structure', () => {
   });
 
   test('renders thinking through the process trace body instead of process receipts', () => {
-    const thinkingCase = buildSummarySource.match(/case 'thinking': \{[\s\S]*?case 'permission':/)?.[0] ?? '';
     const renderProcessReceiptSource =
       source.match(/const renderProcessReceipt = \(item: IProcessReceiptVO, highlighted: boolean\) => \{[\s\S]*?  \};/)?.[0] ?? '';
 
     expect(source.includes('isReadableThinkingReceipt')).toBe(false);
     expect(source.includes("if (isReadableThinkingReceipt(item)) {")).toBe(false);
     expect(renderProcessReceiptSource.includes('<TurnProcessReceipt')).toBe(true);
-    expect(thinkingCase).toBe('');
     expect(source.includes("case 'thinking':\n        return <MessageThinking message={message}></MessageThinking>;")).toBe(true);
     expect(source.includes('isProcessTraceRenderableItem')).toBe(false);
   });
@@ -91,13 +89,8 @@ describe('MessageList turn completion disclosure structure', () => {
       buildSummarySource.match(/if \('type' in item && item\.type === 'tool_summary'\) \{[\s\S]*?if \('type' in item && item\.type === 'file_summary'\)/)?.[0] ?? '';
     const fileSummaryCase =
       buildSummarySource.match(/if \('type' in item && item\.type === 'file_summary'\) \{[\s\S]*?if \('type' in item && item\.type === 'artifact'\)/)?.[0] ?? '';
-    const permissionCase = buildSummarySource.match(/case 'permission':[\s\S]*?case 'agent_status':/)?.[0] ?? '';
-
     expect(toolSummaryCase.includes('hasDetail: true')).toBe(true);
     expect(fileSummaryCase.includes('hasDetail: item.diffs.length > 1')).toBe(true);
-    // One permission carrier remains, so the case block declares its detail
-    // affordance once. The retired second wire shape is gone.
-    expect(permissionCase.match(/hasDetail: true/g) ?? []).toHaveLength(1);
   });
 
   test('routes context compaction tips through process receipts instead of assistant text', () => {

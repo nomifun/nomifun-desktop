@@ -1680,25 +1680,14 @@ fn render_tool_response(
         }
     };
 
-    // Loopback handlers use an explicit top-level result/error envelope.  Keep
+    // Loopback handlers use an explicit top-level result/error envelope. Keep
     // this fail-closed: a malformed 2xx response must never turn into a
-    // successful MCP result.  `needs_confirmation` is the one explicit control
-    // outcome emitted by the gateway permission gate.
+    // successful MCP result.
     let has_result = value.get("result").is_some();
     let has_error = value.get("error").is_some();
-    let is_confirmation = value
-        .get("needs_confirmation")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true);
     if has_result && has_error {
         return ForwardToolOutcome::Error(
             "Error: invalid loopback tool response (both `result` and `error` are present)".into(),
-        );
-    }
-    if is_confirmation && (has_result || has_error) {
-        return ForwardToolOutcome::Error(
-            "Error: invalid loopback tool response (confirmation mixed with result envelope)"
-                .into(),
         );
     }
     if let Some(error) = value.get("error") {
@@ -1712,9 +1701,6 @@ fn render_tool_response(
             ),
             _ => ForwardToolOutcome::Success(text.to_owned()),
         };
-    }
-    if is_confirmation {
-        return ForwardToolOutcome::Success(text.to_owned());
     }
 
     ForwardToolOutcome::Error(
@@ -2388,22 +2374,6 @@ mod tests {
             true,
         );
         assert!(matches!(ambiguous, ForwardToolOutcome::Error(message) if message.contains("both `result` and `error`")));
-
-        let mixed_confirmation = render_tool_response(
-            reqwest::StatusCode::OK,
-            r#"{"result":"ok","needs_confirmation":true}"#,
-            true,
-        );
-        assert!(matches!(mixed_confirmation, ForwardToolOutcome::Error(message) if message.contains("confirmation mixed")));
-    }
-
-    #[test]
-    fn response_renderer_accepts_explicit_confirmation_outcome() {
-        let text = r#"{"needs_confirmation":true,"tool":"nomi_delete"}"#;
-        assert_eq!(
-            render_tool_response(reqwest::StatusCode::OK, text, true),
-            ForwardToolOutcome::Success(text.into())
-        );
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

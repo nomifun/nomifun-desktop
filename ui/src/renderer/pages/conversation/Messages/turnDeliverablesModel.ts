@@ -440,7 +440,7 @@ const mergeDraft = (
  * Aggregate the verified file deliverables of every successfully closed turn.
  *
  * The invariants enforced here mirror the backend's delivery semantics:
- * running/waiting turns emit nothing, canceled turns emit nothing, and a turn
+ * running turns emit nothing, canceled turns emit nothing, and a turn
  * whose final observed item failed emits nothing. A mid-turn failure that the
  * agent recovered from does not disqualify the turn — failed tool calls simply
  * contribute no drafts.
@@ -473,7 +473,7 @@ export function collectTurnDeliverables(
   for (const [turnId, drafts] of draftsByTurn) {
     const gate = options.turnGates.get(turnId);
     if (!gate || gate.running) continue;
-    if (gate.state === 'canceled' || gate.state === 'failed' || gate.state === 'running' || gate.state === 'waiting') {
+    if (gate.state === 'canceled' || gate.state === 'failed' || gate.state === 'running') {
       continue;
     }
     const terminalState = terminalStateByTurn.get(turnId);

@@ -81,8 +81,8 @@ pub struct McpToolProxy {
     manager: Arc<McpManager>,
     /// Whether this tool's schema should be deferred (sent as name-only stub).
     deferred: bool,
-    /// MCP behaviour hints used to derive the approval category. `None` means
-    /// the server declared no annotations → safe default (`Exec`, needs approval).
+    /// MCP behaviour hints used to derive the side-effect category. `None` means
+    /// the server declared no annotations → safe default (`Exec`, is state-changing).
     annotations: Option<ToolAnnotations>,
 }
 
@@ -113,17 +113,15 @@ impl McpToolProxy {
         }
     }
 
-    /// Map MCP annotations to an approval [`ToolCategory`].
     ///
-    /// Rule (mirrors codex `requires_mcp_tool_approval`, collapsed onto nomi's
     /// Info/Exec axis):
-    /// - `readOnlyHint == Some(true)` → [`ToolCategory::Info`] (approval-free).
+    /// - `readOnlyHint == Some(true)` → [`ToolCategory::Info`] (read-only).
     /// - everything else — `destructiveHint`, no hints, or an old server with no
-    ///   `annotations` block at all — → [`ToolCategory::Exec`] (needs approval).
+    ///   `annotations` block at all — → [`ToolCategory::Exec`] (is state-changing).
     ///
     /// The from-strict default is deliberate: an unannotated tool could mutate
-    /// the world, so we never silently auto-approve it.
-    fn category_from_annotations(&self) -> ToolCategory {
+    /// the world, so we never silently treat as read-only it.
+    fn effect_category_from_annotations(&self) -> ToolCategory {
         if self.is_read_only() {
             ToolCategory::Info
         } else {
@@ -132,7 +130,7 @@ impl McpToolProxy {
     }
 
     /// Whether the tool declared `readOnlyHint == true` (no side effects).
-    /// Drives both the approval category and concurrency-safety.
+    /// Drives both the side-effect category and concurrency-safety.
     fn is_read_only(&self) -> bool {
         self.annotations
             .as_ref()
@@ -302,11 +300,11 @@ impl Tool for McpToolProxy {
     }
 
     fn category(&self) -> ToolCategory {
-        // Annotation-driven: readOnly tools are approval-free Info, everything
-        // else (destructive or unannotated) is Exec → needs approval. We no
+        // Annotation-driven: readOnly tools are read-only Info, everything
+        // else (destructive or unannotated) is Exec → is state-changing. We no
         // longer collapse every MCP tool into the single `Mcp` bucket, which
-        // forced even read-only snapshots through the approval gate.
-        self.category_from_annotations()
+        // forced even read-only snapshots through the parallel execution path.
+        self.effect_category_from_annotations()
     }
 
     fn describe(&self, input: &Value) -> String {
@@ -610,7 +608,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // category(): annotations → approval class (readOnly→Info, else→Exec)
+    // category(): annotations → effect class (readOnly→Info, else→Exec)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -626,7 +624,7 @@ mod tests {
 
     #[test]
     fn category_destructive_hint_is_exec() {
-        // destructive (and not read-only) must require approval.
+        // destructive (and not read-only) must be classified as state-changing.
         let proxy = make_proxy_with_annotations(Some(ToolAnnotations {
             destructive_hint: Some(true),
             ..Default::default()
@@ -636,7 +634,7 @@ mod tests {
 
     #[test]
     fn category_read_only_false_is_exec() {
-        // Explicit readOnlyHint=false → still needs approval.
+        // Explicit readOnlyHint=false → still is state-changing.
         let proxy = make_proxy_with_annotations(Some(ToolAnnotations {
             read_only_hint: Some(false),
             ..Default::default()
@@ -1221,7 +1219,7 @@ mod tests {
         assert_eq!(
             canonical_policy.get(&alias).unwrap().category(),
             ToolCategory::Exec,
-            "approval classification must resolve through the unique canonical route"
+            "effect classification must resolve through the unique canonical route"
         );
     }
 

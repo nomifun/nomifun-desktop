@@ -625,7 +625,6 @@ fn build_agent_extra(
         })
         .unwrap_or_else(|| brief.to_owned());
     let mut extra = json!({
-        "session_mode": "yolo",
         "system_prompt": system_prompt,
         "preset_enabled_skills": enabled_skills,
         "exclude_auto_inject_skills": disabled_builtin_skills,

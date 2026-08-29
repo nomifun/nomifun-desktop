@@ -12,8 +12,8 @@
 mod capability;
 
 pub use capability::{
-    AccessScope, Capability, CapabilityMeta, DangerTier, Decision, ProgressSink,
-    StreamingHandler, Surface, decide, default_decision,
+    Capability, CapabilityMeta, EffectClass, OwnershipScope, ProgressSink, StreamingHandler,
+    Surface,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,17 +36,7 @@ fn validate_dispatch_outcome(value: Value) -> Value {
 
     let has_result = object.contains_key("result");
     let has_error = object.contains_key("error");
-    let is_confirmation = object
-        .get("needs_confirmation")
-        .and_then(Value::as_bool)
-        == Some(true);
-
-    if is_confirmation && (has_result || has_error) {
-        return json!({
-            "error": "invalid capability response envelope: confirmation cannot be mixed with result or error"
-        });
-    }
-    if has_result ^ has_error || is_confirmation {
+    if has_result ^ has_error {
         return value;
     }
 
@@ -135,7 +125,7 @@ fn register_instance_owner_domain(
     let first = out.len();
     register(out);
     for capability in &mut out[first..] {
-        capability.meta.access_scope = AccessScope::InstanceOwner;
+        capability.meta.ownership_scope = OwnershipScope::InstanceOwner;
     }
 }
 
@@ -162,7 +152,6 @@ impl Registry {
         // Adding a tool to an EXISTING domain is just one more `out.push(...)` — no wiring.
         register_instance_owner_domain(&mut caps, crate::caps_memory::register);
         register_instance_owner_domain(&mut caps, crate::caps_agent_execution::register);
-        crate::caps_confirmation::register(&mut caps);
         crate::caps_conversation::register(&mut caps);
         register_instance_owner_domain(&mut caps, crate::caps_provider::register);
         crate::caps_cron::register(&mut caps);
@@ -205,10 +194,8 @@ impl Registry {
         self.by_name.len()
     }
 
-    /// The tools visible on a surface: everything except the hard-denied set.
-    /// Confirm-gated tools ARE listed (they are usable with `confirm=true`);
-    /// passing `confirmed = true` to [`decide`] collapses `Confirm → Allow`, so
-    /// only `Deny` outcomes are filtered out.
+    /// The tools visible on a surface. C1 no longer filters by effect class;
+    /// the surface remains transport context only.
     pub fn tool_specs(&self, surface: Surface) -> Vec<ToolSpec> {
         self.tool_specs_for_caller(surface, None, true)
     }
@@ -219,7 +206,7 @@ impl Registry {
     /// dispatch independently enforces the same scope.
     pub fn tool_specs_for_caller(
         &self,
-        surface: Surface,
+        _surface: Surface,
         domains: Option<&[&str]>,
         is_instance_owner: bool,
     ) -> Vec<ToolSpec> {
@@ -227,9 +214,8 @@ impl Registry {
             .values()
             .filter(|c| domains.is_none_or(|domains| domains.contains(&c.meta.domain)))
             .filter(|c| {
-                c.meta.access_scope != AccessScope::InstanceOwner || is_instance_owner
+                c.meta.ownership_scope != OwnershipScope::InstanceOwner || is_instance_owner
             })
-            .filter(|c| decide(&c.meta, surface, true) != Decision::Deny)
             .map(|c| ToolSpec {
                 name: c.meta.name,
                 domain: c.meta.domain,
@@ -255,15 +241,14 @@ impl Registry {
 
     pub fn tool_visible_for_caller(
         &self,
-        surface: Surface,
+        _surface: Surface,
         domains: Option<&[&str]>,
         is_instance_owner: bool,
         name: &str,
     ) -> bool {
         self.by_name.get(name).is_some_and(|c| {
             domains.is_none_or(|domains| domains.contains(&c.meta.domain))
-                && (c.meta.access_scope != AccessScope::InstanceOwner || is_instance_owner)
-                && decide(&c.meta, surface, true) != Decision::Deny
+                && (c.meta.ownership_scope != OwnershipScope::InstanceOwner || is_instance_owner)
         })
     }
 
@@ -271,7 +256,7 @@ impl Registry {
     /// invoking its handler. `None` means the tool name is unknown.
     ///
     /// This is intentionally the same validator used by the capability
-    /// handler, including removal of the cross-cutting `confirm` field.
+    /// handler.
     pub fn validate_arguments(
         &self,
         name: &str,
@@ -292,7 +277,7 @@ impl Registry {
         args: &Value,
     ) -> Option<Value> {
         let cap = self.by_name.get(name)?;
-        if cap.meta.access_scope == AccessScope::InstanceOwner
+        if cap.meta.ownership_scope == OwnershipScope::InstanceOwner
             && ctx.user_id.as_str() != deps.authoritative_user_id.as_ref()
         {
             return Some(validate_dispatch_outcome(json!({
@@ -300,23 +285,7 @@ impl Registry {
                 "tool": name,
             })));
         }
-        let surface = ctx.surface();
-        let confirmed = args
-            .get("confirm")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let result = match decide(&cap.meta, surface, confirmed) {
-            Decision::Deny => json!({
-                "error": format!("'{name}' is not permitted on the {surface:?} surface")
-            }),
-            Decision::Confirm => json!({
-                "needs_confirmation": true,
-                "tool": name,
-                "danger": format!("{:?}", cap.meta.danger),
-                "note": "This action is destructive or sensitive. Restate the exact action and its target to the user, get explicit agreement, then call again with confirm=true."
-            }),
-            Decision::Allow => (cap.handler)(deps, ctx, args.clone()).await,
-        };
+        let result = (cap.handler)(deps, ctx, args.clone()).await;
         Some(validate_dispatch_outcome(result))
     }
 
@@ -335,7 +304,7 @@ impl Registry {
         progress: ProgressSink,
     ) -> Option<Value> {
         let cap = self.by_name.get(name)?;
-        if cap.meta.access_scope == AccessScope::InstanceOwner
+        if cap.meta.ownership_scope == OwnershipScope::InstanceOwner
             && ctx.user_id.as_str() != deps.authoritative_user_id.as_ref()
         {
             return Some(validate_dispatch_outcome(json!({
@@ -343,25 +312,9 @@ impl Registry {
                 "tool": name,
             })));
         }
-        let surface = ctx.surface();
-        let confirmed = args
-            .get("confirm")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let result = match decide(&cap.meta, surface, confirmed) {
-            Decision::Deny => json!({
-                "error": format!("'{name}' is not permitted on the {surface:?} surface")
-            }),
-            Decision::Confirm => json!({
-                "needs_confirmation": true,
-                "tool": name,
-                "danger": format!("{:?}", cap.meta.danger),
-                "note": "This action is destructive or sensitive. Restate the exact action and its target to the user, get explicit agreement, then call again with confirm=true."
-            }),
-            Decision::Allow => match &cap.stream {
-                Some(stream) => stream(deps, ctx, args.clone(), progress).await,
-                None => (cap.handler)(deps, ctx, args.clone()).await,
-            },
+        let result = match &cap.stream {
+            Some(stream) => stream(deps, ctx, args.clone(), progress).await,
+            None => (cap.handler)(deps, ctx, args.clone()).await,
         };
         Some(validate_dispatch_outcome(result))
     }
@@ -374,11 +327,7 @@ mod tests {
 
     #[test]
     fn dispatch_outcome_protocol_is_fail_closed() {
-        for valid in [
-            json!({"result": null}),
-            json!({"error": "failed"}),
-            json!({"needs_confirmation": true, "tool": "nomi_delete"}),
-        ] {
+        for valid in [json!({"result": null}), json!({"error": "failed"})] {
             assert_eq!(validate_dispatch_outcome(valid.clone()), valid);
         }
 
@@ -387,8 +336,7 @@ mod tests {
             json!(["bare"]),
             json!({"ok": true}),
             json!({"result": "ok", "error": "failed"}),
-            json!({"result": "ok", "needs_confirmation": true}),
-            json!({"error": "failed", "needs_confirmation": true}),
+            json!({"deferred": true}),
         ] {
             let outcome = validate_dispatch_outcome(invalid);
             assert!(outcome.get("error").is_some());
@@ -454,7 +402,7 @@ mod tests {
     fn registry_capability_count_floor() {
         let n = Registry::global().len();
         assert!(
-            n >= 129,
+            n >= 128,
             "capability count fell to {n} (floor 129) — a caps_* module may have lost its \
              register() call in Registry::build(), or a domain was removed. If intentional, lower the floor."
         );
@@ -546,52 +494,52 @@ mod tests {
                 .get(name)
                 .unwrap_or_else(|| panic!("missing capability {name}"))
                 .meta
-                .access_scope
+                .ownership_scope
         };
 
         // User-owned aggregates keep their own repository/service owner checks.
-        assert_eq!(scope("nomi_list_conversations"), AccessScope::User);
-        assert_eq!(scope("nomi_cron_list"), AccessScope::User);
+        assert_eq!(scope("nomi_list_conversations"), OwnershipScope::User);
+        assert_eq!(scope("nomi_cron_list"), OwnershipScope::User);
 
         // Installation-wide control planes are rejected centrally before their
         // handlers can observe or mutate shared state.
         assert_eq!(
             scope("nomi_system_get_settings"),
-            AccessScope::InstanceOwner
+            OwnershipScope::InstanceOwner
         );
         assert_eq!(
             scope("nomi_requirement_list"),
-            AccessScope::InstanceOwner
+            OwnershipScope::InstanceOwner
         );
         assert_eq!(
             scope("nomi_knowledge_list_bases"),
-            AccessScope::InstanceOwner
+            OwnershipScope::InstanceOwner
         );
         assert_eq!(
             scope("nomi_companion_list"),
-            AccessScope::InstanceOwner
+            OwnershipScope::InstanceOwner
         );
         assert_eq!(
             scope("nomi_channel_list_plugins"),
-            AccessScope::InstanceOwner
+            OwnershipScope::InstanceOwner
         );
-        assert_eq!(scope("nomi_delegate"), AccessScope::InstanceOwner);
-        assert_eq!(scope("nomi_execution_get"), AccessScope::InstanceOwner);
-        assert_eq!(scope("nomi_execution_update"), AccessScope::InstanceOwner);
+        assert_eq!(scope("nomi_delegate"), OwnershipScope::InstanceOwner);
+        assert_eq!(scope("nomi_execution_get"), OwnershipScope::InstanceOwner);
+        assert_eq!(scope("nomi_execution_update"), OwnershipScope::InstanceOwner);
         // Every IDMM capability is target-scoped and user-owned, and every
         // handler verifies the target owner (there are no global IDMM settings
         // for an installation owner to hold).
-        assert_eq!(scope("nomi_idmm_get_log"), AccessScope::User);
-        assert_eq!(scope("nomi_create_terminal"), AccessScope::InstanceOwner);
-        assert_eq!(scope("nomi_terminal_get"), AccessScope::InstanceOwner);
-        assert_eq!(scope("nomi_fs_read_file"), AccessScope::InstanceOwner);
+        assert_eq!(scope("nomi_idmm_get_log"), OwnershipScope::User);
+        assert_eq!(scope("nomi_create_terminal"), OwnershipScope::InstanceOwner);
+        assert_eq!(scope("nomi_terminal_get"), OwnershipScope::InstanceOwner);
+        assert_eq!(scope("nomi_fs_read_file"), OwnershipScope::InstanceOwner);
         for name in [
             "nomi_creative_studio_list_canvases",
             "nomi_creative_studio_get_canvas",
             "nomi_creative_studio_list_projects",
             "nomi_creative_studio_get_project",
         ] {
-            assert_eq!(scope(name), AccessScope::InstanceOwner, "{name}");
+            assert_eq!(scope(name), OwnershipScope::InstanceOwner, "{name}");
         }
     }
 

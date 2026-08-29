@@ -25,7 +25,6 @@ export type ConfigKeyMap = {
   customCss: string;
   'css.themes': ICssTheme[];
   'css.activeThemeId': string;
-  'nomi.config': { preferredMode?: string } | undefined;
   'nomi.defaultModel': { provider_id: ProviderId; model: string } | undefined;
   // 智能协作的模型偏好：除主模型（nomi.defaultModel）外，可为不同任务选择的
   // 额外模型。仅创建 Nomi 对话时使用；空数组表示只使用主模型。
@@ -94,13 +93,6 @@ export type ConfigKeyMap = {
   // disk + injects them into the agent's context. OFF by default (opt-in,
   // privacy-relevant). Read by the backend browser factory.
   'agent.browserUse.siteMemory': boolean | undefined;
-  // Human takeover / approval (browser-use sub-setting): irreversible browser
-  // actions + gated cross-origin POSTs are held for the user's approval instead of
-  // hard-blocked. ON by default. Read by the backend agent factory.
-  'agent.browserUse.takeover': boolean | undefined;
-  // Dangerous Browser Use approval bypass: skips Browser-specific irreversible
-  // action and gated egress confirmations. OFF by default.
-  'agent.browserUse.unrestrictedApproval': boolean | undefined;
   // Visual fallback (browser-use sub-setting): when DOM/aria anchoring fails, the
   // agent screenshots the page and asks the vision model to locate the target, then
   // clicks the mapped point. OFF by default (opt-in, vision-token cost). Read by the

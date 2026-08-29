@@ -212,10 +212,7 @@ fn tc_3_6_e2e_02_plan_mode_and_compaction_independent() {
     }
 
     // Create plan state simulating active plan mode
-    let plan_state = PlanState {
-        is_active: true,
-        pre_plan_allow_list: vec!["Read".to_string(), "Grep".to_string()],
-    };
+    let plan_state = PlanState { is_active: true };
 
     // Actually run microcompact
     let config = CompactConfig {
@@ -232,11 +229,6 @@ fn tc_3_6_e2e_02_plan_mode_and_compaction_independent() {
 
     // Plan state should be completely unaffected (microcompact only touches messages)
     assert!(plan_state.is_active, "plan mode should remain active");
-    assert_eq!(
-        plan_state.pre_plan_allow_list,
-        vec!["Read".to_string(), "Grep".to_string()],
-        "allow list should be unchanged"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -285,10 +277,7 @@ fn tc_3_6_e2e_04_plan_state_not_persisted_across_sessions() {
     use nomi_agent::plan::state::PlanState;
 
     // Simulate a "previous session" where plan mode was active
-    let active_state = PlanState {
-        is_active: true,
-        pre_plan_allow_list: vec!["Read".into(), "Bash".into()],
-    };
+    let active_state = PlanState { is_active: true };
     assert!(active_state.is_active);
 
     // On session resume, engine creates PlanState::default() (see engine.rs resume_with_provider)
@@ -297,10 +286,6 @@ fn tc_3_6_e2e_04_plan_state_not_persisted_across_sessions() {
     assert!(
         !resumed_state.is_active,
         "plan state should be inactive after session resume"
-    );
-    assert!(
-        resumed_state.pre_plan_allow_list.is_empty(),
-        "allow list should be empty after resume"
     );
 }
 

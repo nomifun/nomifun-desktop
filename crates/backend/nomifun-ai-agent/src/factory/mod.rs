@@ -164,8 +164,8 @@ pub struct AgentFactoryDeps {
     pub knowledge_retrieval: Option<Arc<dyn nomi_agent::knowledge_tools::KnowledgeRetrievalSink>>,
     /// Optional sink enabling the nomi native `knowledge_write` (回血) tool. When
     /// `Some` AND the session has bound knowledge bases with write-back enabled,
-    /// the tool is registered into the in-process engine and allow-listed past
-    /// the approval gate. `None` (standalone) leaves it unregistered.
+    /// the tool is registered into the in-process engine. `None` (standalone)
+    /// leaves it unregistered.
     pub knowledge_writeback: Option<Arc<dyn nomi_agent::knowledge_tools::KnowledgeWritebackSink>>,
     /// Optional persona prompt provider for companion_session conversations that
     /// carry no `extra.system_prompt` (Channel Agent sessions).

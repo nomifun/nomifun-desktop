@@ -1,7 +1,7 @@
 //! Agent-session operations on ConversationService.
 //!
 //! These forward to the active AgentRuntimeHandle (via `self.runtime_handle(id)`) for
-//! mode/model/slash-commands/side-question queries,
+//! model/slash-commands/side-question queries,
 //! plus workspace browsing that needs the conversations.extra.workspace
 //! field.
 //!
@@ -9,7 +9,7 @@
 //! over 2000 lines.
 
 use nomifun_api_types::{
-    AgentModeResponse, GetModelInfoResponse, SetModeRequest, SetModelRequest, SideQuestionRequest,
+    GetModelInfoResponse, SetModelRequest, SideQuestionRequest,
     SideQuestionResponse, SlashCommandItem, WorkspaceBrowseQuery, WorkspaceEntry,
 };
 use nomifun_common::AppError;
@@ -34,32 +34,6 @@ impl ConversationService {
     }
 
     // ── Mode ────────────────────────────────────────────────────────
-
-    pub async fn get_mode(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-    ) -> Result<AgentModeResponse, AppError> {
-        self.require_owned_conversation(user_id, conversation_id)
-            .await?;
-        self.runtime_handle(conversation_id)?.get_mode().await
-    }
-
-    pub async fn set_mode(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        req: SetModeRequest,
-    ) -> Result<(), AppError> {
-        self.require_owned_conversation(user_id, conversation_id)
-            .await?;
-        self.ensure_not_creative_studio_agent_session(user_id, conversation_id, "mode-changed")
-            .await?;
-        if req.mode.trim().is_empty() {
-            return Err(AppError::BadRequest("mode must not be empty".into()));
-        }
-        self.runtime_handle(conversation_id)?.set_mode(&req.mode).await
-    }
 
     // ── Model ───────────────────────────────────────────────────────
 

@@ -29,7 +29,7 @@ describe('legacy tool-group artifact visibility', () => {
     expect(downgraded.status).toBe('Error');
     expect(downgraded.result_display).toBeUndefined();
     expect(downgraded.description.includes('not backed by a committed artifact receipt')).toBe(true);
-    for (const status of ['Executing', 'Confirming', 'Pending', 'Error', 'Canceled'] as const) {
+    for (const status of ['Executing', 'Pending', 'Error', 'Canceled'] as const) {
       expect(getSuccessfulLegacyImage(imageItem(status))).toBeUndefined();
       expect(enforceToolGroupArtifactTrust(imageItem(status)).result_display).toBeUndefined();
     }

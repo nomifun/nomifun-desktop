@@ -8,7 +8,6 @@
   "status": {
     "execution": {
       "planning": "规划中",
-      "awaiting_approval": "待批准",
       "running": "进行中",
       "paused": "已暂停",
       "waiting_input": "等待你的决定",
@@ -31,9 +30,6 @@
     "replan": "重新规划",
     "replanOk": "协作计划已更新",
     "replanError": "重新规划失败：{{error}}",
-    "approve": "批准执行",
-    "approveOk": "已批准，开始协作",
-    "approveError": "批准失败：{{error}}",
     "planning": "规划中…",
     "pause": "暂停",
     "pauseOk": "协作任务已暂停",
@@ -54,13 +50,6 @@
     "placeholder": "说明需要怎样调整；系统会尽量保留仍然有用的已完成工作…",
     "summary": "计划已调整 · 保留 {{kept}} · 新增 {{added}} · 移除 {{removed}}",
     "error": "调整计划失败：{{error}}"
-  },
-  "approval": {
-    "eyebrow": "待批准",
-    "text": "协作计划已就绪，你仍可调整；准备好后批准执行。",
-    "button": "批准执行",
-    "ok": "已批准，开始协作",
-    "error": "批准失败：{{error}}"
   },
   "progress": {
     "title": "协作进度",
@@ -98,13 +87,6 @@
       "rangePlaceholder": "选择多个模型",
       "automaticHint": "系统会根据任务从 {{count}} 个可用模型中自动选择。",
       "required": "请选择可用模型"
-    },
-    "planGateLabel": "开始方式",
-    "planGate": {
-      "automatic": "自动开始",
-      "automaticHint": "计划完成后直接开始协作，你仍可随时介入。",
-      "require_approval": "批准后开始",
-      "require_approvalHint": "计划完成后暂停，等你批准再开始。"
     }
   },
   "step": {

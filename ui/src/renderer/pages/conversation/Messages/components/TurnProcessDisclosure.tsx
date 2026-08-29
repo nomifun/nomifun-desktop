@@ -44,7 +44,6 @@ export interface TurnProcessDisclosureExpansionControls {
 const labelKeyByState: Record<TurnDisclosureProcessState, string> = {
   completed: 'messages.turnProcessed',
   running: 'messages.turnProcessed',
-  waiting: 'messages.turnWaiting',
   failed: 'messages.turnProcessed',
   canceled: 'messages.turnCanceled',
 };
@@ -52,7 +51,6 @@ const labelKeyByState: Record<TurnDisclosureProcessState, string> = {
 const defaultLabelByState: Record<TurnDisclosureProcessState, string> = {
   completed: 'Processed {{duration}}',
   running: 'Processed {{duration}}',
-  waiting: 'Waiting for confirmation {{duration}}',
   failed: 'Processed {{duration}}',
   canceled: 'You stopped after {{duration}}',
 };
@@ -138,7 +136,7 @@ function TurnProcessDisclosure<T>({
   const currentItemKey = useMemo(() => {
     const activeItem = item.processItems.findLast((processItem) => {
       const state = getProcessItemState(processItem);
-      return state === 'running' || state === 'waiting';
+      return state === 'running';
     });
     const failedItem =
       activeItem ??

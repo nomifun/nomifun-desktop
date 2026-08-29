@@ -17,7 +17,6 @@ import { iconColors } from '@/renderer/styles/colors';
 import { CHAT_MESSAGE_JUMP_EVENT, type ChatMessageJumpDetail } from '@/renderer/utils/chat/chatMinimapEvents';
 import { Image } from '@arco-design/web-react';
 import { Down } from '@icon-park/react';
-import MessagePermission from './components/MessagePermission';
 import classNames from 'classnames';
 import React, { createContext, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -149,7 +148,7 @@ type ITurnLiveStepVO = {
   id: string;
   msg_id: MessageId;
   label: string;
-  state: 'running' | 'waiting';
+  state: 'running';
   icon: TurnProcessReceiptIcon;
   sourceMessageIds: SourceMessageId[];
   created_at: number;
@@ -276,7 +275,6 @@ const getProcessedItemRole = (item: IRenderableItem): TurnDisclosureInputItem['r
     case 'tool_call':
     case 'tool_group':
     case 'agent_status':
-    case 'permission':
       return 'process';
     default:
       return 'other';
@@ -288,7 +286,6 @@ type TranslationFn = ReturnType<typeof useTranslation>['t'];
 const defaultToolSummaryByState: Record<TurnDisclosureProcessState, string> = {
   completed: 'Ran {{target}}',
   running: 'Running {{target}}',
-  waiting: 'Waiting to confirm {{target}}',
   failed: 'Failed {{target}}',
   canceled: 'Canceled {{target}}',
 };
@@ -444,9 +441,9 @@ const getToolReceiptIcon = (
   if (latestMessage.type === 'tool_group') {
     if (!Array.isArray(latestMessage.content)) return 'tool';
     const latestTool = latestMessage.content.findLast(Boolean);
-    const confirmationType = latestTool?.confirmationDetails?.type;
-    if (confirmationType === 'edit') return 'edit';
-    if (confirmationType === 'info') return 'file';
+    const latestToolName = `${latestTool?.name ?? ''} ${latestTool?.description ?? ''}`.toLowerCase();
+    if (/\b(write|edit|patch|update|modify)\b/.test(latestToolName)) return 'edit';
+    if (/\b(read|list|ls|glob|search|grep|find)\b/.test(latestToolName)) return 'file';
     return 'tool';
   }
 
@@ -480,7 +477,7 @@ const buildProcessReceiptSummary = (
     return {
       label,
       icon: getToolReceiptIconFromSummaryParts(receiptParts) ?? getToolReceiptIcon(item.messages),
-      defaultExpanded: state === 'waiting',
+      defaultExpanded: false,
       hasDetail: true,
     };
   }
@@ -519,16 +516,6 @@ const buildProcessReceiptSummary = (
   }
 
   switch (item.type) {
-    case 'permission':
-      return {
-        label: t('messages.processReceipt.waitingPermission', {
-          target: compactReceiptText(item.content.title || item.content.description, t('messages.permissionRequest')),
-          defaultValue: 'Waiting to confirm {{target}}',
-        }),
-        icon: 'permission',
-        defaultExpanded: true,
-        hasDetail: true,
-      };
     case 'agent_status':
       return {
         label:
@@ -563,7 +550,7 @@ const buildProcessReceiptSummary = (
           item.content.content,
           t('messages.processReceipt.status', { target: t('messages.processing'), defaultValue: '{{target}}' })
         ),
-        icon: state === 'failed' ? 'permission' : 'status',
+        icon: 'status',
         defaultExpanded: state === 'failed',
         hasDetail: false,
       };
@@ -637,7 +624,6 @@ const getProcessItemLayoutKind = (item: IRenderableItem): string => {
   ) {
     return 'tool';
   }
-  if ('type' in item && item.type === 'permission') return 'permission';
   if ('type' in item && (item.type === 'agent_status' || item.type === 'tips' || item.type === 'artifact')) return 'status';
   return 'other';
 };
@@ -679,8 +665,6 @@ const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActi
         return <MessageToolGroup message={message}></MessageToolGroup>;
       case 'agent_status':
         return <MessageAgentStatus message={message}></MessageAgentStatus>;
-      case 'permission':
-        return <MessagePermission message={message}></MessagePermission>;
       case 'plan':
         // Plans render in the docked PinnedPlan bar, not inline — they're
         // filtered out of processedList above. This guard keeps the switch

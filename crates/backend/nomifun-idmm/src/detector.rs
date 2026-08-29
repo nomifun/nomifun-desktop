@@ -133,7 +133,6 @@ fn detect_decision(line: &str, recent: &VecDeque<String>) -> Option<DecisionProm
         recommended,
         source: DecisionSource::TerminalScan,
         kind: DecisionKind::Options,
-        permission: None,
     })
 }
 
@@ -301,14 +300,13 @@ pub fn detect_chat_decision(text: &str) -> Option<DecisionPrompt> {
         recommended,
         source: DecisionSource::TextScan,
         kind: DecisionKind::Options,
-        permission: None,
     })
 }
 
 /// Detect an open-ended question (纯问答, D6) in an assistant turn's full text:
 /// the turn ends on an interrogative but has NO enumerable options (so
 /// [`detect_chat_decision`] would return `None`). Returns a `DecisionPrompt`
-/// with `kind = OpenQuestion`, empty `options`, and no `permission` — the
+/// with `kind = OpenQuestion` and empty `options` — the
 /// decision watch's model tier answers it with free text; the rule tier never
 /// guesses an open answer (spec §5.4).
 ///
@@ -368,7 +366,6 @@ pub fn detect_chat_open_question(text: &str) -> Option<DecisionPrompt> {
         recommended: None,
         source: DecisionSource::TextScan,
         kind: DecisionKind::OpenQuestion,
-        permission: None,
     })
 }
 
@@ -669,7 +666,6 @@ mod tests {
         let dp = detect_chat_open_question(text).expect("an open question");
         assert_eq!(dp.kind, DecisionKind::OpenQuestion);
         assert!(dp.options.is_empty());
-        assert!(dp.permission.is_none());
         assert_eq!(dp.source, DecisionSource::TextScan);
     }
 
@@ -727,7 +723,6 @@ mod tests {
         let dp = detect_chat_open_question(text).expect("a multi-part design prompt is an open question");
         assert_eq!(dp.kind, DecisionKind::OpenQuestion);
         assert!(dp.options.is_empty(), "an open question carries no enumerable options");
-        assert!(dp.permission.is_none());
         assert_eq!(dp.source, DecisionSource::TextScan);
     }
 
@@ -777,7 +772,6 @@ mod tests {
             .expect("a reply-with-your-choice table menu must be an open question (model answers in free text)");
         assert_eq!(dp.kind, DecisionKind::OpenQuestion);
         assert!(dp.options.is_empty(), "an open question carries no enumerable options");
-        assert!(dp.permission.is_none());
     }
 
     #[test]

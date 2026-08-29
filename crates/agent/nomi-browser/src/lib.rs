@@ -2,17 +2,14 @@
 //! （`nomi-browser-engine`）对外暴露浏览器自动化工具。P0 暴露三动作：
 //! `navigate` / `screenshot` / `capabilities`；observe/aria 在 P1+。
 
-pub mod approval;
 pub mod extract;
 pub mod managed;
 pub mod platform_adapter;
 pub mod redline;
 pub mod site_memory;
-pub mod takeover;
 pub mod tool;
 pub mod visual_fallback;
 
-pub use approval::{ApprovalAsk, ApprovalDecision, ApprovalKind, BrowserApprovalGate, GateEgressApprover};
 pub use extract::{ExtractModel, ExtractSchema};
 pub use managed::{ManagedBrowserFacade, managed_result_envelope, public_lane_json};
 pub use platform_adapter::{
@@ -20,8 +17,8 @@ pub use platform_adapter::{
     ManagedLanePolicyDecorator,
 };
 pub use nomifun_browser_platform::BrowserLaneClient;
-pub use redline::{accname_is_irreversible, classify_action, enforce_redline, ActionContext, ApprovalTier};
-pub use tool::{BrowserTool, StandaloneBrowserTask, OUT_OF_BAND_CONFIRMED_KEY};
+pub use redline::{ActionContext, ActionEffect, accname_is_irreversible, classify_action};
+pub use tool::{BrowserTool, StandaloneBrowserTask};
 
 /// Fields whose authority belongs to the main-process runtime/host registry.
 /// A caller may select an owner-scoped `lane_id`/`lane_name`, but it may never

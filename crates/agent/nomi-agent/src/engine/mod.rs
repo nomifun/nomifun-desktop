@@ -22,10 +22,9 @@ use sha2::{Digest, Sha256};
 use crate::cache_diagnostics::{CacheBreakDetector, CacheDiagnostic, CacheStats};
 use crate::compact::state::CompactState;
 use crate::compact::{auto, emergency, estimate, micro};
-use crate::confirm::ToolConfirmer;
 use crate::tool_execution::{
-    ExecutionControl, ProviderToolAuthority, SKIPPED_AFTER_PRIOR_ERROR,
-    execute_tool_calls_scoped, execute_tool_calls_with_approval,
+    ProviderToolAuthority, SKIPPED_AFTER_PRIOR_ERROR, execute_tool_calls_scoped,
+    execute_tool_calls_with_protocol,
 };
 use crate::output::{OutputSink, ToolCallExecutionContext, ToolCallRetryContext};
 use crate::plan::prompt as plan_prompt;
@@ -455,7 +454,6 @@ const STREAM_IDLE_ACTIVITY_AFTER: Duration = Duration::from_millis(1_200);
 /// Hard limit for complete structured tool calls emitted by one provider
 /// turn. The engine consumes the entire provider turn before dispatching any
 /// call, so rejecting the first call beyond this bound keeps the oversized
-/// turn out of both approval and execution paths.
 const MAX_PROVIDER_TURN_TOOL_CALLS: usize = 128;
 const MAX_PROVIDER_ROUND_ID_BYTES: usize = 512;
 
@@ -925,15 +923,12 @@ pub struct AgentEngine {
     thinking: Option<nomi_types::llm::ThinkingConfig>,
     /// Resolved provider compat settings (for capability validation)
     compat: nomi_config::compat::ProviderCompat,
-    confirmer: Arc<Mutex<ToolConfirmer>>,
     hooks: Option<HookEngine>,
     session_manager: Option<SessionManager>,
     current_session: Option<Session>,
     output: Arc<dyn OutputSink>,
     current_msg_id: String,
-    approval_manager: Option<Arc<nomi_protocol::ToolApprovalManager>>,
     protocol_writer: Option<Arc<dyn nomi_protocol::writer::ProtocolEmitter>>,
-    allow_list: Vec<String>,
     /// Persisted reasoning effort, updated by skill context modifiers.
     /// Carried into each turn's LlmRequest.reasoning_effort.
     current_reasoning_effort: Option<String>,
@@ -941,7 +936,7 @@ pub struct AgentEngine {
     compact_config: CompactConfig,
     /// Runtime compaction state (circuit breaker, last input tokens)
     compact_state: CompactState,
-    /// Runtime plan mode state (active flag, pre-plan allow-list, plan file path)
+    /// Runtime plan mode state (active flag and plan file path).
     plan_state: PlanState,
     /// Shared flag read by EnterPlanMode/ExitPlanMode tools to validate transitions.
     /// Updated by the engine when processing PlanModeTransition modifiers.
@@ -1003,8 +998,6 @@ impl AgentEngine {
         cwd: PathBuf,
     ) -> Self {
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
-        let confirmer =
-            ToolConfirmer::new(config.tools.auto_approve, config.tools.allow_list.clone());
 
         let session_manager = if config.session.enabled {
             Some(SessionManager::new(
@@ -1015,7 +1008,6 @@ impl AgentEngine {
             None
         };
 
-        let allow_list = config.tools.allow_list.clone();
         let compact_config = config.compact.clone();
 
         Self {
@@ -1031,15 +1023,12 @@ impl AgentEngine {
             total_usage: TokenUsage::default(),
             thinking: config.thinking,
             compat: config.compat.clone(),
-            confirmer: Arc::new(Mutex::new(confirmer)),
             hooks: Some(HookEngine::new(config.hooks.clone(), cwd.clone())),
             session_manager,
             current_session: None,
             output,
             current_msg_id: String::new(),
-            approval_manager: None,
             protocol_writer: None,
-            allow_list,
             current_reasoning_effort: None,
             compact_config,
             compact_state: CompactState::new(),
@@ -1071,8 +1060,6 @@ impl AgentEngine {
         cwd: PathBuf,
     ) -> Self {
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
-        let confirmer =
-            ToolConfirmer::new(config.tools.auto_approve, config.tools.allow_list.clone());
 
         let session_manager = if config.session.enabled {
             Some(SessionManager::new(
@@ -1083,7 +1070,6 @@ impl AgentEngine {
             None
         };
 
-        let allow_list = config.tools.allow_list.clone();
         let compact_config = config.compact.clone();
 
         for identity in &session.activated_deferred_tools {
@@ -1112,15 +1098,12 @@ impl AgentEngine {
             total_usage: session.total_usage.clone(),
             thinking: config.thinking,
             compat: config.compat.clone(),
-            confirmer: Arc::new(Mutex::new(confirmer)),
             hooks: Some(HookEngine::new(config.hooks.clone(), cwd)),
             session_manager,
             current_session: Some(session),
             output,
             current_msg_id: String::new(),
-            approval_manager: None,
             protocol_writer: None,
-            allow_list,
             current_reasoning_effort: None,
             compact_config,
             compact_state: CompactState::new(),
@@ -1339,10 +1322,6 @@ impl AgentEngine {
     /// snapshot — it never mutates engine state.
     pub fn messages_transcript(&self) -> String {
         render_transcript(&self.messages)
-    }
-
-    pub fn set_approval_manager(&mut self, mgr: Arc<nomi_protocol::ToolApprovalManager>) {
-        self.approval_manager = Some(mgr);
     }
 
     pub fn set_protocol_writer(&mut self, writer: Arc<dyn nomi_protocol::writer::ProtocolEmitter>) {
@@ -1705,7 +1684,6 @@ impl AgentEngine {
             // editable checkpoint.
             let rollback_persisted = if let Some(root) = completion_context.turn_root.clone() {
                 // Hidden in-memory authority first: a rejected turn must not
-                // leave behind auto-approvals, hooks, or plan/model state that a
                 // fresh reload would not have.
                 self.restore_runtime_authority(completion_context);
                 self.tools
@@ -2412,7 +2390,6 @@ impl AgentEngine {
                         );
                         // Recover only schema-directed nested values that a
                         // provider stringified, then keep that validated value as
-                        // the canonical call seen by lifecycle output, approval,
                         // hooks, and dispatch. Whole-object strings were rejected
                         // above; unknown fields and invalid union branches remain
                         // strict validation failures.
@@ -3001,7 +2978,6 @@ impl AgentEngine {
                     // child/delegation channel. This closes the fork-Skill
                     // chain even when the child used Bash (its local delta +
                     // successful mutation were proven here), without changing
-                    // ToolCategory or approval semantics.
                     round
                         .ledger
                         .record_durable_effect_targets(supported_targets.iter().cloned());
@@ -3113,54 +3089,31 @@ impl AgentEngine {
                 });
             }
 
-            let mut outcome = if let Some(ref approval_mgr) = self.approval_manager {
-                // JSON stream mode: use protocol-based approval
-                let writer = self
-                    .protocol_writer
-                    .as_ref()
-                    .expect("protocol writer required for approval");
-                let auto_approve = self.confirmer.lock().unwrap().is_auto_approve();
-                match execute_tool_calls_with_approval(
+            let mut outcome = if let Some(writer) = self.protocol_writer.as_ref() {
+                execute_tool_calls_with_protocol(
                     &self.tools,
                     &tool_calls,
                     &tool_authority,
-                    approval_mgr,
                     writer,
                     &self.current_msg_id,
-                    auto_approve,
-                    &self.allow_list,
                     self.hooks.as_mut(),
                     self.compaction_level,
                     self.toon_enabled,
                 )
                 .await
-                {
-                    Ok(o) => o,
-                    Err(ExecutionControl::Quit) => {
-                        self.save_session();
-                        return Err(AgentError::UserAborted);
-                    }
-                }
+                .expect("FullAuto protocol execution is infallible")
             } else {
-                // Terminal mode: use interactive confirmation
-                match execute_tool_calls_scoped(
+                execute_tool_calls_scoped(
                     &self.tools,
                     &tool_calls,
                     &tool_authority,
                     &self.current_msg_id,
-                    &self.confirmer,
                     self.hooks.as_mut(),
                     self.compaction_level,
                     self.toon_enabled,
                 )
                 .await
-                {
-                    Ok(o) => o,
-                    Err(ExecutionControl::Quit) => {
-                        self.save_session();
-                        return Err(AgentError::UserAborted);
-                    }
-                }
+                .expect("FullAuto tool execution is infallible")
             };
             let confirmed_invalid_argument_call_ids =
                 confirmed_predispatch_schema_invalid_call_ids(
@@ -3838,18 +3791,10 @@ impl AgentEngine {
             if let Some(effort) = modifier.effort {
                 self.current_reasoning_effort = Some(effort_to_string(effort));
             }
-            for tool_name in &modifier.allowed_tools {
-                if !self.allow_list.contains(tool_name) {
-                    self.allow_list.push(tool_name.clone());
-                }
-                self.confirmer.lock().unwrap().add_to_allow_list(tool_name);
-            }
-
             // Handle plan mode transitions
             if let Some(ref transition) = modifier.plan_mode_transition {
                 match transition {
                     PlanModeTransition::Enter => {
-                        self.plan_state.pre_plan_allow_list = self.allow_list.clone();
                         self.plan_state.is_active = true;
                         if let Some(ref flag) = self.plan_active_flag {
                             flag.store(true, Ordering::Release);
@@ -3857,7 +3802,6 @@ impl AgentEngine {
                     }
                     PlanModeTransition::Exit { .. } => {
                         self.plan_state.is_active = false;
-                        self.allow_list = self.plan_state.pre_plan_allow_list.clone();
                         if let Some(ref flag) = self.plan_active_flag {
                             flag.store(false, Ordering::Release);
                         }
@@ -3896,9 +3840,8 @@ impl AgentEngine {
 
     /// Capture the hidden in-memory authority this turn is allowed to mutate.
     ///
-    /// See [`runtime_authority`] for the field-by-field audit, including what is
-    /// intentionally excluded (`total_usage`, external side effects, and the
-    /// operator's own approval decisions).
+    /// See [`runtime_authority`] for the field-by-field audit, including
+    /// intentionally excluded provider usage and external side effects.
     fn snapshot_runtime_authority(&self) -> AcceptedTurnRuntimeAuthority {
         AcceptedTurnRuntimeAuthority {
             model: self.model.clone(),
@@ -3906,12 +3849,6 @@ impl AgentEngine {
             current_reasoning_effort: self.current_reasoning_effort.clone(),
             compaction_level: self.compaction_level,
             compact_state: self.compact_state.clone(),
-            allow_list: self.allow_list.clone(),
-            confirmer: self
-                .confirmer
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .authority_snapshot(),
             hooks: self
                 .hooks
                 .as_ref()
@@ -3945,11 +3882,6 @@ impl AgentEngine {
         self.current_reasoning_effort = authority.current_reasoning_effort;
         self.compaction_level = authority.compaction_level;
         self.compact_state = authority.compact_state;
-        self.allow_list = authority.allow_list;
-        self.confirmer
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .restore_authority(&authority.confirmer);
         // Replace only the hook config. The supervised shell and its process
         // supervisor are live turn authority and must survive the rollback.
         if let (Some(hooks), Some(config)) = (self.hooks.as_mut(), authority.hooks) {

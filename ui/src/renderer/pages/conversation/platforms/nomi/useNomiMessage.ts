@@ -75,7 +75,6 @@ export const getNomiToolGroupRuntimeState = (data: unknown): {
   tools: NomiToolGroupRuntimeTool[];
   hasActive: boolean;
   hasAny: boolean;
-  confirmingDescription?: string;
   executingDescription?: string;
 } => {
   const tools = Array.isArray(data)
@@ -88,16 +87,12 @@ export const getNomiToolGroupRuntimeState = (data: unknown): {
         }))
     : [];
   const hasActive = tools.some((tool) => isToolGroupStatusActive(tool.status));
-  const confirmingTool = tools.find((tool) => tool.status === 'Confirming');
   const executingTool = tools.find((tool) => tool.status === 'Executing');
 
   return {
     tools,
     hasActive,
     hasAny: tools.length > 0,
-    confirmingDescription: confirmingTool
-      ? optionalDisplayText(confirmingTool.description) || optionalDisplayText(confirmingTool.name) || 'Tool execution'
-      : undefined,
     executingDescription: executingTool
       ? optionalDisplayText(executingTool.description) || optionalDisplayText(executingTool.name) || 'Tool'
       : undefined,
@@ -119,14 +114,11 @@ export const useNomiMessage = (
   conversation_id: ConversationId,
   options?: {
     onError?: (message: IResponseMessage) => void;
-    onConfigChanged?: (capabilities: Record<string, unknown>) => void;
     readOnly?: boolean;
   }
 ) => {
   const onError = options?.onError;
-  const onConfigChanged = options?.onConfigChanged;
   const readOnly = options?.readOnly === true;
-  const onConfigChangedRef = useRef(onConfigChanged);
   const conversationIdRef = useRef(conversation_id);
   conversationIdRef.current = conversation_id;
   const addOrUpdateMessage = useAddOrUpdateMessage();
@@ -191,10 +183,6 @@ export const useNomiMessage = (
   useEffect(() => {
     turnStateRef.current = turnState;
   }, [turnState]);
-
-  useEffect(() => {
-    onConfigChangedRef.current = onConfigChanged;
-  }, [onConfigChanged]);
 
   // Throttle thought updates to reduce render frequency
   const thoughtThrottleRef = useRef<{
@@ -794,10 +782,7 @@ export const useNomiMessage = (
       // A fresh idle hydration and an exact active turn_id form the authority
       // boundary for lifecycle state. Late output is still renderable history,
       // but it cannot reopen a completed turn or mutate a newer accepted turn.
-      // Config changes are session-scoped rather than turn-scoped and therefore
-      // remain applicable while the conversation is idle.
       const appliesToTurn =
-        message.type === 'config_changed' ||
         shouldApplyNomiStreamEventToTurn({
           eventTurnId: message.turn_id,
           activeTurnId: rootTurnIdRef.current,
@@ -937,19 +922,11 @@ export const useNomiMessage = (
           break;
         case 'tool_group':
           {
-            // Check if any tools are executing or awaiting confirmation
+            // Check whether any tools are executing.
             const toolState = getNomiToolGroupRuntimeState(message.data);
             dispatchTurnIfOpen({ type: 'toolGroup', hasActive: toolState.hasActive, hasAny: toolState.hasAny });
 
-            // If tools are awaiting confirmation, update thought hint
-            if (toolState.confirmingDescription) {
-              setThought({
-                subject: 'Awaiting Confirmation',
-                // Prefer the contextual description (file/command/pattern) over the
-                // bare tool name so the status reads e.g. "edit src/auth.ts".
-                description: toolState.confirmingDescription,
-              });
-            } else if (toolState.hasActive) {
+            if (toolState.hasActive) {
               if (toolState.executingDescription) {
                 setThought({
                   subject: 'Executing',
@@ -964,13 +941,6 @@ export const useNomiMessage = (
             // Continue passing message to message list update
             addOrUpdateMessage(transformMessage(message));
           }
-          break;
-        case 'permission':
-          dispatchTurnIfOpen({ type: 'activity' });
-          addOrUpdateMessage(transformMessage(message));
-          break;
-        case 'config_changed':
-          onConfigChangedRef.current?.(message.data as Record<string, unknown>);
           break;
         default: {
           if (message.type === 'error') {

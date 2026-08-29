@@ -44,7 +44,7 @@ Compose a clear, actionable implementation plan in your response including:
 - **Verification**: how to test the changes end-to-end
 
 ### Phase 4: Submit for review
-When your plan is complete, call ExitPlanMode to submit it for user review. Do not ask "Is this plan okay?" — calling ExitPlanMode is the way to request approval."#
+When your plan is complete, call ExitPlanMode to submit it for user review. Do not ask "Is this plan okay?" before submitting the plan."#
 }
 
 #[cfg(test)]
@@ -97,20 +97,6 @@ mod tests {
         assert!(
             text.contains("Compose your implementation plan in your response"),
             "should guide LLM to compose plan in response text"
-        );
-        assert!(
-            !text.contains("Write to the plan file"),
-            "should not mention writing to plan file (R-3.4-01 fix)"
-        );
-    }
-
-    #[test]
-    fn instructions_no_bb_brand() {
-        let text = plan_mode_instructions();
-        assert!(!text.contains("Claude"), "should not contain Claude brand");
-        assert!(
-            !text.contains("~/.claude"),
-            "should not contain bb config path"
         );
     }
 }
