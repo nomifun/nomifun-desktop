@@ -5916,6 +5916,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "nomifun-agent-platform"
+version = "0.7.4"
+dependencies = [
+ "async-trait",
+ "axum",
+ "futures",
+ "http-body-util",
+ "nomifun-agent-contracts",
+ "nomifun-agent-control-plane",
+ "nomifun-agent-kernel",
+ "nomifun-agent-session",
+ "nomifun-api-types",
+ "nomifun-chat-model-broker",
+ "nomifun-codex-runtime",
+ "nomifun-v4-root",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "nomifun-agent-session"
 version = "0.7.4"
 dependencies = [
@@ -6033,13 +6062,20 @@ dependencies = [
  "nomi-process-runtime",
  "nomi-tools",
  "nomi-types",
+ "nomifun-agent-contracts",
+ "nomifun-agent-control-plane",
  "nomifun-agent-execution",
+ "nomifun-agent-kernel",
+ "nomifun-agent-platform",
+ "nomifun-agent-session",
  "nomifun-ai-agent",
  "nomifun-api-types",
  "nomifun-assets",
  "nomifun-auth",
  "nomifun-browser-platform",
  "nomifun-channel",
+ "nomifun-chat-model-broker",
+ "nomifun-codex-runtime",
  "nomifun-common",
  "nomifun-companion",
  "nomifun-conversation",

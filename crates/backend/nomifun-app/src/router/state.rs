@@ -61,7 +61,6 @@ use nomifun_terminal::TerminalRouterState;
 use nomifun_webhook::WebhookRouterState;
 
 use crate::services::AppServices;
-
 /// All module-level router states bundled into a single struct.
 ///
 /// Reduces parameter bloat on router constructors and makes it easy for

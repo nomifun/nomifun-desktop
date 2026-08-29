@@ -1,0 +1,32 @@
+[package]
+name = "nomifun-agent-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nomifun-agent-contracts.workspace = true
+nomifun-agent-control-plane.workspace = true
+nomifun-agent-kernel.workspace = true
+nomifun-agent-session.workspace = true
+nomifun-api-types.workspace = true
+nomifun-chat-model-broker.workspace = true
+nomifun-codex-runtime.workspace = true
+nomifun-v4-root.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }

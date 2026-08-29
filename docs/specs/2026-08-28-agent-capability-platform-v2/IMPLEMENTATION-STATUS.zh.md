@@ -30,10 +30,7 @@
 
 ## 当前阶段
 
-- 当前 boundary：
-  `C2 Fresh-v4 || C3 Kernel/Plugin || C4 Runtime/Model || C5 Preset Product`
-  （CLOSED）
-- 下一 boundary：`C6 Chat + Coding + sample.echo Triad`
+- 当前 boundary：`C6 Chat + Coding + sample.echo Triad`（IN PROGRESS）
 - Review A：
   - Decision Closure：PASS，D-001～D-028（含 D-019）均已确认
   - Contract Closure：PASS
@@ -115,6 +112,21 @@
 
 C2～C5 只建立最终 foundation/control-plane；业务域 composition demolition
 仍等待 C6 三联 Gate 后的 C7 owning slice。
+
+## Active C6 Disjoint Write Sets
+
+机器可读清单：
+`docs/specs/2026-08-28-agent-capability-platform-v2/C6-WRITE-MANIFESTS.json`
+
+- `C6-PLATFORM-CORE`：active
+- `C6-CHAT-MINIMAL`：active
+- `C6-CODING-CODEX`：active
+- `C6-SAMPLE-ECHO`：active
+- `C6-APP-COMPOSITION`：active
+- `C6-UI-INTEGRATION`：active
+
+C6 是第一次允许 workspace `cargo test` 的 final-stack Gate；只在 triad
+implementation commit 冻结后按 exact source tuple 执行一次。
 
 ## Closed C0 Disjoint Write Sets
 

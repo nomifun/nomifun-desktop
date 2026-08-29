@@ -1,0 +1,140 @@
+{
+  "schema_version": "1.0.0",
+  "boundary": "C6",
+  "base_sha": "dee3cc727b3bc09dbd0e0dcf0661ca8f79689813",
+  "code_base_sha": "6e1b7338ae3c3181d14366cc3d52d30f64b45285",
+  "branch": "rf/agent-capability-platform-v2",
+  "status": "active",
+  "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+  "shared_cargo_policy": "agents-must-not-run-workspace-cargo-test-or-edit-root-lockfiles; central-validation-owner-only",
+  "required_final_gates": [
+    "gate-chat-minimal-final",
+    "gate-coding-codex-final",
+    "gate-compiled-plugin-final",
+    "workspace cargo test",
+    "bun run check",
+    "bun run build:ui"
+  ],
+  "tasks": [
+    {
+      "task_id": "C6-PLATFORM-CORE",
+      "owner": "Aquinas",
+      "write_paths": [
+        "crates/backend/nomifun-agent-platform/src/platform.rs"
+      ],
+      "deliverable": "Shared production AgentPlatform over the Fresh-v4 pool, persisted control plane, Session command/query/delete ports, Runtime/Broker orchestration, and common triad harness",
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/backend/nomifun-app/",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ]
+    },
+    {
+      "task_id": "C6-CHAT-MINIMAL",
+      "owner": "Dirac",
+      "write_paths": [
+        "crates/backend/nomifun-agent-platform/src/chat.rs",
+        "crates/backend/nomifun-agent-platform/tests/chat_minimal.rs"
+      ],
+      "deliverable": "Final chat.minimal zero-tool path through formal template/revision/snapshot/session/runtime/model/event/projection/delete contracts",
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/backend/nomifun-app/",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ]
+    },
+    {
+      "task_id": "C6-CODING-CODEX",
+      "owner": "Schrodinger",
+      "write_paths": [
+        "crates/backend/nomifun-agent-platform/src/coding.rs",
+        "crates/backend/nomifun-agent-platform/tests/coding_codex.rs"
+      ],
+      "deliverable": "Final coding.codex native exact-set, review/diff/test/effect/activation/checkpoint/cancel/dispose conformance through the same platform path",
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/backend/nomifun-app/",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ]
+    },
+    {
+      "task_id": "C6-SAMPLE-ECHO",
+      "owner": "Dewey",
+      "write_paths": [
+        "crates/backend/nomifun-agent-platform/src/sample_echo.rs",
+        "crates/backend/nomifun-agent-platform/tests/sample_echo.rs"
+      ],
+      "deliverable": "Compiled sample.echo same-chain Preview/save-or-reuse Revision/persistent Session/real Runtime invoke/Event/Effect/PluginState CAS/restart/delete/fault gate",
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/backend/nomifun-app/",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ]
+    },
+    {
+      "task_id": "C6-APP-COMPOSITION",
+      "owner": "Bernoulli",
+      "write_paths": [
+        "crates/backend/nomifun-app/Cargo.toml",
+        "crates/backend/nomifun-app/src/router/agent_platform.rs",
+        "crates/backend/nomifun-app/src/router/mod.rs",
+        "crates/backend/nomifun-app/src/router/routes.rs",
+        "crates/backend/nomifun-app/src/router/state.rs",
+        "crates/backend/nomifun-app/src/services.rs",
+        "crates/backend/nomifun-app/tests/agent_platform_e2e.rs"
+      ],
+      "deliverable": "Production route/composition wiring for control plane and /api/agent-sessions without legacy Factory/GatewayDeps/Conversation in the triad call stack",
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ]
+    },
+    {
+      "task_id": "C6-UI-INTEGRATION",
+      "owner": "Halley",
+      "write_paths": [
+        "ui/src/renderer/main.tsx",
+        "ui/src/renderer/pages/agentSettings/",
+        "ui/src/renderer/pages/agentSession/",
+        "ui/src/common/adapter/ipcBridge.ts",
+        "ui/src/renderer/components/settings/SettingsModal/",
+        "ui/src/renderer/services/i18n/locales/en-US/agentSettings.json",
+        "ui/src/renderer/services/i18n/locales/zh-CN/agentSettings.json",
+        "ui/src/renderer/services/i18n/i18n-keys.d.ts"
+      ],
+      "deliverable": "Reachable Agent Settings and AgentSession routes, Chat/Coding/sample transcript/tool/effect/inspector projections, and D-024 delete UX using canonical APIs",
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ]
+    }
+  ],
+  "central_owner": {
+    "owner": "main-agent",
+    "write_paths": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "package.json",
+      "scripts/gate-agent-v2.mjs",
+      "crates/backend/nomifun-agent-platform/Cargo.toml",
+      "crates/backend/nomifun-agent-platform/src/lib.rs",
+      "docs/specs/2026-08-28-agent-capability-platform-v2/",
+      "crates/backend/nomifun-agent-contracts/contracts/deletion/triad-core.json",
+      "crates/backend/nomifun-agent-contracts/contracts/generated/",
+      "crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json",
+      "crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json"
+    ]
+  }
+}

@@ -707,6 +707,15 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                   : testResult.preview.candidate_revision_ref.revision}
               </code>
             </div>
+            <Button
+              type='secondary'
+              size='small'
+              onClick={() => {
+                window.location.hash = `/agent-sessions/${testResult.session.agent_session_id}`;
+              }}
+            >
+              {t('agentSettings.session.open')}
+            </Button>
           </div>
         )}
       </section>

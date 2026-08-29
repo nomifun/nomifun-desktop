@@ -65,6 +65,10 @@ name = "agent_provider_health_e2e"
 path = "tests/agent_provider_health_e2e.rs"
 
 [[test]]
+name = "agent_platform_e2e"
+path = "tests/agent_platform_e2e.rs"
+
+[[test]]
 name = "connection_test_e2e"
 path = "tests/connection_test_e2e.rs"
 
@@ -202,6 +206,10 @@ browser-use = [
 [dependencies]
 nomifun-common.workspace = true
 nomifun-v4-root.workspace = true
+nomifun-agent-contracts.workspace = true
+nomifun-agent-control-plane.workspace = true
+nomifun-agent-platform.workspace = true
+nomifun-agent-session.workspace = true
 nomifun-assets.workspace = true
 nomifun-db.workspace = true
 nomifun-api-types.workspace = true
@@ -295,6 +303,9 @@ junction = "1"
 
 [dev-dependencies]
 image = { workspace = true, features = ["jpeg", "gif", "webp"] }
+nomifun-agent-kernel.workspace = true
+nomifun-chat-model-broker.workspace = true
+nomifun-codex-runtime.workspace = true
 nomifun-api-types.workspace = true
 nomifun-realtime.workspace = true
 clap.workspace = true

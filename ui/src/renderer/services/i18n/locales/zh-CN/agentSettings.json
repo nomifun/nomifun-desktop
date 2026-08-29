@@ -204,5 +204,35 @@
   },
   "errors": {
     "title": "Agent 设定操作未完成"
+  },
+  "navigation": {
+    "entryDescription": "打开 canonical AgentPreset 编辑器、Preview、Revision、Test 与 Inspector。",
+    "open": "打开 Agent 设定"
+  },
+  "session": {
+    "title": "Agent 会话",
+    "open": "打开会话",
+    "loading": "正在加载 canonical Session projection…",
+    "backToSettings": "Agent 设定",
+    "fork": "Fork 会话",
+    "delete": "删除会话",
+    "deleteConfirm": "永久删除该会话？Transcript、Projection、Runtime binding、checkpoint 与 Session-owned resource 都会被清除。",
+    "deletedTitle": "会话已删除",
+    "deletedBody": "该 AgentSession 已越过不可逆删除 fence，无法再查看 transcript、继续、观察、fork 或恢复。",
+    "generation": "Active generation",
+    "lastSeq": "最后 sequence",
+    "checkpoint": "Checkpoint through sequence",
+    "activeCapabilities": "Active capabilities",
+    "runtime": "Runtime Inspector",
+    "inspector": "Session Inspector",
+    "details": "Canonical event 详情",
+    "continuationRequired": "冻结 Snapshot 在当前执行栈不可用。历史保持只读；继续工作必须显式 fork 新 AgentSession。",
+    "empty": "尚无已提交的 transcript projection。",
+    "inputPlaceholder": "向该 Session 发送普通 Turn…",
+    "send": "发送 Turn",
+    "role": {
+      "user": "你",
+      "assistant": "Agent"
+    }
   }
 }
