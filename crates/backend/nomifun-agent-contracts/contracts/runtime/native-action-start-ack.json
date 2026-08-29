@@ -1,0 +1,29 @@
+{
+  "start": {
+    "agent_session_id": "0199a8c0-0000-7000-8000-000000000001",
+    "runtime_binding_id": "runtime-binding-0001",
+    "turn_operation_id": "turn-operation-0001",
+    "action_id": "fs.patch",
+    "effect_id": "effect-start-request-0001",
+    "idempotency_key": "native-action-0001",
+    "capability_id": "coding.fs.patch",
+    "active_set_generation": 4,
+    "snapshot_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+    "resource_binding_ids": [
+      "workspace-primary"
+    ]
+  },
+  "ack": {
+    "agent_session_id": "0199a8c0-0000-7000-8000-000000000001",
+    "runtime_binding_id": "runtime-binding-0001",
+    "turn_operation_id": "turn-operation-0001",
+    "action_id": "fs.patch",
+    "effect_id": "effect-start-request-0001",
+    "idempotency_key": "native-action-0001",
+    "capability_id": "coding.fs.patch",
+    "active_set_generation": 4,
+    "snapshot_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+    "effect_started_event_id": "effect-started-event-0001",
+    "committed_session_seq": 42
+  }
+}

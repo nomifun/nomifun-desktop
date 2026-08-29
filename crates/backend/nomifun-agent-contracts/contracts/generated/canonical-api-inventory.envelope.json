@@ -1,0 +1,437 @@
+{
+  "digest_algorithm": "sorted-json-sha256-v1",
+  "payload": {
+    "inventory_version": "1.0.0",
+    "operations": [
+      {
+        "operation_id": "packages.list",
+        "method": "GET",
+        "path": "/api/packages",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "packages.get",
+        "method": "GET",
+        "path": "/api/packages/{package_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "plugin_mounts.get",
+        "method": "GET",
+        "path": "/api/plugin-mounts/{mount_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "plugin_mounts.config.get",
+        "method": "GET",
+        "path": "/api/plugin-mounts/{mount_id}/config",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "plugin_mounts.config.put",
+        "method": "PUT",
+        "path": "/api/plugin-mounts/{mount_id}/config",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "capabilities.list",
+        "method": "GET",
+        "path": "/api/capabilities",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "capabilities.get",
+        "method": "GET",
+        "path": "/api/capabilities/{capability_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "skills.list",
+        "method": "GET",
+        "path": "/api/skills",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "skills.get",
+        "method": "GET",
+        "path": "/api/skills/{skill_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "mcp_tool_mappings.list",
+        "method": "GET",
+        "path": "/api/mcp-tool-mappings",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "mcp_servers.refresh_catalog",
+        "method": "POST",
+        "path": "/api/mcp-servers/{server_id}/refresh-catalog",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "agent_preset_templates.list_official",
+        "method": "GET",
+        "path": "/api/agent-preset-templates?source=official",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "agent_presets.create",
+        "method": "POST",
+        "path": "/api/agent-presets",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "agent_presets.create_from_template",
+        "method": "POST",
+        "path": "/api/agent-presets/from-template/{template_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "agent_presets.editor",
+        "method": "GET",
+        "path": "/api/agent-presets/{preset_id}/editor?revision={revision}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "agent_presets.resolve_preview",
+        "method": "POST",
+        "path": "/api/agent-presets/{preset_id}/resolve-preview",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "CAPABILITY_NOT_MATERIALIZED",
+          "CAPABILITY_UNAVAILABLE_ON_PLATFORM",
+          "PRESET_RESOURCE_NOT_BOUND",
+          "RESOURCE_OWNER_MISMATCH"
+        ]
+      },
+      {
+        "operation_id": "agent_preset_revisions.create",
+        "method": "POST",
+        "path": "/api/agent-presets/{preset_id}/revisions",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "PRESET_CAPABILITY_DUPLICATE",
+          "PRESET_CAPABILITY_SET_OVERLAP",
+          "PRESET_REVISION_DIGEST_MISMATCH"
+        ]
+      },
+      {
+        "operation_id": "agent_preset_revisions.get",
+        "method": "GET",
+        "path": "/api/agent-presets/{preset_id}/revisions/{revision}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "agent_preset_revisions.resolve_preview",
+        "method": "POST",
+        "path": "/api/agent-presets/{preset_id}/revisions/{revision}/resolve-preview",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "CAPABILITY_NOT_MATERIALIZED",
+          "CAPABILITY_UNAVAILABLE_ON_PLATFORM",
+          "PRESET_RESOURCE_NOT_BOUND",
+          "RESOURCE_OWNER_MISMATCH"
+        ]
+      },
+      {
+        "operation_id": "agent_sessions.create",
+        "method": "POST",
+        "path": "/api/agent-sessions",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "CAPABILITY_NOT_MATERIALIZED",
+          "CAPABILITY_UNAVAILABLE_ON_PLATFORM",
+          "PRESET_RESOURCE_NOT_BOUND",
+          "RESOURCE_OWNER_MISMATCH",
+          "SNAPSHOT_EXECUTOR_UNAVAILABLE"
+        ]
+      },
+      {
+        "operation_id": "agent_sessions.get",
+        "method": "GET",
+        "path": "/api/agent-sessions/{agent_session_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED"
+        ]
+      },
+      {
+        "operation_id": "agent_sessions.capabilities",
+        "method": "GET",
+        "path": "/api/agent-sessions/{agent_session_id}/capabilities",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED"
+        ]
+      },
+      {
+        "operation_id": "agent_sessions.turns.create",
+        "method": "POST",
+        "path": "/api/agent-sessions/{agent_session_id}/turns",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "CAPABILITY_NOT_ACTIVE",
+          "CAPABILITY_NOT_IN_PRESET",
+          "SESSION_DELETED",
+          "SNAPSHOT_EXECUTOR_UNAVAILABLE"
+        ]
+      },
+      {
+        "operation_id": "agent_sessions.events",
+        "method": "GET",
+        "path": "/api/agent-sessions/{agent_session_id}/events?after_seq={seq}&limit={limit}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED"
+        ]
+      },
+      {
+        "operation_id": "agent_sessions.messages",
+        "method": "GET",
+        "path": "/api/agent-sessions/{agent_session_id}/messages?after_seq={seq}&limit={limit}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED"
+        ]
+      },
+      {
+        "operation_id": "agent_sessions.forks.create",
+        "method": "POST",
+        "path": "/api/agent-sessions/{agent_session_id}/forks",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED",
+          "SNAPSHOT_EXECUTOR_UNAVAILABLE"
+        ]
+      },
+      {
+        "operation_id": "agent_sessions.delete",
+        "method": "DELETE",
+        "path": "/api/agent-sessions/{agent_session_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED"
+        ]
+      },
+      {
+        "operation_id": "remote_bindings.list",
+        "method": "GET",
+        "path": "/api/remote-bindings",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "remote_bindings.create",
+        "method": "POST",
+        "path": "/api/remote-bindings",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "PRESET_RESOURCE_NOT_BOUND",
+          "RESOURCE_OWNER_MISMATCH"
+        ]
+      },
+      {
+        "operation_id": "remote_bindings.update",
+        "method": "PUT",
+        "path": "/api/remote-bindings/{binding_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "REMOTE_BINDING_DIGEST_CONFLICT",
+          "REMOTE_BINDING_VERSION_CONFLICT"
+        ]
+      },
+      {
+        "operation_id": "remote_bindings.delete",
+        "method": "DELETE",
+        "path": "/api/remote-bindings/{binding_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "REMOTE_BINDING_NOT_FOUND"
+        ]
+      },
+      {
+        "operation_id": "installation_auth.rotate",
+        "method": "POST",
+        "path": "/api/webui/access-token",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "installation_auth.revoke",
+        "method": "DELETE",
+        "path": "/api/webui/access-token",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      },
+      {
+        "operation_id": "remote.open",
+        "method": "POST",
+        "path": "/api/remote/open",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "CAPABILITY_NOT_MATERIALIZED",
+          "CAPABILITY_UNAVAILABLE_ON_PLATFORM",
+          "PRESET_RESOURCE_NOT_BOUND",
+          "REMOTE_AUTH_REQUIRED",
+          "REMOTE_BINDING_DIGEST_CONFLICT",
+          "REMOTE_BINDING_NOT_FOUND",
+          "REMOTE_BINDING_VERSION_CONFLICT",
+          "REMOTE_IDEMPOTENCY_CONFLICT",
+          "RESOURCE_OWNER_MISMATCH"
+        ]
+      },
+      {
+        "operation_id": "remote.turn",
+        "method": "POST",
+        "path": "/api/remote/turn",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "CAPABILITY_NOT_ACTIVE",
+          "CAPABILITY_NOT_IN_PRESET",
+          "REMOTE_AUTH_REQUIRED",
+          "REMOTE_IDEMPOTENCY_CONFLICT",
+          "REMOTE_SESSION_BUSY",
+          "REMOTE_SESSION_NOT_FOUND",
+          "REMOTE_SESSION_OPENING",
+          "SESSION_DELETED",
+          "SNAPSHOT_EXECUTOR_UNAVAILABLE"
+        ]
+      },
+      {
+        "operation_id": "remote.observe",
+        "method": "GET",
+        "path": "/api/remote/observe?agent_session_id={uuidv7}&after_seq={seq}&limit={limit}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "REMOTE_AUTH_REQUIRED",
+          "REMOTE_OPEN_FAILED",
+          "REMOTE_SESSION_NOT_FOUND",
+          "SESSION_DELETED"
+        ]
+      },
+      {
+        "operation_id": "remote.cancel",
+        "method": "POST",
+        "path": "/api/remote/cancel",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "REMOTE_AUTH_REQUIRED",
+          "REMOTE_IDEMPOTENCY_CONFLICT",
+          "REMOTE_SESSION_NOT_FOUND",
+          "SESSION_DELETED"
+        ]
+      },
+      {
+        "operation_id": "agent_bindings.put",
+        "method": "PUT",
+        "path": "/api/agent-bindings/{target_kind}/{target_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "PRESET_RESOURCE_NOT_BOUND",
+          "RESOURCE_OWNER_MISMATCH"
+        ]
+      },
+      {
+        "operation_id": "agent_bindings.get",
+        "method": "GET",
+        "path": "/api/agent-bindings/{target_kind}/{target_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": []
+      }
+    ],
+    "canonical_error_codes": [
+      "CAPABILITY_NOT_ACTIVE",
+      "CAPABILITY_NOT_IN_PRESET",
+      "CAPABILITY_NOT_MATERIALIZED",
+      "CAPABILITY_UNAVAILABLE_ON_PLATFORM",
+      "CHAT_MINIMAL_NOT_EXACT_EMPTY",
+      "CODING_CODEX_NATIVE_INCOMPLETE",
+      "OFFICIAL_PRESET_KEY_SET_MISMATCH",
+      "PRESET_CAPABILITY_DUPLICATE",
+      "PRESET_CAPABILITY_SET_OVERLAP",
+      "PRESET_RESOURCE_NOT_BOUND",
+      "PRESET_REVISION_DIGEST_MISMATCH",
+      "PRESET_REVISION_SAVE_FAILED",
+      "REMOTE_AUTH_REQUIRED",
+      "REMOTE_BINDING_DIGEST_CONFLICT",
+      "REMOTE_BINDING_NOT_FOUND",
+      "REMOTE_BINDING_VERSION_CONFLICT",
+      "REMOTE_IDEMPOTENCY_CONFLICT",
+      "REMOTE_OPEN_FAILED",
+      "REMOTE_SESSION_BUSY",
+      "REMOTE_SESSION_NOT_FOUND",
+      "REMOTE_SESSION_OPENING",
+      "RESOURCE_OWNER_MISMATCH",
+      "ROLE_COVERAGE_INCOMPLETE",
+      "SESSION_DELETED",
+      "SNAPSHOT_EXECUTOR_UNAVAILABLE"
+    ],
+    "forbidden_paths": [
+      "/api/conversations",
+      "/api/presets",
+      "/api/remote/confirm",
+      "/api/test",
+      "/api/test-sessions",
+      "/mcp-agent",
+      "/v1/tools?domains",
+      "/v1/tools?profile"
+    ]
+  },
+  "payload_digest": "ec516189fa29064e7cba25cd219de9d88389a15a29d8aefc2587016cdf148a55"
+}

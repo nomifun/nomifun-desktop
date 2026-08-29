@@ -1,0 +1,1333 @@
+{
+  "schema_version": "1.0.0",
+  "inventory_version": "1.0.0",
+  "version_policy": {
+    "package_version": "1.0.0",
+    "capability_version": "1.0.0"
+  },
+  "packages": [
+    {
+      "package": {
+        "id": "nomifun.model-media",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.model-media"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "llm.realtime",
+            "version": "1.0.0"
+          },
+          "kind": "transport"
+        },
+        {
+          "capability": {
+            "id": "llm.embedding",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "llm.rerank",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "llm.image.generate",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "llm.image.edit",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "llm.video.generate",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "llm.audio.tts",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "llm.audio.asr",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "llm.vision",
+            "version": "1.0.0"
+          },
+          "kind": "context_contributor"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.web-research",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.web-research"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "web.search",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "web.fetch",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "citation.render",
+            "version": "1.0.0"
+          },
+          "kind": "context_contributor"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.chat",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.chat"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "session.attachments.read",
+            "version": "1.0.0"
+          },
+          "kind": "context_contributor"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.agent-execution",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.agent-execution"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "agent.delegate",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "agent.fork",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "agent.execution.plan",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "agent.execution.steer",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "agent.execution.observe",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.workspace-execution",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.workspace-execution"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "fs.read",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "fs.search",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "fs.write",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "fs.patch",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "fs.delete",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "fs.watch",
+            "version": "1.0.0"
+          },
+          "kind": "event_source"
+        },
+        {
+          "capability": {
+            "id": "fs.snapshot",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "workspace.bind",
+            "version": "1.0.0"
+          },
+          "kind": "resource_provider"
+        },
+        {
+          "capability": {
+            "id": "workspace.artifacts",
+            "version": "1.0.0"
+          },
+          "kind": "resource_provider"
+        },
+        {
+          "capability": {
+            "id": "vcs.status",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "vcs.diff",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "vcs.stage",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "vcs.commit",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "vcs.push",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "process.exec",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "process.session",
+            "version": "1.0.0"
+          },
+          "kind": "resource_provider"
+        },
+        {
+          "capability": {
+            "id": "terminal.pty",
+            "version": "1.0.0"
+          },
+          "kind": "resource_provider"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.ssh",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.ssh"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "ssh.connect",
+            "version": "1.0.0"
+          },
+          "kind": "resource_provider"
+        },
+        {
+          "capability": {
+            "id": "ssh.fs.read",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "ssh.fs.write",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "ssh.exec",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "ssh.sudo",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.knowledge",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.knowledge"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "knowledge.search",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "knowledge.read",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "knowledge.write",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "knowledge.mount",
+            "version": "1.0.0"
+          },
+          "kind": "resource_provider"
+        },
+        {
+          "capability": {
+            "id": "knowledge.source.sync",
+            "version": "1.0.0"
+          },
+          "kind": "background_service"
+        },
+        {
+          "capability": {
+            "id": "knowledge.autogen",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "knowledge.embedding",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "knowledge.rerank",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.project-memory",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.project-memory"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "memory.project.read",
+            "version": "1.0.0"
+          },
+          "kind": "context_contributor"
+        },
+        {
+          "capability": {
+            "id": "memory.project.write",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "memory.project.distill",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "memory.project.citation",
+            "version": "1.0.0"
+          },
+          "kind": "context_contributor"
+        },
+        {
+          "capability": {
+            "id": "memory.session.scratch",
+            "version": "1.0.0"
+          },
+          "kind": "resource_provider"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.companion-memory",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.companion-memory"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "memory.companion.recall",
+            "version": "1.0.0"
+          },
+          "kind": "context_contributor"
+        },
+        {
+          "capability": {
+            "id": "memory.companion.write",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "memory.companion.merge",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "memory.companion.evolve",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.skills",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.skills"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "skill.catalog",
+            "version": "1.0.0"
+          },
+          "kind": "context_contributor"
+        },
+        {
+          "capability": {
+            "id": "skill.describe",
+            "version": "1.0.0"
+          },
+          "kind": "context_contributor"
+        },
+        {
+          "capability": {
+            "id": "skill.invoke",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "skill.hooks",
+            "version": "1.0.0"
+          },
+          "kind": "turn_middleware"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.mcp-connectors",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.mcp-connectors"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "mcp.connect",
+            "version": "1.0.0"
+          },
+          "kind": "transport"
+        },
+        {
+          "capability": {
+            "id": "mcp.tool_proxy",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "mcp.resource",
+            "version": "1.0.0"
+          },
+          "kind": "resource_provider"
+        },
+        {
+          "capability": {
+            "id": "mcp.oauth",
+            "version": "1.0.0"
+          },
+          "kind": "transport"
+        },
+        {
+          "capability": {
+            "id": "connector.data.read",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "connector.data.write",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.browser",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.browser"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "browser.identity",
+            "version": "1.0.0"
+          },
+          "kind": "resource_provider"
+        },
+        {
+          "capability": {
+            "id": "browser.observe",
+            "version": "1.0.0"
+          },
+          "kind": "context_contributor"
+        },
+        {
+          "capability": {
+            "id": "browser.navigate",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "browser.act",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "browser.download",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "browser.upload",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "browser.evaluate",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "browser.site_memory",
+            "version": "1.0.0"
+          },
+          "kind": "context_contributor"
+        },
+        {
+          "capability": {
+            "id": "browser.takeover",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.computer-a11y",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.computer-a11y"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "computer.observe",
+            "version": "1.0.0"
+          },
+          "kind": "context_contributor"
+        },
+        {
+          "capability": {
+            "id": "computer.input",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "computer.launch",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "a11y.observe",
+            "version": "1.0.0"
+          },
+          "kind": "context_contributor"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.requirements",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.requirements"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "requirements.read",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "requirements.write",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "requirements.status",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "requirements.claim",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.autowork-scheduler",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.autowork-scheduler"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "autowork.runner",
+            "version": "1.0.0"
+          },
+          "kind": "scheduler"
+        },
+        {
+          "capability": {
+            "id": "schedule.store",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "schedule.timer",
+            "version": "1.0.0"
+          },
+          "kind": "scheduler"
+        },
+        {
+          "capability": {
+            "id": "schedule.agent_trigger",
+            "version": "1.0.0"
+          },
+          "kind": "scheduler"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.idmm",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.idmm"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "idmm.observe",
+            "version": "1.0.0"
+          },
+          "kind": "turn_middleware"
+        },
+        {
+          "capability": {
+            "id": "idmm.intervene",
+            "version": "1.0.0"
+          },
+          "kind": "turn_middleware"
+        },
+        {
+          "capability": {
+            "id": "idmm.fallback_policy",
+            "version": "1.0.0"
+          },
+          "kind": "turn_middleware"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.companion",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.companion"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "companion.persona",
+            "version": "1.0.0"
+          },
+          "kind": "context_contributor"
+        },
+        {
+          "capability": {
+            "id": "companion.roster",
+            "version": "1.0.0"
+          },
+          "kind": "context_contributor"
+        },
+        {
+          "capability": {
+            "id": "companion.summon",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "companion.learn",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "companion.evolve",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.channel",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.channel"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "channel.receive",
+            "version": "1.0.0"
+          },
+          "kind": "event_source"
+        },
+        {
+          "capability": {
+            "id": "channel.reply",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "channel.send",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "channel.pairing",
+            "version": "1.0.0"
+          },
+          "kind": "transport"
+        },
+        {
+          "capability": {
+            "id": "channel.group_policy",
+            "version": "1.0.0"
+          },
+          "kind": "turn_middleware"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.customer-service",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.customer-service"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "customer_service.dialogue",
+            "version": "1.0.0"
+          },
+          "kind": "turn_middleware"
+        },
+        {
+          "capability": {
+            "id": "customer_service.notes.read",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "customer_service.notes.write",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "customer_service.handoff",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.robot",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.robot"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "robot.link",
+            "version": "1.0.0"
+          },
+          "kind": "resource_provider"
+        },
+        {
+          "capability": {
+            "id": "robot.audio",
+            "version": "1.0.0"
+          },
+          "kind": "background_service"
+        },
+        {
+          "capability": {
+            "id": "robot.vision",
+            "version": "1.0.0"
+          },
+          "kind": "context_contributor"
+        },
+        {
+          "capability": {
+            "id": "robot.display",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "robot.motion",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "robot.device_tools",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.creation",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.creation"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "creation.text",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "creation.image",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "creation.image_edit",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "creation.video",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "creation.audio",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.workshop",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.workshop"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "workshop.canvas.read",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "workshop.canvas.edit",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "workshop.asset.read",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "workshop.asset.write",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "workshop.template.run",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "workshop.director",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.office",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.office"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "office.preview",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "office.document.edit",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "office.sheet.edit",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "office.slides.edit",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.miniapp",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.miniapp"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "miniapp.read",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "miniapp.edit",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "miniapp.publish",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        },
+        {
+          "capability": {
+            "id": "miniapp.serve",
+            "version": "1.0.0"
+          },
+          "kind": "tool"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.notification",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.notification"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "notification.webhook",
+            "version": "1.0.0"
+          },
+          "kind": "event_consumer"
+        },
+        {
+          "capability": {
+            "id": "notification.desktop",
+            "version": "1.0.0"
+          },
+          "kind": "event_consumer"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
+        "id": "nomifun.remote-ingress",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.remote-ingress"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "remote.mcp",
+            "version": "1.0.0"
+          },
+          "kind": "transport"
+        },
+        {
+          "capability": {
+            "id": "remote.rest",
+            "version": "1.0.0"
+          },
+          "kind": "transport"
+        },
+        {
+          "capability": {
+            "id": "ingress.web",
+            "version": "1.0.0"
+          },
+          "kind": "transport"
+        },
+        {
+          "capability": {
+            "id": "ingress.mobile",
+            "version": "1.0.0"
+          },
+          "kind": "transport"
+        },
+        {
+          "capability": {
+            "id": "ingress.channel",
+            "version": "1.0.0"
+          },
+          "kind": "transport"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    }
+  ]
+}

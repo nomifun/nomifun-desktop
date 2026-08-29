@@ -1,0 +1,508 @@
+{
+  "schema_version": "1.0.0",
+  "inventory_id": "event-outbox-classification.v1",
+  "base_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
+  "invariants": [
+    "AgentSession Event append owns no core or session outbox",
+    "BroadcastEventBus and UserEventSink are best-effort projection wakeups only",
+    "business completion cannot depend on an in-memory broadcast being delivered",
+    "reliable requests use typed commands and idempotent receipts",
+    "reliable domain facts are written with an owning-domain transactional outbox",
+    "consumers catch up with cursor, inbox and idempotency where reliability is required",
+    "SessionEvent stores bounded invocation facts and never copies owning-domain aggregates",
+    "uncertain Effects are never automatically retried by Host, replay or shadow"
+  ],
+  "entries": [
+    {
+      "entry_id": "platform.realtime-bus",
+      "domain": "platform",
+      "current_event_names": [
+        "all BroadcastEventBus events"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-realtime/src/broadcaster.rs",
+          "symbols": [
+            "BroadcastEventBus",
+            "UserEventSink"
+          ],
+          "line_start": 38,
+          "line_end": 104
+        }
+      ],
+      "current_delivery": "tokio broadcast; send failure is logged when no receiver exists",
+      "target_class": "best_effort_projection_wakeup",
+      "canonical_owner": "platform EventBus",
+      "requires_domain_outbox": false,
+      "target_action": "Retain only as commit-after wakeup carrying durable identity/cursor; prohibit use as completion authority."
+    },
+    {
+      "entry_id": "knowledge.tree-relocation",
+      "domain": "knowledge",
+      "current_event_names": [
+        "knowledge.tree-changed"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-knowledge/src/service.rs",
+          "symbols": [
+            "tree_operation_repository",
+            "publish_pending_tree_event"
+          ],
+          "line_start": 712,
+          "line_end": 730
+        },
+        {
+          "path": "crates/backend/nomifun-knowledge/src/service.rs",
+          "symbols": [
+            "publish_pending_tree_event"
+          ],
+          "line_start": 957,
+          "line_end": 1053
+        },
+        {
+          "path": "crates/backend/nomifun-db/src/repository/knowledge_tree_operation.rs",
+          "symbols": [
+            "IKnowledgeTreeOperationRepository"
+          ]
+        }
+      ],
+      "current_delivery": "durable mutation journal and pending event payload followed by best-effort realtime publication",
+      "target_class": "reliable_domain_fact_transactional_outbox",
+      "canonical_owner": "domain.knowledge",
+      "requires_domain_outbox": true,
+      "target_action": "Retain the owning-domain transaction/outbox pattern; make durable cursor/inbox semantics explicit for reliable consumers."
+    },
+    {
+      "entry_id": "knowledge.catalog-projections",
+      "domain": "knowledge",
+      "current_event_names": [
+        "knowledge.base-created",
+        "knowledge.base-deleted",
+        "knowledge.base-updated",
+        "knowledge.binding-changed",
+        "knowledge.entry-content-updated",
+        "knowledge.tag-changed"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-knowledge/src/events.rs",
+          "symbols": [
+            "KnowledgeEventEmitter"
+          ],
+          "line_start": 38,
+          "line_end": 114
+        }
+      ],
+      "current_delivery": "direct UserEventSink publication after domain operations",
+      "target_class": "best_effort_projection_wakeup",
+      "canonical_owner": "domain.knowledge",
+      "requires_domain_outbox": false,
+      "target_action": "Keep as refresh/projection wakeups only; domain repository remains authoritative."
+    },
+    {
+      "entry_id": "agent-execution.changed",
+      "domain": "agent-execution",
+      "current_event_names": [
+        "agentExecution.changed"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-agent-execution/src/event_publisher.rs",
+          "symbols": [
+            "AgentExecutionEventPublisher"
+          ],
+          "line_start": 1,
+          "line_end": 120
+        },
+        {
+          "path": "crates/backend/nomifun-db/src/repository/agent_execution.rs",
+          "symbols": [
+            "list_unpublished_events",
+            "mark_event_published"
+          ]
+        }
+      ],
+      "current_delivery": "repository transaction appends sequenced outbox event; publisher drains and marks publication",
+      "target_class": "reliable_domain_fact_transactional_outbox",
+      "canonical_owner": "domain.agent-execution",
+      "requires_domain_outbox": true,
+      "target_action": "Retain as the primary owning-domain outbox exemplar; separate durable event cursor from WebSocket wakeup."
+    },
+    {
+      "entry_id": "channel.inbound-receipt",
+      "domain": "channel",
+      "current_event_names": [
+        "channel inbound operation receipt"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-channel/src/message_loop.rs",
+          "symbols": [
+            "NewChannelInboundReceiptRow",
+            "claim_inbound"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-db/src/repository/channel.rs",
+          "symbols": [
+            "ChannelInboundClaim",
+            "IChannelRepository"
+          ]
+        }
+      ],
+      "current_delivery": "durable receiver-side claim and settlement keyed by provider operation identity",
+      "target_class": "durable_receipt_authority",
+      "canonical_owner": "domain.channel",
+      "requires_domain_outbox": false,
+      "target_action": "Preserve as typed ingress receipt/idempotency authority; do not replace it with SessionEvent or EventBus delivery."
+    },
+    {
+      "entry_id": "channel.queue-drain",
+      "domain": "channel",
+      "current_event_names": [
+        "turn.completed"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-channel/src/queue_drain.rs",
+          "symbols": [
+            "QueueDrain"
+          ],
+          "line_start": 1,
+          "line_end": 137
+        }
+      ],
+      "current_delivery": "BroadcastEventBus wakeup with periodic durable queue sweep backstop",
+      "target_class": "typed_command",
+      "canonical_owner": "domain.channel",
+      "requires_domain_outbox": false,
+      "target_action": "Drive queued delivery from durable queue/typed command authority; EventBus may only reduce wakeup latency."
+    },
+    {
+      "entry_id": "companion.ui-projections",
+      "domain": "companion",
+      "current_event_names": [
+        "companion.created",
+        "companion.deleted",
+        "companion.memory-created",
+        "companion.memory-updated",
+        "companion.updated"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-companion/src/events.rs",
+          "symbols": [
+            "CompanionEventEmitter"
+          ]
+        }
+      ],
+      "current_delivery": "direct owner-scoped UserEventSink publication",
+      "target_class": "best_effort_projection_wakeup",
+      "canonical_owner": "domain.companion",
+      "requires_domain_outbox": false,
+      "target_action": "Keep UI refresh events best-effort and derive authoritative state from Companion repositories."
+    },
+    {
+      "entry_id": "companion.collector-learning-input",
+      "domain": "companion",
+      "current_event_names": [
+        "selected public and owner-scoped events"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-companion/src/collector.rs",
+          "symbols": [
+            "Collector::spawn"
+          ],
+          "line_start": 526,
+          "line_end": 560
+        }
+      ],
+      "current_delivery": "best-effort broadcast subscription; lagged events are skipped",
+      "target_class": "requires_reliability_decision",
+      "canonical_owner": "domain.companion",
+      "requires_domain_outbox": false,
+      "target_action": "Classify each consumed event: durable learning/evolution inputs must use a typed command or owning-domain cursor/outbox; optional ambient signals may remain best-effort."
+    },
+    {
+      "entry_id": "requirements.ui-projections",
+      "domain": "requirements",
+      "current_event_names": [
+        "autowork.statusChanged",
+        "autowork.tagPaused",
+        "requirement.created",
+        "requirement.deleted",
+        "requirement.statusChanged",
+        "requirement.updated"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-requirement/src/events.rs",
+          "symbols": [
+            "RequirementEventEmitter"
+          ],
+          "line_start": 10,
+          "line_end": 95
+        }
+      ],
+      "current_delivery": "direct UserEventSink publication after repository mutations",
+      "target_class": "best_effort_projection_wakeup",
+      "canonical_owner": "domain.requirements",
+      "requires_domain_outbox": false,
+      "target_action": "Keep only as UI wakeup; Requirement claims, status and verdict repository rows remain authoritative."
+    },
+    {
+      "entry_id": "autowork.delivery-receipt",
+      "domain": "autowork",
+      "current_event_names": [
+        "Conversation delivery receipt",
+        "Terminal turn admission receipt"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+          "symbols": [
+            "wait_for_conversation_receipt_with_renewal",
+            "autowork_turn_idempotency_key"
+          ]
+        }
+      ],
+      "current_delivery": "durable receiver receipt polling plus auxiliary event wakeup",
+      "target_class": "durable_receipt_authority",
+      "canonical_owner": "domain.autowork",
+      "requires_domain_outbox": false,
+      "target_action": "Preserve the durable receipt/idempotency principle while moving the receiver from Conversation to AgentSession typed commands."
+    },
+    {
+      "entry_id": "cron.ui-projections",
+      "domain": "cron",
+      "current_event_names": [
+        "cron.job-created",
+        "cron.job-executed",
+        "cron.job-removed",
+        "cron.job-updated",
+        "message.stream"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-cron/src/events.rs",
+          "symbols": [
+            "CronEventEmitter"
+          ],
+          "line_start": 10,
+          "line_end": 97
+        }
+      ],
+      "current_delivery": "direct UserEventSink publication",
+      "target_class": "best_effort_projection_wakeup",
+      "canonical_owner": "domain.cron",
+      "requires_domain_outbox": false,
+      "target_action": "Remove Conversation message synthesis; publish Cron projections from Cron facts and AgentSession references."
+    },
+    {
+      "entry_id": "cron.turn-receipt",
+      "domain": "cron",
+      "current_event_names": [
+        "Conversation delivery receipt"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-cron/src/executor.rs",
+          "symbols": [
+            "idempotent_delivery_result_with_idempotency_key"
+          ]
+        }
+      ],
+      "current_delivery": "durable receipt reconciliation is authoritative; runtime broadcast is auxiliary",
+      "target_class": "durable_receipt_authority",
+      "canonical_owner": "domain.cron",
+      "requires_domain_outbox": false,
+      "target_action": "Move receipt ownership to canonical AgentSession command/receipt while keeping Cron run facts domain-owned."
+    },
+    {
+      "entry_id": "idmm.projections",
+      "domain": "idmm",
+      "current_event_names": [
+        "idmm.intervention",
+        "idmm.statusChanged"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-idmm/src/events.rs",
+          "symbols": [
+            "IdmmEventEmitter"
+          ],
+          "line_start": 10,
+          "line_end": 40
+        },
+        {
+          "path": "crates/backend/nomifun-db/src/repository/idmm_intervention.rs",
+          "symbols": [
+            "IIdmmInterventionRepository"
+          ]
+        }
+      ],
+      "current_delivery": "intervention facts persist in domain repository; realtime projection is direct",
+      "target_class": "best_effort_projection_wakeup",
+      "canonical_owner": "domain.idmm",
+      "requires_domain_outbox": false,
+      "target_action": "Keep intervention repository authoritative and use EventBus only for UI wakeup; reliable intervention commands use typed command receipts."
+    },
+    {
+      "entry_id": "customer-service.dialogue-audit",
+      "domain": "customer-service",
+      "current_event_names": [
+        "customer dialogue audit rows"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-customer-service/src/dialogue.rs",
+          "symbols": [
+            "CsDialogueEngine"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-db/src/repository/customer_service.rs",
+          "symbols": [
+            "ICustomerServiceRepository"
+          ]
+        }
+      ],
+      "current_delivery": "dialogue and audit facts persist directly; no explicit domain outbox",
+      "target_class": "requires_reliability_decision",
+      "canonical_owner": "domain.customer-service",
+      "requires_domain_outbox": false,
+      "target_action": "Keep dialogue facts domain-owned; add an outbox only for reliable cross-domain handoff or outbound delivery, not for ordinary UI refresh."
+    },
+    {
+      "entry_id": "robot.status",
+      "domain": "robot",
+      "current_event_names": [
+        "robot.status"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-robot/src/events.rs",
+          "symbols": [
+            "RobotEventEmitter"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-robot/src/status.rs",
+          "symbols": [
+            "RobotStatusRegistry"
+          ]
+        }
+      ],
+      "current_delivery": "process-local registry with direct realtime projection",
+      "target_class": "best_effort_projection_wakeup",
+      "canonical_owner": "domain.robot",
+      "requires_domain_outbox": false,
+      "target_action": "Keep status projection best-effort; device Effects and receipts remain Robot-domain facts."
+    },
+    {
+      "entry_id": "ssh.status",
+      "domain": "ssh",
+      "current_event_names": [
+        "ssh.status"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-ssh/src/events.rs",
+          "symbols": [
+            "SshEventEmitter"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-ssh/src/pool.rs",
+          "symbols": [
+            "SshLinkState"
+          ]
+        }
+      ],
+      "current_delivery": "watch state plus direct UserEventSink projection",
+      "target_class": "best_effort_projection_wakeup",
+      "canonical_owner": "domain.ssh",
+      "requires_domain_outbox": false,
+      "target_action": "Keep connection status best-effort; command Effects use typed receipts and Session/resource identity."
+    },
+    {
+      "entry_id": "office.watch-status",
+      "domain": "office",
+      "current_event_names": [
+        "office watch lifecycle"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-office/src/watch_manager.rs",
+          "symbols": [
+            "OfficecliWatchManager"
+          ]
+        }
+      ],
+      "current_delivery": "process lifecycle state with direct realtime projection",
+      "target_class": "best_effort_projection_wakeup",
+      "canonical_owner": "domain.office",
+      "requires_domain_outbox": false,
+      "target_action": "Keep watch status best-effort; document changes and external Effects remain Office/File domain facts."
+    },
+    {
+      "entry_id": "creative.task-state",
+      "domain": "creative",
+      "current_event_names": [
+        "creation task status",
+        "template run state"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-creation/src/service.rs",
+          "symbols": [
+            "CreationService"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-workshop/src/template_run.rs",
+          "symbols": []
+        }
+      ],
+      "current_delivery": "domain rows and worker polling; no common explicit outbox",
+      "target_class": "requires_reliability_decision",
+      "canonical_owner": "domain.creation",
+      "requires_domain_outbox": false,
+      "target_action": "Classify cross-domain task completion and asset publication; use a transactional outbox only where another domain must reliably consume the fact."
+    },
+    {
+      "entry_id": "webhook.external-delivery",
+      "domain": "webhook",
+      "current_event_names": [
+        "requirement completion notification"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-webhook/src/notifier.rs",
+          "symbols": [
+            "CompletionNotifierImpl"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-webhook/src/sender.rs",
+          "symbols": [
+            "WebhookSender"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-requirement/src/service.rs",
+          "symbols": [
+            "completion_notifier"
+          ]
+        }
+      ],
+      "current_delivery": "detached best-effort notification after Requirement terminal state",
+      "target_class": "reliable_domain_fact_transactional_outbox",
+      "canonical_owner": "domain.webhook",
+      "requires_domain_outbox": true,
+      "target_action": "Write a Webhook delivery request/outbox with idempotency in the owning transaction boundary; EventBus may only wake the sender."
+    }
+  ]
+}

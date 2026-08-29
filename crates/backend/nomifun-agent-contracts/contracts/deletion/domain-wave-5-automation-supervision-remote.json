@@ -1,0 +1,1056 @@
+{
+  "schema_version": "1.0.0",
+  "manifest_id": "d014.domain-wave-5-automation-supervision-remote.v1",
+  "manifest_kind": "domain_wave",
+  "wave": "wave5_automation_supervision_remote",
+  "workstream": "W4",
+  "base_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
+  "canonical_producer": {
+    "owner_id": "domain-wave-5-automation-supervision-remote",
+    "target_package_keys": [
+      "domain.agent-execution",
+      "domain.autowork",
+      "domain.cron",
+      "domain.idmm",
+      "domain.remote",
+      "domain.requirements"
+    ],
+    "target_capability_families": [
+      "agent-execution",
+      "autowork.runner",
+      "idmm.intervene",
+      "idmm.observe",
+      "remote.mcp",
+      "remote.rest",
+      "requirements",
+      "schedule.agent-trigger",
+      "schedule.store",
+      "schedule.timer"
+    ],
+    "current_producer_refs": [
+      {
+        "path": "crates/backend/nomifun-requirement/src/service.rs",
+        "symbols": [
+          "RequirementService"
+        ],
+        "line_start": 93,
+        "line_end": 145
+      },
+      {
+        "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+        "symbols": [
+          "AutoWorkRunner",
+          "AutoWorkRunnerDeps"
+        ],
+        "line_start": 52,
+        "line_end": 75
+      },
+      {
+        "path": "crates/backend/nomifun-cron/src/service.rs",
+        "symbols": [
+          "CronService"
+        ]
+      },
+      {
+        "path": "crates/backend/nomifun-idmm/src/service.rs",
+        "symbols": [
+          "IdmmService",
+          "ProbeDeps"
+        ],
+        "line_start": 62,
+        "line_end": 80
+      },
+      {
+        "path": "crates/backend/nomifun-agent-execution/src/production.rs",
+        "symbols": [
+          "AgentExecutionEngineConfig"
+        ],
+        "line_start": 30,
+        "line_end": 53
+      },
+      {
+        "path": "crates/backend/nomifun-public/src/router.rs",
+        "symbols": [
+          "public_mcp_router_with_admission"
+        ]
+      }
+    ],
+    "canonical_contract_refs": [
+      {
+        "path": "crates/backend/nomifun-agent-contracts/src/primitives.rs",
+        "symbols": [
+          "AgentSessionId",
+          "IdempotencyKey",
+          "RemoteBindingId",
+          "TypedResourceBinding"
+        ]
+      },
+      {
+        "path": "crates/backend/nomifun-agent-contracts/src/deletion.rs",
+        "symbols": [
+          "DeletionManifest"
+        ]
+      }
+    ]
+  },
+  "direct_consumers": [
+    {
+      "consumer_id": "requirements-and-autowork-ui-api",
+      "kind": "product_ui",
+      "current_refs": [
+        {
+          "path": "ui/src/renderer/pages/requirements/WorkspacePage/index.tsx",
+          "symbols": []
+        },
+        {
+          "path": "ui/src/renderer/pages/requirements/ExtensionsPage/AutoWorkPanel.tsx",
+          "symbols": []
+        },
+        {
+          "path": "crates/backend/nomifun-requirement/src/routes.rs",
+          "symbols": [
+            "requirement_routes"
+          ]
+        }
+      ],
+      "canonical_target": "Requirement Package plus canonical AgentBindingValue",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "cron-scheduler",
+      "kind": "background_worker",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-cron/src/executor.rs",
+          "symbols": [
+            "JobExecutor"
+          ],
+          "line_start": 89,
+          "line_end": 125
+        },
+        {
+          "path": "crates/backend/nomifun-cron/src/scheduler.rs",
+          "symbols": [
+            "CronScheduler"
+          ]
+        }
+      ],
+      "canonical_target": "Cron Package using exact AgentBindingValue",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "idmm-supervision",
+      "kind": "background_worker",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-idmm/src/supervisor.rs",
+          "symbols": [
+            "IdmmManager"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-idmm/src/service.rs",
+          "symbols": [
+            "ProbeDeps"
+          ],
+          "line_start": 64,
+          "line_end": 80
+        }
+      ],
+      "canonical_target": "IDMM middleware Package and AgentSession events",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "agent-execution-engine",
+      "kind": "internal_rust",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-agent-execution/src/attempt_runner.rs",
+          "symbols": [
+            "ConversationAttemptRunner"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-agent-execution/src/scheduler.rs",
+          "symbols": []
+        }
+      ],
+      "canonical_target": "AgentExecution Package invoking exact AgentBindingValue",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "remote-rest-mcp",
+      "kind": "public_api",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-public/src/handler.rs",
+          "symbols": [
+            "RemoteMcpHandler"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-public/src/rest.rs",
+          "symbols": [
+            "RestState",
+            "ProfileQuery"
+          ],
+          "line_start": 35,
+          "line_end": 84
+        },
+        {
+          "path": "crates/backend/nomifun-app/src/router/routes.rs",
+          "symbols": [
+            "/mcp",
+            "/mcp-agent",
+            "/v1"
+          ],
+          "line_start": 447,
+          "line_end": 488
+        }
+      ],
+      "canonical_target": "RemoteBinding plus open/turn/observe/cancel",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "wave5-gateway",
+      "kind": "runtime_dispatcher",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-gateway/src/caps_requirement.rs",
+          "symbols": [
+            "register"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-gateway/src/caps_autowork.rs",
+          "symbols": [
+            "register"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-gateway/src/caps_cron.rs",
+          "symbols": [
+            "register"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-gateway/src/caps_idmm.rs",
+          "symbols": [
+            "register"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-gateway/src/caps_agent_execution.rs",
+          "symbols": [
+            "register"
+          ]
+        }
+      ],
+      "canonical_target": "CapabilityRegistry projection",
+      "same_change_required": true
+    }
+  ],
+  "legacy_surfaces": [
+    {
+      "surface_id": "wave5.routes.special-agents-and-remote",
+      "category": "route",
+      "symbols_or_patterns": [
+        "/mcp-agent",
+        "/v1/tools?profile|domains",
+        "autowork special Agent endpoints",
+        "requirement analyst special endpoints"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/router/routes.rs",
+          "symbols": [
+            "/mcp-agent",
+            "/v1"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-requirement/src/routes.rs",
+          "symbols": [
+            "requirement_routes"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-public/src/rest.rs",
+          "symbols": [
+            "ProfileQuery"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 5",
+      "replacement_owner": "canonical AgentBinding and Remote four-operation API"
+    },
+    {
+      "surface_id": "wave5.dto.special-bindings-and-remote",
+      "category": "dto",
+      "symbols_or_patterns": [
+        "CronAgentConfigDto",
+        "RemoteAgent",
+        "profile/domains",
+        "remote_agent_id",
+        "requirements.analyst"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-api-types/src/requirement.rs",
+          "symbols": [
+            "AutoWorkConfigRequest"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-cron/src/types.rs",
+          "symbols": [
+            "CronAgentConfig"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-gateway/src/caps_conversation.rs",
+          "symbols": [
+            "remote_agent_id"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 5",
+      "replacement_owner": "AgentBindingValue and RemoteBinding contracts"
+    },
+    {
+      "surface_id": "wave5.events.direct-and-conversation-derived",
+      "category": "event_name_field_projection",
+      "symbols_or_patterns": [
+        "autowork.statusChanged",
+        "cron.job-*",
+        "idmm.*",
+        "message.stream tips"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-requirement/src/events.rs",
+          "symbols": [
+            "RequirementEventEmitter"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-cron/src/events.rs",
+          "symbols": [
+            "CronEventEmitter"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-idmm/src/events.rs",
+          "symbols": [
+            "IdmmEventEmitter"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 5",
+      "replacement_owner": "owning-domain facts/outboxes and SessionEvent projections"
+    },
+    {
+      "surface_id": "wave5.tables.special-agent-and-remote-state",
+      "category": "table_repository_mapping",
+      "symbols_or_patterns": [
+        "agent_execution_*",
+        "cron_jobs.agent_config",
+        "idmm_interventions.conversation_id",
+        "requirements conversation bindings",
+        "remote session scope"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-db/migrations/001_v3_baseline.sql",
+          "symbols": [
+            "CREATE TABLE agent_executions",
+            "CREATE TABLE cron_jobs",
+            "CREATE TABLE idmm_interventions",
+            "CREATE TABLE requirements"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-db/src/id_schema_contract.rs",
+          "symbols": [
+            "idmm_action_reservations.conversation_id"
+          ],
+          "line_start": 764,
+          "line_end": 770
+        }
+      ],
+      "disposition": "retain_historical_source_excluded_from_v4",
+      "removal_boundary": "C2 plus Wave 5",
+      "replacement_owner": "fresh-v4 Package-owned schema and AgentBindingValue"
+    },
+    {
+      "surface_id": "wave5.config.latest-default-agent-bags",
+      "category": "config_env_feature",
+      "symbols_or_patterns": [
+        "agent_config",
+        "backend",
+        "default/latest preset inference",
+        "mode",
+        "provider_id"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-cron/src/service.rs",
+          "symbols": [
+            "validate_nomi_agent_config"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-cron/src/executor.rs",
+          "symbols": [
+            "agent_config"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+          "symbols": [
+            "AutoWorkRunnerDeps"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 5",
+      "replacement_owner": "exact AgentBindingValue"
+    },
+    {
+      "surface_id": "wave5.mode-approval-remote",
+      "category": "mode_approval_permission",
+      "symbols_or_patterns": [
+        "needs_confirmation",
+        "pending approval",
+        "profile/domains scope",
+        "system.confirm"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-public/src/result.rs",
+          "symbols": [
+            "needs_confirmation"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-public/src/handler.rs",
+          "symbols": [
+            "confirm: true"
+          ],
+          "line_start": 178,
+          "line_end": 188
+        },
+        {
+          "path": "crates/backend/nomifun-idmm/src/signal.rs",
+          "symbols": [
+            "ConversationService::confirm"
+          ]
+        }
+      ],
+      "disposition": "delete_without_replacement",
+      "removal_boundary": "C1/Wave 5",
+      "replacement_owner": "FullAuto and Remote request authentication"
+    },
+    {
+      "surface_id": "wave5.factory-manager",
+      "category": "factory_manager_wiring",
+      "symbols_or_patterns": [
+        "AutoWorkRunnerDeps",
+        "JobExecutor",
+        "ProbeDeps",
+        "ProductionConversationEffects"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+          "symbols": [
+            "AutoWorkRunnerDeps"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-cron/src/executor.rs",
+          "symbols": [
+            "JobExecutor"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-idmm/src/service.rs",
+          "symbols": [
+            "ProbeDeps"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-agent-execution/src/production.rs",
+          "symbols": [
+            "ProductionConversationEffects"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 5",
+      "replacement_owner": "typed commands and declared ServiceKey views"
+    },
+    {
+      "surface_id": "wave5.gateway-deps",
+      "category": "gateway_deps_wiring",
+      "symbols_or_patterns": [
+        "agent_execution_engine",
+        "auto_work_runner",
+        "cron_service",
+        "idmm_service",
+        "requirement_service"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-gateway/src/deps.rs",
+          "symbols": [
+            "agent_execution_engine",
+            "auto_work_runner",
+            "cron_service",
+            "idmm_service",
+            "requirement_service"
+          ],
+          "line_start": 34,
+          "line_end": 100
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 5",
+      "replacement_owner": "CapabilityRegistry and declared ServiceKey views"
+    },
+    {
+      "surface_id": "wave5.app-services",
+      "category": "app_services_wiring",
+      "symbols_or_patterns": [
+        "agent_runtime_registry",
+        "execution_conversation_boundary",
+        "requirement_service"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/services.rs",
+          "symbols": [
+            "agent_runtime_registry",
+            "execution_conversation_boundary",
+            "requirement_service"
+          ],
+          "line_start": 1588,
+          "line_end": 1606
+        },
+        {
+          "path": "crates/backend/nomifun-app/src/router/state.rs",
+          "symbols": [
+            "build_agent_execution_engine",
+            "build_cron_state",
+            "build_idmm_state",
+            "build_requirement_state"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 5",
+      "replacement_owner": "PluginRegistration inventory"
+    },
+    {
+      "surface_id": "wave5.nomi-runtime",
+      "category": "nomi_runtime_wiring",
+      "symbols_or_patterns": [
+        "AgentRuntimeRegistry",
+        "AgentType::Nomi",
+        "ConversationAttemptRunner"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+          "symbols": [
+            "AgentRuntimeRegistry",
+            "ConversationService"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-cron/src/executor.rs",
+          "symbols": [
+            "AgentRuntimeRegistry",
+            "ConversationService"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-agent-execution/src/attempt_runner.rs",
+          "symbols": [
+            "ConversationAttemptRunner"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 5/C9",
+      "replacement_owner": "canonical AgentSession execution port"
+    },
+    {
+      "surface_id": "wave5.remote-global-registry",
+      "category": "generated_contract",
+      "symbols_or_patterns": [
+        "Registry::global",
+        "RemoteMcpSessionIdentity.scope",
+        "profile/domains"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-public/src/handler.rs",
+          "symbols": [
+            "Registry::global",
+            "domains"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-public/src/session.rs",
+          "symbols": [
+            "canonical_scope",
+            "RemoteMcpSessionAdmissionAuthority"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-public/src/rest.rs",
+          "symbols": [
+            "ProfileQuery"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 5",
+      "replacement_owner": "RemoteBinding and Session-bound Capability dispatch"
+    },
+    {
+      "surface_id": "wave5.tests",
+      "category": "test_fixture_golden",
+      "symbols_or_patterns": [
+        "AgentRuntimeHandle::Mock",
+        "remote_mcp_smoke",
+        "service_integration session_mode"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/tests/remote_mcp_smoke.rs",
+          "symbols": []
+        },
+        {
+          "path": "crates/backend/nomifun-cron/tests/service_integration.rs",
+          "symbols": [
+            "session_mode"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-app/tests/autowork_idmm_cooperation_e2e.rs",
+          "symbols": []
+        },
+        {
+          "path": "crates/backend/nomifun-app/tests/agent_execution_e2e.rs",
+          "symbols": []
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 5",
+      "replacement_owner": "canonical AgentBinding/Remote/session/fault tests"
+    },
+    {
+      "surface_id": "wave5.dependencies",
+      "category": "crate_package_dependency",
+      "symbols_or_patterns": [
+        "nomifun-ai-agent",
+        "nomifun-conversation",
+        "nomifun-gateway"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-requirement/Cargo.toml",
+          "symbols": [
+            "nomifun-ai-agent",
+            "nomifun-conversation"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-cron/Cargo.toml",
+          "symbols": [
+            "nomifun-ai-agent",
+            "nomifun-conversation"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-idmm/Cargo.toml",
+          "symbols": [
+            "nomifun-ai-agent",
+            "nomifun-conversation"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-agent-execution/Cargo.toml",
+          "symbols": [
+            "nomifun-ai-agent",
+            "nomifun-conversation"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-public/Cargo.toml",
+          "symbols": [
+            "nomifun-gateway"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 5/C9",
+      "replacement_owner": "contract, ServiceKey and transport dependencies"
+    }
+  ],
+  "production_roots": [
+    {
+      "root_id": "wave5-requirement-autowork",
+      "kind": "background_scheduler_ingress",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+          "symbols": [
+            "AutoWorkRunner"
+          ]
+        }
+      ],
+      "expected_canonical_owner": "Requirement and AutoWork Packages"
+    },
+    {
+      "root_id": "wave5-cron",
+      "kind": "background_scheduler_ingress",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-cron/src/scheduler.rs",
+          "symbols": [
+            "CronScheduler"
+          ]
+        }
+      ],
+      "expected_canonical_owner": "Cron Package"
+    },
+    {
+      "root_id": "wave5-idmm",
+      "kind": "background_scheduler_ingress",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-idmm/src/supervisor.rs",
+          "symbols": [
+            "IdmmManager"
+          ]
+        }
+      ],
+      "expected_canonical_owner": "IDMM Package"
+    },
+    {
+      "root_id": "wave5-agent-execution",
+      "kind": "background_scheduler_ingress",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-agent-execution/src/scheduler.rs",
+          "symbols": []
+        }
+      ],
+      "expected_canonical_owner": "AgentExecution Package"
+    },
+    {
+      "root_id": "wave5-remote",
+      "kind": "public_api_router",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/router/routes.rs",
+          "symbols": [
+            "/mcp",
+            "/mcp-agent",
+            "/v1"
+          ]
+        }
+      ],
+      "expected_canonical_owner": "Remote Package"
+    },
+    {
+      "root_id": "wave5-ui",
+      "kind": "product_ui_route",
+      "current_refs": [
+        {
+          "path": "ui/src/renderer/pages/requirements/WorkspacePage/index.tsx",
+          "symbols": []
+        },
+        {
+          "path": "ui/src/renderer/pages/cron/ScheduledTasksPage/index.tsx",
+          "symbols": []
+        }
+      ],
+      "expected_canonical_owner": "domain pages plus generic AgentBinding/RemoteBinding UI"
+    }
+  ],
+  "allowed_residuals": {
+    "policy": "empty",
+    "entries": []
+  },
+  "target_zero": [
+    {
+      "assertion_id": "wave5.routes.zero",
+      "dimension": "routes",
+      "expected_count": 0,
+      "scope": "special Agent and legacy Remote routes"
+    },
+    {
+      "assertion_id": "wave5.dtos.zero",
+      "dimension": "dtos",
+      "expected_count": 0,
+      "scope": "scene-specific binding and Remote profile/scope DTOs"
+    },
+    {
+      "assertion_id": "wave5.events.zero",
+      "dimension": "event_vocabulary",
+      "expected_count": 0,
+      "scope": "Conversation-derived automation events and Remote confirmation events"
+    },
+    {
+      "assertion_id": "wave5.mode-approval.zero",
+      "dimension": "mode_approval_branches",
+      "expected_count": 0,
+      "scope": "automation, IDMM and Remote execution"
+    },
+    {
+      "assertion_id": "wave5.factory.zero",
+      "dimension": "factory_manager_wiring",
+      "expected_count": 0,
+      "scope": "automation and supervision runners"
+    },
+    {
+      "assertion_id": "wave5.gateway-deps.zero",
+      "dimension": "gateway_deps_wiring",
+      "expected_count": 0,
+      "scope": "Wave 5 services"
+    },
+    {
+      "assertion_id": "wave5.app-services.zero",
+      "dimension": "app_services_wiring",
+      "expected_count": 0,
+      "scope": "Wave 5 business fields"
+    },
+    {
+      "assertion_id": "wave5.dependencies.zero",
+      "dimension": "dependencies",
+      "expected_count": 0,
+      "scope": "legacy runtime, conversation and global Gateway dependencies"
+    },
+    {
+      "assertion_id": "wave5.reachability.zero",
+      "dimension": "runtime_reachability",
+      "expected_count": 0,
+      "scope": "Wave 5 production roots to legacy nodes"
+    }
+  ],
+  "evidence_refs": [
+    {
+      "evidence_id": "wave5.residual",
+      "kind": "source_scan",
+      "gate_name": "gate-d014-residual-wave5-automation-supervision-remote",
+      "source_refs": [
+        {
+          "path": "crates/backend/nomifun-agent-contracts/contracts/deletion/domain-wave-5-automation-supervision-remote.json",
+          "symbols": []
+        }
+      ],
+      "required_for_closure": true
+    },
+    {
+      "evidence_id": "wave5.reachability",
+      "kind": "runtime_reachability",
+      "gate_name": "gate-d014-reachability-wave5-automation-supervision-remote",
+      "source_refs": [
+        {
+          "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+          "symbols": []
+        },
+        {
+          "path": "crates/backend/nomifun-public/src/handler.rs",
+          "symbols": []
+        }
+      ],
+      "required_for_closure": true
+    },
+    {
+      "evidence_id": "wave5.outbox-and-remote",
+      "kind": "fault_test",
+      "gate_name": "gate-domain-wave5-outbox-remote-faults",
+      "source_refs": [
+        {
+          "path": "crates/backend/nomifun-agent-execution/src/event_publisher.rs",
+          "symbols": [
+            "AgentExecutionEventPublisher"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-public/src/session.rs",
+          "symbols": [
+            "RemoteMcpSessionAdmissionAuthority"
+          ]
+        }
+      ],
+      "required_for_closure": true
+    }
+  ],
+  "d027": {
+    "applicability": "domain_wave",
+    "admission_fence_refs": [
+      {
+        "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+        "symbols": [
+          "AutoWorkRunner"
+        ]
+      },
+      {
+        "path": "crates/backend/nomifun-cron/src/executor.rs",
+        "symbols": [
+          "JobExecutor"
+        ]
+      },
+      {
+        "path": "crates/backend/nomifun-public/src/session.rs",
+        "symbols": [
+          "RemoteMcpSessionAdmissionAuthority"
+        ]
+      }
+    ],
+    "deadline_authority_refs": [
+      {
+        "path": "crates/backend/nomifun-conversation/src/runtime_state.rs",
+        "symbols": [
+          "ConversationRuntimeStateService"
+        ]
+      },
+      {
+        "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+        "symbols": [
+          "claim deadline"
+        ]
+      }
+    ],
+    "outstanding_set_refs": [
+      {
+        "kind": "opening_sessions",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-public/src/session.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "running_sessions",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-cron/src/executor.rs",
+            "symbols": []
+          },
+          {
+            "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "unacknowledged_runtime_actions",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-agent-execution/src/attempt_runner.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "tool_dispatches",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-gateway/src/caps_autowork.rs",
+            "symbols": []
+          },
+          {
+            "path": "crates/backend/nomifun-gateway/src/caps_requirement.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "effect_dispatches",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-agent-execution/src/scheduler.rs",
+            "symbols": []
+          },
+          {
+            "path": "crates/backend/nomifun-idmm/src/supervisor.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "tasks",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-cron/src/scheduler.rs",
+            "symbols": []
+          },
+          {
+            "path": "crates/backend/nomifun-agent-execution/src/scheduler.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "private_writes",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-ai-agent/src/nomi_session_persistence.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "runtime_reachability",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-public/src/handler.rs",
+            "symbols": [
+              "Registry::global"
+            ]
+          },
+          {
+            "path": "crates/backend/nomifun-gateway/src/caps_agent_execution.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      }
+    ],
+    "uncertain_handoff_owner": "requirements-cron-idmm-agent-execution-remote-owning-package",
+    "delete_contract_ref": "D-024 DeleteAgentSession",
+    "zero_required_before_legacy_delete": true
+  },
+  "closure_status": {
+    "state": "inventory_complete",
+    "canonical_producer_ready": false,
+    "direct_consumers_switched": false,
+    "legacy_surfaces_deleted": false,
+    "residual_zero_proven": false,
+    "reachability_zero_proven": false,
+    "d027_zero_proven": false,
+    "evidence_complete": false,
+    "notes": [
+      "C0 inventory only; no automation, supervision or Remote production behavior was changed.",
+      "AgentExecution durable outbox is retained as an owning-domain pattern; Remote must move from global Registry dispatch to explicit AgentSession dispatch."
+    ]
+  }
+}

@@ -1,0 +1,922 @@
+{
+  "schema_version": "1.0.0",
+  "manifest_id": "d014.domain-wave-4-identity-channels-devices.v1",
+  "manifest_kind": "domain_wave",
+  "wave": "wave4_identity_channels_devices",
+  "workstream": "W4",
+  "base_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
+  "canonical_producer": {
+    "owner_id": "domain-wave-4-identity-channels-devices",
+    "target_package_keys": [
+      "domain.channel",
+      "domain.companion",
+      "domain.customer-service",
+      "domain.robot",
+      "domain.webhook"
+    ],
+    "target_capability_families": [
+      "channel.receive",
+      "channel.reply",
+      "channel.send",
+      "companion.evolve",
+      "companion.learn",
+      "companion.persona",
+      "customer-service.dialogue",
+      "customer-service.handoff",
+      "notification.webhook",
+      "robot.audio",
+      "robot.device-tools",
+      "robot.display",
+      "robot.motion",
+      "robot.vision"
+    ],
+    "current_producer_refs": [
+      {
+        "path": "crates/backend/nomifun-companion/src/service.rs",
+        "symbols": [
+          "CompanionService"
+        ],
+        "line_start": 181,
+        "line_end": 210
+      },
+      {
+        "path": "crates/backend/nomifun-channel/src/manager.rs",
+        "symbols": [
+          "ChannelManager",
+          "PluginFactory"
+        ],
+        "line_start": 27,
+        "line_end": 66
+      },
+      {
+        "path": "crates/backend/nomifun-customer-service/src/service.rs",
+        "symbols": [
+          "CustomerServiceService"
+        ]
+      },
+      {
+        "path": "crates/backend/nomifun-robot/src/lib.rs",
+        "symbols": [
+          "RobotGateway"
+        ]
+      },
+      {
+        "path": "crates/backend/nomifun-webhook/src/service.rs",
+        "symbols": [
+          "WebhookService"
+        ]
+      }
+    ],
+    "canonical_contract_refs": [
+      {
+        "path": "crates/backend/nomifun-agent-contracts/src/primitives.rs",
+        "symbols": [
+          "CapabilityId",
+          "PrincipalRef",
+          "TypedResourceBinding"
+        ]
+      },
+      {
+        "path": "crates/backend/nomifun-agent-contracts/src/deletion.rs",
+        "symbols": [
+          "DeletionManifest"
+        ]
+      }
+    ]
+  },
+  "direct_consumers": [
+    {
+      "consumer_id": "companion-chat-runtime",
+      "kind": "internal_rust",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-companion/src/service.rs",
+          "symbols": [
+            "attach_companion",
+            "memory_sink"
+          ],
+          "line_start": 426,
+          "line_end": 488
+        },
+        {
+          "path": "crates/backend/nomifun-companion/src/companion.rs",
+          "symbols": [
+            "CompanionThreads"
+          ]
+        }
+      ],
+      "canonical_target": "Companion Package plus AgentBindingValue",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "channel-ingress",
+      "kind": "background_worker",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-channel/src/message_service.rs",
+          "symbols": [
+            "ChannelMessageService"
+          ],
+          "line_start": 90,
+          "line_end": 135
+        },
+        {
+          "path": "crates/backend/nomifun-channel/src/message_loop.rs",
+          "symbols": []
+        }
+      ],
+      "canonical_target": "Channel transport Package to canonical AgentSession open/turn",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "customer-service-channel-seam",
+      "kind": "internal_rust",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-customer-service/src/dialogue.rs",
+          "symbols": [
+            "CsDialogueEngine"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-customer-service/src/routes.rs",
+          "symbols": [
+            "CustomerServiceRouterState"
+          ]
+        }
+      ],
+      "canonical_target": "Customer Service Package typed command and resources",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "robot-turn-dispatch",
+      "kind": "internal_rust",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-robot/src/wiring/dispatcher.rs",
+          "symbols": [
+            "RobotConversationBackend",
+            "RobotDispatcher"
+          ],
+          "line_start": 24,
+          "line_end": 90
+        },
+        {
+          "path": "crates/backend/nomifun-app/src/robot_wiring.rs",
+          "symbols": []
+        }
+      ],
+      "canonical_target": "Robot Package using AgentSession command ServiceKey",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "wave4-product-ui",
+      "kind": "product_ui",
+      "current_refs": [
+        {
+          "path": "ui/src/renderer/pages/nomi/companion/CompanionConversation.tsx",
+          "symbols": []
+        },
+        {
+          "path": "ui/src/renderer/pages/customerService/index.tsx",
+          "symbols": []
+        },
+        {
+          "path": "ui/src/renderer/components/channels/PlatformConfigBody.tsx",
+          "symbols": []
+        }
+      ],
+      "canonical_target": "domain pages with generic AgentBinding picker",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "wave4-gateway",
+      "kind": "runtime_dispatcher",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-gateway/src/caps_channel.rs",
+          "symbols": [
+            "register"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-gateway/src/caps_companion.rs",
+          "symbols": [
+            "register"
+          ]
+        }
+      ],
+      "canonical_target": "CapabilityRegistry projection",
+      "same_change_required": true
+    }
+  ],
+  "legacy_surfaces": [
+    {
+      "surface_id": "wave4.routes.domain-specific-agent-entry",
+      "category": "route",
+      "symbols_or_patterns": [
+        "companion chat special entry",
+        "customer-service agent-specific binding routes",
+        "robot conversation bridge"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-companion/src/routes.rs",
+          "symbols": [
+            "companion_routes"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-customer-service/src/routes.rs",
+          "symbols": [
+            "customer_service_routes"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-robot/src/routes/admin.rs",
+          "symbols": [
+            "admin_router"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 4 owning slices",
+      "replacement_owner": "Package-owned routes and canonical AgentBinding"
+    },
+    {
+      "surface_id": "wave4.dto.agent-type-and-session-extra",
+      "category": "dto",
+      "symbols_or_patterns": [
+        "agent_type",
+        "channel_platform",
+        "companion_id",
+        "companion_session"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-api-types/src/agent_build_extra.rs",
+          "symbols": [
+            "channel_platform",
+            "companion",
+            "companion_id"
+          ],
+          "line_start": 135,
+          "line_end": 185
+        },
+        {
+          "path": "crates/backend/nomifun-channel/src/types.rs",
+          "symbols": [
+            "agent_type"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 4",
+      "replacement_owner": "AgentBindingValue and typed Companion/Channel/Robot resources"
+    },
+    {
+      "surface_id": "wave4.events.direct-domain-broadcasts",
+      "category": "event_name_field_projection",
+      "symbols_or_patterns": [
+        "companion.*",
+        "robot.status",
+        "channel plugin status"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-companion/src/events.rs",
+          "symbols": [
+            "CompanionEventEmitter"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-robot/src/events.rs",
+          "symbols": [
+            "RobotEventEmitter"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-channel/src/manager.rs",
+          "symbols": [
+            "UserEventSink"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 4",
+      "replacement_owner": "owning-domain events/outboxes and best-effort projections"
+    },
+    {
+      "surface_id": "wave4.tables.session-and-domain-bindings",
+      "category": "table_repository_mapping",
+      "symbols_or_patterns": [
+        "channel_session_bindings",
+        "channel_sessions.agent_type",
+        "companion_threads.conversation_id",
+        "cs_channel_bindings"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-db/migrations/003_channel_inbound_receipts.sql",
+          "symbols": [
+            "CREATE TABLE channel_session_bindings"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-db/migrations/018_customer_service.sql",
+          "symbols": [
+            "CREATE TABLE cs_channel_bindings"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-companion/src/store.rs",
+          "symbols": [
+            "companion_threads"
+          ]
+        }
+      ],
+      "disposition": "retain_historical_source_excluded_from_v4",
+      "removal_boundary": "C2 plus Wave 4",
+      "replacement_owner": "fresh-v4 domain resources and AgentBindingValue"
+    },
+    {
+      "surface_id": "wave4.config.scene-specific-agent-assembly",
+      "category": "config_env_feature",
+      "symbols_or_patterns": [
+        "channel defaultModel",
+        "companion profile model",
+        "fallback_model",
+        "robot MCP session config"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-channel/src/message_service.rs",
+          "symbols": [
+            "channel_agent_profile",
+            "model"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-companion/src/profile.rs",
+          "symbols": [
+            "fallback_model"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-robot/src/wiring/dispatcher.rs",
+          "symbols": [
+            "session_mcp_servers"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 4",
+      "replacement_owner": "exact AgentBindingValue and typed resources"
+    },
+    {
+      "surface_id": "wave4.mode-approval-confirmation",
+      "category": "mode_approval_permission",
+      "symbols_or_patterns": [
+        "AgentConfirm",
+        "PendingDecisionStore",
+        "WaitingConfirmation",
+        "system.confirm"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-channel/src/pending_decision.rs",
+          "symbols": [
+            "PendingDecisionStore"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-channel/src/message_service.rs",
+          "symbols": [
+            "confirmation_to_decision",
+            "pending_decisions"
+          ],
+          "line_start": 95,
+          "line_end": 111
+        },
+        {
+          "path": "crates/backend/nomifun-companion/src/companion.rs",
+          "symbols": [
+            "WaitingConfirmation",
+            "nomi_resolve_confirmation"
+          ]
+        }
+      ],
+      "disposition": "delete_without_replacement",
+      "removal_boundary": "C1/Wave 4",
+      "replacement_owner": "FullAuto and transport authentication"
+    },
+    {
+      "surface_id": "wave4.factory-manager",
+      "category": "factory_manager_wiring",
+      "symbols_or_patterns": [
+        "CompanionMemorySink",
+        "ChannelMessageService",
+        "RobotConversationBackend"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/factory/mod.rs",
+          "symbols": [
+            "companion_sink",
+            "companion_skill_sink"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-channel/src/message_service.rs",
+          "symbols": [
+            "ChannelMessageService"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-app/src/robot_wiring.rs",
+          "symbols": []
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 4",
+      "replacement_owner": "domain PluginFactories and declared ServiceKeys"
+    },
+    {
+      "surface_id": "wave4.gateway-deps",
+      "category": "gateway_deps_wiring",
+      "symbols_or_patterns": [
+        "channel_state",
+        "companion_service"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-gateway/src/deps.rs",
+          "symbols": [
+            "channel_state",
+            "companion_service"
+          ],
+          "line_start": 42,
+          "line_end": 82
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 4",
+      "replacement_owner": "CapabilityRegistry and declared ServiceKey views"
+    },
+    {
+      "surface_id": "wave4.app-services",
+      "category": "app_services_wiring",
+      "symbols_or_patterns": [
+        "companion_service",
+        "cs_dialogue_engine",
+        "customer_service_service",
+        "robot"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/services.rs",
+          "symbols": [
+            "companion_service",
+            "cs_dialogue_engine",
+            "customer_service_service",
+            "robot"
+          ],
+          "line_start": 1616,
+          "line_end": 1622
+        },
+        {
+          "path": "crates/backend/nomifun-app/src/services.rs",
+          "symbols": [
+            "companion_service",
+            "cs_dialogue_engine",
+            "customer_service_service"
+          ],
+          "line_start": 1662,
+          "line_end": 1669
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 4",
+      "replacement_owner": "PluginRegistration inventory"
+    },
+    {
+      "surface_id": "wave4.nomi-runtime",
+      "category": "nomi_runtime_wiring",
+      "symbols_or_patterns": [
+        "AgentType::Nomi",
+        "Nomi companion session",
+        "Nomi channel turn"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-companion/src/companion.rs",
+          "symbols": [
+            "AgentType::Nomi"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-channel/src/message_service.rs",
+          "symbols": [
+            "AgentType::Nomi"
+          ],
+          "line_start": 387,
+          "line_end": 430
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 4/C9",
+      "replacement_owner": "canonical AgentSession and Codex Runtime"
+    },
+    {
+      "surface_id": "wave4.ui-state",
+      "category": "ui_route_state",
+      "symbols_or_patterns": [
+        "companion-specific conversation editor",
+        "customer-service agent editor",
+        "system.confirm callbacks"
+      ],
+      "current_refs": [
+        {
+          "path": "ui/src/renderer/pages/nomi/companion/CompanionConversation.tsx",
+          "symbols": []
+        },
+        {
+          "path": "ui/src/renderer/pages/customerService/CsAgentDetailPage.tsx",
+          "symbols": []
+        },
+        {
+          "path": "crates/backend/nomifun-channel/src/plugins/callback.rs",
+          "symbols": [
+            "system.confirm"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 4",
+      "replacement_owner": "generic AgentPreset/AgentBinding components"
+    },
+    {
+      "surface_id": "wave4.tests",
+      "category": "test_fixture_golden",
+      "symbols_or_patterns": [
+        "message_service_integration",
+        "stop_confirmation",
+        "companion_e2e"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-channel/tests/message_service_integration.rs",
+          "symbols": []
+        },
+        {
+          "path": "crates/backend/nomifun-channel/tests/message_loop_test.rs",
+          "symbols": [
+            "stop_confirmation"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-app/tests/companion_e2e.rs",
+          "symbols": []
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 4",
+      "replacement_owner": "canonical transport/domain/session tests"
+    },
+    {
+      "surface_id": "wave4.dependencies",
+      "category": "crate_package_dependency",
+      "symbols_or_patterns": [
+        "nomifun-ai-agent",
+        "nomifun-conversation"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-companion/Cargo.toml",
+          "symbols": [
+            "nomifun-ai-agent",
+            "nomifun-conversation"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-channel/Cargo.toml",
+          "symbols": [
+            "nomifun-ai-agent",
+            "nomifun-conversation"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-customer-service/Cargo.toml",
+          "symbols": [
+            "nomifun-ai-agent"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 4/C9",
+      "replacement_owner": "contract and ServiceKey dependencies"
+    }
+  ],
+  "production_roots": [
+    {
+      "root_id": "wave4-channel-ingress",
+      "kind": "background_scheduler_ingress",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-channel/src/message_loop.rs",
+          "symbols": []
+        }
+      ],
+      "expected_canonical_owner": "Channel Package"
+    },
+    {
+      "root_id": "wave4-robot-ingress",
+      "kind": "background_scheduler_ingress",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-robot/src/session.rs",
+          "symbols": []
+        }
+      ],
+      "expected_canonical_owner": "Robot Package"
+    },
+    {
+      "root_id": "wave4-api",
+      "kind": "public_api_router",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/router/routes.rs",
+          "symbols": [
+            "channel routes",
+            "companion routes",
+            "customer service routes",
+            "robot routes"
+          ]
+        }
+      ],
+      "expected_canonical_owner": "domain Package routes"
+    },
+    {
+      "root_id": "wave4-ui",
+      "kind": "product_ui_route",
+      "current_refs": [
+        {
+          "path": "ui/src/renderer/pages/customerService/index.tsx",
+          "symbols": []
+        },
+        {
+          "path": "ui/src/renderer/pages/nomi/companion/CompanionConversation.tsx",
+          "symbols": []
+        }
+      ],
+      "expected_canonical_owner": "domain pages plus generic AgentBinding UI"
+    },
+    {
+      "root_id": "wave4-gateway",
+      "kind": "runtime_dispatcher",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-gateway/src/caps_channel.rs",
+          "symbols": []
+        },
+        {
+          "path": "crates/backend/nomifun-gateway/src/caps_companion.rs",
+          "symbols": []
+        }
+      ],
+      "expected_canonical_owner": "CapabilityRegistry"
+    }
+  ],
+  "allowed_residuals": {
+    "policy": "empty",
+    "entries": []
+  },
+  "target_zero": [
+    {
+      "assertion_id": "wave4.routes.zero",
+      "dimension": "routes",
+      "expected_count": 0,
+      "scope": "legacy Agent-specific domain routes"
+    },
+    {
+      "assertion_id": "wave4.dtos.zero",
+      "dimension": "dtos",
+      "expected_count": 0,
+      "scope": "agent_type and scene-specific binding DTOs"
+    },
+    {
+      "assertion_id": "wave4.mode-approval.zero",
+      "dimension": "mode_approval_branches",
+      "expected_count": 0,
+      "scope": "Agent Tool confirmation and duplicate permission branches; transport authentication remains explicit"
+    },
+    {
+      "assertion_id": "wave4.factory.zero",
+      "dimension": "factory_manager_wiring",
+      "expected_count": 0,
+      "scope": "Companion/Channel/Customer/Robot Agent assembly"
+    },
+    {
+      "assertion_id": "wave4.gateway-deps.zero",
+      "dimension": "gateway_deps_wiring",
+      "expected_count": 0,
+      "scope": "Wave 4 services"
+    },
+    {
+      "assertion_id": "wave4.app-services.zero",
+      "dimension": "app_services_wiring",
+      "expected_count": 0,
+      "scope": "Wave 4 business fields"
+    },
+    {
+      "assertion_id": "wave4.tests.zero",
+      "dimension": "tests_fixtures",
+      "expected_count": 0,
+      "scope": "legacy Nomi and confirmation fixtures"
+    },
+    {
+      "assertion_id": "wave4.reachability.zero",
+      "dimension": "runtime_reachability",
+      "expected_count": 0,
+      "scope": "Wave 4 production roots to legacy nodes"
+    }
+  ],
+  "evidence_refs": [
+    {
+      "evidence_id": "wave4.residual",
+      "kind": "source_scan",
+      "gate_name": "gate-d014-residual-wave4-identity-channels-devices",
+      "source_refs": [
+        {
+          "path": "crates/backend/nomifun-agent-contracts/contracts/deletion/domain-wave-4-identity-channels-devices.json",
+          "symbols": []
+        }
+      ],
+      "required_for_closure": true
+    },
+    {
+      "evidence_id": "wave4.reachability",
+      "kind": "runtime_reachability",
+      "gate_name": "gate-d014-reachability-wave4-identity-channels-devices",
+      "source_refs": [
+        {
+          "path": "crates/backend/nomifun-channel/src/message_loop.rs",
+          "symbols": []
+        },
+        {
+          "path": "crates/backend/nomifun-app/src/robot_wiring.rs",
+          "symbols": []
+        }
+      ],
+      "required_for_closure": true
+    },
+    {
+      "evidence_id": "wave4.transport-effects",
+      "kind": "fault_test",
+      "gate_name": "gate-domain-wave4-transport-effect-faults",
+      "source_refs": [
+        {
+          "path": "crates/backend/nomifun-channel/src/message_loop.rs",
+          "symbols": []
+        },
+        {
+          "path": "crates/backend/nomifun-robot/src/session.rs",
+          "symbols": []
+        },
+        {
+          "path": "crates/backend/nomifun-webhook/src/sender.rs",
+          "symbols": [
+            "WebhookSender"
+          ]
+        }
+      ],
+      "required_for_closure": true
+    }
+  ],
+  "d027": {
+    "applicability": "domain_wave",
+    "admission_fence_refs": [
+      {
+        "path": "crates/backend/nomifun-channel/src/message_service.rs",
+        "symbols": [
+          "ChannelMessageService"
+        ]
+      },
+      {
+        "path": "crates/backend/nomifun-robot/src/wiring/dispatcher.rs",
+        "symbols": [
+          "RobotConversationBackend"
+        ]
+      }
+    ],
+    "deadline_authority_refs": [
+      {
+        "path": "crates/backend/nomifun-conversation/src/runtime_state.rs",
+        "symbols": [
+          "ConversationRuntimeStateService"
+        ]
+      }
+    ],
+    "outstanding_set_refs": [
+      {
+        "kind": "running_sessions",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-channel/src/message_service.rs",
+            "symbols": []
+          },
+          {
+            "path": "crates/backend/nomifun-robot/src/session.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "tool_dispatches",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-robot/src/tool_registry.rs",
+            "symbols": [
+              "RobotToolRegistry"
+            ]
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "effect_dispatches",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-channel/src/action.rs",
+            "symbols": []
+          },
+          {
+            "path": "crates/backend/nomifun-webhook/src/sender.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "tasks",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-channel/src/manager.rs",
+            "symbols": [
+              "ChannelManager"
+            ]
+          },
+          {
+            "path": "crates/backend/nomifun-companion/src/collector.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "resource_handles",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-robot/src/link.rs",
+            "symbols": [
+              "RobotIdentity"
+            ]
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "runtime_reachability",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-gateway/src/caps_channel.rs",
+            "symbols": []
+          },
+          {
+            "path": "crates/backend/nomifun-gateway/src/caps_companion.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      }
+    ],
+    "uncertain_handoff_owner": "channel-robot-webhook-owning-package",
+    "delete_contract_ref": "D-024 DeleteAgentSession",
+    "zero_required_before_legacy_delete": true
+  },
+  "closure_status": {
+    "state": "inventory_complete",
+    "canonical_producer_ready": false,
+    "direct_consumers_switched": false,
+    "legacy_surfaces_deleted": false,
+    "residual_zero_proven": false,
+    "reachability_zero_proven": false,
+    "d027_zero_proven": false,
+    "evidence_complete": false,
+    "notes": [
+      "C0 inventory only; no channel, companion, customer-service, robot or webhook production behavior was changed.",
+      "Required transport authentication is distinct from the Agent approval/confirmation surfaces targeted for deletion."
+    ]
+  }
+}

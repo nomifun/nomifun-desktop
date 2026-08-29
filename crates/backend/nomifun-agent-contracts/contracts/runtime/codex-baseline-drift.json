@@ -1,0 +1,9 @@
+{
+  "release_pin": {
+    "repository_alias": "../codex",
+    "pinned_commit": "dc2ccc6843abb09c9d297862dc10b6bd12a3935d"
+  },
+  "observed_sibling_head": "4ee04c0aa5833ac39b1763f6ea44c7bc777c83dd",
+  "observed_commits_ahead": 16,
+  "frozen_commit_is_ancestor": true
+}

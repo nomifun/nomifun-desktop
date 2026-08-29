@@ -259,7 +259,7 @@ v2 采用一 Tool 一 Capability 的 canonical 映射。`server_id + canonical_t
 trait InProcessPlugin: Send + Sync {
     fn register(
         &self,
-        host: &mut PluginHost,
+        registrar: &mut PluginRegistrar,
         context: &PluginContext,
     ) -> Result<(), PluginLoadError>;
 }
@@ -267,8 +267,15 @@ trait InProcessPlugin: Send + Sync {
 struct PluginContext {
     package_id: PackageId,
     mount_id: PluginMountId,
+    source: PluginSourceMetadata,
     config: ValidatedJsonConfig,
     state: HostPluginStateApi,
+    services: DeclaredServiceView,
+    host_ports: DeclaredHostPortView,
+    commands: TypedCommandPort,
+    domain_outbox: DomainEventOutboxPort,
+    cancellation: CancellationHandle,
+    tasks: ManagedTaskRegistrar,
 }
 
 struct PluginStateNamespace {
@@ -286,21 +293,21 @@ trait HostPluginStateApi {
 }
 ```
 
-`PluginHost::mount(registration, config_json)` 先把 `config_json` 作为 strict JSON 用 `PackageManifest.config_schema` 校验，再以 `(package_id, mount_id)` 派生唯一 config namespace，并把每个状态值固定在 `(package_id, mount_id, scope_key, state_key)` 四元 `PluginStateNamespace`，最后调用同一个 `register` 和 contribution materializer。`package_id/mount_id` 由 Host 注入，插件只能通过 `PluginContext` 的 Host state API 选择自己的 `scope_key/state_key`，不能跨 Package 查询、打开数据库或自定义 namespace。`get/set/delete/compare_and_swap` 四项是 Stable contract 必选方法，不能把 CAS 降级为 optional extension。Stable state 是 bounded strict-JSON KV，不发布第三方状态迁移 SDK 或兼容层。
+`PluginHost::mount(registration, config_json)` 先把 `config_json` 作为 strict JSON 用 `PackageManifest.config_schema` 校验，再以 `(package_id, mount_id)` 派生唯一 config namespace，并把每个状态值固定在 `(package_id, mount_id, scope_key, state_key)` 四元 `PluginStateNamespace`，最后向插件提供受声明约束的 `PluginRegistrar + PluginContext`。`PluginRegistrar` 只能登记 Manifest 已声明的 contribution/service/route identity，不能暴露 root Host mutation。`package_id/mount_id` 由 Host 注入，插件只能通过 `PluginContext` 的窄 Host ports 选择自己的 `scope_key/state_key`，不能跨 Package 查询、打开数据库、自定义 namespace，或取得 root Registry/Session/Model/EventBus、`AppServices`、`GatewayDeps` 与任意 service locator。`get/set/delete/compare_and_swap` 四项是 Stable contract 必选方法，不能把 CAS 降级为 optional extension。Stable state 是 bounded strict-JSON KV，不发布第三方状态迁移 SDK 或兼容层。
 
 Package Manifest 永远不声明第三方数据库 migration。只有随产品构建、由 Kernel v4 runner 注册的 bundled first-party append-only migrations 可以修改 canonical v4 schema；`sample.echo` 与未来第三方 Package 只能通过上述 Host state API 使用自己的四元 namespace。Phase N2+ 若增加 state migration，也只能在 Host state API 内做受版本约束的 per-Package state callback，不能演化为第三方 SQL/DDL 或 manifest-driven migration platform。
 
-`PluginHost` 接收 exact service、Capability、Tool、Context、Event 和 UI contribution 的注册。built-in、sample fixture 与未来第三方 registration 使用同一个 materializer，不存在内置专用 `match` 分支。Package 间服务只使用稳定的 typed key：
+`PluginRegistrar` 接收 exact service、Capability、Tool、Context、Event 和 UI contribution 的声明。built-in、sample fixture 与未来第三方 registration 使用同一个 materializer，不存在内置专用 `match` 分支。Package 间服务只使用稳定的 typed key：
 
 ```rust
-host.provide(ServiceKey<T>, Arc<T>)
-host.require(ServiceKey<T>) -> Result<Arc<T>, MissingService>
-host.contribute(CapabilityId, Arc<dyn CapabilityFactory>)
+registrar.provide(ServiceKey<T>, Arc<T>)
+context.services.require(ServiceKey<T>) -> Result<Arc<T>, MissingService>
+registrar.contribute(CapabilityId, Arc<dyn CapabilityFactory>)
 ```
 
-一个 `ServiceKey<T>` 在当前 Host generation 只能有一个 Provider；缺失、重复或 version 不匹配都在启动时失败。不做 Provider 自动择优、运行时替换或隐式 fallback。Package 只能通过 `PluginHost` 获得已声明的 service dependency，不能接收 `AppServices`、`GatewayDeps` 或其他全量 service bag。
+一个 `ServiceKey<T>` 在当前 Host generation 只能有一个 Provider；缺失、重复或 version 不匹配都在启动时失败。不做 Provider 自动择优、运行时替换或隐式 fallback。Package 只能通过 `DeclaredServiceView` 获得已声明的 service dependency。
 
-`host.contribute` 注册的是 factory 和 metadata，不在 Host 启动时创建所有 Agent Tool。Resolver 选中 Capability 后，Runtime 才以最小激活上下文创建 contribution：
+`registrar.contribute` 注册的是 factory 和 metadata，不在 Host 启动时创建所有 Agent Tool。Resolver 选中 Capability 后，Runtime 才以最小激活上下文创建 contribution：
 
 ```rust
 struct CapabilityActivationContext {
@@ -398,10 +405,14 @@ fixture 必须同时贡献至少一个可调用 `sample.echo` Capability、一�
 
 ### 4.11 Canonical v4 schema manifest
 
-所有 DB table/constraint、strict-JSON Package schemas、OpenAPI/IPC DTO、SessionEvent registry、canonical error registry、Runtime protocol 和生成类型必须来自同一 machine-readable source，并生成一份 strict-JSON `CanonicalV4SchemaManifest`：
+Contract Closure 后只有三类 canonical machine source：Rust contract types、fresh-v4
+schema 与 SessionEvent Registry。Package/OpenAPI/IPC/error/Runtime schemas 由 Rust types
+生成，数据库 digest 来自 fresh-v4 schema，Event digest 来自 Registry；三者共同生成
+strict-JSON `CanonicalV4SchemaManifest`。本节代码块仅解释生成物 shape，不是第四份
+source：
 
 ```rust
-struct CanonicalV4SchemaManifest {
+struct CanonicalV4SchemaManifestPayload {
     manifest_version: Version,
     database_schema_digest: Digest,
     package_schema_digest: Digest,
@@ -412,11 +423,18 @@ struct CanonicalV4SchemaManifest {
     error_registry_digest: Digest,
     runtime_protocol_digest: Digest,
     confirmed_decision_contract_digest: Digest,
-    manifest_digest: Digest,
 }
+
+type CanonicalV4SchemaManifest =
+    ArtifactEnvelope<CanonicalV4SchemaManifestPayload>;
 ```
 
-Rust/TypeScript types、SQL migrations、OpenAPI、test golden 与本文 schema 摘要都是生成物或 CI 校验投影，不得各自手写成第二权威。`schema_metadata`、v4 ready marker、RC artifact manifest 和 Runtime handshake 使用同一 `manifest_digest`。D-021～D-028 的 confirmed contracts 必须共同进入 `confirmed_decision_contract_digest`；canonical manifest 不再保存 unresolved decision、placeholder/default branch 或“以后再定”的生成字段。
+`payload_digest` 只覆盖 canonical payload，明确排除 envelope 自身字段、运行状态、
+evidence、日志与 summary。Rust/TypeScript projection、OpenAPI、test golden 与本文摘要都
+是生成物或解释，不得各自手写成第二权威。`schema_metadata`、v4 ready marker、RC
+artifact manifest 和 Runtime handshake 使用同一 payload digest。D-021～D-028 的
+confirmed contracts 必须共同进入 `confirmed_decision_contract_digest`；canonical
+manifest 不保存 unresolved decision、placeholder/default branch 或“以后再定”的字段。
 
 ## 5. Capability Catalog
 
@@ -1162,7 +1180,7 @@ Runtime Dispatcher 每次接收模型调用时按固定顺序检查：
 6. Remote 调用是否已经由 ingress 提供已认证 principal；
 7. budget、deadline、rate limit 与依赖服务 availability 是否满足。
 
-全部满足即自动执行并写 EffectReceipt；任一步失败立即返回 `SESSION_DELETED`、`CAPABILITY_NOT_IN_PRESET`、`CAPABILITY_NOT_ACTIVE`、`PRESET_RESOURCE_NOT_BOUND`、`RESOURCE_OWNER_MISMATCH`、`REMOTE_AUTH_REQUIRED`、`CAPABILITY_NOT_INSTALLED`、`CAPABILITY_UNAVAILABLE`、`PROVIDER_DRIFT` 或 `BUDGET_EXCEEDED`。EffectReceipt 用于 live Session 的 UI、恢复和调试；Session 删除后会话侧 receipt/Event/projection 随内容删除，但 owning domain 的真实 Effect receipt/reconciliation 继续存在。state-changing Tool 必须先提交 `effect/started` 再 dispatch；若外部结果未知则追加 `effect/uncertain` 并使当前 turn 明确失败，Runtime、replay 和 Remote ingress 都不得自动重试。上述检查只约束模型通过 Runtime 发起的调用，不约束进程内 trusted plugin 自身。
+全部满足即自动执行并写 EffectReceipt；任一步失败立即返回 `SESSION_DELETED`、`CAPABILITY_NOT_IN_PRESET`、`CAPABILITY_NOT_ACTIVE`、`PRESET_RESOURCE_NOT_BOUND`、`RESOURCE_OWNER_MISMATCH`、`REMOTE_AUTH_REQUIRED`、`CAPABILITY_NOT_MATERIALIZED`、`CAPABILITY_UNAVAILABLE`、`PROVIDER_DRIFT` 或 `BUDGET_EXCEEDED`。EffectReceipt 用于 live Session 的 UI、恢复和调试；Session 删除后会话侧 receipt/Event/projection 随内容删除，但 owning domain 的真实 Effect receipt/reconciliation 继续存在。state-changing Tool 必须先提交 `effect/started` 再 dispatch；若外部结果未知则追加 `effect/uncertain` 并使当前 turn 明确失败，Runtime、replay 和 Remote ingress 都不得自动重试。上述检查只约束模型通过 Runtime 发起的调用，不约束进程内 trusted plugin 自身。
 
 ### 8.2 Runtime Object Model v4
 
@@ -1394,21 +1412,22 @@ Agent 和任何外部调用方都不能安装 Package、修改 Preset Revision�
 官方模板目录只展示以下七项：
 
 ```rust
-struct OfficialPresetSeedManifest {
+struct OfficialPresetSeedManifestPayload {
     manifest_version: Version,
     target_first_party_contribution_digest: Digest,
-    templates: BTreeMap<OfficialPresetKey, OfficialPresetSeed>,
+    templates: BTreeMap<OfficialPresetKey, ArtifactEnvelope<OfficialPresetSeedPayload>>,
     role_coverage_evidence: BTreeMap<OfficialPresetKey, RoleCoverageDigest>,
-    manifest_digest: Digest,
 }
 
-struct OfficialPresetSeed {
+struct OfficialPresetSeedPayload {
     initial_capabilities: Vec<ExactCapabilityRef>,
     on_demand_capabilities: Vec<ExactCapabilityRef>,
     skill_bindings: Vec<ExactSkillRef>,
     typed_resource_defaults: Vec<TypedResourceDefault>,
-    seed_digest: Digest,
 }
+
+type OfficialPresetSeedManifest =
+    ArtifactEnvelope<OfficialPresetSeedManifestPayload>;
 ```
 
 `OfficialPresetSeedManifest` 是 **target first-party contribution contract**。实施 G0 从 checked-in first-party Package/Capability/Skill/MCP contribution manifests 确定性生成并作为源码、schema 与构建输入纳管，不等待所有 executable handler 已完成，也不在用户机器上随 runtime catalog 漂移而重新推断。G0 必须在任何 production baseline、migration 或 seed 编写前冻结 exact IDs/versions、initial/on-demand 分区、Skills、typed resource defaults、target contribution digest 与角色覆盖证据；后续 target contract 改变必须显式生成新 manifest/version 和对应 v4 migration，不能静默改写已发布 seed。具体 exact-set 属于实施期工程检查，不再逐项请求产品审批；只有违反“角色能力完整、初始上下文最小”、七模板边界或下列 hard invariants 时才升级产品决策。
@@ -1731,7 +1750,17 @@ fresh/cutover 共用 operation 的固定顺序是：
 5. 仅 `cutover` 分支对整个 canonical root 发起一次操作系统目录 `rename(source, sibling_archive)`。不得先枚举内容，不得 copy-then-delete，不得逐文件 move，也不得在 `EXDEV`、sharing violation 或其他错误后回退到复制；`fresh` 分支跳过本步且始终不创建 archive；
 6. `fresh` 分支在 parent marker durable 后、`cutover` 分支在 rename 成功后，才可在 canonical path 创建全新空 v4 root，写入 root-local `v4-initializing` marker，执行 fresh baseline 并写 `schema_metadata`，再完成 materialization/seed；全部成功后原子写入含同一 schema manifest digest 的 `v4-ready` marker，移除 initializing 与 parent marker，在此之前不得启动 Runtime 或接受 ingress。
 
-恢复 phase 不是持久字段，而是每次启动从 immutable marker 与 exact identity checks 推导：只允许检查 marker 指定的 canonical source basename、cutover-only archive target basename、canonical root、root-local initializing/ready marker 是否存在，并在新 canonical root 已存在时读取 `schema_metadata`/manifest digest；禁止扫描 sibling、枚举、glob、猜测 timestamp target 或读取 archive 内容。marker durable 前失败不允许出现 root/archive 变化；路径校验、target collision、跨卷检查或 rename 失败时，旧 canonical root 必须保持原 path/identity，不得创建 v4 root/database/seed，只清理匹配 operation id 的 parent marker。rename 后初始化失败时 archive 保持不动；fresh 初始化失败时没有 archive。恢复只能按上述 exact evidence 清理/重试无 ready 的新 v4 root，不触发 rename-back，也不演化为双 root selector。
+恢复 phase 不是持久字段，而是每次启动从 immutable marker 与 exact identity checks
+推导：只允许检查 marker 指定的 canonical source basename、cutover-only archive
+target basename、canonical root、root-local initializing/ready marker 是否存在，并在
+新 canonical root 已存在时读取 `schema_metadata`/manifest digest；禁止扫描 sibling、
+枚举、glob、猜测 timestamp target 或读取 archive 内容。marker durable 前失败不允许
+出现 root/archive 变化；marker durable 后发生 target race、跨卷或 rename 失败时，
+旧 canonical root 必须保持原 path/identity，不得创建 v4 root/database/seed，并保留
+同一 immutable parent marker。恢复重新校验 exact facts 后只能重试或 fail-stop；只有
+ready/metadata exact-match 后才删除 marker。rename 后初始化失败时 archive 保持不动；
+fresh 初始化失败时没有 archive。恢复只能按上述 exact evidence 清理/重试无 ready 的
+新 v4 root，不触发 rename-back，也不演化为双 root selector。
 
 archive 永久位于 v4 系统边界之外：v4 Runtime、数据库 runner、PluginHost、workspace scanner、Knowledge/Memory indexer、backup/support-bundle、quota/cleanup job 和所有 API/UI 都不得访问它。产品只说明用户可以在应用完全停止后，通过操作系统文件管理器或 shell 自行处理该 sibling directory；产品不承诺查看、导出、导入或恢复。
 
@@ -2048,7 +2077,9 @@ Runtime Inspector 可以只读展示 checkpoint cache 的 available/discarded、
 103. Engine/Runtime selector、per-turn/Nomi fallback、pre-v4/Nomi binary、old-binary rollback bundle、data downgrade、D-013 archive read/import/restore 和产品内双 Runtime 永久禁止；
 104. “两发布周期后删除”、dormant Nomi、emergency switch、canary mode、rollback generation 的表/字段/API/UI/config/feature/test 数为 0；
 105. D-020 删除门禁不读取固定天数、发布周期、turn 样本量、性能 baseline/P50/P95/统计质量分，只使用结构、功能、数据、Effect、故障、全场景与 residual evidence。
-106. canonical DB/strict-JSON/OpenAPI/IPC/SessionEvent/error/Runtime schema 必须由同一 machine-readable source 生成 `CanonicalV4SchemaManifest`；手写第二份 schema 或 digest 漂移阻断构建；
+106. canonical Rust types、fresh-v4 schema 与 SessionEvent Registry 是三类唯一 owning
+machine sources；它们共同生成 `CanonicalV4SchemaManifest`、strict-JSON/OpenAPI/IPC/
+error/Runtime schemas 与 goldens。手写第四份 schema 或 digest 漂移阻断构建；
 107. declarative manifest/config 只接受 strict JSON，canonical API 前缀只接受 `/api`；JSON5、未知字段、无前缀/其他前缀 alias 数为 0；
 108. HostPluginStateApi 的 `get/set/delete/compare_and_swap` 四方法均为必选，sample fixture 全覆盖；
 109. 普通 target、RemoteBinding 与 AgentSession 必须嵌入或引用同一个 `AgentBindingValue`，其中 `PresetRevisionRef(revision_digest)` 与 `ResolvedSnapshotRef` 仍是两个独立字段；scene-specific binding DTO、混合 ref、复制列或只存其一均为 schema failure；
@@ -2300,7 +2331,15 @@ D-020 以每个 Domain Wave、最终删除提交、Nomi-free RC 和 Stable promo
 
 ### 16.16 Canonical contract coherence 与 D-019/D-021～D-028 final closure
 
-终审 coherence gate 必须证明：strict-JSON manifests、唯一固定 `/api` routes、DB schema、OpenAPI/IPC、SessionEvent/error registries、Runtime protocol、generated Rust/TypeScript types 和 test goldens 均由同一 machine-readable source 生成，`CanonicalV4SchemaManifest.manifest_digest` 与 `schema_metadata`/ready marker/Runtime handshake/RC manifest 一致；canonical `AgentBindingValue`、PluginState 四方法、三类 sample contribution、两类 Binding ref、recoverable open、RuntimeEvent producer sequence/Host ACK/resend、唯一 `SessionEventAppendPort`、generation 0、content digest、Effect reconcile outcomes、best-effort EventBus 和 lazy CapabilityInstanceHandle 均有唯一 schema/fixture。
+终审 coherence gate 必须证明：strict-JSON manifests、唯一固定 `/api` routes、DB
+schema、OpenAPI/IPC、SessionEvent/error registries、Runtime protocol、generated
+Rust/TypeScript types 和 test goldens 均可追溯到三类唯一 owning machine source；
+`CanonicalV4SchemaManifest.payload_digest` 与 `schema_metadata`/ready marker/Runtime
+handshake/RC manifest 一致；canonical `AgentBindingValue`、PluginState 四方法、三类
+sample contribution、两类 Binding ref、recoverable open、RuntimeEvent producer
+sequence/Host ACK/resend、唯一 `SessionEventAppendPort`、generation 0、content digest、
+Effect reconcile outcomes、best-effort EventBus 和 lazy CapabilityInstanceHandle 均有唯一
+schema/fixture。
 
 **D-021 已冻结并必须生成：**`AgentSession` 是唯一产品/执行 aggregate，`AgentSessionId(UUIDv7)` 是唯一身份；本地 route 只使用 `/api/agent-sessions`，Remote DTO 只使用 exact `agent_session_id: AgentSessionId`，fork 返回新的 child `AgentSessionId`，mandatory schema 只包含 `agent_sessions` 而不增加第二个容器或关系。中文 UI 使用“会话”，英文 UI 使用 “Chat/Session”。除 pre-v4 删除清单与本条 residual-zero 断言外，production schema/type/trait/service/repository/route/DTO/UI key/bundle string 中 `Conversation`、`ConversationId`、`conversations` 与 `/api/conversations` 技术残留数必须为 0。
 

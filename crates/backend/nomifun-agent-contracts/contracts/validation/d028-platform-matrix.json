@@ -1,0 +1,195 @@
+{
+  "target_cells": {
+    "windows_desktop_x64": {
+      "host_os": "windows",
+      "host_arch": "x86_64",
+      "host_target": "x86_64-pc-windows-msvc",
+      "runtime_target": "x86_64-pc-windows-msvc",
+      "host_surface": "desktop",
+      "package_format": "nsis",
+      "capability_availability": {
+        "coding_codex_native": {
+          "availability": "required_exact_set"
+        },
+        "browser": {
+          "availability": "release_manifest_defined"
+        },
+        "computer": {
+          "availability": "release_manifest_defined"
+        }
+      }
+    },
+    "macos_desktop_arm64": {
+      "host_os": "macos",
+      "host_arch": "aarch64",
+      "host_target": "aarch64-apple-darwin",
+      "runtime_target": "aarch64-apple-darwin",
+      "host_surface": "desktop",
+      "package_format": "universal-app",
+      "capability_availability": {
+        "coding_codex_native": {
+          "availability": "required_exact_set"
+        },
+        "browser": {
+          "availability": "release_manifest_defined"
+        },
+        "computer": {
+          "availability": "release_manifest_defined"
+        }
+      }
+    },
+    "macos_desktop_x64": {
+      "host_os": "macos",
+      "host_arch": "x86_64",
+      "host_target": "x86_64-apple-darwin",
+      "runtime_target": "x86_64-apple-darwin",
+      "host_surface": "desktop",
+      "package_format": "universal-app",
+      "capability_availability": {
+        "coding_codex_native": {
+          "availability": "required_exact_set"
+        },
+        "browser": {
+          "availability": "release_manifest_defined"
+        },
+        "computer": {
+          "availability": "release_manifest_defined"
+        }
+      }
+    },
+    "linux_desktop_x64": {
+      "host_os": "linux",
+      "host_arch": "x86_64",
+      "host_target": "x86_64-unknown-linux-gnu",
+      "runtime_target": "x86_64-unknown-linux-musl",
+      "host_surface": "desktop",
+      "package_format": "appimage-deb-rpm",
+      "capability_availability": {
+        "coding_codex_native": {
+          "availability": "required_exact_set"
+        },
+        "browser": {
+          "availability": "release_manifest_defined"
+        },
+        "computer": {
+          "availability": "independent_partial_or_exact_unavailable"
+        }
+      }
+    },
+    "linux_headless_x64": {
+      "host_os": "linux",
+      "host_arch": "x86_64",
+      "host_target": "x86_64-unknown-linux-gnu",
+      "runtime_target": "x86_64-unknown-linux-musl",
+      "host_surface": "headless",
+      "package_format": "headless-service",
+      "capability_availability": {
+        "coding_codex_native": {
+          "availability": "required_exact_set"
+        },
+        "browser": {
+          "availability": "exact_unavailable",
+          "error_code": "CAPABILITY_UNAVAILABLE_ON_PLATFORM"
+        },
+        "computer": {
+          "availability": "exact_unavailable",
+          "error_code": "CAPABILITY_UNAVAILABLE_ON_PLATFORM"
+        }
+      }
+    }
+  },
+  "unsupported_local_targets": [
+    "windows_arm64",
+    "linux_arm64"
+  ],
+  "remote_only_surfaces": [
+    "mobile",
+    "web_browser_client",
+    "robot_firmware",
+    "im_client"
+  ],
+  "relay_order": [
+    {
+      "stage_kind": "boundary",
+      "boundary": "windows-c1-c7-continuous"
+    },
+    {
+      "stage_kind": "boundary",
+      "boundary": "c8-win-pre"
+    },
+    {
+      "stage_kind": "boundary",
+      "boundary": "hp-1"
+    },
+    {
+      "stage_kind": "boundary",
+      "boundary": "c8-ma"
+    },
+    {
+      "stage_kind": "boundary",
+      "boundary": "hp-2"
+    },
+    {
+      "stage_kind": "parallel_boundaries",
+      "boundaries": [
+        "c8-mx",
+        "c8-ld",
+        "c8-lh"
+      ]
+    },
+    {
+      "stage_kind": "boundary",
+      "boundary": "merge-c8-whole-batch-fixes"
+    },
+    {
+      "stage_kind": "repeatable_whole_cohort_recheck",
+      "family": "c8"
+    },
+    {
+      "stage_kind": "boundary",
+      "boundary": "c8-merge"
+    },
+    {
+      "stage_kind": "boundary",
+      "boundary": "d027-final-drain-exact-zero"
+    },
+    {
+      "stage_kind": "boundary",
+      "boundary": "c9-nomi-hard-delete"
+    },
+    {
+      "stage_kind": "parallel_boundaries",
+      "boundaries": [
+        "c10-win",
+        "c10-ma",
+        "c10-mx",
+        "c10-ld",
+        "c10-lh"
+      ]
+    },
+    {
+      "stage_kind": "boundary",
+      "boundary": "merge-c10-whole-batch-fixes"
+    },
+    {
+      "stage_kind": "repeatable_whole_cohort_recheck",
+      "family": "c10"
+    },
+    {
+      "stage_kind": "boundary",
+      "boundary": "c10-merge"
+    },
+    {
+      "stage_kind": "boundary",
+      "boundary": "c11-same-digest-stable"
+    }
+  ],
+  "recheck_policy": {
+    "only_after_complete_round_returns": true,
+    "merge_fixes_before_freezing_new_tuple": true,
+    "affected_cells_run_full_gate": true,
+    "unaffected_cells_run_native_scoped_attestation": true,
+    "central_owner_cannot_attest_for_native_host": true,
+    "single_fix_platform_handoff_forbidden": true
+  }
+}

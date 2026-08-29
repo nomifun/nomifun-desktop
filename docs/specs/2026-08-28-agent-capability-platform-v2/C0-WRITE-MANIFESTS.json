@@ -1,0 +1,191 @@
+{
+  "schema_version": "1.0.0",
+  "boundary": "C0",
+  "base_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
+  "branch": "rf/agent-capability-platform-v2",
+  "canonical_contract_digest": "pending-c0-freeze",
+  "shared_cargo_policy": "agents-must-not-run-cargo; central-validation-owner-only",
+  "tasks": [
+    {
+      "task_id": "C0-W1-PACKAGE-CONTRACTS",
+      "workstream": "W1",
+      "owner": "Schrodinger",
+      "write_paths": [
+        "crates/backend/nomifun-agent-contracts/src/package.rs",
+        "crates/backend/nomifun-agent-contracts/contracts/target-packages/"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "package.json",
+        "crates/backend/nomifun-agent-contracts/Cargo.toml",
+        "crates/backend/nomifun-agent-contracts/src/lib.rs",
+        "crates/backend/nomifun-agent-contracts/schema/",
+        "scripts/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "deliverable": "Package/Capability/Skill/MCP/Plugin registration and state contracts plus deterministic target first-party contribution inventory",
+      "deletion_manifest": null,
+      "required_local_checks": [
+        "git diff --check",
+        "strict JSON parse for changed contract fixtures",
+        "rustfmt --edition 2024 on changed Rust files"
+      ]
+    },
+    {
+      "task_id": "C0-W2-RUNTIME-CONTRACTS",
+      "workstream": "W2",
+      "owner": "Aquinas",
+      "write_paths": [
+        "crates/backend/nomifun-agent-contracts/src/runtime.rs",
+        "crates/backend/nomifun-agent-contracts/contracts/runtime/"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "package.json",
+        "crates/backend/nomifun-agent-contracts/Cargo.toml",
+        "crates/backend/nomifun-agent-contracts/src/lib.rs",
+        "crates/backend/nomifun-agent-contracts/schema/",
+        "scripts/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "deliverable": "Runtime protocol/Profile/Authority/binding/release contracts, frozen Codex baseline and strict RPC allowlist fixtures",
+      "deletion_manifest": null,
+      "required_local_checks": [
+        "git diff --check",
+        "strict JSON parse for changed contract fixtures",
+        "rustfmt --edition 2024 on changed Rust files"
+      ]
+    },
+    {
+      "task_id": "C0-W3-PRESET-REMOTE-CONTRACTS",
+      "workstream": "W3",
+      "owner": "Halley",
+      "write_paths": [
+        "crates/backend/nomifun-agent-contracts/src/preset.rs",
+        "crates/backend/nomifun-agent-contracts/src/remote.rs",
+        "crates/backend/nomifun-agent-contracts/contracts/presets/",
+        "crates/backend/nomifun-agent-contracts/contracts/remote/"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "package.json",
+        "crates/backend/nomifun-agent-contracts/Cargo.toml",
+        "crates/backend/nomifun-agent-contracts/src/lib.rs",
+        "crates/backend/nomifun-agent-contracts/schema/",
+        "scripts/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "deliverable": "Preset/Binding/Snapshot/Remote contracts, official exact-set seed manifest and D-022/D-026 fixtures",
+      "deletion_manifest": null,
+      "required_local_checks": [
+        "git diff --check",
+        "strict JSON parse for changed contract fixtures",
+        "rustfmt --edition 2024 on changed Rust files"
+      ]
+    },
+    {
+      "task_id": "C0-W4-DELETION-INVENTORY",
+      "workstream": "W4",
+      "owner": "Dewey",
+      "write_paths": [
+        "crates/backend/nomifun-agent-contracts/src/deletion.rs",
+        "crates/backend/nomifun-agent-contracts/contracts/deletion/",
+        "crates/backend/nomifun-agent-contracts/contracts/inventory/"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "package.json",
+        "crates/backend/nomifun-agent-contracts/Cargo.toml",
+        "crates/backend/nomifun-agent-contracts/src/lib.rs",
+        "crates/backend/nomifun-agent-contracts/schema/",
+        "scripts/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "deliverable": "D-014 deletion manifests, producer/consumer inventory, production roots and residual/reachability contract",
+      "deletion_manifest": "self",
+      "required_local_checks": [
+        "git diff --check",
+        "strict JSON parse for changed contract fixtures",
+        "rustfmt --edition 2024 on changed Rust files"
+      ]
+    },
+    {
+      "task_id": "C0-W5-VALIDATION-CONTRACTS",
+      "workstream": "W5",
+      "owner": "Bernoulli",
+      "write_paths": [
+        "crates/backend/nomifun-agent-contracts/src/validation.rs",
+        "crates/backend/nomifun-agent-contracts/contracts/validation/"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "package.json",
+        "crates/backend/nomifun-agent-contracts/Cargo.toml",
+        "crates/backend/nomifun-agent-contracts/src/lib.rs",
+        "crates/backend/nomifun-agent-contracts/schema/",
+        "scripts/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "deliverable": "D-025-D-028 fixtures and platform validation/evidence/invalidation/handoff contracts",
+      "deletion_manifest": null,
+      "required_local_checks": [
+        "git diff --check",
+        "strict JSON parse for changed contract fixtures",
+        "rustfmt --edition 2024 on changed Rust files"
+      ]
+    },
+    {
+      "task_id": "C0-W1-SESSION-EVENT-CONTRACTS",
+      "workstream": "W1",
+      "owner": "Dirac",
+      "write_paths": [
+        "crates/backend/nomifun-agent-contracts/src/session.rs",
+        "crates/backend/nomifun-agent-contracts/src/event.rs",
+        "crates/backend/nomifun-agent-contracts/contracts/session/",
+        "crates/backend/nomifun-agent-contracts/contracts/events/"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "package.json",
+        "crates/backend/nomifun-agent-contracts/Cargo.toml",
+        "crates/backend/nomifun-agent-contracts/src/lib.rs",
+        "crates/backend/nomifun-agent-contracts/schema/",
+        "scripts/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "deliverable": "AgentSession, SessionEvent/error registries, delete/checkpoint/compaction/fork contracts and fixtures",
+      "deletion_manifest": null,
+      "required_local_checks": [
+        "git diff --check",
+        "strict JSON parse for changed contract fixtures",
+        "rustfmt --edition 2024 on changed Rust files"
+      ]
+    }
+  ],
+  "central_owner": {
+    "owner": "main-agent",
+    "write_paths": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "package.json",
+      "crates/backend/nomifun-agent-contracts/Cargo.toml",
+      "crates/backend/nomifun-agent-contracts/src/lib.rs",
+      "crates/backend/nomifun-agent-contracts/src/digest.rs",
+      "crates/backend/nomifun-agent-contracts/src/closure.rs",
+      "crates/backend/nomifun-agent-contracts/src/manifest.rs",
+      "crates/backend/nomifun-agent-contracts/src/schema.rs",
+      "crates/backend/nomifun-agent-contracts/src/bin/agent-v2-contract.rs",
+      "crates/backend/nomifun-agent-contracts/schema/",
+      "crates/backend/nomifun-agent-contracts/contracts/closure/",
+      "crates/backend/nomifun-agent-contracts/contracts/generated/",
+      "scripts/gate-agent-v2.mjs",
+      "docs/specs/2026-08-28-agent-capability-platform-v2/"
+    ]
+  }
+}

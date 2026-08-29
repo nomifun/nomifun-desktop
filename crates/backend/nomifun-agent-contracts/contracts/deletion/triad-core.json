@@ -1,0 +1,872 @@
+{
+  "schema_version": "1.0.0",
+  "manifest_id": "d014.triad-core.v1",
+  "manifest_kind": "triad_core",
+  "wave": "triad_core",
+  "workstream": "W4",
+  "base_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
+  "canonical_producer": {
+    "owner_id": "platform-agent-core",
+    "target_package_keys": [
+      "platform.agent-core",
+      "platform.chat",
+      "platform.codex-native",
+      "sample.echo"
+    ],
+    "target_capability_families": [
+      "agent-session",
+      "chat.minimal",
+      "coding.codex-native",
+      "sample.echo"
+    ],
+    "current_producer_refs": [
+      {
+        "path": "crates/agent/nomi-agent/src/bootstrap.rs",
+        "symbols": [
+          "AgentBootstrap::build"
+        ],
+        "line_start": 528,
+        "line_end": 974
+      },
+      {
+        "path": "crates/backend/nomifun-ai-agent/src/factory/mod.rs",
+        "symbols": [
+          "AgentFactoryDeps",
+          "build_agent_factory"
+        ],
+        "line_start": 92,
+        "line_end": 199
+      },
+      {
+        "path": "crates/backend/nomifun-conversation/src/service.rs",
+        "symbols": [
+          "ConversationService"
+        ],
+        "line_start": 1007,
+        "line_end": 1087
+      },
+      {
+        "path": "crates/backend/nomifun-gateway/src/registry/mod.rs",
+        "symbols": [
+          "Registry::build",
+          "Registry::global"
+        ],
+        "line_start": 145,
+        "line_end": 195
+      },
+      {
+        "path": "crates/backend/nomifun-preset/src/service.rs",
+        "symbols": [
+          "PresetService"
+        ]
+      }
+    ],
+    "canonical_contract_refs": [
+      {
+        "path": "crates/backend/nomifun-agent-contracts/src/primitives.rs",
+        "symbols": [
+          "AgentSessionId",
+          "CapabilityId",
+          "TypedResourceBinding"
+        ]
+      },
+      {
+        "path": "crates/backend/nomifun-agent-contracts/src/deletion.rs",
+        "symbols": [
+          "DeletionManifest"
+        ]
+      }
+    ]
+  },
+  "direct_consumers": [
+    {
+      "consumer_id": "app-composition",
+      "kind": "composition_root",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/router/state.rs",
+          "symbols": [
+            "build_module_states",
+            "build_conversation_state"
+          ],
+          "line_start": 470,
+          "line_end": 600
+        }
+      ],
+      "canonical_target": "Thin Kernel plus PluginRegistration inventory",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "conversation-http-api",
+      "kind": "public_api",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-conversation/src/routes.rs",
+          "symbols": [
+            "conversation_routes"
+          ],
+          "line_start": 31,
+          "line_end": 89
+        },
+        {
+          "path": "crates/backend/nomifun-conversation/src/routes_aux.rs",
+          "symbols": [
+            "conversation_ops_routes"
+          ]
+        }
+      ],
+      "canonical_target": "/api/agent-sessions command/query surface",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "gateway-and-remote-transports",
+      "kind": "runtime_dispatcher",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-gateway/src/lib.rs",
+          "symbols": [
+            "caps_*"
+          ],
+          "line_start": 41,
+          "line_end": 73
+        },
+        {
+          "path": "crates/backend/nomifun-public/src/rest.rs",
+          "symbols": [
+            "RestState",
+            "specs_for_profile"
+          ],
+          "line_start": 35,
+          "line_end": 84
+        }
+      ],
+      "canonical_target": "Session-bound Capability dispatcher",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "desktop-guid-and-chat-ui",
+      "kind": "product_ui",
+      "current_refs": [
+        {
+          "path": "ui/src/renderer/pages/guid/GuidPage.tsx",
+          "symbols": [
+            "GuidPage"
+          ]
+        },
+        {
+          "path": "ui/src/renderer/pages/conversation/SessionList/index.tsx",
+          "symbols": [
+            "SessionList"
+          ]
+        }
+      ],
+      "canonical_target": "Agent Preset editor and AgentSession UI",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "triad-e2e",
+      "kind": "test_fixture",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/tests/agent_integration_e2e.rs",
+          "symbols": [
+            "/api/conversations"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-app/tests/conversation_e2e.rs",
+          "symbols": [
+            "/api/conversations"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-app/tests/gateway_e2e.rs",
+          "symbols": [
+            "nomi_*"
+          ]
+        }
+      ],
+      "canonical_target": "C6 chat/coding/sample.echo final-stack gates",
+      "same_change_required": true
+    }
+  ],
+  "legacy_surfaces": [
+    {
+      "surface_id": "core.routes.conversation-and-remote",
+      "category": "route",
+      "symbols_or_patterns": [
+        "/api/conversations",
+        "/mcp-agent",
+        "/v1?profile=agent",
+        "profile/domains"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-conversation/src/routes.rs",
+          "symbols": [
+            "conversation_routes"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-app/src/router/routes.rs",
+          "symbols": [
+            "/mcp-agent",
+            "/v1"
+          ],
+          "line_start": 447,
+          "line_end": 488
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "C6/C7 owning slice",
+      "replacement_owner": "platform-agent-core"
+    },
+    {
+      "surface_id": "core.dto.conversation-and-build-extra",
+      "category": "dto",
+      "symbols_or_patterns": [
+        "ConversationId",
+        "CreateConversationRequest",
+        "NomiBuildExtra"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-api-types/src/conversation.rs",
+          "symbols": [
+            "CreateConversationRequest"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-api-types/src/agent_build_extra.rs",
+          "symbols": [
+            "NomiBuildExtra"
+          ],
+          "line_start": 112,
+          "line_end": 227
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "C6/C8-WIN-PRE",
+      "replacement_owner": "platform-agent-core"
+    },
+    {
+      "surface_id": "core.events.legacy-agent-stream",
+      "category": "event_name_field_projection",
+      "symbols_or_patterns": [
+        "message.stream",
+        "WaitingConfirmation",
+        "permission"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/protocol/events/permission.rs",
+          "symbols": [
+            "permission events"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-conversation/src/stream_relay.rs",
+          "symbols": [
+            "message.stream"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "C1/C6",
+      "replacement_owner": "session-event-registry"
+    },
+    {
+      "surface_id": "core.tables.legacy-session-and-preset",
+      "category": "table_repository_mapping",
+      "symbols_or_patterns": [
+        "agent_metadata",
+        "conversations",
+        "messages",
+        "presets"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-db/migrations/001_v3_baseline.sql",
+          "symbols": [
+            "CREATE TABLE conversations",
+            "CREATE TABLE messages",
+            "CREATE TABLE agent_metadata",
+            "CREATE TABLE presets"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-db/src/repository/sqlite_conversation.rs",
+          "symbols": [
+            "SqliteConversationRepository"
+          ]
+        }
+      ],
+      "disposition": "retain_historical_source_excluded_from_v4",
+      "removal_boundary": "C2/C8-WIN-PRE",
+      "replacement_owner": "fresh-v4 AgentSession persistence"
+    },
+    {
+      "surface_id": "core.config.mode-tools-extra",
+      "category": "config_env_feature",
+      "symbols_or_patterns": [
+        "allowed_tools",
+        "browser_use",
+        "computer_use",
+        "session_mode"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-api-types/src/agent_build_extra.rs",
+          "symbols": [
+            "allowed_tools",
+            "browser_use",
+            "computer_use",
+            "session_mode"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "C1/C6",
+      "replacement_owner": "AgentPreset Compiler and typed resource bindings"
+    },
+    {
+      "surface_id": "core.mode-approval",
+      "category": "mode_approval_permission",
+      "symbols_or_patterns": [
+        "ToolApprovalManager",
+        "confirmations",
+        "session_mode"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/agent/nomi-protocol/src/lib.rs",
+          "symbols": [
+            "ToolApprovalManager"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/manager/nomi/agent.rs",
+          "symbols": [
+            "ToolApprovalManager",
+            "confirmations"
+          ],
+          "line_start": 1203,
+          "line_end": 1253
+        }
+      ],
+      "disposition": "delete_without_replacement",
+      "removal_boundary": "C1",
+      "replacement_owner": "FullAuto invariant"
+    },
+    {
+      "surface_id": "core.factory-manager",
+      "category": "factory_manager_wiring",
+      "symbols_or_patterns": [
+        "AgentFactoryDeps",
+        "NomiAgentManager",
+        "build_agent_factory"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/factory/mod.rs",
+          "symbols": [
+            "AgentFactoryDeps",
+            "build_agent_factory"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/manager/nomi/agent.rs",
+          "symbols": [
+            "NomiAgentManager"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "C6/C9",
+      "replacement_owner": "AgentPreset Compiler plus CodexRuntimeClient"
+    },
+    {
+      "surface_id": "core.gateway-deps",
+      "category": "gateway_deps_wiring",
+      "symbols_or_patterns": [
+        "GatewayDeps",
+        "Registry::global"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-gateway/src/deps.rs",
+          "symbols": [
+            "GatewayDeps"
+          ],
+          "line_start": 17,
+          "line_end": 114
+        },
+        {
+          "path": "crates/backend/nomifun-gateway/src/registry/mod.rs",
+          "symbols": [
+            "Registry::global"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "C7/C8-WIN-PRE",
+      "replacement_owner": "CapabilityRegistry transport projection"
+    },
+    {
+      "surface_id": "core.app-services",
+      "category": "app_services_wiring",
+      "symbols_or_patterns": [
+        "AppServices"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/services.rs",
+          "symbols": [
+            "AppServices"
+          ],
+          "line_start": 1553,
+          "line_end": 1712
+        },
+        {
+          "path": "crates/backend/nomifun-app/src/router/state.rs",
+          "symbols": [
+            "build_module_states"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "C7/C8-WIN-PRE",
+      "replacement_owner": "Thin Kernel composition"
+    },
+    {
+      "surface_id": "core.nomi-runtime",
+      "category": "nomi_runtime_wiring",
+      "symbols_or_patterns": [
+        "NomiSessionPersistence",
+        "SessionManager",
+        "nomi-agent"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/nomi_session_persistence.rs",
+          "symbols": [
+            "NomiSessionPersistence"
+          ]
+        },
+        {
+          "path": "crates/agent/nomi-agent/src/session.rs",
+          "symbols": [
+            "Session",
+            "SessionManager"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "C9",
+      "replacement_owner": "CodexRuntimeSupervisor"
+    },
+    {
+      "surface_id": "core.tests-and-dependencies",
+      "category": "test_fixture_golden",
+      "symbols_or_patterns": [
+        "AgentRuntimeHandle::Mock",
+        "conversation_e2e"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/tests/conversation_e2e.rs",
+          "symbols": [
+            "/api/conversations"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-cron/src/executor.rs",
+          "symbols": [
+            "AgentRuntimeHandle::Mock"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "C6/C9",
+      "replacement_owner": "canonical contract and final-stack fixtures"
+    },
+    {
+      "surface_id": "core.crate-dependencies",
+      "category": "crate_package_dependency",
+      "symbols_or_patterns": [
+        "nomi-agent",
+        "nomifun-ai-agent",
+        "nomifun-conversation"
+      ],
+      "current_refs": [
+        {
+          "path": "Cargo.toml",
+          "symbols": [
+            "nomi-agent",
+            "nomifun-ai-agent",
+            "nomifun-conversation"
+          ]
+        },
+        {
+          "path": "Cargo.lock",
+          "symbols": [
+            "nomi-agent",
+            "nomifun-ai-agent",
+            "nomifun-conversation"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "C9",
+      "replacement_owner": "W5 hard-delete integration"
+    }
+  ],
+  "production_roots": [
+    {
+      "root_id": "desktop-host",
+      "kind": "composition_startup",
+      "current_refs": [
+        {
+          "path": "apps/desktop/src/main.rs",
+          "symbols": [
+            "nomifun_app"
+          ]
+        }
+      ],
+      "expected_canonical_owner": "Thin Kernel composition"
+    },
+    {
+      "root_id": "web-host",
+      "kind": "composition_startup",
+      "current_refs": [
+        {
+          "path": "apps/web/src/main.rs",
+          "symbols": [
+            "AppServices::from_config"
+          ]
+        }
+      ],
+      "expected_canonical_owner": "Thin Kernel composition"
+    },
+    {
+      "root_id": "public-api-router",
+      "kind": "public_api_router",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/router/routes.rs",
+          "symbols": [
+            "create_router"
+          ]
+        }
+      ],
+      "expected_canonical_owner": "AgentSession and Capability transport facades"
+    },
+    {
+      "root_id": "runtime-registry",
+      "kind": "runtime_dispatcher",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/runtime_registry.rs",
+          "symbols": [
+            "AgentRuntimeRegistry"
+          ]
+        }
+      ],
+      "expected_canonical_owner": "CodexRuntimeSupervisor"
+    },
+    {
+      "root_id": "release-workspace",
+      "kind": "release_artifact",
+      "current_refs": [
+        {
+          "path": "Cargo.toml",
+          "symbols": [
+            "workspace.members"
+          ]
+        },
+        {
+          "path": "Cargo.lock",
+          "symbols": []
+        }
+      ],
+      "expected_canonical_owner": "W5 release integration"
+    }
+  ],
+  "allowed_residuals": {
+    "policy": "d004_exact_decrementing_allowlist",
+    "entries": [
+      {
+        "residual_id": "d004.nomi-functional-migration-adapter",
+        "exact_refs": [
+          {
+            "path": "crates/backend/nomifun-ai-agent/src/manager/nomi/agent.rs",
+            "symbols": [
+              "NomiAgentManager"
+            ]
+          },
+          {
+            "path": "crates/backend/nomifun-ai-agent/src/factory/nomi.rs",
+            "symbols": [
+              "build_nomi"
+            ]
+          },
+          {
+            "path": "crates/backend/nomifun-ai-agent/src/nomi_session_persistence.rs",
+            "symbols": [
+              "NomiSessionPersistence"
+            ]
+          },
+          {
+            "path": "crates/agent/nomi-agent/src/engine/mod.rs",
+            "symbols": [
+              "AgentEngine"
+            ],
+            "line_start": 912,
+            "line_end": 940
+          }
+        ],
+        "constraints": [
+          "fresh-v4 internal sessions only",
+          "no product or public route",
+          "no legacy root or archive access",
+          "single primary for effectful turns",
+          "allowlist must only shrink"
+        ],
+        "allowed_until_boundary": "C8-MERGE",
+        "target_zero_boundary": "C9"
+      }
+    ]
+  },
+  "target_zero": [
+    {
+      "assertion_id": "triad.routes.zero",
+      "dimension": "routes",
+      "expected_count": 0,
+      "scope": "legacy conversation and remote aliases in triad production roots"
+    },
+    {
+      "assertion_id": "triad.dtos.zero",
+      "dimension": "dtos",
+      "expected_count": 0,
+      "scope": "Conversation and Nomi build-extra compatibility DTOs"
+    },
+    {
+      "assertion_id": "triad.mode-approval.zero",
+      "dimension": "mode_approval_branches",
+      "expected_count": 0,
+      "scope": "triad runtime and product paths"
+    },
+    {
+      "assertion_id": "triad.factory.zero",
+      "dimension": "factory_manager_wiring",
+      "expected_count": 0,
+      "scope": "chat/coding/sample.echo final-stack paths"
+    },
+    {
+      "assertion_id": "triad.gateway-deps.zero",
+      "dimension": "gateway_deps_wiring",
+      "expected_count": 0,
+      "scope": "triad Capability dispatch"
+    },
+    {
+      "assertion_id": "triad.app-services.zero",
+      "dimension": "app_services_wiring",
+      "expected_count": 0,
+      "scope": "triad composition"
+    },
+    {
+      "assertion_id": "triad.reachability.zero",
+      "dimension": "runtime_reachability",
+      "expected_count": 0,
+      "scope": "product roots to triad legacy nodes, excluding the exact D-004 allowlist"
+    },
+    {
+      "assertion_id": "triad.build-artifacts.zero",
+      "dimension": "build_artifacts",
+      "expected_count": 0,
+      "scope": "C9 Nomi-free source and package"
+    }
+  ],
+  "evidence_refs": [
+    {
+      "evidence_id": "triad.residual",
+      "kind": "source_scan",
+      "gate_name": "gate-d014-residual-triad-core",
+      "source_refs": [
+        {
+          "path": "crates/backend/nomifun-agent-contracts/contracts/deletion/triad-core.json",
+          "symbols": []
+        }
+      ],
+      "required_for_closure": true
+    },
+    {
+      "evidence_id": "triad.reachability",
+      "kind": "runtime_reachability",
+      "gate_name": "gate-d014-reachability-triad-core",
+      "source_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/router/routes.rs",
+          "symbols": [
+            "create_router"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/runtime_registry.rs",
+          "symbols": [
+            "AgentRuntimeRegistry"
+          ]
+        }
+      ],
+      "required_for_closure": true
+    },
+    {
+      "evidence_id": "triad.final-stack",
+      "kind": "targeted_test",
+      "gate_name": "gate-chat-minimal-final|gate-coding-codex-final|gate-compiled-plugin-final",
+      "source_refs": [
+        {
+          "path": "crates/backend/nomifun-app/tests/agent_integration_e2e.rs",
+          "symbols": []
+        }
+      ],
+      "required_for_closure": true
+    }
+  ],
+  "d027": {
+    "applicability": "final_global",
+    "admission_fence_refs": [
+      {
+        "path": "crates/backend/nomifun-ai-agent/src/runtime_registry.rs",
+        "symbols": [
+          "AgentRuntimeRegistry"
+        ]
+      }
+    ],
+    "deadline_authority_refs": [
+      {
+        "path": "crates/backend/nomifun-conversation/src/runtime_state.rs",
+        "symbols": [
+          "ConversationRuntimeStateService"
+        ]
+      },
+      {
+        "path": "crates/agent/nomi-agent/src/session.rs",
+        "symbols": [
+          "AcceptedTurnRoot"
+        ]
+      }
+    ],
+    "outstanding_set_refs": [
+      {
+        "kind": "opening_sessions",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-ai-agent/src/runtime_registry.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "running_sessions",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-conversation/src/runtime_state.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "tool_dispatches",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-ai-agent/src/manager/nomi/agent.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "effect_dispatches",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-conversation/src/service.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "descendant_processes",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-ai-agent/src/manager/process_registry.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "resource_handles",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-ai-agent/src/factory/browser_lane.rs",
+            "symbols": [
+              "BrowserLaneBinding"
+            ]
+          },
+          {
+            "path": "crates/backend/nomifun-ssh/src/pool.rs",
+            "symbols": [
+              "SshLink"
+            ]
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "private_writes",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-ai-agent/src/nomi_session_persistence.rs",
+            "symbols": [
+              "NomiSessionPersistence"
+            ]
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "runtime_reachability",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-app/src/router/state.rs",
+            "symbols": [
+              "build_module_states"
+            ]
+          }
+        ],
+        "expected_count": 0
+      }
+    ],
+    "uncertain_handoff_owner": "owning-domain-plugin",
+    "delete_contract_ref": "D-024 DeleteAgentSession",
+    "zero_required_before_legacy_delete": true
+  },
+  "closure_status": {
+    "state": "inventory_complete",
+    "canonical_producer_ready": false,
+    "direct_consumers_switched": false,
+    "legacy_surfaces_deleted": false,
+    "residual_zero_proven": false,
+    "reachability_zero_proven": false,
+    "d027_zero_proven": false,
+    "evidence_complete": false,
+    "notes": [
+      "C0 inventory contract only; no production deletion has occurred.",
+      "The D-004 allowlist is the only non-empty residual policy and must only shrink."
+    ]
+  }
+}

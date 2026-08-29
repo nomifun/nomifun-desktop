@@ -1,0 +1,70 @@
+{
+  "schema_version": "1.0.0",
+  "cases": [
+    {
+      "case_id": "D022_CLEAN_REUSES_REVISION",
+      "draft_state": "clean",
+      "revision_action": "reuse_current_revision",
+      "expected_revision_delta": 0,
+      "expected_agent_session_delta": 1,
+      "expected_external_effect_delta": 1,
+      "selected_revision_is_ordinary_visible_immutable": true,
+      "uses_exact_agent_binding_value": true,
+      "session_create_path": "/api/agent-sessions",
+      "session_is_ordinary_persistent": true,
+      "delete_path": "/api/agent-sessions/{agent_session_id}",
+      "uses_real_typed_resources": true,
+      "uses_full_auto": true,
+      "expected_error": null
+    },
+    {
+      "case_id": "D022_DIRTY_SAVES_REVISION",
+      "draft_state": "dirty",
+      "revision_action": "save_ordinary_visible_revision",
+      "expected_revision_delta": 1,
+      "expected_agent_session_delta": 1,
+      "expected_external_effect_delta": 1,
+      "selected_revision_is_ordinary_visible_immutable": true,
+      "uses_exact_agent_binding_value": true,
+      "session_create_path": "/api/agent-sessions",
+      "session_is_ordinary_persistent": true,
+      "delete_path": "/api/agent-sessions/{agent_session_id}",
+      "uses_real_typed_resources": true,
+      "uses_full_auto": true,
+      "expected_error": null
+    },
+    {
+      "case_id": "D022_SAVE_FAILS_BEFORE_SESSION",
+      "draft_state": "dirty",
+      "revision_action": "save_failed",
+      "expected_revision_delta": 0,
+      "expected_agent_session_delta": 0,
+      "expected_external_effect_delta": 0,
+      "selected_revision_is_ordinary_visible_immutable": false,
+      "uses_exact_agent_binding_value": false,
+      "session_create_path": null,
+      "session_is_ordinary_persistent": false,
+      "delete_path": null,
+      "uses_real_typed_resources": true,
+      "uses_full_auto": true,
+      "expected_error": "PRESET_REVISION_SAVE_FAILED"
+    }
+  ],
+  "forbidden_backend_surface": [
+    "DraftSnapshot",
+    "TestRevision",
+    "TestSession",
+    "/test",
+    "/test-sessions",
+    "disposable_resource",
+    "disposable_flag",
+    "effect_suppression",
+    "ephemeral_flag",
+    "ephemeral_execution",
+    "hidden_revision",
+    "preview_flag",
+    "test_cleanup_job",
+    "test_mode",
+    "test_route"
+  ]
+}

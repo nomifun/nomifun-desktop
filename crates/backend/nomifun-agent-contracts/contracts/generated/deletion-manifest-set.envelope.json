@@ -1,0 +1,12 @@
+{
+  "digest_algorithm": "sorted-json-sha256-v1",
+  "payload": {
+    "domain-wave-1-read-capabilities.json": "e9f3f766e17d40d166623046dbff2a8179b8e080a13adecd6aa4d09a6bfa264f",
+    "domain-wave-2-coding-extensions.json": "0be103e5b9ef82d36ae560de04743ce912b90265cacb0d114eb064f12c93d651",
+    "domain-wave-3-creative-multimodal.json": "6c63189a8eb5c081c71a38a1685251068f426cf002c5398e018991ec5936fa38",
+    "domain-wave-4-identity-channels-devices.json": "e19cdb8ef7e362deff6a63f2d0c974b089ca12fd668eb3bc501e589e6f232e64",
+    "domain-wave-5-automation-supervision-remote.json": "4f7ee0ac0cda440459be17d5d6c320cddc48e721e5193f45c8d3e16c0dff6707",
+    "triad-core.json": "e04c1b643a6069af41374a99997a9718ef9c3c4df765da98c94022bc41fdcfd1"
+  },
+  "payload_digest": "3fbfc727cd0f9335f94ccbd713042bcc1a4aa059fd8604994e2226327df02556"
+}

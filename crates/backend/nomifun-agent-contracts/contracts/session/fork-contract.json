@@ -1,0 +1,40 @@
+{
+  "contract_version": "session-fork-v1",
+  "fork": {
+    "parent_session_id": "0199f6d4-7c00-7f00-a001-000000000005",
+    "parent_through_seq": 27,
+    "child_session_id": "0199f6d4-7c00-7f00-a001-000000000006",
+    "child_base_payload_id": "fork-base-payload-001",
+    "child_base_digest": "sha256:fork-base-001",
+    "child_agent_binding": {
+      "preset_revision_ref": {
+        "preset_id": "coding.codex",
+        "revision": 2,
+        "revision_digest": "sha256:preset-revision-003"
+      },
+      "resolved_snapshot_ref": {
+        "snapshot_id": "snapshot-003",
+        "snapshot_digest": "sha256:snapshot-003"
+      },
+      "typed_resource_bindings": [
+        {
+          "binding_id": "resource-binding-workspace-002",
+          "resource_kind": "workspace",
+          "resource_id": "workspace-002",
+          "owner_id": "user-001",
+          "operations": [
+            "read",
+            "write",
+            "execute"
+          ],
+          "typed_parameters": {}
+        }
+      ],
+      "binding_version": 2
+    }
+  },
+  "child_base_is_self_contained": true,
+  "copies_full_transcript": false,
+  "migrates_runtime_private_handles": false,
+  "replays_tool_or_effect": false
+}

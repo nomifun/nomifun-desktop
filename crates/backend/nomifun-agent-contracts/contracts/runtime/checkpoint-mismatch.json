@@ -1,0 +1,34 @@
+{
+  "input": {
+    "checkpoint": {
+      "runtime_binding_id": "runtime-binding-old",
+      "locator": {
+        "artifact_id": "runtime-checkpoint-0001",
+        "normalized_relative_path": "checkpoints/runtime-binding-old/through-40.json",
+        "digest": "5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      "runtime_bound_event_id": "runtime-bound-event-old",
+      "protocol_version": "1.0.0",
+      "snapshot_id": "snapshot-0001",
+      "snapshot_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+      "through_seq": 40
+    },
+    "referenced_runtime_build_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+    "expected_runtime_bound_event_id": "runtime-bound-event-current",
+    "expected_runtime_build_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+    "expected_protocol_version": "1.0.0",
+    "expected_snapshot_ref": {
+      "snapshot_id": "snapshot-0001",
+      "snapshot_digest": "9999999999999999999999999999999999999999999999999999999999999999"
+    },
+    "expected_through_seq": 41
+  },
+  "result": {
+    "result": "mismatch",
+    "mismatches": [
+      "runtime_bound_event_mismatch",
+      "snapshot_mismatch",
+      "through_seq_mismatch"
+    ]
+  }
+}

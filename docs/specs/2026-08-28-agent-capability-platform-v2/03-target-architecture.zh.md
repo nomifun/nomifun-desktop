@@ -24,7 +24,7 @@
 - D-028 方案 A 固定首个 Stable 的 required native platform cells、Capability availability 与 Windows-first native handoff；C1～C7 的全部功能开发必须先在 Windows 连续完成，跨平台代码可以同期实现，但非当前原生目标只能累计 `pending_native_verification`，不得按功能/模块暂停交接，也不能借 cross-compile、VM、emulation 或 Rosetta 宣称通过；只有 Windows 整体 pre-candidate 全功能/pre-version Gate 通过后才首次 pause；所有 required local cells 都必须保留完整 Coding，Mobile/Web/Robot firmware/IM client 只作为 Remote client，不打包本地 Host/Runtime；
 - D-018 收窄方案 A 只保留两类确定性正确性边界：轻量 Preset 必须从空集合正向最小装配，`chat.minimal` 精确为零且不扫描、不连接、不启动未选能力；`coding.codex-native` 必须保留完整 canonical Capability/native feature 集合、Native Responses 语义与功能 conformance。本期不建设量化性能测量、matched baseline、benchmark、metric/SLO contract、reference runner、统计 Coding 评测、telemetry-only 字段、性能 RC 或性能平台；
 - D-022 方案 A 将 Editor Test 固定为纯 UI 编排：脏 Draft 先经普通 CAS SaveRevision 保存一个可见、immutable `AgentPresetRevision`，干净 Draft 复用当前 Revision；随后统一经 `/api/agent-sessions` 创建普通、持久化 `AgentSession`，使用当前真实 typed resource bindings 并按 FullAuto 主链执行真实 Tool/Effect；
-- D-017 方案 A 将 Remote 永久固定为 ingress/transport plugin：本地管理面创建 owner-owned `RemoteBinding`，其 `agent_binding` 复用 02 唯一 canonical `AgentBindingValue`，从而冻结 exact `PresetRevisionRef + ResolvedSnapshotRef` 与 typed resource bindings；远端只经 `RemoteIngressAuthenticator` 和 `open/turn/observe/cancel` 显式创建、复用产品 Session，所有调用通过该 Session 的 frozen Snapshot/active generation dispatch；
+- D-017 方案 A 将 Remote 永久固定为 ingress/transport plugin：本地管理面创建 owner-owned `RemoteBinding`，其 `agent_binding` 复用 canonical Rust/generated `AgentBindingValue`，从而冻结 exact `PresetRevisionRef + ResolvedSnapshotRef` 与 typed resource bindings；远端只经 `RemoteIngressAuthenticator` 和 `open/turn/observe/cancel` 显式创建、复用产品 Session，所有调用通过该 Session 的 frozen Snapshot/active generation dispatch；
 - D-014 方案 A 要求每个 Vertical Slice / Domain Wave 在切换全部直接消费者的同一变更中，hard-delete 对应 legacy API/DTO、table mapping、配置、mode/approval、Factory wiring、测试与依赖；首个 v4 Stable 的产品兼容面精确为零；
 - D-004 的 Nomi Runtime 只作为内部 recorded replay/shadow/canary 语义对照 adapter 存在，不进入产品 API、不读取 legacy archive，并由 D-020 的独立最终门禁删除；
 - D-020 方案 A 只允许内部 Beta 在 Session admission 前按 scene + exact Preset digest + Domain Wave/cohort 做 sticky canary；产品没有 Runtime selector、canary binding 或 fallback 状态。每个 Domain Wave 切换时同变更删除本域 Nomi wiring；all-scene Codex-only gate 通过后先硬删除全部 Nomi，再生成 Nomi-free RC，Stable 直接提升同一 digest；
@@ -55,9 +55,16 @@ D-006 方案 A 将 Thin Functional Kernel 设为封闭白名单：Bootstrap/Comp
 
 ### 1.1 Canonical contract 单一来源
 
-[02-capability-catalog-and-agent-presets.zh.md](02-capability-catalog-and-agent-presets.zh.md) 是 v4 machine-readable contract 的唯一规范来源：Package/Capability/Skill/MCP 与进程内注册见其 §4，Preset/RuntimeProfile/Snapshot 见 §7–§8，SessionEvent/Runtime checkpoint 与 activation 见 §8.3–§9，API/持久化/Resolver 见 §11，产品与发布不变量见 §14–§16。对应 schema、OpenAPI/IPC、event vocabulary、示例和 contract digest 只能在 02 及其生成物维护。
+Contract Closure 后的 machine-readable 权威由三类 source 组成：canonical Rust contract
+types、fresh-v4 schema 与 SessionEvent Registry。它们分别拥有类型/wire、数据库
+约束和 Event vocabulary，并共同生成 schema/OpenAPI/IPC/golden/digest。
+[02-capability-catalog-and-agent-presets.zh.md](02-capability-catalog-and-agent-presets.zh.md)
+只解释这些已确认语义和生成物，不再充当可复制的第四份 machine source。
 
-本文件只规定架构所有权、依赖方向、生命周期、因果关系、失败语义和 release flow；不再复制 Rust struct、表 exact-set、API path inventory 或 SessionEvent kind 清单。实现发现 02 与本文件措辞不一致时，以 02 的当前 canonical machine-readable contract 为准，并在同一变更修正本文件的架构描述，禁止生成第二套 DTO/schema/enum。
+本文件只规定架构所有权、依赖方向、生命周期、因果关系、失败语义和 release flow；
+不复制另一份 Rust struct、表 exact-set、API path inventory 或 SessionEvent kind 清单。
+实现发现文档与机器源不一致时，Contract Closure Gate 失败：先修唯一 owning machine
+source，再同步生成物与说明，禁止任选一份或生成第二套 DTO/schema/enum。
 
 ### 1.2 D-021～D-028 与 D-019 最终确认
 
@@ -463,7 +470,7 @@ D-018 要求 Compiler 只从 Preset 明确选择的 Capability/Pack/Skill/resour
 
 ### 3.6 AgentSession 事实与事件
 
-本组件是 D-015 A 的唯一 `AgentSession` 事实所有者：只以规范化语义 `SessionEvent + bounded payload` 持久化 `AgentSessionId` UUIDv7、消息、turn admission/terminal、source-message/turn/tool/effect correlation、Capability activation、Context 变化、Tool call/result、Effect receipt、compaction、fork provenance 与 Runtime binding digest。事实表与 rebuildable projection 的 exact-set 只引用 02 §8.3/§11.2，不在本文件重复。标题、归档、置顶、未读与其他会话列表状态是该 aggregate 的 metadata/projection；中文 UI 显示“会话”，英文 UI 显示“Chat”或“Session”，两者都直接指向同一 `AgentSessionId`。
+本组件是 D-015 A 的唯一 `AgentSession` 事实所有者：只以规范化语义 `SessionEvent + bounded payload` 持久化 `AgentSessionId` UUIDv7、消息、turn admission/terminal、source-message/turn/tool/effect correlation、Capability activation、Context 变化、Tool call/result、Effect receipt、compaction、fork provenance 与 Runtime binding digest。事实表与 rebuildable projection 的 exact-set 只引用 canonical Rust types、fresh-v4 schema 与 SessionEvent Registry；02 §8.3/§11.2 仅作说明，本文件不重复。标题、归档、置顶、未读与其他会话列表状态是该 aggregate 的 metadata/projection；中文 UI 显示“会话”，英文 UI 显示“Chat”或“Session”，两者都直接指向同一 `AgentSessionId`。
 
 每次 append 在一个 SQLite transaction 中分配严格递增的 per-session `seq`，写 Event/Payload并更新 `next_seq` 与 projection；commit 后才发送 best-effort EventBus notification。`event_id` 和 typed `correlation_id` 是 Host 生成的稳定幂等身份，Runtime token、provider chunk id、stdio request id、Codex item id 都不能充当产品 source identity。可靠跨域工作使用 typed command/owning-domain outbox，不混入 Session append。Knowledge、Memory、Customer Service dialogue、Creative task、AutoWork attempt 等领域状态不是 `AgentSession` 字段，也不能借旧扩展字段、projection 或 Runtime private state 回流 Kernel。
 
@@ -495,7 +502,7 @@ Remote 是 PluginManager 管理的 ingress/transport plugin，不是 Agent、Age
 
 `RemoteIngressAuthenticator` 只验证可 rotate/revoke 的 installation-level token，并返回 canonical installation-owner Principal；token 不绑定 companion、Preset、Capability scope、role、mode 或资源，也不保存进 `RemoteBinding`。`binding_id` 只是 owner-owned 配置引用，不是秘密或授权凭据，不能扩大 Principal。Rotate/revoke transaction 提交 auth generation/status 后形成 D-026 request-admission fence：旧 token 的新 `open/turn/observe/cancel` 一律返回 `REMOTE_AUTH_REQUIRED`；commit 前已经 durable accepted 的 operation 继续到正常 finite boundary。Fence 不扫描或修改既有 Session，不 cascade cancel Runtime/Effect，也不创建 per-Session token lease、scope、TTL、grace 或 kill 状态。
 
-`RemoteBinding` 的 exact fields 只引用 02 canonical contract：它只增加 Remote id/owner/name，并在 `agent_binding` 中嵌入唯一 `AgentBindingValue`，不复制第二套 Preset/Snapshot/resource schema。`open(binding_id)` 不伪造跨 SQLite/sidecar 的单事务：第一笔本地事务完成认证结果绑定、Binding/ownership/resource preflight、Compiler 与 frozen Snapshot，并生成 UUIDv7 `AgentSessionId`、创建 `opening` `AgentSession` 事实；commit 后立即向 Remote caller 返回唯一 `agent_session_id + open_state=opening + cursor`，随后 Supervisor 才执行 Runtime open/handshake。成功 ACK 后第二笔事务提交 02 canonical `runtime/bound + session/ready` facts、把 Session 转为可 turn 状态并处理可选首 Turn admission；失败追加 `session/open-failed` 并保持不可执行，客户端通过 `observe` 获取收敛结果。之后 `turn/observe/cancel` 先验证 authenticated Principal 仍拥有该 `AgentSession`，再只接受 `agent_session_id` 与必要 cursor/idempotency key；客户端必须显式保存并复用该 ID，token、IP、HTTP/MCP connection、客户端名称或“最近 Session”都不能成为隐式复用键。Replacement token 只有解析到同一 owner 且显式携带原 `agent_session_id` 时才能继续既有 Session。Remote 删除必须调用同一 `DeleteAgentSession`；命令建立 admission fence 后，任何迟到 Remote/Runtime callback 只返回 `SESSION_DELETED` 且不得复活 Session。
+`RemoteBinding` 的 exact fields 只引用 canonical Rust/generated contract：它只增加 Remote id/owner/name，并在 `agent_binding` 中嵌入唯一 `AgentBindingValue`，不复制第二套 Preset/Snapshot/resource schema。`open(binding_id)` 不伪造跨 SQLite/sidecar 的单事务：第一笔本地事务完成认证结果绑定、Binding/ownership/resource preflight、Compiler 与 frozen Snapshot，并生成 UUIDv7 `AgentSessionId`、创建 `opening` `AgentSession` 事实；commit 后立即向 Remote caller 返回唯一 `agent_session_id + open_state=opening + cursor`，随后 Supervisor 才执行 Runtime open/handshake。成功 ACK 后第二笔事务提交 canonical `runtime/bound + session/ready` facts、把 Session 转为可 turn 状态并处理可选首 Turn admission；失败追加 `session/open-failed` 并保持不可执行，客户端通过 `observe` 获取收敛结果。之后 `turn/observe/cancel` 先验证 authenticated Principal 仍拥有该 `AgentSession`，再只接受 `agent_session_id` 与必要 cursor/idempotency key；客户端必须显式保存并复用该 ID，token、IP、HTTP/MCP connection、客户端名称或“最近 Session”都不能成为隐式复用键。Replacement token 只有解析到同一 owner 且显式携带原 `agent_session_id` 时才能继续既有 Session。Remote 删除必须调用同一 `DeleteAgentSession`；命令建立 admission fence 后，任何迟到 Remote/Runtime callback 只返回 `SESSION_DELETED` 且不得复活 Session。
 
 opening transaction 冻结 exact Preset/Snapshot/model route/config revision、initial/on-demand、Package/MCP/schema digest、RuntimeProfile、所需 Runtime protocol/features/release constraint 和 typed resources，但不写实际 Codex build ID；RuntimeReadyAck 后的第二 transaction 才以 `runtime/bound` Event 记录实际 admitted build 并推进 ready。Binding 更新或新 Preset revision 只影响之后的 `open`；既有 Session 不漂移。任何保留的 Remote direct Capability projection 也必须携带 `agent_session_id`，以该 `AgentSession` 的 frozen Snapshot 与 active generation dispatch；禁止别名 identity、双 ID/mapping 层或 installation token 到全局 Registry 的直通旁路。Remote 唯一执行语义为 FullAuto，不存在 scope DSL、profile/domains、confirmation、`needs_confirmation`、danger approval 或等待状态。
 
@@ -555,7 +562,9 @@ Package dependency 只做 enabled package 的直接 id/version 校验和简单�
 
 ## 5. Canonical contracts 与窄 Host Ports
 
-本章不定义第二套 Rust ABI。所有 exact type、field、schema version 和 wire shape 直接引用 02 的 canonical machine-readable contracts；下文只固定所有权和调用方向。
+本章不定义第二套 Rust ABI。所有 exact type、field、schema version 和 wire shape 直接
+引用 canonical Rust contract types、fresh-v4 schema 或 SessionEvent Registry 的生成物；
+02 仅提供语义说明。下文只固定所有权和调用方向。
 
 ### 5.1 PluginContext 与 PluginManager 所有权
 
@@ -606,7 +615,7 @@ PluginManager 的固定启动协议是：`validate all -> reserve identities/ser
 
 validate 阶段完成 Manifest/config/Host version、Runtime feature、ServiceKey/Cargo DAG 与重复 identity 检查；reserve 在不执行业务副作用的前提下占用 ServiceKey、Capability、route/event schema 等 namespace；start 才创建实例和后台资源；全部 required mount 和当前发布组满足条件后，publish 才原子暴露 contributions。required mount 任一步失败使整个 Bootstrap fail-stop；optional mount 失败只产生 typed effective failure，且其 contributions 不发布。失败路径按逆序 stop 已启动实例并释放 reservation，不允许半套 catalog/route/service 可见。
 
-应用退出或重启按逆 ServiceKey DAG 停止。Stable 不做运行中 hot reload；desired 改变在下一次 boot重新计算 effective state。完整状态和值域由 02 的 canonical schema 唯一维护。
+应用退出或重启按逆 ServiceKey DAG 停止。Stable 不做运行中 hot reload；desired 改变在下一次 boot重新计算 effective state。完整状态和值域由 canonical Rust contract 与 fresh-v4 schema 唯一维护。
 ## 6. Agent Preset 编译
 
 ### 6.1 输入
@@ -645,7 +654,9 @@ flowchart LR
 - 校验 `initial`/`on_demand` 互斥、跨集合 conflict、Host/Runtime feature 和 resource-binding kind；
 - Skill id 只解析 instruction digest/context order，不进入 capability expansion；
 - MCP 和 Codex native operation 此时已经是普通 Capability，不走特殊分支；
-- `on_demand` 非空时 Compiler 把固定控制 Capability `runtime.capability.search` 加入 `initial`；`on_demand` 为空时不生成它；
+- `on_demand` 非空时 RuntimeProfile 暴露固定内部 control operation
+  `capability_search/activate`；它不是 Capability、不进入 `initial`，也不持久化为
+  Capability definition。`on_demand` 为空时 control operation 和索引都不生成；
 - 不处理 `provides/recommends`、候选 Provider、SemVer SAT、评分、自动 fallback 或 optional degradation 求解。
 
 Authority Input Resolution：
@@ -665,7 +676,9 @@ Snapshot：
 - capability/pack、Skill instruction/resource refs、MCP materialization、tool/context/model/authority-input/resource-binding digests；
 - exact `initial`、`on_demand`、on-demand short-index 与 activation-group plan；
 - resolver version；
-- exact enabled package/Codex runtime build/RuntimeProfile/model revisions；
+- exact enabled package、Runtime release constraint/feature inventory、
+  RuntimeProfile 与 model revisions；Snapshot 不保存实际 admitted build，实际 build
+  只由 `runtime/bound` Event 记录；
 - 直接 dependency path 与明确失败原因。
 
 Snapshot 分为 `ResolvedSnapshotContent` 与 `SnapshotEnvelope`。Content 只含确定性解析结果；created_at、resolver run id 和 health evidence 放 Envelope。Host/model availability 必须先冻结成带 revision/evidence 的显式编译输入。本期只计算 canonical content digest，不建设 signer、signature 或供应链验证流程。
@@ -699,7 +712,7 @@ Context 需要两类输入：stable thread context 与 replaceable current-turn 
 | `customer-service.default` | 客服回复 | 默认包含客户/会话 Context、Knowledge、IM/Channel 连接与回复核心闭环；轻量读取 initial，写入、转接和外部动作 on-demand |
 | `creative-studio.default` | 创意工坊 Agent | 默认包含 Canvas、asset、模板与文本/图片/图片编辑/视频/音频生成核心闭环；当前创作 Context initial，编辑与生成动作 on-demand |
 
-这些 key 是官方种子模板，不是 Agent 类型枚举。用户可 fork 成任意自定义 Preset revision，Session 与业务 trigger 最终只引用不可变 revision。D-023 已冻结“角色完整、上下文按需”的产品策略，但上表的能力类别不是可直接编码的候选 exact ids：G0 必须全量检查现有功能、Package/Capability inventory 与各业务入口，生成 02 所属的唯一 machine-readable、versioned official-template seed manifest，并锁定 exact `initial`/`on_demand`、Pack/Skill、typed binding requirements、model route/instruction refs 与 digest。G0 contract gate 未通过前，不得让多个实现 Agent 各自猜测模板默认值；冻结后的实现与 conformance 只消费同一 manifest。
+这些 key 是官方种子模板，不是 Agent 类型枚举。用户可 fork 成任意自定义 Preset revision，Session 与业务 trigger 最终只引用不可变 revision。D-023 已冻结“角色完整、上下文按需”的产品策略，但上表的能力类别不是可直接编码的候选 exact ids：G0 必须全量检查现有功能、Package/Capability inventory 与各业务入口，生成 canonical Rust/generated、versioned official-template seed manifest，并锁定 exact `initial`/`on_demand`、Pack/Skill、typed binding requirements、model route/instruction refs 与 digest。G0 contract gate 未通过前，不得让多个实现 Agent 各自猜测模板默认值；冻结后的实现与 conformance 只消费同一 manifest。
 
 “默认预置”指 Capability/Pack 已进入官方模板 seed，并声明它需要的 typed resource-binding slot；不等于把某个用户的 Knowledge 库、IM 账号/Channel、Robot、Workspace 或凭据写进共享模板。创建/fork/首次使用模板时，产品可以从用户当前可用资源完成默认绑定或提示配置，编译后的 Revision/Snapshot 始终固定实际 resource refs。`on_demand` 也不是缺省关闭：它已属于 Snapshot，只是不在首个模型请求投影完整 Tool/Context schema，模型可通过短索引发现并在 completed-turn boundary 激活，从下一 Turn 开始使用。
 
@@ -915,7 +928,9 @@ Capability membership 与 Tool presentation 分开：
 普通问答不发送 76 个 Gateway stub。模型初始只得到：
 
 - 当前 active capability 中模型可见的 Tool schema；Session 首次 active 等于 initial；
-- `on_demand - active` 非空时才投影固定 initial Capability `runtime.capability.search` 的 Host `capability_search` Tool；它同样具有 Capability/action identity；
+- `on_demand - active` 非空时才投影固定内部 Runtime control operation
+  `capability_search/activate`；它不是 Capability、不进入 initial/on-demand，也不持久化
+  为 Capability definition；
 - 短索引只保存 capability id、name、summary、tags 和 activation-group id，不包含完整 Tool schema/Prompt；
 - `initial = ∅` 且 `on_demand = ∅` 的 zero-tool Preset 不注册 `capability_search`，也不发送任何 capability index。
 
@@ -1141,7 +1156,12 @@ D-020 的 canary 只存在于 internal Beta Session admission，不是产品 Run
 9. **只有硬删除提交之后**才能生成 Nomi-free RC；RC 必须从同一 final content manifest 为五个 native cells 生成目标原生 package，并在各自真实主机重跑 ordinary build/test、protocol conformance、代表性全场景 E2E、Projection rebuild、no-checkpoint rehydrate、Effect uncertain/reconcile、cancel/crash/process-tree cleanup、Remote-only negative surface 和 legacy residual-zero；这些任务可以并行，但 native evidence 不能跨 cell 复用；
 10. Stable 直接提升已经通过的同一 Nomi-free RC digest，不重新构建、重签或换一份含不同代码/依赖的制品。
 
-这里的“同一 digest”优先指同一已经签名并验收的 release artifact；RC 到 Stable 只改变发布渠道元数据，不改变 artifact bytes。若外部分发平台强制生成不同 envelope/signature，则 Host binary、pinned sidecar、schema/migrations、Package inventory、assets 和 lockfiles 必须逐字节来自同一 immutable content manifest，且 Stable 的 `release_content_manifest_digest` 与 RC 完全相同；任何内容变化都视为新候选并重跑完整 gate。此处是产品 release artifact 完整性，不是 D-016 已排除的第三方 Package signing 平台。
+这里的“同一 digest”指同一已经签名并验收的 release artifact。RC 到 Stable 只改变
+发布渠道 metadata/pointer，不改变 artifact bytes、release manifest 或 signature
+envelope，也不重新签名另一份制品。外部分发平台自己的非制品 channel metadata 不属于
+artifact；若平台要求改变受签 envelope 或内容 bytes，则该输出是新候选，必须重新执行
+完整 Gate，不能作为原 RC 的 Stable promotion。此处是 NomiFun 产品 release artifact
+完整性，不是 D-016 已排除的第三方 Package signing 平台。
 
 这里没有固定天数、两发布周期、turn 样本量、性能窗口、P50/P95 或统计质量阈值。Canary/RC 只复用正常结构、功能和故障验收；通过条件由场景矩阵是否完整和 residual 是否为零决定，而不是“观察足够久”。
 
@@ -1257,7 +1277,7 @@ Stable 的 bundled inventory 只能随产品 build 改变，并在应用重启�
 
 ### 12.3 简化 Plugin State
 
-Plugin state 的 exact namespace、row/schema 与 Host API 只引用 02 §4.5、§11.2 的 canonical contract。架构只要求 package/mount identity 由 Host 注入，Package 只能访问自己的四元 namespace，desired/effective boot state 与 Package KV 分离；不得直接打开数据库、自定义 namespace 或把 state 当作权限/Secret store。Stable 不提供第三方 state migration compatibility，Phase N2+ 也只能经受版本约束的 Host state callback，不允许 SQL/DDL。
+Plugin state 的 exact namespace、row/schema 与 Host API 只引用 canonical Rust contract、fresh-v4 schema 与生成物；02 §4.5、§11.2 仅解释语义。架构只要求 package/mount identity 由 Host 注入，Package 只能访问自己的四元 namespace，desired/effective boot state 与 Package KV 分离；不得直接打开数据库、自定义 namespace 或把 state 当作权限/Secret store。Stable 不提供第三方 state migration compatibility，Phase N2+ 也只能经受版本约束的 Host state callback，不允许 SQL/DDL。
 
 ### 12.4 Codex Sidecar 例外
 
@@ -1316,7 +1336,11 @@ N2+ 才评估第二 SDK/entrypoint profile、正式调试工具、dependency/upd
 
 1. **停进程与释放句柄**：coordinator 只调用 G0 冻结的 stop/quiesce port，停止 Desktop/backend、pinned Codex sidecar、Browser/Office/helper 子进程、watcher 与其他可能持有 data-root/SQLite 句柄的相关进程；任一进程未确认停止即终止 cutover，Bootstrap 不得启动；fresh install 也必须在任何 Host/sidecar 启动前完成同一个 initializer 协议。C2 可用该 port 的 deterministic contract fixture 证明 zero-handle/fault semantics，不因此依赖 W2 完成；真实 pinned sidecar/process-tree 集成必须在 C6 通过；
 2. **精确根与模式校验**：把产品配置解析为唯一 absolute canonical data root，只对 root/parent 自身做路径与文件系统 metadata 校验。拒绝空路径、文件系统根、用户 home、workspace/repository root、symlink/junction/reparse target、缺失 parent 或与产品配置不一致的路径；root 不存在表示 fresh install，root 存在表示首次 cutover，其他模糊状态 fail-stop；不得枚举、打开、读取或解析旧 root 内任何文件；
-3. **固定 cutover archive 目标**：仅在 cutover 模式下，于同一 parent 计算唯一 timestamp sibling，例如 `<root-name>.legacy-<UTC timestamp>`。source 与 target 必须位于同一文件系统，target 必须不存在；target collision 或 cross-volume 检测失败立即终止，不得改名重试到另一个目标、覆盖目标或退化为 copy/move-per-file；
+3. **固定 cutover archive 目标**：仅在 cutover 模式下，于同一 parent 计算唯一
+   timestamp sibling `<root-name>.pre-v4-archive-<UTC timestamp>`。source 与 target
+   必须位于同一文件系统，target 必须不存在；target collision 或 cross-volume
+   检测失败立即终止，不得改名重试到另一个目标、覆盖目标或退化为
+   copy/move-per-file；
 4. **先 durable commit immutable parent operation intent**：在任何 whole-root rename、canonical root 创建或 SQLite 打开/创建之前，coordinator 先在 canonical root 的受信任 parent 以 create-once 方式 durable commit 本次 immutable operation intent。exact-set 只引用 02：`operation_id/operation_kind/canonical_normalized_relative_basename/cutover_archive_sibling_relative_basename?/target_data_generation/canonical_schema_manifest_digest`，其中 `operation_kind=fresh|cutover`；不得保存 `phase/status/progress`，durable 后不得原地更新字段。02 维护其 exact wire encoding 与 create/retain/remove 规则。该 intent 只供 pre-Bootstrap coordinator 使用，不进入 Runtime/Plugin/API/日志 payload，也不能使它们发现 archive；
 5. **cutover 才执行原子改名**：cutover 模式在 intent durable 后，对旧 canonical root 执行一次 whole-root atomic rename；fresh install 跳过该步。rename 成功是 archive 成立的唯一时刻；绝不 enumerate/read/parse/copy 单文件，也不生成清单、hash、report、bundle 或 mapping；
 6. **创建 v4 root**：fresh install 在 intent durable 后、cutover 在 intent durable 且 rename 成功后，才在 canonical path 创建新的空目录；
@@ -1340,27 +1364,27 @@ N2+ 才评估第二 SDK/entrypoint profile、正式调试工具、dependency/upd
 
 Fresh v4 的 exact tables、columns、indexes、foreign keys、state vocabularies 与 migration lineage 只定义在 02 §11.2、§11.5 及其 machine-readable schema；本文件不维护表清单。任何在 03 单独新增的表名/字段都不构成实现授权。
 
-D-013 的恢复权威分成两层：canonical root 的受信任 parent 在任何 rename/root/SQLite create 前持有 02 canonical immutable operation intent，以固定 operation kind/basenames/target data generation/canonical schema manifest digest 识别同一次 fresh/cutover 操作；新 v4 SQLite 内的 `schema_metadata` 使用 02 唯一 exact-set，持有 data generation、root identity、migration/seed/projection versions 与 canonical schema manifest digest。Intent 不包含 mutable phase，恢复 phase 只能由 intent、exact canonical/archive-sibling path existence/ready state 与 `schema_metadata` 推导。上述事实一致且 ready 后，coordinator 先 durable remove intent，再由 Bootstrap 接管；恢复看到 ready exact match 时也只执行同一清理。Intent 不赋予 archive reader 权限，不能被 Runtime/Plugin/API/UI 用来发现或恢复 sibling archive。
+D-013 的恢复权威分成两层：canonical root 的受信任 parent 在任何 rename/root/SQLite create 前持有 canonical immutable operation intent，以固定 operation kind/basenames/target data generation/canonical schema manifest digest 识别同一次 fresh/cutover 操作；新 v4 SQLite 内的 `schema_metadata` 使用 fresh-v4 schema 的唯一 exact-set，持有 data generation、root identity、migration/seed/projection versions 与 canonical schema manifest digest。Intent 不包含 mutable phase，恢复 phase 只能由 intent、exact canonical/archive-sibling path existence/ready state 与 `schema_metadata` 推导。上述事实一致且 ready 后，coordinator 先 durable remove intent，再由 Bootstrap 接管；恢复看到 ready exact match 时也只执行同一清理。Intent 不赋予 archive reader 权限，不能被 Runtime/Plugin/API/UI 用来发现或恢复 sibling archive。
 
-初始化顺序固定为 immutable parent operation intent -> cutover-only whole-root rename -> empty canonical root -> fresh schema + `schema_metadata` -> frozen manifest materialization/seed（no resolve） -> ready transition -> durable intent removal -> normal Bootstrap；fresh install 跳过 rename。各箭头是独立 durable state transition，不是跨 filesystem/SQLite 原子事务，intent 自身从不随箭头更新 phase。恢复必须联合 immutable intent + exact paths/ready + metadata 推导 phase；ready exact match 只清理 intent，未完成状态只重试或处置 intent 绑定的新 root，archive 仍不可打开、枚举、读取或恢复。正常 v4 restart/upgrade 只读取 ready canonical root，不依赖、不查找也不重建该 one-shot intent。Intent 与 `schema_metadata` 的 exact encoding、create/retain/remove 和一致性规则只在 02/D-013 canonical contract维护。
+初始化顺序固定为 immutable parent operation intent -> cutover-only whole-root rename -> empty canonical root -> fresh schema + `schema_metadata` -> frozen manifest materialization/seed（no resolve） -> ready transition -> durable intent removal -> normal Bootstrap；fresh install 跳过 rename。各箭头是独立 durable state transition，不是跨 filesystem/SQLite 原子事务，intent 自身从不随箭头更新 phase。恢复必须联合 immutable intent + exact paths/ready + metadata 推导 phase；ready exact match 只清理 intent，未完成状态只重试或处置 intent 绑定的新 root，archive 仍不可打开、枚举、读取或恢复。正常 v4 restart/upgrade 只读取 ready canonical root，不依赖、不查找也不重建该 one-shot intent。Intent 与 `schema_metadata` 的 exact encoding、create/retain/remove 和一致性规则只由 canonical Rust contract、fresh-v4 schema 与生成物维护；02/D-013 仅解释语义。
 
 Preset authoring 与 compiled artifact 必须使用互不混淆的 `PresetRevisionRef` 和 `ResolvedSnapshotRef`。所有业务 Binding/Session 若需要同时冻结 authoring 与 executable contract，就复用完整 `AgentBindingValue`；不得把 snapshot digest 内嵌进 PresetRevisionRef，不得由其中一个推断另一个。
 
-SessionEvent facts/projections、RemoteBinding、Plugin desired/effective state、Runtime build active/draining/retired 和 D-020 no-selector/no-fallback persistence constraints均引用 02 §8.3、§11.2、§11.9 的 canonical schema。本文件只保留对应 ownership：AgentSession facts 归 AgentSession component，RemoteBinding 归 Remote Package，Plugin state 归 PluginManager/Host state API，Runtime build state 归 Supervisor。
+SessionEvent facts/projections、RemoteBinding、Plugin desired/effective state、Runtime build active/draining/retired 和 D-020 no-selector/no-fallback persistence constraints均引用 canonical Rust types、fresh-v4 schema、SessionEvent Registry 与生成物；02 §8.3、§11.2、§11.9 仅解释语义。本文件只保留对应 ownership：AgentSession facts 归 AgentSession component，RemoteBinding 归 Remote Package，Plugin state 归 PluginManager/Host state API，Runtime build state 归 Supervisor。
 
 D-021 已固定 `agent_sessions` 为唯一 aggregate 表且以 UUIDv7 `AgentSessionId` 为唯一产品身份，标题/归档/置顶/未读是其 metadata/projection，fork 产生新 ID。D-022 不增加任何 Test persistence：dirty Test 写入普通可见 `agent_preset_revisions` 事实，clean Test 不写 Revision；两者都写入普通 `agent_sessions`、SessionEvent 与真实 Effect receipt，且没有 test-only flag/table、隐藏记录、TTL 或独立清理状态。D-023 的七模板 exact seed 不散落进手写 migration/代码常量，而由 G0 盘点后冻结的 canonical versioned manifest 生成并以 digest 进入 schema/seed evidence；fresh seed 不 resolve。D-024 只允许临时 `deleting` fence 与最终 `agent_session_id + owner reference + state=deleted + deleted_at` tombstone；SessionEvent/payload/projection/message、Session-owned artifact/resource、Runtime binding 与 checkpoint/cache 全部进入可恢复删除闭包，不建 retention/restore table，领域 Effect/idempotency/receipt/reconciliation/business/outbox 表不级联。D-025 compatibility 是 admission-time 派生结果，不新增 permanent read-only/upcast row；D-026 token revoke 只存在于 Remote auth generation/status，不写 Session lease/provenance；D-027 drain 使用既有 operation deadline 与 Runtime/Effect facts，不建 configurable drain/observation table；D-028 target/availability 写入 release/Capability manifests，不形成产品 Runtime selector或 candidate-state schema。D-019 owner/ROM 只属于实施 ledger，不进入产品数据库。
 
 ## 14. API 与 Protocol Ownership
 
-Canonical HTTP/WS/MCP/IPC paths、request/response DTO、error code、pagination/cursor、event schema 与 OpenAPI inventory 只定义在 02 §11.1、§13–§16 和生成 contract；03 不复制 endpoint 清单。D-014 residual gate 仍要求只有一个正式前缀和一套 canonical DTO，旧 alias/redirect/compat decoder/response projection 为零。
+Canonical HTTP/WS/MCP/IPC paths、request/response DTO、error code、pagination/cursor、event schema 与 OpenAPI inventory 只定义在 canonical Rust/generated contract；02 §11.1、§13–§16 只作语义说明，03 不复制 endpoint 清单。D-014 residual gate 仍要求只有一个正式前缀和一套 canonical DTO，旧 alias/redirect/compat decoder/response projection 为零。
 
-架构边界固定为：Package/Capability/Skill/MCP 与 Preset 管理 API 只操作 authoring/catalog；AgentSession API 以 `/api/agent-sessions` 为唯一 canonical resource 且只操作 canonical Session facts/projections；Runtime status/diagnose 只读当前 pinned build；Remote REST/MCP 只是 02 §7.8/§11.1 定义的 `open/turn/observe/cancel` adapter。任何 direct Capability transport 都必须携带 `agent_session_id` 并通过 Snapshot/active generation。
+架构边界固定为：Package/Capability/Skill/MCP 与 Preset 管理 API 只操作 authoring/catalog；AgentSession API 以 `/api/agent-sessions` 为唯一 canonical resource 且只操作 canonical Session facts/projections；Runtime status/diagnose 只读当前 pinned build；Remote REST/MCP 只是 canonical generated `open/turn/observe/cancel` adapter，02 §7.8/§11.1 仅解释语义。任何 direct Capability transport 都必须携带 `agent_session_id` 并通过 Snapshot/active generation。
 
 RuntimeEvent ingress、Host ACK、unacked resend、Session append/rebuild、Plugin boot reserve/publish、typed domain command/outbox 和 Effect reconcile 是内部 Host protocol，不暴露可让客户端伪造 Event、ACK、generation、receipt 或 build state 的公共 endpoint。EventBus 也没有可靠工作流 API；可靠业务调用进入 owning Package 的 typed command port。
 
 On-demand ActiveCapabilitySet 从 generation 0 开始；只有 02 canonical boundary operation 能在 completed-turn CAS 后提交 generation N+1。API/Runtime 不提供 generation 1 特例、release/revoke、运行中依赖求解或 ResourceHandle eager-create endpoint。
 
-RemoteBinding 管理、installation authentication 与 Remote operation 的 exact path/field 由 02 canonical contract维护。Remote 后续 turn 不接受 Preset/model/Capability/profile/domains/resource override；observe 使用 D-015 cursor；FullAuto error 不产生 confirmation/wait。D-026 固定 request-admission ordering：revoke/rotate commit 后旧 token 的新四操作返回 `REMOTE_AUTH_REQUIRED`，commit 前 durable accepted operation 正常收敛；不发布 Session cancel/revoke/lease/grace API。Replacement token 仍须同 owner + explicit `agent_session_id`。
+RemoteBinding 管理、installation authentication 与 Remote operation 的 exact path/field 由 canonical Rust/generated contract维护。Remote 后续 turn 不接受 Preset/model/Capability/profile/domains/resource override；observe 使用 D-015 cursor；FullAuto error 不产生 confirmation/wait。D-026 固定 request-admission ordering：revoke/rotate commit 后旧 token 的新四操作返回 `REMOTE_AUTH_REQUIRED`，commit 前 durable accepted operation 正常收敛；不发布 Session cancel/revoke/lease/grace API。Replacement token 仍须同 owner + explicit `agent_session_id`。
 
 D-020 internal canary、Domain Wave/cohort、Nomi/Codex assignment、effect-primary selection、RC promotion 与 rollback 没有产品 API/config/writable binding。Stable 只能投影同一 Nomi-free RC content manifest 的 active pinned build，不暴露 dormant Nomi、selector、fallback、pre-v4/archive 或 downgrade action。
 
@@ -1549,9 +1573,9 @@ D-021 的 API identity 已固定为唯一 `agent_session_id`，不发布第二�
 
 ## 17. 必须写成测试的不变量
 
-Machine-readable exact-set、field、path、event kind/version、error code 和 fixture matrix 不在本节重复；required checks 直接执行 02 §14 与 §16 的 canonical contract/conformance artifacts。03 只追加以下架构级不变量：
+Machine-readable exact-set、field、path、event kind/version、error code 和 fixture matrix 不在本节重复；required checks 直接执行 canonical generated contract/conformance artifacts，02 §14 与 §16 只作说明。03 只追加以下架构级不变量：
 
-1. **Single contract source**：02 schema/OpenAPI/IPC/event registry/contract digest 与生成代码是唯一机器契约；03 中不存在第二份 Rust struct、table/API inventory 或 event enum，contract drift check 必须阻断构建。
+1. **Single contract source**：canonical Rust types、fresh-v4 schema、SessionEvent Registry 与生成代码是唯一机器契约；02/03 中不存在第二份 normative Rust struct、table/API inventory 或 event enum，contract drift check 必须阻断构建。
 2. **Narrow PluginContext**：Package 只能看到 identity、validated config、自己的 Host state API、DeclaredServiceView 与 scoped event publisher；SQLite/root Registry/Session/Model/EventBus publisher/AppServices/GatewayDeps reachability 为零。
 3. **Two DAGs**：Runtime ServiceKey DAG 与 compile-time Cargo DAG 都必须无环且 exact；missing/duplicate/version mismatch 或业务 Package 反向进入 Thin Kernel dependency 都在插件代码启动前失败。
 4. **Boot atomic visibility**：Plugin boot 严格按 validate-all、reserve、DAG-order start、publish；required 失败使 Bootstrap fail-stop，optional 失败不发布 contribution；desired state 不被失败覆盖，effective state 可由本次 boot 重建。

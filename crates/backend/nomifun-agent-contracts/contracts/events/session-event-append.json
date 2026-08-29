@@ -1,0 +1,20 @@
+{
+  "agent_session_id": "0199f6d4-7c00-7f00-a001-000000000007",
+  "event_id": "event-message-001",
+  "producer_id": "producer-runtime-001",
+  "idempotency_key": "idem-message-001",
+  "runtime_binding_id": "runtime-binding-001",
+  "runtime_producer_seq": 14,
+  "semantic_event": {
+    "kind": "message/content-part",
+    "kind_version": 1,
+    "correlation_id": "turn-001",
+    "causation_event_id": "event-turn-started-001",
+    "payload": {
+      "storage": "inline_json",
+      "value": {
+        "content": "bounded displayed content"
+      }
+    }
+  }
+}

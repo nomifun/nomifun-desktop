@@ -5840,6 +5840,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nomifun-agent-contracts"
+version = "0.7.4"
+dependencies = [
+ "hex",
+ "jsonschema",
+ "rusqlite",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "nomifun-agent-execution"
 version = "0.7.4"
 dependencies = [

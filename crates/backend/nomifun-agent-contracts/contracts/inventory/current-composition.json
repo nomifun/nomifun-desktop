@@ -1,0 +1,279 @@
+{
+  "schema_version": "1.0.0",
+  "inventory_id": "current-composition.v1",
+  "base_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
+  "roots": [
+    {
+      "root_id": "app-services",
+      "kind": "app_services",
+      "type_name": "nomifun_app::AppServices",
+      "declaration_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/services.rs",
+          "symbols": [
+            "AppServices"
+          ],
+          "line_start": 1553,
+          "line_end": 1712
+        }
+      ],
+      "responsibility_groups": [
+        "agent runtime registry and Conversation runtime state",
+        "authentication and installation token",
+        "browser, robot, SSH and terminal lifecycle",
+        "companion, customer service, creative, knowledge and requirement singletons",
+        "database and repositories",
+        "Gateway MCP server and late dependency injection",
+        "model/provider services",
+        "realtime event bus"
+      ],
+      "direct_consumer_refs": [
+        {
+          "path": "apps/web/src/main.rs",
+          "symbols": [
+            "AppServices::from_config"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-app/src/router/routes.rs",
+          "symbols": [
+            "create_router"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-app/src/router/state.rs",
+          "symbols": [
+            "build_module_states"
+          ]
+        }
+      ],
+      "target_disposition": "Replace the business service bag with app infrastructure handles, Thin Kernel composition and PluginRegistration inventory; remove the AppServices type after its final consumer moves."
+    },
+    {
+      "root_id": "gateway-deps",
+      "kind": "gateway_deps",
+      "type_name": "nomifun_gateway::GatewayDeps",
+      "declaration_refs": [
+        {
+          "path": "crates/backend/nomifun-gateway/src/deps.rs",
+          "symbols": [
+            "GatewayDeps"
+          ],
+          "line_start": 17,
+          "line_end": 114
+        }
+      ],
+      "responsibility_groups": [
+        "Agent and Conversation operations",
+        "Browser and Computer registries",
+        "Channel and Companion services",
+        "Creative and Knowledge services",
+        "Cron, Requirement, AutoWork, IDMM and AgentExecution",
+        "Extension, MCP and Skill catalogs",
+        "File, Shell and Terminal services",
+        "Provider and system settings"
+      ],
+      "direct_consumer_refs": [
+        {
+          "path": "crates/backend/nomifun-gateway/src/registry/capability.rs",
+          "symbols": [
+            "Handler"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-public/src/handler.rs",
+          "symbols": [
+            "RemoteMcpHandler"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-public/src/rest.rs",
+          "symbols": [
+            "RestState"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-app/src/router/routes.rs",
+          "symbols": [
+            "GatewayDeps"
+          ]
+        }
+      ],
+      "target_disposition": "Keep Gateway only as a transport facade over AgentSession and Capability ports; delete GatewayDeps and Registry::global business authority."
+    },
+    {
+      "root_id": "agent-factory-deps",
+      "kind": "agent_factory_deps",
+      "type_name": "nomifun_ai_agent::AgentFactoryDeps",
+      "declaration_refs": [
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/factory/mod.rs",
+          "symbols": [
+            "AgentFactoryDeps"
+          ],
+          "line_start": 92,
+          "line_end": 185
+        }
+      ],
+      "responsibility_groups": [
+        "Browser lane provider",
+        "Companion memory, prompt, skill and summon sinks",
+        "Cron and Requirement sinks",
+        "Gateway MCP injection",
+        "Knowledge retrieval and writeback",
+        "MCP server repository",
+        "Model invoke and image generation",
+        "SSH provider",
+        "workspace and data roots"
+      ],
+      "direct_consumer_refs": [
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/factory/mod.rs",
+          "symbols": [
+            "build_agent_factory"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/factory/nomi.rs",
+          "symbols": []
+        },
+        {
+          "path": "crates/backend/nomifun-app/src/services.rs",
+          "symbols": [
+            "AgentFactoryDeps"
+          ]
+        }
+      ],
+      "target_disposition": "Replace with AgentPreset Compiler output, Capability factories and a declared ServiceKey view; remove the generic Agent factory service bag."
+    },
+    {
+      "root_id": "nomi-build-extra",
+      "kind": "nomi_build_extra",
+      "type_name": "nomifun_api_types::NomiBuildExtra",
+      "declaration_refs": [
+        {
+          "path": "crates/backend/nomifun-api-types/src/agent_build_extra.rs",
+          "symbols": [
+            "NomiBuildExtra"
+          ],
+          "line_start": 112,
+          "line_end": 227
+        }
+      ],
+      "responsibility_groups": [
+        "allowed tools and delegation policy",
+        "Browser and Computer feature booleans",
+        "Channel and Companion context",
+        "Knowledge mounts and writeback policy",
+        "MCP server selections",
+        "session mode",
+        "SSH host and working directory",
+        "system prompt and preset rules"
+      ],
+      "direct_consumer_refs": [
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/factory/nomi.rs",
+          "symbols": [
+            "NomiBuildExtra"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-conversation/src/runtime_options.rs",
+          "symbols": [
+            "NomiBuildExtra"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-channel/src/message_service.rs",
+          "symbols": [
+            "extra"
+          ]
+        }
+      ],
+      "target_disposition": "Replace free-form scene and feature fields with immutable Preset Revision selections, typed resource bindings and CompiledRuntimeProfile."
+    },
+    {
+      "root_id": "conversation-service",
+      "kind": "conversation_service",
+      "type_name": "nomifun_conversation::ConversationService",
+      "declaration_refs": [
+        {
+          "path": "crates/backend/nomifun-conversation/src/service.rs",
+          "symbols": [
+            "ConversationService"
+          ],
+          "line_start": 1007,
+          "line_end": 1087
+        }
+      ],
+      "responsibility_groups": [
+        "Agent runtime creation and turn delivery",
+        "Conversation and message facts",
+        "Cron, MCP, Knowledge and Preset late-wired slots",
+        "delete hooks and domain cascades",
+        "IDMM supervision and model failover",
+        "Runtime state and terminal proof",
+        "turn completion observation"
+      ],
+      "direct_consumer_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/router/state.rs",
+          "symbols": [
+            "ConversationService::new"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-channel/src/message_service.rs",
+          "symbols": [
+            "ConversationService"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-companion/src/service.rs",
+          "symbols": [
+            "attach_companion"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-cron/src/executor.rs",
+          "symbols": [
+            "ConversationService"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+          "symbols": [
+            "ConversationService"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-idmm/src/service.rs",
+          "symbols": [
+            "ConversationService"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-agent-execution/src/production.rs",
+          "symbols": [
+            "ConversationService"
+          ]
+        }
+      ],
+      "target_disposition": "Replace with the single AgentSession aggregate, canonical SessionEvent append/query ports and typed domain commands; delete Conversation identity and late wiring."
+    }
+  ],
+  "absent_target_types": [
+    "AgentBindingValue",
+    "CapabilityManifest",
+    "DeclaredServiceView",
+    "OfficialPresetSeedManifest",
+    "PackageManifest",
+    "PluginRegistration",
+    "PluginStateNamespace",
+    "ResolvedAgentSnapshot",
+    "ServiceKey",
+    "SessionEventAppendPort"
+  ],
+  "service_key_target_map_ref": "crates/backend/nomifun-agent-contracts/contracts/inventory/service-key-target-map.json",
+  "event_outbox_classification_ref": "crates/backend/nomifun-agent-contracts/contracts/inventory/event-outbox-classification.json"
+}

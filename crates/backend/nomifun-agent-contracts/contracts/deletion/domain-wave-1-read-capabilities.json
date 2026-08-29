@@ -1,0 +1,770 @@
+{
+  "schema_version": "1.0.0",
+  "manifest_id": "d014.domain-wave-1-read-capabilities.v1",
+  "manifest_kind": "domain_wave",
+  "wave": "wave1_read_capabilities",
+  "workstream": "W4",
+  "base_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
+  "canonical_producer": {
+    "owner_id": "domain-wave-1-read-capabilities",
+    "target_package_keys": [
+      "domain.companion-memory",
+      "domain.customer-service",
+      "domain.knowledge",
+      "domain.project-memory",
+      "domain.skills",
+      "domain.web-research"
+    ],
+    "target_capability_families": [
+      "attachments.read",
+      "customer-service.read",
+      "knowledge.read",
+      "knowledge.search",
+      "memory.read",
+      "research.core",
+      "skill.instructions",
+      "web.fetch",
+      "web.search"
+    ],
+    "current_producer_refs": [
+      {
+        "path": "crates/backend/nomifun-knowledge/src/service.rs",
+        "symbols": [
+          "KnowledgeService"
+        ],
+        "line_start": 712,
+        "line_end": 750
+      },
+      {
+        "path": "crates/agent/nomi-memory/src/store.rs",
+        "symbols": [
+          "write_memory"
+        ]
+      },
+      {
+        "path": "crates/backend/nomifun-companion/src/store.rs",
+        "symbols": [
+          "CompanionMemory",
+          "CompanionStore"
+        ],
+        "line_start": 137,
+        "line_end": 180
+      },
+      {
+        "path": "crates/backend/nomifun-extension/src/skill_service.rs",
+        "symbols": [
+          "SkillPaths"
+        ]
+      },
+      {
+        "path": "crates/backend/nomifun-ai-agent/src/browser_fetcher.rs",
+        "symbols": [
+          "BrowserFetcher"
+        ]
+      },
+      {
+        "path": "crates/backend/nomifun-customer-service/src/tools.rs",
+        "symbols": [
+          "build_cs_tools"
+        ],
+        "line_start": 279,
+        "line_end": 290
+      }
+    ],
+    "canonical_contract_refs": [
+      {
+        "path": "crates/backend/nomifun-agent-contracts/src/primitives.rs",
+        "symbols": [
+          "CapabilityId",
+          "TypedResourceBinding"
+        ]
+      },
+      {
+        "path": "crates/backend/nomifun-agent-contracts/src/deletion.rs",
+        "symbols": [
+          "DeletionManifest"
+        ]
+      }
+    ]
+  },
+  "direct_consumers": [
+    {
+      "consumer_id": "nomi-read-tool-registration",
+      "kind": "runtime_dispatcher",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/manager/nomi/agent.rs",
+          "symbols": [
+            "KnowledgeSearchTool",
+            "KnowledgeReadTool",
+            "RecallMemoriesTool",
+            "CompanionSkillTool"
+          ],
+          "line_start": 1288,
+          "line_end": 1367
+        }
+      ],
+      "canonical_target": "Capability factories selected by resolved Snapshot",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "gateway-read-capabilities",
+      "kind": "runtime_dispatcher",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-gateway/src/caps_knowledge.rs",
+          "symbols": [
+            "register"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-gateway/src/caps_knowledge_ext.rs",
+          "symbols": [
+            "register"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-gateway/src/caps_memory.rs",
+          "symbols": [
+            "register"
+          ]
+        }
+      ],
+      "canonical_target": "CapabilityRegistry transport projection",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "conversation-knowledge-and-skill-resolution",
+      "kind": "internal_rust",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-conversation/src/service.rs",
+          "symbols": [
+            "with_knowledge_service",
+            "with_preset_service"
+          ],
+          "line_start": 2306,
+          "line_end": 2315
+        },
+        {
+          "path": "crates/backend/nomifun-conversation/src/skill_resolver.rs",
+          "symbols": [
+            "ExtensionSkillResolver"
+          ]
+        }
+      ],
+      "canonical_target": "AgentPreset Compiler plus declared Package services",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "wave1-product-ui",
+      "kind": "product_ui",
+      "current_refs": [
+        {
+          "path": "ui/src/renderer/pages/knowledge/KnowledgeListPage/index.tsx",
+          "symbols": []
+        },
+        {
+          "path": "ui/src/renderer/pages/settings/skill/SkillCard.tsx",
+          "symbols": []
+        },
+        {
+          "path": "ui/src/renderer/pages/customerService/index.tsx",
+          "symbols": []
+        }
+      ],
+      "canonical_target": "Package management plus Capability/Skill catalog and binding pickers",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "wave1-composition",
+      "kind": "composition_root",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/router/state.rs",
+          "symbols": [
+            "build_module_states",
+            "build_companion_state"
+          ],
+          "line_start": 537,
+          "line_end": 577
+        }
+      ],
+      "canonical_target": "PluginRegistration inventory",
+      "same_change_required": true
+    }
+  ],
+  "legacy_surfaces": [
+    {
+      "surface_id": "wave1.routes.parallel-skill-agent-catalog",
+      "category": "route",
+      "symbols_or_patterns": [
+        "/api/extensions/agents",
+        "/api/extensions/presets",
+        "/api/extensions/skills"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-extension/src/routes.rs",
+          "symbols": [
+            "extension_routes"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-extension/src/skill_routes.rs",
+          "symbols": [
+            "skill_routes"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 1 owning slices",
+      "replacement_owner": "Package/Capability/Skill catalog"
+    },
+    {
+      "surface_id": "wave1.dto.binding-and-extension-identities",
+      "category": "dto",
+      "symbols_or_patterns": [
+        "ExtAgent",
+        "ExtPreset",
+        "ExtSkill",
+        "KnowledgeBinding"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-extension/src/types.rs",
+          "symbols": [
+            "ExtContributes"
+          ],
+          "line_start": 333,
+          "line_end": 355
+        },
+        {
+          "path": "crates/backend/nomifun-knowledge/src/service.rs",
+          "symbols": [
+            "KnowledgeBinding"
+          ],
+          "line_start": 283,
+          "line_end": 310
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 1 owning slices",
+      "replacement_owner": "Capability and typed resource contracts"
+    },
+    {
+      "surface_id": "wave1.events.direct-broadcast",
+      "category": "event_name_field_projection",
+      "symbols_or_patterns": [
+        "companion.*",
+        "knowledge.*",
+        "requirement.*"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-knowledge/src/events.rs",
+          "symbols": [
+            "KnowledgeEventEmitter"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-companion/src/events.rs",
+          "symbols": [
+            "CompanionEventEmitter"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 1 owning slices",
+      "replacement_owner": "owning-domain event/outbox plus best-effort projections"
+    },
+    {
+      "surface_id": "wave1.tables.legacy-bindings-and-memory",
+      "category": "table_repository_mapping",
+      "symbols_or_patterns": [
+        "companion_memories",
+        "knowledge_binding_bases",
+        "knowledge_bindings",
+        "presets"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-db/migrations/001_v3_baseline.sql",
+          "symbols": [
+            "CREATE TABLE knowledge_bindings",
+            "CREATE TABLE presets"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-companion/src/store.rs",
+          "symbols": [
+            "companion_memories"
+          ]
+        }
+      ],
+      "disposition": "retain_historical_source_excluded_from_v4",
+      "removal_boundary": "C2 plus Wave 1",
+      "replacement_owner": "fresh-v4 owning-domain schema and typed bindings"
+    },
+    {
+      "surface_id": "wave1.config.nomi-extra-and-preset-bags",
+      "category": "config_env_feature",
+      "symbols_or_patterns": [
+        "knowledge_mounts",
+        "knowledge_writeback",
+        "preset_rules"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-api-types/src/agent_build_extra.rs",
+          "symbols": [
+            "knowledge_mounts",
+            "knowledge_writeback",
+            "preset_rules"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-preset/src/service.rs",
+          "symbols": [
+            "ResolvedPresetSnapshot"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 1 owning slices",
+      "replacement_owner": "AgentPreset Revision and typed resources"
+    },
+    {
+      "surface_id": "wave1.mode-approval.write-allowlist",
+      "category": "mode_approval_permission",
+      "symbols_or_patterns": [
+        "allow_list",
+        "approval gate",
+        "knowledge_write"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/manager/nomi/agent.rs",
+          "symbols": [
+            "knowledge_write",
+            "config.tools.allow_list"
+          ],
+          "line_start": 1123,
+          "line_end": 1175
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "C1/Wave 1",
+      "replacement_owner": "FullAuto Snapshot allowlist"
+    },
+    {
+      "surface_id": "wave1.factory-read-tool-registration",
+      "category": "factory_manager_wiring",
+      "symbols_or_patterns": [
+        "CompanionMemorySink",
+        "KnowledgeRetrievalSink",
+        "KnowledgeWritebackSink"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/factory/mod.rs",
+          "symbols": [
+            "companion_sink",
+            "knowledge_retrieval",
+            "knowledge_writeback"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 1 owning slices",
+      "replacement_owner": "Plugin factories and Capability handlers"
+    },
+    {
+      "surface_id": "wave1.gateway-deps-read-services",
+      "category": "gateway_deps_wiring",
+      "symbols_or_patterns": [
+        "companion_service",
+        "knowledge_service"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-gateway/src/deps.rs",
+          "symbols": [
+            "companion_service",
+            "knowledge_service"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 1 owning slices",
+      "replacement_owner": "declared ServiceKey views"
+    },
+    {
+      "surface_id": "wave1.app-services-read-services",
+      "category": "app_services_wiring",
+      "symbols_or_patterns": [
+        "companion_service",
+        "customer_service_service",
+        "knowledge_service"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/services.rs",
+          "symbols": [
+            "companion_service",
+            "customer_service_service",
+            "knowledge_service"
+          ],
+          "line_start": 1662,
+          "line_end": 1691
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 1/Wave 4 owning slices",
+      "replacement_owner": "PluginRegistration inventory"
+    },
+    {
+      "surface_id": "wave1.nomi-runtime-read-tools",
+      "category": "nomi_runtime_wiring",
+      "symbols_or_patterns": [
+        "KnowledgeReadTool",
+        "KnowledgeSearchTool",
+        "RecallMemoriesTool",
+        "RememberTool"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/agent/nomi-agent/src/knowledge_tools.rs",
+          "symbols": [
+            "KnowledgeReadTool",
+            "KnowledgeSearchTool"
+          ]
+        },
+        {
+          "path": "crates/agent/nomi-agent/src/memory_tools.rs",
+          "symbols": [
+            "RememberTool"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 1/C9",
+      "replacement_owner": "canonical Capability handlers"
+    },
+    {
+      "surface_id": "wave1.tests-fixtures",
+      "category": "test_fixture_golden",
+      "symbols_or_patterns": [
+        "knowledge_search_e2e",
+        "memory_test",
+        "SkillMarketCard"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-ai-agent/tests/knowledge_search_e2e.rs",
+          "symbols": []
+        },
+        {
+          "path": "crates/agent/nomi-agent/tests/acceptance/memory_test.rs",
+          "symbols": []
+        },
+        {
+          "path": "ui/src/renderer/pages/settings/skill/SkillMarketCard.tsx",
+          "symbols": []
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 1",
+      "replacement_owner": "Wave 1 canonical E2E and catalog tests"
+    },
+    {
+      "surface_id": "wave1.dependencies",
+      "category": "crate_package_dependency",
+      "symbols_or_patterns": [
+        "nomifun-ai-agent",
+        "nomifun-conversation"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-companion/Cargo.toml",
+          "symbols": [
+            "nomifun-ai-agent",
+            "nomifun-conversation"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-customer-service/Cargo.toml",
+          "symbols": [
+            "nomifun-ai-agent"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 1/Wave 4",
+      "replacement_owner": "contract and ServiceKey dependencies"
+    }
+  ],
+  "production_roots": [
+    {
+      "root_id": "wave1-app-composition",
+      "kind": "composition_startup",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/router/state.rs",
+          "symbols": [
+            "build_module_states"
+          ]
+        }
+      ],
+      "expected_canonical_owner": "PluginRegistration inventory"
+    },
+    {
+      "root_id": "wave1-gateway",
+      "kind": "runtime_dispatcher",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-gateway/src/registry/mod.rs",
+          "symbols": [
+            "caps_knowledge",
+            "caps_memory"
+          ]
+        }
+      ],
+      "expected_canonical_owner": "CapabilityRegistry"
+    },
+    {
+      "root_id": "wave1-product-ui",
+      "kind": "product_ui_route",
+      "current_refs": [
+        {
+          "path": "ui/src/renderer/pages/knowledge/KnowledgeListPage/index.tsx",
+          "symbols": []
+        },
+        {
+          "path": "ui/src/renderer/pages/customerService/index.tsx",
+          "symbols": []
+        }
+      ],
+      "expected_canonical_owner": "domain packages and generic Agent binding UI"
+    },
+    {
+      "root_id": "wave1-runtime",
+      "kind": "runtime_dispatcher",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/manager/nomi/agent.rs",
+          "symbols": [
+            "NomiAgentManager"
+          ]
+        }
+      ],
+      "expected_canonical_owner": "Codex Runtime plus CapabilityRegistry"
+    }
+  ],
+  "allowed_residuals": {
+    "policy": "empty",
+    "entries": []
+  },
+  "target_zero": [
+    {
+      "assertion_id": "wave1.routes.zero",
+      "dimension": "routes",
+      "expected_count": 0,
+      "scope": "parallel Agent/Skill/Preset read capability routes"
+    },
+    {
+      "assertion_id": "wave1.identities.zero",
+      "dimension": "source_symbols",
+      "expected_count": 0,
+      "scope": "duplicate Native/Gateway/MCP/Extension read capability identities"
+    },
+    {
+      "assertion_id": "wave1.wiring.zero",
+      "dimension": "factory_manager_wiring",
+      "expected_count": 0,
+      "scope": "Wave 1 direct consumers"
+    },
+    {
+      "assertion_id": "wave1.gateway-deps.zero",
+      "dimension": "gateway_deps_wiring",
+      "expected_count": 0,
+      "scope": "Wave 1 services"
+    },
+    {
+      "assertion_id": "wave1.app-services.zero",
+      "dimension": "app_services_wiring",
+      "expected_count": 0,
+      "scope": "Wave 1 services"
+    },
+    {
+      "assertion_id": "wave1.tests.zero",
+      "dimension": "tests_fixtures",
+      "expected_count": 0,
+      "scope": "legacy-only and compatibility fixtures"
+    },
+    {
+      "assertion_id": "wave1.dependencies.zero",
+      "dimension": "dependencies",
+      "expected_count": 0,
+      "scope": "domain-to-legacy runtime dependencies"
+    },
+    {
+      "assertion_id": "wave1.reachability.zero",
+      "dimension": "runtime_reachability",
+      "expected_count": 0,
+      "scope": "Wave 1 production roots to legacy nodes"
+    }
+  ],
+  "evidence_refs": [
+    {
+      "evidence_id": "wave1.residual",
+      "kind": "source_scan",
+      "gate_name": "gate-d014-residual-wave1-read-capabilities",
+      "source_refs": [
+        {
+          "path": "crates/backend/nomifun-agent-contracts/contracts/deletion/domain-wave-1-read-capabilities.json",
+          "symbols": []
+        }
+      ],
+      "required_for_closure": true
+    },
+    {
+      "evidence_id": "wave1.reachability",
+      "kind": "runtime_reachability",
+      "gate_name": "gate-d014-reachability-wave1-read-capabilities",
+      "source_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/router/state.rs",
+          "symbols": [
+            "build_module_states"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/manager/nomi/agent.rs",
+          "symbols": []
+        }
+      ],
+      "required_for_closure": true
+    },
+    {
+      "evidence_id": "wave1.functional-fault",
+      "kind": "fault_test",
+      "gate_name": "gate-domain-wave1-functional-fault",
+      "source_refs": [
+        {
+          "path": "crates/backend/nomifun-knowledge/src/service.rs",
+          "symbols": [
+            "publish_pending_tree_event"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-customer-service/src/tools.rs",
+          "symbols": [
+            "build_cs_tools"
+          ]
+        }
+      ],
+      "required_for_closure": true
+    }
+  ],
+  "d027": {
+    "applicability": "domain_wave",
+    "admission_fence_refs": [
+      {
+        "path": "crates/backend/nomifun-ai-agent/src/runtime_registry.rs",
+        "symbols": [
+          "AgentRuntimeRegistry"
+        ]
+      }
+    ],
+    "deadline_authority_refs": [
+      {
+        "path": "crates/backend/nomifun-conversation/src/runtime_state.rs",
+        "symbols": [
+          "ConversationRuntimeStateService"
+        ]
+      }
+    ],
+    "outstanding_set_refs": [
+      {
+        "kind": "running_sessions",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-ai-agent/src/manager/nomi/agent.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "tool_dispatches",
+        "current_refs": [
+          {
+            "path": "crates/agent/nomi-agent/src/knowledge_tools.rs",
+            "symbols": []
+          },
+          {
+            "path": "crates/agent/nomi-agent/src/memory_tools.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "effect_dispatches",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-knowledge/src/service.rs",
+            "symbols": [
+              "KnowledgeService"
+            ]
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "resource_handles",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-knowledge/src/workspace_binding.rs",
+            "symbols": [
+              "WorkspaceBindingLease"
+            ]
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "runtime_reachability",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-gateway/src/caps_knowledge.rs",
+            "symbols": []
+          },
+          {
+            "path": "crates/backend/nomifun-gateway/src/caps_memory.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      }
+    ],
+    "uncertain_handoff_owner": "owning-domain-plugin",
+    "delete_contract_ref": "D-024 DeleteAgentSession",
+    "zero_required_before_legacy_delete": true
+  },
+  "closure_status": {
+    "state": "inventory_complete",
+    "canonical_producer_ready": false,
+    "direct_consumers_switched": false,
+    "legacy_surfaces_deleted": false,
+    "residual_zero_proven": false,
+    "reachability_zero_proven": false,
+    "d027_zero_proven": false,
+    "evidence_complete": false,
+    "notes": [
+      "C0 inventory only; this manifest does not migrate or delete production code.",
+      "Knowledge and AgentExecution outbox contracts are reusable evidence, not automatic proof for other domains."
+    ]
+  }
+}

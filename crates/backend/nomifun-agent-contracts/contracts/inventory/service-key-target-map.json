@@ -1,0 +1,711 @@
+{
+  "schema_version": "1.0.0",
+  "inventory_id": "service-key-target-map.v1",
+  "base_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
+  "invariants": [
+    "Cargo DAG and runtime ServiceKey DAG are independently acyclic",
+    "each ServiceKey has exactly one provider in one Host generation",
+    "missing, duplicate, version-mismatched or cyclic services fail before plugin start",
+    "ServiceKey is not persisted and is absent from Product API, Preset and Snapshot",
+    "consumers receive only their manifest-declared service view",
+    "start order is topological and stop order is the exact reverse"
+  ],
+  "nodes": [
+    {
+      "service_key": "service.agent-session-command.v1",
+      "provider_package_key": "platform.agent-core",
+      "purpose": "Create, turn, cancel, fork and delete canonical AgentSessions.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-conversation/src/service.rs",
+          "symbols": [
+            "ConversationService"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.agent-session-query.v1",
+      "provider_package_key": "platform.agent-core",
+      "purpose": "Read canonical Session events, projections, lifecycle and ownership.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-conversation/src/service.rs",
+          "symbols": [
+            "ConversationService"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-db/src/repository/conversation.rs",
+          "symbols": [
+            "IConversationRepository"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.knowledge-query.v1",
+      "provider_package_key": "domain.knowledge",
+      "purpose": "Typed Knowledge search/read and bounded context retrieval.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-knowledge/src/service.rs",
+          "symbols": [
+            "KnowledgeService"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.knowledge-write.v1",
+      "provider_package_key": "domain.knowledge",
+      "purpose": "Typed Knowledge writeback and owning-domain reconciliation.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-knowledge/src/turn_writeback.rs",
+          "symbols": [
+            "TurnWritebackCandidate",
+            "TurnWritebackOutput"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-knowledge/src/service.rs",
+          "symbols": [
+            "KnowledgeService"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.companion-profile.v1",
+      "provider_package_key": "domain.companion",
+      "purpose": "Resolve Companion persona, model-facing context and exact resource identity.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-companion/src/service.rs",
+          "symbols": [
+            "CompanionService"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-companion/src/registry.rs",
+          "symbols": [
+            "CompanionRegistry"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.companion-memory.v1",
+      "provider_package_key": "domain.companion-memory",
+      "purpose": "Recall, write, merge and evolve Companion-owned memory.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-companion/src/store.rs",
+          "symbols": [
+            "CompanionStore"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.channel-transport.v1",
+      "provider_package_key": "domain.channel",
+      "purpose": "Manage Channel connections, inbound identity and outbound delivery.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-channel/src/manager.rs",
+          "symbols": [
+            "ChannelManager"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.customer-dialogue.v1",
+      "provider_package_key": "domain.customer-service",
+      "purpose": "Execute customer dialogue turns and own customer notes/handoff facts.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-customer-service/src/dialogue.rs",
+          "symbols": [
+            "CsDialogueEngine"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-customer-service/src/service.rs",
+          "symbols": [
+            "CustomerServiceService"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.file-workspace.v1",
+      "provider_package_key": "domain.workspace-execution",
+      "purpose": "Typed filesystem, workspace, artifact and path-authority operations.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-file/src/lib.rs",
+          "symbols": [
+            "FileService",
+            "PathAuthority",
+            "SnapshotService"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.terminal-driver.v1",
+      "provider_package_key": "domain.workspace-execution",
+      "purpose": "Typed PTY/process lifecycle and terminal turn operations.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-terminal/src/lib.rs",
+          "symbols": [
+            "TerminalDriver",
+            "TerminalService"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.ssh-execution.v1",
+      "provider_package_key": "domain.ssh",
+      "purpose": "Typed SSH host, connection, remote filesystem and process operations.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-ssh/src/lib.rs",
+          "symbols": [
+            "SshConnectionPool",
+            "SshHostService"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.mcp-catalog.v1",
+      "provider_package_key": "domain.mcp-connectors",
+      "purpose": "MCP server configuration, discovery and Tool-to-Capability materialization.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-mcp/src/lib.rs",
+          "symbols": [
+            "McpConfigService",
+            "McpSyncService"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.browser-host.v1",
+      "provider_package_key": "domain.browser",
+      "purpose": "Typed Browser host, lane, profile and cleanup operations.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-browser-platform/src/lib.rs",
+          "symbols": [
+            "BrowserSessionHub"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/factory/browser_lane.rs",
+          "symbols": [
+            "BrowserLaneBinding"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.workshop-assets.v1",
+      "provider_package_key": "domain.workshop",
+      "purpose": "Own Canvas, Asset, Template and Director facts and binary references.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-workshop/src/service.rs",
+          "symbols": [
+            "WorkshopService"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.creation-tasks.v1",
+      "provider_package_key": "domain.creation",
+      "purpose": "Own multimodal creation tasks, idempotency and result artifacts.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-creation/src/service.rs",
+          "symbols": [
+            "CreationService"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.model-invoke.v1",
+      "provider_package_key": "platform.model-adapters",
+      "purpose": "Invoke non-chat model tasks through exact provider/model adapters.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-model-invoke/src/service.rs",
+          "symbols": [
+            "ModelInvokeService"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.requirement-command.v1",
+      "provider_package_key": "domain.requirements",
+      "purpose": "Own Requirement aggregate commands, claims and terminal verdicts.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-requirement/src/service.rs",
+          "symbols": [
+            "RequirementService"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.autowork-control.v1",
+      "provider_package_key": "domain.autowork",
+      "purpose": "Own AutoWork loop admission, durable progress and claim execution.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+          "symbols": [
+            "AutoWorkRunner"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.idmm-supervision.v1",
+      "provider_package_key": "domain.idmm",
+      "purpose": "Arm, observe and intervene in AgentSession or automation execution.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-idmm/src/service.rs",
+          "symbols": [
+            "IdmmService"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-idmm/src/supervisor.rs",
+          "symbols": [
+            "IdmmManager"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.agent-execution.v1",
+      "provider_package_key": "domain.agent-execution",
+      "purpose": "Own collaboration DAG, attempts, receipts and domain outbox.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-agent-execution/src/engine.rs",
+          "symbols": [
+            "AgentExecutionEngine"
+          ]
+        }
+      ]
+    },
+    {
+      "service_key": "service.webhook-notifier.v1",
+      "provider_package_key": "domain.webhook",
+      "purpose": "Deliver idempotent external completion notifications.",
+      "current_provider_refs": [
+        {
+          "path": "crates/backend/nomifun-webhook/src/service.rs",
+          "symbols": [
+            "WebhookService"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-webhook/src/notifier.rs",
+          "symbols": [
+            "CompletionNotifierImpl"
+          ]
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "consumer_package_key": "domain.companion",
+      "requires_service_key": "service.agent-session-command.v1",
+      "migration_wave": "wave4_identity_channels_devices",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-companion/src/service.rs",
+          "symbols": [
+            "attach_companion"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.companion",
+      "requires_service_key": "service.companion-memory.v1",
+      "migration_wave": "wave4_identity_channels_devices",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-companion/src/service.rs",
+          "symbols": [
+            "memory_sink"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.companion",
+      "requires_service_key": "service.knowledge-query.v1",
+      "migration_wave": "wave4_identity_channels_devices",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/router/state.rs",
+          "symbols": [
+            "build_companion_state",
+            "with_knowledge_service"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.customer-service",
+      "requires_service_key": "service.knowledge-query.v1",
+      "migration_wave": "wave1_read_capabilities",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-customer-service/src/tools.rs",
+          "symbols": [
+            "build_cs_tools"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.channel",
+      "requires_service_key": "service.agent-session-command.v1",
+      "migration_wave": "wave4_identity_channels_devices",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-channel/src/message_service.rs",
+          "symbols": [
+            "ConversationService"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.channel",
+      "requires_service_key": "service.companion-profile.v1",
+      "migration_wave": "wave4_identity_channels_devices",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-channel/src/message_service.rs",
+          "symbols": [
+            "ChannelAgentProfile"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.channel",
+      "requires_service_key": "service.customer-dialogue.v1",
+      "migration_wave": "wave4_identity_channels_devices",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-channel/src/message_service.rs",
+          "symbols": [
+            "CsRouting"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.channel",
+      "requires_service_key": "service.workshop-assets.v1",
+      "migration_wave": "wave4_identity_channels_devices",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-channel/src/message_service.rs",
+          "symbols": [
+            "AssetResolver"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.robot",
+      "requires_service_key": "service.agent-session-command.v1",
+      "migration_wave": "wave4_identity_channels_devices",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-robot/src/wiring/dispatcher.rs",
+          "symbols": [
+            "RobotConversationBackend"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.robot",
+      "requires_service_key": "service.companion-profile.v1",
+      "migration_wave": "wave4_identity_channels_devices",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-robot/src/wiring/dispatcher.rs",
+          "symbols": [
+            "vad_engine",
+            "vad_tuning"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.robot",
+      "requires_service_key": "service.model-invoke.v1",
+      "migration_wave": "wave4_identity_channels_devices",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-robot/Cargo.toml",
+          "symbols": [
+            "nomifun-model-invoke"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.creation",
+      "requires_service_key": "service.model-invoke.v1",
+      "migration_wave": "wave3_creative_multimodal",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-creation/src/service.rs",
+          "symbols": [
+            "ModelInvokeService"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.creation",
+      "requires_service_key": "service.workshop-assets.v1",
+      "migration_wave": "wave3_creative_multimodal",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/workshop_bridge.rs",
+          "symbols": [
+            "WorkshopAssetBridge"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.office",
+      "requires_service_key": "service.file-workspace.v1",
+      "migration_wave": "wave3_creative_multimodal",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-office/Cargo.toml",
+          "symbols": [
+            "nomifun-file"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.autowork",
+      "requires_service_key": "service.agent-session-command.v1",
+      "migration_wave": "wave5_automation_supervision_remote",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+          "symbols": [
+            "ConversationService"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.autowork",
+      "requires_service_key": "service.requirement-command.v1",
+      "migration_wave": "wave5_automation_supervision_remote",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+          "symbols": [
+            "RequirementService"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.autowork",
+      "requires_service_key": "service.terminal-driver.v1",
+      "migration_wave": "wave5_automation_supervision_remote",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+          "symbols": [
+            "TerminalDriver"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.autowork",
+      "requires_service_key": "service.idmm-supervision.v1",
+      "migration_wave": "wave5_automation_supervision_remote",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-requirement/src/auto_work_runner.rs",
+          "symbols": [
+            "IdmmHandle"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.cron",
+      "requires_service_key": "service.agent-session-command.v1",
+      "migration_wave": "wave5_automation_supervision_remote",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-cron/src/executor.rs",
+          "symbols": [
+            "ConversationService"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.idmm",
+      "requires_service_key": "service.agent-session-query.v1",
+      "migration_wave": "wave5_automation_supervision_remote",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-idmm/src/probe.rs",
+          "symbols": [
+            "ConversationService"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.idmm",
+      "requires_service_key": "service.terminal-driver.v1",
+      "migration_wave": "wave5_automation_supervision_remote",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-idmm/src/service.rs",
+          "symbols": [
+            "TerminalDriver"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.idmm",
+      "requires_service_key": "service.model-invoke.v1",
+      "migration_wave": "wave5_automation_supervision_remote",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-idmm/Cargo.toml",
+          "symbols": [
+            "nomifun-model-invoke"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.agent-execution",
+      "requires_service_key": "service.agent-session-command.v1",
+      "migration_wave": "wave5_automation_supervision_remote",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-agent-execution/src/production.rs",
+          "symbols": [
+            "ConversationService"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.agent-execution",
+      "requires_service_key": "service.file-workspace.v1",
+      "migration_wave": "wave5_automation_supervision_remote",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-agent-execution/Cargo.toml",
+          "symbols": [
+            "nomifun-file"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.agent-execution",
+      "requires_service_key": "service.model-invoke.v1",
+      "migration_wave": "wave5_automation_supervision_remote",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-agent-execution/Cargo.toml",
+          "symbols": [
+            "nomifun-model-invoke"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.requirements",
+      "requires_service_key": "service.webhook-notifier.v1",
+      "migration_wave": "wave5_automation_supervision_remote",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-requirement/src/service.rs",
+          "symbols": [
+            "CompletionNotifier"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-webhook/src/notifier.rs",
+          "symbols": [
+            "CompletionNotifierImpl"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.remote",
+      "requires_service_key": "service.agent-session-command.v1",
+      "migration_wave": "wave5_automation_supervision_remote",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-public/src/handler.rs",
+          "symbols": [
+            "GatewayDeps",
+            "Registry::global"
+          ]
+        }
+      ]
+    },
+    {
+      "consumer_package_key": "domain.remote",
+      "requires_service_key": "service.agent-session-query.v1",
+      "migration_wave": "wave5_automation_supervision_remote",
+      "current_coupling_refs": [
+        {
+          "path": "crates/backend/nomifun-public/src/session.rs",
+          "symbols": [
+            "RemoteMcpSessionAdmissionAuthority"
+          ]
+        }
+      ]
+    }
+  ]
+}
