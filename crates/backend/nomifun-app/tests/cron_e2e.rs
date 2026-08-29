@@ -351,7 +351,6 @@ async fn au3_authenticated_users_cannot_observe_or_mutate_each_others_cron_jobs(
                     "model": "model-secondary",
                     "cli_path": "/bin/sh",
                     "custom_agent_id": FORGED_CUSTOM_AGENT_ID,
-                    "mode": "yolo",
                     "config_options": { "host": "true" },
                     "workspace": "/unsafe",
                     "clear_context_each_run": true
