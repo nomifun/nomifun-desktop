@@ -626,7 +626,7 @@ mod tests {
             invalid
                 .get("error")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|error| error.contains("invalid arguments")),
+                == Some("invalid_tool_arguments"),
             "expected typed validation error, got {invalid}"
         );
         let revoked = registry
@@ -669,7 +669,7 @@ mod tests {
             invalid
                 .get("error")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|error| error.contains("invalid arguments")),
+                == Some("invalid_tool_arguments"),
             "expected typed validation error on renewal, got {invalid}"
         );
 
