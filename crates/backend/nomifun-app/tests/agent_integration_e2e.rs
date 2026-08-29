@@ -169,18 +169,27 @@ impl AgentRuntimeRegistry for MockAgentRuntimeRegistry {
 
 // ── Test App builder with mock agents ───────────────────────────
 
-async fn build_app_with_mock_runtime_registry() -> (axum::Router, nomifun_app::AppServices, Arc<MockAgentRuntimeRegistry>) {
+async fn build_app_with_mock_runtime_registry() -> (
+    axum::Router,
+    nomifun_app::AppServices,
+    Arc<MockAgentRuntimeRegistry>,
+    tempfile::TempDir,
+) {
+    let root = tempfile::tempdir().unwrap();
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = nomifun_app::AppServices::from_config(db, &nomifun_app::AppConfig::default())
-        .await
-        .unwrap();
+    let config = nomifun_app::AppConfig {
+        data_dir: root.path().join("data"),
+        work_dir: root.path().join("work"),
+        ..nomifun_app::AppConfig::default()
+    };
+    let services = nomifun_app::AppServices::from_config(db, &config).await.unwrap();
     seed_mock_provider(&services).await;
 
     let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
     let services = services.with_agent_runtime_registry(runtime_registry.clone());
 
     let router = nomifun_app::create_router(&services).await;
-    (router, services, runtime_registry)
+    (router, services, runtime_registry, root)
 }
 
 /// Nomi is the only engine, and its runtime options are refused without a
@@ -233,7 +242,8 @@ async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str, na
 
 #[tokio::test]
 async fn send_message_with_mock_agent_returns_202() {
-    let (mut app, services, _runtime_registry) = build_app_with_mock_runtime_registry().await;
+    let (mut app, services, _runtime_registry, _root) =
+        build_app_with_mock_runtime_registry().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Mock Agent Test").await;
 
@@ -257,7 +267,8 @@ async fn send_message_with_mock_agent_returns_202() {
 
 #[tokio::test]
 async fn stop_stream_with_mock_agent() {
-    let (mut app, services, runtime_registry) = build_app_with_mock_runtime_registry().await;
+    let (mut app, services, runtime_registry, _root) =
+        build_app_with_mock_runtime_registry().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Stop Test").await;
     runtime_registry.insert(&conv_id, "/mock-workspace");
@@ -282,7 +293,8 @@ async fn stop_stream_with_mock_agent() {
 
 #[tokio::test]
 async fn warmup_with_mock_agent() {
-    let (mut app, services, _runtime_registry) = build_app_with_mock_runtime_registry().await;
+    let (mut app, services, _runtime_registry, _root) =
+        build_app_with_mock_runtime_registry().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Warmup Test").await;
 
@@ -303,7 +315,8 @@ async fn warmup_with_mock_agent() {
 
 #[tokio::test]
 async fn slash_commands_with_mock_returns_empty() {
-    let (mut app, services, runtime_registry) = build_app_with_mock_runtime_registry().await;
+    let (mut app, services, runtime_registry, _root) =
+        build_app_with_mock_runtime_registry().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Slash Mock Test").await;
     runtime_registry.insert(&conv_id, "/mock-workspace");
@@ -323,7 +336,8 @@ async fn slash_commands_with_mock_returns_empty() {
 
 #[tokio::test]
 async fn side_question_with_mock_agent() {
-    let (mut app, services, runtime_registry) = build_app_with_mock_runtime_registry().await;
+    let (mut app, services, runtime_registry, _root) =
+        build_app_with_mock_runtime_registry().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Side Q Mock").await;
     runtime_registry.insert(&conv_id, "/mock-workspace");
