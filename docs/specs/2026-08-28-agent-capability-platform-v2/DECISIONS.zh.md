@@ -412,7 +412,9 @@ Phase N 不得反向改变已经稳定的 AgentPreset、Capability、Skill、MCP
 
 1. 若 canonical data root 不存在，则视为 fresh install，直接创建 v4 root；不得扫描其他路径猜测旧数据；
 2. 若 canonical data root 存在，先停止会持有该目录的 NomiFun 进程、Runtime sidecar 和后台 worker，并校验源路径、同卷 sibling archive 目标与目标不存在；
-3. 使用操作系统同文件系统 rename 原语将 **整个 root** 改名为 `<canonical-name>.legacy-v3-YYYYMMDD-HHMMSS`；禁止以 copy/delete、逐文件 move 或跨卷 fallback 模拟成功；
+3. 使用操作系统同文件系统 rename 原语将 **整个 root** 改名为
+   `<canonical-name>.pre-v4-archive-<UTC timestamp>`；禁止以 copy/delete、逐文件
+   move 或跨卷 fallback 模拟成功；
 4. rename 成功后，才允许在原 canonical path 创建新的空目录，执行 v4 自己的 baseline migration、七模板和 bundled Package seed，最后写入 v4 ready marker；
 5. rename、路径校验、跨卷检查或 archive 目标冲突失败时，旧 root 必须保持原样，canonical path 不得出现半成品 v4，启动以明确错误终止；
 6. 若 rename 已成功但 v4 baseline/seed 失败，archive 保持不动；重试只可清理或重建新生成且带 initializing marker 的不完整 v4 root，不自动把 archive 改名回来；

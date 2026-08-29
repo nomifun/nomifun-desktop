@@ -1,0 +1,289 @@
+{
+  "digest_algorithm": "sorted-json-sha256-v1",
+  "payload": {
+    "registry_version": "canonical-errors-v1",
+    "entries": [
+      {
+        "code": "SESSION_DELETED",
+        "version": 1,
+        "class": "session",
+        "retry": "never",
+        "terminal_scope": "session_deleted",
+        "http_status": 410
+      },
+      {
+        "code": "CAPABILITY_NOT_IN_PRESET",
+        "version": 1,
+        "class": "capability",
+        "retry": "new_session_required",
+        "terminal_scope": "request",
+        "http_status": 422
+      },
+      {
+        "code": "CAPABILITY_NOT_ACTIVE",
+        "version": 1,
+        "class": "capability",
+        "retry": "retry_after_state_change",
+        "terminal_scope": "request",
+        "http_status": 409
+      },
+      {
+        "code": "CAPABILITY_NOT_MATERIALIZED",
+        "version": 1,
+        "class": "capability",
+        "retry": "new_session_required",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "CAPABILITY_UNAVAILABLE",
+        "version": 1,
+        "class": "capability",
+        "retry": "retry_after_state_change",
+        "terminal_scope": "request",
+        "http_status": 503
+      },
+      {
+        "code": "CAPABILITY_UNAVAILABLE_ON_PLATFORM",
+        "version": 1,
+        "class": "capability",
+        "retry": "new_session_required",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "PRESET_RESOURCE_NOT_BOUND",
+        "version": 1,
+        "class": "resource",
+        "retry": "new_session_required",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "PRESET_CAPABILITY_DUPLICATE",
+        "version": 1,
+        "class": "contract",
+        "retry": "new_session_required",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "PRESET_CAPABILITY_SET_OVERLAP",
+        "version": 1,
+        "class": "contract",
+        "retry": "new_session_required",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "PRESET_REVISION_DIGEST_MISMATCH",
+        "version": 1,
+        "class": "contract",
+        "retry": "never",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "PRESET_REVISION_SAVE_FAILED",
+        "version": 1,
+        "class": "contract",
+        "retry": "retry_same_request",
+        "terminal_scope": "request",
+        "http_status": 409
+      },
+      {
+        "code": "OFFICIAL_PRESET_KEY_SET_MISMATCH",
+        "version": 1,
+        "class": "contract",
+        "retry": "never",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "CHAT_MINIMAL_NOT_EXACT_EMPTY",
+        "version": 1,
+        "class": "contract",
+        "retry": "new_session_required",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "CODING_CODEX_NATIVE_INCOMPLETE",
+        "version": 1,
+        "class": "contract",
+        "retry": "new_session_required",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "ROLE_COVERAGE_INCOMPLETE",
+        "version": 1,
+        "class": "contract",
+        "retry": "new_session_required",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "RESOURCE_OWNER_MISMATCH",
+        "version": 1,
+        "class": "resource",
+        "retry": "never",
+        "terminal_scope": "request",
+        "http_status": 403
+      },
+      {
+        "code": "REMOTE_AUTH_REQUIRED",
+        "version": 1,
+        "class": "remote",
+        "retry": "retry_same_request",
+        "terminal_scope": "request",
+        "http_status": 401
+      },
+      {
+        "code": "REMOTE_BINDING_NOT_FOUND",
+        "version": 1,
+        "class": "remote",
+        "retry": "never",
+        "terminal_scope": "open",
+        "http_status": 404
+      },
+      {
+        "code": "REMOTE_BINDING_VERSION_CONFLICT",
+        "version": 1,
+        "class": "remote",
+        "retry": "retry_after_state_change",
+        "terminal_scope": "request",
+        "http_status": 409
+      },
+      {
+        "code": "REMOTE_BINDING_DIGEST_CONFLICT",
+        "version": 1,
+        "class": "remote",
+        "retry": "new_session_required",
+        "terminal_scope": "open",
+        "http_status": 409
+      },
+      {
+        "code": "REMOTE_SESSION_NOT_FOUND",
+        "version": 1,
+        "class": "remote",
+        "retry": "never",
+        "terminal_scope": "request",
+        "http_status": 404
+      },
+      {
+        "code": "REMOTE_SESSION_OPENING",
+        "version": 1,
+        "class": "remote",
+        "retry": "retry_after_state_change",
+        "terminal_scope": "open",
+        "http_status": 409
+      },
+      {
+        "code": "REMOTE_OPEN_FAILED",
+        "version": 1,
+        "class": "remote",
+        "retry": "new_session_required",
+        "terminal_scope": "open",
+        "http_status": 502
+      },
+      {
+        "code": "REMOTE_SESSION_BUSY",
+        "version": 1,
+        "class": "remote",
+        "retry": "retry_after_state_change",
+        "terminal_scope": "request",
+        "http_status": 409
+      },
+      {
+        "code": "REMOTE_IDEMPOTENCY_CONFLICT",
+        "version": 1,
+        "class": "remote",
+        "retry": "never",
+        "terminal_scope": "request",
+        "http_status": 409
+      },
+      {
+        "code": "SNAPSHOT_EXECUTOR_UNAVAILABLE",
+        "version": 1,
+        "class": "runtime",
+        "retry": "new_session_required",
+        "terminal_scope": "session_read_only",
+        "http_status": 409
+      },
+      {
+        "code": "RUNTIME_PROTOCOL_MISMATCH",
+        "version": 1,
+        "class": "runtime",
+        "retry": "new_session_required",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "CODEX_BASELINE_PIN_MISMATCH",
+        "version": 1,
+        "class": "runtime",
+        "retry": "never",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "CODEX_BASELINE_DRIFT_MISMATCH",
+        "version": 1,
+        "class": "runtime",
+        "retry": "never",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "RUNTIME_RPC_ALLOWLIST_MISMATCH",
+        "version": 1,
+        "class": "runtime",
+        "retry": "never",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "RUNTIME_PROFILE_SET_MISMATCH",
+        "version": 1,
+        "class": "runtime",
+        "retry": "never",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "PROVIDER_DRIFT",
+        "version": 1,
+        "class": "provider",
+        "retry": "new_session_required",
+        "terminal_scope": "turn",
+        "http_status": 422
+      },
+      {
+        "code": "BUDGET_EXCEEDED",
+        "version": 1,
+        "class": "budget",
+        "retry": "never",
+        "terminal_scope": "turn",
+        "http_status": 422
+      },
+      {
+        "code": "SKILL_REQUIRES_CAPABILITY",
+        "version": 1,
+        "class": "contract",
+        "retry": "new_session_required",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
+        "code": "INVALID_SESSION_EVENT",
+        "version": 1,
+        "class": "contract",
+        "retry": "never",
+        "terminal_scope": "request",
+        "http_status": 422
+      }
+    ]
+  },
+  "payload_digest": "6a3856947bb9e861bd4d6f7a1d88f9dc5c04b5b8b18b2b320446385025eec3b5"
+}

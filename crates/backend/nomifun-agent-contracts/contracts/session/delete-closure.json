@@ -1,0 +1,59 @@
+{
+  "contract_version": "session-delete-v1",
+  "command": {
+    "operation_id": "delete-operation-002",
+    "agent_session_id": "0199f6d4-7c00-7f00-a001-000000000004",
+    "owner_ref": {
+      "principal_kind": "user",
+      "principal_id": "user-001"
+    },
+    "requested_at": 1788000002000
+  },
+  "ordered_steps": [
+    "fence_admission",
+    "quiesce_and_cancel_runtime",
+    "prove_zero_outstanding",
+    "purge_session_private_content",
+    "commit_tombstone"
+  ],
+  "required_zero": [
+    "runtime_binding",
+    "runtime_ack",
+    "turn",
+    "tool_dispatch",
+    "effect_dispatch",
+    "capability_instance_handle",
+    "resource_handle",
+    "task",
+    "descendant_process"
+  ],
+  "purge_targets": [
+    "session_event",
+    "session_payload",
+    "session_head_projection",
+    "message_projection",
+    "message",
+    "session_owned_attachment",
+    "session_owned_artifact",
+    "runtime_binding",
+    "runtime_checkpoint",
+    "session_scoped_resource"
+  ],
+  "final_tombstone": {
+    "agent_session_id": "0199f6d4-7c00-7f00-a001-000000000004",
+    "owner_ref": {
+      "principal_kind": "user",
+      "principal_id": "user-001"
+    },
+    "state": "deleted",
+    "deleted_at": 1788000003000
+  },
+  "final_tombstone_fields": [
+    "agent_session_id",
+    "owner_ref",
+    "state",
+    "deleted_at"
+  ],
+  "late_operation_error": "SESSION_DELETED",
+  "domain_effect_policy": "retain_owning_domain_facts_with_minimal_source_reference"
+}

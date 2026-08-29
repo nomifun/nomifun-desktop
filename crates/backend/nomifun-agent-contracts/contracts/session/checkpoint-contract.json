@@ -1,0 +1,40 @@
+{
+  "contract_version": "runtime-checkpoint-v1",
+  "binding": {
+    "runtime_binding_id": "runtime-binding-001",
+    "locator": {
+      "artifact_id": "runtime-checkpoint-001",
+      "normalized_relative_path": "runtime/checkpoints/session-001/checkpoint-001",
+      "digest": "sha256:checkpoint-001"
+    },
+    "runtime_bound_event_id": "event-runtime-bound-001",
+    "protocol_version": "runtime-protocol-v1",
+    "resolved_snapshot_ref": {
+      "snapshot_id": "snapshot-001",
+      "snapshot_digest": "sha256:snapshot-001"
+    },
+    "through_seq": 12
+  },
+  "required_exact_matches": [
+    "runtime_bound_event",
+    "protocol_version",
+    "snapshot",
+    "through_seq"
+  ],
+  "actual_runtime_build_source": "runtime_bound_event",
+  "discard_on": [
+    "missing",
+    "corrupt",
+    "runtime_bound_event_mismatch",
+    "protocol_mismatch",
+    "snapshot_mismatch",
+    "through_seq_mismatch"
+  ],
+  "rehydrate_from": [
+    "exact_snapshot",
+    "latest_completed_compaction",
+    "subsequent_canonical_events"
+  ],
+  "checkpoint_converter_allowed": false,
+  "incompatible_executor_error": "SNAPSHOT_EXECUTOR_UNAVAILABLE"
+}

@@ -1,0 +1,745 @@
+{
+  "schema_version": "1.0.0",
+  "manifest_id": "d014.domain-wave-3-creative-multimodal.v1",
+  "manifest_kind": "domain_wave",
+  "wave": "wave3_creative_multimodal",
+  "workstream": "W4",
+  "base_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
+  "canonical_producer": {
+    "owner_id": "domain-wave-3-creative-multimodal",
+    "target_package_keys": [
+      "domain.creation",
+      "domain.miniapp",
+      "domain.office",
+      "domain.workshop"
+    ],
+    "target_capability_families": [
+      "creation.audio",
+      "creation.image",
+      "creation.image-edit",
+      "creation.text",
+      "creation.video",
+      "miniapp",
+      "office",
+      "workshop.asset",
+      "workshop.canvas",
+      "workshop.director",
+      "workshop.template"
+    ],
+    "current_producer_refs": [
+      {
+        "path": "crates/backend/nomifun-creation/src/service.rs",
+        "symbols": [
+          "CreationService",
+          "CreationServiceBuilder"
+        ],
+        "line_start": 707,
+        "line_end": 740
+      },
+      {
+        "path": "crates/backend/nomifun-workshop/src/service.rs",
+        "symbols": [
+          "WorkshopService"
+        ],
+        "line_start": 316,
+        "line_end": 335
+      },
+      {
+        "path": "crates/backend/nomifun-miniapp/src/service.rs",
+        "symbols": [
+          "MiniAppService"
+        ],
+        "line_start": 56,
+        "line_end": 70
+      },
+      {
+        "path": "crates/backend/nomifun-office/src/lib.rs",
+        "symbols": [
+          "OfficeRouterState",
+          "ProxyService",
+          "SnapshotService"
+        ]
+      }
+    ],
+    "canonical_contract_refs": [
+      {
+        "path": "crates/backend/nomifun-agent-contracts/src/primitives.rs",
+        "symbols": [
+          "ArtifactId",
+          "CapabilityId",
+          "TypedResourceBinding"
+        ]
+      },
+      {
+        "path": "crates/backend/nomifun-agent-contracts/src/deletion.rs",
+        "symbols": [
+          "DeletionManifest"
+        ]
+      }
+    ]
+  },
+  "direct_consumers": [
+    {
+      "consumer_id": "creative-studio-http-api",
+      "kind": "public_api",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-workshop/src/routes.rs",
+          "symbols": [
+            "workshop_routes",
+            "workshop_public_routes"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-creation/src/routes.rs",
+          "symbols": [
+            "creation_routes"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-miniapp/src/routes.rs",
+          "symbols": [
+            "miniapp_routes",
+            "miniapp_public_routes"
+          ]
+        }
+      ],
+      "canonical_target": "Package-owned domain routes and Agent-facing Capabilities",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "creative-agent-session-bridge",
+      "kind": "internal_rust",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-conversation/src/creative_studio_agent_session.rs",
+          "symbols": [
+            "CreativeStudioCanvasAgentSessionBindingResponse"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-db/src/repository/sqlite_conversation.rs",
+          "symbols": [
+            "creative_studio_agent_sessions"
+          ]
+        }
+      ],
+      "canonical_target": "AgentBindingValue plus AgentSession and Canvas typed resources",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "creative-gateway-capabilities",
+      "kind": "runtime_dispatcher",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-gateway/src/caps_creative_studio.rs",
+          "symbols": [
+            "register"
+          ]
+        }
+      ],
+      "canonical_target": "CapabilityRegistry projection",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "creative-product-ui",
+      "kind": "product_ui",
+      "current_refs": [
+        {
+          "path": "ui/src/renderer/pages/creativeStudio/app/routes.ts",
+          "symbols": []
+        },
+        {
+          "path": "ui/src/renderer/pages/creativeStudio/agent/adapters/NomiCreativeStudioAgentChatPort.ts",
+          "symbols": [
+            "NomiCreativeStudioAgentChatPort"
+          ]
+        },
+        {
+          "path": "ui/src/renderer/pages/creativeStudio/canvases/canvasServiceAdapter.ts",
+          "symbols": []
+        }
+      ],
+      "canonical_target": "Creative packages plus generic AgentSession port",
+      "same_change_required": true
+    },
+    {
+      "consumer_id": "creative-composition",
+      "kind": "composition_root",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/router/state.rs",
+          "symbols": [
+            "build_creation_state",
+            "build_miniapp_state",
+            "build_office_state",
+            "build_workshop_state"
+          ]
+        }
+      ],
+      "canonical_target": "PluginRegistration inventory",
+      "same_change_required": true
+    }
+  ],
+  "legacy_surfaces": [
+    {
+      "surface_id": "wave3.routes.alias-and-agent-session",
+      "category": "route",
+      "symbols_or_patterns": [
+        "Creative Studio deprecated project routes",
+        "creative agent session special routes",
+        "legacy MiniApp import aliases"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-workshop/src/routes.rs",
+          "symbols": [
+            "workshop_routes"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-conversation/src/creative_studio_agent_session.rs",
+          "symbols": []
+        },
+        {
+          "path": "crates/backend/nomifun-miniapp/src/import.rs",
+          "symbols": []
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 3",
+      "replacement_owner": "Creative Package routes and canonical AgentSession"
+    },
+    {
+      "surface_id": "wave3.dto.project-canvas-compatibility",
+      "category": "dto",
+      "symbols_or_patterns": [
+        "CreativeProjectDocument",
+        "CreativeProjectSummary",
+        "projectId compatibility"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-workshop/src/creative_studio.rs",
+          "symbols": [
+            "CreativeCanvasDocument",
+            "CreativeProjectDocument"
+          ],
+          "line_start": 1295,
+          "line_end": 1404
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 3",
+      "replacement_owner": "canonical Canvas/Asset contracts"
+    },
+    {
+      "surface_id": "wave3.events.product-local-runtime",
+      "category": "event_name_field_projection",
+      "symbols_or_patterns": [
+        "creative agent transport events",
+        "creation task local status projection"
+      ],
+      "current_refs": [
+        {
+          "path": "ui/src/renderer/pages/creativeStudio/agent/adapters/nomiTransport.ts",
+          "symbols": []
+        },
+        {
+          "path": "ui/src/renderer/pages/creativeStudio/tasks/runtime.ts",
+          "symbols": []
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 3",
+      "replacement_owner": "SessionEvent plus owning-domain task events"
+    },
+    {
+      "surface_id": "wave3.tables.conversation-project-bindings",
+      "category": "table_repository_mapping",
+      "symbols_or_patterns": [
+        "creative_studio_agent_sessions",
+        "creative_studio_projects",
+        "creation_tasks",
+        "miniapps.source_conversation_id"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-db/src/id_schema_contract.rs",
+          "symbols": [
+            "creative_studio_agent_sessions.conversation_id",
+            "miniapps.source_conversation_id"
+          ],
+          "line_start": 624,
+          "line_end": 630
+        },
+        {
+          "path": "crates/backend/nomifun-db/src/id_schema_contract.rs",
+          "symbols": [
+            "creative_studio_agent_sessions.conversation_id"
+          ],
+          "line_start": 758,
+          "line_end": 765
+        }
+      ],
+      "disposition": "retain_historical_source_excluded_from_v4",
+      "removal_boundary": "C2 plus Wave 3",
+      "replacement_owner": "fresh-v4 creative domain schema"
+    },
+    {
+      "surface_id": "wave3.config.product-local-assemblers",
+      "category": "config_env_feature",
+      "symbols_or_patterns": [
+        "canvasOperation",
+        "product-local model/task/skill/knowledge assembler",
+        "test_canvas_id"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-workshop/src/creative_studio.rs",
+          "symbols": [
+            "legacy config parameters.canvasOperation"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-creation/src/service.rs",
+          "symbols": [
+            "test_canvas_id"
+          ],
+          "line_start": 719,
+          "line_end": 740
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 3",
+      "replacement_owner": "Capability config and typed Canvas/Asset bindings"
+    },
+    {
+      "surface_id": "wave3.mode-approval",
+      "category": "mode_approval_permission",
+      "symbols_or_patterns": [
+        "creative approval branches",
+        "proposal confirmation"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-workshop/src/creative_agent_ops.rs",
+          "symbols": [
+            "proposal"
+          ]
+        },
+        {
+          "path": "ui/src/renderer/pages/creativeStudio/agent/CreativeStudioAgentPanel.tsx",
+          "symbols": []
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "C1/Wave 3",
+      "replacement_owner": "FullAuto Effect receipt flow"
+    },
+    {
+      "surface_id": "wave3.factory-manager",
+      "category": "factory_manager_wiring",
+      "symbols_or_patterns": [
+        "AgentTemplateDraftRunner",
+        "image_generation_tool",
+        "product-local agent assembler"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/services.rs",
+          "symbols": [
+            "AgentTemplateDraftRunner"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-ai-agent/src/manager/nomi/agent.rs",
+          "symbols": [
+            "image_generation_tool"
+          ],
+          "line_start": 880,
+          "line_end": 905
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 3",
+      "replacement_owner": "Creative Package Capability factories"
+    },
+    {
+      "surface_id": "wave3.gateway-deps",
+      "category": "gateway_deps_wiring",
+      "symbols_or_patterns": [
+        "creation_service",
+        "workshop_service"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-gateway/src/deps.rs",
+          "symbols": [
+            "creation_service",
+            "workshop_service"
+          ],
+          "line_start": 58,
+          "line_end": 64
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 3",
+      "replacement_owner": "declared ServiceKey views"
+    },
+    {
+      "surface_id": "wave3.app-services",
+      "category": "app_services_wiring",
+      "symbols_or_patterns": [
+        "creation_service",
+        "miniapp_service",
+        "workshop_service"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/services.rs",
+          "symbols": [
+            "creation_service",
+            "miniapp_service",
+            "workshop_service"
+          ],
+          "line_start": 1670,
+          "line_end": 1687
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 3",
+      "replacement_owner": "PluginRegistration inventory"
+    },
+    {
+      "surface_id": "wave3.nomi-runtime-bridge",
+      "category": "nomi_runtime_wiring",
+      "symbols_or_patterns": [
+        "NomiCreativeStudioAgentChatPort",
+        "creative_studio_agent_sessions"
+      ],
+      "current_refs": [
+        {
+          "path": "ui/src/renderer/pages/creativeStudio/agent/adapters/NomiCreativeStudioAgentChatPort.ts",
+          "symbols": [
+            "NomiCreativeStudioAgentChatPort"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-conversation/src/creative_studio_agent_session.rs",
+          "symbols": []
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 3/C9",
+      "replacement_owner": "canonical AgentSession and Creative Capabilities"
+    },
+    {
+      "surface_id": "wave3.tests",
+      "category": "test_fixture_golden",
+      "symbols_or_patterns": [
+        "project compatibility tests",
+        "workshop_public_e2e"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/tests/workshop_public_e2e.rs",
+          "symbols": []
+        },
+        {
+          "path": "ui/src/renderer/pages/creativeStudio/services/projectApi.test.ts",
+          "symbols": []
+        },
+        {
+          "path": "ui/src/renderer/pages/creativeStudio/agent/adapters/NomiCreativeStudioAgentChatPort.test.ts",
+          "symbols": []
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 3",
+      "replacement_owner": "canonical creative contract/E2E/fault tests"
+    },
+    {
+      "surface_id": "wave3.dependencies",
+      "category": "crate_package_dependency",
+      "symbols_or_patterns": [
+        "nomifun-conversation creative session bridge",
+        "nomifun-ai-agent image generation"
+      ],
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-conversation/Cargo.toml",
+          "symbols": [
+            "nomifun-ai-agent"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-app/Cargo.toml",
+          "symbols": [
+            "nomifun-creation",
+            "nomifun-miniapp",
+            "nomifun-office",
+            "nomifun-workshop"
+          ]
+        }
+      ],
+      "disposition": "replace_then_delete",
+      "removal_boundary": "Wave 3/C9",
+      "replacement_owner": "Package contracts and W5 dependency cleanup"
+    }
+  ],
+  "production_roots": [
+    {
+      "root_id": "wave3-api",
+      "kind": "public_api_router",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-app/src/router/routes.rs",
+          "symbols": [
+            "creative routes",
+            "miniapp routes",
+            "office routes"
+          ]
+        }
+      ],
+      "expected_canonical_owner": "Creative Package routes"
+    },
+    {
+      "root_id": "wave3-ui",
+      "kind": "product_ui_route",
+      "current_refs": [
+        {
+          "path": "ui/src/renderer/pages/creativeStudio/app/routes.ts",
+          "symbols": []
+        }
+      ],
+      "expected_canonical_owner": "Creative packages and AgentSession UI"
+    },
+    {
+      "root_id": "wave3-gateway",
+      "kind": "runtime_dispatcher",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-gateway/src/caps_creative_studio.rs",
+          "symbols": []
+        }
+      ],
+      "expected_canonical_owner": "CapabilityRegistry"
+    },
+    {
+      "root_id": "wave3-workers",
+      "kind": "background_scheduler_ingress",
+      "current_refs": [
+        {
+          "path": "crates/backend/nomifun-creation/src/service.rs",
+          "symbols": [
+            "CreationService"
+          ]
+        }
+      ],
+      "expected_canonical_owner": "Creation Package"
+    }
+  ],
+  "allowed_residuals": {
+    "policy": "empty",
+    "entries": []
+  },
+  "target_zero": [
+    {
+      "assertion_id": "wave3.routes.zero",
+      "dimension": "routes",
+      "expected_count": 0,
+      "scope": "legacy and compatibility creative Agent routes"
+    },
+    {
+      "assertion_id": "wave3.dtos.zero",
+      "dimension": "dtos",
+      "expected_count": 0,
+      "scope": "Project/Canvas compatibility DTOs"
+    },
+    {
+      "assertion_id": "wave3.tables.zero",
+      "dimension": "table_mappings",
+      "expected_count": 0,
+      "scope": "Conversation-to-Creative Agent mappings in fresh-v4"
+    },
+    {
+      "assertion_id": "wave3.wiring.zero",
+      "dimension": "factory_manager_wiring",
+      "expected_count": 0,
+      "scope": "Creative Agent assemblers"
+    },
+    {
+      "assertion_id": "wave3.gateway-deps.zero",
+      "dimension": "gateway_deps_wiring",
+      "expected_count": 0,
+      "scope": "Creative services"
+    },
+    {
+      "assertion_id": "wave3.app-services.zero",
+      "dimension": "app_services_wiring",
+      "expected_count": 0,
+      "scope": "Creative business fields"
+    },
+    {
+      "assertion_id": "wave3.tests.zero",
+      "dimension": "tests_fixtures",
+      "expected_count": 0,
+      "scope": "legacy project/session compatibility tests"
+    },
+    {
+      "assertion_id": "wave3.reachability.zero",
+      "dimension": "runtime_reachability",
+      "expected_count": 0,
+      "scope": "Wave 3 production roots to legacy nodes"
+    }
+  ],
+  "evidence_refs": [
+    {
+      "evidence_id": "wave3.residual",
+      "kind": "source_scan",
+      "gate_name": "gate-d014-residual-wave3-creative-multimodal",
+      "source_refs": [
+        {
+          "path": "crates/backend/nomifun-agent-contracts/contracts/deletion/domain-wave-3-creative-multimodal.json",
+          "symbols": []
+        }
+      ],
+      "required_for_closure": true
+    },
+    {
+      "evidence_id": "wave3.reachability",
+      "kind": "runtime_reachability",
+      "gate_name": "gate-d014-reachability-wave3-creative-multimodal",
+      "source_refs": [
+        {
+          "path": "ui/src/renderer/pages/creativeStudio/app/routes.ts",
+          "symbols": []
+        },
+        {
+          "path": "crates/backend/nomifun-conversation/src/creative_studio_agent_session.rs",
+          "symbols": []
+        }
+      ],
+      "required_for_closure": true
+    },
+    {
+      "evidence_id": "wave3.domain-effects",
+      "kind": "fault_test",
+      "gate_name": "gate-domain-wave3-effects-and-recovery",
+      "source_refs": [
+        {
+          "path": "crates/backend/nomifun-creation/src/service.rs",
+          "symbols": [
+            "CreationService"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-workshop/src/template_run.rs",
+          "symbols": []
+        }
+      ],
+      "required_for_closure": true
+    }
+  ],
+  "d027": {
+    "applicability": "domain_wave",
+    "admission_fence_refs": [
+      {
+        "path": "crates/backend/nomifun-conversation/src/creative_studio_agent_session.rs",
+        "symbols": []
+      }
+    ],
+    "deadline_authority_refs": [
+      {
+        "path": "crates/backend/nomifun-conversation/src/runtime_state.rs",
+        "symbols": [
+          "ConversationRuntimeStateService"
+        ]
+      }
+    ],
+    "outstanding_set_refs": [
+      {
+        "kind": "running_sessions",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-conversation/src/creative_studio_agent_session.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "effect_dispatches",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-creation/src/service.rs",
+            "symbols": [
+              "inflight"
+            ]
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "tasks",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-creation/src/service.rs",
+            "symbols": [
+              "CreationService"
+            ]
+          },
+          {
+            "path": "crates/backend/nomifun-workshop/src/template_run.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "resource_handles",
+        "current_refs": [
+          {
+            "path": "crates/backend/nomifun-office/src/watch_manager.rs",
+            "symbols": [
+              "OfficecliWatchManager"
+            ]
+          }
+        ],
+        "expected_count": 0
+      },
+      {
+        "kind": "runtime_reachability",
+        "current_refs": [
+          {
+            "path": "ui/src/renderer/pages/creativeStudio/agent/adapters/NomiCreativeStudioAgentChatPort.ts",
+            "symbols": []
+          },
+          {
+            "path": "crates/backend/nomifun-gateway/src/caps_creative_studio.rs",
+            "symbols": []
+          }
+        ],
+        "expected_count": 0
+      }
+    ],
+    "uncertain_handoff_owner": "creation-or-workshop-package",
+    "delete_contract_ref": "D-024 DeleteAgentSession",
+    "zero_required_before_legacy_delete": true
+  },
+  "closure_status": {
+    "state": "inventory_complete",
+    "canonical_producer_ready": false,
+    "direct_consumers_switched": false,
+    "legacy_surfaces_deleted": false,
+    "residual_zero_proven": false,
+    "reachability_zero_proven": false,
+    "d027_zero_proven": false,
+    "evidence_complete": false,
+    "notes": [
+      "C0 inventory only; current creative domain data is not migrated.",
+      "Published legacy migrations remain immutable history and are excluded from fresh-v4."
+    ]
+  }
+}

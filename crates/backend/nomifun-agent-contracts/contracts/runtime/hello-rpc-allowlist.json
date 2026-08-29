@@ -1,0 +1,40 @@
+{
+  "runtime_release_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "runtime_build_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "fork_commit": "dc2ccc6843abb09c9d297862dc10b6bd12a3935d",
+  "tracked_upstream_commit": "dc2ccc6843abb09c9d297862dc10b6bd12a3935d",
+  "protocol_version": "1.0.0",
+  "protocol_schema_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+  "runtime_target": "x86_64-pc-windows-msvc",
+  "supported_profiles": [
+    "coding_native",
+    "managed_minimal"
+  ],
+  "native_features": [
+    "context.compact",
+    "thread.fork",
+    "thread.resume",
+    "turn.steer"
+  ],
+  "native_actions": [
+    "fs.patch",
+    "process.exec"
+  ],
+  "full_auto": {
+    "ask_for_approval": "never",
+    "sandbox_policy": "danger-full-access"
+  },
+  "rpc_allowlist": {
+    "methods": [
+      "create",
+      "resume",
+      "fork",
+      "start_turn",
+      "steer",
+      "follow_up",
+      "cancel",
+      "session_dispose"
+    ],
+    "experimental_methods": []
+  }
+}

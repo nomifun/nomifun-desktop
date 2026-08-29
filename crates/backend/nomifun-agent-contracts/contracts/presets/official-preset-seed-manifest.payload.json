@@ -1,0 +1,970 @@
+{
+  "manifest_version": "1.0.0",
+  "target_first_party_contribution_digest": "85e250015c78291091a11a68e5205b62a6fb510ed98f5536c2eb1fe351e536f2",
+  "target_runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
+  "templates": {
+    "chat.minimal": {
+      "initial_capabilities": [],
+      "on_demand_capabilities": [],
+      "skill_bindings": [],
+      "typed_resource_defaults": [],
+      "required_runtime_features": []
+    },
+    "assistant.general": {
+      "initial_capabilities": [
+        {
+          "id": "session.attachments.read",
+          "version": "1.0.0"
+        },
+        {
+          "id": "knowledge.search",
+          "version": "1.0.0"
+        },
+        {
+          "id": "knowledge.read",
+          "version": "1.0.0"
+        },
+        {
+          "id": "memory.project.read",
+          "version": "1.0.0"
+        }
+      ],
+      "on_demand_capabilities": [
+        {
+          "id": "web.search",
+          "version": "1.0.0"
+        },
+        {
+          "id": "web.fetch",
+          "version": "1.0.0"
+        },
+        {
+          "id": "citation.render",
+          "version": "1.0.0"
+        },
+        {
+          "id": "fs.read",
+          "version": "1.0.0"
+        },
+        {
+          "id": "memory.project.write",
+          "version": "1.0.0"
+        },
+        {
+          "id": "memory.project.distill",
+          "version": "1.0.0"
+        },
+        {
+          "id": "memory.project.citation",
+          "version": "1.0.0"
+        }
+      ],
+      "skill_bindings": [],
+      "typed_resource_defaults": [
+        {
+          "slot_key": "knowledge",
+          "resource_kind": "knowledge_base",
+          "required": false,
+          "operations": [
+            "read",
+            "search"
+          ],
+          "binding_policy": "select_only_owned_resource"
+        },
+        {
+          "slot_key": "project_memory",
+          "resource_kind": "project_memory",
+          "required": false,
+          "operations": [
+            "read",
+            "write"
+          ],
+          "binding_policy": "select_only_owned_resource"
+        },
+        {
+          "slot_key": "workspace",
+          "resource_kind": "workspace",
+          "required": false,
+          "operations": [
+            "read"
+          ],
+          "binding_policy": "require_explicit_selection"
+        }
+      ],
+      "required_runtime_features": []
+    },
+    "coding.codex": {
+      "initial_capabilities": [
+        {
+          "id": "session.attachments.read",
+          "version": "1.0.0"
+        },
+        {
+          "id": "agent.execution.plan",
+          "version": "1.0.0"
+        },
+        {
+          "id": "agent.execution.steer",
+          "version": "1.0.0"
+        },
+        {
+          "id": "agent.execution.observe",
+          "version": "1.0.0"
+        },
+        {
+          "id": "fs.read",
+          "version": "1.0.0"
+        },
+        {
+          "id": "fs.search",
+          "version": "1.0.0"
+        },
+        {
+          "id": "fs.write",
+          "version": "1.0.0"
+        },
+        {
+          "id": "fs.patch",
+          "version": "1.0.0"
+        },
+        {
+          "id": "workspace.bind",
+          "version": "1.0.0"
+        },
+        {
+          "id": "workspace.artifacts",
+          "version": "1.0.0"
+        },
+        {
+          "id": "vcs.status",
+          "version": "1.0.0"
+        },
+        {
+          "id": "vcs.diff",
+          "version": "1.0.0"
+        },
+        {
+          "id": "process.exec",
+          "version": "1.0.0"
+        },
+        {
+          "id": "process.session",
+          "version": "1.0.0"
+        },
+        {
+          "id": "terminal.pty",
+          "version": "1.0.0"
+        },
+        {
+          "id": "skill.catalog",
+          "version": "1.0.0"
+        },
+        {
+          "id": "skill.describe",
+          "version": "1.0.0"
+        },
+        {
+          "id": "skill.invoke",
+          "version": "1.0.0"
+        },
+        {
+          "id": "skill.hooks",
+          "version": "1.0.0"
+        }
+      ],
+      "on_demand_capabilities": [
+        {
+          "id": "agent.delegate",
+          "version": "1.0.0"
+        },
+        {
+          "id": "agent.fork",
+          "version": "1.0.0"
+        },
+        {
+          "id": "fs.delete",
+          "version": "1.0.0"
+        },
+        {
+          "id": "fs.watch",
+          "version": "1.0.0"
+        },
+        {
+          "id": "fs.snapshot",
+          "version": "1.0.0"
+        },
+        {
+          "id": "vcs.stage",
+          "version": "1.0.0"
+        },
+        {
+          "id": "vcs.commit",
+          "version": "1.0.0"
+        },
+        {
+          "id": "vcs.push",
+          "version": "1.0.0"
+        },
+        {
+          "id": "mcp.connect",
+          "version": "1.0.0"
+        },
+        {
+          "id": "mcp.tool_proxy",
+          "version": "1.0.0"
+        },
+        {
+          "id": "mcp.resource",
+          "version": "1.0.0"
+        },
+        {
+          "id": "mcp.oauth",
+          "version": "1.0.0"
+        },
+        {
+          "id": "web.search",
+          "version": "1.0.0"
+        },
+        {
+          "id": "web.fetch",
+          "version": "1.0.0"
+        },
+        {
+          "id": "citation.render",
+          "version": "1.0.0"
+        },
+        {
+          "id": "llm.vision",
+          "version": "1.0.0"
+        }
+      ],
+      "skill_bindings": [],
+      "typed_resource_defaults": [
+        {
+          "slot_key": "workspace",
+          "resource_kind": "workspace",
+          "required": true,
+          "operations": [
+            "execute",
+            "read",
+            "write"
+          ],
+          "binding_policy": "require_explicit_selection"
+        },
+        {
+          "slot_key": "process_session",
+          "resource_kind": "process_session",
+          "required": false,
+          "operations": [
+            "execute",
+            "observe"
+          ],
+          "binding_policy": "leave_unbound"
+        },
+        {
+          "slot_key": "mcp_server",
+          "resource_kind": "mcp_server",
+          "required": false,
+          "operations": [
+            "connect",
+            "invoke",
+            "read"
+          ],
+          "binding_policy": "require_explicit_selection"
+        }
+      ],
+      "required_runtime_features": [
+        "code_mode",
+        "context.compact.automatic",
+        "context.compact.manual",
+        "multi_agent.coordinate",
+        "process.background_sessions",
+        "responses.native_reasoning",
+        "responses.prompt_cache",
+        "responses.stream_items",
+        "responses.tool_call_correlation",
+        "review.workflow",
+        "subagent.send",
+        "subagent.spawn",
+        "subagent.wait",
+        "thread.fork",
+        "thread.resume",
+        "thread.rollback",
+        "tool.parallel",
+        "tool.search",
+        "turn.cancel",
+        "turn.interrupt",
+        "turn.steer",
+        "validation.feedback"
+      ]
+    },
+    "companion.default": {
+      "initial_capabilities": [
+        {
+          "id": "companion.persona",
+          "version": "1.0.0"
+        },
+        {
+          "id": "memory.companion.recall",
+          "version": "1.0.0"
+        },
+        {
+          "id": "knowledge.search",
+          "version": "1.0.0"
+        },
+        {
+          "id": "knowledge.read",
+          "version": "1.0.0"
+        },
+        {
+          "id": "channel.receive",
+          "version": "1.0.0"
+        }
+      ],
+      "on_demand_capabilities": [
+        {
+          "id": "companion.roster",
+          "version": "1.0.0"
+        },
+        {
+          "id": "companion.summon",
+          "version": "1.0.0"
+        },
+        {
+          "id": "companion.learn",
+          "version": "1.0.0"
+        },
+        {
+          "id": "companion.evolve",
+          "version": "1.0.0"
+        },
+        {
+          "id": "memory.companion.write",
+          "version": "1.0.0"
+        },
+        {
+          "id": "memory.companion.merge",
+          "version": "1.0.0"
+        },
+        {
+          "id": "memory.companion.evolve",
+          "version": "1.0.0"
+        },
+        {
+          "id": "channel.reply",
+          "version": "1.0.0"
+        },
+        {
+          "id": "channel.send",
+          "version": "1.0.0"
+        },
+        {
+          "id": "channel.pairing",
+          "version": "1.0.0"
+        },
+        {
+          "id": "channel.group_policy",
+          "version": "1.0.0"
+        }
+      ],
+      "skill_bindings": [],
+      "typed_resource_defaults": [
+        {
+          "slot_key": "companion",
+          "resource_kind": "companion",
+          "required": true,
+          "operations": [
+            "read",
+            "write"
+          ],
+          "binding_policy": "require_explicit_selection"
+        },
+        {
+          "slot_key": "companion_memory",
+          "resource_kind": "companion_memory",
+          "required": true,
+          "operations": [
+            "read",
+            "write"
+          ],
+          "binding_policy": "select_only_owned_resource"
+        },
+        {
+          "slot_key": "knowledge",
+          "resource_kind": "knowledge_base",
+          "required": true,
+          "operations": [
+            "read",
+            "search"
+          ],
+          "binding_policy": "select_only_owned_resource"
+        },
+        {
+          "slot_key": "channel",
+          "resource_kind": "channel",
+          "required": true,
+          "operations": [
+            "manage",
+            "receive",
+            "reply",
+            "send"
+          ],
+          "binding_policy": "require_explicit_selection"
+        }
+      ],
+      "required_runtime_features": []
+    },
+    "robot.default": {
+      "initial_capabilities": [
+        {
+          "id": "robot.link",
+          "version": "1.0.0"
+        },
+        {
+          "id": "robot.audio",
+          "version": "1.0.0"
+        },
+        {
+          "id": "robot.display",
+          "version": "1.0.0"
+        },
+        {
+          "id": "companion.persona",
+          "version": "1.0.0"
+        },
+        {
+          "id": "memory.companion.recall",
+          "version": "1.0.0"
+        },
+        {
+          "id": "knowledge.search",
+          "version": "1.0.0"
+        },
+        {
+          "id": "knowledge.read",
+          "version": "1.0.0"
+        }
+      ],
+      "on_demand_capabilities": [
+        {
+          "id": "robot.vision",
+          "version": "1.0.0"
+        },
+        {
+          "id": "robot.motion",
+          "version": "1.0.0"
+        },
+        {
+          "id": "robot.device_tools",
+          "version": "1.0.0"
+        },
+        {
+          "id": "memory.companion.write",
+          "version": "1.0.0"
+        },
+        {
+          "id": "channel.receive",
+          "version": "1.0.0"
+        },
+        {
+          "id": "channel.reply",
+          "version": "1.0.0"
+        }
+      ],
+      "skill_bindings": [],
+      "typed_resource_defaults": [
+        {
+          "slot_key": "robot",
+          "resource_kind": "robot",
+          "required": true,
+          "operations": [
+            "audio",
+            "display",
+            "link",
+            "motion",
+            "vision"
+          ],
+          "binding_policy": "require_explicit_selection"
+        },
+        {
+          "slot_key": "companion",
+          "resource_kind": "companion",
+          "required": false,
+          "operations": [
+            "read"
+          ],
+          "binding_policy": "select_only_owned_resource"
+        },
+        {
+          "slot_key": "companion_memory",
+          "resource_kind": "companion_memory",
+          "required": false,
+          "operations": [
+            "read",
+            "write"
+          ],
+          "binding_policy": "select_only_owned_resource"
+        },
+        {
+          "slot_key": "knowledge",
+          "resource_kind": "knowledge_base",
+          "required": false,
+          "operations": [
+            "read",
+            "search"
+          ],
+          "binding_policy": "select_only_owned_resource"
+        },
+        {
+          "slot_key": "channel",
+          "resource_kind": "channel",
+          "required": false,
+          "operations": [
+            "receive",
+            "reply"
+          ],
+          "binding_policy": "require_explicit_selection"
+        }
+      ],
+      "required_runtime_features": []
+    },
+    "customer-service.default": {
+      "initial_capabilities": [
+        {
+          "id": "customer_service.dialogue",
+          "version": "1.0.0"
+        },
+        {
+          "id": "customer_service.notes.read",
+          "version": "1.0.0"
+        },
+        {
+          "id": "knowledge.search",
+          "version": "1.0.0"
+        },
+        {
+          "id": "knowledge.read",
+          "version": "1.0.0"
+        },
+        {
+          "id": "channel.receive",
+          "version": "1.0.0"
+        }
+      ],
+      "on_demand_capabilities": [
+        {
+          "id": "customer_service.notes.write",
+          "version": "1.0.0"
+        },
+        {
+          "id": "customer_service.handoff",
+          "version": "1.0.0"
+        },
+        {
+          "id": "channel.reply",
+          "version": "1.0.0"
+        },
+        {
+          "id": "channel.send",
+          "version": "1.0.0"
+        }
+      ],
+      "skill_bindings": [],
+      "typed_resource_defaults": [
+        {
+          "slot_key": "customer",
+          "resource_kind": "customer",
+          "required": true,
+          "operations": [
+            "read",
+            "write"
+          ],
+          "binding_policy": "require_explicit_selection"
+        },
+        {
+          "slot_key": "knowledge",
+          "resource_kind": "knowledge_base",
+          "required": true,
+          "operations": [
+            "read",
+            "search"
+          ],
+          "binding_policy": "select_only_owned_resource"
+        },
+        {
+          "slot_key": "channel",
+          "resource_kind": "channel",
+          "required": true,
+          "operations": [
+            "receive",
+            "reply",
+            "send"
+          ],
+          "binding_policy": "require_explicit_selection"
+        }
+      ],
+      "required_runtime_features": []
+    },
+    "creative-studio.default": {
+      "initial_capabilities": [
+        {
+          "id": "workshop.canvas.read",
+          "version": "1.0.0"
+        },
+        {
+          "id": "workshop.asset.read",
+          "version": "1.0.0"
+        }
+      ],
+      "on_demand_capabilities": [
+        {
+          "id": "workshop.canvas.edit",
+          "version": "1.0.0"
+        },
+        {
+          "id": "workshop.asset.write",
+          "version": "1.0.0"
+        },
+        {
+          "id": "workshop.template.run",
+          "version": "1.0.0"
+        },
+        {
+          "id": "workshop.director",
+          "version": "1.0.0"
+        },
+        {
+          "id": "creation.text",
+          "version": "1.0.0"
+        },
+        {
+          "id": "creation.image",
+          "version": "1.0.0"
+        },
+        {
+          "id": "creation.image_edit",
+          "version": "1.0.0"
+        },
+        {
+          "id": "creation.video",
+          "version": "1.0.0"
+        },
+        {
+          "id": "creation.audio",
+          "version": "1.0.0"
+        },
+        {
+          "id": "miniapp.read",
+          "version": "1.0.0"
+        },
+        {
+          "id": "miniapp.edit",
+          "version": "1.0.0"
+        },
+        {
+          "id": "miniapp.publish",
+          "version": "1.0.0"
+        },
+        {
+          "id": "miniapp.serve",
+          "version": "1.0.0"
+        }
+      ],
+      "skill_bindings": [],
+      "typed_resource_defaults": [
+        {
+          "slot_key": "canvas",
+          "resource_kind": "canvas",
+          "required": true,
+          "operations": [
+            "read",
+            "write"
+          ],
+          "binding_policy": "require_explicit_selection"
+        },
+        {
+          "slot_key": "asset_library",
+          "resource_kind": "asset_library",
+          "required": true,
+          "operations": [
+            "read",
+            "write"
+          ],
+          "binding_policy": "select_only_owned_resource"
+        },
+        {
+          "slot_key": "generation_provider",
+          "resource_kind": "generation_provider",
+          "required": false,
+          "operations": [
+            "audio",
+            "image",
+            "text",
+            "video"
+          ],
+          "binding_policy": "select_only_owned_resource"
+        },
+        {
+          "slot_key": "miniapp",
+          "resource_kind": "miniapp",
+          "required": false,
+          "operations": [
+            "edit",
+            "publish",
+            "read",
+            "serve"
+          ],
+          "binding_policy": "require_explicit_selection"
+        }
+      ],
+      "required_runtime_features": []
+    }
+  },
+  "role_coverage": {
+    "chat.minimal": {
+      "required_capability_categories": [],
+      "required_capability_ids": [],
+      "required_runtime_features": [],
+      "required_resource_kinds": []
+    },
+    "assistant.general": {
+      "required_capability_categories": [
+        "attachments",
+        "knowledge",
+        "project_memory",
+        "web_research"
+      ],
+      "required_capability_ids": [
+        "citation.render",
+        "fs.read",
+        "knowledge.read",
+        "knowledge.search",
+        "memory.project.citation",
+        "memory.project.distill",
+        "memory.project.read",
+        "memory.project.write",
+        "session.attachments.read",
+        "web.fetch",
+        "web.search"
+      ],
+      "required_runtime_features": [],
+      "required_resource_kinds": [
+        "knowledge_base",
+        "project_memory",
+        "workspace"
+      ]
+    },
+    "coding.codex": {
+      "required_capability_categories": [
+        "file_operations",
+        "mcp",
+        "native_responses",
+        "plan_goal",
+        "shell_process_pty",
+        "skills_plugins",
+        "subagent_multi_agent",
+        "vcs_review",
+        "workspace_repository"
+      ],
+      "required_capability_ids": [
+        "agent.delegate",
+        "agent.execution.observe",
+        "agent.execution.plan",
+        "agent.execution.steer",
+        "agent.fork",
+        "citation.render",
+        "fs.delete",
+        "fs.patch",
+        "fs.read",
+        "fs.search",
+        "fs.snapshot",
+        "fs.watch",
+        "fs.write",
+        "llm.vision",
+        "mcp.connect",
+        "mcp.oauth",
+        "mcp.resource",
+        "mcp.tool_proxy",
+        "process.exec",
+        "process.session",
+        "session.attachments.read",
+        "skill.catalog",
+        "skill.describe",
+        "skill.hooks",
+        "skill.invoke",
+        "terminal.pty",
+        "vcs.commit",
+        "vcs.diff",
+        "vcs.push",
+        "vcs.stage",
+        "vcs.status",
+        "web.fetch",
+        "web.search",
+        "workspace.artifacts",
+        "workspace.bind"
+      ],
+      "required_runtime_features": [
+        "code_mode",
+        "context.compact.automatic",
+        "context.compact.manual",
+        "multi_agent.coordinate",
+        "process.background_sessions",
+        "responses.native_reasoning",
+        "responses.prompt_cache",
+        "responses.stream_items",
+        "responses.tool_call_correlation",
+        "review.workflow",
+        "subagent.send",
+        "subagent.spawn",
+        "subagent.wait",
+        "thread.fork",
+        "thread.resume",
+        "thread.rollback",
+        "tool.parallel",
+        "tool.search",
+        "turn.cancel",
+        "turn.interrupt",
+        "turn.steer",
+        "validation.feedback"
+      ],
+      "required_resource_kinds": [
+        "mcp_server",
+        "process_session",
+        "workspace"
+      ]
+    },
+    "companion.default": {
+      "required_capability_categories": [
+        "companion_memory",
+        "im_channel",
+        "knowledge",
+        "learning_evolution",
+        "persona"
+      ],
+      "required_capability_ids": [
+        "channel.group_policy",
+        "channel.pairing",
+        "channel.receive",
+        "channel.reply",
+        "channel.send",
+        "companion.evolve",
+        "companion.learn",
+        "companion.persona",
+        "companion.roster",
+        "companion.summon",
+        "knowledge.read",
+        "knowledge.search",
+        "memory.companion.evolve",
+        "memory.companion.merge",
+        "memory.companion.recall",
+        "memory.companion.write"
+      ],
+      "required_runtime_features": [],
+      "required_resource_kinds": [
+        "channel",
+        "companion",
+        "companion_memory",
+        "knowledge_base"
+      ]
+    },
+    "robot.default": {
+      "required_capability_categories": [
+        "audio_display",
+        "device_link",
+        "persona_memory_knowledge",
+        "vision_motion"
+      ],
+      "required_capability_ids": [
+        "channel.receive",
+        "channel.reply",
+        "companion.persona",
+        "knowledge.read",
+        "knowledge.search",
+        "memory.companion.recall",
+        "memory.companion.write",
+        "robot.audio",
+        "robot.device_tools",
+        "robot.display",
+        "robot.link",
+        "robot.motion",
+        "robot.vision"
+      ],
+      "required_runtime_features": [],
+      "required_resource_kinds": [
+        "channel",
+        "companion",
+        "companion_memory",
+        "knowledge_base",
+        "robot"
+      ]
+    },
+    "customer-service.default": {
+      "required_capability_categories": [
+        "channel",
+        "dialogue",
+        "handoff",
+        "knowledge",
+        "notes"
+      ],
+      "required_capability_ids": [
+        "channel.receive",
+        "channel.reply",
+        "channel.send",
+        "customer_service.dialogue",
+        "customer_service.handoff",
+        "customer_service.notes.read",
+        "customer_service.notes.write",
+        "knowledge.read",
+        "knowledge.search"
+      ],
+      "required_runtime_features": [],
+      "required_resource_kinds": [
+        "channel",
+        "customer",
+        "knowledge_base"
+      ]
+    },
+    "creative-studio.default": {
+      "required_capability_categories": [
+        "canvas_asset",
+        "editing",
+        "generation",
+        "miniapp",
+        "templates_director"
+      ],
+      "required_capability_ids": [
+        "creation.audio",
+        "creation.image",
+        "creation.image_edit",
+        "creation.text",
+        "creation.video",
+        "miniapp.edit",
+        "miniapp.publish",
+        "miniapp.read",
+        "miniapp.serve",
+        "workshop.asset.read",
+        "workshop.asset.write",
+        "workshop.canvas.edit",
+        "workshop.canvas.read",
+        "workshop.director",
+        "workshop.template.run"
+      ],
+      "required_runtime_features": [],
+      "required_resource_kinds": [
+        "asset_library",
+        "canvas",
+        "generation_provider",
+        "miniapp"
+      ]
+    }
+  },
+  "non_template_capability_packs": [
+    "research.core"
+  ],
+  "forbidden_official_keys": [
+    "autowork.executor",
+    "requirements.analyst",
+    "research",
+    "research.web"
+  ]
+}

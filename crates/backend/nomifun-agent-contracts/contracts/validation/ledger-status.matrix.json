@@ -1,0 +1,81 @@
+{
+  "entries": [
+    {
+      "affected_cell_ids": [],
+      "cell_id": "macos_desktop_arm64",
+      "cohort_tuple": {
+        "candidate_source_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
+        "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+        "platform_validation_manifest_digest": "5ae861c85ac12a5afa2743847b1212b97b37b462c827534bf4238cb1391cb645",
+        "runtime_release_digest": "98ddabe09bcbcdfcccb3d3b9fd3fc87d818c8276f60baa9fee3697308027cc3d"
+      },
+      "evidence_ref": null,
+      "fix_commit": null,
+      "run_id": "pending-native-run",
+      "status": "pending_native_verification",
+      "superseded_run_id": null
+    },
+    {
+      "affected_cell_ids": [],
+      "cell_id": "windows_desktop_x64",
+      "cohort_tuple": {
+        "candidate_source_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
+        "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+        "platform_validation_manifest_digest": "5ae861c85ac12a5afa2743847b1212b97b37b462c827534bf4238cb1391cb645",
+        "runtime_release_digest": "98ddabe09bcbcdfcccb3d3b9fd3fc87d818c8276f60baa9fee3697308027cc3d"
+      },
+      "evidence_ref": {
+        "artifact_id": "pass_native_cell_evidence",
+        "digest": "8181818181818181818181818181818181818181818181818181818181818181",
+        "normalized_relative_path": "build.noindex/agent-capability-v2/7a2ade3c49374add25a35565265399c57729a8b9/windows_desktop_x64/cell-evidence.json"
+      },
+      "fix_commit": null,
+      "run_id": "pass-native-run",
+      "status": "pass",
+      "superseded_run_id": null
+    },
+    {
+      "affected_cell_ids": [
+        "linux_headless_x64"
+      ],
+      "cell_id": "linux_headless_x64",
+      "cohort_tuple": {
+        "candidate_source_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
+        "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+        "platform_validation_manifest_digest": "5ae861c85ac12a5afa2743847b1212b97b37b462c827534bf4238cb1391cb645",
+        "runtime_release_digest": "98ddabe09bcbcdfcccb3d3b9fd3fc87d818c8276f60baa9fee3697308027cc3d"
+      },
+      "evidence_ref": {
+        "artifact_id": "fail_native_cell_evidence",
+        "digest": "9797979797979797979797979797979797979797979797979797979797979797",
+        "normalized_relative_path": "build.noindex/agent-capability-v2/7a2ade3c49374add25a35565265399c57729a8b9/linux_headless_x64/cell-evidence.json"
+      },
+      "fix_commit": null,
+      "run_id": "fail-native-run",
+      "status": "fail",
+      "superseded_run_id": null
+    },
+    {
+      "affected_cell_ids": [
+        "linux_desktop_x64"
+      ],
+      "cell_id": "linux_desktop_x64",
+      "cohort_tuple": {
+        "candidate_source_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
+        "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+        "platform_validation_manifest_digest": "5ae861c85ac12a5afa2743847b1212b97b37b462c827534bf4238cb1391cb645",
+        "runtime_release_digest": "98ddabe09bcbcdfcccb3d3b9fd3fc87d818c8276f60baa9fee3697308027cc3d"
+      },
+      "evidence_ref": {
+        "artifact_id": "stale_native_cell_evidence",
+        "digest": "9898989898989898989898989898989898989898989898989898989898989898",
+        "normalized_relative_path": "build.noindex/agent-capability-v2/7a2ade3c49374add25a35565265399c57729a8b9/linux_desktop_x64/cell-evidence.json"
+      },
+      "fix_commit": "fedcba9876543210fedcba9876543210fedcba98",
+      "run_id": "stale-native-run",
+      "status": "stale",
+      "superseded_run_id": "pass-native-run-before-fix"
+    }
+  ],
+  "schema_version": "1.0.0"
+}

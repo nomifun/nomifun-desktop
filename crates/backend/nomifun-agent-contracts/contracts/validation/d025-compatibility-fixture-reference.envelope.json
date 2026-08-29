@@ -1,0 +1,24 @@
+{
+  "digest_algorithm": "sorted-json-sha256-v1",
+  "payload": {
+    "schema_version": "1.0.0",
+    "input_contract_type": "crate::runtime::SnapshotCompatibilityAdmissionInput",
+    "result_contract_type": "crate::runtime::SnapshotCompatibilityAdmissionResult",
+    "checkpoint_mismatch_fixture": {
+      "artifact_id": "runtime_checkpoint_mismatch_fixture",
+      "normalized_relative_path": "contracts/runtime/checkpoint-mismatch.json",
+      "digest": "e8426ef50a1fc570eaf0105c915c5ae5555eef222740adc07dee13f88ae56c34"
+    },
+    "required_cases": [
+      {
+        "case_id": "compatible_exact_full_ceiling",
+        "expected_result_variant": "compatible_exact"
+      },
+      {
+        "case_id": "executor_unavailable_read_only_explicit_fork",
+        "expected_result_variant": "executor_unavailable"
+      }
+    ]
+  },
+  "payload_digest": "b5987fa1c71d3a04ca6df2f4c216f418adc04ccc7495edc74d99085e35db9556"
+}

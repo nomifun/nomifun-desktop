@@ -429,11 +429,21 @@ D-012 已确认采用方案 C。新架构只在一个全新的空 v4 data root �
 D-013 已确认采用方案 A。fresh install 与存在 legacy canonical data root 的首次 v4 cutover 共用一个一次性 bootstrap operation coordinator，严格按以下顺序执行：
 
 1. 只对 exact canonical root、cutover-only exact archive target、parent operation-marker target 和受信任父目录做存在性、同一 filesystem 与 collision preflight；不得枚举、读取或解析 legacy root 内容。
-2. Preflight 成功后，先在父目录 durable 写入一份**不可变** operation marker。它的 exact-set 只引用 02 canonical contract：`operation_id/operation_kind/canonical_normalized_relative_basename/cutover_archive_sibling_relative_basename?/target_data_generation/canonical_schema_manifest_digest`；不保存盘符、用户名、绝对路径、legacy inventory、旧数据摘要或可变 stage，也不进入 Runtime/API。
+2. Preflight 成功后，先在父目录 durable 写入一份**不可变** operation marker。它的
+   exact-set 只引用 canonical Rust contract：
+   `operation_id/operation_kind/canonical_normalized_relative_basename/cutover_archive_sibling_relative_basename?/target_data_generation/canonical_schema_manifest_digest`；
+   不保存盘符、用户名、绝对路径、legacy inventory、旧数据摘要或可变 stage，也不进入
+   Runtime/API。
 3. fresh 在 marker durable 后直接创建空 canonical root；cutover 在 marker durable 后使用同一 filesystem 的一次原子 whole-root rename 把 legacy root 移到 marker 固定的 archive target，再创建空 canonical root。不逐文件移动，不 copy，不提供 cross-device fallback。
-4. 在新 root 内依次执行 fresh-v4 baseline、写入 canonical `schema_metadata`、系统 seed、七模板与 bundled Package catalog seed，并发布 root-local ready marker；root 未达到 ready invariant 时不得启动产品服务。
+4. 在新 root 内依次执行 fresh-v4 baseline、写入 canonical `schema_metadata`、物化
+   bundled Package catalog、只消费冻结 manifest 创建七模板 authoring seed，最后发布
+   root-local ready marker；root 未达到 ready invariant 时不得启动产品服务。
 5. Root-local ready marker、`schema_metadata`、exact paths 与 operation marker 全部匹配后，coordinator 才删除 parent operation marker并移交正常 Bootstrap。父目录 marker 是一次性 crash fence，不是长期 root marker；正常重启与 v4→v4 upgrade只校验 root-local ready、`schema_metadata` 和 embedded v4 migration/schema digest。
-6. Parent marker durable 前失败不得产生 root/archive 变化。marker durable 后但 mkdir/rename 失败时，legacy root 仍保持原路径原内容，允许留下该不可变 marker；恢复只能用 marker 中的 exact relative identities、source/target/root/ready 的存在性与 `schema_metadata` 推导唯一阶段，重新校验后重试、清理 marker或 fail-stop，禁止扫描目录猜目标。
+6. Parent marker durable 前失败不得产生 root/archive 变化。marker durable 后但
+   mkdir/rename 失败时，legacy root 仍保持原路径原内容且必须保留该不可变 marker；
+   恢复只能用 marker 中的 exact relative identities、source/target/root/ready 的
+   存在性与 `schema_metadata` 推导唯一阶段，重新校验后重试或 fail-stop。只有 ready
+   exact-match 后才删除 marker，禁止提前清理或扫描目录猜目标。
 7. cutover rename 后初始化失败时 archive 保持不动；恢复只可重试或处置 marker 绑定、尚未 ready 的新 canonical root，不得 rename-back、copy-back、读取 archive 或把 archive 当 fallback。fresh 初始化失败使用同一恢复算法但不存在 archive。
 8. `schema_metadata` 位于 fresh-v4 schema 内，是 v4 baseline/version/checksum/apply state 的唯一数据库事实。后续 v4→v4 upgrade 只执行 append-only v4 migrations，在数据库事务内推进 metadata，并在成功后原子更新 root-local ready；它不重新创建 D-013 operation marker。
 9. Archive 是不透明的永久 Runtime 禁区。Kernel、Plugin Manager、Runtime、业务插件、API、UI、CLI、诊断、备份和 Phase N SDK 均不得 enumerate、read、parse、copy、view、export、import 或 restore archive，也不得通过 symlink/junction/alias 重新暴露。
