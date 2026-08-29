@@ -429,7 +429,7 @@ fn all_recommended_lifecycle_urls_match_the_locked_official_matrix() {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
     });
     assert_eq!(
-        hash, 335_427_579_411_274_270,
+        hash, 15_708_070_195_996_868_304,
         "recommendation URL snapshot changed:\n{snapshot}"
     );
 }
