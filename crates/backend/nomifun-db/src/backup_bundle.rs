@@ -1008,11 +1008,37 @@ fn remove_migration_lock_file(
             .and_then(|name| name.to_str())
             .unwrap_or("nomifun-backend.db")
     ));
-    match fs::remove_file(lock_path) {
+    match remove_file_with_windows_retry(&lock_path) {
         Ok(()) => result,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => result,
         Err(error) if result.is_ok() => Err(error.into()),
         Err(_) => result,
+    }
+}
+
+fn remove_file_with_windows_retry(path: &Path) -> Result<(), std::io::Error> {
+    #[cfg(windows)]
+    {
+        const ATTEMPTS: usize = 8;
+        for attempt in 0..ATTEMPTS {
+            match fs::remove_file(path) {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::PermissionDenied
+                        && attempt + 1 < ATTEMPTS =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        15 * (attempt as u64 + 1),
+                    ));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("the bounded Windows retry loop returns on every attempt");
+    }
+    #[cfg(not(windows))]
+    {
+        fs::remove_file(path)
     }
 }
 
@@ -1194,30 +1220,41 @@ fn install_staging_directory(staging: &Path, destination: &Path) -> Result<(), B
         // Omitting MOVEFILE_REPLACE_EXISTING is the no-clobber guarantee.
         // WRITE_THROUGH asks Windows not to report success until the move has
         // reached durable storage.
-        let result = unsafe {
-            MoveFileExW(
-                staging_wide.as_ptr(),
-                destination_wide.as_ptr(),
-                MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if result != 0 {
-            return Ok(());
-        }
-
-        let error = std::io::Error::last_os_error();
-        match error.raw_os_error() {
-            Some(ERROR_FILE_EXISTS | ERROR_ALREADY_EXISTS) => {
-                Err(BackupError::Io(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    format!(
-                        "backup destination already exists: {}",
-                        destination.display()
-                    ),
-                )))
+        const ATTEMPTS: usize = 8;
+        for attempt in 0..ATTEMPTS {
+            let result = unsafe {
+                MoveFileExW(
+                    staging_wide.as_ptr(),
+                    destination_wide.as_ptr(),
+                    MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if result != 0 {
+                return Ok(());
             }
-            _ => Err(error.into()),
+
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(ERROR_FILE_EXISTS | ERROR_ALREADY_EXISTS) => {
+                    return Err(BackupError::Io(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        format!(
+                            "backup destination already exists: {}",
+                            destination.display()
+                        ),
+                    )));
+                }
+                Some(5)
+                    if attempt + 1 < ATTEMPTS =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        15 * (attempt as u64 + 1),
+                    ));
+                }
+                _ => return Err(error.into()),
+            }
         }
+        unreachable!("the bounded Windows move retry loop returns on every attempt");
     }
 
     #[cfg(not(any(
