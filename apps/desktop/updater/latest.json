@@ -1,11 +1,19 @@
 {
   "version": "0.7.5",
   "notes": "# NomiFun v0.7.5\n\n## 中文\n\n- **Windows 首发产物。** 本次先发布 Windows x64 NSIS 安装包、Tauri updater 签名包和自动更新清单；macOS / Linux 可按同一版本后续补充。\n- **CrabNebula Cloud 同步发布。** Windows 自动更新包同步发布到 CrabNebula Cloud，桌面客户端优先使用 Cloud 更新端点，GitHub Releases 继续作为兜底与归档来源。\n- **Windows 知识库文件身份兼容性修复。** Windows 下改用稳定的 handle metadata 读取卷序列号和 file index，修复稳定 Rust release 构建失败，同时保留重命名与原子保存后的知识条目身份恢复语义。\n- **Remote MCP 与 REST 访问改为安装级授权。** 桌面端发放 installation-scoped access token，不再绑定或继承 companion 配置；迁移会使旧 companion token 失效，headless 部署和 `nomicore call` 使用 `NOMIFUN_ACCESS_TOKEN`。\n\n## English\n\n- **Windows-first artifacts.** This release starts with the Windows x64 NSIS installer, the signed Tauri updater package, and the automatic-update manifest; macOS and Linux artifacts can be appended under the same version later.\n- **CrabNebula Cloud is published in sync.** The Windows updater package is published to CrabNebula Cloud, so desktop clients prefer the Cloud update endpoint while GitHub Releases remains the fallback and archive.\n- **Windows knowledge-file identity now builds on stable Rust.** Windows now reads the volume serial number and file index through stable handle metadata APIs, fixing stable Rust release builds while preserving knowledge-entry identity recovery after renames and atomic saves.\n- **Remote MCP and REST access is installation-scoped.** The desktop app issues an installation-scoped access token instead of binding to or inheriting companion configuration; migration invalidates legacy companion tokens, and headless deployments plus `nomicore call` use `NOMIFUN_ACCESS_TOKEN`.",
-  "pub_date": "2026-08-29T07:42:12.616Z",
+  "pub_date": "2026-08-29T09:08:36.559Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODZsdkhIQUtCRjZkU2VWMTFFNnlPSitUTTY1czRmaWh2UXhGQUhuZ3dOZEpTZksrelBPTlg0b1djTENmeHFGMTI3S3lEKzZuQ2FjNjZGOVlwSy9PWGdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3OTg5MzMyCWZpbGU6Tm9taUZ1bl8wLjcuNV94NjQtc2V0dXAuZXhlCmlqalB3MVJZRnMwMW5KQkRrRzFiV3Z2UGdHbWMwOCt1cS9WckJ1ZXozQVhtNVB6YkNSa3p4Tld2alVpWDV0VktlMGd5aFlBVzNUdWgwWXhVd1d5ZUNBPT0K",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.5/NomiFun_0.7.5_x64-setup.exe"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHlBS3IzTk5aSXk5V3ZUei9XYklkUjNWYzBkYlNpZkJjRVR0aVpqaUdSZzNSWXVXaWFxcitVY3l0NUNlUUo4V3NZeEpFUmFwZGdLODFVRUMzVjRvemdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3OTk0MzgyCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CmRBYjlNL2VaUjQ4R2crOUJoSmdNQVBUMlFyaEVMN0xIOThBSk8rbGZSQTlxYTNLaHcxUEFYV1hlTG5relN0OFEzVm1OTVBnaXdhbjlaT3M2L1RFekF3PT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.5/NomiFun.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODBKT1RBNUdqbE9LRjdkUnQ4NEtPZ0RnV0ZsanppUlF5SURqdFVqOFdhNTZJeEFNT1gxeEFQYmtlMmlqRHUzOWowMElIRVl4elZodCtOS24wRHJIVXc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3OTk0MDk5CWZpbGU6Tm9taUZ1bl8wLjcuNV94NjQuYXBwLnRhci5negpwYzdFZjc5YXNIZ0dKVlY0bDFQRGtWVW1VUlV6bkF1NDJHeUxodmc5eXVFUmI0S0E3VW4yeEhQQnpiSGhSY0NkaUc5SkpKZE5kaUw2bXdvTFVFUnJEZz09Cg==",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.5/NomiFun_0.7.5_x64.app.tar.gz"
     }
   }
 }
