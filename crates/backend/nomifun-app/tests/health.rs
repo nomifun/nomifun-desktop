@@ -19,8 +19,22 @@ async fn response_json(body: Body) -> serde_json::Value {
 }
 
 async fn build_app() -> axum::Router {
+    let root = tempfile::Builder::new()
+        .prefix("nomifun-health-e2e-")
+        .tempdir()
+        .unwrap()
+        .keep();
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(
+        db,
+        &AppConfig {
+            data_dir: root.join("data"),
+            work_dir: root.join("work"),
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .unwrap();
     nomifun_app::create_router(&services).await
 }
 

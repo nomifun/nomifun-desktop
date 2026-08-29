@@ -66,10 +66,22 @@ async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str, na
 }
 
 async fn build_app() -> (axum::Router, nomifun_app::AppServices) {
+    let root = tempfile::Builder::new()
+        .prefix("nomifun-auxiliary-e2e-")
+        .tempdir()
+        .unwrap()
+        .keep();
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = nomifun_app::AppServices::from_config(db, &nomifun_app::AppConfig::default())
-        .await
-        .unwrap();
+    let services = nomifun_app::AppServices::from_config(
+        db,
+        &nomifun_app::AppConfig {
+            data_dir: root.join("data"),
+            work_dir: root.join("work"),
+            ..nomifun_app::AppConfig::default()
+        },
+    )
+    .await
+    .unwrap();
     let router = nomifun_app::create_router(&services).await;
     (router, services)
 }

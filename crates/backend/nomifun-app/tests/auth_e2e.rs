@@ -16,8 +16,22 @@ use nomifun_app::{AppConfig, AppServices};
 // ---------------------------------------------------------------------------
 
 async fn build_app() -> (axum::Router, AppServices) {
+    let root = tempfile::Builder::new()
+        .prefix("nomifun-auth-e2e-")
+        .tempdir()
+        .unwrap()
+        .keep();
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
+    let services = AppServices::from_config(
+        db,
+        &AppConfig {
+            data_dir: root.join("data"),
+            work_dir: root.join("work"),
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .unwrap();
     let router = nomifun_app::create_router(&services).await;
     (router, services)
 }
@@ -668,7 +682,6 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
                     "model":"model-safe",
                     "cli_path":"/bin/sh",
                     "workspace":"/",
-                    "mode":"yolo",
                     "config_options":{"host":"true"}
                 }
             }"#,
@@ -677,8 +690,13 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
         ))
         .await
         .unwrap();
-    assert_eq!(cron.status(), StatusCode::CREATED);
+    let cron_status = cron.status();
     let cron = body_json(cron).await;
+    assert_eq!(
+        cron_status,
+        StatusCode::CREATED,
+        "model-only Cron creation failed: {cron}"
+    );
     let cron_id = cron["data"]["cron_job_id"].as_str().unwrap();
     let cron_config = &cron["data"]["metadata"]["agent_config"];
     assert_eq!(
