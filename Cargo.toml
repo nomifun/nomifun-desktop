@@ -52,6 +52,7 @@ nomifun-agent-kernel = { path = "crates/backend/nomifun-agent-kernel" }
 nomifun-codex-runtime = { path = "crates/backend/nomifun-codex-runtime" }
 nomifun-chat-model-broker = { path = "crates/backend/nomifun-chat-model-broker" }
 nomifun-agent-control-plane = { path = "crates/backend/nomifun-agent-control-plane" }
+nomifun-agent-platform = { path = "crates/backend/nomifun-agent-platform" }
 
 # --- Internal crates: shared ---
 nomifun-net = { path = "crates/shared/nomifun-net" }

@@ -159,10 +159,12 @@ import type {
 } from '../types/agentExecution/agentExecutionEvents';
 import type {
   AgentBindingRecord,
+  AgentBindingValue,
   AgentPresetEditorResponse,
   AgentPresetLibraryResponse,
   AgentPresetRevision,
-  AgentSessionEventsResponse,
+  AgentSessionContinuationView,
+  AgentSessionId,
   CapabilityCatalogItem,
   CreateAgentPresetFromTemplateRequest,
   CreateAgentPresetRequest,
@@ -447,6 +449,211 @@ export const presetTags = {
 // Agent Capability Platform v4 control plane
 // ---------------------------------------------------------------------------
 
+export interface IAgentSessionOwnerRef {
+  principal_kind: string;
+  principal_id: string;
+}
+
+export interface IAgentSessionMetadata {
+  title?: string;
+  archived: boolean;
+  pinned: boolean;
+}
+
+export interface IAgentSessionLive {
+  agent_session_id: AgentSessionId;
+  owner_ref: IAgentSessionOwnerRef;
+  metadata: IAgentSessionMetadata;
+  agent_binding: AgentBindingValue;
+  parent_session_id?: AgentSessionId;
+  next_seq: number;
+}
+
+export interface IAgentSessionHead {
+  session_id: AgentSessionId;
+  status: string;
+  active_turn_id?: string;
+  active_set_generation: number;
+  runtime_checkpoint_locator?: string;
+  runtime_checkpoint_digest?: string;
+  runtime_bound_event_id?: string;
+  runtime_protocol_version?: string;
+  snapshot_digest?: string;
+  checkpoint_through_seq?: number;
+  last_seq: number;
+  unread_count: number;
+}
+
+export interface IAgentSessionEvent {
+  agent_session_id: AgentSessionId;
+  seq: number;
+  event_id: string;
+  producer_id: string;
+  idempotency_key: string;
+  runtime_binding_id?: string;
+  runtime_producer_seq?: number;
+  kind: string;
+  kind_version: number;
+  correlation_id: string;
+  causation_event_id?: string;
+  payload: unknown;
+}
+
+export interface IAgentSessionProjectionDocument {
+  projection_id: string;
+  correlation_id: string;
+  presentation_intent: string;
+  events: Array<{
+    seq: number;
+    kind: string;
+    kind_version: number;
+    payload: unknown;
+  }>;
+  state?: string;
+  content?: string;
+  content_digest?: string;
+  part_count?: number;
+}
+
+export interface IAgentSessionMessageProjection {
+  session_id: AgentSessionId;
+  projection_id: string;
+  first_seq: number;
+  last_seq: number;
+  presentation_intent: string;
+  projection: IAgentSessionProjectionDocument;
+  semantic_digest: string;
+}
+
+export interface IAgentSessionObservation {
+  session: IAgentSessionLive;
+  head: IAgentSessionHead;
+  events: IAgentSessionEvent[];
+  messages: IAgentSessionMessageProjection[];
+  next_cursor: { agent_session_id: AgentSessionId; seq: number };
+  continuation?: AgentSessionContinuationView;
+}
+
+export interface IAgentSessionCapabilityState {
+  resolved_snapshot_ref: {
+    snapshot_id: string;
+    snapshot_digest: string;
+  };
+  generation: number;
+  initial_capabilities: string[];
+  on_demand_capabilities: string[];
+  active_capabilities: string[];
+  compact_on_demand_index: Array<{
+    capability_id: string;
+    display_name: string;
+    short_description: string;
+  }>;
+}
+
+export interface IAgentSessionEventPage {
+  agent_session_id: AgentSessionId;
+  events: IAgentSessionEvent[];
+  next_cursor: { agent_session_id: AgentSessionId; seq: number };
+}
+
+export interface IAgentSessionMessagePage {
+  agent_session_id: AgentSessionId;
+  messages: IAgentSessionMessageProjection[];
+  next_cursor: { agent_session_id: AgentSessionId; seq: number };
+}
+
+export interface IAgentSessionDeleteResult {
+  agent_session_id: AgentSessionId;
+  state: 'deleted';
+  deleted_at: number;
+}
+
+const requireAgentSessionRecord = (value: unknown, label: string): Record<string, unknown> => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+};
+
+const fromApiAgentSessionHead = (raw: unknown): IAgentSessionHead => {
+  const head = requireAgentSessionRecord(raw, 'AgentSession head');
+  if (typeof head.session_id !== 'string') {
+    throw new TypeError('AgentSession head requires session_id');
+  }
+  return {
+    ...(head as unknown as IAgentSessionHead),
+    session_id: head.session_id as AgentSessionId,
+    active_set_generation: Number(head.active_set_generation ?? 0),
+    last_seq: Number(head.last_seq ?? 0),
+    unread_count: Number(head.unread_count ?? 0),
+  };
+};
+
+const fromApiAgentSessionProjection = (raw: unknown): IAgentSessionMessageProjection => {
+  const projection = requireAgentSessionRecord(raw, 'AgentSession message projection');
+  if (typeof projection.session_id !== 'string' || typeof projection.projection_id !== 'string') {
+    throw new TypeError('AgentSession projection requires session_id and projection_id');
+  }
+  return {
+    ...(projection as unknown as IAgentSessionMessageProjection),
+    session_id: projection.session_id as AgentSessionId,
+    projection: requireAgentSessionRecord(
+      projection.projection,
+      'AgentSession projection document'
+    ) as unknown as IAgentSessionProjectionDocument,
+  };
+};
+
+const fromApiAgentSessionObservation = (raw: unknown): IAgentSessionObservation => {
+  const observation = requireAgentSessionRecord(raw, 'AgentSession observation');
+  const session = requireAgentSessionRecord(observation.session, 'AgentSession live record');
+  if (typeof session.agent_session_id !== 'string') {
+    throw new TypeError('AgentSession live record requires agent_session_id');
+  }
+  return {
+    session: {
+      ...(session as unknown as IAgentSessionLive),
+      agent_session_id: session.agent_session_id as AgentSessionId,
+      parent_session_id:
+        typeof session.parent_session_id === 'string'
+          ? (session.parent_session_id as AgentSessionId)
+          : undefined,
+    },
+    head: fromApiAgentSessionHead(observation.head),
+    events: Array.isArray(observation.events)
+      ? (observation.events as IAgentSessionEvent[])
+      : [],
+    messages: Array.isArray(observation.messages)
+      ? observation.messages.map(fromApiAgentSessionProjection)
+      : [],
+    next_cursor: observation.next_cursor as IAgentSessionObservation['next_cursor'],
+    continuation: observation.continuation as AgentSessionContinuationView | undefined,
+  };
+};
+
+const fromApiAgentSessionCapabilities = (raw: unknown): IAgentSessionCapabilityState => {
+  const value = requireAgentSessionRecord(raw, 'AgentSession capability state');
+  const active = Array.isArray(value.active_capabilities)
+    ? value.active_capabilities
+    : Array.isArray(value.active)
+      ? value.active
+      : [];
+  return {
+    resolved_snapshot_ref: value.resolved_snapshot_ref as IAgentSessionCapabilityState['resolved_snapshot_ref'],
+    generation: Number(value.generation ?? value.active_set_generation ?? 0),
+    initial_capabilities: Array.isArray(value.initial_capabilities)
+      ? (value.initial_capabilities as string[])
+      : [],
+    on_demand_capabilities: Array.isArray(value.on_demand_capabilities)
+      ? (value.on_demand_capabilities as string[])
+      : [],
+    active_capabilities: active as string[],
+    compact_on_demand_index: Array.isArray(value.compact_on_demand_index)
+      ? (value.compact_on_demand_index as IAgentSessionCapabilityState['compact_on_demand_index'])
+      : [],
+  };
+};
+
 const remoteCredentialContinuation = (): RemoteCredentialContinuation => ({
   requires_same_owner: true,
   requires_explicit_agent_session_id: true,
@@ -598,6 +805,19 @@ export const agentPlatform = {
     create: httpPost<CreateAgentSessionResponse, CreateAgentSessionRequest>(
       '/api/agent-sessions'
     ),
+    get: withResponseMap(
+      httpGet<unknown, { agent_session_id: string }>(
+        (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}`
+      ),
+      fromApiAgentSessionObservation
+    ),
+    capabilities: withResponseMap(
+      httpGet<unknown, { agent_session_id: string }>(
+        (params) =>
+          `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/capabilities`
+      ),
+      fromApiAgentSessionCapabilities
+    ),
     createTurn: httpPost<
       CreateAgentSessionTurnResponse,
       {
@@ -609,12 +829,26 @@ export const agentPlatform = {
         `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/turns`,
       (params) => params.request
     ),
-    events: httpGet<
-      AgentSessionEventsResponse,
-      { agent_session_id: string; after_seq: number; limit: number }
-    >(
-      (params) =>
-        `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/events?after_seq=${params.after_seq}&limit=${params.limit}`
+    events: withResponseMap(
+      httpGet<IAgentSessionEventPage, { agent_session_id: string; after_seq: number; limit: number }>(
+        (params) =>
+          `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/events?after_seq=${params.after_seq}&limit=${params.limit}`
+      ),
+      (page) => ({
+        ...page,
+        agent_session_id: page.agent_session_id as AgentSessionId,
+      })
+    ),
+    messages: withResponseMap(
+      httpGet<IAgentSessionMessagePage, { agent_session_id: string; after_seq: number; limit: number }>(
+        (params) =>
+          `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/messages?after_seq=${params.after_seq}&limit=${params.limit}`
+      ),
+      (page) => ({
+        ...page,
+        agent_session_id: page.agent_session_id as AgentSessionId,
+        messages: page.messages.map(fromApiAgentSessionProjection),
+      })
     ),
     fork: httpPost<
       ForkAgentSessionResponse,
@@ -624,7 +858,7 @@ export const agentPlatform = {
         `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/forks`,
       (params) => params.request
     ),
-    delete: httpDelete<void, { agent_session_id: string }>(
+    delete: httpDelete<IAgentSessionDeleteResult, { agent_session_id: string }>(
       (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}`
     ),
   },

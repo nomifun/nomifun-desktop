@@ -60,6 +60,9 @@ import Layout from './components/layout/Layout';
 import RouteErrorBoundary from './components/layout/RouteErrorBoundary';
 import Router from './components/layout/Router';
 import Sider from './components/layout/Sider';
+import CanonicalAgentRoutes, {
+  isCanonicalAgentHashRoute,
+} from './pages/agentSession/CanonicalAgentRoutes';
 import { useAuth } from './hooks/context/AuthContext';
 import { ConversationHistoryProvider } from './hooks/context/ConversationHistoryContext';
 import HOC from './utils/ui/HOC';
@@ -89,6 +92,15 @@ const Main = () => {
   const { ready, status } = useAuth();
   const [configReady, setConfigReady] = useState(false);
   const [configError, setConfigError] = useState<Error | null>(null);
+  const [canonicalAgentRoute, setCanonicalAgentRoute] = useState(() =>
+    typeof window !== 'undefined' ? isCanonicalAgentHashRoute(window.location.hash) : false
+  );
+
+  useEffect(() => {
+    const syncRoute = () => setCanonicalAgentRoute(isCanonicalAgentHashRoute(window.location.hash));
+    window.addEventListener('hashchange', syncRoute);
+    return () => window.removeEventListener('hashchange', syncRoute);
+  }, []);
 
   useEffect(() => {
     // Browser sessions must pass the auth probe before any protected startup
@@ -146,14 +158,15 @@ const Main = () => {
     void repairAllCronJobTimeZonesOnce();
   }, [ready, status]);
 
-  const router = (
-    <Router
-      layout={
-        <ConversationHistoryProvider>
-          <Layout sider={<Sider />} />
-        </ConversationHistoryProvider>
-      }
-    />
+  const layout = (
+    <ConversationHistoryProvider>
+      <Layout sider={<Sider />} />
+    </ConversationHistoryProvider>
+  );
+  const router = canonicalAgentRoute && status === 'authenticated' ? (
+    <CanonicalAgentRoutes layout={layout} />
+  ) : (
+    <Router layout={layout} />
   );
 
   if (!ready) {

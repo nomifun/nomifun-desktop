@@ -40,8 +40,8 @@ pub use desktop::{
 pub use nomifun_auth::AuthPolicy;
 pub use router::{
     ChannelMessageLoopComponents, ModuleStates, build_preset_state, build_conversation_state,
-    build_extension_states, build_module_states, build_ws_state, create_router, create_router_with_all_state,
-    create_router_with_states,
+    build_extension_states, build_module_states, build_ws_state, create_agent_platform_router,
+    create_router, create_router_with_all_state, create_router_with_states,
 };
 pub use services::AppServices;
 

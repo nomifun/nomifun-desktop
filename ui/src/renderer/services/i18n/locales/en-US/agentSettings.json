@@ -204,5 +204,35 @@
   },
   "errors": {
     "title": "Agent Settings could not complete the operation"
+  },
+  "navigation": {
+    "entryDescription": "Open the canonical AgentPreset editor, Preview, Revision, Test, and Inspector surface.",
+    "open": "Open Agent Settings"
+  },
+  "session": {
+    "title": "Agent Session",
+    "open": "Open Session",
+    "loading": "Loading canonical Session projections…",
+    "backToSettings": "Agent Settings",
+    "fork": "Fork Session",
+    "delete": "Delete Session",
+    "deleteConfirm": "Delete this Session permanently? Its transcript, projections, Runtime binding, checkpoint, and Session-owned resources will be removed.",
+    "deletedTitle": "Session deleted",
+    "deletedBody": "This AgentSession has crossed the irreversible deletion fence. Its transcript cannot be viewed, continued, observed, forked, or restored.",
+    "generation": "Active generation",
+    "lastSeq": "Last sequence",
+    "checkpoint": "Checkpoint through sequence",
+    "activeCapabilities": "Active capabilities",
+    "runtime": "Runtime Inspector",
+    "inspector": "Session Inspector",
+    "details": "Canonical event details",
+    "continuationRequired": "The frozen Snapshot is not executable on the current stack. History remains read-only; continue only by explicitly forking a new AgentSession.",
+    "empty": "No transcript projections have been committed yet.",
+    "inputPlaceholder": "Send an ordinary Turn to this Session…",
+    "send": "Send Turn",
+    "role": {
+      "user": "You",
+      "assistant": "Agent"
+    }
   }
 }

@@ -7,9 +7,16 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const gateName = args[0];
 
-if (!['contract-closure', 'c1-fullauto', 'c2-c5-foundations'].includes(gateName)) {
+if (
+  ![
+    'contract-closure',
+    'c1-fullauto',
+    'c2-c5-foundations',
+    'c6-triad',
+  ].includes(gateName)
+) {
   console.error(
-    'usage: bun run gate:agent-v2 -- <contract-closure|c1-fullauto|c2-c5-foundations>'
+    'usage: bun run gate:agent-v2 -- <contract-closure|c1-fullauto|c2-c5-foundations|c6-triad>'
   );
   process.exit(2);
 }
@@ -96,6 +103,12 @@ if (gateName === 'c2-c5-foundations') {
   runC2C5Gate();
   writeGateReport('c2-c5-foundations');
   finishGate('c2-c5-foundations');
+}
+
+if (gateName === 'c6-triad') {
+  runC6TriadGate();
+  writeGateReport('c6-triad');
+  finishGate('c6-triad');
 }
 
 for (const file of requiredFiles) {
@@ -608,6 +621,144 @@ function runC2C5Gate() {
   ].filter((path) => statSafe(join(repoRoot, path))?.isDirectory());
   if (uiFoundationPaths.length > 0) {
     run('bun', ['test', ...uiFoundationPaths]);
+  }
+  run('bun', ['run', 'check:i18n']);
+  run('git', ['diff', '--check']);
+}
+
+function runC6TriadGate() {
+  const manifestPath =
+    'docs/specs/2026-08-28-agent-capability-platform-v2/C6-WRITE-MANIFESTS.json';
+  const requiredTriadFiles = [
+    manifestPath,
+    'crates/backend/nomifun-agent-platform/Cargo.toml',
+    'crates/backend/nomifun-agent-platform/src/lib.rs',
+    'crates/backend/nomifun-agent-platform/src/platform.rs',
+    'crates/backend/nomifun-agent-platform/src/chat.rs',
+    'crates/backend/nomifun-agent-platform/src/coding.rs',
+    'crates/backend/nomifun-agent-platform/src/sample_echo.rs',
+    'crates/backend/nomifun-agent-platform/tests/chat_minimal.rs',
+    'crates/backend/nomifun-agent-platform/tests/coding_codex.rs',
+    'crates/backend/nomifun-agent-platform/tests/sample_echo.rs',
+    'crates/backend/nomifun-app/src/router/agent_platform.rs',
+    'crates/backend/nomifun-app/tests/agent_platform_e2e.rs',
+    'ui/src/renderer/pages/agentSession',
+  ];
+  for (const file of requiredTriadFiles) {
+    if (!statSafe(join(repoRoot, file))) {
+      failures.push(`missing C6 triad artifact: ${file}`);
+    }
+  }
+
+  const platformManifest = readFileSync(
+    join(repoRoot, 'crates/backend/nomifun-agent-platform/Cargo.toml'),
+    'utf8'
+  );
+  for (const dependency of [
+    'nomi-agent',
+    'nomifun-ai-agent',
+    'nomifun-conversation',
+    'nomifun-gateway',
+    'nomifun-preset',
+    'nomifun-extension',
+  ]) {
+    if (platformManifest.includes(dependency)) {
+      failures.push(
+        `nomifun-agent-platform depends on forbidden legacy/product crate ${dependency}`
+      );
+    }
+  }
+
+  const finalStackRoots = [
+    'crates/backend/nomifun-agent-platform/src',
+    'crates/backend/nomifun-app/src/router/agent_platform.rs',
+  ];
+  const forbiddenFinalStackPatterns = [
+    [/\bAgentFactoryDeps\b/, 'legacy Agent factory dependency'],
+    [/\bbuild_agent_factory\b/, 'legacy Agent factory builder'],
+    [/\bNomiAgentManager\b/, 'legacy Nomi manager'],
+    [/\bNomiBuildExtra\b/, 'legacy Nomi build-extra DTO'],
+    [/\bGatewayDeps\b/, 'legacy Gateway dependency bag'],
+    [/\bConversationService\b/, 'legacy Conversation service'],
+    [/\/api\/conversations\b/, 'legacy Conversation route'],
+    [/\bDraftSnapshot\b/, 'test-only draft snapshot'],
+    [/\bSessionMode\b/, 'legacy execution mode'],
+    [/\bToolApprovalManager\b/, 'legacy approval manager'],
+    [/\bneeds_confirmation\b/, 'legacy confirmation protocol'],
+  ];
+  for (const root of finalStackRoots) {
+    const absoluteRoot = join(repoRoot, root);
+    const files = statSafe(absoluteRoot)?.isDirectory()
+      ? collectFiles(absoluteRoot, '')
+      : statSafe(absoluteRoot)?.isFile()
+        ? [absoluteRoot]
+        : [];
+    for (const file of files) {
+      if (!/\.(rs|toml)$/.test(file)) continue;
+      const normalized = relative(repoRoot, file).replaceAll('\\', '/');
+      const source = readFileSync(file, 'utf8');
+      for (const [pattern, label] of forbiddenFinalStackPatterns) {
+        if (pattern.test(source)) {
+          failures.push(`${normalized}: C6 forbidden final-stack edge (${label})`);
+        }
+      }
+    }
+  }
+
+  const productionSampleEchoRoots = [
+    'crates/backend/nomifun-app/src',
+    'ui/src',
+    'crates/backend/nomifun-agent-contracts/contracts/presets/official-preset-seed-manifest.payload.json',
+  ];
+  for (const root of productionSampleEchoRoots) {
+    const absoluteRoot = join(repoRoot, root);
+    const files = statSafe(absoluteRoot)?.isDirectory()
+      ? collectFiles(absoluteRoot, '')
+      : statSafe(absoluteRoot)?.isFile()
+        ? [absoluteRoot]
+        : [];
+    for (const file of files) {
+      if (!/\.(rs|ts|tsx|json|toml)$/.test(file)) continue;
+      const source = readFileSync(file, 'utf8');
+      if (/\bsample\.echo\b/.test(source)) {
+        failures.push(
+          `${relative(repoRoot, file).replaceAll('\\', '/')}: sample.echo leaked into production inventory/API/UI`
+        );
+      }
+    }
+  }
+
+  const migrationDiff = spawnSync(
+    'git',
+    [
+      'diff',
+      '--quiet',
+      '253e850b44bce83fa9b785dc6805c431201f6c91',
+      '--',
+      'crates/backend/nomifun-db/migrations',
+    ],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      shell: process.platform === 'win32',
+      stdio: 'pipe',
+    }
+  );
+  if (migrationDiff.status !== 0) {
+    failures.push('published legacy migrations changed after the C1 checkpoint');
+  }
+
+  run('cargo', ['check', '-p', 'nomifun-agent-platform', '-p', 'nomifun-app']);
+  run('cargo', ['test', '-p', 'nomifun-agent-platform']);
+  run('cargo', ['test', '-p', 'nomifun-app', '--test', 'agent_platform_e2e']);
+
+  const uiTriadPaths = [
+    'ui/src/common/types/agentPlatform',
+    'ui/src/renderer/pages/agentSettings',
+    'ui/src/renderer/pages/agentSession',
+  ].filter((path) => statSafe(join(repoRoot, path)));
+  if (uiTriadPaths.length > 0) {
+    run('bun', ['test', ...uiTriadPaths]);
   }
   run('bun', ['run', 'check:i18n']);
   run('git', ['diff', '--check']);

@@ -1,0 +1,29 @@
+.toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.error { margin-bottom:12px; border-radius:8px; }
+.loading { min-height:320px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; color:var(--color-text-3); }
+.sessionGrid { display:grid; grid-template-columns:minmax(0,1fr) minmax(260px,330px); gap:16px; align-items:start; }
+.transcript,.inspector { border:1px solid var(--color-border-2); border-radius:8px; background:var(--color-bg-1); }
+.transcript { min-width:0; padding:14px; }
+.inspector { position:sticky; top:0; padding:12px; }
+.inspectorTitle { font-size:13px; font-weight:650; color:var(--color-text-1); margin-bottom:10px; }
+.statusBar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding-bottom:12px; border-bottom:1px solid var(--color-border-2); color:var(--color-text-3); font-size:11px; }
+.cardList { display:flex; flex-direction:column; gap:8px; padding:12px 0; }
+.messageCard,.processCard { border:1px solid var(--color-border-2); border-radius:8px; padding:10px 12px; background:var(--color-bg-2); }
+.userMessage { margin-left:12%; background:var(--color-fill-1); }
+.cardHeader { display:flex; align-items:center; gap:7px; min-width:0; color:var(--color-text-3); font-size:10px; }
+.cardHeader strong { min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--color-text-1); font-size:11px; }
+.messageContent { margin-top:7px; color:var(--color-text-1); font-size:13px; line-height:1.65; white-space:pre-wrap; overflow-wrap:anywhere; }
+.detailCollapse,.inspectorCollapse { margin-top:7px; border:0; background:transparent; }
+.detailCollapse pre { max-height:260px; overflow:auto; margin:0; white-space:pre-wrap; font-size:11px; line-height:1.5; }
+.composer { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:9px; align-items:end; border-top:1px solid var(--color-border-2); padding-top:12px; }
+.inspectorRows { display:flex; flex-direction:column; gap:7px; }
+.inspectorRows > div { display:grid; grid-template-columns:120px minmax(0,1fr); gap:8px; }
+.inspectorRows span { color:var(--color-text-3); font-size:10px; }
+.inspectorRows code { overflow:hidden; text-overflow:ellipsis; color:var(--color-text-2); font-size:10px; }
+.tagList { display:flex; flex-wrap:wrap; gap:5px; }
+.empty { padding:36px 12px; text-align:center; color:var(--color-text-3); font-size:12px; }
+.deletedState { min-height:420px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; border:1px solid var(--color-border-2); border-radius:8px; color:var(--color-text-3); }
+.deletedState h2 { margin:4px 0 0; color:rgb(var(--danger-6)); font-size:18px; }
+.deletedState p { max-width:520px; margin:0 0 8px; text-align:center; font-size:12px; line-height:1.7; }
+@media (max-width:900px) { .sessionGrid { grid-template-columns:1fr; } .inspector { position:static; } }
+@media (max-width:640px) { .composer { grid-template-columns:1fr; } .userMessage { margin-left:0; } }
