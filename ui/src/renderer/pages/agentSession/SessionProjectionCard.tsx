@@ -1,6 +1,6 @@
 import type { SessionCardModel } from './model';
 import { Collapse, Tag } from '@arco-design/web-react';
-import { Code, MessageOne, Warning, Zap } from '@icon-park/react';
+import { Caution, Code, Lightning, MessageOne } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { jsonDetails } from './model';
@@ -9,8 +9,8 @@ import styles from './AgentSessionPage.module.css';
 const icon = (kind: SessionCardModel['kind']) => {
   if (kind === 'message') return <MessageOne theme='outline' size='16' />;
   if (kind === 'tool') return <Code theme='outline' size='16' />;
-  if (kind === 'effect') return <Zap theme='outline' size='16' />;
-  return <Warning theme='outline' size='16' />;
+  if (kind === 'effect') return <Lightning theme='outline' size='16' />;
+  return <Caution theme='outline' size='16' />;
 };
 
 const SessionProjectionCard: React.FC<{ card: SessionCardModel }> = ({ card }) => {
