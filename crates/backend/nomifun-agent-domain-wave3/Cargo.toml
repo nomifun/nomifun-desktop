@@ -1,0 +1,11 @@
+[package]
+name = "nomifun-agent-domain-wave3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+nomifun-agent-contracts = { path = "../nomifun-agent-contracts" }
+nomifun-agent-kernel = { path = "../nomifun-agent-kernel" }
+serde_json.workspace = true

@@ -18,7 +18,7 @@ use crate::filesystem::{
 };
 use crate::inputs::{FrozenRootInputs, application_build_digest};
 use crate::{
-    FreshV4AccessAudit, FreshV4Clock, FreshV4FaultInjector, FreshV4FaultPoint,
+    FreshV4AccessAudit, FreshV4AccessKind, FreshV4Clock, FreshV4FaultInjector, FreshV4FaultPoint,
     FreshV4QuiescePort, FreshV4RootError, NoAccessAudit, NoFaults,
     PreServiceQuiesced, SystemUtcClock,
 };
@@ -157,6 +157,29 @@ where
                         })
                     }
                     (EntryKind::Missing, EntryKind::Missing) => {
+                        // Installers and host launchers commonly create the
+                        // canonical directory before the backend starts. An
+                        // existing empty directory is still a clean install;
+                        // treating it as legacy would force an unnecessary
+                        // Windows directory rename and can fail under
+                        // endpoint/file-system filters.
+                        if directory_is_empty(&paths.canonical_root, &self.audit)? {
+                            let marker = self.new_parent_marker(
+                                paths,
+                                FreshV4OperationKind::Fresh,
+                                None,
+                                inputs,
+                            )?;
+                            let guard = self.create_parent_marker(paths, marker)?;
+                            return self
+                                .run_with_parent_marker(
+                                    paths,
+                                    guard,
+                                    inputs,
+                                    build_digest,
+                                )
+                                .await;
+                        }
                         self.faults
                             .check(FreshV4FaultPoint::BeforeSameFilesystemPreflight)?;
                         if !same_filesystem(
@@ -768,6 +791,16 @@ where
         }
         Ok(FreshV4RecoveryPhase::IntentDurable)
     }
+}
+
+fn directory_is_empty(
+    path: &Path,
+    audit: &dyn FreshV4AccessAudit,
+) -> Result<bool, FreshV4RootError> {
+    audit.record(FreshV4AccessKind::Metadata, path)?;
+    let mut entries = std::fs::read_dir(path)
+        .map_err(|error| FreshV4RootError::io("inspect canonical root entries", path, error))?;
+    Ok(entries.next().is_none())
 }
 
 struct ParentMarkerGuard {

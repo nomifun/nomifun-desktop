@@ -21,6 +21,7 @@ use super::builtin_skills::materialize_builtin_skills;
 use super::server_lock::{BootServerLockAuthority, ServerLock, acquire_server_lock};
 use super::tracing_init::{LogGuards, init_tracing};
 use super::work_dir::resolve_work_dir;
+use nomifun_v4_root::FRESH_V4_READY_MARKER_FILE;
 
 /// Resolved environment needed by all non-MCP subcommands.
 pub struct ServerEnvironment {
@@ -696,10 +697,16 @@ impl ServerEnvironment {
 /// Requires only `data_dir`. Subcommands that need persistent state
 /// (database, skill files) should call this after `init_environment`.
 pub async fn init_data_layer(config: &AppConfig) -> Result<Database> {
-    super::v4_root::reject_legacy_v3_data_layer(
-        &config.data_dir,
-        "legacy v3 data-layer initialization",
-    )?;
+    // During C7 the legacy service shell still owns the non-agent routes while
+    // the canonical Agent platform is opened from its separate Fresh-v4 pool.
+    // The shell is always initialized against the current empty v4 root after
+    // cutover; it must never receive the v4 database pool.
+    if !ready_v4_root_present(&config.data_dir)? {
+        super::v4_root::reject_legacy_v3_data_layer(
+            &config.data_dir,
+            "legacy v3 data-layer initialization",
+        )?;
+    }
     let boot = Instant::now();
 
     let preparation = prepare_v3_data_layer(config).await?;
@@ -746,6 +753,11 @@ pub async fn init_data_layer(config: &AppConfig) -> Result<Database> {
 /// assembly fails, the pending reset plan remains durable and the next boot
 /// resumes instead of accepting a half-initialized dataset.
 pub fn finalize_data_layer(config: &AppConfig) -> Result<()> {
+    if ready_v4_root_present(&config.data_dir)? {
+        // The v4 root has its own immutable ready marker.  The v3 service
+        // shell is transitional and has no authority over that marker.
+        return Ok(());
+    }
     super::v4_root::reject_legacy_v3_data_layer(
         &config.data_dir,
         "legacy v3 data-layer finalization",
@@ -761,6 +773,20 @@ pub fn finalize_data_layer(config: &AppConfig) -> Result<()> {
         &config.work_dir,
     )?;
     Ok(())
+}
+
+fn ready_v4_root_present(data_dir: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(data_dir.join(FRESH_V4_READY_MARKER_FILE)) {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| {
+                format!(
+                    "inspect Fresh-v4 ready marker under {}",
+                    data_dir.display()
+                )
+            }),
+    }
 }
 
 #[cfg(test)]

@@ -53,6 +53,12 @@ nomifun-codex-runtime = { path = "crates/backend/nomifun-codex-runtime" }
 nomifun-chat-model-broker = { path = "crates/backend/nomifun-chat-model-broker" }
 nomifun-agent-control-plane = { path = "crates/backend/nomifun-agent-control-plane" }
 nomifun-agent-platform = { path = "crates/backend/nomifun-agent-platform" }
+nomifun-agent-domain-support = { path = "crates/backend/nomifun-agent-domain-support" }
+nomifun-agent-domain-wave1 = { path = "crates/backend/nomifun-agent-domain-wave1" }
+nomifun-agent-domain-wave2 = { path = "crates/backend/nomifun-agent-domain-wave2" }
+nomifun-agent-domain-wave3 = { path = "crates/backend/nomifun-agent-domain-wave3" }
+nomifun-agent-domain-wave4 = { path = "crates/backend/nomifun-agent-domain-wave4" }
+nomifun-agent-domain-wave5 = { path = "crates/backend/nomifun-agent-domain-wave5" }
 
 # --- Internal crates: shared ---
 nomifun-net = { path = "crates/shared/nomifun-net" }
