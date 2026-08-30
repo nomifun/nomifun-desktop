@@ -1984,7 +1984,7 @@ function c8ValidateC8Manifest(report, manifest, sourceSha) {
     },
     cargo_lock: {
       path: 'Cargo.lock',
-      digest: 'pending_for_candidate',
+      digest: C8_EXPECTED_DIGESTS.cargo_lock,
     },
   };
   const actualInputs = manifest.immutable_inputs;
