@@ -11,6 +11,7 @@ pub mod adapter;
 pub mod broker;
 pub mod contracts;
 pub mod ports;
+pub mod production;
 pub mod recorded;
 pub mod responses_bridge;
 
@@ -18,5 +19,6 @@ pub use adapter::*;
 pub use broker::*;
 pub use contracts::*;
 pub use ports::*;
+pub use production::*;
 pub use recorded::*;
 pub use responses_bridge::*;
