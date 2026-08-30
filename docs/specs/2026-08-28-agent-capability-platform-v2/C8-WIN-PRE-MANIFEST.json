@@ -1,0 +1,203 @@
+{
+  "schema_version": "1.0.0",
+  "boundary": "C8-WIN-PRE",
+  "status": "active",
+  "branch": "rf/agent-capability-platform-v2",
+  "candidate_source_policy": "resolve_clean_git_head_at_run",
+  "cohort_tuple_inputs": {
+    "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+    "platform_validation_manifest_digest": "78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9",
+    "runtime_release_digest": "0c029dd60f53c761bce3451de66c678e95314b354e229e84fde632c70dd8b55f"
+  },
+  "source_checkpoint": {
+    "local_head": "resolved_at_run",
+    "verified_remote_sha": "must_equal_local_head_before_hp1",
+    "clean_worktree_required": true,
+    "shared_ref": "refs/heads/rf/agent-capability-platform-v2"
+  },
+  "target_cell": {
+    "cell_id": "windows_desktop_x64",
+    "host_os": "windows",
+    "host_arch": "x86_64",
+    "host_target": "x86_64-pc-windows-msvc",
+    "runtime_target": "x86_64-pc-windows-msvc",
+    "host_surface": "desktop",
+    "package_format": "nsis",
+    "native_evidence_required": true
+  },
+  "immutable_inputs": {
+    "decision_contract": {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/generated/contract-closure.envelope.json",
+      "digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5"
+    },
+    "canonical_schema_manifest": {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/generated/canonical-v4-schema-manifest.envelope.json",
+      "digest": "f0a1c03696ed180db6786f781282d3a2b81dbea91ac286972b710dd7fe842ed7"
+    },
+    "target_first_party_inventory": {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/generated/target-first-party-contributions.envelope.json",
+      "digest": "85e250015c78291091a11a68e5205b62a6fb510ed98f5536c2eb1fe351e536f2"
+    },
+    "official_seed": {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/generated/official-preset-seed-manifest.envelope.json",
+      "digest": "c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8"
+    },
+    "platform_validation_contract": {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json",
+      "digest": "78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9"
+    },
+    "runtime_release": {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json",
+      "digest": "0c029dd60f53c761bce3451de66c678e95314b354e229e84fde632c70dd8b55f"
+    },
+    "cargo_lock": {
+      "path": "Cargo.lock",
+      "digest": "pending_for_candidate"
+    }
+  },
+  "required_checks": [
+    {
+      "check_id": "c7_domain_waves",
+      "command": "bun run gate:agent-v2 -- c7-domain-waves",
+      "execution_kind": "informational"
+    },
+    {
+      "check_id": "contract_validation",
+      "command": "cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "domain_registration_tests",
+      "command": "cargo test --locked -p nomifun-agent-domain-support -p nomifun-agent-domain-wave1 -p nomifun-agent-domain-wave2 -p nomifun-agent-domain-wave3 -p nomifun-agent-domain-wave4 -p nomifun-agent-domain-wave5",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "fresh_v4_root_tests",
+      "command": "cargo test --locked -p nomifun-v4-root",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "production_host_tests",
+      "command": "cargo test --locked -p nomifun-app --lib router::agent_platform_host",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "workspace_cargo_test",
+      "command": "cargo test --locked --jobs 1 -- --test-threads=1",
+      "execution_kind": "native",
+      "deduplication_key": "c8-win-pre-workspace-cargo"
+    },
+    {
+      "check_id": "ui_check",
+      "command": "bun run check",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "ui_build",
+      "command": "bun run build:ui",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "windows_startup_smoke",
+      "command": "target/debug/nomicore.exe --data-dir <temporary-root> --port <free-port> --local",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "windows_package_contract",
+      "command": "bun run check:windows-installer",
+      "execution_kind": "native"
+    }
+  ],
+  "all_scene_coverage": {
+    "required_official_template_keys": [
+      "chat.minimal",
+      "assistant.general",
+      "coding.codex",
+      "companion.default",
+      "robot.default",
+      "customer-service.default",
+      "creative-studio.default"
+    ],
+    "required_domains": [
+      "research",
+      "attachments",
+      "knowledge",
+      "project-memory",
+      "workspace",
+      "process",
+      "terminal",
+      "vcs",
+      "mcp",
+      "browser",
+      "computer",
+      "companion",
+      "channel",
+      "customer-service",
+      "robot",
+      "creative",
+      "office",
+      "miniapp",
+      "requirements",
+      "autowork",
+      "cron",
+      "idmm",
+      "remote"
+    ],
+    "required_session_operations": [
+      "create",
+      "resume",
+      "fork",
+      "start_turn",
+      "steer",
+      "follow_up",
+      "cancel",
+      "compaction",
+      "delete"
+    ],
+    "required_fault_classes": [
+      "clean_root",
+      "precreated_empty_root",
+      "cutover_recovery",
+      "provider_unavailable",
+      "resource_unavailable",
+      "remote_revoke_admission",
+      "runtime_dispose",
+      "descendant_process_cleanup",
+      "late_callback_after_delete"
+    ]
+  },
+  "pending_native_verification_points": [
+    {
+      "verification_point_id": "c8-macos-arm64",
+      "target_cell": "macos_desktop_arm64",
+      "status": "pending_native_verification",
+      "exact_check_id": "c8_ma_full_gate"
+    },
+    {
+      "verification_point_id": "c8-macos-x64",
+      "target_cell": "macos_desktop_x64",
+      "status": "pending_native_verification",
+      "exact_check_id": "c8_mx_full_gate"
+    },
+    {
+      "verification_point_id": "c8-linux-desktop-x64",
+      "target_cell": "linux_desktop_x64",
+      "status": "pending_native_verification",
+      "exact_check_id": "c8_ld_full_gate"
+    },
+    {
+      "verification_point_id": "c8-linux-headless-x64",
+      "target_cell": "linux_headless_x64",
+      "status": "pending_native_verification",
+      "exact_check_id": "c8_lh_full_gate"
+    }
+  ],
+  "closure_requirements": {
+    "status_transition": "active -> closed",
+    "windows_status": "pass",
+    "non_windows_status": "pending_native_verification",
+    "workspace_cargo_test_must_be_serialized": true,
+    "global_legacy_residual_must_be_zero": true,
+    "hp1_handoff": "clean checkpoint, push, remote SHA verification, handoff bundle, then pause"
+  }
+}
