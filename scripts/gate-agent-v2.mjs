@@ -50,6 +50,7 @@ const requiredFiles = [
 
 const commands = [];
 const failures = [];
+const COMMAND_MAX_BUFFER = 64 * 1024 * 1024;
 
 function run(command, commandArgs) {
   const startedAt = new Date().toISOString();
@@ -1441,6 +1442,7 @@ function c8RunCommand(
       encoding: 'utf8',
       shell: process.platform === 'win32',
       stdio: 'pipe',
+      maxBuffer: COMMAND_MAX_BUFFER,
       ...(timeout ? { timeout } : {}),
     });
   } catch (error) {
