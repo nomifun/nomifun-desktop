@@ -826,7 +826,7 @@ preferred channel.
 <div align="center">
 <table>
   <tr>
-    <td align="center"><img src="docs/assets/nomifun-wechat-group.jpg" alt="NomiFun WeChat group QR" width="220"><br/><sub><b>NomiFun WeChat group / NomiFun 微信交流群</b></sub></td>
+    <td align="center"><img src="docs/assets/nomifun-wecom-group.png" alt="NomiFun WeCom group QR" width="220"><br/><sub><b>NomiFun WeCom group / NomiFun 企业微信群</b></sub></td>
     <td align="center"><img src="docs/images/contact/qq-group-qr.png" alt="QQ group QR" width="220"><br/><sub><b>QQ group / QQ 群</b></sub></td>
   </tr>
 </table>
