@@ -4,7 +4,7 @@
   "base_sha": "dee3cc727b3bc09dbd0e0dcf0661ca8f79689813",
   "code_base_sha": "6e1b7338ae3c3181d14366cc3d52d30f64b45285",
   "branch": "rf/agent-capability-platform-v2",
-  "status": "active",
+  "status": "closed",
   "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
   "shared_cargo_policy": "agents-must-not-run-workspace-cargo-test-or-edit-root-lockfiles; central-validation-owner-only",
   "required_final_gates": [
@@ -29,7 +29,9 @@
         "crates/backend/nomifun-app/",
         "ui/",
         "docs/specs/2026-08-28-agent-capability-platform-v2/"
-      ]
+      ],
+      "status": "closed",
+      "completed_commit": "1dedfedc782b81389ead27858963d0a943f4d142"
     },
     {
       "task_id": "C6-CHAT-MINIMAL",
@@ -45,7 +47,9 @@
         "crates/backend/nomifun-app/",
         "ui/",
         "docs/specs/2026-08-28-agent-capability-platform-v2/"
-      ]
+      ],
+      "status": "closed",
+      "completed_commit": "1dedfedc782b81389ead27858963d0a943f4d142"
     },
     {
       "task_id": "C6-CODING-CODEX",
@@ -61,7 +65,9 @@
         "crates/backend/nomifun-app/",
         "ui/",
         "docs/specs/2026-08-28-agent-capability-platform-v2/"
-      ]
+      ],
+      "status": "closed",
+      "completed_commit": "1dedfedc782b81389ead27858963d0a943f4d142"
     },
     {
       "task_id": "C6-SAMPLE-ECHO",
@@ -77,7 +83,9 @@
         "crates/backend/nomifun-app/",
         "ui/",
         "docs/specs/2026-08-28-agent-capability-platform-v2/"
-      ]
+      ],
+      "status": "closed",
+      "completed_commit": "1dedfedc782b81389ead27858963d0a943f4d142"
     },
     {
       "task_id": "C6-APP-COMPOSITION",
@@ -97,7 +105,9 @@
         "Cargo.lock",
         "ui/",
         "docs/specs/2026-08-28-agent-capability-platform-v2/"
-      ]
+      ],
+      "status": "closed",
+      "completed_commit": "1dedfedc782b81389ead27858963d0a943f4d142"
     },
     {
       "task_id": "C6-UI-INTEGRATION",
@@ -118,7 +128,9 @@
         "Cargo.lock",
         "crates/",
         "docs/specs/2026-08-28-agent-capability-platform-v2/"
-      ]
+      ],
+      "status": "closed",
+      "completed_commit": "1dedfedc782b81389ead27858963d0a943f4d142"
     }
   ],
   "central_owner": {
@@ -136,5 +148,41 @@
       "crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json",
       "crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json"
     ]
+  },
+  "closed_at": "2026-08-29",
+  "implementation_commit": "1dedfedc782b81389ead27858963d0a943f4d142",
+  "gate_evidence": "build.noindex/agent-capability-v2/1dedfedc782b81389ead27858963d0a943f4d142/c6-triad/summary.json",
+  "closure_record": "docs/specs/2026-08-28-agent-capability-platform-v2/C6-CLOSURE.json",
+  "validation": {
+    "candidate_source_sha": "1dedfedc782b81389ead27858963d0a943f4d142",
+    "gate_chat_minimal_final": "pass",
+    "gate_coding_codex_final": "pass",
+    "gate_compiled_plugin_final": "pass",
+    "workspace_cargo_test": {
+      "status": "pass",
+      "command": "cargo test --locked --jobs 1 -- --test-threads=1",
+      "evidence": "build.noindex/agent-capability-v2/1dedfedc782b81389ead27858963d0a943f4d142/c6-workspace-fully-serialized/cargo-test.log"
+    },
+    "bun_run_check": {
+      "status": "baseline_fail",
+      "exit_code": 2,
+      "evidence": "build.noindex/agent-capability-v2/1dedfedc782b81389ead27858963d0a943f4d142/c6-ui/bun-check.log",
+      "note": "Repository-wide React/Arco typecheck debt remains; no C6 production build error remains."
+    },
+    "bun_run_build_ui": {
+      "status": "pass",
+      "evidence": "build.noindex/agent-capability-v2/1dedfedc782b81389ead27858963d0a943f4d142/c6-ui/bun-build-ui.log"
+    },
+    "focused_ui_tests": {
+      "status": "pass",
+      "passed": 23
+    },
+    "i18n_check": {
+      "status": "pass",
+      "keys": 7074,
+      "modules": 33
+    },
+    "published_legacy_migrations": "unchanged",
+    "native_platform_verification": "pending_until_C8_WIN_PRE"
   }
 }

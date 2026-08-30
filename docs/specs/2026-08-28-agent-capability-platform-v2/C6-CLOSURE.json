@@ -1,0 +1,75 @@
+{
+  "schema_version": "1.0.0",
+  "boundary": "C6",
+  "status": "closed",
+  "closed_at": "2026-08-29",
+  "branch": "rf/agent-capability-platform-v2",
+  "candidate_source_sha": "1dedfedc782b81389ead27858963d0a943f4d142",
+  "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+  "implementation_commit": "04bb08f9",
+  "follow_up_validation_commits": [
+    "45f54046",
+    "91f2bf45",
+    "f8623d94",
+    "dbdd3e3c",
+    "eda9edc5",
+    "825356ef",
+    "3f6bfc90",
+    "415a08f9",
+    "a3273d85",
+    "c7181b89",
+    "da833171",
+    "fae95bff",
+    "1dedfedc"
+  ],
+  "gate_results": [
+    {
+      "gate": "gate-chat-minimal-final",
+      "status": "pass",
+      "command": "cargo test --locked -p nomifun-agent-platform --test chat_minimal"
+    },
+    {
+      "gate": "gate-coding-codex-final",
+      "status": "pass",
+      "command": "cargo test --locked -p nomifun-agent-platform --test coding_codex"
+    },
+    {
+      "gate": "gate-compiled-plugin-final",
+      "status": "pass",
+      "command": "cargo test --locked -p nomifun-agent-platform --test sample_echo"
+    },
+    {
+      "gate": "c6-triad",
+      "status": "pass",
+      "evidence": "build.noindex/agent-capability-v2/1dedfedc782b81389ead27858963d0a943f4d142/c6-triad/summary.json"
+    },
+    {
+      "gate": "workspace-cargo",
+      "status": "pass",
+      "command": "cargo test --locked --jobs 1 -- --test-threads=1",
+      "evidence": "build.noindex/agent-capability-v2/1dedfedc782b81389ead27858963d0a943f4d142/c6-workspace-fully-serialized/cargo-test.log"
+    },
+    {
+      "gate": "ui-build",
+      "status": "pass",
+      "command": "bun run build:ui",
+      "evidence": "build.noindex/agent-capability-v2/1dedfedc782b81389ead27858963d0a943f4d142/c6-ui/bun-build-ui.log"
+    },
+    {
+      "gate": "ui-check",
+      "status": "baseline_fail",
+      "exit_code": 2,
+      "command": "bun run check",
+      "evidence": "build.noindex/agent-capability-v2/1dedfedc782b81389ead27858963d0a943f4d142/c6-ui/bun-check.log",
+      "note": "Known repository-wide React/Arco typing baseline; focused C6 UI tests, syntax, i18n, and production build pass."
+    }
+  ],
+  "invariants": [
+    "published legacy migrations unchanged from the C1 checkpoint",
+    "Chat, Coding, and sample.echo use the formal Fresh-v4/Revision/Snapshot/AgentSession/Runtime/Event/Effect chain",
+    "canonical AgentSession route E2E covers create/query/capabilities/events/messages/fork/delete and SESSION_DELETED",
+    "no C6 final-stack production source edge to Factory/GatewayDeps/AppServices/legacy Conversation",
+    "macOS/Linux native evidence remains pending and is not claimed by Windows"
+  ],
+  "next_boundary": "C7 Windows continuous domain waves"
+}
