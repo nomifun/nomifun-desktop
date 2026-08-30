@@ -48,11 +48,11 @@
     },
     "runtime_release": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json",
-      "digest": "0c029dd60f53c761bce3451de66c678e95314b354e229e84fde632c70dd8b55f"
+      "digest": "8f40a7ff0c42bb3180e976ae1c54e89f4942c5d6899507fa70f31c964d9b22fc"
     },
     "cargo_lock": {
       "path": "Cargo.lock",
-      "digest": "pending_for_candidate"
+      "digest": "c6aa85864cac522d8a6bee064f04057393ade35749c95984344a46df51359092"
     }
   },
   "required_checks": [
