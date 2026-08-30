@@ -5875,6 +5875,62 @@ dependencies = [
 ]
 
 [[package]]
+name = "nomifun-agent-domain-support"
+version = "0.7.4"
+dependencies = [
+ "async-trait",
+ "nomifun-agent-contracts",
+ "nomifun-agent-kernel",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "nomifun-agent-domain-wave1"
+version = "0.7.4"
+dependencies = [
+ "async-trait",
+ "nomifun-agent-contracts",
+ "nomifun-agent-kernel",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "nomifun-agent-domain-wave2"
+version = "0.7.4"
+dependencies = [
+ "nomifun-agent-contracts",
+ "nomifun-agent-kernel",
+]
+
+[[package]]
+name = "nomifun-agent-domain-wave3"
+version = "0.7.4"
+dependencies = [
+ "async-trait",
+ "nomifun-agent-contracts",
+ "nomifun-agent-kernel",
+ "serde_json",
+]
+
+[[package]]
+name = "nomifun-agent-domain-wave4"
+version = "0.7.4"
+dependencies = [
+ "nomifun-agent-contracts",
+ "nomifun-agent-kernel",
+]
+
+[[package]]
+name = "nomifun-agent-domain-wave5"
+version = "0.7.4"
+dependencies = [
+ "nomifun-agent-contracts",
+ "nomifun-agent-kernel",
+]
+
+[[package]]
 name = "nomifun-agent-execution"
 version = "0.7.4"
 dependencies = [
@@ -6064,6 +6120,12 @@ dependencies = [
  "nomi-types",
  "nomifun-agent-contracts",
  "nomifun-agent-control-plane",
+ "nomifun-agent-domain-support",
+ "nomifun-agent-domain-wave1",
+ "nomifun-agent-domain-wave2",
+ "nomifun-agent-domain-wave3",
+ "nomifun-agent-domain-wave4",
+ "nomifun-agent-domain-wave5",
  "nomifun-agent-execution",
  "nomifun-agent-kernel",
  "nomifun-agent-platform",

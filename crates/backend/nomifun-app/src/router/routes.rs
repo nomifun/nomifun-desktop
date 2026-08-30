@@ -443,7 +443,44 @@ pub async fn create_router(services: &AppServices) -> Router {
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: route tree build started"
     );
-    let router = create_router_with_states(services, states);
+    let agent_platform_router = match super::agent_platform_host::try_build(services).await {
+        Ok(Some(platform)) => {
+            let registry = platform.materialized_registry();
+            match registry {
+                Ok(registry) => tracing::info!(
+                    packages = registry.packages.len(),
+                    capabilities = registry.capabilities.len(),
+                    "startup: Fresh-v4 Agent platform mounted"
+                ),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "startup: Fresh-v4 Agent platform mounted but inventory projection failed"
+                ),
+            }
+            Some(super::agent_platform::create_agent_platform_router(platform))
+        }
+        Ok(None) => {
+            tracing::debug!(
+                "startup: no ready Fresh-v4 root is present; canonical Agent routes remain unmounted"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "startup: ready Fresh-v4 root could not mount the canonical Agent platform"
+            );
+            None
+        }
+    };
+    let ws_state = build_ws_state(services);
+    let router =
+        create_router_with_all_state_and_agent_platform(
+            services,
+            states,
+            ws_state,
+            agent_platform_router,
+        );
     // Remote capability front door (/mcp): installation-token-authenticated MCP,
     // projecting the SAME Registry/GatewayDeps as the inward stdio bridge. The
     // bearer token authenticates the installation owner and never selects a
@@ -683,6 +720,15 @@ pub fn create_router_with_all_state(
     states: ModuleStates,
     ws_state: WsHandlerState,
 ) -> Router {
+    create_router_with_all_state_and_agent_platform(services, states, ws_state, None)
+}
+
+fn create_router_with_all_state_and_agent_platform(
+    services: &AppServices,
+    states: ModuleStates,
+    ws_state: WsHandlerState,
+    agent_platform_router: Option<Router>,
+) -> Router {
     let boot = Instant::now();
     tracing::info!("startup: route tree build with states started");
     services
@@ -820,12 +866,18 @@ pub fn create_router_with_all_state(
         &instance_owner_state,
     );
 
-    // Skill routes protected by auth middleware
-    let skill_authenticated = protect_instance_owner(
-        skill_routes(states.skill),
-        &auth_mw_state,
-        &instance_owner_state,
-    );
+    // The canonical v4 control plane owns `/api/skills` when it is mounted.
+    // Keep the legacy skill catalog available for test/legacy compositions
+    // that deliberately have no Fresh-v4 platform.
+    let skill_authenticated = if agent_platform_router.is_none() {
+        Some(protect_instance_owner(
+            skill_routes(states.skill),
+            &auth_mw_state,
+            &instance_owner_state,
+        ))
+    } else {
+        None
+    };
 
     // Channel routes protected by auth middleware
     let channel_authenticated = protect_instance_owner(
@@ -940,6 +992,14 @@ pub fn create_router_with_all_state(
         &auth_mw_state,
         &instance_owner_state,
     );
+
+    let agent_platform_authenticated = agent_platform_router.map(|router| {
+        protect_instance_owner(
+            router,
+            &auth_mw_state,
+            &instance_owner_state,
+        )
+    });
 
     // Computer-use OS permission status + prompt (macOS TCC). Stateless: the
     // handlers probe/trigger the host process's own grants. Auth-gated like the
@@ -1111,8 +1171,11 @@ pub fn create_router_with_all_state(
         .merge(file_authenticated)
         .merge(mcp_authenticated)
         .merge(extension_authenticated)
-        .merge(hub_authenticated)
-        .merge(skill_authenticated)
+        .merge(hub_authenticated);
+    let router = match skill_authenticated {
+        Some(skill) => router.merge(skill),
+        None => router,
+    }
         .merge(channel_authenticated)
         .merge(cron_authenticated)
         .merge(requirement_authenticated)
@@ -1129,6 +1192,10 @@ pub fn create_router_with_all_state(
         .merge(office_authenticated)
         .merge(shell_authenticated)
         .merge(preset_authenticated);
+    let router = match agent_platform_authenticated {
+        Some(agent_platform) => router.merge(agent_platform),
+        None => router,
+    };
 
     // Robot management face (owner-only), same group and same gates as the SSH
     // host book: the desktop UI is talking, not a device.

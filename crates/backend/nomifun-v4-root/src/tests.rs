@@ -170,6 +170,33 @@ async fn fresh_install_publishes_distinct_ready_contract() {
 }
 
 #[tokio::test]
+async fn precreated_empty_canonical_directory_is_treated_as_fresh_install() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("NomiFun");
+    std::fs::create_dir(&root).unwrap();
+
+    let outcome = production_test_coordinator()
+        .bootstrap(&root, BUILD_IDENTITY, &[])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome.operation_kind,
+        Some(FreshV4OperationKind::Fresh)
+    );
+    assert!(root.join(crate::FRESH_V4_DATABASE_FILE).is_file());
+    assert!(root.join(FRESH_V4_READY_MARKER_FILE).is_file());
+    assert!(
+        !parent
+            .path()
+            .join(format!(
+                "NomiFun.pre-v4-archive-{FIXED_TIMESTAMP}"
+            ))
+            .exists()
+    );
+}
+
+#[tokio::test]
 async fn cutover_is_one_whole_root_rename_and_archive_is_opaque() {
     let parent = tempfile::tempdir().unwrap();
     let root = parent.path().join("NomiFun");
@@ -421,6 +448,7 @@ async fn missing_archive_never_causes_a_ready_v4_root_to_be_renamed() {
     let parent = tempfile::tempdir().unwrap();
     let root = parent.path().join("NomiFun");
     std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("legacy-sentinel"), b"legacy").unwrap();
     let archive = archive_for(&root);
     let first = FreshV4Coordinator::with_ports(
         PreServiceQuiesced,
@@ -435,7 +463,7 @@ async fn missing_archive_never_causes_a_ready_v4_root_to_be_renamed() {
             .is_err()
     );
     assert!(root.join(FRESH_V4_READY_MARKER_FILE).is_file());
-    std::fs::remove_dir(&archive).unwrap();
+    std::fs::remove_dir_all(&archive).unwrap();
 
     let error = production_test_coordinator()
         .bootstrap(&root, BUILD_IDENTITY, &[])

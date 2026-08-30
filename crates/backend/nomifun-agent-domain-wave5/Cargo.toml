@@ -1,0 +1,9 @@
+[package]
+name = "nomifun-agent-domain-wave5"
+version = "0.7.4"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+nomifun-agent-contracts = { path = "../nomifun-agent-contracts" }
+nomifun-agent-kernel = { path = "../nomifun-agent-kernel" }

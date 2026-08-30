@@ -1,6 +1,7 @@
 //! HTTP router assembly for the application.
 
 mod agent_platform;
+mod agent_platform_host;
 pub mod instance_token_routes;
 #[cfg(feature = "browser-use")]
 pub(crate) mod browser_management;

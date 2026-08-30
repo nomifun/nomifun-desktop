@@ -1,0 +1,324 @@
+{
+  "schema_version": "1.0.0",
+  "boundary": "C7",
+  "base_sha": "efb89b90ede47c88c28065013a5c9e60461ffc14",
+  "code_base_sha": "efb89b90ede47c88c28065013a5c9e60461ffc14",
+  "branch": "rf/agent-capability-platform-v2",
+  "workstream": "W4",
+  "status": "closed",
+  "execution_policy": {
+    "platform_order": "windows_first_continuous",
+    "feature_or_module_pause": false,
+    "native_non_windows_status": "pending_native_verification",
+    "workspace_cargo_test": "forbidden_during_c7",
+    "central_validation_owner": "main-agent",
+    "agent_count_target": "6-8",
+    "same_change_demolition": true
+  },
+  "confirmed_inputs": {
+    "decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+    "schema_manifest_digest": "f0a1c03696ed180db6786f781282d3a2b81dbea91ac286972b710dd7fe842ed7",
+    "contract_ledger_digest": "e26006ad01cd4918ce53ca430fc95aaaf36a04a160467c7432631617145e294a",
+    "deletion_manifest_set_digest": "13431f76e07398c06dc9e42ccb5b70c701297451551c2fcf907c78fcab8f41ad",
+    "official_seed_digest": "c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8",
+    "runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
+    "runtime_release_digest": "0c029dd60f53c761bce3451de66c678e95314b354e229e84fde632c70dd8b55f",
+    "platform_validation_manifest_digest": "78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9"
+  },
+  "preserve_exact": [
+    "published legacy migration bytes and checksums",
+    "Coding review/diff/review-comment workflow",
+    "OS/TCC/Tauri permissions",
+    "Channel pairing and ordinary product confirmations",
+    "D-004 internal Nomi replay/canary allowlist only"
+  ],
+  "waves": [
+    {
+      "task_id": "C7-W1-READ",
+      "owner": "domain-wave-1-read-capabilities",
+      "wave": "wave1_read_capabilities",
+      "deletion_manifest": "crates/backend/nomifun-agent-contracts/contracts/deletion/domain-wave-1-read-capabilities.json",
+      "write_paths": [
+        "crates/backend/nomifun-agent-domain-wave1/"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/backend/nomifun-app/",
+        "crates/backend/nomifun-gateway/",
+        "crates/backend/nomifun-ai-agent/",
+        "crates/backend/nomifun-conversation/",
+        "crates/backend/nomifun-db/migrations/",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "target_packages": [
+        "domain.companion-memory",
+        "domain.customer-service",
+        "domain.knowledge",
+        "domain.project-memory",
+        "domain.skills",
+        "domain.web-research"
+      ],
+      "target_capability_families": [
+        "attachments.read",
+        "customer-service.read",
+        "knowledge.read",
+        "knowledge.search",
+        "memory.read",
+        "research.core",
+        "skill.instructions",
+        "web.fetch",
+        "web.search"
+      ],
+      "direct_consumer_switch": "Resolved AgentPreset Snapshot selects the wave registration; no legacy runtime tool registration or extension route remains in the canonical path.",
+      "deliverable": "Bundled trusted PluginRegistration factories, typed read/resource handlers, deterministic metadata, and focused contract tests for Wave 1.",
+      "required_local_checks": [
+        "rustfmt changed Rust files",
+        "git diff --check",
+        "owned-path residual scan"
+      ]
+    },
+    {
+      "task_id": "C7-W2-CODING",
+      "owner": "domain-wave-2-coding-extensions",
+      "wave": "wave2_coding_extensions",
+      "deletion_manifest": "crates/backend/nomifun-agent-contracts/contracts/deletion/domain-wave-2-coding-extensions.json",
+      "write_paths": [
+        "crates/backend/nomifun-agent-domain-wave2/"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/backend/nomifun-app/",
+        "crates/backend/nomifun-gateway/",
+        "crates/backend/nomifun-ai-agent/",
+        "crates/backend/nomifun-conversation/",
+        "crates/backend/nomifun-db/migrations/",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "target_packages": [
+        "domain.artifacts-review-ci",
+        "domain.browser",
+        "domain.computer",
+        "domain.mcp-connectors",
+        "domain.ssh",
+        "domain.workspace-execution"
+      ],
+      "target_capability_families": [
+        "browser",
+        "computer",
+        "external-mcp",
+        "filesystem",
+        "process",
+        "remote-execution",
+        "review-ci",
+        "ssh",
+        "terminal",
+        "vcs",
+        "workspace"
+      ],
+      "direct_consumer_switch": "coding.codex-native remains the only native exception; all extension capabilities are selected from the frozen Snapshot and use typed resource bindings.",
+      "deliverable": "Bundled coding-extension PluginRegistration factories, native/remote availability descriptors, and focused tests without changing the pinned Codex runtime contract.",
+      "required_local_checks": [
+        "rustfmt changed Rust files",
+        "git diff --check",
+        "owned-path residual scan",
+        "platform availability assertions"
+      ]
+    },
+    {
+      "task_id": "C7-W3-CREATIVE",
+      "owner": "domain-wave-3-creative-multimodal",
+      "wave": "wave3_creative_multimodal",
+      "deletion_manifest": "crates/backend/nomifun-agent-contracts/contracts/deletion/domain-wave-3-creative-multimodal.json",
+      "write_paths": [
+        "crates/backend/nomifun-agent-domain-wave3/"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/backend/nomifun-app/",
+        "crates/backend/nomifun-gateway/",
+        "crates/backend/nomifun-ai-agent/",
+        "crates/backend/nomifun-conversation/",
+        "crates/backend/nomifun-db/migrations/",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "target_packages": [
+        "domain.creation",
+        "domain.miniapp",
+        "domain.office",
+        "domain.workshop"
+      ],
+      "target_capability_families": [
+        "creation.audio",
+        "creation.image",
+        "creation.image-edit",
+        "creation.text",
+        "creation.video",
+        "miniapp",
+        "office",
+        "workshop.asset",
+        "workshop.canvas",
+        "workshop.director",
+        "workshop.template"
+      ],
+      "direct_consumer_switch": "Creative UI/API and AgentSession use the same exact AgentBindingValue and typed canvas/asset/provider resources; no product-local model assembler remains on the v2 path.",
+      "deliverable": "Bundled creative/multimodal PluginRegistration factories, typed resource descriptors, and deterministic capability handlers for the creative slice.",
+      "required_local_checks": [
+        "rustfmt changed Rust files",
+        "git diff --check",
+        "owned-path residual scan",
+        "creative capability contract tests"
+      ]
+    },
+    {
+      "task_id": "C7-W4-IDENTITY",
+      "owner": "domain-wave-4-identity-channels-devices",
+      "wave": "wave4_identity_channels_devices",
+      "deletion_manifest": "crates/backend/nomifun-agent-contracts/contracts/deletion/domain-wave-4-identity-channels-devices.json",
+      "write_paths": [
+        "crates/backend/nomifun-agent-domain-wave4/"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/backend/nomifun-app/",
+        "crates/backend/nomifun-gateway/",
+        "crates/backend/nomifun-ai-agent/",
+        "crates/backend/nomifun-conversation/",
+        "crates/backend/nomifun-db/migrations/",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "target_packages": [
+        "domain.channel",
+        "domain.companion",
+        "domain.customer-service",
+        "domain.robot",
+        "domain.webhook"
+      ],
+      "target_capability_families": [
+        "channel.receive",
+        "channel.reply",
+        "channel.send",
+        "companion.evolve",
+        "companion.learn",
+        "companion.persona",
+        "customer-service.dialogue",
+        "customer-service.handoff",
+        "notification.webhook",
+        "robot.audio",
+        "robot.device-tools",
+        "robot.display",
+        "robot.motion",
+        "robot.vision"
+      ],
+      "direct_consumer_switch": "Ingress/background workers open or address the canonical AgentSession and dispatch typed commands; pairing and ordinary product confirmations are preserved outside the Agent execution authority.",
+      "deliverable": "Bundled identity/channel/device PluginRegistration factories and ingress-safe command descriptors with no approval/confirmation mode branch.",
+      "required_local_checks": [
+        "rustfmt changed Rust files",
+        "git diff --check",
+        "owned-path residual scan",
+        "channel/robot availability assertions"
+      ]
+    },
+    {
+      "task_id": "C7-W5-AUTOMATION",
+      "owner": "domain-wave-5-automation-supervision-remote",
+      "wave": "wave5_automation_supervision_remote",
+      "deletion_manifest": "crates/backend/nomifun-agent-contracts/contracts/deletion/domain-wave-5-automation-supervision-remote.json",
+      "write_paths": [
+        "crates/backend/nomifun-agent-domain-wave5/"
+      ],
+      "forbidden_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/backend/nomifun-app/",
+        "crates/backend/nomifun-gateway/",
+        "crates/backend/nomifun-ai-agent/",
+        "crates/backend/nomifun-conversation/",
+        "crates/backend/nomifun-db/migrations/",
+        "ui/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "target_packages": [
+        "domain.agent-execution",
+        "domain.autowork",
+        "domain.cron",
+        "domain.idmm",
+        "domain.remote",
+        "domain.requirements"
+      ],
+      "target_capability_families": [
+        "agent-execution",
+        "autowork.runner",
+        "idmm.intervene",
+        "idmm.observe",
+        "remote.mcp",
+        "remote.rest",
+        "requirements",
+        "schedule.agent-trigger",
+        "schedule.store",
+        "schedule.timer"
+      ],
+      "direct_consumer_switch": "Schedulers, supervision, execution, and Remote REST/MCP use exact AgentBindingValue plus canonical Session command/query ports; RemoteBinding remains transport-only.",
+      "deliverable": "Bundled automation/supervision/remote PluginRegistration factories and admission/fault descriptors, preserving D-026 ordering and D-027 finite drain semantics.",
+      "required_local_checks": [
+        "rustfmt changed Rust files",
+        "git diff --check",
+        "owned-path residual scan",
+        "remote/admission/drain contract tests"
+      ]
+    }
+  ],
+  "shared_integration": {
+    "task_id": "C7-SHARED-INTEGRATION",
+    "owner": "main-agent",
+      "write_paths": [
+        "crates/backend/nomifun-agent-domain-support/",
+        "crates/backend/nomifun-agent-platform/",
+        "Cargo.toml",
+        "crates/backend/nomifun-app/Cargo.toml",
+      "crates/backend/nomifun-app/src/router/",
+      "crates/backend/nomifun-app/src/services.rs",
+      "crates/backend/nomifun-gateway/",
+      "Cargo.lock",
+      "scripts/gate-agent-v2.mjs",
+      "docs/specs/2026-08-28-agent-capability-platform-v2/"
+    ],
+    "forbidden_paths": [
+      "crates/backend/nomifun-db/migrations/",
+      "vendor/codex-runtime/",
+      "crates/backend/nomifun-codex-runtime/",
+      "ui/src/renderer/pages/conversation/platforms/nomi/"
+    ],
+    "required_outcomes": [
+      "production host mounts a validated v4 pool and publishes the bundled PluginRegistration inventory",
+      "all seven official templates resolve against the canonical inventory",
+      "ordinary domain routes use AgentSession/Capability ports and no new legacy aliases are introduced",
+      "same-change legacy/Nomi route, DTO, factory, manager, AppServices/GatewayDeps, test, and dependency demolition is recorded",
+      "C7 residual and reachability scans are machine-readable and exact",
+      "non-Windows native rows remain pending_native_verification, never pass by cross-compilation"
+    ],
+    "required_checks": [
+      "targeted cargo check for each changed crate",
+      "targeted Rust integration tests",
+      "focused UI tests for changed callers",
+      "bun run check:i18n",
+      "bun run build:ui",
+      "git diff --check"
+    ]
+  },
+  "closure_requirements": {
+    "status_transition": "active -> closed",
+    "required_manifest_status": "all tasks closed",
+    "allowed_residuals": [],
+    "native_status": "windows_c1_c7_continuous_pass_candidate; macos_linux_pending_native_verification",
+    "workspace_cargo_test": "not_run_until_c8_win_pre",
+    "evidence_record": "docs/specs/2026-08-28-agent-capability-platform-v2/C7-CLOSURE.json"
+  }
+}
