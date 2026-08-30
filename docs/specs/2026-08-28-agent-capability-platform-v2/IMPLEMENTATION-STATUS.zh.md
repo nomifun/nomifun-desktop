@@ -11,9 +11,9 @@
 - branch：`rf/agent-capability-platform-v2`
 - base SHA：`7a2ade3c49374add25a35565265399c57729a8b9`
 - current implementation SHA / C6 code base：
-  `6e1b7338ae3c3181d14366cc3d52d30f64b45285`
+  `1dedfedc782b81389ead27858963d0a943f4d142`
 - last verified remote implementation SHA：
-  `6e1b7338ae3c3181d14366cc3d52d30f64b45285`
+  `1dedfedc782b81389ead27858963d0a943f4d142`
 - origin：`https://github.com/nomifun/nomifun-tauri.git`
 - worktree：clean；启动时无用户未提交改动
 - Git identity：`colir0 <colir0@qq.com>`
@@ -30,7 +30,8 @@
 
 ## 当前阶段
 
-- 当前 boundary：`C6 Chat + Coding + sample.echo Triad`（IN PROGRESS）
+- current boundary: `C6 Chat + Coding + sample.echo Triad` (CLOSED)
+- next boundary: `C7 Windows continuous domain waves`
 - Review A：
   - Decision Closure：PASS，D-001～D-028（含 D-019）均已确认
   - Contract Closure：PASS
@@ -38,8 +39,9 @@
   target first-party inventory、`OfficialPresetSeedManifest`、SessionEvent
   Registry、fresh-v4 schema contract、D-014/D-025～D-028 fixtures、generated
   schemas/envelopes 与 digest 已闭合
-- production behavior：C1 FullAuto 删除已完成；fresh-v4 migration/seed/composition
-  仍未开始，按 C2～C5 并行波次推进
+- production behavior: C1 FullAuto, C2 Fresh-v4, C3 Kernel/Plugin, C4 Runtime/Model,
+- C5 Preset Product and C6 Chat/Coding/sample.echo triad are closed; C7 Windows
+  domain waves continue on the canonical AgentSession/Plugin/Runtime chain
 
 ## Contract Closure 裁决
 
@@ -113,20 +115,23 @@
 C2～C5 只建立最终 foundation/control-plane；业务域 composition demolition
 仍等待 C6 三联 Gate 后的 C7 owning slice。
 
-## Active C6 Disjoint Write Sets
+## Closed C6 Disjoint Write Sets
 
-机器可读清单：
+Machine-readable manifest:
 `docs/specs/2026-08-28-agent-capability-platform-v2/C6-WRITE-MANIFESTS.json`
 
-- `C6-PLATFORM-CORE`：active
-- `C6-CHAT-MINIMAL`：active
-- `C6-CODING-CODEX`：active
-- `C6-SAMPLE-ECHO`：active
-- `C6-APP-COMPOSITION`：active
-- `C6-UI-INTEGRATION`：active
+- `C6-PLATFORM-CORE`: closed
+- `C6-CHAT-MINIMAL`: closed
+- `C6-CODING-CODEX`: closed
+- `C6-SAMPLE-ECHO`: closed
+- `C6-APP-COMPOSITION`: closed
+- `C6-UI-INTEGRATION`: closed
 
-C6 是第一次允许 workspace `cargo test` 的 final-stack Gate；只在 triad
-implementation commit 冻结后按 exact source tuple 执行一次。
+C6 exact candidate: `1dedfedc782b81389ead27858963d0a943f4d142`.
+C6 closure record:
+`docs/specs/2026-08-28-agent-capability-platform-v2/C6-CLOSURE.json`.
+Triad gates, fully serialized workspace cargo test, focused UI/i18n, and bun build:ui passed.
+The repository-wide bun check baseline failure is recorded separately.
 
 ## Closed C0 Disjoint Write Sets
 
@@ -227,14 +232,18 @@ C0 contract/golden digests：
   仍有 unrelated Arco/React typing debt
 - `bun run gate:agent-v2 -- c2-c5-foundations`：PASS
 
-## 未运行验证
+## C6 Validation Record
 
-- workspace `cargo test`：C0 不属于允许的 C6/C8-WIN-PRE/C10-WIN 节点族
-- broad `bun run check`：C0 尚未触及 product/UI；只运行后续 contract 定向 Gate
-- macOS/Linux native checks：当前阶段无 native candidate，不能标 pass
-- broad `bun run check`：C1 affected UI lines have no new type errors, but the
-  repository baseline typecheck still reports unrelated Arco/React typing debt；
-  C1 uses the focused UI cohort and i18n gate
+- `bun run gate:agent-v2 -- c6-triad`: PASS; Chat 2, Coding 2, sample.echo 2, app route E2E 1, focused UI 23
+- workspace `cargo test`: PASS at exact SHA `1dedfedc782b81389ead27858963d0a943f4d142` using `cargo test --locked --jobs 1 -- --test-threads=1`
+  evidence: `build.noindex/agent-capability-v2/1dedfedc782b81389ead27858963d0a943f4d142/c6-workspace-fully-serialized/cargo-test.log`
+- `bun run build:ui`: PASS at exact SHA `1dedfedc782b81389ead27858963d0a943f4d142`
+- `bun run check:i18n`: PASS; 7074 keys / 33 modules
+- focused C6 UI tests: 23 passed / 0 failed
+- `bun run check`: baseline failure, exit 2; evidence: `build.noindex/agent-capability-v2/1dedfedc782b81389ead27858963d0a943f4d142/c6-ui/bun-check.log`
+  Reported errors are existing React/Arco typings and matcher definitions; C6 production build and focused changed-surface checks pass.
+- published legacy migrations: unchanged from C1 checkpoint
+- macOS/Linux native checks: pending; Windows cannot attest other native cells
 
 ## Closed Slices / Commits / Evidence
 
@@ -258,13 +267,20 @@ C0 contract/golden digests：
 - C2～C5 Contract Closure evidence：
   `build.noindex/agent-capability-v2/6e1b7338ae3c3181d14366cc3d52d30f64b45285/contract-closure/summary.json`
 
-## 下一批可直接执行
+- C6 implementation commit: `04bb08f9`
+- C6 final validated candidate: `1dedfedc782b81389ead27858963d0a943f4d142`
+- C6 triad evidence: `build.noindex/agent-capability-v2/1dedfedc782b81389ead27858963d0a943f4d142/c6-triad/summary.json`
+- C6 workspace evidence: `build.noindex/agent-capability-v2/1dedfedc782b81389ead27858963d0a943f4d142/c6-workspace-fully-serialized/cargo-test.log`
+- C6 closure record: `docs/specs/2026-08-28-agent-capability-platform-v2/C6-CLOSURE.json`
 
-1. 冻结 C6 triad disjoint write manifests。
-2. 合流 Chat/Coding/`sample.echo` 最终数据、UI、Runtime、Event/Effect 与 D-024 delete。
-3. C6 执行第一次 workspace `cargo test` 与 UI check/build；未通过不得进入 C7。
+## Next Directly Executable Batch
 
-## 真实 Blocker
+1. Create and freeze C7 Windows domain-wave disjoint write manifests.
+2. In parallel, switch Wave 1-5 consumers to canonical PluginFactory/AgentBinding/AgentSession paths and perform same-change demolition.
+3. Run each C7 slice targeted compile/test/fault/residual/reachability gates; continue Windows without feature/module/platform handoff until C7 closes and C8-WIN-PRE begins.
 
-- 无外部 blocker。
-- Codex sibling checkout 漂移已记录；冻结 SHA 本地可读，不阻止 C0。
+## Blocking Status
+
+- No external blocker.
+- Codex sibling drift is recorded; the frozen investigation SHA remains locally available and does not block C7.
+- Repository-wide React/Arco typecheck baseline debt is recorded; focused UI tests and production build pass.
