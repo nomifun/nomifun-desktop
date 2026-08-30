@@ -7,7 +7,7 @@
   "cohort_tuple_inputs": {
     "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
     "platform_validation_manifest_digest": "78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9",
-    "runtime_release_digest": "0c029dd60f53c761bce3451de66c678e95314b354e229e84fde632c70dd8b55f"
+    "runtime_release_digest": "8f40a7ff0c42bb3180e976ae1c54e89f4942c5d6899507fa70f31c964d9b22fc"
   },
   "source_checkpoint": {
     "local_head": "resolved_at_run",
