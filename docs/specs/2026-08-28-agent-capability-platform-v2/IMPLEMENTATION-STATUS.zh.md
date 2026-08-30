@@ -1,6 +1,6 @@
 # Agent Capability Platform v2 实施状态
 
-> 最后更新：2026-08-29
+> 最后更新：2026-08-30
 >
 > 本文件是跨任务、跨机器继续实施的唯一人工可读状态入口。机器契约、
 > Gate input 与 evidence 仍分别由 canonical contract、manifest 和 ledger
@@ -10,10 +10,10 @@
 
 - branch：`rf/agent-capability-platform-v2`
 - base SHA：`7a2ade3c49374add25a35565265399c57729a8b9`
-- current implementation SHA / C6 code base：
-  `1dedfedc782b81389ead27858963d0a943f4d142`
+- current implementation SHA / C7 code base：
+  `c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6`
 - last verified remote implementation SHA：
-  `1dedfedc782b81389ead27858963d0a943f4d142`
+  `efb89b90ede47c88c28065013a5c9e60461ffc14`
 - origin：`https://github.com/nomifun/nomifun-tauri.git`
 - worktree：clean；启动时无用户未提交改动
 - Git identity：`colir0 <colir0@qq.com>`
@@ -30,8 +30,8 @@
 
 ## 当前阶段
 
-- current boundary: `C6 Chat + Coding + sample.echo Triad` (CLOSED)
-- next boundary: `C7 Windows continuous domain waves`
+- current boundary: `C7 Windows continuous domain waves` (CLOSED)
+- next boundary: `C8-WIN-PRE Windows pre-candidate`
 - Review A：
   - Decision Closure：PASS，D-001～D-028（含 D-019）均已确认
   - Contract Closure：PASS
@@ -40,8 +40,8 @@
   Registry、fresh-v4 schema contract、D-014/D-025～D-028 fixtures、generated
   schemas/envelopes 与 digest 已闭合
 - production behavior: C1 FullAuto, C2 Fresh-v4, C3 Kernel/Plugin, C4 Runtime/Model,
-- C5 Preset Product and C6 Chat/Coding/sample.echo triad are closed; C7 Windows
-  domain waves continue on the canonical AgentSession/Plugin/Runtime chain
+- C5 Preset Product, C6 Chat/Coding/sample.echo triad, and C7 five Windows-first
+  domain waves are closed on the canonical AgentSession/Plugin/Runtime chain
 
 ## Contract Closure 裁决
 
@@ -273,11 +273,25 @@ C0 contract/golden digests：
 - C6 workspace evidence: `build.noindex/agent-capability-v2/1dedfedc782b81389ead27858963d0a943f4d142/c6-workspace-fully-serialized/cargo-test.log`
 - C6 closure record: `docs/specs/2026-08-28-agent-capability-platform-v2/C6-CLOSURE.json`
 
+## C7 Closure Record
+
+- C7 implementation candidate: `c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6`
+- C7 manifest: `docs/specs/2026-08-28-agent-capability-platform-v2/C7-WRITE-MANIFESTS.json`
+- C7 closure record: `docs/specs/2026-08-28-agent-capability-platform-v2/C7-CLOSURE.json`
+- C7 gate: PASS
+  `build.noindex/agent-capability-v2/c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6/c7-domain-waves/summary.json`
+- Five domain registration waves plus model-media publish exactly 26 packages and 137 capabilities.
+- Focused domain tests: PASS; Fresh-v4 root tests: PASS; production host tests: PASS.
+- Windows startup smoke: PASS for absent and pre-created empty roots; canonical `/api/capabilities` returned 137 entries.
+- Workspace `cargo test` remains intentionally deferred to `C8-WIN-PRE`.
+- macOS and Linux native verification remains `pending_native_verification`.
+- Known forward work: compose the production ChatModelBroker factory and complete the global legacy residual gate.
+
 ## Next Directly Executable Batch
 
-1. Create and freeze C7 Windows domain-wave disjoint write manifests.
-2. In parallel, switch Wave 1-5 consumers to canonical PluginFactory/AgentBinding/AgentSession paths and perform same-change demolition.
-3. Run each C7 slice targeted compile/test/fault/residual/reachability gates; continue Windows without feature/module/platform handoff until C7 closes and C8-WIN-PRE begins.
+1. Freeze the C8-WIN-PRE verification tuple from C7 candidate `c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6`.
+2. Run the Windows whole-candidate preflight, including workspace Cargo validation, UI check/build, seven-template/resource coverage, lifecycle/fault, and package checks.
+3. Keep macOS/Linux native rows pending until the Windows pre-candidate exits at HP-1.
 
 ## Blocking Status
 

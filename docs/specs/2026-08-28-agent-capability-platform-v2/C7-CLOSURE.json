@@ -1,0 +1,83 @@
+{
+  "schema_version": "1.0.0",
+  "boundary": "C7",
+  "status": "closed",
+  "closed_at": "2026-08-30",
+  "branch": "rf/agent-capability-platform-v2",
+  "candidate_source_sha": "c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6",
+  "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+  "implementation_commit": "c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6",
+  "follow_up_validation_commits": [
+    "e6f789ca7f033be336745f81bbf06087b0cdbc75"
+  ],
+  "gate_results": [
+    {
+      "gate": "c7-domain-waves",
+      "status": "pass",
+      "command": "bun run gate:agent-v2 -- c7-domain-waves",
+      "evidence": "build.noindex/agent-capability-v2/c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6/c7-domain-waves/summary.json"
+    },
+    {
+      "gate": "domain-wave-targeted-tests",
+      "status": "pass",
+      "command": "cargo test --locked -p nomifun-agent-domain-support -p nomifun-agent-domain-wave1 -p nomifun-agent-domain-wave2 -p nomifun-agent-domain-wave3 -p nomifun-agent-domain-wave4 -p nomifun-agent-domain-wave5",
+      "summary": "26 focused unit tests passed across the six registration crates."
+    },
+    {
+      "gate": "fresh-v4-root-targeted-tests",
+      "status": "pass",
+      "command": "cargo test --locked -p nomifun-v4-root",
+      "summary": "11 Fresh-v4 filesystem, marker, recovery, and empty-root tests passed."
+    },
+    {
+      "gate": "production-host-targeted-tests",
+      "status": "pass",
+      "command": "cargo test --locked -p nomifun-app --lib router::agent_platform_host",
+      "summary": "8 host mount, metadata, cleanup, inventory, and publication tests passed."
+    },
+    {
+      "gate": "production-host-smoke",
+      "status": "pass",
+      "command": "target/debug/nomicore.exe --data-dir <temporary-root> --port <free-port> --local",
+      "summary": "Windows startup reached a live HTTP listener for an absent root and a pre-created empty root; /api/capabilities returned 137 entries."
+    }
+  ],
+  "invariants": [
+    "published legacy migrations unchanged from the C1 checkpoint",
+    "Fresh-v4 AgentPlatform uses a separately opened nomifun-v4.db pool and never receives the v3 AppServices pool",
+    "five C7 wave crates plus model-media publish exactly 26 packages and 137 capabilities",
+    "all action-bearing capabilities have deterministic typed handlers; transport, context, event, scheduler, and middleware contributions remain handler-free",
+    "Browser and Computer availability is represented by explicit platform constraints and typed unavailable errors",
+    "Channel pairing and ordinary product confirmations remain outside Agent execution authority",
+    "C7 canonical-owner residual and reachability scans are zero; historical legacy roots remain recorded for the C8 global demolition gate",
+    "non-Windows native verification remains pending and is not claimed by Windows"
+  ],
+  "known_follow_up": [
+    "The production ChatModelBroker factory is not publicly exposed by the current model-invoke service; v4 model turns fail closed with AdapterUnavailable rather than falling back to Nomi.",
+    "AgentPlatform has no explicit async shutdown method; ordinary shutdown relies on router and pool ownership drop after runtime disposal."
+  ],
+  "pending_native_verification_points": [
+    {
+      "target_cell": "macos_desktop_arm64",
+      "status": "pending_native_verification",
+      "exact_check_id": "c8_ma_full_gate"
+    },
+    {
+      "target_cell": "macos_desktop_x64",
+      "status": "pending_native_verification",
+      "exact_check_id": "c8_mx_full_gate"
+    },
+    {
+      "target_cell": "linux_desktop_x64",
+      "status": "pending_native_verification",
+      "exact_check_id": "c8_ld_full_gate"
+    },
+    {
+      "target_cell": "linux_headless_x64",
+      "status": "pending_native_verification",
+      "exact_check_id": "c8_lh_full_gate"
+    }
+  ],
+  "next_boundary": "C8-WIN-PRE",
+  "workspace_cargo_test": "not_run_during_C7; reserved for C8-WIN-PRE"
+}

@@ -2,7 +2,7 @@
   "schema_version": "1.0.0",
   "boundary": "C7",
   "base_sha": "efb89b90ede47c88c28065013a5c9e60461ffc14",
-  "code_base_sha": "efb89b90ede47c88c28065013a5c9e60461ffc14",
+  "code_base_sha": "c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6",
   "branch": "rf/agent-capability-platform-v2",
   "workstream": "W4",
   "status": "closed",
@@ -320,5 +320,19 @@
     "native_status": "windows_c1_c7_continuous_pass_candidate; macos_linux_pending_native_verification",
     "workspace_cargo_test": "not_run_until_c8_win_pre",
     "evidence_record": "docs/specs/2026-08-28-agent-capability-platform-v2/C7-CLOSURE.json"
+  },
+  "closed_at": "2026-08-30",
+  "implementation_commit": "c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6",
+  "gate_evidence": "build.noindex/agent-capability-v2/c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6/c7-domain-waves/summary.json",
+  "closure_record": "docs/specs/2026-08-28-agent-capability-platform-v2/C7-CLOSURE.json",
+  "validation": {
+    "candidate_source_sha": "c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6",
+    "domain_wave_targeted_tests": "pass",
+    "fresh_v4_root_targeted_tests": "pass",
+    "production_host_targeted_tests": "pass",
+    "production_host_smoke": "pass",
+    "workspace_cargo_test": "pending_until_c8_win_pre",
+    "non_windows_native_verification": "pending_native_verification",
+    "historical_legacy_residual": "deferred_to_c8_global_gate"
   }
 }
