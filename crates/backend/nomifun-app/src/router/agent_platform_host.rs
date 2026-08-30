@@ -1011,6 +1011,7 @@ mod tests {
         .unwrap();
 
         let registry = platform.materialized_registry().unwrap();
+        assert_eq!(registry.generation, 1);
         assert_eq!(registry.packages.len(), 26);
         assert_eq!(registry.capabilities.len(), 137);
         let package_rows: Vec<String> = sqlx::query_scalar(
