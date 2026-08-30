@@ -4,9 +4,9 @@
     "manifest_version": "1.0.0",
     "candidate_source_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
     "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
-    "runtime_release_digest": "0c029dd60f53c761bce3451de66c678e95314b354e229e84fde632c70dd8b55f",
+    "runtime_release_digest": "8f40a7ff0c42bb3180e976ae1c54e89f4942c5d6899507fa70f31c964d9b22fc",
     "canonical_schema_manifest_digest": "f0a1c03696ed180db6786f781282d3a2b81dbea91ac286972b710dd7fe842ed7",
-    "cargo_lock_digest": "a5bb66c60c10cb63df3115214240cb3ae425dd8794d537dc02468b37c00df9d7",
+    "cargo_lock_digest": "c6aa85864cac522d8a6bee064f04057393ade35749c95984344a46df51359092",
     "official_preset_seed_manifest_digest": "c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8",
     "capability_availability_manifest_digest": "8fb55c4765eefc59e67e686dfcc1858898c75893b64f353249a2e3d5e705cb68",
     "coding_codex_native_contract_digest": "f699f376a9414b7830b90a68c890d39010687499e6d16ee1687f5c370cd0127a",
@@ -316,5 +316,5 @@
       }
     }
   },
-  "payload_digest": "e89a51d0e11f9e9080cd1cfd860eeea4016f998b0c31eead0096257811e1a284"
+  "payload_digest": "fb7d792e5eced84e05ba1c0805a9cd176cbe2796e47d7910d9e00147a31242bc"
 }

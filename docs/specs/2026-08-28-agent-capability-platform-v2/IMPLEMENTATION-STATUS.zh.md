@@ -179,7 +179,7 @@ C0 contract/golden digests：
 - canonical v4 schema manifest：
   `f0a1c03696ed180db6786f781282d3a2b81dbea91ac286972b710dd7fe842ed7`
 - contract digest ledger：
-  `e26006ad01cd4918ce53ca430fc95aaaf36a04a160467c7432631617145e294a`
+  `7595e15a253fc74c291f52a6ed5fab4efb0cd4e63821f7d6df41c171e3f39868`
 - deletion manifest set：
   `13431f76e07398c06dc9e42ccb5b70c701297451551c2fcf907c78fcab8f41ad`
 - official preset seed manifest：
@@ -191,9 +191,9 @@ C0 contract/golden digests：
 - platform validation contract：
   `78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9`
 - runtime release fixture：
-  `0c029dd60f53c761bce3451de66c678e95314b354e229e84fde632c70dd8b55f`
+  `8f40a7ff0c42bb3180e976ae1c54e89f4942c5d6899507fa70f31c964d9b22fc`
 - platform validation fixture：
-  `e89a51d0e11f9e9080cd1cfd860eeea4016f998b0c31eead0096257811e1a284`
+  `fb7d792e5eced84e05ba1c0805a9cd176cbe2796e47d7910d9e00147a31242bc`
 
 ## Platform Verification
 

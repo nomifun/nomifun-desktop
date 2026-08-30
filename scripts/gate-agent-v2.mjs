@@ -107,7 +107,7 @@ const C8_EXPECTED_DIGESTS = {
   platform_validation_contract:
     '78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9',
   runtime_release:
-    '0c029dd60f53c761bce3451de66c678e95314b354e229e84fde632c70dd8b55f',
+    '8f40a7ff0c42bb3180e976ae1c54e89f4942c5d6899507fa70f31c964d9b22fc',
   runtime_feature_inventory:
     'bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee',
   canonical_schema_manifest:
@@ -121,9 +121,9 @@ const C8_EXPECTED_DIGESTS = {
   coding_codex_native:
     'f699f376a9414b7830b90a68c890d39010687499e6d16ee1687f5c370cd0127a',
   cargo_lock:
-    'a5bb66c60c10cb63df3115214240cb3ae425dd8794d537dc02468b37c00df9d7',
+    'c6aa85864cac522d8a6bee064f04057393ade35749c95984344a46df51359092',
   platform_fixture:
-    'e89a51d0e11f9e9080cd1cfd860eeea4016f998b0c31eead0096257811e1a284',
+    'fb7d792e5eced84e05ba1c0805a9cd176cbe2796e47d7910d9e00147a31242bc',
 };
 const C8_EXPECTED_TEMPLATES = [
   'chat.minimal',
@@ -1706,14 +1706,14 @@ function c8ExpectedChecks() {
       check_id: 'c7_domain_waves',
       command: 'bun run gate:agent-v2 -- c7-domain-waves',
       execution_kind: 'informational',
-      runner: 'command',
+      runner: 'bun',
       command_args: ['run', 'gate:agent-v2', '--', 'c7-domain-waves'],
     },
     {
       check_id: 'contract_validation',
       command: 'cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check',
       execution_kind: 'native',
-      runner: 'command',
+      runner: 'cargo',
       command_args: [
         'run',
         '--locked',
@@ -1730,7 +1730,7 @@ function c8ExpectedChecks() {
       command:
         'cargo test --locked -p nomifun-agent-domain-support -p nomifun-agent-domain-wave1 -p nomifun-agent-domain-wave2 -p nomifun-agent-domain-wave3 -p nomifun-agent-domain-wave4 -p nomifun-agent-domain-wave5',
       execution_kind: 'native',
-      runner: 'command',
+      runner: 'cargo',
       command_args: [
         'test',
         '--locked',
@@ -1752,14 +1752,14 @@ function c8ExpectedChecks() {
       check_id: 'fresh_v4_root_tests',
       command: 'cargo test --locked -p nomifun-v4-root',
       execution_kind: 'native',
-      runner: 'command',
+      runner: 'cargo',
       command_args: ['test', '--locked', '-p', 'nomifun-v4-root'],
     },
     {
       check_id: 'production_host_tests',
       command: 'cargo test --locked -p nomifun-app --lib router::agent_platform_host',
       execution_kind: 'native',
-      runner: 'command',
+      runner: 'cargo',
       command_args: [
         'test',
         '--locked',
@@ -1788,7 +1788,7 @@ function c8ExpectedChecks() {
       check_id: 'ui_build',
       command: 'bun run build:ui',
       execution_kind: 'native',
-      runner: 'command',
+      runner: 'bun',
       command_args: ['run', 'build:ui'],
     },
     {
@@ -1803,7 +1803,7 @@ function c8ExpectedChecks() {
       check_id: 'windows_package_contract',
       command: 'bun run check:windows-installer',
       execution_kind: 'native',
-      runner: 'command',
+      runner: 'bun',
       command_args: ['run', 'check:windows-installer'],
     },
   ];
@@ -2670,7 +2670,9 @@ function c8ValidateAllSceneCoverage(report, manifest, platformValidation) {
   const faultFiles = [
     'crates/backend/nomifun-v4-root/src/tests.rs',
     'crates/backend/nomifun-app/src/router/agent_platform_host.rs',
+    'crates/backend/nomifun-app/src/router/agent_platform.rs',
     'crates/backend/nomifun-agent-contracts/contracts/remote/d026-request-admission-ordering.fixture.json',
+    'crates/backend/nomifun-agent-contracts/contracts/session/delete-closure.json',
     'crates/backend/nomifun-agent-contracts/contracts/validation/d027-terminal-sequences.matrix.json',
   ];
   const faultText = faultFiles
@@ -2686,7 +2688,7 @@ function c8ValidateAllSceneCoverage(report, manifest, platformValidation) {
       remote_revoke_admission: ['D026', 'REMOTE_AUTH_REQUIRED'],
       runtime_dispose: ['dispose'],
       descendant_process_cleanup: ['process_tree', 'descendant'],
-      late_callback_after_delete: ['SESSION_DELETED', 'late'],
+      late_callback_after_delete: ['SESSION_DELETED', 'late_operation'],
     }[fault] || [fault];
     const present = markers.some((marker) => faultText.includes(marker));
     result.fault_classes[fault] = {
@@ -2892,10 +2894,10 @@ try {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
 }
 `;
-  const result = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
     cwd: repoRoot,
     encoding: 'utf8',
-    shell: process.platform === 'win32',
+    shell: false,
     stdio: 'pipe',
     timeout: 180000,
   });
