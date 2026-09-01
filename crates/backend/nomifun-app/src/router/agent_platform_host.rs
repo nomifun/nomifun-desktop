@@ -20,8 +20,11 @@ use nomifun_agent_contracts::{
     FRESH_V4_PROJECTION_SCHEMA_VERSION,
 };
 use nomifun_agent_control_plane::CompilerReleaseInputs;
+use nomifun_agent_domain_wave1::{
+    Wave1CapabilityOperation, Wave1FetchRequest, Wave1HostPort, Wave1HostPortError,
+    Wave1HostRequest,
+};
 use nomifun_agent_kernel::{CompilerEnvironment, MaterializationPolicy};
-use nomifun_agent_domain_wave1::Wave1HostPort;
 use nomifun_agent_domain_wave2::Wave2HostPort;
 use nomifun_agent_domain_wave3::Wave3HostPort;
 use nomifun_agent_domain_wave4::Wave4HostPort;
@@ -60,6 +63,60 @@ const RUNTIME_FEATURE_INVENTORY_JSON: &str = include_str!(
     "../../../nomifun-agent-contracts/contracts/runtime/coding-runtime-feature-inventory.payload.json"
 );
 
+/// The first concrete Wave 1 owner mounted by the Fresh-v4 host.
+///
+/// URL fetching already has a standalone, SSRF-checked domain owner. This
+/// adapter exposes only that real operation; search, Knowledge, Memory, and
+/// Skill actions remain fail-closed until their v4 owners are available.
+#[derive(Clone, Default)]
+struct Wave1ApplicationHost {
+    fetcher: nomifun_knowledge::source_url::HttpFetcher,
+}
+
+#[async_trait::async_trait]
+impl Wave1HostPort for Wave1ApplicationHost {
+    async fn invoke(
+        &self,
+        request: Wave1HostRequest,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, Wave1HostPortError> {
+        match request.operation {
+            Wave1CapabilityOperation::ResearchFetch(Wave1FetchRequest { url }) => {
+                let page = self
+                    .fetcher
+                    .fetch_page(&url)
+                    .await
+                    .map_err(wave1_application_error)?;
+                Ok(nomifun_agent_contracts::StrictJsonValue(serde_json::json!({
+                    "url": page.final_url,
+                    "title": page.title,
+                    "markdown": page.markdown,
+                    "truncated": page.truncated
+                })))
+            }
+            operation => Err(Wave1HostPortError::unavailable(format!(
+                "no Fresh-v4 Wave 1 owner is wired for {}",
+                operation.capability_id().as_ref()
+            ))),
+        }
+    }
+}
+
+fn wave1_application_error(error: nomifun_common::AppError) -> Wave1HostPortError {
+    use nomifun_agent_contracts::CanonicalErrorCode;
+
+    let code = match &error {
+        nomifun_common::AppError::BadRequest(_) => "INVALID_PAYLOAD",
+        nomifun_common::AppError::Timeout(_) => "CAPABILITY_UNAVAILABLE",
+        nomifun_common::AppError::NotFound(_) => "RESOURCE_NOT_FOUND",
+        nomifun_common::AppError::Forbidden(_) => "PRESET_RESOURCE_NOT_BOUND",
+        _ => "CAPABILITY_UNAVAILABLE",
+    };
+    Wave1HostPortError::new(
+        CanonicalErrorCode::from(code),
+        error.to_string(),
+    )
+}
+
 /// All domain action hosts mounted into one Fresh-v4 AgentPlatform
 /// generation.
 ///
@@ -81,7 +138,7 @@ pub(crate) struct AgentDomainHostPorts {
 impl AgentDomainHostPorts {
     fn for_workspace_root(workspace_root: PathBuf) -> Self {
         Self {
-            wave1: nomifun_agent_domain_wave1::unconfigured_host_port(),
+            wave1: Arc::new(Wave1ApplicationHost::default()),
             wave2: Arc::new(Wave2ApplicationHost::for_workspace_root(workspace_root)),
             wave3: nomifun_agent_domain_wave3::unconfigured_host_port(),
             wave4: Arc::new(Wave4ApplicationHost),
@@ -1316,5 +1373,18 @@ mod tests {
             server.received_requests().await.expect("requests").len(),
             1
         );
+    }
+
+    #[test]
+    fn wave1_application_errors_keep_typed_owner_codes() {
+        let invalid = wave1_application_error(nomifun_common::AppError::BadRequest(
+            "bad URL".to_owned(),
+        ));
+        assert_eq!(invalid.code.as_ref(), "INVALID_PAYLOAD");
+
+        let unavailable = wave1_application_error(nomifun_common::AppError::Timeout(
+            "network timeout".to_owned(),
+        ));
+        assert_eq!(unavailable.code.as_ref(), "CAPABILITY_UNAVAILABLE");
     }
 }
