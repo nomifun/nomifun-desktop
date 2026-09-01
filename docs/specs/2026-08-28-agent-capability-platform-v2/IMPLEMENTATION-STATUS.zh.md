@@ -13,10 +13,11 @@
 - last clean C8 execution SHA / current fix base：
   `4de100692983cb0e4e81091d60456dc26a9d8e69`
 - current/last verified remote implementation SHA：
-  `9493428fb6ff25a504338192b166eeb55a9d4a77`
+  `598a63203c10aa8d3b4cc537f0f3bb536f1452f9`
 - origin：`git@github.com:nomifun/nomifun-desktop.git`
-- worktree：clean；当前 source 已可用于工程验证，但尚未形成 C8 native
-  candidate evidence checkpoint
+- worktree：clean；当前 source 已可用于定向工程验证，但尚未形成 C8 native
+  candidate evidence checkpoint。`598a63203` 包含一次旧 C8 release tuple
+  的 canonical digest 刷新，不等同于 C8/HP-1 通过。
 - Git identity：`colir0 <colir0@qq.com>`
 - DeepSeek Harness：
   - expected/current：`cd5ef8148158c3a752a658978873241fdf8e2bbc`
@@ -177,7 +178,7 @@ C0 尚未生成原生候选；以下字段均为 not-applicable，而不是 pass
 - platform_validation_manifest_digest：`not-applicable-before-c8`
 - runtime_release_digest：`not-applicable-before-c8`
 
-C0 contract/golden digests：
+C0 contract/golden digests（历史基线；不是当前 C8 cohort tuple）：
 
 - canonical v4 schema manifest：
   `e28723d7fc524cfdd351c6fc8cc17b8a48d8fd1f5be16a7aebd395ce669f98ff`
@@ -201,7 +202,8 @@ C0 contract/golden digests：
 ## Platform Verification
 
 - 当前 Host：macOS arm64（Darwin，`sysctl.proc_translated=0`）
-- C0 只执行 host-independent contract/schema checks
+- 当前执行上下文：C8-WIN-PRE tuple 刷新后的 macOS arm64 工程定向验证；
+  不是 C8-MA native candidate
 - pending PlatformVerificationPoints：4（macOS arm64/x64、Linux Desktop x64、Linux Headless x64）
 - affected cells：无
 - native pass：0
@@ -696,11 +698,11 @@ C8/HP-1/发布完成。
 - canonical schema：
   `e28723d7fc524cfdd351c6fc8cc17b8a48d8fd1f5be16a7aebd395ce669f98ff`
 - platform validation：
-  `70f23b52f309aeb0938ad86c987958d3f1a05e6c367263c3b73a3038e1ca2ed2`
+  `fa3cd9c542bab988afc366d512c279e34f33bef07bf2546a78094845f81bb948`
 - runtime release：
-  `b9dce00732f6d1c45cb20fc30e7a286518d505d7faeb2d94b6cc70d9e107289d`
+  `c4075b2f7c118fa5eeeb6fc4a0b21cf940d5af6a8acc080e1c8721a8a738a380`
 - Cargo.lock：
-  `b69f75e6cc566ef753f43265e4ddcf2479b671c738e67719b6c84f3f6881f23a`
+  `26e121277eb2054fc43f80dbfc72b7a8ee4fc2cebcc8294752217944989dfb14`
 
 已完成的定向验证：
 
@@ -722,8 +724,9 @@ workspace helper 没有新增类型错误。本轮不重复执行同一已知失
 
 静态 residual 为零不等于业务 action 已可执行。当前生产组合的真实状态如下：
 
-- Wave 1：仍注入 `unconfigured_host_port()`；Research、Knowledge、Memory mutation
-  与 Skill invoke 会 typed fail-closed。
+- Wave 1：Fresh-v4 已挂载真实 `web.fetch` 与基于 Kernel PluginState 的有界
+  project/companion memory mutation owner；Research search、Knowledge、
+  memory read/citation/recall 与 Skill invoke 仍 typed fail-closed。
 - Wave 2：`fs.read/fs.search/fs.write/fs.patch/fs.delete/fs.snapshot` 以及
   `vcs.status/vcs.diff/vcs.stage/vcs.commit` 已通过 owner-scoped workspace
   binding 调用真实 `FileService`、`SnapshotService` 与 Git owner；`process.exec`、
@@ -1077,6 +1080,46 @@ macOS arm64 本轮定向复验：
   baseline，本轮未将其误报为生产 UI build 失败。
 
 当前仍不能宣称 C8-WIN-PRE、HP-1、C8-MA、Universal release 或 native
-PlatformCellEvidence PASS。由于 `9493428fb` 改变了 source，旧
-`candidate_source_sha`/platform tuple/evidence 均不能沿用；待代码稳定后需由
-中央 validation owner 重新生成并对账。
+PlatformCellEvidence PASS。由于 `9493428fb` 改变了 source，且
+`598a63203` 刷新了 release tuple，旧 `candidate_source_sha`/platform
+tuple/evidence 均不能沿用；待代码稳定后需由中央 validation owner 重新生成并
+对账。
+
+## Canonical release tuple 刷新（2026-09-01）
+
+`043c9d5ba` 为 `nomifun-file` 增加 Windows target-specific
+`windows-sys 0.61.2` 依赖后，仓库 `Cargo.lock` 的实际 SHA-256 已从旧的
+`b69f75e6...` 变为：
+
+```text
+26e121277eb2054fc43f80dbfc72b7a8ee4fc2cebcc8294752217944989dfb14
+```
+
+因此先前以 `b69f75e6...` 为输入的 runtime/platform digest tuple 已失效。
+本轮没有把旧 tuple 或旧 evidence 改名继续使用，而是运行 canonical
+`agent-v2-contract write`，并将以下真实产物同步到 `598a63203`：
+
+- runtime release：
+  `c4075b2f7c118fa5eeeb6fc4a0b21cf940d5af6a8acc080e1c8721a8a738a380`
+- platform validation fixture：
+  `fa3cd9c542bab988afc366d512c279e34f33bef07bf2546a78094845f81bb948`
+- contract digest ledger：
+  `de0e564866d0d0ffc896eeaabc0d9ec629f25884ef5055cf35354f4fd653e8a2`
+
+已同步的机器输入包括 `C7-WRITE-MANIFESTS.json`、
+`C8-WIN-PRE-MANIFEST.json`、Gate 常量、Codex runtime vendor input、
+runtime frozen digest 与 macOS helper 的 expected release digest。随后
+`agent-v2-contract check`、Codex runtime 定向测试（31/31）和 Gate self-test
+通过；这些结果仍只是 contract/targeted checks，不是 C8-WIN-PRE、C8-MA 或
+HP-1 通过。
+
+保留的两个审计边界：
+
+1. `C7-CLOSURE.json` 引用的 `c5e1015f...` evidence 不在当前 checkout；
+   没有创建副本、改名或以其他 SHA 的 evidence 冒充它。
+2. `C8-WIN-PRE-MANIFEST.json` 的
+   `immutable_inputs.platform_validation_contract` 当前仍以 raw platform
+   payload 路径配合 platform contract schema digest（`78f264...`）；该
+   path/digest identity 不一致已明确记录，不能把它当作已闭合的 evidence
+   artifact。当前 Gate 的 frozen input 仍按既有 contract 校验，后续需由
+   validation owner 正式修正 schema/path identity 后再冻结新的 tuple。
