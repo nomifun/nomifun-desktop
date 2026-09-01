@@ -17,4 +17,9 @@ describe('InstantHoverTooltip', () => {
     expect(source.includes('onFocus={() => setVisible(true)}')).toBe(true);
     expect(source.includes('onBlur={() => setVisible(false)}')).toBe(true);
   });
+
+  test('uses the shared opaque tooltip background token', () => {
+    expect(source.includes('bg-[var(--color-tooltip-bg)]')).toBe(true);
+    expect(source.includes('bg-[#1f2329]')).toBe(false);
+  });
 });

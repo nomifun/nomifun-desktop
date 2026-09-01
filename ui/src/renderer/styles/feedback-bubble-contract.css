@@ -1,0 +1,10 @@
+/* Transient feedback surface contract.
+ *
+ * Message and Notification are rendered in portals, so page-level surface
+ * styles are not reliable here. Keep their background on one theme token and
+ * force a real painted surface; this prevents text behind a toast from leaking
+ * through and reducing the feedback copy's contrast. */
+.arco-message,
+.arco-notification {
+  background: var(--feedback-bubble-bg, var(--color-bg-popup)) !important;
+}

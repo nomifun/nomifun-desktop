@@ -41,7 +41,7 @@ const InstantHoverTooltip: React.FC<InstantHoverTooltipProps> = ({
         role='tooltip'
         aria-hidden={!visible}
         className={classNames(
-          'pointer-events-none absolute z-[10000] whitespace-nowrap rd-6px bg-[#1f2329] px-8px py-5px text-12px font-500 leading-none text-white shadow-[0_6px_18px_rgba(0,0,0,0.18)] transition-opacity duration-75',
+          'pointer-events-none absolute z-[10000] whitespace-nowrap rd-6px bg-[var(--color-tooltip-bg)] px-8px py-5px text-12px font-500 leading-none text-white shadow-[0_6px_18px_rgba(0,0,0,0.18)] transition-opacity duration-75',
           positionClassName[position],
           visible ? 'visible opacity-100' : 'invisible opacity-0'
         )}
