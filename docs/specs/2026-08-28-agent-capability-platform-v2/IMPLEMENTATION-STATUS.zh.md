@@ -724,9 +724,11 @@ workspace helper 没有新增类型错误。本轮不重复执行同一已知失
 
 - Wave 1：仍注入 `unconfigured_host_port()`；Research、Knowledge、Memory mutation
   与 Skill invoke 会 typed fail-closed。
-- Wave 2：`fs.read/fs.write/fs.delete` 已通过 owner-scoped workspace binding 调用
-  真实 `FileService`；SSH、MCP connector、Browser、Computer 及其余 workspace
-  action 尚未接入 canonical owner，调用时 typed unavailable。
+- Wave 2：`fs.read/fs.search/fs.write/fs.patch/fs.delete/fs.snapshot` 以及
+  `vcs.status/vcs.diff/vcs.stage/vcs.commit` 已通过 owner-scoped workspace
+  binding 调用真实 `FileService`、`SnapshotService` 与 Git owner；`process.exec`、
+  `vcs.push`、SSH、MCP connector、Browser、Computer 及其余 workspace action
+  尚未接入 canonical owner，调用时 typed unavailable。
 - Wave 3：19 个 Creation/Workshop/Office/MiniApp action 仍使用 metadata-only
   unconfigured host，调用时 typed fail-closed。
 - Wave 4：Fresh-v4 显式挂载应用 typed host，但当前没有 v4-native
