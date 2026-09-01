@@ -31,13 +31,19 @@
         "snapshot_id": "snapshot-anthropic",
         "snapshot_digest": "1111111111111111111111111111111111111111111111111111111111111111"
       },
-      "model_route_revision": 7,
+      "route_identity": {
+        "preset_revision_id": "fixture@1",
+        "model_task": "agent_chat",
+        "route_id": "route-anthropic-primary",
+        "route_revision": 7
+      },
       "operation_id": "model-anthropic-0001"
     },
     "route": {
-      "model_route_id": "route-anthropic-primary",
-      "model_route_revision": 7,
-      "task": "agent_chat"
+      "preset_revision_id": "fixture@1",
+      "model_task": "agent_chat",
+      "route_id": "route-anthropic-primary",
+      "route_revision": 7
     },
     "input": {
       "instructions": ["Use the selected tools precisely."],

@@ -33,7 +33,7 @@ use tokio::time;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{debug, info, warn};
 
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 use crate::registry::Registry;
 
 #[cfg(feature = "browser-use")]
@@ -67,11 +67,11 @@ const GATEWAY_REQUEST_BODY_TIMEOUT: std::time::Duration =
 
 /// Late-bound handle to the gateway dependencies. Unlike the guide /
 /// requirement servers (which hold a `Weak` to a singleton that outlives
-/// them elsewhere), this slot OWNS the deps bundle: `GatewayDeps` is
+/// them elsewhere), this slot OWNS the deps bundle: `CompatibilityCapabilityHost` is
 /// assembled specifically for this server during router construction and has
 /// no other owner. Nothing inside the bundle references the server back, so
 /// there is no Arc cycle.
-type DepsSlot = Arc<RwLock<Option<Arc<GatewayDeps>>>>;
+type DepsSlot = Arc<RwLock<Option<Arc<CompatibilityCapabilityHost>>>>;
 #[cfg(feature = "browser-use")]
 type BrowserRegistrySlot =
     Arc<RwLock<Option<crate::browser_registry::BrowserRegistry>>>;
@@ -341,7 +341,7 @@ impl GatewayMcpServer {
 
     /// Wire the dependency bundle after router construction. Must be called
     /// once before the first tool request arrives.
-    pub async fn set_deps(&self, deps: Arc<GatewayDeps>) {
+    pub async fn set_deps(&self, deps: Arc<CompatibilityCapabilityHost>) {
         #[cfg(feature = "browser-use")]
         {
             *self.browser_registry_slot.write().await =

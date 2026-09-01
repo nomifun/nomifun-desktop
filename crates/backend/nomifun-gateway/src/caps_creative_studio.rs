@@ -5,6 +5,7 @@
 //! remain temporary compatibility aliases; new callers should discover and use
 //! the Canvas-first capabilities.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_common::{
@@ -24,7 +25,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
@@ -353,9 +354,43 @@ fn filter_projects(
         .collect()
 }
 
-async fn list_canvases(deps: Arc<GatewayDeps>, params: ListCanvasesParams) -> Value {
+#[derive(Clone)]
+struct CreativeStudioCapabilityDeps {
+    workshop: Arc<nomifun_workshop::WorkshopService>,
+    creation: Arc<nomifun_creation::CreationService>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<CreativeStudioCapabilityDeps>, CallerCtx, P) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, ctx, params| {
+        handler(
+            Arc::new(CreativeStudioCapabilityDeps {
+                workshop: deps.workshop_service.clone(),
+                creation: deps.creation_service.clone(),
+            }),
+            ctx,
+            params,
+        )
+    }
+}
+
+async fn list_canvases(
+    deps: Arc<CreativeStudioCapabilityDeps>,
+    _ctx: CallerCtx,
+    params: ListCanvasesParams,
+) -> Value {
     let (query, limit) = normalized_list_params(params.query, params.limit);
-    match deps.workshop_service.list_creative_projects().await {
+    match deps.workshop.list_creative_projects().await {
         Ok(projects) => {
             let filtered = filter_projects(projects, query.as_deref());
             let total = filtered.len();
@@ -374,9 +409,13 @@ async fn list_canvases(deps: Arc<GatewayDeps>, params: ListCanvasesParams) -> Va
     }
 }
 
-async fn list_projects(deps: Arc<GatewayDeps>, params: ListProjectsParams) -> Value {
+async fn list_projects(
+    deps: Arc<CreativeStudioCapabilityDeps>,
+    _ctx: CallerCtx,
+    params: ListProjectsParams,
+) -> Value {
     let (query, limit) = normalized_list_params(params.query, params.limit);
-    match deps.workshop_service.list_creative_projects().await {
+    match deps.workshop.list_creative_projects().await {
         Ok(projects) => {
             let filtered = filter_projects(projects, query.as_deref());
             let total = filtered.len();
@@ -390,9 +429,13 @@ async fn list_projects(deps: Arc<GatewayDeps>, params: ListProjectsParams) -> Va
     }
 }
 
-async fn get_canvas(deps: Arc<GatewayDeps>, params: GetCanvasParams) -> Value {
+async fn get_canvas(
+    deps: Arc<CreativeStudioCapabilityDeps>,
+    _ctx: CallerCtx,
+    params: GetCanvasParams,
+) -> Value {
     match deps
-        .workshop_service
+        .workshop
         .get_creative_project(params.canvas_id.as_str())
         .await
     {
@@ -401,9 +444,13 @@ async fn get_canvas(deps: Arc<GatewayDeps>, params: GetCanvasParams) -> Value {
     }
 }
 
-async fn get_project(deps: Arc<GatewayDeps>, params: GetProjectParams) -> Value {
+async fn get_project(
+    deps: Arc<CreativeStudioCapabilityDeps>,
+    _ctx: CallerCtx,
+    params: GetProjectParams,
+) -> Value {
     match deps
-        .workshop_service
+        .workshop
         .get_creative_project(params.project_id.as_str())
         .await
     {
@@ -412,7 +459,11 @@ async fn get_project(deps: Arc<GatewayDeps>, params: GetProjectParams) -> Value 
     }
 }
 
-async fn list_assets(deps: Arc<GatewayDeps>, params: ListAssetsParams) -> Value {
+async fn list_assets(
+    deps: Arc<CreativeStudioCapabilityDeps>,
+    _ctx: CallerCtx,
+    params: ListAssetsParams,
+) -> Value {
     let query = AssetQuery {
         kind: params.kind.filter(|kind| !kind.trim().is_empty()),
         q: params.q.filter(|query| !query.trim().is_empty()),
@@ -420,7 +471,7 @@ async fn list_assets(deps: Arc<GatewayDeps>, params: ListAssetsParams) -> Value 
         page_size: params.limit.unwrap_or(20).clamp(1, 50),
         ..Default::default()
     };
-    match deps.workshop_service.list_assets(query).await {
+    match deps.workshop.list_assets(query).await {
         Ok(page) => {
             let items = page
                 .items
@@ -446,13 +497,13 @@ async fn list_assets(deps: Arc<GatewayDeps>, params: ListAssetsParams) -> Value 
 }
 
 async fn apply_operations(
-    deps: Arc<GatewayDeps>,
+    deps: Arc<CreativeStudioCapabilityDeps>,
     ctx: CallerCtx,
     params: ApplyOperationsParams,
 ) -> Value {
     let source = caller_source(&ctx);
     match deps
-        .workshop_service
+        .workshop
         .apply_creative_agent_ops(
             params.canvas_id.as_str(),
             &params.expected_revision,
@@ -521,7 +572,7 @@ fn canvas_task_result(task: CreativeCreationTask) -> Value {
 }
 
 async fn generate(
-    deps: Arc<GatewayDeps>,
+    deps: Arc<CreativeStudioCapabilityDeps>,
     ctx: CallerCtx,
     params: GenerateParams,
 ) -> Value {
@@ -540,7 +591,7 @@ async fn generate(
     };
 
     let mut current = match deps
-        .workshop_service
+        .workshop
         .get_creative_project(params.canvas_id.as_str())
         .await
     {
@@ -602,7 +653,7 @@ async fn generate(
             current.document.pending_task_ids.push(operation_id.clone());
         }
         if let Err(error) = deps
-            .workshop_service
+            .workshop
             .save_creative_project(
                 params.canvas_id.as_str(),
                 &current.project.revision,
@@ -615,7 +666,7 @@ async fn generate(
     }
 
     let task = deps
-        .creation_service
+        .creation
         .create_creative_task(
             CreativeTaskOwner::CanvasNode {
                 canvas_id: params.canvas_id.into_string(),
@@ -640,9 +691,13 @@ async fn generate(
     }
 }
 
-async fn get_task(deps: Arc<GatewayDeps>, params: GetTaskParams) -> Value {
+async fn get_task(
+    deps: Arc<CreativeStudioCapabilityDeps>,
+    _ctx: CallerCtx,
+    params: GetTaskParams,
+) -> Value {
     match deps
-        .creation_service
+        .creation
         .get_task(params.creation_task_id.as_str())
         .await
     {
@@ -662,7 +717,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List Creative Studio Canvases with revision, node count, and connection count.",
             EffectClass::Read,
         ),
-        |deps, _ctx, params| list_canvases(deps, params),
+        adapt(list_canvases),
     ));
     out.push(Capability::new::<GetCanvasParams, _, _>(
         CapabilityMeta::new(
@@ -671,7 +726,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Read a bounded Creative Studio Canvas graph summary and its revision CAS token.",
             EffectClass::Read,
         ),
-        |deps, _ctx, params| get_canvas(deps, params),
+        adapt(get_canvas),
     ));
     out.push(Capability::new::<ListAssetsParams, _, _>(
         CapabilityMeta::new(
@@ -680,7 +735,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List Creative Studio assets by title or kind without returning binary bytes.",
             EffectClass::Read,
         ),
-        |deps, _ctx, params| list_assets(deps, params),
+        adapt(list_assets),
     ));
     out.push(Capability::new::<ApplyOperationsParams, _, _>(
         CapabilityMeta::new(
@@ -689,7 +744,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Apply an all-or-nothing Canvas graph mutation batch using the expected Canvas revision.",
             EffectClass::Write,
         ),
-        apply_operations,
+        adapt(apply_operations),
     ));
     out.push(Capability::new::<GenerateParams, _, _>(
         CapabilityMeta::new(
@@ -698,7 +753,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Fence and submit an idempotent generation task from a persisted Canvas config node using the Canvas revision.",
             EffectClass::Write,
         ),
-        generate,
+        adapt(generate),
     ));
     out.push(Capability::new::<GetTaskParams, _, _>(
         CapabilityMeta::new(
@@ -707,7 +762,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Inspect a Creative Studio generation task and its produced asset ids.",
             EffectClass::Read,
         ),
-        |deps, _ctx, params| get_task(deps, params),
+        adapt(get_task),
     ));
     out.push(Capability::new::<ListProjectsParams, _, _>(
         CapabilityMeta::new(
@@ -716,7 +771,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "DEPRECATED legacy alias: list project-named Canvas rows. Use nomi_creative_studio_list_canvases.",
             EffectClass::Read,
         ),
-        |deps, _ctx, params| list_projects(deps, params),
+        adapt(list_projects),
     ));
     out.push(Capability::new::<GetProjectParams, _, _>(
         CapabilityMeta::new(
@@ -725,7 +780,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "DEPRECATED legacy alias: read a project-named Canvas graph. Use nomi_creative_studio_get_canvas.",
             EffectClass::Read,
         ),
-        |deps, _ctx, params| get_project(deps, params),
+        adapt(get_project),
     ));
 }
 

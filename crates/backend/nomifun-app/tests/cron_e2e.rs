@@ -114,7 +114,7 @@ fn run_now_request(
 
 /// Seed the provider/model pair every nomi cron fixture resolves against.
 /// Idempotent so a test may call it once per conversation it seeds.
-async fn seed_cron_provider(services: &nomifun_app::AppServices) {
+async fn seed_cron_provider(services: &nomifun_app::compatibility::AppServices) {
     let credentials_encrypted = common::encrypted_bearer_credentials();
     sqlx::query(
         "INSERT OR IGNORE INTO providers (\
@@ -139,7 +139,7 @@ async fn seed_cron_provider(services: &nomifun_app::AppServices) {
 /// a cron job bound to an existing nomi conversation takes its model from that
 /// conversation at run time, and `add_job` refuses to schedule one that has
 /// none.
-async fn seed_conversation(services: &nomifun_app::AppServices, id: &str) {
+async fn seed_conversation(services: &nomifun_app::compatibility::AppServices, id: &str) {
     seed_cron_provider(services).await;
     let workspace = services
         .work_dir

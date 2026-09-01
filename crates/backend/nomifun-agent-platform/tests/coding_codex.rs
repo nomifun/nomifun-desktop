@@ -124,6 +124,7 @@ fn resolved_content(contract: &CodingCodexContract) -> ResolvedSnapshotContent {
         required_runtime_features: contract.required_runtime_features.clone(),
         compiled_runtime_profile_digest: DigestHex::from("coding-profile"),
         model_route_refs: BTreeMap::new(),
+        chat_route_identity: None,
         initial_capabilities: contract
             .initial_capabilities
             .iter()

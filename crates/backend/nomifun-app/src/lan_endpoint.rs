@@ -28,7 +28,7 @@ use anyhow::{Result, anyhow};
 use nomifun_robot::endpoint::LanEndpointSnapshot;
 use tokio::sync::watch;
 
-use crate::AppServices;
+use crate::services::AppServices;
 
 /// Address robots must dial to reach this installation: `<ipv4>` or
 /// `<ipv4>:<port>`.

@@ -20,8 +20,9 @@ use nomifun_ai_agent::{
     artifact_store::{ArtifactStore, PersistedArtifact},
 };
 use nomifun_api_types::{
-    CreateConversationRequest, ExecutionModelPool, ExecutionModelRef, ExecutionParticipant,
-    ListMessagesQuery, MessageResponse, SendMessageRequest,
+    ConversationResponse, CreateConversationRequest, ExecutionModelPool, ExecutionModelRef,
+    ExecutionParticipant, ListMessagesQuery, MessageListResponse, MessageResponse,
+    ResolvedPresetSnapshot, SendMessageRequest,
 };
 use nomifun_common::{
     AgentToolPolicy, AgentType, AppError, DecisionPolicy, DelegationPolicy,
@@ -38,6 +39,7 @@ const ARTIFACT_RECEIPT_PAGE_SIZE: u32 = 100;
 // a forged small receipt cannot make us hash an arbitrarily large file.
 const MAX_VERIFIED_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 const DELIVERY_RECEIPT_GRACE: Duration = Duration::from_secs(5);
+const DELIVERY_RECEIPT_WAIT_POLL: Duration = Duration::from_millis(500);
 const DELIVERY_RECEIPT_POLL: Duration = Duration::from_millis(100);
 pub(crate) const MISSING_DELIVERY_RECEIPT_CODE: &str = "agent_delivery_receipt_missing";
 
@@ -136,38 +138,262 @@ pub(crate) trait AttemptRunner: Send + Sync {
     }
 }
 
-/// Production adapter. `ConversationService` owns the real Agent runtime; this
-/// type only performs the create/send/wait/read choreography for one attempt.
-pub(crate) struct ConversationAttemptRunner {
-    conv: ConversationService,
-    execution_port: AgentExecutionConversationPort,
+/// Narrow, stateless session command/query surface used by Agent Execution.
+///
+/// Implementations own no session facts and cannot mint a second identity.
+/// Durable turn authority remains with the canonical session owner. The
+/// [`conversation_session_port`] implementation is transitional and delegates
+/// each operation to the existing Conversation service/typed execution seam.
+#[async_trait]
+pub trait AgentExecutionSessionPort: Send + Sync {
+    async fn create_idempotent(
+        &self,
+        owner_id: &str,
+        request: CreateConversationRequest,
+        creation_key: &str,
+    ) -> Result<ConversationResponse, AppError>;
+
+    async fn create_from_preset_snapshot_idempotent(
+        &self,
+        owner_id: &str,
+        request: CreateConversationRequest,
+        snapshot: ResolvedPresetSnapshot,
+        creation_key: &str,
+    ) -> Result<ConversationResponse, AppError>;
+
+    async fn discard_unlinked_creation(
+        &self,
+        owner_id: &str,
+        creation_key: &str,
+    ) -> Result<(), AppError>;
+
+    async fn deliver_turn(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        authority: AgentExecutionTurnAuthority,
+        request: SendMessageRequest,
+    ) -> Result<nomifun_conversation::IdempotentMessageDelivery, AppError>;
+
+    async fn delivery_result(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<nomifun_conversation::IdempotentMessageDelivery>, AppError>;
+
+    async fn list_messages(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        query: ListMessagesQuery,
+    ) -> Result<MessageListResponse, AppError>;
+
+    async fn get(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<ConversationResponse, AppError>;
+
+    fn take_turn_tokens(&self, conversation_id: &str) -> Option<i64>;
+
+    async fn cancel_for_execution(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<(), AppError>;
+
+    async fn steer_turn(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        request: SendMessageRequest,
+    ) -> Result<String, AppError>;
+
+    async fn project_assistant_message_idempotent(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        content: &str,
+        origin: &str,
+    ) -> Result<String, AppError>;
 }
 
-impl ConversationAttemptRunner {
-    pub fn new(conv: ConversationService, runtime_registry: Arc<dyn AgentRuntimeRegistry>) -> Self {
-        let execution_port = conv.agent_execution_port(runtime_registry);
-        Self {
-            conv,
-            execution_port,
-        }
+/// Transitional host adapter for the existing typed Conversation execution
+/// seam.  It is deliberately a pure delegator: no cache, fallback, retry or
+/// alternate Session authority is introduced here.
+struct ConversationExecutionSessionPort {
+    service: ConversationService,
+    execution: AgentExecutionConversationPort,
+    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+}
+
+#[async_trait]
+impl AgentExecutionSessionPort for ConversationExecutionSessionPort {
+    async fn create_idempotent(
+        &self,
+        owner_id: &str,
+        request: CreateConversationRequest,
+        creation_key: &str,
+    ) -> Result<ConversationResponse, AppError> {
+        self.service
+            .create_idempotent(owner_id, request, creation_key)
+            .await
     }
 
-    async fn await_turn(&self, conversation_id: &str, timeout: Duration, poll: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if !self.conv.runtime_summary_for(conversation_id).await.is_processing {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(poll).await;
-        }
+    async fn create_from_preset_snapshot_idempotent(
+        &self,
+        owner_id: &str,
+        request: CreateConversationRequest,
+        snapshot: ResolvedPresetSnapshot,
+        creation_key: &str,
+    ) -> Result<ConversationResponse, AppError> {
+        self.service
+            .create_from_preset_snapshot_idempotent(owner_id, request, snapshot, creation_key)
+            .await
+    }
+
+    async fn discard_unlinked_creation(
+        &self,
+        owner_id: &str,
+        creation_key: &str,
+    ) -> Result<(), AppError> {
+        self.service
+            .discard_unlinked_creation(owner_id, creation_key)
+            .await
+    }
+
+    async fn deliver_turn(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        authority: AgentExecutionTurnAuthority,
+        request: SendMessageRequest,
+    ) -> Result<nomifun_conversation::IdempotentMessageDelivery, AppError> {
+        self.execution
+            .deliver_turn(
+                owner_id,
+                conversation_id,
+                operation_id,
+                authority,
+                request,
+            )
+            .await
+    }
+
+    async fn delivery_result(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<nomifun_conversation::IdempotentMessageDelivery>, AppError> {
+        self.execution
+            .delivery_result(owner_id, conversation_id, operation_id)
+            .await
+    }
+
+    async fn list_messages(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        query: ListMessagesQuery,
+    ) -> Result<MessageListResponse, AppError> {
+        self.service
+            .list_messages(owner_id, conversation_id, query)
+            .await
+    }
+
+    async fn get(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<ConversationResponse, AppError> {
+        self.service.get(owner_id, conversation_id).await
+    }
+
+    fn take_turn_tokens(&self, conversation_id: &str) -> Option<i64> {
+        self.service.take_turn_tokens(conversation_id)
+    }
+
+    async fn cancel_for_execution(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<(), AppError> {
+        self.service
+            .cancel_for_execution(owner_id, conversation_id, &self.runtime_registry)
+            .await
+    }
+
+    async fn steer_turn(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        request: SendMessageRequest,
+    ) -> Result<String, AppError> {
+        self.execution
+            .steer_turn(owner_id, conversation_id, operation_id, request)
+            .await
+    }
+
+    async fn project_assistant_message_idempotent(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        content: &str,
+        origin: &str,
+    ) -> Result<String, AppError> {
+        self.service
+            .project_assistant_message_idempotent(
+                owner_id,
+                conversation_id,
+                operation_id,
+                content,
+                origin,
+            )
+            .await
+    }
+}
+
+/// Build the transitional Conversation-backed Agent Execution session port.
+///
+/// This is a pure delegator: it retains no session state, does not create
+/// another runtime registry, and does not introduce a second session
+/// authority. New host composition should provide a native
+/// [`AgentExecutionSessionPort`] implementation instead.
+pub fn conversation_session_port(
+    conv: ConversationService,
+    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+) -> Arc<dyn AgentExecutionSessionPort> {
+    let execution = conv.agent_execution_port(runtime_registry.clone());
+    Arc::new(ConversationExecutionSessionPort {
+        service: conv,
+        execution,
+        runtime_registry,
+    })
+}
+
+/// Production adapter.  All runtime/turn work goes through the typed session
+/// surface above; this type only performs the create/send/wait/read choreography
+/// for one attempt.
+pub(crate) struct AgentSessionAttemptRunner {
+    session: Arc<dyn AgentExecutionSessionPort>,
+}
+
+impl AgentSessionAttemptRunner {
+    pub fn new(session: Arc<dyn AgentExecutionSessionPort>) -> Self {
+        Self { session }
     }
 
     async fn recent_messages(&self, owner_id: &str, conversation_id: &str) -> Option<Value> {
         let messages = self
-            .conv
+            .session
             .list_messages(
                 owner_id,
                 conversation_id,
@@ -185,6 +411,52 @@ impl ConversationAttemptRunner {
         serde_json::to_value(messages).ok()
     }
 
+    /// Wait only on the operation-scoped durable receipt exposed by the
+    /// execution port. Runtime idleness is observational and can race receipt
+    /// finalization; it must not be a second completion authority.
+    async fn await_delivery_receipt(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        timeout: Duration,
+    ) -> Result<Option<nomifun_conversation::IdempotentMessageDelivery>, AppError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(receipt) = self
+                .session
+                .delivery_result(owner_id, conversation_id, operation_id)
+                .await?
+                .filter(|receipt| receipt.completed)
+            {
+                return Ok(Some(receipt));
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(DELIVERY_RECEIPT_WAIT_POLL).await;
+        }
+
+        // Preserve the existing short commit grace: a runtime owner can finish
+        // immediately before its durable receipt finalizer commits.
+        let grace_deadline = Instant::now() + DELIVERY_RECEIPT_GRACE;
+        loop {
+            if let Some(receipt) = self
+                .session
+                .delivery_result(owner_id, conversation_id, operation_id)
+                .await?
+                .filter(|receipt| receipt.completed)
+            {
+                return Ok(Some(receipt));
+            }
+            if Instant::now() >= grace_deadline {
+                break;
+            }
+            tokio::time::sleep(DELIVERY_RECEIPT_POLL).await;
+        }
+        Ok(None)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn deliver_turn(
         &self,
@@ -197,7 +469,7 @@ impl ConversationAttemptRunner {
         timeout: Duration,
     ) -> Result<AttemptOutcome, AppError> {
         let delivery = self
-            .execution_port
+            .session
             .deliver_turn(
                 owner_id,
                 conversation_id,
@@ -223,61 +495,42 @@ impl ConversationAttemptRunner {
                 text: delivery.result_text,
                 output_files: projection.files,
                 ok: delivery.result_ok.unwrap_or(false) && projection.integrity_ok,
-                tokens: self.conv.take_turn_tokens(conversation_id),
+                tokens: self.session.take_turn_tokens(conversation_id),
                 error: delivery.result_error,
                 error_code: delivery.result_error_code,
                 error_retryable: delivery.result_error_retryable,
             });
         }
-        let became_idle = self
-            .await_turn(conversation_id, timeout, Duration::from_millis(500))
-            .await;
-        // A runtime can become idle a few milliseconds before the durable
-        // receipt finalizer commits (especially on macOS under filesystem or
-        // SQLite contention). Never convert that small commit window into a
-        // timeout; wait briefly for the exact operation receipt instead.
-        let receipt_deadline = Instant::now() + DELIVERY_RECEIPT_GRACE;
-        loop {
-            if let Some(receipt) = self
-                .execution_port
-                .delivery_result(owner_id, conversation_id, operation_id)
-                .await?
-                .filter(|receipt| receipt.completed)
-            {
-                let projection = self
-                    .output_files_for_turn(owner_id, conversation_id, &receipt.message_id)
-                    .await;
-                return Ok(AttemptOutcome {
-                    conversation_id: conversation_id.to_owned(),
-                    text: receipt.result_text,
-                    output_files: projection.files,
-                    ok: receipt.result_ok.unwrap_or(false) && projection.integrity_ok,
-                    tokens: self.conv.take_turn_tokens(conversation_id),
-                    error: receipt.result_error,
-                    error_code: receipt.result_error_code,
-                    error_retryable: receipt.result_error_retryable,
-                });
-            }
-            if Instant::now() >= receipt_deadline {
-                break;
-            }
-            tokio::time::sleep(DELIVERY_RECEIPT_POLL).await;
+        if let Some(receipt) = self
+            .await_delivery_receipt(owner_id, conversation_id, operation_id, timeout)
+            .await?
+        {
+            let projection = self
+                .output_files_for_turn(owner_id, conversation_id, &receipt.message_id)
+                .await;
+            return Ok(AttemptOutcome {
+                conversation_id: conversation_id.to_owned(),
+                text: receipt.result_text,
+                output_files: projection.files,
+                ok: receipt.result_ok.unwrap_or(false) && projection.integrity_ok,
+                tokens: self.session.take_turn_tokens(conversation_id),
+                error: receipt.result_error,
+                error_code: receipt.result_error_code,
+                error_retryable: receipt.result_error_retryable,
+            });
         }
-        // Runtime idleness is not a delivery receipt. Reading the newest
-        // assistant row here could select a previous or concurrently delivered
-        // turn and falsely complete this attempt. Without the exact operation
-        // receipt above, fail closed and let the scheduler retry/report the
-        // missing terminal delivery.
+        // Runtime state and transcript contents are not completion evidence.
+        // Without the exact operation receipt, fail closed and let the
+        // scheduler retry/report the missing terminal delivery.
         tracing::warn!(
             conversation_id,
             operation_id,
             boundary_message_id,
-            runtime_became_idle = became_idle,
-            "agent turn became idle without a completed delivery receipt"
+            "agent turn reached its receipt deadline without a completed delivery receipt"
         );
         Ok(missing_delivery_receipt_outcome(
             conversation_id,
-            self.conv.take_turn_tokens(conversation_id),
+            self.session.take_turn_tokens(conversation_id),
         ))
     }
 
@@ -321,7 +574,7 @@ impl ConversationAttemptRunner {
         let mut page = 1_u32;
         loop {
             let messages = match self
-                .conv
+                .session
                 .list_messages(
                     owner_id,
                     conversation_id,
@@ -368,7 +621,7 @@ impl ConversationAttemptRunner {
         owner_id: &str,
         conversation_id: &str,
     ) -> Option<PathBuf> {
-        let conversation = self.conv.get(owner_id, conversation_id).await.ok()?;
+        let conversation = self.session.get(owner_id, conversation_id).await.ok()?;
         let workspace = conversation
             .extra
             .get("workspace")
@@ -383,7 +636,7 @@ impl ConversationAttemptRunner {
 }
 
 #[async_trait]
-impl AttemptRunner for ConversationAttemptRunner {
+impl AttemptRunner for AgentSessionAttemptRunner {
     #[allow(clippy::too_many_arguments)]
     async fn execute(
         &self,
@@ -462,7 +715,7 @@ impl AttemptRunner for ConversationAttemptRunner {
             extra,
         };
         let created = if let Some(snapshot) = participant.preset_snapshot.clone() {
-            self.conv
+            self.session
                 .create_from_preset_snapshot_idempotent(
                     owner_id,
                     request,
@@ -471,7 +724,7 @@ impl AttemptRunner for ConversationAttemptRunner {
                 )
                 .await
         } else {
-            self.conv
+            self.session
                 .create_idempotent(owner_id, request, attempt_creation_key)
                 .await
         };
@@ -479,7 +732,7 @@ impl AttemptRunner for ConversationAttemptRunner {
             Ok(conversation) => conversation,
             Err(error) => {
                 if let Err(cleanup_error) = self
-                    .conv
+                    .session
                     .discard_unlinked_creation(owner_id, attempt_creation_key)
                     .await
                 {
@@ -498,7 +751,7 @@ impl AttemptRunner for ConversationAttemptRunner {
             // the Conversation deletion guard rejects this cleanup.  Otherwise
             // the creation key and row are removed together, leaving no orphan.
             match self
-                .conv
+                .session
                 .discard_unlinked_creation(owner_id, attempt_creation_key)
                 .await
             {
@@ -551,7 +804,7 @@ impl AttemptRunner for ConversationAttemptRunner {
         owner_id: &str,
         attempt_creation_key: &str,
     ) -> Result<(), AppError> {
-        self.conv
+        self.session
             .discard_unlinked_creation(owner_id, attempt_creation_key)
             .await
     }

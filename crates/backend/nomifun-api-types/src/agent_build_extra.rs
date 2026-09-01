@@ -109,7 +109,13 @@ pub struct NomiGoalSpec {
     pub max_auto_continuations: Option<usize>,
 }
 
-/// Nomi-specific fields extracted from `extra` in build runtime options.
+/// Transitional fields extracted from `extra` while the runtime factory is
+/// being replaced by the canonical Preset/Snapshot/AgentSession path.
+///
+/// The conversation `extra` bag is intentionally broader than this projection:
+/// unknown legacy keys are ignored here. In particular, the retired
+/// `extra.backend` vendor label is not represented, so it cannot become a
+/// runtime selector by being deserialized and echoed into a build request.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NomiBuildExtra {
     #[serde(default)]
@@ -125,8 +131,6 @@ pub struct NomiBuildExtra {
     pub mcp_server_ids: Option<Vec<McpServerId>>,
     #[serde(default)]
     pub session_mcp_servers: Vec<SessionMcpServer>,
-    #[serde(default)]
-    pub backend: Option<String>,
     #[serde(default, deserialize_with = "deserialize_user_id")]
     pub user_id: Option<String>,
     /// Marks a companion conversation: the factory registers its memory tools
@@ -336,6 +340,22 @@ mod tests {
         .unwrap();
         assert!(guest.channel_group_guest);
         assert_eq!(guest.channel_platform.as_deref(), Some("lark"));
+    }
+
+    #[test]
+    fn retired_backend_label_is_not_projected_into_runtime_extra() {
+        let extra: NomiBuildExtra = serde_json::from_value(serde_json::json!({
+            "backend": "claude",
+            "system_prompt": "keep the prompt",
+        }))
+        .unwrap();
+
+        assert_eq!(extra.system_prompt.as_deref(), Some("keep the prompt"));
+        let serialized = serde_json::to_value(extra).unwrap();
+        assert!(
+            serialized.get("backend").is_none(),
+            "retired backend labels must not be re-emitted as runtime configuration"
+        );
     }
 
     #[test]

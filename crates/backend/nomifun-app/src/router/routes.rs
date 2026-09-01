@@ -215,15 +215,17 @@ fn protect_instance_owner(
         .route_layer(from_fn_with_state(auth_state.clone(), auth_middleware))
 }
 
-/// Create the application router with all routes and global middleware.
+/// Fallible transitional compatibility-router assembly with all legacy routes
+/// and global middleware.
 ///
 /// Middleware stack (outermost → innermost):
 /// 1. Security response headers (X-Frame-Options, etc.)
 /// 2. CSRF protection (Double Submit Cookie)
 /// 3. Route handlers (auth routes + system routes + conversation routes + file routes + health check)
-pub async fn create_router(services: &AppServices) -> Router {
+pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router> {
+    services.require_legacy_compatibility_root("try_create_router")?;
     let boot = Instant::now();
-    tracing::info!("startup: router assembly started");
+    tracing::info!("startup: transitional compatibility router assembly started");
 
     // Bridge event bus → WebSocket manager: forward all broadcast events
     // to connected WebSocket clients.
@@ -269,10 +271,12 @@ pub async fn create_router(services: &AppServices) -> Router {
     // conversation-service / terminal-driver attachments the gateway's
     // autowork + idmm tools need, and share the live loop maps with the REST
     // routes so a gateway toggle and a UI toggle act on the same state.
-    let gateway_deps = Arc::new(nomifun_gateway::GatewayDeps {
+    let gateway_deps = Arc::new(nomifun_gateway::CompatibilityCapabilityHost {
         authoritative_user_id: services.authoritative_user_id.clone(),
-        conversation_service: states.conversation.service.clone(),
-        runtime_registry: services.agent_runtime_registry.clone(),
+        conversation: Arc::new(super::legacy_conversation_port::LegacyConversationCapabilityPort::new(
+            states.conversation.service.clone(),
+            services.agent_runtime_registry.clone(),
+        )),
         cron_service: states.cron.cron_service.clone(),
         requirement_service: states.requirement.requirement_service.clone(),
         companion_service: services.companion_service.clone(),
@@ -334,7 +338,9 @@ pub async fn create_router(services: &AppServices) -> Router {
         // Computer-use: one shared desktop ComputerTool (no per-companion
         // isolation — the desktop is a single screen).
         #[cfg(feature = "computer-use")]
-        computer_registry: Some(nomifun_gateway::computer_registry::ComputerRegistry::new()),
+        computer_registry: Some(Arc::new(
+            nomifun_gateway::computer_registry::ComputerRegistry::new(),
+        )),
     });
     services.inject_gateway_deps(gateway_deps.clone()).await;
     tracing::info!(
@@ -360,7 +366,7 @@ pub async fn create_router(services: &AppServices) -> Router {
 
     // Spec D2: register the delivery-notify observer on the conversation
     // service instance that executes gateway `nomi_send_to_conversation`
-    // turns (the same instance wired into GatewayDeps above). When a watched
+    // turns (the same instance wired into CompatibilityCapabilityHost above). When a watched
     // turn completes, the observer injects a receipt message into the
     // requester session; a channel-bound requester relays the companion's
     // summary to its IM chat through the standard stream relay.
@@ -371,7 +377,7 @@ pub async fn create_router(services: &AppServices) -> Router {
         states.channel.repo.clone(),
         channel_components.manager.clone()
             as Arc<dyn nomifun_channel::stream_relay::ChannelSender>,
-        channel_components.message_service.pending_decisions(),
+        channel_components.message_service.stop_confirmations(),
         channel_components.message_service.asset_resolver(),
     ));
     states
@@ -443,91 +449,31 @@ pub async fn create_router(services: &AppServices) -> Router {
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: route tree build started"
     );
-    let agent_platform_router = match super::agent_platform_host::try_build(services).await {
-        Ok(Some(platform)) => {
-            let registry = platform.materialized_registry();
-            match registry {
-                Ok(registry) => tracing::info!(
-                    packages = registry.packages.len(),
-                    capabilities = registry.capabilities.len(),
-                    "startup: Fresh-v4 Agent platform mounted"
-                ),
-                Err(error) => tracing::warn!(
-                    %error,
-                    "startup: Fresh-v4 Agent platform mounted but inventory projection failed"
-                ),
-            }
-            Some(super::agent_platform::create_agent_platform_router(platform))
-        }
-        Ok(None) => {
-            tracing::debug!(
-                "startup: no ready Fresh-v4 root is present; canonical Agent routes remain unmounted"
-            );
-            None
-        }
-        Err(error) => {
-            tracing::error!(
-                %error,
-                "startup: ready Fresh-v4 root could not mount the canonical Agent platform"
-            );
-            None
-        }
-    };
     let ws_state = build_ws_state(services);
-    let router =
-        create_router_with_all_state_and_agent_platform(
-            services,
-            states,
-            ws_state,
-            agent_platform_router,
-        );
-    // Remote capability front door (/mcp): installation-token-authenticated MCP,
-    // projecting the SAME Registry/GatewayDeps as the inward stdio bridge. The
-    // bearer token authenticates the installation owner and never selects a
-    // companion; CallerCtx.companion_id remains None.
-    // `nest` (NOT `merge`) scopes its token-auth layer + fallback to `/mcp` so
-    // it can't hijack the app's global 404 fallback. Mounted only here (the full
-    // app), not in `create_router_with_states`, so test harnesses that call that
-    // directly are unaffected. The LAN listener's host_guard (DNS-rebind) still
-    // wraps it at the listener level.
-    let remote_mcp_admission =
-        nomifun_public::RemoteMcpSessionAdmissionAuthority::for_gateway(
-            gateway_deps.as_ref(),
-        );
-    let router = router.nest(
-        "/mcp",
-        nomifun_public::public_mcp_router_with_admission(
-            gateway_deps.clone(),
-            services.instance_token_validator.clone(),
-            None,
-            remote_mcp_admission.clone(),
-        ),
-    );
-    // Curated "agent" profile endpoint — a tight do-work tool list for external
-    // task-delegation agents (sibling of /mcp to avoid the catch-all conflict).
-    let router = router.nest(
-        "/mcp-agent",
-        nomifun_public::public_mcp_router_with_admission(
-            gateway_deps.clone(),
-            services.instance_token_validator.clone(),
-            Some(nomifun_public::AGENT_PROFILE_DOMAINS),
-            remote_mcp_admission,
-        ),
-    );
-    // REST /v1 adapter (human/script-facing), same registry + instance token,
-    // also scoped via nest. Supports ?profile=agent.
-    let router = router.nest(
-        "/v1",
-        nomifun_public::public_rest_router(
-            gateway_deps,
-            services.instance_token_validator.clone(),
-        ),
+    let remote_auth_admission =
+        Arc::new(nomifun_auth::RemoteAuthAdmissionFence::new());
+    let router = create_transitional_router_with_all_state(
+        services,
+        states,
+        ws_state,
+        remote_auth_admission.clone(),
     );
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
-        "startup: router assembly completed"
+        "startup: transitional compatibility route assembly completed"
     );
-    router
+    Ok(router)
+}
+
+/// Create the transitional compatibility router.
+///
+/// Fresh-v4 production hosts must use `FreshV4Application::router`; this
+/// `AppServices` graph remains only for legacy-compatible tests and explicitly
+/// selected transitional embeddings.
+pub async fn create_router(services: &AppServices) -> Router {
+    try_create_router(services)
+        .await
+        .unwrap_or_else(|error| panic!("application router assembly failed: {error:#}"))
 }
 
 #[cfg(test)]
@@ -707,6 +653,9 @@ mod realtime_bridge_tests {
 /// Used for testing when specific service overrides are needed
 /// (e.g. injecting a mock HTTP server URL for version check).
 pub fn create_router_with_states(services: &AppServices, states: ModuleStates) -> Router {
+    services
+        .require_legacy_compatibility_root("create_router_with_states")
+        .unwrap_or_else(|error| panic!("application router assembly failed: {error:#}"));
     let ws_state = build_ws_state(services);
     create_router_with_all_state(services, states, ws_state)
 }
@@ -720,14 +669,22 @@ pub fn create_router_with_all_state(
     states: ModuleStates,
     ws_state: WsHandlerState,
 ) -> Router {
-    create_router_with_all_state_and_agent_platform(services, states, ws_state, None)
+    services
+        .require_legacy_compatibility_root("create_router_with_all_state")
+        .unwrap_or_else(|error| panic!("application router assembly failed: {error:#}"));
+    create_transitional_router_with_all_state(
+        services,
+        states,
+        ws_state,
+        Arc::new(nomifun_auth::RemoteAuthAdmissionFence::new()),
+    )
 }
 
-fn create_router_with_all_state_and_agent_platform(
+fn create_transitional_router_with_all_state(
     services: &AppServices,
     states: ModuleStates,
     ws_state: WsHandlerState,
-    agent_platform_router: Option<Router>,
+    remote_auth_admission: Arc<nomifun_auth::RemoteAuthAdmissionFence>,
 ) -> Router {
     let boot = Instant::now();
     tracing::info!("startup: route tree build with states started");
@@ -771,6 +728,7 @@ fn create_router_with_all_state_and_agent_platform(
         provider_repo: services.provider_repo.clone(),
         token_repo: services.instance_token_repo.clone(),
         token_validator: services.instance_token_validator.clone(),
+        admission: remote_auth_admission,
     };
 
     // System routes protected by auth middleware
@@ -866,18 +824,14 @@ fn create_router_with_all_state_and_agent_platform(
         &instance_owner_state,
     );
 
-    // The canonical v4 control plane owns `/api/skills` when it is mounted.
-    // Keep the legacy skill catalog available for test/legacy compositions
-    // that deliberately have no Fresh-v4 platform.
-    let skill_authenticated = if agent_platform_router.is_none() {
-        Some(protect_instance_owner(
-            skill_routes(states.skill),
-            &auth_mw_state,
-            &instance_owner_state,
-        ))
-    } else {
-        None
-    };
+    // This router is itself the explicitly selected transitional composition.
+    // Fresh-v4 owns its canonical control-plane routes in its own application
+    // router and never reaches this legacy skill catalog.
+    let skill_authenticated = Some(protect_instance_owner(
+        skill_routes(states.skill),
+        &auth_mw_state,
+        &instance_owner_state,
+    ));
 
     // Channel routes protected by auth middleware
     let channel_authenticated = protect_instance_owner(
@@ -992,14 +946,6 @@ fn create_router_with_all_state_and_agent_platform(
         &auth_mw_state,
         &instance_owner_state,
     );
-
-    let agent_platform_authenticated = agent_platform_router.map(|router| {
-        protect_instance_owner(
-            router,
-            &auth_mw_state,
-            &instance_owner_state,
-        )
-    });
 
     // Computer-use OS permission status + prompt (macOS TCC). Stateless: the
     // handlers probe/trigger the host process's own grants. Auth-gated like the
@@ -1192,11 +1138,6 @@ fn create_router_with_all_state_and_agent_platform(
         .merge(office_authenticated)
         .merge(shell_authenticated)
         .merge(preset_authenticated);
-    let router = match agent_platform_authenticated {
-        Some(agent_platform) => router.merge(agent_platform),
-        None => router,
-    };
-
     // Robot management face (owner-only), same group and same gates as the SSH
     // host book: the desktop UI is talking, not a device.
     let router = match robot_faces.as_ref() {

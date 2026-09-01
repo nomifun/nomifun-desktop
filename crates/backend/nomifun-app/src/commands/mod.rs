@@ -5,13 +5,13 @@
 
 #[cfg(feature = "computer-use")]
 mod computer_stdio;
-mod ctl;
 mod backup;
 mod doctor;
 mod gateway_stdio;
 mod knowledge_stdio;
 mod mcp_stdio;
 mod open_stdio;
+mod remote_cli;
 mod requirement_stdio;
 mod server;
 mod stdio_common;
@@ -19,7 +19,6 @@ mod terminal_hook;
 
 #[cfg(feature = "computer-use")]
 pub use computer_stdio::run_computer_stdio;
-pub use ctl::{run_call, run_tools};
 pub use backup::{run_backup, run_restore};
 pub use doctor::run_doctor;
 pub use gateway_stdio::run_gateway_stdio;
@@ -29,8 +28,9 @@ pub use mcp_stdio::{
     run_mcp_stdio_subcommand_if_present,
 };
 pub use open_stdio::run_open_stdio;
+pub use remote_cli::run_remote;
 pub use requirement_stdio::run_requirement_stdio;
-pub use server::run_server;
+pub use server::run_canonical_server;
 pub use terminal_hook::run_terminal_hook;
 
 /// Stub for builds without the `computer-use` feature: the discrete-tool desktop

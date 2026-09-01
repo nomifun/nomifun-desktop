@@ -34,8 +34,15 @@ pub mod nostr;
 #[cfg(feature = "qqbot")]
 pub mod qqbot;
 
-/// Shared callback-data encoding for interactive buttons (Telegram/Discord/Slack/...).
-#[cfg(any(feature = "telegram", feature = "discord", feature = "slack", feature = "qqbot"))]
+/// Shared callback-data encoding for interactive buttons.
+#[cfg(any(
+    feature = "telegram",
+    feature = "discord",
+    feature = "slack",
+    feature = "qqbot",
+    feature = "lark",
+    feature = "dingtalk"
+))]
 pub mod callback;
 
 /// Small helpers shared by the plugins.

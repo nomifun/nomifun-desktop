@@ -60,7 +60,7 @@ async fn create_terminal(app: &mut axum::Router, token: &str, csrf: &str) -> Str
 /// IDMM's global backup provider is a hard executable binding. Seed the
 /// provider row explicitly so settings tests exercise a valid production
 /// configuration instead of relying on a dangling provider reference.
-async fn seed_provider(services: &nomifun_app::AppServices, provider_id: &str, model: &str) {
+async fn seed_provider(services: &nomifun_app::compatibility::AppServices, provider_id: &str, model: &str) {
     let credentials_encrypted = common::encrypted_bearer_credentials();
     nomifun_db::sqlx::query(
         "INSERT INTO providers \

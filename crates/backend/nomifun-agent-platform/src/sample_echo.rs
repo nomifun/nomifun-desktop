@@ -12,7 +12,8 @@ use nomifun_agent_contracts::{
     AgentSessionMetadata, ArtifactEnvelope, ArtifactId, CapabilityActionDescriptor,
     CapabilityContributions, CapabilityId, CapabilityKind, CapabilityManifest, CapabilityRef,
     CancellationDescriptor, CanonicalErrorCode, CanonicalSchemaRef, ConnectionConfigRef,
-    CorrelationId, DeclaredServiceViewDescriptor, DeleteAgentSessionCommand, DigestHex,
+    ChatRouteIdentity, CorrelationId, DeclaredServiceViewDescriptor, DeleteAgentSessionCommand,
+    DigestHex,
     EffectClass, EventId, EventProducerId, FullAutoExecutionWire, HostPortId, HostPortRef,
     IdempotencyKey, InProcessEntrypointMetadata, LocalizedMetadata, LogicalArtifactRef,
     ManagedTaskRegistrationDescriptor, McpServerId, McpToolCapabilityMapping, McpToolKey,
@@ -59,7 +60,7 @@ use nomifun_chat_model_broker::{
     ChatContentPart, ChatMessage, ChatModelBroker, ChatModelError, ChatModelErrorCode,
     ChatModelEvent, ChatModelInput, ChatModelRequest, ChatModality, ChatProtocol,
     ChatProtocolAdapter, ChatResponseFormat, ChatRole, ChatRouteResolver, ChatRouteSelection,
-    ChatTask, ChatToolCall, ChatToolChoice, ChatToolDefinition, ChatToolResultPart,
+    ChatToolCall, ChatToolChoice, ChatToolDefinition, ChatToolResultPart,
     CredentialLease, CredentialTarget, GeminiAdapter, OpenAiChatAdapter,
     OpenAiResponsesAdapter, PromptCachePolicy, ProviderCredentialRef, ProviderCredentialStore,
     ProviderIdRef, ProviderTransport, ProviderWireFrame, ProviderWireRequest,
@@ -659,6 +660,37 @@ fn sample_document(owner_id: &str, instructions: &str) -> AgentPresetDocumentDto
             "agent_chat".to_owned(),
             SAMPLE_MODEL_ROUTE.to_owned(),
         )]),
+        chat_route_records: BTreeMap::from([(
+            "agent_chat".to_owned(),
+            json!({
+                "schema": "nomifun.chat-route-record.v1",
+                "task": "agent_chat",
+                "primary": {
+                    "model_route_id": SAMPLE_MODEL_ROUTE,
+                    "model_route_revision": 1,
+                    "provider_id": "sample-echo-provider",
+                    "model": "sample-echo-recorded-model",
+                    "protocol": "openai_responses",
+                    "connection_config_ref": "sample-echo-connection",
+                    "config_revision_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "credential_ref": "sample-echo-credential-ref",
+                    "features": [
+                        "text_input",
+                        "text_output",
+                        "tool_calls",
+                        "reasoning",
+                        "image_input",
+                        "audio_input",
+                        "audio_output",
+                        "prompt_cache",
+                        "structured_output",
+                        "provider_round_state",
+                        "native_responses_items"
+                    ]
+                },
+                "failovers": []
+            }),
+        )]),
         initial_capabilities: vec![CapabilitySelectionDto {
             capability: ExactCatalogRefDto {
                 id: SAMPLE_CAPABILITY.to_owned(),
@@ -1041,8 +1073,8 @@ impl ProviderTransport for RecordedProviderTransport {
         credential: CredentialLease,
     ) -> Result<ProviderWireStream, ChatModelError> {
         if credential.credential_ref() != &request.credential_ref
-            || credential.target().model_route_id != request.model_route_id
-            || credential.target().model_route_revision != request.model_route_revision
+            || credential.target().model_route_id != request.route_identity.route_id
+            || credential.target().model_route_revision != request.route_identity.route_revision
         {
             return Err(ChatModelError::protocol_violation(
                 "recorded credential target mismatch",
@@ -1088,8 +1120,8 @@ impl ChatRouteResolver for ExactRouteResolver {
         &self,
         selection: &ChatRouteSelection,
     ) -> Result<ResolvedChatRouteSet, ChatModelError> {
-        if selection.model_route_id != self.route.model_route_id
-            || selection.model_route_revision != self.route.model_route_revision
+        if selection.route_id != self.route.model_route_id
+            || selection.route_revision != self.route.model_route_revision
         {
             return Err(ChatModelError::protocol_violation(
                 "recorded route selection mismatch",
@@ -1211,6 +1243,12 @@ fn model_request(
     cause: &EventId,
     messages: Vec<ChatMessage>,
 ) -> ChatModelRequest {
+    let route_identity = ChatRouteIdentity::new(
+        "sample.echo@1",
+        nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+        SAMPLE_MODEL_ROUTE.into(),
+        1,
+    );
     ChatModelRequest {
         contract_version: VersionString::from("chat-model-v1"),
         causality: ChatCausality {
@@ -1218,14 +1256,10 @@ fn model_request(
             turn_operation_id: turn.clone(),
             causation_event_id: cause.clone(),
             resolved_snapshot_ref: snapshot.clone(),
-            model_route_revision: 1,
+            route_identity: route_identity.clone(),
             operation_id: OperationId::from(new_id("model")),
         },
-        route: ChatRouteSelection {
-            model_route_id: ModelRouteId::from(SAMPLE_MODEL_ROUTE),
-            model_route_revision: 1,
-            task: ChatTask::AgentChat,
-        },
+        route: route_identity,
         input: ChatModelInput {
             instructions: vec!["Use sample.echo exactly once.".to_owned()],
             messages,
@@ -1848,6 +1882,10 @@ async fn execute_tool(
     let invocation = CapabilityInvocationRequest {
         principal: session.binding_owner(),
         session_owner: session.binding_owner(),
+        agent_session_id: session.session_id.clone(),
+        operation_id: turn.operation.clone(),
+        idempotency_key: effect.start.idempotency_key.clone(),
+        correlation_id: CorrelationId::from(effect.start.effect_id.as_ref().to_owned()),
         resolved_snapshot_ref: compiled.snapshot_ref().clone(),
         active_set_generation: 0,
         capability_id: CapabilityId::from(SAMPLE_CAPABILITY),

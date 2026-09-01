@@ -28,7 +28,6 @@ use nomifun_common::{
     stage_direction::StageDirectionFilter,
 };
 
-use crate::service::ConversationService;
 use nomifun_db::{
     DbError, IConversationRepository, MessageRowUpdate, SortOrder, TurnArtifactMessageCommit,
 };
@@ -1682,13 +1681,6 @@ pub struct StreamRelay {
     repo: Arc<dyn IConversationRepository>,
     user_events: Arc<dyn UserEventSink>,
     cron_service: Option<Arc<dyn ICronService>>,
-    /// Legacy relay-owned completion exists only for isolated unit tests.
-    /// Production completion is owned by ConversationService's durable
-    /// finalize -> exact release -> event fence.
-    #[cfg(test)]
-    complete_turn: bool,
-    #[cfg(test)]
-    allow_legacy_unjournaled_artifacts: bool,
     /// Companion-companion wire markers (from `conversation.extra.companion_session` /
     /// `.companion_id`), stamped onto every `message.stream` / `turn.completed`
     /// payload so the companion collector can classify the turn off the wire.
@@ -1808,10 +1800,6 @@ impl StreamRelay {
             repo,
             user_events,
             cron_service,
-            #[cfg(test)]
-            complete_turn: false,
-            #[cfg(test)]
-            allow_legacy_unjournaled_artifacts: false,
             companion: false,
             companion_id: None,
             origin: None,
@@ -1823,18 +1811,6 @@ impl StreamRelay {
             derived_message_ids: std::sync::Mutex::new(HashMap::new()),
             artifact_workspace: None,
         }
-    }
-
-    #[cfg(test)]
-    fn with_test_turn_completion(mut self) -> Self {
-        self.complete_turn = true;
-        self
-    }
-
-    #[cfg(test)]
-    fn with_test_legacy_unjournaled_artifacts(mut self) -> Self {
-        self.allow_legacy_unjournaled_artifacts = true;
-        self
     }
 
     pub fn with_root_turn_id(mut self, turn_id: impl Into<String>) -> Self {
@@ -2014,17 +1990,6 @@ impl StreamRelay {
         self
     }
 
-    fn allows_legacy_unjournaled_artifacts(&self) -> bool {
-        #[cfg(test)]
-        {
-            return self.allow_legacy_unjournaled_artifacts;
-        }
-        #[cfg(not(test))]
-        {
-            false
-        }
-    }
-
     /// Wire the pre-response failover error-suppressor (review #1/#5). When the
     /// predicate returns `true` for a pre-response provider-fault's error code,
     /// the relay swallows the user-visible error (no WS error event, no error
@@ -2122,7 +2087,7 @@ impl StreamRelay {
             cancellation.mark_terminal_observed();
             return false;
         }
-        let error_message_id = ConversationService::mint_msg_id();
+        let error_message_id = MessageId::new().into_string();
         self.forward_terminal_without_projection(&error_message_id, event);
         // This projection belongs to the still-authoritative turn owner.  Do
         // not detach or time out the insert: cancelling an in-flight database
@@ -2447,7 +2412,7 @@ impl StreamRelay {
                             }
 
                             let segment = active_thinking.get_or_insert_with(|| ThinkingSegmentState {
-                                id: ConversationService::mint_msg_id(),
+                                id: MessageId::new().into_string(),
                                 buffer: String::new(),
                                 started_at: now_ms(),
                                 completed_duration_ms: None,
@@ -2475,7 +2440,7 @@ impl StreamRelay {
                             }
 
                             let segment = active_text.get_or_insert_with(|| TextSegmentState {
-                                id: ConversationService::mint_msg_id(),
+                                id: MessageId::new().into_string(),
                                 buffer: String::new(),
                                 created_at: now_ms(),
                                 record_created: false,
@@ -2678,7 +2643,7 @@ impl StreamRelay {
                             let terminal_message_id = if matches!(event, AgentStreamEvent::Error(_))
                                 && !suppress_error
                             {
-                                ConversationService::mint_msg_id()
+                                MessageId::new().into_string()
                             } else {
                                 self.msg_id.clone()
                             };
@@ -2817,22 +2782,6 @@ impl StreamRelay {
                                 // the wire. The stop worker may now release the
                                 // exact generation and publish turn.completed.
                                 cancellation.mark_terminal_observed();
-                            }
-                            #[cfg(test)]
-                            if self.complete_turn {
-                                Self::complete_conversation_with_context(
-                                    &self.repo,
-                                    &self.user_events,
-                                    &self.user_id,
-                                    &self.conversation_id,
-                                    Some(self.root_turn_id.clone()),
-                                    None,
-                                    self.companion,
-                                    self.companion_id.clone(),
-                                    self.origin.clone(),
-                                    self.channel_platform.clone(),
-                                )
-                                .await;
                             }
                             break outcome;
                         }
@@ -3286,7 +3235,7 @@ impl StreamRelay {
                         RelayTerminal::ChannelClosed
                     };
                     let mut terminal_message_id = if matches!(terminal_event, AgentStreamEvent::Error(_)) {
-                        ConversationService::mint_msg_id()
+                        MessageId::new().into_string()
                     } else {
                         self.msg_id.clone()
                     };
@@ -3357,7 +3306,7 @@ impl StreamRelay {
                         {
                             terminal_event = Self::assistant_segment_persistence_error_event();
                             terminal = Self::terminal_from_event(&terminal_event);
-                            terminal_message_id = ConversationService::mint_msg_id();
+                            terminal_message_id = MessageId::new().into_string();
                         }
                         let outcome = self
                             .finalize(
@@ -3390,22 +3339,6 @@ impl StreamRelay {
                         && let Some(cancellation) = self.cancellation.as_ref()
                     {
                         cancellation.mark_terminal_observed();
-                    }
-                    #[cfg(test)]
-                    if self.complete_turn {
-                        Self::complete_conversation_with_context(
-                            &self.repo,
-                            &self.user_events,
-                            &self.user_id,
-                            &self.conversation_id,
-                            Some(self.root_turn_id.clone()),
-                            None,
-                            self.companion,
-                            self.companion_id.clone(),
-                            self.origin.clone(),
-                            self.channel_platform.clone(),
-                        )
-                        .await;
                     }
                     break outcome;
                 }
@@ -4151,7 +4084,7 @@ impl StreamRelay {
                     // the active segment and must not rewrite earlier narration.
                 }
             } else if !hidden {
-                let message_id = ConversationService::mint_msg_id();
+                let message_id = MessageId::new().into_string();
                 let row = MessageRow {
                     id: 0,
                     message_id: message_id.clone(),
@@ -4226,7 +4159,7 @@ impl StreamRelay {
             return;
         };
 
-        let message_id = ConversationService::mint_msg_id();
+        let message_id = MessageId::new().into_string();
         let created_at = now_ms();
         let live_data = json!({
             "content": message,
@@ -4882,12 +4815,6 @@ impl StreamRelay {
         if data.artifacts.is_empty() {
             return Ok(());
         }
-        if self.allows_legacy_unjournaled_artifacts() && self.artifact_workspace.is_none() {
-            // Explicit test-only fixtures exercise relay tracking/correction
-            // semantics with synthetic receipts that have no real workspace.
-            // Production can never enable this branch.
-            return Ok(());
-        }
         let Some(workspace) = self.artifact_workspace.as_ref() else {
             return Err(DbError::Conflict(
                 "artifact recovery has no canonical session workspace".to_owned(),
@@ -4918,9 +4845,6 @@ impl StreamRelay {
         // recoverable sink path. Production Nomi deferred images are all-or-
         // nothing journaled; a partial journal set is a hard ownership error.
         if matching == 0 {
-            if self.allows_legacy_unjournaled_artifacts() {
-                return Ok(());
-            }
             return Err(DbError::Conflict(format!(
                 "tool call '{}' has no durable artifact recovery journal",
                 data.call_id
@@ -5452,30 +5376,13 @@ impl StreamRelay {
                 .flat_map(|data| data.artifacts.iter().cloned())
                 .collect::<Vec<_>>();
             let store = ArtifactStore::new(workspace);
-            let skip_legacy_fence = if self.allows_legacy_unjournaled_artifacts() {
-                let journaled = store
-                    .recovery_records()
-                    .map_err(|error| {
-                        ArtifactCommitFailure::before_commit(nomifun_db::DbError::Conflict(
-                            error.to_string(),
-                        ))
-                    })?
-                    .into_iter()
-                    .map(|record| record.receipt.id)
-                    .collect::<HashSet<_>>();
-                receipts.iter().all(|receipt| !journaled.contains(&receipt.id))
-            } else {
-                false
-            };
-            if !skip_legacy_fence {
-                store
-                    .mark_recovery_receipts_commit_attempting(&receipts)
-                    .map_err(|error| {
-                        ArtifactCommitFailure::before_commit(nomifun_db::DbError::Conflict(
-                            format!("artifact commit intent could not be persisted: {error}"),
-                        ))
-                    })?;
-            }
+            store
+                .mark_recovery_receipts_commit_attempting(&receipts)
+                .map_err(|error| {
+                    ArtifactCommitFailure::before_commit(nomifun_db::DbError::Conflict(
+                        format!("artifact commit intent could not be persisted: {error}"),
+                    ))
+                })?;
         }
 
         let commit_result = self
@@ -5858,7 +5765,7 @@ impl StreamRelay {
         let source_group_id = entries
             .first()
             .map(|e| e.call_id.clone())
-            .unwrap_or_else(ConversationService::mint_msg_id);
+            .unwrap_or_else(|| MessageId::new().into_string());
         let group_id = self.derived_message_id("tool_group", &source_group_id).await;
 
         let existing = self
@@ -5979,7 +5886,7 @@ impl StreamRelay {
         for response in responses {
             self.broadcast_stream_payload(json!({
                 "conversation_id": self.conv_id(),
-                "msg_id": ConversationService::mint_msg_id(),
+                "msg_id": MessageId::new().into_string(),
                 "type": "system",
                 "data": response,
                 "hidden": true,
@@ -6014,67 +5921,6 @@ impl StreamRelay {
                 turn_id = %self.root_turn_id,
                 "User event sink panicked while projecting an agent stream event"
             );
-        }
-    }
-
-    /// Emit `turn.completed` for the conversation, with the companion-companion
-    /// wire markers and the turn's `origin` marker attached to the
-    /// `turn.completed` payload (see [`Self::with_companion_context`] /
-    /// [`Self::with_origin`]).
-    #[cfg(test)]
-    #[tracing::instrument(skip_all, fields(conversation_id = %conversation_id))]
-    async fn complete_conversation_with_context(
-        repo: &Arc<dyn IConversationRepository>,
-        user_events: &Arc<dyn UserEventSink>,
-        user_id: &str,
-        conversation_id: &str,
-        turn_id: Option<String>,
-        runtime: Option<ConversationRuntimeSummary>,
-        companion: bool,
-        companion_id: Option<CompanionId>,
-        origin: Option<String>,
-        channel_platform: Option<String>,
-    ) {
-        if !Self::persist_conversation_finished(repo, conversation_id).await {
-            warn!(
-                conversation_id,
-                "Suppressing turn.completed because durable Finished persistence failed"
-            );
-            return;
-        }
-        Self::broadcast_turn_completed_with_context(
-            user_events,
-            user_id,
-            conversation_id,
-            turn_id,
-            runtime,
-            companion,
-            companion_id,
-            origin,
-            channel_platform,
-        );
-    }
-
-    #[cfg(test)]
-    async fn persist_conversation_finished(
-        repo: &Arc<dyn IConversationRepository>,
-        conversation_id: &str,
-    ) -> bool {
-        let update = nomifun_db::ConversationRowUpdate {
-            status: Some("finished".to_owned()),
-            updated_at: Some(now_ms()),
-            ..Default::default()
-        };
-        match repo.update(conversation_id, &update).await {
-            Ok(()) => true,
-            Err(e) => {
-                error!(
-                    conversation_id,
-                    error = %ErrorChain(&e),
-                    "Failed to persist durable Finished conversation status"
-                );
-                false
-            }
         }
     }
 
@@ -6368,16 +6214,74 @@ mod tests {
         }
     }
 
-    fn persisted_png_artifact(
+    fn recoverable_png_artifact(
         workspace: &std::path::Path,
+        conversation_id: &str,
+        wire_msg_id: &str,
+        call_id: &str,
     ) -> nomifun_ai_agent::artifact_store::PersistedArtifact {
-        ArtifactStore::new(workspace)
-            .persist_inline(
-                nomifun_ai_agent::artifact_store::ArtifactKind::Image,
-                "image/png",
-                ONE_PIXEL_PNG,
+        recoverable_png_artifact_named(
+            workspace,
+            conversation_id,
+            wire_msg_id,
+            call_id,
+            "ImageGeneration",
+        )
+    }
+
+    fn recoverable_png_artifact_named(
+        workspace: &std::path::Path,
+        conversation_id: &str,
+        wire_msg_id: &str,
+        call_id: &str,
+        tool_name: &str,
+    ) -> nomifun_ai_agent::artifact_store::PersistedArtifact {
+        use nomifun_ai_agent::protocol::events::tool_call::{
+            ToolCallEventData, ToolCallStatus,
+        };
+
+        let store = ArtifactStore::new(workspace);
+        let source = ArtifactRecoverySource {
+            conversation_id: conversation_id.to_owned(),
+            wire_msg_id: wire_msg_id.to_owned(),
+        };
+        let artifact = store
+            .persist_inline_and_existing_batch_recoverable(
+                [(
+                    nomifun_ai_agent::artifact_store::ArtifactKind::Image,
+                    "image/png",
+                    ONE_PIXEL_PNG,
+                )],
+                std::iter::empty::<&std::path::Path>(),
+                &source,
             )
-            .expect("persist verified test PNG")
+            .expect("persist recoverable test PNG")
+            .pop()
+            .expect("one recoverable test PNG");
+        let event = ToolCallEventData {
+            call_id: call_id.to_owned(),
+            name: tool_name.to_owned(),
+            args: json!({"prompt": "cat"}),
+            status: ToolCallStatus::Completed,
+            input: None,
+            output: Some("generated".to_owned()),
+            description: None,
+            artifacts: vec![artifact.clone()],
+            retry: None,
+        };
+        store
+            .prepare_recovery_receipts(
+                std::slice::from_ref(&artifact),
+                &ArtifactRecoveryEnvelope {
+                    conversation_id: conversation_id.to_owned(),
+                    wire_msg_id: wire_msg_id.to_owned(),
+                    event_kind: "tool_call".to_owned(),
+                    event_json: serde_json::to_string(&event)
+                        .expect("serialize recoverable test event"),
+                },
+            )
+            .expect("prepare recoverable test event");
+        artifact
     }
 
     struct TestUserEventBus {
@@ -6399,6 +6303,29 @@ mod tests {
         fn send_to_user(&self, _user_id: &str, event: WebSocketMessage<Value>) {
             let _ = self.sender.send(event);
         }
+    }
+
+    fn publish_service_completion(
+        bus: &Arc<TestUserEventBus>,
+        conversation_id: &str,
+        turn_id: Option<String>,
+        companion: bool,
+        companion_id: Option<CompanionId>,
+        origin: Option<String>,
+        channel_platform: Option<String>,
+    ) {
+        let user_events: Arc<dyn UserEventSink> = bus.clone();
+        StreamRelay::broadcast_turn_completed_with_context(
+            &user_events,
+            TEST_USER_ID,
+            conversation_id,
+            turn_id,
+            None,
+            companion,
+            companion_id,
+            origin,
+            channel_platform,
+        );
     }
 
     struct PanicUserEventSink {
@@ -7973,19 +7900,24 @@ mod tests {
             MessageId::new().into_string()
         ));
         std::fs::create_dir_all(&workspace).expect("create test workspace");
-        let artifact = persisted_png_artifact(&workspace);
+        let conversation_id = test_conversation_id();
+        let artifact = recoverable_png_artifact(
+            &workspace,
+            &conversation_id,
+            TEST_TURN_A,
+            "artifact-before-unpersisted-text",
+        );
         let artifact_path = PathBuf::from(&artifact.path);
         assert!(artifact_path.is_file());
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id,
             TEST_TURN_A.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus,
             None,
         )
-        .with_artifact_workspace(workspace.clone())
-        .with_test_legacy_unjournaled_artifacts();
+        .with_artifact_workspace(workspace.clone());
         let rx = tx.subscribe();
 
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
@@ -9441,17 +9373,18 @@ mod tests {
             MessageId::new().into_string()
         ));
         std::fs::create_dir_all(&workspace).expect("create test workspace");
-        let artifact = persisted_png_artifact(&workspace);
+        let conversation_id = test_conversation_id();
+        let artifact =
+            recoverable_png_artifact(&workspace, &conversation_id, TEST_TURN_A, "artifact-success");
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id,
             TEST_TURN_A.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus,
             None,
         )
-        .with_artifact_workspace(workspace.clone())
-        .with_test_legacy_unjournaled_artifacts();
+        .with_artifact_workspace(workspace.clone());
         let rx = tx.subscribe();
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "artifact-success".into(),
@@ -9527,19 +9460,24 @@ mod tests {
             MessageId::new().into_string()
         ));
         std::fs::create_dir_all(&workspace).expect("create test workspace");
-        let artifact = persisted_png_artifact(&workspace);
+        let conversation_id = test_conversation_id();
+        let artifact = recoverable_png_artifact(
+            &workspace,
+            &conversation_id,
+            TEST_TURN_A,
+            "artifact-commit-fails",
+        );
         let artifact_path = PathBuf::from(&artifact.path);
         assert!(artifact_path.is_file());
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id,
             TEST_TURN_A.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus,
             None,
         )
-        .with_artifact_workspace(workspace.clone())
-        .with_test_legacy_unjournaled_artifacts();
+        .with_artifact_workspace(workspace.clone());
         let rx = tx.subscribe();
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "artifact-commit-fails".into(),
@@ -9609,20 +9547,25 @@ mod tests {
             MessageId::new().into_string()
         ));
         std::fs::create_dir_all(&workspace).expect("create test workspace");
-        let artifact = persisted_png_artifact(&workspace);
+        let conversation_id = test_conversation_id();
+        let artifact = recoverable_png_artifact(
+            &workspace,
+            &conversation_id,
+            TEST_TURN_A,
+            "artifact-reverify-fails",
+        );
         let artifact_path = PathBuf::from(&artifact.path);
         std::fs::write(&artifact_path, b"tampered after receipt publication")
             .expect("tamper provisional artifact");
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id,
             TEST_TURN_A.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             Arc::new(TestUserEventBus::new(64)),
             None,
         )
-        .with_artifact_workspace(workspace.clone())
-        .with_test_legacy_unjournaled_artifacts();
+        .with_artifact_workspace(workspace.clone());
         let rx = tx.subscribe();
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "artifact-reverify-fails".into(),
@@ -9667,18 +9610,23 @@ mod tests {
             MessageId::new().into_string()
         ));
         std::fs::create_dir_all(&workspace).expect("create test workspace");
-        let artifact = persisted_png_artifact(&workspace);
+        let conversation_id = test_conversation_id();
+        let artifact = recoverable_png_artifact(
+            &workspace,
+            &conversation_id,
+            TEST_TURN_A,
+            "artifact-commit-lost-ack",
+        );
         let artifact_path = PathBuf::from(&artifact.path);
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id,
             TEST_TURN_A.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus,
             None,
         )
-        .with_artifact_workspace(workspace.clone())
-        .with_test_legacy_unjournaled_artifacts();
+        .with_artifact_workspace(workspace.clone());
         let rx = tx.subscribe();
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "artifact-commit-lost-ack".into(),
@@ -9734,18 +9682,23 @@ mod tests {
             MessageId::new().into_string()
         ));
         std::fs::create_dir_all(&workspace).expect("create test workspace");
-        let artifact = persisted_png_artifact(&workspace);
+        let conversation_id = test_conversation_id();
+        let artifact = recoverable_png_artifact(
+            &workspace,
+            &conversation_id,
+            TEST_TURN_A,
+            "artifact-commit-unknown",
+        );
         let artifact_path = PathBuf::from(&artifact.path);
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id,
             TEST_TURN_A.into(),
             TEST_USER_ID.into(),
             repo,
             Arc::new(TestUserEventBus::new(64)),
             None,
         )
-        .with_artifact_workspace(workspace.clone())
-        .with_test_legacy_unjournaled_artifacts();
+        .with_artifact_workspace(workspace.clone());
         let rx = tx.subscribe();
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "artifact-commit-unknown".into(),
@@ -9788,19 +9741,29 @@ mod tests {
             MessageId::new().into_string()
         ));
         std::fs::create_dir_all(&workspace).expect("create test workspace");
-        let first = persisted_png_artifact(&workspace);
-        let second = persisted_png_artifact(&workspace);
+        let conversation_id = test_conversation_id();
+        let first = recoverable_png_artifact(
+            &workspace,
+            &conversation_id,
+            TEST_TURN_A,
+            "artifact-partial-a",
+        );
+        let second = recoverable_png_artifact(
+            &workspace,
+            &conversation_id,
+            TEST_TURN_A,
+            "artifact-partial-b",
+        );
         let paths = [PathBuf::from(&first.path), PathBuf::from(&second.path)];
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id,
             TEST_TURN_A.into(),
             TEST_USER_ID.into(),
             repo,
             Arc::new(TestUserEventBus::new(64)),
             None,
         )
-        .with_artifact_workspace(workspace.clone())
-        .with_test_legacy_unjournaled_artifacts();
+        .with_artifact_workspace(workspace.clone());
         let rx = tx.subscribe();
         for (call_id, artifact) in [("artifact-partial-a", first), ("artifact-partial-b", second)] {
             tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
@@ -9847,17 +9810,22 @@ mod tests {
             MessageId::new().into_string()
         ));
         std::fs::create_dir_all(&workspace).expect("create test workspace");
-        let artifact = persisted_png_artifact(&workspace);
+        let conversation_id = test_conversation_id();
+        let artifact = recoverable_png_artifact(
+            &workspace,
+            &conversation_id,
+            TEST_TURN_A,
+            "artifact-commit-times-out",
+        );
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id,
             TEST_TURN_A.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus,
             None,
         )
-        .with_artifact_workspace(workspace.clone())
-        .with_test_legacy_unjournaled_artifacts();
+        .with_artifact_workspace(workspace.clone());
         let rx = tx.subscribe();
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "artifact-commit-times-out".into(),
@@ -9991,19 +9959,24 @@ mod tests {
             MessageId::new().into_string()
         ));
         std::fs::create_dir_all(&workspace).expect("create test workspace");
-        let artifact = persisted_png_artifact(&workspace);
+        let conversation_id = test_conversation_id();
+        let artifact = recoverable_png_artifact(
+            &workspace,
+            &conversation_id,
+            TEST_TURN_A,
+            "artifact-then-error",
+        );
         let artifact_path = PathBuf::from(&artifact.path);
         assert!(artifact_path.is_file());
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id,
             TEST_TURN_A.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus,
             None,
         )
-        .with_artifact_workspace(workspace.clone())
-        .with_test_legacy_unjournaled_artifacts();
+        .with_artifact_workspace(workspace.clone());
         let rx = tx.subscribe();
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "artifact-then-error".into(),
@@ -10082,15 +10055,27 @@ mod tests {
         let bus = Arc::new(TestUserEventBus::new(64));
         let mut ws_rx = bus.subscribe();
         let (tx, _) = broadcast::channel(64);
+        let conversation_id = test_conversation_id();
+        let workspace = std::env::temp_dir().join(format!(
+            "nomifun-conversation-artifact-wedged-db-test-{}",
+            MessageId::new().into_string()
+        ));
+        std::fs::create_dir_all(&workspace).expect("create test workspace");
+        let artifact = recoverable_png_artifact(
+            &workspace,
+            &conversation_id,
+            TEST_TURN_A,
+            "artifact-before-wedged-db",
+        );
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id,
             TEST_TURN_A.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus,
             None,
         )
-        .with_test_legacy_unjournaled_artifacts();
+        .with_artifact_workspace(workspace.clone());
         let rx = tx.subscribe();
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "artifact-before-wedged-db".into(),
@@ -10100,7 +10085,7 @@ mod tests {
             input: None,
             output: Some("generated".into()),
             description: None,
-            artifacts: vec![test_artifact("wedged-db")],
+            artifacts: vec![artifact],
             retry: None,
         }))
         .unwrap();
@@ -10162,6 +10147,7 @@ mod tests {
         );
         relay_task.abort();
         let _ = relay_task.await;
+        std::fs::remove_dir_all(workspace).expect("remove test workspace");
     }
 
     #[tokio::test]
@@ -10172,15 +10158,27 @@ mod tests {
         let bus = Arc::new(TestUserEventBus::new(64));
         let mut ws_rx = bus.subscribe();
         let (tx, _) = broadcast::channel(64);
+        let conversation_id = test_conversation_id();
+        let workspace = std::env::temp_dir().join(format!(
+            "nomifun-conversation-artifact-close-test-{}",
+            MessageId::new().into_string()
+        ));
+        std::fs::create_dir_all(&workspace).expect("create test workspace");
+        let artifact = recoverable_png_artifact(
+            &workspace,
+            &conversation_id,
+            TEST_TURN_A,
+            "generic-before-close",
+        );
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id,
             TEST_TURN_A.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus,
             None,
         )
-        .with_test_legacy_unjournaled_artifacts();
+        .with_artifact_workspace(workspace.clone());
         let rx = tx.subscribe();
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
             call_id: "generic-before-close".into(),
@@ -10190,7 +10188,7 @@ mod tests {
             input: None,
             output: Some("generated".into()),
             description: None,
-            artifacts: vec![test_artifact("generic-close")],
+            artifacts: vec![artifact],
             retry: None,
         }))
         .unwrap();
@@ -10232,6 +10230,7 @@ mod tests {
             2,
             "completed generic tool plus its error correction are both visible"
         );
+        std::fs::remove_dir_all(workspace).expect("remove test workspace");
     }
 
     #[tokio::test]
@@ -10242,26 +10241,35 @@ mod tests {
         let bus = Arc::new(TestUserEventBus::new(4096));
         let mut ws_rx = bus.subscribe();
         let (tx, _) = broadcast::channel(1024);
+        let conversation_id = test_conversation_id();
+        let workspace = std::env::temp_dir().join(format!(
+            "nomifun-conversation-artifact-limit-test-{}",
+            MessageId::new().into_string()
+        ));
+        std::fs::create_dir_all(&workspace).expect("create test workspace");
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id.clone(),
             TEST_TURN_A.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus,
             None,
         )
-        .with_test_legacy_unjournaled_artifacts();
+        .with_artifact_workspace(workspace.clone());
         let rx = tx.subscribe();
         for index in 0..=MAX_TERMINAL_ACTIVE_ITEMS {
+            let call_id = format!("artifact-{index}");
+            let artifact =
+                recoverable_png_artifact(&workspace, &conversation_id, TEST_TURN_A, &call_id);
             tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
-                call_id: format!("artifact-{index}"),
+                call_id,
                 name: "ImageGeneration".into(),
                 args: json!({"prompt": "cat"}),
                 status: ToolCallStatus::Completed,
                 input: None,
                 output: Some("generated".into()),
                 description: None,
-                artifacts: vec![test_artifact(&format!("artifact-{index}"))],
+                artifacts: vec![artifact],
                 retry: None,
             }))
             .unwrap();
@@ -10305,6 +10313,7 @@ mod tests {
                 .count(),
             MAX_TERMINAL_ACTIVE_ITEMS
         );
+        std::fs::remove_dir_all(workspace).expect("remove test workspace");
     }
 
     #[tokio::test]
@@ -10436,16 +10445,16 @@ mod tests {
         let repo = Arc::new(RecordingRepo::new());
         let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
+        let conversation_id = test_conversation_id();
 
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id.clone(),
             TEST_ASSISTANT_MESSAGE_ID.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus.clone(),
             None,
-        )
-        .with_test_turn_completion();
+        );
 
         let mut ws_rx = bus.subscribe();
         let rx = tx.subscribe();
@@ -10457,6 +10466,15 @@ mod tests {
             .unwrap();
 
         let outcome = relay.consume_with_send_error(rx, send_error_rx).await;
+        publish_service_completion(
+            &bus,
+            &conversation_id,
+            Some(TEST_ASSISTANT_MESSAGE_ID.to_owned()),
+            false,
+            None,
+            None,
+            None,
+        );
         assert!(outcome.system_responses.is_empty());
         assert_eq!(
             outcome.terminal,
@@ -10492,7 +10510,14 @@ mod tests {
             .expect("send error should be forwarded as message.stream error");
         assert_eq!(error_event.data["data"]["code"], "USER_LLM_PROVIDER_AUTH_FAILED");
         assert_eq!(error_event.data["data"]["ownership"], "user_llm_provider");
-        assert!(ws_events.iter().any(|evt| evt.name == "turn.completed"));
+        assert_eq!(
+            ws_events
+                .iter()
+                .filter(|evt| evt.name == "turn.completed")
+                .count(),
+            1,
+            "the service completion boundary must be the sole completion publisher"
+        );
     }
 
     #[tokio::test]
@@ -10826,7 +10851,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_only_completion_opt_in_broadcasts_turn_completed() {
+    async fn relay_leaves_completion_projection_to_service_boundary() {
         let repo = Arc::new(RecordingRepo::new());
         let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
@@ -10839,8 +10864,7 @@ mod tests {
             repo.clone(),
             bus.clone(),
             None,
-        )
-        .with_test_turn_completion();
+        );
 
         // Subscribe to the bus before relay runs
         let mut ws_rx = bus.subscribe();
@@ -10851,7 +10875,9 @@ mod tests {
         let outcome = relay.consume(rx).await;
         assert!(outcome.system_responses.is_empty());
 
-        // Collect WebSocket events
+        // A relay terminal is not a durable lifecycle completion. The owning
+        // service publishes `turn.completed` only after receipt finalization
+        // and exact runtime release have committed.
         let mut ws_events = vec![];
         while let Ok(evt) = ws_rx.try_recv() {
             ws_events.push(evt);
@@ -10867,10 +10893,25 @@ mod tests {
             "an empty successful response has no visible final-text owner"
         );
 
-        // Should have turn.completed event
-        let turn_event = ws_events.iter().find(|e| e.name == "turn.completed");
-        assert!(turn_event.is_some());
-        let data = &turn_event.unwrap().data;
+        assert!(
+            ws_events.iter().all(|event| event.name != "turn.completed"),
+            "relay must not publish the service-owned completion projection"
+        );
+
+        publish_service_completion(
+            &bus,
+            &conversation_id,
+            Some(TEST_ASSISTANT_MESSAGE_ID.to_owned()),
+            false,
+            None,
+            None,
+            None,
+        );
+        let turn_event = ws_rx
+            .try_recv()
+            .expect("service completion projection");
+        assert_eq!(turn_event.name, "turn.completed");
+        let data = &turn_event.data;
         assert_eq!(data["conversation_id"], conversation_id);
         assert_eq!(data["turn_id"], TEST_ASSISTANT_MESSAGE_ID);
         assert_eq!(data["status"], "finished");
@@ -10878,30 +10919,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completion_event_requires_a_durable_finished_commit() {
+    async fn relay_does_not_claim_durable_completion() {
         let repo = Arc::new(RecordingRepo::new());
-        repo.fail_conversation_updates();
         let bus = Arc::new(TestUserEventBus::new(64));
         let mut ws_rx = bus.subscribe();
         let conversation_id = test_conversation_id();
+        let (tx, _) = broadcast::channel(64);
+        let relay = StreamRelay::new(
+            conversation_id,
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo,
+            bus,
+            None,
+        );
 
-        StreamRelay::complete_conversation_with_context(
-            &(repo as Arc<dyn IConversationRepository>),
-            &(bus as Arc<dyn UserEventSink>),
-            TEST_USER_ID,
-            &conversation_id,
-            Some(TEST_ASSISTANT_MESSAGE_ID.to_owned()),
-            None,
-            false,
-            None,
-            None,
-            None,
-        )
-        .await;
+        let rx = tx.subscribe();
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default()))
+            .unwrap();
+        let outcome = relay.consume(rx).await;
 
+        assert_eq!(outcome.terminal, RelayTerminal::Finish);
+        let mut projected_events = Vec::new();
+        while let Ok(event) = ws_rx.try_recv() {
+            projected_events.push(event);
+        }
         assert!(
-            ws_rx.try_recv().is_err(),
-            "turn.completed must not be published when durable Finished persistence failed"
+            projected_events
+                .iter()
+                .all(|event| event.name != "turn.completed")
         );
     }
 
@@ -11065,16 +11111,16 @@ mod tests {
         let repo = Arc::new(RecordingRepo::new());
         let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
+        let conversation_id = test_conversation_id();
 
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id.clone(),
             TEST_ASSISTANT_MESSAGE_ID.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus.clone(),
             None,
         )
-        .with_test_turn_completion()
         .with_companion_context(
             true,
             Some(
@@ -11089,6 +11135,18 @@ mod tests {
             .unwrap();
         tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
         relay.consume(rx).await;
+        publish_service_completion(
+            &bus,
+            &conversation_id,
+            Some(TEST_ASSISTANT_MESSAGE_ID.to_owned()),
+            true,
+            Some(
+                CompanionId::parse("0190f5fe-7c00-7a00-8abc-012345678942")
+                    .unwrap(),
+            ),
+            None,
+            None,
+        );
 
         let mut ws_events = vec![];
         while let Ok(evt) = ws_rx.try_recv() {
@@ -11128,7 +11186,6 @@ mod tests {
             bus.clone(),
             None,
         )
-        .with_test_turn_completion()
         .with_companion_context(
             true,
             Some(
@@ -11144,6 +11201,18 @@ mod tests {
             .unwrap();
         tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
         relay.consume(rx).await;
+        publish_service_completion(
+            &bus,
+            "3",
+            Some(TEST_ASSISTANT_MESSAGE_ID.to_owned()),
+            true,
+            Some(
+                CompanionId::parse("0190f5fe-7c00-7a00-8abc-012345678942")
+                    .unwrap(),
+            ),
+            None,
+            Some("telegram".into()),
+        );
 
         let mut ws_events = vec![];
         while let Ok(evt) = ws_rx.try_recv() {
@@ -11197,16 +11266,16 @@ mod tests {
         let repo = Arc::new(RecordingRepo::new());
         let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
+        let conversation_id = test_conversation_id();
 
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id.clone(),
             TEST_ASSISTANT_MESSAGE_ID.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus.clone(),
             None,
-        )
-        .with_test_turn_completion();
+        );
 
         let mut ws_rx = bus.subscribe();
         let rx = tx.subscribe();
@@ -11214,6 +11283,15 @@ mod tests {
             .unwrap();
         tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
         relay.consume(rx).await;
+        publish_service_completion(
+            &bus,
+            &conversation_id,
+            Some(TEST_ASSISTANT_MESSAGE_ID.to_owned()),
+            false,
+            None,
+            None,
+            None,
+        );
 
         let mut ws_events = vec![];
         while let Ok(evt) = ws_rx.try_recv() {
@@ -11495,16 +11573,16 @@ mod tests {
         let repo = Arc::new(RecordingRepo::new());
         let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
+        let conversation_id = test_conversation_id();
 
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id.clone(),
             TEST_ASSISTANT_MESSAGE_ID.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus.clone(),
             None,
         )
-        .with_test_turn_completion()
         .with_origin(Some("companion".into()));
 
         let mut ws_rx = bus.subscribe();
@@ -11512,9 +11590,18 @@ mod tests {
         tx.send(AgentStreamEvent::Text(TextEventData {
             content: "正在创建报表任务".into(),
         }))
-        .unwrap();
+            .unwrap();
         tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
         relay.consume(rx).await;
+        publish_service_completion(
+            &bus,
+            &conversation_id,
+            Some(TEST_ASSISTANT_MESSAGE_ID.to_owned()),
+            false,
+            None,
+            Some("companion".into()),
+            None,
+        );
 
         let mut ws_events = vec![];
         while let Ok(evt) = ws_rx.try_recv() {
@@ -11537,17 +11624,17 @@ mod tests {
         let repo = Arc::new(RecordingRepo::new());
         let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
+        let conversation_id = test_conversation_id();
 
         // Blank origin must normalize to None (owner speech).
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id.clone(),
             TEST_ASSISTANT_MESSAGE_ID.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus.clone(),
             None,
         )
-        .with_test_turn_completion()
         .with_origin(Some("   ".into()));
 
         let mut ws_rx = bus.subscribe();
@@ -11556,6 +11643,15 @@ mod tests {
             .unwrap();
         tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
         relay.consume(rx).await;
+        publish_service_completion(
+            &bus,
+            &conversation_id,
+            Some(TEST_ASSISTANT_MESSAGE_ID.to_owned()),
+            false,
+            None,
+            None,
+            None,
+        );
 
         let mut ws_events = vec![];
         while let Ok(evt) = ws_rx.try_recv() {
@@ -12289,17 +12385,23 @@ mod tests {
             MessageId::new().into_string()
         ));
         std::fs::create_dir_all(&workspace).expect("create test workspace");
-        let artifact = persisted_png_artifact(&workspace);
+        let conversation_id = test_conversation_id();
+        let artifact = recoverable_png_artifact_named(
+            &workspace,
+            &conversation_id,
+            TEST_TURN_A,
+            "group-2pc-image",
+            "image_gen",
+        );
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id,
             TEST_TURN_A.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus,
             None,
         )
-        .with_artifact_workspace(workspace.clone())
-        .with_test_legacy_unjournaled_artifacts();
+        .with_artifact_workspace(workspace.clone());
         let rx = tx.subscribe();
 
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
@@ -12374,17 +12476,23 @@ mod tests {
             MessageId::new().into_string()
         ));
         std::fs::create_dir_all(&workspace).expect("create test workspace");
-        let artifact = persisted_png_artifact(&workspace);
+        let conversation_id = test_conversation_id();
+        let artifact = recoverable_png_artifact_named(
+            &workspace,
+            &conversation_id,
+            TEST_TURN_A,
+            "group-2pc-success",
+            "image_gen",
+        );
         let relay = StreamRelay::new(
-            test_conversation_id(),
+            conversation_id,
             TEST_TURN_A.into(),
             TEST_USER_ID.into(),
             repo.clone(),
             bus,
             None,
         )
-        .with_artifact_workspace(workspace.clone())
-        .with_test_legacy_unjournaled_artifacts();
+        .with_artifact_workspace(workspace.clone());
         let rx = tx.subscribe();
 
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
@@ -12410,7 +12518,11 @@ mod tests {
             .unwrap();
 
         let outcome = relay.consume(rx).await;
-        assert!(matches!(outcome.terminal, RelayTerminal::Finish));
+        assert!(
+            matches!(outcome.terminal, RelayTerminal::Finish),
+            "unexpected outcome: {:?}",
+            outcome
+        );
 
         assert!(
             repo.take_inserts()
@@ -12595,7 +12707,6 @@ mod tests {
         fail_message_update_attempt: AtomicUsize,
         block_message_updates: AtomicBool,
         message_update_notify: Notify,
-        fail_conversation_updates: AtomicBool,
         fail_message_correlations: AtomicBool,
         fail_artifact_commits: AtomicBool,
         fail_artifact_reconciliation_read: AtomicBool,
@@ -12625,7 +12736,6 @@ mod tests {
                 fail_message_update_attempt: AtomicUsize::new(0),
                 block_message_updates: AtomicBool::new(false),
                 message_update_notify: Notify::new(),
-                fail_conversation_updates: AtomicBool::new(false),
                 fail_message_correlations: AtomicBool::new(false),
                 fail_artifact_commits: AtomicBool::new(false),
                 fail_artifact_reconciliation_read: AtomicBool::new(false),
@@ -12686,10 +12796,6 @@ mod tests {
             }
         }
 
-        fn fail_conversation_updates(&self) {
-            self.fail_conversation_updates
-                .store(true, AtomicOrdering::SeqCst);
-        }
 
         fn fail_message_correlations(&self) {
             self.fail_message_correlations
@@ -12759,11 +12865,6 @@ mod tests {
             Ok(row.conversation_id.clone())
         }
         async fn update(&self, _id: &str, _updates: &nomifun_db::ConversationRowUpdate) -> Result<(), DbError> {
-            if self.fail_conversation_updates.load(AtomicOrdering::SeqCst) {
-                return Err(DbError::Init(
-                    "injected conversation status update failure".to_owned(),
-                ));
-            }
             Ok(())
         }
         async fn delete(&self, _id: &str) -> Result<(), DbError> {

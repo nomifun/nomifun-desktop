@@ -31,13 +31,19 @@
         "snapshot_id": "snapshot-vertex",
         "snapshot_digest": "6666666666666666666666666666666666666666666666666666666666666666"
       },
-      "model_route_revision": 6,
+      "route_identity": {
+        "preset_revision_id": "fixture@1",
+        "model_task": "agent_chat",
+        "route_id": "route-vertex-primary",
+        "route_revision": 6
+      },
       "operation_id": "model-vertex-0001"
     },
     "route": {
-      "model_route_id": "route-vertex-primary",
-      "model_route_revision": 6,
-      "task": "agent_chat"
+      "preset_revision_id": "fixture@1",
+      "model_task": "agent_chat",
+      "route_id": "route-vertex-primary",
+      "route_revision": 6
     },
     "input": {
       "instructions": ["Use the exact Vertex route revision."],

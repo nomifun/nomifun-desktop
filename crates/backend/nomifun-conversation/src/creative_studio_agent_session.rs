@@ -51,15 +51,6 @@ pub struct CreativeStudioAgentModelRef {
     pub model: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResolveCreativeStudioAgentSessionRequest {
-    pub project_id: String,
-    pub session_id: String,
-    pub model: CreativeStudioAgentModelRef,
-    pub pending_turn_idempotency_key: Option<String>,
-}
-
 /// Canvas-first wire request. Persistence still uses the historical
 /// `project_id` column internally, but the product boundary never exposes it.
 #[derive(Debug, Clone, Deserialize)]
@@ -69,37 +60,6 @@ pub struct ResolveCreativeStudioCanvasAgentSessionRequest {
     pub session_id: String,
     pub model: CreativeStudioAgentModelRef,
     pub pending_turn_idempotency_key: Option<String>,
-}
-
-impl From<ResolveCreativeStudioCanvasAgentSessionRequest>
-    for ResolveCreativeStudioAgentSessionRequest
-{
-    fn from(request: ResolveCreativeStudioCanvasAgentSessionRequest) -> Self {
-        Self {
-            project_id: request.canvas_id,
-            session_id: request.session_id,
-            model: request.model,
-            pending_turn_idempotency_key: request.pending_turn_idempotency_key,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CreativeStudioAgentSessionBindingResponse {
-    pub ownership: &'static str,
-    pub project_id: String,
-    pub session_id: String,
-    pub conversation_id: String,
-    pub model: CreativeStudioAgentModelRef,
-    pub history_key: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ResolveCreativeStudioAgentSessionResponse {
-    pub binding: CreativeStudioAgentSessionBindingResponse,
-    pub history: Vec<CreativeStudioAgentHistoryMessage>,
-    pub applied_proposal_message_ids: Vec<String>,
-    pub created: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,26 +80,6 @@ pub struct ResolveCreativeStudioCanvasAgentSessionResponse {
     pub created: bool,
 }
 
-impl From<ResolveCreativeStudioAgentSessionResponse>
-    for ResolveCreativeStudioCanvasAgentSessionResponse
-{
-    fn from(response: ResolveCreativeStudioAgentSessionResponse) -> Self {
-        Self {
-            binding: CreativeStudioCanvasAgentSessionBindingResponse {
-                ownership: response.binding.ownership,
-                canvas_id: response.binding.project_id,
-                session_id: response.binding.session_id,
-                conversation_id: response.binding.conversation_id,
-                model: response.binding.model,
-                history_key: response.binding.history_key,
-            },
-            history: response.history,
-            applied_proposal_message_ids: response.applied_proposal_message_ids,
-            created: response.created,
-        }
-    }
-}
-
 fn serialize_history(
     history: &[CreativeStudioAgentHistoryMessage],
 ) -> Result<String, AppError> {
@@ -148,32 +88,6 @@ fn serialize_history(
             "Creative Studio Agent history could not be serialized: {error}"
         ))
     })
-}
-
-fn validate_request(request: &ResolveCreativeStudioAgentSessionRequest) -> Result<(), AppError> {
-    nomifun_common::CreativeStudioProjectId::parse(&request.project_id).map_err(|error| {
-        AppError::BadRequest(format!("invalid Creative Studio project_id: {error}"))
-    })?;
-    validate_uuidv7(&request.session_id).map_err(|error| {
-        AppError::BadRequest(format!("invalid Creative Studio session_id: {error}"))
-    })?;
-    ProviderId::parse(&request.model.provider_id).map_err(|error| {
-        AppError::BadRequest(format!("invalid Creative Studio provider_id: {error}"))
-    })?;
-    if request.model.model.trim().is_empty() || request.model.model.trim() != request.model.model {
-        return Err(AppError::BadRequest(
-            "Creative Studio Agent model must be trimmed and non-empty".to_owned(),
-        ));
-    }
-    if let Some(key) = request.pending_turn_idempotency_key.as_deref() {
-        validate_uuidv7(key).map_err(|error| {
-            AppError::BadRequest(format!(
-                "invalid Creative Studio pending_turn_idempotency_key: {error}"
-            ))
-        })?;
-    }
-
-    Ok(())
 }
 
 fn validate_canvas_request(
@@ -431,7 +345,7 @@ fn validate_history_reconciliation(
 
 fn validate_persisted_binding(
     owner_id: &str,
-    request: &ResolveCreativeStudioAgentSessionRequest,
+    request: &ResolveCreativeStudioCanvasAgentSessionRequest,
     row: &ConversationRow,
 ) -> Result<CreativeStudioAgentModelRef, AppError> {
     if row.user_id != owner_id
@@ -506,23 +420,12 @@ impl ConversationService {
         request: ResolveCreativeStudioCanvasAgentSessionRequest,
     ) -> Result<ResolveCreativeStudioCanvasAgentSessionResponse, AppError> {
         validate_canvas_request(&request)?;
-        self.resolve_creative_studio_agent_session(owner_id, request.into())
-            .await
-            .map(Into::into)
-    }
-
-    pub async fn resolve_creative_studio_agent_session(
-        &self,
-        owner_id: &str,
-        request: ResolveCreativeStudioAgentSessionRequest,
-    ) -> Result<ResolveCreativeStudioAgentSessionResponse, AppError> {
         if owner_id != self.authoritative_user_id.as_ref() {
             return Err(AppError::Forbidden(
                 "Creative Studio Agent sessions are restricted to the installation owner"
                     .to_owned(),
             ));
         }
-        validate_request(&request)?;
         self.validate_creative_studio_model(&request.model).await?;
 
         let provider_model = ProviderWithModel {
@@ -550,7 +453,7 @@ impl ConversationService {
                 None,
                 None,
                 Some(CreativeStudioAgentCreationTarget {
-                    project_id: request.project_id.clone(),
+                    project_id: request.canvas_id.clone(),
                     session_id: request.session_id.clone(),
                     expected_provider_id: request.model.provider_id.clone(),
                     expected_model: request.model.model.clone(),
@@ -577,7 +480,7 @@ impl ConversationService {
             .resolve_or_create_creative_studio_agent_session(
                 &nomifun_db::ResolveCreativeStudioAgentSessionParams {
                     owner_id: owner_id.to_owned(),
-                    project_id: request.project_id.clone(),
+                    project_id: request.canvas_id.clone(),
                     session_id: request.session_id.clone(),
                     expected_provider_id: request.model.provider_id.clone(),
                     expected_model: request.model.model.clone(),
@@ -598,10 +501,10 @@ impl ConversationService {
         )?;
         let history_key = serialize_history(&history)?;
 
-        Ok(ResolveCreativeStudioAgentSessionResponse {
-            binding: CreativeStudioAgentSessionBindingResponse {
+        Ok(ResolveCreativeStudioCanvasAgentSessionResponse {
+            binding: CreativeStudioCanvasAgentSessionBindingResponse {
                 ownership: "creative-studio-exclusive",
-                project_id: resolved.binding.project_id,
+                canvas_id: resolved.binding.project_id,
                 session_id: resolved.binding.session_id,
                 conversation_id: resolved.binding.conversation_id,
                 model: persisted_model,
@@ -624,35 +527,24 @@ mod tests {
     const ASSISTANT_B: &str = "0190f5fe-7c00-7a00-8000-000000000604";
 
     #[test]
-    fn canvas_wire_maps_to_legacy_storage_without_exposing_project_fields() {
+    fn canvas_response_does_not_expose_storage_project_field() {
         let canvas_id = "0190f5fe-7c00-7a00-8000-000000000606";
-        let canonical = ResolveCreativeStudioCanvasAgentSessionRequest {
-            canvas_id: canvas_id.to_owned(),
-            session_id: "0190f5fe-7c00-7a00-8000-000000000607".to_owned(),
-            model: CreativeStudioAgentModelRef {
-                provider_id: "0190f5fe-7c00-7a00-8000-000000000608".to_owned(),
-                model: "nomi-chat".to_owned(),
-            },
-            pending_turn_idempotency_key: None,
-        };
-        let legacy: ResolveCreativeStudioAgentSessionRequest = canonical.into();
-        assert_eq!(legacy.project_id, canvas_id);
-
-        let response = ResolveCreativeStudioCanvasAgentSessionResponse::from(
-            ResolveCreativeStudioAgentSessionResponse {
-                binding: CreativeStudioAgentSessionBindingResponse {
-                    ownership: "creative-studio-exclusive",
-                    project_id: canvas_id.to_owned(),
-                    session_id: legacy.session_id,
-                    conversation_id: "0190f5fe-7c00-7a00-8000-000000000609".to_owned(),
-                    model: legacy.model,
-                    history_key: "[]".to_owned(),
+        let response = ResolveCreativeStudioCanvasAgentSessionResponse {
+            binding: CreativeStudioCanvasAgentSessionBindingResponse {
+                ownership: "creative-studio-exclusive",
+                canvas_id: canvas_id.to_owned(),
+                session_id: "0190f5fe-7c00-7a00-8000-000000000607".to_owned(),
+                conversation_id: "0190f5fe-7c00-7a00-8000-000000000609".to_owned(),
+                model: CreativeStudioAgentModelRef {
+                    provider_id: "0190f5fe-7c00-7a00-8000-000000000608".to_owned(),
+                    model: "nomi-chat".to_owned(),
                 },
-                history: Vec::new(),
-                applied_proposal_message_ids: Vec::new(),
-                created: true,
+                history_key: "[]".to_owned(),
             },
-        );
+            history: Vec::new(),
+            applied_proposal_message_ids: Vec::new(),
+            created: true,
+        };
         let wire = serde_json::to_value(response).unwrap();
         assert_eq!(wire["binding"]["canvas_id"], canvas_id);
         assert!(wire["binding"].get("project_id").is_none());

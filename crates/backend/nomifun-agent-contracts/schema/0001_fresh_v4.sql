@@ -282,6 +282,146 @@ CREATE TABLE installation_auth (
     )
 ) STRICT;
 
+-- Provider configuration is part of the Fresh-v4 root.  A clean start does
+-- not import legacy rows, but the new host must have one canonical place for
+-- user-entered provider routes and encrypted credential material.
+CREATE TABLE providers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_id TEXT NOT NULL UNIQUE,
+    platform TEXT NOT NULL,
+    name TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    auth_scheme TEXT NOT NULL CHECK (trim(auth_scheme) <> ''),
+    credentials_encrypted TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    bedrock_config TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0 CHECK (sort_order >= 0),
+    config_revision INTEGER NOT NULL DEFAULT 0 CHECK (config_revision >= 0),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK (
+        length(provider_id) = 36 AND lower(provider_id) = provider_id
+        AND provider_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(provider_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    ),
+    CHECK (bedrock_config IS NULL OR json_valid(bedrock_config))
+) STRICT;
+
+CREATE TABLE provider_models (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    display_name TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    sort_order INTEGER NOT NULL DEFAULT 0 CHECK (sort_order >= 0),
+    description TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (provider_id, model),
+    FOREIGN KEY (provider_id) REFERENCES providers (provider_id)
+        ON UPDATE RESTRICT ON DELETE CASCADE,
+    CHECK (
+        length(provider_id) = 36 AND lower(provider_id) = provider_id
+        AND provider_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(provider_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    ),
+    CHECK (trim(model) <> '')
+) STRICT;
+
+CREATE TABLE provider_connections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    connection_id TEXT NOT NULL UNIQUE,
+    provider_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (trim(role) <> '' AND role <> 'default'),
+    label TEXT,
+    base_url TEXT NOT NULL,
+    auth_scheme TEXT NOT NULL CHECK (trim(auth_scheme) <> ''),
+    credentials_encrypted TEXT NOT NULL,
+    extra TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (provider_id, role),
+    FOREIGN KEY (provider_id) REFERENCES providers (provider_id)
+        ON UPDATE RESTRICT ON DELETE CASCADE,
+    CHECK (
+        length(connection_id) = 36 AND lower(connection_id) = connection_id
+        AND connection_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(connection_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    ),
+    CHECK (
+        length(provider_id) = 36 AND lower(provider_id) = provider_id
+        AND provider_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(provider_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    ),
+    CHECK (json_valid(extra) AND json_type(extra) = 'object')
+) STRICT;
+
+CREATE TABLE provider_model_capabilities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    task TEXT NOT NULL,
+    traits TEXT NOT NULL DEFAULT '[]',
+    protocol TEXT NOT NULL CHECK (trim(protocol) <> ''),
+    connection_role TEXT NOT NULL DEFAULT 'default'
+        CHECK (trim(connection_role) <> ''),
+    base_url_override TEXT,
+    endpoint TEXT,
+    poll_endpoint TEXT,
+    content_endpoint TEXT,
+    realtime_endpoint TEXT,
+    allow_cross_origin_credentials INTEGER NOT NULL DEFAULT 0
+        CHECK (allow_cross_origin_credentials IN (0, 1)),
+    provider_params TEXT NOT NULL DEFAULT '{}',
+    context_limit INTEGER CHECK (context_limit IS NULL OR context_limit > 0),
+    output_limit INTEGER CHECK (output_limit IS NULL OR output_limit > 0),
+    health TEXT,
+    health_checked_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (provider_id, model, task),
+    FOREIGN KEY (provider_id, model)
+        REFERENCES provider_models (provider_id, model)
+        ON UPDATE RESTRICT ON DELETE CASCADE,
+    CHECK (json_valid(traits) AND json_type(traits) = 'array'),
+    CHECK (json_valid(provider_params) AND json_type(provider_params) = 'object'),
+    CHECK (health IS NULL OR json_valid(health)),
+    CHECK (
+        task IN (
+            'chat', 'realtime_conversation', 'image_generation', 'image_edit',
+            'video_generation', 'speech_synthesis', 'speech_recognition',
+            'embedding', 'rerank'
+        )
+    ),
+    CHECK (
+        length(provider_id) = 36 AND lower(provider_id) = provider_id
+        AND provider_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(provider_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    )
+) STRICT;
+
+CREATE TABLE client_preferences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL UNIQUE CHECK (trim(key) <> ''),
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE system_settings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    singleton_key TEXT NOT NULL UNIQUE CHECK (singleton_key = 'system'),
+    language TEXT NOT NULL DEFAULT 'en-US',
+    notification_enabled INTEGER NOT NULL DEFAULT 1
+        CHECK (notification_enabled IN (0, 1)),
+    cron_notification_enabled INTEGER NOT NULL DEFAULT 0
+        CHECK (cron_notification_enabled IN (0, 1)),
+    command_queue_enabled INTEGER NOT NULL DEFAULT 0
+        CHECK (command_queue_enabled IN (0, 1)),
+    save_upload_to_workspace INTEGER NOT NULL DEFAULT 0
+        CHECK (save_upload_to_workspace IN (0, 1)),
+    updated_at INTEGER NOT NULL
+) STRICT;
+
 CREATE TABLE agent_runtime_snapshots (
     snapshot_id TEXT PRIMARY KEY,
     snapshot_digest TEXT NOT NULL UNIQUE CHECK (length(snapshot_digest) = 64),
@@ -366,8 +506,12 @@ CREATE TABLE agent_sessions (
             created_at IS NULL AND deleted_at IS NOT NULL
         )
     ),
-    FOREIGN KEY (remote_binding_id) REFERENCES remote_bindings (remote_binding_id)
-        ON UPDATE RESTRICT ON DELETE SET NULL,
+    -- A live/deleting Session owns its Remote provenance until the session
+    -- deletion transaction clears the reference before creating the tombstone.
+    -- Never silently erase that provenance when a RemoteBinding is deleted.
+    -- RemoteBinding provenance is an immutable Session fact. It is
+    -- intentionally not a foreign key: deleting a Binding prevents new
+    -- opens, but must not rewrite or invalidate an existing Session.
     FOREIGN KEY (parent_agent_session_id) REFERENCES agent_sessions (agent_session_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
 ) STRICT;
@@ -453,6 +597,18 @@ CREATE INDEX idx_plugin_mounts_package
     ON plugin_mounts (package_id, package_version);
 CREATE INDEX idx_capability_definitions_package
     ON capability_definitions (package_id, package_version);
+CREATE INDEX idx_providers_platform
+    ON providers (platform, sort_order, created_at, id);
+CREATE INDEX idx_provider_models_provider
+    ON provider_models (provider_id, sort_order, id);
+CREATE INDEX idx_provider_connections_provider
+    ON provider_connections (provider_id, role);
+CREATE INDEX idx_provider_model_capabilities_provider_model
+    ON provider_model_capabilities (provider_id, model);
+CREATE INDEX idx_provider_model_capabilities_task
+    ON provider_model_capabilities (task, provider_id, model);
+CREATE INDEX idx_client_preferences_key
+    ON client_preferences (key);
 CREATE INDEX idx_agent_preset_revisions_preset
     ON agent_preset_revisions (preset_id, revision_no);
 CREATE INDEX idx_agent_sessions_owner_state

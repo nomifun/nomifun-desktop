@@ -182,6 +182,123 @@
         ],
         "type": "object"
       },
+      "ChatRouteCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "config_revision_digest": {
+            "type": "string"
+          },
+          "connection_config_ref": {
+            "type": "string"
+          },
+          "credential_ref": {
+            "type": "string"
+          },
+          "features": {
+            "items": {
+              "$ref": "#/$defs/ChatRouteFeature"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "model": {
+            "type": "string"
+          },
+          "model_route_id": {
+            "type": "string"
+          },
+          "model_route_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocol": {
+            "$ref": "#/$defs/ChatRouteProtocol"
+          },
+          "provider_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_route_id",
+          "model_route_revision",
+          "provider_id",
+          "model",
+          "protocol",
+          "connection_config_ref",
+          "config_revision_digest",
+          "credential_ref",
+          "features"
+        ],
+        "type": "object"
+      },
+      "ChatRouteFeature": {
+        "enum": [
+          "text_input",
+          "image_input",
+          "audio_input",
+          "text_output",
+          "audio_output",
+          "tool_calls",
+          "reasoning",
+          "reasoning_signature",
+          "prompt_cache",
+          "structured_output",
+          "provider_round_state",
+          "native_responses_items"
+        ],
+        "type": "string"
+      },
+      "ChatRouteProtocol": {
+        "enum": [
+          "anthropic",
+          "openai_chat",
+          "openai_responses",
+          "gemini",
+          "bedrock",
+          "vertex"
+        ],
+        "type": "string"
+      },
+      "ChatRouteRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "failovers": {
+            "items": {
+              "$ref": "#/$defs/ChatRouteCandidate"
+            },
+            "type": "array"
+          },
+          "primary": {
+            "$ref": "#/$defs/ChatRouteCandidate"
+          },
+          "schema": {
+            "$ref": "#/$defs/ChatRouteRecordSchema"
+          },
+          "task": {
+            "$ref": "#/$defs/ChatRouteTask"
+          }
+        },
+        "required": [
+          "schema",
+          "task",
+          "primary",
+          "failovers"
+        ],
+        "type": "object"
+      },
+      "ChatRouteRecordSchema": {
+        "enum": [
+          "nomifun.chat-route-record.v1"
+        ],
+        "type": "string"
+      },
+      "ChatRouteTask": {
+        "enum": [
+          "agent_chat"
+        ],
+        "type": "string"
+      },
       "ExactVersionRef": {
         "additionalProperties": false,
         "properties": {
@@ -246,6 +363,13 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "properties": {
+      "chat_route_records": {
+        "additionalProperties": {
+          "$ref": "#/$defs/ChatRouteRecord"
+        },
+        "description": "Complete route facts used by the Fresh-v4 persistence writer. Legacy\nopaque IDs are not sufficient to construct a provider request.",
+        "type": "object"
+      },
       "context_policy": true,
       "execution_constraints": true,
       "initial_capabilities": {
@@ -4777,6 +4901,33 @@
   },
   "resolved_snapshot": {
     "$defs": {
+      "ChatRouteIdentity": {
+        "additionalProperties": false,
+        "description": "The immutable identity of one model route as selected by one Preset\nRevision.\n\nThis is deliberately a value object rather than four independently-carried\nfields.  Every layer that resolves or admits a Chat route must carry this\nexact identity unchanged.",
+        "properties": {
+          "model_task": {
+            "type": "string"
+          },
+          "preset_revision_id": {
+            "type": "string"
+          },
+          "route_id": {
+            "type": "string"
+          },
+          "route_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "preset_revision_id",
+          "model_task",
+          "route_id",
+          "route_revision"
+        ],
+        "type": "object"
+      },
       "CompactOnDemandCapabilityEntry": {
         "additionalProperties": false,
         "properties": {
@@ -5046,6 +5197,16 @@
         },
         "type": "array",
         "uniqueItems": true
+      },
+      "chat_route_identity": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ChatRouteIdentity"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "compact_on_demand_index": {
         "items": {

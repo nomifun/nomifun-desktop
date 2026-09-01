@@ -155,15 +155,12 @@ that RSS across live task Lanes and uses the result as a reclaim watchdog. The
 management API and Browser page therefore label the global value as a pressure
 threshold and the per-task memory value as an estimate.
 
-Remote MCP transport state follows the same bounded model. `/mcp` and
-`/mcp-agent` share one machine-adaptive admission authority; request bodies,
-session identifiers, scopes, provisional sessions, initialization rate, and
-pending Browser cleanup debt are all bounded. Headerless non-`initialize`
-requests are rejected before rmcp can create a transport session. A live,
-server-validated MCP session is a trusted task-family boundary, but a fresh
-`initialize` creates a new session: exact continuity across fresh sessions would
-require a future server-signed persistent logical-task lease and is not claimed
-by the current protocol.
+Canonical Remote MCP transport state is also bounded. `/mcp` limits request
+bodies, session identifiers, provisional sessions, initialization rate, and
+per-session in-flight requests. Headerless non-`initialize` requests are
+rejected before rmcp can create a transport session. The server-validated MCP
+session is connection lifecycle only; exact product continuity across fresh MCP
+connections comes from the explicit durable `agent_session_id`.
 
 A structural envelope does not turn one page into a byte- or CPU-isolated
 process. JavaScript or native renderer work can continue after an Agent

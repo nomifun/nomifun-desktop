@@ -1,12 +1,12 @@
 {
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
-    "domain-wave-1-read-capabilities.json": "e9f3f766e17d40d166623046dbff2a8179b8e080a13adecd6aa4d09a6bfa264f",
+    "domain-wave-1-read-capabilities.json": "42c63237e09c4244e908f1d43eb90c950f9b29c3e76e4a5a22e7ede9a63f4d64",
     "domain-wave-2-coding-extensions.json": "0be103e5b9ef82d36ae560de04743ce912b90265cacb0d114eb064f12c93d651",
-    "domain-wave-3-creative-multimodal.json": "6c63189a8eb5c081c71a38a1685251068f426cf002c5398e018991ec5936fa38",
-    "domain-wave-4-identity-channels-devices.json": "e19cdb8ef7e362deff6a63f2d0c974b089ca12fd668eb3bc501e589e6f232e64",
+    "domain-wave-3-creative-multimodal.json": "83a5bfe9809b6aec9680b917475e491e71de99a313f519af3617163565858566",
+    "domain-wave-4-identity-channels-devices.json": "7bf21a73763116e1718806842605911e5d2ae9c1c321cdcd76ba01ef1d1c9387",
     "domain-wave-5-automation-supervision-remote.json": "4f7ee0ac0cda440459be17d5d6c320cddc48e721e5193f45c8d3e16c0dff6707",
-    "triad-core.json": "e6f4628558eb30ab5615afe56bf08c1078e73c3286648818a0a7cee8e35db661"
+    "triad-core.json": "1c691f5de63a9399d36c213f2522862500716d9ac5473cf3a39f402a7cd1a36d"
   },
-  "payload_digest": "13431f76e07398c06dc9e42ccb5b70c701297451551c2fcf907c78fcab8f41ad"
+  "payload_digest": "0fb2e5abf2638e3c3352d4549ddb6a46b5a29ee7d62d35aedd9319a8fb5feecb"
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -8,10 +8,10 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use nomifun_agent_contracts::FRESH_V4_BASELINE_SQL;
 use nomifun_agent_contracts::{
     AgentSessionDeletedState, AgentSessionDeletingRecord, AgentSessionId, AgentSessionLiveRecord,
-    AgentSessionTombstone, ArtifactId, CompactionCompletedPayload, CorrelationId,
+    AgentSessionTombstone, ArtifactId, ChatRouteIdentity, CompactionCompletedPayload, CorrelationId,
     DeleteAgentSessionCommand, DigestHex, EventId, EventProducerId, FRESH_V4_DATA_GENERATION,
     FRESH_V4_MIGRATION_HEAD, FRESH_V4_PROJECTION_SCHEMA_VERSION, IdempotencyKey, PrincipalRef,
-    RemoteBindingId, RuntimeBindingId, RuntimeCheckpointValidationInput,
+    OperationId, RemoteBindingId, RuntimeBindingId, RuntimeCheckpointValidationInput,
     RuntimeCheckpointValidationResult, RuntimeEventAck, SessionEventAck, SessionEventAppend,
     SessionEventCursor, SessionEventKind, SessionEventPayloadRef, SessionEventPredecessorMode,
     SessionEventRecord, SessionForkContract, SessionForkPayload, SessionPayloadBody,
@@ -31,8 +31,9 @@ use crate::registry::EventRegistry;
 use crate::types::{
     CheckpointAdmission, CreateSessionRequest, DeleteResult, EffectEventRequest,
     EffectReconcileOutcome, EffectTerminalState, ForkRequest, ForkResult, MessageProjection,
-    RuntimeAppendContext, RuntimeEventAppendResult, SessionCreateResult, SessionEventAppendResult,
-    SessionEventPage, SessionHeadProjection, SessionObservation, SessionRehydrationInput,
+    ChatCausalityFacts, RuntimeAppendContext, RuntimeEventAppendResult, SessionCreateResult,
+    ChatOperationClaimRequest, SessionEventAppendResult, SessionEventPage,
+    SessionHeadProjection, SessionObservation, SessionRehydrationInput,
     ZeroOutstandingProof,
 };
 
@@ -308,6 +309,289 @@ impl AgentSessionStore {
         Ok(result)
     }
 
+    /// Append a Chat message terminal and its turn terminal under one
+    /// active-turn fence. A cancel/terminal event cannot be committed between
+    /// the two semantic records, and a failed second append rolls the first
+    /// append back with the same SQLite transaction.
+    pub async fn append_chat_completion(
+        &self,
+        message: &SessionEventAppend,
+        turn: &SessionEventAppend,
+        turn_operation_id: &OperationId,
+    ) -> Result<(SessionEventAppendResult, SessionEventAppendResult), SessionStoreError> {
+        if message.semantic_event.kind.0 != "message/completed"
+            || !matches!(
+                turn.semantic_event.kind.0.as_str(),
+                "turn/completed" | "turn/failed"
+            )
+            || turn.semantic_event.correlation_id.as_ref() != turn_operation_id.as_ref()
+        {
+            return Err(SessionStoreError::InvalidEvent(
+                "chat completion append has an invalid terminal event shape".to_owned(),
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, message.agent_session_id.as_ref()).await?;
+        if message.agent_session_id != turn.agent_session_id {
+            return Err(SessionStoreError::InvalidEvent(
+                "chat completion events belong to different AgentSessions".to_owned(),
+            ));
+        }
+        let message_duplicate = duplicate_event_tx(&mut tx, message).await?.is_some();
+        let turn_duplicate = duplicate_event_tx(&mut tx, turn).await?.is_some();
+        if !(message_duplicate && turn_duplicate) {
+            ensure_active_turn_tx(
+                &mut tx,
+                message.agent_session_id.as_ref(),
+                turn_operation_id,
+            )
+            .await?;
+        }
+        let message_result = self.append_event_tx(&mut tx, message, None).await?;
+        let turn_result = self.append_event_tx(&mut tx, turn, None).await?;
+        tx.commit().await?;
+        Ok((message_result, turn_result))
+    }
+
+    /// Append one turn terminal while the exact operation is still active.
+    /// Duplicate replays are accepted by the normal event idempotency path,
+    /// but a new terminal cannot cross a committed cancel/terminal fence.
+    pub async fn append_turn_terminal(
+        &self,
+        append: &SessionEventAppend,
+        turn_operation_id: &OperationId,
+    ) -> Result<SessionEventAppendResult, SessionStoreError> {
+        if !matches!(
+            append.semantic_event.kind.0.as_str(),
+            "turn/completed" | "turn/failed"
+        ) || append.semantic_event.correlation_id.as_ref() != turn_operation_id.as_ref()
+        {
+            return Err(SessionStoreError::InvalidEvent(
+                "turn terminal append has an invalid event shape".to_owned(),
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, append.agent_session_id.as_ref()).await?;
+        let duplicate = duplicate_event_tx(&mut tx, append).await?;
+        if duplicate.is_none() {
+            ensure_active_turn_tx(
+                &mut tx,
+                append.agent_session_id.as_ref(),
+                turn_operation_id,
+            )
+            .await?;
+        }
+        let result = self.append_event_tx(&mut tx, append, None).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    /// Atomically select the current active turn and append its cancellation
+    /// event. The caller receives the exact operation id that was fenced.
+    ///
+    /// Reading `active_turn_id` outside this transaction would allow a
+    /// concurrent terminal event to change the target between the read and the
+    /// append. Replays use the producer/idempotency key and return the original
+    /// target without creating a second event.
+    pub async fn cancel_active_turn(
+        &self,
+        session_id: &AgentSessionId,
+        idempotency_key: IdempotencyKey,
+        producer_id: EventProducerId,
+    ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+
+        if let Some(existing) = event_by_producer_key_tx(
+            &mut tx,
+            producer_id.as_ref(),
+            idempotency_key.as_ref(),
+        )
+        .await?
+        {
+            let record = event_from_row(existing)?;
+            if record.agent_session_id != *session_id
+                || record.kind.0 != "turn/cancelled"
+            {
+                return Err(SessionStoreError::IdempotencyConflict(
+                    "cancellation idempotency key was already used for another event".to_owned(),
+                ));
+            }
+            let target = match &record.payload {
+                SessionEventPayloadRef::InlineJson(value) => value
+                    .0
+                    .get("target_operation_id")
+                    .and_then(Value::as_str)
+                    .map(|value| OperationId::from(value.to_owned()))
+                    .ok_or_else(|| {
+                        SessionStoreError::InvalidEvent(
+                            "turn/cancelled replay has no target_operation_id".to_owned(),
+                        )
+                    })?,
+                _ => {
+                    return Err(SessionStoreError::InvalidEvent(
+                        "turn/cancelled replay must retain inline provenance".to_owned(),
+                    ));
+                }
+            };
+            let ack = event_ack(&record);
+            tx.commit().await?;
+            return Ok((
+                target,
+                SessionEventAppendResult {
+                    record: Some(record),
+                    ack: Some(ack.clone()),
+                    cursor: ack.cursor,
+                    persisted: true,
+                    duplicate: true,
+                },
+            ));
+        }
+
+        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        let target_operation_id = head
+            .active_turn_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .map(OperationId::from)
+            .ok_or_else(|| {
+                SessionStoreError::Conflict(
+                    "Remote cancellation requires an active turn".to_owned(),
+                )
+            })?;
+        let turn_event = sqlx::query_as::<_, StoredEventRow>(
+            "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
+                    runtime_binding_id, runtime_producer_seq, kind, kind_version, \
+                    correlation_id, causation_event_id, inline_json, payload_id \
+             FROM session_events \
+             WHERE session_id = ? AND kind = 'turn/started' AND correlation_id = ? \
+             ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(session_id.as_ref())
+        .bind(target_operation_id.as_ref())
+        .fetch_optional(&mut *tx)
+        .await?;
+        let turn_event = turn_event.ok_or_else(|| {
+            SessionStoreError::Conflict(
+                "active turn has no committed turn/started event".to_owned(),
+            )
+        })?;
+        let turn_event = event_from_row(turn_event)?;
+        let append = SessionEventAppend {
+            agent_session_id: session_id.clone(),
+            event_id: EventId::from(format!(
+                "turn-cancelled:{}:{}",
+                session_id.as_ref(),
+                idempotency_key.as_ref()
+            )),
+            producer_id,
+            idempotency_key,
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("turn/cancelled".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(target_operation_id.as_ref().to_owned()),
+                causation_event_id: Some(turn_event.event_id),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "target_operation_id": target_operation_id
+                }))),
+            },
+        };
+        let result = self.append_event_tx(&mut tx, &append, None).await?;
+        tx.commit().await?;
+        Ok((target_operation_id, result))
+    }
+
+    /// Converge an opening Session to `open_failed` without racing a runtime
+    /// ready event. The head-state check and event append share one SQLite
+    /// transaction; if another opener already committed `ready`, this returns
+    /// `None` and leaves the successful opening untouched.
+    pub async fn append_open_failed(
+        &self,
+        session_id: &AgentSessionId,
+        code: &str,
+        message: &str,
+        recoverable: bool,
+    ) -> Result<Option<SessionEventAppendResult>, SessionStoreError> {
+        if code.trim().is_empty() || code.trim() != code {
+            return Err(SessionStoreError::InvalidEvent(
+                "open failure code must be canonical and non-empty".to_owned(),
+            ));
+        }
+        if message.trim().is_empty() || message.trim() != message {
+            return Err(SessionStoreError::InvalidEvent(
+                "open failure message must be canonical and non-empty".to_owned(),
+            ));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        let idempotency_key =
+            IdempotencyKey::from(format!("session-open-failed:{}", session_id.as_ref()));
+        let producer_id = EventProducerId::from("runtime_supervisor");
+        if let Some(existing) =
+            event_by_producer_key_tx(&mut tx, producer_id.as_ref(), idempotency_key.as_ref())
+                .await?
+        {
+            let record = event_from_row(existing)?;
+            let ack = event_ack(&record);
+            tx.commit().await?;
+            return Ok(Some(SessionEventAppendResult {
+                record: Some(record),
+                ack: Some(ack.clone()),
+                cursor: ack.cursor,
+                persisted: true,
+                duplicate: true,
+            }));
+        }
+
+        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        if head.status != "opening" {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        let opening = sqlx::query_as::<_, StoredEventRow>(
+            "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
+                    runtime_binding_id, runtime_producer_seq, kind, kind_version, \
+                    correlation_id, causation_event_id, inline_json, payload_id \
+             FROM session_events \
+             WHERE session_id = ? AND kind = 'session/opening' \
+             ORDER BY seq ASC LIMIT 1",
+        )
+        .bind(session_id.as_ref())
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            SessionStoreError::Conflict(
+                "opening Session has no committed session/opening event".to_owned(),
+            )
+        })?;
+        let opening = event_from_row(opening)?;
+        let append = SessionEventAppend {
+            agent_session_id: session_id.clone(),
+            event_id: EventId::from(format!("session-open-failed:{}", session_id.as_ref())),
+            producer_id,
+            idempotency_key,
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("session/open-failed".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(session_id.as_ref().to_owned()),
+                causation_event_id: Some(opening.event_id),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "code": code,
+                    "message": message,
+                    "recoverable": recoverable
+                }))),
+            },
+        };
+        let result = self.append_event_tx(&mut tx, &append, None).await?;
+        tx.commit().await?;
+        Ok(Some(result))
+    }
+
     pub async fn append_runtime_event(
         &self,
         context: RuntimeAppendContext,
@@ -321,22 +605,13 @@ impl AgentSessionStore {
             ));
         }
 
-        let append = SessionEventAppend {
-            agent_session_id: context.agent_session_id.clone(),
-            event_id: context.envelope.event_id.clone(),
-            producer_id: EventProducerId(format!(
-                "runtime:{}",
-                context.envelope.runtime_binding_id.as_ref()
-            )),
-            idempotency_key: context.envelope.idempotency_key,
-            runtime_binding_id: Some(context.envelope.runtime_binding_id.clone()),
-            runtime_producer_seq: Some(context.envelope.producer_seq),
-            semantic_event: context.envelope.semantic_event,
-        };
+        let runtime_binding_id = context.envelope.runtime_binding_id.clone();
+        let producer_seq = context.envelope.producer_seq;
+        let append = runtime_event_append(context)?;
         let result = self.append_event(&append).await?;
         let ack = result.ack.clone().map(|session_event_ack| RuntimeEventAck {
-            runtime_binding_id: context.envelope.runtime_binding_id,
-            committed_producer_seq: context.envelope.producer_seq,
+            runtime_binding_id,
+            committed_producer_seq: producer_seq,
             session_event_ack,
         });
         Ok(RuntimeEventAppendResult {
@@ -345,12 +620,84 @@ impl AgentSessionStore {
         })
     }
 
+    /// Commit the Runtime admission boundary as one SessionStore transaction.
+    ///
+    /// `runtime/bound` and `session/ready` are a single durable transition:
+    /// an open failure committed first must prevent the ready event, and a
+    /// ready transition must not expose a half-written Runtime binding.
+    pub async fn append_runtime_bound_and_ready(
+        &self,
+        context: RuntimeAppendContext,
+        ready: &SessionEventAppend,
+    ) -> Result<(), SessionStoreError> {
+        if self.registry.is_transient(
+            &context.envelope.semantic_event.kind,
+            context.envelope.semantic_event.kind_version,
+        )? {
+            return Err(SessionStoreError::InvalidEvent(
+                "RuntimeEventEnvelope cannot carry a transient diagnostic".to_owned(),
+            ));
+        }
+        if context.envelope.semantic_event.kind.0 != "runtime/bound"
+            || ready.agent_session_id != context.agent_session_id
+            || ready.semantic_event.kind.0 != "session/ready"
+            || ready.semantic_event.causation_event_id.as_ref()
+                != Some(&context.envelope.event_id)
+        {
+            return Err(SessionStoreError::InvalidEvent(
+                "Runtime admission boundary has an invalid bound/ready event shape".to_owned(),
+            ));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, context.agent_session_id.as_ref()).await?;
+        let head = head_by_id_tx(&mut tx, context.agent_session_id.as_ref()).await?;
+        if head.status != "opening" {
+            return Err(SessionStoreError::Conflict(format!(
+                "Runtime admission requires an opening Session, found {}",
+                head.status
+            )));
+        }
+        let bound = runtime_event_append(context)?;
+        self.append_event_tx(&mut tx, &bound, None).await?;
+        self.append_event_tx(&mut tx, ready, None).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn get_live_session(
         &self,
         session_id: &AgentSessionId,
     ) -> Result<AgentSessionLiveRecord, SessionStoreError> {
         let row = session_row_by_id(&self.pool, session_id.as_ref()).await?;
         require_live_row(row)
+    }
+
+    /// Return live Remote Sessions whose post-commit Runtime admission has
+    /// not reached a terminal state. The result is used only by the host
+    /// startup recovery coordinator; it never reconstructs a Session or
+    /// changes its frozen binding.
+    pub async fn list_opening_remote_sessions(
+        &self,
+    ) -> Result<Vec<AgentSessionId>, SessionStoreError> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT sessions.agent_session_id \
+             FROM agent_sessions AS sessions \
+             INNER JOIN session_heads AS heads \
+               ON heads.session_id = sessions.agent_session_id \
+             WHERE sessions.state = 'live' \
+               AND sessions.remote_binding_id IS NOT NULL \
+               AND heads.status = 'opening' \
+             ORDER BY sessions.created_at ASC, sessions.agent_session_id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|session_id| {
+                validate_uuidv7(&session_id, "agent_session_id")?;
+                Ok(AgentSessionId::from(session_id))
+            })
+            .collect()
     }
 
     pub async fn inspect_tombstone(
@@ -449,6 +796,181 @@ impl AgentSessionStore {
             messages,
             next_cursor: page.next_cursor,
         })
+    }
+
+    /// Read all committed facts used by the production Chat causality gate in
+    /// one SQLite transaction.  This is intentionally read-only: operation
+    /// claiming remains an explicit admission port because the canonical
+    /// session schema has no operation-claim table.
+    pub async fn chat_causality_facts(
+        &self,
+        session_id: &AgentSessionId,
+        turn_operation_id: &nomifun_agent_contracts::OperationId,
+    ) -> Result<ChatCausalityFacts, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        let session = require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        let rows = event_rows_for_session_tx(&mut tx, session_id.as_ref()).await?;
+
+        let mut events = Vec::with_capacity(rows.len());
+        let mut event_payloads = BTreeMap::new();
+        let mut operation_ids = BTreeSet::new();
+        let mut turn_route_identities = BTreeSet::new();
+        for row in rows {
+            let event = event_from_row(row)?;
+            let payload = payload_value_for_event_tx(&mut tx, &event).await?;
+            if event_belongs_to_turn(&event, &payload, turn_operation_id) {
+                collect_chat_fact_metadata(
+                    &payload,
+                    &mut operation_ids,
+                    &mut turn_route_identities,
+                )?;
+            } else {
+                collect_operation_ids(&payload, &mut operation_ids);
+            }
+            event_payloads.insert(event.event_id.as_ref().to_owned(), payload);
+            events.push(event);
+        }
+        tx.commit().await?;
+
+        Ok(ChatCausalityFacts {
+            session,
+            head,
+            events,
+            event_payloads,
+            operation_ids,
+            turn_route_identities,
+        })
+    }
+
+    /// Atomically admit one model operation against the current Session turn.
+    ///
+    /// This is deliberately implemented beside the canonical event append
+    /// transaction. A read-then-append adapter cannot close the race with
+    /// cancel/terminal events or guarantee operation uniqueness.
+    pub async fn claim_chat_operation(
+        &self,
+        request: ChatOperationClaimRequest,
+    ) -> Result<SessionEventAppendResult, SessionStoreError> {
+        request
+            .route_identity
+            .validate()
+            .map_err(|error| SessionStoreError::Conflict(error.to_string()))?;
+        let append = SessionEventAppend {
+            agent_session_id: request.agent_session_id.clone(),
+            event_id: EventId::from(format!(
+                "model-input-admitted:{}:{}",
+                request.agent_session_id.as_ref(),
+                request.operation_id.as_ref()
+            )),
+            producer_id: EventProducerId::from("runtime_supervisor"),
+            idempotency_key: IdempotencyKey::from(format!(
+                "model-input-admitted:{}:{}",
+                request.agent_session_id.as_ref(),
+                request.operation_id.as_ref()
+            )),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("context/model-visible-applied".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(
+                    request.turn_operation_id.as_ref().to_owned(),
+                ),
+                causation_event_id: Some(request.causation_event_id.clone()),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "operation_id": request.operation_id,
+                    "turn_operation_id": request.turn_operation_id,
+                    "route_identity": request.route_identity,
+                    "resolved_snapshot_ref": request.resolved_snapshot_ref,
+                }))),
+            },
+        };
+
+        let mut tx = self.pool.begin().await?;
+        let _session = require_live_session_tx(&mut tx, request.agent_session_id.as_ref()).await?;
+        let head = head_by_id_tx(&mut tx, request.agent_session_id.as_ref()).await?;
+        if head.status != "running"
+            || head.active_turn_id.as_deref() != Some(request.turn_operation_id.as_ref())
+        {
+            return Err(SessionStoreError::Conflict(
+                "model operation requires the exact active turn boundary".to_owned(),
+            ));
+        }
+        if let Some(existing) = duplicate_event_tx(&mut tx, &append).await? {
+            let record = event_from_row(existing)?;
+            let existing_payload = payload_value_for_event_tx(&mut tx, &record).await?;
+            validate_existing_claim_payload(&existing_payload, &request)?;
+            let ack = event_ack(&record);
+            tx.commit().await?;
+            return Ok(SessionEventAppendResult {
+                cursor: ack.cursor.clone(),
+                record: Some(record),
+                ack: Some(ack),
+                persisted: true,
+                duplicate: true,
+            });
+        }
+
+        let rows = event_rows_for_session_tx(&mut tx, request.agent_session_id.as_ref()).await?;
+        let mut turn = None;
+        let mut cause = None;
+        let mut route_identities = BTreeSet::new();
+        for row in rows {
+            let event = event_from_row(row)?;
+            let payload = payload_value_for_event_tx(&mut tx, &event).await?;
+            if event.kind.0 == "turn/started"
+                && event.correlation_id.as_ref() == request.turn_operation_id.as_ref()
+            {
+                turn = Some((event.clone(), payload.clone()));
+            }
+            if event.event_id == request.causation_event_id {
+                cause = Some(event.clone());
+            }
+            if event.correlation_id.as_ref() == request.turn_operation_id.as_ref() {
+                let mut ignored_operation_ids = BTreeSet::new();
+                collect_chat_fact_metadata(
+                    &payload,
+                    &mut ignored_operation_ids,
+                    &mut route_identities,
+                )?;
+            }
+        }
+        let (turn, turn_payload) = turn.ok_or_else(|| {
+            SessionStoreError::Conflict("active turn fact is missing".to_owned())
+        })?;
+        let cause = cause.ok_or_else(|| {
+            SessionStoreError::Conflict("model causation event is missing".to_owned())
+        })?;
+        if turn.causation_event_id.as_ref() != Some(&cause.event_id)
+            || cause.seq >= turn.seq
+            || !matches!(
+                cause.kind.0.as_str(),
+                "message/user-accepted" | "context/model-visible-applied"
+            )
+        {
+            return Err(SessionStoreError::Conflict(
+                "model causation is not linked to the active turn".to_owned(),
+            ));
+        }
+        if route_identity_from_payload(&turn_payload)?
+            .as_ref()
+            != Some(&request.route_identity)
+            || turn_payload
+                .get("resolved_snapshot_ref")
+                .and_then(|value| value.get("snapshot_digest"))
+                .and_then(Value::as_str)
+                != Some(request.resolved_snapshot_ref.snapshot_digest.as_ref())
+            || route_identities != BTreeSet::from([request.route_identity.clone()])
+        {
+            return Err(SessionStoreError::Conflict(
+                "model route facts differ from the active turn".to_owned(),
+            ));
+        }
+
+        let result = self.append_event_tx(&mut tx, &append, None).await?;
+        tx.commit().await?;
+        Ok(result)
     }
 
     pub async fn head(
@@ -1045,6 +1567,8 @@ impl AgentSessionStore {
             });
         }
 
+        let head = head_by_id_tx(tx, append.agent_session_id.as_ref()).await?;
+        validate_session_event_transition(&head, append)?;
         validate_predecessor_tx(tx, append, &registry_entry).await?;
         validate_runtime_sequence_tx(tx, append).await?;
         validate_effect_transition_tx(tx, append).await?;
@@ -1084,6 +1608,21 @@ impl AgentSessionStore {
             duplicate: false,
         })
     }
+}
+
+fn validate_session_event_transition(
+    head: &SessionHeadProjection,
+    append: &SessionEventAppend,
+) -> Result<(), SessionStoreError> {
+    let kind = append.semantic_event.kind.0.as_str();
+    let requires_opening = matches!(kind, "session/ready" | "session/open-failed");
+    if requires_opening && head.status != "opening" {
+        return Err(SessionStoreError::Conflict(format!(
+            "{kind} requires an opening Session, found {}",
+            head.status
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1247,25 +1786,9 @@ async fn validate_fresh_v4_schema(pool: &SqlitePool) -> Result<(), SessionStoreE
             "AgentSession canonical indexes are missing: {missing_indexes:?}"
         )));
     }
-    let remote_fk: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT \"table\", \"from\", \"to\" \
-         FROM pragma_foreign_key_list('agent_sessions') \
-         WHERE \"from\" = 'remote_binding_id'",
-    )
-    .fetch_optional(pool)
-    .await?;
-    if remote_fk
-        != Some((
-            "remote_bindings".to_owned(),
-            "remote_binding_id".to_owned(),
-            "remote_binding_id".to_owned(),
-        ))
-    {
-        return Err(SessionStoreError::InvalidSession(
-            "agent_sessions.remote_binding_id must reference remote_bindings.remote_binding_id"
-                .to_owned(),
-        ));
-    }
+    // `remote_binding_id` is immutable provenance, not a live configuration
+    // dependency. A RemoteBinding may be deleted to prevent future opens while
+    // existing Sessions retain the ID/version they froze at creation time.
     Ok(())
 }
 
@@ -1401,14 +1924,43 @@ fn validate_event_append(append: &SessionEventAppend) -> Result<(), SessionStore
 }
 
 fn opening_payload(request: &CreateSessionRequest) -> Result<Value, SessionStoreError> {
-    Ok(json!({
+    let mut payload = json!({
         "operation_id": request.operation_id.as_ref(),
         "metadata": &request.session.metadata,
         "agent_binding": &request.session.agent_binding,
         "remote_binding_provenance": &request.session.remote_binding_provenance,
         "parent_session_id": &request.session.parent_session_id,
         "fork_base_payload_id": &request.session.fork_base_payload_id
-    }))
+    });
+    if let Some(initial_input) = &request.initial_input {
+        payload["initial_input"] = initial_input.0.clone();
+    }
+    Ok(payload)
+}
+
+fn runtime_event_append(
+    context: RuntimeAppendContext,
+) -> Result<SessionEventAppend, SessionStoreError> {
+    if context.envelope.runtime_binding_id.as_ref().trim().is_empty()
+        || context.envelope.producer_seq == 0
+    {
+        return Err(SessionStoreError::InvalidEvent(
+            "Runtime event requires a canonical binding id and positive producer sequence"
+                .to_owned(),
+        ));
+    }
+    Ok(SessionEventAppend {
+        agent_session_id: context.agent_session_id,
+        event_id: context.envelope.event_id,
+        producer_id: EventProducerId(format!(
+            "runtime:{}",
+            context.envelope.runtime_binding_id.as_ref()
+        )),
+        idempotency_key: context.envelope.idempotency_key,
+        runtime_binding_id: Some(context.envelope.runtime_binding_id),
+        runtime_producer_seq: Some(context.envelope.producer_seq),
+        semantic_event: context.envelope.semantic_event,
+    })
 }
 
 async fn replay_create(
@@ -2467,6 +3019,86 @@ async fn payload_value_for_event_tx(
     }
 }
 
+fn event_belongs_to_turn(
+    event: &SessionEventRecord,
+    payload: &Value,
+    turn_operation_id: &nomifun_agent_contracts::OperationId,
+) -> bool {
+    event.correlation_id.as_ref() == turn_operation_id.as_ref()
+        || ["operation_id", "turn_operation_id"]
+            .into_iter()
+            .any(|key| payload.get(key).and_then(Value::as_str) == Some(turn_operation_id.as_ref()))
+}
+
+fn collect_operation_ids(payload: &Value, operation_ids: &mut BTreeSet<String>) {
+    for key in ["operation_id", "turn_operation_id", "target_operation_id"] {
+        if let Some(value) = payload.get(key).and_then(Value::as_str) {
+            operation_ids.insert(value.to_owned());
+        }
+    }
+    if let Some(value) = payload.get("causality") {
+        collect_operation_ids(value, operation_ids);
+    }
+}
+
+fn collect_chat_fact_metadata(
+    payload: &Value,
+    operation_ids: &mut BTreeSet<String>,
+    route_identities: &mut BTreeSet<ChatRouteIdentity>,
+) -> Result<(), SessionStoreError> {
+    collect_operation_ids(payload, operation_ids);
+    if let Some(identity) = route_identity_from_payload(payload)? {
+        route_identities.insert(identity);
+    }
+    if let Some(value) = payload.get("causality") {
+        collect_chat_fact_metadata(value, operation_ids, route_identities)?;
+    }
+    Ok(())
+}
+
+fn route_identity_from_payload(
+    payload: &Value,
+) -> Result<Option<ChatRouteIdentity>, SessionStoreError> {
+    let Some(value) = payload.get("route_identity") else {
+        return Ok(None);
+    };
+    let identity = serde_json::from_value::<ChatRouteIdentity>(value.clone()).map_err(|error| {
+        SessionStoreError::Conflict(format!(
+            "route_identity payload is not a canonical ChatRouteIdentity: {error}"
+        ))
+    })?;
+    identity
+        .validate()
+        .map_err(|error| SessionStoreError::Conflict(error.to_string()))?;
+    Ok(Some(identity))
+}
+
+fn validate_existing_claim_payload(
+    payload: &Value,
+    request: &ChatOperationClaimRequest,
+) -> Result<(), SessionStoreError> {
+    if route_identity_from_payload(payload)?.as_ref() != Some(&request.route_identity)
+        || payload
+            .get("resolved_snapshot_ref")
+            .and_then(|value| value.get("snapshot_digest"))
+            .and_then(Value::as_str)
+            != Some(request.resolved_snapshot_ref.snapshot_digest.as_ref())
+        || payload
+            .get("operation_id")
+            .and_then(Value::as_str)
+            != Some(request.operation_id.as_ref())
+        || payload
+            .get("turn_operation_id")
+            .and_then(Value::as_str)
+            != Some(request.turn_operation_id.as_ref())
+    {
+        return Err(SessionStoreError::IdempotencyConflict(
+            "model operation claim already exists with a different immutable identity".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 async fn head_by_id_tx(
     tx: &mut Transaction<'_, Sqlite>,
     session_id: &str,
@@ -2482,6 +3114,22 @@ async fn head_by_id_tx(
     .fetch_one(&mut **tx)
     .await?;
     head_from_row(row)
+}
+
+async fn ensure_active_turn_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session_id: &str,
+    turn_operation_id: &OperationId,
+) -> Result<(), SessionStoreError> {
+    let head = head_by_id_tx(tx, session_id).await?;
+    if head.status != "running"
+        || head.active_turn_id.as_deref() != Some(turn_operation_id.as_ref())
+    {
+        return Err(SessionStoreError::Conflict(
+            "chat terminal requires the exact active turn boundary".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn head_from_row(row: StoredHeadRow) -> Result<SessionHeadProjection, SessionStoreError> {

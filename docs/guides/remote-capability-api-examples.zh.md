@@ -1,33 +1,108 @@
-# Remote 能力 API · 对接示例
-
-本文配套 [Remote 能力 API](./remote-capability-api.zh.md)。所有示例使用当前 NomiFun Desktop 安装直接签发的访问令牌；令牌不绑定伙伴，调用方只应使用实时发现到的 Remote 工具。
+# Canonical Remote API · 对接示例
 
 ```bash
 export HOST=127.0.0.1:25808
-export TOKEN=<NomiFun Desktop 访问令牌>
+export TOKEN=<installation-access-token>
+export BINDING_ID=<remote-binding-id>
 ```
 
 ## MCP 客户端
-
-Claude Code、Cursor 或其他支持 Streamable HTTP 的 MCP 客户端可以配置：
 
 ```json
 {
   "mcpServers": {
     "nomifun": {
       "type": "streamable-http",
-      "url": "http://127.0.0.1:25808/mcp-agent",
+      "url": "http://127.0.0.1:25808/mcp",
       "headers": {
-        "Authorization": "Bearer <NomiFun Desktop 访问令牌>"
+        "Authorization": "Bearer <installation-access-token>"
       }
     }
   }
 }
 ```
 
-`/mcp-agent` 是精简的干活工具面；只有确实需要完整平台控制能力时才使用 `/mcp`。连接后先调用 `tools/list`，以返回的名称和 JSON Schema 为准。
+初始化后，`tools/list` 必须精确包含 `open`、`turn`、`observe`、`cancel`。
 
-Python MCP SDK 示例：
+## REST：open
+
+```bash
+curl -s -X POST "http://$HOST/api/remote/open" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"binding_id\":\"$BINDING_ID\",
+    \"idempotency_key\":\"open-1\",
+    \"initial_input\":{\"text\":\"你好\"}
+  }"
+```
+
+保存响应中的 `agent_session_id` 和 cursor。
+
+## REST：observe
+
+```bash
+curl -s "http://$HOST/api/remote/observe?agent_session_id=$SESSION_ID&after_seq=0&limit=100" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+后续使用返回的 `next_cursor.seq`；`after_seq` 是 exclusive cursor。
+
+## REST：turn
+
+仅在 observe 已证明 Session ready 后调用：
+
+```bash
+curl -s -X POST "http://$HOST/api/remote/turn" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"agent_session_id\":\"$SESSION_ID\",
+    \"input\":{\"text\":\"继续\"},
+    \"idempotency_key\":\"turn-1\"
+  }"
+```
+
+## REST：cancel
+
+```bash
+curl -s -X POST "http://$HOST/api/remote/cancel" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"agent_session_id\":\"$SESSION_ID\",
+    \"idempotency_key\":\"cancel-1\"
+  }"
+```
+
+## Python REST
+
+```python
+import requests
+
+BASE = f"http://{HOST}"
+HEADERS = {"Authorization": f"Bearer {TOKEN}"}
+
+opened = requests.post(
+    f"{BASE}/api/remote/open",
+    headers=HEADERS,
+    json={
+        "binding_id": BINDING_ID,
+        "idempotency_key": "open-1",
+        "initial_input": {"text": "你好"},
+    },
+).json()
+
+session_id = opened["agent_session_id"]
+observed = requests.get(
+    f"{BASE}/api/remote/observe",
+    headers=HEADERS,
+    params={"agent_session_id": session_id, "after_seq": 0, "limit": 100},
+).json()
+print(observed)
+```
+
+## Python Streamable HTTP MCP
 
 ```python
 from mcp import ClientSession
@@ -36,103 +111,47 @@ from mcp.client.streamable_http import streamablehttp_client
 async def main():
     headers = {"Authorization": "Bearer " + TOKEN}
     async with streamablehttp_client(
-        "http://%s/mcp-agent" % HOST,
+        "http://%s/mcp" % HOST,
         headers=headers,
     ) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await session.list_tools()
-            print([tool.name for tool in tools.tools])
-            result = await session.call_tool(TOOL_NAME, arguments)
-            print(result)
+            assert [tool.name for tool in tools.tools] == [
+                "open", "turn", "observe", "cancel"
+            ]
+            opened = await session.call_tool(
+                "open",
+                {
+                    "binding_id": BINDING_ID,
+                    "idempotency_key": "mcp-open-1",
+                    "initial_input": {"text": "你好"},
+                },
+            )
+            print(opened)
 ```
 
-## curl / REST
-
-先发现精简工具集：
-
-```bash
-curl -s "http://$HOST/v1/tools?profile=agent" \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-按发现结果中的工具名称和 schema 调用：
-
-```bash
-curl -s -X POST "http://$HOST/v1/tools/<tool_name>" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"argument":"value"}'
-```
-
-成功返回 `200 {"result": ...}`；参数或工具执行错误返回 `422`；未知工具返回 `404`；令牌无效返回 `401`。破坏性操作首次调用会返回 `409` 确认挑战。向用户清楚复述操作并得到明确授权后，再携带 `"confirm": true` 重试。
-
-## SSE 流式调用
-
-对支持进度的已发现工具使用流式端点：
-
-```bash
-curl -N -X POST "http://$HOST/v1/tools/<tool_name>/stream" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"argument":"value"}'
-```
-
-每个事件是一行 `data: <json>`；最后一个事件为：
-
-```json
-{"type":"__result__","data":{"result":{}}}
-```
-
-## Python REST
-
-```python
-import requests
-
-base = "http://" + HOST
-headers = {
-    "Authorization": "Bearer " + TOKEN,
-    "Content-Type": "application/json",
-}
-
-response = requests.post(
-    f"{base}/v1/tools/{TOOL_NAME}",
-    headers=headers,
-    json=arguments,
-)
-print(response.json())
-```
-
-## nomicore CLI
+## `nomicore` CLI
 
 ```bash
 export NOMIFUN_URL=http://$HOST
 export NOMIFUN_ACCESS_TOKEN=$TOKEN
 
-nomicore tools
-nomicore call <tool_name> '{"argument":"value"}'
+nomicore remote open "$BINDING_ID" \
+  --initial-input '{"text":"你好"}' \
+  --idempotency-key open-1
+
+nomicore remote observe "$SESSION_ID" --after-seq 0 --limit 100
+nomicore remote turn "$SESSION_ID" '{"text":"继续"}' --idempotency-key turn-1
+nomicore remote cancel "$SESSION_ID" --idempotency-key cancel-1
 ```
 
-## OpenAPI 与自动化平台
-
-OpenAPI 3.1 契约可用于生成类型客户端或导入 Postman、Insomnia、Bruno：
+## Headless token 播种
 
 ```bash
-curl -s "http://$HOST/v1/openapi.json?profile=agent" \
-  -H "Authorization: Bearer $TOKEN" > nomifun-openapi.json
+export NOMIFUN_ACCESS_TOKEN="$(openssl rand -hex 32)"
+nomifun-web --host 127.0.0.1 --port 8787
 ```
 
-n8n、Zapier、Make 等自动化平台可直接调用 `POST /v1/tools/{name}`。工具的 `name`、`description` 与 `input_schema` 均来自 `GET /v1/tools`；不要在客户端写死未发现的能力。
-
-## Agent 协作契约的边界
-
-持久化 Agent 协作只有一套按权限收敛的契约：`nomi_delegate` 创建 execution，`nomi_execution_get` 读取 execution，`nomi_execution_update` 修改计划或生命周期。可信本地所有者可以签发安装令牌，其 Remote 工具列表会包含这三项能力；Remote 委派使用与 Desktop 相同的安装所有者边界，不再记录或推断伙伴创建者。次级用户在任何 surface 上都看不到这三项能力。
-
-远程客户端应以 `tools/list` 的实际发现结果为准。安装令牌是安装所有者权限的高权限凭据，不能交给不可信客户端；伙伴的创建、删除或切换不会改变令牌身份。
-
-## 安全提醒
-
-- 持有安装令牌近似拥有该 NomiFun Desktop 的远程代码执行权限，只能交给可信客户端。
-- 公网暴露时必须使用 TLS、网络访问控制和速率限制。
-- 敏感能力默认不在 Remote surface 暴露。
-- 令牌只能从可信本地上下文吊销或轮换；明文只在创建时显示一次。
+已删除的 `/mcp-agent`、`/v1` 和 `profile`/`domains` selector 应返回 route failure
+或 `REMOTE_INVALID_REQUEST`；不要继续重试。

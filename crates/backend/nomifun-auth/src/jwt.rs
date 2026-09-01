@@ -137,16 +137,34 @@ impl JwtService {
     ///
     /// Returns the new secret string for database persistence.
     pub fn rotate_secret(&self) -> Result<String, AuthError> {
-        let new_secret = generate_random_secret_string();
+        let new_secret = self.generate_secret();
+        self.install_secret(new_secret.clone())?;
+        Ok(new_secret)
+    }
+
+    /// Generate a candidate JWT secret without changing the current service state.
+    ///
+    /// Callers that need durable rotation should persist the returned value
+    /// first, then pass it to [`Self::install_secret`].
+    pub fn generate_secret(&self) -> String {
+        generate_random_secret_string()
+    }
+
+    /// Install a previously generated JWT secret.
+    ///
+    /// Installing invalidates all tokens signed with the prior secret and
+    /// clears the blacklist. The caller is responsible for persisting the
+    /// secret before calling this method when rotation must survive restart.
+    pub fn install_secret(&self, new_secret: String) -> Result<(), AuthError> {
         let mut secret = self
             .secret
             .write()
             .map_err(|e| AuthError::TokenInvalid(format!("Secret lock poisoned: {e}")))?;
-        *secret = new_secret.clone();
+        *secret = new_secret;
         // All old tokens are invalid with the new secret; clear the blacklist
         self.blacklist.clear();
         tracing::info!("JWT secret rotated; all existing tokens invalidated");
-        Ok(new_secret)
+        Ok(())
     }
 
     /// Remove expired entries from the blacklist.
@@ -397,6 +415,32 @@ mod tests {
         let token = service.sign(TEST_USER_ID, "admin").unwrap();
         let payload = service.verify(&token).unwrap();
         assert_eq!(payload.user_id.as_str(), TEST_USER_ID);
+    }
+
+    #[test]
+    fn generate_secret_does_not_change_current_state() {
+        let service = test_service();
+        let token = service.sign(TEST_USER_ID, "admin").unwrap();
+
+        let candidate = service.generate_secret();
+
+        assert!(!candidate.is_empty());
+        assert!(service.verify(&token).is_ok());
+    }
+
+    #[test]
+    fn install_secret_invalidates_old_tokens_and_clears_blacklist() {
+        let service = test_service();
+        let old_token = service.sign(TEST_USER_ID, "admin").unwrap();
+        service.blacklist_token(&old_token);
+        assert_eq!(service.blacklist_size(), 1);
+
+        service.install_secret("persisted-secret".to_owned()).unwrap();
+
+        assert!(service.verify(&old_token).is_err());
+        assert_eq!(service.blacklist_size(), 0);
+        let new_token = service.sign(TEST_USER_ID, "admin").unwrap();
+        assert!(service.verify(&new_token).is_ok());
     }
 
     #[test]

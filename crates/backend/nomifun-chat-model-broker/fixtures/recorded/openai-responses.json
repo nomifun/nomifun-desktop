@@ -33,13 +33,19 @@
         "snapshot_id": "snapshot-openai-responses",
         "snapshot_digest": "3333333333333333333333333333333333333333333333333333333333333333"
       },
-      "model_route_revision": 11,
+      "route_identity": {
+        "preset_revision_id": "fixture@1",
+        "model_task": "agent_chat",
+        "route_id": "route-openai-responses-native",
+        "route_revision": 11
+      },
       "operation_id": "model-openai-responses-0001"
     },
     "route": {
-      "model_route_id": "route-openai-responses-native",
-      "model_route_revision": 11,
-      "task": "agent_chat"
+      "preset_revision_id": "fixture@1",
+      "model_task": "agent_chat",
+      "route_id": "route-openai-responses-native",
+      "route_revision": 11
     },
     "input": {
       "instructions": ["Preserve native Responses items."],

@@ -6,8 +6,8 @@ use nomifun_v4_root::{
     FRESH_V4_READY_MARKER_FILE, FreshV4BootstrapOutcome, FreshV4Coordinator,
 };
 
-const APPLICATION_BUILD_IDENTITY: &str =
-    concat!("nomifun-app@", env!("CARGO_PKG_VERSION"));
+pub(crate) const APPLICATION_BUILD_IDENTITY: &str =
+    concat!(env!("CARGO_PKG_NAME"), "@", env!("CARGO_PKG_VERSION"));
 
 pub(super) fn bootstrap_data_root(
     data_root: &Path,

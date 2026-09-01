@@ -13,7 +13,7 @@ use dashmap::DashMap;
 use futures_util::future::BoxFuture;
 use nomi_agent::session::SessionManager;
 use nomifun_common::{
-    AgentKillReason, AgentType, AppError, ErrorChain, OnConversationDelete, ProviderWithModel, now_ms,
+    AgentKillReason, AppError, ErrorChain, OnConversationDelete, ProviderWithModel, now_ms,
 };
 use tokio::sync::{Mutex as AsyncMutex, OnceCell};
 use tokio_util::sync::CancellationToken;
@@ -22,6 +22,7 @@ use tracing::{info, warn};
 use crate::nomi_session_persistence::{
     NomiSessionPersistence, NomiSessionRecoveryRewindOutcome, NomiSessionResetOutcome,
 };
+use crate::factory::provider_config::resolve_runtime_model_selection;
 use crate::runtime_handle::AgentRuntimeHandle;
 use crate::types::AgentRuntimeBuildOptions;
 
@@ -35,8 +36,8 @@ pub type AgentRuntimeFactory =
     Arc<dyn Fn(AgentRuntimeBuildOptions) -> BoxFuture<'static, Result<AgentRuntimeHandle, AppError>> + Send + Sync>;
 
 /// Non-secret identity of the exact provider invocation graph a long-lived
-/// Nomi runtime was built from. The provider-level revision changes whenever
-/// credentials, connection roots or task capabilities change.
+/// model-backed runtime was built from. The provider-level revision changes
+/// whenever credentials, connection roots or task capabilities change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeModelConfigBinding {
     pub provider_id: String,
@@ -44,7 +45,7 @@ pub struct RuntimeModelConfigBinding {
     pub config_revision: i64,
 }
 
-/// Resolve the current exact Chat binding for one selected Nomi model. Product
+/// Resolve the current exact Chat binding for one selected model. Product
 /// composition supplies the ModelInvoke-backed implementation; keeping the
 /// closure async lets the registry validate every admission under its existing
 /// per-conversation lifecycle gate.
@@ -556,10 +557,9 @@ impl InMemoryAgentRuntimeRegistry {
             .filter(AgentRuntimeHandle::is_transport_healthy)?;
         // `OnceCell` becomes visible immediately after the factory returns,
         // before the admission path performs its post-build revision check.
-        // Do not expose a product Nomi runtime through `get_runtime` during
+        // Do not expose a model-backed runtime through `get_runtime` during
         // that window (or if its binding bookkeeping is ever lost).
         if self.model_config_resolver.is_some()
-            && runtime.agent_type() == AgentType::Nomi
             && self
                 .model_config_binding_for_slot(conversation_id, &slot)
                 .is_none()
@@ -732,22 +732,21 @@ impl InMemoryAgentRuntimeRegistry {
 
     async fn resolve_model_config_binding(
         &self,
-        agent_type: AgentType,
         model: Option<&ProviderWithModel>,
     ) -> Result<Option<RuntimeModelConfigBinding>, AppError> {
-        if agent_type != AgentType::Nomi {
+        let Some(model) = model else {
+            // Runtimes whose model route is owned by their own host do not
+            // participate in the ModelInvoke binding fence.
             return Ok(None);
-        }
+        };
         let Some(resolver) = self.model_config_resolver.as_ref() else {
             // Standalone and integration-test registries may host factories
             // that do not cache provider transport state. Product composition
             // always supplies the ModelInvoke-backed resolver.
             return Ok(None);
         };
-        let model = model.cloned().ok_or_else(|| {
-            AppError::BadRequest("Nomi runtime requires a provider and model".to_owned())
-        })?;
-        resolver(model).await.map(Some)
+        let selected = resolve_runtime_model_selection(model)?;
+        resolver(selected.into_provider_with_model()).await.map(Some)
     }
 
     /// Attach a pre-acquired physical workspace binding to `slot`.
@@ -1038,10 +1037,9 @@ impl InMemoryAgentRuntimeRegistry {
             self.ensure_turn_generation_available(conversation_id, turn_generation)?;
         }
 
-        let requested_agent_type = options.agent_type;
         let requested_model = options.model.clone();
         let requested_binding_result = self
-            .resolve_model_config_binding(requested_agent_type, requested_model.as_ref())
+            .resolve_model_config_binding(requested_model.as_ref())
             .await;
         let mut requested_model_binding = match requested_binding_result {
             Ok(binding) => binding,
@@ -1140,10 +1138,7 @@ impl InMemoryAgentRuntimeRegistry {
                     // Teardown can take long enough for another provider edit.
                     // Refresh before any replacement factory is admitted.
                     requested_model_binding = self
-                        .resolve_model_config_binding(
-                            requested_agent_type,
-                            requested_model.as_ref(),
-                        )
+                        .resolve_model_config_binding(requested_model.as_ref())
                         .await?;
                     continue;
                 }
@@ -1362,7 +1357,7 @@ impl InMemoryAgentRuntimeRegistry {
         // brand-new runtime before it can admit a turn; otherwise the process
         // could cache a stale key or endpoint despite the reuse check above.
         let confirmed_model_binding = match self
-            .resolve_model_config_binding(requested_agent_type, requested_model.as_ref())
+            .resolve_model_config_binding(requested_model.as_ref())
             .await
         {
             Ok(binding) => binding,

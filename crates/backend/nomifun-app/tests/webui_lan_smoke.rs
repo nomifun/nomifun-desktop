@@ -1,5 +1,5 @@
 //! Smoke test that drives the REAL desktop WebUI/LAN serving path end-to-end
-//! (`DesktopServer::start` → `start_lan`) against a throwaway data dir, so the
+//! (`DesktopServer::start_legacy_compatibility` → `start_lan`) against a throwaway data dir, so the
 //! actual failure cause of "enable WebUI" surfaces deterministically instead of
 //! being guessed at. Prints the resolved status (port, LAN IP, URL, error).
 
@@ -50,10 +50,10 @@ async fn webui_lan_start_smoke() {
     let merged_path = std::env::var("PATH").unwrap_or_default();
 
     let started =
-        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None).await;
+        nomifun_app::DesktopServer::start_legacy_compatibility(&cli, &merged_path, Some(spa_dir), None, None).await;
     let (server, _keep) = match started {
         Ok(pair) => pair,
-        Err(e) => panic!("DesktopServer::start failed: {e:#}"),
+        Err(e) => panic!("DesktopServer::start_legacy_compatibility failed: {e:#}"),
     };
 
     eprintln!("== loopback_port = {}", server.loopback_port());
@@ -85,9 +85,9 @@ async fn webui_lan_spa_deep_link_serves_app_shell() {
     let merged_path = std::env::var("PATH").unwrap_or_default();
 
     let (server, _keep) =
-        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None)
+        nomifun_app::DesktopServer::start_legacy_compatibility(&cli, &merged_path, Some(spa_dir), None, None)
             .await
-            .expect("DesktopServer::start failed");
+            .expect("DesktopServer::start_legacy_compatibility failed");
 
     let status = server.start_lan().await;
     assert!(status.running, "start_lan failed: {:?}", status.error);
@@ -137,9 +137,9 @@ async fn webui_lan_embedded_asset_source_needs_no_filesystem_shell() {
     ]);
 
     let (server, _keep) =
-        nomifun_app::DesktopServer::start(&cli, &merged_path, None, None, Some(assets))
+        nomifun_app::DesktopServer::start_legacy_compatibility(&cli, &merged_path, None, None, Some(assets))
             .await
-            .expect("DesktopServer::start failed");
+            .expect("DesktopServer::start_legacy_compatibility failed");
     let status = server.start_lan().await;
     assert!(status.running, "start_lan failed: {:?}", status.error);
 
@@ -252,9 +252,9 @@ async fn webui_lan_without_app_shell_fails_instead_of_serving_partial_qr_flow() 
     let merged_path = std::env::var("PATH").unwrap_or_default();
 
     let (server, _keep) =
-        nomifun_app::DesktopServer::start(&cli, &merged_path, None, None, None)
+        nomifun_app::DesktopServer::start_legacy_compatibility(&cli, &merged_path, None, None, None)
             .await
-            .expect("DesktopServer::start failed");
+            .expect("DesktopServer::start_legacy_compatibility failed");
 
     let status = server.start_lan().await;
 
@@ -289,9 +289,9 @@ async fn figure_image_get_is_public_but_listing_stays_authenticated() {
     let cli = isolated_cli(tmp.path());
     let merged_path = std::env::var("PATH").unwrap_or_default();
     let (server, _keep) =
-        nomifun_app::DesktopServer::start(&cli, &merged_path, None, None, None)
+        nomifun_app::DesktopServer::start_legacy_compatibility(&cli, &merged_path, None, None, None)
             .await
-            .expect("DesktopServer::start failed");
+            .expect("DesktopServer::start_legacy_compatibility failed");
 
     let base = format!("http://127.0.0.1:{}", server.loopback_port());
     let client = local_http_client();
@@ -359,7 +359,7 @@ async fn webui_lan_dev_proxy_serves_live_frontend() {
         nomifun_app::WebUiAsset::new(b"STALE_EMBEDDED_MARKER".to_vec(), "text/html"),
     )]);
 
-    let (server, _keep) = nomifun_app::DesktopServer::start(
+    let (server, _keep) = nomifun_app::DesktopServer::start_legacy_compatibility(
         &cli,
         &merged_path,
         None,
@@ -367,7 +367,7 @@ async fn webui_lan_dev_proxy_serves_live_frontend() {
         Some(stale_embedded),
     )
     .await
-    .expect("DesktopServer::start failed");
+    .expect("DesktopServer::start_legacy_compatibility failed");
 
     let status = server.start_lan().await;
     assert!(status.running, "start_lan failed: {:?}", status.error);
@@ -409,9 +409,9 @@ async fn webui_enable_preserves_user_set_username_and_reports_persisted_state() 
     let merged_path = std::env::var("PATH").unwrap_or_default();
 
     let (server, _keep) =
-        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None)
+        nomifun_app::DesktopServer::start_legacy_compatibility(&cli, &merged_path, Some(spa_dir), None, None)
             .await
-            .expect("DesktopServer::start failed");
+            .expect("DesktopServer::start_legacy_compatibility failed");
 
     // Simulate the user renaming the admin from the panel while WebUI is OFF:
     // this leaves `password_hash` empty. Open the SAME db file the server uses
@@ -468,9 +468,9 @@ async fn webui_browser_login_contract_accepts_generated_credentials() {
     let cli = isolated_cli(tmp.path());
     let merged_path = std::env::var("PATH").unwrap_or_default();
     let (server, _keep) =
-        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None)
+        nomifun_app::DesktopServer::start_legacy_compatibility(&cli, &merged_path, Some(spa_dir), None, None)
             .await
-            .expect("DesktopServer::start failed");
+            .expect("DesktopServer::start_legacy_compatibility failed");
 
     let status = server.start_lan().await;
     assert!(status.running, "start_lan failed: {:?}", status.error);
@@ -586,9 +586,9 @@ async fn webui_lan_is_restored_when_the_persisted_switch_is_on() {
     let merged_path = std::env::var("PATH").unwrap_or_default();
 
     let (server, _keep) =
-        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None)
+        nomifun_app::DesktopServer::start_legacy_compatibility(&cli, &merged_path, Some(spa_dir), None, None)
             .await
-            .expect("DesktopServer::start failed");
+            .expect("DesktopServer::start_legacy_compatibility failed");
     // Nothing was persisted at this point, so startup itself must have left LAN off.
     assert!(
         !server.status().running,
@@ -624,9 +624,9 @@ async fn webui_lan_stays_off_without_a_positive_persisted_request() {
     let merged_path = std::env::var("PATH").unwrap_or_default();
 
     let (server, _keep) =
-        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None)
+        nomifun_app::DesktopServer::start_legacy_compatibility(&cli, &merged_path, Some(spa_dir), None, None)
             .await
-            .expect("DesktopServer::start failed");
+            .expect("DesktopServer::start_legacy_compatibility failed");
     seed_admin_password_hash(tmp.path()).await;
 
     // Key absent entirely (never toggled).
@@ -656,9 +656,9 @@ async fn webui_lan_restore_refuses_to_expose_an_installation_without_a_credentia
     let merged_path = std::env::var("PATH").unwrap_or_default();
 
     let (server, _keep) =
-        nomifun_app::DesktopServer::start(&cli, &merged_path, Some(spa_dir), None, None)
+        nomifun_app::DesktopServer::start_legacy_compatibility(&cli, &merged_path, Some(spa_dir), None, None)
             .await
-            .expect("DesktopServer::start failed");
+            .expect("DesktopServer::start_legacy_compatibility failed");
     // Deliberately NO password hash seeded here.
     seed_client_preference(tmp.path(), "webui.desktop.enabled", "true").await;
 

@@ -63,9 +63,9 @@ Factory 行为的源码真相来源：
   普通子进程运行在 `nomifun-terminal` 的 PTY session 里。后端不解析它们的
   协议、也不持有它们的回合状态，只持有伪终端。见
   [`../guides/terminal.zh.md`](../guides/terminal.zh.md)。
-- **公开能力入口。** 外部 agent 与脚本经安装令牌认证的 `/mcp`、
-  `/mcp-agent` 或 `/v1` 调用**进入** NomiFun。那是入站方向：NomiFun 是工具
-  提供方，不是引擎宿主。
+- **Canonical Remote 入口。** 外部 agent 与脚本经安装令牌认证的 `/mcp` 或
+  `/api/remote/*` 调用**进入** NomiFun。四个操作都作用于显式 AgentSession；
+  NomiFun 是 Runtime host，不是通用 Gateway 工具注册表。
 
 ## MCP 与工具注入
 
@@ -116,8 +116,8 @@ UI request
   -> renderer stream handlers
 ```
 
-每个会话回合都在进程内运行。公开 remote capability 调用通过 `nomifun-public`
-与平台 Gateway registry 进入，而不是通过 conversation HTTP route。
+每个会话回合都在进程内运行。Canonical Remote 操作通过 `nomifun-public` 或
+Fresh-v4 REST adapter 进入，并委托 `AgentPlatform`，不再直通旧 Gateway registry。
 
 ## Design Notes
 

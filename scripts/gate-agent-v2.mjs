@@ -9,6 +9,7 @@ const args = process.argv.slice(2);
 const gateName = args[0];
 
 if (
+  !args.includes('--self-test') &&
   ![
     'contract-closure',
     'c1-fullauto',
@@ -16,10 +17,18 @@ if (
     'c6-triad',
     'c7-domain-waves',
     'c8-win-pre',
+    'c8-native',
+    'c8-ma',
+    'c8-mx',
+    'c8-ld',
+    'c8-lh',
+    'c8-win-scoped-attestation',
+    'c8-merge',
+    'c9-hard-delete',
   ].includes(gateName)
 ) {
   console.error(
-    'usage: bun run gate:agent-v2 -- <contract-closure|c1-fullauto|c2-c5-foundations|c6-triad|c7-domain-waves|c8-win-pre>'
+    'usage: bun run gate:agent-v2 -- <contract-closure|c1-fullauto|c2-c5-foundations|c6-triad|c7-domain-waves|c8-win-pre|c8-native|c8-ma|c8-mx|c8-ld|c8-lh|c8-win-scoped-attestation|c8-merge|c9-hard-delete> [--evidence <path>] [--cell <cell_id>] [--mode full|scoped] [--self-test]'
   );
   process.exit(2);
 }
@@ -99,6 +108,16 @@ function statSafe(path) {
 
 const C8_MANIFEST_PATH =
   'docs/specs/2026-08-28-agent-capability-platform-v2/C8-WIN-PRE-MANIFEST.json';
+const C8_PLATFORM_VALIDATION_MANIFEST_PATH =
+  'crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json';
+const C8_PLATFORM_VALIDATION_FIXTURE_PATH =
+  'crates/backend/nomifun-agent-contracts/contracts/generated/platform-validation-fixture.envelope.json';
+const C8_RUNTIME_RELEASE_INPUT_PATH =
+  'crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json';
+const C8_RUNTIME_RELEASE_FIXTURE_PATH =
+  'crates/backend/nomifun-agent-contracts/contracts/generated/runtime-release-fixture.envelope.json';
+const C8_TRIAD_DELETION_MANIFEST_PATH =
+  'crates/backend/nomifun-agent-contracts/contracts/deletion/triad-core.json';
 const C8_BRANCH = 'rf/agent-capability-platform-v2';
 const C8_C7_MIGRATION_CHECKPOINT =
   '253e850b44bce83fa9b785dc6805c431201f6c91';
@@ -107,12 +126,14 @@ const C8_EXPECTED_DIGESTS = {
     'b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5',
   platform_validation_contract:
     '78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9',
+  platform_validation_manifest:
+    '70f23b52f309aeb0938ad86c987958d3f1a05e6c367263c3b73a3038e1ca2ed2',
   runtime_release:
-    '8f40a7ff0c42bb3180e976ae1c54e89f4942c5d6899507fa70f31c964d9b22fc',
+    'b9dce00732f6d1c45cb20fc30e7a286518d505d7faeb2d94b6cc70d9e107289d',
   runtime_feature_inventory:
     'bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee',
   canonical_schema_manifest:
-    'f0a1c03696ed180db6786f781282d3a2b81dbea91ac286972b710dd7fe842ed7',
+    'e28723d7fc524cfdd351c6fc8cc17b8a48d8fd1f5be16a7aebd395ce669f98ff',
   official_seed:
     'c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8',
   target_inventory:
@@ -122,9 +143,9 @@ const C8_EXPECTED_DIGESTS = {
   coding_codex_native:
     'f699f376a9414b7830b90a68c890d39010687499e6d16ee1687f5c370cd0127a',
   cargo_lock:
-    'c6aa85864cac522d8a6bee064f04057393ade35749c95984344a46df51359092',
+    'b69f75e6cc566ef753f43265e4ddcf2479b671c738e67719b6c84f3f6881f23a',
   platform_fixture:
-    'fb7d792e5eced84e05ba1c0805a9cd176cbe2796e47d7910d9e00147a31242bc',
+    '70f23b52f309aeb0938ad86c987958d3f1a05e6c367263c3b73a3038e1ca2ed2',
 };
 const C8_EXPECTED_TEMPLATES = [
   'chat.minimal',
@@ -135,6 +156,103 @@ const C8_EXPECTED_TEMPLATES = [
   'customer-service.default',
   'creative-studio.default',
 ];
+const C8_GLOBAL_RESIDUAL_MAX_FINDINGS = 5000;
+const C8_REQUIRED_NATIVE_CELLS = [
+  'windows_desktop_x64',
+  'macos_desktop_arm64',
+  'macos_desktop_x64',
+  'linux_desktop_x64',
+  'linux_headless_x64',
+];
+const C8_NATIVE_CELL_SPECS = Object.freeze({
+  windows_desktop_x64: Object.freeze({
+    cell_id: 'windows_desktop_x64',
+    host_os: 'windows',
+    host_arch: 'x86_64',
+    host_target: 'x86_64-pc-windows-msvc',
+    runtime_target: 'x86_64-pc-windows-msvc',
+    host_surface: 'desktop',
+    package_format: 'nsis',
+    gate_name: 'c8-win-pre',
+    check_id: 'c8_win_pre_full_gate',
+    command: 'bun run gate:agent-v2 -- c8-win-pre',
+  }),
+  macos_desktop_arm64: Object.freeze({
+    cell_id: 'macos_desktop_arm64',
+    host_os: 'macos',
+    host_arch: 'aarch64',
+    host_target: 'aarch64-apple-darwin',
+    runtime_target: 'aarch64-apple-darwin',
+    host_surface: 'desktop',
+    package_format: 'universal-app',
+    gate_name: 'c8-ma',
+    check_id: 'c8_ma_full_gate',
+    command: 'bun run gate:agent-v2 -- c8-ma',
+  }),
+  macos_desktop_x64: Object.freeze({
+    cell_id: 'macos_desktop_x64',
+    host_os: 'macos',
+    host_arch: 'x86_64',
+    host_target: 'x86_64-apple-darwin',
+    runtime_target: 'x86_64-apple-darwin',
+    host_surface: 'desktop',
+    package_format: 'universal-app',
+    gate_name: 'c8-mx',
+    check_id: 'c8_mx_full_gate',
+    command: 'bun run gate:agent-v2 -- c8-mx',
+  }),
+  linux_desktop_x64: Object.freeze({
+    cell_id: 'linux_desktop_x64',
+    host_os: 'linux',
+    host_arch: 'x86_64',
+    host_target: 'x86_64-unknown-linux-gnu',
+    runtime_target: 'x86_64-unknown-linux-musl',
+    host_surface: 'desktop',
+    package_format: 'appimage-deb-rpm',
+    gate_name: 'c8-ld',
+    check_id: 'c8_ld_full_gate',
+    command: 'bun run gate:agent-v2 -- c8-ld',
+  }),
+  linux_headless_x64: Object.freeze({
+    cell_id: 'linux_headless_x64',
+    host_os: 'linux',
+    host_arch: 'x86_64',
+    host_target: 'x86_64-unknown-linux-gnu',
+    runtime_target: 'x86_64-unknown-linux-musl',
+    host_surface: 'headless',
+    package_format: 'headless-service',
+    gate_name: 'c8-lh',
+    check_id: 'c8_lh_full_gate',
+    command: 'bun run gate:agent-v2 -- c8-lh',
+  }),
+});
+const C8_NATIVE_GATE_DISPATCH = Object.freeze({
+  'c8-ma': Object.freeze({
+    ...C8_NATIVE_CELL_SPECS.macos_desktop_arm64,
+    mode: 'full',
+  }),
+  'c8-mx': Object.freeze({
+    ...C8_NATIVE_CELL_SPECS.macos_desktop_x64,
+    mode: 'full',
+  }),
+  'c8-ld': Object.freeze({
+    ...C8_NATIVE_CELL_SPECS.linux_desktop_x64,
+    mode: 'full',
+  }),
+  'c8-lh': Object.freeze({
+    ...C8_NATIVE_CELL_SPECS.linux_headless_x64,
+    mode: 'full',
+  }),
+  'c8-win-scoped-attestation': Object.freeze({
+    ...C8_NATIVE_CELL_SPECS.windows_desktop_x64,
+    gate_name: 'c8-win-scoped-attestation',
+    check_id: null,
+    command: null,
+    mode: 'scoped',
+  }),
+});
+const C8_NATIVE_GATE_NAMES = Object.keys(C8_NATIVE_GATE_DISPATCH);
+let c8ConfirmationPolicyCache = null;
 const C8_PENDING_NATIVE_POINTS = [
   {
     verification_point_id: 'c8-macos-arm64',
@@ -161,6 +279,25 @@ const C8_PENDING_NATIVE_POINTS = [
     exact_check_id: 'c8_lh_full_gate',
   },
 ];
+
+if (args.includes('--self-test')) {
+  runC8SelfTest();
+  console.log('C8 gate self-test passed');
+  process.exit(0);
+}
+
+if (gateName === 'c8-native' || C8_NATIVE_GATE_NAMES.includes(gateName)) {
+  let dispatch;
+  try {
+    dispatch = c8ParseNativeDispatchArgs(gateName, args);
+  } catch (error) {
+    console.error(`invalid ${gateName} arguments: ${error.message}`);
+    process.exit(2);
+  }
+  const report = runC8NativeCellGate(dispatch);
+  writeC8NativeCellReport(report);
+  finishGate(gateName);
+}
 
 if (gateName === 'c1-fullauto') {
   runC1Gate();
@@ -236,6 +373,18 @@ if (gateName === 'c8-win-pre') {
   }
   writeC8WinPreReport(c8Report);
   finishGate('c8-win-pre');
+}
+
+if (gateName === 'c8-merge') {
+  const report = runC8MergeGate();
+  writeC8MergeReport(report);
+  finishGate('c8-merge');
+}
+
+if (gateName === 'c9-hard-delete') {
+  const report = runC9HardDeleteGate();
+  writeC9HardDeleteReport(report);
+  finishGate('c9-hard-delete');
 }
 
 for (const file of requiredFiles) {
@@ -1325,24 +1474,1555 @@ function runC8WinPreGate() {
     report,
     report.platform_validation
   );
-  report.all_scene_coverage = c8ValidateAllSceneCoverage(
-    report,
-    manifest.value,
-    report.platform_validation
-  );
   report.residual_reachability = c8ValidateC8ResidualReachability(
     report,
-    report.c7
+    report.c7,
+    manifest.value
   );
 
   if (report.preflight_blocked) {
-    c8SkipC8Checks(report, manifest.value, 'C8 preflight failure');
+    c8SkipNativeChecksIfBlocked(
+      report,
+      manifest.value,
+      'C8 preflight failure'
+    );
     return report;
   }
 
   c8RunToolchainProbe(report);
   c8RunDeclaredC8Checks(report, manifest.value);
+  // Scene coverage is finalized only after all declared checks have run.  In
+  // particular, provider_unavailable is not evidence until the real
+  // production broker test has a recorded passing result.
+  report.all_scene_coverage = c8ValidateAllSceneCoverage(
+    report,
+    manifest.value,
+    report.platform_validation
+  );
+  c8ValidateProductionBrokerFunctionalEvidence(report);
   return report;
+}
+
+function c8ParseNativeDispatchArgs(name, argv) {
+  const explicit = C8_NATIVE_GATE_DISPATCH[name] || null;
+  let cellId = explicit?.cell_id || null;
+  let mode = explicit?.mode || 'full';
+  let evidencePath = null;
+  let sawCell = false;
+  let sawMode = false;
+
+  for (let index = 1; index < argv.length; index += 1) {
+    const token = argv[index];
+    const [flag, inlineValue] = token.includes('=')
+      ? [token.slice(0, token.indexOf('=')), token.slice(token.indexOf('=') + 1)]
+      : [token, null];
+    if (
+      ![
+        '--cell',
+        '--mode',
+        '--evidence',
+        '--attestation',
+        '--attest',
+      ].includes(flag)
+    ) {
+      throw new Error(`unknown ${name} option: ${token}`);
+    }
+    let value = inlineValue;
+    if (value === null) {
+      value = argv[index + 1];
+      if (!value || value.startsWith('--')) {
+        throw new Error(`${flag} requires a value`);
+      }
+      index += 1;
+    }
+    if (flag === '--cell') {
+      if (sawCell) throw new Error('--cell may be specified only once');
+      sawCell = true;
+      cellId = value;
+    } else if (flag === '--mode') {
+      if (sawMode) throw new Error('--mode may be specified only once');
+      sawMode = true;
+      mode = value;
+    } else {
+      if (evidencePath !== null) {
+        throw new Error('--evidence/--attestation may be specified only once');
+      }
+      evidencePath = value;
+    }
+  }
+
+  if (name === 'c8-native' && !cellId) {
+    throw new Error('c8-native requires --cell <cell_id>');
+  }
+  if (!Object.hasOwn(C8_NATIVE_CELL_SPECS, cellId)) {
+    throw new Error(`unsupported native cell: ${cellId || '(missing)'}`);
+  }
+  if (!['full', 'scoped'].includes(mode)) {
+    throw new Error(`--mode must be full or scoped, got ${mode}`);
+  }
+  if (explicit && explicit.mode !== mode) {
+    throw new Error(`${name} is fixed to --mode ${explicit.mode}`);
+  }
+  if (explicit && explicit.cell_id !== cellId) {
+    throw new Error(`${name} is fixed to --cell ${explicit.cell_id}`);
+  }
+  if (mode === 'scoped' && name !== 'c8-native' && name !== 'c8-win-scoped-attestation') {
+    throw new Error(`${name} is a full native gate and cannot run scoped attestation`);
+  }
+
+  const spec = C8_NATIVE_CELL_SPECS[cellId];
+  const defaultEvidencePath =
+    `build.noindex/agent-capability-v2/${c8ReadGitHeadForReport()}/${cellId}/cell-evidence.json`;
+  const suppliedEvidencePath =
+    evidencePath ||
+    (typeof process.env.AGENT_V2_CELL_EVIDENCE === 'string'
+      ? process.env.AGENT_V2_CELL_EVIDENCE.trim() || null
+      : null);
+  return {
+    gate_name: name,
+    cell_id: cellId,
+    mode,
+    evidence_path: suppliedEvidencePath || defaultEvidencePath,
+    evidence_path_source: suppliedEvidencePath
+      ? evidencePath
+        ? 'argument'
+        : 'environment'
+      : 'canonical_default',
+    check_id: mode === 'full' ? spec.check_id : null,
+    command: mode === 'full' ? spec.command : null,
+    target: spec,
+  };
+}
+
+function c8NativeFailure(report, code, message, details = {}) {
+  const failure = { code, message, ...details };
+  report.failure_details.push(failure);
+  failures.push(`${report.gate_name}: ${message}`);
+  return false;
+}
+
+function c8NativeRequire(report, condition, code, message, details = {}) {
+  return condition ? true : c8NativeFailure(report, code, message, details);
+}
+
+function c8NativeExpectedTuple(sourceSha) {
+  return {
+    candidate_source_sha: sourceSha,
+    confirmed_decision_contract_digest:
+      C8_EXPECTED_DIGESTS.confirmed_decision_contract,
+    platform_validation_manifest_digest:
+      C8_EXPECTED_DIGESTS.platform_validation_manifest,
+    runtime_release_digest: C8_EXPECTED_DIGESTS.runtime_release,
+  };
+}
+
+function c8NativeRunProbe(command, commandArgs, timeout = 5000) {
+  const startedAt = new Date().toISOString();
+  try {
+    const result = spawnSync(command, commandArgs, {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      shell: process.platform === 'win32',
+      stdio: 'pipe',
+      timeout,
+    });
+    return {
+      command: [command, ...commandArgs].join(' '),
+      started_at: startedAt,
+      finished_at: new Date().toISOString(),
+      status: typeof result.status === 'number' ? result.status : 1,
+      stdout: String(result.stdout || ''),
+      stderr: String(result.stderr || ''),
+      error: result.error?.message || null,
+    };
+  } catch (error) {
+    return {
+      command: [command, ...commandArgs].join(' '),
+      started_at: startedAt,
+      finished_at: new Date().toISOString(),
+      status: 1,
+      stdout: '',
+      stderr: error.message,
+      error: error.message,
+    };
+  }
+}
+
+function c8NativeHostProbe() {
+  const hostOsByPlatform = {
+    win32: 'windows',
+    darwin: 'macos',
+    linux: 'linux',
+  };
+  const hostArchByProcess = {
+    x64: 'x86_64',
+    arm64: 'aarch64',
+  };
+  const hostOs = hostOsByPlatform[process.platform] || null;
+  const hostArch = hostArchByProcess[process.arch] || null;
+  const probes = [];
+  const rejectionReasons = [];
+  let unameSystem = null;
+  let unameMachine = null;
+  let rosettaTranslated = false;
+  let rustcHostTarget = null;
+  let toolchainFingerprintDigest = null;
+  const rustc = c8NativeRunProbe('rustc', ['-vV']);
+  probes.push(rustc);
+  rustcHostTarget =
+    rustc.stdout.match(/^\s*host:\s*([^\s]+)\s*$/m)?.[1] || null;
+  if (rustc.status !== 0 || !rustcHostTarget) {
+    rejectionReasons.push('rustc_host_probe_failed');
+  } else {
+    toolchainFingerprintDigest = createHash('sha256')
+      .update(rustc.stdout)
+      .digest('hex');
+  }
+
+  if (process.platform !== 'win32') {
+    const uname = c8NativeRunProbe('uname', ['-s', '-m']);
+    probes.push(uname);
+    const fields = uname.stdout.trim().split(/\s+/);
+    unameSystem = fields[0] || null;
+    unameMachine = fields[1] || null;
+    if (uname.status !== 0) rejectionReasons.push('uname_probe_failed');
+  }
+
+  if (process.platform === 'darwin') {
+    const translated = c8NativeRunProbe(
+      'sysctl',
+      ['-in', 'sysctl.proc_translated']
+    );
+    probes.push(translated);
+    rosettaTranslated = translated.status === 0 && translated.stdout.trim() === '1';
+    if (rosettaTranslated) rejectionReasons.push('rosetta_translation_detected');
+  }
+
+  if (process.platform === 'linux') {
+    const environmentText = [
+      process.env.WSL_DISTRO_NAME,
+      process.env.WSL_INTEROP,
+      process.env.WSLENV,
+    ]
+      .filter(Boolean)
+      .join(' ');
+    if (environmentText) rejectionReasons.push('wsl_environment_detected');
+
+    const kernelText = [
+      unameSystem,
+      unameMachine,
+      readFileSafe('/proc/version'),
+      readFileSafe('/proc/1/cgroup'),
+    ]
+      .filter(Boolean)
+      .join('\n')
+      .toLowerCase();
+    for (const marker of [
+      'microsoft',
+      'wsl',
+      'docker',
+      'kubepods',
+      'containerd',
+      'libpod',
+      'lxc',
+      'qemu',
+    ]) {
+      if (kernelText.includes(marker)) {
+        rejectionReasons.push(`non_native_environment_marker:${marker}`);
+      }
+    }
+
+    const virtual = c8NativeRunProbe('systemd-detect-virt', ['--vm']);
+    probes.push(virtual);
+    const virtualName = virtual.stdout.trim().toLowerCase();
+    if (virtual.status === 0 && virtualName && virtualName !== 'none') {
+      rejectionReasons.push(`virtual_machine_detected:${virtualName}`);
+    }
+  }
+
+  const expectedUnameSystem =
+    hostOs === 'macos' ? 'darwin' : hostOs === 'linux' ? 'linux' : null;
+  const expectedUnameMachine =
+    process.platform === 'win32'
+      ? null
+      : hostArch === 'aarch64'
+        ? 'arm64'
+        : hostArch === 'x86_64'
+          ? 'x86_64'
+          : null;
+  if (expectedUnameSystem && unameSystem?.toLowerCase() !== expectedUnameSystem) {
+    rejectionReasons.push('host_uname_os_mismatch');
+  }
+  if (expectedUnameMachine && unameMachine !== expectedUnameMachine) {
+    rejectionReasons.push('host_uname_arch_mismatch');
+  }
+
+  return {
+    process_platform: process.platform,
+    process_arch: process.arch,
+    host_os: hostOs,
+    host_arch: hostArch,
+    rustc_host_target: rustcHostTarget,
+    toolchain_fingerprint_digest: toolchainFingerprintDigest,
+    uname_system: unameSystem,
+    uname_machine: unameMachine,
+    rosetta_translated: rosettaTranslated,
+    rejection_reasons: [...new Set(rejectionReasons)],
+    probes: probes.map((probe) => ({
+      command: probe.command,
+      status: probe.status === 0 ? 'pass' : 'fail',
+      stdout: c8Tail(probe.stdout),
+      stderr: c8Tail(probe.stderr),
+      error: probe.error,
+    })),
+    native:
+      Boolean(hostOs && hostArch) &&
+      rejectionReasons.length === 0 &&
+      !rosettaTranslated,
+  };
+}
+
+function c8NativeValidateHost(report, target) {
+  const observed = report.execution_host;
+  c8NativeRequire(
+    report,
+    observed.host_os === target.host_os,
+    'native_host_os_mismatch',
+    `native gate ${target.cell_id} requires ${target.host_os}, observed ${observed.host_os || 'unknown'}`,
+    { expected: target.host_os, observed: observed.host_os }
+  );
+  c8NativeRequire(
+    report,
+    observed.host_arch === target.host_arch,
+    'native_host_arch_mismatch',
+    `native gate ${target.cell_id} requires ${target.host_arch}, observed ${observed.host_arch || 'unknown'}`,
+    { expected: target.host_arch, observed: observed.host_arch }
+  );
+  c8NativeRequire(
+    report,
+    observed.rustc_host_target === target.host_target,
+    'native_host_target_mismatch',
+    `native gate ${target.cell_id} requires rustc host target ${target.host_target}`,
+    { expected: target.host_target, observed: observed.rustc_host_target }
+  );
+  c8NativeRequire(
+    report,
+    observed.native === true,
+    'native_host_not_verified',
+    'the current process is not proven to be a native target host',
+    { rejection_reasons: observed.rejection_reasons }
+  );
+  return report.failure_details.length === 0;
+}
+
+function c8NativeGitProbe(report, checkId, commandArgs, timeout = 10000) {
+  const probe = c8NativeRunProbe('git', commandArgs, timeout);
+  const entry = {
+    check_id: checkId,
+    kind: 'metadata_probe',
+    command: probe.command,
+    started_at: probe.started_at,
+    finished_at: probe.finished_at,
+    exit_code: probe.status,
+    status: probe.status === 0 ? 'pass' : 'fail',
+    stdout: c8Tail(probe.stdout),
+    stderr: c8Tail(probe.stderr),
+  };
+  report.commands.push(entry);
+  report.metadata_commands.push(entry);
+  return probe;
+}
+
+function c8NativeValidateSourceCheckpoint(report, sourceSha) {
+  const branchProbe = c8NativeGitProbe(report, 'source_branch', [
+    'branch',
+    '--show-current',
+  ]);
+  const branch = branchProbe.stdout.trim();
+  const statusProbe = c8NativeGitProbe(report, 'source_worktree', [
+    'status',
+    '--porcelain',
+    '--untracked-files=all',
+  ]);
+  const worktreeStatus = statusProbe.stdout.trim();
+  const headProbe = c8NativeGitProbe(report, 'source_head', [
+    'rev-parse',
+    'HEAD',
+  ]);
+  const observedHead = headProbe.stdout.trim();
+  const checkpoint = {
+    branch,
+    local_head: sourceSha,
+    observed_head: observedHead,
+    shared_ref: `refs/heads/${C8_BRANCH}`,
+    clean_worktree: statusProbe.status === 0 && !worktreeStatus,
+    verified_remote_sha: null,
+    remote_status: 'not_checked',
+  };
+  report.source_checkpoint = checkpoint;
+  c8NativeRequire(
+    report,
+    branch === C8_BRANCH,
+    'native_branch_mismatch',
+    `native cell must run on ${C8_BRANCH}`,
+    { expected: C8_BRANCH, observed: branch }
+  );
+  c8NativeRequire(
+    report,
+    statusProbe.status === 0,
+    'native_worktree_probe_failed',
+    'native cell cannot prove a clean worktree',
+    { exit_code: statusProbe.status, stderr: c8Tail(statusProbe.stderr) }
+  );
+  c8NativeRequire(
+    report,
+    !worktreeStatus,
+    'native_dirty_worktree',
+    'native cell requires a clean worktree before evidence is accepted',
+    { status: worktreeStatus }
+  );
+  c8NativeRequire(
+    report,
+    observedHead === sourceSha,
+    'native_head_mismatch',
+    'native cell source HEAD changed during dispatch',
+    { expected: sourceSha, observed: observedHead }
+  );
+
+  if (checkpoint.clean_worktree && branch === C8_BRANCH) {
+    const remoteProbe = c8NativeGitProbe(
+      report,
+      'source_remote_sha',
+      ['ls-remote', 'origin', `refs/heads/${C8_BRANCH}`]
+    );
+    const remoteSha = remoteProbe.stdout.trim().split(/\s+/)[0] || null;
+    checkpoint.verified_remote_sha = c8Sha(remoteSha) ? remoteSha : null;
+    checkpoint.remote_status =
+      remoteProbe.status === 0 && checkpoint.verified_remote_sha === sourceSha
+        ? 'matches_local_head'
+        : 'not_equal_to_local_head';
+    c8NativeRequire(
+      report,
+      remoteProbe.status === 0 && checkpoint.verified_remote_sha === sourceSha,
+      'native_remote_checkpoint_mismatch',
+      'native cell requires the pushed origin branch to match the local source HEAD',
+      { expected: sourceSha, observed: checkpoint.verified_remote_sha }
+    );
+  } else {
+    checkpoint.remote_status = 'skipped_dirty_or_wrong_branch';
+  }
+  return checkpoint;
+}
+
+function c8NativeReadJson(report, path, label) {
+  const normalized = normalizeRepoPath(path);
+  if (!isSafeRepoPath(normalized)) {
+    c8NativeFailure(report, 'native_invalid_repo_path', `${label} path is not repository-relative`, {
+      path,
+    });
+    return null;
+  }
+  const absolute = join(repoRoot, normalized);
+  if (!statSafe(absolute)?.isFile()) {
+    c8NativeFailure(report, 'native_missing_artifact', `missing ${label}: ${normalized}`, {
+      path: normalized,
+    });
+    return null;
+  }
+  try {
+    return {
+      path: normalized,
+      absolute,
+      value: JSON.parse(readFileSync(absolute, 'utf8')),
+      raw_sha256: sha256File(absolute),
+    };
+  } catch (error) {
+    c8NativeFailure(report, 'native_invalid_json', `${label} is invalid JSON: ${error.message}`, {
+      path: normalized,
+    });
+    return null;
+  }
+}
+
+function c8NativeExpectedPlatformCells() {
+  return Object.fromEntries(
+    Object.entries(C8_NATIVE_CELL_SPECS).map(([cellId, spec]) => [
+      cellId,
+      {
+        host_os: spec.host_os,
+        host_arch: spec.host_arch,
+        host_target: spec.host_target,
+        runtime_target: spec.runtime_target,
+        host_surface: spec.host_surface,
+        package_format: spec.package_format,
+        capability_availability:
+          cellId === 'linux_headless_x64'
+            ? {
+                coding_codex_native: { availability: 'required_exact_set' },
+                browser: {
+                  availability: 'exact_unavailable',
+                  error_code: 'CAPABILITY_UNAVAILABLE_ON_PLATFORM',
+                },
+                computer: {
+                  availability: 'exact_unavailable',
+                  error_code: 'CAPABILITY_UNAVAILABLE_ON_PLATFORM',
+                },
+              }
+            : cellId === 'linux_desktop_x64'
+              ? {
+                  coding_codex_native: { availability: 'required_exact_set' },
+                  browser: { availability: 'release_manifest_defined' },
+                  computer: {
+                    availability: 'independent_partial_or_exact_unavailable',
+                  },
+                }
+              : {
+                  coding_codex_native: { availability: 'required_exact_set' },
+                  browser: { availability: 'release_manifest_defined' },
+                  computer: { availability: 'release_manifest_defined' },
+                },
+      },
+    ])
+  );
+}
+
+function c8NativeValidatePlatformInputs(report, sourceSha) {
+  const result = {
+    status: 'fail',
+    input_digests: {},
+    platform_matrix: null,
+    required_checks: [],
+    verification_points: [],
+  };
+  const fixture = c8NativeReadJson(
+    report,
+    C8_PLATFORM_VALIDATION_FIXTURE_PATH,
+    'generated PlatformValidationManifest fixture'
+  );
+  const platformPayloadArtifact = c8NativeReadJson(
+    report,
+    C8_PLATFORM_VALIDATION_MANIFEST_PATH,
+    'PlatformValidationManifest payload'
+  );
+  const runtimeFixture = c8NativeReadJson(
+    report,
+    C8_RUNTIME_RELEASE_FIXTURE_PATH,
+    'generated Runtime release fixture'
+  );
+  const runtimeInput = c8NativeReadJson(
+    report,
+    C8_RUNTIME_RELEASE_INPUT_PATH,
+    'Runtime release input'
+  );
+  if (!fixture || !platformPayloadArtifact || !runtimeFixture || !runtimeInput) {
+    return result;
+  }
+
+  const platformPayload = fixture.value?.payload;
+  const runtimePayload = runtimeFixture.value?.payload;
+  const platformPayloadDigest = fixture.value?.payload_digest;
+  const runtimePayloadDigest = runtimeFixture.value?.payload_digest;
+  result.input_digests.platform_validation_manifest = {
+    expected: C8_EXPECTED_DIGESTS.platform_validation_manifest,
+    observed: platformPayloadDigest || null,
+    raw_sha256: fixture.raw_sha256,
+    status:
+      platformPayloadDigest === C8_EXPECTED_DIGESTS.platform_validation_manifest
+        ? 'pass'
+        : 'fail',
+  };
+  result.input_digests.runtime_release = {
+    expected: C8_EXPECTED_DIGESTS.runtime_release,
+    observed: runtimePayloadDigest || null,
+    raw_sha256: runtimeFixture.raw_sha256,
+    status:
+      runtimePayloadDigest === C8_EXPECTED_DIGESTS.runtime_release
+        ? 'pass'
+        : 'fail',
+  };
+  c8NativeRequire(
+    report,
+    platformPayloadDigest === C8_EXPECTED_DIGESTS.platform_validation_manifest,
+    'native_platform_fixture_digest',
+    'generated PlatformValidationManifest fixture digest differs from the frozen input'
+  );
+  c8NativeRequire(
+    report,
+    runtimePayloadDigest === C8_EXPECTED_DIGESTS.runtime_release,
+    'native_runtime_fixture_digest',
+    'generated Runtime release fixture digest differs from the frozen input'
+  );
+  c8NativeRequire(
+    report,
+    fixture.value?.digest_algorithm === 'sorted-json-sha256-v1' &&
+      runtimeFixture.value?.digest_algorithm === 'sorted-json-sha256-v1',
+    'native_input_digest_algorithm',
+    'native validation inputs must use sorted-json-sha256-v1'
+  );
+  c8NativeRequire(
+    report,
+    c8DigestPayload(platformPayload) === platformPayloadDigest &&
+      c8DigestPayload(runtimePayload) === runtimePayloadDigest,
+    'native_input_payload_digest',
+    'native validation input payload bytes do not reproduce their frozen digests'
+  );
+  c8NativeRequire(
+    report,
+    c8CanonicalEqual(platformPayloadArtifact.value, platformPayload),
+    'native_platform_payload_mismatch',
+    'PlatformValidationManifest source payload differs from its generated fixture'
+  );
+  c8NativeRequire(
+    report,
+    c8CanonicalEqual(runtimeInput.value, runtimePayload),
+    'native_runtime_payload_mismatch',
+    'Runtime release source payload differs from its generated fixture'
+  );
+  c8NativeRequire(
+    report,
+    platformPayload?.candidate_source_sha === sourceSha,
+    'native_platform_source_mismatch',
+    'PlatformValidationManifest candidate_source_sha differs from the current HEAD',
+    { expected: sourceSha, observed: platformPayload?.candidate_source_sha || null }
+  );
+  for (const [key, expected] of Object.entries({
+    confirmed_decision_contract_digest:
+      C8_EXPECTED_DIGESTS.confirmed_decision_contract,
+    runtime_release_digest: C8_EXPECTED_DIGESTS.runtime_release,
+    canonical_schema_manifest_digest: C8_EXPECTED_DIGESTS.canonical_schema_manifest,
+    cargo_lock_digest: C8_EXPECTED_DIGESTS.cargo_lock,
+    official_preset_seed_manifest_digest: C8_EXPECTED_DIGESTS.official_seed,
+    capability_availability_manifest_digest: C8_EXPECTED_DIGESTS.capability_availability,
+    coding_codex_native_contract_digest: C8_EXPECTED_DIGESTS.coding_codex_native,
+  })) {
+    c8NativeRequire(
+      report,
+      platformPayload?.[key] === expected,
+      'native_platform_input_digest',
+      `PlatformValidationManifest ${key} differs from the frozen input`,
+      { expected, observed: platformPayload?.[key] || null }
+    );
+  }
+
+  const cells = platformPayload?.platform_matrix?.target_cells;
+  const expectedCellIds = [...C8_REQUIRED_NATIVE_CELLS].sort();
+  const observedCellIds =
+    cells && typeof cells === 'object' && !Array.isArray(cells)
+      ? Object.keys(cells).sort()
+      : [];
+  c8NativeRequire(
+    report,
+    JSON.stringify(observedCellIds) === JSON.stringify(expectedCellIds),
+    'native_platform_cell_exact_set',
+    'PlatformValidationManifest target cell set differs from the frozen five-cell matrix',
+    { expected: expectedCellIds, observed: observedCellIds }
+  );
+  const expectedCells = c8NativeExpectedPlatformCells();
+  for (const cellId of C8_REQUIRED_NATIVE_CELLS) {
+    const observed = cells?.[cellId];
+    const expected = expectedCells[cellId];
+    c8NativeRequire(
+      report,
+      c8CanonicalEqual(observed, expected),
+      'native_platform_cell_contract',
+      `PlatformValidationManifest ${cellId} does not match the frozen target/availability contract`,
+      { cell_id: cellId, expected, observed: observed || null }
+    );
+  }
+  result.platform_matrix = cells || null;
+
+  const requiredChecks = Array.isArray(platformPayload?.required_checks)
+    ? platformPayload.required_checks
+    : [];
+  const expectedChecks = C8_REQUIRED_NATIVE_CELLS.map((cellId) => {
+    const spec = C8_NATIVE_CELL_SPECS[cellId];
+    return {
+      check_id: spec.check_id,
+      target_cells: [cellId],
+      command: spec.command,
+      required_execution_kind: 'native',
+    };
+  });
+  result.required_checks = requiredChecks;
+  c8NativeRequire(
+    report,
+    c8CanonicalEqual(
+      requiredChecks.map((check) => ({
+        check_id: check?.check_id,
+        target_cells: check?.target_cells,
+        command: check?.command,
+        required_execution_kind: check?.required_execution_kind,
+      })).sort((left, right) => left.check_id.localeCompare(right.check_id)),
+      expectedChecks.sort((left, right) => left.check_id.localeCompare(right.check_id))
+    ),
+    'native_required_check_contract',
+    'PlatformValidationManifest required native cell checks differ from the frozen dispatch table'
+  );
+
+  const verificationPoints = Array.isArray(platformPayload?.platform_verification_points)
+    ? platformPayload.platform_verification_points
+    : [];
+  result.verification_points = verificationPoints;
+  for (const cellId of C8_REQUIRED_NATIVE_CELLS) {
+    const expectedPoint = verificationPoints.filter(
+      (point) => point?.target_cell === cellId
+    );
+    c8NativeRequire(
+      report,
+      expectedPoint.length === 1 &&
+        expectedPoint[0]?.exact_check_id === C8_NATIVE_CELL_SPECS[cellId].check_id,
+      'native_verification_point_contract',
+      `PlatformValidationManifest must declare exactly one native verification point for ${cellId} with its exact full-gate check`,
+      { cell_id: cellId, observed: expectedPoint }
+    );
+  }
+  c8NativeRequire(
+    report,
+    c8CanonicalEqual(platformPayload?.platform_matrix?.recheck_policy, {
+      only_after_complete_round_returns: true,
+      merge_fixes_before_freezing_new_tuple: true,
+      affected_cells_run_full_gate: true,
+      unaffected_cells_run_native_scoped_attestation: true,
+      central_owner_cannot_attest_for_native_host: true,
+      single_fix_platform_handoff_forbidden: true,
+    }),
+    'native_recheck_policy_contract',
+    'PlatformValidationManifest recheck policy differs from the frozen whole-cohort policy'
+  );
+  return {
+    ...result,
+    platform_payload: platformPayload,
+    runtime_payload: runtimePayload,
+    status: report.failure_details.length === 0 ? 'pass' : 'fail',
+  };
+}
+
+function c8NativeResolveEvidencePath(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  return resolve(repoRoot, value);
+}
+
+function c8NativePathInsideRepo(absolute) {
+  const normalized = relative(repoRoot, absolute).replaceAll('\\', '/');
+  return (
+    normalized === '' ||
+    (normalized !== '..' &&
+      !normalized.startsWith('../') &&
+      !/^[A-Za-z]:\//.test(normalized))
+  );
+}
+
+function c8NativeValidateArtifactRef(
+  report,
+  ref,
+  label,
+  { requireFile = true, inspectJson = true } = {}
+) {
+  const normalized = normalizeRepoPath(ref?.normalized_relative_path);
+  const unknownKeys =
+    ref && typeof ref === 'object' && !Array.isArray(ref)
+      ? Object.keys(ref)
+          .filter(
+            (key) =>
+              !['artifact_id', 'digest', 'normalized_relative_path'].includes(
+                key
+              )
+          )
+          .sort()
+      : [];
+  c8NativeRequire(
+    report,
+    unknownKeys.length === 0,
+    'native_evidence_ref_unknown_fields',
+    `${label} contains fields outside LogicalArtifactRef`,
+    { fields: unknownKeys }
+  );
+  const shape =
+    ref &&
+    typeof ref === 'object' &&
+    !Array.isArray(ref) &&
+    typeof ref.artifact_id === 'string' &&
+    ref.artifact_id.length > 0 &&
+    c8PortablePath(normalized) &&
+    c8Hex(ref.digest);
+  if (!c8NativeRequire(
+    report,
+    shape,
+    'native_evidence_ref_invalid',
+    `${label} is not a valid logical artifact reference`,
+    { observed: ref || null }
+  )) {
+    return null;
+  }
+  if (!isSafeRepoPath(normalized)) {
+    c8NativeFailure(
+      report,
+      'native_evidence_ref_outside_repo',
+      `${label} must use a repository-relative evidence path`,
+      { path: normalized }
+    );
+    return null;
+  }
+  const absolute = join(repoRoot, normalized);
+  if (!requireFile) return { ...ref, normalized_relative_path: normalized };
+  if (!statSafe(absolute)?.isFile()) {
+    c8NativeFailure(
+      report,
+      'native_evidence_artifact_missing',
+      `${label} is missing: ${normalized}`,
+      { path: normalized }
+    );
+    return null;
+  }
+  let observedDigest;
+  try {
+    observedDigest = sha256File(absolute);
+  } catch (error) {
+    c8NativeFailure(
+      report,
+      'native_evidence_artifact_unreadable',
+      `${label} cannot be read: ${error.message}`,
+      { path: normalized }
+    );
+    return null;
+  }
+  if (observedDigest.toLowerCase() !== String(ref.digest).toLowerCase()) {
+    c8NativeFailure(
+      report,
+      'native_evidence_artifact_digest_mismatch',
+      `${label} digest does not match the referenced artifact`,
+      { path: normalized, expected: ref.digest, observed: observedDigest }
+    );
+    return null;
+  }
+  if (inspectJson && normalized.toLowerCase().endsWith('.json')) {
+    try {
+      const parsed = JSON.parse(readFileSync(absolute, 'utf8'));
+      c8NativeInspectAuxiliaryEvidence(report, parsed, label, report.target_cell);
+    } catch (error) {
+      c8NativeFailure(
+        report,
+        'native_evidence_artifact_invalid_json',
+        `${label} is not valid JSON: ${error.message}`,
+        { path: normalized }
+      );
+      return null;
+    }
+  }
+  return {
+    ...ref,
+    normalized_relative_path: normalized,
+    absolute,
+    observed_digest: observedDigest,
+  };
+}
+
+function c8NativeInspectAuxiliaryEvidence(report, value, label, target) {
+  const payload =
+    value && typeof value === 'object' && value.payload && typeof value.payload === 'object'
+      ? value.payload
+      : value;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return;
+  const observedCell = payload.cell_id || payload.target_cell;
+  if (observedCell !== undefined) {
+    c8NativeRequire(
+      report,
+      observedCell === target.cell_id,
+      'native_auxiliary_cell_mismatch',
+      `${label} identifies a different target cell`,
+      { expected: target.cell_id, observed: observedCell }
+    );
+  }
+  if (payload.host_surface !== undefined) {
+    c8NativeRequire(
+      report,
+      payload.host_surface === target.host_surface,
+      'native_auxiliary_surface_mismatch',
+      `${label} identifies a different host surface`,
+      { expected: target.host_surface, observed: payload.host_surface }
+    );
+  }
+  if (payload.execution_kind !== undefined) {
+    c8NativeRequire(
+      report,
+      payload.execution_kind === 'native',
+      'native_auxiliary_execution_kind',
+      `${label} is not native execution evidence`,
+      { observed: payload.execution_kind }
+    );
+  }
+  if (payload.native !== undefined) {
+    c8NativeRequire(
+      report,
+      payload.native === true,
+      'native_auxiliary_native_flag',
+      `${label} does not assert native execution`,
+      { observed: payload.native }
+    );
+  }
+  if (
+    payload.status !== undefined &&
+    (payload.gate_name !== undefined ||
+      payload.cell_id !== undefined ||
+      payload.target_cell !== undefined ||
+      payload.verification_point_id !== undefined ||
+      payload.native !== undefined)
+  ) {
+    c8NativeRequire(
+      report,
+      payload.status === 'pass',
+      'native_auxiliary_status',
+      `${label} is not a passing evidence artifact`,
+      { observed: payload.status }
+    );
+  }
+  for (const key of [
+    'virtualization',
+    'virtual_machine',
+    'emulation',
+    'emulator',
+    'rosetta',
+    'containerized',
+    'container',
+    'wsl',
+  ]) {
+    if (payload[key] === undefined) continue;
+    const valueText = String(payload[key]).toLowerCase();
+    const disallowed =
+      payload[key] === true ||
+      (typeof payload[key] === 'string' &&
+        valueText !== '' &&
+        !['none', 'false', 'no', 'native'].includes(valueText));
+    c8NativeRequire(
+      report,
+      !disallowed,
+      'native_auxiliary_non_native_environment',
+      `${label} contains a cross-compile/VM/emulation/container environment marker`,
+      { key, observed: payload[key] }
+    );
+  }
+}
+
+function c8NativeLoadCellEvidence(report, dispatch) {
+  if (!dispatch.evidence_path) {
+    c8NativeFailure(
+      report,
+      'native_evidence_required',
+      `${dispatch.gate_name} requires --evidence <PlatformCellEvidence.json>; no native evidence was supplied`
+    );
+    return null;
+  }
+  const absolute = c8NativeResolveEvidencePath(dispatch.evidence_path);
+  if (!absolute || !statSafe(absolute)?.isFile()) {
+    c8NativeFailure(
+      report,
+      'native_evidence_missing',
+      'the selected PlatformCellEvidence file does not exist',
+      {
+        source_kind: dispatch.evidence_path_source,
+        configured_path: dispatch.evidence_path_source === 'canonical_default'
+          ? 'canonical cell evidence path'
+          : 'user-supplied path',
+      }
+    );
+    return null;
+  }
+  let source;
+  let parsed;
+  try {
+    source = readFileSync(absolute, 'utf8');
+    parsed = JSON.parse(source);
+  } catch (error) {
+    c8NativeFailure(
+      report,
+      'native_evidence_invalid_json',
+      `the supplied PlatformCellEvidence is invalid JSON: ${error.message}`
+    );
+    return null;
+  }
+  const value =
+    parsed &&
+    typeof parsed === 'object' &&
+    parsed.payload &&
+    typeof parsed.payload === 'object'
+      ? parsed.payload
+      : parsed;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    c8NativeFailure(
+      report,
+      'native_evidence_shape',
+      'PlatformCellEvidence must be a JSON object'
+    );
+    return null;
+  }
+  const evidenceDirectory = join(
+    repoRoot,
+    report.evidence_directory
+  );
+  const canonicalPath = join(evidenceDirectory, 'cell-evidence.json');
+  try {
+    mkdirSync(evidenceDirectory, { recursive: true });
+    writeFileSync(canonicalPath, source);
+  } catch (error) {
+    c8NativeFailure(
+      report,
+      'native_evidence_copy_failed',
+      `cannot retain the supplied evidence as a repo-local artifact: ${error.message}`
+    );
+    return null;
+  }
+  report.input_evidence = {
+    source_kind: c8NativePathInsideRepo(absolute) ? 'repository' : 'external',
+    raw_sha256: createHash('sha256').update(source).digest('hex'),
+    normalized_relative_path: relative(repoRoot, canonicalPath).replaceAll('\\', '/'),
+    envelope: Boolean(parsed?.payload),
+  };
+  return { value, source, absolute, canonicalPath };
+}
+
+function c8NativeValidateCellEvidence(
+  report,
+  dispatch,
+  sourceSha,
+  platform,
+  loaded
+) {
+  if (!loaded) return null;
+  const evidence = loaded.value;
+  const target = dispatch.target;
+  const runtimeCell = platform.runtime_payload?.target_matrix?.[target.cell_id];
+  const expectedTuple = c8NativeExpectedTuple(sourceSha);
+  const allowedKeys = [
+    'artifact_digests',
+    'capability_availability_manifest_digest',
+    'cell_id',
+    'coding_codex_native_exact_set_digest',
+    'coding_codex_native_result',
+    'cohort_tuple',
+    'evidence_bundle',
+    'executed_checks',
+    'gate_suite_digest',
+    'input_manifest_refs',
+    'invalidation',
+    'native_host_fingerprint',
+    'run_id',
+    'schema_version',
+    'status',
+    'unexecuted_check_reasons',
+    'verification_point_results',
+  ];
+  const unknownKeys = Object.keys(evidence)
+    .filter((key) => !allowedKeys.includes(key))
+    .sort();
+  c8NativeRequire(
+    report,
+    unknownKeys.length === 0,
+    'native_evidence_unknown_fields',
+    'PlatformCellEvidence contains fields outside the frozen schema',
+    { fields: unknownKeys }
+  );
+  c8NativeRequire(
+    report,
+    evidence.schema_version === '1.0.0',
+    'native_evidence_schema',
+    'PlatformCellEvidence schema_version must be 1.0.0'
+  );
+  c8NativeRequire(
+    report,
+    typeof evidence.run_id === 'string' && evidence.run_id.length > 0,
+    'native_evidence_run_id',
+    'PlatformCellEvidence requires a non-empty run_id'
+  );
+  c8NativeRequire(
+    report,
+    evidence.cell_id === target.cell_id,
+    'native_evidence_cell_mismatch',
+    'PlatformCellEvidence cell_id does not match the dispatched cell',
+    { expected: target.cell_id, observed: evidence.cell_id || null }
+  );
+  c8NativeRequire(
+    report,
+    evidence.status === 'pass',
+    'native_evidence_not_pass',
+    'only a pass PlatformCellEvidence can be consumed',
+    { observed: evidence.status || null }
+  );
+  c8NativeRequire(
+    report,
+    c8CanonicalEqual(evidence.cohort_tuple, expectedTuple),
+    'native_evidence_tuple_mismatch',
+    'PlatformCellEvidence does not match the current frozen cohort tuple',
+    { expected: expectedTuple, observed: evidence.cohort_tuple || null }
+  );
+
+  const fingerprint = evidence.native_host_fingerprint;
+  const fingerprintUnknownKeys =
+    fingerprint &&
+    typeof fingerprint === 'object' &&
+    !Array.isArray(fingerprint)
+      ? Object.keys(fingerprint)
+          .filter(
+            (key) =>
+              ![
+                'host_os',
+                'host_arch',
+                'host_target',
+                'runtime_target',
+                'toolchain_fingerprint_digest',
+              ].includes(key)
+          )
+          .sort()
+      : [];
+  c8NativeRequire(
+    report,
+    fingerprintUnknownKeys.length === 0,
+    'native_evidence_host_unknown_fields',
+    'native_host_fingerprint contains fields outside the frozen schema',
+    { fields: fingerprintUnknownKeys }
+  );
+  c8NativeRequire(
+    report,
+    fingerprint &&
+      typeof fingerprint === 'object' &&
+      !Array.isArray(fingerprint) &&
+      fingerprint.host_os === target.host_os &&
+      fingerprint.host_arch === target.host_arch &&
+      fingerprint.host_target === target.host_target &&
+      fingerprint.runtime_target === target.runtime_target &&
+      c8Hex(fingerprint.toolchain_fingerprint_digest),
+    'native_evidence_host_fingerprint',
+    'PlatformCellEvidence native_host_fingerprint does not match the target cell',
+    { expected: target, observed: fingerprint || null }
+  );
+  c8NativeRequire(
+    report,
+    fingerprint?.host_os === report.execution_host.host_os &&
+      fingerprint?.host_arch === report.execution_host.host_arch &&
+      fingerprint?.host_target === target.host_target &&
+      fingerprint?.runtime_target === target.runtime_target,
+    'native_evidence_host_probe_mismatch',
+    'PlatformCellEvidence fingerprint does not match the current native process'
+  );
+
+  const expectedInputRefs = {
+    platform_validation_manifest: {
+      artifact_id: 'platform_validation_manifest',
+      normalized_relative_path:
+        'contracts/validation/platform-validation-manifest.payload.json',
+      digest: C8_EXPECTED_DIGESTS.platform_validation_manifest,
+    },
+    runtime_release_manifest: {
+      artifact_id: 'codex_runtime_release_input',
+      normalized_relative_path: 'contracts/runtime/codex-runtime-release-input.json',
+      digest: C8_EXPECTED_DIGESTS.runtime_release,
+    },
+  };
+  c8NativeRequire(
+    report,
+    c8CanonicalEqual(evidence.input_manifest_refs, expectedInputRefs),
+    'native_evidence_input_refs',
+    'PlatformCellEvidence input_manifest_refs do not match the frozen logical inputs',
+    { expected: expectedInputRefs, observed: evidence.input_manifest_refs || null }
+  );
+
+  const artifactDigests = evidence.artifact_digests;
+  c8NativeRequire(
+    report,
+    artifactDigests &&
+      typeof artifactDigests === 'object' &&
+      !Array.isArray(artifactDigests) &&
+      ['host', 'package', 'runtime_helpers', 'runtime_sidecar'].every((key) =>
+        c8Hex(artifactDigests[key])
+      ),
+    'native_evidence_artifact_digests',
+    'PlatformCellEvidence must provide host/package/helper/sidecar digests'
+  );
+  c8NativeRequire(
+    report,
+    artifactDigests?.host === runtimeCell?.host_artifact?.digest &&
+      artifactDigests?.package === runtimeCell?.package_content_digest &&
+      artifactDigests?.runtime_sidecar === runtimeCell?.sidecar_artifact?.digest,
+    'native_evidence_runtime_artifacts',
+    'PlatformCellEvidence artifacts do not match the frozen Runtime release target',
+    {
+      expected: {
+        host: runtimeCell?.host_artifact?.digest || null,
+        package: runtimeCell?.package_content_digest || null,
+        runtime_sidecar: runtimeCell?.sidecar_artifact?.digest || null,
+      },
+      observed: artifactDigests || null,
+    }
+  );
+  c8NativeRequire(
+    report,
+    evidence.coding_codex_native_exact_set_digest ===
+      C8_EXPECTED_DIGESTS.coding_codex_native &&
+      evidence.coding_codex_native_result === 'pass',
+    'native_evidence_coding_contract',
+    'PlatformCellEvidence does not prove the frozen complete coding.codex-native surface'
+  );
+  c8NativeRequire(
+    report,
+    evidence.capability_availability_manifest_digest ===
+      C8_EXPECTED_DIGESTS.capability_availability,
+    'native_evidence_availability_digest',
+    'PlatformCellEvidence capability availability digest differs from D-028'
+  );
+  c8NativeRequire(
+    report,
+    c8Hex(evidence.gate_suite_digest),
+    'native_evidence_gate_suite_digest',
+    'PlatformCellEvidence gate_suite_digest must be a 64-character digest'
+  );
+  c8NativeRequire(
+    report,
+    evidence.invalidation === undefined || evidence.invalidation === null,
+    'native_evidence_invalidated',
+    'invalidated PlatformCellEvidence cannot be consumed',
+    { invalidation: evidence.invalidation || null }
+  );
+
+  const unexecuted =
+    evidence.unexecuted_check_reasons &&
+    typeof evidence.unexecuted_check_reasons === 'object' &&
+    !Array.isArray(evidence.unexecuted_check_reasons)
+      ? evidence.unexecuted_check_reasons
+      : null;
+  c8NativeRequire(
+    report,
+    unexecuted !== null,
+    'native_evidence_unexecuted_shape',
+    'unexecuted_check_reasons must be an object'
+  );
+  if (dispatch.mode === 'full') {
+    c8NativeRequire(
+      report,
+      unexecuted && Object.keys(unexecuted).length === 0,
+      'native_full_gate_unexecuted_checks',
+      'a full native cell gate cannot contain unexecuted checks',
+      { observed: unexecuted || null }
+    );
+  } else {
+    c8NativeRequire(
+      report,
+      unexecuted && Object.keys(unexecuted).length > 0,
+      'native_scoped_attestation_scope',
+      'a scoped attestation must state why checks outside its scope were not executed'
+    );
+  }
+
+  const executed = Array.isArray(evidence.executed_checks)
+    ? evidence.executed_checks
+    : [];
+  report.artifact_digests = {
+    ...(artifactDigests && typeof artifactDigests === 'object'
+      ? artifactDigests
+      : {}),
+  };
+  const expectedCheck = platform.required_checks.find(
+    (check) => check?.check_id === target.check_id
+  );
+  const executedIds = executed.map((check) => check?.check_id).filter(Boolean);
+  c8NativeRequire(
+    report,
+    new Set(executedIds).size === executedIds.length,
+    'native_evidence_check_duplicates',
+    'PlatformCellEvidence executed_checks contains duplicate or invalid check IDs'
+  );
+  if (dispatch.mode === 'full') {
+    c8NativeRequire(
+      report,
+      executedIds.length === 1 && executedIds[0] === target.check_id,
+      'native_full_gate_check_exact_set',
+      `full native evidence must execute exactly ${target.check_id}`,
+      { expected: [target.check_id], observed: executedIds }
+    );
+  } else {
+    c8NativeRequire(
+      report,
+      executed.length > 0,
+      'native_scoped_attestation_empty',
+      'scoped native attestation must execute at least one native check'
+    );
+  }
+  for (const check of executed) {
+    const checkUnknownKeys =
+      check && typeof check === 'object' && !Array.isArray(check)
+        ? Object.keys(check)
+            .filter(
+              (key) =>
+                ![
+                  'check_id',
+                  'command',
+                  'evidence_kind',
+                  'exit_code',
+                  'output_artifact',
+                ].includes(key)
+            )
+            .sort()
+        : [];
+    c8NativeRequire(
+      report,
+      checkUnknownKeys.length === 0,
+      'native_evidence_check_unknown_fields',
+      `native evidence check ${check?.check_id || '(missing)'} contains fields outside the frozen schema`,
+      { fields: checkUnknownKeys }
+    );
+    const isFullCheck = check?.check_id === target.check_id;
+    const commandMatches = isFullCheck
+      ? c8NormalizeCommand(check?.command) === c8NormalizeCommand(expectedCheck?.command)
+      : typeof check?.command === 'string' && check.command.trim().length > 0;
+    c8NativeRequire(
+      report,
+      typeof check?.check_id === 'string' &&
+        check.check_id.length > 0 &&
+        commandMatches &&
+        check.evidence_kind === 'native' &&
+        check.exit_code === 0,
+      'native_evidence_check_invalid',
+      `native evidence check ${check?.check_id || '(missing)'} is not a passing native check`,
+      { observed: check || null }
+    );
+    c8NativeValidateArtifactRef(
+      report,
+      check?.output_artifact,
+      `executed check ${check?.check_id || '(missing)'} output_artifact`
+    );
+  }
+  report.checks = executed.map((check) => ({
+    check_id: check?.check_id || null,
+    command: check?.command || null,
+    execution_kind: check?.evidence_kind || null,
+    exit_code: typeof check?.exit_code === 'number' ? check.exit_code : null,
+    status: check?.exit_code === 0 ? 'pass' : 'fail',
+    output_artifact: check?.output_artifact || null,
+  }));
+  report.statuses = Object.fromEntries(
+    report.checks
+      .filter((check) => check.check_id)
+      .map((check) => [check.check_id, check.status])
+  );
+
+  const expectedPoints = platform.verification_points.filter(
+    (point) => point?.target_cell === target.cell_id
+  );
+  const pointResults = Array.isArray(evidence.verification_point_results)
+    ? evidence.verification_point_results
+    : [];
+  const pointIds = pointResults
+    .map((point) => point?.verification_point_id)
+    .filter(Boolean);
+  c8NativeRequire(
+    report,
+    new Set(pointIds).size === pointIds.length,
+    'native_evidence_point_duplicates',
+    'verification_point_results contains duplicate or invalid IDs'
+  );
+  if (dispatch.mode === 'full') {
+    c8NativeRequire(
+      report,
+      c8CanonicalEqual(
+        [...pointIds].sort(),
+        expectedPoints.map((point) => point.verification_point_id).sort()
+      ),
+      'native_full_gate_point_exact_set',
+      'full native evidence must close the exact verification-point set for its cell',
+      { expected: expectedPoints, observed: pointResults }
+    );
+  } else {
+    c8NativeRequire(
+      report,
+      pointResults.length > 0,
+      'native_scoped_attestation_no_points',
+      'scoped native attestation must include at least one verification point'
+    );
+  }
+  for (const point of pointResults) {
+    const pointUnknownKeys =
+      point && typeof point === 'object' && !Array.isArray(point)
+        ? Object.keys(point)
+            .filter(
+              (key) =>
+                ![
+                  'verification_point_id',
+                  'status',
+                  'evidence_ref',
+                ].includes(key)
+            )
+            .sort()
+        : [];
+    c8NativeRequire(
+      report,
+      pointUnknownKeys.length === 0,
+      'native_evidence_point_unknown_fields',
+      `verification point ${point?.verification_point_id || '(missing)'} contains fields outside the frozen schema`,
+      { fields: pointUnknownKeys }
+    );
+    c8NativeRequire(
+      report,
+      expectedPoints.some(
+        (expected) => expected.verification_point_id === point?.verification_point_id
+      ) && point?.status === 'pass',
+      'native_evidence_point_invalid',
+      `verification point ${point?.verification_point_id || '(missing)'} is not a passing point for this cell`
+    );
+    c8NativeValidateArtifactRef(
+      report,
+      point?.evidence_ref,
+      `verification point ${point?.verification_point_id || '(missing)'} evidence_ref`
+    );
+  }
+
+  const bundleRef = c8NativeValidateArtifactRef(
+    report,
+    evidence.evidence_bundle,
+    'PlatformCellEvidence evidence_bundle'
+  );
+  report.cell_evidence = {
+    status: report.failure_details.length === 0 ? 'pass' : 'fail',
+    run_id: evidence.run_id || null,
+    source_path: report.input_evidence?.normalized_relative_path || null,
+    evidence_bundle: bundleRef
+      ? {
+          artifact_id: bundleRef.artifact_id,
+          digest: bundleRef.digest,
+          normalized_relative_path: bundleRef.normalized_relative_path,
+        }
+      : null,
+    executed_check_ids: executedIds,
+    verification_point_ids: pointIds,
+  };
+  return evidence;
+}
+
+function runC8NativeCellGate(dispatch) {
+  const sourceSha = c8ReadGitHeadForReport();
+  const evidenceDirectory =
+    `build.noindex/agent-capability-v2/${sourceSha}/${dispatch.cell_id}`;
+  const report = {
+    schema_version: '1.0.0',
+    gate_name: dispatch.gate_name,
+    evidence_kind: 'native',
+    source_sha: sourceSha,
+    candidate_source_sha: sourceSha,
+    manifest_path: C8_PLATFORM_VALIDATION_MANIFEST_PATH,
+    evidence_directory: evidenceDirectory,
+    dispatch: {
+      cell_id: dispatch.cell_id,
+      mode: dispatch.mode,
+      required_check_id: dispatch.check_id,
+      required_command: dispatch.command,
+      evidence_supplied: dispatch.evidence_path_source !== 'canonical_default',
+      evidence_path_source: dispatch.evidence_path_source,
+    },
+    execution_host: c8NativeHostProbe(),
+    canonical_cohort_tuple: c8NativeExpectedTuple(sourceSha),
+    source_checkpoint: null,
+    target_cell: dispatch.target,
+    platform_validation: { status: 'not_evaluated' },
+    checks: [],
+    statuses: {},
+    pending_native_verification_points: [],
+    artifact_digests: {},
+    metadata_commands: [],
+    commands: [],
+    failure_details: [],
+    preflight_blocked: false,
+  };
+
+  try {
+    c8NativeValidateHost(report, dispatch.target);
+    c8NativeValidateSourceCheckpoint(report, sourceSha);
+    const platform = c8NativeValidatePlatformInputs(report, sourceSha);
+    const {
+      platform_payload: _platformPayload,
+      runtime_payload: _runtimePayload,
+      ...platformSummary
+    } = platform;
+    report.platform_validation = platformSummary;
+    const pendingPoints = (platform.verification_points || [])
+      .filter((point) => point?.target_cell === dispatch.cell_id)
+      .map((point) => ({
+        verification_point_id: point.verification_point_id,
+        target_cell: point.target_cell,
+        status: 'pending_native_verification',
+        exact_check_id: point.exact_check_id,
+      }));
+    report.pending_native_verification_points =
+      report.failure_details.length === 0 ? pendingPoints : [];
+
+    const loaded = c8NativeLoadCellEvidence(report, dispatch);
+    if (loaded) {
+      c8NativeValidateCellEvidence(
+        report,
+        dispatch,
+        sourceSha,
+        platform,
+        loaded
+      );
+    }
+  } catch (error) {
+    c8NativeFailure(
+      report,
+      'native_gate_crash',
+      `native cell gate failed before completing validation: ${error.message}`
+    );
+  }
+
+  if (report.platform_validation?.verification_points?.length) {
+    const targetPendingPoints = report.platform_validation.verification_points
+      .filter((point) => point?.target_cell === dispatch.cell_id)
+      .map((point) => ({
+        verification_point_id: point.verification_point_id,
+        target_cell: point.target_cell,
+        status: 'pending_native_verification',
+        exact_check_id: point.exact_check_id,
+      }));
+    report.pending_native_verification_points =
+      report.failure_details.length === 0 ? [] : targetPendingPoints;
+  }
+  report.preflight_blocked = report.failure_details.some((failure) =>
+    [
+      'native_host_',
+      'native_branch_',
+      'native_worktree_',
+      'native_dirty_',
+      'native_head_',
+      'native_remote_',
+      'native_platform_',
+      'native_runtime_',
+      'native_required_',
+    ].some((prefix) => String(failure.code).startsWith(prefix))
+  );
+  report.status = report.failure_details.length === 0 ? 'pass' : 'fail';
+  return report;
+}
+
+function writeC8NativeCellReport(report) {
+  const reportDir = join(
+    repoRoot,
+    'build.noindex',
+    'agent-capability-v2',
+    report.source_sha,
+    report.gate_name
+  );
+  mkdirSync(reportDir, { recursive: true });
+  const output = {
+    schema_version: '1.0.0',
+    gate_name: report.gate_name,
+    source_sha: report.source_sha,
+    evidence_kind: 'native',
+    ...report,
+    commands: [...(report.commands || []), ...commands],
+    status: report.status === 'pass' && report.failure_details.length === 0
+      ? 'pass'
+      : 'fail',
+    failures: report.failure_details.map((failure) => failure.message),
+  };
+  writeFileSync(
+    join(reportDir, 'summary.json'),
+    `${JSON.stringify(output, null, 2)}\n`
+  );
 }
 
 function c8DefaultPendingNativePoints() {
@@ -1419,6 +3099,12 @@ function c8SkipC8Checks(report, manifest, reason) {
       reason,
     });
   }
+}
+
+function c8SkipNativeChecksIfBlocked(report, manifest, reason) {
+  if (!report?.preflight_blocked) return false;
+  c8SkipC8Checks(report, manifest, reason);
+  return true;
 }
 
 function c8RunCommand(
@@ -1752,14 +3438,22 @@ function c8ExpectedChecks() {
     },
     {
       check_id: 'fresh_v4_root_tests',
-      command: 'cargo test --locked -p nomifun-v4-root',
+      command: 'cargo test --locked -p nomifun-v4-root -- --test-threads=1',
       execution_kind: 'native',
       runner: 'cargo',
-      command_args: ['test', '--locked', '-p', 'nomifun-v4-root'],
+      command_args: [
+        'test',
+        '--locked',
+        '-p',
+        'nomifun-v4-root',
+        '--',
+        '--test-threads=1',
+      ],
     },
     {
       check_id: 'production_host_tests',
-      command: 'cargo test --locked -p nomifun-app --lib router::agent_platform_host',
+      command:
+        'cargo test --locked -p nomifun-app --lib router::agent_platform_host -- --test-threads=1',
       execution_kind: 'native',
       runner: 'cargo',
       command_args: [
@@ -1769,6 +3463,22 @@ function c8ExpectedChecks() {
         'nomifun-app',
         '--lib',
         'router::agent_platform_host',
+        '--',
+        '--test-threads=1',
+      ],
+    },
+    {
+      check_id: 'production_broker_functional_tests',
+      command: 'cargo test --locked -p nomifun-chat-model-broker production:: --lib',
+      execution_kind: 'native',
+      runner: 'cargo',
+      command_args: [
+        'test',
+        '--locked',
+        '-p',
+        'nomifun-chat-model-broker',
+        'production::',
+        '--lib',
       ],
     },
     {
@@ -1892,7 +3602,7 @@ function c8ValidateC8Manifest(report, manifest, sourceSha) {
   c8Require(
     report,
     tupleInputs?.platform_validation_manifest_digest?.toLowerCase() ===
-      C8_EXPECTED_DIGESTS.platform_validation_contract,
+      C8_EXPECTED_DIGESTS.platform_validation_manifest,
     'cohort_tuple_platform_digest',
     'C8-WIN-PRE platform-validation tuple input differs from the frozen contract'
   );
@@ -1979,6 +3689,10 @@ function c8ValidateC8Manifest(report, manifest, sourceSha) {
     platform_validation_contract: {
       path: 'crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json',
       digest: C8_EXPECTED_DIGESTS.platform_validation_contract,
+    },
+    platform_validation_manifest: {
+      path: 'crates/backend/nomifun-agent-contracts/contracts/generated/platform-validation-fixture.envelope.json',
+      digest: C8_EXPECTED_DIGESTS.platform_validation_manifest,
     },
     runtime_release: {
       path: 'crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json',
@@ -2158,14 +3872,10 @@ function c8ResolveC8SourceCheckpoint(report, manifest, sourceSha) {
     'source_checkpoint_clean_worktree',
     ['status', '--porcelain', '--untracked-files=all']
   );
-  resolved.worktree_status = statusResult.stdout.trim();
-  if (resolved.clean_worktree_required && resolved.worktree_status) {
-    c8Failure(
-      report,
-      'dirty_worktree',
-      'C8-WIN-PRE requires a clean worktree before native evidence is accepted',
-      { status: resolved.worktree_status }
-    );
+  c8ApplyWorktreeCheckpointProbe(report, resolved, statusResult);
+  if (report.preflight_blocked) {
+    resolved.remote_status = 'skipped_preflight_failure';
+    return resolved;
   }
 
   const remoteResult = c8GitProbe(
@@ -2186,6 +3896,62 @@ function c8ResolveC8SourceCheckpoint(report, manifest, sourceSha) {
         ? 'matches_local_head'
         : 'not_equal_to_local_head';
   return resolved;
+}
+
+function c8ApplyWorktreeCheckpointProbe(report, resolved, statusResult) {
+  const probeStatus =
+    typeof statusResult?.status === 'number' ? statusResult.status : 1;
+  const worktreeStatus = String(statusResult?.stdout || '').trim();
+  resolved.worktree_status = worktreeStatus;
+  resolved.worktree_probe_status =
+    probeStatus === 0 &&
+    (!resolved.clean_worktree_required || !worktreeStatus)
+      ? 'pass'
+      : 'fail';
+
+  if (probeStatus !== 0) {
+    c8MarkWorktreeProbeFailure(report, {
+      code: 'worktree_status_probe_failed',
+      exit_code: probeStatus,
+    });
+    c8Block(
+      report,
+      'worktree_status_probe_failed',
+      'C8-WIN-PRE cannot prove a clean worktree before native evidence is accepted',
+      {
+        exit_code: probeStatus,
+        stderr: c8Tail(String(statusResult?.stderr || '')),
+      }
+    );
+    return;
+  }
+
+  if (resolved.clean_worktree_required && worktreeStatus) {
+    c8MarkWorktreeProbeFailure(report, {
+      code: 'dirty_worktree',
+      status: worktreeStatus,
+    });
+    c8Block(
+      report,
+      'dirty_worktree',
+      'C8-WIN-PRE requires a clean worktree before native evidence is accepted',
+      { status: worktreeStatus }
+    );
+  }
+}
+
+function c8MarkWorktreeProbeFailure(report, details) {
+  const entries = [
+    ...(report?.metadata_commands || []),
+    ...(report?.commands || []),
+  ];
+  const entry = entries.find(
+    (candidate) => candidate.check_id === 'source_checkpoint_clean_worktree'
+  );
+  if (entry) {
+    entry.status = 'fail';
+    entry.semantic_failure = details;
+  }
 }
 
 function c8GitProbe(report, checkId, commandArgs) {
@@ -2388,6 +4154,11 @@ function c8ValidateCanonicalPlatformInputs(report, manifest) {
       key: 'runtime_feature_inventory',
       path: 'crates/backend/nomifun-agent-contracts/contracts/generated/runtime-feature-inventory.envelope.json',
       digest: C8_EXPECTED_DIGESTS.runtime_feature_inventory,
+    },
+    {
+      key: 'platform_validation_manifest',
+      path: 'crates/backend/nomifun-agent-contracts/contracts/generated/platform-validation-fixture.envelope.json',
+      digest: C8_EXPECTED_DIGESTS.platform_validation_manifest,
     },
   ];
   for (const input of inputSpecs) {
@@ -2685,23 +4456,50 @@ function c8ValidateAllSceneCoverage(report, manifest, platformValidation) {
       clean_root: ['fresh_install'],
       precreated_empty_root: ['precreated_empty'],
       cutover_recovery: ['cutover'],
-      provider_unavailable: ['ProviderRouteRequiredBroker', 'AdapterUnavailable'],
+      provider_unavailable: [
+        'async fn production_factory_composes_exact_six_adapters_and_streams()',
+        'async fn unavailable_model_invoke_port_is_typed_and_not_a_fake_response()',
+      ],
       resource_unavailable: ['CapabilityUnavailable', 'resource'],
       remote_revoke_admission: ['D026', 'REMOTE_AUTH_REQUIRED'],
       runtime_dispose: ['dispose'],
       descendant_process_cleanup: ['process_tree', 'descendant'],
       late_callback_after_delete: ['SESSION_DELETED', 'late_operation'],
     }[fault] || [fault];
-    const present = markers.some((marker) => faultText.includes(marker));
+    const markerSource =
+      fault === 'provider_unavailable'
+        ? readFileSafe(
+            join(
+              repoRoot,
+              'crates/backend/nomifun-chat-model-broker/src/production.rs'
+            )
+          ) || ''
+        : faultText;
+    const present =
+      fault === 'provider_unavailable'
+        ? markers.every((marker) => markerSource.includes(marker))
+        : markers.some((marker) => markerSource.includes(marker));
     result.fault_classes[fault] = {
       markers,
-      status: present ? 'pass' : 'fail',
+      source_path:
+        fault === 'provider_unavailable'
+          ? 'crates/backend/nomifun-chat-model-broker/src/production.rs'
+          : null,
+      check_id:
+        fault === 'provider_unavailable'
+          ? 'production_broker_functional_tests'
+          : null,
+      status: present
+        ? fault === 'provider_unavailable'
+          ? 'pending_functional_check'
+          : 'pass'
+        : 'fail',
     };
     c8Require(
       report,
       present,
       'scene_fault_coverage',
-      `C8 fault coverage marker is missing for ${fault}`
+      `C8 fault coverage marker is missing for ${fault}; placeholder broker/error strings are not valid evidence`
     );
   }
 
@@ -2734,7 +4532,7 @@ function c8ValidateAllSceneCoverage(report, manifest, platformValidation) {
   return result;
 }
 
-function c8ValidateC8ResidualReachability(report, c7) {
+function c8ValidateC8ResidualReachability(report, c7, manifest) {
   const result = {
     status: 'pending',
     canonical_owner: {
@@ -2743,11 +4541,12 @@ function c8ValidateC8ResidualReachability(report, c7) {
       findings: [],
     },
     global_legacy_source: {
-      status: 'deferred_to_c9',
+      status: 'pending',
       observed_count: 0,
       findings: [],
     },
-    policy: 'C8 records global legacy source inventory; C9 owns physical Nomi deletion',
+    policy:
+      'C8 enforces global legacy residual zero when closure_requirements.global_legacy_residual_must_be_zero is true',
   };
   const canonicalFiles = c7SourceFilesForPaths([
     'crates/backend/nomifun-agent-platform/src',
@@ -2772,31 +4571,1273 @@ function c8ValidateC8ResidualReachability(report, c7) {
     'C8 canonical Agent owner contains a forbidden legacy edge'
   );
 
-  // The old Nomi source remains an explicitly recorded historical inventory
-  // until the post-cohort C9 physical deletion boundary.  It is not used as a
-  // product fallback by the v4 host; record its presence without converting
-  // the C8 pre-candidate into a false Nomi-free claim.
+  const contractIndex = c8ReadC8ResidualContracts(report);
   const historicalRoots = [
     'crates/backend/nomifun-ai-agent/src/manager/nomi',
     'crates/backend/nomifun-conversation/src',
     'crates/backend/nomifun-gateway/src',
   ];
-  const historicalFiles = c7SourceFilesForPaths(historicalRoots);
-  const historicalScan = scanC7ForbiddenEdges(historicalFiles);
+  const historicalPaths = c8ResidualScanPaths(contractIndex, historicalRoots);
+  const historicalFiles = c7SourceFilesForPaths(historicalPaths, {
+    includeLockfiles: true,
+  });
+  const historicalScan = scanC7ForbiddenEdges(historicalFiles, {
+    maxFindings: C8_GLOBAL_RESIDUAL_MAX_FINDINGS,
+  });
+  const classification = c8ClassifyResidualScan(
+    historicalScan,
+    contractIndex
+  );
+  const globalResidualMustBeZero =
+    manifest?.closure_requirements?.global_legacy_residual_must_be_zero === true;
+  const globalResidualPass = c8GlobalResidualPass(
+    globalResidualMustBeZero,
+    historicalScan.total_count,
+    classification
+  );
   result.global_legacy_source = {
-    status: 'deferred_to_c9',
+    status: globalResidualPass ? 'pass' : 'fail',
     observed_count: historicalScan.total_count,
-    findings: historicalScan.findings.slice(0, 50),
+    blocking_count: classification.blocking_count,
+    allowed_count: classification.allowed_count,
+    deferred_c9_count: classification.deferred_c9_count,
+    declared_count: classification.declared_count,
+    unclassified_count: classification.unclassified_count,
+    truncated_count: classification.truncated_count,
+    preserved_channel_product_count:
+      classification.preserved_channel_product_count,
+    agent_approval_count: classification.agent_approval_count,
+    channel_product_count: classification.channel_product_count,
+    ambiguous_confirmation_count:
+      classification.ambiguous_confirmation_count,
+    confirmation_audit: {
+      agent_approval: {
+        count: classification.agent_approval_count,
+        blocking_findings: classification.findings.filter(
+          (finding) =>
+            finding.confirmation_classification ===
+              'agent_approval_confirmation' &&
+            finding.classification.startsWith('blocking_')
+        ).length,
+      },
+      channel_product_confirmation: {
+        count: classification.channel_product_count,
+        preserved_count: classification.preserved_channel_product_count,
+        blocking_findings: classification.findings.filter(
+          (finding) =>
+            finding.confirmation_classification ===
+              'channel_product_confirmation' &&
+            finding.classification.startsWith('blocking_')
+        ).map((finding) => ({
+          path: finding.path,
+          line: finding.line,
+          match: finding.match,
+          reason:
+            finding.confirmation_preservation?.decision ||
+            'blocking_insufficient_preservation_evidence',
+          conflicting_contract_refs:
+            finding.confirmation_preservation?.conflicting_contract_refs || [],
+        })),
+      },
+      ambiguous: {
+        count: classification.ambiguous_confirmation_count,
+        blocking_findings: classification.findings.filter(
+          (finding) =>
+            finding.confirmation_classification === 'ambiguous_confirmation'
+        ).length,
+      },
+    },
+    findings: classification.findings.slice(0, C8_GLOBAL_RESIDUAL_MAX_FINDINGS),
     scanned_files: historicalFiles.length,
+    scanned_paths: historicalPaths,
+    contract_manifests: contractIndex.contracts.map((contract) => ({
+      path: contract.path,
+      manifest_id: contract.manifest_id,
+      allowed_residual_policy: contract.allowed_residual_policy,
+      allowed_residual_count: contract.allowed_residual_count,
+    })),
+    global_legacy_residual_must_be_zero: globalResidualMustBeZero,
+    policy:
+      'C8 blocks canonical/reachable and non-deferred residuals; Agent approval/needs_confirmation remains distinct from channel-owned product stop confirmation. Channel confirmation is preserved only with exact source ownership, explicit C1/C7 preservation policy, and no conflicting deletion contract; otherwise it remains blocking. Exact D-004 allowlist and manifest-declared C9 physical-delete residuals remain recorded until their boundary',
   };
+  c8Require(
+    report,
+    globalResidualPass,
+    'c8_global_legacy_residual',
+    `C8 global legacy residual must be zero for the C8 scope, observed ${historicalScan.total_count} finding(s) (${classification.blocking_count} blocking, ${classification.allowed_count} contract-allowed, ${classification.deferred_c9_count} deferred-to-C9)`
+  );
   result.transitional_host_adapter = {
     path: 'crates/backend/nomifun-app/src/router/agent_platform_host.rs',
     status: 'integration_adapter_recorded',
-    note: 'The v4 host is mounted from AppServices while the remaining non-agent shell is migrated; C9 owns global physical deletion.',
+    note: 'The v4 host is mounted from AppServices while C9-deferred historical implementation residuals remain recorded; canonical/reachable residuals still block C8.',
   };
   result.status =
-    result.canonical_owner.status === 'pass' ? 'pass' : 'fail';
+    result.canonical_owner.status === 'pass' &&
+    result.global_legacy_source.status === 'pass'
+      ? 'pass'
+      : 'fail';
   return result;
+}
+
+function c8DeletionContractPaths() {
+  return [
+    C8_TRIAD_DELETION_MANIFEST_PATH,
+    ...c8ExpectedC7Waves().map((wave) => wave.deletion_manifest),
+  ];
+}
+
+function c8ReadC8ResidualContracts(report) {
+  const contracts = [];
+  for (const path of c8DeletionContractPaths()) {
+    const artifact = c8ReadJsonArtifact(
+      report,
+      path,
+      'C8 deletion contract'
+    );
+    if (artifact) {
+      contracts.push({ path, payload: artifact.value });
+    }
+  }
+  return c8BuildResidualContractIndex(contracts);
+}
+
+function c8BuildResidualContractIndex(contracts) {
+  const index = {
+    contracts: [],
+    declared_refs: [],
+    allowed_refs: [],
+  };
+  const asArray = (value) => (Array.isArray(value) ? value : []);
+
+  const addDeclaredRef = (contract, ref, context) => {
+    const rawPath = normalizeRepoPath(ref?.path);
+    const isDirectory = rawPath.endsWith('/');
+    const path = rawPath.replace(/\/+$/, '');
+    if (!isSafeRepoPath(path)) return;
+    index.declared_refs.push({
+      path,
+      is_directory: isDirectory,
+      symbols: uniqueSortedStrings(ref.symbols),
+      line_start:
+        Number.isInteger(ref.line_start) && ref.line_start > 0
+          ? ref.line_start
+          : null,
+      line_end:
+        Number.isInteger(ref.line_end) && ref.line_end > 0
+          ? ref.line_end
+          : null,
+      contract_path: contract.path,
+      manifest_id: contract.manifest_id,
+      ...context,
+    });
+  };
+
+  for (const contract of contracts || []) {
+    const payload = contract?.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      continue;
+    }
+    const contractMeta = {
+      path: contract.path,
+      manifest_id:
+        typeof payload.manifest_id === 'string'
+          ? payload.manifest_id
+          : typeof payload.wave === 'string'
+            ? payload.wave
+            : contract.path,
+      allowed_residual_policy:
+        payload.allowed_residuals?.policy || null,
+      allowed_residual_count: Array.isArray(
+        payload.allowed_residuals?.entries
+      )
+        ? payload.allowed_residuals.entries.length
+        : 0,
+    };
+    index.contracts.push(contractMeta);
+
+    for (const root of asArray(payload.production_roots)) {
+      for (const ref of asArray(root?.current_refs)) {
+        addDeclaredRef(contractMeta, ref, {
+          source_kind: 'production_root',
+          source_id: root.root_id || null,
+          category: root.kind || null,
+          removal_boundary: null,
+          disposition: null,
+          replacement_owner: root.expected_canonical_owner || null,
+        });
+      }
+    }
+    for (const surface of asArray(payload.legacy_surfaces)) {
+      for (const ref of asArray(surface?.current_refs)) {
+        addDeclaredRef(contractMeta, ref, {
+          source_kind: 'legacy_surface',
+          source_id: surface.surface_id || null,
+          category: surface.category || null,
+          removal_boundary: surface.removal_boundary || null,
+          disposition: surface.disposition || null,
+          replacement_owner: surface.replacement_owner || null,
+        });
+      }
+    }
+    for (const ref of asArray(
+      payload.canonical_producer?.current_producer_refs
+    )) {
+      addDeclaredRef(contractMeta, ref, {
+        source_kind: 'canonical_producer',
+        source_id: 'canonical_producer',
+        category: null,
+        removal_boundary: null,
+        disposition: null,
+        replacement_owner: payload.canonical_producer?.owner_id || null,
+      });
+    }
+    for (const consumer of asArray(payload.direct_consumers)) {
+      for (const ref of asArray(consumer?.current_refs)) {
+        addDeclaredRef(contractMeta, ref, {
+          source_kind: 'direct_consumer',
+          source_id: consumer.consumer_id || null,
+          category: consumer.kind || null,
+          removal_boundary: null,
+          disposition: null,
+          replacement_owner: consumer.canonical_target || null,
+        });
+      }
+    }
+    const d027Refs = [
+      ...asArray(payload.d027?.admission_fence_refs),
+      ...asArray(payload.d027?.deadline_authority_refs),
+      ...asArray(payload.d027?.outstanding_set_refs).flatMap(
+        (entry) => asArray(entry?.current_refs)
+      ),
+    ];
+    for (const ref of d027Refs) {
+      addDeclaredRef(contractMeta, ref, {
+        source_kind: 'd027',
+        source_id: 'd027',
+        category: null,
+        removal_boundary: null,
+        disposition: null,
+        replacement_owner: null,
+      });
+    }
+
+    for (const residual of asArray(payload.allowed_residuals?.entries)) {
+      for (const ref of asArray(residual?.exact_refs)) {
+        const rawPath = normalizeRepoPath(ref?.path);
+        const isDirectory = rawPath.endsWith('/');
+        const path = rawPath.replace(/\/+$/, '');
+        if (!isSafeRepoPath(path)) continue;
+        index.allowed_refs.push({
+          path,
+          is_directory: isDirectory,
+          symbols: uniqueSortedStrings(ref.symbols),
+          line_start:
+            Number.isInteger(ref.line_start) && ref.line_start > 0
+              ? ref.line_start
+              : null,
+          line_end:
+            Number.isInteger(ref.line_end) && ref.line_end > 0
+              ? ref.line_end
+              : null,
+          contract_path: contractMeta.path,
+          manifest_id: contractMeta.manifest_id,
+          residual_id: residual.residual_id || null,
+          policy: payload.allowed_residuals?.policy || null,
+          allowed_until_boundary: residual.allowed_until_boundary || null,
+          target_zero_boundary: residual.target_zero_boundary || null,
+        });
+      }
+    }
+  }
+
+  return {
+    ...index,
+    declared_refs: c8DeduplicateResidualRefs(index.declared_refs),
+    allowed_refs: c8DeduplicateResidualRefs(index.allowed_refs),
+  };
+}
+
+function c8DeduplicateResidualRefs(refs) {
+  const seen = new Set();
+  return (refs || []).filter((ref) => {
+    const key = JSON.stringify([
+      ref.path,
+      ref.contract_path,
+      ref.source_kind,
+      ref.source_id,
+      ref.residual_id,
+      ref.symbols,
+      ref.line_start,
+      ref.line_end,
+      ref.is_directory,
+    ]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function c8ResidualScanPaths(contractIndex, historicalRoots) {
+  return uniqueSortedStrings([
+    ...(historicalRoots || []),
+    ...(contractIndex?.declared_refs || []).map((ref) => ref.path),
+    ...(contractIndex?.allowed_refs || []).map((ref) => ref.path),
+  ]);
+}
+
+function c8ResidualPathMatches(refPath, findingPath) {
+  const ref = normalizeRepoPath(refPath).replace(/\/+$/, '');
+  const finding = normalizeRepoPath(findingPath).replace(/\/+$/, '');
+  return finding === ref;
+}
+
+function c8ResidualSymbolMatches(expected, observed) {
+  if (expected === observed) return true;
+  if (typeof expected !== 'string' || !expected.includes('*')) return false;
+  const pattern = expected
+    .split('*')
+    .map((part) => escapeC7Regex(part))
+    .join('.*');
+  return new RegExp(`^${pattern}$`).test(String(observed || ''));
+}
+
+function c8ResidualRefMatches(ref, finding) {
+  if (
+    !c8ResidualPathMatches(ref?.path, finding?.path) &&
+    !(
+      ref?.is_directory === true &&
+      normalizeRepoPath(finding?.path).startsWith(`${ref.path}/`)
+    )
+  ) {
+    return false;
+  }
+  if (
+    Number.isInteger(ref?.line_start) &&
+    Number.isInteger(finding?.line) &&
+    finding.line < ref.line_start
+  ) {
+    return false;
+  }
+  if (
+    Number.isInteger(ref?.line_end) &&
+    Number.isInteger(finding?.line) &&
+    finding.line > ref.line_end
+  ) {
+    return false;
+  }
+  const symbols = uniqueSortedStrings(ref?.symbols);
+  return (
+    symbols.length === 0 ||
+    symbols.some((symbol) => c8ResidualSymbolMatches(symbol, finding?.match))
+  );
+}
+
+function c8ResidualAllowedAtC8(ref) {
+  return (
+    ref?.policy === 'd004_exact_decrementing_allowlist' &&
+    ref?.allowed_until_boundary === 'C8-MERGE' &&
+    ref?.target_zero_boundary === 'C9'
+  );
+}
+
+function c8ResidualDeferredToC9(ref) {
+  const boundary = String(ref?.removal_boundary || '').toUpperCase();
+  if (ref?.source_kind === 'd027') return true;
+  if (
+    ref?.source_kind === 'production_root' &&
+    ref?.source_id === 'release-workspace' &&
+    ['Cargo.toml', 'Cargo.lock'].includes(String(ref?.path || ''))
+  ) {
+    return true;
+  }
+  return (
+    boundary === 'C9' ||
+    boundary.endsWith('/C9') ||
+    boundary.includes('/C9/')
+  );
+}
+
+function c8ConfirmationPolicyEvidence(policyOverride) {
+  if (policyOverride && typeof policyOverride === 'object') {
+    return {
+      c1_preserve: policyOverride.c1_preserve === true,
+      c7_preserve: policyOverride.c7_preserve === true,
+      source_paths: policyOverride.source_paths || [],
+    };
+  }
+  if (c8ConfirmationPolicyCache) return c8ConfirmationPolicyCache;
+  const policy = {
+    c1_preserve: false,
+    c7_preserve: false,
+    source_paths: [],
+  };
+  const c1Path =
+    'docs/specs/2026-08-28-agent-capability-platform-v2/C1-WRITE-MANIFESTS.json';
+  const c7Path =
+    'docs/specs/2026-08-28-agent-capability-platform-v2/C7-WRITE-MANIFESTS.json';
+  for (const [path, key] of [
+    [c1Path, 'c1_preserve'],
+    [c7Path, 'c7_preserve'],
+  ]) {
+    const source = readFileSafe(join(repoRoot, path));
+    if (!source) continue;
+    try {
+      const manifest = JSON.parse(source);
+      const identityValid =
+        key === 'c1_preserve'
+          ? manifest.boundary === 'C1' &&
+            manifest.status === 'closed' &&
+            manifest.branch === C8_BRANCH &&
+            manifest.confirmed_decision_contract_digest ===
+              C8_EXPECTED_DIGESTS.confirmed_decision_contract
+          : manifest.boundary === 'C7' &&
+            manifest.status === 'closed' &&
+            manifest.branch === C8_BRANCH &&
+            manifest.confirmed_inputs?.decision_contract_digest ===
+              C8_EXPECTED_DIGESTS.confirmed_decision_contract;
+      if (!identityValid) continue;
+      const preserved = uniqueSortedStrings(manifest.preserve_exact);
+      policy[key] =
+        key === 'c1_preserve'
+          ? preserved.includes('Channel/IM pairing authorization and owner admission') &&
+            preserved.includes('ordinary product delete/reset/unsaved-change confirmations')
+          : preserved.includes('Channel pairing and ordinary product confirmations');
+      if (policy[key]) policy.source_paths.push(path);
+    } catch {
+      // A missing or malformed policy is deliberately treated as no proof.
+    }
+  }
+  c8ConfirmationPolicyCache = policy;
+  return policy;
+}
+
+function c8ClassifyConfirmationFinding(
+  finding,
+  sourceOverride = null,
+  policyOverride = undefined
+) {
+  const path = normalizeRepoPath(finding?.path);
+  const match = String(finding?.match || '');
+  const confirmationCandidate =
+    finding?.category === 'approval_confirmation' ||
+    finding?.category === 'channel_product_confirmation_candidate' ||
+    /\b(?:ApprovalScope|ToolApprovalManager|ToolConfirmer|ConfirmRequest|PermissionConfirm|AgentConfirm(?:ation)?|PendingDecisionStore|PendingDecisionKind::StopConversation|WaitingConfirmation|ToolConfirmation(?:Request|State|Manager)?|needs_confirmation|awaiting_approval|waiting_confirmation|require_approval|auto_approve(?:_invocation)?|confirmation_to_decision|pending_decisions|stop_confirmation)\b/.test(
+      match
+    ) ||
+    match === 'system.confirm';
+  if (!confirmationCandidate) return null;
+  const source =
+    typeof sourceOverride === 'string'
+      ? sourceOverride
+      : readFileSafe(join(repoRoot, path)) || '';
+  const semantic =
+    source && /\.(rs|toml|json|ts|tsx)$/.test(path)
+      ? analyzeC7Source(source, path).semantic
+      : source;
+  const channelPath = path.startsWith('crates/backend/nomifun-channel/');
+  const channelStopMarkers = [
+    'PendingDecisionStore',
+    'PendingDecisionKind::StopConversation',
+    'StopDenied',
+    'stop_confirmation',
+    'confirmation_to_decision',
+    'pending_decisions',
+  ];
+  const sourceLines = source.split(/\r?\n/);
+  const localContext =
+    Number.isInteger(finding?.line) && finding.line > 0
+      ? sourceLines
+          .slice(Math.max(0, finding.line - 3), finding.line + 2)
+          .join('\n')
+      : '';
+  const matchedChannelMarker = channelStopMarkers.find(
+    (marker) => match.includes(marker) || localContext.includes(marker)
+  );
+  const matchIsChannelSpecific =
+    /(?:PendingDecisionStore|PendingDecisionKind::StopConversation|confirmation_to_decision|pending_decisions|stop_confirmation)/.test(
+      match
+    );
+  const channelProductionFiles = new Set([
+    'crates/backend/nomifun-channel/src/pending_decision.rs',
+    'crates/backend/nomifun-channel/src/message_service.rs',
+    'crates/backend/nomifun-channel/src/message_loop.rs',
+    'crates/backend/nomifun-channel/src/stream_relay.rs',
+  ]);
+  const channelTestPath =
+    path.includes('/tests/') || path.startsWith('crates/backend/nomifun-channel/tests/');
+  const fileLevelStopProof =
+    path.endsWith('/pending_decision.rs')
+      ? semantic.includes('PendingDecisionKind::StopConversation') &&
+        semantic.includes('target_conversation_id') &&
+        semantic.includes('nomi_stop_conversation')
+      : path.endsWith('/message_service.rs')
+        ? semantic.includes('pending_decisions') &&
+          semantic.includes('stop_conversation') &&
+          semantic.includes('StopDenied')
+        : path.endsWith('/message_loop.rs')
+          ? semantic.includes('pending_decisions') &&
+            semantic.includes('PendingDecisionKind::StopConversation') &&
+            semantic.includes('parse_choice')
+          : path.endsWith('/stream_relay.rs')
+            ? semantic.includes('record_and_send_stop_confirmation') &&
+              semantic.includes('StopDenied')
+            : false;
+  const boundedStopProof =
+    Boolean(matchedChannelMarker) ||
+    (matchIsChannelSpecific && fileLevelStopProof);
+  const channelStopProof =
+    channelPath &&
+    channelProductionFiles.has(path) &&
+    !channelTestPath &&
+    boundedStopProof;
+  const agentApprovalProof =
+    finding?.category === 'approval_confirmation' ||
+    /\b(?:ApprovalScope|ToolApprovalManager|ToolConfirmer|ConfirmRequest|PermissionConfirm|AgentConfirm(?:ation)?|WaitingConfirmation|ToolConfirmation(?:Request|State|Manager)?|needs_confirmation|awaiting_approval|waiting_confirmation|require_approval|auto_approve(?:_invocation)?)\b/.test(
+      match
+    );
+  if (channelStopProof) {
+    const policy = c8ConfirmationPolicyEvidence(policyOverride);
+    return {
+      kind: 'channel_product_confirmation',
+      evidence: {
+        channel_owned_path: true,
+        channel_stop_marker: matchedChannelMarker || null,
+        policy_proof: policy.c1_preserve || policy.c7_preserve,
+        policy_sources: policy.source_paths,
+      },
+    };
+  }
+  if (agentApprovalProof) {
+    return {
+      kind: 'agent_approval_confirmation',
+      evidence: {
+        channel_owned_path: false,
+        policy_proof: false,
+        policy_sources: [],
+      },
+    };
+  }
+  if (
+    finding?.category === 'channel_product_confirmation_candidate' ||
+    finding?.category === 'approval_confirmation'
+  ) {
+    return {
+      kind: 'ambiguous_confirmation',
+      evidence: {
+        channel_owned_path: channelPath,
+        channel_stop_marker: null,
+        policy_proof: false,
+        policy_sources: [],
+      },
+    };
+  }
+  return null;
+}
+
+function c8ChannelPreservationDecision(
+  confirmation,
+  declaredRefs,
+  policyOverride = undefined,
+  pathLevelDeclaredRefs = []
+) {
+  if (confirmation?.kind !== 'channel_product_confirmation') {
+    return null;
+  }
+  const policy = c8ConfirmationPolicyEvidence(policyOverride);
+  const allRelevantRefs = [
+    ...(declaredRefs || []),
+    ...(pathLevelDeclaredRefs || []),
+  ].filter(
+    (ref, index, refs) =>
+      refs.findIndex(
+        (candidate) =>
+          candidate.contract_path === ref.contract_path &&
+          candidate.source_kind === ref.source_kind &&
+          candidate.source_id === ref.source_id &&
+          candidate.path === ref.path &&
+          candidate.residual_id === ref.residual_id
+      ) === index
+  );
+  const conflictingRefs = allRelevantRefs.filter((ref) => {
+    const category = String(ref?.category || '').toLowerCase();
+    const sourceId = String(ref?.source_id || '').toLowerCase();
+    const disposition = String(ref?.disposition || '').toLowerCase();
+    return (
+      category.includes('approval') ||
+      category.includes('confirmation') ||
+      sourceId.includes('approval') ||
+      sourceId.includes('confirmation') ||
+      disposition.includes('delete') ||
+      disposition.includes('replace')
+    );
+  });
+  const policyProof = policy.c1_preserve || policy.c7_preserve;
+  const explicit = policyProof && conflictingRefs.length === 0;
+  return {
+    decision: explicit
+      ? 'preserved_channel_product_confirmation'
+      : conflictingRefs.length > 0
+        ? 'blocking_contract_conflict'
+        : 'blocking_insufficient_preservation_evidence',
+    explicit,
+    policy_proof: policyProof,
+    policy_sources: policy.source_paths,
+    conflicting_contract_refs: conflictingRefs.slice(0, 10).map((ref) => ({
+      contract_path: ref.contract_path,
+      manifest_id: ref.manifest_id,
+      source_kind: ref.source_kind,
+      source_id: ref.source_id,
+      category: ref.category,
+      disposition: ref.disposition,
+      removal_boundary: ref.removal_boundary,
+      match_scope: (declaredRefs || []).includes(ref)
+        ? 'path-and-line'
+        : 'path-and-symbol',
+    })),
+  };
+}
+
+function c8ClassifyResidualFinding(finding, contractIndex, options = {}) {
+  const allowedRefs = (contractIndex?.allowed_refs || [])
+    .filter((ref) => c8ResidualAllowedAtC8(ref))
+    .filter((ref) => c8ResidualRefMatches(ref, finding));
+  const declaredRefs = (contractIndex?.declared_refs || []).filter((ref) =>
+    c8ResidualRefMatches(ref, finding)
+  );
+  const deferredRefs = declaredRefs.filter((ref) =>
+    c8ResidualDeferredToC9(ref)
+  );
+  const nonDeferredRefs = declaredRefs.filter(
+    (ref) => !c8ResidualDeferredToC9(ref)
+  );
+  const pathLevelDeclaredRefs = (contractIndex?.declared_refs || []).filter(
+    (ref) =>
+      c8ResidualPathMatches(ref?.path, finding?.path) &&
+      uniqueSortedStrings(ref?.symbols).length > 0 &&
+      uniqueSortedStrings(ref?.symbols).some((symbol) =>
+        c8ResidualSymbolMatches(symbol, finding?.match)
+      )
+  );
+  const confirmation = c8ClassifyConfirmationFinding(
+    finding,
+    options.source,
+    options.confirmation_policy
+  );
+  const preservation = c8ChannelPreservationDecision(
+    confirmation,
+    declaredRefs,
+    options.confirmation_policy,
+    pathLevelDeclaredRefs
+  );
+  let classification;
+  if (confirmation?.kind === 'channel_product_confirmation') {
+    classification = preservation?.explicit
+      ? 'preserved_channel_product_confirmation'
+      : declaredRefs.length
+        ? 'blocking_declared_residual'
+        : 'blocking_unclassified_residual';
+  } else if (confirmation?.kind === 'ambiguous_confirmation') {
+    classification = declaredRefs.length
+      ? 'blocking_declared_residual'
+      : 'blocking_unclassified_residual';
+  } else {
+    classification = allowedRefs.length
+      ? 'allowed_contract_residual'
+      : deferredRefs.length && nonDeferredRefs.length === 0
+        ? 'deferred_c9_residual'
+        : declaredRefs.length
+          ? 'blocking_declared_residual'
+          : 'blocking_unclassified_residual';
+  }
+  return {
+    ...finding,
+    classification,
+    confirmation_classification: confirmation?.kind || null,
+    confirmation_preservation: preservation,
+    contract_refs: declaredRefs.slice(0, 10).map((ref) => ({
+      contract_path: ref.contract_path,
+      manifest_id: ref.manifest_id,
+      source_kind: ref.source_kind,
+      source_id: ref.source_id,
+      category: ref.category,
+      removal_boundary: ref.removal_boundary,
+      disposition: ref.disposition,
+      replacement_owner: ref.replacement_owner,
+    })),
+    deferred_c9_refs: deferredRefs.slice(0, 10).map((ref) => ({
+      contract_path: ref.contract_path,
+      manifest_id: ref.manifest_id,
+      source_kind: ref.source_kind,
+      source_id: ref.source_id,
+      removal_boundary: ref.removal_boundary,
+      disposition: ref.disposition,
+      replacement_owner: ref.replacement_owner,
+    })),
+    allowed_residual_refs: allowedRefs.slice(0, 10).map((ref) => ({
+      contract_path: ref.contract_path,
+      manifest_id: ref.manifest_id,
+      residual_id: ref.residual_id,
+      policy: ref.policy,
+      allowed_until_boundary: ref.allowed_until_boundary,
+      target_zero_boundary: ref.target_zero_boundary,
+    })),
+  };
+}
+
+function c8ClassifyResidualScan(scan, contractIndex) {
+  const findings = (scan?.findings || []).map((finding) =>
+    c8ClassifyResidualFinding(finding, contractIndex)
+  );
+  const allowedCount = findings.filter(
+    (finding) => finding.classification === 'allowed_contract_residual'
+  ).length;
+  const deferredCount = findings.filter(
+    (finding) => finding.classification === 'deferred_c9_residual'
+  ).length;
+  const declaredCount = findings.filter(
+    (finding) => finding.classification === 'blocking_declared_residual'
+  ).length;
+  const unclassifiedCount = findings.filter(
+    (finding) => finding.classification === 'blocking_unclassified_residual'
+  ).length;
+  const preservedChannelCount = findings.filter(
+    (finding) =>
+      finding.classification === 'preserved_channel_product_confirmation'
+  ).length;
+  const agentApprovalCount = findings.filter(
+    (finding) =>
+      finding.confirmation_classification === 'agent_approval_confirmation'
+  ).length;
+  const channelProductCount = findings.filter(
+    (finding) =>
+      finding.confirmation_classification === 'channel_product_confirmation'
+  ).length;
+  const ambiguousConfirmationCount = findings.filter(
+    (finding) => finding.confirmation_classification === 'ambiguous_confirmation'
+  ).length;
+  const truncatedCount = Math.max(
+    0,
+    Number(scan?.total_count || 0) - findings.length
+  );
+  return {
+    findings,
+    allowed_count: allowedCount,
+    deferred_c9_count: deferredCount,
+    declared_count: declaredCount,
+    unclassified_count: unclassifiedCount + truncatedCount,
+    truncated_count: truncatedCount,
+    preserved_channel_product_count: preservedChannelCount,
+    agent_approval_count: agentApprovalCount,
+    channel_product_count: channelProductCount,
+    ambiguous_confirmation_count: ambiguousConfirmationCount,
+    blocking_count: declaredCount + unclassifiedCount + truncatedCount,
+  };
+}
+
+function c8GlobalResidualPass(mustBeZero, observedCount, classification) {
+  if (!mustBeZero) return true;
+  return (
+    classification &&
+    Number.isInteger(classification.blocking_count) &&
+    classification.blocking_count === 0
+  );
+}
+
+function c8SelfTestAssert(condition, message) {
+  if (!condition) {
+    throw new Error(`C8 self-test failed: ${message}`);
+  }
+}
+
+function runC8SelfTest() {
+  const dirtyReport = {
+    preflight_blocked: false,
+    failure_details: [],
+  };
+  const dirtyResolved = { clean_worktree_required: true };
+  c8ApplyWorktreeCheckpointProbe(
+    dirtyReport,
+    dirtyResolved,
+    { status: 0, stdout: ' M scripts/gate-agent-v2.mjs', stderr: '' }
+  );
+  c8SelfTestAssert(
+    dirtyReport.preflight_blocked === true,
+    'dirty worktree must block preflight'
+  );
+  c8SelfTestAssert(
+    dirtyReport.failure_details.some(
+      (failure) => failure.code === 'dirty_worktree'
+    ),
+    'dirty worktree failure must be recorded'
+  );
+
+  const probeFailureReport = {
+    preflight_blocked: false,
+    failure_details: [],
+  };
+  c8ApplyWorktreeCheckpointProbe(
+    probeFailureReport,
+    { clean_worktree_required: true },
+    { status: 128, stdout: '', stderr: 'git status failed' }
+  );
+  c8SelfTestAssert(
+    probeFailureReport.preflight_blocked === true,
+    'failed worktree probe must block preflight'
+  );
+  c8SelfTestAssert(
+    probeFailureReport.failure_details.some(
+      (failure) => failure.code === 'worktree_status_probe_failed'
+    ),
+    'failed worktree probe failure must be recorded'
+  );
+
+  const skippedReport = {
+    checks: [],
+    statuses: {},
+    preflight_blocked: true,
+  };
+  c8SelfTestAssert(
+    c8SkipNativeChecksIfBlocked(
+      skippedReport,
+      {
+        required_checks: [
+          { check_id: 'native_a', command: 'native-a' },
+          { check_id: 'native_b', command: 'native-b' },
+        ],
+      },
+      'self-test preflight failure'
+    ) === true,
+    'blocked preflight must take the native-check skip path'
+  );
+  c8SelfTestAssert(
+    skippedReport.checks.length === 2 &&
+      skippedReport.checks.every(
+        (check) => check.status === 'skipped_preflight_failure'
+      ),
+    'preflight failure must skip every declared native check'
+  );
+
+  const contractIndex = c8BuildResidualContractIndex([
+    {
+      path: C8_TRIAD_DELETION_MANIFEST_PATH,
+      payload: {
+        manifest_id: 'triad-core',
+        production_roots: [
+          {
+            root_id: 'test-root',
+            kind: 'runtime_dispatcher',
+            current_refs: [
+              {
+                path: 'crates/legacy/src/adapter.rs',
+                symbols: ['LegacyManager'],
+              },
+            ],
+          },
+        ],
+        allowed_residuals: {
+          policy: 'd004_exact_decrementing_allowlist',
+          entries: [
+            {
+              residual_id: 'd004.test',
+              exact_refs: [
+                {
+                  path: 'crates/legacy/src/adapter.rs',
+                  symbols: ['LegacyManager'],
+                },
+              ],
+              allowed_until_boundary: 'C8-MERGE',
+              target_zero_boundary: 'C9',
+            },
+          ],
+        },
+      },
+    },
+  ]);
+  const classified = c8ClassifyResidualScan(
+    {
+      total_count: 2,
+      findings: [
+        {
+          path: 'crates/legacy/src/adapter.rs',
+          line: 12,
+          match: 'LegacyManager',
+          category: 'runtime_selector',
+          label: 'legacy runtime selector',
+        },
+        {
+          path: 'crates/other/src/route.rs',
+          line: 4,
+          match: 'LegacyManager',
+          category: 'runtime_selector',
+          label: 'legacy runtime selector',
+        },
+      ],
+    },
+    contractIndex
+  );
+  c8SelfTestAssert(
+    classified.allowed_count === 1 &&
+      classified.blocking_count === 1 &&
+      classified.findings[0].classification === 'allowed_contract_residual' &&
+      classified.findings[1].classification === 'blocking_unclassified_residual',
+    'residual findings must be classified against contract refs'
+  );
+  c8SelfTestAssert(
+    c8ResidualScanPaths(contractIndex, ['historical/root']).includes(
+      'crates/legacy/src/adapter.rs'
+    ),
+    'residual scan paths must include contract allowlist refs'
+  );
+  c8SelfTestAssert(
+    c8GlobalResidualPass(true, 2, classified) === false &&
+      c8GlobalResidualPass(true, 1, {
+        blocking_count: 0,
+        allowed_count: 0,
+        deferred_c9_count: 1,
+      }) === true &&
+      c8GlobalResidualPass(true, 1, {
+        blocking_count: 0,
+        allowed_count: 1,
+        deferred_c9_count: 0,
+      }) === true &&
+      c8GlobalResidualPass(true, 0, {
+        blocking_count: 0,
+        allowed_count: 0,
+        deferred_c9_count: 0,
+      }) === true,
+    'C8 must permit only explicitly deferred/allowed residuals while blocking all other findings'
+  );
+  const truncated = c8ClassifyResidualScan(
+    {
+      total_count: 3,
+      findings: [
+        {
+          path: 'crates/legacy/src/adapter.rs',
+          line: 12,
+          match: 'LegacyManager',
+        },
+      ],
+    },
+    contractIndex
+  );
+  c8SelfTestAssert(
+    truncated.truncated_count === 2 && truncated.blocking_count === 2,
+    'truncated residual findings must remain blocking'
+  );
+  const outOfBoundaryContract = c8BuildResidualContractIndex([
+    {
+      path: C8_TRIAD_DELETION_MANIFEST_PATH,
+      payload: {
+        manifest_id: 'triad-core',
+        allowed_residuals: {
+          policy: 'd004_exact_decrementing_allowlist',
+          entries: [
+            {
+              residual_id: 'd004.out-of-boundary',
+              exact_refs: [
+                {
+                  path: 'crates/legacy/src/adapter.rs',
+                  symbols: ['LegacyManager'],
+                },
+              ],
+              allowed_until_boundary: 'C9',
+              target_zero_boundary: 'C10',
+            },
+          ],
+        },
+      },
+    },
+  ]);
+  c8SelfTestAssert(
+    c8ClassifyResidualFinding(
+      {
+        path: 'crates/legacy/src/adapter.rs',
+        line: 12,
+        match: 'LegacyManager',
+      },
+      outOfBoundaryContract
+    ).classification === 'blocking_unclassified_residual',
+    'an allowlist outside the C8 boundary must remain blocking'
+  );
+
+  const mergeTuple = {
+    candidate_source_sha: 'a'.repeat(40),
+    confirmed_decision_contract_digest:
+      C8_EXPECTED_DIGESTS.confirmed_decision_contract,
+    platform_validation_manifest_digest:
+      C8_EXPECTED_DIGESTS.platform_validation_manifest,
+    runtime_release_digest: C8_EXPECTED_DIGESTS.runtime_release,
+  };
+  const mergeCells = Object.fromEntries(
+    C8_REQUIRED_NATIVE_CELLS.map((cellId) => [
+      cellId,
+      {
+        status: 'pass',
+        cohort_tuple: mergeTuple,
+        evidence: {
+          digest: 'e'.repeat(64),
+          normalized_relative_path: `build/evidence/${cellId}.json`,
+        },
+      },
+    ])
+  );
+  const mergeReport = {
+    gate_name: 'c8-merge',
+    failure_details: [],
+  };
+  const mergeValidation = validateC8MergeSummary(
+    mergeReport,
+    {
+      cohort_tuple: mergeTuple,
+      cell_evidence: mergeCells,
+      status_counts: {
+        pending_native_verification: 0,
+        pass: C8_REQUIRED_NATIVE_CELLS.length,
+        fail: 0,
+        stale: 0,
+      },
+      all_verification_points_closed: true,
+      global_residual_reachability_zero: true,
+      d027_terminal_evidence: {
+        artifact_id: 'd027-zero',
+        digest: 'f'.repeat(64),
+        normalized_relative_path: 'build/evidence/d027-zero.json',
+      },
+    },
+    mergeTuple.candidate_source_sha,
+    false
+  );
+  c8SelfTestAssert(
+    mergeValidation.status === 'pass' &&
+      mergeReport.failure_details.length === 0,
+    'a complete same-tuple five-cell C8-MERGE summary must pass'
+  );
+
+  const channelPolicy = {
+    c1_preserve: true,
+    c7_preserve: true,
+    source_paths: ['self-test/C1', 'self-test/C7'],
+  };
+  const channelFinding = {
+    path: 'crates/backend/nomifun-channel/src/pending_decision.rs',
+    line: 45,
+    category: 'channel_product_confirmation_candidate',
+    match: 'PendingDecisionStore',
+  };
+  const channelSource = [
+    'struct PendingDecisionStore;',
+    'enum PendingDecisionKind { StopConversation }',
+  ].join('\n');
+  const preservedChannel = c8ClassifyResidualFinding(
+    channelFinding,
+    { declared_refs: [], allowed_refs: [] },
+    { source: channelSource, confirmation_policy: channelPolicy }
+  );
+  c8SelfTestAssert(
+    preservedChannel.confirmation_classification ===
+      'channel_product_confirmation' &&
+      preservedChannel.classification ===
+        'preserved_channel_product_confirmation',
+    'an explicitly evidenced channel-owned stop must not be counted as Agent approval'
+  );
+
+  const conflictingChannel = c8ClassifyResidualFinding(
+    channelFinding,
+    {
+      declared_refs: [
+        {
+          path: channelFinding.path,
+          symbols: ['PendingDecisionStore'],
+          contract_path: 'self-test/deletion.json',
+          manifest_id: 'self-test',
+          source_kind: 'legacy_surface',
+          source_id: 'mode-approval-confirmation',
+          category: 'mode_approval_permission',
+          disposition: 'delete_without_replacement',
+        },
+      ],
+      allowed_refs: [],
+    },
+    { source: channelSource, confirmation_policy: channelPolicy }
+  );
+  c8SelfTestAssert(
+    conflictingChannel.confirmation_classification ===
+      'channel_product_confirmation' &&
+      conflictingChannel.classification === 'blocking_declared_residual' &&
+      conflictingChannel.confirmation_preservation?.decision ===
+        'blocking_contract_conflict',
+    'a channel-owned stop with a conflicting deletion contract must remain blocking'
+  );
+
+  const agentFinding = c8ClassifyResidualFinding(
+    {
+      path: 'crates/backend/nomifun-public/src/result.rs',
+      line: 1,
+      category: 'approval_confirmation',
+      match: 'needs_confirmation',
+    },
+    { declared_refs: [], allowed_refs: [] },
+    {
+      source: 'pub const FIELD: &str = "needs_confirmation";',
+      confirmation_policy: channelPolicy,
+    }
+  );
+  c8SelfTestAssert(
+    agentFinding.confirmation_classification === 'agent_approval_confirmation' &&
+      agentFinding.classification === 'blocking_unclassified_residual',
+    'needs_confirmation must remain an Agent approval residual'
+  );
+
+  const ambiguousChannel = c8ClassifyResidualFinding(
+    {
+      path: 'crates/backend/other/src/store.rs',
+      line: 1,
+      category: 'channel_product_confirmation_candidate',
+      match: 'PendingDecisionStore',
+    },
+    { declared_refs: [], allowed_refs: [] },
+    {
+      source: 'struct PendingDecisionStore;',
+      confirmation_policy: channelPolicy,
+    }
+  );
+  c8SelfTestAssert(
+    ambiguousChannel.confirmation_classification === 'ambiguous_confirmation' &&
+      ambiguousChannel.classification === 'blocking_unclassified_residual',
+    'insufficient channel ownership evidence must remain blocking'
+  );
+
+  const nativeSpec = c8ParseNativeDispatchArgs(
+    'c8-ma',
+    ['c8-ma', '--evidence', 'build/evidence.json']
+  );
+  c8SelfTestAssert(
+    nativeSpec.cell_id === 'macos_desktop_arm64' &&
+      nativeSpec.mode === 'full' &&
+      nativeSpec.check_id === 'c8_ma_full_gate',
+    'c8-ma must dispatch to the exact arm64 macOS full-gate check'
+  );
+  const genericNativeSpec = c8ParseNativeDispatchArgs('c8-native', [
+    'c8-native',
+    '--cell',
+    'linux_headless_x64',
+    '--mode',
+    'scoped',
+    '--attestation',
+    'build/evidence.json',
+  ]);
+  c8SelfTestAssert(
+    genericNativeSpec.cell_id === 'linux_headless_x64' &&
+      genericNativeSpec.mode === 'scoped' &&
+      genericNativeSpec.evidence_path === 'build/evidence.json',
+    'parameterized native dispatch must require and preserve the selected cell/mode'
+  );
+  let wrongModeRejected = false;
+  try {
+    c8ParseNativeDispatchArgs('c8-lh', [
+      'c8-lh',
+      '--mode',
+      'scoped',
+      '--evidence',
+      'build/evidence.json',
+    ]);
+  } catch {
+    wrongModeRejected = true;
+  }
+  c8SelfTestAssert(
+    wrongModeRejected,
+    'full native cell gates must reject scoped mode'
+  );
+
+  const nonNativeReport = {
+    gate_name: 'c8-ma',
+    execution_host: {
+      host_os: 'windows',
+      host_arch: 'x86_64',
+      native: false,
+      rejection_reasons: ['host_uname_os_mismatch'],
+    },
+    failure_details: [],
+  };
+  c8NativeValidateHost(
+    nonNativeReport,
+    C8_NATIVE_CELL_SPECS.macos_desktop_arm64
+  );
+  c8SelfTestAssert(
+    nonNativeReport.failure_details.length >= 2 &&
+      nonNativeReport.failure_details.some(
+        (failure) => failure.code === 'native_host_os_mismatch'
+      ),
+    'a mismatched host can never validate a native cell'
+  );
+}
+
+function c8ValidateProductionBrokerFunctionalEvidence(report) {
+  const fault = report.all_scene_coverage?.fault_classes?.provider_unavailable;
+  if (!fault) {
+    c8Failure(
+      report,
+      'scene_fault_coverage',
+      'C8 provider_unavailable coverage was not evaluated'
+    );
+    if (report.all_scene_coverage) {
+      report.all_scene_coverage.status = 'fail';
+    }
+    return;
+  }
+
+  const checkId = 'production_broker_functional_tests';
+  const expected = c8ExpectedChecks().find(
+    (check) => check.check_id === checkId
+  );
+  const check = report.checks.find((entry) => entry.check_id === checkId);
+  const checkStatus = check?.status || report.statuses?.[checkId] || 'not_run';
+  const commandMatches =
+    Boolean(check) &&
+    c8NormalizeCommand(check.command) === c8NormalizeCommand(expected?.command) &&
+    c8NormalizeCommand(check.invoked_command) ===
+      c8NormalizeCommand(
+        [expected?.runner, ...(expected?.command_args || [])].join(' ')
+      );
+  const markerEvidencePresent = fault.status === 'pending_functional_check';
+  const functionalPass =
+    markerEvidencePresent &&
+    checkStatus === 'pass' &&
+    check?.exit_code === 0 &&
+    commandMatches;
+  fault.functional_check_status = checkStatus;
+  fault.functional_check_command = check?.command || null;
+  fault.functional_check_exit_code =
+    typeof check?.exit_code === 'number' ? check.exit_code : null;
+  fault.functional_check_command_matches = commandMatches;
+
+  if (!functionalPass) {
+    fault.status = 'fail';
+    if (markerEvidencePresent) {
+      c8Failure(
+        report,
+        'scene_fault_coverage',
+        'C8 provider_unavailable requires a passing real production ChatModelBroker functional check',
+        {
+          check_id: checkId,
+          observed_status: checkStatus,
+          observed_exit_code: fault.functional_check_exit_code,
+          command_matches: commandMatches,
+          marker_evidence_present: markerEvidencePresent,
+        }
+      );
+    }
+  }
+
+  const faultStatuses = Object.values(
+    report.all_scene_coverage?.fault_classes || {}
+  ).map((entry) => entry.status);
+  if (
+    report.all_scene_coverage &&
+    (!faultStatuses.length || faultStatuses.some((status) => status !== 'pass'))
+  ) {
+    report.all_scene_coverage.status = 'fail';
+  }
 }
 
 function c8RunToolchainProbe(report) {
@@ -3477,7 +6518,11 @@ function readFileSafe(path) {
   }
 }
 
-function c7SourceFilesForPaths(paths) {
+function c7SourceFilesForPaths(paths, options = {}) {
+  const includeLockfiles = options.includeLockfiles === true;
+  const isScannableFile = (path) =>
+    /\.(rs|toml|json|ts|tsx)$/.test(path) ||
+    (includeLockfiles && path.endsWith('.lock'));
   const files = new Set();
   for (const rawPath of paths || []) {
     const path = normalizeRepoPath(rawPath).replace(/\/$/, '');
@@ -3485,10 +6530,10 @@ function c7SourceFilesForPaths(paths) {
     const absolute = join(repoRoot, path);
     const stat = statSafe(absolute);
     if (stat?.isFile()) {
-      if (/\.(rs|toml|json|ts|tsx)$/.test(path)) files.add(absolute);
+      if (isScannableFile(path)) files.add(absolute);
     } else if (stat?.isDirectory()) {
       for (const file of collectFiles(absolute, '')) {
-        if (/\.(rs|toml|json|ts|tsx)$/.test(file)) files.add(file);
+        if (isScannableFile(file)) files.add(file);
       }
     }
   }
@@ -3626,7 +6671,12 @@ function c7ForbiddenEdgeRules() {
     {
       category: 'approval_confirmation',
       label: 'agent confirmation state or store',
-      pattern: /\b(?:AgentConfirm(?:ation)?|PendingDecisionStore|WaitingConfirmation|ToolConfirmation(?:Request|State|Manager)?)\b/,
+      pattern: /\b(?:AgentConfirm(?:ation)?|WaitingConfirmation|ToolConfirmation(?:Request|State|Manager)?)\b/,
+    },
+    {
+      category: 'channel_product_confirmation_candidate',
+      label: 'channel-owned product stop confirmation candidate',
+      pattern: /\b(?:PendingDecisionStore|PendingDecisionKind::StopConversation|confirmation_to_decision|pending_decisions)\b/,
     },
     {
       category: 'approval_confirmation',
@@ -3716,7 +6766,11 @@ function escapeC7Regex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function scanC7ForbiddenEdges(files) {
+function scanC7ForbiddenEdges(files, options = {}) {
+  const maxFindings =
+    Number.isInteger(options.maxFindings) && options.maxFindings >= 0
+      ? options.maxFindings
+      : 200;
   const findings = [];
   let totalCount = 0;
   const rules = c7ForbiddenEdgeRules();
@@ -3727,7 +6781,7 @@ function scanC7ForbiddenEdges(files) {
     for (const rule of rules) {
       for (const match of c7RegexMatches(analysis.semantic, rule.pattern)) {
         totalCount += 1;
-        if (findings.length >= 200) continue;
+        if (findings.length >= maxFindings) continue;
         findings.push({
           path: relative(repoRoot, file).replaceAll('\\', '/'),
           line: c7LineNumber(source, match.index),
@@ -3742,6 +6796,8 @@ function scanC7ForbiddenEdges(files) {
   return {
     total_count: totalCount,
     findings,
+    max_findings: maxFindings,
+    truncated: findings.length < totalCount,
   };
 }
 
@@ -4344,6 +7400,7 @@ function scanC7Reachability(
     .filter(
       (candidate) =>
         candidate.category === 'approval_confirmation' ||
+        candidate.category === 'channel_product_confirmation_candidate' ||
         candidate.category === 'runtime_selector' ||
         candidate.category === 'legacy_dependency'
     )
@@ -4494,6 +7551,407 @@ function spawnC7Command(command, commandArgs) {
     stderr: result.stderr || '',
   });
   return result;
+}
+
+function currentC8MergeEvidencePath() {
+  const configured = process.env.AGENT_V2_C8_MERGE_SUMMARY;
+  if (configured) return normalizeRepoPath(configured);
+  const sourceSha = c8ReadGitHeadForReport();
+  return `build.noindex/agent-capability-v2/${sourceSha}/c8-merge/evidence-summary.json`;
+}
+
+function readC8MergeSummary(report, path) {
+  const normalized = normalizeRepoPath(path);
+  if (!isSafeRepoPath(normalized)) {
+    c8MergeFailure(
+      report,
+      'invalid_evidence_path',
+      'C8-MERGE evidence summary path is not repository-relative',
+      { path }
+    );
+    return null;
+  }
+  const absolute = join(repoRoot, normalized);
+  const source = readFileSafe(absolute);
+  if (source === null) {
+    c8MergeFailure(
+      report,
+      'missing_evidence_summary',
+      `missing C8-MERGE evidence summary: ${normalized}`,
+      { path: normalized }
+    );
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(source);
+  } catch (error) {
+    c8MergeFailure(
+      report,
+      'invalid_evidence_json',
+      `C8-MERGE evidence summary is invalid JSON: ${error.message}`,
+      { path: normalized }
+    );
+    return null;
+  }
+  const value = parsed;
+  if (value && typeof value === 'object' && value.payload && typeof value.payload === 'object') {
+    return {
+      path: normalized,
+      absolute,
+      raw_sha256: sha256File(absolute),
+      value: value.payload,
+      envelope: value,
+    };
+  }
+  return {
+    path: normalized,
+    absolute,
+    raw_sha256: sha256File(absolute),
+    value,
+  };
+}
+
+function c8MergeFailure(report, code, message, details = {}) {
+  report.failure_details.push({ code, message, ...details });
+  const label = report.gate_name === 'c9-hard-delete' ? 'C9' : 'C8-MERGE';
+  failures.push(`${label}: ${message}`);
+}
+
+function validateC8MergeSummary(
+  report,
+  summary,
+  sourceSha,
+  verifyEvidenceArtifacts = true
+) {
+  const result = {
+    status: 'fail',
+    required_cells: [...C8_REQUIRED_NATIVE_CELLS],
+    observed_cells: [],
+    tuple: null,
+    status_counts: null,
+    failures: [],
+  };
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary)) {
+    c8MergeFailure(report, 'summary_shape', 'C8-MERGE evidence summary must be an object');
+    return result;
+  }
+
+  const expectedTuple = {
+    candidate_source_sha: sourceSha,
+    confirmed_decision_contract_digest:
+      C8_EXPECTED_DIGESTS.confirmed_decision_contract,
+    platform_validation_manifest_digest:
+      C8_EXPECTED_DIGESTS.platform_validation_manifest,
+    runtime_release_digest: C8_EXPECTED_DIGESTS.runtime_release,
+  };
+  result.tuple = summary.cohort_tuple || null;
+  if (!c8CanonicalEqual(summary.cohort_tuple, expectedTuple)) {
+    c8MergeFailure(
+      report,
+      'tuple_mismatch',
+      'C8-MERGE evidence tuple does not exactly match the current source and frozen inputs',
+      { expected: expectedTuple, observed: summary.cohort_tuple || null }
+    );
+  }
+
+  const cells = summary.cell_evidence;
+  const observedCells =
+    cells && typeof cells === 'object' && !Array.isArray(cells)
+      ? Object.keys(cells).sort()
+      : [];
+  result.observed_cells = observedCells;
+  if (
+    JSON.stringify(observedCells) !==
+    JSON.stringify([...C8_REQUIRED_NATIVE_CELLS].sort())
+  ) {
+    c8MergeFailure(
+      report,
+      'cell_exact_set',
+      'C8-MERGE must contain exactly the five required native cells',
+      { expected: C8_REQUIRED_NATIVE_CELLS, observed: observedCells }
+    );
+  }
+
+  const computed = {
+    pending_native_verification: 0,
+    pass: 0,
+    fail: 0,
+    stale: 0,
+  };
+  for (const cellId of observedCells) {
+    const cell = cells[cellId];
+    const status = cell?.status;
+    if (Object.hasOwn(computed, status)) computed[status] += 1;
+    if (status !== 'pass') {
+      c8MergeFailure(
+        report,
+        'cell_not_pass',
+        `C8-MERGE cell ${cellId} is not pass`,
+        { cell_id: cellId, status: status || null }
+      );
+    }
+    if (!c8CanonicalEqual(cell?.cohort_tuple, expectedTuple)) {
+      c8MergeFailure(
+        report,
+        'cell_tuple_mismatch',
+        `C8-MERGE cell ${cellId} has a different cohort tuple`,
+        { cell_id: cellId }
+      );
+    }
+    if (
+      !cell?.evidence ||
+      typeof cell.evidence !== 'object' ||
+      !c8Hex(cell.evidence.digest) ||
+      !isSafeRepoPath(normalizeRepoPath(cell.evidence.normalized_relative_path))
+    ) {
+      c8MergeFailure(
+        report,
+        'cell_evidence_ref_invalid',
+        `C8-MERGE cell ${cellId} has no valid repository-relative evidence reference`,
+        { cell_id: cellId }
+      );
+    } else if (verifyEvidenceArtifacts) {
+      const evidencePath = normalizeRepoPath(
+        cell.evidence.normalized_relative_path
+      );
+      const evidenceSource = readFileSafe(join(repoRoot, evidencePath));
+      if (evidenceSource === null) {
+        c8MergeFailure(
+          report,
+          'cell_evidence_missing',
+          `C8-MERGE evidence artifact for ${cellId} is missing`,
+          { cell_id: cellId, path: evidencePath }
+        );
+      } else {
+        try {
+          const parsed = JSON.parse(evidenceSource);
+          const evidence = parsed?.payload || parsed;
+          if (
+            evidence?.status !== 'pass' ||
+            evidence?.cell_id !== cellId ||
+            !c8CanonicalEqual(evidence?.cohort_tuple, expectedTuple)
+          ) {
+            c8MergeFailure(
+              report,
+              'cell_evidence_mismatch',
+              `C8-MERGE evidence artifact for ${cellId} does not match its summary`,
+              { cell_id: cellId, path: evidencePath }
+            );
+          }
+        } catch (error) {
+          c8MergeFailure(
+            report,
+            'cell_evidence_invalid_json',
+            `C8-MERGE evidence artifact for ${cellId} is invalid JSON: ${error.message}`,
+            { cell_id: cellId, path: evidencePath }
+          );
+        }
+      }
+    }
+  }
+  result.status_counts = computed;
+  if (!c8CanonicalEqual(summary.status_counts, computed)) {
+    c8MergeFailure(
+      report,
+      'status_counts_mismatch',
+      'C8-MERGE status_counts does not match the five cell evidence entries',
+      { expected: computed, observed: summary.status_counts || null }
+    );
+  }
+  if (computed.pending_native_verification !== 0 || computed.fail !== 0 || computed.stale !== 0) {
+    c8MergeFailure(
+      report,
+      'non_pass_status_count',
+      'C8-MERGE requires pending/fail/stale counts to be zero',
+      { counts: computed }
+    );
+  }
+  if (summary.all_verification_points_closed !== true) {
+    c8MergeFailure(
+      report,
+      'verification_points_open',
+      'C8-MERGE requires all verification points to be closed'
+    );
+  }
+  if (summary.global_residual_reachability_zero !== true) {
+    c8MergeFailure(
+      report,
+      'global_residual_nonzero',
+      'C8-MERGE requires global residual/reachability zero evidence'
+    );
+  }
+  if (!summary.d027_terminal_evidence) {
+    c8MergeFailure(
+      report,
+      'd027_evidence_missing',
+      'C8-MERGE requires D-027 terminal drain/exact-zero evidence'
+    );
+  }
+  result.status = report.failure_details.length === 0 ? 'pass' : 'fail';
+  return result;
+}
+
+function runC8MergeGate() {
+  const sourceSha = c8ReadGitHeadForReport();
+  const report = {
+    schema_version: '1.0.0',
+    gate_name: 'c8-merge',
+    evidence_kind: 'merge',
+    source_sha: sourceSha,
+    candidate_source_sha: sourceSha,
+    preflight_blocked: false,
+    evidence_path: currentC8MergeEvidencePath(),
+    failure_details: [],
+    checks: [],
+  };
+  const statusResult = spawnC7Command('git', [
+    'status',
+    '--porcelain',
+    '--untracked-files=all',
+  ]);
+  if (statusResult.status !== 0) {
+    report.preflight_blocked = true;
+    c8MergeFailure(
+      report,
+      'dirty_probe_failed',
+      'C8-MERGE cannot prove a clean worktree',
+      { stderr: c8Tail(statusResult.stderr || '') }
+    );
+  } else if (String(statusResult.stdout || '').trim()) {
+    report.preflight_blocked = true;
+    c8MergeFailure(
+      report,
+      'dirty_worktree',
+      'C8-MERGE requires a clean worktree before accepting native evidence',
+      { status: String(statusResult.stdout || '').trim() }
+    );
+  }
+  const summary = readC8MergeSummary(report, report.evidence_path);
+  if (!report.preflight_blocked && summary) {
+    report.validation = validateC8MergeSummary(report, summary.value, sourceSha);
+  } else if (!summary) {
+    report.validation = {
+      status: 'fail',
+      required_cells: [...C8_REQUIRED_NATIVE_CELLS],
+      observed_cells: [],
+      tuple: null,
+      status_counts: null,
+      failures: ['missing evidence summary'],
+    };
+  }
+  report.status = report.failure_details.length === 0 ? 'pass' : 'fail';
+  return report;
+}
+
+function writeC8MergeReport(report) {
+  const reportDir = join(
+    repoRoot,
+    'build.noindex/agent-capability-v2',
+    report.source_sha,
+    'c8-merge'
+  );
+  mkdirSync(reportDir, { recursive: true });
+  writeFileSync(
+    join(reportDir, 'summary.json'),
+    `${JSON.stringify(report, null, 2)}\n`
+  );
+}
+
+function runC9HardDeleteGate() {
+  const sourceSha = c8ReadGitHeadForReport();
+  const report = {
+    schema_version: '1.0.0',
+    gate_name: 'c9-hard-delete',
+    evidence_kind: 'hard-delete-admission',
+    source_sha: sourceSha,
+    preflight_blocked: false,
+    failure_details: [],
+    prerequisites: {},
+  };
+  const mergePath =
+    process.env.AGENT_V2_C8_MERGE_SUMMARY ||
+    `build.noindex/agent-capability-v2/${sourceSha}/c8-merge/summary.json`;
+  const mergeSource = readFileSafe(join(repoRoot, normalizeRepoPath(mergePath)));
+  let merge = null;
+  if (mergeSource === null) {
+    report.preflight_blocked = true;
+    c8MergeFailure(
+      report,
+      'c8_merge_missing',
+      'C9 requires a same-source C8-MERGE result'
+    );
+  } else {
+    try {
+      merge = JSON.parse(mergeSource);
+    } catch (error) {
+      report.preflight_blocked = true;
+      c8MergeFailure(
+        report,
+        'c8_merge_invalid_json',
+        `C8-MERGE result is invalid JSON: ${error.message}`
+      );
+    }
+    const mergeValue = merge?.validation
+      ? merge
+      : merge?.payload || merge;
+    const mergeStatus = mergeValue?.status || mergeValue?.validation?.status;
+    report.prerequisites.c8_merge_status = mergeStatus || null;
+    if (mergeStatus !== 'pass') {
+      report.preflight_blocked = true;
+      c8MergeFailure(
+        report,
+        'c8_merge_not_pass',
+        'C9 is blocked until C8-MERGE is pass'
+      );
+    }
+  }
+
+  const statusResult = spawnC7Command('git', [
+    'status',
+    '--porcelain',
+    '--untracked-files=all',
+  ]);
+  report.prerequisites.clean_worktree = statusResult.status === 0 &&
+    !String(statusResult.stdout || '').trim();
+  if (!report.prerequisites.clean_worktree) {
+    report.preflight_blocked = true;
+    c8MergeFailure(
+      report,
+      'dirty_worktree',
+      'C9 requires a clean source checkpoint'
+    );
+  }
+
+  // Physical deletion is intentionally not inferred from a source scan. A
+  // future C9 implementation must provide an explicit deletion manifest and a
+  // D-027 zero proof; absent those immutable inputs, fail closed.
+  report.prerequisites.deletion_manifest = {
+    path: 'docs/specs/2026-08-28-agent-capability-platform-v2/C9-HARD-DELETE-MANIFEST.json',
+    present: false,
+  };
+  report.prerequisites.d027_zero_evidence = false;
+  c8MergeFailure(
+    report,
+    'c9_manifest_missing',
+    'C9 hard-delete manifest and D-027 zero evidence are not present; physical deletion is not admitted'
+  );
+  report.status = report.failure_details.length === 0 ? 'pass' : 'fail';
+  return report;
+}
+
+function writeC9HardDeleteReport(report) {
+  const reportDir = join(
+    repoRoot,
+    'build.noindex/agent-capability-v2',
+    report.source_sha,
+    'c9-hard-delete'
+  );
+  mkdirSync(reportDir, { recursive: true });
+  writeFileSync(
+    join(reportDir, 'summary.json'),
+    `${JSON.stringify(report, null, 2)}\n`
+  );
 }
 
 function writeGateReport(name) {

@@ -1,195 +1,182 @@
-# Remote Capability API
+# Canonical Remote API
 
-NomiFun can expose its platform capabilities through a network-reachable,
-token-authenticated MCP and REST front door. A trusted external agent or MCP
-client can connect with a URL plus the NomiFun Desktop access token and call the
-same capability registry used by the desktop app.
+NomiFun exposes one installation-owner Remote ingress over MCP and REST. Remote
+is a transport, not an Agent type or a capability profile:
 
-The installation has one token. It authenticates the installation owner and
-never binds, selects, or impersonates a companion. Remote calls use explicit
-tool arguments and installation-level provider/model authority.
+1. A local owner creates a `RemoteBinding` that freezes an exact Agent Preset
+   revision, resolved snapshot, and typed resources.
+2. `open(binding_id)` creates a durable `AgentSession` and returns its UUIDv7
+   `agent_session_id`.
+3. `turn`, `observe`, and `cancel` always carry that explicit ID.
 
-For copy-ready integrations, see
-[Remote Capability API Examples](./remote-capability-api-examples.md).
+The installation token authenticates the owner only. It never selects a
+companion, model, profile, domain list, workspace, or recent Session.
 
-## Security Model
+See [Canonical Remote examples](./remote-capability-api-examples.md) for
+copy-ready commands.
 
-The NomiFun Desktop access token is high privilege. It can call exposed platform
-capabilities, read and write files, and in desktop builds may operate browser or
-computer-use capabilities. Treat it like remote code execution authority:
+## Security model
 
-- Give tokens only to clients and agents you trust.
-- Prefer loopback, VPN, or a private network.
-- Put TLS, firewall rules, and rate limits in front of any public exposure.
-- Rotate or revoke tokens immediately if they leave your control.
-- Sensitive tools such as secrets and factory reset are not exposed on the
-  remote surface by default.
-- Destructive tools require a confirmation retry: the first call returns a
-  confirmation challenge; the caller must show the action to the user and retry
-  with `confirm: true`.
+The installation token is a high-privilege credential:
+
+- give it only to authorized clients;
+- prefer loopback, VPN, or a private network;
+- use TLS, firewall rules, and rate limits for network exposure;
+- rotate or revoke it immediately if it leaves your control;
+- do not put it in URLs, logs, screenshots, or issue reports.
+
+Remote execution is FullAuto. There is no `confirm: true`,
+`needs_confirmation`, token scope, or profile/domain selector. Authority comes
+from the authenticated owner and the immutable Snapshot frozen into the
+AgentSession.
 
 ## Endpoints
 
-The network front door is mounted by the same backend process as the Web UI.
-
-| Endpoint | Purpose |
+| Endpoint | Contract |
 | --- | --- |
-| `/mcp` | Full Streamable-HTTP MCP server. |
-| `/mcp-agent` | Curated MCP profile for external working agents. |
-| `/v1/tools` | REST tool discovery. Add `?profile=agent` for the curated set. |
-| `/v1/tools/{name}` | REST tool call. |
-| `/v1/tools/{name}/stream` | SSE streaming wrapper for tools that emit progress. |
-| `/v1/openapi.json` | OpenAPI 3.1 description for the REST tool surface. |
+| `/mcp` | Streamable-HTTP MCP exposing exactly `open`, `turn`, `observe`, and `cancel`. |
+| `POST /api/remote/open` | Open a Session from a `RemoteBinding`. |
+| `POST /api/remote/turn` | Start a turn on an explicit Session. |
+| `GET /api/remote/observe` | Read events and message projections after an exclusive cursor. |
+| `POST /api/remote/cancel` | Cancel the active turn on an explicit Session. |
+| `/api/remote-bindings` | Authenticated local management API for owner bindings. |
+| `/api/webui/access-token` | Mint/rotate, inspect, or revoke the installation token. |
 
-Authenticate every request with:
+Authenticate Remote MCP/REST requests with:
 
 ```http
-Authorization: Bearer <nomifun-desktop-access-token>
+Authorization: Bearer <installation-access-token>
 ```
 
-Common base URLs:
+The removed `/mcp-agent`, `/v1`, generic tool discovery/calls, and
+`profile`/`domains` query parameters are not compatibility aliases. They fail
+closed.
 
-- Desktop remote access: `http://<LAN-IP>:25808`
-- Standalone server: `http://<host>:8787` unless you changed the port
-- Local development or embedded desktop backend: `http://127.0.0.1:<port>`
+## Create a RemoteBinding
 
-## Creating The NomiFun Desktop Token
+Create and save an Agent Preset in Agent Settings, resolve its exact revision,
+then create a RemoteBinding from the local management UI. The binding contains
+only:
 
-Tokens are stored hashed. The plaintext token is shown only once.
+- `remote_binding_id`
+- `owner_user_id`
+- `name`
+- canonical `agent_binding`
 
-### Desktop App
+Updating a binding affects only Sessions opened afterward. Deleting it prevents
+new opens but does not rewrite or cancel an existing Session.
 
-Use the Open Capabilities / remote access UI, or call the trusted local API
-from the desktop WebView context:
+## Installation token
+
+The plaintext token is shown only when it is minted. SQLite stores only its
+SHA-256 verifier.
 
 ```bash
-curl -X POST \
-  http://127.0.0.1:<loopback-port>/api/webui/access-token
+# Trusted local desktop context, or an authenticated installation owner on
+# nomifun-web.
+curl -X POST http://127.0.0.1:<port>/api/webui/access-token
+
+curl http://127.0.0.1:<port>/api/webui/access-token
+
+curl -X DELETE http://127.0.0.1:<port>/api/webui/access-token
 ```
 
-The response returns the plaintext token once:
-
-```json
-{
-  "success": true,
-  "data": {
-    "token": "<64-character-hex-token>"
-  }
-}
-```
-
-Status and revoke use the same path:
-
-```bash
-curl http://127.0.0.1:<loopback-port>/api/webui/access-token
-
-curl -X DELETE \
-  http://127.0.0.1:<loopback-port>/api/webui/access-token
-```
-
-These token-management endpoints require local trust. A remote browser or plain
-curl client cannot mint tokens.
-
-### Headless `nomifun-web`
-
-Seed the installation token at startup with `NOMIFUN_ACCESS_TOKEN`. This does
-not require a companion to exist:
+For a headless host, seed the same installation token at startup:
 
 ```bash
 NOMIFUN_ACCESS_TOKEN="$(openssl rand -hex 32)" \
   nomifun-web --host 127.0.0.1 --port 8787
 ```
 
-Use the generated hex string as the Bearer token. For non-local exposure,
-finish admin setup first and put the server behind TLS.
+Changing the environment value on a later start rotates the stored verifier.
 
-## MCP Client Configuration
-
-Example Streamable-HTTP MCP configuration:
+## MCP client configuration
 
 ```json
 {
   "mcpServers": {
     "nomifun": {
       "type": "streamable-http",
-      "url": "http://127.0.0.1:25808/mcp-agent",
+      "url": "http://127.0.0.1:25808/mcp",
       "headers": {
-        "Authorization": "Bearer <nomifun-desktop-access-token>"
+        "Authorization": "Bearer <installation-access-token>"
       }
     }
   }
 }
 ```
 
-Use `/mcp-agent` when an external agent mostly needs work tools
-(browser/computer/knowledge/files/conversations). Use `/mcp` when you
-intentionally want the broader platform control surface.
+`tools/list` must return exactly:
 
-## REST Tool Calls
-
-Discover tools:
-
-```bash
-curl -s "http://127.0.0.1:25808/v1/tools?profile=agent" \
-  -H "Authorization: Bearer $TOKEN"
+```text
+open
+turn
+observe
+cancel
 ```
 
-Call a tool returned by discovery, using that tool's JSON Schema:
+The MCP transport session ID is connection lifecycle state only. Never persist
+or reuse it as the product AgentSession identity.
 
-```bash
-curl -s -X POST "http://127.0.0.1:25808/v1/tools/<tool-name>" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"argument":"value"}'
+## Open lifecycle
+
+`open` commits the Session before crossing the Runtime process boundary, so its
+first successful response may report:
+
+```json
+{"open_state":{"state":"opening"}}
 ```
 
-Successful REST calls return `200 {"result": ...}`. Tool validation failures
-return `422`, unknown tools return `404`, invalid tokens return `401`, and
-confirmation-required calls return `409`.
+Continue with `observe` using the returned cursor. Under ordinary conditions the
+Session converges to `ready` or `open_failed`. Runtime scheduling is bounded to
+5 seconds, the complete admission attempt to 35 seconds, and failure-fact
+persistence to 10 seconds.
 
-## Streaming
+If durable storage is unavailable while the failure fact is being written, an
+error retains `agent_session_id`, cursor, and
+`recovery: "host_restart_reconcile"`. Do not create a replacement Session or
+blindly retry sidecar launch; preserve the ID and restore the database/host.
 
-SSE streaming is available for tools that report progress:
+## Canonical CLI
+
+`nomicore` mirrors the same four REST operations:
 
 ```bash
-curl -N -X POST "http://127.0.0.1:25808/v1/tools/<tool-name>/stream" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"argument":"value"}'
+export NOMIFUN_URL=http://127.0.0.1:25808
+export NOMIFUN_ACCESS_TOKEN=<installation-access-token>
+
+nomicore remote open <binding_id> \
+  --initial-input '{"text":"hello"}' \
+  --idempotency-key open-1
+
+nomicore remote observe <agent_session_id> --after-seq 0 --limit 100
+
+nomicore remote turn <agent_session_id> '{"text":"continue"}' \
+  --idempotency-key turn-1
+
+nomicore remote cancel <agent_session_id> \
+  --idempotency-key cancel-1
 ```
 
-Each event is a `data: <json>` line. The final event uses
-`{"type":"__result__","data":{"result":...}}`.
+If an idempotency key is omitted, the CLI prints and uses a generated one.
+Reuse the printed key after an ambiguous network failure.
 
-## Agent Collaboration Boundary
+## Common failures
 
-Persistent single- and multi-Agent work uses one execution contract:
+| Code | Meaning |
+| --- | --- |
+| `REMOTE_AUTH_REQUIRED` | Token is missing, invalid, or revoked. |
+| `REMOTE_INVALID_REQUEST` | Unknown fields/query parameters or malformed input. |
+| `REMOTE_BINDING_NOT_FOUND` | The binding does not exist for this owner. |
+| `REMOTE_SESSION_NOT_FOUND` | The explicit Session is absent, foreign, or not Remote-owned. |
+| `REMOTE_SESSION_OPENING` | Runtime admission has not reached a durable terminal state. |
+| `REMOTE_OPEN_FAILED` | Runtime admission failed; inspect Session events. |
+| `REMOTE_SESSION_BUSY` | The requested turn/cancel conflicts with current Session state. |
+| `SNAPSHOT_EXECUTOR_UNAVAILABLE` | The frozen Snapshot cannot currently execute. |
 
-- `nomi_delegate` creates an Agent execution from a goal or explicit steps.
-- `nomi_execution_get` reads its plan, attempts, results, and current state.
-- `nomi_execution_update` applies all lifecycle and plan mutations.
+## Related docs
 
-Availability is authority-bound, not transport-bound. Desktop and Channel
-callers derive authority from their calling Conversation and execution link.
-The installation token may also use the three tools through Remote MCP/REST.
-It acts as the same installation owner as Desktop, so execution reads and
-updates use the ordinary owner boundary instead of a synthetic companion
-creator. Secondary users see none of the three tools on any surface. Minting
-or revoking the token is restricted to a trusted local owner context; discover
-the effective Remote catalog through `/v1/tools` and protect the token as a
-high-privilege credential.
-
-## Identity And Model Context
-
-Remote calls run as the NomiFun Desktop installation owner with
-`companion_id = null`. Model-backed tools use an explicit model when their
-schema accepts one, otherwise they resolve from the enabled instance provider
-catalog. No default companion profile, persona, knowledge binding, active
-thread, or workspace is inherited.
-
-## Related Docs
-
-- [Remote Capability API Examples](./remote-capability-api-examples.md)
+- [Canonical Remote examples](./remote-capability-api-examples.md)
 - [WebUI Remote Access](./webui-remote-access.md)
 - [Web Server Deployment](./web-server-deployment.md)
 - [Computer Use And Browser Use](./computer-browser-use.md)

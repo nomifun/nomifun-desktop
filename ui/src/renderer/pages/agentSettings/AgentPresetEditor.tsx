@@ -4,11 +4,14 @@ import type {
   AgentPresetEditorResponse,
   CapabilityCatalogItem,
   CapabilityPlacement,
+  ChatRouteRecord,
   InstallationTokenStateResponse,
   OfficialPresetTemplate,
   ResolveAgentPresetPreviewResponse,
 } from '@/common/types/agentPlatform';
 import {
+  AGENT_CHAT_MODEL_TASK,
+  CHAT_ROUTE_RECORD_SCHEMA,
   capabilityPlacement,
   missingSkillCapabilities,
   placeCapability,
@@ -36,9 +39,11 @@ import {
   Save,
   Search,
 } from '@icon-park/react';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  DEFAULT_WORKSPACE_RESOURCE_ID,
+  WORKSPACE_ROOT_PARAMETER,
   defaultResourceBinding,
   removeResourceBinding,
   resourceKindsForDraft,
@@ -55,6 +60,7 @@ type AgentPresetEditorProps = {
   preview: ResolveAgentPresetPreviewResponse | null;
   testResult: RunAgentPresetTestResult | null;
   tokenState: InstallationTokenStateResponse | null;
+  hostWorkDir: string | null;
   sourceTemplate?: OfficialPresetTemplate;
   dirty: boolean;
   busyAction: 'preview' | 'save' | 'test' | 'fork' | 'create' | null;
@@ -139,6 +145,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   preview,
   testResult,
   tokenState,
+  hostWorkDir,
   sourceTemplate,
   dirty,
   busyAction,
@@ -188,8 +195,58 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   ) => patchDocument((document) => placeCapability(document, capability, placement));
 
   const selectedSkills = new Set(draft.document.skill_bindings.map((skill) => skill.id));
-  const chatRoute = draft.document.model_route_refs.chat ?? '';
+  const chatRoute = draft.document.model_route_refs[AGENT_CHAT_MODEL_TASK] ?? '';
+  const chatRouteRecord = draft.document.chat_route_records[AGENT_CHAT_MODEL_TASK];
+  const [chatRouteRecordText, setChatRouteRecordText] = useState(() =>
+    chatRouteRecord ? JSON.stringify(chatRouteRecord, null, 2) : ''
+  );
+  useEffect(() => {
+    setChatRouteRecordText(
+      chatRouteRecord ? JSON.stringify(chatRouteRecord, null, 2) : ''
+    );
+  }, [chatRouteRecord]);
   const previewBlocked = preview?.status === 'blocked';
+
+  const applyChatRouteRecordText = (text: string) => {
+    setChatRouteRecordText(text);
+    if (!text.trim()) {
+      patchDocument((document) => {
+        const modelRouteRefs = { ...document.model_route_refs };
+        const chatRouteRecords = { ...document.chat_route_records };
+        delete modelRouteRefs[AGENT_CHAT_MODEL_TASK];
+        delete chatRouteRecords[AGENT_CHAT_MODEL_TASK];
+        return {
+          ...document,
+          model_route_refs: modelRouteRefs,
+          chat_route_records: chatRouteRecords,
+        };
+      });
+      return;
+    }
+    try {
+      const parsed = JSON.parse(text) as ChatRouteRecord;
+      if (
+        parsed.schema !== CHAT_ROUTE_RECORD_SCHEMA ||
+        parsed.task !== AGENT_CHAT_MODEL_TASK ||
+        !parsed.primary?.model_route_id
+      ) {
+        return;
+      }
+      patchDocument((document) => ({
+        ...document,
+        model_route_refs: {
+          ...document.model_route_refs,
+          [AGENT_CHAT_MODEL_TASK]: parsed.primary.model_route_id,
+        },
+        chat_route_records: {
+          ...document.chat_route_records,
+          [AGENT_CHAT_MODEL_TASK]: parsed,
+        },
+      }));
+    } catch {
+      // Keep the draft unchanged until the JSON is complete and valid.
+    }
+  };
 
   return (
     <main className={styles.editorSurface}>
@@ -246,18 +303,16 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             <Input
               value={chatRoute}
               placeholder={t('agentSettings.fields.chatModelRoutePlaceholder')}
-              onChange={(route) =>
-                patchDocument((document) => ({
-                  ...document,
-                  model_route_refs: route.trim()
-                    ? { ...document.model_route_refs, chat: route }
-                    : Object.fromEntries(
-                        Object.entries(document.model_route_refs).filter(
-                          ([key]) => key !== 'chat'
-                        )
-                      ),
-                }))
-              }
+              readOnly
+            />
+          </label>
+          <label className={`${styles.field} ${styles.fieldWide}`}>
+            <span>{t('agentSettings.fields.chatModelRouteRecord')}</span>
+            <Input.TextArea
+              value={chatRouteRecordText}
+              placeholder={t('agentSettings.fields.chatModelRouteRecordPlaceholder')}
+              autoSize={{ minRows: 4, maxRows: 12 }}
+              onChange={applyChatRouteRecordText}
             />
           </label>
           <label className={`${styles.field} ${styles.fieldWide}`}>
@@ -475,7 +530,15 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                 defaultResourceBinding(
                   resourceKind,
                   editor.preset.owner_user_id ?? '',
-                  resourceDefault?.operations ?? ['read']
+                  resourceDefault?.operations ?? ['read'],
+                  resourceKind === 'workspace' && hostWorkDir
+                    ? {
+                        resourceId: DEFAULT_WORKSPACE_RESOURCE_ID,
+                        typedParameters: {
+                          [WORKSPACE_ROOT_PARAMETER]: hostWorkDir,
+                        },
+                      }
+                    : undefined
                 );
               return (
                 <div key={resourceKind} className={styles.resourceEditorRow}>
@@ -549,6 +612,22 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                         }
                       />
                     </label>
+                    {resourceKind === 'workspace' && (
+                      <label className={styles.field}>
+                        <span>{t('agentSettings.resources.hostPath')}</span>
+                        <Input
+                          value={
+                            binding.typed_parameters?.[WORKSPACE_ROOT_PARAMETER] ??
+                            hostWorkDir ??
+                            ''
+                          }
+                          disabled
+                          placeholder={t(
+                            'agentSettings.resources.hostPathUnavailable'
+                          )}
+                        />
+                      </label>
+                    )}
                   </div>
                 </div>
               );

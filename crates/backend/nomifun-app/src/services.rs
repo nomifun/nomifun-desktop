@@ -1979,6 +1979,35 @@ impl std::error::Error for RetainedStartupCleanupError {
 }
 
 impl AppServices {
+    /// Reject the legacy service graph once a Fresh-v4 root is ready.
+    ///
+    /// `AppServices` is retained for transitional compatibility consumers only.
+    /// The canonical production host composes its own `AgentPlatform` and router
+    /// from the Fresh-v4 root; allowing this graph to assemble against that same
+    /// root would create two competing session/runtime authorities.
+    pub(crate) fn require_legacy_compatibility_root(
+        &self,
+        consumer: &str,
+    ) -> anyhow::Result<()> {
+        let ready_marker = self
+            .data_dir
+            .join(nomifun_v4_root::FRESH_V4_READY_MARKER_FILE);
+        match std::fs::symlink_metadata(&ready_marker) {
+            Ok(metadata) if metadata.is_file() => anyhow::bail!(
+                "{consumer} is transitional-only and cannot consume a Fresh-v4 root: {}",
+                self.data_dir.display()
+            ),
+            Ok(_) => anyhow::bail!(
+                "Fresh-v4 ready marker is not a regular file; refusing transitional app composition: {}",
+                ready_marker.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(anyhow::Error::new(error).context(format!(
+                "inspect Fresh-v4 ready marker for transitional consumer {consumer}"
+            ))),
+        }
+    }
+
     /// Bind the process server-lock authority to these exact services.
     ///
     /// Both the configured data directory and SQLite's live `main` database
@@ -2234,7 +2263,7 @@ impl AppServices {
     /// Wire the dependency bundle into the Platform Gateway MCP server.
     /// Called from `create_router` after `build_module_states` (the
     /// `ConversationService` / `CronService` instances live there).
-    pub(crate) async fn inject_gateway_deps(&self, deps: Arc<nomifun_gateway::GatewayDeps>) {
+    pub(crate) async fn inject_gateway_deps(&self, deps: Arc<nomifun_gateway::CompatibilityCapabilityHost>) {
         if let Some(server) = &self._gateway_mcp_server {
             server.set_deps(deps).await;
         }

@@ -139,8 +139,8 @@ MCP 服务器对外暴露引擎可调用的工具与资源。当前 `nomifun-app
 - `mcp-open-stdio`
 - `mcp-computer-stdio`
 
-同一二进制还提供 `terminal-hook`、`doctor`、`tools`、`call`
-等运维 / 调用子命令。
+同一二进制还提供 `terminal-hook`、`doctor`，以及
+`remote open/turn/observe/cancel` 等运维 / 调用子命令。
 
 不同运行时的 MCP 注入来源不同：
 
@@ -148,7 +148,8 @@ MCP 服务器对外暴露引擎可调用的工具与资源。当前 `nomifun-app
 - Requirement 与 Knowledge 服务器是有作用域的内部 MCP 服务器；
 - 平台 Gateway 工具通过 `nomifun-gateway` 传输；
 - Browser / Computer 桥按 feature gate 启用；
-- 公开 `/mcp` 与 `/mcp-agent` 由 `nomifun-public` 提供，并使用安装令牌认证。
+- 公开 `/mcp` 由 `nomifun-public` 提供，是安装令牌认证的 canonical Remote
+  AgentSession 入口。
 
 内部 stdio bridge 不信任调用方提交的 user id 或 Conversation 持久标记。宿主在
 服务端派生精确作用域，只向子进程签发带作用域、有效期和签名的能力声明。签名根
@@ -157,17 +158,17 @@ MCP 服务器对外暴露引擎可调用的工具与资源。当前 `nomifun-app
 
 针对 HTTP MCP 服务器的 OAuth 流程由 `nomifun-mcp::oauth_service` 处理（PKCE、回调 URI、token 存储）。加密后的 token 通过 AES-GCM 落入 SQLite 的 `oauth_tokens` 仓库（参见 `nomifun-common::crypto::{encrypt_string, decrypt_string}`）。
 
-## 公开能力入口
+## Canonical Remote 入口
 
-完整 app router 在普通 `/api` browser-auth 树之外挂载三类安装令牌
-认证入口：
+Fresh-v4 host 对同一个安装令牌认证的 Remote contract 提供两种投影：
 
-- `/mcp`：面向安装 owner 的通用 MCP profile；
-- `/mcp-agent`：策划过的 agent profile；
-- `/v1`：REST 能力适配器，可选择 agent profile。
+- `/mcp`：Streamable-HTTP MCP，精确包含 `open`、`turn`、`observe`、`cancel`；
+- `/api/remote/*`：同四操作的 REST 形式。
 
 每个安装只有一枚有效 Token。调用方以安装 owner 身份行动，不隐式绑定伙伴，
-也不继承伙伴 profile、模型 / 人格、知识绑定或活动会话。
+也不继承伙伴 profile、模型 / 人格、知识绑定或活动会话。`open` 使用本地 owner
+创建的 `RemoteBinding`，返回显式 UUIDv7 `agent_session_id`；后续操作始终携带
+该 ID。MCP transport session 只负责连接生命周期。
 
 ## 快速查表：事件 / 传输
 
@@ -178,8 +179,7 @@ MCP 服务器对外暴露引擎可调用的工具与资源。当前 `nomifun-app
 | 持久化 Agent 协作 | HTTP `/api/agent-executions/*`，失效通知与瞬时思考流走 `/ws` |
 | 终端输入 / 输出 | 输入走 HTTP 终端路由，输出走 `/ws` |
 | 桌面 keep-awake | Tauri command |
-| 远程 MCP 工具调用 | `/mcp` 或 `/mcp-agent` |
-| 远程 REST 能力调用 | `/v1` |
+| Remote AgentSession 操作 | MCP `/mcp` 或 REST `/api/remote/*` |
 | 会话回合 | 进程内 `nomi` 引擎，token 流走 `/ws` |
 | 终端（含第三方 agent CLI） | `nomifun-terminal` 管理的 PTY 子进程 stdio |
 | session 内部知识搜索 | `mcp-knowledge-stdio` bridge |

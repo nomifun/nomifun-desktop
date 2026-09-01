@@ -241,37 +241,30 @@ async fn agent_session_capabilities(
     Path(agent_session_id): Path<String>,
 ) -> Result<Json<ApiResponse<AgentSessionCapabilityStateResponse>>, AgentPlatformHttpError> {
     let agent_session_id = AgentSessionId(agent_session_id);
-    state
+    let catalog = state
         .platform
-        .session_head(&user_principal(&owner), &agent_session_id)
+        .session_capability_catalog(&user_principal(&owner), &agent_session_id)
         .await?;
-    let snapshot = state.platform.execution_snapshot(&agent_session_id).await?;
-    let active = state.platform.active_capabilities(&agent_session_id).await?;
     Ok(Json(ApiResponse::ok(
         AgentSessionCapabilityStateResponse {
-            resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
-            generation: active.generation,
-            initial_capabilities: snapshot
-                .content()
+            resolved_snapshot_ref: catalog.resolved_snapshot_ref,
+            generation: catalog.generation,
+            initial_capabilities: catalog
                 .initial_capabilities
-                .iter()
-                .map(|capability| capability.capability.id.as_ref().to_owned())
-                .collect(),
-            on_demand_capabilities: snapshot
-                .content()
-                .on_demand_capabilities
-                .iter()
-                .map(|capability| capability.capability.id.as_ref().to_owned())
-                .collect(),
-            active_capabilities: active
-                .active
-                .iter()
+                .into_iter()
                 .map(|capability| capability.as_ref().to_owned())
                 .collect(),
-            compact_on_demand_index: snapshot
-                .content()
-                .compact_on_demand_index
-                .clone(),
+            on_demand_capabilities: catalog
+                .on_demand_capabilities
+                .into_iter()
+                .map(|capability| capability.as_ref().to_owned())
+                .collect(),
+            active_capabilities: catalog
+                .active_capabilities
+                .into_iter()
+                .map(|capability| capability.as_ref().to_owned())
+                .collect(),
+            compact_on_demand_index: catalog.compact_on_demand_index,
         },
     )))
 }

@@ -287,8 +287,10 @@ async fn send_to_agent_warms_cold_task_before_returning_stream_subscription() {
         SqliteClientPreferenceRepository::new(pool.clone()),
     )));
     let message_svc = ChannelMessageService::new(
-        Arc::clone(&conversation_svc),
-        Arc::clone(&runtime_registry),
+        nomifun_channel::conversation_channel_session_port(
+            Arc::clone(&conversation_svc),
+            Arc::clone(&runtime_registry),
+        ),
         settings,
         Arc::new(SqliteChannelRepository::new(pool)),
         installation_owner,
@@ -362,8 +364,10 @@ async fn build_stack(pool: nomifun_db::SqlitePool) -> TestStack {
     )));
     let channel_repo = Arc::new(SqliteChannelRepository::new(pool));
     let message_svc = ChannelMessageService::new(
-        Arc::clone(&conversation_svc),
-        Arc::clone(&runtime_registry),
+        nomifun_channel::conversation_channel_session_port(
+            Arc::clone(&conversation_svc),
+            Arc::clone(&runtime_registry),
+        ),
         settings,
         channel_repo.clone(),
         installation_owner.clone(),

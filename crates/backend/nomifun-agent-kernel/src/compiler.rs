@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nomifun_agent_contracts::{
     ActionId, AgentPresetRevision, CapabilityId, CapabilityRef, CapabilitySelection,
-    CanonicalSchemaRef, CompactOnDemandCapabilityEntry, DigestHex, ModelRouteId, OperationId,
-    PlatformConstraint, PrecomputedActivationPlan, PrincipalRef, ResolvedCapability,
+    CanonicalSchemaRef, CompactOnDemandCapabilityEntry, DigestHex, ModelRouteId,
+    OperationId, PlatformConstraint, PrecomputedActivationPlan, PrincipalRef, ResolvedCapability,
     ResolvedMcpToolLock, ResolvedSkillLock, ResolvedSnapshotContent, ResolvedSnapshotEnvelope,
     ResolvedSnapshotId, ResolvedSnapshotRef, ResourceBindingId, ResourceKind, RuntimeFeatureId,
     RuntimeProfileKind, RuntimeTarget, SkillId, TypedResourceBinding, VersionString,
@@ -234,6 +234,12 @@ impl AgentPresetCompiler {
                 reason: error.to_string(),
             })?;
 
+        let chat_route_identity = request
+            .revision
+            .chat_route_identity()
+            .map_err(|error| KernelError::InvalidPresetRevision {
+                reason: error.message,
+            })?;
         let content = ResolvedSnapshotContent {
             schema_version: VersionString::from("1.0.0"),
             resolver_version: environment.resolver_version.clone(),
@@ -248,6 +254,7 @@ impl AgentPresetCompiler {
             required_runtime_features,
             compiled_runtime_profile_digest,
             model_route_refs: request.revision.payload.model_route_refs,
+            chat_route_identity,
             initial_capabilities,
             on_demand_capabilities,
             on_demand_activation_plans: activation_plans,

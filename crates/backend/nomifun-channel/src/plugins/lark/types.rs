@@ -1,5 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::plugins::callback::is_supported_callback_action;
+
 /// Deserialize a string that may be null into an empty string.
 fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
@@ -356,6 +358,9 @@ pub(crate) fn build_interactive_card(text: &str, buttons: Option<&[Vec<crate::ty
         let mut actions = Vec::new();
         for row in button_rows {
             for btn in row {
+                if !is_supported_callback_action(&btn.action) {
+                    continue;
+                }
                 let callback_value = format_lark_callback(&btn.action, btn.params.as_ref());
                 actions.push(serde_json::json!({
                     "tag": "button",
@@ -397,9 +402,6 @@ fn format_lark_callback(action: &str, params: Option<&std::collections::HashMap<
 /// Derive the category prefix from an action name.
 /// Same logic as Telegram plugin for consistency.
 fn action_category_prefix(action: &str) -> &'static str {
-    if action == "system.confirm" {
-        return "chat";
-    }
     let prefix = action.split('.').next().unwrap_or("");
     match prefix {
         "pairing" => "platform",
@@ -421,12 +423,16 @@ pub(crate) fn parse_lark_callback(data: &str) -> Option<ParsedLarkCallback> {
     }
 
     let category = parts[0].to_string();
-    let action = parts[1].to_string();
+    let action = parts[1].trim();
 
     // Validate category
     if !matches!(category.as_str(), "platform" | "system" | "chat") {
         return None;
     }
+    if action.is_empty() || !is_supported_callback_action(action) {
+        return None;
+    }
+    let action = action.to_owned();
 
     let params = if parts.len() == 3 && !parts[2].is_empty() {
         let mut map = std::collections::HashMap::new();
@@ -686,7 +692,7 @@ mod tests {
         let buttons = vec![vec![
             ActionButton {
                 label: "Yes".into(),
-                action: "system.confirm".into(),
+                action: "session.new".into(),
                 params: None,
             },
             ActionButton {
@@ -710,19 +716,17 @@ mod tests {
         assert_eq!(format_lark_callback("help.show", None), "system:help.show");
         assert_eq!(format_lark_callback("pairing.show", None), "platform:pairing.show");
         assert_eq!(format_lark_callback("chat.regenerate", None), "chat:chat.regenerate");
-        assert_eq!(format_lark_callback("system.confirm", None), "chat:system.confirm");
+        assert_eq!(format_lark_callback("confirm.yes", None), "system:confirm.yes");
     }
 
     #[test]
     fn format_callback_with_params() {
         use std::collections::HashMap;
         let mut params = HashMap::new();
-        params.insert("callId".into(), "abc".into());
-        params.insert("value".into(), "yes".into());
-        let result = format_lark_callback("system.confirm", Some(&params));
-        assert!(result.starts_with("chat:system.confirm:"));
-        assert!(result.contains("callId=abc"));
-        assert!(result.contains("value=yes"));
+        params.insert("sessionId".into(), "abc".into());
+        let result = format_lark_callback("chat.continue", Some(&params));
+        assert!(result.starts_with("chat:chat.continue:"));
+        assert!(result.contains("sessionId=abc"));
     }
 
     #[test]
@@ -738,18 +742,31 @@ mod tests {
     fn parse_callback_roundtrip_with_params() {
         use std::collections::HashMap;
         let mut p = HashMap::new();
-        p.insert("agentType".into(), "acp".into());
-        let encoded = format_lark_callback("agent.select", Some(&p));
+        p.insert("sessionId".into(), "abc".into());
+        let encoded = format_lark_callback("chat.continue", Some(&p));
         let (cat, action, params) = parse_lark_callback(&encoded).unwrap();
-        assert_eq!(cat, "system");
-        assert_eq!(action, "agent.select");
-        assert_eq!(params.unwrap().get("agentType").unwrap(), "acp");
+        assert_eq!(cat, "chat");
+        assert_eq!(action, "chat.continue");
+        assert_eq!(params.unwrap().get("sessionId").unwrap(), "abc");
     }
 
     #[test]
     fn parse_callback_invalid() {
         assert!(parse_lark_callback("invalid").is_none());
         assert!(parse_lark_callback("unknown:action").is_none());
+    }
+
+    #[test]
+    fn parse_callback_rejects_unsupported_actions() {
+        for data in [
+            "system:unknown.switch:value=yes",
+            "system:confirm:value=yes",
+        ] {
+            assert!(
+                parse_lark_callback(data).is_none(),
+                "unsupported callback must be rejected: {data}"
+            );
+        }
     }
 
     // -- GenericResponse ----------------------------------------------------

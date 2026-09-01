@@ -42,7 +42,7 @@ fn create_conv_body(name: &str) -> serde_json::Value {
 }
 
 /// Seed the provider/model pair `create_conv_body` pins. Idempotent.
-async fn seed_conversation_provider(services: &nomifun_app::AppServices) {
+async fn seed_conversation_provider(services: &nomifun_app::compatibility::AppServices) {
     let credentials_encrypted = common::encrypted_bearer_credentials();
     sqlx::query(
         "INSERT OR IGNORE INTO providers (\
@@ -60,7 +60,7 @@ async fn seed_conversation_provider(services: &nomifun_app::AppServices) {
 
 async fn create_conversation(
     app: &mut axum::Router,
-    services: &nomifun_app::AppServices,
+    services: &nomifun_app::compatibility::AppServices,
     token: &str,
     csrf: &str,
     name: &str,
@@ -98,7 +98,7 @@ fn send_message_request(
 }
 
 async fn insert_message(
-    services: &nomifun_app::AppServices,
+    services: &nomifun_app::compatibility::AppServices,
     conv_id: &str,
     content: &str,
     created_at: i64,
@@ -123,7 +123,7 @@ async fn insert_message(
     message_id
 }
 
-async fn update_conversation_workspace(services: &nomifun_app::AppServices, conv_id: &str, workspace: &str) {
+async fn update_conversation_workspace(services: &nomifun_app::compatibility::AppServices, conv_id: &str, workspace: &str) {
     let repo = nomifun_db::SqliteConversationRepository::new(services.database.pool().clone());
     IConversationRepository::update(
         &repo,
@@ -141,7 +141,7 @@ async fn update_conversation_workspace(services: &nomifun_app::AppServices, conv
 /// to exercise the compaction threshold. `rg` has no artifact obligation, so a
 /// completed receipt-less row stays a valid successful projection.
 async fn insert_tool_call_message(
-    services: &nomifun_app::AppServices,
+    services: &nomifun_app::compatibility::AppServices,
     conv_id: &str,
     call_id: &str,
     output: &str,
@@ -176,7 +176,7 @@ async fn insert_tool_call_message(
 }
 
 async fn upsert_artifact(
-    services: &nomifun_app::AppServices,
+    services: &nomifun_app::compatibility::AppServices,
     artifact: nomifun_db::ConversationArtifactRow,
 ) -> String {
     let repo = nomifun_db::SqliteConversationRepository::new(services.database.pool().clone());
@@ -187,7 +187,7 @@ async fn upsert_artifact(
 }
 
 /// Seed a minimal cron job and return its stable UUIDv7 business ID.
-async fn seed_cron_job(services: &nomifun_app::AppServices) -> String {
+async fn seed_cron_job(services: &nomifun_app::compatibility::AppServices) -> String {
     let cron_job_id = CronJobId::new().into_string();
     sqlx::query_scalar(
         "INSERT INTO cron_jobs \

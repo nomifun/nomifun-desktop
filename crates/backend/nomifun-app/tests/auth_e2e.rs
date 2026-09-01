@@ -1,7 +1,7 @@
 //! End-to-end integration tests for the complete authentication flow.
 //!
 //! These tests exercise the full application stack (security headers, CSRF,
-//! auth routes) via `nomifun_app::create_router`, covering test-plan items
+//! auth routes) via `nomifun_app::compatibility::create_router`, covering test-plan items
 //! T12 (security middleware), T13 (token extraction), T14 (initial bootstrap).
 
 use axum::body::Body;
@@ -9,7 +9,8 @@ use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use nomifun_app::{AppConfig, AppServices};
+use nomifun_app::AppConfig;
+use nomifun_app::compatibility::AppServices;
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -32,7 +33,7 @@ async fn build_app() -> (axum::Router, AppServices) {
     )
     .await
     .unwrap();
-    let router = nomifun_app::create_router(&services).await;
+    let router = nomifun_app::compatibility::create_router(&services).await;
     (router, services)
 }
 

@@ -17,7 +17,6 @@ use async_trait::async_trait;
 use nomifun_ai_agent::CompanionMemorySink;
 use nomifun_api_types::CreateConversationRequest;
 use nomifun_common::{AppError, ProviderWithModel};
-use nomifun_conversation::ConversationService;
 
 use crate::collector::{self, SharedConfig, SharedEventStoreLock};
 use crate::events::CompanionEventEmitter;
@@ -28,6 +27,7 @@ use crate::managed_skills::{
 use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
 use crate::profile::{CompanionProfileConfig, normalized_effective_skill_names};
 use crate::registry::CompanionRegistry;
+use crate::session_port::CompanionSessionPort;
 use crate::store::{CompanionThread, MEMORY_KINDS, CompanionStore};
 
 /// Per-companion runtime-state key holding that companion's active companion thread.
@@ -484,8 +484,7 @@ pub struct CompanionThreads {
     pub store: CompanionStore,
     pub config: SharedConfig,
     pub registry: Arc<CompanionRegistry>,
-    pub conversations: Arc<ConversationService>,
-    pub runtime_registry: Arc<dyn nomifun_ai_agent::AgentRuntimeRegistry>,
+    pub sessions: Arc<dyn CompanionSessionPort>,
     pub skill_paths: Arc<nomifun_extension::SkillPaths>,
 }
 
@@ -651,7 +650,7 @@ impl CompanionThreads {
         conversation_id: &str,
     ) {
         let Ok(response) = self
-            .conversations
+            .sessions
             .get(self.authoritative_user_id.as_ref(), conversation_id)
             .await
         else {
@@ -680,7 +679,7 @@ impl CompanionThreads {
                 .await;
         }
         if let Err(error) = self
-            .conversations
+            .sessions
             .replace_skill_snapshot(conversation_id, &effective)
             .await
         {
@@ -703,7 +702,7 @@ impl CompanionThreads {
     /// 幂等 + 尽力而为，绝不让调用方失败；被占用则保留当前路径下次再试。
     pub(crate) async fn reconcile_thread_workspace(&self, profile: &CompanionProfileConfig, conversation_id: &str) {
         let resp = match self
-            .conversations
+            .sessions
             .get(self.authoritative_user_id.as_ref(), conversation_id)
             .await
         {
@@ -727,7 +726,7 @@ impl CompanionThreads {
             let new_str = new_path.to_string_lossy().into_owned();
             if new_str != current
                 && let Err(e) = self
-                    .conversations
+                    .sessions
                     .update_extra(conversation_id, serde_json::json!({ "workspace": new_str }))
                     .await
             {
@@ -741,7 +740,7 @@ impl CompanionThreads {
     /// 必须在删除会话「之前」读（删除会丢 extra）。
     async fn thread_workspace_under_tree(&self, conversation_id: &str) -> Option<std::path::PathBuf> {
         let resp = self
-            .conversations
+            .sessions
             .get(self.authoritative_user_id.as_ref(), conversation_id)
             .await
             .ok()?;
@@ -851,13 +850,14 @@ impl CompanionThreads {
                 extra
             },
         };
-        let created = if let Some(snapshot) = profile.applied_preset.clone() {
-            self.conversations
-                .create_from_preset_snapshot(self.authoritative_user_id.as_ref(), req, snapshot)
-                .await?
-        } else {
-            self.conversations.create(self.authoritative_user_id.as_ref(), req).await?
-        };
+        let created = self
+            .sessions
+            .create(
+                self.authoritative_user_id.as_ref(),
+                req,
+                profile.applied_preset.clone(),
+            )
+            .await?;
         let created_id = created.conversation_id;
         // Register; if the registry write fails, reap the just-created
         // conversation — an unregistered companion row is invisible to every
@@ -866,7 +866,7 @@ impl CompanionThreads {
             Ok(thread) => thread,
             Err(e) => {
                 let _ = self
-                    .conversations
+                    .sessions
                     .delete(self.authoritative_user_id.as_ref(), &created_id)
                     .await;
                 return Err(e);
@@ -886,7 +886,7 @@ impl CompanionThreads {
         let mut removed_ids: Vec<String> = Vec::new();
         for t in threads.drain(..) {
             match self
-                .conversations
+                .sessions
                 .get(self.authoritative_user_id.as_ref(), &t.conversation_id)
                 .await
             {
@@ -926,7 +926,7 @@ impl CompanionThreads {
         // Conversation first (kills the running agent via delete hooks);
         // tolerate already-deleted rows.
         match self
-            .conversations
+            .sessions
             .delete(self.authoritative_user_id.as_ref(), conversation_id)
             .await
         {
@@ -959,7 +959,7 @@ impl CompanionThreads {
         model: &ProviderWithModel,
     ) -> Result<(), AppError> {
         self.assert_owned(companion_id, conversation_id).await?;
-        self.conversations
+        self.sessions
             .update(
                 self.authoritative_user_id.as_ref(),
                 conversation_id,
@@ -977,7 +977,6 @@ impl CompanionThreads {
                     execution_template_id: None,
                     extra: None,
                 },
-                &self.runtime_registry,
             )
             .await
             .map(|_| ())
@@ -994,7 +993,7 @@ impl CompanionThreads {
         snapshot: &nomifun_api_types::ResolvedPresetSnapshot,
     ) -> Result<(), AppError> {
         self.assert_owned(companion_id, conversation_id).await?;
-        self.conversations
+        self.sessions
             .update(
                 self.authoritative_user_id.as_ref(),
                 conversation_id,
@@ -1017,7 +1016,6 @@ impl CompanionThreads {
                         "preset_knowledge_binding": true,
                     })),
                 },
-                &self.runtime_registry,
             )
             .await
             .map(|_| ())

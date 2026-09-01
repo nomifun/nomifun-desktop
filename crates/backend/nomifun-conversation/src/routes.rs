@@ -1,7 +1,8 @@
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::HeaderMap;
+use axum::http::StatusCode;
 use axum::routing::{get, patch, post, put};
 
 use nomifun_api_types::{
@@ -16,7 +17,6 @@ use nomifun_common::{AppError, ConversationId, MessageId};
 
 use crate::service::summon::SetSummonRequest;
 use crate::service::creative_studio_agent_session::{
-    ResolveCreativeStudioAgentSessionRequest, ResolveCreativeStudioAgentSessionResponse,
     ResolveCreativeStudioCanvasAgentSessionRequest,
     ResolveCreativeStudioCanvasAgentSessionResponse,
 };
@@ -87,10 +87,6 @@ pub fn creative_studio_agent_session_routes(state: ConversationRouterState) -> R
             "/api/creative-studio/canvas-agent-sessions/resolve",
             post(resolve_creative_studio_canvas_agent_session),
         )
-        .route(
-            "/api/creative-studio/agent-sessions/resolve",
-            post(resolve_creative_studio_agent_session),
-        )
         .with_state(state)
 }
 
@@ -121,50 +117,6 @@ async fn resolve_creative_studio_canvas_agent_session(
         status,
         Json(ApiResponse::ok(response)),
     ))
-}
-
-async fn resolve_creative_studio_agent_session(
-    State(state): State<ConversationRouterState>,
-    Extension(user): Extension<CurrentUser>,
-    body: Result<Json<ResolveCreativeStudioAgentSessionRequest>, JsonRejection>,
-) -> Result<
-    (
-        StatusCode,
-        HeaderMap,
-        Json<ApiResponse<ResolveCreativeStudioAgentSessionResponse>>,
-    ),
-    AppError,
-> {
-    let Json(request) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
-    let response = state
-        .service
-        .resolve_creative_studio_agent_session(user.id.as_str(), request)
-        .await?;
-    let status = if response.created {
-        StatusCode::CREATED
-    } else {
-        StatusCode::OK
-    };
-    Ok((
-        status,
-        legacy_creative_studio_agent_session_headers(),
-        Json(ApiResponse::ok(response)),
-    ))
-}
-
-fn legacy_creative_studio_agent_session_headers() -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::HeaderName::from_static("deprecation"),
-        HeaderValue::from_static("true"),
-    );
-    headers.insert(
-        header::LINK,
-        HeaderValue::from_static(
-            "</api/creative-studio/canvas-agent-sessions/resolve>; rel=\"successor-version\"",
-        ),
-    );
-    headers
 }
 
 /// Remove every runtime-authority field from open JSON at the one untrusted
@@ -685,8 +637,8 @@ async fn active_runtime_count(
 #[cfg(test)]
 mod tests {
     use super::{
-        initial_delivery_requested_from_headers, legacy_creative_studio_agent_session_headers,
-        public_idempotency_key_from_headers, send_message_response,
+        initial_delivery_requested_from_headers, public_idempotency_key_from_headers,
+        send_message_response,
         strip_server_owned_preset_fields, strip_server_owned_runtime_fields,
     };
     use crate::service::{
@@ -696,25 +648,6 @@ mod tests {
     use nomifun_api_types::SendMessageRequest;
     use nomifun_common::AppError;
     use serde_json::json;
-
-    #[test]
-    fn legacy_creative_studio_agent_session_route_declares_successor() {
-        let headers = legacy_creative_studio_agent_session_headers();
-        assert_eq!(
-            headers
-                .get("deprecation")
-                .and_then(|value| value.to_str().ok()),
-            Some("true")
-        );
-        assert_eq!(
-            headers
-                .get(axum::http::header::LINK)
-                .and_then(|value| value.to_str().ok()),
-            Some(
-                "</api/creative-studio/canvas-agent-sessions/resolve>; rel=\"successor-version\""
-            )
-        );
-    }
 
     #[test]
     fn public_send_body_cannot_forge_engine_delivery_authority() {

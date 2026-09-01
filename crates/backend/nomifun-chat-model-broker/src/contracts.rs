@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nomifun_agent_contracts::{
-    AgentSessionId, ConnectionConfigRef, DigestHex, EventId, ModelRouteId, OperationId,
-    ResolvedSnapshotRef, StrictJsonValue, VersionString,
+    AgentSessionId, ChatRouteIdentity, ConnectionConfigRef, DigestHex, EventId, ModelRouteId,
+    OperationId, ResolvedSnapshotRef, StrictJsonValue, VersionString,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -118,6 +118,14 @@ pub enum ChatTask {
     AgentChat,
 }
 
+impl ChatTask {
+    pub const fn model_task(self) -> &'static str {
+        match self {
+            Self::AgentChat => nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatCausality {
@@ -125,17 +133,14 @@ pub struct ChatCausality {
     pub turn_operation_id: OperationId,
     pub causation_event_id: EventId,
     pub resolved_snapshot_ref: ResolvedSnapshotRef,
-    pub model_route_revision: u64,
+    pub route_identity: ChatRouteIdentity,
     pub operation_id: OperationId,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ChatRouteSelection {
-    pub model_route_id: ModelRouteId,
-    pub model_route_revision: u64,
-    pub task: ChatTask,
-}
+/// The request-facing route selection is the canonical immutable identity
+/// itself. There is intentionally no second selection struct with a partial
+/// `(route_id, route_revision)` view.
+pub type ChatRouteSelection = ChatRouteIdentity;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -186,10 +191,13 @@ impl ResolvedChatRouteSet {
         selection: &ChatRouteSelection,
     ) -> Result<(), ChatContractError> {
         self.primary.validate()?;
-        if self.primary.model_route_id != selection.model_route_id {
+        selection
+            .validate()
+            .map_err(|error| ChatContractError::InvalidRouteIdentity(error.to_string()))?;
+        if self.primary.model_route_id != selection.route_id {
             return Err(ChatContractError::PrimaryRouteMismatch);
         }
-        if self.primary.model_route_revision != selection.model_route_revision {
+        if self.primary.model_route_revision != selection.route_revision {
             return Err(ChatContractError::PrimaryRouteRevisionMismatch);
         }
 
@@ -460,6 +468,28 @@ impl ChatModelInput {
         required
     }
 
+    pub(crate) fn tool_call_names(
+        &self,
+    ) -> Result<BTreeMap<ToolCallId, String>, ChatContractError> {
+        let mut names = BTreeMap::new();
+        for message in &self.messages {
+            for part in &message.content {
+                let ChatContentPart::ToolCall {
+                    call_id, name, ..
+                } = part
+                else {
+                    continue;
+                };
+                if let Some(previous) = names.insert(call_id.clone(), name.clone())
+                    && previous != *name
+                {
+                    return Err(ChatContractError::ConflictingToolCallName);
+                }
+            }
+        }
+        Ok(names)
+    }
+
     pub fn validate(&self) -> Result<(), ChatContractError> {
         if self.messages.is_empty() {
             return Err(ChatContractError::EmptyMessages);
@@ -634,12 +664,15 @@ impl ChatModelRequest {
             &self.causality.resolved_snapshot_ref.snapshot_digest,
         )?;
         validate_natural_key("operation_id", self.causality.operation_id.as_ref())?;
-        validate_natural_key("model_route_id", self.route.model_route_id.as_ref())?;
-        if self.causality.model_route_revision != self.route.model_route_revision {
-            return Err(ChatContractError::CausalityRouteRevisionMismatch);
-        }
-        if self.route.model_route_revision == 0 {
-            return Err(ChatContractError::ZeroRouteRevision);
+        self.route
+            .validate()
+            .map_err(|error| ChatContractError::InvalidRouteIdentity(error.to_string()))?;
+        self.causality
+            .route_identity
+            .validate()
+            .map_err(|error| ChatContractError::InvalidRouteIdentity(error.to_string()))?;
+        if self.causality.route_identity != self.route {
+            return Err(ChatContractError::RouteIdentityMismatch);
         }
         self.input.validate()
     }
@@ -866,8 +899,10 @@ pub enum ChatContractError {
     UnsupportedContractVersion,
     #[error("model route revision must be greater than zero")]
     ZeroRouteRevision,
-    #[error("causality and route selection revisions differ")]
-    CausalityRouteRevisionMismatch,
+    #[error("chat route identity is invalid: {0}")]
+    InvalidRouteIdentity(String),
+    #[error("causality and route selection identities differ")]
+    RouteIdentityMismatch,
     #[error("chat request must contain at least one message")]
     EmptyMessages,
     #[error("chat message content must not be empty")]
@@ -892,6 +927,8 @@ pub enum ChatContractError {
     ToolChoiceWithoutTools,
     #[error("tool names must be unique")]
     DuplicateToolName,
+    #[error("one tool call id is associated with multiple function names")]
+    ConflictingToolCallName,
     #[error("specific tool choice does not name a declared tool")]
     UnknownSpecificTool,
     #[error("{0} must be a non-empty trimmed natural key")]

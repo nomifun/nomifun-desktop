@@ -10,15 +10,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
 use nomifun_api_types::{IdmmConfig, IdmmState, IdmmTargetKind, InterventionRecord};
 use nomifun_common::{AppError, ConversationId, TerminalId, UserId};
-use nomifun_conversation::ConversationService;
 use nomifun_db::models::IdmmInterventionRow;
 use nomifun_db::{IConversationRepository, IIdmmInterventionRepository};
 use nomifun_terminal::TerminalDriver;
 
-use crate::probe::{ConversationProbe, SessionProbe, TerminalProbe};
+use crate::probe::{ConversationProbe, ConversationSessionPort, SessionProbe, TerminalProbe};
 use crate::sidecar::SidecarClient;
 use crate::supervisor::{ConfigReader, IdmmManager, ProbeFactory, build_state};
 
@@ -62,10 +60,11 @@ fn row_to_record(row: IdmmInterventionRow) -> Result<InterventionRecord, AppErro
 /// Collaborators needed to build probes + read config (NO manager; breaks the
 /// construction cycle). Shared by the factory, config-reader, and service.
 pub struct ProbeDeps {
-    pub conversation_service: ConversationService,
+    /// Narrow command/query access to the current Conversation-backed session
+    /// owner. IDMM cannot construct or replace a runtime through this port.
+    pub conversation_session: Arc<dyn ConversationSessionPort>,
     pub conversation_repo: Arc<dyn IConversationRepository>,
     pub terminal_driver: Arc<dyn TerminalDriver>,
-    pub runtime_registry: Arc<dyn AgentRuntimeRegistry>,
 }
 
 impl ProbeDeps {
@@ -142,8 +141,7 @@ impl ProbeDeps {
         validate_target_id(kind, target_id).ok()?;
         match kind {
             IdmmTargetKind::Conversation => Some(Arc::new(ConversationProbe {
-                runtime_registry: self.runtime_registry.clone(),
-                conversation_service: self.conversation_service.clone(),
+                session: self.conversation_session.clone(),
                 conversation_repo: self.conversation_repo.clone(),
                 conversation_id: ConversationId::parse(target_id).ok()?,
             })),

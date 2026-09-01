@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use nomifun_api_types::WebSocketMessage;
-use nomifun_app::{AppConfig, AppServices, create_router};
+use nomifun_app::AppConfig;
+use nomifun_app::compatibility::{AppServices, create_router};
 use nomifun_realtime::WebSocketManager;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;

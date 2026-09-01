@@ -3,10 +3,11 @@
 //! files do NOT already register.
 //!
 //! Each handler follows the established pattern: typed `*Params` (single source
-//! of schema + deserialization), `(Arc<GatewayDeps>, CallerCtx, P) -> Value` or
-//! `(Arc<GatewayDeps>, P) -> Value`, `crate::server::ok` for success, structured
+//! of schema + deserialization), `(Arc<CompatibilityCapabilityHost>, CallerCtx, P) -> Value` or
+//! `(Arc<CompatibilityCapabilityHost>, P) -> Value`, `crate::server::ok` for success, structured
 //! `json!({"error":…)` on failure.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_api_types::IdmmTargetKind;
@@ -19,7 +20,7 @@ use serde_json::{Value, json};
 use crate::caps_idmm::{
     parse_target_id as parse_idmm_target_id, verify_target as verify_idmm_target,
 };
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 use crate::id_schema::{CanonicalEntityId, SessionTargetKind};
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
@@ -41,9 +42,45 @@ struct CronRunNowParams {
     cron_job_id: CronJobId,
 }
 
-async fn cron_get_job(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronGetJobParams) -> Value {
+#[derive(Clone)]
+struct SchedulingCapabilityDeps {
+    cron: Arc<nomifun_cron::service::CronService>,
+    requirements: Arc<nomifun_requirement::RequirementService>,
+    idmm: Arc<nomifun_idmm::IdmmService>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<SchedulingCapabilityDeps>, CallerCtx, P) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, ctx, params| {
+        handler(
+            Arc::new(SchedulingCapabilityDeps {
+                cron: deps.cron_service.clone(),
+                requirements: deps.requirement_service.clone(),
+                idmm: deps.idmm_service.clone(),
+            }),
+            ctx,
+            params,
+        )
+    }
+}
+
+async fn cron_get_job(
+    deps: Arc<SchedulingCapabilityDeps>,
+    ctx: CallerCtx,
+    p: CronGetJobParams,
+) -> Value {
     match deps
-        .cron_service
+        .cron
         .get_job(ctx.user_id.as_str(), p.cron_job_id.as_str())
         .await
     {
@@ -52,7 +89,11 @@ async fn cron_get_job(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronGetJobParam
     }
 }
 
-async fn cron_run_now(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronRunNowParams) -> Value {
+async fn cron_run_now(
+    deps: Arc<SchedulingCapabilityDeps>,
+    ctx: CallerCtx,
+    p: CronRunNowParams,
+) -> Value {
     let Some(operation_id) = ctx.operation_id.as_deref() else {
         return json!({
             "error": "cron run-now requires a transport-authenticated operation identity"
@@ -60,7 +101,7 @@ async fn cron_run_now(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronRunNowParam
     };
     let operation_id = format!("gateway:{operation_id}");
     match deps
-        .cron_service
+        .cron
         .run_now(
             ctx.user_id.as_str(),
             p.cron_job_id.as_str(),
@@ -114,9 +155,13 @@ struct RequirementResumeTagParams {
     requeue_ids: Vec<RequirementId>,
 }
 
-async fn requirement_get(deps: Arc<GatewayDeps>, p: RequirementGetParams) -> Value {
+async fn requirement_get(
+    deps: Arc<SchedulingCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: RequirementGetParams,
+) -> Value {
     match deps
-        .requirement_service
+        .requirements
         .get(p.requirement_id.as_str())
         .await
     {
@@ -125,21 +170,33 @@ async fn requirement_get(deps: Arc<GatewayDeps>, p: RequirementGetParams) -> Val
     }
 }
 
-async fn requirement_list_tags(deps: Arc<GatewayDeps>, _p: RequirementListTagsParams) -> Value {
-    match deps.requirement_service.tags().await {
+async fn requirement_list_tags(
+    deps: Arc<SchedulingCapabilityDeps>,
+    _ctx: CallerCtx,
+    _p: RequirementListTagsParams,
+) -> Value {
+    match deps.requirements.tags().await {
         Ok(tags) => ok(tags),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-async fn requirement_get_board(deps: Arc<GatewayDeps>, p: RequirementGetBoardParams) -> Value {
-    match deps.requirement_service.board(&p.tag).await {
+async fn requirement_get_board(
+    deps: Arc<SchedulingCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: RequirementGetBoardParams,
+) -> Value {
+    match deps.requirements.board(&p.tag).await {
         Ok(board) => ok(board),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-async fn requirement_resume_tag(deps: Arc<GatewayDeps>, p: RequirementResumeTagParams) -> Value {
+async fn requirement_resume_tag(
+    deps: Arc<SchedulingCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: RequirementResumeTagParams,
+) -> Value {
     // Mirror the REST route: if `requeue_failed`, collect all failed ids from
     // the board and merge with explicit ids.
     let mut requeue_ids = p
@@ -148,18 +205,18 @@ async fn requirement_resume_tag(deps: Arc<GatewayDeps>, p: RequirementResumeTagP
         .map(RequirementId::into_string)
         .collect::<Vec<_>>();
     if p.requeue_failed {
-        match deps.requirement_service.board(&p.tag).await {
+        match deps.requirements.board(&p.tag).await {
             Ok(board) => {
                 requeue_ids.extend(board.failed.into_iter().map(|r| r.requirement_id));
             }
             Err(e) => return json!({"error": e.to_string()}),
         }
     }
-    if let Err(e) = deps.requirement_service.resume_tag(&p.tag, &requeue_ids).await {
+    if let Err(e) = deps.requirements.resume_tag(&p.tag, &requeue_ids).await {
         return json!({"error": e.to_string()});
     }
     // Return the updated tag summary (same as the REST route).
-    match deps.requirement_service.tags().await {
+    match deps.requirements.tags().await {
         Ok(tags) => {
             let summary = tags.into_iter().find(|t| t.tag == p.tag);
             ok(json!({
@@ -215,48 +272,64 @@ struct IdmmClearLogParams {
 
 // --- Handlers --------------------------------------------------------------
 
-async fn idmm_get_log(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmGetLogParams) -> Value {
+async fn idmm_get_log(
+    deps: Arc<SchedulingCapabilityDeps>,
+    ctx: CallerCtx,
+    p: IdmmGetLogParams,
+) -> Value {
     let kind = IdmmTargetKind::from(p.kind);
     let target_id = match parse_idmm_target_id(kind, p.target_id.into_string()) {
         Ok(target_id) => target_id,
         Err(error) => return error,
     };
-    if let Some(err) = verify_idmm_target(&deps, &ctx, kind, &target_id).await {
+    if let Some(err) = verify_idmm_target(deps.idmm.as_ref(), &ctx, kind, &target_id).await {
         return err;
     }
     let limit = p.limit.unwrap_or(50).clamp(1, 500);
-    match deps.idmm_service.log(ctx.user_id.as_str(), kind, &target_id, limit).await {
+    match deps
+        .idmm
+        .log(ctx.user_id.as_str(), kind, &target_id, limit)
+        .await
+    {
         Ok(records) => ok(records),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-async fn idmm_get_activity(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmGetActivityParams) -> Value {
+async fn idmm_get_activity(
+    deps: Arc<SchedulingCapabilityDeps>,
+    ctx: CallerCtx,
+    p: IdmmGetActivityParams,
+) -> Value {
     let limit = p.limit.unwrap_or(50).clamp(1, 500);
-    match deps.idmm_service.recent_activity(ctx.user_id.as_str(), limit).await {
+    match deps.idmm.recent_activity(ctx.user_id.as_str(), limit).await {
         Ok(records) => ok(records),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-async fn idmm_intervene(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmInterveneParams) -> Value {
+async fn idmm_intervene(
+    deps: Arc<SchedulingCapabilityDeps>,
+    ctx: CallerCtx,
+    p: IdmmInterveneParams,
+) -> Value {
     let kind = IdmmTargetKind::from(p.kind);
     let target_id = match parse_idmm_target_id(kind, p.target_id.into_string()) {
         Ok(target_id) => target_id,
         Err(error) => return error,
     };
-    if let Some(err) = verify_idmm_target(&deps, &ctx, kind, &target_id).await {
+    if let Some(err) = verify_idmm_target(deps.idmm.as_ref(), &ctx, kind, &target_id).await {
         return err;
     }
     match deps
-        .idmm_service
+        .idmm
         .intervene_now(ctx.user_id.as_str(), kind, &target_id)
         .await
     {
         Ok(()) => {
             // Return the updated state (same as the REST route).
             match deps
-                .idmm_service
+                .idmm
                 .build_state(ctx.user_id.as_str(), kind, &target_id)
                 .await
             {
@@ -271,16 +344,24 @@ async fn idmm_intervene(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmIntervene
     }
 }
 
-async fn idmm_clear_log(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmClearLogParams) -> Value {
+async fn idmm_clear_log(
+    deps: Arc<SchedulingCapabilityDeps>,
+    ctx: CallerCtx,
+    p: IdmmClearLogParams,
+) -> Value {
     let kind = IdmmTargetKind::from(p.kind);
     let target_id = match parse_idmm_target_id(kind, p.target_id.into_string()) {
         Ok(target_id) => target_id,
         Err(error) => return error,
     };
-    if let Some(err) = verify_idmm_target(&deps, &ctx, kind, &target_id).await {
+    if let Some(err) = verify_idmm_target(deps.idmm.as_ref(), &ctx, kind, &target_id).await {
         return err;
     }
-    match deps.idmm_service.clear_log(ctx.user_id.as_str(), kind, &target_id).await {
+    match deps
+        .idmm
+        .clear_log(ctx.user_id.as_str(), kind, &target_id)
+        .await
+    {
         Ok(count) => json!({"result": format!("cleared {count} intervention records")}),
         Err(e) => json!({"error": e.to_string()}),
     }
@@ -297,7 +378,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Get a single cron job by id (full detail including schedule, next/last run, error).",
             EffectClass::Read,
         ),
-        cron_get_job,
+        adapt(cron_get_job),
     ));
     out.push(Capability::new::<CronRunNowParams, _, _>(
         CapabilityMeta::new(
@@ -306,7 +387,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Trigger a cron job to execute immediately (out-of-schedule one-shot run).",
             EffectClass::Write,
         ),
-        cron_run_now,
+        adapt(cron_run_now),
     ));
 
     // -- Requirement extensions -------------------------------------------
@@ -318,7 +399,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             EffectClass::Read,
         )
         .instance_owner(),
-        |deps, _ctx, p| requirement_get(deps, p),
+        adapt(requirement_get),
     ));
     out.push(Capability::new::<RequirementListTagsParams, _, _>(
         CapabilityMeta::new(
@@ -328,7 +409,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             EffectClass::Read,
         )
         .instance_owner(),
-        |deps, _ctx, p| requirement_list_tags(deps, p),
+        adapt(requirement_list_tags),
     ));
     out.push(Capability::new::<RequirementGetBoardParams, _, _>(
         CapabilityMeta::new(
@@ -338,7 +419,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             EffectClass::Read,
         )
         .instance_owner(),
-        |deps, _ctx, p| requirement_get_board(deps, p),
+        adapt(requirement_get_board),
     ));
     out.push(Capability::new::<RequirementResumeTagParams, _, _>(
         CapabilityMeta::new(
@@ -348,7 +429,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             EffectClass::Write,
         )
         .instance_owner(),
-        |deps, _ctx, p| requirement_resume_tag(deps, p),
+        adapt(requirement_resume_tag),
     ));
 
     // -- IDMM extensions --------------------------------------------------
@@ -359,7 +440,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Read the persisted intervention log for a conversation or terminal (most-recent-first).",
             EffectClass::Read,
         ),
-        idmm_get_log,
+        adapt(idmm_get_log),
     ));
     out.push(Capability::new::<IdmmGetActivityParams, _, _>(
         CapabilityMeta::new(
@@ -368,7 +449,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Read the caller's cross-session intervention feed (their targets only, most-recent-first).",
             EffectClass::Read,
         ),
-        idmm_get_activity,
+        adapt(idmm_get_activity),
     ));
     out.push(Capability::new::<IdmmInterveneParams, _, _>(
         CapabilityMeta::new(
@@ -377,7 +458,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Force one IDMM supervision pass now (manual 'act now') and return the resulting state.",
             EffectClass::Write,
         ),
-        idmm_intervene,
+        adapt(idmm_intervene),
     ));
     out.push(Capability::new::<IdmmClearLogParams, _, _>(
         CapabilityMeta::new(
@@ -386,7 +467,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Clear all persisted intervention records for a conversation or terminal. Irreversible.",
             EffectClass::Destructive,
         ),
-        idmm_clear_log,
+        adapt(idmm_clear_log),
     ));
 }
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures::{Stream, StreamExt};
-use nomifun_agent_contracts::{ModelRouteId, StrictJsonValue, VersionString};
+use nomifun_agent_contracts::{ChatRouteIdentity, ModelRouteId, StrictJsonValue, VersionString};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -14,7 +14,7 @@ use crate::contracts::{
     CHAT_MODEL_CONTRACT_VERSION, ChatCausality, ChatContentPart, ChatFinishReason, ChatMessage,
     ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatModelInput, ChatModelRequest,
     ChatModality, ChatReasoningRequest, ChatResponseFormat, ChatRetryDirective, ChatRole,
-    ChatRouteSelection, ChatTask, ChatToolCall, ChatToolChoice, ChatToolDefinition,
+    ChatToolCall, ChatToolChoice, ChatToolDefinition,
     ChatToolResultPart, ChatUsage, PromptCachePolicy, ProviderResponseId, ProviderRoundId,
     ToolCallId,
 };
@@ -120,13 +120,20 @@ impl ResponsesBridgeRequest {
             .into_iter()
             .map(responses_item_to_message)
             .collect::<Result<Vec<_>, _>>()?;
+        let route = ChatRouteIdentity::new(
+            self.causality.route_identity.preset_revision_id.clone(),
+            self.causality.route_identity.model_task.clone(),
+            self.model_route_id.clone(),
+            self.model_route_revision,
+        );
+        if route != self.causality.route_identity {
+            return Err(ChatModelError::invalid_request(
+                "Responses Bridge route fields do not match the immutable causality identity",
+            ));
+        }
         let request = ChatModelRequest {
             contract_version: VersionString(CHAT_MODEL_CONTRACT_VERSION.to_owned()),
-            route: ChatRouteSelection {
-                model_route_id: self.model_route_id,
-                model_route_revision: self.model_route_revision,
-                task: ChatTask::AgentChat,
-            },
+            route,
             causality: self.causality,
             input: ChatModelInput {
                 instructions: self.instructions,

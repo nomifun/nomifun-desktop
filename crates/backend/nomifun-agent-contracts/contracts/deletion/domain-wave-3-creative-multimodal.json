@@ -207,7 +207,7 @@
         }
       ],
       "disposition": "replace_then_delete",
-      "removal_boundary": "Wave 3",
+      "removal_boundary": "C9",
       "replacement_owner": "Creative Package routes and canonical AgentSession"
     },
     {

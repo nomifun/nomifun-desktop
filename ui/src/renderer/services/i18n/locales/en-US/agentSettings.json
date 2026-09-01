@@ -103,6 +103,8 @@
     "description": "Purpose",
     "chatModelRoute": "Chat model route",
     "chatModelRoutePlaceholder": "Exact model route ID",
+    "chatModelRouteRecord": "Chat route record",
+    "chatModelRouteRecordPlaceholder": "Canonical Chat route JSON",
     "persona": "Persona",
     "instructions": "Instructions"
   },
@@ -141,7 +143,9 @@
     "optional": "Optional",
     "resourceId": "Resource ID",
     "operations": "Operations",
-    "connectionRef": "Connection reference"
+    "connectionRef": "Connection reference",
+    "hostPath": "Host workspace path",
+    "hostPathUnavailable": "Host workspace path unavailable"
   },
   "advanced": {
     "systemTokens": "System context tokens",

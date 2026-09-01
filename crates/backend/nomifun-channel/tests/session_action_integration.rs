@@ -67,7 +67,7 @@ async fn setup() -> (
     let pref_repo: Arc<dyn nomifun_db::IClientPreferenceRepository> =
         Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(db.pool().clone()));
     let settings = Arc::new(ChannelSettingsService::new(pref_repo));
-    let executor = ActionExecutor::new(pairing_arc, session_mgr_arc, settings, "acp");
+    let executor = ActionExecutor::new(pairing_arc, session_mgr_arc, settings);
 
     // Every test message arrives through one persisted channel plugin row.
     // Tests and services use only its stable business UUID.
@@ -491,22 +491,31 @@ async fn action_session_new_resets_existing() {
     assert_eq!(user_sessions.len(), 1);
 }
 
-// ── ActionExecutor: agent.select persists agent_type (H-3 fix) ───
+// ── ActionExecutor: retired agent selection cannot mutate a session ───
 
 #[tokio::test]
-async fn action_agent_select_persists() {
+async fn retired_agent_select_is_rejected_without_session_mutation() {
     let (_, executor, pairing, repo, channel_plugin_id) = setup().await;
 
     authorize_user(&pairing, &channel_plugin_id, "tg_42", "telegram").await;
 
-    // Create a session (default agent is "acp")
+    // Create the channel session through the normal text path.
     let msg1 = make_text_message("tg_42", "chat1", "Hello");
     executor
         .handle_incoming_message(&msg1, &channel_plugin_id)
         .await
         .unwrap();
 
-    // Switch agent to "acp"
+    let before = repo
+        .get_all_sessions()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|session| session.chat_id.as_deref() == Some("chat1"))
+        .expect("text dispatch must create a channel session");
+
+    // `agent.select` was removed from the canonical action surface. A stale
+    // client callback must be treated as an unknown action, not a mutation.
     let select_msg = UnifiedIncomingMessage {
         id: format!("msg_{}", now_ms()),
         platform: PluginType::Telegram,
@@ -547,18 +556,20 @@ async fn action_agent_select_persists() {
     match r {
         MessageResult::Action(resp) => {
             let text = resp.text.unwrap();
-            assert!(text.contains("acp"));
+            assert_eq!(text, "Unknown action: agent.select");
         }
         _ => panic!("Expected Action result"),
     }
 
-    // Verify the session's agent_type in DB
-    let all = repo.get_all_sessions().await.unwrap();
-    let session = all
-        .iter()
-        .find(|s| s.chat_id.as_deref() == Some("chat1"))
+    let after = repo
+        .get_all_sessions()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|session| session.chat_id.as_deref() == Some("chat1"))
         .expect("session should exist");
-    assert_eq!(session.agent_type, "acp");
+    assert_eq!(after.channel_session_id, before.channel_session_id);
+    assert_eq!(after.agent_type, before.agent_type);
 }
 
 // ── ActionExecutor: session isolation across messages ───────────────

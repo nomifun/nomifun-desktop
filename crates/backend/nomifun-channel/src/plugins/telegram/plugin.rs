@@ -9,7 +9,9 @@ use tracing::{debug, error, info, warn};
 use crate::constants::{RECONNECT_MAX_ATTEMPTS, RECONNECT_MAX_DELAY, TELEGRAM_MESSAGE_LIMIT};
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
-use crate::plugins::callback::{format_callback_data, parse_callback_data};
+use crate::plugins::callback::{
+    format_callback_data, is_supported_callback_action, parse_callback_data,
+};
 use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::types::{
     ActionContext, BotInfo, ChatKind, MentionState, MessageContentType, ParseMode, PluginConfig, PluginStatus,
@@ -436,7 +438,11 @@ async fn handle_callback_query(
     };
 
     let data = cb.data.as_deref().unwrap_or("");
-    let parsed = parse_callback_data(data);
+    let Some(parsed) = parse_callback_data(data) else {
+        warn!("Ignoring Telegram callback with invalid or unsupported action");
+        acknowledge_callback_query(api, &cb.id).await;
+        return;
+    };
 
     let chat_id = message.chat.id;
     let message_id = Some(message.message_id.to_string());
@@ -448,10 +454,10 @@ async fn handle_callback_query(
         avatar_url: None,
     };
 
-    let unified_action = parsed.map(|a| UnifiedAction {
-        action: a.action,
-        category: a.category,
-        params: a.params,
+    let unified_action = UnifiedAction {
+        action: parsed.action,
+        category: parsed.category,
+        params: parsed.params,
         context: ActionContext {
             platform: PluginType::Telegram,
             user_id: cb.from.id.to_string(),
@@ -459,7 +465,7 @@ async fn handle_callback_query(
             message_id: message_id.clone(),
             session_id: None,
         },
-    });
+    };
 
     let msg = UnifiedIncomingMessage {
         id: cb.id.clone(),
@@ -482,7 +488,7 @@ async fn handle_callback_query(
         },
         timestamp: chrono_now(),
         reply_to_message_id: None,
-        action: unified_action,
+        action: Some(unified_action),
         raw: None,
     };
 
@@ -661,14 +667,17 @@ fn build_inline_markup(msg: &UnifiedOutgoingMessage) -> Option<ReplyMarkup> {
     let buttons = msg.buttons.as_ref()?;
     let rows: Vec<Vec<InlineKeyboardButton>> = buttons
         .iter()
-        .map(|row| {
-            row.iter()
+        .filter_map(|row| {
+            let buttons: Vec<InlineKeyboardButton> = row
+                .iter()
+                .filter(|btn| is_supported_callback_action(&btn.action))
                 .map(|btn| InlineKeyboardButton {
                     text: btn.label.clone(),
                     callback_data: Some(format_callback_data(btn)),
                     url: None,
                 })
-                .collect()
+                .collect();
+            (!buttons.is_empty()).then_some(buttons)
         })
         .collect();
 
@@ -765,7 +774,7 @@ mod tests {
                 username: Some("alice".into()),
             },
             message: None,
-            data: Some("system:system.confirm:callId=call-1,value=yes".into()),
+            data: Some("system:session.new".into()),
         };
 
         handle_callback_query(&api, &callback, &message_tx).await;

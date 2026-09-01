@@ -38,7 +38,3 @@ pub use service::{
     PublicTurnDeliveryState, TurnCompletionObserver,
 };
 pub use state::ConversationRouterState;
-
-#[cfg(test)]
-#[path = "service_test.rs"]
-mod service_test;

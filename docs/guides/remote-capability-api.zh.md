@@ -1,67 +1,90 @@
-# Remote 能力 API（NomiFun Desktop / MCP 接入指南）
+# Canonical Remote API
 
-NomiFun 把适合远程使用的平台能力（browser / computer / 知识库 / 文件 / 会话及平台控制）通过一个**网络可达、NomiFun Desktop 安装令牌鉴权的 MCP 与 REST 入口**暴露出来。任何受信任的 MCP 客户端（Claude Code、Cursor、自研 LLM agent）都可用 URL + 令牌直接连接当前桌面安装。令牌只认证安装所有者，**不绑定、不选择、也不冒充任何伙伴**。
+NomiFun 只提供一个安装 owner 级 Remote 入口，并同时投影为 MCP 与 REST。Remote
+只是传输层，不是 Agent 类型或能力 profile：
 
-> 📋 **可复制的对接示例**（MCP 客户端 / curl / Python / CLI / 自动化 / OpenAPI codegen / LLM 框架）见 **`remote-capability-api-examples.zh.md`**。
+1. 本地 owner 创建 `RemoteBinding`，冻结 exact Agent Preset revision、resolved
+   Snapshot 与 typed resources。
+2. `open(binding_id)` 创建 durable `AgentSession`，返回 UUIDv7
+   `agent_session_id`。
+3. `turn`、`observe`、`cancel` 始终显式携带该 ID。
 
-## ⚠️ 安全须知
+安装令牌只回答“调用者是谁”，不会选择伙伴、模型、profile、domain、workspace
+或最近 Session。
 
-持有 NomiFun Desktop 访问令牌即可调用平台能力，**等价于授予远程代码执行（RCE）能力**（可驱动 agent、读写文件、操作 computer/browser）。因此：
+可复制命令见 [Canonical Remote 对接示例](./remote-capability-api-examples.zh.md)。
 
-- 只把令牌交给你信任的客户端/agent。
-- 仅在可信网络暴露；公网暴露务必前置 TLS 反代 + 防火墙。
-- 令牌可随时吊销/轮换（见下）；每个桌面安装只有一枚有效令牌，轮换会使旧令牌立即失效。
-- 默认安全栏：危险能力（`secret.*`、`system.factory_reset` 等）在 Remote 面被拒；破坏性操作需二次确认（协议级握手，见「权限模型」）。
+## 安全模型
+
+安装令牌是高权限凭据：
+
+- 只交给明确授权的客户端；
+- 优先使用 loopback、VPN 或可信私网；
+- 网络暴露必须前置 TLS、防火墙与限流；
+- 令牌失控后立即轮换或吊销；
+- 不要把令牌写进 URL、日志、截图或问题报告。
+
+Remote 使用 FullAuto，不存在 `confirm: true`、`needs_confirmation`、token scope
+或 profile/domain selector。实际权限来自已认证 owner 与 AgentSession 冻结的
+immutable Snapshot。
 
 ## 端点
 
-`/mcp`（MCP Streamable-HTTP）随后端进程内挂载，与 WebUI 共用监听器：
+| 端点 | 契约 |
+| --- | --- |
+| `/mcp` | Streamable-HTTP MCP，只公开 `open`、`turn`、`observe`、`cancel`。 |
+| `POST /api/remote/open` | 从 `RemoteBinding` 打开 Session。 |
+| `POST /api/remote/turn` | 在显式 Session 上启动一轮。 |
+| `GET /api/remote/observe` | 从 exclusive cursor 之后读取 Event 与消息投影。 |
+| `POST /api/remote/cancel` | 取消显式 Session 的活动 Turn。 |
+| `/api/remote-bindings` | owner 的本地 Binding 管理 API。 |
+| `/api/webui/access-token` | 创建/轮换、查询或吊销安装令牌。 |
 
-- **本机**：`http://127.0.0.1:<port>/mcp`（桌面应用的回环端口，或 `nomifun-web` 的服务端口）
-- **局域网/远程**：开启 WebUI 远程访问后 `http://<你的IP>:25808/mcp`
+Remote MCP/REST 每个请求都必须携带：
 
-鉴权：HTTP 头 `Authorization: Bearer <NomiFun Desktop 访问令牌>`。
-
-## 一、获取 NomiFun Desktop 访问令牌
-
-令牌**只存哈希、明文只在签发时返回一次**。它属于当前 NomiFun Desktop 安装，与伙伴的创建、删除、模型、人格和知识库均无关。
-
-### 桌面应用（本机可信客户端）
-
-桌面 webview 自带本地信任，可直接调本地端点（“远程&开放能力 → MCP 能力”也提供 UI）：
-
-```bash
-# 签发（明文只返回一次）
-curl -X POST http://127.0.0.1:<loopback-port>/api/webui/access-token
-# => {"success":true,"data":{"token":"<64位hex令牌>"}}
-#    若本机尚无启用的 provider，data 会带 "warning":"…"；认证仍有效，
-#    但需要模型的 Agent 能力要等 provider 配置完成后才能使用。
-
-# 查询是否已配置（不返回令牌）
-curl http://127.0.0.1:<loopback-port>/api/webui/access-token
-# => {"success":true,"data":{"configured":true}}
-
-# 吊销
-curl -X DELETE http://127.0.0.1:<loopback-port>/api/webui/access-token
-# => {"success":true,"data":{"configured":false}}
+```http
+Authorization: Bearer <installation-access-token>
 ```
 
-> `/api/webui/access-token` 仅本地可信客户端可达（`require_local_trust`），远程浏览器不能签发令牌。再次签发会轮换当前安装的唯一令牌。
+已删除的 `/mcp-agent`、`/v1`、generic tool discovery/call，以及
+`profile`/`domains` query 均不是兼容别名，会直接 fail-closed。
 
-### 无头服务器（headless `nomifun-web`）
+## 创建 RemoteBinding
 
-无头部署用环境变量在启动时播种安装令牌，无需先创建伙伴：
+先在 Agent Settings 创建并保存 Agent Preset，解析 exact revision，然后从本地
+管理界面创建 RemoteBinding。Binding 只有：
+
+- `remote_binding_id`
+- `owner_user_id`
+- `name`
+- canonical `agent_binding`
+
+更新 Binding 只影响之后打开的 Session。删除 Binding 只阻止新建，不会改写或
+取消既有 Session。
+
+## 安装令牌
+
+明文只在签发时显示一次，SQLite 只保存 SHA-256 verifier。
+
+```bash
+# 桌面可信本地上下文，或 nomifun-web 中已登录的 installation owner。
+curl -X POST http://127.0.0.1:<port>/api/webui/access-token
+
+curl http://127.0.0.1:<port>/api/webui/access-token
+
+curl -X DELETE http://127.0.0.1:<port>/api/webui/access-token
+```
+
+Headless host 可在启动时播种同一安装令牌：
 
 ```bash
 NOMIFUN_ACCESS_TOKEN="$(openssl rand -hex 32)" \
   nomifun-web --host 127.0.0.1 --port 8787
 ```
 
-把这串 hex 作为客户端的 Bearer 令牌。
+后续启动若更换环境变量值，会轮换数据库中的 verifier。
 
-## 二、连接 MCP 客户端
-
-### Claude Code / 通用 MCP 客户端（Streamable-HTTP）
+## MCP 客户端配置
 
 ```json
 {
@@ -69,47 +92,82 @@ NOMIFUN_ACCESS_TOKEN="$(openssl rand -hex 32)" \
     "nomifun": {
       "type": "streamable-http",
       "url": "http://127.0.0.1:25808/mcp",
-      "headers": { "Authorization": "Bearer <NomiFun Desktop 访问令牌>" }
+      "headers": {
+        "Authorization": "Bearer <installation-access-token>"
+      }
     }
   }
 }
 ```
 
-连上后 `tools/list` 即可看到平台在 Remote 面暴露的工具（`nomi_*`）；`tools/call` 驱动。
+`tools/list` 必须精确返回：
 
-## 三、权限模型（Remote 面）
+```text
+open
+turn
+observe
+cancel
+```
 
-外部调用方落在 `Surface::Remote`，权限矩阵：
+MCP transport session ID 只负责连接生命周期，不能保存或复用为产品
+AgentSession identity。
 
-| 能力危险级 | Remote 行为 |
-|---|---|
-| 读 / 写 | 允许 |
-| 破坏性（删除等） | 需确认：先返回 `{"needs_confirmation":true,...}`，agent 复述动作征得用户同意后，带 `"confirm": true` 重试 |
-| 敏感（`secret.*` / `factory_reset`） | **拒绝**（默认不在 Remote 暴露） |
+## Open 生命周期
 
-被拒的工具**不出现在 `tools/list`**（更好的 UX + 纵深防御）。
+`open` 会先提交 Session，再跨 Runtime 进程边界，因此第一次成功响应可能是：
 
-## 四、能力继承
+```json
+{"open_state":{"state":"opening"}}
+```
 
-平台能力通过同一条能力总线（`nomifun-gateway` 的 Capability Registry）暴露到 MCP/HTTP/CLI/Skill 等外部面。新增能力时，应同时评估它是否适合 Remote surface、是否需要确认，以及是否应进入 `/mcp-agent` 精简集。
+继续用返回的 cursor 调用 `observe`。普通条件下 Session 会收敛到 `ready` 或
+`open_failed`：调度上限 5 秒、完整 admission 上限 35 秒、失败事实持久化上限
+10 秒。
 
-调用方以 **NomiFun Desktop 安装所有者**身份运行，`companion_id = null`。需要模型的能力优先使用工具参数显式指定的模型，否则从本机已启用的 provider/model 中解析；不会读取默认伙伴的 profile、人格、知识绑定、活动会话或工作目录。
+若写入失败事实时 durable storage 不可用，错误会保留 `agent_session_id`、cursor
+和 `recovery: "host_restart_reconcile"`。不要另建 Session 或盲目重复启动
+sidecar；应保留该 ID，并先恢复数据库/Host。
 
-## Agent 协作边界
+## Canonical CLI
 
-单 Agent 与多 Agent 协作共用一套持久化执行契约：
+`nomicore` 直接映射四个 REST 操作：
 
-- `nomi_delegate`：根据目标或显式步骤创建 Agent execution；
-- `nomi_execution_get`：读取计划、attempt、结果与当前状态；
-- `nomi_execution_update`：承载计划调整和全部生命周期操作。
+```bash
+export NOMIFUN_URL=http://127.0.0.1:25808
+export NOMIFUN_ACCESS_TOKEN=<installation-access-token>
 
-三项工具是否可见取决于调用权限，而不是传输 surface。Desktop 与 Channel 调用从当前 Conversation 及其 execution link 解析权限；安装令牌通过 Remote MCP/REST 使用同一安装所有者边界，不再制造“伙伴创建者”身份，也不按伙伴拆分 execution。任何 surface 上的次级用户都看不到三项工具。令牌只能由可信本地所有者上下文签发；Remote 客户端应以 `/v1/tools` 的实际发现结果为准，并按高权限凭据保护令牌。
+nomicore remote open <binding_id> \
+  --initial-input '{"text":"你好"}' \
+  --idempotency-key open-1
 
-## 当前可用面
+nomicore remote observe <agent_session_id> --after-seq 0 --limit 100
 
-- ✅ **MCP**：`/mcp`（完整 Remote 工具面）+ `/mcp-agent`（curated 干活子集）。
-- ✅ **HTTP REST**：`POST /v1/tools/{name}`、`GET /v1/tools[?profile=agent]`、`GET /v1/openapi.json[?profile=agent]`（OpenAPI 3.1，同令牌）。
-- ✅ **CLI**：`nomicore tools`（列 Remote 能力）、`nomicore call <name> [json]`（读 `NOMIFUN_URL`/`NOMIFUN_ACCESS_TOKEN` 或 `--url`/`--token`）。
-- ✅ **Skill**：`docs/skills/drive-nomifun/SKILL.md` —— 教外部 agent 如何连上并驱动 NomiFun（可发布到技能市场）。
-- ✅ **Computer**：桌面版（`computer-use` 构建）暴露 `nomi_computer_*`（snapshot/click/type/key/scroll/launch/screenshot/…），外部调用方可驱动桌面（headless/web 构建不含）。
-- ✅ **流式**：`POST /v1/tools/{name}/stream`（SSE）——支持进度的工具会实时发送 `{type:..}` delta，末帧 `{type:"__result__"}` 携带终值；非流式工具只发送末帧。
+nomicore remote turn <agent_session_id> '{"text":"继续"}' \
+  --idempotency-key turn-1
+
+nomicore remote cancel <agent_session_id> \
+  --idempotency-key cancel-1
+```
+
+未指定 idempotency key 时，CLI 会打印并使用一个新 key。网络结果不确定时应复用
+打印出的 key。
+
+## 常见错误
+
+| Code | 含义 |
+| --- | --- |
+| `REMOTE_AUTH_REQUIRED` | 令牌缺失、无效或已吊销。 |
+| `REMOTE_INVALID_REQUEST` | 未声明字段/query 或输入格式错误。 |
+| `REMOTE_BINDING_NOT_FOUND` | 当前 owner 没有该 Binding。 |
+| `REMOTE_SESSION_NOT_FOUND` | Session 不存在、属于其他 owner 或不是 Remote Session。 |
+| `REMOTE_SESSION_OPENING` | Runtime admission 尚未到达 durable 终态。 |
+| `REMOTE_OPEN_FAILED` | Runtime admission 失败；应读取 Session Event。 |
+| `REMOTE_SESSION_BUSY` | Turn/cancel 与当前 Session 状态冲突。 |
+| `SNAPSHOT_EXECUTOR_UNAVAILABLE` | 冻结 Snapshot 当前无法执行。 |
+
+## 相关文档
+
+- [Canonical Remote 对接示例](./remote-capability-api-examples.zh.md)
+- [WebUI 远程访问](./webui-remote-access.zh.md)
+- [Web 服务部署](./web-server-deployment.zh.md)
+- [Computer Use 与 Browser Use](./computer-browser-use.zh.md)

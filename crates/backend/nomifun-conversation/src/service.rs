@@ -1120,41 +1120,6 @@ impl ConversationService {
     }
 
     #[cfg(test)]
-    pub(crate) fn install_public_admission_cutpoint(
-        &self,
-        stage: PublicAdmissionCutpoint,
-        panic: bool,
-    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        let entered = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        *self
-            .public_admission_cutpoint
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(PublicAdmissionCutpointControl {
-                stage,
-                entered: Arc::clone(&entered),
-                release: Arc::clone(&release),
-                panic,
-            });
-        (entered, release)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn has_durable_operation_guard(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        operation_id: &str,
-    ) -> bool {
-        let key = Self::durable_operation_key(user_id, conversation_id, operation_id);
-        self.durable_operations_in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&key)
-    }
-
-    #[cfg(test)]
     async fn reach_public_admission_cutpoint(&self, stage: PublicAdmissionCutpoint) {
         let control = {
             let mut slot = self
@@ -2704,29 +2669,6 @@ impl ConversationService {
             generation,
             cancellation,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn install_blocking_turn_writeback_run_for_test(
-        &self,
-        conversation_id: &str,
-        message_id: &str,
-    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        let guard = self
-            .try_start_turn_writeback(conversation_id, message_id)
-            .expect("test write-back key must not already be running");
-        let cancellation = guard.cancellation_token();
-        let cancelled = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let cancelled_for_task = Arc::clone(&cancelled);
-        let release_for_task = Arc::clone(&release);
-        tokio::spawn(async move {
-            cancellation.cancelled().await;
-            cancelled_for_task.notify_one();
-            release_for_task.notified().await;
-            drop(guard);
-        });
-        (cancelled, release)
     }
 
     fn turn_writeback_is_running(&self, conversation_id: &str, message_id: &str) -> bool {

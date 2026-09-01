@@ -7,10 +7,11 @@
 //! - `nomifun_conversation::model_failover` — global model-failover config read/write
 //!   (stored in `client_preferences` key `agent.model_failover`).
 //!
-//! NEW GatewayDeps fields assumed (parent wires):
+//! NEW CompatibilityCapabilityHost fields assumed (parent wires):
 //! - `agent_service: Arc<nomifun_ai_agent::AgentService>`
 //! - `client_pref_repo: Arc<dyn nomifun_db::IClientPreferenceRepository>`
 
+use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_api_types::{
@@ -21,7 +22,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::deps::GatewayDeps;
+use crate::deps::CompatibilityCapabilityHost;
 use crate::id_schema::ModelRefParam;
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
@@ -73,15 +74,40 @@ fn default_max_switches() -> u32 {
 
 // ── handlers ──────────────────────────────────────────────────────────────
 
-async fn agent_list(deps: Arc<GatewayDeps>, _p: AgentListParams) -> Value {
-    match deps.agent_service.list_agents().await {
+#[derive(Clone)]
+struct AgentCapabilityDeps {
+    agents: Arc<nomifun_ai_agent::AgentService>,
+    preferences: Arc<dyn nomifun_db::IClientPreferenceRepository>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, crate::deps::CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<AgentCapabilityDeps>, P) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, _ctx, params| {
+        handler(
+            Arc::new(AgentCapabilityDeps {
+                agents: deps.agent_service.clone(),
+                preferences: deps.client_pref_repo.clone(),
+            }),
+            params,
+        )
+    }
+}
+
+async fn agent_list(deps: Arc<AgentCapabilityDeps>, _p: AgentListParams) -> Value {
+    match deps.agents.list_agents().await {
         Ok(agents) => ok(agents),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
 async fn agent_provider_health_check(
-    deps: Arc<GatewayDeps>,
+    deps: Arc<AgentCapabilityDeps>,
     p: AgentProviderHealthCheckParams,
 ) -> Value {
     let req = ProviderHealthCheckRequest {
@@ -89,7 +115,7 @@ async fn agent_provider_health_check(
         model: p.model,
         task: ModelTask::Chat,
     };
-    match deps.agent_service.provider_health_check(req).await {
+    match deps.agents.provider_health_check(req).await {
         Ok(resp) => ok(resp),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -97,14 +123,14 @@ async fn agent_provider_health_check(
 
 // ── model failover handlers ─────────────────────────────────────────────
 
-async fn model_failover_get(deps: Arc<GatewayDeps>, _p: ModelFailoverGetParams) -> Value {
+async fn model_failover_get(deps: Arc<AgentCapabilityDeps>, _p: ModelFailoverGetParams) -> Value {
     let cfg =
-        nomifun_conversation::model_failover::get_global_failover_config(&deps.client_pref_repo)
+        nomifun_conversation::model_failover::get_global_failover_config(&deps.preferences)
             .await;
     ok(cfg)
 }
 
-async fn model_failover_set(deps: Arc<GatewayDeps>, p: ModelFailoverSetParams) -> Value {
+async fn model_failover_set(deps: Arc<AgentCapabilityDeps>, p: ModelFailoverSetParams) -> Value {
     let cfg = ModelFailoverConfig {
         enabled: p.enabled,
         queue: p.queue.into_iter().map(Into::into).collect(),
@@ -112,7 +138,7 @@ async fn model_failover_set(deps: Arc<GatewayDeps>, p: ModelFailoverSetParams) -
     };
 
     match nomifun_conversation::model_failover::set_global_failover_config(
-        &deps.client_pref_repo,
+        &deps.preferences,
         &cfg,
     )
     .await
@@ -136,7 +162,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List all installed agent backends with their availability status, type, and configuration.",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| agent_list(deps, p),
+        adapt(agent_list),
     ));
 
     // 2. Provider health check (Read)
@@ -147,7 +173,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Test model reachability through a specific provider (verify API key, model availability, latency).",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| agent_provider_health_check(deps, p),
+        adapt(agent_provider_health_check),
     ));
 
     // ─── Model failover ──────────────────────────────────────────────────
@@ -160,7 +186,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Read the global model-failover configuration (enabled flag, ordered queue of fallback provider+model pairs, max switches).",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| model_failover_get(deps, p),
+        adapt(model_failover_get),
     ));
 
     // 4. Set model failover config (Write)
@@ -171,6 +197,6 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Set the global model-failover configuration. Controls automatic fallback to alternative models when the primary provider fails.",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| model_failover_set(deps, p),
+        adapt(model_failover_set),
     ));
 }

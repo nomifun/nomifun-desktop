@@ -5,7 +5,7 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use nomifun_common::{
     AgentId, CompanionId, ConversationId, CronJobId, MessageId, PaginatedResult, ProviderId,
-    ProviderWithModel, RemoteAgentId, RequirementId, TimestampMs, validate_uuidv7,
+    ProviderWithModel, RequirementId, TimestampMs, validate_uuidv7,
 };
 
 use crate::error::DbError;
@@ -774,23 +774,6 @@ async fn lock_conversation_extra_references(
     let object = extra
         .as_object()
         .ok_or_else(|| DbError::Conflict("Conversation extra must be a JSON object".to_owned()))?;
-
-    if let Some(remote_agent_id) = optional_extra_id(object, "remote_agent_id")? {
-        let remote_agent_id = RemoteAgentId::parse(remote_agent_id).map_err(|error| {
-            DbError::Conflict(format!(
-                "Conversation extra.remote_agent_id is not a canonical UUIDv7: {error}"
-            ))
-        })?;
-        lock_required_parent(
-            tx,
-            "remote_agents",
-            "remote_agent_id",
-            "updated_at",
-            remote_agent_id.as_str(),
-            "Remote agent",
-        )
-        .await?;
-    }
 
     if let Some(agent_id) = optional_extra_id(object, "agent_id")? {
         lock_required_parent(

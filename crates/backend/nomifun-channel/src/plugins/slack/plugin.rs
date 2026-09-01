@@ -19,7 +19,9 @@ use crate::constants::{RECONNECT_MAX_ATTEMPTS, RECONNECT_MAX_DELAY, SLACK_MESSAG
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
 use crate::plugins::util::{backoff_delay, truncate_message};
-use crate::plugins::callback::{format_callback_data, parse_callback_data};
+use crate::plugins::callback::{
+    format_callback_data, is_supported_callback_action, parse_callback_data,
+};
 use crate::types::{
     ActionContext, BotInfo, ChatKind, MentionState, MessageContentType, PluginConfig, PluginStatus, PluginType,
     UnifiedAction, UnifiedIncomingMessage, UnifiedMessageContent, UnifiedOutgoingMessage, UnifiedUser,
@@ -816,6 +818,7 @@ fn build_blocks(msg: &UnifiedOutgoingMessage) -> Option<serde_json::Value> {
     let elements: Vec<ButtonElement> = buttons
         .iter()
         .flatten()
+        .filter(|btn| is_supported_callback_action(&btn.action))
         .map(|btn| {
             let callback_data = format_callback_data(btn);
             ButtonElement {
@@ -977,18 +980,16 @@ mod tests {
         let buttons = vec![vec![
             ActionButton {
                 label: "Yes".into(),
-                action: "system.confirm".into(),
+                action: "chat.continue".into(),
                 params: Some(HashMap::from([
-                    ("callId".into(), "abc".into()),
-                    ("value".into(), "yes".into()),
+                    ("sessionId".into(), "abc".into()),
                 ])),
             },
             ActionButton {
                 label: "No".into(),
-                action: "system.confirm".into(),
+                action: "chat.regenerate".into(),
                 params: Some(HashMap::from([
-                    ("callId".into(), "abc".into()),
-                    ("value".into(), "no".into()),
+                    ("sessionId".into(), "abc".into()),
                 ])),
             },
         ]];
@@ -1004,7 +1005,28 @@ mod tests {
         assert_eq!(elements[0]["text"]["text"], "Yes");
         // action_id should be encoded callback data
         let action_id = elements[0]["action_id"].as_str().unwrap();
-        assert!(action_id.starts_with("chat:system.confirm:"));
+        assert!(action_id.starts_with("chat:chat.continue:"));
+    }
+
+    #[test]
+    fn build_blocks_omits_unsupported_callbacks() {
+        let buttons = vec![vec![
+            ActionButton {
+                label: "Unsupported".into(),
+                action: "unknown.switch".into(),
+                params: None,
+            },
+            ActionButton {
+                label: "Continue".into(),
+                action: "chat.continue".into(),
+                params: None,
+            },
+        ]];
+        let msg = make_outgoing(None, Some(buttons));
+        let blocks = build_blocks(&msg).expect("ordinary button remains");
+        let elements = blocks[0]["elements"].as_array().unwrap();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0]["text"]["text"], "Continue");
     }
 
     #[test]
@@ -1354,7 +1376,7 @@ mod tests {
         let payload = InteractivePayload {
             interaction_type: Some("block_actions".into()),
             actions: Some(vec![super::super::types::BlockAction {
-                action_id: Some("chat:system.confirm:callId=abc,value=yes".into()),
+                action_id: Some("system:session.new".into()),
                 value: None,
             }]),
             channel: None,

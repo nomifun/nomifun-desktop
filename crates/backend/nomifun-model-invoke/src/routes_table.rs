@@ -68,6 +68,12 @@ pub fn preset_protocol_recommendation(platform: &str, task: ModelTask) -> Option
         ("anthropic", Chat) => route("anthropic.messages"),
         ("bedrock", Chat) => route("bedrock.anthropic_messages"),
 
+        // Vertex Claude requires project_id and location/region URL segments
+        // that the generic route target contract cannot inject independently.
+        // Keep every known platform spelling explicit and deny-by-default until
+        // a provider-specific route contract exists.
+        ("vertex" | "vertex-ai" | "gemini-vertex-ai", Chat) => None,
+
         // Deepgram's REST speech endpoints. Voice Agent WebSocket realtime is
         // intentionally not routed until a dedicated session adapter ships.
         ("deepgram", SpeechRecognition) => route("deepgram.listen"),
@@ -368,7 +374,7 @@ mod tests {
             platform_route("bedrock", Chat),
             plain("bedrock.anthropic_messages")
         );
-        for platform in ["gemini-vertex-ai", "vertex-ai", "", "typo-provider"] {
+        for platform in ["vertex", "gemini-vertex-ai", "vertex-ai", "", "typo-provider"] {
             for task in [
                 Chat,
                 RealtimeConversation,
@@ -381,6 +387,29 @@ mod tests {
                 Rerank,
             ] {
                 assert_eq!(platform_route(platform, task), None, "({platform}, {task:?})");
+            }
+        }
+    }
+
+    #[test]
+    fn vertex_platforms_have_no_implicit_route_for_any_task() {
+        for platform in ["vertex", "vertex-ai", "gemini-vertex-ai"] {
+            for task in [
+                Chat,
+                RealtimeConversation,
+                ImageGeneration,
+                ImageEdit,
+                VideoGeneration,
+                SpeechSynthesis,
+                SpeechRecognition,
+                Embedding,
+                Rerank,
+            ] {
+                assert_eq!(
+                    platform_route(platform, task),
+                    None,
+                    "({platform}, {task:?}) must remain explicitly unsupported"
+                );
             }
         }
     }

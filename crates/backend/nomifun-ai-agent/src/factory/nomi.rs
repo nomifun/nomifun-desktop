@@ -8,7 +8,7 @@ use nomifun_api_types::{
 };
 use nomifun_common::{
     AppError, DelegationPolicy, ExecutionAuthority, LoopbackCapabilityLease,
-    LoopbackCapabilityLeaseSet, ProviderId,
+    LoopbackCapabilityLeaseSet,
 };
 use nomifun_db::IMcpServerRepository;
 use nomifun_db::ISettingsRepository;
@@ -25,6 +25,7 @@ use crate::image_generation::{
 use crate::manager::nomi::{
     NomiAgentManager, NomiHostWiring, NomiSummonWiring, sanitize_session_messages,
 };
+use crate::factory::provider_config::resolve_runtime_model_selection;
 use crate::types::{AgentRuntimeBuildOptions, NomiResolvedConfig};
 
 /// Apply the complete ceiling for an authenticated principal that does not own
@@ -438,33 +439,12 @@ pub(super) async fn build(
     let model_selection = options.model.as_ref().ok_or_else(|| {
         AppError::BadRequest("Nomi runtime requires a provider and model".to_owned())
     })?;
-    ProviderId::try_from(model_selection.provider_id.as_str()).map_err(|_| {
-        AppError::BadRequest("Nomi runtime requires a canonical provider_id".to_owned())
-    })?;
-    if model_selection.model.is_empty() || model_selection.model.trim() != model_selection.model {
-        return Err(AppError::BadRequest(
-            "Nomi runtime requires a trimmed, non-empty model".to_owned(),
-        ));
-    }
-    if model_selection.use_model.as_deref().is_some_and(|model| {
-        model.is_empty() || model.trim() != model
-    }) {
-        return Err(AppError::BadRequest(
-            "Nomi runtime model override must be trimmed and non-empty".to_owned(),
-        ));
-    }
-    let provider_id = &model_selection.provider_id;
-
-    let model_id = model_selection
-        .use_model
-        .as_deref()
-        .unwrap_or(&model_selection.model)
-        .to_owned();
+    let selected_model = resolve_runtime_model_selection(model_selection)?;
 
     let fields = super::provider_config::resolve_provider_fields(
         deps.model_invoke.as_ref(),
-        provider_id,
-        &model_id,
+        &selected_model.provider_id,
+        &selected_model.model,
     )
     .await?;
 

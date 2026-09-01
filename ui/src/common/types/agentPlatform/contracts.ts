@@ -27,6 +27,47 @@ export type OfficialPresetKey = (typeof OFFICIAL_PRESET_KEYS)[number];
 export type AgentPresetSource = 'official' | 'user' | 'package';
 export type CapabilityExposure = 'advertised' | 'discoverable' | 'hidden';
 export type CatalogMaterializationState = 'materialized' | 'unavailable';
+export const AGENT_CHAT_MODEL_TASK = 'agent_chat' as const;
+export const CHAT_ROUTE_RECORD_SCHEMA = 'nomifun.chat-route-record.v1' as const;
+export type ChatRouteProtocol =
+  | 'anthropic'
+  | 'openai_chat'
+  | 'openai_responses'
+  | 'gemini'
+  | 'bedrock'
+  | 'vertex';
+export type ChatRouteFeature =
+  | 'text_input'
+  | 'image_input'
+  | 'audio_input'
+  | 'text_output'
+  | 'audio_output'
+  | 'tool_calls'
+  | 'reasoning'
+  | 'reasoning_signature'
+  | 'prompt_cache'
+  | 'structured_output'
+  | 'provider_round_state'
+  | 'native_responses_items';
+
+export interface ChatRouteCandidate {
+  model_route_id: string;
+  model_route_revision: number;
+  provider_id: string;
+  model: string;
+  protocol: ChatRouteProtocol;
+  connection_config_ref: string;
+  config_revision_digest: DigestHex;
+  credential_ref: string;
+  features: ChatRouteFeature[];
+}
+
+export interface ChatRouteRecord {
+  schema: typeof CHAT_ROUTE_RECORD_SCHEMA;
+  task: typeof AGENT_CHAT_MODEL_TASK;
+  primary: ChatRouteCandidate;
+  failovers: ChatRouteCandidate[];
+}
 
 export interface ExactCatalogRef<Kind extends string = string> {
   id: CatalogId<Kind>;
@@ -77,6 +118,7 @@ export interface AgentPresetDocument {
   schema_version: string;
   surfaces: string[];
   model_route_refs: Record<string, string>;
+  chat_route_records: Partial<Record<typeof AGENT_CHAT_MODEL_TASK, ChatRouteRecord>>;
   initial_capabilities: CapabilitySelection[];
   on_demand_capabilities: CapabilitySelection[];
   skill_bindings: ExactCatalogRef<'skill'>[];
@@ -309,6 +351,7 @@ export interface CreateAgentPresetFromTemplateRequest {
   description?: string;
   resource_bindings: TemplateResourceSelection[];
   model_route_refs: Record<string, string>;
+  chat_route_records: Partial<Record<typeof AGENT_CHAT_MODEL_TASK, ChatRouteRecord>>;
 }
 
 export interface TemplateResourceSelection {

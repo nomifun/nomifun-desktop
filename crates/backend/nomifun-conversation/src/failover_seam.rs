@@ -105,53 +105,6 @@ impl ConversationService {
         Some(get_global_failover_config(&client_prefs).await)
     }
 
-    /// 聚焦测试使用的故障转移入口(plan D3 的「Some(next)」分支主体):
-    /// 挑下一候选 → `kill_and_wait`→
-    /// 写 `conversation.model`→ 用刷新后的行
-    /// `build_runtime_options` 重建任务。返回 `Some(FailoverSwitch)` 表示换好新模型、
-    /// 新句柄就绪;返回 `None` 表示**队列耗尽**(无可用候选)—— 调用方据此回落到
-    /// 「emit 原始错误」,绝不无限切换。
-    ///
-    /// **Agent 类型边界(review #9,plan D7)**:加载会话行后在此**统一**判定 agent
-    /// 类型——仅 `AgentType::Nomi` 放行。send-loop 自己也有一道便宜的早闸,这里是
-    /// 实际有副作用路径的强制点。
-    ///
-    /// 注意:这里只换模型 + 重建 + 交回句柄,**不**负责重发消息;生产 send-loop
-    /// 负责重发同一 `current_send`。
-    ///
-    /// `tried` 是本轮**已经切到过**的候选(review #2 单调性):挑选器跳过它们,
-    /// 多次切换不回头重试同一候选。send-loop 累积本轮 picks 后传入;聚焦测试可传空。
-    // Production failover is authorized only by
-    // `maybe_failover_in_send_loop`, which carries the exact active turn
-    // generation and cancellation token. Keep this standalone wrapper solely
-    // for focused unit tests so no future observer can rebuild a Finished
-    // conversation by calling failover out of band.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) async fn perform_model_failover(
-        &self,
-        conversation_id: &str,
-        config: &nomifun_api_types::ModelFailoverConfig,
-        tried: &[ProviderWithModel],
-        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
-    ) -> Option<FailoverSwitch> {
-        // A standalone failover is also a runtime-build initiator. Acquire the
-        // lease before the first await so stop/delete can cancel this exact
-        // attempt instead of letting it resurrect a stale runtime.
-        let lease = self.begin_runtime_build(conversation_id).ok()?;
-        let cancellation = lease.cancellation_token();
-        self.perform_model_failover_inner(
-            conversation_id,
-            config,
-            tried,
-            None,
-            runtime_registry,
-            lease.id(),
-            &cancellation,
-        )
-        .await
-    }
-
     async fn perform_model_failover_inner(
         &self,
         conversation_id: &str,
@@ -747,6 +700,34 @@ impl ConversationService {
             return Err(AppError::Conflict(
                 "IDMM failover observation requires a durable Running Conversation".to_owned(),
             ));
+        }
+
+        let admission = self
+            .conversation_repo()
+            .get_turn_admission_state(user_id, conv_id)
+            .await?;
+        if let Some(operation_id) = admission.active_operation_id.as_deref() {
+            let receipt = self
+                .conversation_repo()
+                .get_delivery_receipt(user_id, conv_id, operation_id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Conflict(
+                        "IDMM failover observation has no matching durable turn receipt"
+                            .to_owned(),
+                    )
+                })?;
+            if receipt.user_id != user_id
+                || receipt.conversation_id != conv_id
+                || receipt.operation_id != operation_id
+                || receipt.kind != "turn"
+                || receipt.status != "accepted"
+            {
+                return Err(AppError::Conflict(
+                    "IDMM failover observation lost its durable turn receipt authority"
+                        .to_owned(),
+                ));
+            }
         }
 
         let active_turn = runtime_state

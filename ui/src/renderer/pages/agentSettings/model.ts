@@ -27,6 +27,14 @@ export const TEMPLATE_I18N_PATH: Record<OfficialPresetKey, string> = {
   'creative-studio.default': 'creativeStudio.default',
 };
 
+/**
+ * The logical workspace resource identity is intentionally separate from its
+ * native path.  The host supplies the latter through `typed_parameters`; the
+ * editor must never reinterpret `resource_id` as a filesystem path.
+ */
+export const DEFAULT_WORKSPACE_RESOURCE_ID = 'workspace.default';
+export const WORKSPACE_ROOT_PARAMETER = 'workspace_root';
+
 export const selectedCapabilityCount = (document: AgentPresetDocument): number =>
   document.initial_capabilities.length + document.on_demand_capabilities.length;
 
@@ -68,15 +76,58 @@ export function removeResourceBinding(
 export const defaultResourceBinding = (
   resourceKind: string,
   ownerId: string,
-  operations: string[]
+  operations: string[],
+  defaults: {
+    resourceId?: string;
+    typedParameters?: Record<string, string>;
+  } = {}
 ): TypedResourceBinding => ({
   binding_id: `${resourceKind}-primary`,
   resource_kind: resourceKind,
-  resource_id: '',
+  resource_id: defaults.resourceId ?? '',
   owner_id: ownerId,
   operations,
-  typed_parameters: {},
+  typed_parameters: defaults.typedParameters ?? {},
 });
+
+export function withHostResolvedWorkspaceBinding(
+  draft: AgentPresetDraft,
+  hostWorkDir: string | null
+): AgentPresetDraft {
+  const workspaceRoot = hostWorkDir?.trim();
+  if (!workspaceRoot) return draft;
+
+  let changed = false;
+  const resourceBindings = draft.document.resource_bindings.map((binding) => {
+    if (binding.resource_kind !== 'workspace') return binding;
+
+    const resourceId =
+      binding.resource_id.trim() || DEFAULT_WORKSPACE_RESOURCE_ID;
+    const typedParameters = {
+      ...(binding.typed_parameters ?? {}),
+      [WORKSPACE_ROOT_PARAMETER]: workspaceRoot,
+    };
+    if (
+      resourceId === binding.resource_id &&
+      binding.typed_parameters?.[WORKSPACE_ROOT_PARAMETER] === workspaceRoot
+    ) {
+      return binding;
+    }
+    changed = true;
+    return {
+      ...binding,
+      resource_id: resourceId,
+      typed_parameters: typedParameters,
+    };
+  });
+
+  return changed
+    ? updateDocument(draft, (document) => ({
+        ...document,
+        resource_bindings: resourceBindings,
+      }))
+    : draft;
+}
 
 export function resourceKindsForDraft(
   draft: AgentPresetDraft,

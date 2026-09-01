@@ -103,6 +103,8 @@
     "description": "用途",
     "chatModelRoute": "Chat 模型路由",
     "chatModelRoutePlaceholder": "Exact model route ID",
+    "chatModelRouteRecord": "Chat 路由记录",
+    "chatModelRouteRecordPlaceholder": "Canonical Chat 路由 JSON",
     "persona": "Persona",
     "instructions": "Instructions"
   },
@@ -141,7 +143,9 @@
     "optional": "可选",
     "resourceId": "资源 ID",
     "operations": "操作",
-    "connectionRef": "连接引用"
+    "connectionRef": "连接引用",
+    "hostPath": "主机工作区路径",
+    "hostPathUnavailable": "主机工作区路径不可用"
   },
   "advanced": {
     "systemTokens": "系统 Context tokens",

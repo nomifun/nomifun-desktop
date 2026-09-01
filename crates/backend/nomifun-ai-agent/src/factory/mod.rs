@@ -21,6 +21,7 @@ use crate::factory::context::FactoryContext;
 use crate::runtime_registry::{
     AgentRuntimeFactory, AgentRuntimeModelConfigResolver, RuntimeModelConfigBinding,
 };
+use crate::factory::provider_config::resolve_runtime_model_selection;
 use crate::types::AgentRuntimeBuildOptions;
 
 /// Builds the persona system prompt for companion-companion conversations that do
@@ -209,12 +210,12 @@ pub fn build_agent_model_config_resolver(
     Arc::new(move |selection| {
         let model_invoke = Arc::clone(&model_invoke);
         async move {
-            let model = selection.use_model.unwrap_or(selection.model);
+            let selected = resolve_runtime_model_selection(&selection)?;
             let resolved = model_invoke
                 .resolve_task_config(
                     &ModelRef {
-                        provider_id: selection.provider_id,
-                        model,
+                        provider_id: selected.provider_id,
+                        model: selected.model,
                     },
                     ModelTask::Chat,
                 )

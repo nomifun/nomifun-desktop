@@ -1,12 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nomifun_agent_contracts::{
-    AgentBindingValue, AgentSessionLiveRecord, AgentSessionMetadata, AgentSessionTombstone,
-    CanonicalErrorCode, CompactionCompletedPayload, CorrelationId, EventId, EventProducerId,
-    IdempotencyKey, OperationId, PrincipalRef, ResolvedSnapshotRef,
+    AgentBindingValue, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata,
+    AgentSessionTombstone,
+    CanonicalErrorCode, ChatRouteIdentity, CompactionCompletedPayload, CorrelationId, EventId,
+    EventProducerId, IdempotencyKey, OperationId, PrincipalRef, ResolvedSnapshotRef,
     RuntimeCheckpointValidationResult, RuntimeEventAck, RuntimeEventEnvelope, SessionEventAck,
     SessionEventCursor, SessionEventPayloadRef, SessionEventRecord, SessionForkContract,
-    SessionPayloadBody, SessionPayloadId,
+    SessionPayloadBody, SessionPayloadId, StrictJsonValue,
 };
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,8 @@ pub struct CreateSessionRequest {
     pub producer_id: EventProducerId,
     pub idempotency_key: IdempotencyKey,
     pub correlation_id: CorrelationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_input: Option<StrictJsonValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opening_event_id: Option<EventId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -43,6 +46,7 @@ impl CreateSessionRequest {
             producer_id,
             idempotency_key,
             correlation_id,
+            initial_input: None,
             opening_event_id: None,
             activation_event_id: None,
             initial_active_capability_ids: Vec::new(),
@@ -123,6 +127,37 @@ pub struct SessionObservation {
     pub events: Vec<SessionEventRecord>,
     pub messages: Vec<MessageProjection>,
     pub next_cursor: SessionEventCursor,
+}
+
+/// One atomic, read-only snapshot of the AgentSession facts needed by a
+/// provider/chat admission gate.
+///
+/// The store computes the metadata sets in the same transaction as the live
+/// session and head reads.  Callers must not reconstruct these facts from
+/// separately-timed `get_live_session`, `head`, and `read_events` calls.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatCausalityFacts {
+    pub session: AgentSessionLiveRecord,
+    pub head: SessionHeadProjection,
+    pub events: Vec<SessionEventRecord>,
+    pub event_payloads: BTreeMap<String, serde_json::Value>,
+    pub operation_ids: BTreeSet<String>,
+    pub turn_route_identities: BTreeSet<ChatRouteIdentity>,
+}
+
+/// Atomic model-operation admission input. The store validates the active
+/// turn, causation link, frozen Snapshot, route revision, and operation
+/// uniqueness in the same transaction that appends the admission event.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatOperationClaimRequest {
+    pub agent_session_id: AgentSessionId,
+    pub operation_id: OperationId,
+    pub turn_operation_id: OperationId,
+    pub causation_event_id: EventId,
+    pub route_identity: ChatRouteIdentity,
+    pub resolved_snapshot_ref: ResolvedSnapshotRef,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

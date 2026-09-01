@@ -136,7 +136,7 @@ async fn unauthorized_user_gets_pairing_response() {
 
     let pairing = Arc::new(PairingService::new(repo.clone(), bus, TEST_OWNER));
     let session_mgr = Arc::new(SessionManager::new(repo.clone()));
-    let executor = Arc::new(ActionExecutor::new(pairing, Arc::clone(&session_mgr), settings, "acp"));
+    let executor = Arc::new(ActionExecutor::new(pairing, Arc::clone(&session_mgr), settings));
 
     let plugin = repo
         .create_plugin(&NewChannelPluginRow {
@@ -322,7 +322,7 @@ struct Harness {
     installation_owner: String,
     /// The shared pending-decision store the message loop's relay/interception
     /// uses, so tests can seed and inspect pending decisions.
-    pending_decisions: Arc<nomifun_channel::pending_decision::PendingDecisionStore>,
+    stop_confirmations: Arc<nomifun_channel::pending_decision::ChannelStopConfirmationStore>,
     channel_plugin_id: String,
 }
 
@@ -388,7 +388,6 @@ async fn build_harness() -> Harness {
         pairing,
         Arc::clone(&session_mgr),
         Arc::clone(&settings),
-        "nomi",
     ));
 
     let plugin = channel_repo
@@ -439,13 +438,15 @@ async fn build_harness() -> Harness {
         .with_runtime_state(Arc::clone(&runtime)),
     );
     let message_svc = Arc::new(ChannelMessageService::new(
-        Arc::clone(&conversation_svc),
-        Arc::clone(&runtime_registry),
+        nomifun_channel::conversation_channel_session_port(
+            Arc::clone(&conversation_svc),
+            Arc::clone(&runtime_registry),
+        ),
         settings,
         channel_repo.clone(),
         installation_owner.clone(),
     ));
-    let pending_decisions = message_svc.pending_decisions();
+    let stop_confirmations = message_svc.stop_confirmations();
 
     let recorder = Arc::new(MessageRecorder::new());
     let message_loop = ChannelMessageLoop::new(
@@ -465,7 +466,7 @@ async fn build_harness() -> Harness {
         conversation_svc,
         runtime,
         installation_owner,
-        pending_decisions,
+        stop_confirmations,
         channel_plugin_id: plugin.channel_plugin_id,
     }
 }
@@ -774,24 +775,24 @@ async fn chat_regenerate_without_history_replies_with_notice() {
 // Bug 1, Case A: relayed decision → numbered reply interception
 // ═════════════════════════════════════════════════════════════════════════
 
-use nomifun_channel::pending_decision::{PendingDecision, PendingDecisionKind};
-use nomifun_channel::types::DecisionOption;
+use nomifun_channel::pending_decision::{ChannelStopConfirmation, ChannelStopConfirmationKind};
+use nomifun_channel::types::ChannelStopOption;
 
 /// Seeds the channel-owned remote-stop confirmation (batch-1 handover gap),
 /// exactly the entry the relay records when nomi_stop_conversation is denied.
 fn seed_stop_decision(harness: &Harness, conversation_id: &str, target: &str) {
-    harness.pending_decisions.put(PendingDecision {
+    harness.stop_confirmations.put(ChannelStopConfirmation {
         conversation_id: conversation_id.to_owned(),
-        kind: PendingDecisionKind::StopConversation {
+        kind: ChannelStopConfirmationKind::StopConversation {
             target_conversation_id: target.to_owned(),
         },
         prompt: format!("确认停止会话 {target} 的当前任务？"),
         options: vec![
-            DecisionOption {
+            ChannelStopOption {
                 option_id: "confirm-stop".into(),
                 label: "确认停止".into(),
             },
-            DecisionOption {
+            ChannelStopOption {
                 option_id: "cancel".into(),
                 label: "取消".into(),
             },
@@ -839,7 +840,7 @@ async fn stop_confirmation_confirm_cancels_target_as_owner() {
     let ack = wait_for_send_containing(&harness.recorder, &format!("会话 {cid}")).await;
     let ack_text = ack.text.unwrap();
     assert!(ack_text.contains("停止"), "stop ack expected, got: {ack_text}");
-    assert!(harness.pending_decisions.peek(&cid).is_none(), "stop decision consumed");
+    assert!(harness.stop_confirmations.peek(&cid).is_none(), "stop decision consumed");
 
     // The numeric reply was consumed by the confirmation, not dispatched.
     let messages = user_messages(
@@ -880,7 +881,7 @@ async fn stop_confirmation_cancel_choice_only_clears_entry() {
         .unwrap();
 
     wait_for_send_containing(&harness.recorder, "已取消，不停止该会话").await;
-    assert!(harness.pending_decisions.peek(&cid).is_none(), "stop decision consumed");
+    assert!(harness.stop_confirmations.peek(&cid).is_none(), "stop decision consumed");
     let messages = user_messages(
         &harness.conversation_svc,
         &harness.installation_owner,

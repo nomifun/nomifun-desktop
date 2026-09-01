@@ -7,6 +7,7 @@
 //!
 //! Only compiled when the `browser-use` feature is on.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use nomi_browser::managed_result_envelope;
@@ -15,10 +16,8 @@ use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::browser_registry::{
-    BrowserRegistry, browser_result_to_value, platform_error_to_value,
-};
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::browser_registry::{BrowserRegistry, platform_error_to_value};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 
 // ── params ────────────────────────────────────────────────────────────────
@@ -166,9 +165,37 @@ struct CrawlManyParams {
 
 // ── per-caller registry + GW2 helpers (ported verbatim) ───────────────────
 
-fn registry(deps: &GatewayDeps) -> Result<&BrowserRegistry, Value> {
+#[derive(Clone)]
+struct BrowserCapabilityDeps {
+    registry: Option<BrowserRegistry>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<BrowserCapabilityDeps>, CallerCtx, P) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, ctx, params| {
+        handler(
+            Arc::new(BrowserCapabilityDeps {
+                registry: deps.browser_registry.clone(),
+            }),
+            ctx,
+            params,
+        )
+    }
+}
+
+fn registry(deps: &BrowserCapabilityDeps) -> Result<&BrowserRegistry, Value> {
     deps
-        .browser_registry
+        .registry
         .as_ref()
         .ok_or_else(|| {
             json!({
@@ -212,7 +239,7 @@ fn managed_envelope(
 
 // ── handlers ────────────────────────────────────────────────────────────────
 
-async fn navigate(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: NavigateParams) -> Value {
+async fn navigate(deps: Arc<BrowserCapabilityDeps>, ctx: CallerCtx, p: NavigateParams) -> Value {
     let registry = match registry(&deps) {
         Ok(registry) => registry,
         Err(e) => return e,
@@ -230,7 +257,7 @@ async fn navigate(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: NavigateParams) -> 
     )
 }
 
-async fn observe(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ObserveParams) -> Value {
+async fn observe(deps: Arc<BrowserCapabilityDeps>, ctx: CallerCtx, p: ObserveParams) -> Value {
     let registry = match registry(&deps) {
         Ok(registry) => registry,
         Err(e) => return e,
@@ -246,7 +273,7 @@ async fn observe(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ObserveParams) -> Va
     )
 }
 
-async fn act(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ActParams) -> Value {
+async fn act(deps: Arc<BrowserCapabilityDeps>, ctx: CallerCtx, p: ActParams) -> Value {
     let registry = match registry(&deps) {
         Ok(registry) => registry,
         Err(e) => return e,
@@ -266,7 +293,7 @@ async fn act(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ActParams) -> Value {
 }
 
 async fn dispatch_management(
-    deps: Arc<GatewayDeps>,
+    deps: Arc<BrowserCapabilityDeps>,
     ctx: CallerCtx,
     input: Value,
 ) -> Value {
@@ -277,7 +304,7 @@ async fn dispatch_management(
     managed_envelope(registry.dispatch_managed(&ctx, None, input).await)
 }
 
-async fn browser_open(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: OpenParams) -> Value {
+async fn browser_open(deps: Arc<BrowserCapabilityDeps>, ctx: CallerCtx, p: OpenParams) -> Value {
     let mut input = json!({
         "action": "browser_open",
         "lane_name": p.lane_name,
@@ -293,7 +320,7 @@ async fn browser_open(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: OpenParams) -> 
     .await
 }
 
-async fn browser_fork(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: OpenParams) -> Value {
+async fn browser_fork(deps: Arc<BrowserCapabilityDeps>, ctx: CallerCtx, p: OpenParams) -> Value {
     let mut input = json!({
         "action": "browser_fork",
         "lane_name": p.lane_name,
@@ -309,12 +336,12 @@ async fn browser_fork(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: OpenParams) -> 
     .await
 }
 
-async fn browser_list(deps: Arc<GatewayDeps>, ctx: CallerCtx, _p: EmptyParams) -> Value {
+async fn browser_list(deps: Arc<BrowserCapabilityDeps>, ctx: CallerCtx, _p: EmptyParams) -> Value {
     dispatch_management(deps, ctx, json!({"action": "browser_list"})).await
 }
 
 async fn browser_status(
-    deps: Arc<GatewayDeps>,
+    deps: Arc<BrowserCapabilityDeps>,
     ctx: CallerCtx,
     p: LaneIdParams,
 ) -> Value {
@@ -327,7 +354,7 @@ async fn browser_status(
 }
 
 async fn browser_close(
-    deps: Arc<GatewayDeps>,
+    deps: Arc<BrowserCapabilityDeps>,
     ctx: CallerCtx,
     p: LaneIdParams,
 ) -> Value {
@@ -340,7 +367,7 @@ async fn browser_close(
 }
 
 async fn browser_close_all(
-    deps: Arc<GatewayDeps>,
+    deps: Arc<BrowserCapabilityDeps>,
     ctx: CallerCtx,
     _p: EmptyParams,
 ) -> Value {
@@ -348,7 +375,7 @@ async fn browser_close_all(
 }
 
 async fn browser_crawl_many(
-    deps: Arc<GatewayDeps>,
+    deps: Arc<BrowserCapabilityDeps>,
     ctx: CallerCtx,
     p: CrawlManyParams,
 ) -> Value {
@@ -368,43 +395,43 @@ async fn browser_crawl_many(
 pub(crate) fn register(out: &mut Vec<Capability>) {
     out.push(Capability::new::<OpenParams, _, _>(
         CapabilityMeta::new("nomi_browser_open", "browser", "Idempotently open the caller's default or named managed Browser Lane using the trusted host-selected interactive identity.", EffectClass::Write),
-        browser_open,
+        adapt(browser_open),
     ));
     out.push(Capability::new::<OpenParams, _, _>(
         CapabilityMeta::new("nomi_browser_fork", "browser", "Create or open an additional managed Browser Lane using the trusted host-selected interactive identity and return its owner-scoped handle.", EffectClass::Write),
-        browser_fork,
+        adapt(browser_fork),
     ));
     out.push(Capability::new::<EmptyParams, _, _>(
         CapabilityMeta::new("nomi_browser_list", "browser", "List the managed Browser Lanes owned by this runtime, including queue, capacity, identity, epoch, and recovery state.", EffectClass::Read),
-        browser_list,
+        adapt(browser_list),
     ));
     out.push(Capability::new::<LaneIdParams, _, _>(
         CapabilityMeta::new("nomi_browser_status", "browser", "Read one owner-scoped managed Browser Lane status, defaulting to the default Lane.", EffectClass::Read),
-        browser_status,
+        adapt(browser_status),
     ));
     out.push(Capability::new::<LaneIdParams, _, _>(
         CapabilityMeta::new("nomi_browser_close", "browser", "Close one owner-scoped managed Browser Lane.", EffectClass::Write),
-        browser_close,
+        adapt(browser_close),
     ));
     out.push(Capability::new::<EmptyParams, _, _>(
         CapabilityMeta::new("nomi_browser_close_all", "browser", "Close every managed Browser Lane owned by this runtime and no other runtime.", EffectClass::Write),
-        browser_close_all,
+        adapt(browser_close_all),
     ));
     out.push(Capability::new::<CrawlManyParams, _, _>(
         CapabilityMeta::new("nomi_browser_crawl_many", "browser", "Read or extract an ordered bounded URL batch using Hub-managed Lanes with cleanup; the trusted host selects the crawl identity policy.", EffectClass::Read),
-        browser_crawl_many,
+        adapt(browser_crawl_many),
     ));
     out.push(Capability::new::<NavigateParams, _, _>(
         CapabilityMeta::new("nomi_browser_navigate", "browser", "Load a URL in the caller's browser (optionally a new tab).", EffectClass::Write),
-        navigate,
+        adapt(navigate),
     ));
     out.push(Capability::new::<ObserveParams, _, _>(
         CapabilityMeta::new("nomi_browser_observe", "browser", "Read the page's accessibility tree (aria snapshot + ref table) to target later. Read-only.", EffectClass::Read),
-        observe,
+        adapt(observe),
     ));
     out.push(Capability::new::<ActParams, _, _>(
         CapabilityMeta::new("nomi_browser_act", "browser", "Run a browser action (click/type/scroll/screenshot/...) through the caller's owner-scoped Lane.", EffectClass::Write),
-        act,
+        adapt(act),
     ));
 }
 

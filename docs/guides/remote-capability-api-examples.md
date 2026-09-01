@@ -1,76 +1,79 @@
-# Remote Capability API Examples
-
-These examples use the access token issued by one NomiFun Desktop installation. Replace
-`$HOST` with your NomiFun host and `$TOKEN` with the token shown when it was
-created.
+# Canonical Remote API Examples
 
 ```bash
 export HOST=127.0.0.1:25808
-export TOKEN=<nomifun-desktop-access-token>
+export TOKEN=<installation-access-token>
+export BINDING_ID=<remote-binding-id>
 ```
 
-## MCP Client
-
-For Claude Code, Cursor, or any MCP client that supports Streamable HTTP:
+## MCP client
 
 ```json
 {
   "mcpServers": {
     "nomifun": {
       "type": "streamable-http",
-      "url": "http://$HOST/mcp-agent",
+      "url": "http://127.0.0.1:25808/mcp",
       "headers": {
-        "Authorization": "Bearer $TOKEN"
+        "Authorization": "Bearer <installation-access-token>"
       }
     }
   }
 }
 ```
 
-Use `/mcp-agent` for the curated worker surface. Use `/mcp` only when you need
-the broader platform-control surface.
+After initialization, `tools/list` must contain exactly `open`, `turn`,
+`observe`, and `cancel`.
 
-## curl
-
-List curated tools:
+## REST: open
 
 ```bash
-curl -s "http://$HOST/v1/tools?profile=agent" \
+curl -s -X POST "http://$HOST/api/remote/open" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"binding_id\":\"$BINDING_ID\",
+    \"idempotency_key\":\"open-1\",
+    \"initial_input\":{\"text\":\"hello\"}
+  }"
+```
+
+Save both `agent_session_id` and `cursor` from the response.
+
+## REST: observe
+
+```bash
+curl -s "http://$HOST/api/remote/observe?agent_session_id=$SESSION_ID&after_seq=0&limit=100" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Call any discovered tool:
+Advance with the returned `next_cursor.seq`. `after_seq` is exclusive.
+
+## REST: turn
+
+Run this only after observation shows the Session is ready:
 
 ```bash
-curl -s -X POST "http://$HOST/v1/tools/<tool_name>" \
+curl -s -X POST "http://$HOST/api/remote/turn" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"argument":"value"}'
+  -d "{
+    \"agent_session_id\":\"$SESSION_ID\",
+    \"input\":{\"text\":\"continue\"},
+    \"idempotency_key\":\"turn-1\"
+  }"
 ```
 
-For a confirmation-required destructive action, first show the returned
-challenge to the user. Retry only after explicit approval:
+## REST: cancel
 
 ```bash
-curl -s -X POST "http://$HOST/v1/tools/<tool_name>" \
+curl -s -X POST "http://$HOST/api/remote/cancel" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"argument":"value","confirm":true}'
-```
-
-## SSE Streaming
-
-```bash
-curl -N -X POST "http://$HOST/v1/tools/<tool_name>/stream" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"argument":"value"}'
-```
-
-The final event is:
-
-```json
-{"type":"__result__","data":{"result":{}}}
+  -d "{
+    \"agent_session_id\":\"$SESSION_ID\",
+    \"idempotency_key\":\"cancel-1\"
+  }"
 ```
 
 ## Python REST
@@ -78,82 +81,78 @@ The final event is:
 ```python
 import requests
 
-base = f"http://{HOST}"
-headers = {
-    "Authorization": f"Bearer {TOKEN}",
-    "Content-Type": "application/json",
-}
+BASE = f"http://{HOST}"
+HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 
-response = requests.post(
-    f"{base}/v1/tools/{TOOL_NAME}",
-    headers=headers,
-    json=arguments,
-)
-print(response.json())
+opened = requests.post(
+    f"{BASE}/api/remote/open",
+    headers=HEADERS,
+    json={
+        "binding_id": BINDING_ID,
+        "idempotency_key": "open-1",
+        "initial_input": {"text": "hello"},
+    },
+).json()
+
+session_id = opened["agent_session_id"]
+observed = requests.get(
+    f"{BASE}/api/remote/observe",
+    headers=HEADERS,
+    params={"agent_session_id": session_id, "after_seq": 0, "limit": 100},
+).json()
+print(observed)
 ```
 
 ## Python Streamable HTTP MCP
 
 ```python
-from mcp.client.streamable_http import streamablehttp_client
 from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
 
 async def main():
     headers = {"Authorization": "Bearer " + TOKEN}
     async with streamablehttp_client(
-        "http://%s/mcp-agent" % HOST,
+        "http://%s/mcp" % HOST,
         headers=headers,
     ) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await session.list_tools()
-            print([tool.name for tool in tools.tools])
-            # Select a name and arguments from the live tools/list response.
-            result = await session.call_tool(TOOL_NAME, arguments)
-            print(result)
+            assert [tool.name for tool in tools.tools] == [
+                "open", "turn", "observe", "cancel"
+            ]
+            opened = await session.call_tool(
+                "open",
+                {
+                    "binding_id": BINDING_ID,
+                    "idempotency_key": "mcp-open-1",
+                    "initial_input": {"text": "hello"},
+                },
+            )
+            print(opened)
 ```
 
-## Headless Server Token Seed
+## `nomicore` CLI
 
-For a local headless server:
+```bash
+export NOMIFUN_URL=http://$HOST
+export NOMIFUN_ACCESS_TOKEN=$TOKEN
+
+nomicore remote open "$BINDING_ID" \
+  --initial-input '{"text":"hello"}' \
+  --idempotency-key open-1
+
+nomicore remote observe "$SESSION_ID" --after-seq 0 --limit 100
+nomicore remote turn "$SESSION_ID" '{"text":"continue"}' --idempotency-key turn-1
+nomicore remote cancel "$SESSION_ID" --idempotency-key cancel-1
+```
+
+## Headless token seed
 
 ```bash
 export NOMIFUN_ACCESS_TOKEN="$(openssl rand -hex 32)"
 nomifun-web --host 127.0.0.1 --port 8787
 ```
 
-For LAN or public access, finish admin setup first, bind intentionally, and
-place the server behind TLS:
-
-```bash
-nomifun-web --host 0.0.0.0 --port 8787
-```
-
-## OpenAPI
-
-Generate a typed client from:
-
-```bash
-curl -s "http://$HOST/v1/openapi.json?profile=agent" \
-  -H "Authorization: Bearer $TOKEN" > nomifun-openapi.json
-```
-
-## Notes
-
-- MCP clients should prefer `/mcp-agent`.
-- Scripts and automation systems can use `/v1/tools/{name}` directly.
-- Use `/v1/tools/{name}/stream` when live progress matters.
-- The token can be revoked with
-  `DELETE /api/webui/access-token` from a trusted local
-  desktop context.
-
-## Persistent Agent Collaboration
-
-Agent collaboration has one authority-bound contract: `nomi_delegate` creates
-an execution, `nomi_execution_get` reads it, and `nomi_execution_update`
-changes its plan or lifecycle. A trusted local owner may mint the installation
-token whose Remote catalog includes these tools. Remote delegation uses the
-same installation-owner boundary as Desktop; it does not create a companion
-identity or restrict executions by companion. Secondary users receive none of
-the three tools. Always discover the effective catalog and protect the token as
-a high-privilege installation-owner credential.
+The removed `/mcp-agent`, `/v1`, and `profile`/`domains` query selectors should
+return a route or `REMOTE_INVALID_REQUEST` failure; do not retry them.

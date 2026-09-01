@@ -1,31 +1,33 @@
 //! Bundled Agent Capability Platform v2 registrations for C7 Wave 4.
 //!
 //! This crate owns only the identity/channel/device contribution metadata and
-//! a deterministic typed-command adapter.  Pairing and product-level user
+//! a typed host-port adapter.  Pairing and product-level user
 //! confirmation remain transport/host concerns; they are not Agent
 //! capabilities or execution branches.
 
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use nomifun_agent_contracts::{
-    ActionId, ArtifactEnvelope, CapabilityActionDescriptor, CapabilityContributions,
-    CapabilityId, CapabilityKind, CapabilityManifest, CanonicalSchemaRef,
-    CancellationDescriptor, DeclaredServiceViewDescriptor, DomainOutboxPortDescriptor,
-    EffectClass, InProcessEntrypointMetadata, LocalizedMetadata,
-    ManagedTaskRegistrationDescriptor, PackageContributions, PackageId, PackageManifest,
-    PackageRef, PlatformConstraint, PluginBootCriticality, PluginBootState,
-    PluginContextDescriptor, PluginDesiredState, PluginEffectiveState,
-    PluginIdentityDescriptor, PluginMountId, PluginRegistrarDescriptor,
-    PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind,
-    PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod, ResourceBindingId,
-    ResourceId, ResourceKind, ScopeKey, StrictJsonValue, ToolPresentationKind,
-    TypedCommandPortDescriptor, TypedResourceBinding, TypedResourceBindings,
-    ValidatedPluginConfig, VersionString, digest_payload,
+    ActionId, AgentSessionId, ArtifactEnvelope, CapabilityActionDescriptor,
+    CapabilityContributions, CapabilityId, CapabilityKind, CapabilityManifest,
+    CanonicalSchemaRef, CancellationDescriptor, CorrelationId,
+    DeclaredServiceViewDescriptor, DomainOutboxPortDescriptor, EffectClass,
+    HostPortBindingDescriptor, IdempotencyKey,
+    InProcessEntrypointMetadata, LocalizedMetadata, ManagedTaskRegistrationDescriptor,
+    OperationId, PackageContributions, PackageId, PackageManifest, PackageRef,
+    PlatformConstraint, PluginBootCriticality, PluginBootState, PluginContextDescriptor,
+    PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor, PluginMountId,
+    PluginRegistrarDescriptor, PluginRegistrarOperation, PluginRegistrationMetadata,
+    PluginSourceKind, PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod,
+    PrincipalRef, ResolvedSnapshotRef, ResourceBindingId, ResourceId, ResourceKind, ScopeKey,
+    StrictJsonValue, ToolPresentationKind, TypedCommandPortDescriptor, TypedResourceBinding,
+    TypedResourceBindings, ValidatedPluginConfig, VersionString, digest_payload,
 };
 use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, KernelError, PluginRegistration,
@@ -199,6 +201,116 @@ pub struct TypedResourceDescriptor {
     pub required: bool,
     pub operations: BTreeSet<String>,
     pub binding_policy: &'static str,
+}
+
+/// The single narrow host port used by Wave 4 action handlers.
+///
+/// The host owns the Companion, Channel, Customer Service, and Robot facts.
+/// This crate only validates the frozen invocation boundary and routes a
+/// typed operation to the injected owner.  It never manufactures an action
+/// result.
+pub const WAVE4_CAPABILITY_HOST_PORT_ID: &str = "host.wave4.capability.invoke";
+
+/// Invocation metadata projected from the Kernel context into a domain port.
+///
+/// The projection intentionally excludes the application service bag,
+/// Gateway state, and the Kernel authority itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wave4HostContext {
+    pub principal: PrincipalRef,
+    pub agent_session_id: AgentSessionId,
+    pub operation_id: OperationId,
+    pub idempotency_key: IdempotencyKey,
+    pub correlation_id: CorrelationId,
+    pub resolved_snapshot_ref: ResolvedSnapshotRef,
+    pub registry_generation: u64,
+    pub capability_id: CapabilityId,
+    pub action_id: ActionId,
+    pub state_scope_key: ScopeKey,
+    pub resource_bindings: TypedResourceBindings,
+}
+
+/// Typed operation variants understood by the Wave 4 host port.
+///
+/// The input remains a strict JSON value because each first-party domain owns
+/// its action payload schema.  The variant itself fixes the owning domain and
+/// action family before the value reaches that host adapter.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Wave4CapabilityOperation {
+    ChannelReply { input: StrictJsonValue },
+    ChannelSend { input: StrictJsonValue },
+    CompanionSummon { input: StrictJsonValue },
+    CompanionLearn { input: StrictJsonValue },
+    CompanionEvolve { input: StrictJsonValue },
+    CustomerServiceNotesRead { input: StrictJsonValue },
+    CustomerServiceNotesWrite { input: StrictJsonValue },
+    CustomerServiceHandoff { input: StrictJsonValue },
+    RobotDisplay { input: StrictJsonValue },
+    RobotMotion { input: StrictJsonValue },
+    RobotDeviceTools { input: StrictJsonValue },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wave4HostRequest {
+    pub context: Wave4HostContext,
+    pub operation: Wave4CapabilityOperation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wave4HostPortError {
+    pub code: String,
+    pub message: String,
+}
+
+impl Wave4HostPortError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::new("WAVE4_HOST_PORT_UNAVAILABLE", message)
+    }
+}
+
+impl fmt::Display for Wave4HostPortError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for Wave4HostPortError {}
+
+/// Production-owned implementation boundary for Wave 4 actions.
+pub trait Wave4HostPort: Send + Sync {
+    fn invoke<'a>(
+        &'a self,
+        request: Wave4HostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave4HostPortError>> + Send + 'a>>;
+}
+
+struct UnconfiguredWave4HostPort;
+
+impl Wave4HostPort for UnconfiguredWave4HostPort {
+    fn invoke<'a>(
+        &'a self,
+        request: Wave4HostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave4HostPortError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            Err(Wave4HostPortError::unavailable(format!(
+                "no production host adapter is bound for {}",
+                request.context.capability_id.as_ref()
+            )))
+        })
+    }
+}
+
+/// Return the fail-closed adapter used by metadata-only compositions.
+pub fn unconfigured_host_port() -> Arc<dyn Wave4HostPort> {
+    Arc::new(UnconfiguredWave4HostPort)
 }
 
 const CHANNEL_CAPABILITIES: [CapabilitySpec; 5] = [
@@ -441,7 +553,10 @@ const ROBOT_CAPABILITIES: [CapabilitySpec; 6] = [
         resource_kinds: ROBOT_RESOURCE,
         requirements: &[ResourceRequirement {
             resource_kind: ROBOT_RESOURCE_KIND,
-            operation: "device_tools",
+            // Device tools are discovered and dispatched through the selected
+            // device link.  The frozen Robot binding contract has no separate
+            // `device_tools` operation.
+            operation: "link",
         }],
         effect_class: Some(EffectClass::Physical),
     },
@@ -716,27 +831,38 @@ pub fn required_resource_kinds(capability_id: &str) -> Option<BTreeSet<ResourceK
 
 /// Construct all five bundled Wave 4 registrations.
 pub fn registrations() -> Result<Vec<PluginRegistration>, String> {
-    PACKAGE_SPECS.iter().map(registration_for).collect()
+    registrations_with_host_port(unconfigured_host_port())
+}
+
+/// Construct all five bundled Wave 4 registrations with the host-owned
+/// action port.
+pub fn registrations_with_host_port(
+    action_host_port: Arc<dyn Wave4HostPort>,
+) -> Result<Vec<PluginRegistration>, String> {
+    PACKAGE_SPECS
+        .iter()
+        .map(|spec| registration_for(spec, Arc::clone(&action_host_port)))
+        .collect()
 }
 
 pub fn channel_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGE_SPECS[0])
+    registration_for(&PACKAGE_SPECS[0], unconfigured_host_port())
 }
 
 pub fn companion_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGE_SPECS[1])
+    registration_for(&PACKAGE_SPECS[1], unconfigured_host_port())
 }
 
 pub fn customer_service_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGE_SPECS[2])
+    registration_for(&PACKAGE_SPECS[2], unconfigured_host_port())
 }
 
 pub fn robot_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGE_SPECS[3])
+    registration_for(&PACKAGE_SPECS[3], unconfigured_host_port())
 }
 
 pub fn notification_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGE_SPECS[4])
+    registration_for(&PACKAGE_SPECS[4], unconfigured_host_port())
 }
 
 fn all_capabilities() -> impl Iterator<Item = &'static CapabilitySpec> {
@@ -749,7 +875,10 @@ fn find_capability(capability_id: &str) -> Option<&'static CapabilitySpec> {
     all_capabilities().find(|spec| spec.id == capability_id)
 }
 
-fn registration_for(spec: &PackageSpec) -> Result<PluginRegistration, String> {
+fn registration_for(
+    spec: &PackageSpec,
+    action_host_port: Arc<dyn Wave4HostPort>,
+) -> Result<PluginRegistration, String> {
     let package = package_ref(spec.id);
     let config_schema = object_schema(false);
     let capabilities = spec
@@ -794,6 +923,10 @@ fn registration_for(spec: &PackageSpec) -> Result<PluginRegistration, String> {
     };
     let cancellation_port = host_port("host.plugin.cancel");
     let task_port = host_port("host.plugin.tasks");
+    let has_action_handler = spec
+        .capabilities
+        .iter()
+        .any(|capability| capability.effect_class.is_some());
     let typed_command_ports = spec
         .ports
         .command_ports
@@ -806,12 +939,19 @@ fn registration_for(spec: &PackageSpec) -> Result<PluginRegistration, String> {
         .iter()
         .map(|id| outbox_port(id))
         .collect::<Result<Vec<_>, _>>()?;
-    let declared_host_ports = typed_command_ports
+    let mut declared_host_ports = typed_command_ports
         .iter()
         .map(|port| port.port.id.clone())
         .chain(domain_outbox_ports.iter().map(|port| port.port.id.clone()))
         .chain([cancellation_port.id.clone(), task_port.id.clone()])
         .collect::<BTreeSet<_>>();
+    let action_host_port_ref = host_port(WAVE4_CAPABILITY_HOST_PORT_ID);
+    let host_port_bindings = if has_action_handler {
+        declared_host_ports.insert(action_host_port_ref.id.clone());
+        vec![host_port_binding()?]
+    } else {
+        Vec::new()
+    };
     let metadata = PluginRegistrationMetadata {
         manifest: ArtifactEnvelope::new(manifest).map_err(|error| error.to_string())?,
         mount_id: mount_id.clone(),
@@ -853,7 +993,7 @@ fn registration_for(spec: &PackageSpec) -> Result<PluginRegistration, String> {
                 methods: PluginStateMethod::REQUIRED.into_iter().collect(),
             },
             declared_services: DeclaredServiceViewDescriptor::default(),
-            host_ports: Vec::new(),
+            host_ports: host_port_bindings,
             typed_command_ports,
             domain_outbox_ports,
             cancellation: CancellationDescriptor {
@@ -869,18 +1009,18 @@ fn registration_for(spec: &PackageSpec) -> Result<PluginRegistration, String> {
 
     let mut registration = PluginRegistration::new(metadata);
     for capability in spec.capabilities.iter().copied() {
-        let Some(effect_class) = capability.effect_class else {
+        if capability.effect_class.is_none() {
             continue;
-        };
+        }
         let action_id = action_id_for(capability.id);
         registration
             .add_capability_handler(
                 CapabilityId::from(capability.id),
-                Arc::new(DeterministicHandler {
+                Arc::new(Wave4CapabilityHandler {
                     capability_id: CapabilityId::from(capability.id),
                     action_id,
-                    effect_class,
-                    requirements: capability.requirements.to_vec(),
+                    requirements: capability.requirements,
+                    host_port: Arc::clone(&action_host_port),
                 }),
             )
             .map_err(|error| error.to_string())?;
@@ -911,6 +1051,9 @@ fn capability_manifest(
             effect_class,
             presentation: ToolPresentationKind::FunctionTool,
         });
+        contributions
+            .host_ports
+            .push(host_port(WAVE4_CAPABILITY_HOST_PORT_ID));
     }
 
     match spec.kind {
@@ -1039,6 +1182,24 @@ fn host_port(id: &str) -> nomifun_agent_contracts::HostPortRef {
     }
 }
 
+fn host_port_binding() -> Result<HostPortBindingDescriptor, String> {
+    let request_schema = object_schema(true);
+    let response_schema = object_schema(true);
+    Ok(HostPortBindingDescriptor {
+        port: host_port(WAVE4_CAPABILITY_HOST_PORT_ID),
+        request_schema: schema_ref(
+            WAVE4_CAPABILITY_HOST_PORT_ID,
+            "request",
+            &request_schema,
+        )?,
+        response_schema: schema_ref(
+            WAVE4_CAPABILITY_HOST_PORT_ID,
+            "response",
+            &response_schema,
+        )?,
+    })
+}
+
 fn command_port(id: &str) -> Result<TypedCommandPortDescriptor, String> {
     let command_schema = object_schema(true);
     let receipt_schema = object_schema(true);
@@ -1075,29 +1236,14 @@ fn localized(name: &str, description: &str) -> LocalizedMetadata {
     }
 }
 
-fn effect_class_name(effect_class: EffectClass) -> &'static str {
-    match effect_class {
-        EffectClass::Pure => "pure",
-        EffectClass::ReadLocal => "read_local",
-        EffectClass::ReadSensitive => "read_sensitive",
-        EffectClass::WriteReversible => "write_reversible",
-        EffectClass::WriteDurable => "write_durable",
-        EffectClass::ExecuteLocal => "execute_local",
-        EffectClass::ExternalTransmit => "external_transmit",
-        EffectClass::Destructive => "destructive",
-        EffectClass::Irreversible => "irreversible",
-        EffectClass::Physical => "physical",
-    }
-}
-
-struct DeterministicHandler {
+struct Wave4CapabilityHandler {
     capability_id: CapabilityId,
     action_id: ActionId,
-    effect_class: EffectClass,
-    requirements: Vec<ResourceRequirement>,
+    requirements: &'static [ResourceRequirement],
+    host_port: Arc<dyn Wave4HostPort>,
 }
 
-impl CapabilityHandler for DeterministicHandler {
+impl CapabilityHandler for Wave4CapabilityHandler {
     fn invoke<'life0, 'async_trait>(
         &'life0 self,
         context: CapabilityInvocationContext,
@@ -1122,75 +1268,128 @@ impl CapabilityHandler for DeterministicHandler {
                 });
             }
 
-            for requirement in &self.requirements {
-                let Some(binding) = context
-                    .resource_bindings
-                    .iter()
-                    .find(|binding| binding.resource_kind.as_ref() == requirement.resource_kind)
-                else {
-                    return Err(KernelError::CapabilityExecution {
-                        reason: format!(
-                            "{} requires resource kind {}",
-                            self.capability_id.as_ref(),
-                            requirement.resource_kind
-                        ),
-                    });
-                };
-                if !binding.operations.contains(requirement.operation) {
-                    return Err(KernelError::CapabilityExecution {
-                        reason: format!(
-                            "{} requires operation {} on {}",
-                            self.capability_id.as_ref(),
-                            requirement.operation,
-                            requirement.resource_kind
-                        ),
-                    });
-                }
-            }
+            validate_resource_bindings(
+                &self.capability_id,
+                &context.principal.principal_id,
+                self.requirements,
+                &context.resource_bindings,
+            )?;
+            let operation = operation_from_input(&self.capability_id, input)?;
 
-            let mut resource_binding_ids = context
-                .resource_bindings
-                .iter()
-                .map(|binding| binding.binding_id.as_ref().to_owned())
-                .collect::<Vec<_>>();
-            resource_binding_ids.sort();
-
-            let mut result = empty_object();
-            let object = result
-                .0
-                .as_object_mut()
-                .expect("empty_object always returns a JSON object");
-            object.insert("accepted".to_owned(), true.into());
-            object.insert(
-                "capability_id".to_owned(),
-                self.capability_id.as_ref().to_owned().into(),
-            );
-            object.insert(
-                "action_id".to_owned(),
-                self.action_id.as_ref().to_owned().into(),
-            );
-            object.insert(
-                "operation".to_owned(),
-                self.requirements
-                    .first()
-                    .map(|requirement| requirement.operation)
-                    .unwrap_or("dispatch")
-                    .to_owned()
-                    .into(),
-            );
-            object.insert(
-                "effect_class".to_owned(),
-                effect_class_name(self.effect_class).to_owned().into(),
-            );
-            object.insert("resource_binding_ids".to_owned(), resource_binding_ids.into());
-            object.insert("input".to_owned(), input.0);
-            Ok(StrictJsonValue(result.0))
+            self.host_port
+                .invoke(Wave4HostRequest {
+                    context: Wave4HostContext {
+                        principal: context.principal,
+                        agent_session_id: context.agent_session_id,
+                        operation_id: context.operation_id,
+                        idempotency_key: context.idempotency_key,
+                        correlation_id: context.correlation_id,
+                        resolved_snapshot_ref: context.resolved_snapshot_ref,
+                        registry_generation: context.registry_generation,
+                        capability_id: self.capability_id.clone(),
+                        action_id: self.action_id.clone(),
+                        state_scope_key: context.state_scope_key,
+                        resource_bindings: context.resource_bindings,
+                    },
+                    operation,
+                })
+                .await
+                .map_err(|error| KernelError::CapabilityExecution {
+                    reason: error.to_string(),
+                })
         })
     }
 }
 
+fn operation_from_input(
+    capability_id: &CapabilityId,
+    input: StrictJsonValue,
+) -> Result<Wave4CapabilityOperation, KernelError> {
+    let operation = match capability_id.as_ref() {
+        CHANNEL_REPLY => Wave4CapabilityOperation::ChannelReply { input },
+        CHANNEL_SEND => Wave4CapabilityOperation::ChannelSend { input },
+        COMPANION_SUMMON => Wave4CapabilityOperation::CompanionSummon { input },
+        COMPANION_LEARN => Wave4CapabilityOperation::CompanionLearn { input },
+        COMPANION_EVOLVE => Wave4CapabilityOperation::CompanionEvolve { input },
+        CUSTOMER_SERVICE_NOTES_READ => {
+            Wave4CapabilityOperation::CustomerServiceNotesRead { input }
+        }
+        CUSTOMER_SERVICE_NOTES_WRITE => {
+            Wave4CapabilityOperation::CustomerServiceNotesWrite { input }
+        }
+        CUSTOMER_SERVICE_HANDOFF => Wave4CapabilityOperation::CustomerServiceHandoff { input },
+        ROBOT_DISPLAY => Wave4CapabilityOperation::RobotDisplay { input },
+        ROBOT_MOTION => Wave4CapabilityOperation::RobotMotion { input },
+        ROBOT_DEVICE_TOOLS => Wave4CapabilityOperation::RobotDeviceTools { input },
+        other => {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!("{other} does not expose an action host operation"),
+            });
+        }
+    };
+    Ok(operation)
+}
+
+fn validate_resource_bindings(
+    capability_id: &CapabilityId,
+    principal_id: &str,
+    requirements: &[ResourceRequirement],
+    bindings: &[TypedResourceBinding],
+) -> Result<(), KernelError> {
+    let mut seen_binding_ids = BTreeSet::new();
+    for binding in bindings {
+        if binding.binding_id.as_ref().is_empty() || binding.resource_id.as_ref().is_empty() {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!(
+                    "{} requires non-empty binding and resource IDs",
+                    capability_id.as_ref()
+                ),
+            });
+        }
+        if !seen_binding_ids.insert(binding.binding_id.clone()) {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!(
+                    "{} received duplicate resource binding {}",
+                    capability_id.as_ref(),
+                    binding.binding_id.as_ref()
+                ),
+            });
+        }
+        if binding.owner_id != principal_id {
+            return Err(KernelError::ResourceOwnerMismatch {
+                binding_id: binding.binding_id.clone(),
+            });
+        }
+    }
+
+    for requirement in requirements {
+        let Some(binding) = bindings
+            .iter()
+            .find(|binding| binding.resource_kind.as_ref() == requirement.resource_kind)
+        else {
+            return Err(KernelError::CapabilityResourceNotBound {
+                capability_id: capability_id.clone(),
+                resource_kind: requirement.resource_kind.to_owned(),
+            });
+        };
+        if !binding.operations.contains(requirement.operation) {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!(
+                    "{} requires operation {} on {}",
+                    capability_id.as_ref(),
+                    requirement.operation,
+                    requirement.resource_kind
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::task::{Context, Poll, Wake, Waker};
+
     use super::*;
     use nomifun_agent_kernel::{
         InMemoryPluginStatePersistence, KernelRegistry, MaterializationPolicy,
@@ -1443,6 +1642,66 @@ mod tests {
     }
 
     #[test]
+    fn handler_resource_requirements_fit_the_frozen_binding_operations() {
+        let bindings = canonical_resource_bindings("owner-1");
+        for capability in all_capabilities() {
+            for requirement in capability.requirements {
+                let binding = bindings
+                    .iter()
+                    .find(|binding| binding.resource_kind.as_ref() == requirement.resource_kind)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} requires missing resource kind {}",
+                            capability.id, requirement.resource_kind
+                        )
+                    });
+                assert!(
+                    binding.operations.contains(requirement.operation),
+                    "{} requires operation {} on {} but the frozen binding exposes {:?}",
+                    capability.id,
+                    requirement.operation,
+                    requirement.resource_kind,
+                    binding.operations
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn channel_and_robot_availability_stays_on_host_execution_surfaces() {
+        let expected_surfaces = AGENT_SURFACES
+            .iter()
+            .map(|surface| (*surface).to_owned())
+            .collect::<BTreeSet<_>>();
+        for registration in [
+            channel_registration().expect("channel registration"),
+            robot_registration().expect("robot registration"),
+        ] {
+            for capability in &registration
+                .metadata
+                .manifest
+                .payload
+                .contributions
+                .capabilities
+            {
+                assert_eq!(capability.supported_surfaces, expected_surfaces);
+                assert_eq!(
+                    capability.supported_platforms,
+                    vec![PlatformConstraint::Any]
+                );
+                for remote_only_client in [
+                    "im-client",
+                    "mobile",
+                    "robot-firmware",
+                    "web-browser-client",
+                ] {
+                    assert!(!capability.supported_surfaces.contains(remote_only_client));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn registrations_materialize_without_legacy_surface_or_partial_publish() {
         let registry = KernelRegistry::new(
             MaterializationPolicy::stable(CONTRACT_VERSION),
@@ -1470,9 +1729,15 @@ mod tests {
         for registration in &registrations {
             let context = &registration.metadata.context;
             let declared = context
-                .typed_command_ports
+                .host_ports
                 .iter()
                 .map(|port| port.port.id.clone())
+                .chain(
+                    context
+                        .typed_command_ports
+                        .iter()
+                        .map(|port| port.port.id.clone()),
+                )
                 .chain(
                     context
                         .domain_outbox_ports
@@ -1543,5 +1808,127 @@ mod tests {
             canonical_capability_id(ROBOT_LINK),
             Some(CapabilityId::from(ROBOT_LINK))
         );
+    }
+
+    #[test]
+    fn action_capabilities_use_the_wave4_host_port_and_pairing_stays_transport_owned() {
+        let registrations = registrations().expect("registrations should build");
+        for registration in registrations {
+            let context = &registration.metadata.context;
+            let capabilities = &registration
+                .metadata
+                .manifest
+                .payload
+                .contributions
+                .capabilities;
+            let action_capabilities = capabilities
+                .iter()
+                .filter(|capability| capability.kind == CapabilityKind::Tool)
+                .collect::<Vec<_>>();
+            let host_port_ids = context
+                .host_ports
+                .iter()
+                .map(|binding| binding.port.id.as_ref())
+                .collect::<BTreeSet<_>>();
+
+            if action_capabilities.is_empty() {
+                assert!(!host_port_ids.contains(WAVE4_CAPABILITY_HOST_PORT_ID));
+            } else {
+                assert!(host_port_ids.contains(WAVE4_CAPABILITY_HOST_PORT_ID));
+                for capability in action_capabilities {
+                    assert_eq!(
+                        capability.contributions.host_ports,
+                        vec![host_port(WAVE4_CAPABILITY_HOST_PORT_ID)]
+                    );
+                }
+            }
+        }
+
+        let channel = channel_registration().expect("channel registration");
+        let pairing = channel
+            .metadata
+            .manifest
+            .payload
+            .contributions
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_ref() == CHANNEL_PAIRING)
+            .expect("pairing capability");
+        assert_eq!(pairing.kind, CapabilityKind::Transport);
+        assert!(pairing.contributions.actions.is_empty());
+        assert!(pairing.contributions.host_ports.is_empty());
+        assert!(!channel
+            .handler_ids()
+            .contains(&CapabilityId::from(CHANNEL_PAIRING)));
+    }
+
+    #[test]
+    fn action_operation_projection_is_typed_and_has_no_pairing_branch() {
+        assert!(matches!(
+            operation_from_input(
+                &CapabilityId::from(CHANNEL_REPLY),
+                empty_object(),
+            ),
+            Ok(Wave4CapabilityOperation::ChannelReply { .. })
+        ));
+        assert!(matches!(
+            operation_from_input(
+                &CapabilityId::from(ROBOT_DEVICE_TOOLS),
+                empty_object(),
+            ),
+            Ok(Wave4CapabilityOperation::RobotDeviceTools { .. })
+        ));
+        assert!(operation_from_input(
+            &CapabilityId::from(CHANNEL_PAIRING),
+            empty_object()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unconfigured_host_port_fails_closed_without_a_success_projection() {
+        struct NoopWaker;
+
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        fn poll_ready<F: Future>(future: F) -> F::Output {
+            let waker = Waker::from(Arc::new(NoopWaker));
+            let mut context = Context::from_waker(&waker);
+            let mut future = Box::pin(future);
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => value,
+                Poll::Pending => panic!("unconfigured host port must settle immediately"),
+            }
+        }
+
+        let host_port = unconfigured_host_port();
+        let result = poll_ready(host_port.invoke(Wave4HostRequest {
+            context: Wave4HostContext {
+                principal: PrincipalRef {
+                    principal_kind: "user".to_owned(),
+                    principal_id: "wave4-test-owner".to_owned(),
+                },
+                agent_session_id: AgentSessionId::from("wave4-test-session"),
+                operation_id: OperationId::from("wave4-test-operation"),
+                idempotency_key: IdempotencyKey::from("wave4-test-idempotency"),
+                correlation_id: CorrelationId::from("wave4-test-correlation"),
+                resolved_snapshot_ref: ResolvedSnapshotRef {
+                    snapshot_id: "snapshot".into(),
+                    snapshot_digest: "digest".into(),
+                },
+                registry_generation: 1,
+                capability_id: CapabilityId::from(CHANNEL_REPLY),
+                action_id: ActionId::from(CHANNEL_REPLY_ACTION),
+                state_scope_key: ScopeKey::from("session:wave4-test"),
+                resource_bindings: Vec::new(),
+            },
+            operation: Wave4CapabilityOperation::ChannelReply {
+                input: empty_object(),
+            },
+        }));
+        let error = result.expect_err("unconfigured host port must reject the action");
+        assert_eq!(error.code, "WAVE4_HOST_PORT_UNAVAILABLE");
     }
 }

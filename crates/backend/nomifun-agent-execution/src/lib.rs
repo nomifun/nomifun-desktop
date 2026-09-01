@@ -22,6 +22,7 @@ mod routes;
 mod scheduler;
 mod template_routes;
 
+pub use attempt_runner::{AgentExecutionSessionPort, conversation_session_port};
 pub use engine::AgentExecutionEngine;
 pub use production::AgentExecutionEngineConfig;
 pub use routes::agent_execution_routes;

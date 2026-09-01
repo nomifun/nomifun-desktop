@@ -10,6 +10,8 @@ nomifun-common.workspace = true
 nomifun-api-types.workspace = true
 nomifun-db.workspace = true
 nomifun-net.workspace = true
+aws-credential-types.workspace = true
+aws-sigv4.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
@@ -19,6 +21,7 @@ tokio.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 base64.workspace = true
+crc32fast.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

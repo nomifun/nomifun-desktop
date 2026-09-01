@@ -153,20 +153,13 @@
       "kind": "internal_rust",
       "current_refs": [
         {
-          "path": "crates/backend/nomifun-robot/src/wiring/dispatcher.rs",
+          "path": "crates/backend/nomifun-app/src/router/agent_wave4_host.rs",
           "symbols": [
-            "RobotConversationBackend",
-            "RobotDispatcher"
-          ],
-          "line_start": 24,
-          "line_end": 90
-        },
-        {
-          "path": "crates/backend/nomifun-app/src/robot_wiring.rs",
-          "symbols": []
+            "Wave4ApplicationHost"
+          ]
         }
       ],
-      "canonical_target": "Robot Package using AgentSession command ServiceKey",
+      "canonical_target": "Wave 4 typed host port with explicit unavailable behavior until a v4-native Robot resource owner is mounted",
       "same_change_required": true
     },
     {
@@ -438,7 +431,7 @@
         }
       ],
       "disposition": "replace_then_delete",
-      "removal_boundary": "Wave 4",
+      "removal_boundary": "C9",
       "replacement_owner": "domain PluginFactories and declared ServiceKeys"
     },
     {
@@ -580,7 +573,7 @@
         }
       ],
       "disposition": "replace_then_delete",
-      "removal_boundary": "Wave 4",
+      "removal_boundary": "C9",
       "replacement_owner": "canonical transport/domain/session tests"
     },
     {

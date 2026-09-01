@@ -159,7 +159,7 @@ Attempt 状态：
 `interrupted`。用户显式取消任何在途 Attempt 也统一写 `cancelled`；只有系统失去已开始
 调用的控制权时才写 `interrupted`。
 
-普通交互只需要 Conversation/Turn，不为每条聊天虚构 Execution。一旦目标需要独立持久化、跨 Turn 恢复、并行或 DAG，即使只用一个 Agent 也走 AgentExecution：Engine 创建一个 Participant、一个 Step，并在 Step ready 后创建 Attempt。多 Agent 不创建 Cluster：Engine 创建多个 Participant/Step，并由同一个 Scheduler 按依赖和并发上限派发。Attempt 内再次委派只是向当前 Execution 追加 Step；顶层 Conversation 或 Remote actor 才创建新的 Execution。追加调用返回同一个 execution id 与新增 step ids，当前 Attempt 随后正常结束，Scheduler 会在整个 DAG（包括新增 Step）归约完成前阻止 Execution 进入终态。为形成明确 join 语义，Engine 还会在同一事务中把新批次叶节点接成 caller Step 尚未开始的直接下游 Step 的 blocker；已经 running/completed 的下游历史不回写。
+普通交互只需要 Conversation/Turn，不为每条聊天虚构 Execution。一旦目标需要独立持久化、跨 Turn 恢复、并行或 DAG，即使只用一个 Agent 也走 AgentExecution：Engine 创建一个 Participant、一个 Step，并在 Step ready 后创建 Attempt。多 Agent 不创建 Cluster：Engine 创建多个 Participant/Step，并由同一个 Scheduler 按依赖和并发上限派发。Attempt 内再次委派只是向当前 Execution 追加 Step；顶层、已认证的 Conversation actor 才创建新的 Execution。Canonical Remote 目前只提供 `open/turn/observe/cancel`，不通过 Gateway 直接创建 Execution。追加调用返回同一个 execution id 与新增 step ids，当前 Attempt 随后正常结束，Scheduler 会在整个 DAG（包括新增 Step）归约完成前阻止 Execution 进入终态。为形成明确 join 语义，Engine 还会在同一事务中把新批次叶节点接成 caller Step 尚未开始的直接下游 Step 的 blocker；已经 running/completed 的下游历史不回写。
 
 Step 只保存当前归约状态；每次实际派发（包括改派后的再次派发、retry 和 rerun）都新增 ExecutionAttempt，禁止覆盖历史 assignment。只修改未来路由的命令本身不伪造 Attempt。Execution 状态由 Step 状态和策略归约产生，已结算状态不得被迟到的 Attempt 事件复活。
 
@@ -235,7 +235,7 @@ frozen preset 只提供审计与配置快照；Participant 行的最终
 
 在持久协作执行域，模型、Gateway 和内置 Agent 只看到以下三个工具：
 
-1. `nomi_delegate`：从顶层 Conversation/Remote actor 创建 AgentExecution；从已有 Attempt Conversation 调用时，则向该 ConversationLink 所属的同一个 Execution 原子追加 Step。输入包含目标、可选显式 steps、模型范围、计划门禁、适配策略和并发上限；delegation/decision policy 从调用 Conversation 继承。只有目标时由 Planner 生成计划；显式 steps 仍进入同一持久化和调度入口。
+1. `nomi_delegate`：从顶层已认证 Conversation 创建 AgentExecution；从已有 Attempt Conversation 调用时，则向该 ConversationLink 所属的同一个 Execution 原子追加 Step。Canonical Remote 不直接暴露这组 Gateway 工具；远程客户端先通过 Remote 四操作管理显式 AgentSession。输入包含目标、可选显式 steps、模型范围、计划门禁、适配策略和并发上限；delegation/decision policy 从调用 Conversation 继承。只有目标时由 Planner 生成计划；显式 steps 仍进入同一持久化和调度入口。
 2. `nomi_execution_get`：读取 Execution 摘要、Participant、当前及历史 DAG revision，以及每个 Attempt 的输出、错误和 Conversation。不再拆出近似的 status/result 工具；事件游标由 HTTP 事件端点负责。
 3. `nomi_execution_update`：执行带 tag 的命令，当前包括 `replan`、`adjust`、`add`、`rename`、`update_step`、`reassign`、`configure`、`steer`、`retry`、`approve`、`pause`、`resume`、`cancel` 和 Attempt 内的 `request_user_decision`。修改命令携带 expected version，统一经过领域校验。用户或 lead 对已完成/失败 Execution 显式 add 时，Engine 必须先确保上一终态回执已幂等投影，再原子追加并重开为 running；cancelled 永不重开。
 

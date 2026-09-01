@@ -22,6 +22,7 @@ use crate::learner::{CompanionCompleter, CompanionLearnResult, Learner};
 use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
 use crate::profile::{CompanionProfileConfig, SharedCompanionConfig};
 use crate::registry::{CompanionRegistry, json_merge_patch};
+use crate::session_port::CompanionHostPorts;
 use crate::skill_sink::CompanionSkillStoreSink;
 use crate::store::{
     CompanionThread, MemoryActor, MemoryBatchAction, MemoryFilter, MemoryListSort, MemoryPage,
@@ -423,19 +424,12 @@ impl CompanionService {
         }))
     }
 
-    /// Late-wire the companion thread manager (depends on the conversation
-    /// service, which is built after the companion service in app startup).
-    pub fn attach_companion(
-        &self,
-        conversations: Arc<nomifun_conversation::ConversationService>,
-        runtime_registry: Arc<dyn nomifun_ai_agent::AgentRuntimeRegistry>,
-    ) {
+    /// Late-wire the companion thread manager through typed Session ports.
+    pub fn attach_companion(&self, ports: CompanionHostPorts) {
         // Also wire the real transcript source so skill drafting rehydrates the actual
         // (redacted) session transcript from the conversation store — the durable single
         // source of truth — instead of degrading to tool-name steps.
-        self.evolution.set_transcript(Arc::new(crate::evolution::ConversationTranscriptSource::new(
-            conversations.conversation_repo().clone(),
-        )));
+        self.evolution.set_transcript(ports.transcript);
         // Spawn the session-window archiver now that a real conversation port
         // exists. The loop no-ops every tick while `archive.enabled` is false
         // (opt-in), so an unconfigured install pays nothing. `OnceLock::set`
@@ -447,10 +441,7 @@ impl CompanionService {
                 registry: self.registry.clone(),
                 // Reuse the learn completer + model — one background LLM config.
                 completer: self.learner.completer.clone(),
-                port: Arc::new(crate::archive_port::ConversationArchivePort::new(
-                    self.authoritative_user_id.clone(),
-                    conversations.clone(),
-                )),
+                port: ports.archive,
                 run_lock: Arc::new(Mutex::new(())),
             });
             if self.archiver.set(archiver.clone()).is_ok() {
@@ -462,8 +453,7 @@ impl CompanionService {
             store: self.store.clone(),
             config: self.config.clone(),
             registry: self.registry.clone(),
-            conversations,
-            runtime_registry,
+            sessions: ports.sessions,
             skill_paths: self.skill_paths.clone(),
         });
     }
@@ -1445,7 +1435,7 @@ impl CompanionService {
             Some(conversation_id) => {
                 match self
                     .companion()?
-                    .conversations
+                    .sessions
                     .message_local_day_index(self.authoritative_user_id.as_ref(), &conversation_id)
                     .await
                 {

@@ -552,7 +552,7 @@ async fn handle_dispatched(
     // new prompt. Re-show the list on any invalid reply. This runs before the
     // busy guard so a running conversation can still be stopped remotely.
     if let Some(cid) = conversation_id
-        && let Some(pending) = msg_svc.pending_decisions().peek(cid)
+        && let Some(pending) = msg_svc.stop_confirmations().peek(cid)
     {
         match parse_choice(text, pending.options.len()) {
             Some(idx) => match &pending.kind {
@@ -561,10 +561,10 @@ async fn handle_dispatched(
                 // safe service path as the desktop stop button; "取消" just
                 // clears the entry. Never routed through `confirm` — there is
                 // no agent call waiting on this decision.
-                crate::pending_decision::PendingDecisionKind::StopConversation {
+                crate::pending_decision::ChannelStopConfirmationKind::StopConversation {
                     target_conversation_id,
                 } => {
-                    msg_svc.pending_decisions().take(cid);
+                    msg_svc.stop_confirmations().take(cid);
                     let reply = if idx == 0 {
                         // The stop worker is detached inside the service, so a
                         // bounded wait only caps the ACK latency — dropping
@@ -611,7 +611,7 @@ async fn handle_dispatched(
             None => {
                 // Non-numeric / out-of-range reply: re-show the numbered list
                 // (do not dispatch it as a new prompt).
-                let msg = ChannelMessageService::build_decision_message(&pending.prompt, &pending.options);
+                let msg = ChannelMessageService::build_stop_confirmation_message(&pending.prompt, &pending.options);
                 let _ = sender.send_message(plugin_id, chat_id, msg).await;
             }
         }
@@ -720,7 +720,7 @@ async fn handle_dispatched(
         let relay = ChannelStreamRelay::new(
             relay_config,
             Arc::clone(sender),
-            msg_svc.pending_decisions(),
+            msg_svc.stop_confirmations(),
             msg_svc.asset_resolver(),
         );
         tokio::spawn(relay.run(rx));

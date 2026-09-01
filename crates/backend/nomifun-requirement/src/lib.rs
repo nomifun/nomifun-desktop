@@ -1,6 +1,7 @@
 //! Requirements Platform: CRUD store + AutoWork runner for "requirements".
 pub mod auto_work_runner;
 pub mod attachments;
+mod conversation_port;
 mod convert;
 pub mod events;
 pub mod hooks;
@@ -14,6 +15,7 @@ pub mod sink;
 pub mod state;
 
 pub use attachments::{AttachmentStore, PromptAttachment};
+pub use conversation_port::{AutoWorkConversationPort, conversation_autowork_port};
 pub use events::RequirementEventEmitter;
 pub use hooks::IdmmHandle;
 pub use mcp_server::RequirementMcpServer;

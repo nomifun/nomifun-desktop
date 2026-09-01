@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "nomifun.chat-route-record.v1",
+  "title": "ChatRouteRecord",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "nomifun.chat-route-record.v1"
+    },
+    "task": {
+      "const": "agent_chat"
+    },
+    "primary": {
+      "$ref": "#/$defs/ChatRouteCandidate"
+    },
+    "failovers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ChatRouteCandidate"
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "task",
+    "primary",
+    "failovers"
+  ],
+  "$defs": {
+    "ChatRouteCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model_route_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model_route_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "protocol": {
+          "enum": [
+            "anthropic",
+            "openai_chat",
+            "openai_responses",
+            "gemini",
+            "bedrock",
+            "vertex"
+          ]
+        },
+        "connection_config_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "config_revision_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "credential_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "features": {
+          "type": "array",
+          "uniqueItems": true,
+          "contains": {
+            "const": "text_output"
+          },
+          "items": {
+            "enum": [
+              "text_input",
+              "image_input",
+              "audio_input",
+              "text_output",
+              "audio_output",
+              "tool_calls",
+              "reasoning",
+              "reasoning_signature",
+              "prompt_cache",
+              "structured_output",
+              "provider_round_state",
+              "native_responses_items"
+            ]
+          }
+        }
+      },
+      "required": [
+        "model_route_id",
+        "model_route_revision",
+        "provider_id",
+        "model",
+        "protocol",
+        "connection_config_ref",
+        "config_revision_digest",
+        "credential_ref",
+        "features"
+      ]
+    }
+  }
+}

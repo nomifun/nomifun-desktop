@@ -2,18 +2,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 #[cfg(test)]
 use nomifun_ai_agent::types::SendMessageData;
 use nomifun_ai_agent::{AgentRegistry, AgentStreamEvent};
+#[cfg(test)]
+use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
 use nomifun_api_types::{CreateConversationRequest, SendMessageRequest};
 use nomifun_common::{
-    AgentType, AppError, ConversationId, ExecutionAuthority, ProviderWithModel, UserId,
+    AgentType, AppError, ConversationId, ExecutionAuthority, MessageId, ProviderWithModel, UserId,
     now_ms, validate_uuidv7, workspace_path_has_edge_whitespace_segment,
 };
+#[cfg(test)]
+use nomifun_conversation::ConversationService;
 use nomifun_conversation::{
-    ConversationService, IdempotentMessageDelivery,
+    IdempotentMessageDelivery,
     service::{
         BackgroundTurnReconciliationDisposition, BackgroundTurnRuntimePreparation,
         ObservedIdempotentMessageDelivery, PublicTurnDeliveryState,
@@ -34,6 +37,7 @@ use crate::prompt::{
     build_existing_conversation_prompt, build_new_conversation_prompt,
     build_new_conversation_prompt_with_skill_suggest, build_new_conversation_with_skill_prompt,
 };
+use crate::session_port::CronSessionPort;
 use crate::skill_file::{
     cron_skill_name, validate_skill_content, write_raw_skill_file,
 };
@@ -88,9 +92,8 @@ pub(crate) struct PreparedExecution {
 
 pub struct JobExecutor {
     authoritative_user_id: Arc<str>,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    sessions: Arc<dyn CronSessionPort>,
     conversation_repo: Arc<dyn IConversationRepository>,
-    conversation_service: Arc<ConversationService>,
     busy_guard: Arc<CronBusyGuard>,
     work_dir: PathBuf,
     data_dir: PathBuf,
@@ -108,9 +111,8 @@ impl JobExecutor {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         authoritative_user_id: Arc<str>,
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+        sessions: Arc<dyn CronSessionPort>,
         conversation_repo: Arc<dyn IConversationRepository>,
-        conversation_service: Arc<ConversationService>,
         busy_guard: Arc<CronBusyGuard>,
         work_dir: PathBuf,
         data_dir: PathBuf,
@@ -123,9 +125,8 @@ impl JobExecutor {
         );
         Self {
             authoritative_user_id,
-            runtime_registry,
+            sessions,
             conversation_repo,
-            conversation_service,
             busy_guard,
             work_dir,
             data_dir,
@@ -290,7 +291,7 @@ impl JobExecutor {
         // minting boundary.
         let row = MessageRow {
             id: 0,
-            message_id: ConversationService::mint_msg_id(),
+            message_id: MessageId::new().into_string(),
             conversation_id: parse_conversation_id(conversation_id)?.to_owned(),
             msg_id: None,
             r#type: "tips".into(),
@@ -369,7 +370,7 @@ impl JobExecutor {
         conversation_id: &str,
         run_id: &str,
     ) -> Result<PublicTurnDeliveryState, AppError> {
-        self.conversation_service
+        self.sessions
             .public_turn_delivery_state(
                 user_id,
                 conversation_id,
@@ -386,12 +387,11 @@ impl JobExecutor {
         conversation_id: &str,
         run_id: &str,
     ) -> Result<BackgroundTurnReconciliationDisposition, AppError> {
-        self.conversation_service
-            .reconcile_quiescent_running_turn_for_background(
+        self.sessions
+            .reconcile_quiescent_running_turn(
                 user_id,
                 conversation_id,
                 &cron_turn_key(run_id),
-                &self.runtime_registry,
             )
             .await
     }
@@ -476,25 +476,15 @@ impl JobExecutor {
         };
 
         let creation_key = format!("cron:{run_id}:conversation");
-        let response = if let Some(snapshot) = job
+        let snapshot = job
             .agent_config
             .as_ref()
-            .and_then(|config| config.preset_snapshot.clone())
-        {
-            self.conversation_service
-                .create_from_preset_snapshot_idempotent(
-                    &job.user_id,
-                    req,
-                    snapshot,
-                    &creation_key,
-                )
-                .await
-        } else {
-            self.conversation_service
-                .create_idempotent(&job.user_id, req, &creation_key)
-                .await
-        }
-        .map_err(CronError::from_conversation_create)?;
+            .and_then(|config| config.preset_snapshot.clone());
+        let response = self
+            .sessions
+            .create_idempotent(&job.user_id, req, snapshot, &creation_key)
+            .await
+            .map_err(CronError::from_conversation_create)?;
         // Preserve the canonical conversation entity ID through all cron
         // workspace and persistence boundaries.
         let conversation_id = response.conversation_id;
@@ -786,8 +776,8 @@ impl JobExecutor {
         // This lease fences stop/reset while Conversation atomically claims the
         // durable turn. Cron never uses it to build or mutate a runtime itself.
         let build_lease = match self
-            .conversation_service
-            .begin_public_runtime_preparation(conversation_id, &job.user_id)
+            .sessions
+            .begin_runtime_preparation(conversation_id, &job.user_id)
         {
             Ok(lease) => lease,
             Err(error) => {
@@ -797,13 +787,12 @@ impl JobExecutor {
             }
         };
         let observed = match self
-            .conversation_service
-            .send_observed_background_message_with_idempotency_key(
+            .sessions
+            .send_observed_turn(
                 &job.user_id,
                 conversation_id,
                 &turn_key,
                 build_cron_send_request(&prompt, &skill_names),
-                &self.runtime_registry,
                 build_lease,
                 runtime_preparation,
             )
@@ -993,8 +982,8 @@ impl JobExecutor {
         let mut retry_delay = Duration::from_millis(25);
         loop {
             match self
-                .conversation_service
-                .idempotent_delivery_result_with_idempotency_key(
+                .sessions
+                .delivery_result(
                     &job.user_id,
                     conversation_id,
                     turn_key,
@@ -1036,12 +1025,11 @@ impl JobExecutor {
         let mut retry_delay = Duration::from_millis(25);
         loop {
             match self
-                .conversation_service
-                .reconcile_quiescent_running_turn_for_background(
+                .sessions
+                .reconcile_quiescent_running_turn(
                     &job.user_id,
                     conversation_id,
                     turn_key,
-                    &self.runtime_registry,
                 )
                 .await
             {
@@ -1099,8 +1087,8 @@ impl JobExecutor {
         let mut consecutive_probe_failures = 0_u64;
         loop {
             match self
-                .conversation_service
-                .idempotent_delivery_result_with_idempotency_key(
+                .sessions
+                .delivery_result(
                     &job.user_id,
                     conversation_id,
                     turn_key,
@@ -2745,10 +2733,9 @@ mod tests {
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(
             AgentRuntimeHandle::Mock(agent.clone()),
         ));
-        let executor = Arc::new(make_executor_with_runtime_registry(
-            runtime_registry.clone(),
-        ));
-        let conversation_service = executor.conversation_service.clone();
+        let (executor, conversation_service) =
+            make_executor_and_service_with_runtime_registry(runtime_registry.clone());
+        let executor = Arc::new(executor);
         let interactive_registry: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
         let barrier = Arc::new(Barrier::new(2));
         let job = Arc::new(sample_job());
@@ -3389,24 +3376,27 @@ mod tests {
         let stub_repo: Arc<dyn IConversationRepository> = Arc::new(StubConvRepo);
         let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> =
             Arc::new(StubAgentMetadataRepo);
+        let runtime_registry: Arc<dyn AgentRuntimeRegistry> =
+            Arc::new(StubAgentRuntimeRegistry);
         let conv_service = Arc::new(ConversationService::new(
             Arc::<str>::from(USER_ID),
             std::env::temp_dir(),
             stub_broadcaster.clone(),
             Arc::new(StubSkillResolver),
-            Arc::new(StubAgentRuntimeRegistry),
+            runtime_registry.clone(),
             Arc::clone(&stub_repo),
             Arc::clone(&agent_metadata_repo),
             Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
         ));
 
         let agent_registry = AgentRegistry::new(agent_metadata_repo);
+        let sessions =
+            crate::conversation_cron_session_port(conv_service, runtime_registry);
 
         JobExecutor::new(
             Arc::<str>::from(USER_ID),
-            Arc::new(StubAgentRuntimeRegistry),
+            sessions,
             stub_repo,
-            conv_service,
             guard,
             std::env::temp_dir(),
             std::env::temp_dir(),
@@ -4612,7 +4602,13 @@ mod tests {
     }
 
     fn make_executor_with_runtime_registry(runtime_registry: Arc<dyn AgentRuntimeRegistry>) -> JobExecutor {
-        make_executor_with_runtime_registry_and_repo(
+        make_executor_and_service_with_runtime_registry(runtime_registry).0
+    }
+
+    fn make_executor_and_service_with_runtime_registry(
+        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    ) -> (JobExecutor, Arc<ConversationService>) {
+        make_executor_with_runtime_registry_and_repo_and_service(
             runtime_registry,
             Arc::new(ExistingConversationRepo::new()),
         )
@@ -4622,8 +4618,20 @@ mod tests {
         runtime_registry: Arc<dyn AgentRuntimeRegistry>,
         repo: Arc<dyn IConversationRepository>,
     ) -> JobExecutor {
+        make_executor_with_runtime_registry_and_repo_and_service(runtime_registry, repo).0
+    }
+
+    fn make_executor_with_runtime_registry_and_repo_and_service(
+        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+        repo: Arc<dyn IConversationRepository>,
+    ) -> (JobExecutor, Arc<ConversationService>) {
         let broadcaster = Arc::new(StubBroadcaster);
-        make_executor_with_runtime_registry_repo_and_broadcaster(runtime_registry, repo, broadcaster)
+        make_executor_with_runtime_registry_repo_broadcaster_and_work_dir_and_service(
+            runtime_registry,
+            repo,
+            broadcaster,
+            std::env::temp_dir(),
+        )
     }
 
     fn make_executor_with_runtime_registry_and_repo_with_work_dir(
@@ -4662,6 +4670,24 @@ mod tests {
         broadcaster: Arc<B>,
         work_dir: PathBuf,
     ) -> JobExecutor
+    where
+        B: nomifun_realtime::UserEventSink + 'static,
+    {
+        make_executor_with_runtime_registry_repo_broadcaster_and_work_dir_and_service(
+            runtime_registry,
+            repo,
+            broadcaster,
+            work_dir,
+        )
+        .0
+    }
+
+    fn make_executor_with_runtime_registry_repo_broadcaster_and_work_dir_and_service<B>(
+        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+        repo: Arc<dyn IConversationRepository>,
+        broadcaster: Arc<B>,
+        work_dir: PathBuf,
+    ) -> (JobExecutor, Arc<ConversationService>)
     where
         B: nomifun_realtime::UserEventSink + 'static,
     {
@@ -4705,17 +4731,21 @@ mod tests {
 
         let agent_registry = AgentRegistry::new(agent_metadata_repo);
 
-        JobExecutor::new(
-            Arc::<str>::from(USER_ID),
+        let sessions = crate::conversation_cron_session_port(
+            conversation_service.clone(),
             runtime_registry,
+        );
+        let executor = JobExecutor::new(
+            Arc::<str>::from(USER_ID),
+            sessions,
             repo,
-            conversation_service,
             Arc::new(CronBusyGuard::new()),
             work_dir.clone(),
             work_dir,
             broadcaster,
             agent_registry,
-        )
+        );
+        (executor, conversation_service)
     }
 
     struct StubAgentMetadataRepo;

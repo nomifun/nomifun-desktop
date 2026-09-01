@@ -6,6 +6,7 @@
 //! broadcast the state — a config write alone would only take effect after the
 //! next desktop boot.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_api_types::{AutoWorkState, AutoWorkTargetKind};
@@ -13,7 +14,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 use crate::id_schema::{CanonicalEntityId, SessionTargetKind};
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
@@ -55,18 +56,52 @@ fn parse_target_id(kind: AutoWorkTargetKind, raw: String) -> Result<String, Valu
     }
 }
 
+#[derive(Clone)]
+struct AutoWorkCapabilityDeps {
+    requirements: Arc<nomifun_requirement::RequirementService>,
+    runner: Arc<nomifun_requirement::AutoWorkRunner>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<AutoWorkCapabilityDeps>, CallerCtx, P) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, ctx, params| {
+        handler(
+            Arc::new(AutoWorkCapabilityDeps {
+                requirements: deps.requirement_service.clone(),
+                runner: deps.auto_work_runner.clone(),
+            }),
+            ctx,
+            params,
+        )
+    }
+}
+
 /// Assemble the persisted config + the AutoWork runner's live view into one
 /// `AutoWorkState` (the same shape the REST routes return and broadcast).
-async fn build_state(deps: &GatewayDeps, kind: AutoWorkTargetKind, target_id: &str) -> Result<AutoWorkState, Value> {
+async fn build_state(
+    deps: &AutoWorkCapabilityDeps,
+    kind: AutoWorkTargetKind,
+    target_id: &str,
+) -> Result<AutoWorkState, Value> {
     let (enabled, tag, _max) = deps
-        .requirement_service
+        .requirements
         .read_autowork_config(kind, target_id)
         .await
         .map_err(|e| json!({ "error": e.to_string() }))?;
-    let running = deps.auto_work_runner.is_running(kind, target_id);
-    let live_tag = deps.auto_work_runner.running_tag(kind, target_id).or(tag);
+    let running = deps.runner.is_running(kind, target_id);
+    let live_tag = deps.runner.running_tag(kind, target_id).or(tag);
     let (current_requirement_id, completed_count) = deps
-        .auto_work_runner
+        .runner
         .live_progress(kind, target_id)
         .unwrap_or((None, 0));
     let run_state = AutoWorkState::run_state(enabled, current_requirement_id.as_deref());
@@ -82,7 +117,11 @@ async fn build_state(deps: &GatewayDeps, kind: AutoWorkTargetKind, target_id: &s
     })
 }
 
-async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetAutoworkParams) -> Value {
+async fn set(
+    deps: Arc<AutoWorkCapabilityDeps>,
+    ctx: CallerCtx,
+    p: SetAutoworkParams,
+) -> Value {
     let kind = AutoWorkTargetKind::from(p.kind);
     let target_id = match parse_target_id(kind, p.target_id.into_string()) {
         Ok(target_id) => target_id,
@@ -95,23 +134,29 @@ async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetAutoworkParams) -> Va
     // Ownership + (terminal) eligibility — same gates as the REST route.
     let owner_check = match kind {
         AutoWorkTargetKind::Conversation => deps
-            .requirement_service
+            .requirements
             .verify_conversation_owner(&target_id, ctx.user_id.as_str())
             .await,
-        AutoWorkTargetKind::Terminal => deps.requirement_service.verify_terminal_owner(&target_id, ctx.user_id.as_str()).await,
+        AutoWorkTargetKind::Terminal => deps
+            .requirements
+            .verify_terminal_owner(&target_id, ctx.user_id.as_str())
+            .await,
     };
     if let Err(e) = owner_check {
         return json!({ "error": e.to_string() });
     }
     if p.enabled
         && kind == AutoWorkTargetKind::Terminal
-        && let Err(e) = deps.requirement_service.ensure_terminal_autowork_eligible(&target_id).await
+        && let Err(e) = deps
+            .requirements
+            .ensure_terminal_autowork_eligible(&target_id)
+            .await
     {
         return json!({ "error": e.to_string() });
     }
 
     if let Err(e) = deps
-        .requirement_service
+        .requirements
         .save_autowork_config(kind, &target_id, p.enabled, p.tag.as_deref(), p.max_requirements)
         .await
     {
@@ -120,24 +165,28 @@ async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetAutoworkParams) -> Va
 
     if p.enabled {
         if let Some(tag) = p.tag.clone() {
-            deps.auto_work_runner
+            deps.runner
                 .start(kind, target_id.clone(), tag, p.max_requirements)
                 .await;
         }
     } else {
-        deps.auto_work_runner.stop(kind, &target_id).await;
+        deps.runner.stop(kind, &target_id).await;
     }
 
     match build_state(&deps, kind, &target_id).await {
         Ok(state) => {
-            deps.requirement_service.emit_autowork_state(&state);
+            deps.requirements.emit_autowork_state(&state);
             ok(state)
         }
         Err(e) => e,
     }
 }
 
-async fn get(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetAutoworkParams) -> Value {
+async fn get(
+    deps: Arc<AutoWorkCapabilityDeps>,
+    ctx: CallerCtx,
+    p: GetAutoworkParams,
+) -> Value {
     let kind = AutoWorkTargetKind::from(p.kind);
     let target_id = match parse_target_id(kind, p.target_id.into_string()) {
         Ok(target_id) => target_id,
@@ -145,10 +194,13 @@ async fn get(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetAutoworkParams) -> Va
     };
     let owner_check = match kind {
         AutoWorkTargetKind::Conversation => deps
-            .requirement_service
+            .requirements
             .verify_conversation_owner(&target_id, ctx.user_id.as_str())
             .await,
-        AutoWorkTargetKind::Terminal => deps.requirement_service.verify_terminal_owner(&target_id, ctx.user_id.as_str()).await,
+        AutoWorkTargetKind::Terminal => deps
+            .requirements
+            .verify_terminal_owner(&target_id, ctx.user_id.as_str())
+            .await,
     };
     if let Err(e) = owner_check {
         return json!({ "error": e.to_string() });
@@ -167,7 +219,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Enable/disable AutoWork (autonomous requirement execution) on a conversation or terminal and bind a requirement tag.",
             EffectClass::Write,
         ),
-        set,
+        adapt(set),
     ));
     out.push(Capability::new::<GetAutoworkParams, _, _>(
         CapabilityMeta::new(
@@ -176,6 +228,6 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Read the current AutoWork binding + live run state for a conversation or terminal.",
             EffectClass::Read,
         ),
-        get,
+        adapt(get),
     ));
 }

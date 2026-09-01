@@ -8,7 +8,7 @@ use nomi_providers::{LlmProvider, ProviderError, create_provider};
 use nomi_types::llm::{LlmEvent, LlmRequest};
 use nomi_types::message::{ContentBlock, Message, Role, StopReason};
 use nomifun_api_types::{ModelTask, ModelTrait};
-use nomifun_common::{AppError, ProviderId};
+use nomifun_common::{AppError, ProviderId, ProviderWithModel};
 use nomifun_model_invoke::{
     AuthMaterial, AuthScheme, ModelInvokeService, ModelRef, ProtocolExecutorKind,
     protocol_task_descriptor,
@@ -43,6 +43,58 @@ pub(crate) struct ResolvedProviderFields {
     pub bedrock_config: Option<nomi_config::config::BedrockConfig>,
     pub context_limit: Option<i64>,
     pub output_limit: Option<i64>,
+}
+
+/// The exact provider/model pair selected for one runtime admission.
+///
+/// `use_model` is an explicit override, not a catalog fallback. Normalizing it
+/// once keeps the factory and lifecycle registry on the same route identity and
+/// prevents malformed override values from reaching different layers with
+/// different interpretations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeModelSelection {
+    pub provider_id: String,
+    pub model: String,
+}
+
+impl RuntimeModelSelection {
+    /// Rebuild the boundary value after the override has been normalized.
+    ///
+    /// Keeping `use_model` absent here prevents downstream resolvers from
+    /// interpreting the same selection a second time or accidentally falling
+    /// back to the catalog model.
+    pub(crate) fn into_provider_with_model(self) -> ProviderWithModel {
+        ProviderWithModel {
+            provider_id: self.provider_id,
+            model: self.model,
+            use_model: None,
+        }
+    }
+}
+
+pub(crate) fn resolve_runtime_model_selection(
+    selection: &ProviderWithModel,
+) -> Result<RuntimeModelSelection, AppError> {
+    ProviderId::try_from(selection.provider_id.as_str()).map_err(|_| {
+        AppError::BadRequest("Agent runtime requires a canonical provider_id".to_owned())
+    })?;
+    if selection.model.is_empty() || selection.model.trim() != selection.model {
+        return Err(AppError::BadRequest(
+            "Agent runtime requires a trimmed, non-empty model".to_owned(),
+        ));
+    }
+
+    let model = selection.use_model.as_deref().unwrap_or(&selection.model);
+    if model.is_empty() || model.trim() != model {
+        return Err(AppError::BadRequest(
+            "Agent runtime model override must be trimmed and non-empty".to_owned(),
+        ));
+    }
+
+    Ok(RuntimeModelSelection {
+        provider_id: selection.provider_id.clone(),
+        model: model.to_owned(),
+    })
 }
 
 fn invoke_error_to_app_error(error: nomifun_model_invoke::InvokeError) -> AppError {
@@ -903,6 +955,78 @@ mod provider_resolution_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+
+    fn runtime_selection(model: &str, use_model: Option<&str>) -> ProviderWithModel {
+        ProviderWithModel {
+            provider_id: TEST_PROVIDER_ID.to_owned(),
+            model: model.to_owned(),
+            use_model: use_model.map(ToOwned::to_owned),
+        }
+    }
+
+    #[test]
+    fn runtime_model_selection_normalizes_the_explicit_override_once() {
+        let selected =
+            resolve_runtime_model_selection(&runtime_selection("catalog-model", Some("route-model")))
+                .unwrap();
+
+        assert_eq!(
+            selected,
+            RuntimeModelSelection {
+                provider_id: TEST_PROVIDER_ID.to_owned(),
+                model: "route-model".to_owned(),
+            }
+        );
+        assert_eq!(
+            selected.clone().into_provider_with_model(),
+            ProviderWithModel {
+                provider_id: TEST_PROVIDER_ID.to_owned(),
+                model: "route-model".to_owned(),
+                use_model: None,
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_model_selection_uses_the_declared_model_without_an_override() {
+        let selected = resolve_runtime_model_selection(&runtime_selection("declared-model", None))
+            .unwrap();
+
+        assert_eq!(selected.model, "declared-model");
+        assert_eq!(selected.provider_id, TEST_PROVIDER_ID);
+    }
+
+    #[test]
+    fn runtime_model_selection_rejects_invalid_base_or_override_values() {
+        let invalid = [
+            ProviderWithModel {
+                provider_id: "not-a-provider".to_owned(),
+                model: "model".to_owned(),
+                use_model: None,
+            },
+            runtime_selection(" model", None),
+            runtime_selection("", None),
+            runtime_selection("model", Some(" override")),
+            runtime_selection("model", Some("")),
+            runtime_selection("model", Some(" ")),
+        ];
+
+        for selection in invalid {
+            assert!(
+                resolve_runtime_model_selection(&selection).is_err(),
+                "invalid selection unexpectedly accepted: {selection:?}"
+            );
+        }
+
+        // An explicit override does not make an invalid catalog model valid:
+        // the persisted pair must still be structurally complete.
+        assert!(
+            resolve_runtime_model_selection(&runtime_selection(" model", Some("route-model")))
+                .is_err()
+        );
+    }
 
     #[test]
     fn user_message_creates_correct_structure() {

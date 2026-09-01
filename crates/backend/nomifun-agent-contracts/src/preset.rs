@@ -10,9 +10,9 @@ use crate::package::{
 use crate::runtime::RuntimeProfileKind;
 use crate::{
     ActionId, AgentPresetId, ArtifactEnvelope, CanonicalErrorCode, CanonicalSchemaRef, DigestHex,
-    McpServerId, McpToolKey, ModelRouteId, OperationId, PrincipalRef, ResolvedSnapshotId,
-    ResourceBindingId, ResourceKind, RuntimeFeatureId, StrictJsonValue, TypedResourceBindings,
-    UserId, VersionString,
+    ChatRouteIdentity, ChatRouteRecord, McpServerId, McpToolKey, ModelRouteId, OperationId,
+    PrincipalRef, ResolvedSnapshotId, ResourceBindingId, ResourceKind, RuntimeFeatureId,
+    StrictJsonValue, TypedResourceBindings, UserId, VersionString,
 };
 
 pub const CAPABILITY_NOT_MATERIALIZED: &str = "CAPABILITY_NOT_MATERIALIZED";
@@ -29,6 +29,7 @@ pub const OFFICIAL_PRESET_KEY_SET_MISMATCH: &str = "OFFICIAL_PRESET_KEY_SET_MISM
 pub const CHAT_MINIMAL_NOT_EXACT_EMPTY: &str = "CHAT_MINIMAL_NOT_EXACT_EMPTY";
 pub const CODING_CODEX_NATIVE_INCOMPLETE: &str = "CODING_CODEX_NATIVE_INCOMPLETE";
 pub const ROLE_COVERAGE_INCOMPLETE: &str = "ROLE_COVERAGE_INCOMPLETE";
+pub const MODEL_ROUTE_RECORD_INVALID: &str = "MODEL_ROUTE_RECORD_INVALID";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -66,6 +67,12 @@ pub struct PresetRevisionRef {
     pub preset_id: AgentPresetId,
     pub revision: u64,
     pub revision_digest: DigestHex,
+}
+
+impl PresetRevisionRef {
+    pub fn revision_id(&self) -> String {
+        format!("{}@{}", self.preset_id.as_ref(), self.revision)
+    }
 }
 
 #[derive(
@@ -146,6 +153,10 @@ pub struct AgentPresetRevisionPayload {
     pub schema_version: VersionString,
     pub surfaces: BTreeSet<String>,
     pub model_route_refs: BTreeMap<String, ModelRouteId>,
+    /// Complete route facts used by the Fresh-v4 persistence writer. Legacy
+    /// opaque IDs are not sufficient to construct a provider request.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub chat_route_records: BTreeMap<String, ChatRouteRecord>,
     pub initial_capabilities: Vec<CapabilitySelection>,
     pub on_demand_capabilities: Vec<CapabilitySelection>,
     pub skill_bindings: Vec<SkillRef>,
@@ -169,6 +180,10 @@ pub struct AgentPresetRevision {
 
 impl AgentPresetRevision {
     pub fn validate(&self) -> Result<(), PresetContractViolation> {
+        validate_chat_route_records_for_revision(
+            &self.payload,
+            Some(&self.reference.revision_id()),
+        )?;
         validate_capability_selections(
             &self.payload.initial_capabilities,
             &self.payload.on_demand_capabilities,
@@ -185,6 +200,106 @@ impl AgentPresetRevision {
         }
         Ok(())
     }
+
+    pub fn chat_route_identity(
+        &self,
+    ) -> Result<Option<ChatRouteIdentity>, PresetContractViolation> {
+        validate_chat_route_records_for_revision(
+            &self.payload,
+            Some(&self.reference.revision_id()),
+        )?;
+        let Some(route_id) = self
+            .payload
+            .model_route_refs
+            .get(crate::CHAT_MODEL_TASK_AGENT_CHAT)
+        else {
+            return Ok(None);
+        };
+        let record = self
+            .payload
+            .chat_route_records
+            .get(crate::CHAT_MODEL_TASK_AGENT_CHAT)
+            .expect("route-record validation keeps route references paired");
+        Ok(Some(ChatRouteIdentity::new(
+            self.reference.revision_id(),
+            crate::CHAT_MODEL_TASK_AGENT_CHAT,
+            route_id.clone(),
+            record.primary.model_route_revision,
+        )))
+    }
+}
+
+pub fn validate_chat_route_records(
+    payload: &AgentPresetRevisionPayload,
+) -> Result<(), PresetContractViolation> {
+    validate_chat_route_records_for_revision(payload, None)
+}
+
+fn validate_chat_route_records_for_revision(
+    payload: &AgentPresetRevisionPayload,
+    preset_revision_id: Option<&str>,
+) -> Result<(), PresetContractViolation> {
+    let chat_route = payload
+        .model_route_refs
+        .get(crate::CHAT_MODEL_TASK_AGENT_CHAT);
+    let chat_record = payload
+        .chat_route_records
+        .get(crate::CHAT_MODEL_TASK_AGENT_CHAT);
+    if chat_route.is_some() != chat_record.is_some() {
+        return Err(PresetContractViolation {
+            code: CanonicalErrorCode::from(MODEL_ROUTE_RECORD_INVALID),
+            message:
+                "agent_chat must have exactly one opaque route reference and one canonical route record"
+                    .into(),
+        });
+    }
+
+    if let (Some(route_id), Some(record)) = (chat_route, chat_record) {
+        record
+            .validate()
+            .map_err(|error| PresetContractViolation {
+                code: CanonicalErrorCode::from(MODEL_ROUTE_RECORD_INVALID),
+                message: error.to_string(),
+            })?;
+        if record.primary.model_route_id != *route_id {
+            return Err(PresetContractViolation {
+                code: CanonicalErrorCode::from(MODEL_ROUTE_RECORD_INVALID),
+                message: "agent_chat route reference does not match the canonical record".into(),
+            });
+        }
+        if let Some(preset_revision_id) = preset_revision_id {
+            let identity = ChatRouteIdentity::new(
+                preset_revision_id,
+                crate::CHAT_MODEL_TASK_AGENT_CHAT,
+                route_id.clone(),
+                record.primary.model_route_revision,
+            );
+            identity
+                .validate()
+                .map_err(|error| PresetContractViolation {
+                    code: CanonicalErrorCode::from(MODEL_ROUTE_RECORD_INVALID),
+                    message: error.to_string(),
+                })?;
+            record
+                .validate_for(&identity)
+                .map_err(|error| PresetContractViolation {
+                    code: CanonicalErrorCode::from(MODEL_ROUTE_RECORD_INVALID),
+                    message: error.to_string(),
+                })?;
+        }
+    }
+
+    for task in payload.chat_route_records.keys() {
+        if task != crate::CHAT_MODEL_TASK_AGENT_CHAT {
+            return Err(PresetContractViolation {
+                code: CanonicalErrorCode::from(MODEL_ROUTE_RECORD_INVALID),
+                message: format!(
+                    "canonical Chat route records do not support model task {task:?}"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -248,6 +363,8 @@ pub struct ResolvedSnapshotContent {
     pub required_runtime_features: BTreeSet<RuntimeFeatureId>,
     pub compiled_runtime_profile_digest: DigestHex,
     pub model_route_refs: BTreeMap<String, ModelRouteId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_route_identity: Option<ChatRouteIdentity>,
     pub initial_capabilities: Vec<ResolvedCapability>,
     pub on_demand_capabilities: Vec<ResolvedCapability>,
     pub on_demand_activation_plans:
@@ -281,6 +398,7 @@ impl ResolvedSnapshotEnvelope {
             &self.content.initial_capabilities,
             &self.content.on_demand_capabilities,
         )?;
+        validate_snapshot_chat_route_identity(&self.content)?;
         let digest = digest_payload(&self.content).map_err(|error| PresetContractViolation {
             code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
             message: error.to_string(),
@@ -292,6 +410,44 @@ impl ResolvedSnapshotEnvelope {
             });
         }
         Ok(())
+    }
+}
+
+fn validate_snapshot_chat_route_identity(
+    content: &ResolvedSnapshotContent,
+) -> Result<(), PresetContractViolation> {
+    let expected_revision_id = content.preset_revision_ref.revision_id();
+    let route_ref = content
+        .model_route_refs
+        .get(crate::CHAT_MODEL_TASK_AGENT_CHAT);
+    match (&content.chat_route_identity, route_ref) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err(PresetContractViolation {
+            code: CanonicalErrorCode::from(MODEL_ROUTE_RECORD_INVALID),
+            message: "Snapshot model route references require a chat route identity".into(),
+        }),
+        (Some(identity), Some(route_id)) => {
+            identity.validate().map_err(|error| PresetContractViolation {
+                code: CanonicalErrorCode::from(MODEL_ROUTE_RECORD_INVALID),
+                message: error.to_string(),
+            })?;
+            if identity.preset_revision_id != expected_revision_id
+                || identity.model_task != crate::CHAT_MODEL_TASK_AGENT_CHAT
+                || &identity.route_id != route_id
+            {
+                return Err(PresetContractViolation {
+                    code: CanonicalErrorCode::from(MODEL_ROUTE_RECORD_INVALID),
+                    message:
+                        "Snapshot chat route identity does not match its Preset Revision or route reference"
+                            .into(),
+                });
+            }
+            Ok(())
+        }
+        (Some(_), None) => Err(PresetContractViolation {
+            code: CanonicalErrorCode::from(MODEL_ROUTE_RECORD_INVALID),
+            message: "Snapshot chat route identity has no matching route reference".into(),
+        }),
     }
 }
 

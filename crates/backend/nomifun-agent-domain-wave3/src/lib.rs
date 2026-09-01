@@ -1,6 +1,6 @@
 //! Bundled creative and multimodal capability registrations for C7 Wave 3.
 //!
-//! The crate deliberately contains only contract metadata and deterministic
+//! The crate deliberately contains only contract metadata and typed host-backed
 //! capability handlers.  Domain services are mounted by the shared
 //! composition root; no application service bag or legacy route is required
 //! to construct this inventory.
@@ -8,21 +8,24 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    ActionId, ArtifactEnvelope, CancellationDescriptor, CanonicalSchemaRef,
+    ActionId, AgentSessionId, ArtifactEnvelope, CancellationDescriptor, CanonicalSchemaRef,
     CapabilityActionDescriptor, CapabilityContributions, CapabilityId, CapabilityKind,
-    CapabilityManifest, EffectClass, HostPortId, HostPortRef, InProcessEntrypointMetadata,
-    LocalizedMetadata, PackageContributions, PackageId, PackageManifest, PackageRef,
+    CapabilityManifest, CorrelationId, EffectClass, HostPortBindingDescriptor, HostPortId,
+    HostPortRef, IdempotencyKey, InProcessEntrypointMetadata, LocalizedMetadata,
+    OperationId, PackageContributions, PackageId, PackageManifest, PackageRef,
     PlatformConstraint, PluginBootCriticality, PluginBootState, PluginContextDescriptor,
     PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor, PluginMountId,
     PluginRegistrarDescriptor, PluginRegistrarOperation, PluginRegistrationMetadata,
     PluginSourceKind, PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod,
-    ResourceBindingId, ResourceId, ResourceKind, ScopeKey, SkillId, StrictJsonValue,
-    ToolPresentationKind, TypedResourceBinding, ValidatedPluginConfig, VersionString,
-    digest_payload,
+    PrincipalRef, ResolvedSnapshotRef, ResourceBindingId, ResourceId, ResourceKind, ScopeKey,
+    SkillId, StrictJsonValue, ToolPresentationKind, TypedResourceBinding, TypedResourceBindings,
+    ValidatedPluginConfig, VersionString, digest_payload,
 };
 use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, KernelError, PluginRegistration,
@@ -75,6 +78,13 @@ pub const TARGET_CAPABILITY_IDS: [&str; 19] = [
 pub const PACKAGE_IDS: [&str; 4] = TARGET_PACKAGE_IDS;
 pub const ALL_CAPABILITY_IDS: [&str; 19] = TARGET_CAPABILITY_IDS;
 
+/// The single host port for action-bearing Wave 3 capabilities.
+///
+/// The domain crate owns the capability vocabulary and resource requirements.
+/// The application owns creation, Canvas, Office, and MiniApp facts and must
+/// provide the adapter used by [`registrations_with_host_port`].
+pub const WAVE3_CAPABILITY_HOST_PORT_ID: &str = "host.wave3.capability.invoke";
+
 /// The resource slots frozen by the creative-studio official preset.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypedResourceDescriptor {
@@ -83,6 +93,115 @@ pub struct TypedResourceDescriptor {
     pub required: bool,
     pub operations: BTreeSet<String>,
     pub binding_policy: &'static str,
+}
+
+/// Invocation metadata projected from the Kernel into the Wave 3 host port.
+///
+/// No application service bag, Gateway state, legacy Conversation state, or
+/// Kernel authority is exposed through this boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wave3HostContext {
+    pub principal: PrincipalRef,
+    pub agent_session_id: AgentSessionId,
+    pub operation_id: OperationId,
+    pub idempotency_key: IdempotencyKey,
+    pub correlation_id: CorrelationId,
+    pub resolved_snapshot_ref: ResolvedSnapshotRef,
+    pub registry_generation: u64,
+    pub capability_id: CapabilityId,
+    pub action_id: ActionId,
+    pub state_scope_key: ScopeKey,
+    pub resource_bindings: TypedResourceBindings,
+}
+
+/// Typed domain-family operations accepted by the Wave 3 host.
+///
+/// Payload schemas remain owned by each capability.  The enum prevents the
+/// registration crate from fabricating a result while allowing the owning
+/// domain to validate and interpret its input.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Wave3CapabilityOperation {
+    CreationText { input: StrictJsonValue },
+    CreationImage { input: StrictJsonValue },
+    CreationImageEdit { input: StrictJsonValue },
+    CreationVideo { input: StrictJsonValue },
+    CreationAudio { input: StrictJsonValue },
+    WorkshopCanvasRead { input: StrictJsonValue },
+    WorkshopCanvasEdit { input: StrictJsonValue },
+    WorkshopAssetRead { input: StrictJsonValue },
+    WorkshopAssetWrite { input: StrictJsonValue },
+    WorkshopTemplateRun { input: StrictJsonValue },
+    WorkshopDirector { input: StrictJsonValue },
+    OfficePreview { input: StrictJsonValue },
+    OfficeDocumentEdit { input: StrictJsonValue },
+    OfficeSheetEdit { input: StrictJsonValue },
+    OfficeSlidesEdit { input: StrictJsonValue },
+    MiniAppRead { input: StrictJsonValue },
+    MiniAppEdit { input: StrictJsonValue },
+    MiniAppPublish { input: StrictJsonValue },
+    MiniAppServe { input: StrictJsonValue },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wave3HostRequest {
+    pub context: Wave3HostContext,
+    pub operation: Wave3CapabilityOperation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wave3HostPortError {
+    pub code: String,
+    pub message: String,
+}
+
+impl Wave3HostPortError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::new("WAVE3_HOST_PORT_UNAVAILABLE", message)
+    }
+}
+
+impl fmt::Display for Wave3HostPortError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for Wave3HostPortError {}
+
+/// Production-owned implementation boundary for Wave 3 action execution.
+///
+/// Implementations must call the owning domain service and return its
+/// canonical action result.  This trait deliberately has no successful
+/// fallback implementation.
+pub trait Wave3HostPort: Send + Sync {
+    fn invoke<'a>(
+        &'a self,
+        request: Wave3HostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave3HostPortError>> + Send + 'a>>;
+}
+
+struct UnconfiguredWave3HostPort;
+
+impl Wave3HostPort for UnconfiguredWave3HostPort {
+    fn invoke<'a>(
+        &'a self,
+        request: Wave3HostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave3HostPortError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            Err(Wave3HostPortError::unavailable(format!(
+                "no production host adapter is bound for {}",
+                request.context.capability_id.as_ref()
+            )))
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -268,7 +387,7 @@ const WORKSHOP_CAPABILITIES: [CapabilitySpec; 6] = [
     CapabilitySpec {
         id: "workshop.canvas.edit",
         display_name: "Edit Canvas",
-        description: "Apply a deterministic edit to the selected Canvas revision.",
+        description: "Apply a bounded edit to the selected Canvas revision.",
         resource_kinds: CANVAS_EDIT_RESOURCES,
         requirements: CANVAS_EDIT_REQUIREMENTS,
         effect_class: EffectClass::WriteReversible,
@@ -538,24 +657,45 @@ pub fn required_resource_kinds(capability_id: &str) -> Option<BTreeSet<ResourceK
 }
 
 /// Construct the complete bundled Wave 3 registration inventory.
+///
+/// The default composition is metadata-only: action handlers are present so
+/// the inventory can materialize, but invocation fails closed until the host
+/// supplies a real domain adapter.
 pub fn registrations() -> Result<Vec<PluginRegistration>, String> {
-    PACKAGE_SPECS.iter().map(registration_for).collect()
+    registrations_with_host_port(unconfigured_host_port())
+}
+
+/// Return a host-port implementation that fails closed for unconfigured
+/// metadata-only compositions and isolated contract tests.
+pub fn unconfigured_host_port() -> Arc<dyn Wave3HostPort> {
+    Arc::new(UnconfiguredWave3HostPort)
+}
+
+/// Construct the Wave 3 registration inventory with host-owned action
+/// execution.
+pub fn registrations_with_host_port(
+    action_host_port: Arc<dyn Wave3HostPort>,
+) -> Result<Vec<PluginRegistration>, String> {
+    PACKAGE_SPECS
+        .iter()
+        .map(|spec| registration_for(spec, Arc::clone(&action_host_port)))
+        .collect()
 }
 
 pub fn creation_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGE_SPECS[0])
+    registration_for(&PACKAGE_SPECS[0], unconfigured_host_port())
 }
 
 pub fn workshop_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGE_SPECS[1])
+    registration_for(&PACKAGE_SPECS[1], unconfigured_host_port())
 }
 
 pub fn office_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGE_SPECS[2])
+    registration_for(&PACKAGE_SPECS[2], unconfigured_host_port())
 }
 
 pub fn miniapp_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGE_SPECS[3])
+    registration_for(&PACKAGE_SPECS[3], unconfigured_host_port())
 }
 
 fn find_capability(capability_id: &str) -> Option<&'static CapabilitySpec> {
@@ -565,7 +705,10 @@ fn find_capability(capability_id: &str) -> Option<&'static CapabilitySpec> {
         .find(|capability| capability.id == capability_id)
 }
 
-fn registration_for(spec: &PackageSpec) -> Result<PluginRegistration, String> {
+fn registration_for(
+    spec: &PackageSpec,
+    action_host_port: Arc<dyn Wave3HostPort>,
+) -> Result<PluginRegistration, String> {
     let package = package_ref(spec.id);
     let config_schema = package_config_schema();
     let capabilities = spec
@@ -585,6 +728,10 @@ fn registration_for(spec: &PackageSpec) -> Result<PluginRegistration, String> {
     };
     let cancellation_port = host_port("host.plugin.cancel");
     let task_port = host_port("host.plugin.tasks");
+    let action_host_port_ref = host_port(WAVE3_CAPABILITY_HOST_PORT_ID);
+    let mut declared_host_ports =
+        BTreeSet::from([cancellation_port.id.clone(), task_port.id.clone()]);
+    declared_host_ports.insert(action_host_port_ref.id.clone());
     let context = PluginContextDescriptor {
         identity: identity.clone(),
         source: source.clone(),
@@ -599,7 +746,7 @@ fn registration_for(spec: &PackageSpec) -> Result<PluginRegistration, String> {
             methods: PluginStateMethod::REQUIRED.into_iter().collect(),
         },
         declared_services: Default::default(),
-        host_ports: Vec::new(),
+        host_ports: vec![host_port_binding()?],
         typed_command_ports: Vec::new(),
         domain_outbox_ports: Vec::new(),
         cancellation: CancellationDescriptor {
@@ -657,10 +804,7 @@ fn registration_for(spec: &PackageSpec) -> Result<PluginRegistration, String> {
             declared_skill_ids: BTreeSet::<SkillId>::new(),
             declared_mcp_tool_keys: BTreeSet::new(),
             declared_service_keys: BTreeSet::new(),
-            declared_host_ports: BTreeSet::from([
-                HostPortId::from("host.plugin.cancel"),
-                HostPortId::from("host.plugin.tasks"),
-            ]),
+            declared_host_ports,
         },
         context,
     };
@@ -669,11 +813,11 @@ fn registration_for(spec: &PackageSpec) -> Result<PluginRegistration, String> {
         registration
             .add_capability_handler(
                 CapabilityId::from(capability.id),
-                Arc::new(DeterministicHandler {
+                Arc::new(Wave3CapabilityHandler {
                     capability_id: CapabilityId::from(capability.id),
                     action_id: ActionId::from(capability.id),
-                    effect_class: capability.effect_class,
-                    requirements: capability.requirements.to_vec(),
+                    requirements: capability.requirements,
+                    host_port: Arc::clone(&action_host_port),
                 }),
             )
             .map_err(|error| error.to_string())?;
@@ -749,7 +893,7 @@ fn capability_manifest(
                 .iter()
                 .map(|kind| ResourceKind::from(*kind))
                 .collect(),
-            host_ports: Vec::new(),
+            host_ports: vec![host_port(WAVE3_CAPABILITY_HOST_PORT_ID)],
         },
     })
 }
@@ -776,25 +920,11 @@ fn action_input_schema() -> Value {
 }
 
 fn action_output_schema() -> Value {
+    // The owning domain defines the operation result. The registration only
+    // constrains the wire to a JSON object; the host owns the result shape.
     json!({
         "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "status": {"type": "string"},
-            "capability_id": {"type": "string"},
-            "action_id": {"type": "string"},
-            "effect_class": {"type": "string"},
-            "resource_bindings": {"type": "array"},
-            "input": {}
-        },
-        "required": [
-            "status",
-            "capability_id",
-            "action_id",
-            "effect_class",
-            "resource_bindings",
-            "input"
-        ]
+        "additionalProperties": true
     })
 }
 
@@ -803,6 +933,18 @@ fn host_port(id: &str) -> HostPortRef {
         id: HostPortId::from(id),
         version: VersionString::from(CONTRACT_VERSION),
     }
+}
+
+fn schema_ref(
+    subject: &str,
+    role: &str,
+    schema: &Value,
+) -> Result<CanonicalSchemaRef, String> {
+    let digest = digest_payload(schema).map_err(|error| error.to_string())?;
+    Ok(CanonicalSchemaRef::from(format!(
+        "schema://{subject}/{role}@1#{}",
+        digest.as_ref()
+    )))
 }
 
 fn resource_binding(
@@ -826,107 +968,182 @@ fn resource_binding(
     }
 }
 
-fn effect_class_name(effect_class: EffectClass) -> &'static str {
-    match effect_class {
-        EffectClass::Pure => "pure",
-        EffectClass::ReadLocal => "read_local",
-        EffectClass::ReadSensitive => "read_sensitive",
-        EffectClass::WriteReversible => "write_reversible",
-        EffectClass::WriteDurable => "write_durable",
-        EffectClass::ExecuteLocal => "execute_local",
-        EffectClass::ExternalTransmit => "external_transmit",
-        EffectClass::Destructive => "destructive",
-        EffectClass::Irreversible => "irreversible",
-        EffectClass::Physical => "physical",
+fn host_port_binding() -> Result<HostPortBindingDescriptor, String> {
+    let request_schema = action_input_schema();
+    let response_schema = action_output_schema();
+    Ok(HostPortBindingDescriptor {
+        port: host_port(WAVE3_CAPABILITY_HOST_PORT_ID),
+        request_schema: schema_ref(
+            WAVE3_CAPABILITY_HOST_PORT_ID,
+            "request",
+            &request_schema,
+        )?,
+        response_schema: schema_ref(
+            WAVE3_CAPABILITY_HOST_PORT_ID,
+            "response",
+            &response_schema,
+        )?,
+    })
+}
+
+struct Wave3CapabilityHandler {
+    capability_id: CapabilityId,
+    action_id: ActionId,
+    requirements: &'static [ResourceRequirement],
+    host_port: Arc<dyn Wave3HostPort>,
+}
+
+impl CapabilityHandler for Wave3CapabilityHandler {
+    fn invoke<'life0, 'async_trait>(
+        &'life0 self,
+        context: CapabilityInvocationContext,
+        input: StrictJsonValue,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, KernelError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: Sync + 'async_trait,
+    {
+        Box::pin(async move {
+            if context.capability_id != self.capability_id
+                || context.action_id != self.action_id
+            {
+                return Err(KernelError::ActionNotDeclared {
+                    capability_id: context.capability_id,
+                    action_id: context.action_id,
+                });
+            }
+            if !input.0.is_object() {
+                return Err(KernelError::CapabilityExecution {
+                    reason: format!("{} input must be a JSON object", self.capability_id.as_ref()),
+                });
+            }
+
+            validate_resource_bindings(
+                &self.capability_id,
+                &context.principal.principal_id,
+                self.requirements,
+                &context.resource_bindings,
+            )?;
+            let operation = operation_from_input(&self.capability_id, input)?;
+
+            self.host_port
+                .invoke(Wave3HostRequest {
+                    context: Wave3HostContext {
+                        principal: context.principal,
+                        agent_session_id: context.agent_session_id,
+                        operation_id: context.operation_id,
+                        idempotency_key: context.idempotency_key,
+                        correlation_id: context.correlation_id,
+                        resolved_snapshot_ref: context.resolved_snapshot_ref,
+                        registry_generation: context.registry_generation,
+                        capability_id: self.capability_id.clone(),
+                        action_id: self.action_id.clone(),
+                        state_scope_key: context.state_scope_key,
+                        resource_bindings: context.resource_bindings,
+                    },
+                    operation,
+                })
+                .await
+                .map_err(|error| KernelError::CapabilityExecution {
+                    reason: error.to_string(),
+                })
+        })
     }
 }
 
-struct DeterministicHandler {
-    capability_id: CapabilityId,
-    action_id: ActionId,
-    effect_class: EffectClass,
-    requirements: Vec<ResourceRequirement>,
-}
-
-#[async_trait]
-impl CapabilityHandler for DeterministicHandler {
-    async fn invoke(
-        &self,
-        context: CapabilityInvocationContext,
-        input: StrictJsonValue,
-    ) -> Result<StrictJsonValue, KernelError> {
-        if context.capability_id != self.capability_id || context.action_id != self.action_id {
-            return Err(KernelError::ActionNotDeclared {
-                capability_id: context.capability_id,
-                action_id: context.action_id,
+fn operation_from_input(
+    capability_id: &CapabilityId,
+    input: StrictJsonValue,
+) -> Result<Wave3CapabilityOperation, KernelError> {
+    let operation = match capability_id.as_ref() {
+        "creation.text" => Wave3CapabilityOperation::CreationText { input },
+        "creation.image" => Wave3CapabilityOperation::CreationImage { input },
+        "creation.image_edit" => Wave3CapabilityOperation::CreationImageEdit { input },
+        "creation.video" => Wave3CapabilityOperation::CreationVideo { input },
+        "creation.audio" => Wave3CapabilityOperation::CreationAudio { input },
+        "workshop.canvas.read" => Wave3CapabilityOperation::WorkshopCanvasRead { input },
+        "workshop.canvas.edit" => Wave3CapabilityOperation::WorkshopCanvasEdit { input },
+        "workshop.asset.read" => Wave3CapabilityOperation::WorkshopAssetRead { input },
+        "workshop.asset.write" => Wave3CapabilityOperation::WorkshopAssetWrite { input },
+        "workshop.template.run" => Wave3CapabilityOperation::WorkshopTemplateRun { input },
+        "workshop.director" => Wave3CapabilityOperation::WorkshopDirector { input },
+        "office.preview" => Wave3CapabilityOperation::OfficePreview { input },
+        "office.document.edit" => Wave3CapabilityOperation::OfficeDocumentEdit { input },
+        "office.sheet.edit" => Wave3CapabilityOperation::OfficeSheetEdit { input },
+        "office.slides.edit" => Wave3CapabilityOperation::OfficeSlidesEdit { input },
+        "miniapp.read" => Wave3CapabilityOperation::MiniAppRead { input },
+        "miniapp.edit" => Wave3CapabilityOperation::MiniAppEdit { input },
+        "miniapp.publish" => Wave3CapabilityOperation::MiniAppPublish { input },
+        "miniapp.serve" => Wave3CapabilityOperation::MiniAppServe { input },
+        other => {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!("{other} does not expose an action host operation"),
             });
         }
-        if !input.0.is_object() {
+    };
+    Ok(operation)
+}
+
+fn validate_resource_bindings(
+    capability_id: &CapabilityId,
+    principal_id: &str,
+    requirements: &[ResourceRequirement],
+    bindings: &[TypedResourceBinding],
+) -> Result<(), KernelError> {
+    let mut seen_binding_ids = BTreeSet::new();
+    for binding in bindings {
+        if binding.binding_id.as_ref().is_empty() || binding.resource_id.as_ref().is_empty() {
             return Err(KernelError::CapabilityExecution {
                 reason: format!(
-                    "{} input must be a JSON object",
-                    self.capability_id.as_ref()
+                    "{} requires non-empty binding and resource IDs",
+                    capability_id.as_ref()
                 ),
             });
         }
-        for requirement in &self.requirements {
-            let Some(binding) = context
-                .resource_bindings
-                .iter()
-                .find(|binding| binding.resource_kind.as_ref() == requirement.resource_kind)
-            else {
-                return Err(KernelError::CapabilityExecution {
-                    reason: format!(
-                        "{} requires resource kind {}",
-                        self.capability_id.as_ref(),
-                        requirement.resource_kind
-                    ),
-                });
-            };
-            if !binding.operations.contains(requirement.operation) {
-                return Err(KernelError::CapabilityExecution {
-                    reason: format!(
-                        "{} requires operation {} on {}",
-                        self.capability_id.as_ref(),
-                        requirement.operation,
-                        requirement.resource_kind
-                    ),
-                });
-            }
+        if !seen_binding_ids.insert(binding.binding_id.clone()) {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!(
+                    "{} received duplicate resource binding {}",
+                    capability_id.as_ref(),
+                    binding.binding_id.as_ref()
+                ),
+            });
         }
-
-        let mut resource_bindings = context
-            .resource_bindings
-            .iter()
-            .map(|binding| {
-                json!({
-                    "binding_id": binding.binding_id,
-                    "resource_kind": binding.resource_kind,
-                    "resource_id": binding.resource_id,
-                    "operations": binding.operations.iter().cloned().collect::<Vec<_>>()
-                })
-            })
-            .collect::<Vec<_>>();
-        resource_bindings.sort_by(|left, right| {
-            left["binding_id"]
-                .as_str()
-                .unwrap_or_default()
-                .cmp(right["binding_id"].as_str().unwrap_or_default())
-        });
-
-        Ok(StrictJsonValue(json!({
-            "status": "handled",
-            "capability_id": self.capability_id,
-            "action_id": self.action_id,
-            "effect_class": effect_class_name(self.effect_class),
-            "resource_bindings": resource_bindings,
-            "input": input.0
-        })))
+        if binding.owner_id != principal_id {
+            return Err(KernelError::ResourceOwnerMismatch {
+                binding_id: binding.binding_id.clone(),
+            });
+        }
     }
+
+    for requirement in requirements {
+        let Some(binding) = bindings
+            .iter()
+            .find(|binding| binding.resource_kind.as_ref() == requirement.resource_kind)
+        else {
+            return Err(KernelError::CapabilityResourceNotBound {
+                capability_id: capability_id.clone(),
+                resource_kind: requirement.resource_kind.to_owned(),
+            });
+        };
+        if !binding.operations.contains(requirement.operation) {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!(
+                    "{} requires operation {} on {}",
+                    capability_id.as_ref(),
+                    requirement.operation,
+                    requirement.resource_kind
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::task::{Context, Poll, Waker};
+
     use super::*;
     use nomifun_agent_kernel::{
         InMemoryPluginStatePersistence, KernelRegistry, MaterializationPolicy,
@@ -934,7 +1151,7 @@ mod tests {
 
     #[test]
     fn registrations_cover_the_four_wave3_packages_and_all_target_capabilities() {
-        let registrations = registrations().expect("Wave 3 registrations are deterministic");
+        let registrations = registrations().expect("Wave 3 registrations are canonical");
         assert_eq!(registrations.len(), PACKAGE_IDS.len());
 
         let expected = BTreeMap::from([
@@ -1003,7 +1220,24 @@ mod tests {
                     capability.contributions.actions[0].action_id.as_ref(),
                     capability.id.as_ref()
                 );
+                assert_eq!(
+                    capability.contributions.host_ports,
+                    vec![host_port(WAVE3_CAPABILITY_HOST_PORT_ID)]
+                );
             }
+            assert!(registration
+                .metadata
+                .context
+                .host_ports
+                .iter()
+                .any(|binding| {
+                    binding.port.id == HostPortId::from(WAVE3_CAPABILITY_HOST_PORT_ID)
+                }));
+            assert!(registration
+                .metadata
+                .registrar
+                .declared_host_ports
+                .contains(&HostPortId::from(WAVE3_CAPABILITY_HOST_PORT_ID)));
             observed.insert(
                 manifest.package_id.as_ref().to_owned(),
                 manifest
@@ -1111,5 +1345,206 @@ mod tests {
             !matches!(action.effect_class, EffectClass::Pure)
                 || action.presentation == ToolPresentationKind::FunctionTool
         }));
+    }
+
+    #[test]
+    fn every_action_capability_maps_to_a_typed_host_operation() {
+        for capability in PACKAGE_SPECS
+            .iter()
+            .flat_map(|package| package.capabilities.iter())
+        {
+            let capability_id = CapabilityId::from(capability.id);
+            assert!(
+                operation_from_input(&capability_id, StrictJsonValue(serde_json::json!({}))).is_ok(),
+                "{} must have a host operation",
+                capability.id
+            );
+        }
+    }
+
+    #[test]
+    fn operation_mapping_and_resource_requirements_match_the_frozen_inventory() {
+        let bindings = canonical_resource_bindings("wave3-test-owner");
+
+        for capability in PACKAGE_SPECS
+            .iter()
+            .flat_map(|package| package.capabilities.iter())
+        {
+            let capability_id = CapabilityId::from(capability.id);
+            let operation = operation_from_input(&capability_id, StrictJsonValue(json!({})))
+                .expect("every Wave 3 capability has a typed operation");
+
+            match capability.id {
+                "creation.text" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::CreationText { .. }
+                    ));
+                }
+                "creation.image" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::CreationImage { .. }
+                    ));
+                }
+                "creation.image_edit" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::CreationImageEdit { .. }
+                    ));
+                }
+                "creation.video" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::CreationVideo { .. }
+                    ));
+                }
+                "creation.audio" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::CreationAudio { .. }
+                    ));
+                }
+                "workshop.canvas.read" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::WorkshopCanvasRead { .. }
+                    ));
+                }
+                "workshop.canvas.edit" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::WorkshopCanvasEdit { .. }
+                    ));
+                }
+                "workshop.asset.read" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::WorkshopAssetRead { .. }
+                    ));
+                }
+                "workshop.asset.write" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::WorkshopAssetWrite { .. }
+                    ));
+                }
+                "workshop.template.run" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::WorkshopTemplateRun { .. }
+                    ));
+                }
+                "workshop.director" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::WorkshopDirector { .. }
+                    ));
+                }
+                "office.preview" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::OfficePreview { .. }
+                    ));
+                }
+                "office.document.edit" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::OfficeDocumentEdit { .. }
+                    ));
+                }
+                "office.sheet.edit" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::OfficeSheetEdit { .. }
+                    ));
+                }
+                "office.slides.edit" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::OfficeSlidesEdit { .. }
+                    ));
+                }
+                "miniapp.read" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::MiniAppRead { .. }
+                    ));
+                }
+                "miniapp.edit" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::MiniAppEdit { .. }
+                    ));
+                }
+                "miniapp.publish" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::MiniAppPublish { .. }
+                    ));
+                }
+                "miniapp.serve" => {
+                    assert!(matches!(
+                        operation,
+                        Wave3CapabilityOperation::MiniAppServe { .. }
+                    ));
+                }
+                other => panic!("unexpected Wave 3 capability {other}"),
+            }
+
+            validate_resource_bindings(
+                &capability_id,
+                "wave3-test-owner",
+                capability.requirements,
+                &bindings,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{} resource requirements no longer fit canonical bindings: {error}",
+                    capability.id
+                )
+            });
+        }
+    }
+
+    #[test]
+    fn unconfigured_action_host_returns_a_typed_unavailable_error() {
+        let host_port = unconfigured_host_port();
+        let future = host_port.invoke(Wave3HostRequest {
+            context: Wave3HostContext {
+                principal: PrincipalRef {
+                    principal_kind: "user".to_owned(),
+                    principal_id: "wave3-test-owner".to_owned(),
+                },
+                agent_session_id: AgentSessionId::from("wave3-test-session"),
+                operation_id: OperationId::from("wave3-test-operation"),
+                idempotency_key: IdempotencyKey::from("wave3-test-idempotency"),
+                correlation_id: CorrelationId::from("wave3-test-correlation"),
+                resolved_snapshot_ref: ResolvedSnapshotRef {
+                    snapshot_id: "snapshot".into(),
+                    snapshot_digest: "digest".into(),
+                },
+                registry_generation: 1,
+                capability_id: CapabilityId::from("creation.text"),
+                action_id: ActionId::from("creation.text"),
+                state_scope_key: ScopeKey::from("session:wave3-test"),
+                resource_bindings: Vec::new(),
+            },
+            operation: Wave3CapabilityOperation::CreationText {
+                input: StrictJsonValue(serde_json::json!({})),
+            },
+        });
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = std::pin::pin!(future);
+        let result = match future.as_mut().poll(&mut context) {
+            Poll::Ready(result) => result.expect_err("unconfigured Wave 3 actions must fail closed"),
+            Poll::Pending => panic!("unconfigured Wave 3 adapter must fail immediately"),
+        };
+        assert_eq!(result.code, "WAVE3_HOST_PORT_UNAVAILABLE");
+        assert_eq!(
+            result.message,
+            "no production host adapter is bound for creation.text"
+        );
     }
 }

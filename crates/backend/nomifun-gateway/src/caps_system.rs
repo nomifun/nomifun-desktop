@@ -6,12 +6,13 @@
 //! of the user — the headline use case is "set my theme to dark" / "add a
 //! new provider" / "change my zoom level" spoken to the companion.
 //!
-//! SKIPPED tools (listed at the bottom of this file) need extra GatewayDeps
+//! SKIPPED tools (listed at the bottom of this file) need extra CompatibilityCapabilityHost
 //! fields the parent has not yet wired:
 //! - `nomi_system_check_update` — needs `VersionCheckService`
 //! - `nomi_system_factory_reset` — needs `data_dir: PathBuf`
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_api_types::{
@@ -23,7 +24,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::deps::GatewayDeps;
+use crate::deps::CompatibilityCapabilityHost;
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
@@ -209,14 +210,43 @@ struct GetInfoParams {}
 
 // ── handlers ──────────────────────────────────────────────────────────────
 
-async fn get_settings(deps: Arc<GatewayDeps>, _p: GetSettingsParams) -> Value {
-    match deps.settings_service.get_settings().await {
+#[derive(Clone)]
+struct SystemCapabilityDeps {
+    settings: nomifun_system::SettingsService,
+    preferences: nomifun_system::ClientPrefService,
+    providers: nomifun_system::ProviderService,
+    model_fetch: nomifun_system::ModelFetchService,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, crate::deps::CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<SystemCapabilityDeps>, P) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, _ctx, params| {
+        handler(
+            Arc::new(SystemCapabilityDeps {
+                settings: deps.settings_service.clone(),
+                preferences: deps.client_pref_service.clone(),
+                providers: deps.provider_service.clone(),
+                model_fetch: deps.model_fetch_service.clone(),
+            }),
+            params,
+        )
+    }
+}
+
+async fn get_settings(deps: Arc<SystemCapabilityDeps>, _p: GetSettingsParams) -> Value {
+    match deps.settings.get_settings().await {
         Ok(settings) => ok(settings),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn update_settings(deps: Arc<GatewayDeps>, p: UpdateSettingsParams) -> Value {
+async fn update_settings(deps: Arc<SystemCapabilityDeps>, p: UpdateSettingsParams) -> Value {
     let req = UpdateSettingsRequest {
         language: p.language,
         notification_enabled: p.notification_enabled,
@@ -227,33 +257,33 @@ async fn update_settings(deps: Arc<GatewayDeps>, p: UpdateSettingsParams) -> Val
     if req.is_empty() {
         return json!({ "error": "nothing to update: provide at least one field" });
     }
-    match deps.settings_service.update_settings(req).await {
+    match deps.settings.update_settings(req).await {
         Ok(settings) => ok(settings),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn get_preferences(deps: Arc<GatewayDeps>, p: GetPreferencesParams) -> Value {
+async fn get_preferences(deps: Arc<SystemCapabilityDeps>, p: GetPreferencesParams) -> Value {
     let keys_owned = p.keys.unwrap_or_default();
     let keys_ref: Vec<&str> = keys_owned.iter().map(String::as_str).collect();
     let filter = if keys_ref.is_empty() { None } else { Some(keys_ref.as_slice()) };
-    match deps.client_pref_service.get_preferences(filter).await {
+    match deps.preferences.get_preferences(filter).await {
         Ok(prefs) => ok(prefs),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn update_preferences(deps: Arc<GatewayDeps>, p: UpdatePreferencesParams) -> Value {
+async fn update_preferences(deps: Arc<SystemCapabilityDeps>, p: UpdatePreferencesParams) -> Value {
     if p.preferences.is_empty() {
         return json!({ "error": "preferences map must not be empty" });
     }
-    match deps.client_pref_service.update_preferences(p.preferences).await {
+    match deps.preferences.update_preferences(p.preferences).await {
         Ok(()) => ok(json!({ "updated": true })),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn create_provider(deps: Arc<GatewayDeps>, p: CreateProviderParams) -> Value {
+async fn create_provider(deps: Arc<SystemCapabilityDeps>, p: CreateProviderParams) -> Value {
     // Map the bedrock_config Value passthrough into the typed struct.
     let bedrock_config = match p.bedrock_config {
         Some(val) => match serde_json::from_value(val) {
@@ -281,7 +311,7 @@ async fn create_provider(deps: Arc<GatewayDeps>, p: CreateProviderParams) -> Val
         initial_model,
         connections: Vec::new(),
     };
-    match deps.provider_service.create(req).await {
+    match deps.providers.create(req).await {
         Ok(resp) => ok(json!({
             "provider_id": resp.provider_id,
             "platform": resp.platform,
@@ -296,7 +326,7 @@ async fn create_provider(deps: Arc<GatewayDeps>, p: CreateProviderParams) -> Val
     }
 }
 
-async fn update_provider(deps: Arc<GatewayDeps>, p: UpdateProviderParams) -> Value {
+async fn update_provider(deps: Arc<SystemCapabilityDeps>, p: UpdateProviderParams) -> Value {
     let bedrock_config = match p.bedrock_config {
         Some(val) => match serde_json::from_value(val) {
             Ok(cfg) => Some(cfg),
@@ -313,7 +343,7 @@ async fn update_provider(deps: Arc<GatewayDeps>, p: UpdateProviderParams) -> Val
         bedrock_config,
         sort_order: None,
     };
-    match deps.provider_service.update(p.provider_id.as_str(), req).await {
+    match deps.providers.update(p.provider_id.as_str(), req).await {
         Ok(resp) => ok(json!({
             "provider_id": resp.provider_id,
             "platform": resp.platform,
@@ -327,19 +357,19 @@ async fn update_provider(deps: Arc<GatewayDeps>, p: UpdateProviderParams) -> Val
     }
 }
 
-async fn delete_provider(deps: Arc<GatewayDeps>, p: DeleteProviderParams) -> Value {
-    match deps.provider_service.delete(p.provider_id.as_str()).await {
+async fn delete_provider(deps: Arc<SystemCapabilityDeps>, p: DeleteProviderParams) -> Value {
+    match deps.providers.delete(p.provider_id.as_str()).await {
         Ok(()) => json!({ "result": format!("provider {} deleted", p.provider_id) }),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn fetch_models(deps: Arc<GatewayDeps>, p: FetchModelsParams) -> Value {
+async fn fetch_models(deps: Arc<SystemCapabilityDeps>, p: FetchModelsParams) -> Value {
     let req = FetchModelsRequest {
         try_fix: p.try_fix.unwrap_or(false),
     };
     match deps
-        .model_fetch_service
+        .model_fetch
         .fetch_models(p.provider_id.as_str(), &req)
         .await
     {
@@ -360,7 +390,7 @@ async fn fetch_models(deps: Arc<GatewayDeps>, p: FetchModelsParams) -> Value {
     }
 }
 
-async fn get_info(_deps: Arc<GatewayDeps>, _p: GetInfoParams) -> Value {
+async fn get_info(_deps: Arc<SystemCapabilityDeps>, _p: GetInfoParams) -> Value {
     let info = nomifun_system::sysinfo::get_system_info();
     ok(info)
 }
@@ -377,7 +407,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Read the desktop's system settings (language, notification toggles, etc.).",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| get_settings(deps, p),
+        adapt(get_settings),
     ));
 
     // 2. Settings (write)
@@ -388,7 +418,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Partially update system settings (language, notification toggles, command queue, workspace upload). Only provided fields are changed.",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| update_settings(deps, p),
+        adapt(update_settings),
     ));
 
     // 3. Preferences (read)
@@ -399,7 +429,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Read client preferences (theme, zoom, keep-awake, companion size, feature toggles, etc.). Omit keys to get all.",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| get_preferences(deps, p),
+        adapt(get_preferences),
     ));
 
     // 4. Preferences (write) — the headline "set theme / zoom / keep-awake" tool
@@ -410,7 +440,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Batch set/delete client preferences (theme, ui.zoomFactor, system.closeToTray, system.keepAwake, companion.size, feature toggles). Pass null value to delete a key.",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| update_preferences(deps, p),
+        adapt(update_preferences),
     ));
 
     // 5. Create provider (sensitive — handles credentials)
@@ -421,7 +451,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Register a model provider with one fully configured model. Credentials are typed according to auth_scheme, validated, and encrypted at rest.",
             EffectClass::Sensitive,
         ),
-        |deps, _ctx, p| create_provider(deps, p),
+        adapt(create_provider),
     ));
 
     // 6. Update provider (sensitive — may update credentials)
@@ -432,7 +462,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Partially update an existing model provider (name, URL, authentication, credentials, enabled). Only provided fields are changed.",
             EffectClass::Sensitive,
         ),
-        |deps, _ctx, p| update_provider(deps, p),
+        adapt(update_provider),
     ));
 
     // 7. Delete provider (destructive)
@@ -443,7 +473,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Permanently delete a model provider and all its stored credentials.",
             EffectClass::Destructive,
         ),
-        |deps, _ctx, p| delete_provider(deps, p),
+        adapt(delete_provider),
     ));
 
     // 8. Fetch models (write — triggers a network call and may auto-fix the URL)
@@ -454,7 +484,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Fetch the model list from a provider's remote API (by provider id). Use after creating a provider without specifying models.",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| fetch_models(deps, p),
+        adapt(fetch_models),
     ));
 
     // 9. System info (read — pure, no service dependency beyond sysinfo)
@@ -465,7 +495,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Read system info: data/cache/log directories, OS platform, and CPU architecture.",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| get_info(deps, p),
+        adapt(get_info),
     ));
 }
 
@@ -474,12 +504,12 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 // 10. `nomi_system_check_update` (Read)
 //     Needs: `deps.version_check_service: nomifun_system::VersionCheckService`
 //     Method: `version_check_service.check_update(&UpdateCheckRequest { .. })`
-//     Not wired because VersionCheckService is not in the assumed GatewayDeps.
+//     Not wired because VersionCheckService is not in the assumed CompatibilityCapabilityHost.
 //
 // 11. `nomi_system_factory_reset` (Destructive)
 //     Needs: `deps.data_dir: PathBuf`
 //     Method: `nomifun_common::factory_reset::request_v3_dataset_reset(&data_dir, &work_dir)`
-//     Not wired because data_dir is not in the assumed GatewayDeps.
+//     Not wired because data_dir is not in the assumed CompatibilityCapabilityHost.
 
 #[cfg(test)]
 mod tests {

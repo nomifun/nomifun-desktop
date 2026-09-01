@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use nomifun_api_types::{CronJobExecutedEvent, CronJobRemovedPayload, CronJobResponse, WebSocketMessage};
-use nomifun_conversation::ConversationService;
-use nomifun_common::{ConversationId, UserId};
+use nomifun_common::{ConversationId, MessageId, UserId};
 use nomifun_realtime::UserEventSink;
 use serde_json::json;
 use tracing::error;
@@ -66,7 +65,7 @@ impl CronEventEmitter {
         }
         let payload = json!({
             "conversation_id": conversation_id,
-            "msg_id": ConversationService::mint_msg_id(),
+            "msg_id": MessageId::new().into_string(),
             "type": "tips",
             "data": {
                 "content": content,

@@ -41,7 +41,8 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::cli::Cli;
 use crate::lan_endpoint::detect_all_lan_ipv4s;
-use crate::{AppServices, bootstrap, create_router};
+use crate::{bootstrap, services::AppServices};
+use crate::bootstrap::FreshV4Application;
 use nomifun_auth::AuthPolicy;
 use nomifun_db::{IClientPreferenceRepository, IUserRepository};
 
@@ -438,7 +439,7 @@ struct ListenerLifecycle {
 }
 
 /// Owns the desktop's in-process backend serving. Construct with
-/// [`DesktopServer::start`]; drive the LAN listener with the `*_blocking`
+/// [`DesktopServer::start_with_outcome`]; drive the LAN listener with the `*_blocking`
 /// methods (safe to call from Tauri command threads).
 ///
 /// Holds only `Send + Sync` handles so it can live in Tauri managed state. The
@@ -468,11 +469,11 @@ pub struct DesktopServer {
     /// The singleton terminal service (live PTY map + session repo). Held here
     /// so the unified shutdown path can clean up all terminal sessions before
     /// the database is closed.
-    terminal_service: Arc<nomifun_terminal::TerminalService>,
+    terminal_service: Option<Arc<nomifun_terminal::TerminalService>>,
     /// The process SSH connection pool. Held here so the unified shutdown path can
     /// close every live remote session — and write the resulting host status — while
     /// the database is still open.
-    ssh_pool: nomifun_ssh::SshConnectionPool,
+    ssh_pool: Option<nomifun_ssh::SshConnectionPool>,
     /// LAN robot gateway. Held here for two reasons: the unified shutdown path
     /// stops its accept loop and loopback MCP front, and the LAN listener's
     /// status is projected into its endpoint advertiser (the OTA response is the
@@ -481,7 +482,10 @@ pub struct DesktopServer {
     /// Clone of the database pool used by the embedded router. Closing this
     /// clone closes the shared pool, so fatal listener failures cannot leave
     /// the backend's persistent resources alive while the host is exiting.
-    database: nomifun_db::Database,
+    database: Option<nomifun_db::Database>,
+    /// Canonical Fresh-v4 application owned by the production desktop path.
+    /// Legacy startup keeps this absent.
+    canonical_application: Option<FreshV4Application>,
     /// Complete startup authority. Keeping this alongside the published
     /// server prevents a listener failure from dropping the environment lock
     /// or long-lived services before cleanup has been verified.
@@ -490,7 +494,7 @@ pub struct DesktopServer {
     /// exit/restart always stops the Gateway; browser-enabled builds also stop
     /// ACP browser ingress and then join the same Hub shutdown flight used by
     /// services/server cleanup.
-    browser_platform_shutdown: crate::services::BrowserPlatformShutdown,
+    browser_platform_shutdown: Option<crate::services::BrowserPlatformShutdown>,
     /// The first unexpected listener failure is delivered to the desktop
     /// backend thread, which then drops [`DesktopKeepAlive`] and exits the
     /// host. `watch` keeps this signal observable without exposing internals.
@@ -533,6 +537,7 @@ struct DesktopKeepAliveInner {
 enum DesktopStartupCleanupAuthority {
     Services(AppServices),
     Startup(Arc<crate::services::StartupCleanupAuthority>),
+    FreshV4(FreshV4Application),
 }
 
 impl DesktopKeepAlive {
@@ -552,6 +557,9 @@ impl DesktopKeepAlive {
                 Ok(())
             }
             DesktopStartupCleanupAuthority::Startup(authority) => authority.cleanup().await,
+            DesktopStartupCleanupAuthority::FreshV4(application) => {
+                application.clone().close().await
+            }
         }
     }
 
@@ -593,10 +601,23 @@ impl DesktopKeepAlive {
         }
     }
 
+    fn from_fresh_v4(
+        env: bootstrap::ServerEnvironment,
+        application: FreshV4Application,
+    ) -> Self {
+        Self {
+            inner: Arc::new(DesktopKeepAliveInner {
+                _env: env,
+                cleanup: DesktopStartupCleanupAuthority::FreshV4(application),
+            }),
+        }
+    }
+
     fn services(&self) -> Option<&AppServices> {
         match &self.inner.cleanup {
             DesktopStartupCleanupAuthority::Services(services) => Some(services),
-            DesktopStartupCleanupAuthority::Startup(_) => None,
+            DesktopStartupCleanupAuthority::Startup(_)
+            | DesktopStartupCleanupAuthority::FreshV4(_) => None,
         }
     }
 }
@@ -631,19 +652,22 @@ impl DesktopServer {
     /// the SPA to the vite dev server so remote browsers match the live desktop.
     /// `webui_asset_source` is the preferred production source and should adapt
     /// the desktop host's compile-time embedded frontend assets.
-    pub async fn start(
+    pub async fn start_legacy_compatibility(
         cli: &Cli,
         merged_path: &str,
         spa_dir: Option<PathBuf>,
         dev_frontend_url: Option<String>,
         webui_asset_source: Option<WebUiAssetSource>,
     ) -> Result<(Arc<DesktopServer>, DesktopKeepAlive)> {
-        Self::start_with_outcome(
+        // This wrapper is retained for legacy in-process fixtures. The native
+        // desktop shell uses `start_with_outcome`, which is Fresh-v4-only.
+        Self::start_with_composition(
             cli,
             merged_path,
             spa_dir,
             dev_frontend_url,
             webui_asset_source,
+            true,
         )
         .await
         .map_err(DesktopStartError::into_inner)
@@ -651,7 +675,7 @@ impl DesktopServer {
 
     /// Typed desktop startup entry point used by the native shell.
     ///
-    /// Unlike [`Self::start`], failures retain a positive cleanup disposition
+    /// Unlike [`Self::start_legacy_compatibility`], failures retain a positive cleanup disposition
     /// so the shell can distinguish a safe-to-release runtime from a failed
     /// teardown that must retain runtime authority and fail closed.
     pub async fn start_with_outcome(
@@ -664,8 +688,43 @@ impl DesktopServer {
         (Arc<DesktopServer>, DesktopKeepAlive),
         DesktopStartError,
     > {
-        let env = bootstrap::init_environment(cli, merged_path)
+        Self::start_with_composition(
+            cli,
+            merged_path,
+            spa_dir,
+            dev_frontend_url,
+            webui_asset_source,
+            false,
+        )
+        .await
+    }
+
+    async fn start_with_composition(
+        cli: &Cli,
+        merged_path: &str,
+        spa_dir: Option<PathBuf>,
+        dev_frontend_url: Option<String>,
+        webui_asset_source: Option<WebUiAssetSource>,
+        legacy_compatibility: bool,
+    ) -> std::result::Result<
+        (Arc<DesktopServer>, DesktopKeepAlive),
+        DesktopStartError,
+    > {
+        let env = if legacy_compatibility {
+            bootstrap::init_legacy_environment(cli, merged_path)
+        } else {
+            bootstrap::init_environment(cli, merged_path)
+        }
             .map_err(DesktopStartError::verified)?;
+        if !legacy_compatibility {
+            return Self::start_fresh_v4(
+                env,
+                spa_dir,
+                dev_frontend_url,
+                webui_asset_source,
+            )
+            .await;
+        }
 
         // Override the CLI-derived policy: the desktop trusts its own webview via
         // a per-boot secret, and requires login for everyone else.
@@ -749,7 +808,7 @@ impl DesktopServer {
                 );
             }
         };
-        let router = create_router(&services).await;
+        let router = crate::router::create_router(&services).await;
 
         // Seed the initial status with the PERSISTED admin identity so the
         // desktop UI shows the real username / "password set" state immediately
@@ -785,12 +844,13 @@ impl DesktopServer {
             webui_asset_source,
             dev_frontend_url: dev_frontend_url.map(|u| Arc::from(u.trim_end_matches('/'))),
             runtime: Handle::current(),
-            terminal_service,
-            ssh_pool: services.ssh_pool.clone(),
+            terminal_service: Some(terminal_service),
+            ssh_pool: Some(services.ssh_pool.clone()),
             robot: services.robot.clone(),
-            database: services.database.clone(),
+            database: Some(services.database.clone()),
+            canonical_application: None,
             _keep_alive: keep_alive.clone(),
-            browser_platform_shutdown: services.browser_platform_shutdown.clone(),
+            browser_platform_shutdown: Some(services.browser_platform_shutdown.clone()),
             failure_tx,
             loopback_shutdown,
             listener_lifecycle: ListenerLifecycle {
@@ -812,6 +872,105 @@ impl DesktopServer {
         // that can serve a real request. Doing it in Rust (not the webview) is
         // what makes a headless/auto-start boot and an early robot OTA poll find
         // an open port instead of waiting for the frontend to mount.
+        server.restore_lan_if_requested().await;
+        Ok((server, keep_alive))
+    }
+
+    async fn start_fresh_v4(
+        env: bootstrap::ServerEnvironment,
+        spa_dir: Option<PathBuf>,
+        dev_frontend_url: Option<String>,
+        webui_asset_source: Option<WebUiAssetSource>,
+    ) -> std::result::Result<
+        (Arc<DesktopServer>, DesktopKeepAlive),
+        DesktopStartError,
+    > {
+        env.require_fresh_v4("desktop server startup")
+            .map_err(DesktopStartError::verified)?;
+
+        let secret: Arc<str> = Arc::from(generate_random_hex_secret().as_str());
+        let mut config = env.config.clone();
+        config.auth_policy = AuthPolicy::TrustLocalToken;
+        config.local_trust_secret = Some(secret.clone());
+
+        let host = env
+            .canonical_host()
+            .map_err(DesktopStartError::verified)?;
+        let application = host
+            .compose(&config)
+            .await
+            .map_err(DesktopStartError::verified)?;
+        let user_repo = application.user_repo();
+
+        let loopback = match TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .context("failed to bind loopback listener")
+        {
+            Ok(loopback) => loopback,
+            Err(error) => {
+                let keep_alive =
+                    DesktopKeepAlive::from_fresh_v4(env, application);
+                return Err(cleanup_start_failure(keep_alive, error).await);
+            }
+        };
+        let loopback_port = match loopback.local_addr() {
+            Ok(address) => address.port(),
+            Err(error) => {
+                let keep_alive =
+                    DesktopKeepAlive::from_fresh_v4(env, application);
+                return Err(
+                    cleanup_start_failure(keep_alive, anyhow::Error::new(error)).await
+                );
+            }
+        };
+
+        let router = application.router();
+        let (initial_admin, initial_pw_set) = resolve_admin(&*user_repo).await;
+        let initial = WebUiStatus {
+            running: false,
+            local_url: format!("http://localhost:{loopback_port}"),
+            admin_username: initial_admin,
+            password_set: initial_pw_set,
+            ..Default::default()
+        };
+        let (status_tx, status_rx) = watch::channel(initial);
+        let (failure_tx, _) = watch::channel(None);
+        let (loopback_shutdown, _) = watch::channel(false);
+        let loopback_termination = ListenerTermination::new();
+        let (shutdown_complete_tx, shutdown_complete_rx) = watch::channel(false);
+        let keep_alive =
+            DesktopKeepAlive::from_fresh_v4(env, application.clone());
+
+        let server = Arc::new(DesktopServer {
+            loopback_port,
+            local_trust_secret: secret,
+            router,
+            spa_dir,
+            webui_asset_source,
+            dev_frontend_url: dev_frontend_url.map(|url| Arc::from(url.trim_end_matches('/'))),
+            runtime: Handle::current(),
+            terminal_service: None,
+            ssh_pool: None,
+            robot: None,
+            database: None,
+            canonical_application: Some(application),
+            _keep_alive: keep_alive.clone(),
+            browser_platform_shutdown: None,
+            failure_tx,
+            loopback_shutdown,
+            listener_lifecycle: ListenerLifecycle {
+                loopback_termination,
+            },
+            fatal_reported: Arc::new(AtomicBool::new(false)),
+            shutdown_success: Arc::new(OnceCell::new()),
+            shutdown_complete_tx,
+            shutdown_complete_rx,
+            user_repo,
+            lan: Mutex::new(None),
+            status_tx,
+            status_rx,
+        });
+        server.spawn_loopback(loopback);
         server.restore_lan_if_requested().await;
         Ok((server, keep_alive))
     }
@@ -1052,25 +1211,29 @@ impl DesktopServer {
             errors.push(format!("listener cleanup failed: {error:#}"));
         }
 
-        let terminal_result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            self.terminal_service.shutdown_cleanup(),
-        )
-        .await;
-        match terminal_result {
-            Ok(Ok(deleted)) => {
-                tracing::info!(deleted, "terminal sessions cleaned up during desktop shutdown");
+        if let Some(terminal_service) = &self.terminal_service {
+            let terminal_result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                terminal_service.shutdown_cleanup(),
+            )
+            .await;
+            match terminal_result {
+                Ok(Ok(deleted)) => {
+                    tracing::info!(deleted, "terminal sessions cleaned up during desktop shutdown");
+                }
+                Ok(Err(error)) => errors.push(format!("terminal cleanup failed: {error}")),
+                Err(_) => errors.push(
+                    "terminal cleanup timed out after 5 seconds".to_owned(),
+                ),
             }
-            Ok(Err(error)) => errors.push(format!("terminal cleanup failed: {error}")),
-            Err(_) => errors.push(
-                "terminal cleanup timed out after 5 seconds".to_owned(),
-            ),
         }
 
-        let browser_result: anyhow::Result<()> =
-            self.browser_platform_shutdown.shutdown().await;
-        if let Err(error) = browser_result {
-            errors.push(format!("browser cleanup failed: {error:#}"));
+        if let Some(browser_platform_shutdown) = &self.browser_platform_shutdown {
+            let browser_result: anyhow::Result<()> =
+                browser_platform_shutdown.shutdown().await;
+            if let Err(error) = browser_result {
+                errors.push(format!("browser cleanup failed: {error:#}"));
+            }
         }
 
         // Stop the robot gateway before the listeners go: its accept loop and the
@@ -1085,26 +1248,29 @@ impl DesktopServer {
         // host row back from "connected", and a link let go of without exit evidence
         // is a real leak on someone else's machine, so it is reported rather than
         // silently counted as clean.
-        let ssh_result = tokio::time::timeout(            std::time::Duration::from_secs(5),
-            self.ssh_pool.shutdown_all(),
-        )
-        .await;
-        match ssh_result {
-            Ok(report) => {
-                tracing::info!(
-                    reaped = report.reaped,
-                    lost = report.lost,
-                    already_down = report.already_down,
-                    "ssh links closed during desktop shutdown"
-                );
-                if report.lost > 0 {
-                    errors.push(format!(
-                        "{} ssh link(s) were let go of without proof the remote shell died",
-                        report.lost
-                    ));
+        if let Some(ssh_pool) = &self.ssh_pool {
+            let ssh_result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                ssh_pool.shutdown_all(),
+            )
+            .await;
+            match ssh_result {
+                Ok(report) => {
+                    tracing::info!(
+                        reaped = report.reaped,
+                        lost = report.lost,
+                        already_down = report.already_down,
+                        "ssh links closed during desktop shutdown"
+                    );
+                    if report.lost > 0 {
+                        errors.push(format!(
+                            "{} ssh link(s) were let go of without proof the remote shell died",
+                            report.lost
+                        ));
+                    }
                 }
+                Err(_) => errors.push("ssh pool cleanup timed out after 5 seconds".to_owned()),
             }
-            Err(_) => errors.push("ssh pool cleanup timed out after 5 seconds".to_owned()),
         }
 
         // Do not close the shared database after an earlier cleanup failure.
@@ -1113,7 +1279,21 @@ impl DesktopServer {
         // the shared pool here would make both retries fail for the wrong reason.
         // The database is therefore closed only after listeners, terminals, and
         // every explicit Host shutdown have all completed successfully.
-        close_database_after_cleanup(errors, || self.database.close()).await
+        if errors.is_empty() {
+            if let Some(database) = &self.database {
+                database.close().await;
+            }
+            if let Some(application) = &self.canonical_application {
+                if let Err(error) = application.clone().close().await {
+                    errors.push(format!("Fresh-v4 runtime cleanup failed: {error:#}"));
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("desktop cleanup failed: {}", errors.join("; ")))
+        }
     }
 
     pub async fn shutdown_all(&self) -> anyhow::Result<()> {
@@ -1174,9 +1354,22 @@ impl DesktopServer {
     ///   silently at boot with nobody watching the one-time value — while the
     ///   port is already reachable. We stay loopback-only and say why.
     pub async fn restore_lan_if_requested(self: &Arc<Self>) -> LanRestoreOutcome {
-        let prefs = nomifun_db::SqliteClientPreferenceRepository::new(
-            self.database.pool().clone(),
-        );
+        let preference_pool = self
+            .database
+            .as_ref()
+            .map(|database| database.pool().clone())
+            .or_else(|| {
+                self.canonical_application
+                    .as_ref()
+                    .map(|application| application.pool().clone())
+            });
+        let Some(preference_pool) = preference_pool else {
+            // No host-owned persistence is available. Keep the listener
+            // loopback-only rather than guessing whether LAN exposure was
+            // requested.
+            return LanRestoreOutcome::NotRequested;
+        };
+        let prefs = nomifun_db::SqliteClientPreferenceRepository::new(preference_pool);
         let stored = match prefs.get_by_keys(&[DESKTOP_WEBUI_ENABLED_PREF_KEY]).await {
             Ok(rows) => rows
                 .into_iter()
@@ -1622,6 +1815,7 @@ where
     success.get_or_try_init(init).await.map(|_| ())
 }
 
+#[cfg(test)]
 async fn close_database_after_cleanup<F, Fut>(
     errors: Vec<String>,
     close: F,

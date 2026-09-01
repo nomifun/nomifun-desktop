@@ -66,15 +66,7 @@ async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode> {
         Some(Command::McpComputerStdio) => Ok(commands::run_computer_stdio().await),
         Some(Command::TerminalHook { event }) => Ok(commands::run_terminal_hook(event).await),
         Some(Command::Doctor) => commands::run_doctor(&cli, &merged_path).await,
-        Some(Command::Tools) => Ok(commands::run_tools().await),
-        Some(Command::Call {
-            name,
-            args,
-            url,
-            token,
-        }) => Ok(
-            commands::run_call(name, args.as_deref(), url.clone(), token.clone()).await,
-        ),
+        Some(Command::Remote { operation }) => Ok(commands::run_remote(operation).await),
         Some(Command::Backup { output }) => commands::run_backup(&cli, output.clone()).await,
         Some(Command::Restore {
             bundle,

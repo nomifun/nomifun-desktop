@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::plugins::callback::is_supported_callback_action;
+
 // ---------------------------------------------------------------------------
 // Access token
 // ---------------------------------------------------------------------------
@@ -474,9 +476,6 @@ pub(crate) fn format_dingtalk_callback(
 
 /// Derive the category prefix from an action name.
 fn action_category_prefix(action: &str) -> &'static str {
-    if action == "system.confirm" {
-        return "chat";
-    }
     let prefix = action.split('.').next().unwrap_or("");
     match prefix {
         "pairing" => "platform",
@@ -498,12 +497,16 @@ pub(crate) fn parse_dingtalk_callback(data: &str) -> Option<ParsedCallback> {
     }
 
     let category = parts[0].to_string();
-    let action = parts[1].to_string();
+    let action = parts[1].trim();
 
     // Validate category
     if !matches!(category.as_str(), "platform" | "system" | "chat") {
         return None;
     }
+    if action.is_empty() || !is_supported_callback_action(action) {
+        return None;
+    }
+    let action = action.to_owned();
 
     let params = if parts.len() == 3 && !parts[2].is_empty() {
         let mut map = std::collections::HashMap::new();
@@ -920,18 +923,16 @@ mod tests {
             format_dingtalk_callback("chat.regenerate", None),
             "chat:chat.regenerate"
         );
-        assert_eq!(format_dingtalk_callback("system.confirm", None), "chat:system.confirm");
+        assert_eq!(format_dingtalk_callback("confirm.yes", None), "system:confirm.yes");
     }
 
     #[test]
     fn format_callback_with_params() {
         let mut params = std::collections::HashMap::new();
-        params.insert("callId".into(), "abc".into());
-        params.insert("value".into(), "yes".into());
-        let result = format_dingtalk_callback("system.confirm", Some(&params));
-        assert!(result.starts_with("chat:system.confirm:"));
-        assert!(result.contains("callId=abc"));
-        assert!(result.contains("value=yes"));
+        params.insert("sessionId".into(), "abc".into());
+        let result = format_dingtalk_callback("chat.continue", Some(&params));
+        assert!(result.starts_with("chat:chat.continue:"));
+        assert!(result.contains("sessionId=abc"));
     }
 
     #[test]
@@ -946,18 +947,31 @@ mod tests {
     #[test]
     fn parse_callback_roundtrip_with_params() {
         let mut p = std::collections::HashMap::new();
-        p.insert("agentType".into(), "acp".into());
-        let encoded = format_dingtalk_callback("agent.select", Some(&p));
+        p.insert("sessionId".into(), "abc".into());
+        let encoded = format_dingtalk_callback("chat.continue", Some(&p));
         let (cat, action, params) = parse_dingtalk_callback(&encoded).unwrap();
-        assert_eq!(cat, "system");
-        assert_eq!(action, "agent.select");
-        assert_eq!(params.unwrap().get("agentType").unwrap(), "acp");
+        assert_eq!(cat, "chat");
+        assert_eq!(action, "chat.continue");
+        assert_eq!(params.unwrap().get("sessionId").unwrap(), "abc");
     }
 
     #[test]
     fn parse_callback_invalid() {
         assert!(parse_dingtalk_callback("invalid").is_none());
         assert!(parse_dingtalk_callback("unknown:action").is_none());
+    }
+
+    #[test]
+    fn parse_callback_rejects_unsupported_actions() {
+        for data in [
+            "system:unknown.switch:value=yes",
+            "system:confirm:value=yes",
+        ] {
+            assert!(
+                parse_dingtalk_callback(data).is_none(),
+                "unsupported callback must be rejected: {data}"
+            );
+        }
     }
 
     // -- chatId encoding / decoding -------------------------------------------

@@ -420,11 +420,11 @@ pub(crate) fn normalize_interaction(interaction: &InteractionCreate) -> Option<U
         )
     };
 
-    let parsed = parse_callback_data(&button_id);
-    let action = parsed.map(|p| UnifiedAction {
-        action: p.action,
-        category: p.category,
-        params: p.params,
+    let parsed = parse_callback_data(&button_id)?;
+    let action = UnifiedAction {
+        action: parsed.action,
+        category: parsed.category,
+        params: parsed.params,
         context: ActionContext {
             platform: PluginType::Qqbot,
             user_id: user_id.clone(),
@@ -432,7 +432,7 @@ pub(crate) fn normalize_interaction(interaction: &InteractionCreate) -> Option<U
             message_id: None,
             session_id: None,
         },
-    });
+    };
 
     Some(UnifiedIncomingMessage {
         id: stable_event_id.to_owned(),
@@ -455,7 +455,7 @@ pub(crate) fn normalize_interaction(interaction: &InteractionCreate) -> Option<U
         },
         timestamp: 0,
         reply_to_message_id: None,
-        action,
+        action: Some(action),
         raw: None,
     })
 }
@@ -1348,6 +1348,28 @@ mod tests {
         let unified = normalize_interaction(&interaction).expect("should normalize");
         assert_eq!(unified.chat_id, "group:g1");
         assert_eq!(unified.user.id, "mid1");
+    }
+
+    #[test]
+    fn normalize_interaction_rejects_unsupported_callback() {
+        let interaction = InteractionCreate {
+            id: "int_retired".into(),
+            interaction_type: INTERACTION_TYPE_BUTTON,
+            data: Some(super::super::types::InteractionData {
+                resolved: Some(super::super::types::InteractionResolved {
+                    button_id: Some("system:unknown.switch:value=yes".into()),
+                    button_data: None,
+                }),
+            }),
+            channel_id: Some("ch1".into()),
+            guild_id: None,
+            group_openid: None,
+            user_openid: Some("uid1".into()),
+            group_member_openid: None,
+            chat_type: None,
+        };
+
+        assert!(normalize_interaction(&interaction).is_none());
     }
 
     #[test]

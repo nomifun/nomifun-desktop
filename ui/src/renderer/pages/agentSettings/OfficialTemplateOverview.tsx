@@ -1,21 +1,32 @@
 import type {
+  ChatRouteRecord,
   OfficialPresetTemplate,
   TemplateResourceSelection,
+} from '@/common/types/agentPlatform';
+import {
+  AGENT_CHAT_MODEL_TASK,
+  CHAT_ROUTE_RECORD_SCHEMA,
 } from '@/common/types/agentPlatform';
 import { Button, Input, Tag } from '@arco-design/web-react';
 import { Copy, Lock } from '@icon-park/react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { TEMPLATE_I18N_PATH } from './model';
+import {
+  DEFAULT_WORKSPACE_RESOURCE_ID,
+  TEMPLATE_I18N_PATH,
+  WORKSPACE_ROOT_PARAMETER,
+} from './model';
 import styles from './AgentSettingsPage.module.css';
 
 type OfficialTemplateOverviewProps = {
   template: OfficialPresetTemplate;
   busy: boolean;
+  hostWorkDir: string | null;
   onFork: (
     displayName: string,
     resources: TemplateResourceSelection[],
-    modelRouteRefs: Record<string, string>
+    modelRouteRefs: Record<string, string>,
+    chatRouteRecords: Partial<Record<typeof AGENT_CHAT_MODEL_TASK, ChatRouteRecord>>
   ) => void;
 };
 
@@ -47,18 +58,25 @@ const ExactRefList: React.FC<{
 const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
   template,
   busy,
+  hostWorkDir,
   onFork,
 }) => {
   const { t } = useTranslation();
   const path = TEMPLATE_I18N_PATH[template.template_key];
   const name = t(`agentSettings.template.${path}.name`);
   const [resourceIds, setResourceIds] = useState<Record<string, string>>({});
-  const [chatModelRoute, setChatModelRoute] = useState('');
+  const [chatRouteRecordText, setChatRouteRecordText] = useState('');
+  const [chatRouteRecord, setChatRouteRecord] = useState<ChatRouteRecord | null>(null);
 
   useEffect(() => {
-    setResourceIds({});
-    setChatModelRoute('');
-  }, [template.template_key]);
+    setResourceIds(
+      template.template_key === 'coding.codex' && hostWorkDir
+        ? { workspace: DEFAULT_WORKSPACE_RESOURCE_ID }
+        : {}
+    );
+    setChatRouteRecordText('');
+    setChatRouteRecord(null);
+  }, [hostWorkDir, template.template_key]);
 
   const resources = useMemo(
     () =>
@@ -70,15 +88,42 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
             slot_key: resource.slot_key,
             resource_kind: resource.resource_kind,
             resource_id: resourceId,
-            typed_parameters: {},
+            typed_parameters:
+              resource.resource_kind === 'workspace' && hostWorkDir
+                ? { [WORKSPACE_ROOT_PARAMETER]: hostWorkDir }
+                : {},
           };
         })
         .filter((resource): resource is TemplateResourceSelection => resource !== null),
-    [resourceIds, template.seed.typed_resource_defaults]
+    [hostWorkDir, resourceIds, template.seed.typed_resource_defaults]
   );
   const missingRequired = template.seed.typed_resource_defaults.some(
-    (resource) => resource.required && !resourceIds[resource.slot_key]?.trim()
+    (resource) =>
+      resource.required &&
+      !(
+        resourceIds[resource.slot_key]?.trim() ||
+        (resource.slot_key === 'workspace' && hostWorkDir)
+      )
   );
+  const updateChatRouteRecord = (text: string) => {
+    setChatRouteRecordText(text);
+    if (!text.trim()) {
+      setChatRouteRecord(null);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(text) as ChatRouteRecord;
+      if (
+        parsed.schema === CHAT_ROUTE_RECORD_SCHEMA &&
+        parsed.task === AGENT_CHAT_MODEL_TASK &&
+        parsed.primary?.model_route_id
+      ) {
+        setChatRouteRecord(parsed);
+      }
+    } catch {
+      setChatRouteRecord(null);
+    }
+  };
 
   return (
     <main className={styles.editorSurface}>
@@ -102,12 +147,15 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
           type='primary'
           icon={<Copy theme='outline' size='15' />}
           loading={busy}
-          disabled={missingRequired}
+          disabled={missingRequired || chatRouteRecord == null}
           onClick={() =>
             onFork(
               t('agentSettings.defaults.forkName', { name }),
               resources,
-              chatModelRoute.trim() ? { chat: chatModelRoute.trim() } : {}
+              chatRouteRecord
+                ? { [AGENT_CHAT_MODEL_TASK]: chatRouteRecord.primary.model_route_id }
+                : {},
+              chatRouteRecord ? { [AGENT_CHAT_MODEL_TASK]: chatRouteRecord } : {}
             )
           }
         >
@@ -144,11 +192,12 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
           </div>
         </div>
         <label className={styles.field}>
-          <span>{t('agentSettings.fields.chatModelRoute')}</span>
-          <Input
-            value={chatModelRoute}
-            placeholder={t('agentSettings.fields.chatModelRoutePlaceholder')}
-            onChange={setChatModelRoute}
+          <span>{t('agentSettings.fields.chatModelRouteRecord')}</span>
+          <Input.TextArea
+            value={chatRouteRecordText}
+            placeholder={t('agentSettings.fields.chatModelRouteRecordPlaceholder')}
+            autoSize={{ minRows: 4, maxRows: 12 }}
+            onChange={updateChatRouteRecord}
           />
         </label>
         {template.seed.typed_resource_defaults.length === 0 ? (
@@ -172,6 +221,11 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
                     }))
                   }
                 />
+                {resource.resource_kind === 'workspace' && (
+                  <code className={styles.templateResourcePath}>
+                    {hostWorkDir ?? t('agentSettings.resources.hostPathUnavailable')}
+                  </code>
+                )}
                 <div className={styles.tagRow}>
                   {resource.required && (
                     <Tag size='small' color='red'>

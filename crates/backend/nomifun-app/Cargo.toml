@@ -37,10 +37,6 @@ name = "websocket_e2e"
 path = "tests/websocket_e2e.rs"
 
 [[test]]
-name = "gateway_e2e"
-path = "tests/gateway_e2e.rs"
-
-[[test]]
 name = "channel_e2e"
 path = "tests/channel_e2e.rs"
 
@@ -49,24 +45,16 @@ name = "requirements_e2e"
 path = "tests/requirements_e2e.rs"
 
 [[test]]
-name = "agent_execution_e2e"
-path = "tests/agent_execution_e2e.rs"
-
-[[test]]
-name = "autowork_idmm_cooperation_e2e"
-path = "tests/autowork_idmm_cooperation_e2e.rs"
-
-[[test]]
-name = "agent_integration_e2e"
-path = "tests/agent_integration_e2e.rs"
-
-[[test]]
 name = "agent_provider_health_e2e"
 path = "tests/agent_provider_health_e2e.rs"
 
 [[test]]
 name = "agent_platform_e2e"
 path = "tests/agent_platform_e2e.rs"
+
+[[test]]
+name = "remote_rest_e2e"
+path = "tests/remote_rest_e2e.rs"
 
 [[test]]
 name = "connection_test_e2e"
@@ -87,14 +75,6 @@ path = "tests/miniapp_e2e.rs"
 [[test]]
 name = "auxiliary_e2e"
 path = "tests/auxiliary_e2e.rs"
-
-[[test]]
-name = "companion_e2e"
-path = "tests/companion_e2e.rs"
-
-[[test]]
-name = "conversation_e2e"
-path = "tests/conversation_e2e.rs"
 
 [[test]]
 name = "cron_e2e"
@@ -153,10 +133,6 @@ name = "mcp_crud_e2e"
 path = "tests/mcp_crud_e2e.rs"
 
 [[test]]
-name = "remote_mcp_smoke"
-path = "tests/remote_mcp_smoke.rs"
-
-[[test]]
 name = "content_e2e_suite"
 path = "tests/suites/content.rs"
 
@@ -195,7 +171,6 @@ computer-use = [
 browser-use = [
     "nomifun-ai-agent/browser-use",
     "nomifun-gateway/browser-use",
-    "nomifun-public/browser-use",
     "dep:nomi-browser",
     "dep:nomi-browser-engine",
     "dep:nomifun-browser-platform",
@@ -268,6 +243,7 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+zeroize.workspace = true
 base64.workspace = true
 sha2.workspace = true
 uuid.workspace = true

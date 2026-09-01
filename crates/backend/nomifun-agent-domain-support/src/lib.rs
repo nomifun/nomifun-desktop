@@ -22,7 +22,7 @@ use nomifun_agent_contracts::{
     PluginEffectiveState, PluginIdentityDescriptor, PluginMountId, PluginRegistrarDescriptor,
     PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind,
     PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod, ResourceKind, ScopeKey,
-    SkillDefinition, StrictJsonValue, ToolPresentationKind,
+    RuntimeTarget, SkillDefinition, StrictJsonValue, ToolPresentationKind,
     TypedResourceBindings, ValidatedPluginConfig, VersionString, digest_payload,
 };
 use nomifun_agent_kernel::{
@@ -109,7 +109,7 @@ impl CapabilitySpec {
         Self {
             id,
             kind: CapabilityKind::Scheduler,
-            effect_class: Some(EffectClass::WriteDurable),
+            effect_class: None,
             resource_kinds: &[],
             presentation: ToolPresentationKind::Hidden,
             host_targets: &[],
@@ -145,7 +145,7 @@ impl CapabilitySpec {
         Self {
             id,
             kind: CapabilityKind::BackgroundService,
-            effect_class: Some(EffectClass::WriteDurable),
+            effect_class: None,
             resource_kinds: &[],
             presentation: ToolPresentationKind::Hidden,
             host_targets: &[],
@@ -190,7 +190,7 @@ impl CapabilitySpec {
     }
 
     fn has_action(&self) -> bool {
-        self.effect_class.is_some()
+        self.kind == CapabilityKind::Tool
     }
 }
 
@@ -283,18 +283,28 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
         });
         let input_digest = digest_payload(&input_schema).map_err(digest_error)?;
         let output_digest = digest_payload(&output_schema).map_err(digest_error)?;
-        let actions = if capability.has_action() {
-            let action_id = ActionId::from(format!("{}.invoke", capability.id));
-            handler_specs.push((capability_id.clone(), action_id.clone()));
-            vec![CapabilityActionDescriptor {
-                action_id,
-                input_schema: schema_ref(capability.id, "input", &input_digest),
-                output_schema: schema_ref(capability.id, "output", &output_digest),
-                effect_class: capability.effect_class.expect("has_action checked"),
-                presentation: capability.presentation,
-            }]
-        } else {
-            Vec::new()
+        let actions = match (capability.has_action(), capability.effect_class) {
+            (true, Some(effect_class)) => {
+                let action_id = ActionId::from(format!("{}.invoke", capability.id));
+                handler_specs.push((capability_id.clone(), action_id.clone()));
+                vec![CapabilityActionDescriptor {
+                    action_id,
+                    input_schema: schema_ref(capability.id, "input", &input_digest),
+                    output_schema: schema_ref(capability.id, "output", &output_digest),
+                    effect_class,
+                    presentation: capability.presentation,
+                }]
+            }
+            (false, None) => Vec::new(),
+            _ => {
+                return Err(DomainRegistrationError::Invalid {
+                    package_id: package_id.clone(),
+                    reason: format!(
+                        "capability {} must have an effect class iff it is a Tool",
+                        capability.id
+                    ),
+                });
+            }
         };
 
         let supported_surfaces = if capability.host_surfaces.is_empty() {
@@ -487,32 +497,246 @@ pub fn validate_inventory(
     let mut mounts = BTreeSet::new();
     let mut capabilities = BTreeSet::new();
     for registration in registrations {
-        let manifest = &registration.metadata.manifest.payload;
+        let metadata = &registration.metadata;
+        let manifest = &metadata.manifest.payload;
+        if !metadata.manifest.verify().map_err(digest_error)? {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "package manifest digest verification failed",
+            ));
+        }
+        let package_ref = PackageRef {
+            id: manifest.package_id.clone(),
+            version: manifest.package_version.clone(),
+        };
+        if metadata.source.source_identity.trim().is_empty()
+            || metadata.source.source_identity != manifest.package_id.as_ref()
+            || metadata.context.source != metadata.source
+        {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "source metadata does not match the manifest package identity and context",
+            ));
+        }
+        if metadata.mount_id != metadata.registrar.identity.mount_id
+            || metadata.mount_id != metadata.context.identity.mount_id
+            || metadata.registrar.identity.package != package_ref
+            || metadata.context.identity.package != package_ref
+            || metadata.context.state.package_id != manifest.package_id
+            || metadata.context.state.mount_id != metadata.mount_id
+            || metadata.context.state.methods
+                != PluginStateMethod::REQUIRED.into_iter().collect()
+        {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "package identity, mount, or mandatory state metadata drifted",
+            ));
+        }
+        let expected_config_digest =
+            digest_payload(&manifest.config_schema).map_err(digest_error)?;
+        if metadata.context.validated_config.schema_digest != expected_config_digest {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "validated config schema digest does not match the manifest",
+            ));
+        }
         if !packages.insert(manifest.package_id.clone()) {
-            return Err(DomainRegistrationError::Invalid {
-                package_id: manifest.package_id.clone(),
-                reason: "duplicate package in registration inventory".to_owned(),
-            });
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "duplicate package in registration inventory",
+            ));
         }
-        if !mounts.insert(registration.metadata.mount_id.clone()) {
-            return Err(DomainRegistrationError::Invalid {
-                package_id: manifest.package_id.clone(),
-                reason: "duplicate plugin mount in registration inventory".to_owned(),
-            });
+        if !mounts.insert(metadata.mount_id.clone()) {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "duplicate plugin mount in registration inventory",
+            ));
         }
+        let mut expected_handlers = BTreeSet::new();
+        let mut manifest_capability_ids = BTreeSet::new();
+        let mut manifest_skill_ids = BTreeSet::new();
+        let mut manifest_mcp_tool_keys = BTreeSet::new();
+        let mut manifest_service_ids = BTreeSet::new();
         for capability in &manifest.contributions.capabilities {
             if !capabilities.insert(capability.id.clone()) {
-                return Err(DomainRegistrationError::Invalid {
-                    package_id: manifest.package_id.clone(),
-                    reason: format!(
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    format!(
                         "duplicate capability {} in registration inventory",
                         capability.id.as_ref()
                     ),
-                });
+                ));
             }
+            if !manifest_capability_ids.insert(capability.id.clone())
+                || capability.package != package_ref
+            {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    format!(
+                        "capability {} does not belong to the package manifest",
+                        capability.id.as_ref()
+                    ),
+                ));
+            }
+            let action_ids = capability
+                .contributions
+                .actions
+                .iter()
+                .map(|action| action.action_id.clone())
+                .collect::<BTreeSet<_>>();
+            if action_ids.len() != capability.contributions.actions.len() {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    format!(
+                        "capability {} declares duplicate action IDs",
+                        capability.id.as_ref()
+                    ),
+                ));
+            }
+            match capability.kind {
+                CapabilityKind::Tool if capability.contributions.actions.len() == 1 => {
+                    expected_handlers.insert(capability.id.clone());
+                }
+                CapabilityKind::Tool => {
+                    return Err(invalid_registration(
+                        &manifest.package_id,
+                        format!(
+                            "tool capability {} must declare exactly one action",
+                            capability.id.as_ref()
+                        ),
+                    ));
+                }
+                _ if capability.contributions.actions.is_empty() => {}
+                _ => {
+                    return Err(invalid_registration(
+                        &manifest.package_id,
+                        format!(
+                            "non-tool capability {} declares an action",
+                            capability.id.as_ref()
+                        ),
+                    ));
+                }
+            }
+        }
+        for skill in &manifest.contributions.skills {
+            if !manifest_skill_ids.insert(skill.id.clone()) || skill.package != package_ref {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    format!(
+                        "skill {} does not belong to the package manifest",
+                        skill.id.as_ref()
+                    ),
+                ));
+            }
+        }
+        for mapping in &manifest.contributions.mcp_tools {
+            if !manifest_mcp_tool_keys.insert(mapping.canonical_tool_key.clone())
+                || mapping.package != package_ref
+                || !manifest
+                    .contributions
+                    .capabilities
+                    .iter()
+                    .any(|capability| {
+                        capability.id == mapping.capability.id
+                            && capability.version == mapping.capability.version
+                    })
+            {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    format!(
+                        "MCP mapping {} does not belong to the package manifest",
+                        mapping.canonical_tool_key.as_ref()
+                    ),
+                ));
+            }
+        }
+        for provision in &manifest.provides_services {
+            if !manifest_service_ids.insert(provision.service.id.clone()) {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    "provided service declarations are duplicated",
+                ));
+            }
+        }
+        let declared_host_ports = declared_host_ports(metadata);
+        let expected_registrar_operations = required_registrar_operations(
+            !manifest_capability_ids.is_empty(),
+            !manifest_skill_ids.is_empty(),
+            !manifest_mcp_tool_keys.is_empty(),
+            !manifest_service_ids.is_empty(),
+            !declared_host_ports.is_empty(),
+        );
+        if metadata.registrar.declared_capability_ids != manifest_capability_ids
+            || metadata.registrar.declared_skill_ids != manifest_skill_ids
+            || metadata.registrar.declared_mcp_tool_keys != manifest_mcp_tool_keys
+            || metadata.registrar.declared_service_keys != manifest_service_ids
+            || metadata.registrar.declared_host_ports != declared_host_ports
+            || metadata.registrar.allowed_operations != expected_registrar_operations
+        {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "registrar declarations do not match manifest and context",
+            ));
+        }
+        if registration.handler_ids() != expected_handlers {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "capability handler exports differ from Tool actions",
+            ));
         }
     }
     Ok(())
+}
+
+fn declared_host_ports(metadata: &PluginRegistrationMetadata) -> BTreeSet<HostPortId> {
+    metadata
+        .context
+        .host_ports
+        .iter()
+        .map(|binding| binding.port.id.clone())
+        .chain(
+            metadata
+                .context
+                .typed_command_ports
+                .iter()
+                .map(|binding| binding.port.id.clone()),
+        )
+        .chain(
+            metadata
+                .context
+                .domain_outbox_ports
+                .iter()
+                .map(|binding| binding.port.id.clone()),
+        )
+        .chain([metadata.context.cancellation.cancellation_port.id.clone()])
+        .chain([metadata.context.managed_task_registration.registrar_port.id.clone()])
+        .collect()
+}
+
+fn required_registrar_operations(
+    capabilities: bool,
+    skills: bool,
+    mcp: bool,
+    services: bool,
+    host_ports: bool,
+) -> BTreeSet<PluginRegistrarOperation> {
+    let mut operations = BTreeSet::new();
+    if capabilities {
+        operations.insert(PluginRegistrarOperation::ContributeCapability);
+    }
+    if skills {
+        operations.insert(PluginRegistrarOperation::ContributeSkill);
+    }
+    if mcp {
+        operations.insert(PluginRegistrarOperation::ContributeMcpToolMapping);
+    }
+    if services {
+        operations.insert(PluginRegistrarOperation::ProvideService);
+    }
+    if host_ports {
+        operations.insert(PluginRegistrarOperation::BindHostPort);
+    }
+    operations
 }
 
 pub fn typed_resource_bindings_for<'a>(
@@ -562,6 +786,16 @@ fn digest_error(error: impl std::fmt::Display) -> DomainRegistrationError {
     DomainRegistrationError::Digest(error.to_string())
 }
 
+fn invalid_registration(
+    package_id: &PackageId,
+    reason: impl Into<String>,
+) -> DomainRegistrationError {
+    DomainRegistrationError::Invalid {
+        package_id: package_id.clone(),
+        reason: reason.into(),
+    }
+}
+
 /// A small helper for callers that need to make an explicit, typed
 /// availability decision before resolving a capability.
 pub fn capability_available_on_host(
@@ -569,11 +803,62 @@ pub fn capability_available_on_host(
     host_surface: &str,
     capability: &CapabilitySpec,
 ) -> bool {
-    let target_ok = capability.host_targets.is_empty()
-        || capability.host_targets.iter().any(|target| *target == host_target);
-    let surface_ok = capability.host_surfaces.is_empty()
-        || capability.host_surfaces.iter().any(|surface| *surface == host_surface);
-    target_ok && surface_ok
+    check_platform_availability(
+        capability,
+        &RuntimeTarget::from(host_target),
+        host_surface,
+    )
+    .is_ok()
+}
+
+/// Check a capability against its typed host target and surface contract.
+///
+/// Empty host identities fail closed with the canonical Kernel error.
+/// Surface-only restrictions remain represented by the capability's
+/// `supported_surfaces`; `PlatformConstraint::Any` is only used for the
+/// absence of a target restriction.
+pub fn check_platform_availability(
+    capability: &CapabilitySpec,
+    host_target: &RuntimeTarget,
+    host_surface: &str,
+) -> Result<(), KernelError> {
+    if host_target.as_ref().trim().is_empty() {
+        return Err(KernelError::CapabilityUnavailableOnPlatform {
+            capability_id: CapabilityId::from(capability.id),
+            target: host_target.as_ref().to_owned(),
+            surface: host_surface.to_owned(),
+        });
+    }
+    if host_surface.trim().is_empty() {
+        return Err(KernelError::CapabilityUnavailableOnSurface {
+            capability_id: CapabilityId::from(capability.id),
+            surface: host_surface.to_owned(),
+        });
+    }
+    if !capability.host_targets.is_empty()
+        && !capability
+            .host_targets
+            .iter()
+            .any(|target| *target == host_target.as_ref())
+    {
+        return Err(KernelError::CapabilityUnavailableOnPlatform {
+            capability_id: CapabilityId::from(capability.id),
+            target: host_target.as_ref().to_owned(),
+            surface: host_surface.to_owned(),
+        });
+    }
+    if !capability.host_surfaces.is_empty()
+        && !capability
+            .host_surfaces
+            .iter()
+            .any(|surface| *surface == host_surface)
+    {
+        return Err(KernelError::CapabilityUnavailableOnSurface {
+            capability_id: CapabilityId::from(capability.id),
+            surface: host_surface.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// The C7 target inventory, expressed as declarative registration specs.
@@ -813,7 +1098,13 @@ const ASSET_LIBRARY: &[&str] = &["asset_library"];
 const GENERATION_PROVIDER: &[&str] = &["generation_provider"];
 const MINIAPP: &[&str] = &["miniapp"];
 const MCP_SERVER: &[&str] = &["mcp_server"];
-const DESKTOP_NATIVE_TARGETS: &[&str] = &[
+const BROWSER_DESKTOP_TARGETS: &[&str] = &[
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+];
+const COMPUTER_DESKTOP_TARGETS: &[&str] = &[
     "x86_64-pc-windows-msvc",
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
@@ -911,33 +1202,33 @@ const MCP_CAPABILITIES: [CapabilitySpec; 6] = [
 ];
 const BROWSER_CAPABILITIES: [CapabilitySpec; 9] = [
     CapabilitySpec::resource_provider("browser.identity", BROWSER)
-        .on_hosts(DESKTOP_NATIVE_TARGETS, DESKTOP_SURFACE),
+        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
     CapabilitySpec::context("browser.observe")
-        .on_hosts(DESKTOP_NATIVE_TARGETS, DESKTOP_SURFACE),
+        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
     CapabilitySpec::tool("browser.navigate", EffectClass::ExternalTransmit, BROWSER)
-        .on_hosts(DESKTOP_NATIVE_TARGETS, DESKTOP_SURFACE),
+        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
     CapabilitySpec::tool("browser.act", EffectClass::WriteReversible, BROWSER)
-        .on_hosts(DESKTOP_NATIVE_TARGETS, DESKTOP_SURFACE),
+        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
     CapabilitySpec::tool("browser.download", EffectClass::WriteDurable, BROWSER)
-        .on_hosts(DESKTOP_NATIVE_TARGETS, DESKTOP_SURFACE),
+        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
     CapabilitySpec::tool("browser.upload", EffectClass::ExternalTransmit, BROWSER)
-        .on_hosts(DESKTOP_NATIVE_TARGETS, DESKTOP_SURFACE),
+        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
     CapabilitySpec::tool("browser.evaluate", EffectClass::ExecuteLocal, BROWSER)
-        .on_hosts(DESKTOP_NATIVE_TARGETS, DESKTOP_SURFACE),
+        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
     CapabilitySpec::context("browser.site_memory")
-        .on_hosts(DESKTOP_NATIVE_TARGETS, DESKTOP_SURFACE),
+        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
     CapabilitySpec::tool("browser.takeover", EffectClass::WriteReversible, BROWSER)
-        .on_hosts(DESKTOP_NATIVE_TARGETS, DESKTOP_SURFACE),
+        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
 ];
 const COMPUTER_CAPABILITIES: [CapabilitySpec; 4] = [
     CapabilitySpec::context("computer.observe")
-        .on_hosts(DESKTOP_NATIVE_TARGETS, DESKTOP_SURFACE),
+        .on_hosts(COMPUTER_DESKTOP_TARGETS, DESKTOP_SURFACE),
     CapabilitySpec::tool("computer.input", EffectClass::Physical, COMPUTER)
-        .on_hosts(DESKTOP_NATIVE_TARGETS, DESKTOP_SURFACE),
+        .on_hosts(COMPUTER_DESKTOP_TARGETS, DESKTOP_SURFACE),
     CapabilitySpec::tool("computer.launch", EffectClass::ExecuteLocal, COMPUTER)
-        .on_hosts(DESKTOP_NATIVE_TARGETS, DESKTOP_SURFACE),
+        .on_hosts(COMPUTER_DESKTOP_TARGETS, DESKTOP_SURFACE),
     CapabilitySpec::context("a11y.observe")
-        .on_hosts(DESKTOP_NATIVE_TARGETS, DESKTOP_SURFACE),
+        .on_hosts(COMPUTER_DESKTOP_TARGETS, DESKTOP_SURFACE),
 ];
 const REQUIREMENT_CAPABILITIES: [CapabilitySpec; 4] = [
     CapabilitySpec::tool("requirements.read", EffectClass::ReadSensitive, &[]),
@@ -1059,7 +1350,38 @@ mod tests {
     }
 
     #[test]
-    fn host_constraints_are_explicit_and_fail_closed() {
+    fn non_tool_contributions_never_publish_actions_or_handlers() {
+        let registrations = registrations(c7_package_specs()).unwrap();
+        let mut tool_count = 0;
+        for registration in &registrations {
+            for capability in &registration
+                .metadata
+                .manifest
+                .payload
+                .contributions
+                .capabilities
+            {
+                if capability.kind == CapabilityKind::Tool {
+                    tool_count += 1;
+                    assert_eq!(capability.contributions.actions.len(), 1);
+                    assert!(registration.handler_ids().contains(&capability.id));
+                } else {
+                    assert!(capability.contributions.actions.is_empty());
+                    assert!(!registration.handler_ids().contains(&capability.id));
+                }
+            }
+        }
+        assert_eq!(
+            registrations
+                .iter()
+                .flat_map(|registration| registration.handler_ids())
+                .count(),
+            tool_count
+        );
+    }
+
+    #[test]
+    fn host_constraints_are_typed_and_fail_closed() {
         let capability = CapabilitySpec::tool(
             "support.windows",
             EffectClass::ExecuteLocal,
@@ -1075,6 +1397,76 @@ mod tests {
             "x86_64-unknown-linux-gnu",
             "headless",
             &capability
+        ));
+        assert!(matches!(
+            check_platform_availability(
+                &capability,
+                &RuntimeTarget::from("x86_64-unknown-linux-gnu"),
+                "headless",
+            ),
+            Err(KernelError::CapabilityUnavailableOnPlatform { .. })
+        ));
+
+        let surface_only =
+            CapabilitySpec::context("support.desktop-only").on_hosts(&[], &["desktop"]);
+        assert!(check_platform_availability(
+            &surface_only,
+            &RuntimeTarget::from("x86_64-unknown-linux-gnu"),
+            "desktop",
+        )
+        .is_ok());
+        assert!(matches!(
+            check_platform_availability(
+                &surface_only,
+                &RuntimeTarget::from("x86_64-unknown-linux-gnu"),
+                "headless",
+            ),
+            Err(KernelError::CapabilityUnavailableOnSurface { .. })
+        ));
+        assert!(!capability_available_on_host("", "desktop", &surface_only));
+    }
+
+    #[test]
+    fn canonical_platform_inventory_matches_release_boundaries() {
+        let specs = c7_package_specs();
+        let browser = specs
+            .iter()
+            .find(|spec| spec.id == "nomifun.browser")
+            .unwrap();
+        let browser_capability = browser
+            .capabilities
+            .iter()
+            .find(|capability| capability.id == "browser.navigate")
+            .unwrap();
+        assert!(capability_available_on_host(
+            "x86_64-unknown-linux-gnu",
+            "desktop",
+            browser_capability,
+        ));
+        assert!(!capability_available_on_host(
+            "x86_64-unknown-linux-gnu",
+            "headless",
+            browser_capability,
+        ));
+
+        let computer = specs
+            .iter()
+            .find(|spec| spec.id == "nomifun.computer-a11y")
+            .unwrap();
+        let computer_capability = computer
+            .capabilities
+            .iter()
+            .find(|capability| capability.id == "computer.input")
+            .unwrap();
+        assert!(!capability_available_on_host(
+            "x86_64-unknown-linux-gnu",
+            "desktop",
+            computer_capability,
+        ));
+        assert!(capability_available_on_host(
+            "x86_64-pc-windows-msvc",
+            "desktop",
+            computer_capability,
         ));
     }
 
@@ -1096,5 +1488,58 @@ mod tests {
             })
             .sum::<usize>();
         assert_eq!(capability_count, 137);
+    }
+
+    #[test]
+    fn canonical_registration_metadata_is_repeatable() {
+        let first = registrations(c7_package_specs()).unwrap();
+        let second = registrations(c7_package_specs()).unwrap();
+        let first_metadata = first
+            .iter()
+            .map(|registration| registration.metadata.clone())
+            .collect::<Vec<_>>();
+        let second_metadata = second
+            .iter()
+            .map(|registration| registration.metadata.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(first_metadata, second_metadata);
+    }
+
+    #[test]
+    fn inventory_rejects_tampered_manifest_and_identity_metadata() {
+        let mut manifest_tampered = registrations([PackageSpec {
+            id: "domain.support",
+            display_name: "Support",
+            description: "Test support package",
+            mount_id: "domain-support",
+            capabilities: CAPS,
+            supported_surfaces: &["desktop"],
+        }])
+        .unwrap();
+        manifest_tampered[0]
+            .metadata
+            .manifest
+            .payload
+            .display
+            .name = "Tampered".to_owned();
+        assert!(validate_inventory(&manifest_tampered)
+            .unwrap_err()
+            .to_string()
+            .contains("digest"));
+
+        let mut identity_tampered = registrations([PackageSpec {
+            id: "domain.support",
+            display_name: "Support",
+            description: "Test support package",
+            mount_id: "domain-support",
+            capabilities: CAPS,
+            supported_surfaces: &["desktop"],
+        }])
+        .unwrap();
+        identity_tampered[0].metadata.source.source_identity = "other".to_owned();
+        assert!(validate_inventory(&identity_tampered)
+            .unwrap_err()
+            .to_string()
+            .contains("source metadata"));
     }
 }

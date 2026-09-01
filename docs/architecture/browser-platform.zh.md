@@ -72,7 +72,7 @@ Automatic 策略从系统总内存和逻辑 CPU 推导安全上限。运行期�
 
 每个可信的用户可见任务族都有独立资源包络；同一对话的兄弟运行时共享该任务族，轮换运行时不会获得新配额。Automatic 与 High concurrency 均为单任务族提供 1 GiB 归因内存预算、2 个加权活动操作、4 个打开的 Lane 和 16 个顶层标签页；Resource saving 分别为 768 MiB、1 个操作、2 个 Lane 和 8 个标签页。High concurrency 只提高安装级总吞吐，不放宽单任务族限制。操作、Lane、顶层标签页、队列及内部状态边界属于精确硬限制；运行时和 owner lease 仍是独立的精确生命周期清理权限，因此清理一个运行时不会关闭同任务族的兄弟运行时。共享 Chromium Host 只有一棵操作系统进程树，无法精确测量其中每个任务族的 RSS；Hub 会在存活任务族的 Lane 之间归因 Host RSS，并把结果用作回收监控。因此，管理 API 与 Browser 页面会把全局值明确标为压力阈值，把单任务族内存明确标为估算值。
 
-Remote MCP 的 transport 状态遵循同一套有界模型。`/mcp` 与 `/mcp-agent` 共用一套按机器能力推导的 admission；请求体、session ID、scope、临时 session、初始化速率和待处理 Browser 清理债务全部有界。无 session header 的非 `initialize` 请求会在 rmcp 创建 transport session 之前被拒绝。仍存活且经服务端验证的 MCP session 是可信任务族边界，但 fresh `initialize` 会创建新 session；若要跨 fresh session 提供精确连续性，未来仍需服务端签发并持久化的 logical-task lease，当前协议不会虚假声称已经具备这一能力。
+Canonical Remote MCP 的 transport 状态同样有界。`/mcp` 对请求体、session ID、临时 session、初始化速率和每 session 并发请求设定上限；无 session header 的非 `initialize` 请求会在 rmcp 创建 transport session 前被拒绝。服务端验证的 MCP session 只负责连接生命周期；跨 fresh MCP 连接的精确产品连续性来自显式、durable 的 `agent_session_id`。
 
 结构资源包络并不会把单个页面变成按字节或 CPU 隔离的进程。Agent 操作释放许可后，页面中的 JavaScript 或 renderer 原生工作仍可继续；共享 Host 的 RSS 归因也可能被兄弟任务稀释。作为物理兜底，当经过进程身份校验的受管 Chromium RSS 连续 3 次超过硬件推导比例，并且精确的任务级回收没有进展时，Hub 会替换实际占用最大的可归属受管 Host。CPU 另有一条独立的 Host 级终态：当全系统 CPU 至少达到 90%，且与当前 live driver PID 精确匹配的受管 Chromium 进程树连续 3 次占到整机容量至少 50% 时，Hub 会替换其中 CPU 最忙的受管 Host。一次恢复样本或成功的任务级关闭都会重置对应的连续计数。这些兜底不会扫描或终止系统中无关的 Chrome，但替换共享 Host 必然会中断其中的兄弟任务，后续必须重新 observe。若要实现精确的单任务字节与 CPU 硬限制，需要为任务提供独立 Chromium 进程树，并使用 OS Job/cgroup；当前归因内存设置和 CPU 终态均不会声称具备这种物理隔离。
 

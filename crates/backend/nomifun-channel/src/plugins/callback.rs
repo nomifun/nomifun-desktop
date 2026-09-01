@@ -3,9 +3,9 @@
 //! Channels that support inline buttons (Telegram, Discord, Slack, QQ Bot)
 //! encode an [`ActionButton`] into a compact `custom_id`/`callback_data` string
 //! `"category:action"` or `"category:action:k=v,k=v"`, and decode the reverse
-//! when the user clicks. The `category` prefix mirrors the routing in
-//! `ActionExecutor` so the decoded [`crate::types::UnifiedAction`] lands in the
-//! right handler group.
+//! when the user clicks. Only the current Channel action surface is accepted;
+//! unknown or stale callbacks are rejected before they can become a unified
+//! inbound action.
 
 use std::collections::HashMap;
 
@@ -19,16 +19,28 @@ pub struct ParsedCallback {
     pub params: Option<HashMap<String, String>>,
 }
 
+/// Returns whether an action is allowed on the current Channel callback wire.
+///
+/// Ordinary product namespaces remain open so a newly added Channel action
+/// does not require a transport parser release. The retired Agent namespace
+/// and confirmation verb are rejected before a callback can become a unified
+/// inbound action.
+pub fn is_supported_callback_action(action: &str) -> bool {
+    let Some((namespace, verb)) = action.split_once('.') else {
+        return false;
+    };
+    matches!(
+        namespace,
+        "pairing" | "session" | "help" | "settings" | "chat" | "action" | "confirm"
+    ) && !(namespace == "system" && verb == "confirm")
+}
+
 /// Derive the category prefix from an action name, matching `ActionExecutor`
 /// routing:
-///   - `system.confirm` → `"chat"` (handled by `handle_chat_action`)
 ///   - `pairing.*` → `"platform"`
 ///   - `chat.*` / `action.*` → `"chat"`
 ///   - everything else (`session.*`, `help.*`, `agent.*`, `system.*`, ...) → `"system"`
 pub fn action_category_prefix(action: &str) -> &'static str {
-    if action == "system.confirm" {
-        return "chat";
-    }
     match action.split('.').next().unwrap_or("") {
         "pairing" => "platform",
         "chat" | "action" => "chat",
@@ -62,7 +74,11 @@ pub fn parse_callback_data(data: &str) -> Option<ParsedCallback> {
         "chat" => ActionCategory::Chat,
         _ => return None,
     };
-    let action = parts[1].to_string();
+    let action = parts[1].trim();
+    if action.is_empty() || !is_supported_callback_action(action) {
+        return None;
+    }
+    let action = action.to_owned();
     let params = if parts.len() == 3 && !parts[2].is_empty() {
         let mut map = HashMap::new();
         for pair in parts[2].split(',') {
@@ -91,7 +107,7 @@ mod tests {
         assert_eq!(action_category_prefix("chat.regenerate"), "chat");
         assert_eq!(action_category_prefix("action.copy"), "chat");
         assert_eq!(action_category_prefix("session.new"), "system");
-        assert_eq!(action_category_prefix("system.confirm"), "chat");
+        assert_eq!(action_category_prefix("confirm.yes"), "system");
     }
 
     #[test]
@@ -107,13 +123,13 @@ mod tests {
     #[test]
     fn format_with_params() {
         let btn = ActionButton {
-            label: "Confirm".into(),
-            action: "system.confirm".into(),
-            params: Some(HashMap::from([("callId".into(), "abc".into())])),
+            label: "Continue".into(),
+            action: "chat.continue".into(),
+            params: Some(HashMap::from([("sessionId".into(), "abc".into())])),
         };
         let s = format_callback_data(&btn);
-        assert!(s.starts_with("chat:system.confirm:"));
-        assert!(s.contains("callId=abc"));
+        assert!(s.starts_with("chat:chat.continue:"));
+        assert!(s.contains("sessionId=abc"));
     }
 
     #[test]
@@ -126,11 +142,10 @@ mod tests {
 
     #[test]
     fn parse_with_params() {
-        let p = parse_callback_data("chat:system.confirm:callId=abc,value=yes").unwrap();
-        assert_eq!(p.action, "system.confirm");
+        let p = parse_callback_data("chat:chat.continue:sessionId=abc").unwrap();
+        assert_eq!(p.action, "chat.continue");
         let params = p.params.unwrap();
-        assert_eq!(params.get("callId").unwrap(), "abc");
-        assert_eq!(params.get("value").unwrap(), "yes");
+        assert_eq!(params.get("sessionId").unwrap(), "abc");
     }
 
     #[test]
@@ -140,15 +155,23 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_confirm_routes_to_chat() {
-        let btn = ActionButton {
-            label: "Yes".into(),
-            action: "system.confirm".into(),
-            params: Some(HashMap::from([("value".into(), "yes".into())])),
-        };
-        let parsed = parse_callback_data(&format_callback_data(&btn)).unwrap();
-        // system.confirm is routed to chat handler
-        assert_eq!(parsed.category, ActionCategory::Chat);
-        assert_eq!(parsed.action, "system.confirm");
+    fn unsupported_callbacks_are_rejected() {
+        for data in [
+            "system:unknown.switch:value=yes",
+            "system:confirm:value=yes",
+        ] {
+            assert!(
+                parse_callback_data(data).is_none(),
+                "unsupported callback must be rejected: {data}"
+            );
+        }
+    }
+
+    #[test]
+    fn channel_stop_callbacks_remain_supported() {
+        for data in ["system:confirm.yes", "system:confirm.no"] {
+            let parsed = parse_callback_data(data).expect("channel stop callback");
+            assert_eq!(parsed.category, ActionCategory::System);
+        }
     }
 }

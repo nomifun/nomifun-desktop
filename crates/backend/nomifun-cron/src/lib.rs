@@ -7,6 +7,7 @@ pub mod executor;
 pub mod prompt;
 pub mod routes;
 pub mod scheduler;
+mod session_port;
 pub mod service;
 pub mod sink;
 pub mod skill_file;
@@ -16,4 +17,5 @@ pub mod types;
 
 pub use events::CronEventEmitter;
 pub use routes::cron_routes;
+pub use session_port::{CronSessionPort, conversation_cron_session_port};
 pub use state::CronRouterState;

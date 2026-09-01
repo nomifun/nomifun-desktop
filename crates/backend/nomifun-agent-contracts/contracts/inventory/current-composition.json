@@ -31,7 +31,9 @@
         {
           "path": "apps/web/src/main.rs",
           "symbols": [
-            "AppServices::from_config"
+            "init_environment",
+            "CanonicalHost::compose",
+            "run_canonical_server"
           ]
         },
         {
@@ -78,18 +80,6 @@
           "path": "crates/backend/nomifun-gateway/src/registry/capability.rs",
           "symbols": [
             "Handler"
-          ]
-        },
-        {
-          "path": "crates/backend/nomifun-public/src/handler.rs",
-          "symbols": [
-            "RemoteMcpHandler"
-          ]
-        },
-        {
-          "path": "crates/backend/nomifun-public/src/rest.rs",
-          "symbols": [
-            "RestState"
           ]
         },
         {

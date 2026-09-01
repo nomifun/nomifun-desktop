@@ -154,7 +154,7 @@ from silently tying themselves to engine internals.
 | [`nomifun-knowledge`](../../crates/backend/nomifun-knowledge) | Knowledge bases, bound-base state, and scoped knowledge MCP search. |
 | [`nomifun-companion`](../../crates/backend/nomifun-companion) | Desktop companions, figures, per-companion memory (every row owned by exactly one companion), and companion-bound state. |
 | [`nomifun-gateway`](../../crates/backend/nomifun-gateway) | Platform Gateway MCP registry and process-issued capability tools. |
-| [`nomifun-public`](../../crates/backend/nomifun-public) | Public `/mcp`, `/mcp-agent`, and `/v1` front doors with installation-token auth. |
+| [`nomifun-public`](../../crates/backend/nomifun-public) | Canonical installation-token Remote MCP adapter at `/mcp`; product identity remains the explicit AgentSession ID. |
 | [`nomifun-app`](../../crates/backend/nomifun-app) | Application crate: assembles every domain crate into the axum server with DI + middleware. Ships the `nomicore` binary. |
 
 > The full backend layering — request lifecycle, who owns which routes, the

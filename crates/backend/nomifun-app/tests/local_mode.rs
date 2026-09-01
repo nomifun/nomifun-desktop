@@ -22,9 +22,9 @@ async fn test_local_mode_skips_auth() {
         auth_policy: nomifun_app::AuthPolicy::NoAuth,
         ..isolated_config("nomifun-local-mode-e2e-")
     };
-    let services = nomifun_app::AppServices::from_config(db, &config).await.unwrap();
+    let services = nomifun_app::compatibility::AppServices::from_config(db, &config).await.unwrap();
 
-    let router = nomifun_app::create_router(&services).await;
+    let router = nomifun_app::compatibility::create_router(&services).await;
 
     // Health check should work
     let response = router
@@ -47,14 +47,14 @@ async fn test_local_mode_skips_auth() {
 #[tokio::test]
 async fn test_non_local_mode_requires_auth() {
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = nomifun_app::AppServices::from_config(
+    let services = nomifun_app::compatibility::AppServices::from_config(
         db,
         &isolated_config("nomifun-auth-required-e2e-"),
     )
     .await
     .unwrap();
 
-    let router = nomifun_app::create_router(&services).await;
+    let router = nomifun_app::compatibility::create_router(&services).await;
 
     let response = router
         .oneshot(Request::builder().uri("/api/settings").body(Body::empty()).unwrap())

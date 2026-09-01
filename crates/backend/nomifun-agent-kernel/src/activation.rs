@@ -216,6 +216,7 @@ mod tests {
                     required_runtime_features: BTreeSet::new(),
                     compiled_runtime_profile_digest: DigestHex::from("profile"),
                     model_route_refs: BTreeMap::new(),
+                    chat_route_identity: None,
                     initial_capabilities: Vec::new(),
                     on_demand_capabilities: Vec::new(),
                     on_demand_activation_plans: BTreeMap::from([(

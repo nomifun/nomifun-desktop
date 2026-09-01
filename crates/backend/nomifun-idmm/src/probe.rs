@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nomifun_ai_agent::{AgentStreamEvent, TurnStopReason};
 use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
+use nomifun_ai_agent::{AgentStreamEvent, TurnStopReason};
 use nomifun_api_types::{
     ConversationRuntimeStateKind, ConversationRuntimeSummary, IdmmTargetKind, SendMessageRequest,
 };
@@ -19,7 +19,7 @@ use nomifun_common::CompanionId;
 use nomifun_conversation::{ConversationService, IdmmTurnScope};
 use nomifun_db::{IConversationRepository, SortOrder};
 use nomifun_terminal::TerminalDriver;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::detector::{TerminalDetector, signal_from_agent_error};
 #[cfg(test)]
@@ -204,11 +204,137 @@ fn has_live_turn_authority(
         && runtime.state == ConversationRuntimeStateKind::Running
 }
 
+/// Typed command/query seam consumed by IDMM for a Conversation-backed
+/// session.  It exposes only observation and exact active-turn operations;
+/// runtime construction, replacement, and lifecycle ownership remain with the
+/// session provider.
+#[async_trait]
+pub trait ConversationSessionPort: Send + Sync {
+    fn subscribe(&self, conversation_id: &str)
+        -> Option<broadcast::Receiver<AgentStreamEvent>>;
+    async fn runtime_summary(&self, conversation_id: &str) -> ConversationRuntimeSummary;
+    fn user_cancelled_since(&self, conversation_id: &str, since_ms: i64) -> bool;
+    fn is_alive(&self, conversation_id: &str) -> bool;
+    async fn active_turn_scope(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<IdmmTurnScope, AppError>;
+    async fn continue_active_turn(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        expected_scope: &IdmmTurnScope,
+        request: SendMessageRequest,
+    ) -> Result<String, AppError>;
+    async fn failover(&self, owner_id: &str, conversation_id: &str)
+        -> Result<bool, AppError>;
+}
+
+/// Stateless adapter over the existing Conversation session owner.  IDMM
+/// receives only the exact query/command operations it needs; it cannot retain
+/// session state or construct a replacement runtime.
+pub struct ConversationServiceSessionPort {
+    service: ConversationService,
+    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+}
+
+impl ConversationServiceSessionPort {
+    pub fn new(
+        service: ConversationService,
+        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    ) -> Self {
+        Self {
+            service,
+            runtime_registry,
+        }
+    }
+}
+
+/// Build IDMM's transitional Conversation-backed session port.
+///
+/// The returned object is a stateless delegate over the existing session
+/// owner. It does not cache runtime handles, mint identities, retry commands,
+/// or introduce another lifecycle authority.
+pub fn conversation_session_port(
+    service: ConversationService,
+    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+) -> Arc<dyn ConversationSessionPort> {
+    Arc::new(ConversationServiceSessionPort::new(
+        service,
+        runtime_registry,
+    ))
+}
+
+#[async_trait]
+impl ConversationSessionPort for ConversationServiceSessionPort {
+    fn subscribe(
+        &self,
+        conversation_id: &str,
+    ) -> Option<broadcast::Receiver<AgentStreamEvent>> {
+        self.runtime_registry
+            .get_runtime(conversation_id)
+            .map(|runtime| runtime.subscribe())
+    }
+
+    async fn runtime_summary(&self, conversation_id: &str) -> ConversationRuntimeSummary {
+        self.service.runtime_summary_for(conversation_id).await
+    }
+
+    fn user_cancelled_since(&self, conversation_id: &str, since_ms: i64) -> bool {
+        self.service.user_cancelled_since(conversation_id, since_ms)
+    }
+
+    fn is_alive(&self, conversation_id: &str) -> bool {
+        self.runtime_registry.get_runtime(conversation_id).is_some()
+    }
+
+    async fn active_turn_scope(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<IdmmTurnScope, AppError> {
+        self.service
+            .idmm_active_turn_scope(owner_id, conversation_id, &self.runtime_registry)
+            .await
+    }
+
+    async fn continue_active_turn(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        expected_scope: &IdmmTurnScope,
+        request: SendMessageRequest,
+    ) -> Result<String, AppError> {
+        self.service
+            .idmm_continue_active_turn(
+                owner_id,
+                conversation_id,
+                expected_scope,
+                request,
+                &self.runtime_registry,
+            )
+            .await
+    }
+
+    async fn failover(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<bool, AppError> {
+        self.service
+            .idmm_failover_conversation(owner_id, conversation_id, &self.runtime_registry)
+            .await
+    }
+}
+
 /// Supervises a chat conversation's Agent runtime.
 #[derive(Clone)]
 pub struct ConversationProbe {
-    pub runtime_registry: Arc<dyn AgentRuntimeRegistry>,
-    pub conversation_service: ConversationService,
+    /// A narrow command/query view over the canonical session owner.  The
+    /// probe never receives a runtime registry or ConversationService and
+    /// therefore cannot build, replace, or address a second session.
+    pub session: Arc<dyn ConversationSessionPort>,
     pub conversation_repo: Arc<dyn IConversationRepository>,
     pub conversation_id: ConversationId,
 }
@@ -242,10 +368,7 @@ impl ConversationProbe {
             .await
             .map_err(AppError::from)?
             .ok_or_else(|| AppError::NotFound(format!("conversation {}", self.conversation_id)))?;
-        let runtime = self
-            .conversation_service
-            .runtime_summary_for(self.conversation_id.as_str())
-            .await;
+        let runtime = self.session.runtime_summary(self.conversation_id.as_str()).await;
         if has_live_turn_authority(row.status.as_deref(), &runtime) {
             Ok(())
         } else {
@@ -267,13 +390,12 @@ impl SessionProbe for ConversationProbe {
         let (tx, rx) = mpsc::channel(64);
         // Attach lazily: if no agent exists yet there is nothing to observe; the
         // supervisor re-arms on the next loop tick / status fetch.
-        let Some(instance) = self.runtime_registry.get_runtime(self.conversation_id.as_str()) else {
+        let Some(mut sub) = self.session.subscribe(self.conversation_id.as_str()) else {
             // Closed receiver-with-no-sender-task: drop tx so observe yields nothing.
             return rx;
         };
-        let mut sub = instance.subscribe();
         // Cloned into the observe task for the idle-tick user-cancel cross-check.
-        let conversation_service = self.conversation_service.clone();
+        let session = self.session.clone();
         let conversation_id = self.conversation_id.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(idle_threshold);
@@ -293,7 +415,7 @@ impl SessionProbe for ConversationProbe {
                             // authority after the turn has completed.
                             let sig = match &ev {
                                 AgentStreamEvent::Finish(d) => {
-                                    let cancelled = conversation_service
+                                    let cancelled = session
                                         .user_cancelled_since(conversation_id.as_str(), work_epoch_ms);
                                     Some(finish_signal(d.stop_reason, cancelled))
                                 }
@@ -316,7 +438,7 @@ impl SessionProbe for ConversationProbe {
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     },
                     _ = ticker.tick() => {
-                        let cancelled = conversation_service
+                        let cancelled = session
                             .user_cancelled_since(conversation_id.as_str(), work_epoch_ms);
                         if cancelled {
                             tracing::debug!(
@@ -339,11 +461,10 @@ impl SessionProbe for ConversationProbe {
     async fn action_scope(&self) -> Result<Option<IdmmTurnScope>, AppError> {
         let owner_id = self.owner_id().await?;
         self.ensure_live_turn_authority().await?;
-        self.conversation_service
-            .idmm_active_turn_scope(
+        self.session
+            .active_turn_scope(
                 &owner_id,
                 self.conversation_id.as_str(),
-                &self.runtime_registry,
             )
             .await
             .map(Some)
@@ -370,12 +491,8 @@ impl SessionProbe for ConversationProbe {
         // or a fresh send after ownership was lost.
         if matches!(action, WakeAction::Failover) {
             let switched = self
-                .conversation_service
-                .idmm_failover_conversation(
-                    &owner_id,
-                    self.conversation_id.as_str(),
-                    &self.runtime_registry,
-                )
+                .session
+                .failover(&owner_id, self.conversation_id.as_str())
                 .await?;
             if switched {
                 return Ok(());
@@ -399,13 +516,12 @@ impl SessionProbe for ConversationProbe {
             origin: Some("idmm".into()),
             channel_platform: None,
         };
-        self.conversation_service
-            .idmm_continue_active_turn(
+        self.session
+            .continue_active_turn(
                 &owner_id,
                 self.conversation_id.as_str(),
                 expected_scope,
                 req,
-                &self.runtime_registry,
             )
             .await
             .map(|_| ())
@@ -440,9 +556,7 @@ impl SessionProbe for ConversationProbe {
     }
 
     fn is_alive(&self) -> bool {
-        self.runtime_registry
-            .get_runtime(self.conversation_id.as_str())
-            .is_some()
+        self.session.is_alive(self.conversation_id.as_str())
     }
 
     async fn describe(&self) -> Result<SessionDescription, AppError> {

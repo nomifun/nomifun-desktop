@@ -423,6 +423,15 @@ pub trait ChatModelInvokePort: Send + Sync {
     }
 }
 
+/// A provider-neutral executor boundary for one already-encoded Chat attempt.
+///
+/// This alias is intentionally public so the application can install its
+/// provider transport without making the broker depend on the legacy
+/// `ModelInvokeService` or on a second routing layer.
+pub trait ProviderWireExecutor: ChatModelInvokePort {}
+
+impl<T> ProviderWireExecutor for T where T: ChatModelInvokePort + ?Sized {}
+
 /// Compatibility alias for callers that name the bridge after the old
 /// model-invoke service.
 pub use ChatModelInvokePort as ModelInvokeChatPort;
@@ -478,8 +487,8 @@ impl SixProtocolProviderTransport {
         let target = credential.target();
         if request.protocol != target.protocol
             || request.provider_id != target.provider_id
-            || request.model_route_id != target.model_route_id
-            || request.model_route_revision != target.model_route_revision
+            || request.route_identity.route_id != target.model_route_id
+            || request.route_identity.route_revision != target.model_route_revision
             || request.connection_config_ref != target.connection_config_ref
             || request.config_revision_digest != target.config_revision_digest
             || request.credential_ref != *credential.credential_ref()
@@ -521,22 +530,29 @@ impl ProviderTransport for SixProtocolProviderTransport {
 
 fn contains_sensitive_wire_key(value: &Value) -> bool {
     const SENSITIVE_KEYS: &[&str] = &[
-        "api_key",
         "apikey",
         "authorization",
-        "access_token",
-        "refresh_token",
-        "client_secret",
-        "private_key",
+        "accesstoken",
+        "refreshtoken",
+        "clientsecret",
+        "privatekey",
         "credential",
-        "credential_material",
+        "credentialmaterial",
+        "secretaccesskey",
+        "accesskeyid",
+        "sessiontoken",
     ];
 
     match value {
         Value::Object(object) => object.iter().any(|(key, value)| {
+            let normalized = key
+                .chars()
+                .filter(|character| *character != '_' && *character != '-')
+                .collect::<String>()
+                .to_ascii_lowercase();
             SENSITIVE_KEYS
                 .iter()
-                .any(|sensitive| key.eq_ignore_ascii_case(sensitive))
+                .any(|sensitive| normalized == *sensitive)
                 || contains_sensitive_wire_key(value)
         }),
         Value::Array(values) => values.iter().any(contains_sensitive_wire_key),
@@ -984,7 +1000,9 @@ mod tests {
         };
         assert_eq!(error.code, ChatModelErrorCode::RouteNotFound);
         assert_eq!(invoke.calls(), 0);
-        assert_eq!(gate.calls.load(Ordering::Acquire), 1);
+        // Route resolution deliberately precedes causality admission. A
+        // missing immutable route must not consume the operation claim.
+        assert_eq!(gate.calls.load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]
@@ -1092,8 +1110,7 @@ mod tests {
             protocol: route.protocol,
             provider_id: route.provider_id.clone(),
             model: route.model.clone(),
-            model_route_id: route.model_route_id.clone(),
-            model_route_revision: route.model_route_revision,
+            route_identity: fixture.request.route.clone(),
             connection_config_ref: route.connection_config_ref.clone(),
             config_revision_digest: route.config_revision_digest.clone(),
             credential_ref: route.credential_ref.clone(),
@@ -1106,6 +1123,23 @@ mod tests {
         };
         assert_eq!(error.code, ChatModelErrorCode::ProtocolViolation);
         assert_eq!(invoke.calls(), 0);
+    }
+
+    #[test]
+    fn transport_credential_filter_rejects_provider_specific_secret_names() {
+        for key in [
+            "secret_access_key",
+            "SecretAccessKey",
+            "session-token",
+            "access_key_id",
+            "client-secret",
+            "private_key",
+        ] {
+            assert!(
+                contains_sensitive_wire_key(&json!({key: "must-not-wire"})),
+                "credential key {key:?} was not rejected"
+            );
+        }
     }
 
     struct RetryingModelInvoke;

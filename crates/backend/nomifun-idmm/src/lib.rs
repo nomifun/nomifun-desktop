@@ -23,6 +23,7 @@ pub mod supervisor;
 pub mod util;
 
 pub use events::IdmmEventEmitter;
+pub use probe::{ConversationSessionPort, conversation_session_port};
 pub use routes::idmm_routes;
 pub use service::{IdmmService, ProbeDeps};
 pub use sidecar::{Completer, LiveCompleter, SidecarClient};

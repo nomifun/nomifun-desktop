@@ -12,7 +12,8 @@ use futures::{StreamExt, stream};
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentPresetId, AgentSessionId, AgentSessionLiveRecord,
     AgentSessionMetadata, ArtifactId, CanonicalErrorCode, CompactionCompletedPayload,
-    ConnectionConfigRef, CorrelationId, DeleteAgentSessionCommand, DigestHex, EventId,
+    ChatRouteIdentity, ConnectionConfigRef, CorrelationId, DeleteAgentSessionCommand, DigestHex,
+    EventId,
     EventProducerId, FullAutoExecutionWire, IdempotencyKey, LogicalArtifactRef, ModelRouteId,
     NativeActionStart, NativeActionStartAck, OperationId, PrincipalRef, RuntimeBindingContract,
     RuntimeBindingId, RuntimeCancelParams, RuntimeCommand, RuntimeCommandContext,
@@ -20,8 +21,8 @@ use nomifun_agent_contracts::{
     RuntimeReleaseTargetPayload, RuntimeResumeParams, RuntimeSessionDisposeParams,
     RuntimeStartTurnParams, SemanticSessionEventDraft, SessionEventAck, SessionEventAppend,
     SessionEventKind, SessionEventPayloadRef, SessionPayloadBody, SessionPayloadRecord,
-    StrictJsonValue, UserId, VersionString, canonical_json_bytes, digest_bytes, digest_payload,
-    official_preset_seed_manifest_payload,
+    ChatRouteLookupKey, StrictJsonValue, UserId, VersionString, canonical_json_bytes, digest_bytes,
+    digest_payload, official_preset_seed_manifest_payload,
 };
 use nomifun_agent_control_plane::{
     CompilerReleaseInputs, ControlPlaneStore,
@@ -30,7 +31,8 @@ use nomifun_agent_kernel::{
     CompiledSnapshot, CompilerEnvironment, MaterializationPolicy, SessionCapabilityState,
 };
 use nomifun_agent_platform::{
-    AgentPlatform, AgentPlatformConfig, ChatMinimalContract, ChatMinimalHiddenInitialization,
+    load_exact_chat_route_record, AgentPlatform, AgentPlatformConfig, ChatMinimalContract,
+    ChatMinimalHiddenInitialization,
 };
 use nomifun_agent_session::{
     CreateSessionRequest, RuntimeAppendContext, SessionStoreError, ZeroOutstandingProof,
@@ -43,7 +45,7 @@ use nomifun_chat_model_broker::{
     ChatContentPart, ChatMessage, ChatModelBroker, ChatModelError, ChatModelErrorCode,
     ChatModelEvent, ChatModelInput, ChatModelRequest, ChatModality, ChatProtocol,
     ChatProtocolAdapter, ChatResponseFormat, ChatRetryDirective, ChatRole, ChatRouteResolver,
-    ChatRouteSelection, ChatTask, ChatToolChoice, CredentialLease, CredentialTarget,
+    ChatRouteSelection, ChatToolChoice, CredentialLease, CredentialTarget,
     GeminiAdapter, OpenAiChatAdapter, OpenAiResponsesAdapter, PromptCachePolicy,
     ProviderCredentialRef, ProviderCredentialStore, ProviderIdRef, ProviderTransport,
     ProviderWireFrame, ProviderWireRequest, ProviderWireStream, ResolvedChatRoute,
@@ -194,8 +196,8 @@ impl ChatRouteResolver for ExactRouteResolver {
         &self,
         selection: &ChatRouteSelection,
     ) -> Result<ResolvedChatRouteSet, ChatModelError> {
-        if selection.model_route_id != self.route.model_route_id
-            || selection.model_route_revision != self.route.model_route_revision
+        if selection.route_id != self.route.model_route_id
+            || selection.route_revision != self.route.model_route_revision
         {
             return Err(ChatModelError::new(
                 ChatModelErrorCode::RouteRevisionMismatch,
@@ -378,7 +380,7 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
     )?;
     let supervisor = Arc::new(CodexRuntimeSupervisor::new());
     let platform = AgentPlatform::from_pool(AgentPlatformConfig::with_supervisor(
-        pool,
+        pool.clone(),
         MaterializationPolicy::stable(VERSION),
         release_inputs,
         kernel_environment,
@@ -412,6 +414,33 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
                     "agent_chat".to_owned(),
                     MODEL_ROUTE.to_owned(),
                 )]),
+                chat_route_records: BTreeMap::from([(
+                    "agent_chat".to_owned(),
+                    json!({
+                        "schema": "nomifun.chat-route-record.v1",
+                        "task": "agent_chat",
+                        "primary": {
+                            "model_route_id": MODEL_ROUTE,
+                            "model_route_revision": MODEL_ROUTE_REVISION,
+                            "provider_id": "provider-chat-minimal",
+                            "model": "chat-minimal-recorded-model",
+                            "protocol": "openai_chat",
+                            "connection_config_ref": "connection-chat-minimal",
+                            "config_revision_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                            "credential_ref": "credential-chat-minimal",
+                            "features": [
+                                "text_input",
+                                "text_output",
+                                "tool_calls",
+                                "reasoning",
+                                "image_input",
+                                "audio_input",
+                                "structured_output"
+                            ]
+                        },
+                        "failovers": []
+                    }),
+                )]),
             },
         )
         .await?;
@@ -443,6 +472,55 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
         .get_snapshot(&revision.reference)
         .await?
         .expect("persisted ResolvedSnapshot");
+    let route_json: String = sqlx::query_scalar(
+        "SELECT route_json FROM agent_preset_model_routes \
+         WHERE revision_id = ? AND model_task = ?",
+    )
+    .bind(format!(
+        "{}@{}",
+        revision.reference.preset_id.as_ref(),
+        revision.reference.revision
+    ))
+    .bind("agent_chat")
+    .fetch_one(&pool)
+    .await?;
+    let route_value: Value = serde_json::from_str(&route_json)?;
+    assert!(route_value.is_object());
+    assert_eq!(
+        route_value["primary"]["model_route_id"],
+        json!(MODEL_ROUTE)
+    );
+    let route_lookup = ChatRouteLookupKey {
+        preset_revision_id: format!(
+            "{}@{}",
+            revision.reference.preset_id.as_ref(),
+            revision.reference.revision
+        ),
+        model_task: "agent_chat".to_owned(),
+        route_id: ModelRouteId::from(MODEL_ROUTE),
+        route_revision: MODEL_ROUTE_REVISION,
+    };
+    let persisted_route = load_exact_chat_route_record(&pool, &route_lookup)
+        .await?
+        .expect("exact route record");
+    assert_eq!(
+        persisted_route.primary.model_route_id.as_ref(),
+        MODEL_ROUTE
+    );
+    let mut wrong_route_revision = route_lookup.clone();
+    wrong_route_revision.route_revision += 1;
+    assert!(
+        load_exact_chat_route_record(&pool, &wrong_route_revision)
+            .await
+            .is_err()
+    );
+    let mut wrong_revision_id = route_lookup.clone();
+    wrong_revision_id.preset_revision_id.push_str("-other");
+    assert!(
+        load_exact_chat_route_record(&pool, &wrong_revision_id)
+            .await?
+            .is_none()
+    );
     contract.validate_snapshot(&snapshot.content)?;
     let registry = platform.materialized_registry()?;
     assert!(registry.packages.is_empty());
@@ -496,6 +574,7 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
             producer_id: EventProducerId::from("session-api"),
             idempotency_key: IdempotencyKey::from(new_id("session-open")),
             correlation_id: CorrelationId::from(new_id("session")),
+            initial_input: None,
             opening_event_id: Some(EventId::from(new_id("session-opening"))),
             activation_event_id: Some(EventId::from(new_id("active-set"))),
             initial_active_capability_ids: Vec::new(),
@@ -972,6 +1051,12 @@ fn chat_request(
     causation_event_id: &EventId,
     route: &ResolvedChatRoute,
 ) -> ChatModelRequest {
+    let route_identity = ChatRouteIdentity::new(
+        compiled.content().preset_revision_ref.revision_id(),
+        nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+        route.model_route_id.clone(),
+        route.model_route_revision,
+    );
     ChatModelRequest {
         contract_version: VersionString::from("chat-model-v1"),
         causality: ChatCausality {
@@ -979,14 +1064,10 @@ fn chat_request(
             turn_operation_id: turn_operation_id.clone(),
             causation_event_id: causation_event_id.clone(),
             resolved_snapshot_ref: compiled.snapshot_ref().clone(),
-            model_route_revision: route.model_route_revision,
+            route_identity: route_identity.clone(),
             operation_id: OperationId::from(new_id("model")),
         },
-        route: ChatRouteSelection {
-            model_route_id: route.model_route_id.clone(),
-            model_route_revision: route.model_route_revision,
-            task: ChatTask::AgentChat,
-        },
+        route: route_identity,
         input: ChatModelInput {
             instructions: vec!["Answer directly and concisely.".to_owned()],
             messages: vec![ChatMessage {

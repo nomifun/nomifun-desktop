@@ -506,6 +506,17 @@
   margin-left: auto;
 }
 
+.templateResourcePath {
+  min-width: 0;
+  max-width: min(360px, 100%);
+  overflow: hidden;
+  color: var(--agent-muted);
+  font-size: 10px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .resourceEditorHeader {
   display: flex;
   align-items: center;
@@ -815,5 +826,9 @@
   .templateResourceInput {
     width: 100%;
     margin-left: 0;
+  }
+
+  .templateResourcePath {
+    max-width: 100%;
   }
 }

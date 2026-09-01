@@ -104,9 +104,8 @@ NomiFun 启动时进入三种鉴权策略之一：
 | 连接探测（Bedrock 等） | `/api/bedrock/test-connection` | 已鉴权 | [`nomifun-system/src/bedrock_probe/routes.rs`](../../crates/backend/nomifun-system/src/bedrock_probe/routes.rs) |
 | Shell 辅助 + STT | `/api/shell/*`、`/api/stt` | 已鉴权 | [`nomifun-shell/src/routes.rs`](../../crates/backend/nomifun-shell/src/routes.rs) |
 | 公共资源（logo） | `/api/assets/logos/*` | 公共 | [`nomifun-assets/src/routes.rs`](../../crates/backend/nomifun-assets/src/routes.rs) |
-| Public MCP front door | `/mcp/*` | 安装令牌 | [`nomifun-public/src/router.rs`](../../crates/backend/nomifun-public/src/router.rs) |
-| Public MCP agent front door | `/mcp-agent/*` | 安装令牌 | [`nomifun-public/src/router.rs`](../../crates/backend/nomifun-public/src/router.rs) |
-| Remote capability REST API | `/v1/*` | 安装令牌 | [`nomifun-public/src/rest.rs`](../../crates/backend/nomifun-public/src/rest.rs) |
+| Canonical Remote MCP front door | `/mcp` | 安装令牌 | [`nomifun-public/src/canonical.rs`](../../crates/backend/nomifun-public/src/canonical.rs) |
+| Canonical Remote REST API | `/api/remote/open`、`/api/remote/turn`、`/api/remote/observe`、`/api/remote/cancel` | 安装令牌 | [`nomifun-app/src/router/remote_rest.rs`](../../crates/backend/nomifun-app/src/router/remote_rest.rs) |
 | 实时 WebSocket | `/ws` | 已鉴权（token 通过 `Sec-WebSocket-Protocol` 或查询串传递） | [`nomifun-realtime/src/handler.rs`](../../crates/backend/nomifun-realtime/src/handler.rs) |
 
 如需各路由具体支持的方法，请阅读对应的 `routes.rs` 文件——每个 router

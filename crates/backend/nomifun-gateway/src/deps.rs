@@ -1,10 +1,8 @@
-//! Late-bound dependency bundle for the gateway tool implementations.
+//! Legacy compatibility host for the pre-Fresh-v4 Gateway transport.
 
 use std::sync::Arc;
 
-use nomifun_ai_agent::AgentRuntimeRegistry;
 use nomifun_companion::CompanionService;
-use nomifun_conversation::ConversationService;
 use nomifun_cron::service::CronService;
 use nomifun_db::IProviderRepository;
 use nomifun_idmm::IdmmService;
@@ -14,30 +12,27 @@ use nomifun_system::{ClientPrefService, ModelFetchService, ProviderService, Sett
 use nomifun_terminal::TerminalService;
 use nomifun_common::{CompanionId, ConversationId, UserId};
 
-/// Everything the gateway tools need to operate the desktop.
+use crate::conversation_port::ConversationCapabilityPort;
+
+/// Compatibility-only composition input for the legacy Gateway transport.
 ///
-/// Constructed by `nomifun-app` AFTER `build_module_states` (the
-/// `ConversationService` / `CronService` instances live there) and wired into
-/// the already-running [`crate::GatewayMcpServer`] via `set_deps` — the same
-/// late-wire choreography as the guide / requirement MCP servers, which is
-/// what lets the server start before the agent factory while the factory
-/// still receives the server's connection config.
+/// Fresh-v4 production entry points dispatch through `AgentPlatform` and never
+/// construct this host. The explicit compatibility router builds it after its
+/// legacy module states exist, then wires it into [`crate::GatewayMcpServer`].
 ///
-/// NEW FIELD? A capability needing a new service adds it here, then wires it in
-/// `nomifun-app/src/router/routes.rs::inject_gateway_deps` (clone from the
-/// matching `states.*` / `services.*`). The struct is just an Arc bundle —
-/// growth is O(1) pointers, negligible.
-pub struct GatewayDeps {
+/// Capability modules must immediately project a domain-specific dependency
+/// view before executing business logic. This root is not a canonical service
+/// locator and must not be added to Fresh-v4 composition.
+pub struct CompatibilityCapabilityHost {
     /// Canonical installation owner. Every installation-scoped capability is
     /// gated against this same immutable identity before its handler runs.
     pub authoritative_user_id: Arc<str>,
-    pub conversation_service: ConversationService,
-    pub runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    pub conversation: Arc<dyn ConversationCapabilityPort>,
     pub cron_service: Arc<CronService>,
-    /// MUST be the router-state instance (the singleton clone that had
-    /// `with_conversation_service` / `with_terminal_driver` attached in
-    /// `build_requirement_state`) — the AutoWork config tools need those
-    /// attachments; the bare singleton would error "not attached".
+    /// MUST be the router-state instance with its session-owner and
+    /// terminal-driver attachments from `build_requirement_state`; AutoWork
+    /// config tools need those attachments and the bare singleton would error
+    /// "not attached".
     pub requirement_service: Arc<RequirementService>,
     pub companion_service: Arc<CompanionService>,
     /// Singleton terminal service (owns the live PTY map shared with the
@@ -110,7 +105,7 @@ pub struct GatewayDeps {
     /// otherwise the gateway exposes no `nomi_computer_*` tools. See
     /// [`crate::computer_registry`].
     #[cfg(feature = "computer-use")]
-    pub computer_registry: Option<crate::computer_registry::ComputerRegistry>,
+    pub computer_registry: Option<Arc<crate::computer_registry::ComputerRegistry>>,
 }
 
 /// Identity of the calling Agent session, reconstructed only from the validated
@@ -132,12 +127,6 @@ pub struct CallerCtx {
     /// `None` for plain companion/desktop sessions. Used to resolve the write
     /// surface (channel → write-disabled in P1).
     pub channel_platform: Option<String>,
-    /// `true` when the caller is an external network consumer reaching the
-    /// platform through the installation-owner Remote front door. Takes
-    /// precedence over `channel_platform` in [`CallerCtx::surface`]. Defaults
-    /// `false` so every existing (desktop/channel) construction site is
-    /// unaffected.
-    pub remote: bool,
     /// Authenticated, transport-derived identity for the current mutating
     /// operation. Conversation send capabilities fail closed when absent; it
     /// is never read from model-visible tool arguments or a JSON-RPC request id.
@@ -158,30 +147,9 @@ impl Default for CallerCtx {
             user_id: UserId::new(),
             companion_id: None,
             channel_platform: None,
-            remote: false,
             operation_id: None,
             #[cfg(feature = "browser-use")]
             browser_identity: None,
         }
-    }
-}
-
-impl CallerCtx {
-    /// Build the identity context for an authenticated Remote caller.
-    ///
-    /// The installation owner id crosses the process/network boundary as a
-    /// string, so it is validated here before any capability can observe it.
-    /// Remote authentication never selects or impersonates a companion.
-    pub fn try_remote_owner(user_id: &str) -> Result<Self, String> {
-        Ok(Self {
-            conversation_id: None,
-            user_id: UserId::parse(user_id).map_err(|error| error.to_string())?,
-            companion_id: None,
-            channel_platform: None,
-            remote: true,
-            operation_id: None,
-            #[cfg(feature = "browser-use")]
-            browser_identity: None,
-        })
     }
 }

@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 use crate::constants::{DINGTALK_MESSAGE_LIMIT, RECONNECT_MAX_ATTEMPTS, RECONNECT_MAX_DELAY};
 use crate::error::ChannelError;
 use crate::plugin::{ChannelPlugin, PluginCallbacks, SharedPluginStatus, mark_error_on_unexpected_exit};
+use crate::plugins::callback::is_supported_callback_action;
 use crate::plugins::util::{backoff_delay, truncate_message};
 use crate::types::{
     ActionCategory, ActionContext, BotInfo, ChatKind, MentionState, MessageContentType, OutgoingMessageType,
@@ -342,6 +343,9 @@ fn build_final_card_param_map(text: &str, buttons: Option<&[Vec<crate::types::Ac
         let mut action_list = Vec::new();
         for row in button_rows {
             for btn in row {
+                if !is_supported_callback_action(&btn.action) {
+                    continue;
+                }
                 let callback_value = format_dingtalk_callback(&btn.action, btn.params.as_ref());
                 action_list.push(serde_json::json!({
                     "label": btn.label,
@@ -1061,7 +1065,7 @@ mod tests {
         use crate::types::ActionButton;
         let buttons = vec![vec![ActionButton {
             label: "Yes".into(),
-            action: "system.confirm".into(),
+            action: "chat.continue".into(),
             params: None,
         }]];
         let map = build_final_card_param_map("Choose:", Some(&buttons));
@@ -1069,7 +1073,7 @@ mod tests {
         assert_eq!(map["msgContent"], "Choose:");
         let actions = map["actions"].as_array().unwrap();
         assert_eq!(actions[0]["label"], "Yes");
-        assert!(actions[0]["action"].as_str().unwrap().contains("system.confirm"));
+        assert_eq!(actions[0]["action"], "chat:chat.continue");
     }
 
     // -- build_ack ----------------------------------------------------------
@@ -1099,7 +1103,7 @@ mod tests {
         use crate::types::ActionButton;
         let buttons = vec![vec![ActionButton {
             label: "Confirm".into(),
-            action: "system.confirm".into(),
+            action: "confirm.yes".into(),
             params: None,
         }]];
         let map = build_final_card_param_map("", Some(&buttons));
@@ -1108,6 +1112,28 @@ mod tests {
         let actions = map["actions"].as_array().unwrap();
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0]["label"], "Confirm");
+    }
+
+    #[test]
+    fn build_final_card_param_map_omits_unsupported_callbacks() {
+        use crate::types::ActionButton;
+        let buttons = vec![vec![
+            ActionButton {
+                label: "Unsupported".into(),
+                action: "unknown.switch".into(),
+                params: None,
+            },
+            ActionButton {
+                label: "Continue".into(),
+                action: "chat.continue".into(),
+                params: None,
+            },
+        ]];
+
+        let map = build_final_card_param_map("Choose:", Some(&buttons));
+        let actions = map["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["label"], "Continue");
     }
 
     // -- edit_message: not initialized guard -----------------------------------
@@ -1404,7 +1430,7 @@ mod tests {
                 "userId": "user_xyz",
                 "spaceId": "conv_group",
                 "spaceType": "IM_GROUP",
-                "content": r#"{"cardPrivateData":{"actionIds":["btn_confirm"],"params":{"action":"chat:system.confirm:callId=call_123,value=yes","source":"card"}}}"#
+                "content": r#"{"cardPrivateData":{"actionIds":["btn_continue"],"params":{"action":"chat:chat.continue:sessionId=session_123","source":"card"}}}"#
             }).to_string()
         });
 
@@ -1418,9 +1444,8 @@ mod tests {
         assert_eq!(msg.chat_kind, ChatKind::Group);
         assert_eq!(msg.mention_state, MentionState::Mentioned);
         let action = msg.action.unwrap();
-        assert_eq!(action.action, "system.confirm");
-        assert_eq!(action.params.as_ref().unwrap()["callId"], "call_123");
-        assert_eq!(action.params.as_ref().unwrap()["value"], "yes");
+        assert_eq!(action.action, "chat.continue");
+        assert_eq!(action.params.as_ref().unwrap()["sessionId"], "session_123");
         assert_eq!(action.params.as_ref().unwrap()["source"], "card");
     }
 
@@ -1530,7 +1555,29 @@ mod tests {
                 "userId": "user_xyz",
                 "spaceId": "user_xyz",
                 "spaceType": "IM_ROBOT",
-                "content": r#"{"cardPrivateData":{"params":{"action":"chat:system.confirm:callId=call_123,value=yes"}}}"#
+                "content": r#"{"cardPrivateData":{"params":{"action":"system:session.new"}}}"#
+            }).to_string()
+        });
+
+        handle_stream_frame(&card_frame.to_string(), &msg_tx).await;
+
+        assert!(msg_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_stream_frame_unsupported_card_action_is_dropped() {
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(16);
+        let card_frame = serde_json::json!({
+            "type": "CALLBACK",
+            "headers": {
+                "messageId": "cb_card_retired",
+                "topic": "/v1.0/card/instances/callback"
+            },
+            "data": serde_json::json!({
+                "userId": "user_direct",
+                "spaceId": "user_direct",
+                "spaceType": "IM_ROBOT",
+                "content": r#"{"cardPrivateData":{"params":{"action":"system:unlisted.action"}}}"#
             }).to_string()
         });
 

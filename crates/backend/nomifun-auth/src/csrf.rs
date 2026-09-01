@@ -43,8 +43,14 @@ pub async fn csrf_middleware(
 
     // Validate CSRF for state-changing requests
     let needs_validation = matches!(method, Method::POST | Method::PUT | Method::DELETE | Method::PATCH);
-    let is_exempt =
-        path == "/login" || path == "/api/auth/qr-login" || path == "/api/auth/setup" || path == "/logout";
+    let is_exempt = path == "/login"
+        || path == "/api/auth/qr-login"
+        || path == "/api/auth/setup"
+        || path == "/logout"
+        // Remote lifecycle requests authenticate with a non-ambient Bearer
+        // token, so a browser cookie cannot forge them and CSRF does not
+        // apply. The Remote token middleware remains the authoritative gate.
+        || path.starts_with("/api/remote/");
 
     // Locally-trusted requests authenticate via the `X-Nomi-Local-Trust` header,
     // not an ambient cookie, so they are not a CSRF target — skip validation.

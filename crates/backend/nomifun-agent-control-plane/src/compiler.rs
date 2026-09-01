@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use nomifun_agent_contracts::{
     AgentPresetRevision, AgentPresetRevisionPayload, CanonicalErrorCode, CapabilityId,
-    CapabilityManifest, CapabilityRef, CompactOnDemandCapabilityEntry, DigestHex,
+    CapabilityManifest, CapabilityRef, ChatRouteIdentity, CompactOnDemandCapabilityEntry, DigestHex,
     McpToolCapabilityMapping, OfficialPresetKey, OperationId, PrecomputedActivationPlan,
     PresetRevisionRef, PrincipalRef, ResolvedCapability, ResolvedMcpToolLock, ResolvedSkillLock,
     ResolvedSnapshotContent, ResolvedSnapshotEnvelope, ResolvedSnapshotId, ResolvedSnapshotRef,
@@ -338,6 +338,22 @@ impl PresetPreviewCompiler {
                 materialization_revision: materialization_revision(mapping),
             })
             .collect();
+        let chat_route_identity = payload
+            .model_route_refs
+            .get(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT)
+            .zip(
+                payload
+                    .chat_route_records
+                    .get(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT),
+            )
+            .map(|(route_id, record)| {
+                ChatRouteIdentity::new(
+                    candidate_revision_ref.revision_id(),
+                    nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+                    route_id.clone(),
+                    record.primary.model_route_revision,
+                )
+            });
         let content = ResolvedSnapshotContent {
             schema_version: VersionString::from("1.0.0"),
             resolver_version: self.release.resolver_version.clone(),
@@ -351,6 +367,7 @@ impl PresetPreviewCompiler {
             required_runtime_features,
             compiled_runtime_profile_digest,
             model_route_refs: payload.model_route_refs.clone(),
+            chat_route_identity,
             initial_capabilities,
             on_demand_capabilities,
             on_demand_activation_plans: activation_plans,

@@ -386,11 +386,11 @@ pub(super) fn normalize_interaction(interaction: &InteractionCreate) -> Option<U
     let chat_id = chat_id.to_owned();
     let message_id = interaction.message.as_ref().map(|m| m.id.clone());
 
-    let parsed = parse_callback_data(&custom_id);
-    let action = parsed.map(|p| UnifiedAction {
-        action: p.action,
-        category: p.category,
-        params: p.params,
+    let parsed = parse_callback_data(&custom_id)?;
+    let action = UnifiedAction {
+        action: parsed.action,
+        category: parsed.category,
+        params: parsed.params,
         context: ActionContext {
             platform: PluginType::Discord,
             user_id: user_id.to_owned(),
@@ -398,7 +398,7 @@ pub(super) fn normalize_interaction(interaction: &InteractionCreate) -> Option<U
             message_id: message_id.clone(),
             session_id: None,
         },
-    });
+    };
 
     Some(UnifiedIncomingMessage {
         id: interaction.id.clone(),
@@ -419,7 +419,7 @@ pub(super) fn normalize_interaction(interaction: &InteractionCreate) -> Option<U
         },
         timestamp: snowflake_to_unix(&interaction.id),
         reply_to_message_id: message_id,
-        action,
+        action: Some(action),
         raw: None,
     })
 }
@@ -641,7 +641,7 @@ mod tests {
             token: "tok".into(),
             interaction_type: INTERACTION_TYPE_MESSAGE_COMPONENT,
             data: Some(InteractionData {
-                custom_id: Some("chat:system.confirm:callId=call-1,value=yes".into()),
+                custom_id: Some("system:session.new".into()),
             }),
             channel_id: Some("chan1".into()),
             member: None,
@@ -655,6 +655,24 @@ mod tests {
 
         assert!(normalize_interaction(&interaction).is_none());
         assert!(message_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn unsupported_callback_is_rejected_before_normalization() {
+        let interaction = InteractionCreate {
+            id: "175928847299117063".into(),
+            token: "tok".into(),
+            interaction_type: INTERACTION_TYPE_MESSAGE_COMPONENT,
+            data: Some(InteractionData {
+                custom_id: Some("system:unknown.switch:value=yes".into()),
+            }),
+            channel_id: Some("chan1".into()),
+            member: None,
+            user: Some(user("7", false)),
+            message: Some(InteractionMessage { id: "msg9".into() }),
+        };
+
+        assert!(normalize_interaction(&interaction).is_none());
     }
 
     #[test]

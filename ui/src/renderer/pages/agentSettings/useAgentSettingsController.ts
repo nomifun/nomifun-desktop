@@ -1,10 +1,11 @@
-import { agentPlatform } from '@/common/adapter/ipcBridge';
+import { agentPlatform, application } from '@/common/adapter/ipcBridge';
 import type {
   AgentCatalogResponse,
   AgentPresetDraft,
   AgentPresetEditorResponse,
   AgentPresetLibraryResponse,
   AgentPresetSummary,
+  ChatRouteRecord,
   InstallationTokenStateResponse,
   OfficialPresetKey,
   OfficialPresetTemplate,
@@ -12,11 +13,13 @@ import type {
   TemplateResourceSelection,
 } from '@/common/types/agentPlatform';
 import {
+  AGENT_CHAT_MODEL_TASK,
   cloneDraft,
   isDraftDirty,
   runAgentPresetTest,
   type RunAgentPresetTestResult,
 } from '@/common/types/agentPlatform';
+import { withHostResolvedWorkspaceBinding } from './model';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 type Selection =
@@ -51,6 +54,7 @@ export function useAgentSettingsController() {
   const [preview, setPreview] = useState<ResolveAgentPresetPreviewResponse | null>(null);
   const [testResult, setTestResult] = useState<RunAgentPresetTestResult | null>(null);
   const [tokenState, setTokenState] = useState<InstallationTokenStateResponse | null>(null);
+  const [hostWorkDir, setHostWorkDir] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<'preview' | 'save' | 'test' | 'fork' | 'create' | null>(
     null
@@ -61,17 +65,28 @@ export function useAgentSettingsController() {
     setLoading(true);
     setError(null);
     try {
-      const [nextLibrary, capabilities, skills, mcpTools, nextTokenState] = await Promise.all([
+      const [
+        nextLibrary,
+        capabilities,
+        skills,
+        mcpTools,
+        nextTokenState,
+        systemInfo,
+      ] = await Promise.all([
         agentPlatform.library.invoke(),
         agentPlatform.capabilities.invoke(),
         agentPlatform.skills.invoke(),
         agentPlatform.mcpTools.invoke(),
         agentPlatform.installationToken.status.invoke().catch(() => null),
+        application.systemInfo.invoke().catch(() => null),
       ]);
       const nextCatalog = { capabilities, skills, mcp_tools: mcpTools };
       setLibrary(nextLibrary);
       setCatalog(nextCatalog);
       setTokenState(nextTokenState);
+      setHostWorkDir(
+        systemInfo?.workDir?.trim() ? systemInfo.workDir.trim() : null
+      );
       setSelection((current) => {
         if (current) return current;
         const firstTemplate = nextLibrary.official_templates[0];
@@ -98,34 +113,32 @@ export function useAgentSettingsController() {
     setError(null);
   }, []);
 
-  const openPreset = useCallback(async (preset: AgentPresetSummary) => {
-    setSelection({ kind: 'preset', preset });
-    setBusyAction('create');
-    setError(null);
-    try {
-      const response = await agentPlatform.getEditor.invoke({ preset_id: preset.preset_id });
-      const nextDraft = cloneDraft(response.draft);
-      setEditor(response);
-      setDraftState(nextDraft);
-      setSavedDraft(cloneDraft(nextDraft));
-      setPreview(null);
-      setTestResult(null);
-    } catch (openError) {
-      setError(String(openError));
-    } finally {
-      setBusyAction(null);
-    }
-  }, []);
-
   const applyEditor = useCallback((response: AgentPresetEditorResponse) => {
-    const nextDraft = cloneDraft(response.draft);
+    const nextDraft = withHostResolvedWorkspaceBinding(
+      cloneDraft(response.draft),
+      hostWorkDir
+    );
     setEditor(response);
     setDraftState(nextDraft);
     setSavedDraft(response.revision ? cloneDraft(nextDraft) : null);
     setSelection({ kind: 'preset', preset: response.preset });
     setPreview(null);
     setTestResult(null);
-  }, []);
+  }, [hostWorkDir]);
+
+  const openPreset = useCallback(async (preset: AgentPresetSummary) => {
+    setSelection({ kind: 'preset', preset });
+    setBusyAction('create');
+    setError(null);
+    try {
+      const response = await agentPlatform.getEditor.invoke({ preset_id: preset.preset_id });
+      applyEditor(response);
+    } catch (openError) {
+      setError(String(openError));
+    } finally {
+      setBusyAction(null);
+    }
+  }, [applyEditor]);
 
   const createPreset = useCallback(
     async (displayName: string) => {
@@ -152,7 +165,8 @@ export function useAgentSettingsController() {
       templateKey: OfficialPresetKey,
       displayName: string,
       resourceBindings: TemplateResourceSelection[],
-      modelRouteRefs: Record<string, string>
+      modelRouteRefs: Record<string, string>,
+      chatRouteRecords: Partial<Record<typeof AGENT_CHAT_MODEL_TASK, ChatRouteRecord>>
     ) => {
       setBusyAction('fork');
       setError(null);
@@ -163,6 +177,7 @@ export function useAgentSettingsController() {
             display_name: displayName,
             resource_bindings: resourceBindings,
             model_route_refs: modelRouteRefs,
+            chat_route_records: chatRouteRecords,
           },
         });
         applyEditor(response);
@@ -188,9 +203,11 @@ export function useAgentSettingsController() {
     setBusyAction('preview');
     setError(null);
     try {
+      const resolvedDraft = withHostResolvedWorkspaceBinding(draft, hostWorkDir);
+      if (resolvedDraft !== draft) setDraftState(resolvedDraft);
       const response = await agentPlatform.resolvePreview.invoke({
-        preset_id: draft.preset_id,
-        request: previewRequest(draft),
+        preset_id: resolvedDraft.preset_id,
+        request: previewRequest(resolvedDraft),
       });
       setPreview(response);
       return response;
@@ -200,29 +217,31 @@ export function useAgentSettingsController() {
     } finally {
       setBusyAction(null);
     }
-  }, [draft]);
+  }, [draft, hostWorkDir]);
 
   const saveRevision = useCallback(async () => {
     if (!draft) return null;
     setBusyAction('save');
     setError(null);
     try {
+      const resolvedDraft = withHostResolvedWorkspaceBinding(draft, hostWorkDir);
+      if (resolvedDraft !== draft) setDraftState(resolvedDraft);
       const freshPreview = await agentPlatform.resolvePreview.invoke({
-        preset_id: draft.preset_id,
-        request: previewRequest(draft),
+        preset_id: resolvedDraft.preset_id,
+        request: previewRequest(resolvedDraft),
       });
       setPreview(freshPreview);
       if (!freshPreview.can_save_revision) return null;
       const saved = await agentPlatform.saveRevision.invoke({
-        preset_id: draft.preset_id,
+        preset_id: resolvedDraft.preset_id,
         request: {
-          expected_current_revision: draft.current_revision,
+          expected_current_revision: resolvedDraft.current_revision,
           preview_digest: freshPreview.preview_digest,
-          draft,
+          draft: resolvedDraft,
         },
       });
       const nextDraft: AgentPresetDraft = {
-        ...draft,
+        ...resolvedDraft,
         current_revision: saved.revision.reference,
       };
       setDraftState(nextDraft);
@@ -245,7 +264,7 @@ export function useAgentSettingsController() {
     } finally {
       setBusyAction(null);
     }
-  }, [draft, load]);
+  }, [draft, hostWorkDir, load]);
 
   const runTest = useCallback(
     async (input: string) => {
@@ -253,9 +272,11 @@ export function useAgentSettingsController() {
       setBusyAction('test');
       setError(null);
       try {
-        const dirty = isDraftDirty(savedDraft, draft);
+        const resolvedDraft = withHostResolvedWorkspaceBinding(draft, hostWorkDir);
+        if (resolvedDraft !== draft) setDraftState(resolvedDraft);
+        const dirty = isDraftDirty(savedDraft, resolvedDraft);
         const result = await runAgentPresetTest({
-          draft,
+          draft: resolvedDraft,
           dirty,
           input,
           idempotencyKey: idempotencyKey(),
@@ -285,7 +306,7 @@ export function useAgentSettingsController() {
         setTestResult(result);
         if (result.savedRevision) {
           const nextDraft = {
-            ...draft,
+            ...resolvedDraft,
             current_revision: result.savedRevision.revision.reference,
           };
           setDraftState(nextDraft);
@@ -304,7 +325,7 @@ export function useAgentSettingsController() {
         setBusyAction(null);
       }
     },
-    [draft, load, savedDraft]
+    [draft, hostWorkDir, load, savedDraft]
   );
 
   const dirty = useMemo(
@@ -321,6 +342,7 @@ export function useAgentSettingsController() {
     preview,
     testResult,
     tokenState,
+    hostWorkDir,
     loading,
     busyAction,
     error,

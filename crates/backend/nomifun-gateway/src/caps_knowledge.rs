@@ -6,6 +6,7 @@
 //! now a declared param, so the single typed struct fixes the drift.
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_api_types::{KnowledgeSource, KnowledgeSourceEntry, KnowledgeSourceMode};
@@ -13,13 +14,14 @@ use nomifun_common::KnowledgeBaseId;
 use nomifun_common::{CompanionId, ConversationId, TerminalId};
 use nomifun_knowledge::source_url::truncate_to_bytes;
 use nomifun_knowledge::{
-    HttpFetcher, KnowledgeBinding, WriteRequest, WriteSurface, WriteTargetSpec, resolve_write_policy,
+    HttpFetcher, KnowledgeBinding, KnowledgeService, WriteRequest, WriteSurface,
+    WriteTargetSpec, resolve_write_policy,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 use crate::id_schema::CanonicalEntityId;
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
@@ -144,7 +146,7 @@ struct SetBindingParams {
 /// has no reader, so writing one would be a silent no-op that looks exactly
 /// like the "UI says mounted but nothing works" incident from the agent's seat.
 async fn resolve_binding_row(
-    deps: &GatewayDeps,
+    deps: &KnowledgeCapabilityDeps,
     kind: KnowledgeBindingTargetKind,
     target_id: CanonicalEntityId,
 ) -> Result<(&'static str, String), Value> {
@@ -207,7 +209,7 @@ fn unknown_kb_error(id: &str) -> Value {
 
 /// Reject unknown base ids up front. Shared with `caps_terminal`'s bind-on-create.
 pub(crate) async fn ensure_known_kb_ids(
-    deps: &GatewayDeps,
+    service: &KnowledgeService,
     ids: &[KnowledgeBaseId],
 ) -> Result<(), Value> {
     if ids.is_empty() {
@@ -216,7 +218,7 @@ pub(crate) async fn ensure_known_kb_ids(
     // ID-existence check only — use the disk-free registry lookup, NOT
     // `list_bases()`, which walks every base's directory tree and would hang
     // binding operations whenever a base is rooted on a slow/offline NAS mount.
-    let known_ids = match deps.knowledge_service.list_base_ids().await {
+    let known_ids = match service.list_base_ids().await {
         Ok(ids) => ids,
         Err(e) => return Err(json!({ "error": e.to_string() })),
     };
@@ -292,9 +294,43 @@ async fn fetch_url_with(fetcher: &HttpFetcher, url: &str) -> Value {
 
 // ── handlers ──────────────────────────────────────────────────────────────
 
-async fn list_bases(deps: Arc<GatewayDeps>, p: ListBasesParams) -> Value {
+#[derive(Clone)]
+struct KnowledgeCapabilityDeps {
+    service: Arc<KnowledgeService>,
+    terminal_service: Arc<nomifun_terminal::TerminalService>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<KnowledgeCapabilityDeps>, CallerCtx, P) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, ctx, params| {
+        handler(
+            Arc::new(KnowledgeCapabilityDeps {
+                service: deps.knowledge_service.clone(),
+                terminal_service: deps.terminal_service.clone(),
+            }),
+            ctx,
+            params,
+        )
+    }
+}
+
+async fn list_bases(
+    deps: Arc<KnowledgeCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: ListBasesParams,
+) -> Value {
     let query = p.query.map(|q| q.to_lowercase());
-    match deps.knowledge_service.list_bases().await {
+    match deps.service.list_bases().await {
         Ok(bases) => {
             let items: Vec<Value> = bases
                 .iter()
@@ -319,7 +355,11 @@ async fn list_bases(deps: Arc<GatewayDeps>, p: ListBasesParams) -> Value {
     }
 }
 
-async fn create_base(deps: Arc<GatewayDeps>, p: CreateBaseParams) -> Value {
+async fn create_base(
+    deps: Arc<KnowledgeCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: CreateBaseParams,
+) -> Value {
     let name = p.name.trim().to_owned();
     if name.is_empty() {
         return json!({ "error": "missing required field: name" });
@@ -337,7 +377,7 @@ async fn create_base(deps: Arc<GatewayDeps>, p: CreateBaseParams) -> Value {
     // `create_base_with_background_fetch` spawns a background fetch task and so
     // consumes an owned `Arc<Self>` — clone the service handle for it.
     match deps
-        .knowledge_service
+        .service
         .clone()
         .create_base_with_background_fetch(&name, &description, None, source)
         .await
@@ -353,12 +393,19 @@ async fn create_base(deps: Arc<GatewayDeps>, p: CreateBaseParams) -> Value {
     }
 }
 
-async fn write_file(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteFileParams) -> Value {
+async fn write_file(
+    deps: Arc<KnowledgeCapabilityDeps>,
+    ctx: CallerCtx,
+    p: WriteFileParams,
+) -> Value {
     let companion_id = ctx.companion_id.as_ref().map(|id| id.as_str());
     let surface = gateway_surface(ctx.channel_platform.as_deref(), companion_id);
     let binding = match (surface, companion_id) {
         (WriteSurface::Companion, Some(cid)) => {
-            deps.knowledge_service.get_binding("companion", cid).await.unwrap_or_default()
+            deps.service
+                .get_binding("companion", cid)
+                .await
+                .unwrap_or_default()
         }
         _ => {
             if ctx.conversation_id.is_none() {
@@ -372,14 +419,14 @@ async fn write_file(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteFileParams) 
         }
     };
     let policy = resolve_write_policy(surface, &binding);
-    let bound_kb_ids = deps.knowledge_service.resolve_kb_ids_for_cwd("").await;
+    let bound_kb_ids = deps.service.resolve_kb_ids_for_cwd("").await;
     let req = WriteRequest {
         spec: WriteTargetSpec::Path { kb_id: p.kb_id, rel_path: p.rel_path },
         content: p.content,
         policy,
         bound_kb_ids,
     };
-    match deps.knowledge_service.write_document(req).await {
+    match deps.service.write_document(req).await {
         Ok(out) => ok(json!({
             "kb_id": out.kb_id,
             "rel_path": out.final_rel_path,
@@ -390,9 +437,13 @@ async fn write_file(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteFileParams) 
     }
 }
 
-async fn autogen(deps: Arc<GatewayDeps>, p: AutogenParams) -> Value {
+async fn autogen(
+    deps: Arc<KnowledgeCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: AutogenParams,
+) -> Value {
     match deps
-        .knowledge_service
+        .service
         .generate_overview(p.kb_id.as_str(), p.overwrite_readme.unwrap_or(false), None)
         .await
     {
@@ -401,22 +452,34 @@ async fn autogen(deps: Arc<GatewayDeps>, p: AutogenParams) -> Value {
     }
 }
 
-async fn fetch_url(_deps: Arc<GatewayDeps>, p: FetchUrlParams) -> Value {
+async fn fetch_url(
+    _deps: Arc<KnowledgeCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: FetchUrlParams,
+) -> Value {
     fetch_url_with(&HttpFetcher::default(), &p.url).await
 }
 
-async fn get_binding(deps: Arc<GatewayDeps>, p: GetBindingParams) -> Value {
+async fn get_binding(
+    deps: Arc<KnowledgeCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: GetBindingParams,
+) -> Value {
     let (kind, target_id) = match resolve_binding_row(&deps, p.kind, p.target_id).await {
         Ok(row) => row,
         Err(error) => return error,
     };
-    match deps.knowledge_service.get_binding(kind, &target_id).await {
+    match deps.service.get_binding(kind, &target_id).await {
         Ok(binding) => ok(binding),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn set_binding(deps: Arc<GatewayDeps>, p: SetBindingParams) -> Value {
+async fn set_binding(
+    deps: Arc<KnowledgeCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: SetBindingParams,
+) -> Value {
     let effect_note = match p.kind {
         // Terminal rows resolve to the workpath key, whose set_binding hook
         // re-syncs live terminals immediately; live MCP dispatch re-reads the
@@ -432,7 +495,7 @@ async fn set_binding(deps: Arc<GatewayDeps>, p: SetBindingParams) -> Value {
         Ok(row) => row,
         Err(error) => return error,
     };
-    let mut binding = match deps.knowledge_service.get_binding(kind, &target_id).await {
+    let mut binding = match deps.service.get_binding(kind, &target_id).await {
         Ok(b) => b,
         Err(e) => return json!({ "error": e.to_string() }),
     };
@@ -452,10 +515,10 @@ async fn set_binding(deps: Arc<GatewayDeps>, p: SetBindingParams) -> Value {
     if p.enabled && binding.kb_ids.is_empty() {
         return json!({ "error": "kb_ids must not be empty when enabling a binding; call nomi_knowledge_list_bases for valid ids" });
     }
-    if let Err(e) = ensure_known_kb_ids(&deps, &binding.kb_ids).await {
+    if let Err(e) = ensure_known_kb_ids(deps.service.as_ref(), &binding.kb_ids).await {
         return e;
     }
-    match deps.knowledge_service.set_binding(kind, &target_id, binding).await {
+    match deps.service.set_binding(kind, &target_id, binding).await {
         Ok(binding) => ok(json!({
             "binding": binding,
             "note": effect_note
@@ -467,31 +530,31 @@ async fn set_binding(deps: Arc<GatewayDeps>, p: SetBindingParams) -> Value {
 pub(crate) fn register(out: &mut Vec<Capability>) {
     out.push(Capability::new::<ListBasesParams, _, _>(
         CapabilityMeta::new("nomi_knowledge_list_bases", "knowledge", "List knowledge bases (optionally filtered).", EffectClass::Read),
-        |deps, _ctx, p| list_bases(deps, p),
+        adapt(list_bases),
     ));
     out.push(Capability::new::<CreateBaseParams, _, _>(
         CapabilityMeta::new("nomi_knowledge_create_base", "knowledge", "Create a new managed knowledge base, optionally seeded with URL sources (fetched in the background).", EffectClass::Write),
-        |deps, _ctx, p| create_base(deps, p),
+        adapt(create_base),
     ));
     out.push(Capability::new::<WriteFileParams, _, _>(
         CapabilityMeta::new("nomi_knowledge_write_file", "knowledge", "Create/update one markdown document in a base (placement enforced by per-surface policy).", EffectClass::Write),
-        write_file,
+        adapt(write_file),
     ));
     out.push(Capability::new::<AutogenParams, _, _>(
         CapabilityMeta::new("nomi_knowledge_autogen", "knowledge", "Generate the AI overview (description + root README) for a base.", EffectClass::Write),
-        |deps, _ctx, p| autogen(deps, p),
+        adapt(autogen),
     ));
     out.push(Capability::new::<FetchUrlParams, _, _>(
         CapabilityMeta::new("nomi_knowledge_fetch_url", "knowledge", "Server-side fetch + HTML→markdown of a URL (SSRF-guarded).", EffectClass::Read),
-        |deps, _ctx, p| fetch_url(deps, p),
+        adapt(fetch_url),
     ));
     out.push(Capability::new::<GetBindingParams, _, _>(
         CapabilityMeta::new("nomi_knowledge_get_binding", "knowledge", "Read the knowledge binding for one target (conversation/terminal/companion).", EffectClass::Read),
-        |deps, _ctx, p| get_binding(deps, p),
+        adapt(get_binding),
     ));
     out.push(Capability::new::<SetBindingParams, _, _>(
         CapabilityMeta::new("nomi_knowledge_set_binding", "knowledge", "Set the bound base list / toggle a target's knowledge binding and write-back knobs.", EffectClass::Write),
-        |deps, _ctx, p| set_binding(deps, p),
+        adapt(set_binding),
     ));
 }
 
