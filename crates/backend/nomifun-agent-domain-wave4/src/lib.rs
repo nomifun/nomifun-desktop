@@ -210,6 +210,11 @@ pub struct TypedResourceDescriptor {
 /// typed operation to the injected owner.  It never manufactures an action
 /// result.
 pub const WAVE4_CAPABILITY_HOST_PORT_ID: &str = "host.wave4.capability.invoke";
+pub const WAVE4_HOST_PORT_UNAVAILABLE: &str = "WAVE4_HOST_PORT_UNAVAILABLE";
+pub const WAVE4_INVALID_REQUEST: &str = "WAVE4_INVALID_REQUEST";
+pub const WAVE4_ACTION_OPERATION_MISMATCH: &str = "WAVE4_ACTION_OPERATION_MISMATCH";
+pub const WAVE4_RESOURCE_BINDING_INVALID: &str = "WAVE4_RESOURCE_BINDING_INVALID";
+pub const WAVE4_RESOURCE_OWNER_MISMATCH: &str = "RESOURCE_OWNER_MISMATCH";
 
 /// Invocation metadata projected from the Kernel context into a domain port.
 ///
@@ -250,10 +255,117 @@ pub enum Wave4CapabilityOperation {
     RobotDeviceTools { input: StrictJsonValue },
 }
 
+impl Wave4CapabilityOperation {
+    /// Return the canonical capability identity fixed by this typed variant.
+    pub fn capability_id(&self) -> CapabilityId {
+        CapabilityId::from(match self {
+            Self::ChannelReply { .. } => CHANNEL_REPLY,
+            Self::ChannelSend { .. } => CHANNEL_SEND,
+            Self::CompanionSummon { .. } => COMPANION_SUMMON,
+            Self::CompanionLearn { .. } => COMPANION_LEARN,
+            Self::CompanionEvolve { .. } => COMPANION_EVOLVE,
+            Self::CustomerServiceNotesRead { .. } => CUSTOMER_SERVICE_NOTES_READ,
+            Self::CustomerServiceNotesWrite { .. } => CUSTOMER_SERVICE_NOTES_WRITE,
+            Self::CustomerServiceHandoff { .. } => CUSTOMER_SERVICE_HANDOFF,
+            Self::RobotDisplay { .. } => ROBOT_DISPLAY,
+            Self::RobotMotion { .. } => ROBOT_MOTION,
+            Self::RobotDeviceTools { .. } => ROBOT_DEVICE_TOOLS,
+        })
+    }
+
+    /// Return the canonical action identity paired with this operation.
+    pub fn action_id(&self) -> ActionId {
+        action_id_for(self.capability_id().as_ref())
+    }
+
+    /// Return the first-party owner domain for the operation.
+    pub fn owner_domain(&self) -> Wave4OwnerDomain {
+        match self {
+            Self::ChannelReply { .. } | Self::ChannelSend { .. } => Wave4OwnerDomain::Channel,
+            Self::CompanionSummon { .. }
+            | Self::CompanionLearn { .. }
+            | Self::CompanionEvolve { .. } => Wave4OwnerDomain::Companion,
+            Self::CustomerServiceNotesRead { .. }
+            | Self::CustomerServiceNotesWrite { .. }
+            | Self::CustomerServiceHandoff { .. } => Wave4OwnerDomain::CustomerService,
+            Self::RobotDisplay { .. }
+            | Self::RobotMotion { .. }
+            | Self::RobotDeviceTools { .. } => Wave4OwnerDomain::Robot,
+        }
+    }
+
+    fn input(&self) -> &StrictJsonValue {
+        match self {
+            Self::ChannelReply { input }
+            | Self::ChannelSend { input }
+            | Self::CompanionSummon { input }
+            | Self::CompanionLearn { input }
+            | Self::CompanionEvolve { input }
+            | Self::CustomerServiceNotesRead { input }
+            | Self::CustomerServiceNotesWrite { input }
+            | Self::CustomerServiceHandoff { input }
+            | Self::RobotDisplay { input }
+            | Self::RobotMotion { input }
+            | Self::RobotDeviceTools { input } => input,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Wave4HostRequest {
     pub context: Wave4HostContext,
     pub operation: Wave4CapabilityOperation,
+}
+
+impl Wave4HostRequest {
+    /// Validate the complete boundary before an owner receives the request.
+    ///
+    /// This is intentionally public so central composition and future owners
+    /// can apply the same fail-closed contract when they receive a request
+    /// outside the Kernel handler path.
+    pub fn validate(&self) -> Result<(), Wave4HostPortError> {
+        let capability_id = &self.context.capability_id;
+        let Some(spec) = find_capability(capability_id.as_ref()) else {
+            return Err(Wave4HostPortError::invalid_request(format!(
+                "unknown Wave 4 capability {}",
+                capability_id.as_ref()
+            )));
+        };
+        if spec.effect_class.is_none() {
+            return Err(Wave4HostPortError::action_operation_mismatch(format!(
+                "{} is transport/context/event owned and has no Agent action host operation",
+                capability_id.as_ref()
+            )));
+        }
+
+        let operation_capability_id = self.operation.capability_id();
+        let operation_action_id = self.operation.action_id();
+        if operation_capability_id != *capability_id
+            || operation_action_id != self.context.action_id
+        {
+            return Err(Wave4HostPortError::action_operation_mismatch(format!(
+                "context maps {} / {} but typed operation maps {} / {}",
+                capability_id.as_ref(),
+                self.context.action_id.as_ref(),
+                operation_capability_id.as_ref(),
+                operation_action_id.as_ref()
+            )));
+        }
+        if !self.operation.input().0.is_object() {
+            return Err(Wave4HostPortError::invalid_request(format!(
+                "{} input must be a JSON object",
+                capability_id.as_ref()
+            )));
+        }
+
+        validate_host_context(&self.context)?;
+        validate_resource_bindings_contract(
+            capability_id,
+            &self.context.principal.principal_id,
+            spec.requirements,
+            &self.context.resource_bindings,
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -271,7 +383,23 @@ impl Wave4HostPortError {
     }
 
     pub fn unavailable(message: impl Into<String>) -> Self {
-        Self::new("WAVE4_HOST_PORT_UNAVAILABLE", message)
+        Self::new(WAVE4_HOST_PORT_UNAVAILABLE, message)
+    }
+
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self::new(WAVE4_INVALID_REQUEST, message)
+    }
+
+    pub fn action_operation_mismatch(message: impl Into<String>) -> Self {
+        Self::new(WAVE4_ACTION_OPERATION_MISMATCH, message)
+    }
+
+    pub fn resource_binding_invalid(message: impl Into<String>) -> Self {
+        Self::new(WAVE4_RESOURCE_BINDING_INVALID, message)
+    }
+
+    pub fn resource_owner_mismatch(message: impl Into<String>) -> Self {
+        Self::new(WAVE4_RESOURCE_OWNER_MISMATCH, message)
     }
 }
 
@@ -300,6 +428,7 @@ impl Wave4HostPort for UnconfiguredWave4HostPort {
     ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave4HostPortError>> + Send + 'a>>
     {
         Box::pin(async move {
+            request.validate()?;
             Err(Wave4HostPortError::unavailable(format!(
                 "no production host adapter is bound for {}",
                 request.context.capability_id.as_ref()
@@ -311,6 +440,89 @@ impl Wave4HostPort for UnconfiguredWave4HostPort {
 /// Return the fail-closed adapter used by metadata-only compositions.
 pub fn unconfigured_host_port() -> Arc<dyn Wave4HostPort> {
     Arc::new(UnconfiguredWave4HostPort)
+}
+
+/// The owner domains that may be injected independently by central
+/// composition.  Pairing/transport remains outside this enum by design.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wave4OwnerDomain {
+    Channel,
+    Companion,
+    CustomerService,
+    Robot,
+}
+
+/// Optional first-party owner bindings for the canonical Wave 4 action port.
+///
+/// Each owner implements the same typed port, while central composition can
+/// provide only the owners that are real.  Missing owners remain unavailable;
+/// this type never supplies a success fallback.
+#[derive(Default)]
+pub struct Wave4OwnerBindings {
+    pub channel: Option<Arc<dyn Wave4HostPort>>,
+    pub companion: Option<Arc<dyn Wave4HostPort>>,
+    pub customer_service: Option<Arc<dyn Wave4HostPort>>,
+    pub robot: Option<Arc<dyn Wave4HostPort>>,
+}
+
+impl Wave4OwnerBindings {
+    pub fn with_channel(mut self, owner: Arc<dyn Wave4HostPort>) -> Self {
+        self.channel = Some(owner);
+        self
+    }
+
+    pub fn with_companion(mut self, owner: Arc<dyn Wave4HostPort>) -> Self {
+        self.companion = Some(owner);
+        self
+    }
+
+    pub fn with_customer_service(mut self, owner: Arc<dyn Wave4HostPort>) -> Self {
+        self.customer_service = Some(owner);
+        self
+    }
+
+    pub fn with_robot(mut self, owner: Arc<dyn Wave4HostPort>) -> Self {
+        self.robot = Some(owner);
+        self
+    }
+}
+
+/// Compose independently injected owners behind the one manifest host port.
+pub fn composed_host_port(bindings: Wave4OwnerBindings) -> Arc<dyn Wave4HostPort> {
+    Arc::new(ComposedWave4HostPort { bindings })
+}
+
+struct ComposedWave4HostPort {
+    bindings: Wave4OwnerBindings,
+}
+
+impl Wave4HostPort for ComposedWave4HostPort {
+    fn invoke<'a>(
+        &'a self,
+        request: Wave4HostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave4HostPortError>> + Send + 'a>>
+    {
+        if let Err(error) = request.validate() {
+            return Box::pin(async move { Err(error) });
+        }
+
+        let owner = match request.operation.owner_domain() {
+            Wave4OwnerDomain::Channel => self.bindings.channel.clone(),
+            Wave4OwnerDomain::Companion => self.bindings.companion.clone(),
+            Wave4OwnerDomain::CustomerService => self.bindings.customer_service.clone(),
+            Wave4OwnerDomain::Robot => self.bindings.robot.clone(),
+        };
+        let capability_id = request.context.capability_id.clone();
+        Box::pin(async move {
+            let Some(owner) = owner else {
+                return Err(Wave4HostPortError::unavailable(format!(
+                    "no production owner is bound for {}",
+                    capability_id.as_ref()
+                )));
+            };
+            owner.invoke(request).await
+        })
+    }
 }
 
 const CHANNEL_CAPABILITIES: [CapabilitySpec; 5] = [
@@ -829,6 +1041,13 @@ pub fn required_resource_kinds(capability_id: &str) -> Option<BTreeSet<ResourceK
     })
 }
 
+/// Resolve the only action identity that may be used for a capability.
+pub fn canonical_action_id(capability_id: &str) -> Option<ActionId> {
+    find_capability(capability_id)
+        .filter(|spec| spec.effect_class.is_some())
+        .map(|_| action_id_for(capability_id))
+}
+
 /// Construct all five bundled Wave 4 registrations.
 pub fn registrations() -> Result<Vec<PluginRegistration>, String> {
     registrations_with_host_port(unconfigured_host_port())
@@ -1275,24 +1494,30 @@ impl CapabilityHandler for Wave4CapabilityHandler {
                 &context.resource_bindings,
             )?;
             let operation = operation_from_input(&self.capability_id, input)?;
+            let request = Wave4HostRequest {
+                context: Wave4HostContext {
+                    principal: context.principal,
+                    agent_session_id: context.agent_session_id,
+                    operation_id: context.operation_id,
+                    idempotency_key: context.idempotency_key,
+                    correlation_id: context.correlation_id,
+                    resolved_snapshot_ref: context.resolved_snapshot_ref,
+                    registry_generation: context.registry_generation,
+                    capability_id: self.capability_id.clone(),
+                    action_id: self.action_id.clone(),
+                    state_scope_key: context.state_scope_key,
+                    resource_bindings: context.resource_bindings,
+                },
+                operation,
+            };
+            request
+                .validate()
+                .map_err(|error| KernelError::CapabilityExecution {
+                    reason: error.to_string(),
+                })?;
 
             self.host_port
-                .invoke(Wave4HostRequest {
-                    context: Wave4HostContext {
-                        principal: context.principal,
-                        agent_session_id: context.agent_session_id,
-                        operation_id: context.operation_id,
-                        idempotency_key: context.idempotency_key,
-                        correlation_id: context.correlation_id,
-                        resolved_snapshot_ref: context.resolved_snapshot_ref,
-                        registry_generation: context.registry_generation,
-                        capability_id: self.capability_id.clone(),
-                        action_id: self.action_id.clone(),
-                        state_scope_key: context.state_scope_key,
-                        resource_bindings: context.resource_bindings,
-                    },
-                    operation,
-                })
+                .invoke(request)
                 .await
                 .map_err(|error| KernelError::CapabilityExecution {
                     reason: error.to_string(),
@@ -1301,7 +1526,9 @@ impl CapabilityHandler for Wave4CapabilityHandler {
     }
 }
 
-fn operation_from_input(
+/// Convert a canonical capability ID and its object payload into the only
+/// typed operation variant accepted by the host port.
+pub fn operation_from_input(
     capability_id: &CapabilityId,
     input: StrictJsonValue,
 ) -> Result<Wave4CapabilityOperation, KernelError> {
@@ -1336,29 +1563,149 @@ fn validate_resource_bindings(
     requirements: &[ResourceRequirement],
     bindings: &[TypedResourceBinding],
 ) -> Result<(), KernelError> {
+    validate_resource_bindings_contract(capability_id, principal_id, requirements, bindings)
+        .map_err(|error| {
+            if error.code == WAVE4_RESOURCE_OWNER_MISMATCH {
+                let binding_id = bindings
+                    .iter()
+                    .find(|binding| binding.owner_id != principal_id)
+                    .map(|binding| binding.binding_id.clone())
+                    .unwrap_or_else(|| ResourceBindingId::from("unknown"));
+                KernelError::ResourceOwnerMismatch { binding_id }
+            } else {
+                KernelError::CapabilityExecution {
+                    reason: error.to_string(),
+                }
+            }
+        })
+}
+
+fn validate_host_context(context: &Wave4HostContext) -> Result<(), Wave4HostPortError> {
+    let fields = [
+        ("principal.principal_kind", context.principal.principal_kind.as_str()),
+        ("principal.principal_id", context.principal.principal_id.as_str()),
+        ("agent_session_id", context.agent_session_id.as_ref()),
+        ("operation_id", context.operation_id.as_ref()),
+        ("idempotency_key", context.idempotency_key.as_ref()),
+        ("correlation_id", context.correlation_id.as_ref()),
+        (
+            "resolved_snapshot_ref.snapshot_id",
+            context.resolved_snapshot_ref.snapshot_id.as_ref(),
+        ),
+        (
+            "resolved_snapshot_ref.snapshot_digest",
+            context.resolved_snapshot_ref.snapshot_digest.as_ref(),
+        ),
+        ("state_scope_key", context.state_scope_key.as_ref()),
+    ];
+    if let Some((field, _)) = fields
+        .iter()
+        .find(|(_, value)| value.trim().is_empty())
+    {
+        return Err(Wave4HostPortError::invalid_request(format!(
+            "{field} must be non-empty"
+        )));
+    }
+    if context.registry_generation == 0 {
+        return Err(Wave4HostPortError::invalid_request(
+            "registry_generation must identify a published generation",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_resource_bindings_contract(
+    capability_id: &CapabilityId,
+    principal_id: &str,
+    requirements: &[ResourceRequirement],
+    bindings: &[TypedResourceBinding],
+) -> Result<(), Wave4HostPortError> {
+    if principal_id.trim().is_empty() {
+        return Err(Wave4HostPortError::invalid_request(
+            "principal.principal_id must be non-empty",
+        ));
+    }
+
+    let expected_kinds = requirements
+        .iter()
+        .map(|requirement| ResourceKind::from(requirement.resource_kind))
+        .collect::<BTreeSet<_>>();
+    let declared_operations = typed_resource_descriptors()
+        .into_iter()
+        .map(|descriptor| (descriptor.resource_kind, descriptor.operations))
+        .collect::<BTreeMap<_, _>>();
     let mut seen_binding_ids = BTreeSet::new();
+    let mut seen_resource_kinds = BTreeSet::new();
     for binding in bindings {
-        if binding.binding_id.as_ref().is_empty() || binding.resource_id.as_ref().is_empty() {
-            return Err(KernelError::CapabilityExecution {
-                reason: format!(
-                    "{} requires non-empty binding and resource IDs",
-                    capability_id.as_ref()
-                ),
-            });
+        if binding.binding_id.as_ref().trim().is_empty()
+            || binding.resource_kind.as_ref().trim().is_empty()
+            || binding.resource_id.as_ref().trim().is_empty()
+            || binding.owner_id.trim().is_empty()
+        {
+            return Err(Wave4HostPortError::resource_binding_invalid(format!(
+                "{} requires non-empty binding, resource kind, resource ID, and owner ID",
+                capability_id.as_ref()
+            )));
         }
         if !seen_binding_ids.insert(binding.binding_id.clone()) {
-            return Err(KernelError::CapabilityExecution {
-                reason: format!(
-                    "{} received duplicate resource binding {}",
-                    capability_id.as_ref(),
-                    binding.binding_id.as_ref()
-                ),
-            });
+            return Err(Wave4HostPortError::resource_binding_invalid(format!(
+                "{} received duplicate resource binding {}",
+                capability_id.as_ref(),
+                binding.binding_id.as_ref()
+            )));
         }
         if binding.owner_id != principal_id {
-            return Err(KernelError::ResourceOwnerMismatch {
-                binding_id: binding.binding_id.clone(),
-            });
+            return Err(Wave4HostPortError::resource_owner_mismatch(format!(
+                "resource binding {} belongs to {}, not {}",
+                binding.binding_id.as_ref(),
+                binding.owner_id,
+                principal_id
+            )));
+        }
+        if !seen_resource_kinds.insert(binding.resource_kind.clone()) {
+            return Err(Wave4HostPortError::resource_binding_invalid(format!(
+                "{} received duplicate resource kind {}",
+                capability_id.as_ref(),
+                binding.resource_kind.as_ref()
+            )));
+        }
+        if !expected_kinds.contains(&binding.resource_kind) {
+            return Err(Wave4HostPortError::resource_binding_invalid(format!(
+                "{} received unexpected resource kind {}",
+                capability_id.as_ref(),
+                binding.resource_kind.as_ref()
+            )));
+        }
+        let Some(allowed_operations) = declared_operations.get(&binding.resource_kind) else {
+            return Err(Wave4HostPortError::resource_binding_invalid(format!(
+                "{} received undeclared resource kind {}",
+                capability_id.as_ref(),
+                binding.resource_kind.as_ref()
+            )));
+        };
+        if binding.operations.is_empty()
+            || binding
+                .operations
+                .iter()
+                .any(|operation| operation.trim().is_empty())
+        {
+            return Err(Wave4HostPortError::resource_binding_invalid(format!(
+                "{} received empty resource operation metadata for {}",
+                capability_id.as_ref(),
+                binding.binding_id.as_ref()
+            )));
+        }
+        if let Some(operation) = binding
+            .operations
+            .iter()
+            .find(|operation| !allowed_operations.contains(*operation))
+        {
+            return Err(Wave4HostPortError::resource_binding_invalid(format!(
+                "{} received undeclared operation {} on resource kind {}",
+                capability_id.as_ref(),
+                operation,
+                binding.resource_kind.as_ref()
+            )));
         }
     }
 
@@ -1367,20 +1714,19 @@ fn validate_resource_bindings(
             .iter()
             .find(|binding| binding.resource_kind.as_ref() == requirement.resource_kind)
         else {
-            return Err(KernelError::CapabilityResourceNotBound {
-                capability_id: capability_id.clone(),
-                resource_kind: requirement.resource_kind.to_owned(),
-            });
+            return Err(Wave4HostPortError::resource_binding_invalid(format!(
+                "{} is missing resource kind {}",
+                capability_id.as_ref(),
+                requirement.resource_kind
+            )));
         };
         if !binding.operations.contains(requirement.operation) {
-            return Err(KernelError::CapabilityExecution {
-                reason: format!(
-                    "{} requires operation {} on {}",
-                    capability_id.as_ref(),
-                    requirement.operation,
-                    requirement.resource_kind
-                ),
-            });
+            return Err(Wave4HostPortError::resource_binding_invalid(format!(
+                "{} requires operation {} on {}",
+                capability_id.as_ref(),
+                requirement.operation,
+                requirement.resource_kind
+            )));
         }
     }
     Ok(())
@@ -1388,12 +1734,66 @@ fn validate_resource_bindings(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::task::{Context, Poll, Wake, Waker};
 
     use super::*;
     use nomifun_agent_kernel::{
         InMemoryPluginStatePersistence, KernelRegistry, MaterializationPolicy,
     };
+
+    fn valid_context(
+        capability_id: &str,
+        action_id: &str,
+        resource_kind: &str,
+    ) -> Wave4HostContext {
+        let owner_id = "wave4-test-owner";
+        let resource_bindings = canonical_resource_bindings(owner_id)
+            .into_iter()
+            .filter(|binding| binding.resource_kind.as_ref() == resource_kind)
+            .collect();
+        Wave4HostContext {
+            principal: PrincipalRef {
+                principal_kind: "user".to_owned(),
+                principal_id: owner_id.to_owned(),
+            },
+            agent_session_id: AgentSessionId::from("wave4-test-session"),
+            operation_id: OperationId::from("wave4-test-operation"),
+            idempotency_key: IdempotencyKey::from("wave4-test-idempotency"),
+            correlation_id: CorrelationId::from("wave4-test-correlation"),
+            resolved_snapshot_ref: ResolvedSnapshotRef {
+                snapshot_id: "snapshot".into(),
+                snapshot_digest: "digest".into(),
+            },
+            registry_generation: 1,
+            capability_id: CapabilityId::from(capability_id),
+            action_id: ActionId::from(action_id),
+            state_scope_key: ScopeKey::from("session:wave4-test"),
+            resource_bindings,
+        }
+    }
+
+    fn valid_request(
+        capability_id: &str,
+        action_id: &str,
+        resource_kind: &str,
+        operation: Wave4CapabilityOperation,
+    ) -> Wave4HostRequest {
+        Wave4HostRequest {
+            context: valid_context(capability_id, action_id, resource_kind),
+            operation,
+        }
+    }
+
+    fn object_with_message() -> StrictJsonValue {
+        let mut input = empty_object();
+        input
+            .0
+            .as_object_mut()
+            .expect("empty object")
+            .insert("message".to_owned(), "hello".into());
+        input
+    }
 
     #[test]
     fn registrations_cover_the_full_target_package_inventory() {
@@ -1643,8 +2043,15 @@ mod tests {
 
     #[test]
     fn handler_resource_requirements_fit_the_frozen_binding_operations() {
-        let bindings = canonical_resource_bindings("owner-1");
         for capability in all_capabilities() {
+            let bindings = canonical_resource_bindings("owner-1")
+                .into_iter()
+                .filter(|binding| {
+                    capability
+                        .resource_kinds
+                        .contains(&binding.resource_kind.as_ref())
+                })
+                .collect::<Vec<_>>();
             for requirement in capability.requirements {
                 let binding = bindings
                     .iter()
@@ -1665,6 +2072,310 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_action_capability_has_an_exact_typed_operation_and_action_pair() {
+        for capability in all_capabilities().filter(|capability| capability.effect_class.is_some()) {
+            let capability_id = CapabilityId::from(capability.id);
+            let operation = operation_from_input(&capability_id, empty_object())
+                .expect("every action capability must have a typed operation");
+            assert_eq!(operation.capability_id(), capability_id);
+            assert_eq!(operation.action_id(), canonical_action_id(capability.id).unwrap());
+            assert_eq!(
+                action_id_for(capability.id),
+                ActionId::from(format!("{}.invoke", capability.id))
+            );
+        }
+        for capability in all_capabilities().filter(|capability| capability.effect_class.is_none()) {
+            assert!(canonical_action_id(capability.id).is_none());
+            assert!(operation_from_input(&CapabilityId::from(capability.id), empty_object()).is_err());
+        }
+    }
+
+    #[test]
+    fn canonical_action_matrix_maps_each_capability_to_its_exact_variant_and_owner() {
+        let cases = [
+            (CHANNEL_REPLY, CHANNEL_REPLY_ACTION, Wave4OwnerDomain::Channel),
+            (CHANNEL_SEND, CHANNEL_SEND_ACTION, Wave4OwnerDomain::Channel),
+            (
+                COMPANION_SUMMON,
+                COMPANION_SUMMON_ACTION,
+                Wave4OwnerDomain::Companion,
+            ),
+            (
+                COMPANION_LEARN,
+                COMPANION_LEARN_ACTION,
+                Wave4OwnerDomain::Companion,
+            ),
+            (
+                COMPANION_EVOLVE,
+                COMPANION_EVOLVE_ACTION,
+                Wave4OwnerDomain::Companion,
+            ),
+            (
+                CUSTOMER_SERVICE_NOTES_READ,
+                CUSTOMER_SERVICE_NOTES_READ_ACTION,
+                Wave4OwnerDomain::CustomerService,
+            ),
+            (
+                CUSTOMER_SERVICE_NOTES_WRITE,
+                CUSTOMER_SERVICE_NOTES_WRITE_ACTION,
+                Wave4OwnerDomain::CustomerService,
+            ),
+            (
+                CUSTOMER_SERVICE_HANDOFF,
+                CUSTOMER_SERVICE_HANDOFF_ACTION,
+                Wave4OwnerDomain::CustomerService,
+            ),
+            (
+                ROBOT_DISPLAY,
+                ROBOT_DISPLAY_ACTION,
+                Wave4OwnerDomain::Robot,
+            ),
+            (ROBOT_MOTION, ROBOT_MOTION_ACTION, Wave4OwnerDomain::Robot),
+            (
+                ROBOT_DEVICE_TOOLS,
+                ROBOT_DEVICE_TOOLS_ACTION,
+                Wave4OwnerDomain::Robot,
+            ),
+        ];
+
+        for (capability_id, action_id, owner_domain) in cases {
+            let operation =
+                operation_from_input(&CapabilityId::from(capability_id), empty_object())
+                    .expect("canonical action capability");
+            assert_eq!(operation.capability_id().as_ref(), capability_id);
+            assert_eq!(operation.action_id().as_ref(), action_id);
+            assert_eq!(operation.owner_domain(), owner_domain);
+            match capability_id {
+                CHANNEL_REPLY => assert!(matches!(
+                    operation,
+                    Wave4CapabilityOperation::ChannelReply { .. }
+                )),
+                CHANNEL_SEND => assert!(matches!(
+                    operation,
+                    Wave4CapabilityOperation::ChannelSend { .. }
+                )),
+                COMPANION_SUMMON => assert!(matches!(
+                    operation,
+                    Wave4CapabilityOperation::CompanionSummon { .. }
+                )),
+                COMPANION_LEARN => assert!(matches!(
+                    operation,
+                    Wave4CapabilityOperation::CompanionLearn { .. }
+                )),
+                COMPANION_EVOLVE => assert!(matches!(
+                    operation,
+                    Wave4CapabilityOperation::CompanionEvolve { .. }
+                )),
+                CUSTOMER_SERVICE_NOTES_READ => assert!(matches!(
+                    operation,
+                    Wave4CapabilityOperation::CustomerServiceNotesRead { .. }
+                )),
+                CUSTOMER_SERVICE_NOTES_WRITE => assert!(matches!(
+                    operation,
+                    Wave4CapabilityOperation::CustomerServiceNotesWrite { .. }
+                )),
+                CUSTOMER_SERVICE_HANDOFF => assert!(matches!(
+                    operation,
+                    Wave4CapabilityOperation::CustomerServiceHandoff { .. }
+                )),
+                ROBOT_DISPLAY => assert!(matches!(
+                    operation,
+                    Wave4CapabilityOperation::RobotDisplay { .. }
+                )),
+                ROBOT_MOTION => assert!(matches!(
+                    operation,
+                    Wave4CapabilityOperation::RobotMotion { .. }
+                )),
+                ROBOT_DEVICE_TOOLS => assert!(matches!(
+                    operation,
+                    Wave4CapabilityOperation::RobotDeviceTools { .. }
+                )),
+                _ => unreachable!("all canonical action cases are explicit"),
+            }
+        }
+    }
+
+    #[test]
+    fn host_request_validation_accepts_each_action_with_its_declared_resource_operation() {
+        for capability in all_capabilities().filter(|capability| capability.effect_class.is_some()) {
+            assert_eq!(
+                capability.requirements.len(),
+                1,
+                "{} must have one canonical resource requirement",
+                capability.id
+            );
+            let requirement = capability.requirements[0];
+            let capability_id = CapabilityId::from(capability.id);
+            let action_id = canonical_action_id(capability.id).expect("action identity");
+            let operation =
+                operation_from_input(&capability_id, empty_object()).expect("typed operation");
+            let request = valid_request(
+                capability.id,
+                action_id.as_ref(),
+                requirement.resource_kind,
+                operation,
+            );
+            request
+                .validate()
+                .unwrap_or_else(|error| panic!("{} must validate: {error}", capability.id));
+        }
+    }
+
+    #[test]
+    fn host_request_validation_rejects_cross_capability_operations_and_transport_branches() {
+        let mismatched = valid_request(
+            CHANNEL_SEND,
+            CHANNEL_SEND_ACTION,
+            CHANNEL_RESOURCE_KIND,
+            Wave4CapabilityOperation::ChannelReply {
+                input: empty_object(),
+            },
+        );
+        let error = mismatched.validate().expect_err("cross-capability operation must reject");
+        assert_eq!(error.code, WAVE4_ACTION_OPERATION_MISMATCH);
+
+        let pairing = Wave4HostRequest {
+            context: valid_context(CHANNEL_PAIRING, "channel.pairing.invoke", CHANNEL_RESOURCE_KIND),
+            operation: Wave4CapabilityOperation::ChannelReply {
+                input: empty_object(),
+            },
+        };
+        let error = pairing
+            .validate()
+            .expect_err("pairing must remain transport-owned");
+        assert_eq!(error.code, WAVE4_ACTION_OPERATION_MISMATCH);
+    }
+
+    #[test]
+    fn host_request_validation_rejects_invalid_binding_metadata_before_owner_dispatch() {
+        let mut request = valid_request(
+            CHANNEL_REPLY,
+            CHANNEL_REPLY_ACTION,
+            CHANNEL_RESOURCE_KIND,
+            Wave4CapabilityOperation::ChannelReply {
+                input: empty_object(),
+            },
+        );
+        request.context.resource_bindings[0].owner_id = "another-owner".to_owned();
+        let error = request
+            .validate()
+            .expect_err("foreign resource owner must reject");
+        assert_eq!(error.code, WAVE4_RESOURCE_OWNER_MISMATCH);
+
+        request.context.resource_bindings[0].owner_id = "wave4-test-owner".to_owned();
+        request.context.resource_bindings[0]
+            .operations
+            .insert("not-declared".to_owned());
+        let error = request
+            .validate()
+            .expect_err("undeclared resource operation must reject");
+        assert_eq!(error.code, WAVE4_RESOURCE_BINDING_INVALID);
+
+        request.context.resource_bindings.push(typed_resource_binding(
+            "wave4-robot",
+            ROBOT_RESOURCE_KIND,
+            "robot-1",
+            "wave4-test-owner",
+            ["link", "display", "motion", "audio", "vision"],
+        ));
+        let error = request
+            .validate()
+            .expect_err("unexpected resource kind must reject");
+        assert_eq!(error.code, WAVE4_RESOURCE_BINDING_INVALID);
+    }
+
+    #[test]
+    fn composed_host_port_routes_only_to_injected_owner_and_keeps_missing_owner_unavailable() {
+        fn poll_ready<F: Future>(future: F) -> F::Output {
+            let waker = Waker::from(Arc::new(NoopWaker));
+            let mut context = Context::from_waker(&waker);
+            let mut future = Box::pin(future);
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => value,
+                Poll::Pending => panic!("test host owner must settle immediately"),
+            }
+        }
+
+        struct NoopWaker;
+
+        impl Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        struct RejectingOwner {
+            calls: Arc<Mutex<Vec<Wave4OwnerDomain>>>,
+            domain: Wave4OwnerDomain,
+        }
+
+        impl Wave4HostPort for RejectingOwner {
+            fn invoke<'a>(
+                &'a self,
+                request: Wave4HostRequest,
+            ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave4HostPortError>> + Send + 'a>>
+            {
+                let calls = Arc::clone(&self.calls);
+                let domain = self.domain;
+                Box::pin(async move {
+                    request.validate()?;
+                    calls.lock().unwrap().push(domain);
+                    Err(Wave4HostPortError::new(
+                        "TEST_OWNER_REJECTED",
+                        "the boundary test owner never projects success",
+                    ))
+                })
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let host = composed_host_port(
+            Wave4OwnerBindings::default().with_channel(Arc::new(RejectingOwner {
+                calls: Arc::clone(&calls),
+                domain: Wave4OwnerDomain::Channel,
+            })),
+        );
+        let request = valid_request(
+            CHANNEL_REPLY,
+            CHANNEL_REPLY_ACTION,
+            CHANNEL_RESOURCE_KIND,
+            Wave4CapabilityOperation::ChannelReply {
+                input: object_with_message(),
+            },
+        );
+        let error =
+            poll_ready(host.invoke(request)).expect_err("boundary owner deliberately rejects");
+        assert_eq!(error.code, "TEST_OWNER_REJECTED");
+        assert_eq!(*calls.lock().unwrap(), vec![Wave4OwnerDomain::Channel]);
+
+        let invalid = valid_request(
+            CHANNEL_SEND,
+            CHANNEL_SEND_ACTION,
+            CHANNEL_RESOURCE_KIND,
+            Wave4CapabilityOperation::ChannelReply {
+                input: empty_object(),
+            },
+        );
+        let error = poll_ready(host.invoke(invalid)).expect_err("invalid request must reject");
+        assert_eq!(error.code, WAVE4_ACTION_OPERATION_MISMATCH);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![Wave4OwnerDomain::Channel],
+            "invalid requests must not reach an injected owner"
+        );
+
+        let missing_owner = composed_host_port(Wave4OwnerBindings::default());
+        let error = poll_ready(missing_owner.invoke(valid_request(
+            ROBOT_DISPLAY,
+            ROBOT_DISPLAY_ACTION,
+            ROBOT_RESOURCE_KIND,
+            Wave4CapabilityOperation::RobotDisplay {
+                input: empty_object(),
+            },
+        )))
+        .expect_err("missing Robot owner must remain unavailable");
+        assert_eq!(error.code, WAVE4_HOST_PORT_UNAVAILABLE);
     }
 
     #[test]
@@ -1922,7 +2633,10 @@ mod tests {
                 capability_id: CapabilityId::from(CHANNEL_REPLY),
                 action_id: ActionId::from(CHANNEL_REPLY_ACTION),
                 state_scope_key: ScopeKey::from("session:wave4-test"),
-                resource_bindings: Vec::new(),
+                resource_bindings: canonical_resource_bindings("wave4-test-owner")
+                    .into_iter()
+                    .filter(|binding| binding.resource_kind.as_ref() == CHANNEL_RESOURCE_KIND)
+                    .collect(),
             },
             operation: Wave4CapabilityOperation::ChannelReply {
                 input: empty_object(),

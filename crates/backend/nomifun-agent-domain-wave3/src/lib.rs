@@ -77,6 +77,7 @@ pub const TARGET_CAPABILITY_IDS: [&str; 19] = [
 
 pub const PACKAGE_IDS: [&str; 4] = TARGET_PACKAGE_IDS;
 pub const ALL_CAPABILITY_IDS: [&str; 19] = TARGET_CAPABILITY_IDS;
+pub const AGENT_SURFACES: &[&str] = &["desktop", "headless", "remote", "web"];
 
 /// The single host port for action-bearing Wave 3 capabilities.
 ///
@@ -84,6 +85,13 @@ pub const ALL_CAPABILITY_IDS: [&str; 19] = TARGET_CAPABILITY_IDS;
 /// The application owns creation, Canvas, Office, and MiniApp facts and must
 /// provide the adapter used by [`registrations_with_host_port`].
 pub const WAVE3_CAPABILITY_HOST_PORT_ID: &str = "host.wave3.capability.invoke";
+pub const WAVE3_HOST_PORT_UNAVAILABLE: &str = "WAVE3_HOST_PORT_UNAVAILABLE";
+pub const WAVE3_INVALID_REQUEST: &str = "WAVE3_INVALID_REQUEST";
+pub const WAVE3_ACTION_OPERATION_MISMATCH: &str = "WAVE3_ACTION_OPERATION_MISMATCH";
+pub const WAVE3_RESOURCE_BINDING_INVALID: &str = "WAVE3_RESOURCE_BINDING_INVALID";
+pub const WAVE3_RESOURCE_OWNER_MISMATCH: &str = "RESOURCE_OWNER_MISMATCH";
+pub const WAVE3_RESOURCE_NOT_BOUND: &str = "WAVE3_RESOURCE_NOT_BOUND";
+pub const WAVE3_INVALID_RESPONSE: &str = "WAVE3_INVALID_RESPONSE";
 
 /// The resource slots frozen by the creative-studio official preset.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,8 +105,12 @@ pub struct TypedResourceDescriptor {
 
 /// Invocation metadata projected from the Kernel into the Wave 3 host port.
 ///
-/// No application service bag, Gateway state, legacy Conversation state, or
-/// Kernel authority is exposed through this boundary.
+/// No application service bag, Gateway state, legacy Conversation state,
+/// `PluginStateHandle`, or other Kernel authority is exposed through this
+/// boundary. The central adapter owns its real business persistence (for
+/// example, an injected Creation/Workshop/Office/MiniApp service or
+/// repository) and uses this context's principal, snapshot, idempotency,
+/// correlation, and resource identities to authorize and persist the action.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wave3HostContext {
     pub principal: PrincipalRef,
@@ -148,6 +160,127 @@ pub struct Wave3HostRequest {
     pub operation: Wave3CapabilityOperation,
 }
 
+impl Wave3CapabilityOperation {
+    /// Return the canonical capability identity fixed by this typed variant.
+    pub fn capability_id(&self) -> CapabilityId {
+        CapabilityId::from(match self {
+            Self::CreationText { .. } => "creation.text",
+            Self::CreationImage { .. } => "creation.image",
+            Self::CreationImageEdit { .. } => "creation.image_edit",
+            Self::CreationVideo { .. } => "creation.video",
+            Self::CreationAudio { .. } => "creation.audio",
+            Self::WorkshopCanvasRead { .. } => "workshop.canvas.read",
+            Self::WorkshopCanvasEdit { .. } => "workshop.canvas.edit",
+            Self::WorkshopAssetRead { .. } => "workshop.asset.read",
+            Self::WorkshopAssetWrite { .. } => "workshop.asset.write",
+            Self::WorkshopTemplateRun { .. } => "workshop.template.run",
+            Self::WorkshopDirector { .. } => "workshop.director",
+            Self::OfficePreview { .. } => "office.preview",
+            Self::OfficeDocumentEdit { .. } => "office.document.edit",
+            Self::OfficeSheetEdit { .. } => "office.sheet.edit",
+            Self::OfficeSlidesEdit { .. } => "office.slides.edit",
+            Self::MiniAppRead { .. } => "miniapp.read",
+            Self::MiniAppEdit { .. } => "miniapp.edit",
+            Self::MiniAppPublish { .. } => "miniapp.publish",
+            Self::MiniAppServe { .. } => "miniapp.serve",
+        })
+    }
+
+    /// Return the canonical action identity paired with this operation.
+    pub fn action_id(&self) -> ActionId {
+        action_id(self.capability_id().as_ref())
+            .expect("every Wave 3 operation is action-bearing")
+    }
+
+    /// Return the first-party owner domain for the operation.
+    pub fn owner_domain(&self) -> Wave3OwnerDomain {
+        match self {
+            Self::CreationText { .. }
+            | Self::CreationImage { .. }
+            | Self::CreationImageEdit { .. }
+            | Self::CreationVideo { .. }
+            | Self::CreationAudio { .. } => Wave3OwnerDomain::Creation,
+            Self::WorkshopCanvasRead { .. }
+            | Self::WorkshopCanvasEdit { .. }
+            | Self::WorkshopAssetRead { .. }
+            | Self::WorkshopAssetWrite { .. }
+            | Self::WorkshopTemplateRun { .. }
+            | Self::WorkshopDirector { .. } => Wave3OwnerDomain::Workshop,
+            Self::OfficePreview { .. }
+            | Self::OfficeDocumentEdit { .. }
+            | Self::OfficeSheetEdit { .. }
+            | Self::OfficeSlidesEdit { .. } => Wave3OwnerDomain::Office,
+            Self::MiniAppRead { .. }
+            | Self::MiniAppEdit { .. }
+            | Self::MiniAppPublish { .. }
+            | Self::MiniAppServe { .. } => Wave3OwnerDomain::MiniApp,
+        }
+    }
+
+    fn input(&self) -> &StrictJsonValue {
+        match self {
+            Self::CreationText { input }
+            | Self::CreationImage { input }
+            | Self::CreationImageEdit { input }
+            | Self::CreationVideo { input }
+            | Self::CreationAudio { input }
+            | Self::WorkshopCanvasRead { input }
+            | Self::WorkshopCanvasEdit { input }
+            | Self::WorkshopAssetRead { input }
+            | Self::WorkshopAssetWrite { input }
+            | Self::WorkshopTemplateRun { input }
+            | Self::WorkshopDirector { input }
+            | Self::OfficePreview { input }
+            | Self::OfficeDocumentEdit { input }
+            | Self::OfficeSheetEdit { input }
+            | Self::OfficeSlidesEdit { input }
+            | Self::MiniAppRead { input }
+            | Self::MiniAppEdit { input }
+            | Self::MiniAppPublish { input }
+            | Self::MiniAppServe { input } => input,
+        }
+    }
+}
+
+impl Wave3HostRequest {
+    /// Validate the complete boundary before an owner receives the request.
+    pub fn validate(&self) -> Result<(), Wave3HostPortError> {
+        let capability_id = &self.context.capability_id;
+        let Some(spec) = find_capability(capability_id.as_ref()) else {
+            return Err(Wave3HostPortError::invalid_request(format!(
+                "unknown Wave 3 capability {}",
+                capability_id.as_ref()
+            )));
+        };
+        let operation_capability_id = self.operation.capability_id();
+        let operation_action_id = self.operation.action_id();
+        if operation_capability_id != *capability_id
+            || operation_action_id != self.context.action_id
+        {
+            return Err(Wave3HostPortError::action_operation_mismatch(format!(
+                "context maps {} / {} but typed operation maps {} / {}",
+                capability_id.as_ref(),
+                self.context.action_id.as_ref(),
+                operation_capability_id.as_ref(),
+                operation_action_id.as_ref()
+            )));
+        }
+        if !self.operation.input().0.is_object() {
+            return Err(Wave3HostPortError::invalid_request(format!(
+                "{} input must be a JSON object",
+                capability_id.as_ref()
+            )));
+        }
+        validate_host_context(&self.context)?;
+        validate_resource_bindings_contract(
+            capability_id,
+            &self.context.principal.principal_id,
+            spec.requirements,
+            &self.context.resource_bindings,
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wave3HostPortError {
     pub code: String,
@@ -163,7 +296,27 @@ impl Wave3HostPortError {
     }
 
     pub fn unavailable(message: impl Into<String>) -> Self {
-        Self::new("WAVE3_HOST_PORT_UNAVAILABLE", message)
+        Self::new(WAVE3_HOST_PORT_UNAVAILABLE, message)
+    }
+
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self::new(WAVE3_INVALID_REQUEST, message)
+    }
+
+    pub fn action_operation_mismatch(message: impl Into<String>) -> Self {
+        Self::new(WAVE3_ACTION_OPERATION_MISMATCH, message)
+    }
+
+    pub fn resource_binding_invalid(message: impl Into<String>) -> Self {
+        Self::new(WAVE3_RESOURCE_BINDING_INVALID, message)
+    }
+
+    pub fn resource_owner_mismatch(message: impl Into<String>) -> Self {
+        Self::new(WAVE3_RESOURCE_OWNER_MISMATCH, message)
+    }
+
+    pub fn invalid_response(message: impl Into<String>) -> Self {
+        Self::new(WAVE3_INVALID_RESPONSE, message)
     }
 }
 
@@ -196,10 +349,94 @@ impl Wave3HostPort for UnconfiguredWave3HostPort {
     ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave3HostPortError>> + Send + 'a>>
     {
         Box::pin(async move {
+            request.validate()?;
             Err(Wave3HostPortError::unavailable(format!(
                 "no production host adapter is bound for {}",
                 request.context.capability_id.as_ref()
             )))
+        })
+    }
+}
+
+/// The owner domains that may be injected independently by central
+/// composition. Each owner still receives the same validated typed request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wave3OwnerDomain {
+    Creation,
+    Workshop,
+    Office,
+    MiniApp,
+}
+
+/// Optional first-party owner bindings for the canonical Wave 3 action port.
+///
+/// Central composition can connect only owners backed by real services.
+/// Missing owners remain unavailable; this type never supplies a success
+/// fallback or a synthetic result.
+#[derive(Default)]
+pub struct Wave3OwnerBindings {
+    pub creation: Option<Arc<dyn Wave3HostPort>>,
+    pub workshop: Option<Arc<dyn Wave3HostPort>>,
+    pub office: Option<Arc<dyn Wave3HostPort>>,
+    pub miniapp: Option<Arc<dyn Wave3HostPort>>,
+}
+
+impl Wave3OwnerBindings {
+    pub fn with_creation(mut self, owner: Arc<dyn Wave3HostPort>) -> Self {
+        self.creation = Some(owner);
+        self
+    }
+
+    pub fn with_workshop(mut self, owner: Arc<dyn Wave3HostPort>) -> Self {
+        self.workshop = Some(owner);
+        self
+    }
+
+    pub fn with_office(mut self, owner: Arc<dyn Wave3HostPort>) -> Self {
+        self.office = Some(owner);
+        self
+    }
+
+    pub fn with_miniapp(mut self, owner: Arc<dyn Wave3HostPort>) -> Self {
+        self.miniapp = Some(owner);
+        self
+    }
+}
+
+/// Compose independently injected owners behind the one manifest host port.
+pub fn composed_host_port(bindings: Wave3OwnerBindings) -> Arc<dyn Wave3HostPort> {
+    Arc::new(ComposedWave3HostPort { bindings })
+}
+
+struct ComposedWave3HostPort {
+    bindings: Wave3OwnerBindings,
+}
+
+impl Wave3HostPort for ComposedWave3HostPort {
+    fn invoke<'a>(
+        &'a self,
+        request: Wave3HostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave3HostPortError>> + Send + 'a>>
+    {
+        if let Err(error) = request.validate() {
+            return Box::pin(async move { Err(error) });
+        }
+
+        let owner = match request.operation.owner_domain() {
+            Wave3OwnerDomain::Creation => self.bindings.creation.clone(),
+            Wave3OwnerDomain::Workshop => self.bindings.workshop.clone(),
+            Wave3OwnerDomain::Office => self.bindings.office.clone(),
+            Wave3OwnerDomain::MiniApp => self.bindings.miniapp.clone(),
+        };
+        let capability_id = request.context.capability_id.clone();
+        Box::pin(async move {
+            let Some(owner) = owner else {
+                return Err(Wave3HostPortError::unavailable(format!(
+                    "no production owner is bound for {}",
+                    capability_id.as_ref()
+                )));
+            };
+            owner.invoke(request).await
         })
     }
 }
@@ -571,6 +808,14 @@ pub fn resource_descriptors() -> Vec<TypedResourceDescriptor> {
     typed_resource_descriptors()
 }
 
+/// Return the operations exposed by each canonical Wave 3 resource kind.
+pub fn resource_binding_metadata() -> BTreeMap<ResourceKind, BTreeSet<String>> {
+    typed_resource_descriptors()
+        .into_iter()
+        .map(|descriptor| (descriptor.resource_kind, descriptor.operations))
+        .collect()
+}
+
 fn descriptor<const N: usize>(
     slot_key: &'static str,
     resource_kind: &'static str,
@@ -656,6 +901,67 @@ pub fn required_resource_kinds(capability_id: &str) -> Option<BTreeSet<ResourceK
     })
 }
 
+/// Return the canonical action identity for an action-bearing capability.
+pub fn action_id(capability_id: &str) -> Option<ActionId> {
+    find_capability(capability_id).map(|_| ActionId::from(format!("{capability_id}.invoke")))
+}
+
+fn validate_capability_specs(spec: &PackageSpec) -> Result<(), String> {
+    let resource_metadata = resource_binding_metadata();
+    let mut capability_ids = BTreeSet::new();
+
+    for capability in spec.capabilities {
+        if !capability_ids.insert(capability.id) {
+            return Err(format!(
+                "duplicate Wave 3 capability {} in package {}",
+                capability.id, spec.id
+            ));
+        }
+
+        let declared_kinds = capability
+            .resource_kinds
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let required_kinds = capability
+            .requirements
+            .iter()
+            .map(|requirement| requirement.resource_kind)
+            .collect::<BTreeSet<_>>();
+        if declared_kinds != required_kinds {
+            return Err(format!(
+                "Wave 3 capability {} resource kinds do not match its requirements",
+                capability.id
+            ));
+        }
+
+        let mut requirement_keys = BTreeSet::new();
+        for requirement in capability.requirements {
+            if !requirement_keys.insert((requirement.resource_kind, requirement.operation)) {
+                return Err(format!(
+                    "Wave 3 capability {} declares duplicate resource requirement {}:{}",
+                    capability.id, requirement.resource_kind, requirement.operation
+                ));
+            }
+            let Some(operations) =
+                resource_metadata.get(&ResourceKind::from(requirement.resource_kind))
+            else {
+                return Err(format!(
+                    "Wave 3 capability {} requires unknown resource kind {}",
+                    capability.id, requirement.resource_kind
+                ));
+            };
+            if !operations.contains(requirement.operation) {
+                return Err(format!(
+                    "Wave 3 capability {} requires unsupported operation {} on {}",
+                    capability.id, requirement.operation, requirement.resource_kind
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Construct the complete bundled Wave 3 registration inventory.
 ///
 /// The default composition is metadata-only: action handlers are present so
@@ -709,6 +1015,7 @@ fn registration_for(
     spec: &PackageSpec,
     action_host_port: Arc<dyn Wave3HostPort>,
 ) -> Result<PluginRegistration, String> {
+    validate_capability_specs(spec)?;
     let package = package_ref(spec.id);
     let config_schema = package_config_schema();
     let capabilities = spec
@@ -815,7 +1122,8 @@ fn registration_for(
                 CapabilityId::from(capability.id),
                 Arc::new(Wave3CapabilityHandler {
                     capability_id: CapabilityId::from(capability.id),
-                    action_id: ActionId::from(capability.id),
+                    action_id: action_id(capability.id)
+                        .expect("every Wave 3 capability is action-bearing"),
                     requirements: capability.requirements,
                     host_port: Arc::clone(&action_host_port),
                 }),
@@ -866,13 +1174,17 @@ fn capability_manifest(
         display: capability_display(spec),
         requires: Vec::new(),
         conflicts: Vec::new(),
-        supported_surfaces: BTreeSet::new(),
+        supported_surfaces: AGENT_SURFACES
+            .iter()
+            .map(|surface| (*surface).to_owned())
+            .collect(),
         requires_runtime_features: Vec::new(),
         supported_platforms: vec![PlatformConstraint::Any],
         config_schema: capability_config_schema(),
         contributions: CapabilityContributions {
             actions: vec![CapabilityActionDescriptor {
-                action_id: ActionId::from(spec.id),
+                action_id: action_id(spec.id)
+                    .expect("every Wave 3 capability is action-bearing"),
                 input_schema: CanonicalSchemaRef::from(format!(
                     "schema://{}/input@1#{}",
                     spec.id,
@@ -1025,33 +1337,51 @@ impl CapabilityHandler for Wave3CapabilityHandler {
                 &context.resource_bindings,
             )?;
             let operation = operation_from_input(&self.capability_id, input)?;
-
-            self.host_port
-                .invoke(Wave3HostRequest {
-                    context: Wave3HostContext {
-                        principal: context.principal,
-                        agent_session_id: context.agent_session_id,
-                        operation_id: context.operation_id,
-                        idempotency_key: context.idempotency_key,
-                        correlation_id: context.correlation_id,
-                        resolved_snapshot_ref: context.resolved_snapshot_ref,
-                        registry_generation: context.registry_generation,
-                        capability_id: self.capability_id.clone(),
-                        action_id: self.action_id.clone(),
-                        state_scope_key: context.state_scope_key,
-                        resource_bindings: context.resource_bindings,
-                    },
-                    operation,
-                })
+            let request = Wave3HostRequest {
+                context: Wave3HostContext {
+                    principal: context.principal,
+                    agent_session_id: context.agent_session_id,
+                    operation_id: context.operation_id,
+                    idempotency_key: context.idempotency_key,
+                    correlation_id: context.correlation_id,
+                    resolved_snapshot_ref: context.resolved_snapshot_ref,
+                    registry_generation: context.registry_generation,
+                    capability_id: self.capability_id.clone(),
+                    action_id: self.action_id.clone(),
+                    state_scope_key: context.state_scope_key,
+                    resource_bindings: context.resource_bindings,
+                },
+                operation,
+            };
+            request
+                .validate()
+                .map_err(|error| KernelError::CapabilityExecution {
+                    reason: error.to_string(),
+                })?;
+            let result = self
+                .host_port
+                .invoke(request)
                 .await
                 .map_err(|error| KernelError::CapabilityExecution {
                     reason: error.to_string(),
-                })
+                })?;
+            if !result.0.is_object() {
+                return Err(KernelError::CapabilityExecution {
+                    reason: Wave3HostPortError::invalid_response(format!(
+                        "{} host result must be a JSON object",
+                        self.capability_id.as_ref()
+                    ))
+                    .to_string(),
+                });
+            }
+            Ok(result)
         })
     }
 }
 
-fn operation_from_input(
+/// Convert a canonical capability ID and its object payload into the only
+/// typed operation variant accepted by the host port.
+pub fn operation_from_input(
     capability_id: &CapabilityId,
     input: StrictJsonValue,
 ) -> Result<Wave3CapabilityOperation, KernelError> {
@@ -1090,29 +1420,156 @@ fn validate_resource_bindings(
     requirements: &[ResourceRequirement],
     bindings: &[TypedResourceBinding],
 ) -> Result<(), KernelError> {
+    validate_resource_bindings_contract(capability_id, principal_id, requirements, bindings)
+        .map_err(|error| {
+            if error.code == WAVE3_RESOURCE_OWNER_MISMATCH {
+                let binding_id = bindings
+                    .iter()
+                    .find(|binding| binding.owner_id != principal_id)
+                    .map(|binding| binding.binding_id.clone())
+                    .unwrap_or_else(|| ResourceBindingId::from("unknown"));
+                KernelError::ResourceOwnerMismatch { binding_id }
+            } else if error.code == WAVE3_RESOURCE_NOT_BOUND {
+                let resource_kind = requirements
+                    .iter()
+                    .find(|requirement| {
+                        !bindings.iter().any(|binding| {
+                            binding.resource_kind.as_ref() == requirement.resource_kind
+                        })
+                    })
+                    .map(|requirement| requirement.resource_kind.to_owned())
+                    .unwrap_or_else(|| "unknown".to_owned());
+                KernelError::CapabilityResourceNotBound {
+                    capability_id: capability_id.clone(),
+                    resource_kind,
+                }
+            } else {
+                KernelError::CapabilityExecution {
+                    reason: error.to_string(),
+                }
+            }
+        })
+}
+
+fn validate_host_context(context: &Wave3HostContext) -> Result<(), Wave3HostPortError> {
+    let fields = [
+        ("principal.principal_kind", context.principal.principal_kind.as_str()),
+        ("principal.principal_id", context.principal.principal_id.as_str()),
+        ("agent_session_id", context.agent_session_id.as_ref()),
+        ("operation_id", context.operation_id.as_ref()),
+        ("idempotency_key", context.idempotency_key.as_ref()),
+        ("correlation_id", context.correlation_id.as_ref()),
+        (
+            "resolved_snapshot_ref.snapshot_id",
+            context.resolved_snapshot_ref.snapshot_id.as_ref(),
+        ),
+        (
+            "resolved_snapshot_ref.snapshot_digest",
+            context.resolved_snapshot_ref.snapshot_digest.as_ref(),
+        ),
+        ("state_scope_key", context.state_scope_key.as_ref()),
+    ];
+    if let Some((field, _)) = fields
+        .iter()
+        .find(|(_, value)| value.trim().is_empty())
+    {
+        return Err(Wave3HostPortError::invalid_request(format!(
+            "{field} must be non-empty"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_resource_bindings_contract(
+    capability_id: &CapabilityId,
+    principal_id: &str,
+    requirements: &[ResourceRequirement],
+    bindings: &[TypedResourceBinding],
+) -> Result<(), Wave3HostPortError> {
+    if principal_id.trim().is_empty() {
+        return Err(Wave3HostPortError::invalid_request(
+            "principal.principal_id must be non-empty",
+        ));
+    }
+
+    let expected_kinds = requirements
+        .iter()
+        .map(|requirement| ResourceKind::from(requirement.resource_kind))
+        .collect::<BTreeSet<_>>();
+    let declared_operations = resource_binding_metadata();
     let mut seen_binding_ids = BTreeSet::new();
+    let mut seen_resource_kinds = BTreeSet::new();
+
     for binding in bindings {
-        if binding.binding_id.as_ref().is_empty() || binding.resource_id.as_ref().is_empty() {
-            return Err(KernelError::CapabilityExecution {
-                reason: format!(
-                    "{} requires non-empty binding and resource IDs",
-                    capability_id.as_ref()
-                ),
-            });
+        if binding.binding_id.as_ref().trim().is_empty()
+            || binding.resource_kind.as_ref().trim().is_empty()
+            || binding.resource_id.as_ref().trim().is_empty()
+            || binding.owner_id.trim().is_empty()
+        {
+            return Err(Wave3HostPortError::resource_binding_invalid(format!(
+                "{} requires non-empty binding, resource kind, resource ID, and owner ID",
+                capability_id.as_ref()
+            )));
         }
         if !seen_binding_ids.insert(binding.binding_id.clone()) {
-            return Err(KernelError::CapabilityExecution {
-                reason: format!(
-                    "{} received duplicate resource binding {}",
-                    capability_id.as_ref(),
-                    binding.binding_id.as_ref()
-                ),
-            });
+            return Err(Wave3HostPortError::resource_binding_invalid(format!(
+                "{} received duplicate resource binding {}",
+                capability_id.as_ref(),
+                binding.binding_id.as_ref()
+            )));
         }
         if binding.owner_id != principal_id {
-            return Err(KernelError::ResourceOwnerMismatch {
-                binding_id: binding.binding_id.clone(),
-            });
+            return Err(Wave3HostPortError::resource_owner_mismatch(format!(
+                "resource binding {} belongs to {}, not {}",
+                binding.binding_id.as_ref(),
+                binding.owner_id,
+                principal_id
+            )));
+        }
+        if !seen_resource_kinds.insert(binding.resource_kind.clone()) {
+            return Err(Wave3HostPortError::resource_binding_invalid(format!(
+                "{} received duplicate resource kind {}",
+                capability_id.as_ref(),
+                binding.resource_kind.as_ref()
+            )));
+        }
+        if !expected_kinds.contains(&binding.resource_kind) {
+            return Err(Wave3HostPortError::resource_binding_invalid(format!(
+                "{} received unexpected resource kind {}",
+                capability_id.as_ref(),
+                binding.resource_kind.as_ref()
+            )));
+        }
+        let Some(allowed_operations) = declared_operations.get(&binding.resource_kind) else {
+            return Err(Wave3HostPortError::resource_binding_invalid(format!(
+                "{} received undeclared resource kind {}",
+                capability_id.as_ref(),
+                binding.resource_kind.as_ref()
+            )));
+        };
+        if binding.operations.is_empty()
+            || binding
+                .operations
+                .iter()
+                .any(|operation| operation.trim().is_empty())
+        {
+            return Err(Wave3HostPortError::resource_binding_invalid(format!(
+                "{} received empty resource operation metadata for {}",
+                capability_id.as_ref(),
+                binding.binding_id.as_ref()
+            )));
+        }
+        if let Some(operation) = binding
+            .operations
+            .iter()
+            .find(|operation| !allowed_operations.contains(*operation))
+        {
+            return Err(Wave3HostPortError::resource_binding_invalid(format!(
+                "{} received undeclared operation {} on resource kind {}",
+                capability_id.as_ref(),
+                operation,
+                binding.resource_kind.as_ref()
+            )));
         }
     }
 
@@ -1121,20 +1578,22 @@ fn validate_resource_bindings(
             .iter()
             .find(|binding| binding.resource_kind.as_ref() == requirement.resource_kind)
         else {
-            return Err(KernelError::CapabilityResourceNotBound {
-                capability_id: capability_id.clone(),
-                resource_kind: requirement.resource_kind.to_owned(),
-            });
-        };
-        if !binding.operations.contains(requirement.operation) {
-            return Err(KernelError::CapabilityExecution {
-                reason: format!(
-                    "{} requires operation {} on {}",
+            return Err(Wave3HostPortError::new(
+                WAVE3_RESOURCE_NOT_BOUND,
+                format!(
+                    "{} is missing resource kind {}",
                     capability_id.as_ref(),
-                    requirement.operation,
                     requirement.resource_kind
                 ),
-            });
+            ));
+        };
+        if !binding.operations.contains(requirement.operation) {
+            return Err(Wave3HostPortError::resource_binding_invalid(format!(
+                "{} requires operation {} on {}",
+                capability_id.as_ref(),
+                requirement.operation,
+                requirement.resource_kind
+            )));
         }
     }
     Ok(())
@@ -1142,6 +1601,7 @@ fn validate_resource_bindings(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::task::{Context, Poll, Waker};
 
     use super::*;
@@ -1218,7 +1678,7 @@ mod tests {
                 assert_eq!(capability.contributions.actions.len(), 1);
                 assert_eq!(
                     capability.contributions.actions[0].action_id.as_ref(),
-                    capability.id.as_ref()
+                    format!("{}.invoke", capability.id.as_ref())
                 );
                 assert_eq!(
                     capability.contributions.host_ports,
@@ -1364,15 +1824,23 @@ mod tests {
 
     #[test]
     fn operation_mapping_and_resource_requirements_match_the_frozen_inventory() {
-        let bindings = canonical_resource_bindings("wave3-test-owner");
-
         for capability in PACKAGE_SPECS
             .iter()
             .flat_map(|package| package.capabilities.iter())
         {
             let capability_id = CapabilityId::from(capability.id);
+            let expected_kinds = required_resource_kinds(capability.id).expect("known capability");
+            let bindings = canonical_resource_bindings("wave3-test-owner")
+                .into_iter()
+                .filter(|binding| expected_kinds.contains(&binding.resource_kind))
+                .collect::<Vec<_>>();
             let operation = operation_from_input(&capability_id, StrictJsonValue(json!({})))
                 .expect("every Wave 3 capability has a typed operation");
+            assert_eq!(operation.capability_id(), capability_id);
+            assert_eq!(
+                operation.action_id(),
+                action_id(capability.id).expect("every Wave 3 capability has an action id")
+            );
 
             match capability.id {
                 "creation.text" => {
@@ -1508,6 +1976,174 @@ mod tests {
     }
 
     #[test]
+    fn composed_host_port_routes_by_owner_and_propagates_owner_errors() {
+        struct RecordingOwner {
+            domain: Wave3OwnerDomain,
+            calls: Arc<Mutex<Vec<Wave3OwnerDomain>>>,
+            error: Wave3HostPortError,
+        }
+
+        impl Wave3HostPort for RecordingOwner {
+            fn invoke<'a>(
+                &'a self,
+                request: Wave3HostRequest,
+            ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave3HostPortError>> + Send + 'a>>
+            {
+                let calls = Arc::clone(&self.calls);
+                let domain = self.domain;
+                let error = self.error.clone();
+                Box::pin(async move {
+                    request.validate()?;
+                    calls.lock().expect("recording owner lock").push(domain);
+                    Err(error)
+                })
+            }
+        }
+
+        fn poll_ready<F: Future>(future: F) -> F::Output {
+            let waker = Waker::noop();
+            let mut context = Context::from_waker(waker);
+            let mut future = std::pin::pin!(future);
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => value,
+                Poll::Pending => panic!("test owner must settle immediately"),
+            }
+        }
+
+        fn request_for(capability_id: &str) -> Wave3HostRequest {
+            let capability_id = CapabilityId::from(capability_id);
+            let input = StrictJsonValue(json!({"request": capability_id.as_ref()}));
+            let operation =
+                operation_from_input(&capability_id, input).expect("known Wave 3 operation");
+            let owner_id = "wave3-test-owner";
+            let required_kinds = required_resource_kinds(capability_id.as_ref())
+                .expect("known Wave 3 resource requirements");
+            let resource_bindings = canonical_resource_bindings(owner_id)
+                .into_iter()
+                .filter(|binding| required_kinds.contains(&binding.resource_kind))
+                .collect();
+            Wave3HostRequest {
+                context: Wave3HostContext {
+                    principal: PrincipalRef {
+                        principal_kind: "user".to_owned(),
+                        principal_id: owner_id.to_owned(),
+                    },
+                    agent_session_id: AgentSessionId::from("wave3-test-session"),
+                    operation_id: OperationId::from("wave3-test-operation"),
+                    idempotency_key: IdempotencyKey::from("wave3-test-idempotency"),
+                    correlation_id: CorrelationId::from("wave3-test-correlation"),
+                    resolved_snapshot_ref: ResolvedSnapshotRef {
+                        snapshot_id: "wave3-test-snapshot".into(),
+                        snapshot_digest: "wave3-test-digest".into(),
+                    },
+                    registry_generation: 1,
+                    capability_id: capability_id.clone(),
+                    action_id: action_id(capability_id.as_ref()).expect("action id"),
+                    state_scope_key: ScopeKey::from("session:wave3-test"),
+                    resource_bindings,
+                },
+                operation,
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let host = composed_host_port(
+            Wave3OwnerBindings::default().with_creation(Arc::new(RecordingOwner {
+                domain: Wave3OwnerDomain::Creation,
+                calls: Arc::clone(&calls),
+                error: Wave3HostPortError::new(
+                    "CREATION_OWNER_REACHED",
+                    "Creation owner received the request",
+                ),
+            })),
+        );
+        let error = poll_ready(host.invoke(request_for("creation.text")))
+            .expect_err("bound Creation owner should receive the request");
+        assert_eq!(error.code, "CREATION_OWNER_REACHED");
+        assert_eq!(
+            *calls.lock().expect("recording owner lock"),
+            vec![Wave3OwnerDomain::Creation]
+        );
+
+        let missing_owner = composed_host_port(Wave3OwnerBindings::default());
+        let error = poll_ready(missing_owner.invoke(request_for("miniapp.read")))
+            .expect_err("missing MiniApp owner must fail closed");
+        assert_eq!(error.code, WAVE3_HOST_PORT_UNAVAILABLE);
+        assert_eq!(
+            error.message,
+            "no production owner is bound for miniapp.read"
+        );
+
+        let owner_error = Wave3HostPortError::new("OWNER_ACTION_FAILED", "owner rejected action");
+        let failing_host = composed_host_port(
+            Wave3OwnerBindings::default().with_office(Arc::new(RecordingOwner {
+                domain: Wave3OwnerDomain::Office,
+                calls,
+                error: owner_error.clone(),
+            })),
+        );
+        assert_eq!(
+            poll_ready(failing_host.invoke(request_for("office.preview")))
+                .expect_err("owner errors must propagate unchanged"),
+            owner_error
+        );
+    }
+
+    #[test]
+    fn host_request_validation_rejects_cross_capability_and_invalid_resource_operations() {
+        let mut request = {
+            let capability_id = CapabilityId::from("creation.text");
+            let operation =
+                operation_from_input(&capability_id, StrictJsonValue(json!({}))).unwrap();
+            let mut request = {
+                let owner_id = "wave3-test-owner";
+                Wave3HostRequest {
+                    context: Wave3HostContext {
+                        principal: PrincipalRef {
+                            principal_kind: "user".to_owned(),
+                            principal_id: owner_id.to_owned(),
+                        },
+                        agent_session_id: AgentSessionId::from("wave3-test-session"),
+                        operation_id: OperationId::from("wave3-test-operation"),
+                        idempotency_key: IdempotencyKey::from("wave3-test-idempotency"),
+                        correlation_id: CorrelationId::from("wave3-test-correlation"),
+                        resolved_snapshot_ref: ResolvedSnapshotRef {
+                            snapshot_id: "snapshot".into(),
+                            snapshot_digest: "digest".into(),
+                        },
+                        registry_generation: 1,
+                        capability_id,
+                        action_id: ActionId::from("creation.text.invoke"),
+                        state_scope_key: ScopeKey::from("session:wave3-test"),
+                        resource_bindings: canonical_resource_bindings(owner_id)
+                            .into_iter()
+                            .filter(|binding| {
+                                binding.resource_kind.as_ref() == GENERATION_PROVIDER_RESOURCE_KIND
+                            })
+                            .collect(),
+                    },
+                    operation,
+                }
+            };
+            request.context.action_id = ActionId::from("creation.image.invoke");
+            request
+        };
+        let error = request
+            .validate()
+            .expect_err("cross-capability action identity must reject");
+        assert_eq!(error.code, WAVE3_ACTION_OPERATION_MISMATCH);
+
+        request.context.action_id = ActionId::from("creation.text.invoke");
+        request.context.resource_bindings[0]
+            .operations
+            .insert("not-declared".to_owned());
+        let error = request
+            .validate()
+            .expect_err("undeclared resource operation must reject");
+        assert_eq!(error.code, WAVE3_RESOURCE_BINDING_INVALID);
+    }
+
+    #[test]
     fn unconfigured_action_host_returns_a_typed_unavailable_error() {
         let host_port = unconfigured_host_port();
         let future = host_port.invoke(Wave3HostRequest {
@@ -1526,9 +2162,14 @@ mod tests {
                 },
                 registry_generation: 1,
                 capability_id: CapabilityId::from("creation.text"),
-                action_id: ActionId::from("creation.text"),
+                action_id: ActionId::from("creation.text.invoke"),
                 state_scope_key: ScopeKey::from("session:wave3-test"),
-                resource_bindings: Vec::new(),
+                resource_bindings: canonical_resource_bindings("wave3-test-owner")
+                    .into_iter()
+                    .filter(|binding| {
+                        binding.resource_kind.as_ref() == GENERATION_PROVIDER_RESOURCE_KIND
+                    })
+                    .collect(),
             },
             operation: Wave3CapabilityOperation::CreationText {
                 input: StrictJsonValue(serde_json::json!({})),

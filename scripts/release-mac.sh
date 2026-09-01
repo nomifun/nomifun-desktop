@@ -151,7 +151,7 @@ commit_paths() {
     echo "  无待提交改动，跳过 commit。"
     return 0
   fi
-  git -c user.name=nomifun -c user.email=nomifun@users.noreply.github.com commit -m "$message"
+  git commit -m "$message"
 }
 
 validate_manifest() {
@@ -311,7 +311,8 @@ if [[ "$Mode" == "CREATE" ]]; then
   else
     echo "▶ 提交并打 tag ${Tag}（author=nomifun）..."
     commit_paths "chore(release): $Tag" \
-      Cargo.toml Cargo.lock package.json ui/package.json apps/desktop/tauri.conf.json "$LatestJson"
+      Cargo.toml Cargo.lock package.json ui/package.json \
+      apps/desktop/tauri.conf.json apps/desktop/tauri.macos.conf.json "$LatestJson"
     if git rev-parse -q --verify "refs/tags/$Tag" >/dev/null 2>&1; then
       echo "  tag ${Tag} 已存在，复用。"
     else

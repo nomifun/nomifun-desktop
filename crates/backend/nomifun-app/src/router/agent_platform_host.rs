@@ -23,6 +23,9 @@ use nomifun_agent_control_plane::CompilerReleaseInputs;
 use nomifun_agent_kernel::{CompilerEnvironment, MaterializationPolicy};
 use nomifun_agent_domain_wave1::Wave1HostPort;
 use nomifun_agent_domain_wave2::Wave2HostPort;
+use nomifun_agent_domain_wave3::Wave3HostPort;
+use nomifun_agent_domain_wave4::Wave4HostPort;
+use nomifun_agent_domain_wave5::Wave5HostPort;
 use nomifun_agent_platform::{
     AgentPlatform, AgentPlatformConfig, ChatExecutionAuthority,
     BrokerBackedRuntimePort, ProductionChatCausalityGate,
@@ -57,6 +60,50 @@ const RUNTIME_FEATURE_INVENTORY_JSON: &str = include_str!(
     "../../../nomifun-agent-contracts/contracts/runtime/coding-runtime-feature-inventory.payload.json"
 );
 
+/// All domain action hosts mounted into one Fresh-v4 AgentPlatform
+/// generation.
+///
+/// The platform owns the registration generation, while each domain owns its
+/// action vocabulary and typed host boundary. Keeping the five ports together
+/// makes the composition seam explicit and gives the central owner one place
+/// to replace a fail-closed/unconfigured domain with a real owner-backed
+/// adapter. No domain port is allowed to reach back into `AppServices` or a
+/// second Session authority.
+#[derive(Clone)]
+pub(crate) struct AgentDomainHostPorts {
+    pub wave1: Arc<dyn Wave1HostPort>,
+    pub wave2: Arc<dyn Wave2HostPort>,
+    pub wave3: Arc<dyn Wave3HostPort>,
+    pub wave4: Arc<dyn Wave4HostPort>,
+    pub wave5: Arc<dyn Wave5HostPort>,
+}
+
+impl AgentDomainHostPorts {
+    fn for_workspace_root(workspace_root: PathBuf) -> Self {
+        Self {
+            wave1: nomifun_agent_domain_wave1::unconfigured_host_port(),
+            wave2: Arc::new(Wave2ApplicationHost::for_workspace_root(workspace_root)),
+            wave3: nomifun_agent_domain_wave3::unconfigured_host_port(),
+            wave4: Arc::new(Wave4ApplicationHost),
+            wave5: nomifun_agent_domain_wave5::unconfigured_host_port(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_wave1_and_wave2(
+        wave1: Arc<dyn Wave1HostPort>,
+        wave2: Arc<dyn Wave2HostPort>,
+    ) -> Self {
+        Self {
+            wave1,
+            wave2,
+            wave3: nomifun_agent_domain_wave3::unconfigured_host_port(),
+            wave4: Arc::new(Wave4ApplicationHost),
+            wave5: nomifun_agent_domain_wave5::unconfigured_host_port(),
+        }
+    }
+}
+
 /// Build the canonical Agent platform from an already-open Fresh-v4 pool and
 /// an optional provider pool.  A Fresh-v4 host passes its own pool here so
 /// provider/model/connection facts remain in the same canonical database; the
@@ -71,15 +118,41 @@ pub(crate) async fn build_from_open_pool(
     encryption_key: [u8; 32],
     workspace_root: PathBuf,
 ) -> anyhow::Result<Arc<AgentPlatform>> {
-    initialize_platform_with_cleanup(
+    build_from_open_pool_with_host_ports(
         pool,
         ready_path,
         marker,
         expected_schema_digest,
         provider_pool,
         encryption_key,
-        nomifun_agent_domain_wave1::unconfigured_host_port(),
-        Arc::new(Wave2ApplicationHost::for_workspace_root(workspace_root)),
+        AgentDomainHostPorts::for_workspace_root(workspace_root),
+    )
+    .await
+}
+
+/// Build the canonical Agent platform with explicit domain action ports.
+///
+/// This is the central composition seam for the migration waves. Production
+/// callers may replace only the domains that have a real v4 owner; omitted
+/// domains must be represented by their fail-closed port rather than by a
+/// synthetic action implementation.
+pub(crate) async fn build_from_open_pool_with_host_ports(
+    pool: SqlitePool,
+    ready_path: PathBuf,
+    marker: FreshV4ReadyMarker,
+    expected_schema_digest: DigestHex,
+    provider_pool: Option<SqlitePool>,
+    encryption_key: [u8; 32],
+    host_ports: AgentDomainHostPorts,
+) -> anyhow::Result<Arc<AgentPlatform>> {
+    initialize_platform_with_cleanup_and_host_ports(
+        pool,
+        ready_path,
+        marker,
+        expected_schema_digest,
+        provider_pool,
+        encryption_key,
+        host_ports,
     )
     .await
 }
@@ -97,6 +170,7 @@ pub(crate) async fn open_validated_pool(path: &Path) -> anyhow::Result<SqlitePoo
         .await?)
 }
 
+#[cfg(test)]
 async fn initialize_platform_with_cleanup(
     pool: SqlitePool,
     ready_path: PathBuf,
@@ -106,6 +180,27 @@ async fn initialize_platform_with_cleanup(
     encryption_key: [u8; 32],
     wave1_host: Arc<dyn Wave1HostPort>,
     wave2_host: Arc<dyn Wave2HostPort>,
+) -> anyhow::Result<Arc<AgentPlatform>> {
+    initialize_platform_with_cleanup_and_host_ports(
+        pool,
+        ready_path,
+        marker,
+        expected_schema_digest,
+        provider_pool,
+        encryption_key,
+        AgentDomainHostPorts::with_wave1_and_wave2(wave1_host, wave2_host),
+    )
+    .await
+}
+
+async fn initialize_platform_with_cleanup_and_host_ports(
+    pool: SqlitePool,
+    ready_path: PathBuf,
+    marker: FreshV4ReadyMarker,
+    expected_schema_digest: DigestHex,
+    provider_pool: Option<SqlitePool>,
+    encryption_key: [u8; 32],
+    host_ports: AgentDomainHostPorts,
 ) -> anyhow::Result<Arc<AgentPlatform>> {
     // AgentPlatform::from_pool takes ownership of the pool while it builds its
     // persistent adapters and publishes the initial generation. Keep one
@@ -121,8 +216,7 @@ async fn initialize_platform_with_cleanup(
             expected_schema_digest,
             provider_pool,
             encryption_key,
-            wave1_host,
-            wave2_host,
+            host_ports,
         ),
     )
     .await
@@ -149,8 +243,7 @@ async fn initialize_platform(
     expected_schema_digest: DigestHex,
     provider_pool: Option<SqlitePool>,
     encryption_key: [u8; 32],
-    wave1_host: Arc<dyn Wave1HostPort>,
-    wave2_host: Arc<dyn Wave2HostPort>,
+    host_ports: AgentDomainHostPorts,
 ) -> anyhow::Result<Arc<AgentPlatform>> {
     validate_ready_marker(&marker, &expected_schema_digest)?;
     validate_schema_metadata(&pool, &marker, &expected_schema_digest).await?;
@@ -195,7 +288,7 @@ async fn initialize_platform(
         availability_evidence_revision: C7_AVAILABILITY_REVISION.to_owned(),
     };
 
-    let registrations = bundled_registrations(wave1_host, wave2_host)?;
+    let registrations = bundled_registrations_with_host_ports(host_ports)?;
 
     // Runtime process supervision is real and shared by all v4 Sessions. Its
     // constructor is inert: no Tokio task or child process exists until a
@@ -259,9 +352,19 @@ async fn initialize_platform(
     Ok(AgentPlatform::from_pool(config).await?)
 }
 
+#[cfg(test)]
 fn bundled_registrations(
     wave1_host: Arc<dyn Wave1HostPort>,
     wave2_host: Arc<dyn Wave2HostPort>,
+) -> anyhow::Result<Vec<nomifun_agent_kernel::PluginRegistration>> {
+    bundled_registrations_with_host_ports(AgentDomainHostPorts::with_wave1_and_wave2(
+        wave1_host,
+        wave2_host,
+    ))
+}
+
+fn bundled_registrations_with_host_ports(
+    host_ports: AgentDomainHostPorts,
 ) -> anyhow::Result<Vec<nomifun_agent_kernel::PluginRegistration>> {
     let target_specs = nomifun_agent_domain_support::c7_package_specs();
     let model_media_specs = target_specs
@@ -281,33 +384,31 @@ fn bundled_registrations(
         &mut registrations,
         "Wave 1",
         &nomifun_agent_domain_wave1::PACKAGE_IDS,
-        nomifun_agent_domain_wave1::registrations_with_host_port(wave1_host),
+        nomifun_agent_domain_wave1::registrations_with_host_port(host_ports.wave1),
     )?;
     append_wave_registrations(
         &mut registrations,
         "Wave 2",
         &nomifun_agent_domain_wave2::PACKAGE_IDS,
-        nomifun_agent_domain_wave2::registrations_with_host_port(wave2_host),
+        nomifun_agent_domain_wave2::registrations_with_host_port(host_ports.wave2),
     )?;
     append_wave_registrations(
         &mut registrations,
         "Wave 3",
         &nomifun_agent_domain_wave3::PACKAGE_IDS,
-        nomifun_agent_domain_wave3::registrations(),
+        nomifun_agent_domain_wave3::registrations_with_host_port(host_ports.wave3),
     )?;
     append_wave_registrations(
         &mut registrations,
         "Wave 4",
         &nomifun_agent_domain_wave4::PACKAGE_IDS,
-        nomifun_agent_domain_wave4::registrations_with_host_port(Arc::new(
-            Wave4ApplicationHost,
-        )),
+        nomifun_agent_domain_wave4::registrations_with_host_port(host_ports.wave4),
     )?;
     append_wave_registrations(
         &mut registrations,
         "Wave 5",
         &nomifun_agent_domain_wave5::PACKAGE_IDS,
-        nomifun_agent_domain_wave5::registrations(),
+        nomifun_agent_domain_wave5::registrations_with_host_port(host_ports.wave5),
     )?;
     registrations.push(
         nomifun_agent_domain_support::registration(model_media_spec)

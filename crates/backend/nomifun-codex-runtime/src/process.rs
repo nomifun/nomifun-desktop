@@ -103,6 +103,47 @@ impl RuntimeProcessConfig {
                 "runtime executable path must be absolute",
             )));
         }
+        let metadata = std::fs::symlink_metadata(&self.executable).map_err(|error| {
+            RuntimeError::Process(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "runtime executable path could not be inspected: {} ({error})",
+                    self.executable.display()
+                ),
+            ))
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(RuntimeError::Process(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "runtime executable must be a regular non-symlink file: {}",
+                    self.executable.display()
+                ),
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = metadata.permissions().mode();
+            if mode & 0o111 == 0 {
+                return Err(RuntimeError::Process(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "runtime executable is not executable: {}",
+                        self.executable.display()
+                    ),
+                )));
+            }
+            if mode & 0o022 != 0 {
+                return Err(RuntimeError::Process(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "runtime executable must not be group/world writable: {}",
+                        self.executable.display()
+                    ),
+                )));
+            }
+        }
         if !self.working_directory.is_absolute() {
             return Err(RuntimeError::Process(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -424,6 +465,7 @@ fn sanitize_builder_environment(builder: &mut ChildProcessBuilder) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
     use std::time::Duration;
 
     use super::*;
@@ -484,6 +526,72 @@ mod tests {
                 .with_non_secret_environment("NOMIFUN_RUNTIME_LOG", "json")
                 .is_ok()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_config_rejects_a_sidecar_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("runtime");
+        std::fs::write(&executable, b"not a real executable").unwrap();
+        let link = root.path().join("runtime-link");
+        std::os::unix::fs::symlink(&executable, &link).unwrap();
+        let release = RuntimeReleaseDescriptor::frozen_from_fixture().unwrap();
+
+        let error = RuntimeProcessConfig::pinned_app_server(
+            &link,
+            root.path(),
+            "macos_desktop_arm64",
+            &release,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("non-symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_config_rejects_a_non_executable_sidecar() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("runtime");
+        std::fs::write(&executable, b"not executable").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let release = RuntimeReleaseDescriptor::frozen_from_fixture().unwrap();
+
+        let error = RuntimeProcessConfig::pinned_app_server(
+            &executable,
+            root.path(),
+            "macos_desktop_arm64",
+            &release,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not executable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_config_rejects_a_group_or_world_writable_sidecar() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("runtime");
+        std::fs::write(&executable, b"runtime").unwrap();
+        std::fs::set_permissions(
+            &executable,
+            std::fs::Permissions::from_mode(0o755 | 0o020),
+        )
+        .unwrap();
+        let release = RuntimeReleaseDescriptor::frozen_from_fixture().unwrap();
+
+        let error = RuntimeProcessConfig::pinned_app_server(
+            &executable,
+            root.path(),
+            "macos_desktop_arm64",
+            &release,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("group/world writable"));
     }
 
     fn sha256_path(path: &Path) -> DigestHex {

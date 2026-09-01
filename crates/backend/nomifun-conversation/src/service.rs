@@ -10811,48 +10811,9 @@ impl ConversationService {
         );
     }
 
-    pub(crate) async fn persist_and_broadcast_model_failover_teardown_tip(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        turn_id: Option<&str>,
-    ) -> Option<MessageRow> {
-        let Some(row) = self
-            .persist_model_failover_teardown_tip(conversation_id, turn_id)
-            .await
-        else {
-            return None;
-        };
-
-        let msg_id = row
-            .msg_id
-            .clone()
-            .unwrap_or_else(|| row.message_id.clone());
-        let content_value: serde_json::Value = serde_json::from_str(&row.content)
-            .unwrap_or_else(|_| serde_json::Value::String(row.content.clone()));
-        self.user_events.send_to_user(
-            user_id,
-            WebSocketMessage::new(
-                "message.stream",
-                serde_json::json!({
-                    "conversation_id": row.conversation_id,
-                    "turn_id": turn_id,
-                    "msg_id": msg_id,
-                    "type": row.r#type,
-                    "data": content_value,
-                    "position": row.position,
-                    "status": row.status,
-                    "hidden": row.hidden,
-                    "replace": false,
-                }),
-            ),
-        );
-        Some(row)
-    }
-
     /// Persist and broadcast the audit receipt for a committed model switch.
-    /// Mirrors the teardown tip so a receipt arriving mid-turn renders live and
-    /// remains visible after reconnect.
+    /// The committed receipt is the only user-visible failover lifecycle
+    /// message; teardown progress remains an internal runtime fence.
     pub(crate) async fn persist_and_broadcast_model_failover_receipt(
         &self,
         user_id: &str,
@@ -10898,44 +10859,6 @@ impl ConversationService {
             ),
         );
         Some(row)
-    }
-
-    pub(crate) async fn resolve_and_broadcast_model_failover_teardown_tip(
-        &self,
-        user_id: &str,
-        row: &mut MessageRow,
-        turn_id: Option<&str>,
-    ) -> bool {
-        if !self
-            .resolve_model_failover_teardown_tip(row, turn_id)
-            .await
-        {
-            return false;
-        }
-        let msg_id = row
-            .msg_id
-            .clone()
-            .unwrap_or_else(|| row.message_id.clone());
-        let content_value: serde_json::Value = serde_json::from_str(&row.content)
-            .unwrap_or_else(|_| serde_json::Value::String(row.content.clone()));
-        self.user_events.send_to_user(
-            user_id,
-            WebSocketMessage::new(
-                "message.stream",
-                serde_json::json!({
-                    "conversation_id": row.conversation_id,
-                    "turn_id": turn_id,
-                    "msg_id": msg_id,
-                    "type": row.r#type,
-                    "data": content_value,
-                    "position": row.position,
-                    "status": row.status,
-                    "hidden": row.hidden,
-                    "replace": true,
-                }),
-            ),
-        );
-        true
     }
 
     /// Durable at-most-once edit/rewind/truncate/resubmit workflow.
