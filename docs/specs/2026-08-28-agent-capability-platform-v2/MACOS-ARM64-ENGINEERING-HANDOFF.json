@@ -1,0 +1,177 @@
+{
+  "schema_version": "1.0.0",
+  "handoff_kind": "macos_arm64_engineering_continuation",
+  "handoff_status": "ready_for_windows_continuation",
+  "formal_gate_status": {
+    "c8_ma": "blocked_not_pass",
+    "hp_2": "not_reached",
+    "platform_cell_evidence": "not_generated"
+  },
+  "applicable_date": "2026-09-01",
+  "repository": {
+    "branch": "rf/agent-capability-platform-v2",
+    "shared_ref": "refs/heads/rf/agent-capability-platform-v2",
+    "verified_remote_sha": "6f2ad3eca1ad7bede4a1a3c500b06bd91ba41f36",
+    "worktree_clean": true,
+    "checkpoint_scope": "The checkpoint is clean and pushed. The latest commits after the last Rust implementation are contract/status/handoff metadata changes; no native PASS is implied."
+  },
+  "native_host": {
+    "os": "darwin",
+    "arch": "arm64",
+    "translated": "0",
+    "rustc_host": "aarch64-apple-darwin",
+    "xcode_select_command": "xcode-select -p",
+    "xcode_path_observed": "available"
+  },
+  "canonical_inputs": {
+    "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+    "canonical_schema_manifest_digest": "e28723d7fc524cfdd351c6fc8cc17b8a48d8fd1f5be16a7aebd395ce669f98ff",
+    "target_inventory_digest": "85e250015c78291091a11a68e5205b62a6fb510ed98f5536c2eb1fe351e536f2",
+    "official_seed_digest": "c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8",
+    "platform_validation_contract_schema_digest": "78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9",
+    "platform_validation_fixture_digest": "fa3cd9c542bab988afc366d512c279e34f33bef07bf2546a78094845f81bb948",
+    "runtime_release_digest": "c4075b2f7c118fa5eeeb6fc4a0b21cf940d5af6a8acc080e1c8721a8a738a380",
+    "cargo_lock_digest": "26e121277eb2054fc43f80dbfc72b7a8ee4fc2cebcc8294752217944989dfb14",
+    "coding_codex_native_contract_digest": "f699f376a9414b7830b90a68c890d39010687499e6d16ee1687f5c370cd0127a"
+  },
+  "candidate_source_state": {
+    "manifest_path": "crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json",
+    "manifest_candidate_source_sha": "7a2ade3c49374add25a35565265399c57729a8b9",
+    "verified_checkpoint_sha": "6f2ad3eca1ad7bede4a1a3c500b06bd91ba41f36",
+    "status": "stale_until_final_candidate_freeze",
+    "required_action": "On the final clean candidate, regenerate the platform payload/fixture and four-field cohort tuple. Do not hand-edit the source SHA into a self-referential tracked commit and do not reuse old native evidence."
+  },
+  "macos_validation": {
+    "helper_command": "bun scripts/validation/check-macos-arm64-native.mjs --report <local-report.json>",
+    "helper_result": "fail_closed",
+    "passed_subchecks": [
+      "native host fingerprint",
+      "absent-root startup",
+      "pre-created empty-root startup",
+      "health",
+      "137 capability inventory",
+      "process cleanup",
+      "arm64 app path/case/permissions",
+      "arm64 app executable",
+      "codesign validity",
+      "DMG path/permissions",
+      "DMG hdiutil verification"
+    ],
+    "failed_or_blocked_subchecks": [
+      {
+        "id": "universal-app:architectures",
+        "status": "fail",
+        "expected": [
+          "arm64",
+          "x86_64"
+        ],
+        "observed": [
+          "arm64"
+        ]
+      },
+      {
+        "id": "sidecar:artifact-sha-target-permissions",
+        "status": "blocked",
+        "code": "MACOS_ARM64_SIDECAR_MISSING",
+        "expected_sha256": "7863db3a77545eec8966483f26fb5b493aea6e285ac35b5c29d0920342438060",
+        "logical_path": "runtime/macos/arm64/nomifun-codex-runtime"
+      },
+      {
+        "id": "lifecycle:open-ready-turn-observe-cancel-dispose",
+        "status": "blocked",
+        "reason": "No sidecar, hello metadata, endpoint, binding, token, or provider credential was available."
+      }
+    ],
+    "build_check_command": "bash scripts/desktop-build-mac.sh --check-only",
+    "build_check_result": "fail_closed_missing_real_arm64_sidecar"
+  },
+  "targeted_validation": {
+    "cargo_check": {
+      "command": "cargo check --locked -p nomifun-app -p nomifun-web -p nomifun-desktop",
+      "status": "pass"
+    },
+    "domain_tests": {
+      "command": "cargo test --locked -p nomifun-agent-domain-support -p nomifun-agent-domain-wave1 -p nomifun-agent-domain-wave2 -p nomifun-agent-domain-wave3 -p nomifun-agent-domain-wave4 -p nomifun-agent-domain-wave5 -- --test-threads=1",
+      "status": "pass",
+      "tests": 58
+    },
+    "production_host_tests": {
+      "command": "cargo test --locked -p nomifun-app --lib router::agent_platform_host -- --test-threads=1",
+      "status": "pass",
+      "tests": 18
+    },
+    "workspace_host_tests": {
+      "command": "cargo test --locked -p nomifun-app --lib router::agent_wave2_host -- --test-threads=1",
+      "status": "pass",
+      "tests": 16
+    },
+    "file_tests": {
+      "command": "cargo test --locked -p nomifun-file --lib -- --test-threads=1",
+      "status": "pass",
+      "tests": 202
+    },
+    "runtime_tests": {
+      "command": "cargo test --locked -p nomifun-codex-runtime --lib -- --test-threads=1",
+      "status": "pass",
+      "tests": 31
+    },
+    "tools_tests": {
+      "command": "cargo test --locked -p nomi-tools --lib -- --test-threads=1",
+      "status": "pass",
+      "tests": 311
+    },
+    "i18n": {
+      "command": "bun run check:i18n",
+      "status": "pass",
+      "keys": 7078,
+      "modules": 33
+    },
+    "ui_build": {
+      "command": "bun run build:ui",
+      "status": "pass",
+      "modules_transformed": 7720
+    },
+    "workspace_cargo_test": {
+      "status": "not_run",
+      "reason": "Per the macOS task boundary, workspace-wide cargo test is reserved for the Windows C8-WIN-PRE node."
+    }
+  },
+  "windows_continuation": {
+    "required_external_artifacts": [
+      {
+        "logical_path": "runtime/windows/x64/nomifun-codex-runtime.exe",
+        "expected_sha256": "36f175f56e065560749fcc16caffbe06639eece66e19b655ea9104052d85cab4",
+        "required_metadata": "Runtime hello metadata matching the pinned fork, protocol, profiles, FullAuto wire, and eight stable RPC methods."
+      }
+    ],
+    "first_commands": [
+      "git fetch origin refs/heads/rf/agent-capability-platform-v2",
+      "git rev-parse HEAD",
+      "git ls-remote origin refs/heads/rf/agent-capability-platform-v2",
+      "git status --short --branch",
+      "cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check",
+      "bun run gate:agent-v2 -- --self-test",
+      "bun run gate:agent-v2 -- c7-domain-waves"
+    ],
+    "candidate_freeze_requirement": "Before the native Windows gate, the validation owner must resolve the stale candidate_source_sha and regenerate the platform manifest/fixture and tuple from the final clean source checkpoint.",
+    "full_gate_command": "bun run gate:agent-v2 -- c8-win-pre",
+    "allowed_workspace_gate": "The serialized workspace cargo test belongs to the Windows C8-WIN-PRE gate only.",
+    "required_runtime_smoke": [
+      "runtime/hello",
+      "open",
+      "ready",
+      "initial turn",
+      "observe",
+      "cancel",
+      "dispose"
+    ],
+    "required_return_artifact": "PlatformCellEvidence.json bound to the final four-field tuple, native Windows x64 fingerprint, artifact digests, exact checks, and raw-log digests."
+  },
+  "do_not_claim": [
+    "C8-MA pass",
+    "HP-2 reached",
+    "Universal macOS release",
+    "native PlatformCellEvidence pass",
+    "C8-MERGE or C9 readiness"
+  ]
+}
