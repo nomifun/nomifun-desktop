@@ -24,6 +24,10 @@ use nomifun_realtime::UserEventSink;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+const MAX_SEARCH_QUERY_CHARS: usize = 1024;
+const MAX_SEARCH_LINE_CHARS: usize = 4096;
+const MAX_DIFF_BYTES: usize = 1024 * 1024;
+
 #[derive(Clone)]
 pub(crate) struct Wave2ApplicationHost {
     files: Arc<FileService>,
@@ -145,6 +149,11 @@ impl Wave2ApplicationHost {
                         "fs.search query must not be empty",
                     ));
                 }
+                if query.chars().count() > MAX_SEARCH_QUERY_CHARS {
+                    return Err(Wave2HostPortError::invalid_payload(format!(
+                        "fs.search query must not exceed {MAX_SEARCH_QUERY_CHARS} characters"
+                    )));
+                }
                 let limit = params.limit.unwrap_or(100);
                 if !(1..=200).contains(&limit) {
                     return Err(Wave2HostPortError::invalid_payload(
@@ -207,10 +216,12 @@ impl Wave2ApplicationHost {
                             truncated = true;
                             break;
                         }
+                        let text = line.chars().take(MAX_SEARCH_LINE_CHARS).collect::<String>();
                         matches.push(json!({
                             "path": &relative_path,
                             "line": line_index + 1,
-                            "text": line
+                            "text": text,
+                            "truncated": line.chars().count() > MAX_SEARCH_LINE_CHARS
                         }));
                     }
                     if truncated {
@@ -247,12 +258,7 @@ impl Wave2ApplicationHost {
         let capability_id = capability_id.to_owned();
         let worker_capability_id = capability_id.clone();
         let status = tokio::task::spawn_blocking(move || {
-            let repository = git2::Repository::discover(&workspace).map_err(|error| {
-                Wave2HostPortError::new(
-                    "RESOURCE_NOT_FOUND",
-                    format!("workspace is not a Git repository: {error}"),
-                )
-            })?;
+            let (repository, workspace_prefix) = scoped_repository(&workspace)?;
             let mut options = git2::StatusOptions::new();
             options
                 .include_untracked(true)
@@ -269,6 +275,9 @@ impl Wave2ApplicationHost {
             let mut entries = Vec::new();
             for entry in statuses.iter() {
                 let Some(path) = entry.path() else {
+                    continue;
+                };
+                let Some(path) = path_relative_to_workspace(path, &workspace_prefix) else {
                     continue;
                 };
                 entries.push(json!({
@@ -319,16 +328,21 @@ impl Wave2ApplicationHost {
             })
             .transpose()
             .map_err(|error| operation_error(&capability_id, error))?;
+        let repository_prefix = scoped_repository(&workspace)
+            .map(|(_, prefix)| prefix)
+            .map_err(|error| error)?;
+        let pathspec = path
+            .as_deref()
+            .map(|relative| join_repo_path(&repository_prefix, relative));
         tokio::task::spawn_blocking(move || {
-            let repository = git2::Repository::discover(&workspace).map_err(|error| {
-                Wave2HostPortError::new(
-                    "RESOURCE_NOT_FOUND",
-                    format!("workspace is not a Git repository: {error}"),
-                )
-            })?;
+            let (repository, actual_prefix) = scoped_repository(&workspace)?;
+            debug_assert_eq!(actual_prefix, repository_prefix);
             let mut options = git2::DiffOptions::new();
-            if let Some(path) = &path {
-                options.pathspec(path);
+            let scope_pathspec = pathspec
+                .as_deref()
+                .or_else(|| (!repository_prefix.is_empty()).then_some(repository_prefix.as_str()));
+            if let Some(pathspec) = scope_pathspec {
+                options.pathspec(pathspec);
             }
             let diff = repository
                 .diff_index_to_workdir(None, Some(&mut options))
@@ -341,12 +355,23 @@ impl Wave2ApplicationHost {
                     )
             })?;
             let mut patch = String::new();
+            let mut truncated = false;
             diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
                 if line.origin() != '\0' {
                     patch.push(line.origin());
                 }
                 patch.push_str(&String::from_utf8_lossy(line.content()));
-                true
+                if patch.len() > MAX_DIFF_BYTES {
+                    let mut end = MAX_DIFF_BYTES;
+                    while end > 0 && !patch.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    patch.truncate(end);
+                    truncated = true;
+                    false
+                } else {
+                    true
+                }
             })
             .map_err(|error| {
                 Wave2HostPortError::new(
@@ -358,7 +383,8 @@ impl Wave2ApplicationHost {
             })?;
             Ok::<_, Wave2HostPortError>(StrictJsonValue(json!({
                 "path": path,
-                "patch": patch
+                "patch": patch,
+                "truncated": truncated
             })))
         })
         .await
@@ -392,19 +418,18 @@ impl Wave2ApplicationHost {
         let workspace = scope.workspace_root().to_path_buf();
         let path_label = path.to_owned();
         tokio::task::spawn_blocking(move || {
-            let repository = git2::Repository::discover(&workspace).map_err(|error| {
-                Wave2HostPortError::new(
-                    "RESOURCE_NOT_FOUND",
-                    format!("workspace is not a Git repository: {error}"),
-                )
-            })?;
+            let (repository, workspace_prefix) = scoped_repository(&workspace)?;
+            let repo_path = join_repo_path(
+                &workspace_prefix,
+                &relative.to_string_lossy().replace('\\', "/"),
+            );
             let mut index = repository.index().map_err(|error| {
                 Wave2HostPortError::new(
                     "CAPABILITY_UNAVAILABLE",
                     format!("vcs.stage could not open the Git index: {error}"),
                 )
             })?;
-            index.add_path(&relative).map_err(|error| {
+            index.add_path(Path::new(&repo_path)).map_err(|error| {
                 Wave2HostPortError::new(
                     "CAPABILITY_UNAVAILABLE",
                     format!("vcs.stage could not stage {}: {error}", path_label),
@@ -429,6 +454,73 @@ impl Wave2ApplicationHost {
             )
         })?
     }
+}
+
+/// Open the repository containing the bound workspace and return the
+/// repository-relative prefix of that workspace. Git status/index APIs operate
+/// from the repository root, so every result and mutation must be projected
+/// back into the exact typed workspace scope.
+fn scoped_repository(
+    workspace: &Path,
+) -> Result<(git2::Repository, String), Wave2HostPortError> {
+    let repository = git2::Repository::discover(workspace).map_err(|error| {
+        Wave2HostPortError::new(
+            "RESOURCE_NOT_FOUND",
+            format!("workspace is not a Git repository: {error}"),
+        )
+    })?;
+    let repository_root = repository.workdir().ok_or_else(|| {
+        Wave2HostPortError::new(
+            "RESOURCE_NOT_FOUND",
+            "Git repository has no working directory",
+        )
+    })?;
+    let repository_root = std::fs::canonicalize(repository_root).map_err(|error| {
+        Wave2HostPortError::new(
+            "RESOURCE_NOT_FOUND",
+            format!("Git repository working directory is unavailable: {error}"),
+        )
+    })?;
+    let workspace = std::fs::canonicalize(workspace).map_err(|error| {
+        Wave2HostPortError::new(
+            "RESOURCE_NOT_FOUND",
+            format!("workspace is unavailable: {error}"),
+        )
+    })?;
+    let prefix = workspace
+        .strip_prefix(&repository_root)
+        .map_err(|_| {
+            Wave2HostPortError::new(
+                "PRESET_RESOURCE_NOT_BOUND",
+                "workspace is outside the discovered Git repository",
+            )
+        })?
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_matches('/')
+        .to_owned();
+    Ok((repository, prefix))
+}
+
+fn join_repo_path(prefix: &str, relative: &str) -> String {
+    let relative = relative.trim_matches('/');
+    if prefix.is_empty() {
+        relative.to_owned()
+    } else if relative.is_empty() {
+        prefix.to_owned()
+    } else {
+        format!("{prefix}/{relative}")
+    }
+}
+
+fn path_relative_to_workspace(path: &str, prefix: &str) -> Option<String> {
+    let path = path.replace('\\', "/");
+    if prefix.is_empty() {
+        return Some(path);
+    }
+    path.strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .map(str::to_owned)
 }
 
 fn git_status_name(status: git2::Status) -> Vec<&'static str> {
@@ -821,6 +913,66 @@ mod tests {
             status_after
                 .iter()
                 .any(|entry| entry.status().contains(git2::Status::INDEX_MODIFIED))
+        );
+    }
+
+    #[tokio::test]
+    async fn vcs_operations_remain_confined_to_a_repository_subdirectory() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        let nested = directory.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("inside.txt"), "inside\n").unwrap();
+        std::fs::write(directory.path().join("tracked.txt"), "root changed\n").unwrap();
+
+        let host = Wave2ApplicationHost::for_workspace_root(&nested);
+        let context = {
+            let mut context = context(&nested);
+            context.resource_bindings[0]
+                .typed_parameters
+                .insert(
+                    WORKSPACE_ROOT_PARAMETER.to_owned(),
+                    nested.to_string_lossy().into_owned(),
+                );
+            context
+        };
+
+        let status = invoke(&host, context.clone(), "vcs.status", json!({}))
+            .await
+            .unwrap();
+        let status_paths = status.0["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["path"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(status_paths, vec!["inside.txt"]);
+
+        let diff = invoke(&host, context.clone(), "vcs.diff", json!({}))
+            .await
+            .unwrap();
+        assert!(!diff.0["patch"].as_str().unwrap().contains("root changed"));
+
+        invoke(
+            &host,
+            context,
+            "vcs.stage",
+            json!({"path": "inside.txt"}),
+        )
+        .await
+        .unwrap();
+        let status_after = repository.statuses(None).unwrap();
+        assert!(
+            status_after.iter().any(|entry| {
+                entry.path() == Some("nested/inside.txt")
+                    && entry.status().contains(git2::Status::INDEX_NEW)
+            })
+        );
+        assert!(
+            status_after.iter().any(|entry| {
+                entry.path() == Some("tracked.txt")
+                    && entry.status().contains(git2::Status::WT_MODIFIED)
+            })
         );
     }
 }
