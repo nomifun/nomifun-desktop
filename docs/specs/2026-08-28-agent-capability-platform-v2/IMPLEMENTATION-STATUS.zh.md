@@ -10,8 +10,8 @@
 
 - branch：`rf/agent-capability-platform-v2`
 - base SHA：`7a2ade3c49374add25a35565265399c57729a8b9`
-- current implementation SHA / dirty C8 candidate：
-  `149fd8923a2feef8b2fbdd6ec59d04a8dbaccca1`
+- last clean C8 execution SHA / current fix base：
+  `4de100692983cb0e4e81091d60456dc26a9d8e69`
 - last verified remote implementation SHA：
   `d6391775b13f076cb10c7e03351692fa532888a8`
 - origin：`https://github.com/nomifun/nomifun-tauri.git`
@@ -30,7 +30,8 @@
 
 ## 当前阶段
 
-- current boundary: `C8-WIN-PRE Windows pre-candidate`（等待 clean checkpoint Gate）
+- current boundary: `C8-WIN-PRE Windows pre-candidate`
+  （上一 clean Gate 已完成并定向修复，正式全量证据仍未闭合）
 - next boundary: `C8-MERGE` after five native cells and D-027 zero evidence
 - Review A：
   - Decision Closure：PASS，D-001～D-028（含 D-019）均已确认
@@ -180,9 +181,9 @@ C0 contract/golden digests：
 - canonical v4 schema manifest：
   `e28723d7fc524cfdd351c6fc8cc17b8a48d8fd1f5be16a7aebd395ce669f98ff`
 - contract digest ledger：
-  `011c225de7ff0865880ad820868b77d68731c094199079d50c2e3baf1f0c0fd7`
+  `7b8e1941df5340a7fb59c61dc96a5871575c89c952c4919271fe7f32fe8bb8d4`
 - deletion manifest set：
-  `13431f76e07398c06dc9e42ccb5b70c701297451551c2fcf907c78fcab8f41ad`
+  `0fb2e5abf2638e3c3352d4549ddb6a46b5a29ee7d62d35aedd9319a8fb5feecb`
 - official preset seed manifest：
   `c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8`
 - runtime protocol：
@@ -741,16 +742,40 @@ D-028 只定义 Coding、Browser、Computer 的平台 availability，不能自�
 
 ### Clean checkpoint 与 macOS 工程验证边界
 
-下一步只在当前大批重构形成 clean commit 后执行一次完整
-`bun run gate:agent-v2 -- c8-win-pre`。若 workspace lifecycle 再次长时间挂起、
-崩溃或出现 `ENOBUFS`，保留本次日志并停止，不盲目重试。
+2026-09-01 已在 clean SHA
+`4de100692983cb0e4e81091d60456dc26a9d8e69` 上执行一次完整
+`bun run gate:agent-v2 -- c8-win-pre`。该轮约 25 分钟完成，没有 workspace
+lifecycle 挂起、`STATUS_ACCESS_VIOLATION` 或 `ENOBUFS`：
+
+- PASS：contract validation、Domain registration、Fresh-v4 root、production host、
+  production broker、UI build、Windows startup smoke、Windows package contract。
+- `baseline_fail`：repository-wide UI typecheck，仍是既有 React/Arco/implicit-any
+  基线；生产 UI build 通过。
+- FAIL：C7 manifest 的四个 confirmed input digest 尚停留在旧生成物。
+- FAIL：workspace `cargo test` 在
+  `nomi-tools::file_cache::normalize_above_root_is_clamped` 的 Windows 路径表示断言
+  上停止；该 crate 在失败前为 `301 passed / 1 failed`。
+
+随后已做两项定向修复，没有重复完整 C8 Gate：
+
+- C7 manifest 同步当前 schema、contract ledger、deletion manifest set 与 runtime
+  release payload digest；`bun run gate:agent-v2 -- c7-domain-waves` 通过。
+- `nomi-tools` 测试改为验证 `/../b` 与 `/b` 的归一化等价性，不再硬编码 POSIX
+  路径表示；`cargo test --locked -p nomi-tools --lib -- --test-threads=1`
+  为 `302 passed / 0 failed`。
+- `cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check`、
+  `cargo fmt --package nomi-tools -- --check` 与 `git diff --check` 通过。
+
+上述修复生成新的 source SHA，因此 `4de10069` 的完整 Gate evidence 不能提升为
+最终 pass；本轮不重复运行同一全量测试风暴。后续如需正式 HP-1，必须在最终 clean
+tuple 上由 validation coordinator 安排一次新的完整 Windows Gate。
 
 Windows Codex sidecar 仍缺失，预期 SHA-256 为
 `36f175f56e065560749fcc16caffbe06639eece66e19b655ea9104052d85cab4`。在提供
 sidecar 与 hello metadata 前，真实
 `open -> ready -> turn -> observe -> cancel -> dispose` 只能列为手动阻塞项。
 
-clean checkpoint 可以作为 macOS arm64 的工程逻辑验证候选，用于编译、启动、
+修复后的 clean checkpoint 可以作为 macOS arm64 的工程逻辑验证候选，用于编译、启动、
 路径/权限、bundle、进程树与 target-specific adapter 补齐；它不是正式 HP-1。
 正式 HP-1 仍要求 Windows 全场景功能、sidecar/native Gate 和 clean remote SHA
 全部闭合。
