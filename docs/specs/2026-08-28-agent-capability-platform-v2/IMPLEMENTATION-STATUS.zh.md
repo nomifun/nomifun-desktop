@@ -13,11 +13,11 @@
 - last clean C8 execution SHA / current fix base：
   `4de100692983cb0e4e81091d60456dc26a9d8e69`
 - current/last verified remote implementation SHA：
-  `598a63203c10aa8d3b4cc537f0f3bb536f1452f9`
+  `0bacc9ab1628315b8dbc61e03c1643c77ca39c0e`
 - origin：`git@github.com:nomifun/nomifun-desktop.git`
 - worktree：clean；当前 source 已可用于定向工程验证，但尚未形成 C8 native
-  candidate evidence checkpoint。`598a63203` 包含一次旧 C8 release tuple
-  的 canonical digest 刷新，不等同于 C8/HP-1 通过。
+  candidate evidence checkpoint。`0bacc9ab` 包含 C8 immutable input reference
+  的语义校正，不等同于 C8/HP-1 通过。
 - Git identity：`colir0 <colir0@qq.com>`
 - DeepSeek Harness：
   - expected/current：`cd5ef8148158c3a752a658978873241fdf8e2bbc`
@@ -1097,7 +1097,9 @@ tuple/evidence 均不能沿用；待代码稳定后需由中央 validation owner
 
 因此先前以 `b69f75e6...` 为输入的 runtime/platform digest tuple 已失效。
 本轮没有把旧 tuple 或旧 evidence 改名继续使用，而是运行 canonical
-`agent-v2-contract write`，并将以下真实产物同步到 `598a63203`：
+`agent-v2-contract write`，并将以下真实产物同步到
+`598a63203`；随后在 `0bacc9ab` 修正了 C8 manifest 对 schema digest 的
+显式 field reference：
 
 - runtime release：
   `c4075b2f7c118fa5eeeb6fc4a0b21cf940d5af6a8acc080e1c8721a8a738a380`
@@ -1124,3 +1126,9 @@ HP-1 通过。
    `78f264...`。Platform validation payload/fixture 仍独立使用
    `fa3cd9...`；三种 identity 不再混用。Gate 现在同时校验 entry 的 exact
    field set、引用字段和 digest 值。
+
+当前 platform payload 的 `candidate_source_sha` 仍是生成器使用的历史
+`7a2ade3c...` 基线；它不能被文档更新或手工替换成当前 HEAD 来伪造自引用闭合。
+最终 candidate 冻结时必须由 validation owner 在 clean source checkpoint 上重新
+生成 payload/fixture 并同步四字段 tuple；在此之前 native C8 gate 对该 mismatch
+保持 fail-closed，旧 native evidence 不可沿用。
