@@ -6,8 +6,8 @@
   "candidate_source_policy": "resolve_clean_git_head_at_run",
   "cohort_tuple_inputs": {
     "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
-    "platform_validation_manifest_digest": "70f23b52f309aeb0938ad86c987958d3f1a05e6c367263c3b73a3038e1ca2ed2",
-    "runtime_release_digest": "b9dce00732f6d1c45cb20fc30e7a286518d505d7faeb2d94b6cc70d9e107289d"
+    "platform_validation_manifest_digest": "fa3cd9c542bab988afc366d512c279e34f33bef07bf2546a78094845f81bb948",
+    "runtime_release_digest": "c4075b2f7c118fa5eeeb6fc4a0b21cf940d5af6a8acc080e1c8721a8a738a380"
   },
   "source_checkpoint": {
     "local_head": "resolved_at_run",
@@ -48,15 +48,15 @@
     },
     "platform_validation_manifest": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/platform-validation-fixture.envelope.json",
-      "digest": "70f23b52f309aeb0938ad86c987958d3f1a05e6c367263c3b73a3038e1ca2ed2"
+      "digest": "fa3cd9c542bab988afc366d512c279e34f33bef07bf2546a78094845f81bb948"
     },
     "runtime_release": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json",
-      "digest": "b9dce00732f6d1c45cb20fc30e7a286518d505d7faeb2d94b6cc70d9e107289d"
+      "digest": "c4075b2f7c118fa5eeeb6fc4a0b21cf940d5af6a8acc080e1c8721a8a738a380"
     },
     "cargo_lock": {
       "path": "Cargo.lock",
-      "digest": "b69f75e6cc566ef753f43265e4ddcf2479b671c738e67719b6c84f3f6881f23a"
+      "digest": "26e121277eb2054fc43f80dbfc72b7a8ee4fc2cebcc8294752217944989dfb14"
     }
   },
   "required_checks": [

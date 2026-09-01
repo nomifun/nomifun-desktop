@@ -127,9 +127,9 @@ const C8_EXPECTED_DIGESTS = {
   platform_validation_contract:
     '78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9',
   platform_validation_manifest:
-    '70f23b52f309aeb0938ad86c987958d3f1a05e6c367263c3b73a3038e1ca2ed2',
+    'fa3cd9c542bab988afc366d512c279e34f33bef07bf2546a78094845f81bb948',
   runtime_release:
-    'b9dce00732f6d1c45cb20fc30e7a286518d505d7faeb2d94b6cc70d9e107289d',
+    'c4075b2f7c118fa5eeeb6fc4a0b21cf940d5af6a8acc080e1c8721a8a738a380',
   runtime_feature_inventory:
     'bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee',
   canonical_schema_manifest:
@@ -143,9 +143,9 @@ const C8_EXPECTED_DIGESTS = {
   coding_codex_native:
     'f699f376a9414b7830b90a68c890d39010687499e6d16ee1687f5c370cd0127a',
   cargo_lock:
-    'b69f75e6cc566ef753f43265e4ddcf2479b671c738e67719b6c84f3f6881f23a',
+    '26e121277eb2054fc43f80dbfc72b7a8ee4fc2cebcc8294752217944989dfb14',
   platform_fixture:
-    '70f23b52f309aeb0938ad86c987958d3f1a05e6c367263c3b73a3038e1ca2ed2',
+    'fa3cd9c542bab988afc366d512c279e34f33bef07bf2546a78094845f81bb948',
 };
 const C8_EXPECTED_TEMPLATES = [
   'chat.minimal',
