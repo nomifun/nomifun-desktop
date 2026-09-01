@@ -22,9 +22,12 @@ use nomifun_agent_contracts::{
 use nomifun_agent_control_plane::CompilerReleaseInputs;
 use nomifun_agent_domain_wave1::{
     Wave1CapabilityOperation, Wave1FetchRequest, Wave1HostPort, Wave1HostPortError,
-    Wave1HostRequest,
+    Wave1HostRequest, Wave1MemoryMutationRequest,
 };
-use nomifun_agent_kernel::{CompilerEnvironment, MaterializationPolicy};
+use nomifun_agent_kernel::{
+    CompilerEnvironment, MaterializationPolicy, MAX_PLUGIN_STATE_BYTES,
+    MAX_PLUGIN_STATE_KEY_BYTES,
+};
 use nomifun_agent_domain_wave2::Wave2HostPort;
 use nomifun_agent_domain_wave3::Wave3HostPort;
 use nomifun_agent_domain_wave4::Wave4HostPort;
@@ -66,11 +69,97 @@ const RUNTIME_FEATURE_INVENTORY_JSON: &str = include_str!(
 /// The first concrete Wave 1 owner mounted by the Fresh-v4 host.
 ///
 /// URL fetching already has a standalone, SSRF-checked domain owner. This
-/// adapter exposes only that real operation; search, Knowledge, Memory, and
+/// adapter exposes that real operation and a bounded first-party memory
+/// mutation owner backed by the Kernel PluginState API. Search, Knowledge and
 /// Skill actions remain fail-closed until their v4 owners are available.
 #[derive(Clone, Default)]
 struct Wave1ApplicationHost {
     fetcher: nomifun_knowledge::source_url::HttpFetcher,
+}
+
+const MEMORY_STATE_KEY: &str = "memory.entries";
+const MEMORY_STATE_FORMAT_VERSION: &str = "1.0.0";
+const MAX_MEMORY_ENTRIES: usize = 128;
+const MAX_MEMORY_ENTRY_BYTES: usize = 16 * 1024;
+const MAX_MEMORY_CAS_ATTEMPTS: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wave1MemoryOperation {
+    ProjectWrite,
+    ProjectDistill,
+    CompanionWrite,
+    CompanionMerge,
+    CompanionEvolve,
+}
+
+impl Wave1MemoryOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ProjectWrite => "project.write",
+            Self::ProjectDistill => "project.distill",
+            Self::CompanionWrite => "companion.write",
+            Self::CompanionMerge => "companion.merge",
+            Self::CompanionEvolve => "companion.evolve",
+        }
+    }
+
+    fn capability_id(self) -> &'static str {
+        match self {
+            Self::ProjectWrite => nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+            Self::ProjectDistill => nomifun_agent_domain_wave1::MEMORY_PROJECT_DISTILL,
+            Self::CompanionWrite => nomifun_agent_domain_wave1::MEMORY_COMPANION_WRITE,
+            Self::CompanionMerge => nomifun_agent_domain_wave1::MEMORY_COMPANION_MERGE,
+            Self::CompanionEvolve => nomifun_agent_domain_wave1::MEMORY_COMPANION_EVOLVE,
+        }
+    }
+
+    fn package_id(self) -> &'static str {
+        match self {
+            Self::ProjectWrite | Self::ProjectDistill => {
+                nomifun_agent_domain_wave1::PROJECT_MEMORY_PACKAGE_ID
+            }
+            Self::CompanionWrite | Self::CompanionMerge | Self::CompanionEvolve => {
+                nomifun_agent_domain_wave1::COMPANION_MEMORY_PACKAGE_ID
+            }
+        }
+    }
+
+    fn mount_id(self) -> &'static str {
+        match self {
+            Self::ProjectWrite | Self::ProjectDistill => {
+                nomifun_agent_domain_wave1::PROJECT_MEMORY_MOUNT_ID
+            }
+            Self::CompanionWrite | Self::CompanionMerge | Self::CompanionEvolve => {
+                nomifun_agent_domain_wave1::COMPANION_MEMORY_MOUNT_ID
+            }
+        }
+    }
+
+    fn resource_kind(self) -> &'static str {
+        match self {
+            Self::ProjectWrite | Self::ProjectDistill => {
+                nomifun_agent_domain_wave1::PROJECT_MEMORY_RESOURCE_KIND
+            }
+            Self::CompanionWrite | Self::CompanionMerge | Self::CompanionEvolve => {
+                nomifun_agent_domain_wave1::COMPANION_MEMORY_RESOURCE_KIND
+            }
+        }
+    }
+
+    fn is_project(self) -> bool {
+        matches!(self, Self::ProjectWrite | Self::ProjectDistill)
+    }
+
+    fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "project.write" => Some(Self::ProjectWrite),
+            "project.distill" => Some(Self::ProjectDistill),
+            "companion.write" => Some(Self::CompanionWrite),
+            "companion.merge" => Some(Self::CompanionMerge),
+            "companion.evolve" => Some(Self::CompanionEvolve),
+            _ => None,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -79,7 +168,8 @@ impl Wave1HostPort for Wave1ApplicationHost {
         &self,
         request: Wave1HostRequest,
     ) -> Result<nomifun_agent_contracts::StrictJsonValue, Wave1HostPortError> {
-        match request.operation {
+        let nomifun_agent_domain_wave1::Wave1HostRequest { context, operation } = request;
+        match operation {
             Wave1CapabilityOperation::ResearchFetch(Wave1FetchRequest { url }) => {
                 let page = self
                     .fetcher
@@ -93,12 +183,714 @@ impl Wave1HostPort for Wave1ApplicationHost {
                     "truncated": page.truncated
                 })))
             }
+            Wave1CapabilityOperation::ProjectMemoryWrite(request) => {
+                self.persist_memory(
+                    context,
+                    Wave1MemoryOperation::ProjectWrite,
+                    request,
+                )
+                .await
+            }
+            Wave1CapabilityOperation::ProjectMemoryDistill(request) => {
+                self.persist_memory(
+                    context,
+                    Wave1MemoryOperation::ProjectDistill,
+                    request,
+                )
+                .await
+            }
+            Wave1CapabilityOperation::CompanionMemoryWrite(request) => {
+                self.persist_memory(
+                    context,
+                    Wave1MemoryOperation::CompanionWrite,
+                    request,
+                )
+                .await
+            }
+            Wave1CapabilityOperation::CompanionMemoryMerge(request) => {
+                self.persist_memory(
+                    context,
+                    Wave1MemoryOperation::CompanionMerge,
+                    request,
+                )
+                .await
+            }
+            Wave1CapabilityOperation::CompanionMemoryEvolve(request) => {
+                self.persist_memory(
+                    context,
+                    Wave1MemoryOperation::CompanionEvolve,
+                    request,
+                )
+                .await
+            }
             operation => Err(Wave1HostPortError::unavailable(format!(
                 "no Fresh-v4 Wave 1 owner is wired for {}",
                 operation.capability_id().as_ref()
             ))),
         }
     }
+}
+
+impl Wave1ApplicationHost {
+    /// Persist the bounded memory mutation in the package's namespace-scoped
+    /// PluginState store. This is a real v4-owned state transition, not a
+    /// synthetic action receipt; the operation is retried only on a bounded
+    /// CAS conflict and never routed to a legacy memory service.
+    async fn persist_memory(
+        &self,
+        context: nomifun_agent_domain_wave1::Wave1HostContext,
+        operation: Wave1MemoryOperation,
+        request: Wave1MemoryMutationRequest,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, Wave1HostPortError> {
+        use nomifun_agent_contracts::{
+            PluginStateCompareAndSwapOutcome, StateKey, StrictJsonValue, VersionString,
+        };
+
+        let state = context.state.clone();
+        let expected_action = nomifun_agent_domain_wave1::action_id(operation.capability_id())
+            .expect("every memory mutation has a canonical action");
+        if context.capability_id.as_ref() != operation.capability_id()
+            || context.action_id != expected_action
+        {
+            return Err(Wave1HostPortError::new(
+                "INVALID_PAYLOAD",
+                format!(
+                    "{} operation identity does not match the host context",
+                    operation.label()
+                ),
+            ));
+        }
+
+        let descriptor = state.descriptor();
+        if descriptor.package_id.as_ref() != operation.package_id()
+            || descriptor.mount_id.as_ref() != operation.mount_id()
+        {
+            return Err(Wave1HostPortError::unavailable(format!(
+                "{} state handle is mounted as {}/{}",
+                operation.label(),
+                descriptor.package_id.as_ref(),
+                descriptor.mount_id.as_ref()
+            )));
+        }
+
+        // Project/Companion memory is shared by the exact bound resource, not
+        // by a transient Session. A missing or ambiguous target is a wiring
+        // error and must fail closed rather than silently falling back to the
+        // session scope.
+        let matching_bindings = context
+            .resource_bindings
+            .iter()
+            .filter(|binding| binding.resource_kind.as_ref() == operation.resource_kind())
+            .collect::<Vec<_>>();
+        let binding = match matching_bindings.as_slice() {
+            [binding] => *binding,
+            [] => {
+                return Err(Wave1HostPortError::new(
+                    "PRESET_RESOURCE_NOT_BOUND",
+                    format!(
+                        "{} has no bound {} resource",
+                        operation.label(),
+                        operation.resource_kind()
+                    ),
+                ));
+            }
+            _ => {
+                return Err(Wave1HostPortError::new(
+                    "PRESET_RESOURCE_NOT_BOUND",
+                    format!(
+                        "{} requires exactly one bound {} resource",
+                        operation.label(),
+                        operation.resource_kind()
+                    ),
+                ));
+            }
+        };
+        if binding.owner_id != context.principal.principal_id {
+            return Err(Wave1HostPortError::new(
+                "RESOURCE_OWNER_MISMATCH",
+                format!(
+                    "{} resource {} is owned by a different principal",
+                    operation.label(),
+                    binding.resource_id.as_ref()
+                ),
+            ));
+        }
+        if !binding.operations.contains("write") {
+            return Err(Wave1HostPortError::new(
+                "PRESET_RESOURCE_NOT_BOUND",
+                format!(
+                    "{} resource binding {} does not grant write",
+                    operation.label(),
+                    binding.binding_id.as_ref()
+                ),
+            ));
+        }
+        if binding.resource_id.as_ref().trim().is_empty() {
+            return Err(Wave1HostPortError::new(
+                "INVALID_PAYLOAD",
+                format!("{} resource ID must not be blank", operation.label()),
+            ));
+        }
+
+        let scope = nomifun_agent_contracts::ScopeKey::from(format!(
+            "resource:{}",
+            binding.resource_id.as_ref()
+        ));
+        if scope.as_ref().len() > MAX_PLUGIN_STATE_KEY_BYTES {
+            return Err(Wave1HostPortError::new(
+                "INVALID_PAYLOAD",
+                format!(
+                    "{} resource scope exceeds {MAX_PLUGIN_STATE_KEY_BYTES} bytes",
+                    operation.label()
+                ),
+            ));
+        }
+        let state_key = StateKey::from(MEMORY_STATE_KEY);
+        let format = VersionString::from(MEMORY_STATE_FORMAT_VERSION);
+
+        validate_memory_request(&request, operation.label())?;
+        if context.idempotency_key.as_ref().trim().is_empty() {
+            return Err(Wave1HostPortError::new(
+                "INVALID_PAYLOAD",
+                "memory mutation requires a non-empty idempotency key",
+            ));
+        }
+        let request_value = memory_request_value(request);
+        let request_digest = memory_request_digest(operation, binding, &request_value)?;
+        let mut entry = serde_json::json!({
+            "operation": operation.label(),
+            "request": request_value,
+            "request_digest": request_digest,
+            "idempotency_key": context.idempotency_key.as_ref(),
+            "operation_id": context.operation_id.as_ref(),
+            "correlation_id": context.correlation_id.as_ref(),
+        });
+        for _attempt in 0..MAX_MEMORY_CAS_ATTEMPTS {
+            let current = state
+                .get(&scope, &state_key)
+                .await
+                .map_err(|error| {
+                    Wave1HostPortError::new(
+                        "CAPABILITY_UNAVAILABLE",
+                        format!("memory state could not be read: {error}"),
+                    )
+                })?;
+            let revision = current.as_ref().map(|entry| entry.revision).unwrap_or(0);
+            let mut entries = decode_memory_state(
+                current.as_ref(),
+                &format,
+                operation,
+                binding,
+            )?;
+            if let Some(previous) = entries.iter().find(|previous| {
+                previous
+                    .get("idempotency_key")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(context.idempotency_key.as_ref())
+            }) {
+                let Some(previous_digest) = previous
+                    .get("request_digest")
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    return Err(Wave1HostPortError::unavailable(
+                        "memory state idempotency record has no request digest",
+                    ));
+                };
+                if previous_digest != request_digest.as_ref() {
+                    return Err(Wave1HostPortError::new(
+                        "IDEMPOTENCY_CONFLICT",
+                        format!(
+                            "{} idempotency key was already used for different input",
+                            operation.label()
+                        ),
+                    ));
+                }
+                let Some(result) = previous.get("result").cloned() else {
+                    return Err(Wave1HostPortError::unavailable(
+                        "memory state idempotency record has no replay result",
+                    ));
+                };
+                return Ok(StrictJsonValue(result));
+            }
+            if entries.len() >= MAX_MEMORY_ENTRIES {
+                return Err(Wave1HostPortError::new(
+                    "CAPABILITY_UNAVAILABLE",
+                    format!(
+                        "memory state reached its {MAX_MEMORY_ENTRIES} entry limit"
+                    ),
+                ));
+            }
+            let next_revision = revision.checked_add(1).ok_or_else(|| {
+                Wave1HostPortError::new(
+                    "CAPABILITY_UNAVAILABLE",
+                    "memory state revision counter is exhausted",
+                )
+            })?;
+            let entry_count = entries.len() + 1;
+            let result = serde_json::json!({
+                "persisted": true,
+                "operation": operation.label(),
+                "revision": next_revision,
+                "entry_count": entry_count
+            });
+            let Some(entry_object) = entry.as_object_mut() else {
+                return Err(Wave1HostPortError::new(
+                    "INVALID_PAYLOAD",
+                    "memory entry unexpectedly lost its object shape",
+                ));
+            };
+            entry_object.insert("result".to_owned(), result.clone());
+            let entry_bytes = canonical_json_bytes(&entry).map_err(|error| {
+                Wave1HostPortError::new(
+                    "INVALID_PAYLOAD",
+                    format!("memory entry could not be encoded: {error}"),
+                )
+            })?;
+            if entry_bytes.len() > MAX_MEMORY_ENTRY_BYTES {
+                return Err(Wave1HostPortError::new(
+                    "INVALID_PAYLOAD",
+                    format!(
+                        "memory entry exceeds {MAX_MEMORY_ENTRY_BYTES} bytes"
+                    ),
+                ));
+            }
+            entries.push(entry.clone());
+            let next = StrictJsonValue(serde_json::json!({
+                "entries": entries,
+                "last_operation": operation.label(),
+            }));
+            let state_bytes = canonical_json_bytes(&next.0).map_err(|error| {
+                Wave1HostPortError::new(
+                    "INVALID_PAYLOAD",
+                    format!("memory state could not be encoded: {error}"),
+                )
+            })?;
+            if state_bytes.len() > MAX_PLUGIN_STATE_BYTES {
+                return Err(Wave1HostPortError::new(
+                    "CAPABILITY_UNAVAILABLE",
+                    format!(
+                        "memory state exceeds the {MAX_PLUGIN_STATE_BYTES}-byte PluginState limit"
+                    ),
+                ));
+            }
+            let response = state
+                .compare_and_swap(
+                    &scope,
+                    &state_key,
+                    revision,
+                    &format,
+                    Some(next),
+                )
+                .await
+                .map_err(|error| {
+                    Wave1HostPortError::new(
+                        "CAPABILITY_UNAVAILABLE",
+                        format!("memory state could not be committed: {error}"),
+                    )
+                })?;
+            match response {
+                PluginStateCompareAndSwapOutcome::Applied { revision }
+                    if revision == next_revision =>
+                {
+                    return Ok(StrictJsonValue(result));
+                }
+                PluginStateCompareAndSwapOutcome::Applied { revision } => {
+                    return Err(Wave1HostPortError::new(
+                        "CAPABILITY_UNAVAILABLE",
+                        format!(
+                            "memory state committed unexpected revision {revision}, expected {next_revision}"
+                        ),
+                    ));
+                }
+                PluginStateCompareAndSwapOutcome::Conflict { .. } => continue,
+            }
+        }
+        Err(Wave1HostPortError::new(
+            "CAPABILITY_UNAVAILABLE",
+            "memory state changed concurrently; bounded CAS retry exhausted",
+        ))
+    }
+}
+
+fn validate_memory_request(
+    request: &Wave1MemoryMutationRequest,
+    operation: &str,
+) -> Result<(), Wave1HostPortError> {
+    let has_content = request
+        .content
+        .as_deref()
+        .is_some_and(|content| !content.trim().is_empty());
+    let has_items = request
+        .items
+        .as_ref()
+        .is_some_and(|items| !items.is_empty());
+    if !has_content && !has_items {
+        return Err(Wave1HostPortError::new(
+            "INVALID_PAYLOAD",
+            format!("{operation} requires non-empty content or items"),
+        ));
+    }
+    if let Some(content) = request.content.as_deref() {
+        if content.trim().is_empty() {
+            return Err(Wave1HostPortError::new(
+                "INVALID_PAYLOAD",
+                format!("{operation} content must not be blank"),
+            ));
+        }
+        if content.chars().count() > 65_536 {
+            return Err(Wave1HostPortError::new(
+                "INVALID_PAYLOAD",
+                format!("{operation} content exceeds 65536 characters"),
+            ));
+        }
+    }
+    if let Some(title) = request.title.as_deref() {
+        if title.trim().is_empty() || title.chars().count() > 512 {
+            return Err(Wave1HostPortError::new(
+                "INVALID_PAYLOAD",
+                format!("{operation} title is blank or exceeds 512 characters"),
+            ));
+        }
+    }
+    if let Some(items) = request.items.as_ref() {
+        if items.is_empty() || items.len() > MAX_MEMORY_ENTRIES {
+            return Err(Wave1HostPortError::new(
+                "INVALID_PAYLOAD",
+                format!(
+                    "{operation} items must contain between 1 and {MAX_MEMORY_ENTRIES} entries"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn decode_memory_state(
+    current: Option<&nomifun_agent_contracts::PluginStateEntry>,
+    expected_format: &nomifun_agent_contracts::VersionString,
+    operation: Wave1MemoryOperation,
+    binding: &nomifun_agent_contracts::TypedResourceBinding,
+) -> Result<Vec<serde_json::Value>, Wave1HostPortError> {
+    let Some(current) = current else {
+        return Ok(Vec::new());
+    };
+    if current.revision == 0 {
+        return Err(Wave1HostPortError::unavailable(
+            "memory state has an invalid zero revision",
+        ));
+    }
+    if current.state_format_version != *expected_format {
+        return Err(Wave1HostPortError::unavailable(format!(
+            "{} state format {} is unsupported; expected {}",
+            operation.label(),
+            current.state_format_version.as_ref(),
+            expected_format.as_ref()
+        )));
+    }
+    let object = current.value.0.as_object().ok_or_else(|| {
+        Wave1HostPortError::unavailable("memory state has an invalid stored shape")
+    })?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "entries" | "last_operation"))
+    {
+        return Err(Wave1HostPortError::unavailable(
+            "memory state contains unknown top-level fields",
+        ));
+    }
+    let entries = object
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            Wave1HostPortError::unavailable(
+                "memory state has an invalid stored entries array",
+            )
+        })?;
+    if entries.len() > MAX_MEMORY_ENTRIES {
+        return Err(Wave1HostPortError::unavailable(format!(
+            "memory state contains more than {MAX_MEMORY_ENTRIES} entries"
+        )));
+    }
+    let entry_count = u64::try_from(entries.len()).map_err(|_| {
+        Wave1HostPortError::unavailable("memory state entry count cannot be represented")
+    })?;
+    let first_entry_revision = current
+        .revision
+        .checked_sub(entry_count.saturating_sub(1))
+        .ok_or_else(|| {
+            Wave1HostPortError::unavailable(
+                "memory state revision is older than its entry history",
+            )
+        })?;
+    let mut idempotency_keys = BTreeSet::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let entry_object = entry.as_object().ok_or_else(|| {
+            Wave1HostPortError::unavailable(format!(
+                "memory state entry {index} is not an object"
+            ))
+        })?;
+        if entry_object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "operation"
+                    | "request"
+                    | "request_digest"
+                    | "idempotency_key"
+                    | "operation_id"
+                    | "correlation_id"
+                    | "result"
+            )
+        }) {
+            return Err(Wave1HostPortError::unavailable(format!(
+                "memory state entry {index} contains unknown fields"
+            )));
+        }
+        let entry_operation = entry_object
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                Wave1HostPortError::unavailable(format!(
+                    "memory state entry {index} has no operation"
+                ))
+            })?;
+        let Some(entry_domain) = Wave1MemoryOperation::from_label(entry_operation) else {
+            return Err(Wave1HostPortError::unavailable(format!(
+                "memory state entry {index} has an unknown operation"
+            )));
+        };
+        if entry_domain.is_project() != operation.is_project() {
+            return Err(Wave1HostPortError::unavailable(format!(
+                "memory state entry {index} crosses project/companion state domains"
+            )));
+        }
+        let key = entry_object
+            .get("idempotency_key")
+            .and_then(serde_json::Value::as_str)
+            .filter(|key| !key.trim().is_empty())
+            .ok_or_else(|| {
+                Wave1HostPortError::unavailable(format!(
+                    "memory state entry {index} has an invalid idempotency key"
+                ))
+            })?;
+        if !idempotency_keys.insert(key.to_owned()) {
+            return Err(Wave1HostPortError::unavailable(format!(
+                "memory state contains duplicate idempotency key at entry {index}"
+            )));
+        }
+        let request = entry_object.get("request").ok_or_else(|| {
+            Wave1HostPortError::unavailable(format!(
+                "memory state entry {index} has no request"
+            ))
+        })?;
+        validate_stored_memory_request(request, operation.label(), index)?;
+        let request_digest = entry_object
+            .get("request_digest")
+            .and_then(serde_json::Value::as_str)
+            .filter(|digest| {
+                digest.len() == 64
+                    && digest.bytes().all(|byte| {
+                        byte.is_ascii_digit()
+                            || (b'a'..=b'f').contains(&byte)
+                    })
+            })
+            .ok_or_else(|| {
+                Wave1HostPortError::unavailable(format!(
+                    "memory state entry {index} has an invalid request digest"
+                ))
+            })?;
+        let expected_digest =
+            memory_request_digest(entry_domain, binding, request).map_err(|error| {
+                Wave1HostPortError::unavailable(format!(
+                    "memory state entry {index} request digest could not be recomputed: {error}"
+                ))
+            })?;
+        if request_digest != expected_digest.as_ref() {
+            return Err(Wave1HostPortError::unavailable(format!(
+                "memory state entry {index} request digest does not match its request"
+            )));
+        }
+        for field in ["operation_id", "correlation_id"] {
+            if entry_object
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(Wave1HostPortError::unavailable(format!(
+                    "memory state entry {index} has an invalid {field}"
+                )));
+            }
+        }
+        let result = entry_object
+            .get("result")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                Wave1HostPortError::unavailable(format!(
+                    "memory state entry {index} has no replay result"
+                ))
+            })?;
+        if result.keys().any(|key| {
+            !matches!(key.as_str(), "persisted" | "operation" | "revision" | "entry_count")
+        })
+            || result.get("persisted") != Some(&serde_json::Value::Bool(true))
+            || result
+                .get("operation")
+                .and_then(serde_json::Value::as_str)
+                != Some(entry_operation)
+            || result
+                .get("revision")
+                .and_then(serde_json::Value::as_u64)
+                != Some(
+                    first_entry_revision
+                        .checked_add(index as u64)
+                        .ok_or_else(|| {
+                            Wave1HostPortError::unavailable(
+                                "memory state entry revision cannot be represented",
+                            )
+                        })?,
+                )
+            || result
+                .get("entry_count")
+                .and_then(serde_json::Value::as_u64)
+                != Some(index as u64 + 1)
+        {
+            return Err(Wave1HostPortError::unavailable(format!(
+                "memory state entry {index} has an invalid replay result"
+            )));
+        }
+        let entry_bytes = canonical_json_bytes(entry).map_err(|error| {
+            Wave1HostPortError::unavailable(format!(
+                "memory state entry {index} could not be encoded: {error}"
+            ))
+        })?;
+        if entry_bytes.len() > MAX_MEMORY_ENTRY_BYTES {
+            return Err(Wave1HostPortError::unavailable(format!(
+                "memory state entry {index} exceeds {MAX_MEMORY_ENTRY_BYTES} bytes"
+            )));
+        }
+    }
+    if let Some(last_operation) = object.get("last_operation") {
+        let last_operation = last_operation
+            .as_str()
+            .ok_or_else(|| {
+                Wave1HostPortError::unavailable(
+                    "memory state last_operation is not a string",
+                )
+            })?;
+        if entries
+            .last()
+            .and_then(|entry| entry.get("operation"))
+            .and_then(serde_json::Value::as_str)
+            != Some(last_operation)
+        {
+            return Err(Wave1HostPortError::unavailable(
+                "memory state last_operation does not match its last entry",
+            ));
+        }
+    } else if !entries.is_empty() {
+        return Err(Wave1HostPortError::unavailable(
+            "memory state has entries but no last_operation",
+        ));
+    }
+    let state_bytes = canonical_json_bytes(&current.value.0).map_err(|error| {
+        Wave1HostPortError::unavailable(format!(
+            "memory state could not be encoded: {error}"
+        ))
+    })?;
+    if state_bytes.len() > MAX_PLUGIN_STATE_BYTES {
+        return Err(Wave1HostPortError::unavailable(format!(
+            "memory state exceeds the {MAX_PLUGIN_STATE_BYTES}-byte PluginState limit"
+        )));
+    }
+    Ok(entries.clone())
+}
+
+fn validate_stored_memory_request(
+    value: &serde_json::Value,
+    operation: &str,
+    index: usize,
+) -> Result<(), Wave1HostPortError> {
+    let object = value.as_object().ok_or_else(|| {
+        Wave1HostPortError::unavailable(format!(
+            "memory state entry {index} request is not an object"
+        ))
+    })?;
+    for key in object.keys() {
+        if !matches!(key.as_str(), "content" | "title" | "items") {
+            return Err(Wave1HostPortError::unavailable(format!(
+                "memory state entry {index} request contains unknown field {key:?}"
+            )));
+        }
+    }
+    let content = match object.get("content") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(content)) => Some(content.clone()),
+        Some(_) => {
+            return Err(Wave1HostPortError::unavailable(format!(
+                "memory state entry {index} request content is not a string"
+            )));
+        }
+    };
+    let title = match object.get("title") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(title)) => Some(title.clone()),
+        Some(_) => {
+            return Err(Wave1HostPortError::unavailable(format!(
+                "memory state entry {index} request title is not a string"
+            )));
+        }
+    };
+    let items = match object.get("items") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Array(items)) => Some(items.clone()),
+        Some(_) => {
+            return Err(Wave1HostPortError::unavailable(format!(
+                "memory state entry {index} request items is not an array"
+            )));
+        }
+    };
+    validate_memory_request(
+        &Wave1MemoryMutationRequest {
+            content,
+            title,
+            items,
+        },
+        operation,
+    )
+    .map_err(|error| {
+        Wave1HostPortError::unavailable(format!(
+            "memory state entry {index} request is invalid: {error}"
+        ))
+    })
+}
+
+fn memory_request_value(request: Wave1MemoryMutationRequest) -> serde_json::Value {
+    serde_json::json!({
+        "content": request.content,
+        "title": request.title,
+        "items": request.items,
+    })
+}
+
+fn memory_request_digest(
+    operation: Wave1MemoryOperation,
+    binding: &nomifun_agent_contracts::TypedResourceBinding,
+    request: &serde_json::Value,
+) -> Result<nomifun_agent_contracts::DigestHex, Wave1HostPortError> {
+    let fingerprint = serde_json::json!({
+        "operation": operation.label(),
+        "capability_id": operation.capability_id(),
+        "action_id": nomifun_agent_domain_wave1::action_id(operation.capability_id())
+            .expect("every memory mutation has a canonical action"),
+        "resource_kind": binding.resource_kind.as_ref(),
+        "resource_id": binding.resource_id.as_ref(),
+        "request": request,
+    });
+    digest_payload(&fingerprint).map_err(|error| {
+        Wave1HostPortError::new(
+            "INVALID_PAYLOAD",
+            format!("memory request could not be canonicalized: {error}"),
+        )
+    })
 }
 
 fn wave1_application_error(error: nomifun_common::AppError) -> Wave1HostPortError {
@@ -901,12 +1693,25 @@ fn current_runtime_target() -> RuntimeTarget {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
     use super::*;
     use async_trait::async_trait;
     use futures_util::StreamExt;
     use nomifun_agent_contracts::{
+        AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, AgentSessionId,
+        CapabilityExposure, CapabilityId, CapabilityRef, CapabilitySelection, CorrelationId,
         ChatRouteCandidate, ChatRouteFeature, ChatRouteIdentity, ChatRouteProtocol,
-        ChatRouteRecord, ChatRouteRecordSchema, ChatRouteTask,
+        ChatRouteRecord, ChatRouteRecordSchema, ChatRouteTask, IdempotencyKey,
+        OperationId, PluginStateEntry, PresetRevisionRef, ResourceBindingId, ResourceId,
+        ResourceKind, ScopeKey, StateKey, StrictJsonValue, TypedResourceBinding, UserId,
+        VersionString,
+    };
+    use nomifun_agent_kernel::{
+        ActiveCapabilitySetSnapshot, AgentPresetCompiler, CapabilityInvocationRequest,
+        CompileRequest, CompiledSnapshot, InMemoryPluginStatePersistence, KernelRegistry,
+        MaterializationPolicy, PluginStatePersistence, PluginStateSnapshot,
+        SessionCapabilityState, StateIdentity,
     };
     use nomifun_chat_model_broker::{
         BrokerRetryPolicy, ChatCausality, ChatCausalityGate, ChatModelError,
@@ -921,8 +1726,6 @@ mod tests {
     use super::super::chat_broker_host::{
         ChatBrokerHostComposition, ConnectionCredentialLeaseRegistry,
     };
-    use std::collections::BTreeSet;
-
     fn valid_ready_marker() -> FreshV4ReadyMarker {
         FreshV4ReadyMarker {
             data_generation: FRESH_V4_DATA_GENERATION,
@@ -938,6 +1741,235 @@ mod tests {
             application_build_digest:
                 application_build_digest(APPLICATION_BUILD_IDENTITY).unwrap(),
         }
+    }
+
+    fn principal() -> nomifun_agent_contracts::PrincipalRef {
+        nomifun_agent_contracts::PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: "wave1-memory-owner".to_owned(),
+        }
+    }
+
+    struct MemoryKernelFixture {
+        registry: Arc<KernelRegistry>,
+        persistence: Arc<InMemoryPluginStatePersistence>,
+    }
+
+    impl MemoryKernelFixture {
+        fn new() -> Self {
+            let persistence = Arc::new(InMemoryPluginStatePersistence::new());
+            Self::with_persistence(persistence)
+        }
+
+        fn with_persistence(
+            persistence: Arc<InMemoryPluginStatePersistence>,
+        ) -> Self {
+            let registry = Arc::new(
+                KernelRegistry::new(
+                    MaterializationPolicy::stable(CONTRACT_VERSION),
+                    Arc::clone(&persistence) as Arc<dyn PluginStatePersistence>,
+                )
+                .expect("kernel registry"),
+            );
+            registry
+                .replace_all(
+                    nomifun_agent_domain_wave1::registrations_with_host_port(
+                        Arc::new(Wave1ApplicationHost::default()),
+                    )
+                    .expect("Wave 1 registrations"),
+                )
+                .expect("publish Wave 1 registrations");
+            Self {
+                registry,
+                persistence,
+            }
+        }
+
+        fn compile_memory_snapshot(
+            &self,
+            capability_id: &str,
+            resource_id: &str,
+        ) -> (
+            Arc<CompiledSnapshot>,
+            ActiveCapabilitySetSnapshot,
+            TypedResourceBinding,
+        ) {
+            compile_memory_snapshot_for_registry(
+                &self.registry,
+                capability_id,
+                resource_id,
+            )
+        }
+    }
+
+    fn compile_memory_snapshot_for_registry(
+        registry: &KernelRegistry,
+        capability_id: &str,
+        resource_id: &str,
+    ) -> (
+        Arc<CompiledSnapshot>,
+        ActiveCapabilitySetSnapshot,
+        TypedResourceBinding,
+    ) {
+        let owner = principal();
+        let binding = TypedResourceBinding {
+            binding_id: ResourceBindingId::from(format!(
+                "binding-{}",
+                resource_id
+            )),
+            resource_kind: ResourceKind::from(
+                if capability_id.starts_with("memory.project.") {
+                    nomifun_agent_domain_wave1::PROJECT_MEMORY_RESOURCE_KIND
+                } else {
+                    nomifun_agent_domain_wave1::COMPANION_MEMORY_RESOURCE_KIND
+                },
+            ),
+            resource_id: ResourceId::from(resource_id),
+            owner_id: owner.principal_id.clone(),
+            operations: BTreeSet::from(["read".to_owned(), "write".to_owned()]),
+            connection_config_ref: None,
+            typed_parameters: BTreeMap::new(),
+        };
+        let action = nomifun_agent_domain_wave1::action_id(capability_id)
+            .expect("memory capability has an action");
+        let payload = AgentPresetRevisionPayload {
+            schema_version: VersionString::from(CONTRACT_VERSION),
+            surfaces: BTreeSet::from(["desktop".to_owned()]),
+            model_route_refs: BTreeMap::new(),
+            chat_route_records: BTreeMap::new(),
+            initial_capabilities: vec![CapabilitySelection {
+                capability: CapabilityRef {
+                    id: capability_id.into(),
+                    version: VersionString::from(CONTRACT_VERSION),
+                },
+                required: true,
+                exposure: CapabilityExposure::Advertised,
+                action_allowlist: BTreeSet::from([action]),
+                resource_binding_refs: vec![binding.binding_id.clone()],
+                destination_constraints: BTreeSet::new(),
+                context_budget_override: None,
+                tool_budget_override: None,
+                config: StrictJsonValue(serde_json::json!({})),
+            }],
+            on_demand_capabilities: Vec::new(),
+            skill_bindings: Vec::new(),
+            resource_bindings: vec![binding.clone()],
+            persona: "Wave 1 memory test".to_owned(),
+            instructions: "Persist bounded memory.".to_owned(),
+            context_policy: StrictJsonValue(serde_json::json!({})),
+            execution_constraints: StrictJsonValue(serde_json::json!({})),
+            runtime_budget: StrictJsonValue(serde_json::json!({})),
+        };
+        let revision = AgentPresetRevision {
+            reference: PresetRevisionRef {
+                preset_id: AgentPresetId::from(format!(
+                    "wave1-memory-{}",
+                    capability_id.replace('.', "-")
+                )),
+                revision: 1,
+                revision_digest: digest_payload(&payload)
+                    .expect("revision digest"),
+            },
+            payload,
+            created_by: UserId::from(owner.principal_id.clone()),
+            created_at_ms: 1,
+            reason: None,
+        };
+        let snapshot = AgentPresetCompiler::compile(
+            &registry.snapshot().expect("registry snapshot"),
+            &CompilerEnvironment {
+                resolver_version: VersionString::from(CONTRACT_VERSION),
+                required_runtime_protocol_version: VersionString::from(CONTRACT_VERSION),
+                required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+                runtime_feature_inventory_digest: DigestHex::from("runtime"),
+                available_runtime_features: BTreeSet::new(),
+                canonical_schema_manifest_digest: DigestHex::from("schema"),
+                target_contribution_manifest_digest: DigestHex::from("target"),
+                host_target: RuntimeTarget::from("test-target"),
+                host_surface: "desktop".to_owned(),
+                availability_evidence_revision: "wave1-memory-test".to_owned(),
+            },
+            CompileRequest {
+                revision,
+                principal: owner,
+                scene: "wave1-memory-test".to_owned(),
+                surface: "desktop".to_owned(),
+                audience: "test".to_owned(),
+                created_at_ms: 2,
+                resolver_run_id: OperationId::from("wave1-memory-resolve"),
+            },
+        )
+        .expect("compile memory capability");
+        let active = SessionCapabilityState::new(&snapshot)
+            .snapshot()
+            .expect("initial active set");
+        (Arc::new(snapshot), active, binding)
+    }
+
+    fn memory_invocation(
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        binding: &TypedResourceBinding,
+        capability_id: &str,
+        idempotency_key: &str,
+        content: &str,
+        operation_id: &str,
+    ) -> CapabilityInvocationRequest {
+        let owner = principal();
+        CapabilityInvocationRequest {
+            principal: owner.clone(),
+            session_owner: owner,
+            agent_session_id: AgentSessionId::from("wave1-memory-session"),
+            operation_id: OperationId::from(operation_id),
+            idempotency_key: IdempotencyKey::from(idempotency_key),
+            correlation_id: CorrelationId::from(format!("correlation-{idempotency_key}")),
+            resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
+            active_set_generation: active.generation,
+            capability_id: CapabilityId::from(capability_id),
+            action_id: nomifun_agent_domain_wave1::action_id(capability_id)
+                .expect("memory capability action"),
+            resource_binding_ids: BTreeSet::from([binding.binding_id.clone()]),
+            state_scope_key: ScopeKey::from("session:wave1-memory-session"),
+            input: StrictJsonValue(serde_json::json!({
+                "content": content
+            })),
+        }
+    }
+
+    fn malformed_memory_persistence() -> Arc<InMemoryPluginStatePersistence> {
+        memory_persistence_with_state(
+            serde_json::json!({
+                "entries": "not-an-array"
+            }),
+            MEMORY_STATE_FORMAT_VERSION,
+            "project-corrupt",
+        )
+    }
+
+    fn memory_persistence_with_state(
+        value: serde_json::Value,
+        state_format_version: &str,
+        resource_scope: &str,
+    ) -> Arc<InMemoryPluginStatePersistence> {
+        let identity = StateIdentity {
+            package_id: nomifun_agent_domain_wave1::PROJECT_MEMORY_PACKAGE_ID.into(),
+            mount_id: nomifun_agent_domain_wave1::PROJECT_MEMORY_MOUNT_ID.into(),
+            scope_key: ScopeKey::from(format!("resource:{resource_scope}")),
+            state_key: StateKey::from(MEMORY_STATE_KEY),
+        };
+        let entry = PluginStateEntry {
+            namespace: identity.namespace(),
+            revision: 1,
+            state_format_version: VersionString::from(state_format_version),
+            writer_package_version: VersionString::from(CONTRACT_VERSION),
+            value: StrictJsonValue(value),
+        };
+        let snapshot = PluginStateSnapshot::from_parts(
+            BTreeMap::from([(identity.clone(), entry)]),
+            BTreeMap::from([(identity, 1)]),
+        )
+        .expect("malformed fixture namespace");
+        Arc::new(InMemoryPluginStatePersistence::reopen(snapshot))
     }
 
     #[test]
@@ -1373,6 +2405,637 @@ mod tests {
             server.received_requests().await.expect("requests").len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn wave1_memory_owner_persists_and_replays_by_request_identity() {
+        let fixture = MemoryKernelFixture::new();
+        let (snapshot, active, binding) = fixture
+            .compile_memory_snapshot(
+                nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                "project-replay",
+            );
+        let request = memory_invocation(
+            &snapshot,
+            &active,
+            &binding,
+            nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+            "memory-replay-1",
+            "remember this",
+            "memory-operation-1",
+        );
+        let first = fixture
+            .registry
+            .invoke(&snapshot, &active, request.clone())
+            .await
+            .expect("first memory mutation");
+        assert_eq!(first.0["persisted"], serde_json::json!(true));
+        assert_eq!(first.0["revision"], serde_json::json!(1));
+        assert_eq!(first.0["entry_count"], serde_json::json!(1));
+
+        let state = fixture.persistence.snapshot().expect("state snapshot");
+        let stored = state
+            .entry(
+                &nomifun_agent_domain_wave1::PROJECT_MEMORY_PACKAGE_ID.into(),
+                &nomifun_agent_domain_wave1::PROJECT_MEMORY_MOUNT_ID.into(),
+                &ScopeKey::from("resource:project-replay"),
+                &StateKey::from(MEMORY_STATE_KEY),
+            )
+            .expect("project memory state");
+        assert_eq!(stored.revision, 1);
+        assert_eq!(stored.value.0["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            stored.value.0["entries"][0]["request"]["content"],
+            serde_json::json!("remember this")
+        );
+
+        let mut replay_request = request.clone();
+        replay_request.operation_id = OperationId::from("memory-operation-retry");
+        replay_request.correlation_id = CorrelationId::from("memory-correlation-retry");
+        let replay = fixture
+            .registry
+            .invoke(&snapshot, &active, replay_request)
+            .await
+            .expect("idempotent replay");
+        assert_eq!(replay, first);
+        let replayed_state = fixture.persistence.snapshot().expect("state snapshot");
+        let replayed = replayed_state
+            .entry(
+                &nomifun_agent_domain_wave1::PROJECT_MEMORY_PACKAGE_ID.into(),
+                &nomifun_agent_domain_wave1::PROJECT_MEMORY_MOUNT_ID.into(),
+                &ScopeKey::from("resource:project-replay"),
+                &StateKey::from(MEMORY_STATE_KEY),
+            )
+            .expect("project memory state after replay");
+        assert_eq!(replayed.revision, 1);
+        assert_eq!(replayed.value.0["entries"].as_array().unwrap().len(), 1);
+
+        let conflicting_request = memory_invocation(
+            &snapshot,
+            &active,
+            &binding,
+            nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+            "memory-replay-1",
+            "different content",
+            "memory-operation-conflict",
+        );
+        let conflict = fixture
+            .registry
+            .invoke(&snapshot, &active, conflicting_request)
+            .await
+            .expect_err("different input must conflict");
+        assert!(
+            conflict
+                .to_string()
+                .contains("IDEMPOTENCY_CONFLICT"),
+            "unexpected conflict: {conflict}"
+        );
+        let unchanged = fixture.persistence.snapshot().expect("state snapshot");
+        let unchanged_entry = unchanged
+            .entry(
+                &nomifun_agent_domain_wave1::PROJECT_MEMORY_PACKAGE_ID.into(),
+                &nomifun_agent_domain_wave1::PROJECT_MEMORY_MOUNT_ID.into(),
+                &ScopeKey::from("resource:project-replay"),
+                &StateKey::from(MEMORY_STATE_KEY),
+            )
+            .expect("project memory state after conflict");
+        assert_eq!(unchanged_entry.revision, 1);
+        assert_eq!(unchanged_entry.value.0["entries"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn wave1_memory_owner_isolates_resources_and_package_mounts() {
+        let fixture = MemoryKernelFixture::new();
+        let (project_a, active_a, binding_a) = fixture
+            .compile_memory_snapshot(
+                nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                "memory-a",
+            );
+        let (project_b, active_b, binding_b) = fixture
+            .compile_memory_snapshot(
+                nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                "memory-b",
+            );
+        let (companion, active_companion, companion_binding) = fixture
+            .compile_memory_snapshot(
+                nomifun_agent_domain_wave1::MEMORY_COMPANION_WRITE,
+                "memory-a",
+            );
+
+        for (snapshot, active, binding, capability_id, content) in [
+            (
+                project_a,
+                active_a,
+                binding_a,
+                nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                "project a",
+            ),
+            (
+                project_b,
+                active_b,
+                binding_b,
+                nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                "project b",
+            ),
+            (
+                companion,
+                active_companion,
+                companion_binding,
+                nomifun_agent_domain_wave1::MEMORY_COMPANION_WRITE,
+                "companion a",
+            ),
+        ] {
+            fixture
+                .registry
+                .invoke(
+                    &snapshot,
+                    &active,
+                    memory_invocation(
+                        &snapshot,
+                        &active,
+                        &binding,
+                        capability_id,
+                        "shared-idempotency-key",
+                        content,
+                        content,
+                    ),
+                )
+                .await
+                .expect("isolated memory mutation");
+        }
+
+        let state = fixture.persistence.snapshot().expect("state snapshot");
+        for (package_id, mount_id, scope, expected_content) in [
+            (
+                nomifun_agent_domain_wave1::PROJECT_MEMORY_PACKAGE_ID,
+                nomifun_agent_domain_wave1::PROJECT_MEMORY_MOUNT_ID,
+                "resource:memory-a",
+                "project a",
+            ),
+            (
+                nomifun_agent_domain_wave1::PROJECT_MEMORY_PACKAGE_ID,
+                nomifun_agent_domain_wave1::PROJECT_MEMORY_MOUNT_ID,
+                "resource:memory-b",
+                "project b",
+            ),
+            (
+                nomifun_agent_domain_wave1::COMPANION_MEMORY_PACKAGE_ID,
+                nomifun_agent_domain_wave1::COMPANION_MEMORY_MOUNT_ID,
+                "resource:memory-a",
+                "companion a",
+            ),
+        ] {
+            let entry = state
+                .entry(
+                    &package_id.into(),
+                    &mount_id.into(),
+                    &ScopeKey::from(scope),
+                    &StateKey::from(MEMORY_STATE_KEY),
+                )
+                .expect("isolated state entry");
+            assert_eq!(entry.value.0["entries"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                entry.value.0["entries"][0]["request"]["content"],
+                serde_json::json!(expected_content)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn wave1_memory_owner_dispatches_all_mutation_variants() {
+        let fixture = MemoryKernelFixture::new();
+        for (index, (capability_id, resource_id, expected_operation)) in [
+            (
+                nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                "variant-project",
+                "project.write",
+            ),
+            (
+                nomifun_agent_domain_wave1::MEMORY_PROJECT_DISTILL,
+                "variant-project",
+                "project.distill",
+            ),
+            (
+                nomifun_agent_domain_wave1::MEMORY_COMPANION_WRITE,
+                "variant-companion",
+                "companion.write",
+            ),
+            (
+                nomifun_agent_domain_wave1::MEMORY_COMPANION_MERGE,
+                "variant-companion",
+                "companion.merge",
+            ),
+            (
+                nomifun_agent_domain_wave1::MEMORY_COMPANION_EVOLVE,
+                "variant-companion",
+                "companion.evolve",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (snapshot, active, binding) = fixture
+                .compile_memory_snapshot(capability_id, resource_id);
+            let output = fixture
+                .registry
+                .invoke(
+                    &snapshot,
+                    &active,
+                    memory_invocation(
+                        &snapshot,
+                        &active,
+                        &binding,
+                        capability_id,
+                        &format!("variant-key-{index}"),
+                        &format!("variant-{index}"),
+                        &format!("variant-operation-{index}"),
+                    ),
+                )
+                .await
+                .expect("memory mutation variant");
+            assert_eq!(output.0["operation"], serde_json::json!(expected_operation));
+        }
+    }
+
+    #[tokio::test]
+    async fn wave1_memory_owner_survives_kernel_restart_and_concurrent_cas() {
+        let fixture = MemoryKernelFixture::new();
+        let (snapshot, active, binding) = fixture
+            .compile_memory_snapshot(
+                nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                "project-restart",
+            );
+        let first_request = memory_invocation(
+            &snapshot,
+            &active,
+            &binding,
+            nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+            "restart-key",
+            "before restart",
+            "restart-operation",
+        );
+        let first = fixture
+            .registry
+            .invoke(&snapshot, &active, first_request.clone())
+            .await
+            .expect("pre-restart mutation");
+        let persisted_snapshot = fixture.persistence.snapshot().expect("persisted state");
+
+        let restarted_persistence = Arc::new(
+            InMemoryPluginStatePersistence::reopen(persisted_snapshot),
+        );
+        let restarted = MemoryKernelFixture::with_persistence(restarted_persistence.clone());
+        let (restarted_snapshot, restarted_active, restarted_binding) = restarted
+            .compile_memory_snapshot(
+                nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                "project-restart",
+            );
+        let replay = restarted
+            .registry
+            .invoke(
+                &restarted_snapshot,
+                &restarted_active,
+                memory_invocation(
+                    &restarted_snapshot,
+                    &restarted_active,
+                    &restarted_binding,
+                    nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                    "restart-key",
+                    "before restart",
+                    "restart-operation-retry",
+                ),
+            )
+            .await
+            .expect("post-restart replay");
+        assert_eq!(replay, first);
+
+        let task_count = 12;
+        let mut tasks = Vec::with_capacity(task_count);
+        for index in 0..task_count {
+            let registry = Arc::clone(&restarted.registry);
+            let snapshot = Arc::clone(&restarted_snapshot);
+            let active = restarted_active.clone();
+            let binding = restarted_binding.clone();
+            tasks.push(tokio::spawn(async move {
+                registry
+                    .invoke(
+                        &snapshot,
+                        &active,
+                        memory_invocation(
+                            &snapshot,
+                            &active,
+                            &binding,
+                            nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                            &format!("concurrent-key-{index}"),
+                            &format!("concurrent-{index}"),
+                            &format!("concurrent-operation-{index}"),
+                        ),
+                    )
+                    .await
+            }));
+        }
+        for task in tasks {
+            task.await
+                .expect("concurrent task")
+                .expect("concurrent CAS mutation");
+        }
+        let state = restarted_persistence.snapshot().expect("restarted state");
+        let entry = state
+            .entry(
+                &nomifun_agent_domain_wave1::PROJECT_MEMORY_PACKAGE_ID.into(),
+                &nomifun_agent_domain_wave1::PROJECT_MEMORY_MOUNT_ID.into(),
+                &ScopeKey::from("resource:project-restart"),
+                &StateKey::from(MEMORY_STATE_KEY),
+            )
+            .expect("restarted project memory state");
+        assert_eq!(
+            entry.value.0["entries"].as_array().unwrap().len(),
+            task_count + 1
+        );
+        assert_eq!(entry.revision, task_count as u64 + 1);
+    }
+
+    #[tokio::test]
+    async fn wave1_memory_owner_enforces_bounded_state_without_partial_append() {
+        let fixture = MemoryKernelFixture::new();
+        let (snapshot, active, binding) = fixture
+            .compile_memory_snapshot(
+                nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                "project-capacity",
+            );
+        let content = "x".repeat(1_024);
+        let mut successful = 0usize;
+        let mut terminal_error = None;
+        for index in 0..MAX_MEMORY_ENTRIES {
+            let result = fixture
+                .registry
+                .invoke(
+                    &snapshot,
+                    &active,
+                    memory_invocation(
+                        &snapshot,
+                        &active,
+                        &binding,
+                        nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                        &format!("capacity-key-{index}"),
+                        &content,
+                        &format!("capacity-operation-{index}"),
+                    ),
+                )
+                .await;
+            match result {
+                Ok(_) => successful += 1,
+                Err(error) => {
+                    terminal_error = Some(error);
+                    break;
+                }
+            }
+        }
+        let terminal_error = terminal_error.expect("bounded state must eventually reject");
+        assert!(
+            terminal_error
+                .to_string()
+                .contains("CAPABILITY_UNAVAILABLE"),
+            "unexpected capacity error: {terminal_error}"
+        );
+        assert!(successful > 0 && successful < MAX_MEMORY_ENTRIES);
+
+        let state = fixture.persistence.snapshot().expect("state snapshot");
+        let entry = state
+            .entry(
+                &nomifun_agent_domain_wave1::PROJECT_MEMORY_PACKAGE_ID.into(),
+                &nomifun_agent_domain_wave1::PROJECT_MEMORY_MOUNT_ID.into(),
+                &ScopeKey::from("resource:project-capacity"),
+                &StateKey::from(MEMORY_STATE_KEY),
+            )
+            .expect("capacity state");
+        assert_eq!(entry.revision, successful as u64);
+        assert_eq!(
+            entry.value.0["entries"].as_array().unwrap().len(),
+            successful
+        );
+    }
+
+    #[tokio::test]
+    async fn wave1_memory_owner_survives_sqlite_platform_restart() {
+        let directory = tempfile::tempdir().expect("v4 temp root");
+        let data_dir = directory.path().join("data");
+        let outcome = nomifun_v4_root::FreshV4Coordinator::default()
+            .bootstrap(&data_dir, APPLICATION_BUILD_IDENTITY, &[])
+            .await
+            .expect("fresh v4 root");
+        let schema_digest = canonical_schema_manifest_digest().unwrap();
+        let host_ports = || {
+            AgentDomainHostPorts::with_wave1_and_wave2(
+                Arc::new(Wave1ApplicationHost::default()),
+                Arc::new(Wave2ApplicationHost::new()),
+            )
+        };
+        let first_pool = open_validated_pool(&data_dir.join(FRESH_V4_DATABASE_FILE))
+            .await
+            .expect("first v4 pool");
+        let first_platform = initialize_platform_with_cleanup_and_host_ports(
+            first_pool,
+            data_dir.join(FRESH_V4_READY_MARKER_FILE),
+            outcome.ready_marker.clone(),
+            schema_digest.clone(),
+            None,
+            [0; 32],
+            host_ports(),
+        )
+        .await
+        .expect("first Agent platform");
+        let (snapshot, active, binding) = compile_memory_snapshot_for_registry(
+            first_platform.kernel_registry(),
+            nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+            "sqlite-project",
+        );
+        let first = first_platform
+            .kernel_registry()
+            .invoke(
+                &snapshot,
+                &active,
+                memory_invocation(
+                    &snapshot,
+                    &active,
+                    &binding,
+                    nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                    "sqlite-restart-key",
+                    "durable sqlite memory",
+                    "sqlite-operation-1",
+                ),
+            )
+            .await
+            .expect("SQLite-backed memory mutation");
+        assert_eq!(first.0["revision"], serde_json::json!(1));
+        let first_row: (String, i64) = sqlx::query_as(
+            "SELECT value_json, cas_revision FROM plugin_states \
+             WHERE package_id = ? AND mount_id = ? AND scope_key = ? AND state_key = ?",
+        )
+        .bind(nomifun_agent_domain_wave1::PROJECT_MEMORY_PACKAGE_ID)
+        .bind(nomifun_agent_domain_wave1::PROJECT_MEMORY_MOUNT_ID)
+        .bind("resource:sqlite-project")
+        .bind(MEMORY_STATE_KEY)
+        .fetch_one(first_platform.pool())
+        .await
+        .expect("SQLite PluginState row");
+        assert_eq!(first_row.1, 1);
+        let first_value: serde_json::Value =
+            serde_json::from_str(&first_row.0).expect("stored state JSON");
+        assert_eq!(
+            first_value["entries"][0]["request"]["content"],
+            serde_json::json!("durable sqlite memory")
+        );
+
+        first_platform.shutdown().await.expect("first platform shutdown");
+        first_platform.pool().close().await;
+
+        let second_pool = open_validated_pool(&data_dir.join(FRESH_V4_DATABASE_FILE))
+            .await
+            .expect("second v4 pool");
+        let second_platform = initialize_platform_with_cleanup_and_host_ports(
+            second_pool,
+            data_dir.join(FRESH_V4_READY_MARKER_FILE),
+            outcome.ready_marker,
+            schema_digest,
+            None,
+            [0; 32],
+            host_ports(),
+        )
+        .await
+        .expect("restarted Agent platform");
+        let (restarted_snapshot, restarted_active, restarted_binding) =
+            compile_memory_snapshot_for_registry(
+                second_platform.kernel_registry(),
+                nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                "sqlite-project",
+            );
+        let replay = second_platform
+            .kernel_registry()
+            .invoke(
+                &restarted_snapshot,
+                &restarted_active,
+                memory_invocation(
+                    &restarted_snapshot,
+                    &restarted_active,
+                    &restarted_binding,
+                    nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                    "sqlite-restart-key",
+                    "durable sqlite memory",
+                    "sqlite-operation-2",
+                ),
+            )
+            .await
+            .expect("SQLite-backed idempotent replay");
+        assert_eq!(replay, first);
+        let second_revision: i64 = sqlx::query_scalar(
+            "SELECT cas_revision FROM plugin_states \
+             WHERE package_id = ? AND mount_id = ? AND scope_key = ? AND state_key = ?",
+        )
+        .bind(nomifun_agent_domain_wave1::PROJECT_MEMORY_PACKAGE_ID)
+        .bind(nomifun_agent_domain_wave1::PROJECT_MEMORY_MOUNT_ID)
+        .bind("resource:sqlite-project")
+        .bind(MEMORY_STATE_KEY)
+        .fetch_one(second_platform.pool())
+        .await
+        .expect("replayed SQLite PluginState row");
+        assert_eq!(second_revision, 1);
+        second_platform.shutdown().await.expect("second platform shutdown");
+        second_platform.pool().close().await;
+    }
+
+    #[tokio::test]
+    async fn wave1_memory_owner_rejects_corrupt_plugin_state_without_overwrite() {
+        let persistence = malformed_memory_persistence();
+        let fixture = MemoryKernelFixture::with_persistence(Arc::clone(&persistence));
+        let (snapshot, active, binding) = fixture
+            .compile_memory_snapshot(
+                nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                "project-corrupt",
+            );
+        let error = fixture
+            .registry
+            .invoke(
+                &snapshot,
+                &active,
+                memory_invocation(
+                    &snapshot,
+                    &active,
+                    &binding,
+                    nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                    "corrupt-repair-attempt",
+                    "must not overwrite",
+                    "corrupt-operation",
+                ),
+            )
+            .await
+            .expect_err("corrupt state must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("CAPABILITY_UNAVAILABLE"),
+            "unexpected corrupt-state error: {error}"
+        );
+        let state = persistence.snapshot().expect("state snapshot");
+        let entry = state
+            .entry(
+                &nomifun_agent_domain_wave1::PROJECT_MEMORY_PACKAGE_ID.into(),
+                &nomifun_agent_domain_wave1::PROJECT_MEMORY_MOUNT_ID.into(),
+                &ScopeKey::from("resource:project-corrupt"),
+                &StateKey::from(MEMORY_STATE_KEY),
+            )
+            .expect("corrupt state remains");
+        assert_eq!(entry.revision, 1);
+        assert_eq!(entry.value.0["entries"], serde_json::json!("not-an-array"));
+    }
+
+    #[tokio::test]
+    async fn wave1_memory_owner_rejects_unsupported_state_format() {
+        let persistence = memory_persistence_with_state(
+            serde_json::json!({"entries": []}),
+            "2.0.0",
+            "project-format",
+        );
+        let fixture = MemoryKernelFixture::with_persistence(Arc::clone(&persistence));
+        let (snapshot, active, binding) = fixture
+            .compile_memory_snapshot(
+                nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                "project-format",
+            );
+        let error = fixture
+            .registry
+            .invoke(
+                &snapshot,
+                &active,
+                memory_invocation(
+                    &snapshot,
+                    &active,
+                    &binding,
+                    nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
+                    "format-key",
+                    "must not migrate implicitly",
+                    "format-operation",
+                ),
+            )
+            .await
+            .expect_err("unsupported state format must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("CAPABILITY_UNAVAILABLE"),
+            "unexpected state-format error: {error}"
+        );
+        let state = persistence.snapshot().expect("state snapshot");
+        let entry = state
+            .entry(
+                &nomifun_agent_domain_wave1::PROJECT_MEMORY_PACKAGE_ID.into(),
+                &nomifun_agent_domain_wave1::PROJECT_MEMORY_MOUNT_ID.into(),
+                &ScopeKey::from("resource:project-format"),
+                &StateKey::from(MEMORY_STATE_KEY),
+            )
+            .expect("format state remains");
+        assert_eq!(entry.state_format_version.as_ref(), "2.0.0");
+        assert_eq!(entry.value.0["entries"], serde_json::json!([]));
     }
 
     #[test]
