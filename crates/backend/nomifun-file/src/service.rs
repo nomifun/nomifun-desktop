@@ -1,4 +1,5 @@
-use std::io::Write;
+use std::collections::HashSet;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,6 +8,7 @@ use std::time::UNIX_EPOCH;
 use base64::Engine;
 use dashmap::DashMap;
 use ignore::WalkBuilder;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use nomifun_api_types::WebSocketMessage;
@@ -34,6 +36,30 @@ const MAX_REMOTE_IMAGE_SIZE: usize = 5 * 1024 * 1024;
 /// Maximum number of HTTP redirects for remote image fetching.
 const MAX_REDIRECTS: usize = 5;
 
+/// Maximum number of files accepted by one agent patch request.
+pub const MAX_AGENT_PATCH_FILES: usize = 64;
+
+/// Maximum number of hunks accepted for one file in an agent patch request.
+pub const MAX_AGENT_PATCH_HUNKS_PER_FILE: usize = 256;
+
+/// Maximum number of patch lines accepted for one hunk.
+pub const MAX_AGENT_PATCH_LINES_PER_HUNK: usize = 16_384;
+
+/// Maximum number of source/output lines accepted for one patched file.
+pub const MAX_AGENT_PATCH_LINES_PER_FILE: usize = 131_072;
+
+/// Maximum bytes read from or written to one file by the agent patch API.
+pub const MAX_AGENT_PATCH_FILE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Maximum bytes read from or written to all files in one agent patch.
+pub const MAX_AGENT_PATCH_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+
+/// Maximum bytes in one workspace-relative patch path.
+const MAX_AGENT_PATCH_PATH_BYTES: usize = 4 * 1024;
+
+/// Maximum bytes in one patch line's text.
+const MAX_AGENT_PATCH_LINE_BYTES: usize = 1024 * 1024;
+
 /// Request timeout for remote image fetching (30 seconds).
 const REMOTE_IMAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -60,6 +86,68 @@ const PLACEHOLDER_SVG: &str = concat!(
     "</svg>",
 );
 
+/// A bounded, typed patch request for one AgentSession workspace.
+///
+/// The request deliberately models patch lines instead of accepting an
+/// arbitrary unified-diff string. This keeps the wire shape explicit and
+/// allows serde to reject fields that are not part of this contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionPatchRequest {
+    pub files: Vec<AgentSessionFilePatch>,
+}
+
+/// A patch for one workspace-relative file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionFilePatch {
+    pub path: String,
+    pub hunks: Vec<AgentSessionPatchHunk>,
+}
+
+/// A line-addressed patch hunk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionPatchHunk {
+    pub old_start: usize,
+    pub old_lines: usize,
+    pub new_start: usize,
+    pub new_lines: usize,
+    pub lines: Vec<AgentSessionPatchLine>,
+}
+
+/// One context, addition, or removal line in a patch hunk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentSessionPatchLine {
+    Context { text: String },
+    Add { text: String },
+    Remove { text: String },
+}
+
+/// Bounded metadata returned after an agent patch is applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionPatchResult {
+    pub files: Vec<AgentSessionPatchFileResult>,
+    pub file_count: usize,
+    pub total_bytes_before: u64,
+    pub total_bytes_after: u64,
+}
+
+/// Bounded metadata for one successfully patched file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionPatchFileResult {
+    /// Normalized workspace-relative path; no native absolute path is
+    /// returned to the agent.
+    pub path: String,
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+    pub hunks_applied: usize,
+    pub created: bool,
+}
+
 /// A concrete implementation of [`crate::traits::IFileService`].
 pub struct FileService {
     user_events: Arc<dyn UserEventSink>,
@@ -69,6 +157,11 @@ pub struct FileService {
     workspace_files_cache: DashMap<String, Vec<WorkspaceFlatFile>>,
     /// Cancellation flags for in-progress ZIP operations, keyed by request_id.
     zip_cancellations: DashMap<String, Arc<AtomicBool>>,
+    /// Serializes multi-file AgentSession patch commits within this service.
+    /// Individual file operations remain independently usable by the UI, but
+    /// one patch must not interleave with another patch's prepare/commit
+    /// sequence.
+    agent_patch_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl FileService {
@@ -78,6 +171,7 @@ impl FileService {
             allowed_roots,
             workspace_files_cache: DashMap::new(),
             zip_cancellations: DashMap::new(),
+            agent_patch_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -160,6 +254,350 @@ impl FileService {
         let path = scope.resolve_relative_path(relative_path)?;
         self.rename_entry_impl(&path.to_string_lossy(), new_name, &scope.authority())
             .await
+    }
+
+    /// Apply a bounded, typed patch under an AgentSession workspace binding.
+    ///
+    /// Every target is resolved and authority-checked first. All source files
+    /// are read and all hunks are applied in memory before the first write is
+    /// attempted, so malformed paths, limits, or hunks cannot partially
+    /// modify the workspace. The actual writes reuse the existing
+    /// authority-aware read/write/remove paths rather than a legacy gateway or
+    /// conversation implementation.
+    pub async fn apply_patch_for_agent_session(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        request: AgentSessionPatchRequest,
+    ) -> Result<AgentSessionPatchResult, AppError> {
+        let _patch_guard = self.agent_patch_lock.lock().await;
+        scope.require_operation(crate::resource::WRITE_OPERATION)?;
+        validate_agent_patch_request_shape(&request)?;
+
+        let authority = scope.authority();
+        let workspace_root = std::fs::canonicalize(scope.workspace_root()).map_err(|error| {
+            AppError::BadRequest(format!(
+                "cannot resolve bound workspace '{}': {error}",
+                scope.workspace_root().display()
+            ))
+        })?;
+        let mut prepared = Vec::with_capacity(request.files.len());
+        let mut seen_paths = HashSet::with_capacity(request.files.len());
+        let mut total_before = 0_u64;
+        let mut total_after = 0_u64;
+
+        for file_patch in &request.files {
+            let (path, existed) = validate_agent_patch_target(scope, &file_patch.path, &authority)?;
+            if !seen_paths.insert(path.clone()) {
+                return Err(AppError::BadRequest(format!(
+                    "agent patch contains duplicate target '{}'",
+                    file_patch.path
+                )));
+            }
+
+            let before = if existed {
+                let metadata = std::fs::metadata(&path).map_err(|error| {
+                    AppError::Internal(format!(
+                        "cannot inspect patch target '{}': {error}",
+                        path.display()
+                    ))
+                })?;
+                if metadata.len() > MAX_AGENT_PATCH_FILE_BYTES as u64 {
+                    return Err(AppError::BadRequest(format!(
+                        "patch target '{}' exceeds the {} byte per-file limit",
+                        file_patch.path, MAX_AGENT_PATCH_FILE_BYTES
+                    )));
+                }
+
+                self.read_file_impl(&path.to_string_lossy(), &authority)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::Internal(format!(
+                            "patch target '{}' disappeared while it was being read",
+                            file_patch.path
+                        ))
+                    })?
+                    .into_bytes()
+            } else {
+                Vec::new()
+            };
+
+            let before_text = String::from_utf8(before.clone()).map_err(|_| {
+                AppError::BadRequest(format!(
+                    "patch target '{}' is not valid UTF-8 text",
+                    file_patch.path
+                ))
+            })?;
+            let after_text = apply_agent_patch_hunks(&before_text, &file_patch.hunks)?;
+            let after = after_text.into_bytes();
+
+            if after.len() > MAX_AGENT_PATCH_FILE_BYTES {
+                return Err(AppError::BadRequest(format!(
+                    "patched file '{}' exceeds the {} byte per-file limit",
+                    file_patch.path, MAX_AGENT_PATCH_FILE_BYTES
+                )));
+            }
+            total_before = total_before
+                .checked_add(before.len() as u64)
+                .ok_or_else(|| AppError::BadRequest("patch byte count overflow".to_owned()))?;
+            total_after = total_after
+                .checked_add(after.len() as u64)
+                .ok_or_else(|| AppError::BadRequest("patch byte count overflow".to_owned()))?;
+            if total_before > MAX_AGENT_PATCH_TOTAL_BYTES as u64
+                || total_after > MAX_AGENT_PATCH_TOTAL_BYTES as u64
+            {
+                return Err(AppError::BadRequest(format!(
+                    "agent patch exceeds the {} byte total limit",
+                    MAX_AGENT_PATCH_TOTAL_BYTES
+                )));
+            }
+
+            let relative_path = rel_to_api_string(path.strip_prefix(&workspace_root).map_err(|_| {
+                AppError::Forbidden(format!(
+                    "patch target '{}' is outside the bound workspace",
+                    file_patch.path
+                ))
+            })?);
+
+            prepared.push(PreparedAgentPatchFile {
+                path,
+                relative_path,
+                before,
+                after,
+                existed,
+                hunks_applied: file_patch.hunks.len(),
+            });
+        }
+
+        // No write occurs above this point. If an I/O failure happens during
+        // the commit phase, restore already-touched entries through the same
+        // authority-aware write/remove paths.
+        let workspace = scope.workspace_root().to_string_lossy().into_owned();
+        let mut applied = Vec::with_capacity(prepared.len());
+        for (index, file) in prepared.iter().enumerate() {
+            if let Err(error) = self
+                .verify_agent_patch_precondition(file, &authority)
+                .await
+            {
+                self.rollback_agent_patch_files(
+                    scope,
+                    &authority,
+                    &workspace,
+                    &prepared,
+                    &applied,
+                )
+                .await;
+                return Err(error);
+            }
+            let write_result = self
+                .write_agent_patch_file(
+                    scope.owner_id(),
+                    file,
+                    &file.after,
+                    &workspace,
+                    &authority,
+                )
+                .await;
+
+            if let Err(error) = write_result {
+                self.rollback_agent_patch_files(scope, &authority, &workspace, &prepared, &applied)
+                    .await;
+                return Err(error);
+            }
+            applied.push(index);
+        }
+
+        Ok(AgentSessionPatchResult {
+            file_count: prepared.len(),
+            files: prepared
+                .into_iter()
+                .map(|file| AgentSessionPatchFileResult {
+                    path: file.relative_path,
+                    bytes_before: file.before.len() as u64,
+                    bytes_after: file.after.len() as u64,
+                    hunks_applied: file.hunks_applied,
+                    created: !file.existed,
+                })
+                .collect(),
+            total_bytes_before: total_before,
+            total_bytes_after: total_after,
+        })
+    }
+
+    async fn verify_agent_patch_precondition(
+        &self,
+        file: &PreparedAgentPatchFile,
+        authority: &PathAuthority,
+    ) -> Result<(), AppError> {
+        let path = file.path.to_string_lossy();
+        match std::fs::symlink_metadata(file.path.as_path()) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(AppError::Conflict(format!(
+                        "patch target '{}' became a symbolic link; retry from a fresh read",
+                        file.relative_path
+                    )));
+                }
+                if !metadata.is_file() {
+                    return Err(AppError::Conflict(format!(
+                        "patch target '{}' is no longer a regular file",
+                        file.relative_path
+                    )));
+                }
+                let canonical = validate_path_authority(&path, authority)?;
+                if canonical != file.path {
+                    return Err(AppError::Conflict(format!(
+                        "patch target '{}' changed identity; retry from a fresh read",
+                        file.relative_path
+                    )));
+                }
+                let reader = std::fs::File::open(file.path.as_path()).map_err(|error| {
+                    AppError::Internal(format!(
+                        "cannot re-open patch target '{}': {error}",
+                        file.relative_path
+                    ))
+                })?;
+                let mut current = Vec::new();
+                reader
+                    .take((MAX_AGENT_PATCH_FILE_BYTES + 1) as u64)
+                    .read_to_end(&mut current)
+                    .map_err(|error| {
+                        AppError::Internal(format!(
+                            "cannot re-read patch target '{}': {error}",
+                            file.relative_path
+                        ))
+                    })?;
+                if current.len() > MAX_AGENT_PATCH_FILE_BYTES {
+                    return Err(AppError::Conflict(format!(
+                        "patch target '{}' grew beyond the per-file limit",
+                        file.relative_path
+                    )));
+                }
+                if current != file.before {
+                    return Err(AppError::Conflict(format!(
+                        "patch target '{}' changed while the patch was being prepared",
+                        file.relative_path
+                    )));
+                }
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !file.existed => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(AppError::Conflict(format!(
+                    "patch target '{}' disappeared while the patch was being prepared",
+                    file.relative_path
+                )))
+            }
+            Err(error) => Err(AppError::Internal(format!(
+                "cannot inspect patch target '{}': {error}",
+                file.relative_path
+            ))),
+        }
+    }
+
+    async fn rollback_agent_patch_files(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        authority: &PathAuthority,
+        workspace: &str,
+        files: &[PreparedAgentPatchFile],
+        applied: &[usize],
+    ) {
+        for index in applied.iter().rev().copied() {
+            let file = &files[index];
+            if file.existed {
+                if !current_file_matches(&file.path, &file.after) {
+                    continue;
+                }
+                let _ = self
+                    .write_agent_patch_file(
+                        scope.owner_id(),
+                        file,
+                        &file.before,
+                        workspace,
+                        authority,
+                    )
+                    .await;
+            } else {
+                if !current_file_matches(&file.path, &file.after) {
+                    continue;
+                }
+                let _ = self
+                    .remove_entry_impl(
+                        scope.owner_id(),
+                        &file.path.to_string_lossy(),
+                        workspace,
+                        authority,
+                    )
+                    .await;
+            }
+        }
+    }
+
+    async fn write_agent_patch_file(
+        &self,
+        owner_id: &str,
+        file: &PreparedAgentPatchFile,
+        data: &[u8],
+        workspace: &str,
+        authority: &PathAuthority,
+    ) -> Result<bool, AppError> {
+        let path = file.path.to_string_lossy();
+        if has_traversal(&path) {
+            return Err(AppError::BadRequest(format!(
+                "path '{}' contains invalid traversal patterns",
+                path
+            )));
+        }
+        let canonical = validate_path_for_write_authority(&path, authority)?;
+        if canonical != file.path {
+            return Err(AppError::Conflict(format!(
+                "patch target '{}' changed identity before publication",
+                file.relative_path
+            )));
+        }
+        if let Ok(metadata) = std::fs::symlink_metadata(&canonical)
+            && metadata.file_type().is_symlink()
+        {
+            return Err(AppError::Conflict(format!(
+                "patch target '{}' is a symbolic link",
+                file.relative_path
+            )));
+        }
+        write_file_sync_atomic(&canonical, data)?;
+        self.emit_content_update(owner_id, &canonical, data, workspace);
+        Ok(true)
+    }
+
+    fn emit_content_update(
+        &self,
+        owner_id: &str,
+        canonical: &Path,
+        data: &[u8],
+        workspace: &str,
+    ) {
+        let workspace_path = Path::new(workspace);
+        let relative_path = rel_to_api_string(
+            canonical
+                .strip_prefix(
+                    std::fs::canonicalize(workspace_path)
+                        .unwrap_or_else(|_| workspace_path.to_path_buf()),
+                )
+                .unwrap_or(canonical),
+        );
+        let content = String::from_utf8(data.to_vec()).ok();
+        let event = ContentUpdateEvent {
+            file_path: canonical.to_string_lossy().into_owned(),
+            content,
+            workspace: workspace.to_owned(),
+            relative_path,
+            operation: ContentUpdateOperation::Write,
+        };
+        let payload = serde_json::to_value(&event).unwrap_or_default();
+        self.user_events
+            .send_to_user(owner_id, WebSocketMessage::new("fileStream.contentUpdate", payload));
+        if let Ok(canonical_ws) = std::fs::canonicalize(workspace_path) {
+            self.invalidate_cache(&canonical_ws.to_string_lossy());
+        }
     }
 
     /// Invalidate the workspace files cache for a given root.
@@ -438,6 +876,315 @@ impl FileService {
     }
 }
 
+struct PreparedAgentPatchFile {
+    path: PathBuf,
+    relative_path: String,
+    before: Vec<u8>,
+    after: Vec<u8>,
+    existed: bool,
+    hunks_applied: usize,
+}
+
+fn validate_agent_patch_request_shape(request: &AgentSessionPatchRequest) -> Result<(), AppError> {
+    if request.files.is_empty() {
+        return Err(AppError::BadRequest(
+            "agent patch must contain at least one file".to_owned(),
+        ));
+    }
+    if request.files.len() > MAX_AGENT_PATCH_FILES {
+        return Err(AppError::BadRequest(format!(
+            "agent patch contains {} files; maximum is {}",
+            request.files.len(),
+            MAX_AGENT_PATCH_FILES
+        )));
+    }
+
+    let mut total_patch_text = 0_usize;
+    for file in &request.files {
+        if file.path.trim().is_empty() {
+            return Err(AppError::BadRequest(
+                "agent patch file path must not be empty".to_owned(),
+            ));
+        }
+        if file.path.as_bytes().len() > MAX_AGENT_PATCH_PATH_BYTES {
+            return Err(AppError::BadRequest(format!(
+                "agent patch file path exceeds the {} byte limit",
+                MAX_AGENT_PATCH_PATH_BYTES
+            )));
+        }
+        if file.hunks.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "agent patch file '{}' must contain at least one hunk",
+                file.path
+            )));
+        }
+        if file.hunks.len() > MAX_AGENT_PATCH_HUNKS_PER_FILE {
+            return Err(AppError::BadRequest(format!(
+                "agent patch file '{}' contains too many hunks; maximum is {}",
+                file.path, MAX_AGENT_PATCH_HUNKS_PER_FILE
+            )));
+        }
+
+        for hunk in &file.hunks {
+            if hunk.lines.is_empty() {
+                return Err(AppError::BadRequest(format!(
+                    "agent patch file '{}' contains an empty hunk",
+                    file.path
+                )));
+            }
+            if hunk.lines.len() > MAX_AGENT_PATCH_LINES_PER_HUNK {
+                return Err(AppError::BadRequest(format!(
+                    "agent patch file '{}' contains a hunk with too many lines; maximum is {}",
+                    file.path, MAX_AGENT_PATCH_LINES_PER_HUNK
+                )));
+            }
+            if hunk.old_lines > MAX_AGENT_PATCH_LINES_PER_FILE
+                || hunk.new_lines > MAX_AGENT_PATCH_LINES_PER_FILE
+                || hunk.old_start > MAX_AGENT_PATCH_LINES_PER_FILE
+                || hunk.new_start > MAX_AGENT_PATCH_LINES_PER_FILE
+            {
+                return Err(AppError::BadRequest(format!(
+                    "agent patch file '{}' has a line count or offset beyond the bounded limit",
+                    file.path
+                )));
+            }
+
+            for line in &hunk.lines {
+                let text = match line {
+                    AgentSessionPatchLine::Context { text }
+                    | AgentSessionPatchLine::Add { text }
+                    | AgentSessionPatchLine::Remove { text } => text,
+                };
+                if text.contains('\n') || text.contains('\0') {
+                    return Err(AppError::BadRequest(format!(
+                        "agent patch file '{}' contains a line with an embedded newline or NUL",
+                        file.path
+                    )));
+                }
+                if text.len() > MAX_AGENT_PATCH_LINE_BYTES {
+                    return Err(AppError::BadRequest(format!(
+                        "agent patch file '{}' contains a line exceeding the {} byte limit",
+                        file.path, MAX_AGENT_PATCH_LINE_BYTES
+                    )));
+                }
+                total_patch_text = total_patch_text
+                    .checked_add(text.len())
+                    .ok_or_else(|| AppError::BadRequest("patch byte count overflow".to_owned()))?;
+                if total_patch_text > MAX_AGENT_PATCH_TOTAL_BYTES {
+                    return Err(AppError::BadRequest(format!(
+                        "agent patch text exceeds the {} byte total limit",
+                        MAX_AGENT_PATCH_TOTAL_BYTES
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_agent_patch_target(
+    scope: &AgentSessionWorkspaceBinding,
+    relative_path: &str,
+    authority: &PathAuthority,
+) -> Result<(PathBuf, bool), AppError> {
+    let relative_path = relative_path.trim();
+    let candidate = scope.resolve_relative_path(relative_path)?;
+    let candidate_string = candidate.to_string_lossy();
+    let write_candidate = validate_path_for_write_authority(&candidate_string, authority)?;
+
+    // A final symlink is rejected instead of being followed. The parent was
+    // canonicalized by the write validator, but following a final symlink
+    // would otherwise let a bound write land outside the workspace.
+    match std::fs::symlink_metadata(&write_candidate) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(AppError::Forbidden(format!(
+                    "patch target '{}' is a symbolic link",
+                    relative_path
+                )));
+            }
+            if !metadata.is_file() {
+                return Err(AppError::BadRequest(format!(
+                    "patch target '{}' is not a regular file",
+                    relative_path
+                )));
+            }
+            let canonical = validate_path_authority(&candidate_string, authority)?;
+            Ok((canonical, true))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((write_candidate, false)),
+        Err(error) => Err(AppError::BadRequest(format!(
+            "cannot inspect patch target '{}': {error}",
+            relative_path
+        ))),
+    }
+}
+
+fn apply_agent_patch_hunks(
+    original: &str,
+    hunks: &[AgentSessionPatchHunk],
+) -> Result<String, AppError> {
+    let (source, had_trailing_newline) = split_agent_patch_lines(original);
+    if source.len() > MAX_AGENT_PATCH_LINES_PER_FILE {
+        return Err(AppError::BadRequest(format!(
+            "patch source has too many lines; maximum is {}",
+            MAX_AGENT_PATCH_LINES_PER_FILE
+        )));
+    }
+
+    let mut output = Vec::with_capacity(source.len());
+    let mut source_cursor = 0_usize;
+
+    for hunk in hunks {
+        let hunk_start = if hunk.old_lines == 0 {
+            // For an insertion, accept the common unified-diff positions:
+            // 0/1 at the beginning, or the number of source lines already
+            // consumed (with +1 also accepted for callers that describe the
+            // insertion as "before the next line").
+            if source_cursor == 0 && (hunk.old_start == 0 || hunk.old_start == 1) {
+                0
+            } else if hunk.old_start == source_cursor
+                || hunk.old_start == source_cursor.saturating_add(1)
+            {
+                source_cursor
+            } else {
+                return Err(invalid_agent_hunk(
+                    hunk,
+                    "insertion old_start must identify the current source position",
+                ));
+            }
+        } else {
+            hunk.old_start.checked_sub(1).ok_or_else(|| {
+                invalid_agent_hunk(hunk, "old_start must be at least 1 for a non-empty hunk")
+            })?
+        };
+        if hunk_start < source_cursor || hunk_start > source.len() {
+            return Err(invalid_agent_hunk(hunk, "old_start is outside the source file"));
+        }
+
+        output.extend(source[source_cursor..hunk_start].iter().cloned());
+        let output_start = output.len();
+        let expected_new_start = if output_start == 0 && hunk.new_lines == 0 {
+            if hunk.new_start != 0 && hunk.new_start != 1 {
+                return Err(invalid_agent_hunk(
+                    hunk,
+                    "an empty output hunk must start at new line 0 or 1",
+                ));
+            }
+            hunk.new_start
+        } else {
+            output_start.checked_add(1).ok_or_else(|| {
+                AppError::BadRequest("patch output line offset overflow".to_owned())
+            })?
+        };
+        if hunk.new_start != expected_new_start {
+            return Err(invalid_agent_hunk(
+                hunk,
+                "hunks must be ordered and new_start must match the output position",
+            ));
+        }
+
+        let mut source_position = hunk_start;
+        let mut old_consumed = 0_usize;
+        let mut new_produced = 0_usize;
+        for line in &hunk.lines {
+            match line {
+                AgentSessionPatchLine::Context { text } => {
+                    if source.get(source_position).map(String::as_str) != Some(text.as_str()) {
+                        return Err(invalid_agent_hunk(
+                            hunk,
+                            "context line does not match the source",
+                        ));
+                    }
+                    output.push(text.clone());
+                    source_position += 1;
+                    old_consumed += 1;
+                    new_produced += 1;
+                }
+                AgentSessionPatchLine::Remove { text } => {
+                    if source.get(source_position).map(String::as_str) != Some(text.as_str()) {
+                        return Err(invalid_agent_hunk(
+                            hunk,
+                            "removed line does not match the source",
+                        ));
+                    }
+                    source_position += 1;
+                    old_consumed += 1;
+                }
+                AgentSessionPatchLine::Add { text } => {
+                    output.push(text.clone());
+                    new_produced += 1;
+                }
+            }
+
+            if old_consumed > hunk.old_lines || new_produced > hunk.new_lines {
+                return Err(invalid_agent_hunk(
+                    hunk,
+                    "hunk line counts are smaller than the supplied lines",
+                ));
+            }
+        }
+
+        if old_consumed != hunk.old_lines || new_produced != hunk.new_lines {
+            return Err(invalid_agent_hunk(
+                hunk,
+                "hunk line counts do not match the supplied context/add/remove lines",
+            ));
+        }
+        source_cursor = source_position;
+        if output.len() > MAX_AGENT_PATCH_LINES_PER_FILE {
+            return Err(AppError::BadRequest(format!(
+                "patched file has too many lines; maximum is {}",
+                MAX_AGENT_PATCH_LINES_PER_FILE
+            )));
+        }
+    }
+
+    output.extend(source[source_cursor..].iter().cloned());
+    if output.len() > MAX_AGENT_PATCH_LINES_PER_FILE {
+        return Err(AppError::BadRequest(format!(
+            "patched file has too many lines; maximum is {}",
+            MAX_AGENT_PATCH_LINES_PER_FILE
+        )));
+    }
+    let output_line_count = output.len();
+    let output = output
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut result = output;
+    if had_trailing_newline && output_line_count > 0 {
+        result.push('\n');
+    }
+    if result.len() > MAX_AGENT_PATCH_FILE_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "patched file exceeds the {} byte per-file limit",
+            MAX_AGENT_PATCH_FILE_BYTES
+        )));
+    }
+    Ok(result)
+}
+
+fn split_agent_patch_lines(content: &str) -> (Vec<String>, bool) {
+    if content.is_empty() {
+        return (Vec::new(), false);
+    }
+    let had_trailing_newline = content.ends_with('\n');
+    let mut lines = content.split('\n').map(str::to_owned).collect::<Vec<_>>();
+    if had_trailing_newline {
+        lines.pop();
+    }
+    (lines, had_trailing_newline)
+}
+
+fn invalid_agent_hunk(hunk: &AgentSessionPatchHunk, reason: &str) -> AppError {
+    AppError::BadRequest(format!(
+        "invalid patch hunk (old {}+{}, new {}+{}): {reason}",
+        hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
+    ))
+}
+
 /// Normalize a workspace-relative path to forward-slash separators for the
 /// cross-platform JSON/WS API contract (frontend consumers expect '/').
 ///
@@ -642,6 +1389,190 @@ fn write_file_sync(path: &Path, data: &[u8]) -> Result<bool, AppError> {
     std::fs::write(path, data)
         .map_err(|e| AppError::Internal(format!("cannot write file '{}': {e}", path.display())))?;
     Ok(true)
+}
+
+fn current_file_matches(path: &Path, expected: &[u8]) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return false;
+    }
+    if metadata.len() > (MAX_AGENT_PATCH_FILE_BYTES as u64) {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    bytes == expected
+}
+
+/// Atomically publish one already-authorized AgentSession patch file.
+///
+/// The temporary file is created beside the target, fully written and synced,
+/// and then replaced with a same-filesystem rename. A new file uses a
+/// no-clobber hard-link publication so a concurrent creator cannot be silently
+/// overwritten. Existing files use the platform's atomic replacement primitive.
+fn write_file_sync_atomic(path: &Path, data: &[u8]) -> Result<(), AppError> {
+    let parent = path.parent().ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "patch target '{}' has no parent directory",
+            path.display()
+        ))
+    })?;
+    let file_name = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "patch target '{}' has no valid file name",
+            path.display()
+        ))
+    })?;
+    static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".{file_name}.nomifun-patch-{}.{}.tmp",
+        std::process::id(),
+        sequence
+    ));
+    let result = (|| -> Result<(), AppError> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary).map_err(|error| {
+            AppError::Internal(format!(
+                "cannot create temporary patch file '{}': {error}",
+                temporary.display()
+            ))
+        })?;
+        file.write_all(data).map_err(|error| {
+            AppError::Internal(format!(
+                "cannot write temporary patch file '{}': {error}",
+                temporary.display()
+            ))
+        })?;
+        file.sync_all().map_err(|error| {
+            AppError::Internal(format!(
+                "cannot sync temporary patch file '{}': {error}",
+                temporary.display()
+            ))
+        })?;
+        drop(file);
+
+        let target_metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(AppError::Conflict(format!(
+                        "patch target '{}' changed to a non-regular file",
+                        path.display()
+                    )));
+                }
+                Some(metadata)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(AppError::Internal(format!(
+                    "cannot inspect patch target '{}': {error}",
+                    path.display()
+                )));
+            }
+        };
+        if let Some(metadata) = target_metadata {
+            std::fs::set_permissions(&temporary, metadata.permissions()).map_err(|error| {
+                AppError::Internal(format!(
+                    "cannot preserve patch target permissions '{}': {error}",
+                    path.display()
+                ))
+            })?;
+            replace_file_path(&temporary, path)?;
+        } else {
+            // hard_link is intentionally used for the create case: unlike
+            // rename, it fails rather than replacing a target that appeared
+            // after the precondition check.
+            std::fs::hard_link(&temporary, path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    AppError::Conflict(format!(
+                        "patch target '{}' appeared during publication",
+                        path.display()
+                    ))
+                } else {
+                    AppError::Internal(format!(
+                        "cannot publish new patch target '{}': {error}",
+                        path.display()
+                    ))
+                }
+            })?;
+            std::fs::remove_file(&temporary).map_err(|error| {
+                AppError::Internal(format!(
+                    "cannot remove temporary patch file '{}': {error}",
+                    temporary.display()
+                ))
+            })?;
+        }
+        #[cfg(unix)]
+        if let Ok(directory) = std::fs::File::open(parent) {
+            directory.sync_all().map_err(|error| {
+                AppError::Internal(format!(
+                    "cannot sync patch target directory '{}': {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file_path(source: &Path, target: &Path) -> Result<(), AppError> {
+    std::fs::rename(source, target).map_err(|error| {
+        AppError::Internal(format!(
+            "cannot atomically replace patch target '{}': {error}",
+            target.display()
+        ))
+    })
+}
+
+#[cfg(windows)]
+fn replace_file_path(source: &Path, target: &Path) -> Result<(), AppError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let target_display = target.display().to_string();
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both vectors are NUL-terminated and remain alive for the call.
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(AppError::Internal(format!(
+            "cannot atomically replace patch target '{}': {}",
+            target_display,
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
 }
 
 /// Split a file name into `(base, ext)` where `ext` includes the leading dot.
@@ -2238,5 +3169,432 @@ mod tests {
 
         let parent = std::path::Path::new(&a).parent().unwrap().to_path_buf();
         let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    fn patch_scope(root: &std::path::Path) -> AgentSessionWorkspaceBinding {
+        crate::resource::workspace_binding(
+            nomifun_common::generate_id(),
+            "patch-binding",
+            "patch-workspace",
+            "owner-1",
+            [
+                crate::resource::READ_OPERATION,
+                crate::resource::WRITE_OPERATION,
+            ],
+            root,
+        )
+        .unwrap()
+    }
+
+    fn replace_hunk(
+        old_start: usize,
+        old_lines: usize,
+        new_start: usize,
+        new_lines: usize,
+        lines: Vec<AgentSessionPatchLine>,
+    ) -> AgentSessionPatchHunk {
+        AgentSessionPatchHunk {
+            old_start,
+            old_lines,
+            new_start,
+            new_lines,
+            lines,
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_agent_patch_updates_multiple_files_and_returns_bounded_result() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+        fs::write(dir.path().join("b.txt"), "bravo\n").unwrap();
+        let svc = make_service();
+        let scope = patch_scope(dir.path());
+
+        let result = svc
+            .apply_patch_for_agent_session(
+                &scope,
+                AgentSessionPatchRequest {
+                    files: vec![
+                        AgentSessionFilePatch {
+                            path: "a.txt".into(),
+                            hunks: vec![replace_hunk(
+                                1,
+                                1,
+                                1,
+                                1,
+                                vec![
+                                    AgentSessionPatchLine::Remove {
+                                        text: "alpha".into(),
+                                    },
+                                    AgentSessionPatchLine::Add {
+                                        text: "ALPHA".into(),
+                                    },
+                                ],
+                            )],
+                        },
+                        AgentSessionFilePatch {
+                            path: "b.txt".into(),
+                            hunks: vec![replace_hunk(
+                                1,
+                                1,
+                                1,
+                                1,
+                                vec![
+                                    AgentSessionPatchLine::Remove {
+                                        text: "bravo".into(),
+                                    },
+                                    AgentSessionPatchLine::Add {
+                                        text: "BRAVO".into(),
+                                    },
+                                ],
+                            )],
+                        },
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(dir.path().join("a.txt")).unwrap(), "ALPHA\n");
+        assert_eq!(fs::read_to_string(dir.path().join("b.txt")).unwrap(), "BRAVO\n");
+        assert_eq!(result.file_count, 2);
+        assert_eq!(result.files[0].path, "a.txt");
+        assert_eq!(result.files[0].bytes_before, 6);
+        assert_eq!(result.files[0].bytes_after, 6);
+        assert_eq!(result.total_bytes_before, 12);
+        assert_eq!(result.total_bytes_after, 12);
+    }
+
+    #[tokio::test]
+    async fn apply_agent_patch_supports_ordered_multiple_hunks_and_insertions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ordered.txt");
+        fs::write(&path, "a\nb\nc\nd\n").unwrap();
+        let svc = make_service();
+        let scope = patch_scope(dir.path());
+
+        svc.apply_patch_for_agent_session(
+            &scope,
+            AgentSessionPatchRequest {
+                files: vec![AgentSessionFilePatch {
+                    path: "ordered.txt".into(),
+                    hunks: vec![
+                        replace_hunk(
+                            1,
+                            1,
+                            1,
+                            1,
+                            vec![
+                                AgentSessionPatchLine::Remove { text: "a".into() },
+                                AgentSessionPatchLine::Add { text: "A".into() },
+                            ],
+                        ),
+                        replace_hunk(
+                            3,
+                            1,
+                            3,
+                            1,
+                            vec![
+                                AgentSessionPatchLine::Remove { text: "c".into() },
+                                AgentSessionPatchLine::Add { text: "C".into() },
+                            ],
+                        ),
+                        replace_hunk(
+                            3,
+                            0,
+                            4,
+                            1,
+                            vec![AgentSessionPatchLine::Add { text: "inserted".into() }],
+                        ),
+                    ],
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "A\nb\nC\ninserted\nd\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_agent_patch_hunk_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        fs::write(&first, "first\n").unwrap();
+        fs::write(&second, "second\n").unwrap();
+        let svc = make_service();
+        let scope = patch_scope(dir.path());
+
+        let error = svc
+            .apply_patch_for_agent_session(
+                &scope,
+                AgentSessionPatchRequest {
+                    files: vec![
+                        AgentSessionFilePatch {
+                            path: "first.txt".into(),
+                            hunks: vec![replace_hunk(
+                                1,
+                                1,
+                                1,
+                                1,
+                                vec![
+                                    AgentSessionPatchLine::Remove {
+                                        text: "first".into(),
+                                    },
+                                    AgentSessionPatchLine::Add {
+                                        text: "changed".into(),
+                                    },
+                                ],
+                            )],
+                        },
+                        AgentSessionFilePatch {
+                            path: "second.txt".into(),
+                            hunks: vec![replace_hunk(
+                                1,
+                                1,
+                                1,
+                                1,
+                                vec![
+                                    AgentSessionPatchLine::Remove {
+                                        text: "not-the-source".into(),
+                                    },
+                                    AgentSessionPatchLine::Add {
+                                        text: "never-written".into(),
+                                    },
+                                ],
+                            )],
+                        },
+                    ],
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AppError::BadRequest(_)));
+        assert_eq!(fs::read_to_string(first).unwrap(), "first\n");
+        assert_eq!(fs::read_to_string(second).unwrap(), "second\n");
+    }
+
+    struct MutatingPatchEventSink {
+        target: std::path::PathBuf,
+        fired: std::sync::atomic::AtomicBool,
+    }
+
+    impl nomifun_realtime::UserEventSink for MutatingPatchEventSink {
+        fn send_to_user(
+            &self,
+            _user_id: &str,
+            _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+        ) {
+            if !self
+                .fired
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+            {
+                std::fs::write(&self.target, "external change\n")
+                    .expect("mutating test sink writes its target");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_patch_detects_external_change_and_rolls_back_prior_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        fs::write(&first, "first\n").unwrap();
+        fs::write(&second, "second\n").unwrap();
+        let sink = Arc::new(MutatingPatchEventSink {
+            target: second.clone(),
+            fired: std::sync::atomic::AtomicBool::new(false),
+        });
+        let svc = crate::service::FileService::new(sink, vec![]);
+        let scope = patch_scope(dir.path());
+        let replace = |path: &str, old: &str, new: &str| AgentSessionFilePatch {
+            path: path.to_owned(),
+            hunks: vec![replace_hunk(
+                1,
+                1,
+                1,
+                1,
+                vec![
+                    AgentSessionPatchLine::Remove {
+                        text: old.to_owned(),
+                    },
+                    AgentSessionPatchLine::Add {
+                        text: new.to_owned(),
+                    },
+                ],
+            )],
+        };
+
+        let error = svc
+            .apply_patch_for_agent_session(
+                &scope,
+                AgentSessionPatchRequest {
+                    files: vec![
+                        replace("first.txt", "first", "FIRST"),
+                        replace("second.txt", "second", "SECOND"),
+                    ],
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Conflict(_)));
+        assert_eq!(fs::read_to_string(first).unwrap(), "first\n");
+        // The failed target changed externally before its write; rollback must
+        // not clobber that newer user change.
+        assert_eq!(fs::read_to_string(second).unwrap(), "external change\n");
+    }
+
+    #[tokio::test]
+    async fn agent_patch_rejects_traversal_without_touching_workspace_or_outside() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("outside.txt");
+        fs::write(&outside_file, "secret\n").unwrap();
+        let svc = make_service();
+        let scope = patch_scope(workspace.path());
+
+        let error = svc
+            .apply_patch_for_agent_session(
+                &scope,
+                AgentSessionPatchRequest {
+                    files: vec![AgentSessionFilePatch {
+                        path: format!("../{}", outside_file.file_name().unwrap().to_string_lossy()),
+                        hunks: vec![replace_hunk(
+                            1,
+                            1,
+                            1,
+                            1,
+                            vec![
+                                AgentSessionPatchLine::Remove {
+                                    text: "secret".into(),
+                                },
+                                AgentSessionPatchLine::Add {
+                                    text: "escaped".into(),
+                                },
+                            ],
+                        )],
+                    }],
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AppError::BadRequest(_)));
+        assert_eq!(fs::read_to_string(outside_file).unwrap(), "secret\n");
+        assert_eq!(fs::read_dir(workspace.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_patch_rejects_a_final_symlink_target() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("outside.txt");
+        fs::write(&outside_file, "secret\n").unwrap();
+        std::os::unix::fs::symlink(&outside_file, workspace.path().join("link.txt")).unwrap();
+        let svc = make_service();
+        let scope = patch_scope(workspace.path());
+
+        let error = svc
+            .apply_patch_for_agent_session(
+                &scope,
+                AgentSessionPatchRequest {
+                    files: vec![AgentSessionFilePatch {
+                        path: "link.txt".into(),
+                        hunks: vec![replace_hunk(
+                            1,
+                            1,
+                            1,
+                            1,
+                            vec![
+                                AgentSessionPatchLine::Remove { text: "secret".into() },
+                                AgentSessionPatchLine::Add { text: "escaped".into() },
+                            ],
+                        )],
+                    }],
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Forbidden(_)));
+        assert_eq!(fs::read_to_string(outside_file).unwrap(), "secret\n");
+    }
+
+    #[tokio::test]
+    async fn agent_patch_enforces_file_count_and_size_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service();
+        let scope = patch_scope(dir.path());
+        let tiny_hunk = || {
+            replace_hunk(
+                0,
+                0,
+                1,
+                1,
+                vec![AgentSessionPatchLine::Add {
+                    text: "x".into(),
+                }],
+            )
+        };
+
+        let too_many_files = AgentSessionPatchRequest {
+            files: (0..=MAX_AGENT_PATCH_FILES)
+                .map(|index| AgentSessionFilePatch {
+                    path: format!("file-{index}.txt"),
+                    hunks: vec![tiny_hunk()],
+                })
+                .collect(),
+        };
+        let error = svc
+            .apply_patch_for_agent_session(&scope, too_many_files)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("maximum is"));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        let oversized = dir.path().join("oversized.txt");
+        fs::write(&oversized, vec![b'x'; MAX_AGENT_PATCH_FILE_BYTES + 1]).unwrap();
+        let error = svc
+            .apply_patch_for_agent_session(
+                &scope,
+                AgentSessionPatchRequest {
+                    files: vec![AgentSessionFilePatch {
+                        path: "oversized.txt".into(),
+                        hunks: vec![replace_hunk(
+                            1,
+                            1,
+                            1,
+                            1,
+                            vec![
+                                AgentSessionPatchLine::Remove {
+                                    text: "x".into(),
+                                },
+                                AgentSessionPatchLine::Add {
+                                    text: "y".into(),
+                                },
+                            ],
+                        )],
+                    }],
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("per-file limit"));
+        assert_eq!(fs::metadata(&oversized).unwrap().len(), (MAX_AGENT_PATCH_FILE_BYTES + 1) as u64);
+    }
+
+    #[test]
+    fn agent_patch_request_rejects_unknown_fields() {
+        let value = serde_json::json!({
+            "files": [],
+            "unexpected": true
+        });
+        assert!(serde_json::from_value::<AgentSessionPatchRequest>(value).is_err());
     }
 }
