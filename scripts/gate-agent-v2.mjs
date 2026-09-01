@@ -3687,7 +3687,8 @@ function c8ValidateC8Manifest(report, manifest, sourceSha) {
       digest: C8_EXPECTED_DIGESTS.official_seed,
     },
     platform_validation_contract: {
-      path: 'crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json',
+      path: 'crates/backend/nomifun-agent-contracts/contracts/generated/canonical-v4-schema-manifest.envelope.json',
+      field: 'payload.platform_validation_contract_digest',
       digest: C8_EXPECTED_DIGESTS.platform_validation_contract,
     },
     platform_validation_manifest: {
@@ -3712,6 +3713,18 @@ function c8ValidateC8Manifest(report, manifest, sourceSha) {
   );
   for (const [key, expected] of Object.entries(expectedInputs)) {
     const actual = actualInputs?.[key];
+    const expectedKeys = Object.keys(expected).sort();
+    const actualKeys =
+      actual && typeof actual === 'object' && !Array.isArray(actual)
+        ? Object.keys(actual).sort()
+        : [];
+    c8Require(
+      report,
+      JSON.stringify(actualKeys) === JSON.stringify(expectedKeys),
+      'immutable_input_shape',
+      `C8-WIN-PRE immutable_inputs.${key} has an unexpected field set`,
+      { expected: expectedKeys, observed: actualKeys }
+    );
     c8Require(
       report,
       actual?.path === expected.path,
@@ -3719,6 +3732,15 @@ function c8ValidateC8Manifest(report, manifest, sourceSha) {
       `C8-WIN-PRE immutable_inputs.${key}.path is not canonical`,
       { expected: expected.path, observed: actual?.path }
     );
+    if (expected.field) {
+      c8Require(
+        report,
+        actual?.field === expected.field,
+        'immutable_input_field',
+        `C8-WIN-PRE immutable_inputs.${key}.field is not canonical`,
+        { expected: expected.field, observed: actual?.field }
+      );
+    }
     c8Require(
       report,
       String(actual?.digest || '').toLowerCase() === expected.digest,
@@ -3726,6 +3748,23 @@ function c8ValidateC8Manifest(report, manifest, sourceSha) {
       `C8-WIN-PRE immutable_inputs.${key}.digest is not the frozen value`,
       { expected: expected.digest, observed: actual?.digest }
     );
+    if (expected.field) {
+      const referencedArtifact = c8ReadJsonArtifact(
+        report,
+        expected.path,
+        `C8-WIN-PRE immutable_inputs.${key}`
+      );
+      const referencedValue = expected.field
+        .split('.')
+        .reduce((value, field) => value?.[field], referencedArtifact?.value);
+      c8Require(
+        report,
+        referencedValue === expected.digest,
+        'immutable_input_field_digest',
+        `C8-WIN-PRE immutable_inputs.${key} field does not contain its declared digest`,
+        { expected: expected.digest, observed: referencedValue || null }
+      );
+    }
   }
 
   const expectedChecks = c8ExpectedChecks();

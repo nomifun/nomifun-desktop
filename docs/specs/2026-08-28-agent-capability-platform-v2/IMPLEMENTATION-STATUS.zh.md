@@ -1118,8 +1118,9 @@ HP-1 通过。
 1. `C7-CLOSURE.json` 引用的 `c5e1015f...` evidence 不在当前 checkout；
    没有创建副本、改名或以其他 SHA 的 evidence 冒充它。
 2. `C8-WIN-PRE-MANIFEST.json` 的
-   `immutable_inputs.platform_validation_contract` 当前仍以 raw platform
-   payload 路径配合 platform contract schema digest（`78f264...`）；该
-   path/digest identity 不一致已明确记录，不能把它当作已闭合的 evidence
-   artifact。当前 Gate 的 frozen input 仍按既有 contract 校验，后续需由
-   validation owner 正式修正 schema/path identity 后再冻结新的 tuple。
+   `immutable_inputs.platform_validation_contract` 已改为显式 field
+   reference：canonical schema envelope 的
+   `payload.platform_validation_contract_digest` 字段必须等于
+   `78f264...`。Platform validation payload/fixture 仍独立使用
+   `fa3cd9...`；三种 identity 不再混用。Gate 现在同时校验 entry 的 exact
+   field set、引用字段和 digest 值。
