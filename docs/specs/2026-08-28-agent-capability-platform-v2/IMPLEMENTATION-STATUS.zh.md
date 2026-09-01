@@ -980,3 +980,48 @@ Kernel `PluginState` CAS owner：
 本次代码变化使此前以 `3303f93ab...` 为 source 的任何 candidate tuple/evidence
 失效；最终代码稳定后仍需由中央 owner 更新/重新生成
 `candidate_source_sha`、platform validation manifest digest 和 cohort tuple。
+
+## 增量实现记录（2026-09-01，Wave 2 workspace patch/VCS completion）
+
+在上述记录之后，已提交并普通推送：
+
+- `043c9d5ba` — `feat(agent): close bounded workspace patch and vcs owners`
+- 当前远端 `rf/agent-capability-platform-v2` 与本地提交一致。
+
+本提交继续只关闭已有真实 Workspace owner 的 bounded action，不扩展到
+SSH/MCP/Browser/Computer/process 或 `vcs.push`：
+
+1. `fs.patch` 现在通过 `FileService` 的 typed
+   `AgentSessionWorkspaceBinding` 执行多文件、逐 hunk 的内存预验证，再进行
+   authority-confined publication；支持严格 JSON patch line union、路径/符号链接/
+   文件数/行数/字节数上限、外部变更 precondition、失败回滚和无 clobber 的
+   新文件发布。
+2. `vcs.commit` 使用真实 Git index/tree/commit API，仅允许提交绑定 workspace
+   内的 staged changes；nested workspace 会投影逻辑相对路径，rename 同时校验
+   old/new path，损坏或非空仓库的异常 HEAD fail-closed，literal-backslash
+   Unix 路径不会被错误解释为目录分隔符。
+3. Wave 2 HostContext 透传 Kernel 授权的 namespace-scoped `PluginStateHandle`。
+   `fs.write`、`fs.patch`、`fs.delete`、`vcs.stage`、`vcs.commit` 使用按
+   capability/resource scope 的 bounded effect journal：同一请求 replay 返回原
+   结果、不同 payload 返回 `IDEMPOTENCY_CONFLICT`，started/uncertain 记录禁止
+   自动重试；不会使用第二个数据库或 Session authority。
+4. `FileService` 的 patch API 保持 `nomifun-file` 既有 public service 边界；
+   Windows 原子替换使用 target-specific `windows-sys` API，lockfile 仅增加该
+   已存在依赖的 package edge。
+
+定向验证（macOS arm64）：
+
+- `cargo test --locked -p nomifun-agent-domain-wave2 --lib -- --test-threads=1`：
+  9 passed；
+- `cargo test --locked -p nomifun-file --lib -- --test-threads=1`：200 passed；
+- `cargo test --locked -p nomifun-app --lib router::agent_wave2_host
+  -- --test-threads=1`：18 passed；
+- `cargo check --locked -p nomifun-agent-domain-wave2 -p nomifun-file -p nomifun-app`
+  及 `cargo check --locked -p nomifun-app -p nomifun-web -p nomifun-desktop`：
+  通过；
+- 受影响 package `cargo fmt --check`、`git diff --check`：通过。
+
+该提交仍不代表 Wave 2 全量完成：`fs.snapshot`、`process.exec`、SSH/MCP/
+Browser/Computer、`vcs.push` 尚无对应真实 v4 owner。缺少真实 Codex sidecar、
+hello metadata、Universal package 和 provider/binding lifecycle 资源的外部阻塞
+也仍未改变；不得将本地 target checks 写成 C8-MA/HP-1/native release PASS。
