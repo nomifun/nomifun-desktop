@@ -1147,3 +1147,33 @@ HP-1 通过。
 最终 candidate 冻结时必须由 validation owner 在 clean source checkpoint 上重新
 生成 payload/fixture 并同步四字段 tuple；在此之前 native C8 gate 对该 mismatch
 保持 fail-closed，旧 native evidence 不可沿用。
+
+## 本轮最终定向复验（2026-09-01）
+
+- 当前 branch 与 origin 均为 `rf/agent-capability-platform-v2`；
+  最新 remote SHA：`9e2098298d079545f1de0a5cee76212f6acccb9c`；
+  worktree clean。
+- 原生环境：`Darwin` / `arm64` / `sysctl.proc_translated=0`，
+  `rustc host=aarch64-apple-darwin`。
+- contract generator `check`、C7 domain-wave gate、C8 Gate self-test、
+  Gate/arm64 helper syntax checks、`cargo fmt --all -- --check` 与
+  `git diff --check` 通过。
+- Rust 定向复验通过：六个 Domain crate `58` tests、`router::agent_platform_host`
+  `18`、`router::agent_wave2_host` `16`、`nomifun-file` `202`、
+  `nomifun-codex-runtime` `31`、`nomi-tools` `311`；app/web/desktop
+  `cargo check --locked` 通过。上述 Rust 结果之后仅发生文档/Gate reference
+  修正，没有改变这些 Rust owner 实现。
+- `bun run check:i18n`：`7078` keys / `33` modules；`bun run build:ui`：
+  `7720` modules transformed，构建成功。全仓 UI typecheck 的既有
+  React/Arco/implicit-any baseline 仍未被误报为通过。
+- `check-macos-arm64-native.mjs` 在真实 arm64 Host 上仍按设计
+  fail-closed：native host、空 root/预创建空 root、health、`137` capability
+  inventory 和进程清理通过；当前 app 仅 `arm64`（缺 `x86_64`），真实 arm64
+  sidecar 缺失（期望 SHA-256：
+  `7863db3a77545eec8966483f26fb5b493aea6e285ac35b5c29d0920342438060`），
+  live lifecycle 未执行。`desktop-build-mac.sh --check-only` 同样因缺真实
+  sidecar 拒绝，没有复制或制造替代制品。
+- 本轮没有运行 macOS `c8-ma` full Gate、没有生成
+  `PlatformCellEvidence` PASS，也没有运行 workspace-wide `cargo test`；
+  缺少 sidecar/Universal 双架构包/真实 binding、token、provider 资源及
+  其它 native Host，仍是外部阻塞。
