@@ -12,10 +12,11 @@
 - base SHA：`7a2ade3c49374add25a35565265399c57729a8b9`
 - last clean C8 execution SHA / current fix base：
   `4de100692983cb0e4e81091d60456dc26a9d8e69`
-- last verified remote implementation SHA：
-  `d6391775b13f076cb10c7e03351692fa532888a8`
-- origin：`https://github.com/nomifun/nomifun-tauri.git`
-- worktree：dirty；当前候选尚未形成 clean evidence checkpoint
+- current/last verified remote implementation SHA：
+  `9493428fb6ff25a504338192b166eeb55a9d4a77`
+- origin：`git@github.com:nomifun/nomifun-desktop.git`
+- worktree：clean；当前 source 已可用于工程验证，但尚未形成 C8 native
+  candidate evidence checkpoint
 - Git identity：`colir0 <colir0@qq.com>`
 - DeepSeek Harness：
   - expected/current：`cd5ef8148158c3a752a658978873241fdf8e2bbc`
@@ -199,7 +200,7 @@ C0 contract/golden digests：
 
 ## Platform Verification
 
-- 当前 Host：Windows x64
+- 当前 Host：macOS arm64（Darwin，`sysctl.proc_translated=0`）
 - C0 只执行 host-independent contract/schema checks
 - pending PlatformVerificationPoints：4（macOS arm64/x64、Linux Desktop x64、Linux Headless x64）
 - affected cells：无
@@ -1025,3 +1026,55 @@ SSH/MCP/Browser/Computer/process 或 `vcs.push`：
 Browser/Computer、`vcs.push` 尚无对应真实 v4 owner。缺少真实 Codex sidecar、
 hello metadata、Universal package 和 provider/binding lifecycle 资源的外部阻塞
 也仍未改变；不得将本地 target checks 写成 C8-MA/HP-1/native release PASS。
+
+## 增量实现记录（2026-09-01，Wave 2 snapshot owner 与 macOS 工程复验）
+
+随后已提交并普通推送：
+
+- `9493428fb` — `feat(agent): add scoped workspace snapshot owner`
+- 远端分支与本地提交已核对一致（状态文档更新本身另形成后续 status-only
+  commit）。
+
+本提交把已有 `nomifun-file::SnapshotService` 作为 `fs.snapshot` 的真实
+Wave 2 owner，通过 typed workspace binding 提供以下 bounded operation：
+
+- `init`：为当前 AgentSession 初始化或复用同一 workspace snapshot；
+- `compare`：返回有上限的 staged/unstaged 相对路径变化；
+- `baseline`：读取绑定 workspace 的 baseline 文本，并限制返回大小；
+- `dispose`：按 AgentSession 引用释放 snapshot。
+
+实现不创建第二套快照存储：Git workspace 复用真实 repository，非 Git workspace
+复用既有临时 snapshot repository；同一 Session 的重复 `init` 不增加引用，
+不同 Session 的 snapshot 使用独立 session ownership，未初始化或非 owner
+Session 的 `compare/baseline` fail-closed。`SnapshotService::info` 是只读状态
+查询，不改变 refcount。
+
+macOS arm64 本轮定向复验：
+
+- 原生环境：`Darwin` / `arm64` / `sysctl.proc_translated=0`；
+  `rustc host=aarch64-apple-darwin`；
+- `cargo check --locked -p nomifun-app -p nomifun-web -p nomifun-desktop`：
+  通过；
+- Wave 2 domain：9 passed；
+- `nomifun-file` library：202 passed；
+- `router::agent_wave2_host`：16 passed；
+- `cargo fmt --check`、`git diff --check`：通过；
+- i18n：7078 keys / 33 modules，生成物已是最新；
+- `bun run build:ui`：通过（Vite 7720 modules；仅有既有 chunk size warning）；
+- macOS helper self-test：通过；helper test：2 passed；
+- `bun scripts/validation/check-macos-arm64-native.mjs`：按设计 fail-closed，
+  不是 C8-MA PASS。启动空 root/预创建空 root、health、137 capability inventory
+  和进程清理通过；Universal app 当前仅 `arm64`，缺少 `x86_64`；真实 arm64
+  sidecar 缺失，期望 SHA-256 为
+  `7863db3a77545eec8966483f26fb5b493aea6e285ac35b5c29d0920342438060`；没有
+  endpoint/binding/token/provider/credential，因此
+  `open → ready → initial turn → observe → cancel → dispose` 未执行；
+- `bash scripts/desktop-build-mac.sh --check-only`：按设计拒绝缺失真实
+  arm64 sidecar，没有复制或制造替代制品；
+- repository-wide `bun run typecheck` 仍保留既有 React/Arco/implicit-any
+  baseline，本轮未将其误报为生产 UI build 失败。
+
+当前仍不能宣称 C8-WIN-PRE、HP-1、C8-MA、Universal release 或 native
+PlatformCellEvidence PASS。由于 `9493428fb` 改变了 source，旧
+`candidate_source_sha`/platform tuple/evidence 均不能沿用；待代码稳定后需由
+中央 validation owner 重新生成并对账。
