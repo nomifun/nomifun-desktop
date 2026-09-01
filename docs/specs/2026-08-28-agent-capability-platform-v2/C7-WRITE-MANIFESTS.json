@@ -17,12 +17,12 @@
   },
   "confirmed_inputs": {
     "decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
-    "schema_manifest_digest": "f0a1c03696ed180db6786f781282d3a2b81dbea91ac286972b710dd7fe842ed7",
-    "contract_ledger_digest": "7595e15a253fc74c291f52a6ed5fab4efb0cd4e63821f7d6df41c171e3f39868",
-    "deletion_manifest_set_digest": "13431f76e07398c06dc9e42ccb5b70c701297451551c2fcf907c78fcab8f41ad",
+    "schema_manifest_digest": "e28723d7fc524cfdd351c6fc8cc17b8a48d8fd1f5be16a7aebd395ce669f98ff",
+    "contract_ledger_digest": "7b8e1941df5340a7fb59c61dc96a5871575c89c952c4919271fe7f32fe8bb8d4",
+    "deletion_manifest_set_digest": "0fb2e5abf2638e3c3352d4549ddb6a46b5a29ee7d62d35aedd9319a8fb5feecb",
     "official_seed_digest": "c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8",
     "runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
-    "runtime_release_digest": "8f40a7ff0c42bb3180e976ae1c54e89f4942c5d6899507fa70f31c964d9b22fc",
+    "runtime_release_digest": "b9dce00732f6d1c45cb20fc30e7a286518d505d7faeb2d94b6cc70d9e107289d",
     "platform_validation_manifest_digest": "78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9"
   },
   "preserve_exact": [
