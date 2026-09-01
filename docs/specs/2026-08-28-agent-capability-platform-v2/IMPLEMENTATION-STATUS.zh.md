@@ -18,6 +18,8 @@
 - worktree：clean；当前 source 已可用于定向工程验证，但尚未形成 C8 native
   candidate evidence checkpoint。`0bacc9ab` 包含 C8 immutable input reference
   的语义校正，不等同于 C8/HP-1 通过。
+- current branch/remote HEAD（包含本轮 handoff 文档）：
+  `e43afe44c26db7a68d489ae6724c1852cfd86022`
 - Git identity：`colir0 <colir0@qq.com>`
 - DeepSeek Harness：
   - expected/current：`cd5ef8148158c3a752a658978873241fdf8e2bbc`
@@ -1151,7 +1153,9 @@ HP-1 通过。
 ## 本轮最终定向复验（2026-09-01）
 
 - 当前 branch 与 origin 均为 `rf/agent-capability-platform-v2`；
-  最新 remote SHA：`9e2098298d079545f1de0a5cee76212f6acccb9c`；
+  本轮定向 Rust/UI 验证时的 remote SHA：
+  `9e2098298d079545f1de0a5cee76212f6acccb9c`；随后只提交了 handoff
+  文档，当前 branch/remote HEAD 为 `e43afe44c26db7a68d489ae6724c1852cfd86022`，
   worktree clean。
 - 原生环境：`Darwin` / `arm64` / `sysctl.proc_translated=0`，
   `rustc host=aarch64-apple-darwin`。
