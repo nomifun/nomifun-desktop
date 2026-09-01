@@ -298,7 +298,8 @@ export function imageWorkbenchModelOptions(
   return exactWorkbenchModelOptions(catalog, task).map((option) => ({
     providerId: option.providerId,
     model: option.model,
-    label: option.model,
+    label: option.displayName ?? option.model,
+    ...(option.rawModelId ? { rawModelId: option.rawModelId } : {}),
     providerLabel: option.providerName,
     platform: option.platform,
     protocol: option.protocol,

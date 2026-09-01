@@ -25,7 +25,10 @@ export interface ImageWorkbenchModelIdentity {
 }
 
 export interface ImageWorkbenchModelOption extends ImageWorkbenchModelIdentity {
+  /** User-facing alias, falling back to the exact model id. */
   label: string;
+  /** Exact id shown as secondary text when `label` is a configured alias. */
+  rawModelId?: string;
   providerLabel?: string;
   /** Catalog protocol metadata used to select a provider-safe size policy. */
   platform?: string;
