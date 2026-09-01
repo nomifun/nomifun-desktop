@@ -27,17 +27,6 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::deps::CallerCtx;
 
-/// Server-side authority that created one cached Gateway browser attachment.
-///
-/// Signed child attachments are reconciled against the process-local loopback
-/// issuer. Remote MCP attachments instead live and die with rmcp's logical
-/// session manager and must never be interpreted as signed-child lease ids.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub enum BrowserAttachmentAuthority {
-    SignedChild,
-    RemoteMcpSession,
-}
-
 /// Complete server-defined browser operation scope.
 ///
 /// Callers may pass a narrower set to [`BrowserRegistry::attach_trusted_identity_scoped`];
@@ -58,7 +47,6 @@ pub fn all_browser_operations() -> BTreeSet<BrowserOperationKind> {
 
 #[derive(Clone, Debug)]
 struct CachedBrowserIdentity {
-    authority: BrowserAttachmentAuthority,
     identity: CallerIdentity,
     /// A failed Hub cleanup leaves this record authoritative and retryable.
     revocation_pending: bool,
@@ -196,51 +184,32 @@ const MODEL_IDENTITY_INPUT_FIELDS: &[&str] = &[
 // [`nomi_browser::TRUSTED_OWNER_INPUT_FIELDS`] list (F23), so identical
 // requests behave identically across surfaces.
 
-/// Bounded authority-aware revoked-runtime tombstones (F62).
+/// Bounded revoked-runtime tombstones (F62).
 ///
 /// Ids are tracked in insertion order; once the capacity is reached the oldest
 /// tombstone is evicted, keeping the anti-resurrection authority for recent
 /// revocations without growing per revoked session forever.
 #[derive(Default)]
 struct RevokedRuntimeTombstones {
-    entries: HashMap<String, HashSet<BrowserAttachmentAuthority>>,
+    entries: HashSet<String>,
     insertion_order: VecDeque<String>,
 }
 
 impl RevokedRuntimeTombstones {
-    fn insert(
-        &mut self,
-        runtime_instance_id: &str,
-        authority: BrowserAttachmentAuthority,
-    ) {
-        match self.entries.get_mut(runtime_instance_id) {
-            Some(authorities) => {
-                authorities.insert(authority);
-            }
-            None => {
-                self.entries.insert(
-                    runtime_instance_id.to_owned(),
-                    HashSet::from([authority]),
-                );
-                self.insertion_order.push_back(runtime_instance_id.to_owned());
-                while self.insertion_order.len() > REVOKED_RUNTIME_TOMBSTONE_CAPACITY {
-                    let Some(evicted) = self.insertion_order.pop_front() else {
-                        break;
-                    };
-                    self.entries.remove(&evicted);
-                }
+    fn insert(&mut self, runtime_instance_id: &str) {
+        if self.entries.insert(runtime_instance_id.to_owned()) {
+            self.insertion_order.push_back(runtime_instance_id.to_owned());
+            while self.insertion_order.len() > REVOKED_RUNTIME_TOMBSTONE_CAPACITY {
+                let Some(evicted) = self.insertion_order.pop_front() else {
+                    break;
+                };
+                self.entries.remove(&evicted);
             }
         }
     }
 
-    fn contains(
-        &self,
-        runtime_instance_id: &str,
-        authority: BrowserAttachmentAuthority,
-    ) -> bool {
-        self.entries
-            .get(runtime_instance_id)
-            .is_some_and(|authorities| authorities.contains(&authority))
+    fn contains(&self, runtime_instance_id: &str) -> bool {
+        self.entries.contains(runtime_instance_id)
     }
 }
 
@@ -251,10 +220,9 @@ pub struct BrowserRegistry {
     identity_resolver: Arc<dyn TrustedBrowserIdentityResolver>,
     /// Stable owner capability per server-validated runtime attachment.
     identities: Arc<std::sync::Mutex<HashMap<String, CachedBrowserIdentity>>>,
-    /// Runtime ids are never reusable after an authoritative revoke. Keeping
-    /// an authority-aware tombstone prevents an attach racing with session
-    /// close from resurrecting a revoked Browser owner while ensuring an
-    /// unrelated authority cannot tombstone the runtime.
+    /// Runtime ids are never reusable after an authoritative revoke. Keeping a
+    /// bounded tombstone prevents an attach racing with close from resurrecting
+    /// a revoked Browser owner.
     revoked_runtime_ids: Arc<std::sync::Mutex<RevokedRuntimeTombstones>>,
     /// Runtime-scoped attachment/revocation gates. Same-runtime transitions
     /// serialize; unrelated runtimes can attach and clean up concurrently.
@@ -289,23 +257,6 @@ impl BrowserRegistry {
         Self::new(hub, Arc::new(CallerCtxBrowserIdentityResolver))
     }
 
-    /// Test-only fail-closed constructor: no hub injected, launches nothing.
-    /// Application wiring must use [`Self::from_hub`] or [`Self::new`].
-    #[cfg(test)]
-    pub(crate) fn default_for_browser_use() -> Self {
-        Self {
-            hub: None,
-            identity_resolver: Arc::new(CallerCtxBrowserIdentityResolver),
-            identities: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            revoked_runtime_ids: Arc::new(std::sync::Mutex::new(
-                RevokedRuntimeTombstones::default(),
-            )),
-            runtime_lifecycle_slots: Arc::new(std::sync::Mutex::new(
-                HashMap::new(),
-            )),
-        }
-    }
-
     /// Attach a browser identity after the Gateway server validates signed
     /// child capability claims.
     ///
@@ -320,128 +271,30 @@ impl BrowserRegistry {
         attempt_id: Option<&str>,
         capability_expires_at_ms: u64,
     ) -> Result<(), BrowserPlatformError> {
-        self.attach_trusted_identity_with_authority(
-            caller,
-            runtime_instance_id,
-            attempt_id,
-            capability_expires_at_ms,
-            BrowserAttachmentAuthority::SignedChild,
-        )
-        .await
-    }
-
-    /// Attach a browser identity whose runtime and lifecycle authority were
-    /// derived by a trusted server ingress.
-    ///
-    /// `allowed_operations` is supplied by that ingress after it resolves the
-    /// advertised tool scope. It is never read from browser tool arguments.
-    pub async fn attach_trusted_identity_with_authority(
-        &self,
-        caller: &mut CallerCtx,
-        runtime_instance_id: &str,
-        attempt_id: Option<&str>,
-        capability_expires_at_ms: u64,
-        authority: BrowserAttachmentAuthority,
-    ) -> Result<(), BrowserPlatformError> {
         self.attach_trusted_identity_scoped(
             caller,
             runtime_instance_id,
             attempt_id,
             capability_expires_at_ms,
-            authority,
             all_browser_operations(),
         )
         .await
     }
 
-    /// Scoped form of [`Self::attach_trusted_identity_with_authority`].
+    /// Attach a browser identity with a server-derived operation scope.
     pub async fn attach_trusted_identity_scoped(
         &self,
         caller: &mut CallerCtx,
         runtime_instance_id: &str,
         attempt_id: Option<&str>,
         capability_expires_at_ms: u64,
-        authority: BrowserAttachmentAuthority,
         allowed_operations: BTreeSet<BrowserOperationKind>,
     ) -> Result<(), BrowserPlatformError> {
-        // A Remote MCP logical session is itself a server-issued connection
-        // authority. Keep this compatibility path explicit by using the same
-        // trusted value for both runtime cleanup and quota-family accounting.
-        // Ingresses that can prove a task spanning more than one runtime must
-        // call `attach_trusted_remote_identity_scoped` with that separate,
-        // server-pinned connection id instead.
-        let remote_connection_id = match authority {
-            BrowserAttachmentAuthority::SignedChild => None,
-            BrowserAttachmentAuthority::RemoteMcpSession => Some(runtime_instance_id),
-        };
-        self.attach_trusted_identity_scoped_with_remote_connection(
-            caller,
-            runtime_instance_id,
-            attempt_id,
-            capability_expires_at_ms,
-            authority,
-            remote_connection_id,
-            allowed_operations,
-        )
-        .await
-    }
-
-    /// Attach a Remote browser identity using two independent trusted
-    /// authorities: an exact runtime/session id for lifecycle cleanup and a
-    /// server-pinned logical connection id for task-family resource quotas.
-    ///
-    /// The connection id must come from authenticated host state. It must
-    /// never be copied from Browser tool JSON or inferred from companion/user
-    /// identity, because either would let one task mint quota families or
-    /// collapse unrelated tasks into one budget.
-    pub async fn attach_trusted_remote_identity_scoped(
-        &self,
-        caller: &mut CallerCtx,
-        runtime_instance_id: &str,
-        remote_connection_id: &str,
-        attempt_id: Option<&str>,
-        capability_expires_at_ms: u64,
-        allowed_operations: BTreeSet<BrowserOperationKind>,
-    ) -> Result<(), BrowserPlatformError> {
-        if !caller.remote {
-            return Err(BrowserPlatformError::new(
-                BrowserErrorCode::InvalidCallerIdentity,
-                "A trusted Remote browser task requires an authenticated Remote caller.",
-                false,
-                "Request a fresh Remote MCP browser capability.",
-            ));
-        }
-        self.attach_trusted_identity_scoped_with_remote_connection(
-            caller,
-            runtime_instance_id,
-            attempt_id,
-            capability_expires_at_ms,
-            BrowserAttachmentAuthority::RemoteMcpSession,
-            Some(remote_connection_id),
-            allowed_operations,
-        )
-        .await
-    }
-
-    async fn attach_trusted_identity_scoped_with_remote_connection(
-        &self,
-        caller: &mut CallerCtx,
-        runtime_instance_id: &str,
-        attempt_id: Option<&str>,
-        capability_expires_at_ms: u64,
-        authority: BrowserAttachmentAuthority,
-        remote_connection_id: Option<&str>,
-        allowed_operations: BTreeSet<BrowserOperationKind>,
-    ) -> Result<(), BrowserPlatformError> {
-        let lifecycle = self.runtime_lifecycle_slot(runtime_instance_id);
-        let _lifecycle_guard = lifecycle.gate.lock().await;
         self.attach_trusted_identity_scoped_locked(
             caller,
             runtime_instance_id,
             attempt_id,
             capability_expires_at_ms,
-            authority,
-            remote_connection_id,
             allowed_operations,
         )
         .await
@@ -453,10 +306,10 @@ impl BrowserRegistry {
         runtime_instance_id: &str,
         attempt_id: Option<&str>,
         capability_expires_at_ms: u64,
-        authority: BrowserAttachmentAuthority,
-        remote_connection_id: Option<&str>,
         allowed_operations: BTreeSet<BrowserOperationKind>,
     ) -> Result<(), BrowserPlatformError> {
+        let lifecycle = self.runtime_lifecycle_slot(runtime_instance_id);
+        let _lifecycle_guard = lifecycle.gate.lock().await;
         let hub = self.hub.clone().ok_or_else(|| {
             BrowserPlatformError::new(
                 BrowserErrorCode::BrowserUnavailable,
@@ -471,22 +324,12 @@ impl BrowserRegistry {
         {
             return Err(missing_identity_error());
         }
-        if remote_connection_id.is_some_and(|value| {
-            value.is_empty() || value.trim() != value || value.len() > 128
-        }) {
-            return Err(missing_remote_connection_identity_error());
-        }
-        if authority == BrowserAttachmentAuthority::RemoteMcpSession
-            && remote_connection_id.is_none()
-        {
-            return Err(missing_remote_connection_identity_error());
-        }
         if allowed_operations.is_empty() {
             return Err(BrowserPlatformError::new(
                 BrowserErrorCode::OperationNotAllowed,
                 "The server-derived browser capability scope is empty.",
                 false,
-                "Request a Remote MCP profile that includes browser operations.",
+                "Request an authenticated browser capability that includes browser operations.",
             ));
         }
 
@@ -494,7 +337,7 @@ impl BrowserRegistry {
             .revoked_runtime_ids
             .lock()
             .expect("gateway browser revoked-runtime store poisoned")
-            .contains(runtime_instance_id, authority)
+            .contains(runtime_instance_id)
         {
             return Err(revoked_runtime_error());
         }
@@ -509,22 +352,6 @@ impl BrowserRegistry {
         let identity = if let Some(existing) = existing {
             if existing.revocation_pending {
                 return Err(revoked_runtime_error());
-            }
-            if existing.authority != authority {
-                return Err(BrowserPlatformError::new(
-                    BrowserErrorCode::InvalidCallerIdentity,
-                    "The browser runtime is already bound to another authority.",
-                    false,
-                    "Request a fresh authenticated browser runtime.",
-                ));
-            }
-            if existing.identity.remote_connection_id.as_deref() != remote_connection_id {
-                return Err(BrowserPlatformError::new(
-                    BrowserErrorCode::InvalidCallerIdentity,
-                    "The browser runtime is already bound to another Remote task family.",
-                    false,
-                    "Resume the original Remote task or request a fresh authenticated runtime.",
-                ));
             }
             validate_identity_binding(caller, &existing.identity)?;
 
@@ -614,7 +441,6 @@ impl BrowserRegistry {
                 .insert(
                     runtime_instance_id.to_owned(),
                     CachedBrowserIdentity {
-                        authority,
                         identity: identity.clone(),
                         revocation_pending: false,
                         pending_owner_cleanup: None,
@@ -643,12 +469,8 @@ impl BrowserRegistry {
                 execution_id: None,
                 step_id: None,
                 attempt_id: attempt_id.map(str::to_owned),
-                remote_connection_id: remote_connection_id.map(str::to_owned),
-                surface: if caller.remote {
-                    BrowserSurface::Remote
-                } else {
-                    BrowserSurface::Gateway
-                },
+                remote_connection_id: None,
+                surface: BrowserSurface::Gateway,
                 owner_lease_id: owner.lease_id,
                 capability_expires_at_ms: capability_expires_at_ms
                     .min(owner.expires_at_ms),
@@ -660,7 +482,6 @@ impl BrowserRegistry {
                 .insert(
                     runtime_instance_id.to_owned(),
                     CachedBrowserIdentity {
-                        authority,
                         identity: identity.clone(),
                         revocation_pending: false,
                         pending_owner_cleanup: None,
@@ -673,33 +494,13 @@ impl BrowserRegistry {
         Ok(())
     }
 
-    /// Revoke one exact trusted attachment regardless of its ingress source.
-    ///
-    /// The runtime id comes from signed claims or rmcp's server-generated
-    /// session id. Repeated lifecycle callbacks are successful no-ops.
-    pub async fn revoke_trusted_identity(
+    async fn revoke_identity(
         &self,
         runtime_instance_id: &str,
-    ) -> Result<CloseResult, BrowserPlatformError> {
-        self.revoke_identity_for_authority(
-            runtime_instance_id,
-            BrowserAttachmentAuthority::RemoteMcpSession,
-        )
-        .await
-    }
-
-    async fn revoke_identity_for_authority(
-        &self,
-        runtime_instance_id: &str,
-        expected_authority: BrowserAttachmentAuthority,
     ) -> Result<CloseResult, BrowserPlatformError> {
         let lifecycle = self.runtime_lifecycle_slot(runtime_instance_id);
         let _lifecycle_guard = lifecycle.gate.lock().await;
-        self.revoke_identity_for_authority_locked(
-            runtime_instance_id,
-            expected_authority,
-        )
-        .await
+        self.revoke_identity_locked(runtime_instance_id).await
     }
 
     /// Revoke one cached identity while the attachment lifecycle gate is held.
@@ -708,12 +509,11 @@ impl BrowserRegistry {
     /// cleaned independently. A failed cleanup keeps the cached authority
     /// marked pending so the next sweep can retry it rather than silently
     /// losing the old lease.
-    async fn revoke_identity_for_authority_locked(
+    async fn revoke_identity_locked(
         &self,
         runtime_instance_id: &str,
-        expected_authority: BrowserAttachmentAuthority,
     ) -> Result<CloseResult, BrowserPlatformError> {
-        let (owner_lease_id, effective_runtime_id, authority, pending_owner_cleanup) = {
+        let (owner_lease_id, effective_runtime_id, pending_owner_cleanup) = {
             let mut identities = self
                 .identities
                 .lock()
@@ -722,25 +522,17 @@ impl BrowserRegistry {
                 self.revoked_runtime_ids
                     .lock()
                     .expect("gateway browser revoked-runtime store poisoned")
-                    .insert(runtime_instance_id, expected_authority);
+                    .insert(runtime_instance_id);
                 return Ok(CloseResult {
                     closed: 0,
                     already_closed: true,
                     ..Default::default()
                 });
             };
-            if cached.authority != expected_authority {
-                return Ok(CloseResult {
-                    closed: 0,
-                    already_closed: true,
-                    ..Default::default()
-                });
-            }
             cached.revocation_pending = true;
             (
                 cached.identity.owner_lease_id.clone(),
                 cached.identity.runtime_instance_id.clone(),
-                cached.authority,
                 cached.pending_owner_cleanup.clone(),
             )
         };
@@ -748,7 +540,7 @@ impl BrowserRegistry {
         self.revoked_runtime_ids
             .lock()
             .expect("gateway browser revoked-runtime store poisoned")
-            .insert(&effective_runtime_id, authority);
+            .insert(&effective_runtime_id);
 
         let hub = self.hub.clone().ok_or_else(|| {
             BrowserPlatformError::new(
@@ -903,9 +695,8 @@ impl BrowserRegistry {
 
     /// Retry all browser attachment cleanups that previously failed.
     ///
-    /// This covers both signed-child and Remote MCP authorities. It is called
-    /// from the Gateway lifecycle sweep because Remote MCP sessions are not
-    /// represented by the signed-child capability issuer.
+    /// It is called from the Gateway lifecycle sweep because a child process can
+    /// disappear without sending an explicit HTTP revoke request.
     pub async fn retry_pending_browser_cleanups(&self) {
         let Some(hub) = self.hub.clone() else {
             return;
@@ -920,7 +711,6 @@ impl BrowserRegistry {
                 if cached.revocation_pending || cached.pending_owner_cleanup.is_some() {
                     Some((
                         runtime_id.clone(),
-                        cached.authority,
                         cached.revocation_pending,
                         cached.identity.owner_lease_id.clone(),
                         cached.pending_owner_cleanup.clone(),
@@ -936,7 +726,6 @@ impl BrowserRegistry {
                 MAX_CONCURRENT_GATEWAY_OWNER_CLEANUPS,
                 |(
                 runtime_id,
-                authority,
                 revocation_pending,
                 current_owner,
                 pending_owner_cleanup,
@@ -945,10 +734,7 @@ impl BrowserRegistry {
                     async move {
                     if revocation_pending {
                         if let Err(error) = self
-                            .revoke_identity_for_authority(
-                                &runtime_id,
-                                authority,
-                            )
+                            .revoke_identity(&runtime_id)
                             .await
                         {
                             tracing::warn!(
@@ -990,9 +776,6 @@ impl BrowserRegistry {
             .lock()
             .expect("gateway browser identity cache poisoned")
             .values()
-            .filter(|cached| {
-                cached.authority == BrowserAttachmentAuthority::SignedChild
-            })
             .fold(BrowserCleanupStatus::default(), |mut status, cached| {
                 status.pending_attachments =
                     status.pending_attachments.saturating_add(1);
@@ -1029,9 +812,6 @@ impl BrowserRegistry {
             .lock()
             .expect("gateway browser identity cache poisoned")
             .iter()
-            .filter(|(_, cached)| {
-                cached.authority == BrowserAttachmentAuthority::SignedChild
-            })
             .map(|(runtime_id, _)| runtime_id.clone())
             .collect::<Vec<_>>();
 
@@ -1087,11 +867,7 @@ impl BrowserRegistry {
         &self,
         signed_child_lease_id: &str,
     ) -> Result<CloseResult, BrowserPlatformError> {
-        self.revoke_identity_for_authority(
-            signed_child_lease_id,
-            BrowserAttachmentAuthority::SignedChild,
-        )
-        .await
+        self.revoke_identity(signed_child_lease_id).await
     }
 
     /// Reconcile cached browser owners with the process-local signed
@@ -1111,10 +887,7 @@ impl BrowserRegistry {
             .lock()
             .expect("gateway browser identity cache poisoned")
             .iter()
-            .filter(|(runtime_id, cached)| {
-                cached.authority == BrowserAttachmentAuthority::SignedChild
-                    && !is_active(runtime_id)
-            })
+            .filter(|(runtime_id, _)| !is_active(runtime_id))
             .map(|(runtime_id, _)| runtime_id.clone())
             .collect::<Vec<_>>();
         for lease_id in inactive {
@@ -1375,15 +1148,6 @@ fn missing_identity_error() -> BrowserPlatformError {
         "The Gateway caller has no trusted browser identity.",
         false,
         "Request a fresh authenticated browser capability.",
-    )
-}
-
-fn missing_remote_connection_identity_error() -> BrowserPlatformError {
-    BrowserPlatformError::new(
-        BrowserErrorCode::InvalidCallerIdentity,
-        "The Remote browser caller has no server-pinned logical task identity.",
-        false,
-        "Reconnect through an authenticated Remote MCP session.",
     )
 }
 
@@ -2003,176 +1767,6 @@ mod tests {
         }
     }
 
-    fn remote_caller_without_conversation() -> CallerCtx {
-        let mut caller = gateway_caller_without_browser_identity();
-        caller.conversation_id = None;
-        caller.remote = true;
-        caller
-    }
-
-    #[tokio::test]
-    async fn remote_task_family_survives_reconnect_and_runtime_rotation() {
-        let mut config = HubConfig::default();
-        config.resource_policy.max_task_open_lanes = 1;
-        config.resource_policy.max_open_lanes = 4;
-        let harness = harness_with_config(config);
-        let remote_task_id = "server-pinned-remote-task";
-
-        let mut first = remote_caller_without_conversation();
-        harness
-            .registry
-            .attach_trusted_remote_identity_scoped(
-                &mut first,
-                "remote-runtime-a",
-                remote_task_id,
-                None,
-                u64::MAX,
-                all_browser_operations(),
-            )
-            .await
-            .unwrap();
-        let first_identity = first.browser_identity.clone().unwrap();
-        assert_eq!(
-            first_identity.remote_connection_id.as_deref(),
-            Some(remote_task_id)
-        );
-        harness.registry.open(&first, None).await.unwrap();
-
-        // Re-presenting the same live logical session renews its exact owner;
-        // it does not allocate another task-family bucket.
-        let mut reconnected = remote_caller_without_conversation();
-        harness
-            .registry
-            .attach_trusted_remote_identity_scoped(
-                &mut reconnected,
-                "remote-runtime-a",
-                remote_task_id,
-                None,
-                u64::MAX,
-                all_browser_operations(),
-            )
-            .await
-            .unwrap();
-        let reconnected_identity = reconnected.browser_identity.clone().unwrap();
-        assert_eq!(
-            reconnected_identity.owner_lease_id,
-            first_identity.owner_lease_id
-        );
-        assert_eq!(
-            reconnected_identity.task_resource_family_key(),
-            first_identity.task_resource_family_key()
-        );
-
-        // A trusted host may rotate the exact runtime/session while preserving
-        // one logical Remote task. The second runtime shares the Lane ceiling
-        // and therefore cannot mint an additional active allowance.
-        let mut rotated = remote_caller_without_conversation();
-        harness
-            .registry
-            .attach_trusted_remote_identity_scoped(
-                &mut rotated,
-                "remote-runtime-b",
-                remote_task_id,
-                None,
-                u64::MAX,
-                all_browser_operations(),
-            )
-            .await
-            .unwrap();
-        let rotated_identity = rotated.browser_identity.as_ref().unwrap();
-        assert_eq!(
-            rotated_identity.task_resource_family_key(),
-            first_identity.task_resource_family_key()
-        );
-        let error = harness.registry.open(&rotated, None).await.unwrap_err();
-        assert_eq!(error.code, BrowserErrorCode::BrowserCapacityQueued);
-    }
-
-    #[tokio::test]
-    async fn independent_remote_tasks_do_not_share_structural_quota() {
-        let mut config = HubConfig::default();
-        config.resource_policy.max_task_open_lanes = 1;
-        config.resource_policy.max_open_lanes = 4;
-        let harness = harness_with_config(config);
-
-        let mut first = remote_caller_without_conversation();
-        harness
-            .registry
-            .attach_trusted_remote_identity_scoped(
-                &mut first,
-                "remote-independent-runtime-a",
-                "server-pinned-task-a",
-                None,
-                u64::MAX,
-                all_browser_operations(),
-            )
-            .await
-            .unwrap();
-        let mut second = remote_caller_without_conversation();
-        harness
-            .registry
-            .attach_trusted_remote_identity_scoped(
-                &mut second,
-                "remote-independent-runtime-b",
-                "server-pinned-task-b",
-                None,
-                u64::MAX,
-                all_browser_operations(),
-            )
-            .await
-            .unwrap();
-
-        assert_ne!(
-            first
-                .browser_identity
-                .as_ref()
-                .unwrap()
-                .task_resource_family_key(),
-            second
-                .browser_identity
-                .as_ref()
-                .unwrap()
-                .task_resource_family_key()
-        );
-        harness.registry.open(&first, None).await.unwrap();
-        harness.registry.open(&second, None).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn live_remote_runtime_cannot_switch_task_family() {
-        let harness = harness();
-        let mut first = remote_caller_without_conversation();
-        harness
-            .registry
-            .attach_trusted_remote_identity_scoped(
-                &mut first,
-                "remote-family-sealed-runtime",
-                "server-pinned-task-a",
-                None,
-                u64::MAX,
-                all_browser_operations(),
-            )
-            .await
-            .unwrap();
-        harness.registry.open(&first, None).await.unwrap();
-
-        let mut attempted_rotation = remote_caller_without_conversation();
-        let error = harness
-            .registry
-            .attach_trusted_remote_identity_scoped(
-                &mut attempted_rotation,
-                "remote-family-sealed-runtime",
-                "server-pinned-task-b",
-                None,
-                u64::MAX,
-                all_browser_operations(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, BrowserErrorCode::InvalidCallerIdentity);
-        assert!(attempted_rotation.browser_identity.is_none());
-    }
-
     /// Spread a cleanup-concurrency fixture across real task families while
     /// retaining several sibling runtimes in every family.  These tests target
     /// the Gateway's global cleanup worker window, not the independent
@@ -2396,265 +1990,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_cached_owner_is_reissued_for_the_same_live_runtime() {
-        let harness = harness_with_owner_ttl(10);
-        let mut first = gateway_caller_without_browser_identity();
-        harness
-            .registry
-            .attach_trusted_identity_with_authority(
-                &mut first,
-                "remote-session-live",
-                None,
-                u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
-            )
-            .await
-            .unwrap();
-        let old_owner = first
-            .browser_identity
-            .as_ref()
-            .unwrap()
-            .owner_lease_id
-            .clone();
-        let stale_lane = harness.registry.open(&first, None).await.unwrap();
-
-        tokio::time::sleep(Duration::from_millis(20)).await;
-
-        let mut resumed = gateway_caller_without_browser_identity();
-        harness
-            .registry
-            .attach_trusted_identity_with_authority(
-                &mut resumed,
-                "remote-session-live",
-                None,
-                u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
-            )
-            .await
-            .unwrap();
-        let new_owner = resumed
-            .browser_identity
-            .as_ref()
-            .unwrap()
-            .owner_lease_id
-            .clone();
-        assert_ne!(
-            old_owner, new_owner,
-            "an expired cached owner must be replaced, not returned as stale authority"
-        );
-        let replacement_lane = harness.registry.open(&resumed, None).await.unwrap();
-        assert_ne!(stale_lane.lane_id, replacement_lane.lane_id);
-
-        harness.hub.sweep().await.unwrap();
-        let lanes = harness.hub.list_lanes().await;
-        assert_eq!(lanes.len(), 1);
-        assert_eq!(lanes[0].lane_id, replacement_lane.lane_id);
-        assert_eq!(lanes[0].caller.owner_lease_id, new_owner);
-    }
-
-    #[tokio::test]
-    async fn expired_owner_replacement_cannot_broaden_scope() {
-        let harness = harness_with_owner_ttl(10);
-        let mut first = gateway_caller_without_browser_identity();
-        first.remote = true;
-        harness
-            .registry
-            .attach_trusted_identity_scoped(
-                &mut first,
-                "remote-session-narrow-replacement",
-                None,
-                u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
-                BTreeSet::from([
-                    BrowserOperationKind::Manage,
-                    BrowserOperationKind::Observe,
-                ]),
-            )
-            .await
-            .unwrap();
-        let old_identity = first.browser_identity.clone().unwrap();
-        let old_lane = harness.registry.open(&first, None).await.unwrap();
-
-        tokio::time::sleep(Duration::from_millis(20)).await;
-
-        let mut replacement = gateway_caller_without_browser_identity();
-        replacement.remote = true;
-        harness
-            .registry
-            .attach_trusted_identity_scoped(
-                &mut replacement,
-                "remote-session-narrow-replacement",
-                None,
-                u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
-                BTreeSet::from([
-                    BrowserOperationKind::Manage,
-                    BrowserOperationKind::Observe,
-                    BrowserOperationKind::Act,
-                ]),
-            )
-            .await
-            .unwrap();
-        let replacement_identity = replacement.browser_identity.clone().unwrap();
-
-        assert_eq!(replacement_identity.surface, BrowserSurface::Remote);
-        assert_eq!(
-            replacement_identity.allowed_operations,
-            BTreeSet::from([
-                BrowserOperationKind::Manage,
-                BrowserOperationKind::Observe,
-            ])
-        );
-        assert_ne!(
-            replacement_identity.owner_lease_id,
-            old_identity.owner_lease_id
-        );
-        let replacement_lane = harness.registry.open(&replacement, None).await.unwrap();
-        assert_ne!(replacement_lane.lane_id, old_lane.lane_id);
-        let error = harness
-            .registry
-            .open(&first, None)
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, BrowserErrorCode::OwnerLeaseExpired);
-    }
-
-    #[tokio::test]
-    async fn live_owner_renewal_persists_scope_narrowing() {
-        let harness = harness();
-        let mut broad = gateway_caller_without_browser_identity();
-        broad.remote = true;
-        harness
-            .registry
-            .attach_trusted_identity_scoped(
-                &mut broad,
-                "remote-session-live-narrowing",
-                None,
-                u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
-                BTreeSet::from([
-                    BrowserOperationKind::Manage,
-                    BrowserOperationKind::Observe,
-                    BrowserOperationKind::Act,
-                ]),
-            )
-            .await
-            .unwrap();
-        let owner_lease_id = broad
-            .browser_identity
-            .as_ref()
-            .unwrap()
-            .owner_lease_id
-            .clone();
-
-        let mut narrow = gateway_caller_without_browser_identity();
-        narrow.remote = true;
-        harness
-            .registry
-            .attach_trusted_identity_scoped(
-                &mut narrow,
-                "remote-session-live-narrowing",
-                None,
-                u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
-                BTreeSet::from([
-                    BrowserOperationKind::Manage,
-                    BrowserOperationKind::Observe,
-                ]),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            narrow
-                .browser_identity
-                .as_ref()
-                .unwrap()
-                .owner_lease_id,
-            owner_lease_id
-        );
-
-        let mut attempted_broaden = gateway_caller_without_browser_identity();
-        attempted_broaden.remote = true;
-        harness
-            .registry
-            .attach_trusted_identity_scoped(
-                &mut attempted_broaden,
-                "remote-session-live-narrowing",
-                None,
-                u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
-                BTreeSet::from([
-                    BrowserOperationKind::Manage,
-                    BrowserOperationKind::Observe,
-                    BrowserOperationKind::Act,
-                ]),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            attempted_broaden
-                .browser_identity
-                .unwrap()
-                .allowed_operations,
-            BTreeSet::from([
-                BrowserOperationKind::Manage,
-                BrowserOperationKind::Observe,
-            ])
-        );
-    }
-
-    #[tokio::test]
-    async fn signed_child_reconciliation_ignores_remote_mcp_attachments() {
-        let harness = harness();
-        let mut signed = gateway_caller_without_browser_identity();
-        harness
-            .registry
-            .attach_trusted_identity(
-                &mut signed,
-                "signed-child-inactive",
-                Some("attempt-inactive"),
-                u64::MAX,
-            )
-            .await
-            .unwrap();
-        let mut remote = gateway_caller_without_browser_identity();
-        remote.remote = true;
-        harness
-            .registry
-            .attach_trusted_identity_with_authority(
-                &mut remote,
-                "remote-session-active",
-                None,
-                u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
-            )
-            .await
-            .unwrap();
-
-        harness.registry.open(&signed, None).await.unwrap();
-        let remote_lane = harness.registry.open(&remote, None).await.unwrap();
-        harness
-            .registry
-            .cleanup_inactive_signed_child_leases(|_| false)
-            .await;
-
-        let lanes = harness.hub.list_lanes().await;
-        assert_eq!(lanes.len(), 1);
-        assert_eq!(lanes[0].lane_id, remote_lane.lane_id);
-        let identities = harness
-            .registry
-            .identities
-            .lock()
-            .expect("gateway browser identity cache poisoned");
-        assert!(!identities.contains_key("signed-child-inactive"));
-        assert!(identities.contains_key("remote-session-active"));
-        assert_eq!(
-            identities["remote-session-active"].authority,
-            BrowserAttachmentAuthority::RemoteMcpSession
-        );
-    }
-
-    #[tokio::test]
     async fn final_signed_child_drain_reports_pending_exact_owner_cleanup() {
         // A terminal lane-cleanup failure on a host with no surviving lanes is
         // resolved by authoritative host retirement, so the drain
@@ -2690,20 +2025,33 @@ mod tests {
         // A sibling lane on the shared Primary host makes retirement
         // impossible, so the retained exact owner stays pending until retry.
         let harness = self::harness();
-        let mut remote = gateway_caller_without_browser_identity();
-        remote.remote = true;
-        harness
-            .registry
-            .attach_trusted_identity_with_authority(
-                &mut remote,
-                "remote-session-final-sibling",
-                None,
-                u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
-            )
+        // Keep the sibling outside the Registry identity cache. The final drain
+        // intentionally detaches every cached owner before host retirement, so
+        // a sibling cached there would disappear from the Hub's live-lane view
+        // and would not exercise the shared-host postcondition.
+        let sibling = caller(
+            &harness.hub,
+            "signed-child-final-sibling",
+            "attempt-final-sibling",
+        );
+        let sibling_identity = sibling
+            .browser_identity
+            .clone()
+            .expect("sibling fixture has a trusted browser identity");
+        let sibling_client = harness
+            .hub
+            .bind(sibling_identity.clone())
+            .expect("bind sibling browser owner");
+        let sibling_lane = match sibling_client
+            .open(None, BrowserIdentityMode::Primary, None)
             .await
-            .unwrap();
-        let remote_lane = harness.registry.open(&remote, None).await.unwrap();
+            .expect("open sibling lane")
+        {
+            OpenLaneOutcome::Running { lane } => lane,
+            OpenLaneOutcome::Queued { .. } => {
+                panic!("sibling fixture must not be queued")
+            }
+        };
         let mut signed = gateway_caller_without_browser_identity();
         harness
             .registry
@@ -2758,36 +2106,12 @@ mod tests {
         assert!(harness.registry.signed_child_cleanup_status().is_empty());
         let lanes = harness.hub.list_lanes().await;
         assert_eq!(lanes.len(), 1);
-        assert_eq!(lanes[0].lane_id, remote_lane.lane_id);
-    }
-
-    #[tokio::test]
-    async fn final_signed_child_drain_does_not_consume_remote_authority() {
-        let harness = harness();
-        let mut remote = gateway_caller_without_browser_identity();
-        remote.remote = true;
+        assert_eq!(lanes[0].lane_id, sibling_lane.lane_id);
         harness
-            .registry
-            .attach_trusted_identity_with_authority(
-                &mut remote,
-                "remote-session-survives-gateway-drain",
-                None,
-                u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
-            )
+            .hub
+            .close_owner_lease(&sibling_identity.owner_lease_id)
             .await
-            .unwrap();
-        let remote_lane = harness.registry.open(&remote, None).await.unwrap();
-
-        harness
-            .registry
-            .drain_signed_child_browser_owners_once()
-            .await
-            .expect("an empty signed-child postcondition must succeed");
-        assert!(harness.registry.signed_child_cleanup_status().is_empty());
-        let lanes = harness.hub.list_lanes().await;
-        assert_eq!(lanes.len(), 1);
-        assert_eq!(lanes[0].lane_id, remote_lane.lane_id);
+            .expect("close the out-of-band sibling fixture");
     }
 
     #[tokio::test]
@@ -2878,26 +2202,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_mcp_revoke_is_exact_and_idempotent() {
+    async fn signed_child_revoke_is_exact_and_idempotent() {
         let harness = harness();
-        let mut remote = gateway_caller_without_browser_identity();
-        remote.remote = true;
+        let mut signed = gateway_caller_without_browser_identity();
         harness
             .registry
-            .attach_trusted_identity_with_authority(
-                &mut remote,
-                "remote-session-close",
+            .attach_trusted_identity(
+                &mut signed,
+                "signed-child-close",
                 None,
                 u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
             )
             .await
             .unwrap();
-        harness.registry.open(&remote, None).await.unwrap();
+        harness.registry.open(&signed, None).await.unwrap();
 
         let first = harness
             .registry
-            .revoke_trusted_identity("remote-session-close")
+            .revoke_signed_child_lease("signed-child-close")
             .await
             .unwrap();
         assert_eq!(first.closed, 1);
@@ -2906,7 +2228,7 @@ mod tests {
 
         let repeated = harness
             .registry
-            .revoke_trusted_identity("remote-session-close")
+            .revoke_signed_child_lease("signed-child-close")
             .await
             .unwrap();
         assert_eq!(repeated.closed, 0);
@@ -2914,32 +2236,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_remote_mcp_revoke_remains_authoritative_until_retry() {
+    async fn failed_signed_child_revoke_remains_authoritative_until_retry() {
         // A terminal lane-cleanup failure on a host with no surviving lanes is
         // resolved by authoritative host retirement: the revoke succeeds on
         // its first attempt and no retained authority survives.
         let harness = harness();
-        let mut remote = gateway_caller_without_browser_identity();
-        remote.remote = true;
+        let mut signed = gateway_caller_without_browser_identity();
         harness
             .registry
-            .attach_trusted_identity_with_authority(
-                &mut remote,
-                "remote-session-retired",
+            .attach_trusted_identity(
+                &mut signed,
+                "signed-child-retired",
                 None,
                 u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
             )
             .await
             .unwrap();
-        harness.registry.open(&remote, None).await.unwrap();
+        harness.registry.open(&signed, None).await.unwrap();
         harness
             .probe
             .lane_close_failures_remaining
             .store(1, Ordering::Release);
         let result = harness
             .registry
-            .revoke_trusted_identity("remote-session-retired")
+            .revoke_signed_child_lease("signed-child-retired")
             .await
             .expect("host retirement resolves the terminal lane-cleanup failure");
         assert_eq!(result.closed, 1);
@@ -2957,30 +2277,26 @@ mod tests {
         // A sibling lane on the shared Primary host makes retirement
         // impossible, so the failed cleanup retains its authority until retry.
         let harness = self::harness();
-        let mut remote = gateway_caller_without_browser_identity();
-        remote.remote = true;
+        let mut signed = gateway_caller_without_browser_identity();
         harness
             .registry
-            .attach_trusted_identity_with_authority(
-                &mut remote,
-                "remote-session-retry",
+            .attach_trusted_identity(
+                &mut signed,
+                "signed-child-retry",
                 None,
                 u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
             )
             .await
             .unwrap();
-        harness.registry.open(&remote, None).await.unwrap();
+        harness.registry.open(&signed, None).await.unwrap();
         let mut sibling = gateway_caller_without_browser_identity();
-        sibling.remote = true;
         harness
             .registry
-            .attach_trusted_identity_with_authority(
+            .attach_trusted_identity(
                 &mut sibling,
-                "remote-session-retry-sibling",
+                "signed-child-retry-sibling",
                 None,
                 u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
             )
             .await
             .unwrap();
@@ -2992,7 +2308,7 @@ mod tests {
 
         let error = harness
             .registry
-            .revoke_trusted_identity("remote-session-retry")
+            .revoke_signed_child_lease("signed-child-retry")
             .await
             .unwrap_err();
         assert_eq!(error.code, BrowserErrorCode::BrowserUnavailable);
@@ -3003,7 +2319,7 @@ mod tests {
                 .lock()
                 .expect("gateway browser identity cache poisoned");
             let cached = identities
-                .get("remote-session-retry")
+                .get("signed-child-retry")
                 .expect("failed cleanup must retain its authority");
             assert!(cached.revocation_pending);
         }
@@ -3015,7 +2331,7 @@ mod tests {
                 .identities
                 .lock()
                 .expect("gateway browser identity cache poisoned")
-                .contains_key("remote-session-retry")
+                .contains_key("signed-child-retry")
         );
         assert_eq!(harness.probe.lane_closes.load(Ordering::Acquire), 2);
 
@@ -3036,42 +2352,40 @@ mod tests {
         let family_width = config.resource_policy.max_task_open_lanes.max(1);
         let harness = harness_with_config(config);
         let runtime_ids = (0..total)
-            .map(|index| format!("remote-bounded-retry-{index}"))
+            .map(|index| format!("signed-child-bounded-retry-{index}"))
             .collect::<Vec<_>>();
         let mut owner_lease_ids = Vec::with_capacity(total);
         let mut task_family_counts = HashMap::<String, usize>::new();
 
         for (index, runtime_id) in runtime_ids.iter().enumerate() {
-            let mut remote = gateway_caller_without_browser_identity();
-            remote.remote = true;
-            assign_cleanup_stress_task_family(&mut remote, index, family_width);
+            let mut signed = gateway_caller_without_browser_identity();
+            assign_cleanup_stress_task_family(&mut signed, index, family_width);
             harness
                 .registry
-                .attach_trusted_identity_with_authority(
-                    &mut remote,
+                .attach_trusted_identity(
+                    &mut signed,
                     runtime_id,
                     None,
                     u64::MAX,
-                    BrowserAttachmentAuthority::RemoteMcpSession,
                 )
                 .await
                 .unwrap();
             owner_lease_ids.push(
-                remote
+                signed
                     .browser_identity
                     .as_ref()
                     .expect("attached browser identity")
                     .owner_lease_id
                     .clone(),
             );
-            let family_key = remote
+            let family_key = signed
                 .browser_identity
                 .as_ref()
-                .expect("attached Remote MCP browser identity")
+                .expect("attached signed-child browser identity")
                 .task_resource_family_key()
                 .into_string();
             *task_family_counts.entry(family_key).or_default() += 1;
-            harness.registry.open(&remote, None).await.unwrap();
+            harness.registry.open(&signed, None).await.unwrap();
         }
         assert_eq!(
             task_family_counts.len(),
@@ -3191,15 +2505,13 @@ mod tests {
         // consumes the superseded owner immediately.
         let harness = harness_with_owner_ttl(10);
         let mut first = gateway_caller_without_browser_identity();
-        first.remote = true;
         harness
             .registry
-            .attach_trusted_identity_with_authority(
+            .attach_trusted_identity(
                 &mut first,
-                "remote-session-retired-owner",
+                "signed-child-retired-owner",
                 None,
                 u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
             )
             .await
             .unwrap();
@@ -3216,15 +2528,13 @@ mod tests {
             .lane_close_failures_remaining
             .store(1, Ordering::Release);
         let mut replacement = gateway_caller_without_browser_identity();
-        replacement.remote = true;
         harness
             .registry
-            .attach_trusted_identity_with_authority(
+            .attach_trusted_identity(
                 &mut replacement,
-                "remote-session-retired-owner",
+                "signed-child-retired-owner",
                 None,
                 u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
             )
             .await
             .unwrap();
@@ -3235,7 +2545,7 @@ mod tests {
                 .lock()
                 .expect("gateway browser identity cache poisoned");
             let cached = identities
-                .get("remote-session-retired-owner")
+                .get("signed-child-retired-owner")
                 .expect("replacement authority must be published");
             assert!(
                 cached.pending_owner_cleanup.is_none(),
@@ -3252,15 +2562,13 @@ mod tests {
         // succeeds.
         let harness = harness_with_owner_ttl(10);
         let mut first = gateway_caller_without_browser_identity();
-        first.remote = true;
         harness
             .registry
-            .attach_trusted_identity_with_authority(
+            .attach_trusted_identity(
                 &mut first,
-                "remote-session-superseded",
+                "signed-child-superseded",
                 None,
                 u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
             )
             .await
             .unwrap();
@@ -3274,15 +2582,13 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(20)).await;
         let mut sibling = gateway_caller_without_browser_identity();
-        sibling.remote = true;
         harness
             .registry
-            .attach_trusted_identity_with_authority(
+            .attach_trusted_identity(
                 &mut sibling,
-                "remote-session-superseded-sibling",
+                "signed-child-superseded-sibling",
                 None,
                 u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
             )
             .await
             .unwrap();
@@ -3293,15 +2599,13 @@ mod tests {
             .store(1, Ordering::Release);
 
         let mut replacement = gateway_caller_without_browser_identity();
-        replacement.remote = true;
         let error = harness
             .registry
-            .attach_trusted_identity_with_authority(
+            .attach_trusted_identity(
                 &mut replacement,
-                "remote-session-superseded",
+                "signed-child-superseded",
                 None,
                 u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
             )
             .await
             .expect_err("cleanup failure must fence replacement publication");
@@ -3315,7 +2619,7 @@ mod tests {
                 .lock()
                 .expect("gateway browser identity cache poisoned");
             let cached = identities
-                .get("remote-session-superseded")
+                .get("signed-child-superseded")
                 .expect("expired owner cleanup authority must remain cached");
             assert_eq!(cached.pending_owner_cleanup, Some(old_owner.clone()));
             assert_eq!(cached.identity.owner_lease_id, old_owner);
@@ -3327,12 +2631,11 @@ mod tests {
             .store(0, Ordering::Release);
         harness
             .registry
-            .attach_trusted_identity_with_authority(
+            .attach_trusted_identity(
                 &mut replacement,
-                "remote-session-superseded",
+                "signed-child-superseded",
                 None,
                 u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
             )
             .await
             .expect("replacement may publish after exact old-owner cleanup");
@@ -3344,7 +2647,7 @@ mod tests {
                 .identities
                 .lock()
                 .expect("gateway browser identity cache poisoned")
-                ["remote-session-superseded"]
+                ["signed-child-superseded"]
                 .pending_owner_cleanup
                 .is_none()
         );
@@ -3352,7 +2655,7 @@ mod tests {
 
         let result = harness
             .registry
-            .revoke_trusted_identity("remote-session-superseded")
+            .revoke_signed_child_lease("signed-child-superseded")
             .await
             .unwrap();
         assert_eq!(result.closed, 1);
@@ -3362,7 +2665,7 @@ mod tests {
                 .identities
                 .lock()
                 .expect("gateway browser identity cache poisoned")
-                .contains_key("remote-session-superseded")
+                .contains_key("signed-child-superseded")
         );
 
         // Old-owner cleanup, replacement cleanup, and the sibling remain
@@ -3381,17 +2684,15 @@ mod tests {
     #[tokio::test]
     async fn permanent_expired_owner_cleanup_is_constant_and_concurrent_recovery_mints_once() {
         let harness = harness_with_owner_ttl(10);
-        let runtime_id = "remote-session-generation-fence";
+        let runtime_id = "signed-child-generation-fence";
         let mut first = gateway_caller_without_browser_identity();
-        first.remote = true;
         harness
             .registry
-            .attach_trusted_identity_with_authority(
+            .attach_trusted_identity(
                 &mut first,
                 runtime_id,
                 None,
                 u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
             )
             .await
             .unwrap();
@@ -3406,15 +2707,13 @@ mod tests {
         // Keep a sibling target on the shared Primary Host so a failed Lane
         // close cannot be discharged by retiring the whole Host.
         let mut sibling = gateway_caller_without_browser_identity();
-        sibling.remote = true;
         harness
             .registry
-            .attach_trusted_identity_with_authority(
+            .attach_trusted_identity(
                 &mut sibling,
-                "remote-session-generation-fence-sibling",
+                "signed-child-generation-fence-sibling",
                 None,
                 u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
             )
             .await
             .unwrap();
@@ -3431,15 +2730,13 @@ mod tests {
             // generation or publish a capability to its caller.
             tokio::time::sleep(Duration::from_millis(20)).await;
             let mut blocked = gateway_caller_without_browser_identity();
-            blocked.remote = true;
             let error = harness
                 .registry
-                .attach_trusted_identity_with_authority(
+                .attach_trusted_identity(
                     &mut blocked,
                     runtime_id,
                     Some(&format!("blocked-{attempt}")),
                     u64::MAX,
-                    BrowserAttachmentAuthority::RemoteMcpSession,
                 )
                 .await
                 .expect_err("permanent old-owner cleanup failure must fence attach");
@@ -3482,14 +2779,12 @@ mod tests {
                 let registry = harness.registry.clone();
                 tokio::spawn(async move {
                     let mut caller = gateway_caller_without_browser_identity();
-                    caller.remote = true;
                     registry
-                        .attach_trusted_identity_with_authority(
+                        .attach_trusted_identity(
                             &mut caller,
                             runtime_id,
                             Some(&format!("recovery-{attempt}")),
                             u64::MAX,
-                            BrowserAttachmentAuthority::RemoteMcpSession,
                         )
                         .await?;
                     Ok::<_, BrowserPlatformError>(
@@ -3625,7 +2920,6 @@ mod tests {
     async fn server_derived_operation_scope_cannot_be_widened_by_tool_input() {
         let harness = harness();
         let mut caller = gateway_caller_without_browser_identity();
-        caller.remote = true;
         harness
             .registry
             .attach_trusted_identity_scoped(
@@ -3633,7 +2927,6 @@ mod tests {
                 "remote-session-observe-only",
                 None,
                 u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
                 BTreeSet::from([BrowserOperationKind::Observe]),
             )
             .await
@@ -4067,24 +3360,22 @@ mod tests {
         for index in 0..=REVOKED_RUNTIME_TOMBSTONE_CAPACITY {
             harness
                 .registry
-                .revoke_trusted_identity(&format!("remote-tombstone-{index}"))
+                .revoke_signed_child_lease(&format!("remote-tombstone-{index}"))
                 .await
                 .unwrap();
         }
 
         // Recent revocations keep their anti-resurrection authority.
         let mut newest = gateway_caller_without_browser_identity();
-        newest.remote = true;
         let error = harness
             .registry
-            .attach_trusted_identity_with_authority(
+            .attach_trusted_identity(
                 &mut newest,
                 &format!(
                     "remote-tombstone-{REVOKED_RUNTIME_TOMBSTONE_CAPACITY}"
                 ),
                 None,
                 u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
             )
             .await
             .unwrap_err();
@@ -4092,15 +3383,13 @@ mod tests {
 
         // The oldest tombstone is evicted instead of retained forever.
         let mut oldest = gateway_caller_without_browser_identity();
-        oldest.remote = true;
         harness
             .registry
-            .attach_trusted_identity_with_authority(
+            .attach_trusted_identity(
                 &mut oldest,
                 "remote-tombstone-0",
                 None,
                 u64::MAX,
-                BrowserAttachmentAuthority::RemoteMcpSession,
             )
             .await
             .expect("evicted tombstones must not grow the store unbounded");

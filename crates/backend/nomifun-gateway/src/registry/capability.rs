@@ -13,13 +13,13 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 
 pub type BoxFut = Pin<Box<dyn Future<Output = Value> + Send>>;
-pub type Handler = Arc<dyn Fn(Arc<GatewayDeps>, CallerCtx, Value) -> BoxFut + Send + Sync>;
+pub type Handler = Arc<dyn Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, Value) -> BoxFut + Send + Sync>;
 pub type ProgressSink = tokio::sync::mpsc::Sender<Value>;
 pub type StreamingHandler =
-    Arc<dyn Fn(Arc<GatewayDeps>, CallerCtx, Value, ProgressSink) -> BoxFut + Send + Sync>;
+    Arc<dyn Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, Value, ProgressSink) -> BoxFut + Send + Sync>;
 
 fn invalid_arguments_error(error: serde_json::Error) -> Value {
     json!({
@@ -48,14 +48,11 @@ pub enum OwnershipScope {
 pub enum Surface {
     Desktop,
     Channel,
-    Remote,
 }
 
 impl CallerCtx {
     pub fn surface(&self) -> Surface {
-        if self.remote {
-            Surface::Remote
-        } else if self.channel_platform.is_some() {
+        if self.channel_platform.is_some() {
             Surface::Channel
         } else {
             Surface::Desktop
@@ -105,7 +102,7 @@ impl Capability {
     pub fn new<P, F, Fut>(meta: CapabilityMeta, f: F) -> Self
     where
         P: DeserializeOwned + JsonSchema + Send + 'static,
-        F: Fn(Arc<GatewayDeps>, CallerCtx, P) -> Fut + Send + Sync + 'static,
+        F: Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Value> + Send + 'static,
     {
         let input_schema = schema_for_params::<P>();
@@ -134,7 +131,7 @@ impl Capability {
     pub fn new_streaming<P, F, Fut>(meta: CapabilityMeta, f: F) -> Self
     where
         P: DeserializeOwned + JsonSchema + Send + 'static,
-        F: Fn(Arc<GatewayDeps>, CallerCtx, P, ProgressSink) -> Fut + Send + Sync + 'static,
+        F: Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P, ProgressSink) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Value> + Send + 'static,
     {
         let input_schema = schema_for_params::<P>();

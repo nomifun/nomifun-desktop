@@ -4,22 +4,23 @@
 //! (logging, work_dir resolution, builtin-skill materialization, database
 //! init) that subcommands compose to start the application.
 
-mod admin;
 mod bind;
 mod boot_log;
 mod builtin_skills;
+mod canonical_host;
 mod data_root;
 mod environment;
 mod relocation;
+pub(crate) mod runtime_artifact;
 mod server_lock;
 mod tracing_init;
 mod v4_root;
 mod webui_dist;
 mod work_dir;
 
-pub use admin::{AdminBootstrap, ensure_admin_credentials};
 pub use bind::{PORT_FILE, PortAnnouncement, SCAN_SPAN, announce_bound_port, bind_with_fallback, write_port_file};
 pub use boot_log::{BootNoteLevel, record_boot_note};
+pub use canonical_host::{CanonicalHost, FreshV4Application, FreshV4Host};
 pub use data_root::{
     LAYOUT_MIGRATION_PENDING_MARKER, RELOCATED_DONE_MARKER,
     RELOCATED_FROM_MARKER, RelocationMarker, is_known_default_location,
@@ -28,9 +29,11 @@ pub use data_root::{
 pub use environment::{
     ServerEnvironment, finalize_data_layer, init_data_layer, init_environment,
 };
+pub(crate) use environment::init_legacy_environment;
 pub(crate) use environment::{
     acquire_distinct_work_root_lock, acquire_work_root_lock,
 };
+pub(crate) use v4_root::APPLICATION_BUILD_IDENTITY;
 pub use server_lock::{BootServerLockAuthority, SERVER_LOCK_FILE, ServerLock};
 pub use webui_dist::{
     UI_BUILD_MANIFEST_FILE, UI_BUILD_MANIFEST_SCHEMA, UiBuildManifest, ui_api_contract_version,

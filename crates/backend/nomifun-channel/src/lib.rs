@@ -15,9 +15,13 @@ pub mod plugin;
 pub mod plugins;
 pub mod queue_drain;
 pub mod routes;
+mod session_port;
 pub mod session;
 pub mod stream_relay;
 pub mod think_filter;
 pub mod types;
 
 pub use routes::{ChannelRouterState, channel_routes};
+pub use session_port::{
+    ChannelSessionPort, ChannelTurnDelivery, conversation_channel_session_port,
+};

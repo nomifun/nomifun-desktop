@@ -3,10 +3,11 @@
 //! gateway session gets the same context derivation (agent type / model from
 //! the bound conversation) and bind-back behavior as the in-chat protocol.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_api_types::{ListCronJobsQuery, UpdateConversationRequest};
-use nomifun_common::{AgentType, ConversationId, CronJobId};
+use nomifun_common::{ConversationId, CronJobId};
 use nomifun_conversation::response_middleware::{
     CronCreateParams as SvcCronCreate, CronUpdateParams as SvcCronUpdate, ICronService,
 };
@@ -15,10 +16,11 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
+use crate::conversation_port::ConversationCapabilityPort;
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
-use crate::provider_support;
+use crate::provider_support::{self, ProviderSupportDeps};
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -82,17 +84,50 @@ fn is_duplicate_job(existing_name: &str, existing_message: &str, new_name: &str,
     existing_name.trim().eq_ignore_ascii_case(new_name.trim()) || existing_message.trim() == new_message.trim()
 }
 
-async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronListParams) -> Value {
+#[derive(Clone)]
+struct CronCapabilityDeps {
+    service: Arc<nomifun_cron::service::CronService>,
+    conversation: Arc<dyn ConversationCapabilityPort>,
+    provider_support: ProviderSupportDeps,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<CronCapabilityDeps>, CallerCtx, P) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, ctx, params| {
+        handler(
+            Arc::new(CronCapabilityDeps {
+                service: deps.cron_service.clone(),
+                conversation: deps.conversation.clone(),
+                provider_support: ProviderSupportDeps {
+                    provider_repo: deps.provider_repo.clone(),
+                    provider_model_repo: deps.provider_model_repo.clone(),
+                    provider_model_capability_repo: deps.provider_model_capability_repo.clone(),
+                    companion_service: deps.companion_service.clone(),
+                },
+            }),
+            ctx,
+            params,
+        )
+    }
+}
+
+async fn list(deps: Arc<CronCapabilityDeps>, ctx: CallerCtx, p: CronListParams) -> Value {
     let query = ListCronJobsQuery {
         conversation_id: p.conversation_id.map(ConversationId::into_string),
     };
-    match deps.cron_service.list_jobs(ctx.user_id.as_str(), &query).await {
+    match deps.service.list_jobs(ctx.user_id.as_str(), &query).await {
         Ok(jobs) => ok(jobs.iter().map(cron_job_to_response).collect::<Vec<_>>()),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronCreateParams) -> Value {
+async fn create(deps: Arc<CronCapabilityDeps>, ctx: CallerCtx, p: CronCreateParams) -> Value {
     let target_conversation_id = p
         .conversation_id
         .map(ConversationId::into_string)
@@ -104,7 +139,7 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronCreateParams) -> 
 
     // -- duplicate guard ----------------------------------------------
     match deps
-        .cron_service
+        .service
         .list_jobs(ctx.user_id.as_str(), &ListCronJobsQuery {
             conversation_id: Some(target_conversation_id),
         })
@@ -127,11 +162,28 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronCreateParams) -> 
 
     // -- model guard (nomi conversations only) ------------------------
     let mut model_note: Option<String> = None;
-    match deps.conversation_service.get(ctx.user_id.as_str(), &target_conversation).await {
+    match deps.conversation.get(ctx.user_id.as_str(), &target_conversation).await {
         Ok(conv) => {
             let model_missing = conv.model.as_ref().is_none_or(|model| model.validate().is_err());
-            if conv.r#type == AgentType::Nomi && model_missing {
-                match provider_support::resolve_nomi_model(&deps, &ctx, None).await {
+            let supports_reconciliation = match deps
+                .conversation
+                .supports_scheduled_model_reconciliation(
+                    ctx.user_id.as_str(),
+                    &target_conversation,
+                )
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    return json!({
+                        "error": format!(
+                            "cannot determine whether the bound conversation supports scheduled model reconciliation: {error}"
+                        )
+                    });
+                }
+            };
+            if supports_reconciliation && model_missing {
+                match provider_support::resolve_nomi_model(&deps.provider_support, &ctx, None).await {
                     Ok((m, source)) => {
                         let req = UpdateConversationRequest {
                             name: None,
@@ -144,8 +196,8 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronCreateParams) -> 
                             extra: None,
                         };
                         if let Err(e) = deps
-                            .conversation_service
-                            .update(ctx.user_id.as_str(), &target_conversation, req, &deps.runtime_registry)
+                            .conversation
+                            .update(ctx.user_id.as_str(), &target_conversation, req)
                             .await
                         {
                             return json!({ "error": format!("failed to persist auto-selected model onto the bound conversation: {e}") });
@@ -172,7 +224,13 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronCreateParams) -> 
         schedule_description: p.description.unwrap_or_default(),
         message: p.message,
     };
-    let result = ICronService::create_job(deps.cron_service.as_ref(), ctx.user_id.as_str(), &target_conversation, &params).await;
+    let result = ICronService::create_job(
+        deps.service.as_ref(),
+        ctx.user_id.as_str(),
+        &target_conversation,
+        &params,
+    )
+    .await;
     if result.success {
         ok(json!({ "message": result.message, "model_note": model_note }))
     } else {
@@ -180,7 +238,7 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronCreateParams) -> 
     }
 }
 
-async fn update(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronUpdateParams) -> Value {
+async fn update(deps: Arc<CronCapabilityDeps>, ctx: CallerCtx, p: CronUpdateParams) -> Value {
     let Some(target_conversation) = p
         .conversation_id
         .map(ConversationId::into_string)
@@ -195,13 +253,21 @@ async fn update(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronUpdateParams) -> 
         schedule_description: p.description.unwrap_or_default(),
         message: p.message,
     };
-    command_result(ICronService::update_job(deps.cron_service.as_ref(), ctx.user_id.as_str(), &target_conversation, &params).await)
+    command_result(
+        ICronService::update_job(
+            deps.service.as_ref(),
+            ctx.user_id.as_str(),
+            &target_conversation,
+            &params,
+        )
+        .await,
+    )
 }
 
-async fn delete(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronDeleteParams) -> Value {
+async fn delete(deps: Arc<CronCapabilityDeps>, ctx: CallerCtx, p: CronDeleteParams) -> Value {
     command_result(
         ICronService::delete_job(
-            deps.cron_service.as_ref(),
+            deps.service.as_ref(),
             ctx.user_id.as_str(),
             p.cron_job_id.as_str(),
         )
@@ -225,7 +291,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List scheduled cron jobs (all jobs by default; pass conversation_id to filter to one session).",
             EffectClass::Read,
         ),
-        list,
+        adapt(list),
     ));
     out.push(Capability::new::<CronCreateParams, _, _>(
         CapabilityMeta::new(
@@ -234,7 +300,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Schedule a recurring prompt (cron). Binds to conversation_id or the calling conversation; guards against duplicates and model-less nomi sessions.",
             EffectClass::Write,
         ),
-        create,
+        adapt(create),
     ));
     out.push(Capability::new::<CronUpdateParams, _, _>(
         CapabilityMeta::new(
@@ -243,7 +309,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Update a cron job (full replacement of name/cron/message).",
             EffectClass::Write,
         ),
-        update,
+        adapt(update),
     ));
     out.push(Capability::new::<CronDeleteParams, _, _>(
         CapabilityMeta::new(
@@ -252,7 +318,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Delete a cron job.",
             EffectClass::Destructive,
         ),
-        delete,
+        adapt(delete),
     ));
 }
 

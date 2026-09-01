@@ -686,10 +686,19 @@
       "migration_wave": "wave5_automation_supervision_remote",
       "current_coupling_refs": [
         {
-          "path": "crates/backend/nomifun-public/src/handler.rs",
+          "path": "crates/backend/nomifun-public/src/canonical.rs",
           "symbols": [
-            "GatewayDeps",
-            "Registry::global"
+            "CanonicalRemoteMcpHandler",
+            "AgentPlatform",
+            "AgentSessionCommandPort"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-app/src/router/remote_rest.rs",
+          "symbols": [
+            "open",
+            "turn",
+            "cancel"
           ]
         }
       ]
@@ -700,9 +709,17 @@
       "migration_wave": "wave5_automation_supervision_remote",
       "current_coupling_refs": [
         {
-          "path": "crates/backend/nomifun-public/src/session.rs",
+          "path": "crates/backend/nomifun-public/src/canonical.rs",
           "symbols": [
-            "RemoteMcpSessionAdmissionAuthority"
+            "CanonicalRemoteMcpHandler",
+            "AgentSessionQueryPort",
+            "observe"
+          ]
+        },
+        {
+          "path": "crates/backend/nomifun-app/src/router/remote_rest.rs",
+          "symbols": [
+            "observe"
           ]
         }
       ]

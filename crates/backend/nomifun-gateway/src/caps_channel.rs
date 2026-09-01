@@ -5,7 +5,7 @@
 //! user — the headline use case is "set up a Telegram bot and bind it to my
 //! work companion" spoken via conversation (no manual UI required).
 //!
-//! ## Assumed GatewayDeps field
+//! ## Assumed CompatibilityCapabilityHost field
 //!
 //! ```ignore
 //! pub channel_state: nomifun_channel::ChannelRouterState,
@@ -18,6 +18,7 @@
 //! `Arc<ChannelSettingsService>`, `Option<Arc<dyn ChannelAgentProfile>>`, and
 //! `ExtensionRegistry`.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_common::{ChannelPluginId, ChannelUserId, CompanionId};
@@ -25,7 +26,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::deps::GatewayDeps;
+use crate::deps::CompatibilityCapabilityHost;
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
@@ -210,19 +211,44 @@ struct SetCompanionParams {
 
 // ── handlers ─────────────────────────────────────────────────────────────
 
-async fn list_plugins(deps: Arc<GatewayDeps>, _p: ListPluginsParams) -> Value {
-    match deps.channel_state.manager.get_plugin_status().await {
+#[derive(Clone)]
+struct ChannelCapabilityDeps {
+    state: nomifun_channel::ChannelRouterState,
+    workshop: Arc<nomifun_workshop::WorkshopService>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, crate::deps::CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<ChannelCapabilityDeps>, P) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, _ctx, params| {
+        handler(
+            Arc::new(ChannelCapabilityDeps {
+                state: deps.channel_state.clone(),
+                workshop: deps.workshop_service.clone(),
+            }),
+            params,
+        )
+    }
+}
+
+async fn list_plugins(deps: Arc<ChannelCapabilityDeps>, _p: ListPluginsParams) -> Value {
+    match deps.state.manager.get_plugin_status().await {
         Ok(statuses) => ok(statuses),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn enable_plugin(deps: Arc<GatewayDeps>, p: EnablePluginParams) -> Value {
+async fn enable_plugin(deps: Arc<ChannelCapabilityDeps>, p: EnablePluginParams) -> Value {
     use nomifun_channel::manager::EnableChannelSpec;
 
     // Validate companion binding if provided.
     if let Some(companion_id) = p.companion_id.as_ref().map(CompanionId::as_str) {
-        if let Some(profile) = &deps.channel_state.channel_agent_profile {
+        if let Some(profile) = &deps.state.channel_agent_profile {
             if !profile.companion_exists(companion_id).await {
                 return json!({ "error": format!("companion '{}' not found", companion_id) });
             }
@@ -239,9 +265,9 @@ async fn enable_plugin(deps: Arc<GatewayDeps>, p: EnablePluginParams) -> Value {
     };
 
     match deps
-        .channel_state
+        .state
         .manager
-        .enable_plugin(&spec, &p.config, deps.channel_state.plugin_factory.as_ref())
+        .enable_plugin(&spec, &p.config, deps.state.plugin_factory.as_ref())
         .await
     {
         Ok(plugin_id) => ok(json!({
@@ -252,21 +278,21 @@ async fn enable_plugin(deps: Arc<GatewayDeps>, p: EnablePluginParams) -> Value {
     }
 }
 
-async fn disable_plugin(deps: Arc<GatewayDeps>, p: DisablePluginParams) -> Value {
-    match deps.channel_state.manager.disable_plugin(p.plugin_id.as_str()).await {
+async fn disable_plugin(deps: Arc<ChannelCapabilityDeps>, p: DisablePluginParams) -> Value {
+    match deps.state.manager.disable_plugin(p.plugin_id.as_str()).await {
         Ok(()) => ok(json!({ "disabled": true, "plugin_id": p.plugin_id })),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn delete_plugin(deps: Arc<GatewayDeps>, p: DeletePluginParams) -> Value {
-    match deps.channel_state.manager.delete_channel(p.plugin_id.as_str()).await {
+async fn delete_plugin(deps: Arc<ChannelCapabilityDeps>, p: DeletePluginParams) -> Value {
+    match deps.state.manager.delete_channel(p.plugin_id.as_str()).await {
         Ok(()) => json!({ "result": format!("channel {} permanently deleted", p.plugin_id) }),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn test_plugin(deps: Arc<GatewayDeps>, p: TestPluginParams) -> Value {
+async fn test_plugin(deps: Arc<ChannelCapabilityDeps>, p: TestPluginParams) -> Value {
     use nomifun_channel::types::{PluginConfig, PluginCredentials};
 
     let mut credentials = PluginCredentials::default();
@@ -344,9 +370,9 @@ async fn test_plugin(deps: Arc<GatewayDeps>, p: TestPluginParams) -> Value {
     };
 
     match deps
-        .channel_state
+        .state
         .manager
-        .test_plugin(&p.plugin_type, config, deps.channel_state.plugin_factory.as_ref())
+        .test_plugin(&p.plugin_type, config, deps.state.plugin_factory.as_ref())
         .await
     {
         Ok(bot_username) => ok(json!({
@@ -360,8 +386,8 @@ async fn test_plugin(deps: Arc<GatewayDeps>, p: TestPluginParams) -> Value {
     }
 }
 
-async fn list_pairings(deps: Arc<GatewayDeps>, _p: ListPairingsParams) -> Value {
-    match deps.channel_state.pairing_service.get_pending_pairings().await {
+async fn list_pairings(deps: Arc<ChannelCapabilityDeps>, _p: ListPairingsParams) -> Value {
+    match deps.state.pairing_service.get_pending_pairings().await {
         Ok(rows) => {
             let pairings: Vec<Value> = rows
                 .into_iter()
@@ -383,8 +409,8 @@ async fn list_pairings(deps: Arc<GatewayDeps>, _p: ListPairingsParams) -> Value 
     }
 }
 
-async fn approve_pairing(deps: Arc<GatewayDeps>, p: ApprovePairingParams) -> Value {
-    match deps.channel_state.pairing_service.approve_pairing(&p.code).await {
+async fn approve_pairing(deps: Arc<ChannelCapabilityDeps>, p: ApprovePairingParams) -> Value {
+    match deps.state.pairing_service.approve_pairing(&p.code).await {
         Ok(()) => ok(json!({ "approved": true, "code": p.code })),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -395,7 +421,7 @@ async fn approve_pairing(deps: Arc<GatewayDeps>, p: ApprovePairingParams) -> Val
 /// pipeline that ships AI-generated images through the channel. Delivery only
 /// happens when the current turn arrived over an IM channel (a relay is running
 /// for it); on a plain desktop turn the asset is prepared but nothing is pushed.
-async fn send_file(deps: Arc<GatewayDeps>, p: SendFileParams) -> Value {
+async fn send_file(deps: Arc<ChannelCapabilityDeps>, p: SendFileParams) -> Value {
     use std::path::Path;
 
     let path = p.path.trim();
@@ -424,7 +450,7 @@ async fn send_file(deps: Arc<GatewayDeps>, p: SendFileParams) -> Value {
     let origin = json!({ "source": "nomi_channel_send_file", "path": path });
 
     match deps
-        .workshop_service
+        .workshop
         .ingest_asset_bytes(bytes, mime, &file_name, false, Some(origin))
         .await
     {
@@ -468,15 +494,15 @@ fn mime_for_file_name(name: &str) -> &'static str {
     }
 }
 
-async fn reject_pairing(deps: Arc<GatewayDeps>, p: RejectPairingParams) -> Value {
-    match deps.channel_state.pairing_service.reject_pairing(&p.code).await {
+async fn reject_pairing(deps: Arc<ChannelCapabilityDeps>, p: RejectPairingParams) -> Value {
+    match deps.state.pairing_service.reject_pairing(&p.code).await {
         Ok(()) => ok(json!({ "rejected": true, "code": p.code })),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn list_users(deps: Arc<GatewayDeps>, _p: ListUsersParams) -> Value {
-    match deps.channel_state.repo.get_all_users().await {
+async fn list_users(deps: Arc<ChannelCapabilityDeps>, _p: ListUsersParams) -> Value {
+    match deps.state.repo.get_all_users().await {
         Ok(rows) => {
             let users: Vec<Value> = rows
                 .into_iter()
@@ -498,9 +524,9 @@ async fn list_users(deps: Arc<GatewayDeps>, _p: ListUsersParams) -> Value {
     }
 }
 
-async fn revoke_user(deps: Arc<GatewayDeps>, p: RevokeUserParams) -> Value {
+async fn revoke_user(deps: Arc<ChannelCapabilityDeps>, p: RevokeUserParams) -> Value {
     match deps
-        .channel_state
+        .state
         .pairing_service
         .revoke_user(p.channel_user_id.as_str())
         .await
@@ -510,12 +536,12 @@ async fn revoke_user(deps: Arc<GatewayDeps>, p: RevokeUserParams) -> Value {
     }
 }
 
-async fn set_companion(deps: Arc<GatewayDeps>, p: SetCompanionParams) -> Value {
+async fn set_companion(deps: Arc<ChannelCapabilityDeps>, p: SetCompanionParams) -> Value {
     let companion_id = p.companion_id.as_ref().map(CompanionId::as_str);
 
     // Validate companion existence if binding (not clearing).
     if let Some(cid) = companion_id {
-        if let Some(profile) = &deps.channel_state.channel_agent_profile {
+        if let Some(profile) = &deps.state.channel_agent_profile {
             if !profile.companion_exists(cid).await {
                 return json!({ "error": format!("companion '{}' not found", cid) });
             }
@@ -523,7 +549,7 @@ async fn set_companion(deps: Arc<GatewayDeps>, p: SetCompanionParams) -> Value {
     }
 
     match deps
-        .channel_state
+        .state
         .manager
         .rebind_channel_companion(p.plugin_id.as_str(), companion_id)
         .await
@@ -550,7 +576,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List all configured IM channel bots (telegram, discord, slack, lark, etc.) with their connection status, companion binding, and authorized user count.",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| list_plugins(deps, p),
+        adapt(list_plugins),
     ));
 
     // 2. Enable/configure a bot channel (sensitive — writes credentials).
@@ -561,7 +587,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Enable or reconfigure an IM bot channel with platform-specific credentials. Creates a new bot if plugin_id is omitted, updates existing if provided. Optionally binds to a companion.",
             EffectClass::Sensitive,
         ),
-        |deps, _ctx, p| enable_plugin(deps, p),
+        adapt(enable_plugin),
     ));
 
     // 3. Disable a bot channel (write — config retained).
@@ -572,7 +598,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Disable an IM bot channel. The bot is stopped but configuration is retained for re-enabling later.",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| disable_plugin(deps, p),
+        adapt(disable_plugin),
     ));
 
     // 4. Delete a bot channel permanently (destructive).
@@ -583,7 +609,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Permanently delete a bot channel: stops the bot, removes all its sessions, and deletes the database row. Conversations created through this bot survive.",
             EffectClass::Destructive,
         ),
-        |deps, _ctx, p| delete_plugin(deps, p),
+        adapt(delete_plugin),
     ));
 
     // 5. Test bot credentials (sensitive — sends a network probe).
@@ -594,7 +620,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Test IM bot credentials by probing the remote platform API. Returns the resolved bot_username on success. Does NOT persist any config changes.",
             EffectClass::Sensitive,
         ),
-        |deps, _ctx, p| test_plugin(deps, p),
+        adapt(test_plugin),
     ));
 
     // 6. List pending pairing/authorization requests (read-only).
@@ -605,7 +631,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List pending pairing requests from IM users waiting to be authorized to interact with the bot.",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| list_pairings(deps, p),
+        adapt(list_pairings),
     ));
 
     // 7. Approve a pairing request (write).
@@ -616,7 +642,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Approve a pending pairing request, granting the IM user authorization to interact with the bot.",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| approve_pairing(deps, p),
+        adapt(approve_pairing),
     ));
 
     // 8. Reject a pairing request (write).
@@ -627,7 +653,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Reject a pending pairing request, denying the IM user access to the bot.",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| reject_pairing(deps, p),
+        adapt(reject_pairing),
     ));
 
     // 9. List authorized users (read-only).
@@ -638,7 +664,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List all authorized IM users across all channel bots, including their platform info and last activity.",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| list_users(deps, p),
+        adapt(list_users),
     ));
 
     // 10. Revoke an authorized user (destructive — deletes access + sessions).
@@ -649,7 +675,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Revoke an authorized user's access: cleans up all their sessions and deletes the authorization record.",
             EffectClass::Destructive,
         ),
-        |deps, _ctx, p| revoke_user(deps, p),
+        adapt(revoke_user),
     ));
 
     // 11. Bind a channel bot to a companion (write).
@@ -660,7 +686,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Bind (or clear) the companion that handles one channel bot's conversations, addressed by its stable plugin_id. Clears that bot's sessions so the next message uses the new companion.",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| set_companion(deps, p),
+        adapt(set_companion),
     ));
 
     // 12. Send a local file/image to the user through the current IM channel (write).
@@ -671,7 +697,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Send a local file or image to the user you are chatting with, through their IM channel (WeChat/Telegram/etc.). Give an absolute file path; images are delivered as photos, other files as documents. Use THIS when the user asks you to send/deliver a file or picture to them — do NOT try to browse the web, download, or paste a file path as text. Only delivers when the current conversation arrived over an IM channel.",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| send_file(deps, p),
+        adapt(send_file),
     ));
 }
 

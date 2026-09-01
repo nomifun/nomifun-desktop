@@ -8,24 +8,26 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use nomifun_agent_contracts::{
-    ActionId, ArtifactEnvelope, CapabilityActionDescriptor, CapabilityContributions,
-    CapabilityId, CapabilityKind, CapabilityManifest, CanonicalErrorCode,
-    CanonicalSchemaRef, CancellationDescriptor, DeclaredServiceViewDescriptor,
-    EffectClass, HostPortId, HostPortRef, InProcessEntrypointMetadata,
+    ActionId, AgentSessionId, ArtifactEnvelope, CapabilityActionDescriptor,
+    CapabilityContributions, CapabilityId, CapabilityKind, CapabilityManifest,
+    CanonicalErrorCode, CanonicalSchemaRef, CancellationDescriptor,
+    CorrelationId, DeclaredServiceViewDescriptor, EffectClass, HostPortBindingDescriptor,
+    HostPortId, HostPortRef, IdempotencyKey, InProcessEntrypointMetadata,
     LocalizedMetadata, ManagedTaskRegistrationDescriptor, PackageContributions,
     PackageId, PackageManifest, PackageRef, PlatformConstraint, PluginBootCriticality,
     PluginBootState, PluginContextDescriptor, PluginDesiredState, PluginEffectiveState,
     PluginIdentityDescriptor, PluginMountId, PluginRegistrarDescriptor,
     PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind,
     PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod,
-    ResourceKind, RuntimeTarget, ScopeKey, StrictJsonValue, ToolPresentationKind,
-    ValidatedPluginConfig, VersionString, CAPABILITY_UNAVAILABLE_ON_PLATFORM,
-    digest_payload,
+    OperationId, PrincipalRef, ResolvedSnapshotRef, ResourceKind, RuntimeTarget, ScopeKey,
+    StrictJsonValue, ToolPresentationKind, TypedResourceBindings, ValidatedPluginConfig,
+    VersionString, CAPABILITY_UNAVAILABLE_ON_PLATFORM, digest_payload,
 };
 use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, KernelError, PluginRegistration,
@@ -205,6 +207,107 @@ const CONNECTOR_RESOURCES: &[&str] = &["mcp_server"];
 
 const PLUGIN_CANCEL_PORT: &str = "host.plugin.cancel";
 const PLUGIN_TASKS_PORT: &str = "host.plugin.tasks";
+
+/// The single host port used by action-bearing Wave 2 capabilities.
+///
+/// The domain crate owns capability metadata and invocation validation.  The
+/// host owns filesystem, process, SSH, MCP, Browser, and Computer facts and
+/// must provide the real action result through this port.
+pub const WAVE2_CAPABILITY_HOST_PORT_ID: &str = "host.wave2.capability.invoke";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wave2HostContext {
+    pub principal: PrincipalRef,
+    pub agent_session_id: AgentSessionId,
+    pub operation_id: OperationId,
+    pub idempotency_key: IdempotencyKey,
+    pub correlation_id: CorrelationId,
+    pub resolved_snapshot_ref: ResolvedSnapshotRef,
+    pub registry_generation: u64,
+    pub capability_id: CapabilityId,
+    pub action_id: ActionId,
+    pub resource_bindings: TypedResourceBindings,
+}
+
+/// A family-typed action operation for the host adapter.
+///
+/// Capability and action identity remain in [`Wave2HostContext`].  The
+/// variant prevents a host adapter from treating every Wave 2 action as an
+/// untyped generic success path while leaving capability-specific JSON
+/// decoding to the owning host service.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Wave2CapabilityOperation {
+    WorkspaceExecution { input: StrictJsonValue },
+    Ssh { input: StrictJsonValue },
+    McpConnectors { input: StrictJsonValue },
+    Browser { input: StrictJsonValue },
+    ComputerA11y { input: StrictJsonValue },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wave2HostRequest {
+    pub context: Wave2HostContext,
+    pub operation: Wave2CapabilityOperation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wave2HostPortError {
+    pub code: String,
+    pub message: String,
+}
+
+impl Wave2HostPortError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::new("WAVE2_HOST_PORT_UNAVAILABLE", message)
+    }
+}
+
+impl fmt::Display for Wave2HostPortError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for Wave2HostPortError {}
+
+/// Host-owned implementation boundary for action-bearing Wave 2 capabilities.
+pub trait Wave2HostPort: Send + Sync {
+    fn invoke<'a>(
+        &'a self,
+        request: Wave2HostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'a>>;
+}
+
+struct UnconfiguredWave2HostPort;
+
+impl Wave2HostPort for UnconfiguredWave2HostPort {
+    fn invoke<'a>(
+        &'a self,
+        request: Wave2HostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            Err(Wave2HostPortError::unavailable(format!(
+                "no production host adapter is bound for {}",
+                request.context.capability_id.as_ref()
+            )))
+        })
+    }
+}
+
+/// Return the default adapter used by metadata-only compositions.
+///
+/// It deliberately fails closed; it never fabricates an action result.
+pub fn unconfigured_host_port() -> Arc<dyn Wave2HostPort> {
+    Arc::new(UnconfiguredWave2HostPort)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PlatformScope {
@@ -473,12 +576,17 @@ const PACKAGE_DEFINITIONS: &[PackageDefinition] = &[
     },
 ];
 
-/// Build the complete Wave 2 bundled registration inventory.
-///
-/// Every action-bearing Capability receives exactly one deterministic typed
-/// handler.  Context, resource-provider, event-source, and transport
-/// contributions intentionally do not receive Tool handlers.
+/// Build the complete Wave 2 bundled registration inventory with a
+/// fail-closed host adapter.
 pub fn registrations() -> Result<Vec<PluginRegistration>, String> {
+    registrations_with_host_port(unconfigured_host_port())
+}
+
+/// Build the complete Wave 2 bundled registration inventory with an
+/// application-owned action host port.
+pub fn registrations_with_host_port(
+    action_host_port: Arc<dyn Wave2HostPort>,
+) -> Result<Vec<PluginRegistration>, String> {
     let mut registrations = Vec::with_capacity(PACKAGE_DEFINITIONS.len());
     let mut packages = BTreeSet::new();
     let mut mounts = BTreeSet::new();
@@ -491,7 +599,7 @@ pub fn registrations() -> Result<Vec<PluginRegistration>, String> {
         if !mounts.insert(package.mount_id) {
             return Err(format!("duplicate Wave 2 mount {}", package.mount_id));
         }
-        let registration = build_registration(package)?;
+        let registration = build_registration(package, Arc::clone(&action_host_port))?;
         for capability in &registration
             .metadata
             .manifest
@@ -520,7 +628,10 @@ pub fn registrations() -> Result<Vec<PluginRegistration>, String> {
     Ok(registrations)
 }
 
-fn build_registration(package: &PackageDefinition) -> Result<PluginRegistration, String> {
+fn build_registration(
+    package: &PackageDefinition,
+    action_host_port: Arc<dyn Wave2HostPort>,
+) -> Result<PluginRegistration, String> {
     let package_ref = PackageRef {
         id: PackageId::from(package.id),
         version: VersionString::from(CONTRACT_VERSION),
@@ -580,6 +691,18 @@ fn build_registration(package: &PackageDefinition) -> Result<PluginRegistration,
     };
     let cancellation_port = host_port(PLUGIN_CANCEL_PORT);
     let tasks_port = host_port(PLUGIN_TASKS_PORT);
+    let action_port = host_port(WAVE2_CAPABILITY_HOST_PORT_ID);
+    let has_action_handler = !handlers.is_empty();
+    let mut declared_host_ports =
+        BTreeSet::from([cancellation_port.id.clone(), tasks_port.id.clone()]);
+    if has_action_handler {
+        declared_host_ports.insert(action_port.id.clone());
+    }
+    let host_port_bindings = if has_action_handler {
+        vec![host_port_binding()?]
+    } else {
+        Vec::new()
+    };
     let metadata = PluginRegistrationMetadata {
         manifest: ArtifactEnvelope::new(manifest)
             .map_err(|error| format!("build {} manifest: {error}", package.id))?,
@@ -605,10 +728,7 @@ fn build_registration(package: &PackageDefinition) -> Result<PluginRegistration,
             declared_skill_ids: BTreeSet::new(),
             declared_mcp_tool_keys: BTreeSet::new(),
             declared_service_keys: BTreeSet::new(),
-            declared_host_ports: BTreeSet::from([
-                HostPortId::from(PLUGIN_CANCEL_PORT),
-                HostPortId::from(PLUGIN_TASKS_PORT),
-            ]),
+            declared_host_ports,
         },
         context: PluginContextDescriptor {
             identity: identity.clone(),
@@ -625,7 +745,7 @@ fn build_registration(package: &PackageDefinition) -> Result<PluginRegistration,
                 methods: PluginStateMethod::REQUIRED.into_iter().collect(),
             },
             declared_services: DeclaredServiceViewDescriptor::default(),
-            host_ports: Vec::new(),
+            host_ports: host_port_bindings,
             typed_command_ports: Vec::new(),
             domain_outbox_ports: Vec::new(),
             cancellation: CancellationDescriptor {
@@ -644,10 +764,11 @@ fn build_registration(package: &PackageDefinition) -> Result<PluginRegistration,
         registration
             .add_capability_handler(
                 capability_id.clone(),
-                Arc::new(DeterministicToolHandler {
+                Arc::new(Wave2CapabilityHandler {
                     capability_id,
                     action_id,
                     required_resource_kinds,
+                    host_port: Arc::clone(&action_host_port),
                 }),
             )
             .map_err(|error| format!("register {} handler: {error}", package.id))?;
@@ -717,18 +838,23 @@ fn build_capability(
                 .iter()
                 .map(|resource_kind| ResourceKind::from(*resource_kind))
                 .collect(),
-            host_ports: Vec::new(),
+            host_ports: definition
+                .is_tool()
+                .then(|| host_port(WAVE2_CAPABILITY_HOST_PORT_ID))
+                .into_iter()
+                .collect(),
         },
     })
 }
 
-struct DeterministicToolHandler {
+struct Wave2CapabilityHandler {
     capability_id: CapabilityId,
     action_id: ActionId,
     required_resource_kinds: BTreeSet<ResourceKind>,
+    host_port: Arc<dyn Wave2HostPort>,
 }
 
-impl CapabilityHandler for DeterministicToolHandler {
+impl CapabilityHandler for Wave2CapabilityHandler {
     fn invoke<'life0, 'async_trait>(
         &'life0 self,
         context: CapabilityInvocationContext,
@@ -762,6 +888,34 @@ impl CapabilityHandler for DeterministicToolHandler {
                 });
             }
 
+            let mut binding_ids = BTreeSet::new();
+            for binding in &context.resource_bindings {
+                if binding.binding_id.as_ref().is_empty()
+                    || binding.resource_id.as_ref().is_empty()
+                {
+                    return Err(KernelError::CapabilityExecution {
+                        reason: format!(
+                            "{} requires non-empty binding and resource IDs",
+                            self.capability_id.as_ref()
+                        ),
+                    });
+                }
+                if !binding_ids.insert(binding.binding_id.clone()) {
+                    return Err(KernelError::CapabilityExecution {
+                        reason: format!(
+                            "{} received duplicate resource binding {}",
+                            self.capability_id.as_ref(),
+                            binding.binding_id.as_ref()
+                        ),
+                    });
+                }
+                if binding.owner_id != context.principal.principal_id {
+                    return Err(KernelError::ResourceOwnerMismatch {
+                        binding_id: binding.binding_id.clone(),
+                    });
+                }
+            }
+
             for resource_kind in &self.required_resource_kinds {
                 if !context
                     .resource_bindings
@@ -775,46 +929,73 @@ impl CapabilityHandler for DeterministicToolHandler {
                 }
             }
 
-            let mut resource_binding_ids = context
-                .resource_bindings
-                .iter()
-                .map(|binding| binding.binding_id.as_ref().to_owned())
-                .collect::<Vec<_>>();
-            resource_binding_ids.sort();
-
-            Ok(deterministic_result(
-                &self.capability_id,
-                &self.action_id,
-                context.registry_generation,
-                resource_binding_ids,
-                input,
-            ))
+            let operation = operation_for(&self.capability_id, input)?;
+            self.host_port
+                .invoke(Wave2HostRequest {
+                    context: Wave2HostContext {
+                        principal: context.principal,
+                        agent_session_id: context.agent_session_id,
+                        operation_id: context.operation_id,
+                        idempotency_key: context.idempotency_key,
+                        correlation_id: context.correlation_id,
+                        resolved_snapshot_ref: context.resolved_snapshot_ref,
+                        registry_generation: context.registry_generation,
+                        capability_id: self.capability_id.clone(),
+                        action_id: context.action_id,
+                        resource_bindings: context.resource_bindings,
+                    },
+                    operation,
+                })
+                .await
+                .map_err(|error| KernelError::CapabilityExecution {
+                    reason: error.to_string(),
+                })
         })
     }
 }
 
-fn deterministic_result(
+fn operation_for(
     capability_id: &CapabilityId,
-    action_id: &ActionId,
-    registry_generation: u64,
-    resource_binding_ids: Vec<String>,
     input: StrictJsonValue,
-) -> StrictJsonValue {
-    let mut result = empty_object();
-    let object = result
-        .0
-        .as_object_mut()
-        .expect("empty_object always returns an object");
-    object.insert("accepted".to_owned(), true.into());
-    object.insert(
-        "capability_id".to_owned(),
-        capability_id.as_ref().to_owned().into(),
-    );
-    object.insert("action_id".to_owned(), action_id.as_ref().to_owned().into());
-    object.insert("registry_generation".to_owned(), registry_generation.into());
-    object.insert("resource_binding_ids".to_owned(), resource_binding_ids.into());
-    object.insert("input".to_owned(), input.0);
-    result
+) -> Result<Wave2CapabilityOperation, KernelError> {
+    let operation = match capability_id.as_ref() {
+        "fs.read"
+        | "fs.search"
+        | "fs.write"
+        | "fs.patch"
+        | "fs.delete"
+        | "fs.snapshot"
+        | "vcs.status"
+        | "vcs.diff"
+        | "vcs.stage"
+        | "vcs.commit"
+        | "vcs.push"
+        | "process.exec" => Wave2CapabilityOperation::WorkspaceExecution { input },
+        "ssh.fs.read" | "ssh.fs.write" | "ssh.exec" | "ssh.sudo" => {
+            Wave2CapabilityOperation::Ssh { input }
+        }
+        "mcp.tool_proxy" | "connector.data.read" | "connector.data.write" => {
+            Wave2CapabilityOperation::McpConnectors { input }
+        }
+        "browser.navigate"
+        | "browser.act"
+        | "browser.download"
+        | "browser.upload"
+        | "browser.evaluate"
+        | "browser.takeover" => Wave2CapabilityOperation::Browser { input },
+        "computer.input" | "computer.launch" => {
+            Wave2CapabilityOperation::ComputerA11y { input }
+        }
+        _ => {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!(
+                    "{} does not expose an action host operation",
+                    capability_id.as_ref()
+                ),
+            });
+        }
+    };
+    Ok(operation)
 }
 
 /// Return the complete canonical Wave 2 Capability ID set.
@@ -914,27 +1095,27 @@ pub fn unavailable_on_platform_code() -> CanonicalErrorCode {
 /// Build one package registration from the same factory used by
 /// [`registrations`].
 pub fn workspace_execution_registration() -> Result<PluginRegistration, String> {
-    build_registration(&PACKAGE_DEFINITIONS[0])
+    build_registration(&PACKAGE_DEFINITIONS[0], unconfigured_host_port())
 }
 
 /// Build the bundled SSH registration.
 pub fn ssh_registration() -> Result<PluginRegistration, String> {
-    build_registration(&PACKAGE_DEFINITIONS[1])
+    build_registration(&PACKAGE_DEFINITIONS[1], unconfigured_host_port())
 }
 
 /// Build the bundled MCP/connectors registration.
 pub fn mcp_connectors_registration() -> Result<PluginRegistration, String> {
-    build_registration(&PACKAGE_DEFINITIONS[2])
+    build_registration(&PACKAGE_DEFINITIONS[2], unconfigured_host_port())
 }
 
 /// Build the bundled Browser registration.
 pub fn browser_registration() -> Result<PluginRegistration, String> {
-    build_registration(&PACKAGE_DEFINITIONS[3])
+    build_registration(&PACKAGE_DEFINITIONS[3], unconfigured_host_port())
 }
 
 /// Build the bundled Computer/A11y registration.
 pub fn computer_a11y_registration() -> Result<PluginRegistration, String> {
-    build_registration(&PACKAGE_DEFINITIONS[4])
+    build_registration(&PACKAGE_DEFINITIONS[4], unconfigured_host_port())
 }
 
 fn definition_for(capability_id: &str) -> Option<CapabilityDefinition> {
@@ -983,8 +1164,8 @@ fn target_constraint(targets: &[&str]) -> Vec<PlatformConstraint> {
 
 fn schema_ref(capability_id: &str, role: &str) -> Result<CanonicalSchemaRef, String> {
     let schema = match role {
-        "input" => open_object_schema(),
-        "output" => output_schema(),
+        "input" | "request" => open_object_schema(),
+        "output" | "response" => output_schema(),
         _ => object_schema(),
     };
     let digest = digest_payload(&schema)
@@ -1018,66 +1199,9 @@ fn open_object_schema() -> StrictJsonValue {
 }
 
 fn output_schema() -> StrictJsonValue {
-    let mut schema = object_schema();
-    let mut properties = empty_object();
-    let properties_object = properties
-        .0
-        .as_object_mut()
-        .expect("empty_object always returns an object");
-    properties_object.insert("accepted".to_owned(), property_schema("boolean").0);
-    properties_object.insert(
-        "capability_id".to_owned(),
-        property_schema("string").0,
-    );
-    properties_object.insert("action_id".to_owned(), property_schema("string").0);
-    properties_object.insert(
-        "registry_generation".to_owned(),
-        property_schema("integer").0,
-    );
-    let mut resource_binding_ids = empty_object();
-    let resource_binding_ids_object = resource_binding_ids
-        .0
-        .as_object_mut()
-        .expect("empty_object always returns an object");
-    resource_binding_ids_object.insert("type".to_owned(), "array".to_owned().into());
-    resource_binding_ids_object.insert(
-        "items".to_owned(),
-        property_schema("string").0,
-    );
-    properties_object.insert(
-        "resource_binding_ids".to_owned(),
-        resource_binding_ids.0,
-    );
-    properties_object.insert("input".to_owned(), open_object_schema().0);
-
-    let schema_object = schema
-        .0
-        .as_object_mut()
-        .expect("object_schema always returns an object");
-    schema_object.insert("properties".to_owned(), properties.0);
-    schema_object.insert(
-        "required".to_owned(),
-        vec![
-            "accepted",
-            "capability_id",
-            "action_id",
-            "registry_generation",
-            "resource_binding_ids",
-            "input",
-        ]
-        .into(),
-    );
-    schema
-}
-
-fn property_schema(type_name: &str) -> StrictJsonValue {
-    let mut schema = empty_object();
-    let object = schema
-        .0
-        .as_object_mut()
-        .expect("empty_object always returns an object");
-    object.insert("type".to_owned(), type_name.to_owned().into());
-    schema
+    // The owning host service defines the operation result.  The registration
+    // only requires an object and does not publish a fabricated result shape.
+    open_object_schema()
 }
 
 fn empty_object() -> StrictJsonValue {
@@ -1108,6 +1232,14 @@ fn host_port(id: &str) -> HostPortRef {
         id: HostPortId::from(id),
         version: VersionString::from(CONTRACT_VERSION),
     }
+}
+
+fn host_port_binding() -> Result<HostPortBindingDescriptor, String> {
+    Ok(HostPortBindingDescriptor {
+        port: host_port(WAVE2_CAPABILITY_HOST_PORT_ID),
+        request_schema: schema_ref(WAVE2_CAPABILITY_HOST_PORT_ID, "request")?,
+        response_schema: schema_ref(WAVE2_CAPABILITY_HOST_PORT_ID, "response")?,
+    })
 }
 
 #[cfg(test)]
@@ -1191,10 +1323,33 @@ mod tests {
                         action_id(capability.id.as_ref()),
                         Some(capability.contributions.actions[0].action_id.clone())
                     );
+                    assert_eq!(
+                        capability.contributions.host_ports,
+                        vec![host_port(WAVE2_CAPABILITY_HOST_PORT_ID)]
+                    );
                 } else {
                     assert!(capability.contributions.actions.is_empty());
+                    assert!(capability.contributions.host_ports.is_empty());
                 }
             }
+            assert!(manifest
+                .contributions
+                .capabilities
+                .iter()
+                .any(|capability| capability.kind == CapabilityKind::Tool));
+            assert!(registration
+                .metadata
+                .context
+                .host_ports
+                .iter()
+                .any(|binding| {
+                    binding.port.id == HostPortId::from(WAVE2_CAPABILITY_HOST_PORT_ID)
+                }));
+            assert!(registration
+                .metadata
+                .registrar
+                .declared_host_ports
+                .contains(&HostPortId::from(WAVE2_CAPABILITY_HOST_PORT_ID)));
         }
     }
 
@@ -1229,42 +1384,60 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_handler_projection_is_stable_for_the_same_typed_input() {
-        let capability_id = CapabilityId::from("fs.read");
-        let action_id = action_id(capability_id.as_ref()).expect("Tool action");
-        let first = deterministic_result(
-            &capability_id,
-            &action_id,
-            3,
-            vec!["workspace".to_owned()],
-            empty_object(),
-        );
-        let second = deterministic_result(
-            &capability_id,
-            &action_id,
-            3,
-            vec!["workspace".to_owned()],
-            empty_object(),
-        );
-        assert_eq!(first, second);
+    fn every_action_capability_maps_to_a_typed_host_operation() {
+        for definition in PACKAGE_DEFINITIONS
+            .iter()
+            .flat_map(|package| package.capabilities.iter())
+            .filter(|definition| definition.is_tool())
+        {
+            let capability_id = CapabilityId::from(definition.id);
+            assert!(
+                operation_for(&capability_id, empty_object()).is_ok(),
+                "{} must have a host operation",
+                definition.id
+            );
+        }
+    }
+
+    #[test]
+    fn unconfigured_action_host_returns_a_typed_unavailable_error() {
+        use std::task::{Context, Poll, Waker};
+
+        let host_port = unconfigured_host_port();
+        let future = host_port.invoke(Wave2HostRequest {
+                context: Wave2HostContext {
+                    principal: PrincipalRef {
+                        principal_kind: "user".to_owned(),
+                        principal_id: "wave2-test-owner".to_owned(),
+                    },
+                    agent_session_id: AgentSessionId::from("wave2-test-session"),
+                    operation_id: OperationId::from("wave2-test-operation"),
+                    idempotency_key: IdempotencyKey::from("wave2-test-idempotency"),
+                    correlation_id: CorrelationId::from("wave2-test-correlation"),
+                    resolved_snapshot_ref: ResolvedSnapshotRef {
+                        snapshot_id: "snapshot".into(),
+                        snapshot_digest: "digest".into(),
+                    },
+                    registry_generation: 1,
+                    capability_id: CapabilityId::from("fs.read"),
+                    action_id: ActionId::from("fs.read.invoke"),
+                    resource_bindings: Vec::new(),
+                },
+                operation: Wave2CapabilityOperation::WorkspaceExecution {
+                    input: empty_object(),
+                },
+            });
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = std::pin::pin!(future);
+        let result = match future.as_mut().poll(&mut context) {
+            Poll::Ready(result) => result.expect_err("unconfigured Wave 2 actions must fail closed"),
+            Poll::Pending => panic!("unconfigured Wave 2 adapter must fail immediately"),
+        };
+        assert_eq!(result.code, "WAVE2_HOST_PORT_UNAVAILABLE");
         assert_eq!(
-            first
-                .0
-                .get("capability_id")
-                .and_then(|value| value.as_str()),
-            Some("fs.read")
-        );
-        assert_eq!(
-            first.0.get("accepted").and_then(|value| value.as_bool()),
-            Some(true)
-        );
-        assert_eq!(
-            first
-                .0
-                .get("resource_binding_ids")
-                .and_then(|value| value.as_array())
-                .map(Vec::len),
-            Some(1)
+            result.message,
+            "no production host adapter is bound for fs.read"
         );
     }
 

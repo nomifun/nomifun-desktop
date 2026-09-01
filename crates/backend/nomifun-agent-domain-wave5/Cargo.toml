@@ -7,3 +7,7 @@ license = "Apache-2.0"
 [dependencies]
 nomifun-agent-contracts = { path = "../nomifun-agent-contracts" }
 nomifun-agent-kernel = { path = "../nomifun-agent-kernel" }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

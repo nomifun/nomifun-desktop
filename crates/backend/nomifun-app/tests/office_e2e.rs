@@ -19,7 +19,10 @@ use tower::ServiceExt;
 
 use common::{body_json, get_request, json_with_token, setup_and_login};
 
-use nomifun_app::{AppConfig, AppServices, build_module_states, create_router_with_states};
+use nomifun_app::AppConfig;
+use nomifun_app::compatibility::{
+    AppServices, build_module_states, create_router_with_states,
+};
 use nomifun_office::{
     OfficeRouterState, OfficecliWatchManager, ProxyService, SnapshotService,
 };

@@ -9,6 +9,7 @@
 //! their values; the gateway exposes the DECISION watch's core knobs
 //! (enabled / tier / freeform policy).
 
+use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_api_types::{IdmmTargetKind, WatchTier};
@@ -16,7 +17,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 use crate::id_schema::{CanonicalEntityId, SessionTargetKind};
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
@@ -84,14 +85,13 @@ pub(crate) fn parse_target_id(kind: IdmmTargetKind, raw: String) -> Result<Strin
 /// Keeping this in one helper prevents the base and extended capability sets
 /// from drifting into different authorization behavior.
 pub(crate) async fn verify_target(
-    deps: &GatewayDeps,
+    service: &nomifun_idmm::IdmmService,
     ctx: &CallerCtx,
     kind: IdmmTargetKind,
     target_id: &str,
 ) -> Option<Value> {
     let user_id = ctx.user_id.as_str().to_owned();
-    match deps
-        .idmm_service
+    match service
         .verify_target_owner(kind, target_id, &user_id)
         .await
     {
@@ -102,13 +102,45 @@ pub(crate) async fn verify_target(
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
-async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetIdmmParams) -> Value {
+#[derive(Clone)]
+struct IdmmCapabilityDeps {
+    service: Arc<nomifun_idmm::IdmmService>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<IdmmCapabilityDeps>, CallerCtx, P) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, ctx, params| {
+        handler(
+            Arc::new(IdmmCapabilityDeps {
+                service: deps.idmm_service.clone(),
+            }),
+            ctx,
+            params,
+        )
+    }
+}
+
+async fn set(
+    deps: Arc<IdmmCapabilityDeps>,
+    ctx: CallerCtx,
+    p: SetIdmmParams,
+) -> Value {
     let kind = IdmmTargetKind::from(p.kind);
     let target_id = match parse_target_id(kind, p.target_id.into_string()) {
         Ok(target_id) => target_id,
         Err(error) => return error,
     };
-    if let Some(err) = verify_target(&deps, &ctx, kind, &target_id).await {
+    if let Some(err) = verify_target(deps.service.as_ref(), &ctx, kind, &target_id).await {
         return err;
     }
 
@@ -116,7 +148,7 @@ async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetIdmmParams) -> Value 
     // (fault watch / strategy / budget details) keep their values. The gateway
     // exposes the DECISION watch (the agent-facing decision capability).
     let mut cfg = match deps
-        .idmm_service
+        .service
         .read_config_persisted(ctx.user_id.as_str(), kind, &target_id)
         .await
     {
@@ -132,7 +164,7 @@ async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetIdmmParams) -> Value 
     }
 
     if let Err(e) = deps
-        .idmm_service
+        .service
         .save_config(ctx.user_id.as_str(), kind, &target_id, &cfg)
         .await
     {
@@ -142,7 +174,7 @@ async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetIdmmParams) -> Value 
         return json!({"error": e.to_string()});
     }
     match deps
-        .idmm_service
+        .service
         .build_state(ctx.user_id.as_str(), kind, &target_id)
         .await
     {
@@ -151,17 +183,21 @@ async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetIdmmParams) -> Value 
     }
 }
 
-async fn get(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetIdmmParams) -> Value {
+async fn get(
+    deps: Arc<IdmmCapabilityDeps>,
+    ctx: CallerCtx,
+    p: GetIdmmParams,
+) -> Value {
     let kind = IdmmTargetKind::from(p.kind);
     let target_id = match parse_target_id(kind, p.target_id.into_string()) {
         Ok(target_id) => target_id,
         Err(error) => return error,
     };
-    if let Some(err) = verify_target(&deps, &ctx, kind, &target_id).await {
+    if let Some(err) = verify_target(deps.service.as_ref(), &ctx, kind, &target_id).await {
         return err;
     }
     match deps
-        .idmm_service
+        .service
         .build_state(ctx.user_id.as_str(), kind, &target_id)
         .await
     {
@@ -181,7 +217,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Update IDMM supervision knobs (enabled / tier / steering prompt) and (re)arm the live supervisor for a conversation or terminal.",
             EffectClass::Write,
         ),
-        |deps, ctx, p| set(deps, ctx, p),
+        adapt(set),
     ));
     out.push(Capability::new::<GetIdmmParams, _, _>(
         CapabilityMeta::new(
@@ -190,7 +226,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Read the current IDMM config and live supervision state for a conversation or terminal.",
             EffectClass::Read,
         ),
-        |deps, ctx, p| get(deps, ctx, p),
+        adapt(get),
     ));
 }
 

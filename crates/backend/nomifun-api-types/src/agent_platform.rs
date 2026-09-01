@@ -114,6 +114,11 @@ pub struct AgentPresetDocumentDto {
     pub schema_version: String,
     pub surfaces: BTreeSet<String>,
     pub model_route_refs: BTreeMap<String, String>,
+    /// Canonical provider/model route objects. Legacy route IDs remain a
+    /// separate opaque reference and are rejected at persistence time unless
+    /// this map contains the matching complete record.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub chat_route_records: BTreeMap<String, Value>,
     pub initial_capabilities: Vec<CapabilitySelectionDto>,
     pub on_demand_capabilities: Vec<CapabilitySelectionDto>,
     pub skill_bindings: Vec<ExactCatalogRefDto>,
@@ -433,6 +438,8 @@ pub struct CreateAgentPresetFromTemplateRequest {
     pub resource_bindings: Vec<TemplateResourceSelectionDto>,
     #[serde(default)]
     pub model_route_refs: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub chat_route_records: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

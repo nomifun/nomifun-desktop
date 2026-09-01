@@ -3,7 +3,7 @@
 //! Lets the LLM agent manage the desktop's MCP server registry, enable/disable
 //! extensions, import/delete skills, and install extensions from the Hub.
 //!
-//! ## Assumed GatewayDeps fields (parent must wire):
+//! ## Assumed CompatibilityCapabilityHost fields (parent must wire):
 //!
 //! - `mcp_config_service: McpConfigService`
 //!    Clone of `states.mcp.config_service` (from `McpRouterState`).
@@ -36,9 +36,9 @@
 //! - `nomi_skill_set_tags` — needs `skill_tag_repo` + `builtin_skill_tags`;
 //!   low agent utility (user-facing tagging).
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, future::Future, sync::Arc};
 
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 use nomifun_api_types::McpServerId;
@@ -200,14 +200,58 @@ struct HubInstallExtensionParams {
 // MCP Server handlers
 // ══════════════════════════════════════════════════════════════════════════════
 
-async fn mcp_list_servers(deps: Arc<GatewayDeps>, _ctx: CallerCtx, _p: McpListServersParams) -> Value {
-    match deps.mcp_config_service.list_servers().await {
+#[derive(Clone)]
+struct McpCapabilityDeps {
+    config: nomifun_mcp::McpConfigService,
+    extensions: nomifun_extension::ExtensionRegistry,
+    hub_index: nomifun_extension::HubIndexManager,
+    hub_installer: nomifun_extension::HubInstaller,
+    skill_paths: nomifun_extension::SkillPaths,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<McpCapabilityDeps>, CallerCtx, P) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, ctx, params| {
+        handler(
+            Arc::new(McpCapabilityDeps {
+                config: deps.mcp_config_service.clone(),
+                extensions: deps.extension_registry.clone(),
+                hub_index: deps.hub_index_manager.clone(),
+                hub_installer: deps.hub_installer.clone(),
+                skill_paths: deps.skill_paths.clone(),
+            }),
+            ctx,
+            params,
+        )
+    }
+}
+
+async fn mcp_list_servers(
+    deps: Arc<McpCapabilityDeps>,
+    _ctx: CallerCtx,
+    _p: McpListServersParams,
+) -> Value {
+    match deps.config.list_servers().await {
         Ok(servers) => ok(servers),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn mcp_add_server(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: McpAddServerParams) -> Value {
+async fn mcp_add_server(
+    deps: Arc<McpCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: McpAddServerParams,
+) -> Value {
     let req = nomifun_api_types::CreateMcpServerRequest {
         name: p.name,
         description: p.description,
@@ -215,13 +259,17 @@ async fn mcp_add_server(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: McpAddServer
         original_json: None,
         builtin: false,
     };
-    match deps.mcp_config_service.add_server(req).await {
+    match deps.config.add_server(req).await {
         Ok(server) => ok(server),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn mcp_edit_server(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: McpEditServerParams) -> Value {
+async fn mcp_edit_server(
+    deps: Arc<McpCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: McpEditServerParams,
+) -> Value {
     let req = nomifun_api_types::UpdateMcpServerRequest {
         name: None,
         description: p.description,
@@ -230,7 +278,7 @@ async fn mcp_edit_server(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: McpEditServ
         builtin: None,
     };
     match deps
-        .mcp_config_service
+        .config
         .edit_server(&p.mcp_server_id, req)
         .await
     {
@@ -239,9 +287,13 @@ async fn mcp_edit_server(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: McpEditServ
     }
 }
 
-async fn mcp_delete_server(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: McpDeleteServerParams) -> Value {
+async fn mcp_delete_server(
+    deps: Arc<McpCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: McpDeleteServerParams,
+) -> Value {
     match deps
-        .mcp_config_service
+        .config
         .delete_server(&p.mcp_server_id)
         .await
     {
@@ -253,9 +305,13 @@ async fn mcp_delete_server(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: McpDelete
     }
 }
 
-async fn mcp_toggle_server(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: McpToggleServerParams) -> Value {
+async fn mcp_toggle_server(
+    deps: Arc<McpCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: McpToggleServerParams,
+) -> Value {
     match deps
-        .mcp_config_service
+        .config
         .toggle_server(&p.mcp_server_id)
         .await
     {
@@ -268,8 +324,12 @@ async fn mcp_toggle_server(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: McpToggle
 // Extension handlers
 // ══════════════════════════════════════════════════════════════════════════════
 
-async fn extension_list(deps: Arc<GatewayDeps>, _ctx: CallerCtx, _p: ExtensionListParams) -> Value {
-    let summaries = deps.extension_registry.get_loaded_extensions().await;
+async fn extension_list(
+    deps: Arc<McpCapabilityDeps>,
+    _ctx: CallerCtx,
+    _p: ExtensionListParams,
+) -> Value {
+    let summaries = deps.extensions.get_loaded_extensions().await;
     let items: Vec<Value> = summaries
         .into_iter()
         .map(|s| {
@@ -285,15 +345,27 @@ async fn extension_list(deps: Arc<GatewayDeps>, _ctx: CallerCtx, _p: ExtensionLi
     ok(items)
 }
 
-async fn extension_enable(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: ExtensionEnableParams) -> Value {
-    match deps.extension_registry.enable_extension(&p.name).await {
+async fn extension_enable(
+    deps: Arc<McpCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: ExtensionEnableParams,
+) -> Value {
+    match deps.extensions.enable_extension(&p.name).await {
         Ok(()) => ok(json!({ "enabled": true, "name": p.name })),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn extension_disable(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: ExtensionDisableParams) -> Value {
-    match deps.extension_registry.disable_extension(&p.name, p.reason.as_deref()).await {
+async fn extension_disable(
+    deps: Arc<McpCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: ExtensionDisableParams,
+) -> Value {
+    match deps
+        .extensions
+        .disable_extension(&p.name, p.reason.as_deref())
+        .await
+    {
         Ok(()) => ok(json!({ "disabled": true, "name": p.name })),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -303,7 +375,11 @@ async fn extension_disable(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: Extension
 // Skill handlers
 // ══════════════════════════════════════════════════════════════════════════════
 
-async fn skill_list(deps: Arc<GatewayDeps>, _ctx: CallerCtx, _p: SkillListParams) -> Value {
+async fn skill_list(
+    deps: Arc<McpCapabilityDeps>,
+    _ctx: CallerCtx,
+    _p: SkillListParams,
+) -> Value {
     match nomifun_extension::skill_service::list_available_skills(&deps.skill_paths).await {
         Ok(items) => {
             let resp: Vec<Value> = items
@@ -322,7 +398,11 @@ async fn skill_list(deps: Arc<GatewayDeps>, _ctx: CallerCtx, _p: SkillListParams
     }
 }
 
-async fn skill_import(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: SkillImportParams) -> Value {
+async fn skill_import(
+    deps: Arc<McpCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: SkillImportParams,
+) -> Value {
     let path = std::path::Path::new(&p.skill_path);
     match nomifun_extension::skill_service::import_skill(&deps.skill_paths, path).await {
         Ok(name) => ok(json!({ "imported": true, "skill_name": name })),
@@ -330,7 +410,11 @@ async fn skill_import(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: SkillImportPar
     }
 }
 
-async fn skill_delete(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: SkillDeleteParams) -> Value {
+async fn skill_delete(
+    deps: Arc<McpCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: SkillDeleteParams,
+) -> Value {
     match nomifun_extension::skill_service::delete_skill(&deps.skill_paths, &p.name).await {
         Ok(()) => ok(json!({ "deleted": true, "name": p.name })),
         Err(e) => json!({ "error": e.to_string() }),
@@ -341,8 +425,12 @@ async fn skill_delete(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: SkillDeletePar
 // Hub handlers
 // ══════════════════════════════════════════════════════════════════════════════
 
-async fn hub_list_extensions(deps: Arc<GatewayDeps>, _ctx: CallerCtx, _p: HubListExtensionsParams) -> Value {
-    let entries = deps.hub_index_manager.load_index().await;
+async fn hub_list_extensions(
+    deps: Arc<McpCapabilityDeps>,
+    _ctx: CallerCtx,
+    _p: HubListExtensionsParams,
+) -> Value {
+    let entries = deps.hub_index.load_index().await;
     let items: Vec<Value> = entries
         .into_iter()
         .map(|e| {
@@ -363,7 +451,11 @@ async fn hub_list_extensions(deps: Arc<GatewayDeps>, _ctx: CallerCtx, _p: HubLis
     ok(items)
 }
 
-async fn hub_install_extension(deps: Arc<GatewayDeps>, _ctx: CallerCtx, p: HubInstallExtensionParams) -> Value {
+async fn hub_install_extension(
+    deps: Arc<McpCapabilityDeps>,
+    _ctx: CallerCtx,
+    p: HubInstallExtensionParams,
+) -> Value {
     let result = deps.hub_installer.install(&p.name).await;
     ok(json!({
         "success": result.success,
@@ -386,7 +478,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List all configured MCP servers (name, transport, enabled state, connection status).",
             EffectClass::Read,
         ),
-        |deps, ctx, p| mcp_list_servers(deps, ctx, p),
+        adapt(mcp_list_servers),
     ));
 
     out.push(Capability::new::<McpAddServerParams, _, _>(
@@ -396,7 +488,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Add a new MCP server (stdio/sse/http). Upserts by name if one already exists. Headers may contain auth tokens.",
             EffectClass::Sensitive,
         ),
-        |deps, ctx, p| mcp_add_server(deps, ctx, p),
+        adapt(mcp_add_server),
     ));
 
     out.push(Capability::new::<McpEditServerParams, _, _>(
@@ -406,7 +498,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Edit an existing MCP server's transport or description (by mcp_server_id).",
             EffectClass::Write,
         ),
-        |deps, ctx, p| mcp_edit_server(deps, ctx, p),
+        adapt(mcp_edit_server),
     ));
 
     out.push(Capability::new::<McpDeleteServerParams, _, _>(
@@ -416,7 +508,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Permanently delete an MCP server configuration (by mcp_server_id).",
             EffectClass::Destructive,
         ),
-        |deps, ctx, p| mcp_delete_server(deps, ctx, p),
+        adapt(mcp_delete_server),
     ));
 
     out.push(Capability::new::<McpToggleServerParams, _, _>(
@@ -426,7 +518,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Toggle the enabled/disabled state of an MCP server (by mcp_server_id).",
             EffectClass::Write,
         ),
-        |deps, ctx, p| mcp_toggle_server(deps, ctx, p),
+        adapt(mcp_toggle_server),
     ));
 
     // ── Extensions ───────────────────────────────────────────────────────
@@ -438,7 +530,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List all loaded extensions (name, version, enabled state).",
             EffectClass::Read,
         ),
-        |deps, ctx, p| extension_list(deps, ctx, p),
+        adapt(extension_list),
     ));
 
     out.push(Capability::new::<ExtensionEnableParams, _, _>(
@@ -448,7 +540,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Enable a disabled extension by name.",
             EffectClass::Write,
         ),
-        |deps, ctx, p| extension_enable(deps, ctx, p),
+        adapt(extension_enable),
     ));
 
     out.push(Capability::new::<ExtensionDisableParams, _, _>(
@@ -458,7 +550,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Disable an enabled extension by name (with optional reason).",
             EffectClass::Write,
         ),
-        |deps, ctx, p| extension_disable(deps, ctx, p),
+        adapt(extension_disable),
     ));
 
     // ── Skills ───────────────────────────────────────────────────────────
@@ -470,7 +562,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List all available skills (built-in and user-custom).",
             EffectClass::Read,
         ),
-        |deps, ctx, p| skill_list(deps, ctx, p),
+        adapt(skill_list),
     ));
 
     out.push(Capability::new::<SkillImportParams, _, _>(
@@ -480,7 +572,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Import a skill from a local directory (by absolute path). Copies the skill into the user skills folder.",
             EffectClass::Write,
         ),
-        |deps, ctx, p| skill_import(deps, ctx, p),
+        adapt(skill_import),
     ));
 
     out.push(Capability::new::<SkillDeleteParams, _, _>(
@@ -490,7 +582,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Permanently delete a user-custom skill by name.",
             EffectClass::Destructive,
         ),
-        |deps, ctx, p| skill_delete(deps, ctx, p),
+        adapt(skill_delete),
     ));
 
     // ── Hub ──────────────────────────────────────────────────────────────
@@ -502,7 +594,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List extensions available in the Hub marketplace (name, version, install status).",
             EffectClass::Read,
         ),
-        |deps, ctx, p| hub_list_extensions(deps, ctx, p),
+        adapt(hub_list_extensions),
     ));
 
     out.push(Capability::new::<HubInstallExtensionParams, _, _>(
@@ -512,7 +604,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Install an extension from the Hub by name. Downloads and registers it locally.",
             EffectClass::Write,
         ),
-        |deps, ctx, p| hub_install_extension(deps, ctx, p),
+        adapt(hub_install_extension),
     ));
 }
 

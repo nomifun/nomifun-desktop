@@ -13,7 +13,8 @@ fn builtin_presets_root() -> PathBuf {
 }
 
 fn builtin_skills_root() -> PathBuf {
-    asset_root().join("builtin-skills")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../nomifun-extension/assets/builtin-skills")
 }
 
 fn read_to_string(path: impl AsRef<Path>) -> String {

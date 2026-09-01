@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 use crate::error::ChannelError;
 use crate::formatter::format_text_for_platform;
 use crate::message_service::{ChannelMessageService, StreamAction};
-use crate::pending_decision::{PendingDecision, PendingDecisionStore};
+use crate::pending_decision::{ChannelStopConfirmation, ChannelStopConfirmationStore};
 use crate::think_filter::{Stage, strip_reasoning};
 use crate::types::{OutgoingMessageType, ParseMode, PluginType, UnifiedOutgoingMessage};
 
@@ -66,7 +66,7 @@ pub struct ChannelStreamRelay {
     config: RelayConfig,
     sender: Arc<dyn ChannelSender>,
     /// Shared store for the channel-owned remote-stop confirmation.
-    pending: Arc<PendingDecisionStore>,
+    stop_confirmations: Arc<ChannelStopConfirmationStore>,
     /// Resolves workshop asset UUIDv7 ids to bytes for outbound media. `None`
     /// disables sending.
     asset_resolver: Option<Arc<dyn crate::message_service::AssetResolver>>,
@@ -100,13 +100,13 @@ impl ChannelStreamRelay {
     pub fn new(
         config: RelayConfig,
         sender: Arc<dyn ChannelSender>,
-        pending: Arc<PendingDecisionStore>,
+        stop_confirmations: Arc<ChannelStopConfirmationStore>,
         asset_resolver: Option<Arc<dyn crate::message_service::AssetResolver>>,
     ) -> Self {
         Self {
             config,
             sender,
-            pending,
+            stop_confirmations,
             asset_resolver,
         }
     }
@@ -932,24 +932,23 @@ impl ChannelStreamRelay {
             "确认停止会话 {target_conversation_id} 的当前任务？（远程停止需要你确认）"
         );
         let options = vec![
-            crate::types::DecisionOption {
+            crate::types::ChannelStopOption {
                 option_id: "confirm-stop".to_owned(),
                 label: "确认停止".to_owned(),
             },
-            crate::types::DecisionOption {
+            crate::types::ChannelStopOption {
                 option_id: "cancel".to_owned(),
                 label: "取消".to_owned(),
             },
         ];
-        self.pending.put(PendingDecision {
-            conversation_id: self.config.conversation_id.clone(),
-            kind: crate::pending_decision::PendingDecisionKind::StopConversation {
+        self.stop_confirmations
+            .put(ChannelStopConfirmation::new(
+                self.config.conversation_id.clone(),
                 target_conversation_id,
-            },
-            prompt: prompt.clone(),
-            options: options.clone(),
-        });
-        let msg = ChannelMessageService::build_decision_message(&prompt, &options);
+                prompt.clone(),
+                options.clone(),
+            ));
+        let msg = ChannelMessageService::build_stop_confirmation_message(&prompt, &options);
         let _ = self
             .sender
             .send_message(&self.config.plugin_id, &self.config.chat_id, msg)
@@ -1195,7 +1194,7 @@ mod media_tests {
         use nomifun_ai_agent::protocol::events::{FinishEventData, TextEventData, ToolCallEventData, ToolCallStatus};
 
         let recorder = Arc::new(MessageRecorder::new());
-        let pending = crate::pending_decision::PendingDecisionStore::new();
+        let pending = crate::pending_decision::ChannelStopConfirmationStore::new();
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
@@ -1244,7 +1243,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             Some(Arc::new(MissingResolver)),
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
@@ -1300,7 +1299,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             sender.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             Some(Arc::new(StubResolver)),
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
@@ -1359,7 +1358,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             sender.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             Some(Arc::new(StubResolver)),
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
@@ -1410,7 +1409,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             sender.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
@@ -1482,7 +1481,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
@@ -1539,7 +1538,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             sender.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
@@ -1600,7 +1599,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             sender.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
@@ -1657,7 +1656,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
@@ -1726,7 +1725,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
@@ -1779,7 +1778,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
@@ -1845,7 +1844,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
@@ -1876,7 +1875,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
@@ -1921,7 +1920,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Weixin),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
@@ -1968,7 +1967,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Telegram),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(1);
@@ -2002,7 +2001,7 @@ mod media_tests {
         let relay = ChannelStreamRelay::new(
             cfg(PluginType::Weixin),
             recorder.clone(),
-            crate::pending_decision::PendingDecisionStore::new(),
+            crate::pending_decision::ChannelStopConfirmationStore::new(),
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(1);
@@ -2041,7 +2040,7 @@ mod media_tests {
         use nomifun_ai_agent::protocol::events::{FinishEventData, ToolCallEventData, ToolCallStatus};
 
         let recorder = Arc::new(MessageRecorder::new());
-        let pending = crate::pending_decision::PendingDecisionStore::new();
+        let pending = crate::pending_decision::ChannelStopConfirmationStore::new();
         let relay = ChannelStreamRelay::new(cfg(PluginType::Telegram), recorder.clone(), pending, None);
 
         let (tx, rx) = tokio::sync::broadcast::channel(16);

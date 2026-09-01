@@ -33,6 +33,7 @@ pub mod profile;
 pub mod prompt;
 pub mod registry;
 pub mod routes;
+mod session_port;
 pub mod service;
 pub mod skill_sink;
 pub mod state;
@@ -51,6 +52,9 @@ pub use profile::{
 };
 pub use registry::CompanionRegistry;
 pub use routes::{companion_public_routes, companion_routes};
+pub use session_port::{
+    CompanionHostPorts, CompanionSessionPort, conversation_companion_ports,
+};
 pub use service::CompanionService;
 pub use state::CompanionRouterState;
 pub use store::CompanionStore;

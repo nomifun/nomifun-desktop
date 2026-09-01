@@ -288,34 +288,19 @@ async fn serve(
     // Boot the backend in-process (env → data layer → services), then mount the
     // real API router with the SPA as the fallback for non-/api routes.
     let env = nomifun_app::bootstrap::init_environment(&cli, &merged_path)?;
-    let database = nomifun_app::bootstrap::init_data_layer(&env.config).await?;
-    let services = nomifun_app::AppServices::from_config(database, &env.config)
-        .await?
-        .with_boot_reconciliation_authority(
-            env.boot_reconciliation_authority(),
-            &env.config,
-        )
-        .await?;
-    if let Err(error) = nomifun_app::bootstrap::finalize_data_layer(&env.config) {
-        return Err(services.cleanup_after_startup_failure(error).await);
-    }
+    let host = env.canonical_host()?;
+    let application = host.compose(&env.config).await?;
 
     // First-run admin provisioning. No-op in local mode and once an admin
     // exists; otherwise a fresh authenticated install would have no way to set
     // the first password (the in-band setup routes are local-only). Returns
     // whether the install still awaits interactive first-run setup.
-    let needs_first_run_setup = match nomifun_app::bootstrap::ensure_admin_credentials(
-        &services,
-        nomifun_app::bootstrap::AdminBootstrap {
-            username: Some(args.admin_user.clone()),
-            password: args.admin_password.clone(),
-        },
-    )
-    .await
-    {
-        Ok(value) => value,
-        Err(error) => return Err(services.cleanup_after_startup_failure(error).await),
-    };
+    let needs_first_run_setup = application
+        .ensure_admin_credentials(
+            Some(&args.admin_user),
+            args.admin_password.as_deref(),
+        )
+        .await?;
     if needs_first_run_setup && !ip.is_loopback() {
         tracing::warn!(
             %ip,
@@ -325,7 +310,7 @@ async fn serve(
         );
     }
 
-    let mut app = nomifun_app::create_router(&services).await;
+    let mut app = application.router();
     if !args.api_only {
         app = app.fallback_service(spa_with_api_404(&args.dist));
     }
@@ -346,7 +331,14 @@ async fn serve(
     let (actual_port, listener) =
         match nomifun_app::bootstrap::bind_with_fallback(ip, args.port).await {
             Ok(value) => value,
-            Err(error) => return Err(services.cleanup_after_startup_failure(error).await),
+            Err(error) => {
+                return Err(match application.close().await {
+                    Ok(()) => error,
+                    Err(cleanup_error) => anyhow::anyhow!(
+                        "{error:#}; Fresh-v4 runtime cleanup also failed: {cleanup_error:#}"
+                    ),
+                });
+            }
         };
     if actual_port != args.port {
         tracing::warn!(
@@ -356,13 +348,16 @@ async fn serve(
         );
     }
     nomifun_app::bootstrap::announce_bound_port(&cli.data_dir, &args.host, actual_port);
-    // Tell the robot gateway where devices can reach us. The router already
-    // serves `/robot/*`, but until this snapshot lands the advertiser reports no
-    // endpoint, so every OTA response hands the device an empty websocket URL.
-    // Uses the port actually bound unless `NOMIFUN_ROBOT_ADVERTISE` states one —
-    // a container whose port is remapped (`-p 9000:8787`) must advertise the
-    // host-side port, which this process cannot know.
-    nomifun_app::lan_endpoint::publish_robot_endpoint(&services, actual_port, robot_advertise);
+    // Fresh-v4 Web is currently a Remote-only host and does not mount the
+    // legacy robot surface. Never pretend an advertise address was accepted:
+    // report the configuration as explicitly unsupported and keep the
+    // listener alive for the canonical Web/Remote API.
+    if robot_advertise.is_some() {
+        tracing::warn!(
+            requested_port = actual_port,
+            "NOMIFUN_ROBOT_ADVERTISE is disabled on the Fresh-v4 Web host: robot routes are not mounted"
+        );
+    }
     // ConnectInfo gives the rate limiter each client's real peer address. Without
     // it every browser in the deployment collapses into one shared "unknown"
     // bucket: a single user's login failures 429-lock everyone out, and aggregate
@@ -373,13 +368,16 @@ async fn serve(
     )
     .await
     {
-        return Err(services.cleanup_after_startup_failure(error.into()).await);
+        return Err(match application.close().await {
+            Ok(()) => error.into(),
+            Err(cleanup_error) => anyhow::anyhow!(
+                "{error}; Fresh-v4 runtime cleanup also failed: {cleanup_error:#}"
+            ),
+        });
     }
 
-    let browser_shutdown = services.shutdown_browser_platform().await;
-    services.database.close().await;
+    application.close().await?;
     drop(env);
-    browser_shutdown?;
     Ok(ExitCode::SUCCESS)
 }
 

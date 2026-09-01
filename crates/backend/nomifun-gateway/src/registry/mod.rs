@@ -2,7 +2,7 @@
 //! operable platform capability, keyed by MCP tool name.
 //!
 //! - The in-process [`crate::server`] dispatches tool calls through
-//!   [`Registry::dispatch_opt`] (with real `GatewayDeps`).
+//!   [`Registry::dispatch_opt`] (with real `CompatibilityCapabilityHost`).
 //! - The `mcp-gateway-stdio` bridge answers `tools/list` from
 //!   [`Registry::tool_specs`] (schema only, no deps).
 //!
@@ -21,7 +21,7 @@ use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value, json};
 
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 
 /// Enforce the one gateway outcome protocol before a capability result reaches
 /// any transport adapter. Keeping this at the shared dispatch boundary means
@@ -147,7 +147,7 @@ impl Registry {
         //   1. create `caps_<domain>.rs` with `pub(crate) fn register(out: &mut Vec<Capability>)`
         //   2. add `mod caps_<domain>;` to lib.rs
         //   3. add the domain HERE through the direct or instance-owner path
-        //   4. if it needs a NEW service: add a field to deps.rs::GatewayDeps and
+        //   4. if it needs a NEW service: add a field to deps.rs::CompatibilityCapabilityHost and
         //      wire it in nomifun-app/src/router/routes.rs::inject_gateway_deps.
         // Adding a tool to an EXISTING domain is just one more `out.push(...)` — no wiring.
         register_instance_owner_domain(&mut caps, crate::caps_memory::register);
@@ -271,7 +271,7 @@ impl Registry {
     /// registered tool.
     pub async fn dispatch_opt(
         &self,
-        deps: Arc<GatewayDeps>,
+        deps: Arc<CompatibilityCapabilityHost>,
         ctx: CallerCtx,
         name: &str,
         args: &Value,
@@ -297,7 +297,7 @@ impl Registry {
     /// `None` means the tool name is unknown.
     pub async fn dispatch_stream(
         &self,
-        deps: Arc<GatewayDeps>,
+        deps: Arc<CompatibilityCapabilityHost>,
         ctx: CallerCtx,
         name: &str,
         args: &Value,
@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn gateway_surfaces_do_not_advertise_team_tools() {
         let reg = Registry::global();
-        for surface in [Surface::Desktop, Surface::Remote, Surface::Channel] {
+        for surface in [Surface::Desktop, Surface::Channel] {
             let team_tools: Vec<&str> = reg
                 .tool_specs(surface)
                 .iter()
@@ -585,16 +585,16 @@ mod tests {
     fn tool_specs_for_filters_to_domains() {
         let reg = Registry::global();
         let agentish = reg.tool_specs_for(
-            Surface::Remote,
+            Surface::Desktop,
             &["agent_execution", "agent", "remote", "conversation"],
         );
         assert!(
             !agentish.is_empty(),
             "agent/conversation domains must expose tools"
         );
-        // strict subset of the full Remote surface
+        // strict subset of the full internal Gateway catalog
         let all: std::collections::BTreeSet<&str> = reg
-            .tool_specs(Surface::Remote)
+            .tool_specs(Surface::Desktop)
             .iter()
             .map(|s| s.name)
             .collect();
@@ -612,7 +612,7 @@ mod tests {
         );
         // unknown domain yields nothing
         assert!(
-            reg.tool_specs_for(Surface::Remote, &["does_not_exist"])
+            reg.tool_specs_for(Surface::Desktop, &["does_not_exist"])
                 .is_empty()
         );
     }

@@ -3,7 +3,8 @@
 mod common;
 
 use nomifun_api_types::CreateConversationRequest;
-use nomifun_app::{AppConfig, AppServices, build_conversation_state};
+use nomifun_app::AppConfig;
+use nomifun_app::compatibility::{AppServices, build_conversation_state};
 use nomifun_common::AgentType;
 
 #[tokio::test]

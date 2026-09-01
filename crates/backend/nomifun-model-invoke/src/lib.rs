@@ -16,6 +16,7 @@ pub mod adapter;
 pub mod adapters;
 pub mod auth;
 pub mod call;
+pub mod chat_executor;
 pub mod error;
 pub mod manifest;
 mod media_prompt;
@@ -37,6 +38,11 @@ pub use auth::{AuthMaterial, AuthScheme};
 pub use call::{
     ResolvedCall, ResolvedConnection, ResolvedTaskConfig, ResolvedTaskTransport,
     resolve_submit_url, validate_credentialed_target_url,
+};
+pub use chat_executor::{
+    OpaqueCredentialLease, OpaqueCredentialResolver, SingleAttemptFrame,
+    SingleAttemptFraming, SingleAttemptHttpExecutor, SingleAttemptRequest,
+    SingleAttemptStream,
 };
 pub use error::{InvokeError, InvokeErrorKind};
 pub use manifest::{

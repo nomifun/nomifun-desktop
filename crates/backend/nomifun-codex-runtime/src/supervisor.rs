@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use nomifun_agent_contracts::{
-    AgentSessionId, RuntimeBindingContract, RuntimeBindingId, RuntimeCommand,
+    AgentSessionId, CanonicalErrorCode, RuntimeBindingContract, RuntimeBindingId, RuntimeCommand,
     RuntimeCommandContext, RuntimeSessionDisposeParams,
 };
 use tokio::sync::{Mutex, Notify};
@@ -19,6 +19,8 @@ use crate::process::{
 };
 use crate::profile::PinnedRuntimeProfile;
 use crate::release::{RuntimeHelloExpectation, RuntimeReleaseDescriptor};
+
+const RUNTIME_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DisposeRpcOutcome {
@@ -48,8 +50,9 @@ pub struct RuntimeLaunchRequest {
 }
 
 pub struct CodexRuntimeSupervisor {
-    sessions: Mutex<BTreeMap<RuntimeBindingId, Arc<ManagedRuntimeSession>>>,
-    opening: Mutex<BTreeSet<RuntimeBindingId>>,
+    sessions: StdMutex<BTreeMap<RuntimeBindingId, Arc<ManagedRuntimeSession>>>,
+    opening: Arc<StdMutex<BTreeSet<RuntimeBindingId>>>,
+    lifecycle: Mutex<()>,
 }
 
 impl Default for CodexRuntimeSupervisor {
@@ -61,8 +64,9 @@ impl Default for CodexRuntimeSupervisor {
 impl CodexRuntimeSupervisor {
     pub fn new() -> Self {
         Self {
-            sessions: Mutex::new(BTreeMap::new()),
-            opening: Mutex::new(BTreeSet::new()),
+            sessions: StdMutex::new(BTreeMap::new()),
+            opening: Arc::new(StdMutex::new(BTreeSet::new())),
+            lifecycle: Mutex::new(()),
         }
     }
 
@@ -70,31 +74,37 @@ impl CodexRuntimeSupervisor {
         &self,
         request: RuntimeLaunchRequest,
     ) -> Result<Arc<ManagedRuntimeSession>, RuntimeError> {
+        let _lifecycle = tokio::time::timeout(
+            RUNTIME_OPEN_TIMEOUT,
+            self.lifecycle.lock(),
+        )
+        .await
+        .map_err(|_| RuntimeError::Timeout("runtime launch admission".to_owned()))?;
         let context = open_context(&request.open_command)?.clone();
         {
-            let sessions = self.sessions.lock().await;
+            let sessions = lock_sessions(&self.sessions)?;
             if sessions.contains_key(&context.runtime_binding_id) {
                 return Err(RuntimeError::SessionAlreadyExists);
             }
         }
         {
-            let mut opening = self.opening.lock().await;
+            let mut opening = lock_opening(&self.opening)?;
             if !opening.insert(context.runtime_binding_id.clone()) {
                 return Err(RuntimeError::SessionAlreadyExists);
             }
         }
+        let opening_guard =
+            OpeningMarker::new(Arc::clone(&self.opening), context.runtime_binding_id.clone());
 
         match ManagedRuntimeSession::launch(request, context.clone()).await {
             Ok(session) => {
-                self.sessions
-                    .lock()
-                    .await
+                lock_sessions(&self.sessions)?
                     .insert(context.runtime_binding_id.clone(), Arc::clone(&session));
-                self.opening.lock().await.remove(&context.runtime_binding_id);
+                drop(opening_guard);
                 Ok(session)
             }
             Err(error) => {
-                self.opening.lock().await.remove(&context.runtime_binding_id);
+                drop(opening_guard);
                 Err(error)
             }
         }
@@ -104,7 +114,9 @@ impl CodexRuntimeSupervisor {
         &self,
         runtime_binding_id: &RuntimeBindingId,
     ) -> Option<Arc<ManagedRuntimeSession>> {
-        self.sessions.lock().await.get(runtime_binding_id).cloned()
+        lock_sessions(&self.sessions)
+            .ok()
+            .and_then(|sessions| sessions.get(runtime_binding_id).cloned())
     }
 
     pub async fn dispose(
@@ -119,7 +131,9 @@ impl CodexRuntimeSupervisor {
     }
 
     pub async fn session_count(&self) -> usize {
-        self.sessions.lock().await.len()
+        lock_sessions(&self.sessions)
+            .map(|sessions| sessions.len())
+            .unwrap_or(0)
     }
 
     pub async fn evict_disposed(&self, runtime_binding_id: &RuntimeBindingId) -> bool {
@@ -129,8 +143,108 @@ impl CodexRuntimeSupervisor {
         if !session.is_disposed().await {
             return false;
         }
-        self.sessions.lock().await.remove(runtime_binding_id);
-        true
+        lock_sessions(&self.sessions)
+            .map(|mut sessions| sessions.remove(runtime_binding_id).is_some())
+            .unwrap_or(false)
+    }
+
+    /// Dispose every live binding owned by this supervisor. The operation is
+    /// idempotent: successful disposals are evicted, while a failed disposal
+    /// remains in the map for an explicit retry.
+    pub async fn shutdown_all(&self) -> Result<(), RuntimeError> {
+        let _lifecycle = tokio::time::timeout(
+            RUNTIME_OPEN_TIMEOUT,
+            self.lifecycle.lock(),
+        )
+        .await
+        .map_err(|_| RuntimeError::Timeout("runtime shutdown admission".to_owned()))?;
+        if !lock_opening(&self.opening)?.is_empty() {
+            return Err(RuntimeError::Protocol(
+                "runtime shutdown raced an opening binding".to_owned(),
+            ));
+        }
+        let sessions = lock_sessions(&self.sessions)?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut failures = Vec::new();
+        for session in sessions {
+            let binding = session.binding().clone();
+            let result = session
+                .dispose(RuntimeSessionDisposeParams {
+                    agent_session_id: binding.agent_session_id,
+                    runtime_binding_id: binding.runtime_binding_id.clone(),
+                    operation_id: nomifun_agent_contracts::OperationId::from(format!(
+                        "runtime-shutdown:{}",
+                        binding.runtime_binding_id.as_ref()
+                    )),
+                    reason: CanonicalErrorCode::from("RUNTIME_HOST_SHUTDOWN"),
+                })
+                .await;
+            match result {
+                Ok(_) => {
+                    self.evict_disposed(&binding.runtime_binding_id).await;
+                }
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(RuntimeError::Protocol(format!(
+                "one or more runtime bindings failed to dispose: {}",
+                failures.join("; ")
+            )))
+        }
+    }
+}
+
+fn lock_sessions(
+    sessions: &StdMutex<BTreeMap<RuntimeBindingId, Arc<ManagedRuntimeSession>>>,
+) -> Result<
+    std::sync::MutexGuard<'_, BTreeMap<RuntimeBindingId, Arc<ManagedRuntimeSession>>>,
+    RuntimeError,
+> {
+    sessions
+        .lock()
+        .map_err(|_| RuntimeError::Protocol("runtime session registry is poisoned".to_owned()))
+}
+
+fn lock_opening(
+    opening: &StdMutex<BTreeSet<RuntimeBindingId>>,
+) -> Result<std::sync::MutexGuard<'_, BTreeSet<RuntimeBindingId>>, RuntimeError> {
+    opening
+        .lock()
+        .map_err(|_| RuntimeError::Protocol("runtime opening registry is poisoned".to_owned()))
+}
+
+struct OpeningMarker {
+    opening: Arc<StdMutex<BTreeSet<RuntimeBindingId>>>,
+    runtime_binding_id: RuntimeBindingId,
+}
+
+impl OpeningMarker {
+    fn new(
+        opening: Arc<StdMutex<BTreeSet<RuntimeBindingId>>>,
+        runtime_binding_id: RuntimeBindingId,
+    ) -> Self {
+        Self {
+            opening,
+            runtime_binding_id,
+        }
+    }
+}
+
+impl Drop for OpeningMarker {
+    fn drop(&mut self) {
+        match self.opening.lock() {
+            Ok(mut opening) => {
+                opening.remove(&self.runtime_binding_id);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().remove(&self.runtime_binding_id);
+            }
+        };
     }
 }
 
@@ -287,15 +401,28 @@ impl ManagedRuntimeSession {
             }
         });
 
-        let binding = match client.open(&request.open_command).await {
-            Ok(binding) => binding,
-            Err(error) => {
+        let binding = match tokio::time::timeout(
+            RUNTIME_OPEN_TIMEOUT,
+            client.open(&request.open_command),
+        )
+        .await
+        {
+            Ok(Ok(binding)) => binding,
+            Ok(Err(error)) => {
                 ingress_cancellation.cancel();
                 ingress_task.abort();
                 let _ = ingress_task.await;
                 client.close().await;
                 let _ = process.dispose_tree().await;
                 return Err(error);
+            }
+            Err(_) => {
+                ingress_cancellation.cancel();
+                ingress_task.abort();
+                let _ = ingress_task.await;
+                client.close().await;
+                let _ = process.dispose_tree().await;
+                return Err(RuntimeError::Timeout("runtime open".to_owned()));
             }
         };
         if let Err(error) = validate_open_binding(
@@ -415,7 +542,6 @@ mod tests {
         DigestHex, EventId, ResolvedSnapshotId, ResolvedSnapshotRef, RuntimeProfileKind,
         RuntimeTarget, VersionString,
     };
-
     use super::*;
 
     #[test]

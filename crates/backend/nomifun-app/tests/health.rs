@@ -3,7 +3,8 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use nomifun_app::{AppConfig, AppServices};
+use nomifun_app::AppConfig;
+use nomifun_app::compatibility::AppServices;
 
 fn build_request(method: &str, uri: &str) -> Request<Body> {
     Request::builder()
@@ -35,7 +36,7 @@ async fn build_app() -> axum::Router {
     )
     .await
     .unwrap();
-    nomifun_app::create_router(&services).await
+    nomifun_app::compatibility::create_router(&services).await
 }
 
 #[tokio::test]

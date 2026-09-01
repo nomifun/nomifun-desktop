@@ -22,3 +22,17 @@ pub fn http_client() -> reqwest::Client {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }
+
+/// Build the shared outbound client with redirects disabled.
+///
+/// Provider attempts must have exactly one network request boundary. Following
+/// an HTTP redirect would silently create a second POST outside the Broker's
+/// retry/failover accounting and could forward credentials to a new origin.
+pub fn http_client_no_redirect() -> Result<reqwest::Client, reqwest::Error> {
+    proxy::apply_detected_proxy(
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none()),
+    )
+    .build()
+}

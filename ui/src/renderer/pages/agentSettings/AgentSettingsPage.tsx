@@ -86,12 +86,14 @@ const AgentSettingsPage: React.FC = () => {
             <OfficialTemplateOverview
               template={selectedTemplate}
               busy={controller.busyAction === 'fork'}
-              onFork={(displayName, resources, modelRoutes) =>
+              hostWorkDir={controller.hostWorkDir}
+              onFork={(displayName, resources, modelRoutes, routeRecords) =>
                 void controller.forkTemplate(
                   selectedTemplate.template_key,
                   displayName,
                   resources,
-                  modelRoutes
+                  modelRoutes,
+                  routeRecords
                 )
               }
             />
@@ -103,6 +105,7 @@ const AgentSettingsPage: React.FC = () => {
               preview={controller.preview}
               testResult={controller.testResult}
               tokenState={controller.tokenState}
+              hostWorkDir={controller.hostWorkDir}
               sourceTemplate={sourceTemplate}
               dirty={controller.dirty}
               busyAction={controller.busyAction}

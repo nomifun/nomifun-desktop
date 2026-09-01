@@ -56,8 +56,8 @@ impl RecordedConformanceFixture {
         if self.protocol != self.route.protocol {
             return Err(RecordedFixtureError::ProtocolRouteMismatch);
         }
-        if self.route.model_route_id != self.request.route.model_route_id
-            || self.route.model_route_revision != self.request.route.model_route_revision
+        if self.route.model_route_id != self.request.route.route_id
+            || self.route.model_route_revision != self.request.route.route_revision
         {
             return Err(RecordedFixtureError::RequestRouteMismatch);
         }

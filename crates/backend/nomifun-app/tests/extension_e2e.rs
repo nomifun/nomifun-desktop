@@ -3,7 +3,10 @@ use serde_json::json;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-use nomifun_app::{AppConfig, AppServices, build_module_states, create_router_with_states};
+use nomifun_app::AppConfig;
+use nomifun_app::compatibility::{
+    AppServices, build_module_states, create_router_with_states,
+};
 use nomifun_common::{decrypt_string, now_ms};
 use nomifun_db::{IChannelRepository, SqliteChannelRepository};
 use nomifun_extension::{ExtensionSource, ScanPath};

@@ -36,6 +36,7 @@ export const createEmptyAgentPresetDocument = (): AgentPresetDocument => ({
   schema_version: '1.0.0',
   surfaces: ['desktop', 'remote', 'web'],
   model_route_refs: {},
+  chat_route_records: {},
   initial_capabilities: [],
   on_demand_capabilities: [],
   skill_bindings: [],
@@ -91,8 +92,11 @@ export const draftFromOfficialTemplate = (
   },
 });
 
-export const cloneDraft = (draft: AgentPresetDraft): AgentPresetDraft =>
-  structuredClone(draft);
+export const cloneDraft = (draft: AgentPresetDraft): AgentPresetDraft => {
+  const cloned = structuredClone(draft);
+  cloned.document.chat_route_records ??= {};
+  return cloned;
+};
 
 export type CapabilityPlacement = 'initial' | 'on_demand' | 'none';
 

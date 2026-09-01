@@ -322,8 +322,10 @@ async fn build_stack(pool: nomifun_db::SqlitePool, fail_first: u32) -> Stack {
     )));
     let channel_repo = Arc::new(SqliteChannelRepository::new(pool));
     let message_svc = Arc::new(ChannelMessageService::new(
-        Arc::clone(&conversation_svc),
-        Arc::clone(&runtime_registry),
+        nomifun_channel::conversation_channel_session_port(
+            Arc::clone(&conversation_svc),
+            Arc::clone(&runtime_registry),
+        ),
         settings,
         channel_repo.clone(),
         installation_owner.clone(),

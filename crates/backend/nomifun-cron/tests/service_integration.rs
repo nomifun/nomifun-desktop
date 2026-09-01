@@ -964,11 +964,14 @@ async fn setup_with_conv_repo() -> (
     let agent_registry = AgentRegistry::new(agent_metadata_repo);
     agent_registry.hydrate().await.unwrap();
     let busy_guard = Arc::new(CronBusyGuard::new());
+    let sessions = nomifun_cron::conversation_cron_session_port(
+        conv_service,
+        runtime_registry,
+    );
     let executor = Arc::new(JobExecutor::new(
         Arc::<str>::from(TEST_USER_ID),
-        runtime_registry,
+        sessions,
         stub_conv_repo_trait,
-        conv_service,
         busy_guard,
         data_dir.clone(),
         data_dir.clone(),

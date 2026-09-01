@@ -224,6 +224,10 @@ impl KernelRegistry {
                 Arc::clone(&binding.handler),
                 CapabilityInvocationContext {
                     principal: request.principal.clone(),
+                    agent_session_id: request.agent_session_id.clone(),
+                    operation_id: request.operation_id.clone(),
+                    idempotency_key: request.idempotency_key.clone(),
+                    correlation_id: request.correlation_id.clone(),
                     resolved_snapshot_ref: request.resolved_snapshot_ref.clone(),
                     registry_generation: published.materialized.generation,
                     capability_id: request.capability_id.clone(),

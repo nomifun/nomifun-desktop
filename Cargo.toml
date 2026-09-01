@@ -215,6 +215,7 @@ toml = "0.8"
 
 # --- Encoding / misc ---
 base64 = "0.22"
+crc32fast = "1"
 # Cheap refcounted byte buffers for the robot audio frame path. Already in the
 # graph via axum/hyper, so this adds nothing to the lockfile.
 bytes = "1"

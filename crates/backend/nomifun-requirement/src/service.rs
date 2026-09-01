@@ -17,6 +17,7 @@ use nomifun_terminal::TerminalDriver;
 use tracing::warn;
 
 use crate::attachments::AttachmentStore;
+use crate::conversation_port::AutoWorkConversationPort;
 use crate::convert::row_to_dto;
 use crate::events::RequirementEventEmitter;
 use crate::notifier::CompletionNotifier;
@@ -95,8 +96,9 @@ fn validate_attachment_ids(ids: &[String]) -> Result<(), AppError> {
 pub struct RequirementService {
     repo: Arc<dyn IRequirementRepository>,
     emitter: RequirementEventEmitter,
-    /// Attached for AutoWork config persistence (`extra.autowork` merge-write).
-    conversation_service: Option<nomifun_conversation::ConversationService>,
+    /// Attached for AutoWork config persistence (`extra.autowork`
+    /// merge-write) through the current Session owner.
+    conversation: Option<Arc<dyn AutoWorkConversationPort>>,
     /// Attached for reading a conversation row when loading AutoWork config.
     conversation_repo: Option<Arc<dyn IConversationRepository>>,
     /// Attached for terminal AutoWork config + ownership/eligibility checks.
@@ -125,7 +127,7 @@ impl RequirementService {
         Self {
             repo,
             emitter,
-            conversation_service: None,
+            conversation: None,
             conversation_repo: None,
             terminal_driver: None,
             terminal_repo: None,
@@ -135,13 +137,14 @@ impl RequirementService {
         }
     }
 
-    /// Attach the conversation service + repo for AutoWork config persistence.
-    pub fn with_conversation_service(
+    /// Attach the typed Conversation-backed Session port + repo for AutoWork
+    /// config persistence and reads.
+    pub fn with_conversation_port(
         mut self,
-        cs: nomifun_conversation::ConversationService,
+        conversation: Arc<dyn AutoWorkConversationPort>,
         conv_repo: Arc<dyn IConversationRepository>,
     ) -> Self {
-        self.conversation_service = Some(cs);
+        self.conversation = Some(conversation);
         self.conversation_repo = Some(conv_repo);
         self
     }
@@ -159,7 +162,7 @@ impl RequirementService {
     }
 
     /// Attach only the conversation repo (without the full conversation service).
-    /// `with_conversation_service` also sets it; this is for callers/tests that
+    /// `with_conversation_port` also sets it; this is for callers/tests that
     /// need just the read side (e.g. `tag_bindings`).
     pub fn with_conversation_repo(mut self, repo: Arc<dyn IConversationRepository>) -> Self {
         self.conversation_repo = Some(repo);
@@ -1039,20 +1042,14 @@ impl RequirementService {
     ) -> Result<(), AppError> {
         match kind {
             AutoWorkTargetKind::Conversation => {
-                let Some(cs) = &self.conversation_service else {
-                    return Err(AppError::Internal("conversation service not attached".into()));
+                let Some(conversation) = &self.conversation else {
+                    return Err(AppError::Internal(
+                        "AutoWork conversation port not attached".into(),
+                    ));
                 };
-                cs.update_extra(
-                    target_id,
-                    serde_json::json!({
-                        "autowork": {
-                            "enabled": enabled,
-                            "tag": tag,
-                            "max_requirements": max_requirements,
-                        }
-                    }),
-                )
-                .await
+                conversation
+                    .save_config(target_id, enabled, tag, max_requirements)
+                    .await
             }
             AutoWorkTargetKind::Terminal => {
                 let Some(driver) = &self.terminal_driver else {

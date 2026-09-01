@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
-use nomifun_ai_agent::{AgentStreamEvent, AgentRuntimeRegistry};
+use nomifun_ai_agent::AgentStreamEvent;
 use nomifun_api_types::{
-    ConversationRuntimeStateKind, CreateConversationRequest, ListMessagesQuery, MessageResponse, SendMessageRequest,
+    CreateConversationRequest, ListMessagesQuery, MessageResponse, SendMessageRequest,
 };
 use nomifun_common::{AgentType, ConversationSource, MessagePosition, MessageType};
-use nomifun_conversation::ConversationService;
 use nomifun_db::IChannelRepository;
 use nomifun_db::models::{
     CHANNEL_CHAT_KIND_DIRECT, CHANNEL_CHAT_KIND_GROUP, CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE,
@@ -17,6 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::channel_settings::{ChannelSettingsService, resolved_model_to_provider};
 use crate::error::ChannelError;
+use crate::session_port::ChannelSessionPort;
 use crate::types::{OutgoingMessageType, PluginType, UnifiedOutgoingMessage};
 
 /// 客服域接缝 (customer-service routing seam) — the channel layer's ONLY
@@ -93,8 +93,7 @@ pub trait AssetResolver: Send + Sync {
 /// - Receiving stream events and converting them to outgoing messages
 /// - Throttling editMessage calls for streaming responses
 pub struct ChannelMessageService {
-    conversation_svc: Arc<ConversationService>,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    sessions: Arc<dyn ChannelSessionPort>,
     settings: Arc<ChannelSettingsService>,
     repo: Arc<dyn IChannelRepository>,
     owner_user_id: String,
@@ -104,10 +103,10 @@ pub struct ChannelMessageService {
     /// Conversation path. `None` (default / tests) means no customer-service
     /// domain is available and every bot follows the companion path.
     cs_routing: Option<Arc<dyn CsRouting>>,
-    /// Per-conversation store of the decision currently awaiting a numbered
-    /// reply. Shared with each `ChannelStreamRelay` (writer) so the inbound
-    /// reply can be resolved against the right `call_id`/option.
-    pending_decisions: Arc<crate::pending_decision::PendingDecisionStore>,
+    /// Per-conversation store of the channel-owned stop confirmation currently
+    /// awaiting a numbered reply. Shared with each `ChannelStreamRelay`
+    /// (writer) so the inbound reply resolves against the correct target.
+    stop_confirmations: Arc<crate::pending_decision::ChannelStopConfirmationStore>,
     /// Optional resolver turning workshop asset UUIDv7 ids into raw bytes for
     /// outbound media.
     /// `None` (default / tests) disables channel image sending gracefully.
@@ -116,21 +115,19 @@ pub struct ChannelMessageService {
 
 impl ChannelMessageService {
     pub fn new(
-        conversation_svc: Arc<ConversationService>,
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+        sessions: Arc<dyn ChannelSessionPort>,
         settings: Arc<ChannelSettingsService>,
         repo: Arc<dyn IChannelRepository>,
         owner_user_id: String,
     ) -> Self {
         Self {
-            conversation_svc,
-            runtime_registry,
+            sessions,
             settings,
             repo,
             owner_user_id,
             channel_agent_profile: None,
             cs_routing: None,
-            pending_decisions: crate::pending_decision::PendingDecisionStore::new(),
+            stop_confirmations: crate::pending_decision::ChannelStopConfirmationStore::new(),
             asset_resolver: None,
         }
     }
@@ -202,8 +199,10 @@ impl ChannelMessageService {
     /// `ChannelStreamRelay` it spawns and reads it back when intercepting a
     /// numeric reply, so the relay (writer) and the message loop (reader) act
     /// on the same store.
-    pub fn pending_decisions(&self) -> Arc<crate::pending_decision::PendingDecisionStore> {
-        Arc::clone(&self.pending_decisions)
+    pub fn stop_confirmations(
+        &self,
+    ) -> Arc<crate::pending_decision::ChannelStopConfirmationStore> {
+        Arc::clone(&self.stop_confirmations)
     }
 
     /// Installation owner used to namespace server-derived channel operation
@@ -218,11 +217,7 @@ impl ChannelMessageService {
     /// channel message for a busy conversation is answered with a "still
     /// processing" notice instead of being queued as a second prompt.
     pub async fn is_conversation_busy(&self, conversation_id: &str) -> bool {
-        let summary = self.conversation_svc.runtime_summary_for(conversation_id).await;
-        matches!(
-            summary.state,
-            ConversationRuntimeStateKind::Starting | ConversationRuntimeStateKind::Running
-        )
+        self.sessions.is_busy(conversation_id).await
     }
 
     // ── Busy-time pending prompt queue (spec D1) ─────────────────────
@@ -273,8 +268,8 @@ impl ChannelMessageService {
         conversation_id: &str,
         idempotency_key: &str,
     ) -> Result<nomifun_conversation::PublicTurnDeliveryState, ChannelError> {
-        self.conversation_svc
-            .public_turn_delivery_state(&self.owner_user_id, conversation_id, idempotency_key)
+        self.sessions
+            .turn_outcome(&self.owner_user_id, conversation_id, idempotency_key)
             .await
             .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))
     }
@@ -285,8 +280,8 @@ impl ChannelMessageService {
     /// button (`POST /api/conversations/{id}/cancel`); deliberately NOT the
     /// gateway matrix, which denies Destructive on the Channel surface.
     pub async fn stop_conversation(&self, conversation_id: &str) -> Result<(), ChannelError> {
-        self.conversation_svc
-            .cancel(&self.owner_user_id, conversation_id, &self.runtime_registry)
+        self.sessions
+            .cancel(&self.owner_user_id, conversation_id)
             .await
             .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))
     }
@@ -306,7 +301,7 @@ impl ChannelMessageService {
             day: None,
         };
         let result = self
-            .conversation_svc
+            .sessions
             .list_messages(&self.owner_user_id, conversation_id, query)
             .await
             .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))?;
@@ -474,14 +469,13 @@ impl ChannelMessageService {
         // runtime build. That gate is also the only safe place to recover a
         // pre-admission edit reservation; an observer-only precheck here used
         // to make that crash cutpoint permanently unrecoverable.
-        let delivery = match self
-            .conversation_svc
-            .send_message_with_idempotency_key(
+        let turn = match self
+            .sessions
+            .send_turn(
                 user_id,
                 &conversation_id,
                 idempotency_key,
                 req,
-                &self.runtime_registry,
             )
             .await
         {
@@ -501,22 +495,8 @@ impl ChannelMessageService {
             }
             Err(other) => return Err(ChannelError::MessageSendFailed(other.to_string())),
         };
-        let message_id = delivery.message_id;
-
-        // `send_message_with_idempotency_key` admits synchronously but builds a
-        // cold runtime in its owned background task. Attach as soon as the
-        // registered runtime appears; registration happens before prompt
-        // dispatch. A timeout degrades streaming only and never retries the
-        // model turn.
-        let stream_rx = if delivery.completed {
-            None
-        } else {
-            wait_for_runtime_subscription(
-                &self.runtime_registry,
-                &conversation_id,
-            )
-            .await
-        };
+        let message_id = turn.delivery.message_id;
+        let stream_rx = turn.events;
 
         info!(
             conversation_id = %conversation_id,
@@ -558,7 +538,7 @@ impl ChannelMessageService {
         }
 
         let conversation = match self
-            .conversation_svc
+            .sessions
             .get(&self.owner_user_id, conversation_id)
             .await
         {
@@ -686,7 +666,7 @@ impl ChannelMessageService {
         };
         let creation_key = channel_creation_key(&self.owner_user_id, session, creation_scope);
         let response = self
-            .conversation_svc
+            .sessions
             .create_idempotent(&self.owner_user_id, req, &creation_key)
             .await
             .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))?;
@@ -888,12 +868,15 @@ impl ChannelMessageService {
         }
     }
 
-    /// Builds the numbered-text rendering of a channel-owned decision.
+    /// Builds the numbered-text rendering of a channel-owned stop confirmation.
     ///
     /// Portable across channels (no card-button dependency): the prompt, a
     /// numbered list of option labels, and an instruction to reply with the
     /// number. Plain `Text` with no buttons.
-    pub fn build_decision_message(prompt: &str, options: &[crate::types::DecisionOption]) -> UnifiedOutgoingMessage {
+    pub fn build_stop_confirmation_message(
+        prompt: &str,
+        options: &[crate::types::ChannelStopOption],
+    ) -> UnifiedOutgoingMessage {
         let mut text = format!("\u{26a0}\u{fe0f} 需要你的决策：\n{prompt}\n");
         for (idx, option) in options.iter().enumerate() {
             text.push_str(&format!("{}. {}\n", idx + 1, option.label));
@@ -942,26 +925,6 @@ fn channel_creation_key(
         serde_json::to_vec(&scope).expect("channel creation scope always serializes"),
     );
     format!("channel-session:v1:{digest:x}")
-}
-
-async fn wait_for_runtime_subscription(
-    runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
-    conversation_id: &str,
-) -> Option<broadcast::Receiver<AgentStreamEvent>> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        if let Some(handle) = runtime_registry.get_runtime(conversation_id) {
-            return Some(handle.subscribe());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            warn!(
-                conversation_id,
-                "runtime did not register before channel relay subscription timeout"
-            );
-            return None;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
 }
 
 /// Result of sending a message to the agent.
@@ -1586,7 +1549,7 @@ mod tests {
         ));
     }
 
-    // ── process_stream_event → Decision ────────────────────────────────
+    // ── process_stream_event → channel stop confirmation ───────────────
 
     #[test]
     fn denied_stop_tool_call_produces_stop_denied_with_target() {
@@ -1706,21 +1669,21 @@ mod tests {
         assert!(msg.buttons.is_none());
     }
 
-    // ── build_decision_message ─────────────────────────────────────────
+    // ── build_stop_confirmation_message ────────────────────────────────
 
     #[test]
-    fn decision_message_is_numbered_plain_text() {
+    fn stop_confirmation_message_is_numbered_plain_text() {
         let options = vec![
-            crate::types::DecisionOption {
+            crate::types::ChannelStopOption {
                 option_id: "a".into(),
                 label: "Allow".into(),
             },
-            crate::types::DecisionOption {
+            crate::types::ChannelStopOption {
                 option_id: "b".into(),
                 label: "Deny".into(),
             },
         ];
-        let msg = ChannelMessageService::build_decision_message("Proceed?", &options);
+        let msg = ChannelMessageService::build_stop_confirmation_message("Proceed?", &options);
 
         assert_eq!(msg.message_type, OutgoingMessageType::Text);
         assert!(msg.buttons.is_none(), "decision is plain text, no buttons");

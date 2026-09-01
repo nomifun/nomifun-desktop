@@ -53,8 +53,10 @@ Subcommands (used internally by the agent CLI bridge and for diagnostics):
 | `mcp-computer-stdio` | MCP stdio server exposing desktop computer-use tools. |
 | `terminal-hook --event <kind>` | One-shot terminal lifecycle hook relay. |
 | `doctor` | Self-check: hydrate the agent registry, probe every CLI on `$PATH`, print a per-agent availability table. |
-| `tools` | List public Remote capability names and descriptions as JSON. |
-| `call <name> [json-args]` | Invoke a public Remote capability on a running instance via `/v1`. |
+| `remote open <binding_id>` | Open a canonical Remote AgentSession. |
+| `remote turn <agent_session_id> <json-input>` | Start a turn on an explicit Remote AgentSession. |
+| `remote observe <agent_session_id>` | Read Remote Session events/messages after `--after-seq`. |
+| `remote cancel <agent_session_id>` | Cancel the explicit Session's active turn. |
 
 ## Shared environment variables
 
@@ -68,8 +70,8 @@ These are read by the backend regardless of which host embeds it.
 | `JWT_SECRET` | `nomifun-app` | Secret used to sign session JWTs. See [Auth secret resolution](#auth-secret-resolution) for the resolution order. |
 | `NOMIFUN_HTTPS` | `nomifun-auth::CookieConfig` | When truthy, session and CSRF cookies get the `Secure` flag and `SameSite=Strict`. Set it whenever the app is reached over HTTPS (TLS reverse proxy, etc.). Default is `false` → no `Secure` flag, `SameSite=Lax`. |
 | `SHELL` | agent engine (Linux/macOS) | Shell used when the agent engine spawns child processes. On Linux servers under systemd, set this explicitly (the system account often has no `$SHELL`). |
-| `NOMIFUN_URL` | `nomicore call` | Base URL for a running instance when invoking Remote capabilities. |
-| `NOMIFUN_ACCESS_TOKEN` | `nomifun-app`, `nomicore call` | Installation-scoped access token for `/mcp`, `/mcp-agent`, and `/v1`; never companion-bound. |
+| `NOMIFUN_URL` | `nomicore remote` | Base URL for a running instance when using canonical Remote operations. |
+| `NOMIFUN_ACCESS_TOKEN` | Fresh-v4 host, `nomicore remote` | Installation-scoped token for `/mcp` and `/api/remote/*`; startup values seed/rotate the stored verifier and never bind a companion. |
 
 There is no `SENTRY_DSN` integration: the codebase does not read that environment variable.
 

@@ -1,24 +1,333 @@
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    AgentSessionDeletedState, AgentSessionId, CompactionCompletedPayload, DigestHex,
-    OfficialPresetKey, PrincipalRef, ResolvedSnapshotContent, RuntimeProfileKind,
+    AgentSessionDeletedState, AgentSessionId, ChatRouteIdentity, CompactionCompletedPayload, DigestHex,
+    OfficialPresetKey, OperationId, PrincipalRef, ResolvedSnapshotContent, RuntimeProfileKind,
     SESSION_DELETED, SessionEventPayloadRef, SessionEventRecord,
     official_preset_seed_manifest_payload,
 };
 use nomifun_agent_session::{
-    DeleteResult, SessionObservation, SessionRehydrationInput,
+    AgentSessionStore, ChatCausalityFacts, ChatOperationClaimRequest, DeleteResult,
+    SessionObservation, SessionRehydrationInput, SessionStoreError,
 };
 use nomifun_api_types::{
     AgentPresetEditorResponse, AgentPresetSourceDto, OfficialPresetKeyDto,
     OfficialPresetTemplateDto, PreviewStatusDto, ResolveAgentPresetPreviewResponse,
 };
 use nomifun_chat_model_broker::{
-    ChatContentPart, ChatFinishReason, ChatModelEvent, ChatModelFeature, ChatModelRequest,
-    ChatModality, ChatRole, ChatToolChoice,
+    ChatContentPart, ChatCausality, ChatCausalityGate, ChatFinishReason, ChatModelError,
+    ChatModelErrorCode, ChatModelEvent, ChatModelFeature, ChatModelRequest, ChatModality,
+    ChatRetryDirective, ChatRole, ChatToolChoice,
 };
 use nomifun_codex_runtime::{PinnedRuntimeProfile, RuntimeProfileLaunchPolicy};
 use thiserror::Error;
+
+/// Read-only fact source for production chat admission.
+///
+/// The implementation supplied by [`AgentSessionStore`] reads the live
+/// session, head, events, and referenced payloads in one SQLite transaction.
+#[async_trait]
+pub trait ChatCausalityFactsReader: Send + Sync {
+    async fn read_chat_causality_facts(
+        &self,
+        session_id: &AgentSessionId,
+        turn_operation_id: &OperationId,
+    ) -> Result<ChatCausalityFacts, SessionStoreError>;
+}
+
+#[async_trait]
+impl ChatCausalityFactsReader for AgentSessionStore {
+    async fn read_chat_causality_facts(
+        &self,
+        session_id: &AgentSessionId,
+        turn_operation_id: &OperationId,
+    ) -> Result<ChatCausalityFacts, SessionStoreError> {
+        self.chat_causality_facts(session_id, turn_operation_id)
+            .await
+    }
+}
+
+/// Durable operation-claim boundary for model operations.
+///
+/// The canonical Fresh-v4 schema deliberately has no extra claim table, so a
+/// host must inject its existing durable idempotency authority here.  A
+/// process-local set is not a production implementation and is intentionally
+/// not provided by this module.
+#[async_trait]
+pub trait ChatOperationClaimStore: Send + Sync {
+    async fn claim(
+        &self,
+        request: ChatOperationClaimRequest,
+    ) -> Result<(), ChatModelError>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatExecutionAuthority {
+    Primary,
+    Shadow,
+}
+
+/// Production causality gate for ChatModelBroker requests.
+///
+/// Admission is fail-closed.  It validates the durable AgentSession facts
+/// before invoking the injected atomic operation claim.  The gate does not
+/// infer route revisions from model names or snapshots, and it does not
+/// silently permit shadow model calls.
+pub struct ProductionChatCausalityGate {
+    facts: Arc<dyn ChatCausalityFactsReader>,
+    operations: Arc<dyn ChatOperationClaimStore>,
+    authority: ChatExecutionAuthority,
+}
+
+impl ProductionChatCausalityGate {
+    pub fn new(
+        facts: Arc<dyn ChatCausalityFactsReader>,
+        operations: Arc<dyn ChatOperationClaimStore>,
+        authority: ChatExecutionAuthority,
+    ) -> Self {
+        Self {
+            facts,
+            operations,
+            authority,
+        }
+    }
+
+    pub fn primary(
+        facts: Arc<dyn ChatCausalityFactsReader>,
+        operations: Arc<dyn ChatOperationClaimStore>,
+    ) -> Self {
+        Self::new(facts, operations, ChatExecutionAuthority::Primary)
+    }
+
+    pub fn shadow(
+        facts: Arc<dyn ChatCausalityFactsReader>,
+        operations: Arc<dyn ChatOperationClaimStore>,
+    ) -> Self {
+        Self::new(facts, operations, ChatExecutionAuthority::Shadow)
+    }
+}
+
+#[async_trait]
+impl ChatCausalityGate for ProductionChatCausalityGate {
+    async fn authorize(&self, causality: &ChatCausality) -> Result<(), ChatModelError> {
+        if self.authority != ChatExecutionAuthority::Primary {
+            return Err(ChatModelError::new(
+                ChatModelErrorCode::ShadowNotPrimary,
+                "shadow execution cannot obtain ChatModelBroker primary authority",
+                ChatRetryDirective::Never,
+            ));
+        }
+
+        let facts = self
+            .facts
+            .read_chat_causality_facts(
+                &causality.agent_session_id,
+                &causality.turn_operation_id,
+            )
+            .await
+            .map_err(chat_facts_error)?;
+
+        validate_chat_causality_facts(&facts, causality)?;
+
+        self.operations
+            .claim(ChatOperationClaimRequest {
+                agent_session_id: causality.agent_session_id.clone(),
+                operation_id: causality.operation_id.clone(),
+                turn_operation_id: causality.turn_operation_id.clone(),
+                causation_event_id: causality.causation_event_id.clone(),
+                route_identity: causality.route_identity.clone(),
+                resolved_snapshot_ref: causality.resolved_snapshot_ref.clone(),
+            })
+            .await
+    }
+}
+
+fn validate_chat_causality_facts(
+    facts: &ChatCausalityFacts,
+    causality: &ChatCausality,
+) -> Result<(), ChatModelError> {
+    if facts.session.agent_session_id != causality.agent_session_id
+        || facts.head.session_id != causality.agent_session_id
+    {
+        return Err(causality_rejected("AgentSession facts belong to another session"));
+    }
+    if facts.head.status != "running"
+        || facts.head.active_turn_id.as_deref() != Some(causality.turn_operation_id.as_ref())
+    {
+        return Err(ChatModelError::new(
+            ChatModelErrorCode::SessionTerminal,
+            "AgentSession is not at the active turn boundary",
+            ChatRetryDirective::Never,
+        ));
+    }
+    if facts
+        .head
+        .snapshot_digest
+        .as_deref()
+        .is_some_and(|digest| digest != causality.resolved_snapshot_ref.snapshot_digest.as_ref())
+    {
+        return Err(causality_rejected(
+            "Session head is bound to a different frozen Snapshot",
+        ));
+    }
+    if causality.operation_id == causality.turn_operation_id {
+        return Err(causality_rejected(
+            "model operation id must differ from the turn operation id",
+        ));
+    }
+    if causality.resolved_snapshot_ref != facts.session.agent_binding.resolved_snapshot_ref {
+        return Err(causality_rejected(
+            "request does not use the Session's frozen ResolvedSnapshotRef",
+        ));
+    }
+
+    let turn = facts
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind.0 == "turn/started"
+                && event.correlation_id.as_ref() == causality.turn_operation_id.as_ref()
+        })
+        .max_by_key(|event| event.seq)
+        .ok_or_else(|| causality_rejected("active turn admission event is missing"))?;
+    let turn_payload = facts
+        .event_payloads
+        .get(turn.event_id.as_ref())
+        .ok_or_else(|| causality_rejected("active turn payload is missing"))?;
+    if turn_payload
+        .get("operation_id")
+        .and_then(serde_json::Value::as_str)
+        != Some(causality.turn_operation_id.as_ref())
+    {
+        return Err(causality_rejected(
+            "turn operation identity differs from the committed turn fact",
+        ));
+    }
+    if route_identity_from_payload(turn_payload)? != Some(causality.route_identity.clone())
+        || turn_payload
+            .get("resolved_snapshot_ref")
+            .and_then(|value| value.get("snapshot_digest"))
+            .and_then(serde_json::Value::as_str)
+            != Some(causality.resolved_snapshot_ref.snapshot_digest.as_ref())
+    {
+        return Err(ChatModelError::new(
+            ChatModelErrorCode::RouteRevisionMismatch,
+            "active turn route facts differ from the Chat request",
+            ChatRetryDirective::Never,
+        ));
+    }
+
+    if facts.events.iter().any(|event| {
+        event.seq > turn.seq
+            && event.correlation_id.as_ref() == causality.turn_operation_id.as_ref()
+            && matches!(
+                event.kind.0.as_str(),
+                "turn/completed" | "turn/failed" | "turn/cancelled"
+            )
+    }) {
+        return Err(ChatModelError::new(
+            ChatModelErrorCode::SessionTerminal,
+            "active turn has already crossed a terminal or cancel fence",
+            ChatRetryDirective::Never,
+        ));
+    }
+
+    let cause = facts
+        .events
+        .iter()
+        .find(|event| event.event_id == causality.causation_event_id)
+        .ok_or_else(|| causality_rejected("causation event is not committed in this session"))?;
+    if cause.agent_session_id != causality.agent_session_id || cause.seq >= turn.seq {
+        return Err(causality_rejected(
+            "causation event is outside the admitted turn boundary",
+        ));
+    }
+    if turn.causation_event_id.as_ref() != Some(&cause.event_id) {
+        return Err(causality_rejected(
+            "causation event is not linked to the active turn",
+        ));
+    }
+    if !matches!(
+        cause.kind.0.as_str(),
+        "message/user-accepted" | "context/model-visible-applied"
+    ) {
+        return Err(causality_rejected(
+            "causation event is not an allowed model-input fact",
+        ));
+    }
+
+    if !facts
+        .operation_ids
+        .contains(causality.turn_operation_id.as_ref())
+    {
+        return Err(causality_rejected(
+            "turn operation is not present in committed AgentSession facts",
+        ));
+    }
+    if facts
+        .operation_ids
+        .contains(causality.operation_id.as_ref())
+    {
+        return Err(ChatModelError::new(
+            ChatModelErrorCode::DuplicateOperation,
+            "model operation is already present in AgentSession facts",
+            ChatRetryDirective::Never,
+        ));
+    }
+    if facts.turn_route_identities
+        != BTreeSet::from([causality.route_identity.clone()])
+    {
+        return Err(ChatModelError::new(
+            ChatModelErrorCode::RouteRevisionMismatch,
+            "active turn does not carry one exact model-route revision",
+            ChatRetryDirective::Never,
+        ));
+    }
+    Ok(())
+}
+
+fn route_identity_from_payload(
+    payload: &serde_json::Value,
+) -> Result<Option<ChatRouteIdentity>, ChatModelError> {
+    let Some(value) = payload.get("route_identity") else {
+        return Ok(None);
+    };
+    let identity = serde_json::from_value::<ChatRouteIdentity>(value.clone()).map_err(|error| {
+        causality_rejected(format!("active turn route identity is invalid: {error}"))
+    })?;
+    identity
+        .validate()
+        .map_err(|error| causality_rejected(error.to_string()))?;
+    Ok(Some(identity))
+}
+
+fn causality_rejected(message: impl Into<String>) -> ChatModelError {
+    ChatModelError::new(
+        ChatModelErrorCode::CausalityRejected,
+        message,
+        ChatRetryDirective::Never,
+    )
+}
+
+fn chat_facts_error(error: SessionStoreError) -> ChatModelError {
+    let (code, message) = match error {
+        SessionStoreError::Deleted(_) => (
+            ChatModelErrorCode::SessionTerminal,
+            "AgentSession is deleted or fenced",
+        ),
+        SessionStoreError::NotFound(_) => (
+            ChatModelErrorCode::CausalityRejected,
+            "AgentSession does not exist",
+        ),
+        _ => (
+            ChatModelErrorCode::Internal,
+            "AgentSession facts are unavailable",
+        ),
+    };
+    ChatModelError::new(code, message, ChatRetryDirective::Never)
+}
 
 pub const CHAT_MINIMAL_TEMPLATE_KEY: &str = "chat.minimal";
 
@@ -365,8 +674,7 @@ impl ChatMinimalContract {
                 .resolved_snapshot_ref
                 .snapshot_digest
                 != snapshot_digest
-            || request.causality.model_route_revision
-                != request.route.model_route_revision
+            || request.causality.route_identity != request.route
         {
             return Err(ChatMinimalError::ModelRequest(
                 "request causality does not match the persistent Session and frozen Snapshot"
@@ -817,5 +1125,270 @@ fn contains_hidden_coding_context(instruction: &str) -> bool {
         "codex coding",
     ]
     .into_iter()
-    .any(|marker| instruction.contains(marker))
+        .any(|marker| instruction.contains(marker))
+}
+
+#[cfg(test)]
+mod causality_tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use nomifun_agent_contracts::{
+        AgentBindingValue, AgentSessionLiveRecord, AgentSessionMetadata, AgentSessionId,
+        ChatRouteIdentity, CorrelationId, EventId, EventProducerId, IdempotencyKey,
+        OperationId, PresetRevisionRef, PrincipalRef, ResolvedSnapshotId, ResolvedSnapshotRef,
+        SessionEventKind, SessionEventPayloadRef, StrictJsonValue,
+    };
+    use nomifun_agent_session::{ChatCausalityFacts, SessionHeadProjection};
+    use nomifun_chat_model_broker::{
+        ChatCausality, ChatCausalityGate, ChatModelError, ChatModelErrorCode,
+    };
+    use serde_json::json;
+
+    use super::{
+        ChatCausalityFactsReader, ChatExecutionAuthority, ChatOperationClaimStore,
+        ProductionChatCausalityGate,
+    };
+
+    const SESSION: &str = "0190f5fe-7c00-7a00-8000-000000009901";
+    const TURN: &str = "turn-causality-test";
+    const ROUTE: &str = "route-causality-test";
+    const SNAPSHOT_DIGEST: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    struct StaticFacts(ChatCausalityFacts);
+
+    #[async_trait]
+    impl ChatCausalityFactsReader for StaticFacts {
+        async fn read_chat_causality_facts(
+            &self,
+            _session_id: &AgentSessionId,
+            _turn_operation_id: &OperationId,
+        ) -> Result<ChatCausalityFacts, nomifun_agent_session::SessionStoreError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct ClaimCounter {
+        calls: AtomicUsize,
+        error: Option<ChatModelError>,
+    }
+
+    #[async_trait]
+    impl ChatOperationClaimStore for ClaimCounter {
+        async fn claim(
+            &self,
+            _request: nomifun_agent_session::ChatOperationClaimRequest,
+        ) -> Result<(), ChatModelError> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            self.error.clone().map_or(Ok(()), Err)
+        }
+    }
+
+    fn snapshot() -> ResolvedSnapshotRef {
+        ResolvedSnapshotRef {
+            snapshot_id: ResolvedSnapshotId::from("snapshot-causality-test"),
+            snapshot_digest: SNAPSHOT_DIGEST.into(),
+        }
+    }
+
+    fn event(
+        seq: u64,
+        event_id: &str,
+        kind: &str,
+        correlation: &str,
+        causation: Option<&str>,
+        payload: serde_json::Value,
+    ) -> nomifun_agent_contracts::SessionEventRecord {
+        nomifun_agent_contracts::SessionEventRecord {
+            agent_session_id: SESSION.into(),
+            seq,
+            event_id: event_id.into(),
+            producer_id: EventProducerId::from("session_api"),
+            idempotency_key: IdempotencyKey::from(format!("event-key-{seq}")),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            kind: SessionEventKind(kind.to_owned()),
+            kind_version: 1,
+            correlation_id: CorrelationId::from(correlation),
+            causation_event_id: causation.map(EventId::from),
+            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(payload)),
+        }
+    }
+
+    fn facts() -> ChatCausalityFacts {
+        let input = event(
+            3,
+            "event-chat-input",
+            "message/user-accepted",
+            TURN,
+            None,
+            json!({"content": "hello"}),
+        );
+        let turn = event(
+            4,
+            "event-chat-turn",
+            "turn/started",
+            TURN,
+            Some("event-chat-input"),
+            json!({
+                "operation_id": TURN,
+                "input_event_id": "event-chat-input",
+                "model_route_id": ROUTE,
+                "model_route_revision": 4,
+                "resolved_snapshot_ref": snapshot(),
+            }),
+        );
+        let session = AgentSessionLiveRecord {
+            agent_session_id: SESSION.into(),
+            owner_ref: PrincipalRef {
+                principal_kind: "user".to_owned(),
+                principal_id: "owner".to_owned(),
+            },
+            metadata: AgentSessionMetadata {
+                title: None,
+                archived: false,
+                pinned: false,
+            },
+            agent_binding: AgentBindingValue {
+                preset_revision_ref: PresetRevisionRef {
+                    preset_id: "preset-causality-test".into(),
+                    revision: 1,
+                    revision_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .into(),
+                },
+                resolved_snapshot_ref: snapshot(),
+                typed_resource_bindings: Vec::new(),
+                binding_version: 1,
+            },
+            remote_binding_provenance: None,
+            parent_session_id: None,
+            fork_base_payload_id: None,
+            next_seq: 5,
+        };
+        let head = SessionHeadProjection {
+            session_id: SESSION.into(),
+            status: "running".to_owned(),
+            active_turn_id: Some(TURN.to_owned()),
+            active_set_generation: 0,
+            runtime_checkpoint_locator: None,
+            runtime_checkpoint_digest: None,
+            runtime_bound_event_id: None,
+            runtime_protocol_version: None,
+            snapshot_digest: Some(SNAPSHOT_DIGEST.to_owned()),
+            checkpoint_through_seq: None,
+            last_seq: 4,
+            unread_count: 0,
+        };
+        ChatCausalityFacts {
+            session,
+            head,
+            events: vec![input.clone(), turn.clone()],
+            event_payloads: BTreeMap::from([
+                (input.event_id.as_ref().to_owned(), json!({"content": "hello"})),
+                (
+                    turn.event_id.as_ref().to_owned(),
+                    json!({
+                        "operation_id": TURN,
+                        "input_event_id": "event-chat-input",
+                        "route_identity": route_identity(),
+                        "resolved_snapshot_ref": snapshot(),
+                    }),
+                ),
+            ]),
+            operation_ids: BTreeSet::from([TURN.to_owned()]),
+            turn_route_identities: BTreeSet::from([route_identity()]),
+        }
+    }
+
+    fn causality() -> ChatCausality {
+        ChatCausality {
+            agent_session_id: SESSION.into(),
+            turn_operation_id: TURN.into(),
+            causation_event_id: "event-chat-input".into(),
+            resolved_snapshot_ref: snapshot(),
+            route_identity: route_identity(),
+            operation_id: "model-causality-test".into(),
+        }
+    }
+
+    fn route_identity() -> ChatRouteIdentity {
+        ChatRouteIdentity::new(
+            "preset-causality-test@1",
+            nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+            ROUTE.into(),
+            4,
+        )
+    }
+
+    #[tokio::test]
+    async fn production_gate_accepts_only_the_exact_live_turn() {
+        let claims = std::sync::Arc::new(ClaimCounter {
+            calls: AtomicUsize::new(0),
+            error: None,
+        });
+        let gate = ProductionChatCausalityGate::new(
+            std::sync::Arc::new(StaticFacts(facts())),
+            claims.clone(),
+            ChatExecutionAuthority::Primary,
+        );
+        gate.authorize(&causality()).await.unwrap();
+        assert_eq!(claims.calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn production_gate_rejects_shadow_and_terminal_requests_before_claim() {
+        let claims = std::sync::Arc::new(ClaimCounter {
+            calls: AtomicUsize::new(0),
+            error: None,
+        });
+        let shadow = ProductionChatCausalityGate::new(
+            std::sync::Arc::new(StaticFacts(facts())),
+            claims.clone(),
+            ChatExecutionAuthority::Shadow,
+        );
+        assert_eq!(
+            shadow.authorize(&causality()).await.unwrap_err().code,
+            ChatModelErrorCode::ShadowNotPrimary
+        );
+        let mut terminal_facts = facts();
+        terminal_facts.head.status = "ready".to_owned();
+        terminal_facts.head.active_turn_id = None;
+        let terminal = ProductionChatCausalityGate::new(
+            std::sync::Arc::new(StaticFacts(terminal_facts)),
+            claims.clone(),
+            ChatExecutionAuthority::Primary,
+        );
+        assert_eq!(
+            terminal.authorize(&causality()).await.unwrap_err().code,
+            ChatModelErrorCode::SessionTerminal
+        );
+        assert_eq!(claims.calls.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn production_gate_rejects_route_and_causation_mismatch() {
+        let claims = std::sync::Arc::new(ClaimCounter {
+            calls: AtomicUsize::new(0),
+            error: None,
+        });
+        let gate = ProductionChatCausalityGate::new(
+            std::sync::Arc::new(StaticFacts(facts())),
+            claims,
+            ChatExecutionAuthority::Primary,
+        );
+        let mut wrong_route = causality();
+        wrong_route.route_identity.route_revision = 9;
+        assert_eq!(
+            gate.authorize(&wrong_route).await.unwrap_err().code,
+            ChatModelErrorCode::RouteRevisionMismatch
+        );
+        let mut wrong_cause = causality();
+        wrong_cause.causation_event_id = "old-event".into();
+        assert_eq!(
+            gate.authorize(&wrong_cause).await.unwrap_err().code,
+            ChatModelErrorCode::CausalityRejected
+        );
+    }
 }

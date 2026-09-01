@@ -7,21 +7,17 @@ repository.workspace = true
 
 [features]
 default = []
-# Browser tools are optional because the public crate is also used by
-# headless/web hosts. Desktop builds can opt in together with the Gateway's
-# browser-use feature.
-browser-use = [
-    "nomifun-gateway/browser-use",
-    "dep:nomifun-browser-platform",
-]
 
 [dependencies]
-# The single capability source of truth + the Remote surface + dispatch.
-nomifun-gateway.workspace = true
+# Canonical Remote MCP operations delegate to the single AgentSession
+# authority. This crate does not own a second session store.
+nomifun-agent-platform.workspace = true
+nomifun-agent-contracts.workspace = true
+nomifun-agent-session.workspace = true
+nomifun-api-types.workspace = true
 # Instance API token validation and installation-owner authentication.
 nomifun-auth.workspace = true
 nomifun-common.workspace = true
-nomifun-browser-platform = { workspace = true, optional = true }
 # rmcp's official axum-mountable Streamable-HTTP MCP server transport. NOTE:
 # version is pinned to the lockfile-resolved 1.7 (nomifun-app declares "1.5" but
 # the workspace unifies to 1.7); the streamable-http-server transport feature is
@@ -34,7 +30,6 @@ http-body-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-sha2.workspace = true
 thiserror.workspace = true
 sysinfo.workspace = true
 tower-http.workspace = true

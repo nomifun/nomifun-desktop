@@ -5,15 +5,15 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use nomifun_agent_contracts::{
-    AgentSessionId, ConnectionConfigRef, DigestHex, EventId, ModelRouteId, OperationId,
-    ResolvedSnapshotId, ResolvedSnapshotRef, VersionString,
+    AgentSessionId, ChatRouteIdentity, ConnectionConfigRef, DigestHex, EventId, ModelRouteId,
+    OperationId, ResolvedSnapshotId, ResolvedSnapshotRef, VersionString,
 };
 use nomifun_chat_model_broker::{
     AnthropicAdapter, BedrockAdapter, BrokerRetryPolicy, ChatBrokerPort, ChatCausality,
     ChatCausalityGate, ChatContentPart, ChatFinishReason, ChatMessage, ChatModelBroker,
     ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatModelInput, ChatModelRequest,
     ChatModality, ChatProtocol, ChatProtocolAdapter, ChatResponseFormat, ChatRetryDirective,
-    ChatRole, ChatRouteResolver, ChatRouteSelection, ChatTask, ChatToolChoice,
+    ChatRole, ChatRouteResolver, ChatRouteSelection, ChatToolChoice,
     CredentialLease, CredentialTarget, GeminiAdapter, OpenAiChatAdapter,
     OpenAiResponsesAdapter, PromptCachePolicy, ProviderCredentialRef,
     ProviderCredentialStore, ProviderIdRef, ProviderTransport, ProviderWireFrame,
@@ -54,13 +54,10 @@ impl ProviderTransport for ScriptedTransport {
         credential: CredentialLease,
     ) -> Result<ProviderWireStream, ChatModelError> {
         assert_eq!(credential.credential_ref(), &request.credential_ref);
-        assert_eq!(
-            credential.target().model_route_id,
-            request.model_route_id
-        );
+        assert_eq!(credential.target().model_route_id, request.route_identity.route_id);
         assert_eq!(
             credential.target().model_route_revision,
-            request.model_route_revision
+            request.route_identity.route_revision
         );
         assert_eq!(credential.target().provider_id, request.provider_id);
         assert_eq!(credential.target().protocol, request.protocol);
@@ -178,6 +175,12 @@ fn route(protocol: ChatProtocol, id: &str, revision: u64) -> ResolvedChatRoute {
 }
 
 fn basic_request(route: &ResolvedChatRoute) -> ChatModelRequest {
+    let route_identity = ChatRouteIdentity::new(
+        "fixture@1",
+        nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+        route.model_route_id.clone(),
+        route.model_route_revision,
+    );
     ChatModelRequest {
         contract_version: VersionString("chat-model-v1".to_owned()),
         causality: ChatCausality {
@@ -190,14 +193,10 @@ fn basic_request(route: &ResolvedChatRoute) -> ChatModelRequest {
                 snapshot_id: ResolvedSnapshotId("snapshot-test".to_owned()),
                 snapshot_digest: DigestHex("9".repeat(64)),
             },
-            model_route_revision: route.model_route_revision,
+            route_identity: route_identity.clone(),
             operation_id: OperationId("model-operation-test".to_owned()),
         },
-        route: ChatRouteSelection {
-            model_route_id: route.model_route_id.clone(),
-            model_route_revision: route.model_route_revision,
-            task: ChatTask::AgentChat,
-        },
+        route: route_identity,
         input: ChatModelInput {
             instructions: vec!["Answer directly.".to_owned()],
             messages: vec![ChatMessage {
@@ -353,6 +352,443 @@ fn every_recorded_wire_decodes_to_its_canonical_event_sequence() {
 }
 
 #[test]
+fn openai_chat_raw_sse_shape_decodes_text_tools_usage_and_finish() {
+    let transports =
+        transport_map(std::iter::empty::<(ChatProtocol, Arc<dyn ProviderTransport>)>());
+    let adapter = OpenAiChatAdapter::new(transports[&ChatProtocol::OpenaiChat].clone());
+    let frames = [
+        serde_json::json!({
+            "id": "chatcmpl_raw_1",
+            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}]
+        }),
+        serde_json::json!({
+            "id": "chatcmpl_raw_1",
+            "choices": [{"index": 0, "delta": {"content": "Hello "}, "finish_reason": null}]
+        }),
+        serde_json::json!({
+            "id": "chatcmpl_raw_1",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_raw_1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{\"q\":\""}
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "chatcmpl_raw_1",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {"arguments": "raw\"}"}
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "chatcmpl_raw_1",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 7,
+                "completion_tokens_details": {"reasoning_tokens": 2},
+                "prompt_tokens_details": {"cached_tokens": 3}
+            }
+        }),
+    ];
+    let events = frames
+        .into_iter()
+        .flat_map(|data| {
+            adapter
+                .decode_frame(ProviderWireFrame {
+                    event: "message".to_owned(),
+                    data,
+                })
+                .expect("OpenAI raw frame")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        events,
+        vec![
+            ChatModelEvent::ResponseStarted {
+                provider_response_id: Some(nomifun_chat_model_broker::ProviderResponseId(
+                    "chatcmpl_raw_1".to_owned()
+                ))
+            },
+            ChatModelEvent::OutputTextDelta {
+                text: "Hello ".to_owned()
+            },
+            ChatModelEvent::ToolCallDelta {
+                call_id: nomifun_chat_model_broker::ToolCallId("call_raw_1".to_owned()),
+                name: "lookup".to_owned(),
+                arguments_delta: "{\"q\":\"".to_owned()
+            },
+            ChatModelEvent::ToolCallDelta {
+                call_id: nomifun_chat_model_broker::ToolCallId("call_raw_1".to_owned()),
+                name: "lookup".to_owned(),
+                arguments_delta: "raw\"}".to_owned()
+            },
+            ChatModelEvent::ToolCallCompleted {
+                call: nomifun_chat_model_broker::ChatToolCall {
+                    call_id: nomifun_chat_model_broker::ToolCallId("call_raw_1".to_owned()),
+                    name: "lookup".to_owned(),
+                    arguments: nomifun_agent_contracts::StrictJsonValue(
+                        serde_json::json!({"q": "raw"})
+                    ),
+                    provider_metadata: None,
+                }
+            },
+            ChatModelEvent::Usage {
+                usage: nomifun_chat_model_broker::ChatUsage {
+                    input_tokens: 12,
+                    output_tokens: 7,
+                    reasoning_tokens: 2,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 3,
+                    audio_input_tokens: 0,
+                    audio_output_tokens: 0,
+                    provider_reported: BTreeMap::new(),
+                }
+            },
+            ChatModelEvent::Completed {
+                finish_reason: ChatFinishReason::ToolCalls
+            }
+        ]
+    );
+}
+
+#[test]
+fn openai_chat_done_marker_completes_a_stream_without_finish_reason() {
+    let transports =
+        transport_map(std::iter::empty::<(ChatProtocol, Arc<dyn ProviderTransport>)>());
+    let adapter = OpenAiChatAdapter::new(transports[&ChatProtocol::OpenaiChat].clone());
+    let frames = [
+        serde_json::json!({
+            "id": "chatcmpl_done_only",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "complete me"},
+                "finish_reason": null
+            }]
+        }),
+        serde_json::json!({
+            "id": "chatcmpl_done_only",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 2
+            }
+        }),
+        serde_json::json!({}),
+    ];
+    let events = frames
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, data)| {
+            adapter
+                .decode_frame(ProviderWireFrame {
+                    event: if index == 2 {
+                        "done".to_owned()
+                    } else {
+                        "message".to_owned()
+                    },
+                    data,
+                })
+                .expect("OpenAI raw frame")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        events,
+        vec![
+            ChatModelEvent::ResponseStarted {
+                provider_response_id: Some(nomifun_chat_model_broker::ProviderResponseId(
+                    "chatcmpl_done_only".to_owned()
+                ))
+            },
+            ChatModelEvent::OutputTextDelta {
+                text: "complete me".to_owned()
+            },
+            ChatModelEvent::Usage {
+                usage: nomifun_chat_model_broker::ChatUsage {
+                    input_tokens: 3,
+                    output_tokens: 2,
+                    reasoning_tokens: 0,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                    audio_input_tokens: 0,
+                    audio_output_tokens: 0,
+                    provider_reported: BTreeMap::new(),
+                }
+            },
+            ChatModelEvent::Completed {
+                finish_reason: ChatFinishReason::Completed
+            }
+        ]
+    );
+}
+
+#[test]
+fn gemini_raw_sse_and_json_shapes_decode_parts_usage_and_finish() {
+    let transports =
+        transport_map(std::iter::empty::<(ChatProtocol, Arc<dyn ProviderTransport>)>());
+    let adapter = GeminiAdapter::new(transports[&ChatProtocol::Gemini].clone());
+    let frames = [
+        serde_json::json!({
+            "responseId": "gemini-raw-1",
+            "candidates": [{
+                "index": 0,
+                "content": {
+                    "role": "model",
+                    "parts": [{"text": "thinking", "thought": true}]
+                }
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 20,
+                "candidatesTokenCount": 4,
+                "thoughtsTokenCount": 1,
+                "cachedContentTokenCount": 6
+            }
+        }),
+        serde_json::json!({
+            "candidates": [],
+            "usageMetadata": {
+                "promptTokenCount": 20,
+                "candidatesTokenCount": 5,
+                "thoughtsTokenCount": 1,
+                "cachedContentTokenCount": 6
+            }
+        }),
+        serde_json::json!({
+            "candidates": [{
+                "index": 0,
+                "content": {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {
+                            "id": "gemini-call-1",
+                            "name": "lookup",
+                            "args": {"q": "raw"}
+                        },
+                        "thoughtSignature": "sig-1"
+                    }]
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 20,
+                "candidatesTokenCount": 8,
+                "thoughtsTokenCount": 2,
+                "cachedContentTokenCount": 6
+            }
+        }),
+    ];
+    let events = frames
+        .into_iter()
+        .flat_map(|data| {
+            adapter
+                .decode_frame(ProviderWireFrame {
+                    event: "message".to_owned(),
+                    data,
+                })
+                .expect("Gemini raw frame")
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        events,
+        vec![
+            ChatModelEvent::ResponseStarted {
+                provider_response_id: Some(nomifun_chat_model_broker::ProviderResponseId(
+                    "gemini-raw-1".to_owned()
+                ))
+            },
+            ChatModelEvent::ReasoningDelta {
+                text: "thinking".to_owned()
+            },
+            ChatModelEvent::ReasoningSignature {
+                signature: "sig-1".to_owned()
+            },
+            ChatModelEvent::ToolCallCompleted {
+                call: nomifun_chat_model_broker::ChatToolCall {
+                    call_id: nomifun_chat_model_broker::ToolCallId("gemini-call-1".to_owned()),
+                    name: "lookup".to_owned(),
+                    arguments: nomifun_agent_contracts::StrictJsonValue(
+                        serde_json::json!({"q": "raw"})
+                    ),
+                    provider_metadata: Some(nomifun_agent_contracts::StrictJsonValue(
+                        serde_json::json!({"thoughtSignature": "sig-1"})
+                    )),
+                }
+            },
+            ChatModelEvent::Usage {
+                usage: nomifun_chat_model_broker::ChatUsage {
+                    input_tokens: 20,
+                    output_tokens: 8,
+                    reasoning_tokens: 2,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 6,
+                    audio_input_tokens: 0,
+                    audio_output_tokens: 0,
+                    provider_reported: BTreeMap::new(),
+                }
+            },
+            ChatModelEvent::Completed {
+                finish_reason: ChatFinishReason::ToolCalls
+            }
+        ]
+    );
+
+    let json_events = adapter
+        .decode_frame(ProviderWireFrame {
+            event: "json".to_owned(),
+            data: serde_json::json!({
+                "candidates": [{
+                    "content": {
+                        "parts": [{"text": "done"}]
+                    },
+                    "finishReason": "STOP"
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 1,
+                    "candidatesTokenCount": 1
+                }
+            }),
+        })
+        .expect("Gemini JSON frame");
+    assert_eq!(
+        json_events,
+        vec![
+            ChatModelEvent::OutputTextDelta {
+                text: "done".to_owned()
+            },
+            ChatModelEvent::Usage {
+                usage: nomifun_chat_model_broker::ChatUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    reasoning_tokens: 0,
+                    cache_write_tokens: 0,
+                    cache_read_tokens: 0,
+                    audio_input_tokens: 0,
+                    audio_output_tokens: 0,
+                    provider_reported: BTreeMap::new(),
+                }
+            },
+            ChatModelEvent::Completed {
+                finish_reason: ChatFinishReason::Completed
+            }
+        ]
+    );
+}
+
+#[test]
+fn gemini_blocked_payload_is_provider_failure_before_empty_candidate_validation() {
+    let transports =
+        transport_map(std::iter::empty::<(ChatProtocol, Arc<dyn ProviderTransport>)>());
+    let adapter = GeminiAdapter::new(transports[&ChatProtocol::Gemini].clone());
+    let error = adapter
+        .decode_frame(ProviderWireFrame {
+            event: "message".to_owned(),
+            data: serde_json::json!({
+                "candidates": [],
+                "promptFeedback": {"blockReason": "SAFETY"}
+            }),
+        })
+        .expect_err("blocked Gemini response must not be treated as malformed JSON");
+    assert_eq!(error.code, ChatModelErrorCode::ProviderUnavailable);
+}
+
+#[test]
+fn gemini_tool_result_continuation_uses_function_name_and_preserves_call_id() {
+    let fixture = recorded_conformance_fixtures()
+        .into_iter()
+        .find(|fixture| fixture.protocol == ChatProtocol::Gemini)
+        .expect("Gemini fixture");
+    let transports =
+        transport_map(std::iter::empty::<(ChatProtocol, Arc<dyn ProviderTransport>)>());
+    let adapter = GeminiAdapter::new(transports[&ChatProtocol::Gemini].clone());
+    let lease = CredentialLease::new(
+        fixture.route.credential_ref.clone(),
+        CredentialTarget::for_route(&fixture.route),
+        "opaque-fixture-handle",
+    );
+    let body = adapter
+        .encode_request(&fixture.request, &fixture.route, &lease)
+        .expect("Gemini continuation must encode")
+        .body;
+    let parts = body["contents"]
+        .as_array()
+        .expect("Gemini contents")
+        .iter()
+        .flat_map(|content| {
+            content["parts"]
+                .as_array()
+                .expect("Gemini content parts")
+        })
+        .collect::<Vec<_>>();
+    let function_call = parts
+        .iter()
+        .find_map(|part| part.get("functionCall"))
+        .expect("Gemini functionCall");
+    let function_response = parts
+        .iter()
+        .find_map(|part| part.get("functionResponse"))
+        .expect("Gemini functionResponse");
+
+    assert_eq!(function_call["id"], "call-history-gemini");
+    assert_eq!(function_call["name"], "lookup");
+    assert_eq!(function_response["id"], "call-history-gemini");
+    assert_eq!(function_response["name"], "lookup");
+    assert_ne!(function_response["name"], function_response["id"]);
+}
+
+#[test]
+fn gemini_tool_result_without_matching_call_fails_closed() {
+    let mut fixture = recorded_conformance_fixtures()
+        .into_iter()
+        .find(|fixture| fixture.protocol == ChatProtocol::Gemini)
+        .expect("Gemini fixture");
+    for message in &mut fixture.request.input.messages {
+        for part in &mut message.content {
+            if let ChatContentPart::ToolResult { call_id, .. } = part {
+                *call_id =
+                    nomifun_chat_model_broker::ToolCallId("unmatched-gemini-call".to_owned());
+            }
+        }
+    }
+    let transports =
+        transport_map(std::iter::empty::<(ChatProtocol, Arc<dyn ProviderTransport>)>());
+    let adapter = GeminiAdapter::new(transports[&ChatProtocol::Gemini].clone());
+    let lease = CredentialLease::new(
+        fixture.route.credential_ref.clone(),
+        CredentialTarget::for_route(&fixture.route),
+        "opaque-fixture-handle",
+    );
+    let error = adapter
+        .encode_request(&fixture.request, &fixture.route, &lease)
+        .expect_err("unmatched Gemini function response must not encode");
+
+    assert_eq!(error.code, ChatModelErrorCode::InvalidRequest);
+    assert_eq!(
+        error.message,
+        "Gemini function response has no matching function call"
+    );
+}
+
+#[test]
 fn adapters_are_single_attempt_and_request_bodies_contain_no_credentials() {
     let transports =
         transport_map(std::iter::empty::<(ChatProtocol, Arc<dyn ProviderTransport>)>());
@@ -374,9 +810,9 @@ fn adapters_are_single_attempt_and_request_bodies_contain_no_credentials() {
             .encode_request(&fixture.request, &fixture.route, &lease)
             .expect("fixture must encode");
         assert_eq!(request.protocol, fixture.route.protocol);
-        assert_eq!(request.model_route_id, fixture.route.model_route_id);
+        assert_eq!(request.route_identity.route_id, fixture.route.model_route_id);
         assert_eq!(
-            request.model_route_revision,
+            request.route_identity.route_revision,
             fixture.route.model_route_revision
         );
         assert_eq!(

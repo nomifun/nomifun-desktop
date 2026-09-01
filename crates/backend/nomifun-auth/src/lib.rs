@@ -9,6 +9,7 @@ pub mod middleware;
 mod password;
 pub mod qr_token;
 mod rate_limit;
+mod remote_admission;
 mod routes;
 mod security;
 pub mod trust;
@@ -25,6 +26,11 @@ pub use jwt::{
 
 // Installation-scoped API token (Remote front door)
 pub use instance_token::{InstanceTokenValidator, token_sha256_hex};
+
+// D-026 Remote request-admission fence
+pub use remote_admission::{
+    RemoteAuthAdmissionFence, RemoteAuthMutationPermit, RemoteRequestAdmissionPermit,
+};
 
 // Password service
 pub use password::{

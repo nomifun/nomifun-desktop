@@ -17,6 +17,7 @@ use crate::path_safety::{
     PathAuthority, has_traversal, is_unsafe_path_segment, validate_path, validate_path_authority,
     validate_path_for_write, validate_path_for_write_authority, validate_path_with_extra_root,
 };
+use crate::resource::AgentSessionWorkspaceBinding;
 use crate::types::{
     ContentUpdateEvent, ContentUpdateOperation, CopyResult, DirOrFile, FileMetadata, WorkspaceFlatFile, ZipEntry,
 };
@@ -78,6 +79,87 @@ impl FileService {
             workspace_files_cache: DashMap::new(),
             zip_cancellations: DashMap::new(),
         }
+    }
+
+    /// Read a workspace-relative file through an explicit AgentSession
+    /// resource binding. The host supplies the resolved native workspace root;
+    /// all path I/O still goes through the existing confined authority.
+    pub async fn read_file_for_agent_session(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        relative_path: &str,
+    ) -> Result<Option<String>, AppError> {
+        scope.require_operation(crate::resource::READ_OPERATION)?;
+        let path = scope.resolve_relative_path(relative_path)?;
+        self.read_file_impl(&path.to_string_lossy(), &scope.authority()).await
+    }
+
+    pub async fn list_workspace_files_for_agent_session(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+    ) -> Result<Vec<WorkspaceFlatFile>, AppError> {
+        scope.require_operation(crate::resource::READ_OPERATION)?;
+        self.list_workspace_files_impl(&scope.workspace_root().to_string_lossy(), &scope.authority())
+            .await
+    }
+
+    pub async fn get_file_metadata_for_agent_session(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        relative_path: &str,
+    ) -> Result<FileMetadata, AppError> {
+        scope.require_operation(crate::resource::READ_OPERATION)?;
+        let path = scope.resolve_relative_path(relative_path)?;
+        self.get_file_metadata_impl(&path.to_string_lossy(), &scope.authority())
+            .await
+    }
+
+    pub async fn write_file_for_agent_session(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        relative_path: &str,
+        data: &[u8],
+    ) -> Result<bool, AppError> {
+        scope.require_operation(crate::resource::WRITE_OPERATION)?;
+        let path = scope.resolve_relative_path(relative_path)?;
+        let workspace = scope.workspace_root().to_string_lossy();
+        self.write_file_impl(
+            scope.owner_id(),
+            &path.to_string_lossy(),
+            data,
+            &workspace,
+            &scope.authority(),
+        )
+        .await
+    }
+
+    pub async fn remove_entry_for_agent_session(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        relative_path: &str,
+    ) -> Result<(), AppError> {
+        scope.require_operation(crate::resource::DELETE_OPERATION)?;
+        let path = scope.resolve_relative_path(relative_path)?;
+        let workspace = scope.workspace_root().to_string_lossy();
+        self.remove_entry_impl(
+            scope.owner_id(),
+            &path.to_string_lossy(),
+            &workspace,
+            &scope.authority(),
+        )
+        .await
+    }
+
+    pub async fn rename_entry_for_agent_session(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        relative_path: &str,
+        new_name: &str,
+    ) -> Result<String, AppError> {
+        scope.require_operation(crate::resource::WRITE_OPERATION)?;
+        let path = scope.resolve_relative_path(relative_path)?;
+        self.rename_entry_impl(&path.to_string_lossy(), new_name, &scope.authority())
+            .await
     }
 
     /// Invalidate the workspace files cache for a given root.

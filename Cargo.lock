@@ -5928,6 +5928,8 @@ version = "0.7.4"
 dependencies = [
  "nomifun-agent-contracts",
  "nomifun-agent-kernel",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -6190,6 +6192,7 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]
@@ -6761,7 +6764,10 @@ name = "nomifun-model-invoke"
 version = "0.7.4"
 dependencies = [
  "async-trait",
+ "aws-credential-types",
+ "aws-sigv4",
  "base64 0.22.1",
+ "crc32fast",
  "futures-util",
  "nomifun-api-types",
  "nomifun-common",
@@ -6842,14 +6848,15 @@ dependencies = [
  "axum",
  "futures",
  "http-body-util",
+ "nomifun-agent-contracts",
+ "nomifun-agent-platform",
+ "nomifun-agent-session",
+ "nomifun-api-types",
  "nomifun-auth",
- "nomifun-browser-platform",
  "nomifun-common",
- "nomifun-gateway",
  "rmcp",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "sysinfo",
  "thiserror 2.0.19",
  "tokio",

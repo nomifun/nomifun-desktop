@@ -2,32 +2,36 @@
 //! supervision, and Remote domain wave.
 //!
 //! This crate intentionally depends only on the contract and thin-kernel
-//! crates.  The domain registrations are source-neutral metadata plus pure,
-//! deterministic handlers; production service wiring is supplied by the host
+//! crates.  The domain registrations are source-neutral metadata plus typed
+//! handlers; production service wiring is supplied by the host
 //! through the typed ports declared by each registration.
 
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use nomifun_agent_contracts::{
-    ActionId, ArtifactEnvelope, CapabilityActionDescriptor, CapabilityContributions,
-    CapabilityId, CapabilityKind, CapabilityManifest, CancellationDescriptor,
-    CanonicalErrorCode, CanonicalSchemaRef, D026AdmissionOutcome, D026OrderingCaseKind,
-    D026OrderingOutcome, D026OrderingOutcomeMatrix, D027DeadlineRule, D027DrainCaseKind,
-    D027OutstandingSet, D027TerminalSequence, D027TerminalSequenceMatrix, D027TerminalStep,
+    ActionId, AgentSessionId, ArtifactEnvelope, CapabilityActionDescriptor,
+    CapabilityContributions, CapabilityId, CapabilityKind, CapabilityManifest,
+    CancellationDescriptor, CanonicalErrorCode, CanonicalSchemaRef, CorrelationId,
+    D026AdmissionOutcome, D026OrderingCaseKind, D026OrderingOutcome,
+    D026OrderingOutcomeMatrix, D027DeadlineRule, D027DrainCaseKind, D027OutstandingSet,
+    D027TerminalSequence, D027TerminalSequenceMatrix, D027TerminalStep,
     DeclaredServiceViewDescriptor, DomainOutboxPortDescriptor, EffectClass,
-    HostPortBindingDescriptor, HostPortId, HostPortRef, InProcessEntrypointMetadata,
-    LocalizedMetadata, ManagedTaskRegistrationDescriptor, PackageContributions, PackageId,
-    PackageManifest, PackageRef, PlatformConstraint, PluginBootCriticality, PluginBootState,
-    PluginContextDescriptor, PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor,
-    PluginMountId, PluginRegistrarDescriptor, PluginRegistrarOperation, PluginRegistrationMetadata,
+    HostPortBindingDescriptor, HostPortId, HostPortRef, IdempotencyKey,
+    InProcessEntrypointMetadata, LocalizedMetadata, ManagedTaskRegistrationDescriptor,
+    OperationId, PackageContributions, PackageId, PackageManifest, PackageRef,
+    PlatformConstraint, PluginBootCriticality, PluginBootState, PluginContextDescriptor,
+    PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor, PluginMountId,
+    PluginRegistrarDescriptor, PluginRegistrarOperation, PluginRegistrationMetadata,
     PluginSourceKind, PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod,
-    RemoteAuthMutation, RemoteOperation, ResourceKind, ScopeKey, StrictJsonValue,
-    RuntimeTarget, TypedCommandPortDescriptor, VersionString, REMOTE_AUTH_REQUIRED,
+    RemoteAuthMutation, RemoteOperation, ResourceBindingId, ResourceId, ResourceKind, ScopeKey,
+    StrictJsonValue, TypedCommandPortDescriptor, TypedResourceBinding, TypedResourceBindings,
+    RuntimeTarget, VersionString, REMOTE_AUTH_REQUIRED,
 };
 use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, KernelError, PluginRegistration,
@@ -75,6 +79,12 @@ pub const REQUIREMENTS_READ: &str = "requirements.read";
 pub const REQUIREMENTS_WRITE: &str = "requirements.write";
 pub const REQUIREMENTS_STATUS: &str = "requirements.status";
 pub const REQUIREMENTS_CLAIM: &str = "requirements.claim";
+
+/// Resource kind used by AgentExecution capabilities that operate on a
+/// session-backed process/PTY lane.
+pub const PROCESS_SESSION_RESOURCE_KIND: &str = "process_session";
+
+const PROCESS_SESSION_RESOURCES: &[&str] = &[PROCESS_SESSION_RESOURCE_KIND];
 
 pub const AGENT_DELEGATE_ACTION: &str = "agent.delegate.invoke";
 pub const AGENT_FORK_ACTION: &str = "agent.fork.invoke";
@@ -186,6 +196,107 @@ pub const REMOTE_OPERATION_IDS: [&str; 4] = [
     REMOTE_CANCEL_ACTION,
 ];
 
+/// The single host port for action-bearing Wave 5 capabilities.
+///
+/// Wave 5 owns the capability vocabulary and input boundary, while the
+/// application owns AgentExecution, scheduling, IDMM, and requirements facts.
+/// Keeping this port in the domain crate avoids a dependency on the
+/// application composition root and prevents a synthetic success result when
+/// no owner has been wired.
+pub const WAVE5_CAPABILITY_HOST_PORT_ID: &str = "host.wave5.capability.invoke";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wave5HostContext {
+    pub principal: nomifun_agent_contracts::PrincipalRef,
+    pub agent_session_id: AgentSessionId,
+    pub operation_id: OperationId,
+    pub idempotency_key: IdempotencyKey,
+    pub correlation_id: CorrelationId,
+    pub resolved_snapshot_ref: nomifun_agent_contracts::ResolvedSnapshotRef,
+    pub registry_generation: u64,
+    pub capability_id: CapabilityId,
+    pub action_id: ActionId,
+    pub resource_bindings: TypedResourceBindings,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Wave5CapabilityOperation {
+    AgentExecution {
+        capability_id: CapabilityId,
+        input: StrictJsonValue,
+    },
+    ScheduleStore {
+        input: StrictJsonValue,
+    },
+    Requirement {
+        capability_id: CapabilityId,
+        input: StrictJsonValue,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wave5HostRequest {
+    pub context: Wave5HostContext,
+    pub operation: Wave5CapabilityOperation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wave5HostPortError {
+    pub code: String,
+    pub message: String,
+}
+
+impl Wave5HostPortError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::new("WAVE5_HOST_PORT_UNAVAILABLE", message)
+    }
+}
+
+impl fmt::Display for Wave5HostPortError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for Wave5HostPortError {}
+
+/// Application-owned implementation boundary for action-bearing Wave 5
+/// capabilities.
+pub trait Wave5HostPort: Send + Sync {
+    fn invoke<'a>(
+        &'a self,
+        request: Wave5HostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave5HostPortError>> + Send + 'a>>;
+}
+
+struct UnconfiguredWave5HostPort;
+
+impl Wave5HostPort for UnconfiguredWave5HostPort {
+    fn invoke<'a>(
+        &'a self,
+        request: Wave5HostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave5HostPortError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            Err(Wave5HostPortError::unavailable(format!(
+                "no production host adapter is bound for {}",
+                request.context.capability_id.as_ref()
+            )))
+        })
+    }
+}
+
+pub fn unconfigured_host_port() -> Arc<dyn Wave5HostPort> {
+    Arc::new(UnconfiguredWave5HostPort)
+}
+
 /// A typed view of the Remote transport contribution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteTransportDescriptor {
@@ -248,6 +359,24 @@ pub type RemoteBindingDescriptor = RemoteTransportDescriptor;
 pub type AdmissionDescriptor = RemoteAdmissionDescriptor;
 pub type DrainDescriptor = RemoteDrainDescriptor;
 
+impl RemoteAdmissionDescriptor {
+    pub fn is_exact_contract(&self) -> bool {
+        let fixture = d026_request_admission_fixture();
+        self.ordering.schema_version == VersionString::from(VERSION)
+            && self.ordering.validate_exact_contract()
+            && self.request_operations == fixture.operation_exact_set
+            && self.auth_mutations == fixture.auth_mutation_exact_set
+            && self.forbidden_auth_state == fixture.forbidden_auth_state
+            && self.rejected_after_fence_code == CanonicalErrorCode::from(REMOTE_AUTH_REQUIRED)
+            && self.binding_mutation_count == 0
+            && self.session_mutation_count == 0
+            && self.effect_replay_count == 0
+            && self.replacement_requires_same_owner
+            && self.replacement_requires_explicit_session_id
+            && !self.implicit_lookup_allowed
+    }
+}
+
 impl RemoteAvailabilityDescriptor {
     pub fn is_available_on(&self, surface: &str) -> bool {
         self.supported_surfaces.contains(surface)
@@ -271,19 +400,22 @@ impl RemoteTransportDescriptor {
         &self,
         operation: RemoteOperation,
     ) -> Option<&TypedCommandPortDescriptor> {
-        let index = match operation {
-            RemoteOperation::Open => 0,
-            RemoteOperation::Turn => 1,
-            RemoteOperation::Observe => 2,
-            RemoteOperation::Cancel => 3,
+        let port_id = match operation {
+            RemoteOperation::Open => REMOTE_OPEN_PORT,
+            RemoteOperation::Turn => REMOTE_TURN_PORT,
+            RemoteOperation::Observe => REMOTE_OBSERVE_PORT,
+            RemoteOperation::Cancel => REMOTE_CANCEL_PORT,
         };
-        self.typed_command_ports.get(index)
+        self.typed_command_ports
+            .iter()
+            .find(|port| port.port.id.as_ref() == port_id)
     }
 }
 
 impl RemoteDrainDescriptor {
     pub fn is_exact_contract(&self) -> bool {
-        self.sequences.validate_exact_contract()
+        self.sequences.schema_version == VersionString::from(VERSION)
+            && self.sequences.validate_exact_contract()
             && self.exact_zero_before_delete
             && !self.configurable_timeout_allowed
             && !self.same_session_runtime_switch_allowed
@@ -293,12 +425,48 @@ impl RemoteDrainDescriptor {
 
 /// Return the five bundled registrations owned by Wave 5.
 pub fn registrations() -> Result<Vec<PluginRegistration>, String> {
+    registrations_with_host_port(unconfigured_host_port())
+}
+
+pub fn registrations_with_host_port(
+    action_host_port: Arc<dyn Wave5HostPort>,
+) -> Result<Vec<PluginRegistration>, String> {
     Ok(vec![
-        agent_execution_registration()?,
-        autowork_registration()?,
-        idmm_registration()?,
-        remote_ingress_registration()?,
-        requirements_registration()?,
+        registration_for(
+            AGENT_EXECUTION_PACKAGE,
+            "nomifun-agent-execution",
+            agent_execution_capabilities(),
+            agent_execution_ports(),
+            Arc::clone(&action_host_port),
+        )?,
+        registration_for(
+            AUTOWORK_SCHEDULER_PACKAGE,
+            "nomifun-autowork-scheduler",
+            autowork_capabilities(),
+            autowork_ports(),
+            Arc::clone(&action_host_port),
+        )?,
+        registration_for(
+            IDMM_PACKAGE,
+            "nomifun-idmm",
+            idmm_capabilities(),
+            idmm_ports(),
+            Arc::clone(&action_host_port),
+        )?,
+        registration_for(
+            REMOTE_INGRESS_PACKAGE,
+            "nomifun-remote-ingress",
+            remote_capabilities(),
+            remote_ports(),
+            Arc::clone(&action_host_port),
+        )?,
+        registration_for(
+            REQUIREMENTS_PACKAGE,
+            "nomifun-requirements",
+            requirements_capabilities(),
+            requirements_ports(),
+            action_host_port,
+        )?,
     ])
 }
 
@@ -308,6 +476,7 @@ pub fn agent_execution_registration() -> Result<PluginRegistration, String> {
         "nomifun-agent-execution",
         agent_execution_capabilities(),
         agent_execution_ports(),
+        unconfigured_host_port(),
     )
 }
 
@@ -317,6 +486,7 @@ pub fn autowork_registration() -> Result<PluginRegistration, String> {
         "nomifun-autowork-scheduler",
         autowork_capabilities(),
         autowork_ports(),
+        unconfigured_host_port(),
     )
 }
 
@@ -326,6 +496,7 @@ pub fn idmm_registration() -> Result<PluginRegistration, String> {
         "nomifun-idmm",
         idmm_capabilities(),
         idmm_ports(),
+        unconfigured_host_port(),
     )
 }
 
@@ -335,6 +506,7 @@ pub fn remote_ingress_registration() -> Result<PluginRegistration, String> {
         "nomifun-remote-ingress",
         remote_capabilities(),
         remote_ports(),
+        unconfigured_host_port(),
     )
 }
 
@@ -344,6 +516,7 @@ pub fn requirements_registration() -> Result<PluginRegistration, String> {
         "nomifun-requirements",
         requirements_capabilities(),
         requirements_ports(),
+        unconfigured_host_port(),
     )
 }
 
@@ -362,6 +535,103 @@ pub fn capability_ids() -> BTreeSet<CapabilityId> {
 /// Return the package IDs in deterministic registration order.
 pub fn package_ids() -> BTreeSet<PackageId> {
     PACKAGE_IDS.into_iter().map(PackageId::from).collect()
+}
+
+/// A typed resource slot used by the Wave 5 AgentExecution contribution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypedResourceDescriptor {
+    pub slot_key: &'static str,
+    pub resource_kind: ResourceKind,
+    pub required: bool,
+    pub operations: BTreeSet<String>,
+    pub binding_policy: &'static str,
+}
+
+/// Return the resource slots declared by this wave.
+pub fn typed_resource_descriptors() -> Vec<TypedResourceDescriptor> {
+    vec![TypedResourceDescriptor {
+        slot_key: PROCESS_SESSION_RESOURCE_KIND,
+        resource_kind: ResourceKind::from(PROCESS_SESSION_RESOURCE_KIND),
+        required: false,
+        operations: BTreeSet::from(["execute".to_owned(), "observe".to_owned()]),
+        binding_policy: "leave_unbound",
+    }]
+}
+
+pub fn all_resource_descriptors() -> Vec<TypedResourceDescriptor> {
+    typed_resource_descriptors()
+}
+
+pub fn resource_descriptors() -> Vec<TypedResourceDescriptor> {
+    typed_resource_descriptors()
+}
+
+/// Return the union of operations declared for each typed resource kind.
+pub fn resource_binding_metadata() -> BTreeMap<ResourceKind, BTreeSet<String>> {
+    typed_resource_descriptors()
+        .into_iter()
+        .map(|descriptor| (descriptor.resource_kind, descriptor.operations))
+        .collect()
+}
+
+/// Build a deterministic fixture binding for the AgentExecution process lane.
+///
+/// This creates no process and does not resolve a product resource. It is only
+/// a typed contract fixture for callers constructing an AgentBinding revision.
+pub fn canonical_resource_bindings(owner_id: impl Into<String>) -> TypedResourceBindings {
+    vec![typed_resource_binding(
+        "wave5-process-session",
+        PROCESS_SESSION_RESOURCE_KIND,
+        "wave5-process-session",
+        owner_id,
+        ["execute", "observe"],
+    )]
+}
+
+pub fn resource_bindings(owner_id: impl Into<String>) -> TypedResourceBindings {
+    canonical_resource_bindings(owner_id)
+}
+
+pub fn typed_resource_binding<I, S>(
+    binding_id: impl Into<ResourceBindingId>,
+    resource_kind: impl Into<ResourceKind>,
+    resource_id: impl Into<ResourceId>,
+    owner_id: impl Into<String>,
+    operations: I,
+) -> TypedResourceBinding
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    TypedResourceBinding {
+        binding_id: binding_id.into(),
+        resource_kind: resource_kind.into(),
+        resource_id: resource_id.into(),
+        owner_id: owner_id.into(),
+        operations: operations.into_iter().map(Into::into).collect(),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    }
+}
+
+pub fn typed_resource_bindings_for<'a>(
+    owner_id: &str,
+    entries: impl IntoIterator<Item = (&'a str, &'a str, &'a str, &'a [&'a str])>,
+) -> TypedResourceBindings {
+    entries
+        .into_iter()
+        .map(
+            |(binding_id, resource_kind, resource_id, operations)| {
+                typed_resource_binding(
+                    binding_id,
+                    resource_kind,
+                    resource_id,
+                    owner_id,
+                    operations.iter().copied(),
+                )
+            },
+        )
+        .collect()
 }
 
 pub fn capability_ids_by_package() -> BTreeMap<PackageId, BTreeSet<CapabilityId>> {
@@ -405,9 +675,12 @@ pub fn capability_ids_by_package() -> BTreeMap<PackageId, BTreeSet<CapabilityId>
 }
 
 pub fn required_resource_kinds(id: &str) -> Option<BTreeSet<ResourceKind>> {
-    target_capability_ids()
-        .contains(&CapabilityId::from(id))
-        .then(BTreeSet::new)
+    capability_spec(id).map(|spec| {
+        spec.resource_kinds
+            .iter()
+            .map(|kind| ResourceKind::from(*kind))
+            .collect()
+    })
 }
 
 /// Map a deletion-contract family to its canonical catalog IDs.
@@ -715,13 +988,22 @@ pub fn remote_forbidden_binding_fields() -> BTreeSet<String> {
     remote_transport_descriptor().forbidden_binding_fields
 }
 
+#[derive(Clone, Copy)]
 struct CapabilitySpec {
     id: &'static str,
     kind: CapabilityKind,
     effect: EffectClass,
+    resource_kinds: &'static [&'static str],
+    requirements: &'static [ResourceRequirement],
     surfaces: &'static [&'static str],
     host_ports: &'static [&'static str],
     actions: &'static [&'static str],
+}
+
+#[derive(Clone, Copy)]
+struct ResourceRequirement {
+    resource_kind: &'static str,
+    operation: &'static str,
 }
 
 struct PortSpec {
@@ -789,6 +1071,8 @@ const fn tool_spec(id: &'static str) -> CapabilitySpec {
         id,
         kind: CapabilityKind::Tool,
         effect: EffectClass::WriteReversible,
+        resource_kinds: &[],
+        requirements: &[],
         surfaces: GENERAL_SURFACES,
         host_ports: &[],
         actions: &[],
@@ -800,6 +1084,8 @@ const fn scheduler_spec(id: &'static str) -> CapabilitySpec {
         id,
         kind: CapabilityKind::Scheduler,
         effect: EffectClass::WriteDurable,
+        resource_kinds: &[],
+        requirements: &[],
         surfaces: GENERAL_SURFACES,
         host_ports: &[],
         actions: &[],
@@ -811,6 +1097,8 @@ const fn middleware_spec(id: &'static str) -> CapabilitySpec {
         id,
         kind: CapabilityKind::TurnMiddleware,
         effect: EffectClass::ReadLocal,
+        resource_kinds: &[],
+        requirements: &[],
         surfaces: GENERAL_SURFACES,
         host_ports: &[],
         actions: &[],
@@ -822,6 +1110,8 @@ const fn remote_spec(id: &'static str) -> CapabilitySpec {
         id,
         kind: CapabilityKind::Transport,
         effect: EffectClass::ExternalTransmit,
+        resource_kinds: &[],
+        requirements: &[],
         surfaces: REMOTE_SURFACES,
         host_ports: &[
             REMOTE_TRANSPORT_PORT,
@@ -836,7 +1126,12 @@ fn agent_execution_capabilities() -> Vec<CapabilitySpec> {
     vec![
         CapabilitySpec {
             actions: &[AGENT_DELEGATE_ACTION],
-            effect: EffectClass::WriteDurable,
+            effect: EffectClass::ExecuteLocal,
+            resource_kinds: PROCESS_SESSION_RESOURCES,
+            requirements: &[ResourceRequirement {
+                resource_kind: PROCESS_SESSION_RESOURCE_KIND,
+                operation: "execute",
+            }],
             ..tool_spec(AGENT_DELEGATE)
         },
         CapabilitySpec {
@@ -851,11 +1146,22 @@ fn agent_execution_capabilities() -> Vec<CapabilitySpec> {
         },
         CapabilitySpec {
             actions: &[AGENT_EXECUTION_STEER_ACTION],
+            effect: EffectClass::WriteDurable,
+            resource_kinds: PROCESS_SESSION_RESOURCES,
+            requirements: &[ResourceRequirement {
+                resource_kind: PROCESS_SESSION_RESOURCE_KIND,
+                operation: "execute",
+            }],
             ..tool_spec(AGENT_EXECUTION_STEER)
         },
         CapabilitySpec {
             actions: &[AGENT_EXECUTION_OBSERVE_ACTION],
             effect: EffectClass::ReadLocal,
+            resource_kinds: PROCESS_SESSION_RESOURCES,
+            requirements: &[ResourceRequirement {
+                resource_kind: PROCESS_SESSION_RESOURCE_KIND,
+                operation: "observe",
+            }],
             ..tool_spec(AGENT_EXECUTION_OBSERVE)
         },
     ]
@@ -896,7 +1202,7 @@ fn requirements_capabilities() -> Vec<CapabilitySpec> {
     vec![
         CapabilitySpec {
             actions: &[REQUIREMENTS_READ_ACTION],
-            effect: EffectClass::ReadLocal,
+            effect: EffectClass::ReadSensitive,
             ..tool_spec(REQUIREMENTS_READ)
         },
         CapabilitySpec {
@@ -936,11 +1242,25 @@ fn requirements_ports() -> PortSpec {
     REQUIREMENTS_PORTS
 }
 
+fn capability_spec(id: &str) -> Option<CapabilitySpec> {
+    [
+        agent_execution_capabilities(),
+        autowork_capabilities(),
+        idmm_capabilities(),
+        remote_capabilities(),
+        requirements_capabilities(),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|spec| spec.id == id)
+}
+
 fn registration_for(
     package_id: &'static str,
     mount_id: &'static str,
     capabilities: Vec<CapabilitySpec>,
     ports: PortSpec,
+    action_host_port: Arc<dyn Wave5HostPort>,
 ) -> Result<PluginRegistration, String> {
     let package = package_ref(package_id);
     let port_ids = all_port_ids(&ports);
@@ -1055,13 +1375,15 @@ fn registration_for(
         registration
             .add_capability_handler(
                 CapabilityId::from(spec.id),
-                Arc::new(DeterministicActionHandler {
+                Arc::new(Wave5CapabilityHandler {
                     capability_id: CapabilityId::from(spec.id),
                     action_ids: spec
                         .actions
                         .iter()
                         .map(|action| ActionId::from(*action))
                         .collect(),
+                    requirements: spec.requirements.to_vec(),
+                    host_port: Arc::clone(&action_host_port),
                 }),
             )
             .map_err(|error| error.to_string())?;
@@ -1108,7 +1430,7 @@ fn capability_manifest(
         version: VersionString::from(VERSION),
         kind: spec.kind,
         package: package.clone(),
-        display: display(spec.id, "Deterministic Wave 5 capability contribution."),
+        display: display(spec.id, "Wave 5 capability contribution."),
         requires: Vec::new(),
         conflicts: Vec::new(),
         supported_surfaces: spec
@@ -1123,7 +1445,11 @@ fn capability_manifest(
             actions,
             context_schema_refs,
             event_schema_refs,
-            resource_kinds: BTreeSet::<ResourceKind>::new(),
+            resource_kinds: spec
+                .resource_kinds
+                .iter()
+                .map(|kind| ResourceKind::from(*kind))
+                .collect(),
             host_ports: spec
                 .host_ports
                 .iter()
@@ -1134,12 +1460,14 @@ fn capability_manifest(
     }
 }
 
-struct DeterministicActionHandler {
+struct Wave5CapabilityHandler {
     capability_id: CapabilityId,
     action_ids: BTreeSet<ActionId>,
+    requirements: Vec<ResourceRequirement>,
+    host_port: Arc<dyn Wave5HostPort>,
 }
 
-impl CapabilityHandler for DeterministicActionHandler {
+impl CapabilityHandler for Wave5CapabilityHandler {
     fn invoke<'life0, 'async_trait>(
         &'life0 self,
         context: CapabilityInvocationContext,
@@ -1166,52 +1494,76 @@ impl CapabilityHandler for DeterministicActionHandler {
                     ),
                 });
             }
-            Ok(deterministic_result(
-                &context.capability_id,
-                &context.action_id,
-                &context.resource_bindings,
-                context.registry_generation,
-                input,
-            ))
+            for requirement in &self.requirements {
+                let Some(binding) = context
+                    .resource_bindings
+                    .iter()
+                    .find(|binding| binding.resource_kind.as_ref() == requirement.resource_kind)
+                else {
+                    return Err(KernelError::CapabilityResourceNotBound {
+                        capability_id: self.capability_id.clone(),
+                        resource_kind: requirement.resource_kind.to_owned(),
+                    });
+                };
+                if !binding.operations.contains(requirement.operation) {
+                    return Err(KernelError::CapabilityExecution {
+                        reason: format!(
+                            "{} requires operation {} on {}",
+                            self.capability_id.as_ref(),
+                            requirement.operation,
+                            requirement.resource_kind
+                        ),
+                    });
+                }
+            }
+            let operation = match self.capability_id.as_ref() {
+                AGENT_DELEGATE
+                | AGENT_FORK
+                | AGENT_EXECUTION_PLAN
+                | AGENT_EXECUTION_STEER
+                | AGENT_EXECUTION_OBSERVE => Wave5CapabilityOperation::AgentExecution {
+                    capability_id: self.capability_id.clone(),
+                    input,
+                },
+                SCHEDULE_STORE => Wave5CapabilityOperation::ScheduleStore { input },
+                REQUIREMENTS_READ
+                | REQUIREMENTS_WRITE
+                | REQUIREMENTS_STATUS
+                | REQUIREMENTS_CLAIM => Wave5CapabilityOperation::Requirement {
+                    capability_id: self.capability_id.clone(),
+                    input,
+                },
+                other => {
+                    return Err(KernelError::CapabilityExecution {
+                        reason: format!(
+                            "{} does not expose an action host operation",
+                            other
+                        ),
+                    });
+                }
+            };
+            self.host_port
+                .invoke(Wave5HostRequest {
+                    context: Wave5HostContext {
+                        principal: context.principal,
+                        agent_session_id: context.agent_session_id,
+                        operation_id: context.operation_id,
+                        idempotency_key: context.idempotency_key,
+                        correlation_id: context.correlation_id,
+                        resolved_snapshot_ref: context.resolved_snapshot_ref,
+                        registry_generation: context.registry_generation,
+                        capability_id: self.capability_id.clone(),
+                        action_id: context.action_id,
+                        resource_bindings: context.resource_bindings,
+                    },
+                    operation,
+                })
+                .await
+                .map_err(|error| KernelError::CapabilityExecution {
+                    reason: error.to_string(),
+                })
         })
     }
-}
-
-fn deterministic_result(
-    capability_id: &CapabilityId,
-    action_id: &ActionId,
-    resource_bindings: &[nomifun_agent_contracts::TypedResourceBinding],
-    registry_generation: u64,
-    input: StrictJsonValue,
-) -> StrictJsonValue {
-    let mut result = empty_object();
-    let object = result
-        .0
-        .as_object_mut()
-        .expect("empty_object always returns a JSON object");
-    let mut resource_binding_ids = resource_bindings
-        .iter()
-        .map(|binding| binding.binding_id.as_ref().to_owned())
-        .collect::<Vec<_>>();
-    resource_binding_ids.sort();
-    object.insert("accepted".to_owned(), true.into());
-    object.insert(
-        "command".to_owned(),
-        "agent-session.domain-dispatch".to_owned().into(),
-    );
-    object.insert(
-        "action_id".to_owned(),
-        action_id.as_ref().to_owned().into(),
-    );
-    object.insert(
-        "capability_id".to_owned(),
-        capability_id.as_ref().to_owned().into(),
-    );
-    object.insert("registry_generation".to_owned(), registry_generation.into());
-    object.insert("resource_binding_ids".to_owned(), resource_binding_ids.into());
-    object.insert("deterministic".to_owned(), true.into());
-    object.insert("input".to_owned(), input.0);
-    StrictJsonValue(result.0)
 }
 
 fn display(name: &str, description: &str) -> LocalizedMetadata {
@@ -1586,7 +1938,7 @@ mod tests {
     }
 
     #[test]
-    fn handlers_return_stable_results_without_a_second_authority() {
+    fn handlers_are_registered_without_a_second_authority() {
         let registrations = registrations().unwrap();
         let agent_execution = &registrations[0];
         let capability = agent_execution
@@ -1612,5 +1964,37 @@ mod tests {
             .contains(&CapabilityId::from(AGENT_DELEGATE)));
         assert!(registrations[3].handler_ids().is_empty());
         assert!(remote_drain_descriptor().is_exact_contract());
+    }
+
+    #[tokio::test]
+    async fn unconfigured_action_host_fails_closed_without_a_synthetic_receipt() {
+        let result = unconfigured_host_port()
+            .invoke(Wave5HostRequest {
+                context: Wave5HostContext {
+                    principal: nomifun_agent_contracts::PrincipalRef {
+                        principal_kind: "user".to_owned(),
+                        principal_id: "wave5-test-owner".to_owned(),
+                    },
+                    agent_session_id: AgentSessionId::from("wave5-test-session"),
+                    operation_id: OperationId::from("wave5-test-operation"),
+                    idempotency_key: IdempotencyKey::from("wave5-test-idempotency"),
+                    correlation_id: CorrelationId::from("wave5-test-correlation"),
+                    resolved_snapshot_ref: nomifun_agent_contracts::ResolvedSnapshotRef {
+                        snapshot_id: "snapshot".into(),
+                        snapshot_digest: "digest".into(),
+                    },
+                    registry_generation: 1,
+                    capability_id: CapabilityId::from(SCHEDULE_STORE),
+                    action_id: ActionId::from(SCHEDULE_STORE_ACTION),
+                    resource_bindings: Vec::new(),
+                },
+                operation: Wave5CapabilityOperation::ScheduleStore {
+                    input: StrictJsonValue(serde_json::json!({})),
+                },
+            })
+            .await
+            .expect_err("unconfigured Wave 5 actions must fail closed");
+        assert_eq!(result.code, "WAVE5_HOST_PORT_UNAVAILABLE");
+        assert!(!result.message.contains("accepted"));
     }
 }

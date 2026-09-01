@@ -3,14 +3,16 @@
 //! and the symlink-contract `/api/skills/materialize-for-agent` (POST).
 //!
 //! Covers the spec's §9.2 scenarios end-to-end through
-//! `nomifun_app::create_router_with_states` against an in-memory DB.
+//! `nomifun_app::compatibility::create_router_with_states` against an in-memory DB.
 
 mod common;
 
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use nomifun_app::{ModuleStates, build_module_states, create_router_with_states};
+use nomifun_app::compatibility::{
+    ModuleStates, build_module_states, create_router_with_states,
+};
 use nomifun_db::init_database_memory;
 use nomifun_extension::{ExternalPathsManager, SkillPaths, SkillRouterState};
 use serde_json::{Value, json};
@@ -55,7 +57,7 @@ async fn fixture_embedded() -> Fixture {
         .expect("failed to materialize embedded builtin skills for test fixture");
 
     let db = init_database_memory().await.unwrap();
-    let services = nomifun_app::AppServices::from_config(
+    let services = nomifun_app::compatibility::AppServices::from_config(
         db,
         &nomifun_app::AppConfig {
             data_dir: data_dir.join("app-data"),

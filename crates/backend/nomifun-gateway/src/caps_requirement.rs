@@ -5,6 +5,7 @@
 //! `*Params` structs are now the single source (schema + runtime deserialization),
 //! eliminating hand-parsing via `require_str`/`opt_str`/`require_i64`.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_api_types::{
@@ -16,7 +17,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::deps::GatewayDeps;
+use crate::deps::CompatibilityCapabilityHost;
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
@@ -120,7 +121,30 @@ pub(crate) fn is_open_duplicate(
 
 // --- Handlers --------------------------------------------------------------
 
-async fn list(deps: Arc<GatewayDeps>, p: RequirementListParams) -> Value {
+#[derive(Clone)]
+struct RequirementCapabilityDeps {
+    service: Arc<nomifun_requirement::RequirementService>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, crate::deps::CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<RequirementCapabilityDeps>, P) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, _ctx, params| {
+        handler(
+            Arc::new(RequirementCapabilityDeps {
+                service: deps.requirement_service.clone(),
+            }),
+            params,
+        )
+    }
+}
+
+async fn list(deps: Arc<RequirementCapabilityDeps>, p: RequirementListParams) -> Value {
     let status = match parse_status(p.status.as_deref()) {
         Ok(s) => s,
         Err(e) => return e,
@@ -135,7 +159,7 @@ async fn list(deps: Arc<GatewayDeps>, p: RequirementListParams) -> Value {
         page: p.page,
         page_size: p.page_size,
     };
-    match deps.requirement_service.list(&query).await {
+    match deps.service.list(&query).await {
         Ok(result) => ok(result),
         Err(e) => json!({"error": e.to_string()}),
     }
@@ -144,7 +168,7 @@ async fn list(deps: Arc<GatewayDeps>, p: RequirementListParams) -> Value {
 /// Creates a requirement after checking the duplicate guard: an open
 /// requirement with the same tag + title (trimmed, case-insensitive) returns
 /// the existing one instead of creating a twin.
-async fn create(deps: Arc<GatewayDeps>, p: RequirementCreateParams) -> Value {
+async fn create(deps: Arc<RequirementCapabilityDeps>, p: RequirementCreateParams) -> Value {
     let title = p.title;
     let tag = p.tag;
 
@@ -159,7 +183,7 @@ async fn create(deps: Arc<GatewayDeps>, p: RequirementCreateParams) -> Value {
         page: Some(1),
         page_size: Some(DEDUP_SCAN_PAGE_SIZE),
     };
-    match deps.requirement_service.list(&dedup_query).await {
+    match deps.service.list(&dedup_query).await {
         Ok(page) => {
             if let Some(existing) = page
                 .items
@@ -185,13 +209,13 @@ async fn create(deps: Arc<GatewayDeps>, p: RequirementCreateParams) -> Value {
         created_by: Some("agent".to_owned()),
         attachments: vec![],
     };
-    match deps.requirement_service.create(req).await {
+    match deps.service.create(req).await {
         Ok(requirement) => ok(requirement),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-async fn update(deps: Arc<GatewayDeps>, p: RequirementUpdateParams) -> Value {
+async fn update(deps: Arc<RequirementCapabilityDeps>, p: RequirementUpdateParams) -> Value {
     let status = match parse_status(p.status.as_deref()) {
         Ok(s) => s,
         Err(e) => return e,
@@ -207,7 +231,7 @@ async fn update(deps: Arc<GatewayDeps>, p: RequirementUpdateParams) -> Value {
         remove_attachment_ids: vec![],
     };
     match deps
-        .requirement_service
+        .service
         .update(p.requirement_id.as_str(), req)
         .await
     {
@@ -216,9 +240,9 @@ async fn update(deps: Arc<GatewayDeps>, p: RequirementUpdateParams) -> Value {
     }
 }
 
-async fn delete(deps: Arc<GatewayDeps>, p: RequirementDeleteParams) -> Value {
+async fn delete(deps: Arc<RequirementCapabilityDeps>, p: RequirementDeleteParams) -> Value {
     match deps
-        .requirement_service
+        .service
         .delete(p.requirement_id.as_str())
         .await
     {
@@ -238,7 +262,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List requirements (the desktop task board). Paginated; filter by tag / status / full-text query.",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| list(deps, p),
+        adapt(list),
     ));
     out.push(Capability::new::<RequirementCreateParams, _, _>(
         CapabilityMeta::new(
@@ -247,7 +271,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Create a new requirement. Refuses to create a duplicate of an open requirement with the same tag + title (returns the existing one instead).",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| create(deps, p),
+        adapt(create),
     ));
     out.push(Capability::new::<RequirementUpdateParams, _, _>(
         CapabilityMeta::new(
@@ -256,7 +280,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Update a requirement's title, content, tag, status, or completion note.",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| update(deps, p),
+        adapt(update),
     ));
     out.push(Capability::new::<RequirementDeleteParams, _, _>(
         CapabilityMeta::new(
@@ -265,7 +289,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Permanently delete a requirement.",
             EffectClass::Destructive,
         ),
-        |deps, _ctx, p| delete(deps, p),
+        adapt(delete),
     ));
 }
 

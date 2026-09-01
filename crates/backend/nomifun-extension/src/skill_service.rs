@@ -20,7 +20,7 @@ use crate::error::ExtensionError;
 /// (`NOMIFUN_BUILTIN_SKILLS_PATH`) is consulted at runtime for rapid
 /// iteration and E2E fixtures.
 static BUILTIN_SKILLS: Dir<'static> =
-    include_dir!("$CARGO_MANIFEST_DIR/../nomifun-app/assets/builtin-skills");
+    include_dir!("$CARGO_MANIFEST_DIR/assets/builtin-skills");
 
 /// Name of the environment variable that, when set, overrides the embedded
 /// corpus with an on-disk directory. Consumed by

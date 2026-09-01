@@ -2,7 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{
+    Arc, Mutex as StdMutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -10,16 +13,18 @@ use axum::http::StatusCode;
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentPreset, AgentPresetId, AgentPresetRevision, AgentPresetSource,
     AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata, CanonicalDigestError,
-    CapabilityId, CorrelationId, DeleteAgentSessionCommand, DigestHex, EffectClass, EventId,
-    EventProducerId, FullAutoExecutionWire, IdempotencyKey, NativeActionStart,
-    NativeActionStartAck, OperationId, PluginStateEntry, PresetRevisionRef, PrincipalRef,
-    RemoteBinding, RemoteBindingId, RemoteBindingProvenance, ResolvedSnapshotEnvelope,
+    CapabilityId, ChatRouteIdentity, ChatRouteLookupError, ChatRouteLookupKey, ChatRouteRecord,
+    ChatRouteRecordRow, CompactOnDemandCapabilityEntry, CorrelationId,
+    DeleteAgentSessionCommand, DigestHex, EffectClass, EventId, EventProducerId,
+    FullAutoExecutionWire, IdempotencyKey, ModelRouteId, NativeActionStart, NativeActionStartAck,
+    OperationId, PluginStateEntry, PresetRevisionRef, PrincipalRef, RemoteBinding, RemoteBindingId,
+    RemoteBindingProvenance, ResolvedSnapshotEnvelope, ResolvedSnapshotRef,
     RuntimeBindingContract, RuntimeBindingId, RuntimeCancelParams, RuntimeCommand,
     RuntimeCommandContext, RuntimeCreateParams, RuntimeEventEnvelope, RuntimeEventWireAck,
-    RuntimeEventWireEnvelope, RuntimeProfileKind, RuntimeSessionDisposeParams,
-    RuntimeStartTurnParams, ScopeKey, SemanticSessionEventDraft, SessionEventAppend,
-    SessionEventCursor, SessionEventKind, SessionEventPayloadRef, StrictJsonValue,
-    TypedResourceBindings, UserId, VersionString, canonical_json_bytes, digest_payload,
+    RuntimeEventWireEnvelope, RuntimeProfileKind, RuntimeSessionDisposeParams, RuntimeStartTurnParams,
+    ScopeKey, SemanticSessionEventDraft, SessionEventAppend, SessionEventCursor, SessionEventKind,
+    SessionEventPayloadRef, StrictJsonValue, TypedResourceBindings, UserId, VersionString,
+    canonical_json_bytes, digest_payload, resolve_exact_chat_route_record,
 };
 use nomifun_agent_control_plane::{
     AgentBindingTarget, AgentControlPlane, CatalogProvider, CatalogSnapshot, CompilerReleaseInputs,
@@ -47,8 +52,9 @@ use nomifun_chat_model_broker::{
     ChatBrokerPort, ChatModelError, ChatModelRequest, ChatModelStream,
 };
 use nomifun_codex_runtime::{
-    CodexRuntimeSupervisor, ManagedRuntimeSession, RuntimeDisposeReport, RuntimeError,
-    RuntimeIngressPort, RuntimeLaunchRequest,
+    ClientLimits, CodexRuntimeSupervisor, InheritedHandleCredential, ManagedRuntimeSession,
+    RuntimeDisposeReport, RuntimeError, RuntimeHelloExpectation, RuntimeIngressPort,
+    RuntimeLaunchRequest, RuntimeProcessConfig, RuntimeReleaseDescriptor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -115,6 +121,15 @@ pub trait CodexRuntimePort: Send + Sync {
         &self,
         params: RuntimeSessionDisposeParams,
     ) -> Result<RuntimeDisposeReport, RuntimeError>;
+
+    /// Stop every runtime binding owned by this platform instance.
+    ///
+    /// The default is a no-op for deterministic test ports; the production
+    /// supervisor overrides it to dispose every live sidecar before the
+    /// Fresh-v4 pool is closed.
+    async fn shutdown(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
 }
 
 pub struct SupervisedCodexRuntimePort {
@@ -172,6 +187,10 @@ impl CodexRuntimePort for SupervisedCodexRuntimePort {
         self.supervisor.evict_disposed(&runtime_binding_id).await;
         Ok(report)
     }
+
+    async fn shutdown(&self) -> Result<(), RuntimeError> {
+        self.supervisor.shutdown_all().await
+    }
 }
 
 pub struct AgentPlatformConfig {
@@ -185,6 +204,25 @@ pub struct AgentPlatformConfig {
 }
 
 impl AgentPlatformConfig {
+    pub fn with_runtime(
+        pool: SqlitePool,
+        materialization_policy: MaterializationPolicy,
+        control_plane_release: CompilerReleaseInputs,
+        kernel_environment: CompilerEnvironment,
+        runtime: Arc<dyn CodexRuntimePort>,
+        broker: Arc<dyn ChatBrokerPort>,
+    ) -> Self {
+        Self {
+            pool,
+            materialization_policy,
+            control_plane_release,
+            kernel_environment,
+            runtime,
+            broker,
+            initial_plugins: Vec::new(),
+        }
+    }
+
     pub fn with_supervisor(
         pool: SqlitePool,
         materialization_policy: MaterializationPolicy,
@@ -193,15 +231,14 @@ impl AgentPlatformConfig {
         supervisor: Arc<CodexRuntimeSupervisor>,
         broker: Arc<dyn ChatBrokerPort>,
     ) -> Self {
-        Self {
+        Self::with_runtime(
             pool,
             materialization_policy,
             control_plane_release,
             kernel_environment,
-            runtime: Arc::new(SupervisedCodexRuntimePort::new(supervisor)),
+            Arc::new(SupervisedCodexRuntimePort::new(supervisor)),
             broker,
-            initial_plugins: Vec::new(),
-        }
+        )
     }
 }
 
@@ -211,6 +248,7 @@ pub struct OpenAgentSessionRequest {
     pub owner_ref: PrincipalRef,
     pub agent_binding: AgentBindingValue,
     pub metadata: AgentSessionMetadata,
+    pub initial_input: Option<StrictJsonValue>,
     pub remote_binding_provenance: Option<RemoteBindingProvenance>,
     pub operation_id: OperationId,
     pub producer_id: EventProducerId,
@@ -238,6 +276,7 @@ impl OpenAgentSessionRequest {
                 archived: false,
                 pinned: false,
             },
+            initial_input: None,
             remote_binding_provenance: None,
             operation_id: OperationId::from(format!(
                 "session-open:{}",
@@ -272,6 +311,34 @@ pub struct AgentTurnDispatch {
     pub input_event: SessionEventAppendResult,
     pub turn_event: SessionEventAppendResult,
     pub runtime_response: Value,
+}
+
+pub struct SessionRuntimeLaunchConfig {
+    pub process: RuntimeProcessConfig,
+    pub credential: InheritedHandleCredential,
+    pub release: RuntimeReleaseDescriptor,
+    pub hello_expectation: RuntimeHelloExpectation,
+    pub client_limits: ClientLimits,
+    pub dispose_timeout: std::time::Duration,
+}
+
+/// One owner-checked view of the capability facts frozen for an AgentSession.
+///
+/// Transport adapters must consume this view instead of independently reading
+/// the Session, compiled Snapshot, and active-set state. The method that builds
+/// it performs the ownership check before exposing any capability or resource
+/// facts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SessionCapabilityCatalog {
+    pub agent_session_id: AgentSessionId,
+    pub owner_ref: PrincipalRef,
+    pub resolved_snapshot_ref: ResolvedSnapshotRef,
+    pub generation: u64,
+    pub initial_capabilities: Vec<CapabilityId>,
+    pub on_demand_capabilities: Vec<CapabilityId>,
+    pub active_capabilities: BTreeSet<CapabilityId>,
+    pub compact_on_demand_index: Vec<CompactOnDemandCapabilityEntry>,
+    pub typed_resource_bindings: TypedResourceBindings,
 }
 
 #[derive(Clone, Debug)]
@@ -373,6 +440,137 @@ struct SessionExecutionState {
     runtime_binding: RwLock<Option<RuntimeBindingContract>>,
 }
 
+struct OpeningBindingLease {
+    bindings: Arc<StdMutex<BTreeMap<RuntimeBindingId, AgentSessionId>>>,
+    runtime_binding_id: RuntimeBindingId,
+}
+
+impl OpeningBindingLease {
+    fn new(
+        bindings: Arc<StdMutex<BTreeMap<RuntimeBindingId, AgentSessionId>>>,
+        runtime_binding_id: RuntimeBindingId,
+    ) -> Self {
+        Self {
+            bindings,
+            runtime_binding_id,
+        }
+    }
+}
+
+impl Drop for OpeningBindingLease {
+    fn drop(&mut self) {
+        match self.bindings.lock() {
+            Ok(mut bindings) => {
+                bindings.remove(&self.runtime_binding_id);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().remove(&self.runtime_binding_id);
+            }
+        };
+    }
+}
+
+struct RuntimeAdmissionLease {
+    runtime: Arc<dyn CodexRuntimePort>,
+    sessions: Arc<AgentSessionStore>,
+    runtime_bound_event_id: EventId,
+    params: Option<RuntimeSessionDisposeParams>,
+}
+
+impl RuntimeAdmissionLease {
+    fn new(
+        runtime: Arc<dyn CodexRuntimePort>,
+        sessions: Arc<AgentSessionStore>,
+        binding: &RuntimeBindingContract,
+    ) -> Self {
+        Self {
+            runtime,
+            sessions,
+            runtime_bound_event_id: binding.runtime_bound_event_id.clone(),
+            params: Some(RuntimeSessionDisposeParams {
+                agent_session_id: binding.agent_session_id.clone(),
+                runtime_binding_id: binding.runtime_binding_id.clone(),
+                operation_id: OperationId::from(format!(
+                    "dispose-after-runtime-admission:{}",
+                    binding.runtime_binding_id.as_ref()
+                )),
+                reason: nomifun_agent_contracts::CanonicalErrorCode::from(
+                    "RUNTIME_BINDING_ADMISSION_CANCELLED",
+                ),
+            }),
+        }
+    }
+
+    async fn dispose_now(&mut self) {
+        let Some(params) = self.params.take() else {
+            return;
+        };
+        dispose_uncommitted_runtime(
+            Arc::clone(&self.runtime),
+            Arc::clone(&self.sessions),
+            self.runtime_bound_event_id.clone(),
+            params,
+        )
+        .await;
+    }
+
+    fn disarm(&mut self) {
+        self.params = None;
+    }
+}
+
+impl Drop for RuntimeAdmissionLease {
+    fn drop(&mut self) {
+        let Some(params) = self.params.take() else {
+            return;
+        };
+        let Some(handle) = tokio::runtime::Handle::try_current().ok() else {
+            tracing::error!(
+                runtime_binding_id = params.runtime_binding_id.as_ref(),
+                "Runtime admission lease dropped without a Tokio runtime; cleanup was not scheduled"
+            );
+            return;
+        };
+        let runtime = Arc::clone(&self.runtime);
+        let sessions = Arc::clone(&self.sessions);
+        let runtime_bound_event_id = self.runtime_bound_event_id.clone();
+        handle.spawn(async move {
+            dispose_uncommitted_runtime(
+                runtime,
+                sessions,
+                runtime_bound_event_id,
+                params,
+            )
+            .await;
+        });
+    }
+}
+
+async fn dispose_uncommitted_runtime(
+    runtime: Arc<dyn CodexRuntimePort>,
+    sessions: Arc<AgentSessionStore>,
+    runtime_bound_event_id: EventId,
+    params: RuntimeSessionDisposeParams,
+) {
+    if sessions
+        .head(&params.agent_session_id)
+        .await
+        .is_ok_and(|head| {
+            head.status == "ready"
+                && head.runtime_bound_event_id.as_deref()
+                    == Some(runtime_bound_event_id.as_ref())
+        })
+    {
+        return;
+    }
+    if let Err(error) = runtime.dispose(params).await {
+        tracing::error!(
+            ?error,
+            "Runtime admission cleanup failed after cancellation"
+        );
+    }
+}
+
 pub struct AgentPlatform {
     pool: SqlitePool,
     control_store: Arc<SqliteControlPlaneStore>,
@@ -383,9 +581,12 @@ pub struct AgentPlatform {
     runtime: Arc<dyn CodexRuntimePort>,
     broker: Arc<dyn ChatBrokerPort>,
     executions: RwLock<BTreeMap<AgentSessionId, Arc<SessionExecutionState>>>,
-    opening_bindings: RwLock<BTreeMap<RuntimeBindingId, AgentSessionId>>,
+    opening_bindings: Arc<StdMutex<BTreeMap<RuntimeBindingId, AgentSessionId>>>,
     registrations: RwLock<Vec<PluginRegistration>>,
     publish_lock: Mutex<()>,
+    turn_admission_lock: Mutex<()>,
+    shutdown_lock: Mutex<()>,
+    closed: AtomicBool,
 }
 
 pub struct TriadHarness {
@@ -508,6 +709,28 @@ impl SqliteControlPlaneStore {
 
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    pub async fn load_exact_chat_route_record(
+        &self,
+        lookup: &ChatRouteLookupKey,
+    ) -> Result<Option<ChatRouteRecord>, ControlPlaneError> {
+        load_exact_chat_route_record(&self.pool, lookup).await
+    }
+
+    pub async fn load_chat_route_record_for_id(
+        &self,
+        revision_id: &str,
+        model_route_id: &ModelRouteId,
+    ) -> Result<Option<ChatRouteRecord>, ControlPlaneError> {
+        load_chat_route_record_for_id(&self.pool, revision_id, model_route_id).await
+    }
+
+    pub async fn load_chat_route_record(
+        &self,
+        identity: &ChatRouteIdentity,
+    ) -> Result<Option<ChatRouteRecord>, ControlPlaneError> {
+        load_exact_chat_route_record(&self.pool, identity).await
     }
 }
 
@@ -1247,13 +1470,14 @@ async fn insert_revision_snapshot_tx(
     .map_err(control_sql)?;
 
     for (task, route) in &revision.payload.model_route_refs {
+        let route_json = canonical_chat_route_json(revision, task, route)?;
         sqlx::query(
             "INSERT INTO agent_preset_model_routes \
              (revision_id, model_task, route_json) VALUES (?, ?, ?)",
         )
         .bind(&revision_id)
         .bind(task)
-        .bind(encode_control_json(route)?)
+        .bind(route_json)
         .execute(&mut **tx)
         .await
         .map_err(control_sql)?;
@@ -1377,6 +1601,149 @@ async fn insert_revision_snapshot_tx(
     .await
     .map_err(control_sql)?;
     Ok(())
+}
+
+fn canonical_chat_route_json(
+    revision: &AgentPresetRevision,
+    model_task: &str,
+    route_id: &ModelRouteId,
+) -> Result<String, ControlPlaneError> {
+    if model_task != nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT {
+        return Err(ControlPlaneError::Wire(format!(
+            "model task {model_task:?} has no canonical Chat route writer"
+        )));
+    }
+    let record = revision
+        .payload
+        .chat_route_records
+        .get(model_task)
+        .ok_or_else(|| {
+            ControlPlaneError::Wire(format!(
+                "model route {model_task:?} has no canonical chat route record"
+            ))
+        })?;
+    let identity = ChatRouteIdentity::new(
+        revision.reference.revision_id(),
+        model_task,
+        route_id.clone(),
+        record.primary.model_route_revision,
+    );
+    record
+        .validate_for(&identity)
+        .map_err(|error| {
+            ControlPlaneError::Wire(format!(
+                "model route {model_task:?} is not a valid canonical chat route record: {error}"
+            ))
+        })?;
+    let route_json = record
+        .to_canonical_json()
+        .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
+    if !serde_json::from_str::<Value>(&route_json)
+        .map_err(ControlPlaneError::from)?
+        .is_object()
+    {
+        return Err(ControlPlaneError::Wire(
+            "canonical chat route record did not serialize as an object".to_owned(),
+        ));
+    }
+    Ok(route_json)
+}
+
+pub async fn load_exact_chat_route_record(
+    pool: &SqlitePool,
+    lookup: &ChatRouteLookupKey,
+) -> Result<Option<ChatRouteRecord>, ControlPlaneError> {
+    lookup.validate().map_err(|error| {
+        ControlPlaneError::Wire(format!("invalid exact chat route lookup: {error}"))
+    })?;
+    let route_revision = i64_from_u64(lookup.route_revision, "route_revision")?;
+    let exact_rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT revision_id, model_task, route_json \
+         FROM agent_preset_model_routes \
+         WHERE revision_id = ? AND model_task = ? \
+           AND json_type(route_json, '$.primary.model_route_id') = 'text' \
+           AND json_extract(route_json, '$.primary.model_route_id') = ? \
+           AND json_type(route_json, '$.primary.model_route_revision') = 'integer' \
+           AND json_extract(route_json, '$.primary.model_route_revision') = ?",
+    )
+    .bind(&lookup.preset_revision_id)
+    .bind(&lookup.model_task)
+    .bind(lookup.route_id.as_ref())
+    .bind(route_revision)
+    .fetch_all(pool)
+    .await
+    .map_err(control_sql)?;
+    if !exact_rows.is_empty() {
+        return resolve_persisted_route_rows(exact_rows, lookup);
+    }
+
+    let outer_rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT revision_id, model_task, route_json \
+         FROM agent_preset_model_routes \
+         WHERE revision_id = ? AND model_task = ?",
+    )
+    .bind(&lookup.preset_revision_id)
+    .bind(&lookup.model_task)
+    .fetch_all(pool)
+    .await
+    .map_err(control_sql)?;
+    if outer_rows.is_empty() {
+        return Ok(None);
+    }
+    resolve_persisted_route_rows(outer_rows, lookup)
+}
+
+fn resolve_persisted_route_rows(
+    rows: Vec<(String, String, String)>,
+    lookup: &ChatRouteLookupKey,
+) -> Result<Option<ChatRouteRecord>, ControlPlaneError> {
+    let result = resolve_exact_chat_route_record(
+        rows.into_iter()
+            .map(|(revision_id, model_task, route_json)| ChatRouteRecordRow {
+                revision_id,
+                model_task,
+                route_json,
+            }),
+        lookup,
+    );
+    match result {
+        Ok(record) => Ok(Some(record)),
+        Err(ChatRouteLookupError::Missing) => Ok(None),
+        Err(error) => Err(ControlPlaneError::Wire(format!(
+            "persisted chat route record does not match the exact lookup: {error}"
+        ))),
+    }
+}
+
+async fn load_chat_route_record_for_id(
+    pool: &SqlitePool,
+    revision_id: &str,
+    route_id: &ModelRouteId,
+) -> Result<Option<ChatRouteRecord>, ControlPlaneError> {
+    let row: Option<String> = sqlx::query_scalar(
+        "SELECT route_json FROM agent_preset_model_routes \
+         WHERE revision_id = ? AND model_task = ?",
+    )
+    .bind(revision_id)
+    .bind(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT)
+    .fetch_optional(pool)
+    .await
+    .map_err(control_sql)?;
+    let Some(route_json) = row else {
+        return Ok(None);
+    };
+    let record = ChatRouteRecord::from_json(&route_json)
+        .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
+    let identity = ChatRouteIdentity::new(
+        revision_id,
+        nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+        route_id.clone(),
+        record.primary.model_route_revision,
+    );
+    record
+        .validate_for(&identity)
+        .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
+    Ok(Some(record))
 }
 
 async fn insert_snapshot_capability_tx(
@@ -1802,9 +2169,12 @@ impl AgentPlatform {
             runtime: config.runtime,
             broker: config.broker,
             executions: RwLock::new(BTreeMap::new()),
-            opening_bindings: RwLock::new(BTreeMap::new()),
+            opening_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
             registrations: RwLock::new(Vec::new()),
             publish_lock: Mutex::new(()),
+            turn_admission_lock: Mutex::new(()),
+            shutdown_lock: Mutex::new(()),
+            closed: AtomicBool::new(false),
         });
         if !initial_plugins.is_empty() {
             platform.publish_plugins(initial_plugins).await?;
@@ -1838,6 +2208,31 @@ impl AgentPlatform {
 
     pub fn broker_port(&self) -> &Arc<dyn ChatBrokerPort> {
         &self.broker
+    }
+
+    /// Dispose all live Runtime bindings before the host closes its pool.
+    /// Session facts remain durable; only runtime-private processes/handles
+    /// are torn down here.
+    pub async fn shutdown(&self) -> Result<(), AgentPlatformError> {
+        let _guard = self.shutdown_lock.lock().await;
+        if self.closed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.closed.store(true, Ordering::Release);
+        if let Err(error) = self.runtime.shutdown().await {
+            self.closed.store(false, Ordering::Release);
+            return Err(error.into());
+        }
+        self.executions.write().await.clear();
+        self.opening_bindings
+            .lock()
+            .map_err(|_| {
+                AgentPlatformError::Contract(
+                    "AgentPlatform opening binding registry is poisoned".to_owned(),
+                )
+            })?
+            .clear();
+        Ok(())
     }
 
     pub fn materialized_registry(
@@ -2020,6 +2415,7 @@ impl AgentPlatform {
         target_operation_id: OperationId,
         idempotency_key: IdempotencyKey,
     ) -> Result<SessionEventAppendResult, AgentPlatformError> {
+        let _turn_admission = self.turn_admission_lock.lock().await;
         self.require_owned_session(principal, session_id).await?;
         let execution = self.execution_for(session_id).await?;
         let binding = execution
@@ -2028,15 +2424,28 @@ impl AgentPlatform {
             .await
             .clone()
             .ok_or(RuntimeError::SessionNotFound)?;
-        let runtime_binding_id = binding.runtime_binding_id.clone();
+        let (admitted_target, cancelled) = self
+            .sessions
+            .cancel_active_turn(
+                session_id,
+                idempotency_key.clone(),
+                EventProducerId::from("session_api"),
+            )
+            .await?;
+        if admitted_target != target_operation_id {
+            return Err(AgentPlatformError::Contract(
+                "requested cancellation target differs from the active turn".to_owned(),
+            ));
+        }
         let active = execution.capabilities.snapshot()?;
-        self.runtime
+        if let Err(error) = self
+            .runtime
             .command(
-                &runtime_binding_id,
+                &binding.runtime_binding_id,
                 &RuntimeCommand::Cancel(RuntimeCancelParams {
                     context: RuntimeCommandContext {
                         agent_session_id: session_id.clone(),
-                        runtime_binding_id: runtime_binding_id.clone(),
+                        runtime_binding_id: binding.runtime_binding_id.clone(),
                         operation_id: OperationId::from(format!(
                             "cancel:{}",
                             idempotency_key.as_ref()
@@ -2052,33 +2461,84 @@ impl AgentPlatform {
                     target_operation_id: target_operation_id.clone(),
                 }),
             )
-            .await?;
-        Ok(self
+            .await
+        {
+            tracing::warn!(
+                ?error,
+                session_id = session_id.as_ref(),
+                "turn cancellation was durably admitted but runtime cancellation failed"
+            );
+        }
+        Ok(cancelled)
+    }
+
+    /// Atomically select and cancel the currently active Remote turn.
+    ///
+    /// The active operation id is read and fenced inside the SessionStore
+    /// transaction. Callers therefore cannot observe one active turn and
+    /// cancel another after a concurrent terminal event has committed.
+    pub async fn cancel_remote_turn(
+        &self,
+        principal: &PrincipalRef,
+        session_id: &AgentSessionId,
+        idempotency_key: IdempotencyKey,
+    ) -> Result<SessionEventAppendResult, AgentPlatformError> {
+        let _turn_admission = self.turn_admission_lock.lock().await;
+        let session = self.require_owned_session(principal, session_id).await?;
+        if session.remote_binding_provenance.is_none() {
+            return Err(AgentPlatformError::Contract(
+                "AgentSession is not owned by the Remote ingress".to_owned(),
+            ));
+        }
+        let execution = self.execution_for(session_id).await?;
+        let binding = execution
+            .runtime_binding
+            .read()
+            .await
+            .clone()
+            .ok_or(RuntimeError::SessionNotFound)?;
+
+        let (target_operation_id, cancelled) = self
             .sessions
-            .append_event(&SessionEventAppend {
-                agent_session_id: session_id.clone(),
-                event_id: stable_event_id(
-                    "turn-cancelled",
-                    session_id,
-                    idempotency_key.as_ref(),
-                ),
-                producer_id: EventProducerId::from("session_api"),
-                idempotency_key,
-                runtime_binding_id: None,
-                runtime_producer_seq: None,
-                semantic_event: SemanticSessionEventDraft {
-                    kind: SessionEventKind("turn/cancelled".to_owned()),
-                    kind_version: 1,
-                    correlation_id: CorrelationId::from(
-                        target_operation_id.as_ref().to_owned(),
-                    ),
-                    causation_event_id: None,
-                    payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                        "target_operation_id": target_operation_id
-                    }))),
-                },
-            })
-            .await?)
+            .cancel_active_turn(
+                session_id,
+                idempotency_key.clone(),
+                EventProducerId::from("session_api"),
+            )
+            .await?;
+        let active = execution.capabilities.snapshot()?;
+        let runtime_result = self
+            .runtime
+            .command(
+                &binding.runtime_binding_id,
+                &RuntimeCommand::Cancel(RuntimeCancelParams {
+                    context: RuntimeCommandContext {
+                        agent_session_id: session_id.clone(),
+                        runtime_binding_id: binding.runtime_binding_id.clone(),
+                        operation_id: OperationId::from(format!(
+                            "cancel:{}",
+                            idempotency_key.as_ref()
+                        )),
+                        resolved_snapshot_ref: execution.compiled.snapshot_ref().clone(),
+                        runtime_profile_digest: execution
+                            .compiled
+                            .content()
+                            .compiled_runtime_profile_digest
+                            .clone(),
+                        active_set_generation: active.generation,
+                    },
+                    target_operation_id,
+                }),
+            )
+            .await;
+        if let Err(error) = runtime_result {
+            tracing::warn!(
+                ?error,
+                session_id = session_id.as_ref(),
+                "Remote cancellation was durably admitted but runtime cancellation failed"
+            );
+        }
+        Ok(cancelled)
     }
 
     pub async fn compile_saved_binding(
@@ -2196,6 +2656,41 @@ impl AgentPlatform {
             .snapshot()?)
     }
 
+    /// Return the complete owner-scoped capability view for one Session.
+    ///
+    /// This is intentionally a single platform operation. Callers must not
+    /// combine separately-timed Session, Snapshot, and active-set reads when
+    /// constructing a transport response or dispatch request.
+    pub async fn session_capability_catalog(
+        &self,
+        principal: &PrincipalRef,
+        session_id: &AgentSessionId,
+    ) -> Result<SessionCapabilityCatalog, AgentPlatformError> {
+        let session = self.require_owned_session(principal, session_id).await?;
+        let execution = self.execution_for(session_id).await?;
+        let active = execution.capabilities.snapshot()?;
+        let content = execution.compiled.content();
+        Ok(SessionCapabilityCatalog {
+            agent_session_id: session_id.clone(),
+            owner_ref: session.owner_ref,
+            resolved_snapshot_ref: execution.compiled.snapshot_ref().clone(),
+            generation: active.generation,
+            initial_capabilities: content
+                .initial_capabilities
+                .iter()
+                .map(|capability| capability.capability.id.clone())
+                .collect(),
+            on_demand_capabilities: content
+                .on_demand_capabilities
+                .iter()
+                .map(|capability| capability.capability.id.clone())
+                .collect(),
+            active_capabilities: active.active,
+            compact_on_demand_index: content.compact_on_demand_index.clone(),
+            typed_resource_bindings: content.typed_resource_bindings.clone(),
+        })
+    }
+
     pub async fn runtime_binding(
         &self,
         session_id: &AgentSessionId,
@@ -2209,11 +2704,71 @@ impl AgentPlatform {
             .clone())
     }
 
+    /// Launch the pinned Runtime for one already-persisted opening Session.
+    ///
+    /// The caller owns artifact resolution and credential issuance. The
+    /// platform derives every Session-bound command field from the frozen
+    /// execution state and commits `runtime/bound` plus `session/ready` only
+    /// after the Runtime handshake and create ACK succeed.
+    pub async fn launch_session_runtime(
+        self: &Arc<Self>,
+        session_id: &AgentSessionId,
+        config: SessionRuntimeLaunchConfig,
+    ) -> Result<(), AgentPlatformError> {
+        let head = self.sessions.head(session_id).await?;
+        match head.status.as_str() {
+            "ready" => return Ok(()),
+            "opening" => {}
+            status => {
+                return Err(AgentPlatformError::Contract(format!(
+                    "Runtime launch requires an opening AgentSession, found {status}"
+                )));
+            }
+        }
+
+        let execution = self.execution_for(session_id).await?;
+        let active = execution.capabilities.snapshot()?;
+        let runtime_binding_id =
+            RuntimeBindingId::from(format!("runtime-binding:{}", session_id.as_ref()));
+        let open_command = self.runtime_create_command(
+            session_id.clone(),
+            runtime_binding_id,
+            OperationId::from(format!("runtime-open:{}", session_id.as_ref())),
+            &execution.compiled,
+            &active,
+        );
+        let profile = self.pinned_runtime_profile(&execution.compiled);
+        self.launch_runtime(RuntimeLaunchRequest {
+            process: config.process,
+            credential: config.credential,
+            release: config.release,
+            hello_expectation: config.hello_expectation,
+            profile,
+            open_command,
+            ingress: Arc::clone(self) as Arc<dyn RuntimeIngressPort>,
+            client_limits: config.client_limits,
+            dispose_timeout: config.dispose_timeout,
+        })
+        .await?;
+        Ok(())
+    }
+
     pub async fn launch_runtime(
         self: &Arc<Self>,
         mut request: RuntimeLaunchRequest,
     ) -> Result<Arc<ManagedRuntimeSession>, AgentPlatformError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(AgentPlatformError::Contract(
+                "AgentPlatform is shutting down".to_owned(),
+            ));
+        }
         let context = runtime_open_context(&request.open_command)?.clone();
+        let initial_status = self.sessions.head(&context.agent_session_id).await?.status;
+        if !matches!(initial_status.as_str(), "opening" | "ready") {
+            return Err(AgentPlatformError::Contract(format!(
+                "Runtime launch requires an opening or ready AgentSession, found {initial_status}"
+            )));
+        }
         let execution = self.execution_for(&context.agent_session_id).await?;
         let active = execution.capabilities.snapshot()?;
         if context.resolved_snapshot_ref != *execution.compiled.snapshot_ref()
@@ -2231,8 +2786,12 @@ impl AgentPlatform {
             ));
         }
         request.ingress = Arc::clone(self) as Arc<dyn RuntimeIngressPort>;
-        {
-            let mut opening = self.opening_bindings.write().await;
+        let opening_lease = {
+            let mut opening = self.opening_bindings.lock().map_err(|_| {
+                AgentPlatformError::Contract(
+                    "AgentPlatform opening binding registry is poisoned".to_owned(),
+                )
+            })?;
             if opening
                 .insert(
                     context.runtime_binding_id.clone(),
@@ -2242,39 +2801,56 @@ impl AgentPlatform {
             {
                 return Err(RuntimeError::SessionAlreadyExists.into());
             }
-        }
-        let launched = self.runtime.launch(request).await;
-        self.opening_bindings
-            .write()
-            .await
-            .remove(&context.runtime_binding_id);
+            OpeningBindingLease::new(
+                Arc::clone(&self.opening_bindings),
+                context.runtime_binding_id.clone(),
+            )
+        };
+        let launched = {
+            let _opening_lease = opening_lease;
+            self.runtime.launch(request).await
+        };
         let managed = launched?;
-        if let Err(error) = self
-            .commit_runtime_binding(managed.binding().clone())
+        let mut admission_lease = RuntimeAdmissionLease::new(
+            Arc::clone(&self.runtime),
+            Arc::clone(&self.sessions),
+            managed.binding(),
+        );
+        let commit_result = if initial_status == "opening" {
+            self.commit_runtime_binding(
+                managed.binding().clone(),
+                &execution,
+                &mut admission_lease,
+            )
             .await
+        } else {
+            self.commit_runtime_rebind(managed.binding().clone(), &execution)
+                .await
+        };
+        if let Err(error) = commit_result
         {
-            let _ = self
-                .runtime
-                .dispose(RuntimeSessionDisposeParams {
-                    agent_session_id: managed.binding().agent_session_id.clone(),
-                    runtime_binding_id: managed.binding().runtime_binding_id.clone(),
-                    operation_id: OperationId::from(format!(
-                        "dispose-after-bind-failure:{}",
-                        managed.binding().runtime_binding_id.as_ref()
-                    )),
-                    reason: nomifun_agent_contracts::CanonicalErrorCode::from(
-                        "RUNTIME_BINDING_COMMIT_FAILED",
-                    ),
-                })
-                .await;
+            admission_lease.dispose_now().await;
             return Err(error);
+        }
+        if initial_status == "ready" {
+            admission_lease.disarm();
+        }
+        if initial_status == "opening" {
+            let platform = Arc::clone(self);
+            let session_id = managed.binding().agent_session_id.clone();
+            tokio::spawn(async move {
+                platform
+                    .admit_pending_remote_initial_turn(&session_id)
+                    .await;
+            });
         }
         Ok(managed)
     }
 
-    async fn commit_runtime_binding(
+    async fn commit_runtime_rebind(
         &self,
         binding: RuntimeBindingContract,
+        execution: &Arc<SessionExecutionState>,
     ) -> Result<(), AgentPlatformError> {
         let envelope = RuntimeEventEnvelope {
             runtime_binding_id: binding.runtime_binding_id.clone(),
@@ -2302,6 +2878,36 @@ impl AgentPlatform {
                 envelope,
             })
             .await?;
+        *execution.runtime_binding.write().await = Some(binding);
+        Ok(())
+    }
+
+    async fn commit_runtime_binding(
+        &self,
+        binding: RuntimeBindingContract,
+        execution: &Arc<SessionExecutionState>,
+        admission_lease: &mut RuntimeAdmissionLease,
+    ) -> Result<(), AgentPlatformError> {
+        let envelope = RuntimeEventEnvelope {
+            runtime_binding_id: binding.runtime_binding_id.clone(),
+            producer_seq: 1,
+            event_id: binding.runtime_bound_event_id.clone(),
+            idempotency_key: IdempotencyKey::from(format!(
+                "runtime-bound:{}",
+                binding.runtime_binding_id.as_ref()
+            )),
+            semantic_event: SemanticSessionEventDraft {
+                kind: SessionEventKind("runtime/bound".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(
+                    binding.runtime_binding_id.as_ref().to_owned(),
+                ),
+                causation_event_id: None,
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(
+                    serde_json::to_value(&binding)?,
+                )),
+            },
+        };
         let ready = SessionEventAppend {
             agent_session_id: binding.agent_session_id.clone(),
             event_id: stable_event_id(
@@ -2332,10 +2938,86 @@ impl AgentPlatform {
                 }))),
             },
         };
-        self.sessions.append_event(&ready).await?;
-        let execution = self.execution_for(&binding.agent_session_id).await?;
-        *execution.runtime_binding.write().await = Some(binding);
+        *execution.runtime_binding.write().await = Some(binding.clone());
+        if let Err(error) = self
+            .sessions
+            .append_runtime_bound_and_ready(
+                RuntimeAppendContext {
+                    agent_session_id: binding.agent_session_id.clone(),
+                    envelope,
+                },
+                &ready,
+            )
+            .await
+        {
+            let committed_ready = self
+                .sessions
+                .head(&binding.agent_session_id)
+                .await
+                .is_ok_and(|head| {
+                    head.status == "ready"
+                        && head.runtime_bound_event_id.as_deref()
+                            == Some(binding.runtime_bound_event_id.as_ref())
+                });
+            if committed_ready {
+                admission_lease.disarm();
+                return Ok(());
+            }
+            *execution.runtime_binding.write().await = None;
+            return Err(error.into());
+        }
+        admission_lease.disarm();
         Ok(())
+    }
+
+    async fn admit_pending_remote_initial_turn(&self, session_id: &AgentSessionId) {
+        let Some((input, open_operation_id)) =
+            (match pending_remote_initial_turn(&self.sessions, session_id).await {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        session_id = session_id.as_ref(),
+                        "Remote initial input could not be inspected after runtime became ready"
+                    );
+                    return;
+                }
+            })
+        else {
+            return;
+        };
+        let initial_turn_key = IdempotencyKey::from(format!(
+            "remote-initial-turn:{}",
+            open_operation_id.as_ref()
+        ));
+        let principal = match self.sessions.get_live_session(session_id).await {
+            Ok(session) => session.owner_ref,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    session_id = session_id.as_ref(),
+                    "Remote initial input could not load its Session after runtime became ready"
+                );
+                return;
+            }
+        };
+        if let Err(error) = AgentSessionCommandPort::start_turn(
+            self,
+            StartAgentTurnRequest {
+                agent_session_id: session_id.clone(),
+                principal,
+                input,
+                idempotency_key: initial_turn_key,
+            },
+        )
+        .await
+        {
+            tracing::warn!(
+                ?error,
+                session_id = session_id.as_ref(),
+                "Remote initial input could not be admitted after runtime became ready"
+            );
+        }
     }
 
     async fn execution_for(
@@ -2346,13 +3028,18 @@ impl AgentPlatform {
             return Ok(execution);
         }
         let session = self.sessions.get_live_session(session_id).await?;
+        let (scene, surface, audience) = if session.remote_binding_provenance.is_some() {
+            ("remote", "remote", "owner")
+        } else {
+            ("agent_session", "desktop", "owner")
+        };
         let compiled = self
             .compile_saved_binding(
                 &session.owner_ref,
                 &session.agent_binding,
-                "agent_session",
-                "desktop",
-                "owner",
+                scene,
+                surface,
+                audience,
             )
             .await?;
         let capabilities = Arc::new(SessionCapabilityState::new(&compiled));
@@ -2431,6 +3118,7 @@ impl AgentSessionCommandPort for AgentPlatform {
             request.idempotency_key.clone(),
             request.correlation_id,
         );
+        create.initial_input = request.initial_input;
         create.opening_event_id = Some(stable_event_id(
             "session-opening",
             &agent_session_id,
@@ -2472,6 +3160,12 @@ impl AgentSessionCommandPort for AgentPlatform {
         &self,
         request: StartAgentTurnRequest,
     ) -> Result<AgentTurnDispatch, AgentPlatformError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(AgentPlatformError::Contract(
+                "AgentPlatform is shutting down".to_owned(),
+            ));
+        }
+        let _turn_admission = self.turn_admission_lock.lock().await;
         self.require_owned_session(&request.principal, &request.agent_session_id)
             .await?;
         let execution = self.execution_for(&request.agent_session_id).await?;
@@ -2497,6 +3191,42 @@ impl AgentSessionCommandPort for AgentPlatform {
             &request.agent_session_id,
             request.idempotency_key.as_ref(),
         );
+        let turn_event_id = stable_event_id(
+            "turn-started",
+            &request.agent_session_id,
+            request.idempotency_key.as_ref(),
+        );
+        let turn_payload = {
+            let mut payload = serde_json::Map::from_iter([
+                ("operation_id".to_owned(), json!(&operation_id)),
+                ("input_event_id".to_owned(), json!(&input_event_id)),
+            ]);
+            let route_identity = execution
+                .compiled
+                .content()
+                .chat_route_identity
+                .clone()
+                .ok_or_else(|| {
+                    AgentPlatformError::Contract(
+                        "AgentSession has no canonical agent_chat route identity".to_owned(),
+                    )
+                })?;
+            let _record = self
+                .control_store
+                .load_chat_route_record(&route_identity)
+                .await?
+                .ok_or_else(|| {
+                    AgentPlatformError::Contract(
+                        "AgentSession Chat route record is missing".to_owned(),
+                    )
+                })?;
+            payload.insert("route_identity".to_owned(), json!(route_identity));
+            payload.insert(
+                "resolved_snapshot_ref".to_owned(),
+                json!(execution.compiled.snapshot_ref()),
+            );
+            Value::Object(payload)
+        };
         let input_event = self
             .sessions
             .append_event(&SessionEventAppend {
@@ -2515,11 +3245,6 @@ impl AgentSessionCommandPort for AgentPlatform {
                 },
             })
             .await?;
-        let turn_event_id = stable_event_id(
-            "turn-started",
-            &request.agent_session_id,
-            request.idempotency_key.as_ref(),
-        );
         let turn_event = self
             .sessions
             .append_event(&SessionEventAppend {
@@ -2537,10 +3262,7 @@ impl AgentSessionCommandPort for AgentPlatform {
                     kind_version: 1,
                     correlation_id: CorrelationId::from(operation_id.as_ref().to_owned()),
                     causation_event_id: Some(input_event_id.clone()),
-                    payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                        "operation_id": &operation_id,
-                        "input_event_id": &input_event_id
-                    }))),
+                    payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(turn_payload)),
                 },
             })
             .await?;
@@ -3116,6 +3838,7 @@ fn validate_compiler_convergence(
         || persisted_content.required_runtime_features
             != compiled_content.required_runtime_features
         || persisted_content.model_route_refs != compiled_content.model_route_refs
+        || persisted_content.chat_route_identity != compiled_content.chat_route_identity
         || persisted_content.capability_allowlist != compiled_content.capability_allowlist
         || persisted_content.typed_resource_bindings
             != compiled_content.typed_resource_bindings
@@ -3216,19 +3939,67 @@ async fn find_supervised_binding(
     None
 }
 
+async fn pending_remote_initial_turn(
+    sessions: &AgentSessionStore,
+    session_id: &AgentSessionId,
+) -> Result<Option<(StrictJsonValue, OperationId)>, AgentPlatformError> {
+    let page = sessions
+        .read_events(session_id, None, nomifun_agent_session::MAX_EVENT_PAGE_SIZE)
+        .await?;
+    let Some(opening) = page
+        .events
+        .iter()
+        .find(|event| event.kind.0 == "session/opening")
+    else {
+        return Ok(None);
+    };
+    let SessionEventPayloadRef::InlineJson(payload) = &opening.payload else {
+        return Ok(None);
+    };
+    let Some(initial_input) = payload.0.get("initial_input").cloned() else {
+        return Ok(None);
+    };
+    if initial_input.is_null() {
+        return Ok(None);
+    }
+    let open_operation_id = payload
+        .0
+        .get("operation_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(|value| OperationId::from(value.to_owned()))
+        .ok_or_else(|| {
+            AgentPlatformError::Contract(
+                "Remote session opening is missing its operation_id provenance".to_owned(),
+            )
+        })?;
+    let initial_key = format!("remote-initial-turn:{}", open_operation_id.as_ref());
+    if page.events.iter().any(|event| {
+        event.kind.0 == "message/user-accepted"
+            && event.idempotency_key.as_ref() == initial_key
+    }) {
+        return Ok(None);
+    }
+    Ok(Some((StrictJsonValue(initial_input), open_operation_id)))
+}
+
 #[async_trait]
 impl RuntimeIngressPort for AgentPlatform {
     async fn append_runtime_event(
         &self,
         event: RuntimeEventWireEnvelope,
     ) -> Result<RuntimeEventWireAck, RuntimeError> {
-        let agent_session_id = match self
+        let opening_session = self
             .opening_bindings
-            .read()
-            .await
+            .lock()
+            .map_err(|_| {
+                RuntimeError::Protocol(
+                    "AgentPlatform opening binding registry is poisoned".to_owned(),
+                )
+            })?
             .get(&event.runtime_binding_id)
-            .cloned()
-        {
+            .cloned();
+        let agent_session_id = match opening_session {
             Some(agent_session_id) => agent_session_id,
             None => self
                 .runtime
@@ -3272,6 +4043,13 @@ impl RuntimeIngressPort for AgentPlatform {
         let invocation = CapabilityInvocationRequest {
             principal: session.owner_ref.clone(),
             session_owner: session.owner_ref,
+            agent_session_id: start.agent_session_id.clone(),
+            operation_id: OperationId::from(format!(
+                "native-action:{}",
+                start.effect_id.as_ref()
+            )),
+            idempotency_key: start.idempotency_key.clone(),
+            correlation_id: CorrelationId::from(start.effect_id.as_ref().to_owned()),
             resolved_snapshot_ref: execution.compiled.snapshot_ref().clone(),
             active_set_generation: start.active_set_generation,
             capability_id: start.capability_id.clone(),
@@ -3525,5 +4303,103 @@ fn platform_wire<T: Serialize>(value: &T) -> Result<String, AgentPlatformError> 
         _ => Err(AgentPlatformError::Contract(
             "wire enum did not serialize to a string".to_owned(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod route_writer_tests {
+    use super::*;
+    use nomifun_agent_contracts::{
+        AgentPresetRevisionPayload, ChatRouteCandidate, ChatRouteFeature, ChatRouteProtocol,
+        ChatRouteRecordSchema, ChatRouteTask,
+    };
+
+    fn revision_with_routes(
+        model_route_refs: BTreeMap<String, ModelRouteId>,
+        chat_route_records: BTreeMap<String, ChatRouteRecord>,
+    ) -> AgentPresetRevision {
+        AgentPresetRevision {
+            reference: PresetRevisionRef {
+                preset_id: AgentPresetId::from("preset"),
+                revision: 1,
+                revision_digest: DigestHex::from("a".repeat(64)),
+            },
+            payload: AgentPresetRevisionPayload {
+                schema_version: VersionString::from("1.0.0"),
+                surfaces: BTreeSet::new(),
+                model_route_refs,
+                chat_route_records,
+                initial_capabilities: Vec::new(),
+                on_demand_capabilities: Vec::new(),
+                skill_bindings: Vec::new(),
+                resource_bindings: Vec::new(),
+                persona: String::new(),
+                instructions: String::new(),
+                context_policy: StrictJsonValue(Value::Object(Default::default())),
+                execution_constraints: StrictJsonValue(Value::Object(Default::default())),
+                runtime_budget: StrictJsonValue(Value::Object(Default::default())),
+            },
+            created_by: UserId::from("owner"),
+            created_at_ms: 0,
+            reason: None,
+        }
+    }
+
+    fn route_record() -> ChatRouteRecord {
+        ChatRouteRecord {
+            schema: ChatRouteRecordSchema::V1,
+            task: ChatRouteTask::AgentChat,
+            primary: ChatRouteCandidate {
+                model_route_id: ModelRouteId::from("opaque-route"),
+                model_route_revision: 1,
+                provider_id: "provider".to_owned(),
+                model: "model".to_owned(),
+                protocol: ChatRouteProtocol::OpenaiChat,
+                connection_config_ref: nomifun_agent_contracts::ConnectionConfigRef::from(
+                    "connection",
+                ),
+                config_revision_digest: DigestHex::from("b".repeat(64)),
+                credential_ref: "credential".to_owned(),
+                features: BTreeSet::from([
+                    ChatRouteFeature::TextInput,
+                    ChatRouteFeature::TextOutput,
+                ]),
+            },
+            failovers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn route_writer_rejects_an_opaque_id_without_a_record() {
+        let route_id = ModelRouteId::from("opaque-route");
+        let revision = revision_with_routes(
+            BTreeMap::from([(
+                "agent_chat".to_owned(),
+                route_id.clone(),
+            )]),
+            BTreeMap::new(),
+        );
+        let error = canonical_chat_route_json(&revision, "agent_chat", &route_id).unwrap_err();
+        assert!(matches!(
+            error,
+            ControlPlaneError::Wire(message) if message.contains("no canonical chat route record")
+        ));
+    }
+
+    #[test]
+    fn route_writer_serializes_the_complete_record_as_an_object() {
+        let route_id = ModelRouteId::from("opaque-route");
+        let revision = revision_with_routes(
+            BTreeMap::from([(
+                "agent_chat".to_owned(),
+                route_id.clone(),
+            )]),
+            BTreeMap::from([("agent_chat".to_owned(), route_record())]),
+        );
+        let route_json = canonical_chat_route_json(&revision, "agent_chat", &route_id).unwrap();
+        let value: Value = serde_json::from_str(&route_json).unwrap();
+        assert!(value.is_object());
+        assert_eq!(value["primary"]["model_route_id"], "opaque-route");
+        assert!(value.get("provider_id").is_none());
     }
 }

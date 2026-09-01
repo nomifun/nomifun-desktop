@@ -6,13 +6,10 @@ use std::time::Duration;
 use dashmap::DashMap;
 use nomifun_ai_agent::AgentStreamEvent;
 use nomifun_ai_agent::registry::AgentRegistry;
-use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 use nomifun_api_types::{AutoWorkState, AutoWorkTargetKind, Requirement, RequirementStatus, SendMessageRequest};
 use nomifun_common::{AppError, ConversationId, TerminalId, UserId};
-use nomifun_conversation::{
-    ConversationService, IdempotentMessageDelivery, runtime_state::RuntimeBuildLease,
-};
+use nomifun_conversation::{IdempotentMessageDelivery, runtime_state::RuntimeBuildLease};
 use nomifun_conversation::service::{
     BackgroundTurnPreSendHook, BackgroundTurnReconciliationDisposition,
     BackgroundTurnRuntimePreparation, ObservedIdempotentMessageDelivery,
@@ -30,6 +27,7 @@ use tracing::{debug, error, info, warn};
 use crate::prompt::{build_requirement_prompt, build_terminal_requirement_prompt};
 use crate::service::{DEFAULT_LEASE_MS, RequirementService};
 use crate::attachments::PromptAttachmentPlan;
+use crate::conversation_port::AutoWorkConversationPort;
 
 /// Lease is renewed on this cadence while a turn is in flight.
 const LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(30);
@@ -56,8 +54,7 @@ pub struct AutoWorkRunnerDeps {
     /// Conversation/Terminal targets.
     pub authoritative_user_id: Arc<str>,
     pub service: Arc<RequirementService>,
-    pub runtime_registry: Arc<dyn AgentRuntimeRegistry>,
-    pub conversation_service: ConversationService,
+    pub conversation: Arc<dyn AutoWorkConversationPort>,
     pub conversation_repo: Arc<dyn IConversationRepository>,
     pub agent_registry: Arc<AgentRegistry>,
     /// Drives terminal targets (write PTY input, observe output). `None` if the
@@ -429,11 +426,14 @@ impl AutoWorkRunner {
             // already finalized between abortion and this read.
             let active_claim = recovered_claim.or(published_claim);
 
-            if handle.kind == AutoWorkTargetKind::Conversation
-                && let Some(agent) = self.deps.runtime_registry.get_runtime(target_id)
-                && let Err(e) = agent.cancel().await
-            {
-                warn!(target_id, error = %e, "Failed to cancel in-flight AutoWork turn on stop");
+            if handle.kind == AutoWorkTargetKind::Conversation {
+                if let Err(error) = self.deps.conversation.cancel_active_turn(target_id).await {
+                    warn!(
+                        target_id,
+                        error = %error,
+                        "Failed to cancel in-flight AutoWork turn on stop"
+                    );
+                }
             }
             if let Some(active_claim) = active_claim {
                 let req_id = active_claim.requirement_id;
@@ -1098,8 +1098,8 @@ async fn run_loop(
     // first await, then consumed by the first claim iteration.
     let mut startup_conversation_lease = if kind == AutoWorkTargetKind::Conversation {
         match deps
-            .conversation_service
-            .begin_public_runtime_preparation(owner_id, &deps.authoritative_user_id)
+            .conversation
+            .begin_runtime_preparation(owner_id, &deps.authoritative_user_id)
         {
             Ok(lease) => Some(lease),
             Err(error) => {
@@ -1194,8 +1194,8 @@ async fn run_loop(
             let lease = match startup_conversation_lease.take() {
                 Some(lease) => Ok(lease),
                 None => deps
-                    .conversation_service
-                    .begin_public_runtime_preparation(owner_id, &deps.authoritative_user_id),
+                    .conversation
+                    .begin_runtime_preparation(owner_id, &deps.authoritative_user_id),
             };
             match lease {
                 Ok(lease) => {
@@ -1208,7 +1208,7 @@ async fn run_loop(
                 Err(error) => {
                     debug!(target_id, tag, error = %error, "AutoWork conversation admission is fenced");
                     if deps
-                        .conversation_service
+                        .conversation
                         .user_cancelled_since(target_id, claim_started_ms)
                     {
                         info!(target_id, tag, "AutoWork idle preparation was stopped by user");
@@ -1314,7 +1314,7 @@ async fn run_loop(
                         // user pressed stop.
                         let user_cancelled = end == TurnEnd::Cancelled
                             || deps
-                                .conversation_service
+                                .conversation
                                 .user_cancelled_since(target_id, turn_started_ms);
                         if user_cancelled {
                             info!(
@@ -1366,7 +1366,7 @@ async fn run_loop(
                     // and falsely fails it (and pauses its tag).
                     Err(AppError::Conflict(conflict)) => {
                         if deps
-                            .conversation_service
+                            .conversation
                             .user_cancelled_since(target_id, turn_started_ms)
                         {
                             info!(
@@ -1783,13 +1783,12 @@ async fn inject_and_wait(
         })),
     };
     let (observed, send_error_context) = match deps
-        .conversation_service
-        .send_observed_autowork_message_with_idempotency_key(
+        .conversation
+        .send_observed_turn(
             &user_id,
             conversation_id,
             &operation_id,
             send_req,
-            &deps.runtime_registry,
             build_lease,
             runtime_preparation,
             authority,
@@ -1806,8 +1805,8 @@ async fn inject_and_wait(
             // present continues the same generation, absent escapes to the
             // caller's atomic pre-effect abandon, and ambiguous is quarantined.
             match deps
-                .conversation_service
-                .autowork_delivery_result_with_idempotency_key(
+                .conversation
+                .delivery_result(
                     &user_id,
                     conversation_id,
                     &operation_id,
@@ -1981,19 +1980,18 @@ async fn reconcile_accepted_autowork_delivery(
     // terminalized. Remote/OpenClaw/unknown ownership remains accepted and
     // returns Conflict, which the runner parks for explicit review.
     let disposition = deps
-        .conversation_service
-        .reconcile_quiescent_running_turn_for_background(
+        .conversation
+        .reconcile_quiescent_running_turn(
             user_id,
             conversation_id,
             idempotency_key,
-            &deps.runtime_registry,
         )
         .await?;
     authorize_accepted_receipt_wait(disposition, &delivery.message_id)?;
 
     match deps
-        .conversation_service
-        .autowork_delivery_result_with_idempotency_key(
+        .conversation
+        .delivery_result(
             user_id,
             conversation_id,
             idempotency_key,
@@ -2170,8 +2168,8 @@ async fn wait_for_conversation_receipt_with_renewal(
                 }
                 _ = receipts.tick() => {
                     match deps
-                        .conversation_service
-                        .autowork_delivery_result_with_idempotency_key(
+                        .conversation
+                        .delivery_result(
                             user_id,
                             conversation_id,
                             operation_id,

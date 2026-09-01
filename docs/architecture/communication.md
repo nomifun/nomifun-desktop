@@ -12,7 +12,7 @@ callers and security models.
 | Tauri IPC | SPA -> desktop shell | Desktop-only OS features | `apps/desktop/src/main.rs` + Tauri plugins |
 | PTY stdio | backend <-> child process | Terminal session bytes, including third-party agent CLIs | `nomifun-terminal` |
 | MCP stdio/HTTP | agent/backend/client <-> MCP server | Tools/resources/prompts | `nomi-mcp`, `nomifun-mcp`, `nomifun-public`, bridge subcommands |
-| Public Remote fronts | external agents/scripts -> backend | MCP tools or REST capability calls | `/mcp`, `/mcp-agent`, `/v1` |
+| Canonical Remote ingress | external agents/scripts -> backend | Explicit AgentSession `open/turn/observe/cancel` | `/mcp`, `/api/remote/*` |
 
 ## Auth Modes
 
@@ -83,8 +83,10 @@ The current `nomicore` CLI subcommands include:
 - `mcp-computer-stdio`
 - `terminal-hook`
 - `doctor`
-- `tools`
-- `call`
+- `remote open`
+- `remote turn`
+- `remote observe`
+- `remote cancel`
 
 MCP injection differs by session and by caller:
 
@@ -92,8 +94,8 @@ MCP injection differs by session and by caller:
 - requirement and knowledge servers are scoped internal MCP servers,
 - platform Gateway tools are transported through `nomifun-gateway`,
 - browser/computer bridges are feature-gated,
-- public `/mcp` and `/mcp-agent` are installation-token authenticated fronts from
-  `nomifun-public`.
+- public `/mcp` is the installation-token authenticated canonical Remote
+  AgentSession front from `nomifun-public`.
 
 Internal stdio bridges do not trust caller-supplied user ids or persisted
 Conversation flags. The host derives an exact server-side scope and gives a
@@ -102,17 +104,19 @@ inside the parent process; they are not serialized into runtime DTOs, database
 rows, or child configuration. Public capability fronts use their own
 installation-token boundary and do not inherit the internal host claim.
 
-## Public Capability Fronts
+## Canonical Remote Ingress
 
-The full app router mounts three installation-token authenticated surfaces outside
-the normal `/api` browser-auth tree:
+The Fresh-v4 host mounts two projections of the same installation-token
+authenticated Remote contract:
 
-- `/mcp`: general MCP profile for the installation owner,
-- `/mcp-agent`: curated agent profile,
-- `/v1`: REST capability adapter, with optional agent profile selection.
+- `/mcp`: Streamable-HTTP MCP with exactly `open`, `turn`, `observe`, `cancel`;
+- `/api/remote/*`: REST forms of the same four operations.
 
 Each installation has one token. A caller acts as the installation owner with
 no implicit companion, profile, persona, knowledge binding, or active thread.
+`open` uses a local owner-created `RemoteBinding` and returns an explicit
+UUIDv7 `agent_session_id`; every later operation carries that ID. The MCP
+transport session remains connection lifecycle only.
 
 ## Quick Lookup
 
@@ -123,8 +127,7 @@ no implicit companion, profile, persona, knowledge binding, or active thread.
 | Persistent Agent collaboration | HTTP `/api/agent-executions/*`; invalidation/thinking over `/ws` |
 | Terminal input | HTTP terminal route; output over `/ws` |
 | Desktop keep-awake | Tauri command |
-| Remote MCP tool call | `/mcp` or `/mcp-agent` |
-| Remote REST capability call | `/v1` |
+| Remote AgentSession operations | MCP `/mcp` or REST `/api/remote/*` |
 | Conversation turn | in-process `nomi` engine; tokens streamed over `/ws` |
 | Terminal (incl. third-party agent CLIs) | child process stdio over a PTY managed by `nomifun-terminal` |
 | Internal knowledge search for a session | `mcp-knowledge-stdio` bridge |

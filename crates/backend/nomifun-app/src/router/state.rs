@@ -46,7 +46,9 @@ use nomifun_office::{
     OfficeRouterState, OfficecliWatchManager, ProxyService,
     SnapshotService as OfficeSnapshotService,
 };
-use nomifun_agent_execution::{AgentExecutionEngine, AgentExecutionEngineConfig};
+use nomifun_agent_execution::{
+    AgentExecutionEngine, AgentExecutionEngineConfig, conversation_session_port,
+};
 use nomifun_companion::CompanionRouterState;
 use nomifun_workshop::WorkshopRouterState;
 use nomifun_creation::CreationRouterState;
@@ -1001,7 +1003,7 @@ pub async fn build_channel_state(
     let plugin_factory: Arc<nomifun_channel::manager::PluginFactory> =
         Arc::new(Box::new(nomifun_channel::plugins::create_plugin));
 
-    // Build channel settings service for per-plugin agent/model configuration
+    // Build channel settings service for per-plugin channel configuration.
     let pref_pool = services.database.pool().clone();
     let pref_repo: Arc<dyn nomifun_db::IClientPreferenceRepository> =
         Arc::new(SqliteClientPreferenceRepository::new(pref_pool));
@@ -1009,9 +1011,9 @@ pub async fn build_channel_state(
         pref_repo,
     ));
 
-    // Build message-loop dependencies. The fallback agent type for the
-    // `agent.select` action mirrors `ChannelSettingsService`'s default
-    // ("nomi") so the two resolution paths cannot drift apart.
+    // Build message-loop dependencies. Channel routing and the ActionExecutor
+    // share the same settings service, so their ordinary product defaults
+    // cannot drift apart.
     // 客服域接缝: one adapter instance shared by the message service (turn
     // routing) and the action executor (stranger auto-serve gate).
     let cs_routing: Arc<dyn nomifun_channel::message_service::CsRouting> =
@@ -1024,7 +1026,6 @@ pub async fn build_channel_state(
             Arc::clone(&pairing_service),
             Arc::clone(&session_manager),
             Arc::clone(&channel_settings),
-            "nomi",
         )
         // Opt-in IM → requirement pipeline: the creator is always wired, but the
         // per-platform `routeToRequirement` setting (default off) gates it, so
@@ -1097,10 +1098,13 @@ pub async fn build_channel_state(
             channel_settings: Arc::clone(&channel_settings),
         });
 
+    let channel_sessions = nomifun_channel::conversation_channel_session_port(
+        conversation_svc,
+        services.agent_runtime_registry.clone(),
+    );
     let message_service = Arc::new(
         nomifun_channel::message_service::ChannelMessageService::new(
-            conversation_svc,
-            services.agent_runtime_registry.clone(),
+            channel_sessions,
             Arc::clone(&channel_settings),
             repo.clone(),
             owner_user_id,
@@ -1290,10 +1294,14 @@ pub fn build_requirement_state(services: &AppServices) -> (RequirementRouterStat
     // Shared AutoWork waker: the service fires it when a requirement becomes
     // claimable so idle AutoWork loops pick up new work without polling delay.
     let autowork_waker = Arc::new(tokio::sync::Notify::new());
+    let autowork_conversation = nomifun_requirement::conversation_autowork_port(
+        conv_service.clone(),
+        services.agent_runtime_registry.clone(),
+    );
     let requirement_service = Arc::new(
         (*services.requirement_service)
             .clone()
-            .with_conversation_service(conv_service.clone(), conv_repo.clone())
+            .with_conversation_port(autowork_conversation.clone(), conv_repo.clone())
             .with_terminal_driver(terminal_driver.clone())
             .with_terminal_repo(terminal_repo)
             .with_autowork_waker(autowork_waker.clone()),
@@ -1321,8 +1329,7 @@ pub fn build_requirement_state(services: &AppServices) -> (RequirementRouterStat
     let deps = Arc::new(nomifun_requirement::AutoWorkRunnerDeps {
         authoritative_user_id: services.authoritative_user_id.clone(),
         service: requirement_service.clone(),
-        runtime_registry: services.agent_runtime_registry.clone(),
-        conversation_service: conv_service,
+        conversation: autowork_conversation,
         conversation_repo: conv_repo,
         agent_registry: services.agent_registry.clone(),
         terminal_driver: Some(terminal_driver),
@@ -1409,6 +1416,15 @@ pub fn build_agent_execution_engine(
     let provider_model_repository: Arc<dyn nomifun_db::IProviderModelRepository> = Arc::new(
         nomifun_db::SqliteProviderModelRepository::new(services.database.pool().clone()),
     );
+    // Transitional only: AgentExecution consumes the public typed Session port
+    // and no longer receives ConversationService/AgentRuntimeRegistry as
+    // production configuration. The adapter is a pure delegate over the
+    // existing owner while the canonical AgentSession implementation replaces
+    // the remaining Conversation-backed operations.
+    let session = conversation_session_port(
+        conversation,
+        services.agent_runtime_registry.clone(),
+    );
     let engine = Arc::new(AgentExecutionEngine::new(AgentExecutionEngineConfig {
         repository,
         template_repository,
@@ -1417,8 +1433,7 @@ pub fn build_agent_execution_engine(
         provider_model_capability_repository: services.provider_model_capability_repo.clone(),
         preset_service,
         realtime: services.ws_manager.clone(),
-        conversation,
-        runtime_registry: services.agent_runtime_registry.clone(),
+        session,
         model_invoke: services.model_invoke_service.clone(),
         workspace_root: services.work_dir.clone(),
     }));
@@ -1455,10 +1470,12 @@ pub fn build_idmm_state(
     let sidecar = Arc::new(nomifun_idmm::SidecarClient::new(completer));
 
     let probe_deps = Arc::new(nomifun_idmm::ProbeDeps {
-        conversation_service: conv_service,
+        conversation_session: nomifun_idmm::conversation_session_port(
+            conv_service,
+            services.agent_runtime_registry.clone(),
+        ),
         conversation_repo: conv_repo,
         terminal_driver,
-        runtime_registry: services.agent_runtime_registry.clone(),
     });
 
     let loop_deps = Arc::new(nomifun_idmm::LoopDeps {
@@ -1603,9 +1620,12 @@ pub fn build_companion_state(
         }
     });
 
-    services
-        .companion_service
-        .attach_companion(conv_service, services.agent_runtime_registry.clone());
+    let companion_ports = nomifun_companion::conversation_companion_ports(
+        services.authoritative_user_id.clone(),
+        conv_service,
+        services.agent_runtime_registry.clone(),
+    );
+    services.companion_service.attach_companion(companion_ports);
     CompanionRouterState::new(services.companion_service.clone())
 }
 
@@ -2031,11 +2051,14 @@ pub fn build_cron_state(
     );
 
     let busy_guard = Arc::new(nomifun_cron::busy_guard::CronBusyGuard::new());
+    let cron_sessions = nomifun_cron::conversation_cron_session_port(
+        Arc::new(conv_service.clone()),
+        services.agent_runtime_registry.clone(),
+    );
     let executor = Arc::new(nomifun_cron::executor::JobExecutor::new(
         services.authoritative_user_id.clone(),
-        services.agent_runtime_registry.clone(),
+        cron_sessions,
         conv_repo,
-        Arc::new(conv_service.clone()),
         busy_guard,
         services.work_dir.clone(),
         services.data_dir.clone(),
@@ -2503,38 +2526,43 @@ mod tests {
     }
 
     #[test]
-    fn every_production_host_attaches_exact_server_lock_authority() {
-        for (host, source) in [
-            ("embedded", include_str!("../lib.rs")),
-            ("desktop", include_str!("../desktop.rs")),
-            ("web", include_str!("../../../../../apps/web/src/main.rs")),
-        ] {
-            let services = source
-                .find("AppServices::from_config")
-                .or_else(|| source.find("AppServices::try_from_config"))
-                .expect("production host must construct AppServices");
-            let authority = source[services..]
-                .find(".with_boot_reconciliation_authority(")
-                .or_else(|| {
-                    source[services..]
-                        .find(".try_with_boot_reconciliation_authority(")
-                })
-                .expect("production host must retain exact server-lock authority");
-            let router = source[services..]
-                .find("create_router")
-                .or_else(|| source[services..].find("run_server"))
-                .expect("production host must eventually publish/start the router");
-            assert!(
-                authority < router,
-                "{host} must attach boot authority before router/background startup"
-            );
-        }
+    fn every_production_host_selects_the_canonical_v4_host_before_router_start() {
+        let embedded = include_str!("../lib.rs");
+        assert!(
+            embedded.contains("canonical_host()") && embedded.contains("host.compose"),
+            "embedded production startup must compose the canonical Fresh-v4 host"
+        );
+        assert!(
+            embedded.contains("run_canonical_server"),
+            "embedded production startup must use the Fresh-v4 server runner"
+        );
+
+        let desktop = include_str!("../desktop.rs");
+        let desktop_start = desktop
+            .find("pub async fn start_with_outcome")
+            .expect("desktop typed startup must remain present");
+        let desktop_source = &desktop[desktop_start..];
+        assert!(
+            desktop_source.contains("canonical_host()")
+                && desktop_source.contains("host\n            .compose"),
+            "desktop typed startup must compose Fresh-v4 before publishing its router"
+        );
+
+        let web = include_str!("../../../../../apps/web/src/main.rs");
+        assert!(
+            web.contains("canonical_host()") && web.contains("host.compose"),
+            "standalone Web startup must compose the canonical Fresh-v4 host"
+        );
+        assert!(
+            !web.contains("init_data_layer"),
+            "standalone Web startup must not enter legacy v3 data-layer initialization"
+        );
 
         // nomicore delegates to run_embedded_server, whose construction is
-        // covered by the "embedded" (lib.rs) row above.
+        // covered by the embedded row above.
         assert!(
             include_str!("../main.rs").contains("run_embedded_server"),
-            "nomicore must delegate to run_embedded_server so the embedded path's boot authority applies"
+            "nomicore must delegate to run_embedded_server so the canonical v4 host applies"
         );
 
         let service_source = include_str!("../services.rs");

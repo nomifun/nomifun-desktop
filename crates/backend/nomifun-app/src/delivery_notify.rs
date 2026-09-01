@@ -21,7 +21,7 @@ use std::time::Duration;
 use nomifun_ai_agent::AgentRuntimeRegistry;
 use nomifun_api_types::SendMessageRequest;
 use nomifun_channel::message_service::AssetResolver;
-use nomifun_channel::pending_decision::PendingDecisionStore;
+use nomifun_channel::pending_decision::ChannelStopConfirmationStore;
 use nomifun_channel::stream_relay::{ChannelSender, ChannelStreamRelay, RelayConfig};
 use nomifun_channel::types::PluginType;
 use nomifun_common::AppError;
@@ -46,7 +46,7 @@ pub struct DeliveryNotifyObserver {
     owner_user_id: Arc<str>,
     channel_repo: Arc<dyn IChannelRepository>,
     channel_sender: Arc<dyn ChannelSender>,
-    pending_decisions: Arc<PendingDecisionStore>,
+    stop_confirmations: Arc<ChannelStopConfirmationStore>,
     asset_resolver: Option<Arc<dyn AssetResolver>>,
 }
 
@@ -58,7 +58,7 @@ impl DeliveryNotifyObserver {
         owner_user_id: Arc<str>,
         channel_repo: Arc<dyn IChannelRepository>,
         channel_sender: Arc<dyn ChannelSender>,
-        pending_decisions: Arc<PendingDecisionStore>,
+        stop_confirmations: Arc<ChannelStopConfirmationStore>,
         asset_resolver: Option<Arc<dyn AssetResolver>>,
     ) -> Self {
         Self {
@@ -67,7 +67,7 @@ impl DeliveryNotifyObserver {
             owner_user_id,
             channel_repo,
             channel_sender,
-            pending_decisions,
+            stop_confirmations,
             asset_resolver,
         }
     }
@@ -186,7 +186,7 @@ impl DeliveryNotifyObserver {
                 conversation_id: requester_conversation_id.to_owned(),
             },
             Arc::clone(&self.channel_sender),
-            Arc::clone(&self.pending_decisions),
+            Arc::clone(&self.stop_confirmations),
             self.asset_resolver.clone(),
         );
         tokio::spawn(relay.run(rx));

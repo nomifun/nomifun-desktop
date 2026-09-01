@@ -4,6 +4,7 @@
 //! [`AgentExecutionEngine`](nomifun_agent_execution::AgentExecutionEngine) as
 //! REST and never assemble persistence or scheduler state themselves.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_api_types::{
@@ -25,11 +26,11 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
+use crate::conversation_port::ConversationCapabilityPort;
 use crate::id_schema::ModelRefParam;
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
-use crate::provider_support;
 
 const MAX_EXPLICIT_STEPS: usize = 16;
 
@@ -346,13 +347,43 @@ fn narrow_model_pool(
     Ok(explicit)
 }
 
+#[derive(Clone)]
+struct AgentExecutionCapabilityDeps {
+    conversation: Arc<dyn ConversationCapabilityPort>,
+    engine: Arc<nomifun_agent_execution::AgentExecutionEngine>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<AgentExecutionCapabilityDeps>, CallerCtx, P) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, ctx, params| {
+        handler(
+            Arc::new(AgentExecutionCapabilityDeps {
+                conversation: deps.conversation.clone(),
+                engine: deps.agent_execution_engine.clone(),
+            }),
+            ctx,
+            params,
+        )
+    }
+}
+
 async fn execution_model_authority(
-    deps: &GatewayDeps,
+    deps: &AgentExecutionCapabilityDeps,
     owner_id: &str,
     execution_id: &str,
 ) -> Result<ExecutionModelPool, nomifun_common::AppError> {
     let detail = deps
-        .agent_execution_engine
+        .engine
         .get(owner_id, execution_id)
         .await?;
     let mut models = Vec::new();
@@ -382,7 +413,7 @@ async fn execution_model_authority(
 }
 
 async fn narrow_execution_model_pool(
-    deps: &GatewayDeps,
+    deps: &AgentExecutionCapabilityDeps,
     owner_id: &str,
     execution_id: &str,
     explicit: ExecutionModelPool,
@@ -392,17 +423,13 @@ async fn narrow_execution_model_pool(
 }
 
 async fn create_context(
-    deps: &GatewayDeps,
+    deps: &AgentExecutionCapabilityDeps,
     ctx: &CallerCtx,
     explicit_pool: Option<ModelPoolParam>,
 ) -> Result<CreateContext, String> {
-    if ctx.remote {
-        return remote_create_context(deps, ctx, explicit_pool).await;
-    }
-
     let conversation_id = caller_conversation_id(ctx)?;
     let conversation = deps
-        .conversation_service
+        .conversation
         .get(ctx.user_id.as_str(), &conversation_id)
         .await
         .map_err(|error| error.to_string())?;
@@ -419,18 +446,18 @@ async fn create_context(
         .and_then(Value::as_str)
         .map(str::to_owned);
     let current_execution_id = deps
-        .agent_execution_engine
+        .engine
         .execution_for_attempt_conversation(ctx.user_id.as_str(), &conversation_id)
         .await
         .map_err(|error| error.to_string())?;
     let actor = deps
-        .agent_execution_engine
+        .engine
         .agent_caller_for_delegation(ctx.user_id.as_str(), &conversation_id)
         .await
         .map_err(|error| error.to_string())?;
     if let Some(execution_id) = current_execution_id {
         let execution = deps
-            .agent_execution_engine
+            .engine
             .get(ctx.user_id.as_str(), &execution_id)
             .await
             .map_err(|error| error.to_string())?;
@@ -496,52 +523,6 @@ async fn create_context(
         adaptation_policy: AdaptationPolicy::Fixed,
         inherited_work_dir,
         actor,
-    })
-}
-
-/// An installation-owner Remote caller has no live Conversation. Build a
-/// top-level execution directly from instance model authority; no companion
-/// profile, preset, active thread, or workspace is consulted.
-async fn remote_create_context(
-    deps: &GatewayDeps,
-    ctx: &CallerCtx,
-    explicit_pool: Option<ModelPoolParam>,
-) -> Result<CreateContext, String> {
-    let model_pool = narrow_model_pool(
-        ExecutionModelPool::Automatic,
-        explicit_pool.map(Into::into),
-    )?;
-    let lead_model = if let Some(model) = finite_pool_models(&model_pool)
-        .and_then(|models| models.into_iter().next())
-    {
-        model
-    } else {
-        let (model, _) = provider_support::resolve_nomi_model(deps, ctx, None)
-            .await
-            .map_err(|error| {
-                error
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("no model is available for Remote delegation")
-                    .to_owned()
-            })?;
-        ExecutionModelRef {
-            provider_id: model.provider_id,
-            model: model.use_model.unwrap_or(model.model),
-        }
-    };
-    Ok(CreateContext {
-        conversation: None,
-        lead_preset: None,
-        lead_conversation_id: None,
-        current_execution_id: None,
-        template_id: None,
-        model_pool,
-        lead_model: Some(lead_model),
-        delegation_policy: DelegationPolicy::Automatic,
-        adaptation_policy: AdaptationPolicy::Fixed,
-        inherited_work_dir: None,
-        actor: AgentExecutionActor::user(ctx.user_id.as_str()),
     })
 }
 
@@ -617,7 +598,11 @@ fn delegate_receipt(
     AgentExecutionReceipt::new(execution_id, status, message)
 }
 
-async fn delegate(deps: Arc<GatewayDeps>, ctx: CallerCtx, params: DelegateParams) -> Value {
+async fn delegate(
+    deps: Arc<AgentExecutionCapabilityDeps>,
+    ctx: CallerCtx,
+    params: DelegateParams,
+) -> Value {
     let owner_id = ctx.user_id.as_str().to_owned();
     let (goal, work_dir, model_pool, adaptation_policy, max_parallel, steps) =
         match params {
@@ -691,7 +676,7 @@ async fn delegate(deps: Arc<GatewayDeps>, ctx: CallerCtx, params: DelegateParams
             Err(error) => return json!({"error":error}),
         };
         return match deps
-            .agent_execution_engine
+            .engine
             .delegate_from_attempt(
                 &owner_id,
                 &actor,
@@ -752,7 +737,7 @@ async fn delegate(deps: Arc<GatewayDeps>, ctx: CallerCtx, params: DelegateParams
         };
         match conversation.as_ref() {
             Some(conversation) => {
-                deps.agent_execution_engine
+                deps.engine
                     .create_from_template_for_conversation(
                         &owner_id,
                         &actor,
@@ -769,12 +754,12 @@ async fn delegate(deps: Arc<GatewayDeps>, ctx: CallerCtx, params: DelegateParams
     } else {
         match (conversation.as_ref(), request.lead_conversation_id.as_ref()) {
             (Some(conversation), Some(_)) => {
-            deps.agent_execution_engine
+            deps.engine
                 .create_from_conversation(&owner_id, &actor, conversation, request)
                 .await
             }
             _ => {
-                deps.agent_execution_engine
+                deps.engine
                     .create_for_agent(&owner_id, &actor, lead_preset.as_ref(), request)
                     .await
             }
@@ -790,38 +775,20 @@ async fn delegate(deps: Arc<GatewayDeps>, ctx: CallerCtx, params: DelegateParams
     }
 }
 
-/// The installation token authenticates the same installation owner used by
-/// Desktop. Owner scoping in the execution engine is therefore the complete
-/// authorization boundary; no companion-created subset is inferred.
-async fn authorize_remote_execution(
-    deps: &GatewayDeps,
-    ctx: &CallerCtx,
-    execution_id: &str,
-) -> Result<AgentExecutionActor, nomifun_common::AppError> {
-    deps.agent_execution_engine
-        .get(ctx.user_id.as_str(), execution_id)
-        .await?;
-    Ok(AgentExecutionActor::user(ctx.user_id.as_str()))
-}
-
 async fn authorize_execution_caller(
-    deps: &GatewayDeps,
+    deps: &AgentExecutionCapabilityDeps,
     ctx: &CallerCtx,
     execution_id: &str,
 ) -> Result<AgentExecutionActor, nomifun_common::AppError> {
-    if ctx.remote {
-        authorize_remote_execution(deps, ctx, execution_id).await
-    } else {
-        let conversation_id = caller_conversation_id(ctx)
-            .map_err(nomifun_common::AppError::BadRequest)?;
-        deps.agent_execution_engine
-            .authorize_agent_caller(ctx.user_id.as_str(), execution_id, &conversation_id)
-            .await
-    }
+    let conversation_id =
+        caller_conversation_id(ctx).map_err(nomifun_common::AppError::BadRequest)?;
+    deps.engine
+        .authorize_agent_caller(ctx.user_id.as_str(), execution_id, &conversation_id)
+        .await
 }
 
 async fn execution_get(
-    deps: Arc<GatewayDeps>,
+    deps: Arc<AgentExecutionCapabilityDeps>,
     ctx: CallerCtx,
     params: ExecutionGetParams,
 ) -> Value {
@@ -830,7 +797,7 @@ async fn execution_get(
         return json!({"error":error.to_string()});
     }
     match deps
-        .agent_execution_engine
+        .engine
         .get(owner_id, &params.execution_id)
         .await
     {
@@ -840,7 +807,7 @@ async fn execution_get(
 }
 
 async fn execution_update(
-    deps: Arc<GatewayDeps>,
+    deps: Arc<AgentExecutionCapabilityDeps>,
     ctx: CallerCtx,
     params: ExecutionUpdateParams,
 ) -> Value {
@@ -878,7 +845,7 @@ async fn execution_update(
                 },
                 None => None,
             };
-            deps.agent_execution_engine
+            deps.engine
                 .replan(
                     &owner_id,
                     &actor,
@@ -900,7 +867,7 @@ async fn execution_update(
             expected_version,
             intent,
         } => deps
-            .agent_execution_engine
+            .engine
             .adjust(
                 &owner_id,
                 &actor,
@@ -919,7 +886,7 @@ async fn execution_update(
             synthesize,
         } => match explicit_plan(steps, synthesize) {
             Ok(steps) => deps
-                .agent_execution_engine
+                .engine
                 .add_steps(
                     &owner_id,
                     &actor,
@@ -938,7 +905,7 @@ async fn execution_update(
             expected_version,
             goal,
         } => deps
-            .agent_execution_engine
+            .engine
             .rename(
                 &owner_id,
                 &actor,
@@ -958,7 +925,7 @@ async fn execution_update(
             title,
             spec,
         } => deps
-            .agent_execution_engine
+            .engine
             .update_step(
                 &owner_id,
                 &actor,
@@ -981,7 +948,7 @@ async fn execution_update(
             participant_id,
             locked,
         } => deps
-            .agent_execution_engine
+            .engine
             .reassign_step(
                 &owner_id,
                 &actor,
@@ -1038,7 +1005,7 @@ async fn execution_update(
             } else {
                 preset_prompt.map(Some)
             };
-            deps.agent_execution_engine
+            deps.engine
                 .configure_step(
                     &owner_id,
                     &actor,
@@ -1061,7 +1028,7 @@ async fn execution_update(
             expected_step_version,
             text,
         } => deps
-            .agent_execution_engine
+            .engine
             .steer_step(
                 &owner_id,
                 &actor,
@@ -1081,7 +1048,7 @@ async fn execution_update(
             expected_execution_version,
             expected_step_version,
         } => deps
-            .agent_execution_engine
+            .engine
             .retry_step(
                 &owner_id,
                 &actor,
@@ -1098,7 +1065,7 @@ async fn execution_update(
             execution_id,
             expected_version,
         } => deps
-            .agent_execution_engine
+            .engine
             .pause(
                 &owner_id,
                 &actor,
@@ -1111,7 +1078,7 @@ async fn execution_update(
             execution_id,
             expected_version,
         } => deps
-            .agent_execution_engine
+            .engine
             .resume(
                 &owner_id,
                 &actor,
@@ -1124,7 +1091,7 @@ async fn execution_update(
             execution_id,
             expected_version,
         } => deps
-            .agent_execution_engine
+            .engine
             .cancel(
                 &owner_id,
                 &actor,
@@ -1153,7 +1120,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Delegate work into one Agent Execution. Choose exactly one native-JSON shape. planned: strategy='planned' plus goal and optional work_dir/model_pool(object)/adaptation_policy/max_parallel(integer); never send tasks or synthesize. parallel: strategy='parallel' plus tasks(array of 1-16 objects) and optional synthesize(boolean); never send planned aggregate settings. At a top-level Conversation this creates an execution; inside an active Attempt it atomically appends Steps and returns immediately, so end the turn without polling. Returns the canonical execution receipt.",
             EffectClass::Write,
         ),
-        |deps, ctx, params| delegate(deps, ctx, params),
+        adapt(delegate),
     ));
     out.push(Capability::new::<ExecutionGetParams, _, _>(
         CapabilityMeta::new(
@@ -1162,7 +1129,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Read one Agent Execution directly owned by or linked to the calling Agent: aggregate status, immutable participants, current and historical DAG revisions, and every attempt output/error/conversation.",
             EffectClass::Read,
         ),
-        |deps, ctx, params| execution_get(deps, ctx, params),
+        adapt(execution_get),
     ));
     out.push(Capability::new::<ExecutionUpdateParams, _, _>(
         CapabilityMeta::new(
@@ -1171,7 +1138,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Apply exactly one typed execution command to an Agent Execution directly owned by or linked to the caller, with optimistic versions. Active Attempts append work through nomi_delegate and cannot issue aggregate lifecycle commands. User/top-level lead callers may replan, adjust, add, rename, update_step, reassign, configure, steer, retry, pause, resume, or cancel. Selected commands execute directly after typed ownership validation.",
             EffectClass::Write,
         ),
-        |deps, ctx, params| execution_update(deps, ctx, params),
+        adapt(execution_update),
     ));
 }
 
@@ -1197,7 +1164,7 @@ mod tests {
         ]
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
-        for surface in [Surface::Desktop, Surface::Remote, Surface::Channel] {
+        for surface in [Surface::Desktop, Surface::Channel] {
             let owner_visible = registry
                 .tool_specs_for_caller(surface, Some(&["agent_execution"]), true)
                 .into_iter()

@@ -8,7 +8,7 @@ use axum::http::{Request, StatusCode, header};
 use axum::Extension;
 use http_body_util::BodyExt;
 use nomifun_agent_contracts::{
-    AgentBindingValue, PresetRevisionRef, RuntimeProfileKind, RuntimeTarget,
+    AgentBindingValue, PresetRevisionRef, PrincipalRef, RuntimeProfileKind, RuntimeTarget,
     VersionString, official_preset_seed_manifest_payload,
 };
 use nomifun_agent_control_plane::{
@@ -188,6 +188,28 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
         assert!(envelope.success, "{path}");
         assert!(envelope.data.is_some(), "{path}");
     }
+
+    let catalog = platform
+        .session_capability_catalog(
+            &PrincipalRef {
+                principal_kind: "user".to_owned(),
+                principal_id: owner_id.clone(),
+            },
+            &create.agent_session_id.clone().into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(catalog.agent_session_id.as_ref(), create.agent_session_id);
+    assert_eq!(catalog.owner_ref.principal_id, owner_id);
+    let expected_snapshot: nomifun_agent_contracts::ResolvedSnapshotRef =
+        serde_json::from_value(
+            serde_json::to_value(&create.agent_binding.resolved_snapshot_ref).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        catalog.resolved_snapshot_ref,
+        expected_snapshot
+    );
 
     let fork = post_json::<ForkAgentSessionResponseDto>(
         &router,

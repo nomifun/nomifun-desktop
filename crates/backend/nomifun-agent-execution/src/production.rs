@@ -9,10 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nomifun_ai_agent::AgentRuntimeRegistry;
 use nomifun_api_types::{AgentExecutionDetail, SendMessageRequest};
 use nomifun_common::AppError;
-use nomifun_conversation::{AgentExecutionConversationPort, ConversationService};
 use nomifun_db::{
     IAgentExecutionRepository, IAgentExecutionTemplateRepository, IProviderRepository,
 };
@@ -20,7 +18,7 @@ use nomifun_preset::PresetService;
 use nomifun_realtime::UserEventSink;
 use nomifun_model_invoke::ModelInvokeService;
 
-use crate::attempt_runner::ConversationAttemptRunner;
+use crate::attempt_runner::{AgentExecutionSessionPort, AgentSessionAttemptRunner};
 use crate::engine::{AgentExecutionEngine, AgentExecutionEngineDeps};
 use crate::event_publisher::AgentExecutionEventPublisher;
 use crate::planner::{LlmPlanProducer, PlanProducer};
@@ -40,23 +38,20 @@ pub struct AgentExecutionEngineConfig {
         Arc<dyn nomifun_db::IProviderModelCapabilityRepository>,
     pub preset_service: Arc<PresetService>,
     pub realtime: Arc<dyn UserEventSink>,
-    pub conversation: ConversationService,
-    pub runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    pub session: Arc<dyn AgentExecutionSessionPort>,
     pub model_invoke: Arc<ModelInvokeService>,
     pub workspace_root: PathBuf,
 }
 
 struct ProductionConversationEffects {
-    conversation: ConversationService,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
-    execution_port: AgentExecutionConversationPort,
+    session: Arc<dyn AgentExecutionSessionPort>,
 }
 
 #[async_trait]
 impl ConversationEffects for ProductionConversationEffects {
     async fn cancel_attempt(&self, owner_id: &str, conversation_id: &str) -> Result<(), AppError> {
-        self.conversation
-            .cancel_for_execution(owner_id, conversation_id, &self.runtime_registry)
+        self.session
+            .cancel_for_execution(owner_id, conversation_id)
             .await
     }
     async fn steer_attempt(
@@ -66,7 +61,7 @@ impl ConversationEffects for ProductionConversationEffects {
         operation_id: &str,
         text: &str,
     ) -> Result<(), AppError> {
-        self.execution_port
+        self.session
             .steer_turn(
                 owner_id,
                 conversation_id,
@@ -89,8 +84,8 @@ impl ConversationEffects for ProductionConversationEffects {
         conversation_id: &str,
         _operation_id: &str,
     ) -> Result<(), AppError> {
-        self.conversation
-            .cancel_for_execution(owner_id, conversation_id, &self.runtime_registry)
+        self.session
+            .cancel_for_execution(owner_id, conversation_id)
             .await
     }
     async fn report_lead(
@@ -111,7 +106,7 @@ impl ConversationEffects for ProductionConversationEffects {
         // The persisted terminal summary is already the synthesis/sole
         // business output selected by the scheduler. Project it as the final
         // assistant message; never feed it back through the lead model.
-        self.conversation
+        self.session
             .project_assistant_message_idempotent(
                 owner_id,
                 conversation_id,
@@ -128,10 +123,8 @@ impl AgentExecutionEngine {
     /// Construct the canonical production engine.
     pub fn new(config: AgentExecutionEngineConfig) -> Self {
         let publisher = AgentExecutionEventPublisher::new(config.realtime);
-        let attempt_runner = Arc::new(ConversationAttemptRunner::new(
-            config.conversation.clone(),
-            config.runtime_registry.clone(),
-        ));
+        let session = config.session;
+        let attempt_runner = Arc::new(AgentSessionAttemptRunner::new(session.clone()));
         // The immutable participant snapshot supplies the actual lead model;
         // absence stays typed and fails explicitly in the planner.
         let planner: Arc<dyn PlanProducer> = Arc::new(LlmPlanProducer::new(
@@ -139,14 +132,7 @@ impl AgentExecutionEngine {
             config.model_invoke,
             config.workspace_root.clone(),
         ));
-        let execution_port = config
-            .conversation
-            .agent_execution_port(config.runtime_registry.clone());
-        let conversation_effects = Arc::new(ProductionConversationEffects {
-            conversation: config.conversation,
-            runtime_registry: config.runtime_registry,
-            execution_port,
-        });
+        let conversation_effects = Arc::new(ProductionConversationEffects { session });
         let deps = AgentExecutionEngineDeps::new(
             config.repository,
             config.template_repository,

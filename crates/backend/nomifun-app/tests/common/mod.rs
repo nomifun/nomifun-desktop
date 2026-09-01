@@ -8,7 +8,10 @@ use tower::ServiceExt;
 use wiremock::MockServer;
 
 use nomifun_ai_agent::{AgentRuntimeHandle, AgentRuntimeControl, MockAgentRuntime, InMemoryAgentRuntimeRegistry};
-use nomifun_app::{AppConfig, AppServices, build_module_states, create_router, create_router_with_states};
+use nomifun_app::AppConfig;
+use nomifun_app::compatibility::{
+    AppServices, build_module_states, create_router, create_router_with_states,
+};
 use nomifun_auth::AuthPolicy;
 use nomifun_extension::{ExternalPathsManager, SkillPaths, SkillRouterState};
 use nomifun_file::FileService;

@@ -410,18 +410,23 @@ async fn change_password_handler(
         .await
         .map_err(|e| AppError::Internal(format!("Database error: {e}")))?;
 
-    // Rotate JWT secret to invalidate all sessions
+    // Generate the candidate without changing this process's active secret.
     let new_secret = state
         .jwt_service
-        .rotate_secret()
-        .map_err(|e| AppError::Internal(format!("Secret rotation error: {e}")))?;
+        .generate_secret();
 
-    // Persist new secret to database
+    // Persist before installing it locally. If persistence fails, this process
+    // must continue using the old secret rather than diverging from storage.
     state
         .user_repo
         .update_jwt_secret(current_user.id.as_str(), &new_secret)
         .await
         .map_err(|e| AppError::Internal(format!("Database error: {e}")))?;
+
+    state
+        .jwt_service
+        .install_secret(new_secret)
+        .map_err(|e| AppError::Internal(format!("Secret installation error: {e}")))?;
 
     Ok(Json(ApiResponse::message("Password changed successfully")))
 }
@@ -769,4 +774,196 @@ async fn webui_generate_qr_token_handler(
         token,
         expires_at_ms,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::middleware::CurrentUser;
+    use nomifun_common::UserId;
+    use nomifun_db::{DbError, models::User};
+    use std::sync::Mutex;
+
+    const TEST_USER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+
+    struct StubUserRepo {
+        user: User,
+        jwt_service: Arc<JwtService>,
+        old_token: String,
+        events: Arc<Mutex<Vec<&'static str>>>,
+        fail_jwt_persist: bool,
+    }
+
+    fn test_user(password_hash: String) -> User {
+        User {
+            id: 1,
+            user_id: UserId::parse(TEST_USER_ID).unwrap(),
+            username: "admin".to_owned(),
+            email: None,
+            password_hash,
+            avatar_path: None,
+            jwt_secret: None,
+            created_at: 0,
+            updated_at: 0,
+            last_login: None,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl IUserRepository for StubUserRepo {
+        async fn has_users(&self) -> Result<bool, DbError> {
+            unreachable!()
+        }
+
+        async fn get_system_user(&self) -> Result<Option<User>, DbError> {
+            unreachable!()
+        }
+
+        async fn get_primary_webui_user(&self) -> Result<Option<User>, DbError> {
+            unreachable!()
+        }
+
+        async fn set_system_user_credentials(&self, _: &str, _: &str) -> Result<(), DbError> {
+            unreachable!()
+        }
+
+        async fn set_system_user_credentials_if_uninitialized(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, DbError> {
+            unreachable!()
+        }
+
+        async fn set_system_user_password_if_uninitialized(&self, _: &str) -> Result<bool, DbError> {
+            unreachable!()
+        }
+
+        async fn create_user(&self, _: &str, _: &str) -> Result<User, DbError> {
+            unreachable!()
+        }
+
+        async fn find_by_username(&self, _: &str) -> Result<Option<User>, DbError> {
+            unreachable!()
+        }
+
+        async fn find_by_id(&self, id: &str) -> Result<Option<User>, DbError> {
+            Ok((id == TEST_USER_ID).then(|| self.user.clone()))
+        }
+
+        async fn list_users(&self) -> Result<Vec<User>, DbError> {
+            unreachable!()
+        }
+
+        async fn count_users(&self) -> Result<i64, DbError> {
+            unreachable!()
+        }
+
+        async fn update_password(&self, _: &str, _: &str) -> Result<(), DbError> {
+            self.events.lock().unwrap().push("password");
+            Ok(())
+        }
+
+        async fn update_username(&self, _: &str, _: &str) -> Result<(), DbError> {
+            unreachable!()
+        }
+
+        async fn update_last_login(&self, _: &str) -> Result<(), DbError> {
+            unreachable!()
+        }
+
+        async fn update_jwt_secret(&self, _: &str, _: &str) -> Result<(), DbError> {
+            self.events.lock().unwrap().push("jwt");
+            assert!(
+                self.jwt_service.verify(&self.old_token).is_ok(),
+                "the active JWT secret must remain unchanged until persistence succeeds"
+            );
+            if self.fail_jwt_persist {
+                Err(DbError::Init("injected JWT persistence failure".to_owned()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn test_state(
+        jwt_service: Arc<JwtService>,
+        user_repo: Arc<dyn IUserRepository>,
+    ) -> AuthRouterState {
+        AuthRouterState {
+            jwt_service,
+            user_repo,
+            cookie_config: Arc::new(CookieConfig {
+                secure: false,
+                same_site: "Lax",
+            }),
+            qr_token_store: Arc::new(QrTokenStore::new()),
+        }
+    }
+
+    fn change_password_request() -> Result<Json<ChangePasswordRequest>, JsonRejection> {
+        Ok(Json(ChangePasswordRequest {
+            current_password: "OldP@ssword1".to_owned(),
+            new_password: "NewP@ssword2".to_owned(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn change_password_persists_secret_before_installing_it() {
+        let jwt_service = Arc::new(JwtService::new("old-secret".to_owned()));
+        let old_token = jwt_service.sign(TEST_USER_ID, "admin").unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let repo = Arc::new(StubUserRepo {
+            user: test_user(hash_password("OldP@ssword1").unwrap()),
+            jwt_service: jwt_service.clone(),
+            old_token: old_token.clone(),
+            events: events.clone(),
+            fail_jwt_persist: false,
+        });
+        let state = test_state(jwt_service.clone(), repo);
+
+        let response = change_password_handler(
+            axum::extract::State(state),
+            Extension(CurrentUser {
+                id: UserId::parse(TEST_USER_ID).unwrap(),
+                username: "admin".to_owned(),
+            }),
+            change_password_request(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.0.message.as_deref(), Some("Password changed successfully"));
+        assert_eq!(&*events.lock().unwrap(), &["password", "jwt"]);
+        assert!(jwt_service.verify(&old_token).is_err());
+    }
+
+    #[tokio::test]
+    async fn change_password_persistence_failure_keeps_old_secret_active() {
+        let jwt_service = Arc::new(JwtService::new("old-secret".to_owned()));
+        let old_token = jwt_service.sign(TEST_USER_ID, "admin").unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let repo = Arc::new(StubUserRepo {
+            user: test_user(hash_password("OldP@ssword1").unwrap()),
+            jwt_service: jwt_service.clone(),
+            old_token: old_token.clone(),
+            events,
+            fail_jwt_persist: true,
+        });
+        let state = test_state(jwt_service.clone(), repo);
+
+        let error = change_password_handler(
+            axum::extract::State(state),
+            Extension(CurrentUser {
+                id: UserId::parse(TEST_USER_ID).unwrap(),
+                username: "admin".to_owned(),
+            }),
+            change_password_request(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, AppError::Internal(message) if message.contains("Database error")));
+        assert!(jwt_service.verify(&old_token).is_ok());
+    }
 }

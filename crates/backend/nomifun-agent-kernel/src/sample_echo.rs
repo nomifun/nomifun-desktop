@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    ActionId, AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, ArtifactEnvelope,
-    CapabilityActionDescriptor, CapabilityContributions, CapabilityExposure, CapabilityId,
-    CapabilityKind, CapabilityManifest, CapabilityRef, CancellationDescriptor, CanonicalSchemaRef,
-    DeclaredServiceViewDescriptor, DigestHex, EffectClass, HostPortId, HostPortRef,
+    ActionId, AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, AgentSessionId,
+    ArtifactEnvelope, CapabilityActionDescriptor, CapabilityContributions, CapabilityExposure,
+    CapabilityId, CapabilityKind, CapabilityManifest, CapabilityRef, CancellationDescriptor,
+    CanonicalSchemaRef, CorrelationId, DeclaredServiceViewDescriptor, DigestHex, EffectClass,
+    HostPortId, HostPortRef, IdempotencyKey,
     InProcessEntrypointMetadata, LocalizedMetadata, LogicalArtifactRef, ManagedTaskRegistrationDescriptor,
     McpServerId, McpToolCapabilityMapping, McpToolKey, OperationId, PackageContributions,
     PackageId, PackageManifest, PackageRef, PlatformConstraint, PluginBootCriticality,
@@ -37,6 +38,10 @@ const SAMPLE_ACTION: &str = "sample.echo.invoke";
 const SAMPLE_SKILL: &str = "sample.echo-guidance";
 const SAMPLE_RESOURCE_KIND: &str = "sample.echo.target";
 const VERSION: &str = "1.0.0";
+const SAMPLE_AGENT_SESSION_ID: &str = "agent-session-sample-1";
+const SAMPLE_OPERATION_ID: &str = "operation-sample-1";
+const SAMPLE_IDEMPOTENCY_KEY: &str = "idempotency-sample-1";
+const SAMPLE_CORRELATION_ID: &str = "correlation-sample-1";
 
 fn package_ref(package_id: &str) -> PackageRef {
     PackageRef {
@@ -291,6 +296,15 @@ impl CapabilityHandler for EchoHandler {
         context: CapabilityInvocationContext,
         input: StrictJsonValue,
     ) -> Result<StrictJsonValue, KernelError> {
+        if context.agent_session_id.as_ref() != SAMPLE_AGENT_SESSION_ID
+            || context.operation_id.as_ref() != SAMPLE_OPERATION_ID
+            || context.idempotency_key.as_ref() != SAMPLE_IDEMPOTENCY_KEY
+            || context.correlation_id.as_ref() != SAMPLE_CORRELATION_ID
+        {
+            return Err(KernelError::CapabilityExecution {
+                reason: "sample.echo received unexpected invocation identity".to_owned(),
+            });
+        }
         if context.action_id.as_ref() != SAMPLE_ACTION {
             return Err(KernelError::ActionNotDeclared {
                 capability_id: context.capability_id,
@@ -384,6 +398,7 @@ fn sample_revision(owner_id: &str) -> AgentPresetRevision {
         schema_version: VersionString::from(VERSION),
         surfaces: BTreeSet::from(["test".to_owned()]),
         model_route_refs: BTreeMap::new(),
+        chat_route_records: BTreeMap::new(),
         initial_capabilities: Vec::new(),
         on_demand_capabilities: vec![nomifun_agent_contracts::CapabilitySelection {
             capability: CapabilityRef {
@@ -462,6 +477,10 @@ fn invocation(
     CapabilityInvocationRequest {
         principal: owner.clone(),
         session_owner: owner,
+        agent_session_id: AgentSessionId::from(SAMPLE_AGENT_SESSION_ID),
+        operation_id: OperationId::from(SAMPLE_OPERATION_ID),
+        idempotency_key: IdempotencyKey::from(SAMPLE_IDEMPOTENCY_KEY),
+        correlation_id: CorrelationId::from(SAMPLE_CORRELATION_ID),
         resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
         active_set_generation: active_generation,
         capability_id: CapabilityId::from(SAMPLE_CAPABILITY),

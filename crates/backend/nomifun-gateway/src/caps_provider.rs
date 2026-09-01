@@ -2,13 +2,15 @@
 //! catalog. The shared nomi model-resolution chain stays in `provider_support`
 //! (used by the cron + conversation capabilities), this only exposes listing.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::deps::GatewayDeps;
+use crate::deps::CompatibilityCapabilityHost;
+use crate::provider_support::ProviderSupportDeps;
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 use crate::provider_support::load_provider_summaries;
@@ -25,9 +27,34 @@ struct ListProvidersParams {
     include_disabled: Option<bool>,
 }
 
-async fn list(deps: Arc<GatewayDeps>, p: ListProvidersParams) -> Value {
+#[derive(Clone)]
+struct ProviderCapabilityDeps {
+    support: ProviderSupportDeps,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, crate::deps::CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<ProviderCapabilityDeps>, P) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, _ctx, params| {
+        handler(Arc::new(ProviderCapabilityDeps {
+            support: ProviderSupportDeps {
+                provider_repo: deps.provider_repo.clone(),
+                provider_model_repo: deps.provider_model_repo.clone(),
+                provider_model_capability_repo: deps.provider_model_capability_repo.clone(),
+                companion_service: deps.companion_service.clone(),
+            },
+        }), params)
+    }
+}
+
+async fn list(deps: Arc<ProviderCapabilityDeps>, p: ListProvidersParams) -> Value {
     let include_disabled = p.include_disabled.unwrap_or(false);
-    let summaries = match load_provider_summaries(&deps).await {
+    let summaries = match load_provider_summaries(&deps.support).await {
         Ok(s) => s,
         Err(e) => return e,
     };
@@ -66,6 +93,6 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Read-only catalog of configured model providers and their enabled models (no API keys), for guiding a model choice before creating sessions / cron jobs.",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| list(deps, p),
+        adapt(list),
     ));
 }

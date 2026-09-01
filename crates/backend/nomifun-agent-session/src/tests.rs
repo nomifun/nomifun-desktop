@@ -3,9 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use nomifun_agent_contracts::{
     ActionId, AgentBindingValue, AgentPresetId, AgentSessionId, AgentSessionLiveRecord,
     AgentSessionMetadata, ArtifactId, CapabilityId, CompactionCompletedPayload, CorrelationId,
-    DeleteAgentSessionCommand, DigestHex, EventId, EventProducerId, IdempotencyKey,
-    LogicalArtifactRef, OperationId, PresetRevisionRef, PrincipalRef, ResolvedSnapshotId,
-    ResolvedSnapshotRef, RuntimeBindingId, RuntimeCapabilityExecutionContract,
+    ChatRouteIdentity, DeleteAgentSessionCommand, DigestHex, EventId, EventProducerId,
+    IdempotencyKey, LogicalArtifactRef, OperationId, PresetRevisionRef, PrincipalRef,
+    RemoteBindingId, RemoteBindingProvenance, ResolvedSnapshotId, ResolvedSnapshotRef,
+    RuntimeBindingId, RuntimeCapabilityExecutionContract,
     RuntimeCheckpointBinding, RuntimeCheckpointValidationInput, RuntimeCheckpointValidationResult,
     RuntimeEventEnvelope, RuntimeExecutionCeiling, RuntimeExecutorSupport, RuntimeProfileKind,
     SemanticSessionEventDraft, SessionEventAppend, SessionEventKind, SessionEventPayloadRef,
@@ -17,9 +18,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    AgentSessionStore, CreateSessionRequest, EffectEventRequest, EffectReconcileOutcome,
-    EffectTerminalState, ForkRequest, RuntimeAppendContext, SessionStoreError,
-    ZeroOutstandingProof, evaluate_snapshot_compatibility, validate_checkpoint,
+    AgentSessionStore, ChatOperationClaimRequest, CreateSessionRequest, EffectEventRequest,
+    EffectReconcileOutcome, EffectTerminalState, ForkRequest, RuntimeAppendContext,
+    SessionStoreError, ZeroOutstandingProof, evaluate_snapshot_compatibility, validate_checkpoint,
 };
 
 fn session_id() -> AgentSessionId {
@@ -86,6 +87,7 @@ fn create_request(session: AgentSessionLiveRecord, key: &str) -> CreateSessionRe
         producer_id: EventProducerId("session-api".to_owned()),
         idempotency_key: IdempotencyKey(key.to_owned()),
         correlation_id: CorrelationId(format!("session-{key}")),
+        initial_input: None,
         opening_event_id: Some(event_id(&format!("event-opening-{key}"))),
         activation_event_id: Some(event_id(&format!("event-active-{key}"))),
         initial_active_capability_ids: vec!["coding.workspace".to_owned()],
@@ -167,21 +169,17 @@ async fn shared_fresh_v4_schema_and_session_creation_are_exact_and_idempotent() 
     ] {
         assert!(tables.contains(owned));
     }
-    let remote_fk: (String, String, String) = sqlx::query_as(
+    let remote_fk: Option<(String, String, String)> = sqlx::query_as(
         "SELECT \"table\", \"from\", \"to\" \
          FROM pragma_foreign_key_list('agent_sessions') \
          WHERE \"from\" = 'remote_binding_id'",
     )
-    .fetch_one(store.test_pool())
+    .fetch_optional(store.test_pool())
     .await
     .unwrap();
-    assert_eq!(
-        remote_fk,
-        (
-            "remote_bindings".to_owned(),
-            "remote_binding_id".to_owned(),
-            "remote_binding_id".to_owned(),
-        )
+    assert!(
+        remote_fk.is_none(),
+        "Session provenance must not have a reverse foreign key to RemoteBinding"
     );
     AgentSessionStore::from_pool(store.test_pool().clone())
         .await
@@ -209,6 +207,185 @@ async fn shared_fresh_v4_schema_and_session_creation_are_exact_and_idempotent() 
         created.session.agent_session_id
     );
     assert_eq!(replay.activation_ack.cursor, created.activation_ack.cursor);
+}
+
+#[tokio::test]
+async fn opening_remote_session_listing_is_exact_and_excludes_ready_or_local_sessions() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+
+    let opening_id = session_id();
+    let mut opening = live_session(opening_id.clone());
+    opening.remote_binding_provenance = Some(RemoteBindingProvenance {
+        remote_binding_id: RemoteBindingId::from("remote-opening"),
+        binding_version: 1,
+    });
+    store
+        .create_session(create_request(opening, "remote-opening"))
+        .await
+        .unwrap();
+
+    let ready_id = session_id();
+    let mut ready = live_session(ready_id.clone());
+    ready.remote_binding_provenance = Some(RemoteBindingProvenance {
+        remote_binding_id: RemoteBindingId::from("remote-ready"),
+        binding_version: 1,
+    });
+    let ready_created = store
+        .create_session(create_request(ready, "remote-ready"))
+        .await
+        .unwrap();
+    store
+        .append_event(&append(
+            &ready_id,
+            "event-ready-remote",
+            "runtime-supervisor",
+            "ready-remote",
+            "session/ready",
+            "session-ready-remote",
+            Some(ready_created.opening_ack.event_id),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+
+    store
+        .create_session(create_request(live_session(session_id()), "local-opening"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.list_opening_remote_sessions().await.unwrap(),
+        vec![opening_id]
+    );
+}
+
+#[tokio::test]
+async fn runtime_admission_boundary_is_atomic_and_cannot_revive_open_failed() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+
+    let ready_session = live_session(session_id());
+    let ready_created = store
+        .create_session(create_request(ready_session, "atomic-ready"))
+        .await
+        .unwrap();
+    let ready_binding = RuntimeBindingId::from("atomic-ready-binding");
+    let ready_bound_event = event_id("atomic-ready-bound");
+    let ready_context = RuntimeAppendContext {
+        agent_session_id: ready_created.session.agent_session_id.clone(),
+        envelope: RuntimeEventEnvelope {
+            runtime_binding_id: ready_binding.clone(),
+            producer_seq: 1,
+            event_id: ready_bound_event.clone(),
+            idempotency_key: IdempotencyKey::from("atomic-ready-bound"),
+            semantic_event: SemanticSessionEventDraft {
+                kind: SessionEventKind("runtime/bound".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from("atomic-ready-binding"),
+                causation_event_id: Some(ready_created.opening_ack.event_id.clone()),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "runtime_build_digest": digest('c'),
+                    "protocol_version": "runtime-v1",
+                    "snapshot_digest": digest('b')
+                }))),
+            },
+        },
+    };
+    let ready_event = append(
+        &ready_created.session.agent_session_id,
+        "atomic-ready-event",
+        "runtime-supervisor",
+        "atomic-ready",
+        "session/ready",
+        "atomic-ready-session",
+        Some(ready_bound_event),
+        json!({}),
+    );
+    store
+        .append_runtime_bound_and_ready(ready_context, &ready_event)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .head(&ready_created.session.agent_session_id)
+            .await
+            .unwrap()
+            .status,
+        "ready"
+    );
+
+    let failed_session = live_session(session_id());
+    let failed_created = store
+        .create_session(create_request(failed_session, "atomic-failed"))
+        .await
+        .unwrap();
+    store
+        .append_open_failed(
+            &failed_created.session.agent_session_id,
+            "REMOTE_OPEN_FAILED",
+            "runtime unavailable",
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("open failure should be committed");
+
+    let late_binding = RuntimeBindingId::from("atomic-late-binding");
+    let late_bound_event = event_id("atomic-late-bound");
+    let late_context = RuntimeAppendContext {
+        agent_session_id: failed_created.session.agent_session_id.clone(),
+        envelope: RuntimeEventEnvelope {
+            runtime_binding_id: late_binding,
+            producer_seq: 1,
+            event_id: late_bound_event.clone(),
+            idempotency_key: IdempotencyKey::from("atomic-late-bound"),
+            semantic_event: SemanticSessionEventDraft {
+                kind: SessionEventKind("runtime/bound".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from("atomic-late-binding"),
+                causation_event_id: Some(failed_created.opening_ack.event_id),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "runtime_build_digest": digest('e'),
+                    "protocol_version": "runtime-v1",
+                    "snapshot_digest": digest('b')
+                }))),
+            },
+        },
+    };
+    let late_ready = append(
+        &failed_created.session.agent_session_id,
+        "atomic-late-ready",
+        "runtime-supervisor",
+        "atomic-late-ready",
+        "session/ready",
+        "atomic-late-session",
+        Some(late_bound_event),
+        json!({}),
+    );
+    assert!(matches!(
+        store
+            .append_runtime_bound_and_ready(late_context, &late_ready)
+            .await
+            .unwrap_err(),
+        SessionStoreError::Conflict(message)
+            if message.contains("requires an opening Session")
+    ));
+    assert_eq!(
+        store
+            .head(&failed_created.session.agent_session_id)
+            .await
+            .unwrap()
+            .status,
+        "open_failed"
+    );
+    let event_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM session_events \
+         WHERE session_id = ? AND kind IN ('runtime/bound', 'session/ready')",
+    )
+    .bind(failed_created.session.agent_session_id.as_ref())
+    .fetch_one(store.test_pool())
+    .await
+    .unwrap();
+    assert_eq!(event_count, 0);
 }
 
 #[tokio::test]
@@ -306,6 +483,244 @@ async fn append_projection_cursor_and_rebuild_are_one_deterministic_chain() {
             .await
             .unwrap(),
         before_cursor
+    );
+}
+
+#[tokio::test]
+async fn chat_operation_claim_is_atomic_and_respects_turn_fence() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _ready_event) = create_ready(&store, "chat-claim").await;
+    let turn_operation = OperationId("turn-chat-claim".to_owned());
+    let input = append(
+        &session.agent_session_id,
+        "event-chat-input",
+        "session-api",
+        "chat-input",
+        "message/user-accepted",
+        turn_operation.as_ref(),
+        None,
+        json!({"content": "hello"}),
+    );
+    let input_ack = store.append_event(&input).await.unwrap().ack.unwrap();
+    let turn = append(
+        &session.agent_session_id,
+        "event-chat-turn",
+        "session-api",
+        "chat-turn",
+        "turn/started",
+        turn_operation.as_ref(),
+        Some(input_ack.event_id.clone()),
+        json!({
+            "operation_id": turn_operation,
+            "input_event_id": input_ack.event_id,
+            "route_identity": ChatRouteIdentity::new(
+                "coding.codex@1",
+                nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+                "chat-route".into(),
+                4,
+            ),
+            "resolved_snapshot_ref": snapshot_ref(),
+        }),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    assert_eq!(turn_ack.seq, 5);
+
+    let claim = ChatOperationClaimRequest {
+        agent_session_id: session.agent_session_id.clone(),
+        operation_id: OperationId("model-chat-claim".to_owned()),
+        turn_operation_id: turn_operation.clone(),
+        causation_event_id: input_ack.event_id,
+        route_identity: ChatRouteIdentity::new(
+            "coding.codex@1",
+            nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+            "chat-route".into(),
+            4,
+        ),
+        resolved_snapshot_ref: snapshot_ref(),
+    };
+    let first = store.claim_chat_operation(claim.clone()).await.unwrap();
+    assert!(!first.duplicate);
+    let replay = store.claim_chat_operation(claim).await.unwrap();
+    assert!(replay.duplicate);
+
+    let cancelled = append(
+        &session.agent_session_id,
+        "event-chat-cancelled",
+        "session-api",
+        "chat-cancelled",
+        "turn/cancelled",
+        turn_operation.as_ref(),
+        Some(turn_ack.event_id),
+        json!({"target_operation_id": "turn-chat-claim"}),
+    );
+    store.append_event(&cancelled).await.unwrap();
+    let fenced = store
+        .claim_chat_operation(ChatOperationClaimRequest {
+            agent_session_id: session.agent_session_id,
+            operation_id: OperationId("model-after-cancel".to_owned()),
+            turn_operation_id: turn_operation,
+            causation_event_id: EventId("event-chat-input".to_owned()),
+            route_identity: ChatRouteIdentity::new(
+                "coding.codex@1",
+                nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+                "chat-route".into(),
+                4,
+            ),
+            resolved_snapshot_ref: snapshot_ref(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(fenced, SessionStoreError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn remote_cancel_selects_active_turn_atomically_and_replays() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, ready_event) = create_ready(&store, "remote-cancel").await;
+    let turn_operation = OperationId::from("remote-turn-operation");
+    let input = append(
+        &session.agent_session_id,
+        "remote-cancel-input",
+        "session-api",
+        "remote-cancel-input",
+        "message/user-accepted",
+        turn_operation.as_ref(),
+        Some(ready_event),
+        json!({"content": "cancel me"}),
+    );
+    let input_ack = store.append_event(&input).await.unwrap().ack.unwrap();
+    let turn = append(
+        &session.agent_session_id,
+        "remote-cancel-turn",
+        "session-api",
+        "remote-cancel-turn",
+        "turn/started",
+        turn_operation.as_ref(),
+        Some(input_ack.event_id),
+        json!({"operation_id": turn_operation}),
+    );
+    store.append_event(&turn).await.unwrap();
+
+    let key = IdempotencyKey::from("remote-cancel-key");
+    let (target, first) = store
+        .cancel_active_turn(
+            &session.agent_session_id,
+            key.clone(),
+            EventProducerId::from("remote_rest"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(target, turn_operation);
+    assert!(!first.duplicate);
+    assert_eq!(
+        store.head(&session.agent_session_id).await.unwrap().status,
+        "ready"
+    );
+
+    let (replayed_target, replay) = store
+        .cancel_active_turn(
+            &session.agent_session_id,
+            key,
+            EventProducerId::from("remote_rest"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replayed_target, target);
+    assert!(replay.duplicate);
+
+    let no_active = store
+        .cancel_active_turn(
+            &session.agent_session_id,
+            IdempotencyKey::from("remote-cancel-no-active"),
+            EventProducerId::from("remote_rest"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(no_active, SessionStoreError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn chat_completion_is_atomic_and_cannot_cross_a_cancel_fence() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, ready_event) = create_ready(&store, "chat-terminal").await;
+    let turn_operation = OperationId("turn-chat-terminal".to_owned());
+    let input = append(
+        &session.agent_session_id,
+        "event-chat-terminal-input",
+        "session-api",
+        "chat-terminal-input",
+        "message/user-accepted",
+        turn_operation.as_ref(),
+        Some(ready_event.clone()),
+        json!({"content": "hello"}),
+    );
+    let input_ack = store.append_event(&input).await.unwrap().ack.unwrap();
+    let turn = append(
+        &session.agent_session_id,
+        "event-chat-terminal-turn",
+        "session-api",
+        "chat-terminal-turn",
+        "turn/started",
+        turn_operation.as_ref(),
+        Some(input_ack.event_id),
+        json!({"operation_id": turn_operation}),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    let cancelled = append(
+        &session.agent_session_id,
+        "event-chat-terminal-cancelled",
+        "session-api",
+        "chat-terminal-cancelled",
+        "turn/cancelled",
+        turn_operation.as_ref(),
+        Some(turn_ack.event_id),
+        json!({"target_operation_id": turn_operation}),
+    );
+    store.append_event(&cancelled).await.unwrap();
+
+    let message = append(
+        &session.agent_session_id,
+        "event-chat-terminal-message",
+        "runtime-supervisor",
+        "chat-terminal-message",
+        "message/completed",
+        "message-chat-terminal",
+        Some(EventId("event-chat-terminal-turn".to_owned())),
+        json!({
+            "content_digest": digest_bytes(b""),
+            "part_count": 0
+        }),
+    );
+    let terminal = append(
+        &session.agent_session_id,
+        "event-chat-terminal-completed",
+        "runtime-supervisor",
+        "chat-terminal-completed",
+        "turn/completed",
+        turn_operation.as_ref(),
+        Some(message.event_id.clone()),
+        json!({"message_event_id": message.event_id}),
+    );
+    let error = store
+        .append_chat_completion(&message, &terminal, &turn_operation)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SessionStoreError::Conflict(_)));
+
+    let events = store
+        .read_events(&session.agent_session_id, None, crate::MAX_EVENT_PAGE_SIZE)
+        .await
+        .unwrap()
+        .events;
+    assert!(
+        events
+            .iter()
+            .all(|event| event.kind.0 != "message/completed"),
+        "message terminal must roll back when the turn is already cancelled"
+    );
+    assert_eq!(
+        store.head(&session.agent_session_id).await.unwrap().status,
+        "ready"
     );
 }
 

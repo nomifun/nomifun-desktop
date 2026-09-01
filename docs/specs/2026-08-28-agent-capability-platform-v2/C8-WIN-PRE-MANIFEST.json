@@ -6,8 +6,8 @@
   "candidate_source_policy": "resolve_clean_git_head_at_run",
   "cohort_tuple_inputs": {
     "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
-    "platform_validation_manifest_digest": "78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9",
-    "runtime_release_digest": "8f40a7ff0c42bb3180e976ae1c54e89f4942c5d6899507fa70f31c964d9b22fc"
+    "platform_validation_manifest_digest": "70f23b52f309aeb0938ad86c987958d3f1a05e6c367263c3b73a3038e1ca2ed2",
+    "runtime_release_digest": "b9dce00732f6d1c45cb20fc30e7a286518d505d7faeb2d94b6cc70d9e107289d"
   },
   "source_checkpoint": {
     "local_head": "resolved_at_run",
@@ -32,7 +32,7 @@
     },
     "canonical_schema_manifest": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/canonical-v4-schema-manifest.envelope.json",
-      "digest": "f0a1c03696ed180db6786f781282d3a2b81dbea91ac286972b710dd7fe842ed7"
+      "digest": "e28723d7fc524cfdd351c6fc8cc17b8a48d8fd1f5be16a7aebd395ce669f98ff"
     },
     "target_first_party_inventory": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/target-first-party-contributions.envelope.json",
@@ -46,13 +46,17 @@
       "path": "crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json",
       "digest": "78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9"
     },
+    "platform_validation_manifest": {
+      "path": "crates/backend/nomifun-agent-contracts/contracts/generated/platform-validation-fixture.envelope.json",
+      "digest": "70f23b52f309aeb0938ad86c987958d3f1a05e6c367263c3b73a3038e1ca2ed2"
+    },
     "runtime_release": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json",
-      "digest": "8f40a7ff0c42bb3180e976ae1c54e89f4942c5d6899507fa70f31c964d9b22fc"
+      "digest": "b9dce00732f6d1c45cb20fc30e7a286518d505d7faeb2d94b6cc70d9e107289d"
     },
     "cargo_lock": {
       "path": "Cargo.lock",
-      "digest": "c6aa85864cac522d8a6bee064f04057393ade35749c95984344a46df51359092"
+      "digest": "b69f75e6cc566ef753f43265e4ddcf2479b671c738e67719b6c84f3f6881f23a"
     }
   },
   "required_checks": [
@@ -73,12 +77,17 @@
     },
     {
       "check_id": "fresh_v4_root_tests",
-      "command": "cargo test --locked -p nomifun-v4-root",
+      "command": "cargo test --locked -p nomifun-v4-root -- --test-threads=1",
       "execution_kind": "native"
     },
     {
       "check_id": "production_host_tests",
-      "command": "cargo test --locked -p nomifun-app --lib router::agent_platform_host",
+      "command": "cargo test --locked -p nomifun-app --lib router::agent_platform_host -- --test-threads=1",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "production_broker_functional_tests",
+      "command": "cargo test --locked -p nomifun-chat-model-broker production:: --lib",
       "execution_kind": "native"
     },
     {

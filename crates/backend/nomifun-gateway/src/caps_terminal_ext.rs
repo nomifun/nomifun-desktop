@@ -5,15 +5,16 @@
 //! are the remaining mutation and query endpoints that a gateway-connected agent
 //! needs to fully manage PTY sessions.
 
-use std::sync::Arc;
 use std::borrow::Cow;
+use std::future::Future;
+use std::sync::Arc;
 
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::de;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
@@ -165,7 +166,7 @@ struct UpdateTerminalParams {
 /// necessary but not sufficient: an agent must never inspect or mutate a
 /// standalone terminal, or a terminal owned by another conversation.
 async fn authorize_terminal(
-    deps: &GatewayDeps,
+    deps: &TerminalCapabilityDeps,
     ctx: &CallerCtx,
     terminal_id: &str,
 ) -> Result<(), Value> {
@@ -177,7 +178,7 @@ async fn authorize_terminal(
             }));
         }
     };
-    deps.terminal_service
+    deps.service
         .authorize_conversation(ctx.user_id.as_str(), conversation_id, terminal_id)
         .await
         .map_err(|error| {
@@ -189,12 +190,44 @@ async fn authorize_terminal(
         })
 }
 
-async fn get_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetTerminalParams) -> Value {
+#[derive(Clone)]
+struct TerminalCapabilityDeps {
+    service: Arc<nomifun_terminal::TerminalService>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<TerminalCapabilityDeps>, CallerCtx, P) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, ctx, params| {
+        handler(
+            Arc::new(TerminalCapabilityDeps {
+                service: deps.terminal_service.clone(),
+            }),
+            ctx,
+            params,
+        )
+    }
+}
+
+async fn get_terminal(
+    deps: Arc<TerminalCapabilityDeps>,
+    ctx: CallerCtx,
+    p: GetTerminalParams,
+) -> Value {
     let terminal_id = p.terminal_id.as_str();
     if let Err(error) = authorize_terminal(&deps, &ctx, terminal_id).await {
         return error;
     }
-    match deps.terminal_service.get(terminal_id).await {
+    match deps.service.get(terminal_id).await {
         Ok(resp) => ok(json!({
             "terminal_id": resp.terminal_id,
             "owner_conversation_id": resp.owner_conversation_id,
@@ -216,13 +249,17 @@ async fn get_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetTerminalPara
     }
 }
 
-async fn write_input(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteInputParams) -> Value {
+async fn write_input(
+    deps: Arc<TerminalCapabilityDeps>,
+    ctx: CallerCtx,
+    p: WriteInputParams,
+) -> Value {
     let terminal_id = p.terminal_id.as_str();
     if let Err(error) = authorize_terminal(&deps, &ctx, terminal_id).await {
         return error;
     }
     match deps
-        .terminal_service
+        .service
         .input(terminal_id, &p.data_b64)
         .await
     {
@@ -231,13 +268,17 @@ async fn write_input(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteInputParams
     }
 }
 
-async fn submit_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SubmitTerminalParams) -> Value {
+async fn submit_terminal(
+    deps: Arc<TerminalCapabilityDeps>,
+    ctx: CallerCtx,
+    p: SubmitTerminalParams,
+) -> Value {
     let terminal_id = p.terminal_id.as_str();
     if let Err(error) = authorize_terminal(&deps, &ctx, terminal_id).await {
         return error;
     }
     if let Err(e) = deps
-        .terminal_service
+        .service
         .submit_text(terminal_id, &p.text)
         .await
     {
@@ -252,7 +293,7 @@ async fn submit_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SubmitTermin
     }
     let secs = p.timeout_secs.unwrap_or(300).min(1800);
     let reason = deps
-        .terminal_service
+        .service
         .await_turn_settle(terminal_id, std::time::Duration::from_secs(secs))
         .await;
     let structured_turn_end = matches!(
@@ -260,7 +301,7 @@ async fn submit_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SubmitTermin
         nomifun_terminal::submit::SettleReason::TurnEnd
     );
     let tail = deps
-        .terminal_service
+        .service
         .read_output_tail(terminal_id, 4096)
         .await
         .map(|t| t.text)
@@ -279,14 +320,18 @@ async fn submit_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SubmitTermin
     }))
 }
 
-async fn read_terminal_output(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ReadTerminalOutputParams) -> Value {
+async fn read_terminal_output(
+    deps: Arc<TerminalCapabilityDeps>,
+    ctx: CallerCtx,
+    p: ReadTerminalOutputParams,
+) -> Value {
     let terminal_id = p.terminal_id.as_str();
     if let Err(error) = authorize_terminal(&deps, &ctx, terminal_id).await {
         return error;
     }
     let cap = p.max_bytes.unwrap_or(16_384).min(65_536);
     match deps
-        .terminal_service
+        .service
         .read_output_tail(terminal_id, cap)
         .await
     {
@@ -300,12 +345,16 @@ async fn read_terminal_output(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ReadTer
     }
 }
 
-async fn kill_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: KillTerminalParams) -> Value {
+async fn kill_terminal(
+    deps: Arc<TerminalCapabilityDeps>,
+    ctx: CallerCtx,
+    p: KillTerminalParams,
+) -> Value {
     let terminal_id = p.terminal_id.as_str();
     if let Err(error) = authorize_terminal(&deps, &ctx, terminal_id).await {
         return error;
     }
-    match deps.terminal_service.kill(terminal_id).await {
+    match deps.service.kill(terminal_id).await {
         Ok(()) => ok(json!({
             "close_requested": true,
             "terminal_id": terminal_id,
@@ -316,24 +365,32 @@ async fn kill_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: KillTerminalPa
     }
 }
 
-async fn delete_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: DeleteTerminalParams) -> Value {
+async fn delete_terminal(
+    deps: Arc<TerminalCapabilityDeps>,
+    ctx: CallerCtx,
+    p: DeleteTerminalParams,
+) -> Value {
     let terminal_id = p.terminal_id.as_str();
     if let Err(error) = authorize_terminal(&deps, &ctx, terminal_id).await {
         return error;
     }
-    match deps.terminal_service.delete(terminal_id).await {
+    match deps.service.delete(terminal_id).await {
         Ok(()) => ok(json!({"deleted": true, "terminal_id": terminal_id})),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-async fn resize_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ResizeTerminalParams) -> Value {
+async fn resize_terminal(
+    deps: Arc<TerminalCapabilityDeps>,
+    ctx: CallerCtx,
+    p: ResizeTerminalParams,
+) -> Value {
     let terminal_id = p.terminal_id.as_str();
     if let Err(error) = authorize_terminal(&deps, &ctx, terminal_id).await {
         return error;
     }
     match deps
-        .terminal_service
+        .service
         .resize(terminal_id, p.cols, p.rows)
         .await
     {
@@ -342,12 +399,16 @@ async fn resize_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ResizeTermin
     }
 }
 
-async fn relaunch_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: RelaunchTerminalParams) -> Value {
+async fn relaunch_terminal(
+    deps: Arc<TerminalCapabilityDeps>,
+    ctx: CallerCtx,
+    p: RelaunchTerminalParams,
+) -> Value {
     let terminal_id = p.terminal_id.as_str();
     if let Err(error) = authorize_terminal(&deps, &ctx, terminal_id).await {
         return error;
     }
-    match deps.terminal_service.relaunch(terminal_id).await {
+    match deps.service.relaunch(terminal_id).await {
         Ok(resp) => ok(json!({
             "terminal_id": resp.terminal_id,
             "owner_conversation_id": resp.owner_conversation_id,
@@ -364,7 +425,11 @@ async fn relaunch_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: RelaunchTe
     }
 }
 
-async fn update_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: UpdateTerminalParams) -> Value {
+async fn update_terminal(
+    deps: Arc<TerminalCapabilityDeps>,
+    ctx: CallerCtx,
+    p: UpdateTerminalParams,
+) -> Value {
     if p.name.is_none() && p.pinned.is_none() {
         return json!({"error": "nothing to update: provide at least one of name / pinned"});
     }
@@ -373,7 +438,7 @@ async fn update_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: UpdateTermin
         return error;
     }
     match deps
-        .terminal_service
+        .service
         .update_meta(terminal_id, p.name, p.pinned)
         .await
     {
@@ -398,7 +463,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Get a single terminal session's detail and current status (running/exited, exit code, dimensions, etc.).",
             EffectClass::Read,
         ),
-        |deps, ctx, p| get_terminal(deps, ctx, p),
+        adapt(get_terminal),
     ));
     out.push(Capability::new::<WriteInputParams, _, _>(
         CapabilityMeta::new(
@@ -407,7 +472,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Write base64-encoded bytes/keystrokes to a terminal's PTY stdin. Powerful: can execute arbitrary commands in the running shell. For sending a command/prompt to run, prefer nomi_terminal_send (handles Enter + agent-CLI paste); use this for raw control bytes like Ctrl-C.",
             EffectClass::Write,
         ),
-        |deps, ctx, p| write_input(deps, ctx, p),
+        adapt(write_input),
     ));
     out.push(Capability::new::<SubmitTerminalParams, _, _>(
         CapabilityMeta::new(
@@ -416,7 +481,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Type text/a command into a terminal and RUN it (plain text, no base64, no manual newline 闁?Enter and the agent-CLI paste sequence are handled). Optional wait=true returns settle_reason + output_tail. Preferred over nomi_terminal_write_input for sending commands.",
             EffectClass::Write,
         ),
-        |deps, ctx, p| submit_terminal(deps, ctx, p),
+        adapt(submit_terminal),
     ));
     out.push(Capability::new::<ReadTerminalOutputParams, _, _>(
         CapabilityMeta::new(
@@ -428,7 +493,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         // Intentionally no Channel deny: this is a read-only status/output view
         // and follows the registry's default Read policy, unlike send/write and
         // other terminal process mutations.
-        |deps, ctx, p| read_terminal_output(deps, ctx, p),
+        adapt(read_terminal_output),
     ));
     out.push(Capability::new::<KillTerminalParams, _, _>(
         CapabilityMeta::new(
@@ -437,7 +502,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Send SIGKILL to terminate the terminal's running process. The session remains (status becomes 'exited'); use relaunch to restart or delete to remove entirely.",
             EffectClass::Destructive,
         ),
-        |deps, ctx, p| kill_terminal(deps, ctx, p),
+        adapt(kill_terminal),
     ));
     out.push(Capability::new::<DeleteTerminalParams, _, _>(
         CapabilityMeta::new(
@@ -446,7 +511,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Permanently delete a terminal session (kills the process if running, removes the row and all associated data).",
             EffectClass::Destructive,
         ),
-        |deps, ctx, p| delete_terminal(deps, ctx, p),
+        adapt(delete_terminal),
     ));
     out.push(Capability::new::<ResizeTerminalParams, _, _>(
         CapabilityMeta::new(
@@ -455,7 +520,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Resize a terminal's PTY to the given cols x rows (triggers deferred spawn if the session was created with defer_spawn).",
             EffectClass::Write,
         ),
-        |deps, ctx, p| resize_terminal(deps, ctx, p),
+        adapt(resize_terminal),
     ));
     out.push(Capability::new::<RelaunchTerminalParams, _, _>(
         CapabilityMeta::new(
@@ -464,7 +529,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Relaunch a terminal's process in place: kills the old child and spawns a fresh one reusing the same terminal_id, command, and cwd.",
             EffectClass::Write,
         ),
-        |deps, ctx, p| relaunch_terminal(deps, ctx, p),
+        adapt(relaunch_terminal),
     ));
     out.push(Capability::new::<UpdateTerminalParams, _, _>(
         CapabilityMeta::new(
@@ -473,7 +538,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Update a terminal session's metadata: rename it and/or pin/unpin it.",
             EffectClass::Write,
         ),
-        |deps, ctx, p| update_terminal(deps, ctx, p),
+        adapt(update_terminal),
     ));
 }
 
@@ -551,7 +616,6 @@ mod tests {
             assert!(reg.contains(name));
             assert!(reg.tool_visible(crate::registry::Surface::Desktop, name));
             assert!(reg.tool_visible(crate::registry::Surface::Channel, name));
-            assert!(reg.tool_visible(crate::registry::Surface::Remote, name));
         }
     }
 }

@@ -34,6 +34,39 @@ pub const ALL_MODEL_TASKS: [ModelTask; 9] = [
     ModelTask::Rerank,
 ];
 
+/// Vertex Claude uses a provider-native URL that requires three independent
+/// values:
+/// `projects/{project_id}/locations/{location}/.../{model}`. The generic
+/// endpoint contract only expands every placeholder from one runtime value
+/// (the model id), so advertising this protocol would either substitute the
+/// model into project/location or require an unvalidated second URL builder.
+pub const VERTEX_ANTHROPIC_MESSAGES_PROTOCOL: &str = "vertex.anthropic_messages";
+
+const VERTEX_UNSUPPORTED_REASON: &str = "Vertex Anthropic Messages is not supported by the generic route target contract: its URL requires independently injected project_id and location/region values, while endpoint expansion only supplies the model value";
+
+/// Reject protocols which are known to exist in another provider layer but
+/// cannot be represented safely by this crate's persisted route contract.
+///
+/// This is intentionally separate from [`protocol_task_descriptor`]: an
+/// unsupported protocol must not be represented as a normal descriptor, or
+/// configuration discovery would present it as executable.
+pub fn validate_protocol_support(
+    protocol_id: &str,
+    task: ModelTask,
+) -> Result<(), InvokeError> {
+    if protocol_id == VERTEX_ANTHROPIC_MESSAGES_PROTOCOL {
+        return Err(InvokeError::config(format!(
+            "{VERTEX_UNSUPPORTED_REASON}; refusing task {task:?}"
+        )));
+    }
+    if protocol_task_descriptor(protocol_id, task).is_none() {
+        return Err(InvokeError::config(format!(
+            "unknown or task-incompatible protocol {protocol_id:?} for {task:?}"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct ProtocolManifestRegistry {
     by_id: BTreeMap<String, ProtocolDescriptor>,
@@ -626,11 +659,9 @@ pub fn validate_endpoint_template(
             "protocol {protocol_id:?} endpoint field {field:?} cannot be blank"
         )));
     }
-    let descriptor = protocol_task_descriptor(protocol_id, task).ok_or_else(|| {
-        InvokeError::config(format!(
-            "unknown or task-incompatible protocol {protocol_id:?} for {task:?}"
-        ))
-    })?;
+    validate_protocol_support(protocol_id, task)?;
+    let descriptor = protocol_task_descriptor(protocol_id, task)
+        .expect("validate_protocol_support checked the descriptor");
     let endpoint = descriptor
         .endpoints
         .iter()
@@ -772,11 +803,7 @@ pub fn validate_provider_params_for_protocol(
     task: ModelTask,
     params: &serde_json::Value,
 ) -> Result<(), InvokeError> {
-    if protocol_task_descriptor(protocol_id, task).is_none() {
-        return Err(InvokeError::config(format!(
-            "unknown or task-incompatible protocol {protocol_id:?} for {task:?}"
-        )));
-    }
+    validate_protocol_support(protocol_id, task)?;
     let object = params.as_object().ok_or_else(|| {
         InvokeError::config("capability provider_params must be a JSON object")
     })?;
@@ -1347,6 +1374,25 @@ mod tests {
         assert!(registry.get("bedrock.anthropic_messages").is_some());
         assert!(registry.get("gemini.generate_text").is_some());
         assert!(registry.get("openai.responses").is_some());
+    }
+
+    #[test]
+    fn vertex_anthropic_messages_is_typed_unsupported_without_a_descriptor() {
+        let error = validate_protocol_support(VERTEX_ANTHROPIC_MESSAGES_PROTOCOL, Chat)
+            .expect_err("Vertex must not be advertised by the generic route contract");
+        assert_eq!(error.kind, crate::error::InvokeErrorKind::Config);
+        assert!(error.message.contains("project_id"));
+        assert!(error.message.contains("location/region"));
+        assert!(protocol_descriptor(VERTEX_ANTHROPIC_MESSAGES_PROTOCOL).is_none());
+        assert!(
+            validate_endpoint_template(
+                VERTEX_ANTHROPIC_MESSAGES_PROTOCOL,
+                Chat,
+                "endpoint",
+                "/v1/projects/{project_id}/locations/{location}/publishers/anthropic/models/{model}:streamRawPredict",
+            )
+            .is_err()
+        );
     }
 
     #[test]

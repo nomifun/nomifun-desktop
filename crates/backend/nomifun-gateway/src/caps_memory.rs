@@ -6,6 +6,7 @@
 //! so the historical drift — `offset` readable at runtime but absent from the MCP
 //! schema — is fixed by construction (it is a declared field here).
 
+use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_companion::store::{MemoryActor, MemoryFilter};
@@ -14,7 +15,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::deps::GatewayDeps;
+use crate::deps::CompatibilityCapabilityHost;
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 
@@ -79,7 +80,30 @@ struct MemoryDeleteParams {
     memory_id: CompanionMemoryId,
 }
 
-async fn list(deps: Arc<GatewayDeps>, p: MemoryListParams) -> Value {
+#[derive(Clone)]
+struct MemoryCapabilityDeps {
+    service: Arc<nomifun_companion::CompanionService>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, crate::deps::CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<MemoryCapabilityDeps>, P) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, _ctx, params| {
+        handler(
+            Arc::new(MemoryCapabilityDeps {
+                service: deps.companion_service.clone(),
+            }),
+            params,
+        )
+    }
+}
+
+async fn list(deps: Arc<MemoryCapabilityDeps>, p: MemoryListParams) -> Value {
     let filter = MemoryFilter {
         kind: p.kind,
         q: p.query,
@@ -96,13 +120,13 @@ async fn list(deps: Arc<GatewayDeps>, p: MemoryListParams) -> Value {
         limit: p.limit.unwrap_or(DEFAULT_LIST_LIMIT).clamp(1, 200),
         offset: p.offset.unwrap_or(0).max(0),
     };
-    match deps.companion_service.list_memories(&filter).await {
+    match deps.service.list_memories(&filter).await {
         Ok(memories) => ok(memories),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn save(deps: Arc<GatewayDeps>, p: MemorySaveParams) -> Value {
+async fn save(deps: Arc<MemoryCapabilityDeps>, p: MemorySaveParams) -> Value {
     let content = p.content.trim();
     if content.is_empty() {
         return json!({ "error": "missing required field: content" });
@@ -112,18 +136,18 @@ async fn save(deps: Arc<GatewayDeps>, p: MemorySaveParams) -> Value {
     // The owner agent has no companion in its CallerCtx, so the memory lands on
     // the server-resolved owner (explicit default → oldest companion). An empty
     // roster has no legal owner and the service refuses with a readable error.
-    match deps.companion_service.add_memory(&kind, content, &tags, None).await {
+    match deps.service.add_memory(&kind, content, &tags, None).await {
         Ok(memory) => ok(memory),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn update(deps: Arc<GatewayDeps>, p: MemoryUpdateParams) -> Value {
+async fn update(deps: Arc<MemoryCapabilityDeps>, p: MemoryUpdateParams) -> Value {
     if p.content.is_none() && p.pinned.is_none() && p.status.is_none() {
         return json!({ "error": "nothing to update: provide at least one of content / pinned / status" });
     }
     match deps
-        .companion_service
+        .service
         .update_memory(
             p.memory_id.as_str(),
             p.content.as_deref(),
@@ -142,10 +166,10 @@ async fn update(deps: Arc<GatewayDeps>, p: MemoryUpdateParams) -> Value {
     }
 }
 
-async fn delete(deps: Arc<GatewayDeps>, p: MemoryDeleteParams) -> Value {
+async fn delete(deps: Arc<MemoryCapabilityDeps>, p: MemoryDeleteParams) -> Value {
     // Cross-companion by design — see `update`.
     match deps
-        .companion_service
+        .service
         .delete_memory(p.memory_id.as_str(), &MemoryActor::AnyOwner)
         .await
     {
@@ -163,7 +187,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List the desktop's long-term memories (active by default; filter by kind/query; include_archived to see archived).",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| list(deps, p),
+        adapt(list),
     ));
     out.push(Capability::new::<MemorySaveParams, _, _>(
         CapabilityMeta::new(
@@ -172,7 +196,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Persist a new long-term memory (one self-contained fact).",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| save(deps, p),
+        adapt(save),
     ));
     out.push(Capability::new::<MemoryUpdateParams, _, _>(
         CapabilityMeta::new(
@@ -181,7 +205,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Edit a memory's content, pin/unpin it, or archive/reactivate it.",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| update(deps, p),
+        adapt(update),
     ));
     out.push(Capability::new::<MemoryDeleteParams, _, _>(
         CapabilityMeta::new(
@@ -190,7 +214,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Permanently delete a memory. Prefer archiving via nomi_memory_update unless the user asked to delete.",
             EffectClass::Destructive,
         ),
-        |deps, _ctx, p| delete(deps, p),
+        adapt(delete),
     ));
 }
 

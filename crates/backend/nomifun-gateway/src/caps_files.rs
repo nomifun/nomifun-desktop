@@ -15,13 +15,14 @@
 //! mode: only `allowed_roots` configured at construction time apply). Write
 //! operations require a `workspace` parameter for event scoping.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 use crate::registry::{Capability, CapabilityMeta, EffectClass, Surface};
 use crate::server::ok;
 
@@ -127,14 +128,48 @@ struct ShellOpenExternalParams {
 fn file_authority(ctx: &CallerCtx) -> Option<PathAuthority> {
     match ctx.surface() {
         Surface::Desktop => Some(PathAuthority::Unrestricted),
-        Surface::Channel | Surface::Remote => None,
+        Surface::Channel => None,
     }
 }
 
-async fn read_file(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ReadFileParams) -> Value {
+#[derive(Clone)]
+struct FileCapabilityDeps {
+    files: nomifun_file::FileServiceRef,
+    shell: Arc<nomifun_shell::ShellService>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<FileCapabilityDeps>, CallerCtx, P) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, ctx, params| {
+        handler(
+            Arc::new(FileCapabilityDeps {
+                files: deps.file_service.clone(),
+                shell: deps.shell_service.clone(),
+            }),
+            ctx,
+            params,
+        )
+    }
+}
+
+async fn read_file(
+    deps: Arc<FileCapabilityDeps>,
+    ctx: CallerCtx,
+    p: ReadFileParams,
+) -> Value {
     let result = match file_authority(&ctx) {
-        Some(auth) => deps.file_service.read_file_scoped(&p.path, &auth).await,
-        None => deps.file_service.read_file(&p.path, None).await,
+        Some(auth) => deps.files.read_file_scoped(&p.path, &auth).await,
+        None => deps.files.read_file(&p.path, None).await,
     };
     match result {
         Ok(Some(content)) => {
@@ -155,15 +190,19 @@ async fn read_file(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ReadFileParams) ->
     }
 }
 
-async fn write_file(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteFileParams) -> Value {
+async fn write_file(
+    deps: Arc<FileCapabilityDeps>,
+    ctx: CallerCtx,
+    p: WriteFileParams,
+) -> Value {
     let result = match file_authority(&ctx) {
         Some(auth) => {
-            deps.file_service
+            deps.files
                 .write_file_scoped(ctx.user_id.as_str(), &p.path, p.content.as_bytes(), &p.workspace, &auth)
                 .await
         }
         None => {
-            deps.file_service
+            deps.files
                 .write_file(ctx.user_id.as_str(), &p.path, p.content.as_bytes(), &p.workspace)
                 .await
         }
@@ -174,10 +213,14 @@ async fn write_file(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteFileParams) 
     }
 }
 
-async fn browse(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: BrowseParams) -> Value {
+async fn browse(
+    deps: Arc<FileCapabilityDeps>,
+    ctx: CallerCtx,
+    p: BrowseParams,
+) -> Value {
     let result = match file_authority(&ctx) {
-        Some(auth) => deps.file_service.get_files_by_dir_scoped(&p.dir, &p.root, &auth).await,
-        None => deps.file_service.get_files_by_dir(&p.dir, &p.root).await,
+        Some(auth) => deps.files.get_files_by_dir_scoped(&p.dir, &p.root, &auth).await,
+        None => deps.files.get_files_by_dir(&p.dir, &p.root).await,
     };
     match result {
         Ok(entries) => {
@@ -199,13 +242,13 @@ async fn browse(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: BrowseParams) -> Valu
 }
 
 async fn list_workspace_files(
-    deps: Arc<GatewayDeps>,
+    deps: Arc<FileCapabilityDeps>,
     ctx: CallerCtx,
     p: ListWorkspaceFilesParams,
 ) -> Value {
     let result = match file_authority(&ctx) {
-        Some(auth) => deps.file_service.list_workspace_files_scoped(&p.root, &auth).await,
-        None => deps.file_service.list_workspace_files(&p.root).await,
+        Some(auth) => deps.files.list_workspace_files_scoped(&p.root, &auth).await,
+        None => deps.files.list_workspace_files(&p.root).await,
     };
     match result {
         Ok(files) => {
@@ -225,10 +268,14 @@ async fn list_workspace_files(
     }
 }
 
-async fn get_metadata(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetMetadataParams) -> Value {
+async fn get_metadata(
+    deps: Arc<FileCapabilityDeps>,
+    ctx: CallerCtx,
+    p: GetMetadataParams,
+) -> Value {
     let result = match file_authority(&ctx) {
-        Some(auth) => deps.file_service.get_file_metadata_scoped(&p.path, &auth).await,
-        None => deps.file_service.get_file_metadata(&p.path, None).await,
+        Some(auth) => deps.files.get_file_metadata_scoped(&p.path, &auth).await,
+        None => deps.files.get_file_metadata(&p.path, None).await,
     };
     match result {
         Ok(meta) => ok(json!({
@@ -243,15 +290,19 @@ async fn get_metadata(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetMetadataPara
     }
 }
 
-async fn remove(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: RemoveParams) -> Value {
+async fn remove(
+    deps: Arc<FileCapabilityDeps>,
+    ctx: CallerCtx,
+    p: RemoveParams,
+) -> Value {
     let result = match file_authority(&ctx) {
         Some(auth) => {
-            deps.file_service
+            deps.files
                 .remove_entry_scoped(ctx.user_id.as_str(), &p.path, &p.workspace, &auth)
                 .await
         }
         None => {
-            deps.file_service
+            deps.files
                 .remove_entry(ctx.user_id.as_str(), &p.path, &p.workspace)
                 .await
         }
@@ -262,10 +313,14 @@ async fn remove(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: RemoveParams) -> Valu
     }
 }
 
-async fn rename(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: RenameParams) -> Value {
+async fn rename(
+    deps: Arc<FileCapabilityDeps>,
+    ctx: CallerCtx,
+    p: RenameParams,
+) -> Value {
     let result = match file_authority(&ctx) {
-        Some(auth) => deps.file_service.rename_entry_scoped(&p.path, &p.new_name, &auth).await,
-        None => deps.file_service.rename_entry(&p.path, &p.new_name).await,
+        Some(auth) => deps.files.rename_entry_scoped(&p.path, &p.new_name, &auth).await,
+        None => deps.files.rename_entry(&p.path, &p.new_name).await,
     };
     match result {
         Ok(new_path) => ok(json!({ "renamed": true, "new_path": new_path })),
@@ -274,7 +329,7 @@ async fn rename(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: RenameParams) -> Valu
 }
 
 async fn shell_open_external(
-    deps: Arc<GatewayDeps>,
+    deps: Arc<FileCapabilityDeps>,
     _ctx: CallerCtx,
     p: ShellOpenExternalParams,
 ) -> Value {
@@ -292,7 +347,7 @@ async fn shell_open_external(
                       or interact with web pages; only mailto: links may be opened here."
         });
     }
-    match deps.shell_service.open_external(&p.url).await {
+    match deps.shell.open_external(&p.url).await {
         Ok(()) => ok(json!({ "opened": true, "url": p.url })),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -310,7 +365,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Read a file as UTF-8 text (output capped at ~64KB). Returns the content or an error if the path is outside the sandbox or does not exist.",
             EffectClass::Read,
         ),
-        |deps, ctx, p| read_file(deps, ctx, p),
+        adapt(read_file),
     ));
 
     // 2. Write file
@@ -321,7 +376,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Write (create or overwrite) a file with the given UTF-8 content. On a local desktop session this can target any path the OS user can write; on external channel/remote sessions it is confined to the session's allowed roots.",
             EffectClass::Write,
         ),
-        |deps, ctx, p| write_file(deps, ctx, p),
+        adapt(write_file),
     ));
 
     // 3. Browse directory (Read)
@@ -332,7 +387,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List immediate children of a directory (one level). Returns name, full_path, relative_path, and is_dir for each entry.",
             EffectClass::Read,
         ),
-        |deps, ctx, p| browse(deps, ctx, p),
+        adapt(browse),
     ));
 
     // 4. List workspace files (Read)
@@ -343,7 +398,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Recursively list all files under a workspace root as a flat list (up to 20,000 entries). Useful for discovering project structure.",
             EffectClass::Read,
         ),
-        |deps, ctx, p| list_workspace_files(deps, ctx, p),
+        adapt(list_workspace_files),
     ));
 
     // 5. Get metadata (Read)
@@ -354,7 +409,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Get metadata for a file or directory: name, path, size (bytes), MIME type, last_modified (unix timestamp), and whether it is a directory.",
             EffectClass::Read,
         ),
-        |deps, ctx, p| get_metadata(deps, ctx, p),
+        adapt(get_metadata),
     ));
 
     // 6. Remove entry
@@ -365,7 +420,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Delete a file or directory (recursively). Irreversible — the snapshot system can restore if initialized, but the raw FS deletion cannot be undone.",
             EffectClass::Destructive,
         ),
-        |deps, ctx, p| remove(deps, ctx, p),
+        adapt(remove),
     ));
 
     // 7. Rename entry
@@ -376,7 +431,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Rename a file or directory (same parent, new name). Returns the new absolute path on success.",
             EffectClass::Write,
         ),
-        |deps, ctx, p| rename(deps, ctx, p),
+        adapt(rename),
     ));
 
     // 8. Shell open external. Mailto only: Agent web
@@ -388,7 +443,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Open a mailto: link in the user's default mail client. Web URLs (http/https) are rejected: read or interact with web pages through the managed Browser tool instead.",
             EffectClass::Write,
         ),
-        |deps, ctx, p| shell_open_external(deps, ctx, p),
+        adapt(shell_open_external),
     ));
 }
 
@@ -449,8 +504,5 @@ mod tests {
         // External IM channel stranger → keep the default allowed_roots confinement.
         let channel = CallerCtx { channel_platform: Some("lark".into()), ..Default::default() };
         assert!(file_authority(&channel).is_none(), "channel must not be unrestricted");
-        // Remote front-door consumer → likewise confined.
-        let remote = CallerCtx { remote: true, ..Default::default() };
-        assert!(file_authority(&remote).is_none(), "remote must not be unrestricted");
     }
 }

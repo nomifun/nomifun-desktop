@@ -79,7 +79,7 @@
 | [`nomifun-miniapp`](../../crates/backend/nomifun-miniapp/) | 小程序域：单文件网页小工具，可由 AI 生成，也可从用户自己写的页面导入。持有两层存储 —— `miniapps` 表里内联的 HTML 是**已发布快照**，由免认证的 `GET /api/miniapps/{id}/serve` 路由供 iframe 渲染；`{work_dir}/miniapps/{id}/miniapp.html` 是**工作副本**，由当下正在改这个小程序的会话就地写入，只经 `POST .../publish` 提升回快照。同时持有属主隔离的 `/api/miniapps` CRUD 路由面、`validate`/`import` 导入对，以及 `POST /api/miniapps/{id}/workspace`（幂等物化工作副本并返回其绝对路径）。本 crate **不认识会话**：既不依赖 `nomifun-conversation`，也不创建任何会话 —— 小程序相关会话就是客户端新建的普通会话。 |
 | [`nomifun-creation`](../../crates/backend/nomifun-creation/) | 创意工坊画布节点、独立工作台与模板 step 背后的媒体生成引擎。持有 canonical owner-only `/api/creative-studio/tasks*` 队列（`queued → running → succeeded/failed/canceled`）、exact Provider/model/task/输入身份、Provider 级与全局并发、取消与启动对账；模型执行委托 `nomifun-model-invoke`，产物字节交给 Workshop `AssetSink`。 |
 | [`nomifun-customer-service`](../../crates/backend/nomifun-customer-service/) | 客服独立域：面向 IM 渠道陌生人的独立服务域，与伙伴 / 会话体系不共享概念——对话是本域自己的聚合，回复由一次性引擎会话产出，工具注册表固定为只读三件套。 |
-| [`nomifun-public`](../../crates/backend/nomifun-public/) | 由安装令牌鉴权的公开对外入口：`/mcp`、`/mcp-agent` 与 `/v1`。 |
+| [`nomifun-public`](../../crates/backend/nomifun-public/) | 安装令牌鉴权的 canonical Remote MCP adapter：挂载于 `/mcp`，只通过 `AgentPlatform`/`AgentSession` 暴露 `open/turn/observe/cancel`。 |
 ## 基础设施特性
 
 | Crate | 职责 |

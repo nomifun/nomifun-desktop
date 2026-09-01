@@ -171,7 +171,7 @@ async fn get_unknown_is_404() {
 
 /// Seed a conversation row so the logical conversation reference set by claim
 /// resolves to an existing conversation.
-async fn seed_conversation(services: &nomifun_app::AppServices, conv_id: &str) {
+async fn seed_conversation(services: &nomifun_app::compatibility::AppServices, conv_id: &str) {
     sqlx::query(
         "INSERT INTO conversations (conversation_id, user_id, name, type, extra, created_at, updated_at) \
          VALUES (?, ?, 'Dispatch Conv', 'nomi', '{}', 0, 0)",

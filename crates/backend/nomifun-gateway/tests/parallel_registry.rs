@@ -228,7 +228,6 @@ fn gateway_caller_without_browser_identity(
         conversation_id: Some(conversation_id.clone()),
         user_id: user_id.clone(),
         companion_id: Some(companion_id.clone()),
-        remote: true,
         ..Default::default()
     }
 }

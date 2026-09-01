@@ -21,7 +21,7 @@ use super::builtin_skills::materialize_builtin_skills;
 use super::server_lock::{BootServerLockAuthority, ServerLock, acquire_server_lock};
 use super::tracing_init::{LogGuards, init_tracing};
 use super::work_dir::resolve_work_dir;
-use nomifun_v4_root::FRESH_V4_READY_MARKER_FILE;
+use nomifun_v4_root::{FRESH_V4_READY_MARKER_FILE, FreshV4BootstrapOutcome};
 
 /// Resolved environment needed by all non-MCP subcommands.
 pub struct ServerEnvironment {
@@ -38,6 +38,13 @@ pub struct ServerEnvironment {
     /// When work_dir differs from data_dir, retain its second work-root lock.
     pub _external_work_root_lock: Option<WorkRootLock>,
     pub config: AppConfig,
+    fresh_v4_bootstrap: Option<FreshV4BootstrapOutcome>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StartupComposition {
+    FreshV4Only,
+    LegacyV3Compatibility,
 }
 
 #[derive(Debug)]
@@ -123,11 +130,55 @@ impl WorkRootLock {
 /// The Fresh-v4 check runs before service construction. All subcommands that
 /// need logging and config should call this first.
 pub fn init_environment(cli: &Cli, merged_path: &str) -> Result<ServerEnvironment> {
+    let composition = if matches!(
+        cli.command.as_ref(),
+        Some(crate::cli::Command::Doctor)
+    ) {
+        StartupComposition::LegacyV3Compatibility
+    } else {
+        StartupComposition::FreshV4Only
+    };
+    init_environment_with_composition(cli, merged_path, composition)
+}
+
+/// Explicit compatibility bootstrap for in-process legacy test fixtures.
+///
+/// Production server entry points must use [`init_environment`]. Keeping this
+/// path named and crate-private prevents a missing Fresh-v4 root from becoming
+/// an implicit fallback in the production composition.
+pub(crate) fn init_legacy_environment(
+    cli: &Cli,
+    merged_path: &str,
+) -> Result<ServerEnvironment> {
+    init_environment_with_composition(
+        cli,
+        merged_path,
+        StartupComposition::LegacyV3Compatibility,
+    )
+}
+
+fn init_environment_with_composition(
+    cli: &Cli,
+    merged_path: &str,
+    composition: StartupComposition,
+) -> Result<ServerEnvironment> {
     let startup_data_dir =
         super::data_root::normalize_requested_startup_data_root(
             cli.data_dir.clone(),
         );
-    super::v4_root::recover_or_validate_if_present(&startup_data_dir)?;
+    let fresh_v4_bootstrap = match composition {
+        StartupComposition::FreshV4Only => {
+            Some(super::v4_root::bootstrap_data_root(&startup_data_dir)?)
+        }
+        StartupComposition::LegacyV3Compatibility => {
+            super::v4_root::recover_or_validate_if_present(&startup_data_dir)?;
+            None
+        }
+    };
+    let startup_data_dir = fresh_v4_bootstrap
+        .as_ref()
+        .map(|outcome| outcome.canonical_root.clone())
+        .unwrap_or(startup_data_dir);
     let log_dir = cli
         .log_dir
         .clone()
@@ -221,6 +272,7 @@ pub fn init_environment(cli: &Cli, merged_path: &str) -> Result<ServerEnvironmen
         _data_root_work_lock: data_root_work_lock,
         _external_work_root_lock: external_work_root_lock,
         config,
+        fresh_v4_bootstrap,
     })
 }
 
@@ -656,6 +708,33 @@ fn install_storage_generation_environment(config: &AppConfig) -> Result<()> {
 }
 
 impl ServerEnvironment {
+    pub fn canonical_host(&self) -> Result<super::canonical_host::CanonicalHost> {
+        let outcome = self
+            .fresh_v4_bootstrap
+            .clone()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "production startup did not select a Fresh-v4 root; \
+                     refusing to infer a legacy v3 host"
+                )
+            })?;
+        Ok(super::canonical_host::CanonicalHost::from_bootstrap(outcome))
+    }
+
+    pub(crate) fn require_fresh_v4(&self, operation: &str) -> Result<()> {
+        if self.fresh_v4_bootstrap.is_none() {
+            anyhow::bail!(
+                "{operation} requires the Fresh-v4-only startup composition; \
+                 the legacy v3 compatibility bootstrap is not a production path"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn fresh_v4_bootstrap(&self) -> Option<&FreshV4BootstrapOutcome> {
+        self.fresh_v4_bootstrap.as_ref()
+    }
+
     /// Mint authority for startup orphan reconciliation while retaining the
     /// exact OS-level server lock. This proves exclusive database ownership;
     /// it does not prove that descendants of a previous owner have exited.
@@ -697,16 +776,13 @@ impl ServerEnvironment {
 /// Requires only `data_dir`. Subcommands that need persistent state
 /// (database, skill files) should call this after `init_environment`.
 pub async fn init_data_layer(config: &AppConfig) -> Result<Database> {
-    // During C7 the legacy service shell still owns the non-agent routes while
-    // the canonical Agent platform is opened from its separate Fresh-v4 pool.
-    // The shell is always initialized against the current empty v4 root after
-    // cutover; it must never receive the v4 database pool.
-    if !ready_v4_root_present(&config.data_dir)? {
-        super::v4_root::reject_legacy_v3_data_layer(
-            &config.data_dir,
-            "legacy v3 data-layer initialization",
-        )?;
-    }
+    // A ready Fresh-v4 root is an exclusive ownership boundary. Until the
+    // v4-only service composition is wired into this host, fail closed before
+    // preparing, materializing, or opening any legacy v3 state.
+    super::v4_root::reject_legacy_v3_data_layer(
+        &config.data_dir,
+        "legacy v3 data-layer initialization",
+    )?;
     let boot = Instant::now();
 
     let preparation = prepare_v3_data_layer(config).await?;
@@ -754,9 +830,11 @@ pub async fn init_data_layer(config: &AppConfig) -> Result<Database> {
 /// resumes instead of accepting a half-initialized dataset.
 pub fn finalize_data_layer(config: &AppConfig) -> Result<()> {
     if ready_v4_root_present(&config.data_dir)? {
-        // The v4 root has its own immutable ready marker.  The v3 service
-        // shell is transitional and has no authority over that marker.
-        return Ok(());
+        anyhow::bail!(
+            "legacy v3 data-layer finalization is fenced from the ready Fresh-v4 root at {}; \
+             the v4 service composition must own this database",
+            config.data_dir.display()
+        );
     }
     super::v4_root::reject_legacy_v3_data_layer(
         &config.data_dir,
@@ -848,6 +926,41 @@ mod tests {
         assert_eq!(
             probe_existing_v3_database(&path).await.unwrap(),
             ExistingV3DatabaseProbe::Current
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_v4_root_fails_closed_before_legacy_database_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let v4_identity = format!("nomifun-app@{}", env!("CARGO_PKG_VERSION"));
+        nomifun_v4_root::FreshV4Coordinator::default()
+            .bootstrap(dir.path(), &v4_identity, &[])
+            .await
+            .unwrap();
+
+        let config = test_config(dir.path(), dir.path());
+        let error = init_data_layer(&config)
+            .await
+            .expect_err("ready Fresh-v4 roots must not enter the legacy v3 path");
+
+        assert!(
+            error
+                .to_string()
+                .contains("legacy v3 data-layer initialization is fenced")
+        );
+        assert!(
+            !config.database_path().exists(),
+            "ready-v4 startup must not create or open nomifun-backend.db"
+        );
+        assert!(
+            !dir.path().join("builtin-skills").exists(),
+            "ready-v4 startup must not materialize legacy builtin skills"
+        );
+        assert!(
+            dir.path()
+                .join(nomifun_v4_root::FRESH_V4_DATABASE_FILE)
+                .is_file(),
+            "the Fresh-v4 database remains the only initialized database"
         );
     }
 

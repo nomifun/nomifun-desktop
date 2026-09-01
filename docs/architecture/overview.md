@@ -45,8 +45,8 @@ This document is the map. The sibling documents drill into the parts:
                         ┌─────────────────────────────────────┐
                         │  nomifun-app  (binary nomicore)     │
                         │  composition root · axum router     │
-                        │  bootstrap → data layer → services  │
-                        │  /api · /ws · public /mcp · /v1     │
+                        │  Fresh-v4 host · AgentPlatform      │
+                        │  /api · /ws · /mcp · /api/remote    │
                         └─────────────────────────────────────┘
                           │                       │
                           ▼                       ▼
@@ -161,14 +161,11 @@ The desktop also has an optional LAN WebUI listener controlled by Tauri commands
 (`webui_start`, `webui_stop`, `webui_get_status`). That listener is separate
 from the loopback listener used by the desktop's own webview.
 
-The desktop binary's `main.rs` ([`apps/desktop/src/main.rs`](../../apps/desktop/src/main.rs))
-is intentionally short — the bulk of the logic is `nomifun_app::run_embedded_server`.
-The web binary ([`apps/web/src/main.rs`](../../apps/web/src/main.rs)) reuses the
-same boot helpers (`init_environment`, `init_data_layer`, `AppServices::from_config`,
-`create_router`) and adds the SPA fallback plus first-run admin provisioning
-(`ensure_admin_credentials`).
+The desktop and web binaries both select the coordinator-approved canonical
+host, call `FreshV4Host::compose`, and serve its router in-process. The web host
+adds the SPA fallback and first-run admin provisioning.
 
-The full app router also exposes installation-token authenticated public fronts at
-`/mcp`, `/mcp-agent`, and `/v1`. These are intentionally separate from the
-normal `/api` browser-auth tree and are mounted in
-[`crates/backend/nomifun-app/src/router/routes.rs`](../../crates/backend/nomifun-app/src/router/routes.rs).
+The Fresh-v4 router exposes installation-token authenticated canonical Remote
+operations at `/mcp` and `/api/remote/*`. They are mounted by
+[`bootstrap/canonical_host.rs`](../../crates/backend/nomifun-app/src/bootstrap/canonical_host.rs)
+and use explicit AgentSession IDs rather than the legacy Gateway registry.

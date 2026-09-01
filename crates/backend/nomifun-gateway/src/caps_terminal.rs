@@ -9,6 +9,7 @@
 //! deserialization). The `preset_launch` helper lives in `terminal_support.rs`
 //! and is reused directly (pub(crate)).
 
+use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_api_types::CreateTerminalRequest;
@@ -18,7 +19,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-use crate::deps::{CallerCtx, GatewayDeps};
+use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
+use crate::conversation_port::ConversationCapabilityPort;
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
 use crate::terminal_support::preset_launch;
@@ -68,7 +70,43 @@ struct ListTerminalsParams {
 
 // ─── Handlers ──────────────────────────────────────────────────────────────
 
-async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateTerminalParams) -> Value {
+#[derive(Clone)]
+struct TerminalCapabilityDeps {
+    conversation: Arc<dyn ConversationCapabilityPort>,
+    service: Arc<nomifun_terminal::TerminalService>,
+    knowledge: Arc<nomifun_knowledge::KnowledgeService>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<TerminalCapabilityDeps>, CallerCtx, P) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, ctx, params| {
+        handler(
+            Arc::new(TerminalCapabilityDeps {
+                conversation: deps.conversation.clone(),
+                service: deps.terminal_service.clone(),
+                knowledge: deps.knowledge_service.clone(),
+            }),
+            ctx,
+            params,
+        )
+    }
+}
+
+async fn create(
+    deps: Arc<TerminalCapabilityDeps>,
+    ctx: CallerCtx,
+    p: CreateTerminalParams,
+) -> Value {
     let conversation_id = match ctx.conversation_id.as_deref() {
         Some(id) if nomifun_common::ConversationId::parse(id).is_ok() => id.to_owned(),
         _ => {
@@ -96,7 +134,7 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateTerminalParams)
     }
 
     let conversation = match deps
-        .conversation_service
+        .conversation
         .get(user_id.as_str(), &conversation_id)
         .await
     {
@@ -132,7 +170,9 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateTerminalParams)
     // blocks the launch), so the ids are validated HERE — a typo'd id would
     // otherwise be accepted and silently mount nothing.
     if let Some(ids) = &p.knowledge_base_ids {
-        if let Err(e) = crate::caps_knowledge::ensure_known_kb_ids(&deps, ids).await {
+        if let Err(e) =
+            crate::caps_knowledge::ensure_known_kb_ids(deps.knowledge.as_ref(), ids).await
+        {
             return e;
         }
     }
@@ -155,7 +195,7 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateTerminalParams)
     };
 
     match deps
-        .terminal_service
+        .service
         .create_for_conversation(user_id.as_str(), &conversation_id, req)
         .await
     {
@@ -178,7 +218,11 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateTerminalParams)
     }
 }
 
-async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListTerminalsParams) -> Value {
+async fn list(
+    deps: Arc<TerminalCapabilityDeps>,
+    ctx: CallerCtx,
+    p: ListTerminalsParams,
+) -> Value {
     let user_id = ctx.user_id.as_str();
     let conversation_id = match ctx.conversation_id.as_deref() {
         Some(id) if nomifun_common::ConversationId::parse(id).is_ok() => id,
@@ -190,7 +234,7 @@ async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListTerminalsParams) ->
     };
 
     match deps
-        .terminal_service
+        .service
         .list_for_conversation(user_id, conversation_id)
         .await
     {
@@ -340,7 +384,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Spawn a conversation-owned PTY in the current conversation workspace (shell or agent CLI). It stays out of the global sidebar. Use preset to pick the program; close it with nomi_terminal_kill/delete when no longer needed.",
             EffectClass::Write,
         ),
-        |deps, ctx, p| create(deps, ctx, p),
+        adapt(create),
     ));
     out.push(Capability::new::<ListTerminalsParams, _, _>(
         CapabilityMeta::new(
@@ -349,7 +393,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List only terminal sessions owned by the current conversation (filter by status: running | exited). Use this to observe lifecycle changes, including terminals the user closed from the conversation panel.",
             EffectClass::Read,
         ),
-        |deps, ctx, p| list(deps, ctx, p),
+        adapt(list),
     ));
 }
 

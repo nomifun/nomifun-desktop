@@ -160,11 +160,14 @@ impl ChatModelBroker {
         request
             .validate()
             .map_err(contract_error_to_model_error)?;
-        self.causality_gate.authorize(&request.causality).await?;
         let routes = self.route_resolver.resolve(&request.route).await?;
         routes
             .validate_for(&request.route)
             .map_err(contract_error_to_model_error)?;
+        // Resolve and validate the immutable route plan before the gate claims
+        // the operation. A malformed/missing route must not permanently
+        // consume an operation id in the Session facts.
+        self.causality_gate.authorize(&request.causality).await?;
 
         let required = request.input.required_features();
         let mut candidates = Vec::new();

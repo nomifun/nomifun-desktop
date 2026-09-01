@@ -43,7 +43,6 @@ use crate::image_generation::{
 use crate::protocol::events::{AgentStreamEvent, TurnCompletedEventData, TurnStopReason};
 use crate::protocol::send_error::AgentSendError;
 use crate::types::{NomiResolvedConfig, SendMessageData};
-
 use super::image_attachments::{ImageAttachmentError, load_image_blocks};
 
 /// Process-level memory of which `(provider, model)` pairs have already been

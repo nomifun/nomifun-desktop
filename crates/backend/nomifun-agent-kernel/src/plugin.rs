@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    ActionId, CapabilityId, PluginRegistrationMetadata, PrincipalRef, ResolvedSnapshotRef,
+    ActionId, AgentSessionId, CapabilityId, CorrelationId, IdempotencyKey,
+    OperationId, PluginRegistrationMetadata, PrincipalRef, ResolvedSnapshotRef,
     ResourceBindingId, ScopeKey, StrictJsonValue, TypedResourceBindings,
 };
 
@@ -13,6 +14,10 @@ use crate::{DeclaredServiceView, KernelError, PluginStateHandle, ServiceExports}
 pub struct CapabilityInvocationRequest {
     pub principal: PrincipalRef,
     pub session_owner: PrincipalRef,
+    pub agent_session_id: AgentSessionId,
+    pub operation_id: OperationId,
+    pub idempotency_key: IdempotencyKey,
+    pub correlation_id: CorrelationId,
     pub resolved_snapshot_ref: ResolvedSnapshotRef,
     pub active_set_generation: u64,
     pub capability_id: CapabilityId,
@@ -25,6 +30,10 @@ pub struct CapabilityInvocationRequest {
 #[derive(Clone)]
 pub struct CapabilityInvocationContext {
     pub principal: PrincipalRef,
+    pub agent_session_id: AgentSessionId,
+    pub operation_id: OperationId,
+    pub idempotency_key: IdempotencyKey,
+    pub correlation_id: CorrelationId,
     pub resolved_snapshot_ref: ResolvedSnapshotRef,
     pub registry_generation: u64,
     pub capability_id: CapabilityId,

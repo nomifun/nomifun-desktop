@@ -65,14 +65,14 @@ async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str, na
         .to_owned()
 }
 
-async fn build_app() -> (axum::Router, nomifun_app::AppServices) {
+async fn build_app() -> (axum::Router, nomifun_app::compatibility::AppServices) {
     let root = tempfile::Builder::new()
         .prefix("nomifun-auxiliary-e2e-")
         .tempdir()
         .unwrap()
         .keep();
     let db = nomifun_db::init_database_memory().await.unwrap();
-    let services = nomifun_app::AppServices::from_config(
+    let services = nomifun_app::compatibility::AppServices::from_config(
         db,
         &nomifun_app::AppConfig {
             data_dir: root.join("data"),
@@ -82,13 +82,13 @@ async fn build_app() -> (axum::Router, nomifun_app::AppServices) {
     )
     .await
     .unwrap();
-    let router = nomifun_app::create_router(&services).await;
+    let router = nomifun_app::compatibility::create_router(&services).await;
     (router, services)
 }
 
 async fn setup_owner(
     app: &mut axum::Router,
-    services: &nomifun_app::AppServices,
+    services: &nomifun_app::compatibility::AppServices,
 ) -> (String, String) {
     setup_and_login(app, services, "admin", "StrongP@ss1").await
 }

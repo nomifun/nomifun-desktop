@@ -5,6 +5,7 @@
 //! behalf of the user — create/configure/delete companions and inspect their
 //! status.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_common::{CompanionId, FigureId};
@@ -12,7 +13,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::deps::GatewayDeps;
+use crate::deps::CompatibilityCapabilityHost;
 use crate::id_schema::ModelRefParam;
 use crate::registry::{Capability, CapabilityMeta, EffectClass};
 use crate::server::ok;
@@ -702,14 +703,37 @@ mod id_contract_tests {
 
 // ── handlers ──────────────────────────────────────────────────────────────
 
-async fn list(deps: Arc<GatewayDeps>, _p: CompanionListParams) -> Value {
-    let companions = deps.companion_service.list_companions().await;
+#[derive(Clone)]
+struct CompanionCapabilityDeps {
+    service: Arc<nomifun_companion::CompanionService>,
+}
+
+fn adapt<P, F, Fut>(
+    handler: F,
+) -> impl Fn(Arc<CompatibilityCapabilityHost>, crate::deps::CallerCtx, P) -> Fut + Send + Sync + 'static
+where
+    P: Send + 'static,
+    F: Fn(Arc<CompanionCapabilityDeps>, P) -> Fut + Send + Sync + Clone + 'static,
+    Fut: Future<Output = Value> + Send + 'static,
+{
+    move |deps, _ctx, params| {
+        handler(
+            Arc::new(CompanionCapabilityDeps {
+                service: deps.companion_service.clone(),
+            }),
+            params,
+        )
+    }
+}
+
+async fn list(deps: Arc<CompanionCapabilityDeps>, _p: CompanionListParams) -> Value {
+    let companions = deps.service.list_companions().await;
     ok(companions)
 }
 
-async fn get(deps: Arc<GatewayDeps>, p: CompanionGetParams) -> Value {
+async fn get(deps: Arc<CompanionCapabilityDeps>, p: CompanionGetParams) -> Value {
     match deps
-        .companion_service
+        .service
         .get_companion(&p.companion_id)
         .await
     {
@@ -718,7 +742,7 @@ async fn get(deps: Arc<GatewayDeps>, p: CompanionGetParams) -> Value {
     }
 }
 
-async fn create(deps: Arc<GatewayDeps>, p: CompanionCreateParams) -> Value {
+async fn create(deps: Arc<CompanionCapabilityDeps>, p: CompanionCreateParams) -> Value {
     let name = p.name.trim();
     if name.is_empty() {
         return json!({ "error": "missing required field: name" });
@@ -727,13 +751,13 @@ async fn create(deps: Arc<GatewayDeps>, p: CompanionCreateParams) -> Value {
     if character.is_empty() {
         return json!({ "error": "missing required field: character" });
     }
-    match deps.companion_service.create_companion(name, character).await {
+    match deps.service.create_companion(name, character).await {
         Ok(companion) => ok(companion),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
-async fn update(deps: Arc<GatewayDeps>, p: CompanionUpdateParams) -> Value {
+async fn update(deps: Arc<CompanionCapabilityDeps>, p: CompanionUpdateParams) -> Value {
     let patch = match serde_json::to_value(&p.patch) {
         Ok(Value::Object(patch)) if !patch.is_empty() => Value::Object(patch),
         Ok(_) => return json!({ "error": "patch must contain at least one field to update" }),
@@ -743,7 +767,7 @@ async fn update(deps: Arc<GatewayDeps>, p: CompanionUpdateParams) -> Value {
         return json!({ "error": "patch must contain at least one field to update" });
     }
     match deps
-        .companion_service
+        .service
         .patch_companion(&p.companion_id, patch)
         .await
     {
@@ -752,9 +776,9 @@ async fn update(deps: Arc<GatewayDeps>, p: CompanionUpdateParams) -> Value {
     }
 }
 
-async fn delete(deps: Arc<GatewayDeps>, p: CompanionDeleteParams) -> Value {
+async fn delete(deps: Arc<CompanionCapabilityDeps>, p: CompanionDeleteParams) -> Value {
     match deps
-        .companion_service
+        .service
         .delete_companion(&p.companion_id)
         .await
     {
@@ -763,14 +787,14 @@ async fn delete(deps: Arc<GatewayDeps>, p: CompanionDeleteParams) -> Value {
     }
 }
 
-async fn status(deps: Arc<GatewayDeps>, p: CompanionStatusParams) -> Value {
+async fn status(deps: Arc<CompanionCapabilityDeps>, p: CompanionStatusParams) -> Value {
     let result = match p.companion_id {
         Some(ref companion_id) => {
-            deps.companion_service
+            deps.service
                 .companion_status(companion_id)
                 .await
         }
-        None => deps.companion_service.status().await,
+        None => deps.service.status().await,
     };
     match result {
         Ok(s) => ok(s),
@@ -778,12 +802,12 @@ async fn status(deps: Arc<GatewayDeps>, p: CompanionStatusParams) -> Value {
     }
 }
 
-async fn get_config(deps: Arc<GatewayDeps>, _p: CompanionGetConfigParams) -> Value {
-    let config = deps.companion_service.get_config().await;
+async fn get_config(deps: Arc<CompanionCapabilityDeps>, _p: CompanionGetConfigParams) -> Value {
+    let config = deps.service.get_config().await;
     ok(config)
 }
 
-async fn update_config(deps: Arc<GatewayDeps>, p: CompanionUpdateConfigParams) -> Value {
+async fn update_config(deps: Arc<CompanionCapabilityDeps>, p: CompanionUpdateConfigParams) -> Value {
     let patch = match serde_json::to_value(&p.patch) {
         Ok(Value::Object(patch)) if !patch.is_empty() => Value::Object(patch),
         Ok(_) => return json!({ "error": "patch must contain at least one field to update" }),
@@ -792,7 +816,7 @@ async fn update_config(deps: Arc<GatewayDeps>, p: CompanionUpdateConfigParams) -
     if patch.as_object().is_none_or(|m| m.is_empty()) {
         return json!({ "error": "patch must contain at least one field to update" });
     }
-    match deps.companion_service.patch_config(patch).await {
+    match deps.service.patch_config(patch).await {
         Ok(config) => ok(config),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -810,7 +834,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List all digital companions (id, name, character, model, appearance).",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| list(deps, p),
+        adapt(list),
     ));
 
     // 2. Get companion (read)
@@ -821,7 +845,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Get a single companion's full profile and configuration by companion_id.",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| get(deps, p),
+        adapt(get),
     ));
 
     // 3. Create companion (write)
@@ -832,7 +856,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Create a new digital companion with a name and character description. The model must be configured separately via nomi_companion_update.",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| create(deps, p),
+        adapt(create),
     ));
 
     // 4. Update companion (write)
@@ -843,7 +867,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Partially update a companion's profile (name, character, persona, model, appearance). Pass an RFC 7396 merge-patch object.",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| update(deps, p),
+        adapt(update),
     ));
 
     // 5. Delete companion (destructive, deny on channel)
@@ -854,7 +878,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Permanently delete a companion and all its associated data (thread, figure binding). Irreversible.",
             EffectClass::Destructive,
         ),
-        |deps, _ctx, p| delete(deps, p),
+        adapt(delete),
     ));
 
     // 6. Companion status (read)
@@ -865,7 +889,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Get a companion's runtime status (XP, level, mood, memory counts, model readiness). Omit companion_id for the default companion.",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| status(deps, p),
+        adapt(status),
     ));
 
     // 7. Get shared config (read)
@@ -876,7 +900,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Read the machine-level companion configuration (collection toggles, session archiving, default companion_id). Learning and evolution settings are per companion — read them with nomi_companion_get.",
             EffectClass::Read,
         ),
-        |deps, _ctx, p| get_config(deps, p),
+        adapt(get_config),
     ));
 
     // 8. Update shared config (write)
@@ -887,6 +911,6 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Partially update the machine-level companion configuration (collection toggles, session archiving, default companion, memory bridge). Learning and evolution are per companion — patch them with nomi_companion_update. RFC 7396 merge-patch.",
             EffectClass::Write,
         ),
-        |deps, _ctx, p| update_config(deps, p),
+        adapt(update_config),
     ));
 }

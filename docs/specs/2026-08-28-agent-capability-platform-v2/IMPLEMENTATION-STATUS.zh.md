@@ -1,6 +1,6 @@
 # Agent Capability Platform v2 实施状态
 
-> 最后更新：2026-08-30
+> 最后更新：2026-09-01
 >
 > 本文件是跨任务、跨机器继续实施的唯一人工可读状态入口。机器契约、
 > Gate input 与 evidence 仍分别由 canonical contract、manifest 和 ledger
@@ -10,12 +10,12 @@
 
 - branch：`rf/agent-capability-platform-v2`
 - base SHA：`7a2ade3c49374add25a35565265399c57729a8b9`
-- current implementation SHA / C7 code base：
-  `c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6`
+- current implementation SHA / dirty C8 candidate：
+  `149fd8923a2feef8b2fbdd6ec59d04a8dbaccca1`
 - last verified remote implementation SHA：
-  `efb89b90ede47c88c28065013a5c9e60461ffc14`
+  `d6391775b13f076cb10c7e03351692fa532888a8`
 - origin：`https://github.com/nomifun/nomifun-tauri.git`
-- worktree：clean；启动时无用户未提交改动
+- worktree：dirty；当前候选尚未形成 clean evidence checkpoint
 - Git identity：`colir0 <colir0@qq.com>`
 - DeepSeek Harness：
   - expected/current：`cd5ef8148158c3a752a658978873241fdf8e2bbc`
@@ -30,8 +30,8 @@
 
 ## 当前阶段
 
-- current boundary: `C7 Windows continuous domain waves` (CLOSED)
-- next boundary: `C8-WIN-PRE Windows pre-candidate`
+- current boundary: `C8-WIN-PRE Windows pre-candidate`（等待 clean checkpoint Gate）
+- next boundary: `C8-MERGE` after five native cells and D-027 zero evidence
 - Review A：
   - Decision Closure：PASS，D-001～D-028（含 D-019）均已确认
   - Contract Closure：PASS
@@ -39,9 +39,10 @@
   target first-party inventory、`OfficialPresetSeedManifest`、SessionEvent
   Registry、fresh-v4 schema contract、D-014/D-025～D-028 fixtures、generated
   schemas/envelopes 与 digest 已闭合
-- production behavior: C1 FullAuto, C2 Fresh-v4, C3 Kernel/Plugin, C4 Runtime/Model,
-- C5 Preset Product, C6 Chat/Coding/sample.echo triad, and C7 five Windows-first
-  domain waves are closed on the canonical AgentSession/Plugin/Runtime chain
+- production behavior: C1 FullAuto、C2 Fresh-v4、C3 Kernel/Plugin、
+  C4 Runtime/Model、C5 Preset Product 与 C6 Chat/Coding/sample.echo 三联已闭合。
+  C7 的五个 Domain Wave 已闭合 registration/inventory 与 typed host boundary，
+  但 Fresh-v4 的业务 action 可执行性仍不完整，不能据此宣称七模板/all-scene 已闭合。
 
 ## Contract Closure 裁决
 
@@ -177,9 +178,9 @@ C0 尚未生成原生候选；以下字段均为 not-applicable，而不是 pass
 C0 contract/golden digests：
 
 - canonical v4 schema manifest：
-  `f0a1c03696ed180db6786f781282d3a2b81dbea91ac286972b710dd7fe842ed7`
+  `e28723d7fc524cfdd351c6fc8cc17b8a48d8fd1f5be16a7aebd395ce669f98ff`
 - contract digest ledger：
-  `7595e15a253fc74c291f52a6ed5fab4efb0cd4e63821f7d6df41c171e3f39868`
+  `011c225de7ff0865880ad820868b77d68731c094199079d50c2e3baf1f0c0fd7`
 - deletion manifest set：
   `13431f76e07398c06dc9e42ccb5b70c701297451551c2fcf907c78fcab8f41ad`
 - official preset seed manifest：
@@ -191,15 +192,15 @@ C0 contract/golden digests：
 - platform validation contract：
   `78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9`
 - runtime release fixture：
-  `8f40a7ff0c42bb3180e976ae1c54e89f4942c5d6899507fa70f31c964d9b22fc`
+  `b9dce00732f6d1c45cb20fc30e7a286518d505d7faeb2d94b6cc70d9e107289d`
 - platform validation fixture：
-  `fb7d792e5eced84e05ba1c0805a9cd176cbe2796e47d7910d9e00147a31242bc`
+  `70f23b52f309aeb0938ad86c987958d3f1a05e6c367263c3b73a3038e1ca2ed2`
 
 ## Platform Verification
 
 - 当前 Host：Windows x64
 - C0 只执行 host-independent contract/schema checks
-- pending PlatformVerificationPoints：0（C1 之后触及跨平台实现时开始登记）
+- pending PlatformVerificationPoints：4（macOS arm64/x64、Linux Desktop x64、Linux Headless x64）
 - affected cells：无
 - native pass：0
 - whole-cohort recheck：未开始
@@ -295,6 +296,461 @@ C0 contract/golden digests：
 
 ## Blocking Status
 
-- No external blocker.
+- External validation blockers are recorded below: the Windows Codex sidecar
+  artifact and four required native hosts are still unavailable in this
+  workspace. They block full C8/native release evidence, but do not block the
+  local implementation and targeted checks.
 - Codex sibling drift is recorded; the frozen investigation SHA remains locally available and does not block C7.
 - Repository-wide React/Arco typecheck baseline debt is recorded; focused UI tests and production build pass.
+
+## 恢复更新（2026-08-31）
+
+本轮从提交 `149fd8923a2feef8b2fbdd6ec59d04a8dbaccca1` 的未提交工作树继续，
+没有回退或覆盖用户已有改动。当前工作树仍为 dirty，不能产生有效的 C8 native
+candidate evidence。
+
+已完成的实现闭合：
+
+- Fresh-v4 provider/model/connection/capability、client preference、system settings
+  使用同一个 canonical SQLite pool；installation token 直接读写
+  `installation_auth`，不访问 legacy `instance_access_token`。
+- Fresh-v4 canonical host 已挂载 auth、system/provider、AgentPreset/Binding、
+  AgentSession、Remote REST 与 health 路由；Remote REST 提供
+  `/api/remote/open`、`/api/remote/turn`、`/api/remote/observe`、
+  `/api/remote/cancel`。
+- Remote token rotate/revoke 与 REST/MCP Remote ingress 共用 D-026
+  `RemoteAuthAdmissionFence`；旧 token 在 mutation commit 后的新 admission 返回
+  `REMOTE_AUTH_REQUIRED`，不会先读取 Binding/Session。
+- `AgentSessionStore::cancel_active_turn` 在同一 SQLite transaction 内选择当前
+  `active_turn_id` 并提交 `turn/cancelled`，消除了 HTTP 层先读后取消的 TOCTOU；
+  initial input 作为 `session/opening` 的持久 provenance，并在 Runtime ready 后
+  由平台尝试首 Turn admission。
+- Remote Runtime admission 现在有明确的生命周期边界：调度最多等待 5 秒，
+  整个 post-commit admission 最多 35 秒，失败事实写入最多等待 10 秒；
+  `runtime/bound + session/ready` 在同一 SessionStore transaction 内提交，并在
+  transaction 内要求 Session 仍是 `opening`。取消、panic、Host shutdown 与
+  迟到 ACK 都有单飞/RAII 清理路径，`observe/turn` 看到遗留 `opening` 时会重新触发
+  同一 coordinator，不会把失败的 Session 当作 ready 执行。另修复了幂等
+  `open` 在 Session 已处于 `running` 时被错误投影为 `opening` 的问题；现在
+  `running` 明确投影为 `ready`，未知状态 fail-closed。
+- RemoteBinding 删除不再通过外键静默改写既有 Session provenance；既有 Session
+  保留冻结的 RemoteBinding ID/version，删除只阻止后续 open。
+- OpenAI Chat 与 Gemini raw SSE/JSON decoder 已覆盖真实嵌套 text、usage、finish
+  与 tool shape；Vertex 继续 typed unsupported，不伪装成可执行 route。
+- C8 gate 已将 dirty worktree 设为 fatal preflight，native checks 会被跳过；
+  residual scan 读取 triad 与 domain deletion manifests 并区分 allowlisted/
+  blocking/unclassified residual，但不会用 allowlist 把非零 global residual 假装为
+  pass。`c8-merge` 与 fail-closed `c9-hard-delete` 入口已加入。
+
+本轮关键验证：
+
+- `cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check`
+  通过，generated contract artifacts 已按当前 schema digest 重生成。
+- AgentSession、AgentPlatform、Auth、Control Plane、Public Remote、Chat broker、
+  Model invoke 与 Fresh-v4 canonical host 定向测试通过。
+- Remote REST 状态投影回归测试通过（2 项）：覆盖 `running -> ready`、
+  `open_failed/failed` 终态和未知状态 fail-closed。
+- Remote 定向 E2E 通过（1 项，约 0.4 秒）：无 sidecar 时在 2 秒窗口内进入
+  `open_failed`，并拒绝后续 `turn`。
+- `bun run gate:agent-v2 -- --self-test` 通过。
+- `bun run gate:agent-v2 -- c8-win-pre` 正确阻断：dirty worktree 与 global legacy
+  residual 非零；当前不能将旧 C8 evidence 视为候选证据。
+
+当前真实 blocker：
+
+1. C8-WIN-PRE 仍未闭合：必须先在 clean commit 上重跑；global legacy residual
+   当前为 1046（714 blocking、26 contract-allowed、306 deferred-to-C9），
+   不能进入 HP-1。主要 blocking consumer 集中在
+   `nomifun-conversation/src/service_test.rs`、`nomifun-app/src/router/state.rs`、
+   `nomifun-app/src/services.rs`、`nomifun-ai-agent/src/factory/nomi.rs`、
+   Gateway capability files 和旧 API/Registry composition；不能全部标成 C9
+   deferred。
+2. C8-MERGE/C9 尚无五格 native evidence、D-027 final drain/zero proof 或 C9
+   hard-delete manifest；`c9-hard-delete` 按设计 fail-closed。
+3. Fresh-v4 production runtime 尚未获得可由发布 manifest 验证的实际 Codex
+   sidecar artifact/path；Remote open 已接入单飞 Runtime coordinator，首次响应
+   仍按两事务语义返回 `opening`，随后在 artifact 缺失、启动/握手/open ACK/
+   binding 失败时追加 `session/open-failed`。在 SQLite 可写且 Host/Runtime 正常的
+   条件下不会无限停留；但若 SQLite pool 在失败事实写入期间持续不可用，当前
+   实现仍可能出现条件性永久 `opening`，因为任何实现都无法凭空提交 durable
+   Event。该情况会被记录，并在后续 `observe/turn` 或进程重启 recovery 时再次
+   收敛；这不是可用 mock 或无界重试消除的测试问题。Runtime hello/open 内层上限为
+   10 秒，整个 admission 上限为 35 秒。
+4. Fresh-v4 host 尚未迁移所有旧 UI/domain API；未挂载的旧入口不能视为 v4
+    产品功能已完成。
+5. Web host 的 robot advertise 在 Fresh-v4 明确 disabled，因为当前 Web host
+    没有 robot routes；不能发布空 endpoint。
+6. 本轮曾发现一个真实的共享编译阻塞：`ActionExecutor::new` 的调用方仍传入已
+   删除的旧 `agent_type` 参数；已在 `router/state.rs` 修复，并清理对应测试导入，
+   不再阻塞当前定向编译。
+7. 之前 C8 预检日志中的 `chat_broker_host.rs: ChatTask` 编译错误属于旧源快照；
+   当前源文件已刷新，`router::agent_platform_host` 定向测试 10/10 通过。C8
+   预检仍不能据此视为通过，因为它还被 dirty worktree 和全局 residual 阻断。
+
+## 继续更新（2026-08-31）
+
+- Remote `open` 的结论是有条件的：在 SQLite 可写、Host/Runtime 调度正常时，
+  调度上限为 5 秒，整个 Runtime admission 上限为 35 秒，失败事实写入上限为
+  10 秒，Session 会从 `opening` 收敛到 `ready` 或 `open_failed`。因此普通运行
+  路径不会永久停在 `opening`。
+- 若 SQLite 在写入 `session/open-failed` 期间持续不可用，任何实现都无法提交
+  durable 终态，Session 仍可能条件性停在 `opening`。这属于存储故障边界，不
+  通过 mock、伪造 ready 或无界重试掩盖。现在 admission 无法 settle 时，Remote
+  HTTP 错误会保留 `agent_session_id`、cursor 和 `host_restart_reconcile` 恢复
+ 线索，避免客户端丢失已提交 Session。
+- `knowledge.autogen` 的 `overwrite_readme` 已改为严格布尔解析；错误类型不再
+  静默退化为 `false`。Wave 1 focused tests 3/3 通过。
+- 本轮 focused 验证通过：Remote REST 状态单测 2/2、Remote REST E2E 1/1、
+  Wave 1 3/3、Fresh-v4 production host 10/10；相关 `cargo fmt --check` 及
+  `git diff --check` 通过。
+- 已停止的长时测试不再重复执行：`bootstrap::canonical_host` 两次超过一小时的
+  harness/lifecycle 调查、历史 `STATUS_ACCESS_VIOLATION` 和 `spawnSync ENOBUFS`
+  均保留原始证据，不作为当前产品行为结论。后续只有在代码或环境前置条件发生
+  明确变化时才重新安排。
+
+## 需要手动配合的验证项
+
+以下项目不是普通 Rust 编译失败，继续重复运行不会产生新信息：
+
+1. **Windows Codex sidecar runtime**
+   - 需要提供与 `runtime_release_digest =
+     b9dce00732f6d1c45cb20fc30e7a286518d505d7faeb2d94b6cc70d9e107289d`
+     对应的 `windows_desktop_x64` sidecar 可执行文件路径。
+   - 该可执行文件的预期 SHA-256 是
+     `36f175f56e065560749fcc16caffbe06639eece66e19b655ea9104052d85cab4`；
+     需要确认它与 release input 中
+     `runtime/windows/x64/nomifun-codex-runtime.exe` 的 manifest digest 一致。
+   - 需要提供与 sidecar 配套的 hello metadata 文件，并确认它能响应
+     fork-owned `runtime/hello`、八个 stable RPC 及 `runtime/session/dispose`。
+   - 当前仓库只有 release/协议输入和 Rust supervisor，没有随仓库提供的实际
+     sidecar binary；因此不能在本机安全地把 Remote Session 从 `opening` 推进
+     到 `ready`，也不能验证 `initial_input → turn → provider → observe` 的真实链。
+   - 建议手动提供：可执行文件绝对路径、`Get-FileHash -Algorithm SHA256`
+     输出、hello metadata 校验结果、sidecar 构建/来源说明，以及一次
+     `runtime/hello → create → start_turn → session_dispose` smoke 结果。
+     Provider credential 只需在本机的 Fresh-v4 设置中配置并报告成功/失败代码，
+     不要把 secret 粘贴到任务记录。路径不会写入 contract digest。
+
+2. **其它 native cells**
+    - `macos_desktop_arm64`、`macos_desktop_x64`、`linux_desktop_x64`、
+      `linux_headless_x64` 必须在对应真实主机执行，Windows/cross-compile/VM
+      不能代验。当前状态保持 `pending_native_verification`。
+    - 当前 Gate CLI 已提供独立 dispatch：在对应真实主机分别执行
+      `bun scripts/gate-agent-v2.mjs -- c8-ma --evidence <PlatformCellEvidence.json>`、
+      `bun scripts/gate-agent-v2.mjs -- c8-mx --evidence <PlatformCellEvidence.json>`、
+      `bun scripts/gate-agent-v2.mjs -- c8-ld --evidence <PlatformCellEvidence.json>`、
+      `bun scripts/gate-agent-v2.mjs -- c8-lh --evidence <PlatformCellEvidence.json>`，
+      或使用通用的
+      `bun scripts/gate-agent-v2.mjs -- c8-native --cell <cell_id> --evidence <PlatformCellEvidence.json>`。
+      证据文件必须携带同一 candidate tuple、native host fingerprint、artifact digest
+      和真实命令结果；缺失、dirty checkout、跨编译/VM/模拟环境或 tuple 不一致都会
+      fail-closed，不能把 cross-compile 当作 native PASS。
+
+3. **已停止自动重试的测试**
+    - `cargo test --locked -p nomifun-app --lib bootstrap::canonical_host
+      -- --test-threads=1` 曾在 2026-08-31 两次运行超过 1 小时并留下测试进程；
+      该进程已由本任务清理。它被记录为 test-harness/lifecycle cleanup
+      investigation，未作为 pass 或 fail 证据，也不会再次盲目重跑。
+    - 历史 Windows workspace run 在
+      `d6391775b13f076cb10c7e03351692fa532888a8` 的
+      `c8-win-pre/commands/workspace_cargo_test.stderr.log` 记录了
+      `STATUS_ACCESS_VIOLATION (0xc0000005)`；另一次
+      `f8e2de0a0bcc6c876b95cc5af41f824081da714b` 因 Gate 的
+      `spawnSync ENOBUFS` 失败。二者都不是当前产品行为结论，不再重复长跑。
+    - Remote/Session/Runtime 的短 focused checks 已通过：
+      `cargo test --locked -p nomifun-app --lib router::remote_rest::tests
+      -- --test-threads=1`（5 passed）以及
+      `cargo test --locked -p nomifun-app --test remote_rest_e2e
+      -- --test-threads=1`（1 passed，约 0.4 秒）；后者断言无 sidecar
+      时在 2 秒窗口内进入 `open_failed`，并拒绝后续 `turn`。
+    - Channel 旧 `agent.select` 测试已改为验证 retired action 不会修改 Session；
+      `cargo test --locked -p nomifun-channel --test session_action_integration
+      -- --test-threads=1`：13 passed。
+   - 本轮新增的 Runtime admission atomic boundary test、AgentSession 14 项、
+     AgentPlatform 11 项、Codex Runtime 31 项、domain support 7 项，以及
+     `chat_minimal_runs_the_formal_final_stack`（单测约 6.3 秒）均通过。
+   - 曾出现的 1 次 `chat_minimal` 失败已定位为测试暴露的真实 resume 回归：
+     全局状态校验错误拒绝了 `ready` Session 的新 Runtime binding；已改为只在
+     Remote opening admission 上要求 `opening`，修复后完整 `chat_minimal` 2 项通过。
+     这不是外部测试障碍，也未通过 mock 或跳过逻辑掩盖。
+
+下一阶段顺序固定为：取得 Windows sidecar artifact/hello metadata 后执行一次
+真实 `open → ready → initial turn → observe → cancel → dispose`；同时完成剩余
+Fresh-v4 direct consumers 与 runtime/package wiring；在 clean candidate 重跑
+C8-WIN-PRE；取得真实 macOS/Linux native cells 后执行 C8-MERGE 与 D-027 final
+drain；只有 C8-MERGE 和 exact-zero 通过后才进入 C9 physical deletion。C9 未开始。
+
+## 网络中断恢复后的更新（2026-08-31）
+
+- Fresh-v4 canonical host 现在同时挂载 Remote REST 与 canonical `/mcp`；
+  MCP 只公开 `open/turn/observe/cancel` 四个操作，并直接使用
+  `AgentPlatform/AgentSession` 与注入的 Runtime admission port。旧
+  `/mcp-agent`、`/v1`、`profile/domains`、Remote Registry dispatch、browser
+  scope 与对应 legacy smoke 已物理删除。
+- Remote Runtime 普通路径有明确上限：调度 5 秒、完整 admission 35 秒、
+  `session/open-failed` 写入 10 秒。SQLite 持续不可写时会记录 recovery
+  blocker，后续请求保留 `agent_session_id + cursor + host_restart_reconcile`，
+  不重复启动 sidecar。
+- Wave 2/3/4 已从 synthetic deterministic receipt 切换到 typed host port；
+  默认未接线时 fail-closed，定向测试分别为 5/5、7/7、10/10。
+- Conversation relay 已删除 relay-owned completion authority；failover
+  观察需匹配 durable accepted receipt，相关定向测试 40/40 通过。
+- `NomiBuildExtra.backend` 已从运行配置投影中移除；其余字段仍被未迁移的
+  Nomi factory/Conversation transitional path 使用，因此没有做不安全的类型删除或
+  兼容 alias。API types 545/545、Nomi factory focused tests 37/37 通过。
+- Remote E2E 2/2 通过：缺少 sidecar 时 REST 在约 0.4 秒进入 `open_failed`；
+  MCP 完成 initialize、exact four-tool inventory、真实 `open -> observe`。
+- 此前 bounded `c8-win-pre` 只执行 dirty preflight/static residual，没有运行
+  workspace tests：`total=1046`、`blocking=714`、`contract-allowed=26`、
+  `deferred-to-C9=306`。
+- canonical MCP/Remote REST selector query 已补上 fail-closed 回归：
+  MCP query（例如 `?profile=agent`）在 transport session 分配前返回
+  `REMOTE_INVALID_REQUEST`；REST 四操作只允许 observe 的
+  `agent_session_id/after_seq/limit`，`profile/domains` 及其他未声明 query
+  在 handler 前返回同一 canonical code。Public transport 定向测试 14/14，
+  Remote REST 单测 5/5。
+
+### 已停止自动重试的测试障碍
+
+- Windows 全 workspace `cargo fmt --all -- --check` 因路径长度错误 206 失败；
+  受影响 package 的定向 rustfmt 已通过。
+- Channel 全 feature lib tests 曾在 150 秒超时；只保留 parser/plugin focused tests。
+- `nomifun-app` 的 `bootstrap::canonical_host` 单测曾两次超过 1 小时并遗留进程；
+  不再盲目重跑。
+- 历史 workspace `STATUS_ACCESS_VIOLATION (0xc0000005)` 与 Gate
+  `spawnSync ENOBUFS` 只作为 harness evidence，不作为产品行为结论。
+
+### 需要用户提供或手动执行
+
+1. Windows `windows_desktop_x64` Codex sidecar 与 hello metadata。当前
+   `runtime_release_digest` 为
+   `b9dce00732f6d1c45cb20fc30e7a286518d505d7faeb2d94b6cc70d9e107289d`；
+   提供 sidecar 绝对路径、`Get-FileHash -Algorithm SHA256` 输出和 hello metadata
+   后，执行一次真实 `open -> ready -> initial turn -> observe -> cancel -> dispose`。
+2. 真实 macOS arm64/x64、Linux Desktop x64、Linux Headless x64 主机仍为
+   `pending_native_verification`；Windows/cross-compile/VM 不能代验。
+
+## 网络中断恢复后的继续更新（2026-08-31）
+
+- canonical MCP 与 Remote REST 已在 handler 前拒绝旧 selector query：
+  `/mcp?profile=agent`、`/mcp?domains=...` 以及 REST 非 observe 的任意 query
+  都返回 `REMOTE_INVALID_REQUEST`；observe 只接受
+  `agent_session_id/after_seq/limit`。
+- REST/MCP 的 `binding_id`、`idempotency_key`、`initial_input`/`input` 与
+  `observe.limit` 输入校验已统一：空白标识、非法/超限 JSON 和零 limit 均在
+  平台调用前返回 `REMOTE_INVALID_REQUEST`。
+- Fresh-v4 host 已恢复 `NOMIFUN_ACCESS_TOKEN` headless seed：启动时只将环境值
+  的 SHA-256 verifier 写入 `installation_auth`，同一 token 不重复写；持久化失败
+  会阻止继续发布一个未认证的 Host。新增 seed 单测通过。
+- `nomicore tools`、`nomicore call` 及 `/v1/tools/*` generic Registry CLI 入口已
+  删除，替换为显式 `nomicore remote open/turn/observe/cancel`；CLI 不再读取
+  `Registry::global()` 或推断最近 Session。
+- Gateway 不再发布 `Surface::Remote`、`CallerCtx.remote` 或 Remote generic
+  conversation/execution 创建旁路；Remote 产品流只经 Fresh-v4
+  `AgentPlatform/AgentSession`。Browser Gateway 中仅保留测试期的旧 attachment
+  lifecycle helper，生产 API 不发布第二个 Remote 入口。
+- 当前用户文档、架构说明、CLI 配置说明、Remote 对接示例和
+  `drive-nomifun` skill 已统一为 `/mcp` + `/api/remote/*` 四操作；历史 deletion
+  manifests 仍原样保留，作为删除证据，不作为当前生产入口。
+
+本轮定向验证：
+
+- `nomifun-public` library：14/14；
+- `nomifun-app` Remote REST 单测：5/5；
+- Fresh-v4 Remote E2E：2/2（包含 selector query fail-closed；本机无 sidecar 时
+  `open` 在约 0.4 秒收敛到 `open_failed`）；
+- Fresh-v4 installation token seed 单测：1/1；
+- `nomifun-gateway` library：123/123；
+- Gateway browser-use lifecycle focused tests：36/36；
+- Gateway browser-use `parallel_registry` integration：3/3；
+- Gateway computer-use focused tests：3/3；
+- `cargo check --locked -p nomifun-app --bin nomicore`：通过；
+- `cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check`：
+  通过；`cargo fmt` 受影响 package 定向检查与 `git diff --check`：通过。
+
+当前 Gate 证据：
+
+- 上一轮 `bun run gate:agent-v2 -- c8-win-pre` 结果为 fail-closed：
+  `1078` residual（`748` blocking、`26` contract-allowed、`304`
+  deferred-to-C9），同时因 dirty worktree 跳过所有 native/workspace checks；
+  本轮最新数字见下方恢复更新。
+- 主要 blocking 仍是未迁移的 `ConversationService`、`AppServices`、
+  `GatewayDeps`、Nomi factory/runtime 及其 direct consumers；没有把这些项目改成
+  allowlist 或用 mock/bypass 掩盖。
+- Windows Codex sidecar、macOS/Linux 四个真实 native cell 仍未提供，因此无法
+  验证 `open → ready → turn → observe → cancel → dispose` 的真实 Runtime 路径。
+
+## 网络中断恢复后的验证更新（2026-08-31）
+
+- Conversation relay 的真实 recovery journal 测试已完成迁移，删除
+  `with_test_legacy_unjournaled_artifacts` 测试旁路；StreamRelay 定向测试
+  `111/111` 通过。
+- AgentExecution 的 session adapter 与 IDMM 的 typed session port 定向验证通过：
+  AgentExecution `86/86`、IDMM probe `46/46`；两者均只委托现有 canonical
+  authority，不创建第二套 Session/Runtime 事实源。
+- Gateway browser-use feature 的旧 Remote authority 测试调用已删除或改为
+  signed-child/Hub 语义；browser-use 全库 `164/164`、browser registry
+  `28/28` 通过。共享 Host cleanup 测试保留了真实 sibling lane，验证失败时
+  pending owner 不会被错误报告为已清理。
+- 本轮定向编译通过：Conversation、AgentExecution、IDMM、Gateway，以及
+  `nomifun-app` 默认和 `browser-use,computer-use` binary check。未运行
+  workspace 全量测试，也未重跑已确认会长时间挂起的 lifecycle harness。
+- 最新 `bun run gate:agent-v2 -- c8-win-pre` 仍按设计 fail-closed：工作树
+  未 clean，residual `1065`，其中 `735` blocking、`26` contract-allowed、
+  `304` deferred-to-C9；相较上一轮 `1078/748` 有收口，但尚不能形成 C8
+  native candidate。
+
+### 本轮新增的跨 crate 阻塞
+
+1. App composition 仍在 `router/routes.rs` 手工构造 `GatewayDeps`，在
+   `router/state.rs` 构造多个 `ConversationService`，并在 `services.rs`
+   构造 `AgentFactoryDeps`/旧 Runtime registry。当前
+   `nomifun-agent-platform` 只公开 Session command/query/delete 与 Codex
+   runtime port，尚无能覆盖这些旧业务服务的 canonical host port；直接删除
+   会造成真实编译断裂，新增本地 adapter 则会制造第二 authority。
+2. Gateway capability handler 仍依赖 `GatewayDeps` 的业务字段；Gateway
+   Cargo 未接入 `nomifun-agent-platform`，且当前 manifest 将 Cargo/中央
+   组合文件保留给主线 owner。不能靠重命名、allowlist 或 mock 关闭该残留。
+3. Channel/IDMM/AgentExecution 已收窄为 typed delegator，但完整切换仍需
+   `nomifun-agent-platform` 的统一 host port 和对应 Cargo DAG 调整。
+
+这些项目已记录为需要下一批中央接口与组合迁移的代码阻塞，不再重复执行
+同一失败测试。
+
+## C8 typed consumer 与 Gateway facade 收口（2026-09-01）
+
+本轮继续保留现有 dirty worktree，没有 reset、覆盖、提交或 push。完成的生产代码
+收口如下：
+
+- `nomifun-agent-execution` 已公开 `AgentExecutionSessionPort`；生产 engine config
+  不再接收 `ConversationService`/`AgentRuntimeRegistry`，app 只挂载一个无状态纯委托
+  transitional adapter，不增加第二套 Session authority。
+- Cron、Requirement/AutoWork、Companion、IDMM 与 Channel 已分别改为窄 typed
+  Session port。各 adapter 只委托当前 Conversation owner 和 Runtime registry，
+  不缓存事实、不重试、不 fallback、不伪造成功。
+- Gateway Computer、Browser、Channel、Companion、System 与 Agent capability handler
+  已改为领域窄依赖 view；完整 `GatewayDeps` 只在 capability adapter 边界投影一次，
+  handler 不再直接持有整包业务服务。
+- Gateway `computer_registry` 改为共享 `Arc<ComputerRegistry>`，仍保持单桌面、
+  串行执行和 unavailable fail-closed 语义。
+
+本轮验证：
+
+- `nomifun-agent-execution`：86/86。
+- `nomifun-cron` library：191/191。
+- `nomifun-idmm` probe focused：46/46。
+- Channel `session_action_integration`：13/13；`stream_relay_test`：21/21；
+  Channel 全测试目标 `--no-run` 编译通过。
+- Gateway `browser-use + computer-use` library：167/167。
+- `cargo check --locked -p nomifun-app --features computer-use` 通过；
+  受影响 Rust 文件定向 rustfmt 与 `git diff --check` 通过。
+
+最新 fail-fast：
+
+```text
+bun run gate:agent-v2 -- c8-win-pre
+```
+
+仍按设计 fail-closed：
+
+- worktree：dirty
+- residual：984
+- blocking：662
+- contract-allowed：26
+- deferred-to-C9：296
+
+相较本轮开始的 `1065/735/26/304`，减少 81 条 residual 和 73 条 blocking。
+当前最大 blocking 仍集中在旧 Conversation 测试/实现、`router/state.rs`、
+`services.rs`、Nomi factory/runtime、剩余 Gateway 领域 facade 与旧 API DTO。
+Windows Codex sidecar及四个非 Windows native cell 仍是外部证据阻塞，不重复自动
+测试；在 clean candidate、exact-zero 与真实 native evidence 之前仍不能宣称
+C8/HP-1/发布完成。
+
+## C8 residual 与生产 Host 审计（2026-09-01）
+
+本轮在不放宽扫描规则、不扩大 D-004 allowlist 的前提下完成了生产组合图的静态
+收口：
+
+- 2026-09-01 dirty preflight 的 C8 source residual 为 `561`：
+  `0 blocking`、`26 contract-allowed`、`535 deferred-to-C9`。
+  状态文档本身也属于 source scan，因此总数高于代码收口前的临时统计；
+  `contract-allowed` 仍是原有 D-004 exact allowlist；
+  其余项目均有逐路径、逐符号的 C9 删除登记。
+- `AppServices`、旧 router builder 与 legacy server start 已隔离到显式
+  compatibility surface；Embedded、Desktop 与 Web 生产入口只组合
+  `FreshV4Application`。
+- `GatewayDeps` 已收窄为 compatibility capability host，业务 handler 只接收领域
+  窄依赖 view；AgentExecution、Cron、Requirement/AutoWork、Companion、IDMM 与
+  Channel 使用 typed Session port，不再把完整 Conversation/Runtime service bag
+  作为生产构造参数。
+- Agent Settings 的 Coding workspace 使用逻辑资源 ID `workspace.default`；
+  Host 的真实 `work_dir` 只进入 `typed_parameters.workspace_root`。历史草稿在
+  Preview/Save/Test 前补齐 Host-resolved 参数，不从 `resource_id` 猜本地路径。
+
+当前 canonical tuple：
+
+- confirmed decision contract：
+  `b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5`
+- canonical schema：
+  `e28723d7fc524cfdd351c6fc8cc17b8a48d8fd1f5be16a7aebd395ce669f98ff`
+- platform validation：
+  `70f23b52f309aeb0938ad86c987958d3f1a05e6c367263c3b73a3038e1ca2ed2`
+- runtime release：
+  `b9dce00732f6d1c45cb20fc30e7a286518d505d7faeb2d94b6cc70d9e107289d`
+- Cargo.lock：
+  `b69f75e6cc566ef753f43265e4ddcf2479b671c738e67719b6c84f3f6881f23a`
+
+已完成的定向验证：
+
+- `cargo check --locked -p nomifun-app -p nomifun-web -p nomifun-desktop`
+- `health`、`webui_lan_smoke`、`content_e2e_suite` representative targets
+  `--no-run`
+- Wave 4 typed unavailable：1/1
+- Agent Settings focused tests：18/18
+- `bun run check:i18n`：7078 keys / 33 modules
+- `cargo fmt --package nomifun-app -- --check`
+- 相关 `git diff --check`
+- `cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check`
+- C8 Gate self-test
+
+全量 TypeScript typecheck 仍失败于既有 React/Arco 与 implicit-any 基线；focused
+workspace helper 没有新增类型错误。本轮不重复执行同一已知失败。
+
+### Fresh-v4 Domain Wave 的真实功能状态
+
+静态 residual 为零不等于业务 action 已可执行。当前生产组合的真实状态如下：
+
+- Wave 1：仍注入 `unconfigured_host_port()`；Research、Knowledge、Memory mutation
+  与 Skill invoke 会 typed fail-closed。
+- Wave 2：`fs.read/fs.write/fs.delete` 已通过 owner-scoped workspace binding 调用
+  真实 `FileService`；SSH、MCP connector、Browser、Computer 及其余 workspace
+  action 尚未接入 canonical owner，调用时 typed unavailable。
+- Wave 3：19 个 Creation/Workshop/Office/MiniApp action 仍使用 metadata-only
+  unconfigured host，调用时 typed fail-closed。
+- Wave 4：Fresh-v4 显式挂载应用 typed host，但当前没有 v4-native
+  Channel/Companion/Customer/Robot owner，因此明确返回 typed unavailable，不重试、
+  不 fallback、不制造成功。
+- Wave 5：AgentExecution、schedule.store 与 Requirement action 仍使用
+  unconfigured host；Remote REST/MCP 的 `open/turn/observe/cancel` 是独立挂载的
+  canonical transport，不能反向证明其它 Wave 5 action 已完成。
+
+D-028 只定义 Coding、Browser、Computer 的平台 availability，不能自动豁免上述
+业务域。根据 C8 contract，七模板和 all-scene executable conformance 仍需真实
+业务 owner 与原生 evidence；因此即使 clean Gate 的现有结构/测试检查通过，也不得
+把该结果解释为完整功能发布或正式 HP-1。
+
+### Clean checkpoint 与 macOS 工程验证边界
+
+下一步只在当前大批重构形成 clean commit 后执行一次完整
+`bun run gate:agent-v2 -- c8-win-pre`。若 workspace lifecycle 再次长时间挂起、
+崩溃或出现 `ENOBUFS`，保留本次日志并停止，不盲目重试。
+
+Windows Codex sidecar 仍缺失，预期 SHA-256 为
+`36f175f56e065560749fcc16caffbe06639eece66e19b655ea9104052d85cab4`。在提供
+sidecar 与 hello metadata 前，真实
+`open -> ready -> turn -> observe -> cancel -> dispose` 只能列为手动阻塞项。
+
+clean checkpoint 可以作为 macOS arm64 的工程逻辑验证候选，用于编译、启动、
+路径/权限、bundle、进程树与 target-specific adapter 补齐；它不是正式 HP-1。
+正式 HP-1 仍要求 Windows 全场景功能、sidecar/native Gate 和 clean remote SHA
+全部闭合。

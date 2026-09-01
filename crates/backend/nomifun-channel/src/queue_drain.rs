@@ -411,7 +411,7 @@ impl QueueDrain {
                             conversation_id: send_result.conversation_id.clone(),
                         },
                         Arc::clone(&self.sender),
-                        self.message_service.pending_decisions(),
+                        self.message_service.stop_confirmations(),
                         self.message_service.asset_resolver(),
                     );
                     tokio::spawn(relay.run(rx));

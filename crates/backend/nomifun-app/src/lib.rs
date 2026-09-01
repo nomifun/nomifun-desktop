@@ -37,13 +37,24 @@ pub use desktop::{
     DesktopKeepAlive, DesktopServer, DesktopStartError, LanRestoreOutcome,
     StartupCleanupDisposition, WebUiAsset, WebUiAssetSource, WebUiStatus,
 };
+pub use bootstrap::{CanonicalHost, FreshV4Host};
 pub use nomifun_auth::AuthPolicy;
-pub use router::{
-    ChannelMessageLoopComponents, ModuleStates, build_preset_state, build_conversation_state,
-    build_extension_states, build_module_states, build_ws_state, create_agent_platform_router,
-    create_router, create_router_with_all_state, create_router_with_states,
-};
-pub use services::AppServices;
+pub use router::create_agent_platform_router;
+
+/// Explicitly isolated v3 compatibility graph used by legacy-focused tests.
+///
+/// Production server, Web, and native Desktop entry points compose
+/// [`bootstrap::FreshV4Application`] and do not construct anything exported
+/// here. The entire module remains scheduled for C9 physical deletion.
+pub mod compatibility {
+    pub use crate::router::{
+        ChannelMessageLoopComponents, ModuleStates, build_conversation_state,
+        build_extension_states, build_module_states, build_preset_state, build_ws_state,
+        create_router, create_router_with_all_state, create_router_with_states,
+        try_create_router,
+    };
+    pub use crate::services::AppServices;
+}
 
 /// In-process server entry used by embedded hosts (Tauri desktop, `nomifun-web`)
 /// and by the `nomicore` bin's default path. Builds environment → data layer →
@@ -51,16 +62,7 @@ pub use services::AppServices;
 /// assets (the web SPA), compose `create_router` + your fallback instead.
 pub async fn run_embedded_server(cli: &cli::Cli, merged_path: &str) -> anyhow::Result<std::process::ExitCode> {
     let env = bootstrap::init_environment(cli, merged_path)?;
-    let database = bootstrap::init_data_layer(&env.config).await?;
-    let services = AppServices::from_config(database, &env.config)
-        .await?
-        .with_boot_reconciliation_authority(
-            env.boot_reconciliation_authority(),
-            &env.config,
-        )
-        .await?;
-    if let Err(error) = bootstrap::finalize_data_layer(&env.config) {
-        return Err(services.cleanup_after_startup_failure(error).await);
-    }
-    commands::run_server(env, services).await
+    let host = env.canonical_host()?;
+    let application = host.compose(&env.config).await?;
+    commands::run_canonical_server(env, application).await
 }

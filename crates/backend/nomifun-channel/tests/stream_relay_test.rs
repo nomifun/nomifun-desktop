@@ -5,7 +5,7 @@ use nomifun_ai_agent::protocol::events::{
     ErrorEventData, FinishEventData, OutputDiscardedEventData, StartEventData, TextEventData,
     ToolCallEventData, ToolCallStatus,
 };
-use nomifun_channel::pending_decision::PendingDecisionStore;
+use nomifun_channel::pending_decision::ChannelStopConfirmationStore;
 use nomifun_channel::stream_relay::{ChannelSender, ChannelStreamRelay, MessageRecorder, RelayConfig};
 use nomifun_channel::types::{OutgoingMessageType, ParseMode, PluginType};
 use tokio::sync::broadcast;
@@ -17,7 +17,7 @@ const LARK_CHANNEL_PLUGIN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000103";
 
 /// Builds a relay with a fresh pending-decision store.
 fn relay(config: RelayConfig, sender: Arc<dyn ChannelSender>) -> ChannelStreamRelay {
-    ChannelStreamRelay::new(config, sender, PendingDecisionStore::new(), None)
+    ChannelStreamRelay::new(config, sender, ChannelStopConfirmationStore::new(), None)
 }
 
 // ── RelayConfig construction ─────────────────────────────────────

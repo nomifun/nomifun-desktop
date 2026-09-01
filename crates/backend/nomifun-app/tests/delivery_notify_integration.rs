@@ -18,7 +18,7 @@ use nomifun_ai_agent::{AgentRuntimeRegistry, AgentSendError, AgentStreamEvent, M
 use nomifun_api_types::{SendMessageRequest, WebSocketMessage};
 use nomifun_app::delivery_notify::DeliveryNotifyObserver;
 use nomifun_channel::error::ChannelError;
-use nomifun_channel::pending_decision::PendingDecisionStore;
+use nomifun_channel::pending_decision::ChannelStopConfirmationStore;
 use nomifun_channel::stream_relay::ChannelSender;
 use nomifun_channel::types::{OutgoingMedia, UnifiedOutgoingMessage};
 use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationStatus, TimestampMs};
@@ -289,7 +289,7 @@ async fn build_stack(pool: nomifun_db::SqlitePool) -> Stack {
         Arc::<str>::from(owner.as_str()),
         channel_repo.clone() as Arc<dyn IChannelRepository>,
         Arc::clone(&recorder) as Arc<dyn ChannelSender>,
-        PendingDecisionStore::new(),
+        ChannelStopConfirmationStore::new(),
         None,
     ));
     conversation_svc.with_turn_completion_observer(

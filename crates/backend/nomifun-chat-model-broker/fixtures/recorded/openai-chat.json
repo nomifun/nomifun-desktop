@@ -30,13 +30,19 @@
         "snapshot_id": "snapshot-openai-chat",
         "snapshot_digest": "2222222222222222222222222222222222222222222222222222222222222222"
       },
-      "model_route_revision": 3,
+      "route_identity": {
+        "preset_revision_id": "fixture@1",
+        "model_task": "agent_chat",
+        "route_id": "route-openai-chat-primary",
+        "route_revision": 3
+      },
       "operation_id": "model-openai-chat-0001"
     },
     "route": {
-      "model_route_id": "route-openai-chat-primary",
-      "model_route_revision": 3,
-      "task": "agent_chat"
+      "preset_revision_id": "fixture@1",
+      "model_task": "agent_chat",
+      "route_id": "route-openai-chat-primary",
+      "route_revision": 3
     },
     "input": {
       "instructions": ["Return valid structured output."],

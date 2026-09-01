@@ -1,10 +1,8 @@
-//! Production Fresh-v4 Agent platform mount.
+//! Production Fresh-v4 Agent platform composition.
 //!
-//! The legacy application service graph remains alive for the slices that have
-//! not yet crossed their C7 boundary.  This module deliberately gives the
-//! canonical Agent platform its own validated Fresh-v4 pool and its own
-//! registration inventory; it never passes the v3 application pool into
-//! `AgentPlatform`.
+//! The canonical Agent platform owns a validated Fresh-v4 pool and its
+//! registration inventory. It never accepts a legacy application service graph
+//! or a v3 database pool.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -13,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use nomifun_agent_contracts::{
     CodingRuntimeFeatureInventoryPayload, DigestHex, FreshV4ReadyMarker,
     FreshV4SchemaMetadata, RuntimeProfileKind, RuntimeTarget, VersionString,
@@ -24,26 +21,34 @@ use nomifun_agent_contracts::{
 };
 use nomifun_agent_control_plane::CompilerReleaseInputs;
 use nomifun_agent_kernel::{CompilerEnvironment, MaterializationPolicy};
-use nomifun_agent_platform::{AgentPlatform, AgentPlatformConfig};
-use nomifun_chat_model_broker::{
-    ChatBrokerPort, ChatModelError, ChatModelErrorCode, ChatModelRequest, ChatModelStream,
-    ChatRetryDirective,
+use nomifun_agent_domain_wave1::Wave1HostPort;
+use nomifun_agent_domain_wave2::Wave2HostPort;
+use nomifun_agent_platform::{
+    AgentPlatform, AgentPlatformConfig, ChatExecutionAuthority,
+    BrokerBackedRuntimePort, ProductionChatCausalityGate,
+    RuntimeStartTurnBrokerBridge, SupervisedCodexRuntimePort,
 };
+use nomifun_agent_session::AgentSessionStore;
 use nomifun_codex_runtime::CodexRuntimeSupervisor;
+use nomifun_v4_root::application_build_digest;
+#[cfg(test)]
 use nomifun_v4_root::{
-    FRESH_V4_DATABASE_FILE, FRESH_V4_INITIALIZING_MARKER_FILE,
-    FRESH_V4_PARENT_MARKER_FILE, FRESH_V4_READY_MARKER_FILE,
-    application_build_digest, canonical_schema_manifest_digest,
+    FRESH_V4_DATABASE_FILE, FRESH_V4_READY_MARKER_FILE,
+    canonical_schema_manifest_digest,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
-use crate::services::AppServices;
+use super::agent_wave2_host::Wave2ApplicationHost;
+use super::agent_wave4_host::Wave4ApplicationHost;
+use super::chat_broker_host::{
+    ChatBrokerHostComposition, ConnectionCredentialLeaseRegistry,
+    SqliteChatOperationClaimStore,
+};
+use crate::bootstrap::APPLICATION_BUILD_IDENTITY;
 
 const CONTRACT_VERSION: &str = "1.0.0";
 const C7_AVAILABILITY_REVISION: &str = "c7-windows-continuous-2026-08-30";
-const APPLICATION_BUILD_IDENTITY: &str =
-    concat!("nomifun-app@", env!("CARGO_PKG_VERSION"));
 const BASELINE_MIGRATION_NAME: &str = "0001_fresh_v4";
 const MAX_READY_MARKER_BYTES: u64 = 64 * 1024;
 const MOUNT_INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -52,30 +57,44 @@ const RUNTIME_FEATURE_INVENTORY_JSON: &str = include_str!(
     "../../../nomifun-agent-contracts/contracts/runtime/coding-runtime-feature-inventory.payload.json"
 );
 
-/// Mount the canonical platform if the pre-service Fresh-v4 root is ready.
-///
-/// A legacy-only test or an older embedding that has not run the Fresh-v4
-/// bootstrap simply keeps its existing router.  It is not allowed to open a
-/// second v4 database or silently fall back to the v3 pool.
-pub(crate) async fn try_build(
-    services: &AppServices,
-) -> anyhow::Result<Option<Arc<AgentPlatform>>> {
-    let Some(paths) = probe_fresh_v4_mount(&services.data_dir)? else {
-        return Ok(None);
-    };
-
-    let marker = read_ready_marker(&paths.ready)?;
-    let expected_schema_digest = canonical_schema_manifest_digest()?;
-    validate_ready_marker(&marker, &expected_schema_digest)?;
-    let pool = open_validated_pool(&paths.database).await?;
+/// Build the canonical Agent platform from an already-open Fresh-v4 pool and
+/// an optional provider pool.  A Fresh-v4 host passes its own pool here so
+/// provider/model/connection facts remain in the same canonical database; the
+/// explicit `None` path is retained for test fixtures that exercise the
+/// fail-closed unconfigured broker shape.
+pub(crate) async fn build_from_open_pool(
+    pool: SqlitePool,
+    ready_path: PathBuf,
+    marker: FreshV4ReadyMarker,
+    expected_schema_digest: DigestHex,
+    provider_pool: Option<SqlitePool>,
+    encryption_key: [u8; 32],
+    workspace_root: PathBuf,
+) -> anyhow::Result<Arc<AgentPlatform>> {
     initialize_platform_with_cleanup(
         pool,
-        paths.ready,
+        ready_path,
         marker,
         expected_schema_digest,
+        provider_pool,
+        encryption_key,
+        nomifun_agent_domain_wave1::unconfigured_host_port(),
+        Arc::new(Wave2ApplicationHost::for_workspace_root(workspace_root)),
     )
     .await
-    .map(Some)
+}
+
+pub(crate) async fn open_validated_pool(path: &Path) -> anyhow::Result<SqlitePool> {
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(false)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(5));
+    Ok(SqlitePoolOptions::new()
+        .max_connections(5)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_with(options)
+        .await?)
 }
 
 async fn initialize_platform_with_cleanup(
@@ -83,6 +102,10 @@ async fn initialize_platform_with_cleanup(
     ready_path: PathBuf,
     marker: FreshV4ReadyMarker,
     expected_schema_digest: DigestHex,
+    provider_pool: Option<SqlitePool>,
+    encryption_key: [u8; 32],
+    wave1_host: Arc<dyn Wave1HostPort>,
+    wave2_host: Arc<dyn Wave2HostPort>,
 ) -> anyhow::Result<Arc<AgentPlatform>> {
     // AgentPlatform::from_pool takes ownership of the pool while it builds its
     // persistent adapters and publishes the initial generation. Keep one
@@ -91,7 +114,16 @@ async fn initialize_platform_with_cleanup(
     let cleanup_pool = pool.clone();
     let result = match tokio::time::timeout(
         MOUNT_INITIALIZATION_TIMEOUT,
-        initialize_platform(pool, ready_path, marker, expected_schema_digest),
+        initialize_platform(
+            pool,
+            ready_path,
+            marker,
+            expected_schema_digest,
+            provider_pool,
+            encryption_key,
+            wave1_host,
+            wave2_host,
+        ),
     )
     .await
     {
@@ -115,7 +147,12 @@ async fn initialize_platform(
     ready_path: PathBuf,
     marker: FreshV4ReadyMarker,
     expected_schema_digest: DigestHex,
+    provider_pool: Option<SqlitePool>,
+    encryption_key: [u8; 32],
+    wave1_host: Arc<dyn Wave1HostPort>,
+    wave2_host: Arc<dyn Wave2HostPort>,
 ) -> anyhow::Result<Arc<AgentPlatform>> {
+    validate_ready_marker(&marker, &expected_schema_digest)?;
     validate_schema_metadata(&pool, &marker, &expected_schema_digest).await?;
     // Bind the opened pool to the same immutable marker that was inspected
     // before the connection was established. The application lock normally
@@ -158,27 +195,60 @@ async fn initialize_platform(
         availability_evidence_revision: C7_AVAILABILITY_REVISION.to_owned(),
     };
 
-    let registrations = bundled_registrations()?;
+    let registrations = bundled_registrations(wave1_host, wave2_host)?;
 
     // Runtime process supervision is real and shared by all v4 Sessions. Its
     // constructor is inert: no Tokio task or child process exists until a
-    // Session is launched.
-    //
-    // AppServices currently exposes ModelInvokeService, but that public API is
-    // not a ChatBrokerPort and cannot supply the broker's exact route resolver,
-    // credential lease, causality gate, six-adapter set, and sole-retry
-    // boundary. Adapting it here would bypass those contracts. Keep this
-    // bounded, task-free broker fail-closed until a composed public
-    // ChatModelBroker factory is available; it never routes through legacy
-    // Nomi or invents a provider fallback.
+    // Session is launched. Compose the broker from exact v4 route records,
+    // provider/connection repositories, a durable Session facts gate, and a
+    // single-attempt provider transport.
+    let sessions = Arc::new(AgentSessionStore::from_pool(pool.clone()).await?);
+    let operation_claims = Arc::new(SqliteChatOperationClaimStore::new(sessions.clone()));
+    let causality_gate = Arc::new(ProductionChatCausalityGate::new(
+        sessions.clone(),
+        operation_claims,
+        ChatExecutionAuthority::Primary,
+    ));
+    let broker = match provider_pool {
+        Some(provider_pool) => {
+            let composition = ChatBrokerHostComposition::new(
+                pool.clone(),
+                provider_pool,
+                encryption_key,
+                ConnectionCredentialLeaseRegistry::new(),
+            );
+            let model_invoke = composition.build_model_invoke(
+                nomifun_net::http_client_no_redirect()
+                    .map_err(|error| anyhow::anyhow!("build provider HTTP client: {error}"))?,
+            );
+            composition.build_broker(
+                causality_gate,
+                model_invoke,
+                nomifun_chat_model_broker::BrokerRetryPolicy::default(),
+            )?
+        }
+        None => super::chat_broker_host::build_unconfigured_broker(
+            causality_gate,
+            encryption_key,
+            nomifun_chat_model_broker::BrokerRetryPolicy::default(),
+        )?,
+    };
     let supervisor = Arc::new(CodexRuntimeSupervisor::new());
-    let broker: Arc<dyn ChatBrokerPort> = Arc::new(ProviderRouteRequiredBroker);
-    let mut config = AgentPlatformConfig::with_supervisor(
+    let runtime_delegate = Arc::new(SupervisedCodexRuntimePort::new(supervisor));
+    let runtime_bridge = Arc::new(RuntimeStartTurnBrokerBridge::new(
+        Arc::clone(&sessions),
+        broker.clone(),
+    ));
+    let runtime = Arc::new(BrokerBackedRuntimePort::new(
+        runtime_delegate,
+        runtime_bridge,
+    ));
+    let mut config = AgentPlatformConfig::with_runtime(
         pool,
         policy,
         release,
         kernel_environment,
-        supervisor,
+        runtime,
         broker,
     );
     config.initial_plugins = registrations;
@@ -190,6 +260,8 @@ async fn initialize_platform(
 }
 
 fn bundled_registrations(
+    wave1_host: Arc<dyn Wave1HostPort>,
+    wave2_host: Arc<dyn Wave2HostPort>,
 ) -> anyhow::Result<Vec<nomifun_agent_kernel::PluginRegistration>> {
     let target_specs = nomifun_agent_domain_support::c7_package_specs();
     let model_media_specs = target_specs
@@ -209,13 +281,13 @@ fn bundled_registrations(
         &mut registrations,
         "Wave 1",
         &nomifun_agent_domain_wave1::PACKAGE_IDS,
-        nomifun_agent_domain_wave1::registrations(),
+        nomifun_agent_domain_wave1::registrations_with_host_port(wave1_host),
     )?;
     append_wave_registrations(
         &mut registrations,
         "Wave 2",
         &nomifun_agent_domain_wave2::PACKAGE_IDS,
-        nomifun_agent_domain_wave2::registrations(),
+        nomifun_agent_domain_wave2::registrations_with_host_port(wave2_host),
     )?;
     append_wave_registrations(
         &mut registrations,
@@ -227,7 +299,9 @@ fn bundled_registrations(
         &mut registrations,
         "Wave 4",
         &nomifun_agent_domain_wave4::PACKAGE_IDS,
-        nomifun_agent_domain_wave4::registrations(),
+        nomifun_agent_domain_wave4::registrations_with_host_port(Arc::new(
+            Wave4ApplicationHost,
+        )),
     )?;
     append_wave_registrations(
         &mut registrations,
@@ -365,130 +439,6 @@ fn validate_bundled_registrations(
     Ok(())
 }
 
-struct ProviderRouteRequiredBroker;
-
-#[async_trait]
-impl ChatBrokerPort for ProviderRouteRequiredBroker {
-    async fn open_chat_stream(
-        &self,
-        _request: ChatModelRequest,
-    ) -> Result<ChatModelStream, ChatModelError> {
-        Err(ChatModelError::new(
-            ChatModelErrorCode::AdapterUnavailable,
-            "no canonical provider route is configured for this AgentSession",
-            ChatRetryDirective::Never,
-        ))
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MountEntryKind {
-    Missing,
-    RealFile,
-    Other,
-}
-
-struct FreshV4MountPaths {
-    database: PathBuf,
-    ready: PathBuf,
-}
-
-fn probe_fresh_v4_mount(
-    data_dir: &Path,
-) -> anyhow::Result<Option<FreshV4MountPaths>> {
-    let database = data_dir.join(FRESH_V4_DATABASE_FILE);
-    let ready = data_dir.join(FRESH_V4_READY_MARKER_FILE);
-    let initializing = data_dir.join(FRESH_V4_INITIALIZING_MARKER_FILE);
-    let ready_staging = data_dir.join(format!(
-        "{FRESH_V4_READY_MARKER_FILE}.staging"
-    ));
-    let parent_marker = data_dir
-        .parent()
-        .map(|parent| parent.join(FRESH_V4_PARENT_MARKER_FILE));
-
-    let ready_kind = classify_mount_entry(&ready)?;
-    let database_kind = classify_mount_entry(&database)?;
-    if classify_mount_entry(&initializing)? != MountEntryKind::Missing {
-        anyhow::bail!(
-            "Fresh-v4 initializing marker must be absent before Agent platform mount: {}",
-            initializing.display()
-        );
-    }
-    if classify_mount_entry(&ready_staging)? != MountEntryKind::Missing {
-        anyhow::bail!(
-            "Fresh-v4 ready marker staging path must be absent before Agent platform mount: {}",
-            ready_staging.display()
-        );
-    }
-    if let Some(parent_marker) = parent_marker
-        && classify_mount_entry(&parent_marker)? != MountEntryKind::Missing
-    {
-        anyhow::bail!(
-            "Fresh-v4 parent operation marker must be absent before Agent platform mount: {}",
-            parent_marker.display()
-        );
-    }
-
-    match (ready_kind, database_kind) {
-        (MountEntryKind::Missing, MountEntryKind::Missing) => Ok(None),
-        (MountEntryKind::RealFile, MountEntryKind::RealFile) => {
-            require_real_directory(data_dir)?;
-            Ok(Some(FreshV4MountPaths { database, ready }))
-        }
-        (MountEntryKind::Missing, MountEntryKind::RealFile) => {
-            anyhow::bail!(
-                "Fresh-v4 database exists without its ready marker: {}",
-                database.display()
-            );
-        }
-        (MountEntryKind::RealFile, MountEntryKind::Missing) => {
-            anyhow::bail!(
-                "Fresh-v4 ready marker exists without its database: {}",
-                ready.display()
-            );
-        }
-        _ => anyhow::bail!(
-            "Fresh-v4 database and ready marker must both be real regular files: database={}, ready={}",
-            database.display(),
-            ready.display()
-        ),
-    }
-}
-
-fn classify_mount_entry(path: &Path) -> anyhow::Result<MountEntryKind> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(MountEntryKind::Missing);
-        }
-        Err(error) => {
-            return Err(anyhow::Error::new(error).context(format!(
-                "inspect Fresh-v4 mount entry {}",
-                path.display()
-            )));
-        }
-    };
-    if metadata_is_link_or_reparse(&metadata) {
-        return Ok(MountEntryKind::Other);
-    }
-    Ok(if metadata.is_file() {
-        MountEntryKind::RealFile
-    } else {
-        MountEntryKind::Other
-    })
-}
-
-fn require_real_directory(path: &Path) -> anyhow::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
-        anyhow::bail!(
-            "Fresh-v4 canonical data root must be a real directory: {}",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
 fn read_ready_marker(path: &Path) -> anyhow::Result<FreshV4ReadyMarker> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata_is_link_or_reparse(&metadata) || !metadata.is_file() {
@@ -556,19 +506,6 @@ fn validate_ready_marker(
         );
     }
     Ok(())
-}
-
-async fn open_validated_pool(path: &Path) -> anyhow::Result<SqlitePool> {
-    let options = SqliteConnectOptions::new()
-        .filename(path)
-        .create_if_missing(false)
-        .foreign_keys(true)
-        .busy_timeout(Duration::from_secs(5));
-    Ok(SqlitePoolOptions::new()
-        .max_connections(5)
-        .acquire_timeout(Duration::from_secs(5))
-        .connect_with(options)
-        .await?)
 }
 
 type SchemaObject = (String, String, String, Option<String>);
@@ -807,6 +744,26 @@ fn current_runtime_target() -> RuntimeTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use futures_util::StreamExt;
+    use nomifun_agent_contracts::{
+        ChatRouteCandidate, ChatRouteFeature, ChatRouteIdentity, ChatRouteProtocol,
+        ChatRouteRecord, ChatRouteRecordSchema, ChatRouteTask,
+    };
+    use nomifun_chat_model_broker::{
+        BrokerRetryPolicy, ChatCausality, ChatCausalityGate, ChatModelError,
+        ChatModelErrorCode, ChatProtocol, ProviderIdRef,
+        ProductionProviderRepository as ProductionProviderRepositoryPort,
+    };
+    use nomifun_common::encrypt_string;
+    use nomifun_db::{
+        CreateProviderParams, IProviderRepository, NewProviderModel,
+        NewProviderModelCapability, SqliteProviderRepository,
+    };
+    use super::super::chat_broker_host::{
+        ChatBrokerHostComposition, ConnectionCredentialLeaseRegistry,
+    };
+    use std::collections::BTreeSet;
 
     fn valid_ready_marker() -> FreshV4ReadyMarker {
         FreshV4ReadyMarker {
@@ -842,7 +799,12 @@ mod tests {
 
     #[test]
     fn bundled_registration_inventory_is_complete_and_unique() {
-        let registrations = bundled_registrations().unwrap();
+        let registrations =
+            bundled_registrations(
+                nomifun_agent_domain_wave1::unconfigured_host_port(),
+                Arc::new(Wave2ApplicationHost::new()),
+            )
+                .unwrap();
         let target_specs = nomifun_agent_domain_support::c7_package_specs();
         validate_bundled_registrations(&registrations, &target_specs)
             .unwrap();
@@ -922,25 +884,6 @@ mod tests {
         .is_err());
     }
 
-    #[test]
-    fn mount_probe_rejects_partial_and_in_progress_roots() {
-        let directory = tempfile::tempdir().unwrap();
-        let data_dir = directory.path().join("data");
-        std::fs::create_dir(&data_dir).unwrap();
-        assert!(probe_fresh_v4_mount(&data_dir).unwrap().is_none());
-
-        std::fs::write(data_dir.join(FRESH_V4_DATABASE_FILE), []).unwrap();
-        assert!(probe_fresh_v4_mount(&data_dir).is_err());
-
-        std::fs::remove_file(data_dir.join(FRESH_V4_DATABASE_FILE)).unwrap();
-        std::fs::write(
-            data_dir.join(FRESH_V4_INITIALIZING_MARKER_FILE),
-            b"{}",
-        )
-        .unwrap();
-        assert!(probe_fresh_v4_mount(&data_dir).is_err());
-    }
-
     #[tokio::test]
     async fn initialization_failure_closes_the_owned_pool() {
         let pool = SqlitePoolOptions::new()
@@ -954,10 +897,14 @@ mod tests {
             .unwrap();
         let observer = pool.clone();
         let result = initialize_platform_with_cleanup(
-            pool,
+            pool.clone(),
             PathBuf::from("missing-ready-marker"),
             valid_ready_marker(),
             canonical_schema_manifest_digest().unwrap(),
+            Some(pool),
+            [0; 32],
+            nomifun_agent_domain_wave1::unconfigured_host_port(),
+            Arc::new(Wave2ApplicationHost::new()),
         )
         .await;
         assert!(result.is_err());
@@ -997,15 +944,18 @@ mod tests {
             .bootstrap(&data_dir, APPLICATION_BUILD_IDENTITY, &[])
             .await
             .unwrap();
-        let platform = initialize_platform_with_cleanup(
-            open_validated_pool(
-                &data_dir.join(FRESH_V4_DATABASE_FILE),
-            )
+        let pool = open_validated_pool(&data_dir.join(FRESH_V4_DATABASE_FILE))
             .await
-            .unwrap(),
+            .unwrap();
+        let platform = initialize_platform_with_cleanup(
+            pool.clone(),
             data_dir.join(FRESH_V4_READY_MARKER_FILE),
             outcome.ready_marker,
             canonical_schema_manifest_digest().unwrap(),
+            Some(pool),
+            [0; 32],
+            nomifun_agent_domain_wave1::unconfigured_host_port(),
+            Arc::new(Wave2ApplicationHost::new()),
         )
         .await
         .unwrap();
@@ -1028,5 +978,242 @@ mod tests {
             package_rows.len()
         );
         platform.pool().close().await;
+    }
+
+    struct AllowChatGate;
+
+    #[async_trait]
+    impl ChatCausalityGate for AllowChatGate {
+        async fn authorize(&self, _causality: &ChatCausality) -> Result<(), ChatModelError> {
+            Ok(())
+        }
+    }
+
+    async fn production_chat_fixture(
+        status: u16,
+    ) -> (
+        nomifun_chat_model_broker::ChatModelStream,
+        wiremock::MockServer,
+    ) {
+        let server = wiremock::MockServer::start().await;
+        let body = if status == 200 {
+            "event: response.created\ndata: {\"id\":\"host-response\"}\n\n\
+             event: text.delta\ndata: {\"text\":\"host success\"}\n\n\
+             event: usage\ndata: {\"input_tokens\":1,\"output_tokens\":2}\n\n\
+             event: response.completed\ndata: {\"finish_reason\":\"stop\"}\n\n"
+        } else {
+            "{\"error\":{\"message\":\"provider unavailable\"}}"
+        };
+        let mut response = wiremock::ResponseTemplate::new(status);
+        response = if status == 200 {
+            response
+                .set_body_raw(body, "text/event-stream")
+                .insert_header("cache-control", "no-cache")
+        } else {
+            response.set_body_raw(body, "application/json")
+        };
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/chat"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+
+        let v4_dir = tempfile::tempdir().expect("v4 temp root");
+        nomifun_v4_root::FreshV4Coordinator::default()
+            .bootstrap(v4_dir.path(), APPLICATION_BUILD_IDENTITY, &[])
+            .await
+            .expect("v4 root");
+        let v4_pool = super::open_validated_pool(
+            &v4_dir.path().join(FRESH_V4_DATABASE_FILE),
+        )
+        .await
+        .expect("v4 pool");
+        let encrypted =
+            encrypt_string(r#"{"api_keys":["host-test-key"]}"#, &[0x41; 32])
+                .expect("encrypted credentials");
+        let capabilities = [NewProviderModelCapability {
+            task: "chat",
+            traits: "[]",
+            protocol: "openai.chat_text",
+            connection_role: "default",
+            endpoint: Some("/chat"),
+            provider_params: r#"{"temperature":0.25}"#,
+            output_limit: Some(64),
+            ..Default::default()
+        }];
+        let (provider, _) = SqliteProviderRepository::new(v4_pool.clone())
+            .create(
+                CreateProviderParams {
+                    provider_id: None,
+                    platform: "openai",
+                    name: "host test provider",
+                    base_url: &server.uri(),
+                    auth_scheme: "bearer",
+                    credentials_encrypted: &encrypted,
+                    enabled: true,
+                    bedrock_config: None,
+                    sort_order: Some(0),
+                },
+                &NewProviderModel {
+                    model: "host-test-model",
+                    enabled: true,
+                    sort_order: 0,
+                    description: None,
+                    capabilities: &capabilities,
+                },
+                &[],
+            )
+            .await
+            .expect("provider graph");
+        let provider_id = ProviderIdRef::from(provider.provider_id.clone());
+        let provider_repository =
+            super::super::chat_broker_host::ProductionProviderRepository::new(
+                v4_pool.clone(),
+            );
+        let provider_record = provider_repository
+            .find_provider(&provider_id)
+            .await
+            .expect("provider digest")
+            .expect("provider row");
+
+        sqlx::query(
+            "INSERT INTO agent_presets \
+             (preset_id, owner_ref_json, source_json, display_json, \
+              current_stable_revision, created_at) \
+             VALUES (?, '{}', '{}', '{}', 1, 0)",
+        )
+        .bind("host-preset")
+        .execute(&v4_pool)
+        .await
+        .expect("preset row");
+        sqlx::query(
+            "INSERT INTO agent_preset_revisions \
+             (revision_id, preset_id, revision_no, schema_version, \
+              editor_document_json, revision_digest, created_by, created_at, reason) \
+             VALUES (?, ?, 1, '1.0.0', '{}', ?, 'host-test-owner', 0, '')",
+        )
+        .bind("host-preset@1")
+        .bind("host-preset")
+        .bind("a".repeat(64))
+        .execute(&v4_pool)
+        .await
+        .expect("revision row");
+        let route_record = ChatRouteRecord {
+            schema: ChatRouteRecordSchema::V1,
+            task: ChatRouteTask::AgentChat,
+            primary: ChatRouteCandidate {
+                model_route_id: "host-route".into(),
+                model_route_revision: 1,
+                provider_id: provider.provider_id,
+                model: "host-test-model".to_owned(),
+                protocol: ChatRouteProtocol::OpenaiChat,
+                connection_config_ref: "default".into(),
+                config_revision_digest: provider_record.config_revision_digest,
+                credential_ref: "host-credential".to_owned(),
+                features: BTreeSet::from([
+                    ChatRouteFeature::TextInput,
+                    ChatRouteFeature::ImageInput,
+                    ChatRouteFeature::AudioInput,
+                    ChatRouteFeature::TextOutput,
+                    ChatRouteFeature::ToolCalls,
+                    ChatRouteFeature::Reasoning,
+                    ChatRouteFeature::StructuredOutput,
+                ]),
+            },
+            failovers: Vec::new(),
+        };
+        sqlx::query(
+            "INSERT INTO agent_preset_model_routes \
+             (revision_id, model_task, route_json) VALUES (?, ?, ?)",
+        )
+        .bind("host-preset@1")
+        .bind("agent_chat")
+        .bind(route_record.to_canonical_json().expect("route JSON"))
+        .execute(&v4_pool)
+        .await
+        .expect("route row");
+
+        let composition = ChatBrokerHostComposition::new(
+            v4_pool.clone(),
+            v4_pool.clone(),
+            [0x41; 32],
+            ConnectionCredentialLeaseRegistry::new(),
+        );
+        let broker = composition
+            .build_broker(
+                Arc::new(AllowChatGate),
+                composition.build_model_invoke(
+                    reqwest::Client::builder()
+                        .no_proxy()
+                        .build()
+                        .expect("HTTP client"),
+                ),
+                BrokerRetryPolicy {
+                    max_total_attempts: 1,
+                    max_attempts_per_route: 1,
+                },
+            )
+            .expect("production broker");
+        let fixture = nomifun_chat_model_broker::recorded_conformance_fixtures()
+            .into_iter()
+            .find(|fixture| fixture.protocol == ChatProtocol::OpenaiChat)
+            .expect("OpenAI Chat fixture");
+        let mut request = fixture.request;
+        let identity = ChatRouteIdentity::new(
+            "host-preset@1",
+            nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+            "host-route".into(),
+            1,
+        );
+        request.route = identity.clone();
+        request.causality.route_identity = identity;
+        let stream = broker
+            .open_chat_stream(request)
+            .await
+            .expect("broker stream");
+        (stream, server)
+    }
+
+    #[tokio::test]
+    async fn production_host_chat_broker_streams_a_real_provider_response() {
+        let (stream, server) = production_chat_fixture(200).await;
+        let events = stream.collect::<Vec<_>>().await;
+        assert!(events.iter().all(Result::is_ok));
+        assert!(events.iter().any(|event| {
+            event.as_ref().is_ok_and(|event| {
+                matches!(
+                    event.event,
+                    nomifun_chat_model_broker::ChatModelEvent::OutputTextDelta { .. }
+                )
+            })
+        }));
+        assert!(events.last().is_some_and(|event| {
+            event
+                .as_ref()
+                .is_ok_and(|event| event.event.is_terminal())
+        }));
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1);
+        let body: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("request JSON");
+        assert_eq!(body["temperature"], 0.25);
+        assert_eq!(body["max_tokens"], 64);
+    }
+
+    #[tokio::test]
+    async fn production_host_chat_broker_reports_provider_unavailable_without_fake_output() {
+        let (stream, server) = production_chat_fixture(503).await;
+        let events = stream.collect::<Vec<_>>().await;
+        let error = events
+            .last()
+            .expect("terminal broker error")
+            .as_ref()
+            .expect_err("provider failure");
+        assert_eq!(error.code, ChatModelErrorCode::ProviderUnavailable);
+        assert!(events.iter().all(|event| event.is_err()));
+        assert_eq!(
+            server.received_requests().await.expect("requests").len(),
+            1
+        );
     }
 }

@@ -9,6 +9,7 @@ pub mod deletion;
 pub mod digest;
 pub mod event;
 pub mod manifest;
+pub mod model_route;
 pub mod package;
 pub mod preset;
 pub mod primitives;
@@ -26,6 +27,7 @@ pub use digest::{
 };
 pub use event::*;
 pub use manifest::*;
+pub use model_route::*;
 pub use package::*;
 pub use preset::*;
 pub use primitives::*;
@@ -33,9 +35,9 @@ pub use remote::*;
 pub use root::*;
 pub use runtime::*;
 pub use schema::{
-    FRESH_V4_BASELINE_SQL, FRESH_V4_DATA_GENERATION, FRESH_V4_MIGRATION_HEAD,
-    FRESH_V4_PROJECTION_SCHEMA_VERSION, FreshV4SchemaManifestPayload, SchemaTableContract,
-    fresh_v4_schema_manifest_payload,
+    CHAT_ROUTE_RECORD_JSON_SCHEMA, FRESH_V4_BASELINE_SQL, FRESH_V4_DATA_GENERATION,
+    FRESH_V4_MIGRATION_HEAD, FRESH_V4_PROJECTION_SCHEMA_VERSION,
+    FreshV4SchemaManifestPayload, SchemaTableContract, fresh_v4_schema_manifest_payload,
 };
 pub use session::*;
 pub use validation::*;

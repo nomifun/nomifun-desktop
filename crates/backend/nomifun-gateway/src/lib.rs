@@ -35,6 +35,7 @@ pub mod computer_registry;
 // Pure support functions shared by multiple registered capability domains.
 // They do not dispatch tools and are not an alternate capability surface.
 mod id_schema;
+mod conversation_port;
 mod provider_support;
 mod terminal_support;
 
@@ -68,6 +69,10 @@ mod caps_terminal;
 mod caps_terminal_ext;
 mod caps_creative_studio;
 
-pub use deps::{CallerCtx, GatewayDeps};
+pub use conversation_port::{
+    ConversationCapabilityPort, ConversationCreateSpec, ConversationDeliveryReceipt,
+    DeliveryNotifyRegistration,
+};
+pub use deps::{CallerCtx, CompatibilityCapabilityHost};
 pub use registry::{Registry, Surface, ToolSpec};
 pub use server::GatewayMcpServer;

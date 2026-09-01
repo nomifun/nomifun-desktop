@@ -5,6 +5,8 @@ pub const FRESH_V4_DATA_GENERATION: u32 = 4;
 pub const FRESH_V4_MIGRATION_HEAD: u32 = 1;
 pub const FRESH_V4_PROJECTION_SCHEMA_VERSION: u32 = 1;
 pub const FRESH_V4_BASELINE_SQL: &str = include_str!("../schema/0001_fresh_v4.sql");
+pub const CHAT_ROUTE_RECORD_JSON_SCHEMA: &str =
+    include_str!("../schema/chat-route-record.v1.json");
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -112,6 +114,20 @@ const TABLES: &[(&str, &str, &str)] = &[
     ("agent_bindings", "platform.agent-preset", "fact"),
     ("remote_bindings", "plugin.remote-ingress", "fact"),
     ("installation_auth", "plugin.remote-ingress", "fact"),
+    ("providers", "platform.chat-model-broker", "fact"),
+    ("provider_models", "platform.chat-model-broker", "fact"),
+    (
+        "provider_connections",
+        "platform.chat-model-broker",
+        "fact",
+    ),
+    (
+        "provider_model_capabilities",
+        "platform.chat-model-broker",
+        "fact",
+    ),
+    ("client_preferences", "platform.host-configuration", "fact"),
+    ("system_settings", "platform.host-configuration", "fact"),
     (
         "agent_runtime_snapshots",
         "platform.agent-preset-compiler",
@@ -215,5 +231,39 @@ mod tests {
                 .iter()
                 .all(|(_, owner, class)| !owner.is_empty() && !class.is_empty())
         );
+    }
+
+    #[test]
+    fn chat_route_record_schema_is_strict_and_compilable() {
+        let schema: serde_json::Value =
+            serde_json::from_str(CHAT_ROUTE_RECORD_JSON_SCHEMA).expect("route JSON schema");
+        let validator = jsonschema::options()
+            .build(&schema)
+            .expect("route JSON schema must compile");
+        let record = serde_json::json!({
+            "schema": "nomifun.chat-route-record.v1",
+            "task": "agent_chat",
+            "primary": {
+                "model_route_id": "route-1",
+                "model_route_revision": 1,
+                "provider_id": "provider-1",
+                "model": "model-1",
+                "protocol": "openai_chat",
+                "connection_config_ref": "connection-1",
+                "config_revision_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "credential_ref": "credential-1",
+                "features": ["text_input", "text_output"]
+            },
+            "failovers": []
+        });
+        assert!(validator.is_valid(&record));
+        assert!(!validator.is_valid(&serde_json::json!("route-1")));
+        assert!(!validator.is_valid(&serde_json::json!({
+            "schema": "nomifun.chat-route-record.v1",
+            "task": "agent_chat",
+            "primary": record["primary"],
+            "failovers": [],
+            "unexpected": true
+        })));
     }
 }

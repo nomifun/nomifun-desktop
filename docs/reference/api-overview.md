@@ -89,9 +89,8 @@ Each group is owned by a specific crate. The base path is the actual URL prefix 
 | Connection probes (Bedrock, …) | `/api/bedrock/test-connection` | authenticated | [`nomifun-system/src/bedrock_probe/routes.rs`](../../crates/backend/nomifun-system/src/bedrock_probe/routes.rs) |
 | Shell helpers + STT | `/api/shell/*`, `/api/stt` | authenticated | [`nomifun-shell/src/routes.rs`](../../crates/backend/nomifun-shell/src/routes.rs) |
 | Public assets (logos) | `/api/assets/logos/*` | public | [`nomifun-assets/src/routes.rs`](../../crates/backend/nomifun-assets/src/routes.rs) |
-| Public MCP front door | `/mcp/*` | installation token | [`nomifun-public/src/router.rs`](../../crates/backend/nomifun-public/src/router.rs) |
-| Public MCP agent front door | `/mcp-agent/*` | installation token | [`nomifun-public/src/router.rs`](../../crates/backend/nomifun-public/src/router.rs) |
-| Remote capability REST API | `/v1/*` | installation token | [`nomifun-public/src/rest.rs`](../../crates/backend/nomifun-public/src/rest.rs) |
+| Canonical Remote MCP front door | `/mcp` | installation token | [`nomifun-public/src/canonical.rs`](../../crates/backend/nomifun-public/src/canonical.rs) |
+| Canonical Remote REST API | `/api/remote/open`, `/api/remote/turn`, `/api/remote/observe`, `/api/remote/cancel` | installation token | [`nomifun-app/src/router/remote_rest.rs`](../../crates/backend/nomifun-app/src/router/remote_rest.rs) |
 | Realtime WebSocket | `/ws` | authenticated (token in `Sec-WebSocket-Protocol` or query) | [`nomifun-realtime/src/handler.rs`](../../crates/backend/nomifun-realtime/src/handler.rs) |
 
 For the exact set of methods on each route, read the corresponding `routes.rs` file — every router declares its routes inline.

@@ -33,13 +33,19 @@
         "snapshot_id": "snapshot-gemini",
         "snapshot_digest": "4444444444444444444444444444444444444444444444444444444444444444"
       },
-      "model_route_revision": 5,
+      "route_identity": {
+        "preset_revision_id": "fixture@1",
+        "model_task": "agent_chat",
+        "route_id": "route-gemini-primary",
+        "route_revision": 5
+      },
       "operation_id": "model-gemini-0001"
     },
     "route": {
-      "model_route_id": "route-gemini-primary",
-      "model_route_revision": 5,
-      "task": "agent_chat"
+      "preset_revision_id": "fixture@1",
+      "model_task": "agent_chat",
+      "route_id": "route-gemini-primary",
+      "route_revision": 5
     },
     "input": {
       "instructions": ["Use multimodal evidence."],

@@ -71,9 +71,10 @@ Two things that are *not* conversation engines but are often confused with one:
   run as ordinary child processes inside `nomifun-terminal` PTY sessions. The
   backend does not interpret their protocol or own their turn state; it owns the
   pseudo-terminal. See [`../guides/terminal.md`](../guides/terminal.md).
-- **Public capability fronts.** External agents and scripts call *into* NomiFun
-  through installation-token authenticated `/mcp`, `/mcp-agent`, or `/v1`. That is
-  the inbound direction: NomiFun is the tool provider, not the engine host.
+- **Canonical Remote ingress.** External agents and scripts call *into*
+  NomiFun through installation-token authenticated `/mcp` or `/api/remote/*`.
+  The four operations manipulate an explicit AgentSession; NomiFun is the
+  runtime host, not a generic Gateway tool registry.
 
 ## MCP And Tool Injection
 
@@ -129,9 +130,9 @@ UI request
   -> renderer stream handlers
 ```
 
-Every conversation turn runs inside the process. Public remote capability calls
-enter through `nomifun-public` and the platform Gateway registry rather than the
-conversation HTTP route.
+Every conversation turn runs inside the process. Canonical Remote operations
+enter through `nomifun-public`/the Fresh-v4 REST adapter and delegate to
+`AgentPlatform` rather than the legacy Gateway registry.
 
 ## Design Notes
 

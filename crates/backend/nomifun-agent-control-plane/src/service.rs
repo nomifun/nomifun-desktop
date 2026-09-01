@@ -184,6 +184,7 @@ impl AgentControlPlane {
                 "web".into(),
             ]),
             model_route_refs: request.model_route_refs,
+            chat_route_records: request.chat_route_records,
             initial_capabilities: seed
                 .initial_capabilities
                 .iter()
@@ -523,6 +524,17 @@ impl AgentControlPlane {
             .collect()
     }
 
+    pub async fn get_remote_binding(
+        &self,
+        owner: &UserId,
+        binding_id: &str,
+    ) -> Result<Option<RemoteBindingDto>, ControlPlaneError> {
+        self.owned_remote_binding(owner, binding_id)
+            .await?
+            .map(|binding| wire_cast(&binding))
+            .transpose()
+    }
+
     pub async fn create_remote_binding(
         &self,
         owner: &UserId,
@@ -545,12 +557,9 @@ impl AgentControlPlane {
         binding_id: &str,
         request: UpdateRemoteBindingRequest,
     ) -> Result<RemoteBindingDto, ControlPlaneError> {
-        let binding_id = RemoteBindingId::from(binding_id.to_owned());
         let existing = self
-            .store
-            .get_remote_binding(&binding_id)
+            .owned_remote_binding(owner, binding_id)
             .await?
-            .filter(|binding| &binding.owner_user_id == owner)
             .ok_or_else(|| not_found("RemoteBinding"))?;
         let agent_binding: AgentBindingValue = wire_cast(&request.agent_binding)?;
         self.validate_agent_binding(owner, &agent_binding).await?;
@@ -590,6 +599,18 @@ impl AgentControlPlane {
         reason: Option<String>,
     ) -> Result<nomifun_api_types::AgentPresetEditorTestPlanDto, ControlPlaneError> {
         editor_test_plan(draft_state, preview, draft, reason)
+    }
+
+    async fn owned_remote_binding(
+        &self,
+        owner: &UserId,
+        binding_id: &str,
+    ) -> Result<Option<RemoteBinding>, ControlPlaneError> {
+        Ok(self
+            .store
+            .get_remote_binding(&RemoteBindingId::from(binding_id.to_owned()))
+            .await?
+            .filter(|binding| &binding.owner_user_id == owner))
     }
 
     async fn create_with_initial_revision(
@@ -649,6 +670,8 @@ impl AgentControlPlane {
                 violation.message,
             )
         })?;
+        let canonical_document: nomifun_api_types::AgentPresetDocumentDto =
+            wire_cast(&revision.payload)?;
         let stored = StoredPreset {
             preset: AgentPreset {
                 preset_id,
@@ -663,7 +686,12 @@ impl AgentControlPlane {
             .store
             .insert_preset_with_revision(stored, revision.clone(), snapshot)
             .await?;
-        editor_response(stored, Some(revision), document, transient_template_key)
+        editor_response(
+            stored,
+            Some(revision),
+            canonical_document,
+            transient_template_key,
+        )
     }
 
     async fn owned_preset(
@@ -779,6 +807,7 @@ fn empty_document() -> nomifun_api_types::AgentPresetDocumentDto {
         schema_version: "1.0.0".into(),
         surfaces: BTreeSet::from(["desktop".into(), "remote".into(), "web".into()]),
         model_route_refs: BTreeMap::new(),
+        chat_route_records: BTreeMap::new(),
         initial_capabilities: Vec::new(),
         on_demand_capabilities: Vec::new(),
         skill_bindings: Vec::new(),
@@ -1078,6 +1107,7 @@ mod tests {
                     description: None,
                     resource_bindings: Vec::new(),
                     model_route_refs: BTreeMap::new(),
+                    chat_route_records: BTreeMap::new(),
                 },
             )
             .await
@@ -1121,5 +1151,80 @@ mod tests {
             .await
             .unwrap();
         assert!(reloaded.draft.source_template_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_remote_binding_returns_only_the_authenticated_owners_binding() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
+        let templates = OfficialTemplateCatalog::load().unwrap();
+        let compiler = PresetPreviewCompiler::new(
+            CompilerReleaseInputs {
+                resolver_version: VersionString::from("1.0.0"),
+                runtime_protocol_version: VersionString::from("1.0.0"),
+                runtime_feature_inventory_digest: DigestHex::from("runtime-features"),
+                canonical_schema_manifest_digest: DigestHex::from("schema"),
+                target_contribution_manifest_digest: DigestHex::from("contributions"),
+                availability_evidence_revision: "fixture".into(),
+            },
+            templates.clone(),
+        );
+        let control_plane = AgentControlPlane::new(
+            store.clone(),
+            catalog,
+            templates,
+            compiler,
+        );
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let other_owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        let binding_id = RemoteBindingId::from("remote-binding-1");
+        store
+            .insert_remote_binding(RemoteBinding {
+                remote_binding_id: binding_id.clone(),
+                owner_user_id: owner.clone(),
+                name: "Remote".into(),
+                agent_binding: AgentBindingValue {
+                    preset_revision_ref: PresetRevisionRef {
+                        preset_id: AgentPresetId::from("preset-1"),
+                        revision: 1,
+                        revision_digest: DigestHex::from("revision"),
+                    },
+                    resolved_snapshot_ref:
+                        nomifun_agent_contracts::ResolvedSnapshotRef {
+                            snapshot_id:
+                                nomifun_agent_contracts::ResolvedSnapshotId::from("snapshot-1"),
+                            snapshot_digest: DigestHex::from("snapshot"),
+                        },
+                    typed_resource_bindings: Vec::new(),
+                    binding_version: 1,
+                },
+            })
+            .await
+            .unwrap();
+
+        let found = control_plane
+            .get_remote_binding(&owner, binding_id.as_ref())
+            .await
+            .unwrap()
+            .expect("the owner must see its remote binding");
+        assert_eq!(found.remote_binding_id, binding_id.as_ref());
+        assert_eq!(found.owner_user_id, owner.as_ref());
+        assert_eq!(found.name, "Remote");
+
+        assert!(
+            control_plane
+                .get_remote_binding(&other_owner, binding_id.as_ref())
+                .await
+                .unwrap()
+                .is_none(),
+            "a binding owned by another user must be indistinguishable from a missing binding"
+        );
+        assert!(
+            control_plane
+                .get_remote_binding(&owner, "missing-remote-binding")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }
