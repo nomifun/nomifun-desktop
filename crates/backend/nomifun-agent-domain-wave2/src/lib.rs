@@ -24,14 +24,16 @@ use nomifun_agent_contracts::{
     PluginBootState, PluginContextDescriptor, PluginDesiredState, PluginEffectiveState,
     PluginIdentityDescriptor, PluginMountId, PluginRegistrarDescriptor,
     PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind,
-    PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod,
-    OperationId, PrincipalRef, ResolvedSnapshotRef, ResourceKind, RuntimeTarget, ScopeKey,
-    StrictJsonValue, ToolPresentationKind, TypedResourceBindings, ValidatedPluginConfig,
-    VersionString, CAPABILITY_UNAVAILABLE_ON_PLATFORM, PRESET_RESOURCE_NOT_BOUND,
-    RESOURCE_OWNER_MISMATCH, digest_payload,
+    PluginSourceMetadata, PluginStateCompareAndSwapOutcome, PluginStateEntry,
+    PluginStateHandleDescriptor, PluginStateMethod, OperationId, PrincipalRef,
+    ResolvedSnapshotRef, ResourceKind, RuntimeTarget, ScopeKey, StateKey, StrictJsonValue,
+    ToolPresentationKind, TypedResourceBindings, ValidatedPluginConfig, VersionString,
+    CAPABILITY_UNAVAILABLE_ON_PLATFORM, PRESET_RESOURCE_NOT_BOUND, RESOURCE_OWNER_MISMATCH,
+    digest_payload,
 };
 use nomifun_agent_kernel::{
-    CapabilityHandler, CapabilityInvocationContext, KernelError, PluginRegistration,
+    CapabilityHandler, CapabilityInvocationContext, HostPluginStateApi, KernelError,
+    PluginRegistration, PluginStateError, PluginStateHandle,
 };
 
 pub const CONTRACT_VERSION: &str = "1.0.0";
@@ -226,6 +228,68 @@ pub const CAPABILITY_UNAVAILABLE: &str = "CAPABILITY_UNAVAILABLE";
 pub const INVALID_PAYLOAD: &str = "INVALID_PAYLOAD";
 pub const RESOURCE_NOT_FOUND: &str = "RESOURCE_NOT_FOUND";
 
+/// The narrow state surface exposed to a Wave 2 owner.
+///
+/// The owner can inspect its Kernel-authorized namespace and perform an
+/// atomic compare-and-swap transition, but it cannot receive a pool or a
+/// service locator. Read/modify/write state transitions must use CAS.
+#[derive(Clone)]
+pub struct Wave2StateHandle(PluginStateHandle);
+
+impl fmt::Debug for Wave2StateHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Wave2StateHandle")
+            .field("descriptor", self.descriptor())
+            .finish()
+    }
+}
+
+impl PartialEq for Wave2StateHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.descriptor() == other.descriptor()
+    }
+}
+
+impl Eq for Wave2StateHandle {}
+
+impl Wave2StateHandle {
+    fn new(handle: PluginStateHandle) -> Self {
+        Self(handle)
+    }
+
+    pub fn descriptor(&self) -> &PluginStateHandleDescriptor {
+        self.0.descriptor()
+    }
+
+    pub async fn get(
+        &self,
+        scope_key: &ScopeKey,
+        state_key: &StateKey,
+    ) -> Result<Option<PluginStateEntry>, PluginStateError> {
+        self.0.get(scope_key, state_key).await
+    }
+
+    pub async fn compare_and_swap(
+        &self,
+        scope_key: &ScopeKey,
+        state_key: &StateKey,
+        expected_revision: u64,
+        state_format_version: &VersionString,
+        value: Option<StrictJsonValue>,
+    ) -> Result<PluginStateCompareAndSwapOutcome, PluginStateError> {
+        self.0
+            .compare_and_swap(
+                scope_key,
+                state_key,
+                expected_revision,
+                state_format_version,
+                value,
+            )
+            .await
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wave2HostContext {
     /// The authenticated principal used for owner checks; adapters must not
@@ -242,6 +306,9 @@ pub struct Wave2HostContext {
     /// The frozen, authorization-bearing host bindings selected for this
     /// invocation. The application resolves these bindings; the adapter
     /// receives them without any pool or service-bag access.
+    /// The state handle is similarly scoped to the mounted package and is
+    /// the only state surface exposed to the adapter.
+    pub state: Wave2StateHandle,
     pub resource_bindings: TypedResourceBindings,
 }
 
@@ -1212,6 +1279,7 @@ impl CapabilityHandler for Wave2CapabilityHandler {
                         registry_generation: context.registry_generation,
                         capability_id: self.capability_id.clone(),
                         action_id: context.action_id,
+                        state: Wave2StateHandle::new(context.state),
                         resource_bindings: context.resource_bindings,
                     },
                     operation,
@@ -1639,11 +1707,198 @@ fn host_port_binding() -> Result<HostPortBindingDescriptor, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::task::{Context, Poll, Waker};
+
     use super::*;
     use nomifun_agent_kernel::{
-        InMemoryPluginStatePersistence, KernelRegistry, MaterializationPolicy,
-        Materializer,
+        AgentPresetCompiler, CapabilityInvocationRequest, CompileRequest, CompilerEnvironment,
+        InMemoryPluginStatePersistence, KernelRegistry, MaterializationPolicy, Materializer,
+        SessionCapabilityState,
     };
+    use nomifun_agent_contracts::{
+        AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, CapabilityExposure,
+        CapabilityRef, CapabilitySelection, DigestHex, PresetRevisionRef, ResourceBindingId,
+        RuntimeProfileKind, UserId, TypedResourceBinding,
+    };
+
+    struct StateCaptureHostPort {
+        captured: Arc<Mutex<Option<Wave2StateHandle>>>,
+    }
+
+    impl Wave2HostPort for StateCaptureHostPort {
+        fn invoke<'a>(
+            &'a self,
+            request: Wave2HostRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'a>>
+        {
+            let captured = Arc::clone(&self.captured);
+            let state = request.context.state;
+            Box::pin(std::future::ready({
+                *captured.lock().expect("state capture mutex") = Some(state);
+                Ok(empty_object())
+            }))
+        }
+    }
+
+    fn poll_ready<F: Future>(future: F) -> F::Output {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = std::pin::pin!(future);
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("test future must complete without an executor"),
+        }
+    }
+
+    fn test_state_handle() -> Wave2StateHandle {
+        static HANDLE: OnceLock<Wave2StateHandle> = OnceLock::new();
+        HANDLE.get_or_init(capture_state_handle).clone()
+    }
+
+    fn capture_state_handle() -> Wave2StateHandle {
+        let captured = Arc::new(Mutex::new(None));
+        let registry = KernelRegistry::new(
+            MaterializationPolicy::stable(CONTRACT_VERSION),
+            Arc::new(InMemoryPluginStatePersistence::new()),
+        )
+        .expect("kernel registry");
+        let materialized = registry
+            .replace_all(
+                registrations_with_host_port(Arc::new(StateCaptureHostPort {
+                    captured: Arc::clone(&captured),
+                }))
+                .expect("Wave 2 registrations"),
+            )
+            .expect("publish Wave 2 registrations");
+
+        let principal = nomifun_agent_contracts::PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: "wave2-state-owner".to_owned(),
+        };
+        let binding = TypedResourceBinding {
+            binding_id: ResourceBindingId::from("wave2-state-workspace"),
+            resource_kind: nomifun_agent_contracts::ResourceKind::from("workspace"),
+            resource_id: nomifun_agent_contracts::ResourceId::from("wave2-state-resource"),
+            owner_id: principal.principal_id.clone(),
+            operations: BTreeSet::from(["read".to_owned()]),
+            connection_config_ref: None,
+            typed_parameters: BTreeMap::new(),
+        };
+        let action = action_id("fs.read").expect("fs.read action");
+        let payload = AgentPresetRevisionPayload {
+            schema_version: VersionString::from(CONTRACT_VERSION),
+            surfaces: BTreeSet::from(["desktop".to_owned()]),
+            model_route_refs: BTreeMap::new(),
+            chat_route_records: BTreeMap::new(),
+            initial_capabilities: vec![CapabilitySelection {
+                capability: CapabilityRef {
+                    id: CapabilityId::from("fs.read"),
+                    version: VersionString::from(CONTRACT_VERSION),
+                },
+                required: true,
+                exposure: CapabilityExposure::Advertised,
+                action_allowlist: BTreeSet::from([action.clone()]),
+                resource_binding_refs: vec![binding.binding_id.clone()],
+                destination_constraints: BTreeSet::new(),
+                context_budget_override: None,
+                tool_budget_override: None,
+                config: empty_object(),
+            }],
+            on_demand_capabilities: Vec::new(),
+            skill_bindings: Vec::new(),
+            resource_bindings: vec![binding],
+            persona: "Wave 2 state test".to_owned(),
+            instructions: "Invoke the selected capability.".to_owned(),
+            context_policy: empty_object(),
+            execution_constraints: empty_object(),
+            runtime_budget: empty_object(),
+        };
+        let revision = AgentPresetRevision {
+            reference: PresetRevisionRef {
+                preset_id: AgentPresetId::from("wave2-state-test"),
+                revision: 1,
+                revision_digest: digest_payload(&payload).expect("revision digest"),
+            },
+            payload,
+            created_by: UserId::from(principal.principal_id.clone()),
+            created_at_ms: 1,
+            reason: None,
+        };
+        let snapshot = AgentPresetCompiler::compile(
+            &materialized,
+            &CompilerEnvironment {
+                resolver_version: VersionString::from(CONTRACT_VERSION),
+                required_runtime_protocol_version: VersionString::from(CONTRACT_VERSION),
+                required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+                runtime_feature_inventory_digest: DigestHex::from("runtime"),
+                available_runtime_features: BTreeSet::new(),
+                canonical_schema_manifest_digest: DigestHex::from("schema"),
+                target_contribution_manifest_digest: DigestHex::from("target"),
+                host_target: RuntimeTarget::from("windows-desktop-x64"),
+                host_surface: "desktop".to_owned(),
+                availability_evidence_revision: "wave2-state-test".to_owned(),
+            },
+            CompileRequest {
+                revision,
+                principal: principal.clone(),
+                scene: "wave2-state-test".to_owned(),
+                surface: "desktop".to_owned(),
+                audience: "test".to_owned(),
+                created_at_ms: 2,
+                resolver_run_id: OperationId::from("wave2-state-resolve"),
+            },
+        )
+        .expect("compile selected capability");
+        let active = SessionCapabilityState::new(&snapshot)
+            .snapshot()
+            .expect("initial active set");
+        let result = poll_ready(registry.invoke(
+            &snapshot,
+            &active,
+            CapabilityInvocationRequest {
+                principal: principal.clone(),
+                session_owner: principal,
+                agent_session_id: AgentSessionId::from("wave2-state-session"),
+                operation_id: OperationId::from("wave2-state-operation"),
+                idempotency_key: IdempotencyKey::from("wave2-state-idempotency"),
+                correlation_id: CorrelationId::from("wave2-state-correlation"),
+                resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
+                active_set_generation: active.generation,
+                capability_id: CapabilityId::from("fs.read"),
+                action_id: action,
+                resource_binding_ids: BTreeSet::from([ResourceBindingId::from(
+                    "wave2-state-workspace",
+                )]),
+                state_scope_key: ScopeKey::from("package:wave2-state-test"),
+                input: empty_object(),
+            },
+        ));
+        result.expect("state projection invocation");
+        captured
+            .lock()
+            .expect("state capture mutex")
+            .take()
+            .expect("host adapter received the state handle")
+    }
+
+    #[test]
+    fn kernel_projects_package_and_mount_scoped_state_handle_to_host_adapter() {
+        let state = capture_state_handle();
+        assert_eq!(
+            state.descriptor().package_id.as_ref(),
+            WORKSPACE_EXECUTION_PACKAGE_ID
+        );
+        assert_eq!(
+            state.descriptor().mount_id.as_ref(),
+            WORKSPACE_EXECUTION_MOUNT_ID
+        );
+        assert_eq!(
+            state.descriptor().methods,
+            PluginStateMethod::REQUIRED.into_iter().collect()
+        );
+    }
 
     #[test]
     fn registrations_have_unique_inventory_ids_and_exact_handler_coverage() {
@@ -1845,19 +2100,23 @@ mod tests {
             registry_generation: 7,
             capability_id: CapabilityId::from("fs.read"),
             action_id: ActionId::from("fs.read.invoke"),
+            state: test_state_handle(),
             resource_bindings: vec![binding.clone()],
         };
-        let wrong_family = Wave2HostRequest {
+        let wrong_family = match (Wave2HostRequest {
             context: context.clone(),
             operation: Wave2CapabilityOperation::Ssh {
                 input: empty_object(),
             },
-        }
+        })
         .into_typed()
-        .expect_err("fs.read cannot be routed through the SSH family");
+        {
+            Ok(_) => panic!("fs.read cannot be routed through the SSH family"),
+            Err(error) => error,
+        };
         assert_eq!(wrong_family.code, "ACTION_OPERATION_MISMATCH");
 
-        let missing_binding = Wave2HostRequest {
+        let missing_binding = match (Wave2HostRequest {
             context: Wave2HostContext {
                 resource_bindings: Vec::new(),
                 ..context.clone()
@@ -1865,12 +2124,15 @@ mod tests {
             operation: Wave2CapabilityOperation::WorkspaceExecution {
                 input: empty_object(),
             },
-        }
+        })
         .into_typed()
-        .expect_err("owner adapters must not receive an unbound action");
+        {
+            Ok(_) => panic!("owner adapters must not receive an unbound action"),
+            Err(error) => error,
+        };
         assert_eq!(missing_binding.code, PRESET_RESOURCE_NOT_BOUND);
 
-        let wrong_owner = Wave2HostRequest {
+        let wrong_owner = match (Wave2HostRequest {
             context: Wave2HostContext {
                 principal: PrincipalRef {
                     principal_id: "different-owner".to_owned(),
@@ -1882,12 +2144,15 @@ mod tests {
             operation: Wave2CapabilityOperation::WorkspaceExecution {
                 input: empty_object(),
             },
-        }
+        })
         .into_typed()
-        .expect_err("owner adapters must not receive another principal's binding");
+        {
+            Ok(_) => panic!("owner adapters must not receive another principal's binding"),
+            Err(error) => error,
+        };
         assert_eq!(wrong_owner.code, RESOURCE_OWNER_MISMATCH);
 
-        let missing_grant = Wave2HostRequest {
+        let missing_grant = match (Wave2HostRequest {
             context: Wave2HostContext {
                 resource_bindings: vec![nomifun_agent_contracts::TypedResourceBinding {
                     operations: BTreeSet::new(),
@@ -1898,9 +2163,12 @@ mod tests {
             operation: Wave2CapabilityOperation::WorkspaceExecution {
                 input: empty_object(),
             },
-        }
+        })
         .into_typed()
-        .expect_err("owner adapters must not receive a binding without read grant");
+        {
+            Ok(_) => panic!("owner adapters must not receive a binding without read grant"),
+            Err(error) => error,
+        };
         assert_eq!(missing_grant.code, PRESET_RESOURCE_NOT_BOUND);
     }
 
@@ -1949,6 +2217,7 @@ mod tests {
                 registry_generation: 11,
                 capability_id: CapabilityId::from("fs.read"),
                 action_id: ActionId::from("fs.read.invoke"),
+                state: test_state_handle(),
                 resource_bindings: vec![nomifun_agent_contracts::TypedResourceBinding {
                     binding_id: "binding".into(),
                     resource_kind: "workspace".into(),
@@ -2013,6 +2282,7 @@ mod tests {
                         registry_generation: 11,
                         capability_id: CapabilityId::from("fs.write"),
                         action_id: ActionId::from("fs.write.invoke"),
+                        state: test_state_handle(),
                         resource_bindings: Vec::new(),
                     }
                 },
@@ -2052,6 +2322,7 @@ mod tests {
                     registry_generation: 1,
                     capability_id: CapabilityId::from("fs.read"),
                     action_id: ActionId::from("fs.read.invoke"),
+                    state: test_state_handle(),
                     resource_bindings: Vec::new(),
                 },
                 operation: Wave2CapabilityOperation::WorkspaceExecution {

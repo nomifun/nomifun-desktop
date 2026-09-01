@@ -17,7 +17,11 @@ pub use resource::{
     WORKSPACE_RESOURCE_KIND, WORKSPACE_ROOT_PARAMETER, workspace_binding,
 };
 pub use routes::{FileRouterState, file_routes};
-pub use service::FileService;
+pub use service::{
+    AgentSessionFilePatch, AgentSessionPatchHunk, AgentSessionPatchLine,
+    AgentSessionPatchRequest, AgentSessionPatchResult, AgentSessionPatchFileResult,
+    FileService,
+};
 pub use snapshot_service::SnapshotService;
 pub use traits::{
     FileServiceRef, FileWatchServiceRef, IFileService, IFileWatchService, ISnapshotService, SnapshotServiceRef,
