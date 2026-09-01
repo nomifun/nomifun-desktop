@@ -7,7 +7,7 @@
   "fork_commit": "dc2ccc6843abb09c9d297862dc10b6bd12a3935d",
   "tracked_upstream_commit": "dc2ccc6843abb09c9d297862dc10b6bd12a3935d",
   "patch_series_digest": "d4343bd392203dfc9ba52b716b0420cbd846ec9d3924a388f7102ff84356ea9e",
-  "cargo_lock_digest": "088fca84566da418c20d531ab29dd94093949d6dd3d50e3c7b21eba524b2ef61",
+  "cargo_lock_digest": "b69f75e6cc566ef753f43265e4ddcf2479b671c738e67719b6c84f3f6881f23a",
   "protocol_version": "1.0.0",
   "protocol_schema_digest": "f1c0422f04c9de923e18c7df40d814d3c9f5b2db5f1c5fef2745e77e6d62590f",
   "rpc_allowlist": {

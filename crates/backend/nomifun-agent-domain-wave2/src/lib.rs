@@ -27,7 +27,8 @@ use nomifun_agent_contracts::{
     PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod,
     OperationId, PrincipalRef, ResolvedSnapshotRef, ResourceKind, RuntimeTarget, ScopeKey,
     StrictJsonValue, ToolPresentationKind, TypedResourceBindings, ValidatedPluginConfig,
-    VersionString, CAPABILITY_UNAVAILABLE_ON_PLATFORM, digest_payload,
+    VersionString, CAPABILITY_UNAVAILABLE_ON_PLATFORM, PRESET_RESOURCE_NOT_BOUND,
+    RESOURCE_OWNER_MISMATCH, digest_payload,
 };
 use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, KernelError, PluginRegistration,
@@ -215,8 +216,20 @@ const PLUGIN_TASKS_PORT: &str = "host.plugin.tasks";
 /// must provide the real action result through this port.
 pub const WAVE2_CAPABILITY_HOST_PORT_ID: &str = "host.wave2.capability.invoke";
 
+/// Canonical error codes used by the typed Wave 2 host boundary.
+///
+/// `CAPABILITY_UNAVAILABLE` is intentionally distinct from
+/// `CAPABILITY_UNAVAILABLE_ON_PLATFORM`: the former means that the owning
+/// application adapter is not currently mounted, while the latter means that
+/// the capability is not part of the host's declared platform surface.
+pub const CAPABILITY_UNAVAILABLE: &str = "CAPABILITY_UNAVAILABLE";
+pub const INVALID_PAYLOAD: &str = "INVALID_PAYLOAD";
+pub const RESOURCE_NOT_FOUND: &str = "RESOURCE_NOT_FOUND";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wave2HostContext {
+    /// The authenticated principal used for owner checks; adapters must not
+    /// infer identity from input payloads or resource IDs.
     pub principal: PrincipalRef,
     pub agent_session_id: AgentSessionId,
     pub operation_id: OperationId,
@@ -226,6 +239,9 @@ pub struct Wave2HostContext {
     pub registry_generation: u64,
     pub capability_id: CapabilityId,
     pub action_id: ActionId,
+    /// The frozen, authorization-bearing host bindings selected for this
+    /// invocation. The application resolves these bindings; the adapter
+    /// receives them without any pool or service-bag access.
     pub resource_bindings: TypedResourceBindings,
 }
 
@@ -244,10 +260,182 @@ pub enum Wave2CapabilityOperation {
     ComputerA11y { input: StrictJsonValue },
 }
 
+/// Exact capability-to-operation mapping exposed to composable host
+/// adapters.
+///
+/// [`Wave2CapabilityOperation`] remains the compatibility envelope consumed by
+/// the existing application host. This enum is the stricter contract for new
+/// owners: each action has its own variant, so a dispatch implementation cannot
+/// accidentally handle `fs.delete` as `fs.read` or silently treat an
+/// unsupported action as a successful generic operation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Wave2TypedCapabilityOperation {
+    FsRead { input: StrictJsonValue },
+    FsSearch { input: StrictJsonValue },
+    FsWrite { input: StrictJsonValue },
+    FsPatch { input: StrictJsonValue },
+    FsDelete { input: StrictJsonValue },
+    FsSnapshot { input: StrictJsonValue },
+    VcsStatus { input: StrictJsonValue },
+    VcsDiff { input: StrictJsonValue },
+    VcsStage { input: StrictJsonValue },
+    VcsCommit { input: StrictJsonValue },
+    VcsPush { input: StrictJsonValue },
+    ProcessExec { input: StrictJsonValue },
+    SshFsRead { input: StrictJsonValue },
+    SshFsWrite { input: StrictJsonValue },
+    SshExec { input: StrictJsonValue },
+    SshSudo { input: StrictJsonValue },
+    McpToolProxy { input: StrictJsonValue },
+    ConnectorDataRead { input: StrictJsonValue },
+    ConnectorDataWrite { input: StrictJsonValue },
+    BrowserNavigate { input: StrictJsonValue },
+    BrowserAct { input: StrictJsonValue },
+    BrowserDownload { input: StrictJsonValue },
+    BrowserUpload { input: StrictJsonValue },
+    BrowserEvaluate { input: StrictJsonValue },
+    BrowserTakeover { input: StrictJsonValue },
+    ComputerInput { input: StrictJsonValue },
+    ComputerLaunch { input: StrictJsonValue },
+}
+
+impl Wave2TypedCapabilityOperation {
+    pub fn capability_id(&self) -> &'static str {
+        match self {
+            Self::FsRead { .. } => "fs.read",
+            Self::FsSearch { .. } => "fs.search",
+            Self::FsWrite { .. } => "fs.write",
+            Self::FsPatch { .. } => "fs.patch",
+            Self::FsDelete { .. } => "fs.delete",
+            Self::FsSnapshot { .. } => "fs.snapshot",
+            Self::VcsStatus { .. } => "vcs.status",
+            Self::VcsDiff { .. } => "vcs.diff",
+            Self::VcsStage { .. } => "vcs.stage",
+            Self::VcsCommit { .. } => "vcs.commit",
+            Self::VcsPush { .. } => "vcs.push",
+            Self::ProcessExec { .. } => "process.exec",
+            Self::SshFsRead { .. } => "ssh.fs.read",
+            Self::SshFsWrite { .. } => "ssh.fs.write",
+            Self::SshExec { .. } => "ssh.exec",
+            Self::SshSudo { .. } => "ssh.sudo",
+            Self::McpToolProxy { .. } => "mcp.tool_proxy",
+            Self::ConnectorDataRead { .. } => "connector.data.read",
+            Self::ConnectorDataWrite { .. } => "connector.data.write",
+            Self::BrowserNavigate { .. } => "browser.navigate",
+            Self::BrowserAct { .. } => "browser.act",
+            Self::BrowserDownload { .. } => "browser.download",
+            Self::BrowserUpload { .. } => "browser.upload",
+            Self::BrowserEvaluate { .. } => "browser.evaluate",
+            Self::BrowserTakeover { .. } => "browser.takeover",
+            Self::ComputerInput { .. } => "computer.input",
+            Self::ComputerLaunch { .. } => "computer.launch",
+        }
+    }
+
+    fn family(&self) -> Wave2CapabilityOperation {
+        match self {
+            Self::FsRead { input }
+            | Self::FsSearch { input }
+            | Self::FsWrite { input }
+            | Self::FsPatch { input }
+            | Self::FsDelete { input }
+            | Self::FsSnapshot { input }
+            | Self::VcsStatus { input }
+            | Self::VcsDiff { input }
+            | Self::VcsStage { input }
+            | Self::VcsCommit { input }
+            | Self::VcsPush { input }
+            | Self::ProcessExec { input } => {
+                Wave2CapabilityOperation::WorkspaceExecution { input: input.clone() }
+            }
+            Self::SshFsRead { input }
+            | Self::SshFsWrite { input }
+            | Self::SshExec { input }
+            | Self::SshSudo { input } => Wave2CapabilityOperation::Ssh { input: input.clone() },
+            Self::McpToolProxy { input }
+            | Self::ConnectorDataRead { input }
+            | Self::ConnectorDataWrite { input } => {
+                Wave2CapabilityOperation::McpConnectors { input: input.clone() }
+            }
+            Self::BrowserNavigate { input }
+            | Self::BrowserAct { input }
+            | Self::BrowserDownload { input }
+            | Self::BrowserUpload { input }
+            | Self::BrowserEvaluate { input }
+            | Self::BrowserTakeover { input } => {
+                Wave2CapabilityOperation::Browser { input: input.clone() }
+            }
+            Self::ComputerInput { input } | Self::ComputerLaunch { input } => {
+                Wave2CapabilityOperation::ComputerA11y { input: input.clone() }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Wave2HostRequest {
     pub context: Wave2HostContext,
     pub operation: Wave2CapabilityOperation,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wave2TypedHostRequest {
+    pub context: Wave2HostContext,
+    pub operation: Wave2TypedCapabilityOperation,
+}
+
+impl Wave2HostRequest {
+    /// Validate the compatibility envelope and project it to the exact
+    /// operation contract used by a new owner-backed adapter.
+    pub fn into_typed(self) -> Result<Wave2TypedHostRequest, Wave2HostPortError> {
+        let expected_action = action_id(self.context.capability_id.as_ref()).ok_or_else(|| {
+            Wave2HostPortError::new(
+                CAPABILITY_UNAVAILABLE,
+                format!(
+                    "{} does not expose an action host operation",
+                    self.context.capability_id.as_ref()
+                ),
+            )
+        })?;
+        if self.context.action_id != expected_action {
+            return Err(Wave2HostPortError::new(
+                "ACTION_NOT_DECLARED",
+                format!(
+                    "{} received action {} instead of {}",
+                    self.context.capability_id.as_ref(),
+                    self.context.action_id.as_ref(),
+                    expected_action.as_ref()
+                ),
+            ));
+        }
+        let input = match &self.operation {
+            Wave2CapabilityOperation::WorkspaceExecution { input }
+            | Wave2CapabilityOperation::Ssh { input }
+            | Wave2CapabilityOperation::McpConnectors { input }
+            | Wave2CapabilityOperation::Browser { input }
+            | Wave2CapabilityOperation::ComputerA11y { input } => input.clone(),
+        };
+        let typed = typed_operation_for(&self.context.capability_id, input)
+            .map_err(|error| Wave2HostPortError::new("ACTION_NOT_DECLARED", error.to_string()))?;
+        if typed.family() != self.operation {
+            return Err(Wave2HostPortError::new(
+                "ACTION_OPERATION_MISMATCH",
+                format!(
+                    "{} was paired with the wrong typed host operation family",
+                    self.context.capability_id.as_ref()
+                ),
+            ));
+        }
+        validate_action_resource_bindings(
+            &self.context.capability_id,
+            &self.context.principal,
+            &self.context.resource_bindings,
+        )
+        .map_err(|error| {
+            Wave2HostPortError::new(error.canonical_code().as_ref().to_owned(), error.to_string())
+        })?;
+        Ok(Wave2TypedHostRequest { context: self.context, operation: typed })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -265,7 +453,27 @@ impl Wave2HostPortError {
     }
 
     pub fn unavailable(message: impl Into<String>) -> Self {
-        Self::new("WAVE2_HOST_PORT_UNAVAILABLE", message)
+        Self::new(CAPABILITY_UNAVAILABLE, message)
+    }
+
+    pub fn invalid_payload(message: impl Into<String>) -> Self {
+        Self::new(INVALID_PAYLOAD, message)
+    }
+
+    pub fn resource_not_bound(message: impl Into<String>) -> Self {
+        Self::new(PRESET_RESOURCE_NOT_BOUND, message)
+    }
+
+    pub fn owner_mismatch(message: impl Into<String>) -> Self {
+        Self::new(RESOURCE_OWNER_MISMATCH, message)
+    }
+
+    pub fn platform_unavailable(message: impl Into<String>) -> Self {
+        Self::new(CAPABILITY_UNAVAILABLE_ON_PLATFORM, message)
+    }
+
+    pub fn canonical_code(&self) -> CanonicalErrorCode {
+        CanonicalErrorCode::from(self.code.clone())
     }
 }
 
@@ -283,6 +491,110 @@ pub trait Wave2HostPort: Send + Sync {
         &'a self,
         request: Wave2HostRequest,
     ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'a>>;
+}
+
+/// An exact-operation adapter used by [`Wave2HostPortDispatcher`].
+pub trait Wave2TypedOperationAdapter: Send + Sync {
+    fn supports(&self, operation: &Wave2TypedCapabilityOperation) -> bool;
+
+    fn invoke<'a>(
+        &'a self,
+        request: Wave2TypedHostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'a>>;
+}
+
+/// Compose independently owned capability owners behind one Wave 2 host port.
+///
+/// Dispatch is first-match and fail-closed. An adapter is selected only by its
+/// exact typed operation. The dispatcher never retries another owner after an
+/// adapter has accepted an operation, so an owner remains authoritative for
+/// its side effects.
+pub struct Wave2HostPortDispatcher {
+    adapters: Vec<Arc<dyn Wave2TypedOperationAdapter>>,
+}
+
+impl Wave2HostPortDispatcher {
+    pub fn new(adapters: Vec<Arc<dyn Wave2TypedOperationAdapter>>) -> Self {
+        Self { adapters }
+    }
+
+    pub fn empty() -> Self {
+        Self::new(Vec::new())
+    }
+
+    pub fn push(&mut self, adapter: Arc<dyn Wave2TypedOperationAdapter>) {
+        self.adapters.push(adapter);
+    }
+}
+
+impl Wave2HostPort for Wave2HostPortDispatcher {
+    fn invoke<'a>(
+        &'a self,
+        request: Wave2HostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'a>> {
+        let typed = match request.into_typed() {
+            Ok(typed) => typed,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let Some(adapter) = self
+            .adapters
+            .iter()
+            .find(|adapter| adapter.supports(&typed.operation))
+        else {
+            let capability_id = typed.context.capability_id.clone();
+            return Box::pin(async move {
+                Err(Wave2HostPortError::unavailable(format!(
+                    "no canonical application owner is wired for {}",
+                    capability_id.as_ref()
+                )))
+            });
+        };
+        adapter.invoke(typed)
+    }
+}
+
+struct ClosureWave2TypedOperationAdapter<S, F> {
+    supports: S,
+    dispatch: F,
+}
+
+impl<S, F> ClosureWave2TypedOperationAdapter<S, F> {
+    fn new(supports: S, dispatch: F) -> Self {
+        Self { supports, dispatch }
+    }
+}
+
+impl<S, F, Fut> Wave2TypedOperationAdapter for ClosureWave2TypedOperationAdapter<S, F>
+where
+    S: Fn(&Wave2TypedCapabilityOperation) -> bool + Send + Sync + 'static,
+    F: Fn(Wave2TypedHostRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'static,
+{
+    fn supports(&self, operation: &Wave2TypedCapabilityOperation) -> bool {
+        (self.supports)(operation)
+    }
+
+    fn invoke<'a>(
+        &'a self,
+        request: Wave2TypedHostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'a>> {
+        let dispatch = &self.dispatch;
+        Box::pin(async move { dispatch(request).await })
+    }
+}
+
+/// Build one exact-operation adapter from closures for central app
+/// composition without exposing this crate's private handler types.
+pub fn typed_operation_adapter<S, F, Fut>(
+    supports: S,
+    dispatch: F,
+) -> Arc<dyn Wave2TypedOperationAdapter>
+where
+    S: Fn(&Wave2TypedCapabilityOperation) -> bool + Send + Sync + 'static,
+    F: Fn(Wave2TypedHostRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'static,
+{
+    Arc::new(ClosureWave2TypedOperationAdapter::new(supports, dispatch))
 }
 
 struct UnconfiguredWave2HostPort;
@@ -646,11 +958,6 @@ fn build_registration(
             handlers.push((
                 capability_id.clone(),
                 ActionId::from(format!("{}.invoke", definition.id)),
-                definition
-                    .resource_kinds
-                    .iter()
-                    .map(|resource_kind| ResourceKind::from(*resource_kind))
-                    .collect(),
             ));
         }
         capability_manifests.push(capability);
@@ -760,14 +1067,13 @@ fn build_registration(
     };
 
     let mut registration = PluginRegistration::new(metadata);
-    for (capability_id, action_id, required_resource_kinds) in handlers {
+    for (capability_id, action_id) in handlers {
         registration
             .add_capability_handler(
                 capability_id.clone(),
                 Arc::new(Wave2CapabilityHandler {
                     capability_id,
                     action_id,
-                    required_resource_kinds,
                     host_port: Arc::clone(&action_host_port),
                 }),
             )
@@ -850,7 +1156,6 @@ fn build_capability(
 struct Wave2CapabilityHandler {
     capability_id: CapabilityId,
     action_id: ActionId,
-    required_resource_kinds: BTreeSet<ResourceKind>,
     host_port: Arc<dyn Wave2HostPort>,
 }
 
@@ -888,46 +1193,11 @@ impl CapabilityHandler for Wave2CapabilityHandler {
                 });
             }
 
-            let mut binding_ids = BTreeSet::new();
-            for binding in &context.resource_bindings {
-                if binding.binding_id.as_ref().is_empty()
-                    || binding.resource_id.as_ref().is_empty()
-                {
-                    return Err(KernelError::CapabilityExecution {
-                        reason: format!(
-                            "{} requires non-empty binding and resource IDs",
-                            self.capability_id.as_ref()
-                        ),
-                    });
-                }
-                if !binding_ids.insert(binding.binding_id.clone()) {
-                    return Err(KernelError::CapabilityExecution {
-                        reason: format!(
-                            "{} received duplicate resource binding {}",
-                            self.capability_id.as_ref(),
-                            binding.binding_id.as_ref()
-                        ),
-                    });
-                }
-                if binding.owner_id != context.principal.principal_id {
-                    return Err(KernelError::ResourceOwnerMismatch {
-                        binding_id: binding.binding_id.clone(),
-                    });
-                }
-            }
-
-            for resource_kind in &self.required_resource_kinds {
-                if !context
-                    .resource_bindings
-                    .iter()
-                    .any(|binding| &binding.resource_kind == resource_kind)
-                {
-                    return Err(KernelError::CapabilityResourceNotBound {
-                        capability_id: self.capability_id.clone(),
-                        resource_kind: resource_kind.as_ref().to_owned(),
-                    });
-                }
-            }
+            validate_action_resource_bindings(
+                &self.capability_id,
+                &context.principal,
+                &context.resource_bindings,
+            )?;
 
             let operation = operation_for(&self.capability_id, input)?;
             self.host_port
@@ -958,34 +1228,46 @@ fn operation_for(
     capability_id: &CapabilityId,
     input: StrictJsonValue,
 ) -> Result<Wave2CapabilityOperation, KernelError> {
+    Ok(typed_operation_for(capability_id, input)?.family())
+}
+
+/// Map an action capability to its exact typed host operation.
+///
+/// This is deliberately exhaustive over the action inventory. Non-action
+/// capabilities (providers, contexts, transports, and event sources) return an
+/// error instead of being admitted to an action dispatcher.
+pub fn typed_operation_for(
+    capability_id: &CapabilityId,
+    input: StrictJsonValue,
+) -> Result<Wave2TypedCapabilityOperation, KernelError> {
     let operation = match capability_id.as_ref() {
-        "fs.read"
-        | "fs.search"
-        | "fs.write"
-        | "fs.patch"
-        | "fs.delete"
-        | "fs.snapshot"
-        | "vcs.status"
-        | "vcs.diff"
-        | "vcs.stage"
-        | "vcs.commit"
-        | "vcs.push"
-        | "process.exec" => Wave2CapabilityOperation::WorkspaceExecution { input },
-        "ssh.fs.read" | "ssh.fs.write" | "ssh.exec" | "ssh.sudo" => {
-            Wave2CapabilityOperation::Ssh { input }
-        }
-        "mcp.tool_proxy" | "connector.data.read" | "connector.data.write" => {
-            Wave2CapabilityOperation::McpConnectors { input }
-        }
-        "browser.navigate"
-        | "browser.act"
-        | "browser.download"
-        | "browser.upload"
-        | "browser.evaluate"
-        | "browser.takeover" => Wave2CapabilityOperation::Browser { input },
-        "computer.input" | "computer.launch" => {
-            Wave2CapabilityOperation::ComputerA11y { input }
-        }
+        "fs.read" => Wave2TypedCapabilityOperation::FsRead { input },
+        "fs.search" => Wave2TypedCapabilityOperation::FsSearch { input },
+        "fs.write" => Wave2TypedCapabilityOperation::FsWrite { input },
+        "fs.patch" => Wave2TypedCapabilityOperation::FsPatch { input },
+        "fs.delete" => Wave2TypedCapabilityOperation::FsDelete { input },
+        "fs.snapshot" => Wave2TypedCapabilityOperation::FsSnapshot { input },
+        "vcs.status" => Wave2TypedCapabilityOperation::VcsStatus { input },
+        "vcs.diff" => Wave2TypedCapabilityOperation::VcsDiff { input },
+        "vcs.stage" => Wave2TypedCapabilityOperation::VcsStage { input },
+        "vcs.commit" => Wave2TypedCapabilityOperation::VcsCommit { input },
+        "vcs.push" => Wave2TypedCapabilityOperation::VcsPush { input },
+        "process.exec" => Wave2TypedCapabilityOperation::ProcessExec { input },
+        "ssh.fs.read" => Wave2TypedCapabilityOperation::SshFsRead { input },
+        "ssh.fs.write" => Wave2TypedCapabilityOperation::SshFsWrite { input },
+        "ssh.exec" => Wave2TypedCapabilityOperation::SshExec { input },
+        "ssh.sudo" => Wave2TypedCapabilityOperation::SshSudo { input },
+        "mcp.tool_proxy" => Wave2TypedCapabilityOperation::McpToolProxy { input },
+        "connector.data.read" => Wave2TypedCapabilityOperation::ConnectorDataRead { input },
+        "connector.data.write" => Wave2TypedCapabilityOperation::ConnectorDataWrite { input },
+        "browser.navigate" => Wave2TypedCapabilityOperation::BrowserNavigate { input },
+        "browser.act" => Wave2TypedCapabilityOperation::BrowserAct { input },
+        "browser.download" => Wave2TypedCapabilityOperation::BrowserDownload { input },
+        "browser.upload" => Wave2TypedCapabilityOperation::BrowserUpload { input },
+        "browser.evaluate" => Wave2TypedCapabilityOperation::BrowserEvaluate { input },
+        "browser.takeover" => Wave2TypedCapabilityOperation::BrowserTakeover { input },
+        "computer.input" => Wave2TypedCapabilityOperation::ComputerInput { input },
+        "computer.launch" => Wave2TypedCapabilityOperation::ComputerLaunch { input },
         _ => {
             return Err(KernelError::CapabilityExecution {
                 reason: format!(
@@ -1030,6 +1312,119 @@ pub fn required_resource_kinds(capability_id: &str) -> Option<BTreeSet<ResourceK
             .map(|resource_kind| ResourceKind::from(*resource_kind))
             .collect()
     })
+}
+
+/// Return the operation that must be granted by the bound resource for an
+/// action capability.
+///
+/// The official Coding resource defaults grant `read`, `write`, and `execute`;
+/// destructive filesystem actions therefore consume the workspace `write`
+/// grant rather than inventing a separate `delete` permission.
+pub fn required_resource_operation(capability_id: &CapabilityId) -> Option<&'static str> {
+    match capability_id.as_ref() {
+        "fs.read" | "fs.search" | "fs.snapshot" | "vcs.status" | "vcs.diff" => Some("read"),
+        "fs.write" | "fs.patch" | "fs.delete" | "vcs.stage" | "vcs.commit" | "vcs.push"
+        | "ssh.fs.write" | "connector.data.write" => Some("write"),
+        "process.exec" | "ssh.exec" | "ssh.sudo" => Some("execute"),
+        "ssh.fs.read" | "connector.data.read" => Some("read"),
+        "mcp.tool_proxy" => Some("invoke"),
+        "browser.navigate" | "browser.upload" => Some("navigate"),
+        "browser.act" | "browser.takeover" => Some("interact"),
+        "browser.download" => Some("download"),
+        "browser.evaluate" => Some("evaluate"),
+        "computer.input" => Some("input"),
+        "computer.launch" => Some("launch"),
+        _ => None,
+    }
+}
+
+/// Validate the authorization-bearing resource projection before an action is
+/// handed to an owner.
+///
+/// This is intentionally reusable by a central host dispatcher. It validates
+/// binding identity, principal ownership, required resource cardinality, and
+/// the operation grant. It does not resolve a resource or expose an
+/// application pool.
+pub fn validate_action_resource_bindings(
+    capability_id: &CapabilityId,
+    principal: &PrincipalRef,
+    bindings: &TypedResourceBindings,
+) -> Result<(), KernelError> {
+    let Some(definition) = definition_for(capability_id.as_ref()) else {
+        return Err(KernelError::CapabilityExecution {
+            reason: format!("unknown Wave 2 capability {}", capability_id.as_ref()),
+        });
+    };
+    if !definition.is_tool() {
+        return Err(KernelError::CapabilityExecution {
+            reason: format!("{} is not an action capability", capability_id.as_ref()),
+        });
+    }
+
+    let mut binding_ids = BTreeSet::new();
+    for binding in bindings {
+        if binding.binding_id.as_ref().is_empty() || binding.resource_id.as_ref().is_empty() {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!(
+                    "{} requires non-empty binding and resource IDs",
+                    capability_id.as_ref()
+                ),
+            });
+        }
+        if !binding_ids.insert(binding.binding_id.clone()) {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!(
+                    "{} received duplicate resource binding {}",
+                    capability_id.as_ref(),
+                    binding.binding_id.as_ref()
+                ),
+            });
+        }
+        if binding.owner_id != principal.principal_id {
+            return Err(KernelError::ResourceOwnerMismatch {
+                binding_id: binding.binding_id.clone(),
+            });
+        }
+    }
+
+    for resource_kind in definition
+        .resource_kinds
+        .iter()
+        .map(|kind| ResourceKind::from(*kind))
+    {
+        let matching_bindings = bindings
+            .iter()
+            .filter(|binding| binding.resource_kind == resource_kind)
+            .collect::<Vec<_>>();
+        if matching_bindings.is_empty() {
+            return Err(KernelError::CapabilityResourceNotBound {
+                capability_id: capability_id.clone(),
+                resource_kind: resource_kind.as_ref().to_owned(),
+            });
+        }
+        if matching_bindings.len() > 1 {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!(
+                    "{} requires exactly one {} resource binding",
+                    capability_id.as_ref(),
+                    resource_kind.as_ref()
+                ),
+            });
+        }
+        if let Some(required_operation) = required_resource_operation(capability_id) {
+            if !matching_bindings[0].operations.contains(required_operation) {
+                return Err(KernelError::CapabilityResourceNotBound {
+                    capability_id: capability_id.clone(),
+                    resource_kind: format!(
+                        "{} (operation {})",
+                        resource_kind.as_ref(),
+                        required_operation
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The action identity used by each Tool contribution.
@@ -1128,7 +1523,7 @@ fn definition_for(capability_id: &str) -> Option<CapabilityDefinition> {
 
 fn platform_supported(scope: PlatformScope, host_target: &str, host_surface: &str) -> bool {
     match scope {
-        PlatformScope::Any => true,
+        PlatformScope::Any => AGENT_SURFACES.iter().any(|surface| *surface == host_surface),
         PlatformScope::BrowserDesktop => {
             host_surface == "desktop"
                 && BROWSER_DESKTOP_HOST_TARGETS
@@ -1385,18 +1780,254 @@ mod tests {
 
     #[test]
     fn every_action_capability_maps_to_a_typed_host_operation() {
+        assert!(matches!(
+            typed_operation_for(&CapabilityId::from("fs.read"), empty_object()),
+            Ok(Wave2TypedCapabilityOperation::FsRead { .. })
+        ));
+        assert!(matches!(
+            typed_operation_for(&CapabilityId::from("fs.write"), empty_object()),
+            Ok(Wave2TypedCapabilityOperation::FsWrite { .. })
+        ));
+        assert!(matches!(
+            typed_operation_for(&CapabilityId::from("fs.delete"), empty_object()),
+            Ok(Wave2TypedCapabilityOperation::FsDelete { .. })
+        ));
+
         for definition in PACKAGE_DEFINITIONS
             .iter()
             .flat_map(|package| package.capabilities.iter())
             .filter(|definition| definition.is_tool())
         {
             let capability_id = CapabilityId::from(definition.id);
+            let typed = typed_operation_for(&capability_id, empty_object())
+                .expect("action capabilities must have an exact typed operation");
+            assert_eq!(typed.capability_id(), definition.id);
             assert!(
                 operation_for(&capability_id, empty_object()).is_ok(),
                 "{} must have a host operation",
                 definition.id
             );
         }
+    }
+
+    #[test]
+    fn non_action_capabilities_cannot_enter_the_host_dispatch_contract() {
+        let error = typed_operation_for(&CapabilityId::from("workspace.bind"), empty_object())
+            .expect_err("resource providers must not become action operations");
+        assert!(error.to_string().contains("does not expose an action host operation"));
+    }
+
+    #[test]
+    fn host_request_rejects_wrong_family_and_missing_or_unauthorized_bindings() {
+        let principal = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: "owner".to_owned(),
+        };
+        let binding = nomifun_agent_contracts::TypedResourceBinding {
+            binding_id: "workspace-binding".into(),
+            resource_kind: "workspace".into(),
+            resource_id: "workspace-resource".into(),
+            owner_id: "owner".to_owned(),
+            operations: BTreeSet::from(["read".to_owned()]),
+            connection_config_ref: None,
+            typed_parameters: Default::default(),
+        };
+        let context = Wave2HostContext {
+            principal: principal.clone(),
+            agent_session_id: AgentSessionId::from("session"),
+            operation_id: OperationId::from("operation"),
+            idempotency_key: IdempotencyKey::from("idempotency"),
+            correlation_id: CorrelationId::from("correlation"),
+            resolved_snapshot_ref: ResolvedSnapshotRef {
+                snapshot_id: "snapshot".into(),
+                snapshot_digest: "digest".into(),
+            },
+            registry_generation: 7,
+            capability_id: CapabilityId::from("fs.read"),
+            action_id: ActionId::from("fs.read.invoke"),
+            resource_bindings: vec![binding.clone()],
+        };
+        let wrong_family = Wave2HostRequest {
+            context: context.clone(),
+            operation: Wave2CapabilityOperation::Ssh {
+                input: empty_object(),
+            },
+        }
+        .into_typed()
+        .expect_err("fs.read cannot be routed through the SSH family");
+        assert_eq!(wrong_family.code, "ACTION_OPERATION_MISMATCH");
+
+        let missing_binding = Wave2HostRequest {
+            context: Wave2HostContext {
+                resource_bindings: Vec::new(),
+                ..context.clone()
+            },
+            operation: Wave2CapabilityOperation::WorkspaceExecution {
+                input: empty_object(),
+            },
+        }
+        .into_typed()
+        .expect_err("owner adapters must not receive an unbound action");
+        assert_eq!(missing_binding.code, PRESET_RESOURCE_NOT_BOUND);
+
+        let wrong_owner = Wave2HostRequest {
+            context: Wave2HostContext {
+                principal: PrincipalRef {
+                    principal_id: "different-owner".to_owned(),
+                    ..principal
+                },
+                resource_bindings: vec![binding.clone()],
+                ..context.clone()
+            },
+            operation: Wave2CapabilityOperation::WorkspaceExecution {
+                input: empty_object(),
+            },
+        }
+        .into_typed()
+        .expect_err("owner adapters must not receive another principal's binding");
+        assert_eq!(wrong_owner.code, RESOURCE_OWNER_MISMATCH);
+
+        let missing_grant = Wave2HostRequest {
+            context: Wave2HostContext {
+                resource_bindings: vec![nomifun_agent_contracts::TypedResourceBinding {
+                    operations: BTreeSet::new(),
+                    ..binding
+                }],
+                ..context
+            },
+            operation: Wave2CapabilityOperation::WorkspaceExecution {
+                input: empty_object(),
+            },
+        }
+        .into_typed()
+        .expect_err("owner adapters must not receive a binding without read grant");
+        assert_eq!(missing_grant.code, PRESET_RESOURCE_NOT_BOUND);
+    }
+
+    #[test]
+    fn composed_typed_adapter_receives_exact_operation_and_authorization_projection() {
+        use std::sync::Mutex;
+        use std::task::{Context, Poll, Waker};
+
+        let seen = Arc::new(Mutex::new(None));
+        let seen_by_adapter = Arc::clone(&seen);
+        let adapter = typed_operation_adapter(
+            |operation| matches!(operation, Wave2TypedCapabilityOperation::FsRead { .. }),
+            move |request| {
+                let seen = Arc::clone(&seen_by_adapter);
+                std::future::ready({
+                    let is_exact = matches!(
+                        request.operation,
+                        Wave2TypedCapabilityOperation::FsRead { .. }
+                    );
+                    let authorization = (
+                        request.context.principal.principal_id,
+                        request.context.registry_generation,
+                        request.context.resource_bindings[0].resource_id.clone(),
+                    );
+                    *seen.lock().expect("test adapter mutex") =
+                        Some((is_exact, authorization));
+                    Ok(empty_object())
+                })
+            },
+        );
+        let dispatcher = Wave2HostPortDispatcher::new(vec![adapter]);
+        let request = Wave2HostRequest {
+            context: Wave2HostContext {
+                principal: PrincipalRef {
+                    principal_kind: "user".to_owned(),
+                    principal_id: "owner".to_owned(),
+                },
+                agent_session_id: AgentSessionId::from("session"),
+                operation_id: OperationId::from("operation"),
+                idempotency_key: IdempotencyKey::from("idempotency"),
+                correlation_id: CorrelationId::from("correlation"),
+                resolved_snapshot_ref: ResolvedSnapshotRef {
+                    snapshot_id: "snapshot".into(),
+                    snapshot_digest: "digest".into(),
+                },
+                registry_generation: 11,
+                capability_id: CapabilityId::from("fs.read"),
+                action_id: ActionId::from("fs.read.invoke"),
+                resource_bindings: vec![nomifun_agent_contracts::TypedResourceBinding {
+                    binding_id: "binding".into(),
+                    resource_kind: "workspace".into(),
+                    resource_id: "resource".into(),
+                    owner_id: "owner".to_owned(),
+                    operations: BTreeSet::from(["read".to_owned()]),
+                    connection_config_ref: None,
+                    typed_parameters: Default::default(),
+                }],
+            },
+            operation: Wave2CapabilityOperation::WorkspaceExecution {
+                input: empty_object(),
+            },
+        };
+        let future = dispatcher.invoke(request);
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = std::pin::pin!(future);
+        assert!(matches!(
+            future.as_mut().poll(&mut context),
+            Poll::Ready(Ok(_))
+        ));
+        assert_eq!(
+            *seen.lock().expect("test adapter mutex"),
+            Some((
+                true,
+                (
+                    "owner".to_owned(),
+                    11,
+                    nomifun_agent_contracts::ResourceId::from("resource"),
+                )
+            ))
+        );
+
+        let empty_dispatcher = Wave2HostPortDispatcher::empty();
+        let unavailable_future = empty_dispatcher.invoke(Wave2HostRequest {
+                context: Wave2HostContext {
+                    capability_id: CapabilityId::from("fs.write"),
+                    action_id: ActionId::from("fs.write.invoke"),
+                    resource_bindings: vec![nomifun_agent_contracts::TypedResourceBinding {
+                        binding_id: "binding".into(),
+                        resource_kind: "workspace".into(),
+                        resource_id: "resource".into(),
+                        owner_id: "owner".to_owned(),
+                        operations: BTreeSet::from(["write".to_owned()]),
+                        connection_config_ref: None,
+                        typed_parameters: Default::default(),
+                    }],
+                    ..Wave2HostContext {
+                        principal: PrincipalRef {
+                            principal_kind: "user".to_owned(),
+                            principal_id: "owner".to_owned(),
+                        },
+                        agent_session_id: AgentSessionId::from("session"),
+                        operation_id: OperationId::from("operation"),
+                        idempotency_key: IdempotencyKey::from("idempotency"),
+                        correlation_id: CorrelationId::from("correlation"),
+                        resolved_snapshot_ref: ResolvedSnapshotRef {
+                            snapshot_id: "snapshot".into(),
+                            snapshot_digest: "digest".into(),
+                        },
+                        registry_generation: 11,
+                        capability_id: CapabilityId::from("fs.write"),
+                        action_id: ActionId::from("fs.write.invoke"),
+                        resource_bindings: Vec::new(),
+                    }
+                },
+                operation: Wave2CapabilityOperation::WorkspaceExecution {
+                    input: empty_object(),
+                },
+            });
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut unavailable_future = std::pin::pin!(unavailable_future);
+        let unavailable = match unavailable_future.as_mut().poll(&mut context) {
+            Poll::Ready(result) => result.expect_err("unsupported owner-backed action must fail closed"),
+            Poll::Pending => panic!("unsupported owner-backed action must fail immediately"),
+        };
+        assert_eq!(unavailable.code, CAPABILITY_UNAVAILABLE);
     }
 
     #[test]
@@ -1434,7 +2065,7 @@ mod tests {
             Poll::Ready(result) => result.expect_err("unconfigured Wave 2 actions must fail closed"),
             Poll::Pending => panic!("unconfigured Wave 2 adapter must fail immediately"),
         };
-        assert_eq!(result.code, "WAVE2_HOST_PORT_UNAVAILABLE");
+        assert_eq!(result.code, CAPABILITY_UNAVAILABLE);
         assert_eq!(
             result.message,
             "no production host adapter is bound for fs.read"

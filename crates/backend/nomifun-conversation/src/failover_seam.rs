@@ -152,13 +152,19 @@ impl ConversationService {
             return None;
         }
 
-        // ACP 边界(review #9,plan D7)的**唯一强制闸**:仅 nomi 自有引擎的普通会话
-        // 可换模型重建。ACP / 终端 / 远程等 agent 自管模型(独立 reconcile),在此被
-        // fail-safe 拒绝——不终止 runtime、不写 model。IDMM 不进入这条有副作用路径。
+        // The runtime registry remains a transitional compatibility seam until
+        // the central AgentSession host owns model failover. Keep the exact
+        // runtime-family admission here so this helper cannot become a second
+        // cross-family failover authority.
         let agent_type: AgentType = match string_to_enum(&row.r#type) {
             Ok(t) => t,
             Err(e) => {
-                warn!(error = %ErrorChain(&e), conversation_id, agent_type = %row.r#type, "Failover skipped: unparseable agent type");
+                warn!(
+                    error = %ErrorChain(&e),
+                    conversation_id,
+                    agent_type = %row.r#type,
+                    "Failover skipped: unparseable agent type"
+                );
                 return None;
             }
         };
@@ -166,7 +172,7 @@ impl ConversationService {
             warn!(
                 conversation_id,
                 agent_type = ?agent_type,
-                "Failover skipped: not a nomi conversation (ACP/terminal self-manage their model)"
+                "Failover skipped: runtime family is not owned by this failover seam"
             );
             return None;
         }
@@ -273,17 +279,13 @@ impl ConversationService {
         let mut retry_delay = Duration::from_millis(25);
         let warning_deadline = Instant::now() + Duration::from_secs(2);
         let mut warning_attempted = false;
-        let mut teardown_warning = None;
         loop {
             if !warning_attempted && Instant::now() >= warning_deadline {
                 warning_attempted = true;
-                teardown_warning = self
-                    .persist_and_broadcast_model_failover_teardown_tip(
-                        &row.user_id,
-                        conversation_id,
-                        None,
-                    )
-                    .await;
+                warn!(
+                    conversation_id,
+                    "Model failover is still proving old runtime teardown; keeping the turn fenced"
+                );
             }
             let teardown = Self::terminate_runtime_with_proof(
                 runtime_registry,
@@ -300,13 +302,10 @@ impl ConversationService {
                     result = &mut teardown => result,
                     _ = tokio::time::sleep_until(warning_deadline) => {
                         warning_attempted = true;
-                        teardown_warning = self
-                            .persist_and_broadcast_model_failover_teardown_tip(
-                                &row.user_id,
-                                conversation_id,
-                                None,
-                            )
-                            .await;
+                        warn!(
+                            conversation_id,
+                            "Model failover is still proving old runtime teardown; keeping the turn fenced"
+                        );
                         teardown.await
                     }
                 }
@@ -317,15 +316,6 @@ impl ConversationService {
             }
             tokio::time::sleep(retry_delay).await;
             retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
-        }
-        if let Some(mut warning) = teardown_warning {
-            let _ = self
-                .resolve_and_broadcast_model_failover_teardown_tip(
-                    &row.user_id,
-                    &mut warning,
-                    None,
-                )
-                .await;
         }
         if cancellation.is_cancelled() {
             return None;
@@ -452,9 +442,9 @@ impl ConversationService {
         })
     }
 
-    /// 同模型"剔图重建":标记 registry(该 provider+model 不支持图片)→终止 runtime→
-    /// 用同一行重建任务。重建时工厂重新读 registry → compat.supports_image=false →
-    /// build_messages 剔图。仅 nomi 会话放行;返回新句柄或 None(不可重建)。
+    /// Same-model image fallback: mark the provider/model unsupported in the
+    /// shared capability registry, terminate the exact runtime, and rebuild
+    /// from the same durable row so message construction strips the image.
     pub(crate) async fn strip_images_and_rebuild(
         &self,
         conversation_id: &str,
@@ -573,7 +563,8 @@ impl ConversationService {
     ///    计费;额外 token 风险由较低的 provider 重试次数和有限模型切换次数约束;
     /// 3. 故障转移启用(会话级覆盖否则全局,`enabled == true`);
     /// 4. `switches_done < min(max_switches, queue.len())` —— bounded;
-    /// 5. agent 是 **nomi** 实例(plan D7;终端 CLI / ACP 自管模型,排除)。
+    /// 5. the active runtime is the caller's exact turn owner; this seam does
+    /// not select a second runtime family.
     /// 6. 持久化 model / pool / template 仍与失败 runtime 构建时的完整 authority
     ///    一致;并发显式 PATCH 已提交时立即放弃旧 failover,绝不覆盖用户的新选择。
     ///
@@ -599,8 +590,6 @@ impl ConversationService {
         if cancellation.is_cancelled() {
             return None;
         }
-        // (5) 仅 nomi 自有引擎的普通会话。便宜的早闸(避免无谓加载);真正的强制点
-        //     在 inner 的 ACP 边界闸(review #9)。IDMM 不进入有副作用路径。
         if agent_type != AgentType::Nomi {
             return None;
         }

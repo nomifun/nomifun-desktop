@@ -23,13 +23,14 @@ use nomifun_agent_contracts::{
     PluginMountId, PluginRegistrarDescriptor, PluginRegistrarOperation,
     PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
     PluginStateHandleDescriptor, PluginStateMethod, PrincipalRef, ResolvedSnapshotRef,
-    ResourceBindingId, ResourceId, ResourceKind, ScopeKey, SkillDefinition, StrictJsonValue,
-    ToolPresentationKind, TypedResourceBinding, TypedResourceBindings, ValidatedPluginConfig,
-    VersionString,
+    ResourceBindingId, ResourceId, ResourceKind, ScopeKey, SkillDefinition, StateKey,
+    StrictJsonValue, ToolPresentationKind, TypedResourceBinding, TypedResourceBindings,
+    ValidatedPluginConfig, VersionString, PluginStateCompareAndSwapOutcome, PluginStateEntry,
     CAPABILITY_UNAVAILABLE_ON_PLATFORM, digest_payload,
 };
 use nomifun_agent_kernel::{
-    CapabilityHandler, CapabilityInvocationContext, KernelError, PluginRegistration,
+    CapabilityHandler, CapabilityInvocationContext, HostPluginStateApi, KernelError,
+    PluginRegistration, PluginStateError, PluginStateHandle,
 };
 use serde_json::{Value, json};
 
@@ -152,6 +153,7 @@ pub const KNOWLEDGE_BASE_RESOURCE_KIND: &str = "knowledge_base";
 pub const PROJECT_MEMORY_RESOURCE_KIND: &str = "project_memory";
 pub const COMPANION_MEMORY_RESOURCE_KIND: &str = "companion_memory";
 pub const RESEARCH_CORE_PACK_ID: &str = "research.core";
+const CAPABILITY_UNAVAILABLE_CODE: &str = "CAPABILITY_UNAVAILABLE";
 
 const SURFACES: &[&str] = AGENT_SURFACES;
 const KNOWLEDGE: &[&str] = &[KNOWLEDGE_BASE_RESOURCE_KIND];
@@ -244,11 +246,56 @@ pub struct TypedResourceDescriptor {
 /// neither those stores nor their business facts.
 pub const WAVE1_CAPABILITY_HOST_PORT_ID: &str = "host.wave1.capability.invoke";
 
+/// The narrow state surface exposed to a Wave 1 owner.
+///
+/// The owner can inspect an authorized namespace and perform an atomic
+/// compare-and-swap transition, but cannot receive a pool or a service
+/// locator. Read/modify/write state transitions must use CAS.
+#[derive(Clone)]
+pub struct Wave1StateHandle(PluginStateHandle);
+
+impl Wave1StateHandle {
+    fn new(handle: PluginStateHandle) -> Self {
+        Self(handle)
+    }
+
+    pub fn descriptor(&self) -> &PluginStateHandleDescriptor {
+        self.0.descriptor()
+    }
+
+    pub async fn get(
+        &self,
+        scope_key: &ScopeKey,
+        state_key: &StateKey,
+    ) -> Result<Option<PluginStateEntry>, PluginStateError> {
+        self.0.get(scope_key, state_key).await
+    }
+
+    pub async fn compare_and_swap(
+        &self,
+        scope_key: &ScopeKey,
+        state_key: &StateKey,
+        expected_revision: u64,
+        state_format_version: &VersionString,
+        value: Option<StrictJsonValue>,
+    ) -> Result<PluginStateCompareAndSwapOutcome, PluginStateError> {
+        self.0
+            .compare_and_swap(
+                scope_key,
+                state_key,
+                expected_revision,
+                state_format_version,
+                value,
+            )
+            .await
+    }
+}
+
 /// Invocation metadata projected from the Kernel context into a domain port.
 ///
 /// The projection intentionally excludes the application service bag,
 /// Gateway state, legacy Conversation state, and the Kernel authority itself.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct Wave1HostContext {
     pub principal: PrincipalRef,
     pub agent_session_id: AgentSessionId,
@@ -260,6 +307,13 @@ pub struct Wave1HostContext {
     pub capability_id: CapabilityId,
     pub action_id: ActionId,
     pub state_scope_key: ScopeKey,
+    /// The Kernel-authorized namespace handle for this mounted package.
+    ///
+    /// Owners may use this handle for bounded state-backed coordination and
+    /// must use its compare-and-swap API for read/modify/write transitions.
+    /// It is intentionally not a pool, service locator, or second Session
+    /// authority.
+    pub state: Wave1StateHandle,
     pub resource_bindings: TypedResourceBindings,
 }
 
@@ -302,24 +356,8 @@ pub struct Wave1KnowledgeAutogenRequest {
     pub overwrite_readme: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Wave1MemoryScope {
-    Project,
-    Companion,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Wave1MemoryOperation {
-    Write,
-    Distill,
-    Merge,
-    Evolve,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct Wave1MemoryMutationRequest {
-    pub scope: Wave1MemoryScope,
-    pub operation: Wave1MemoryOperation,
     pub content: Option<String>,
     pub title: Option<String>,
     pub items: Option<Vec<Value>>,
@@ -346,11 +384,43 @@ pub enum Wave1CapabilityOperation {
     KnowledgeAutogen(Wave1KnowledgeAutogenRequest),
     KnowledgeEmbedding(Wave1KnowledgeEmbeddingRequest),
     KnowledgeRerank(Wave1KnowledgeEmbeddingRequest),
-    MemoryMutation(Wave1MemoryMutationRequest),
+    ProjectMemoryWrite(Wave1MemoryMutationRequest),
+    ProjectMemoryDistill(Wave1MemoryMutationRequest),
+    CompanionMemoryWrite(Wave1MemoryMutationRequest),
+    CompanionMemoryMerge(Wave1MemoryMutationRequest),
+    CompanionMemoryEvolve(Wave1MemoryMutationRequest),
     SkillInvoke(Wave1SkillInvokeRequest),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+impl Wave1CapabilityOperation {
+    /// Return the sole canonical capability identity represented by an
+    /// operation variant.
+    pub fn capability_id(&self) -> CapabilityId {
+        CapabilityId::from(match self {
+            Self::ResearchSearch(_) => WEB_SEARCH,
+            Self::ResearchFetch(_) => WEB_FETCH,
+            Self::KnowledgeSearch(_) => KNOWLEDGE_SEARCH,
+            Self::KnowledgeRead(_) => KNOWLEDGE_READ,
+            Self::KnowledgeWrite(_) => KNOWLEDGE_WRITE,
+            Self::KnowledgeAutogen(_) => KNOWLEDGE_AUTOGEN,
+            Self::KnowledgeEmbedding(_) => KNOWLEDGE_EMBEDDING,
+            Self::KnowledgeRerank(_) => KNOWLEDGE_RERANK,
+            Self::ProjectMemoryWrite(_) => MEMORY_PROJECT_WRITE,
+            Self::ProjectMemoryDistill(_) => MEMORY_PROJECT_DISTILL,
+            Self::CompanionMemoryWrite(_) => MEMORY_COMPANION_WRITE,
+            Self::CompanionMemoryMerge(_) => MEMORY_COMPANION_MERGE,
+            Self::CompanionMemoryEvolve(_) => MEMORY_COMPANION_EVOLVE,
+            Self::SkillInvoke(_) => SKILL_INVOKE,
+        })
+    }
+
+    /// Return the action identity paired with this operation variant.
+    pub fn action_id(&self) -> ActionId {
+        ActionId::from(format!("{}.invoke", self.capability_id().as_ref()))
+    }
+}
+
+#[derive(Clone)]
 pub struct Wave1HostRequest {
     pub context: Wave1HostContext,
     pub operation: Wave1CapabilityOperation,
@@ -358,12 +428,12 @@ pub struct Wave1HostRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wave1HostPortError {
-    pub code: String,
+    pub code: CanonicalErrorCode,
     pub message: String,
 }
 
 impl Wave1HostPortError {
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(code: impl Into<CanonicalErrorCode>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
             message: message.into(),
@@ -371,13 +441,17 @@ impl Wave1HostPortError {
     }
 
     pub fn unavailable(message: impl Into<String>) -> Self {
-        Self::new("WAVE1_HOST_PORT_UNAVAILABLE", message)
+        Self::new(CAPABILITY_UNAVAILABLE_CODE, message)
+    }
+
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self::new(CAPABILITY_UNAVAILABLE_CODE, message)
     }
 }
 
 impl fmt::Display for Wave1HostPortError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}: {}", self.code, self.message)
+        write!(formatter, "{}: {}", self.code.as_ref(), self.message)
     }
 }
 
@@ -394,6 +468,183 @@ pub trait Wave1HostPort: Send + Sync {
         &self,
         request: Wave1HostRequest,
     ) -> Result<StrictJsonValue, Wave1HostPortError>;
+}
+
+/// Typed Research owner seam for the central composition root.
+#[async_trait]
+pub trait Wave1ResearchOwner: Send + Sync {
+    async fn research_search(
+        &self,
+        context: Wave1HostContext,
+        request: Wave1SearchRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError>;
+    async fn research_fetch(
+        &self,
+        context: Wave1HostContext,
+        request: Wave1FetchRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError>;
+}
+
+/// Typed Knowledge owner seam for all Knowledge actions.
+#[async_trait]
+pub trait Wave1KnowledgeOwner: Send + Sync {
+    async fn knowledge_search(
+        &self,
+        context: Wave1HostContext,
+        request: Wave1SearchRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError>;
+    async fn knowledge_read(
+        &self,
+        context: Wave1HostContext,
+        request: Wave1KnowledgeReadRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError>;
+    async fn knowledge_write(
+        &self,
+        context: Wave1HostContext,
+        request: Wave1KnowledgeWriteRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError>;
+    async fn knowledge_autogen(
+        &self,
+        context: Wave1HostContext,
+        request: Wave1KnowledgeAutogenRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError>;
+    async fn knowledge_embedding(
+        &self,
+        context: Wave1HostContext,
+        request: Wave1KnowledgeEmbeddingRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError>;
+    async fn knowledge_rerank(
+        &self,
+        context: Wave1HostContext,
+        request: Wave1KnowledgeEmbeddingRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError>;
+}
+
+/// Typed Project/Companion memory owner seam. The operation variant keeps
+/// those two resource domains distinct at the dispatch boundary.
+#[async_trait]
+pub trait Wave1MemoryOwner: Send + Sync {
+    async fn project_memory_write(
+        &self,
+        context: Wave1HostContext,
+        request: Wave1MemoryMutationRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError>;
+    async fn project_memory_distill(
+        &self,
+        context: Wave1HostContext,
+        request: Wave1MemoryMutationRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError>;
+    async fn companion_memory_write(
+        &self,
+        context: Wave1HostContext,
+        request: Wave1MemoryMutationRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError>;
+    async fn companion_memory_merge(
+        &self,
+        context: Wave1HostContext,
+        request: Wave1MemoryMutationRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError>;
+    async fn companion_memory_evolve(
+        &self,
+        context: Wave1HostContext,
+        request: Wave1MemoryMutationRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError>;
+}
+
+/// Typed Skills owner seam for explicit Skill invocation.
+#[async_trait]
+pub trait Wave1SkillOwner: Send + Sync {
+    async fn skill_invoke(
+        &self,
+        context: Wave1HostContext,
+        request: Wave1SkillInvokeRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError>;
+}
+
+/// Minimal typed adapter used by the app composition root.
+pub struct Wave1HostPortAdapter {
+    research: Arc<dyn Wave1ResearchOwner>,
+    knowledge: Arc<dyn Wave1KnowledgeOwner>,
+    memory: Arc<dyn Wave1MemoryOwner>,
+    skills: Arc<dyn Wave1SkillOwner>,
+}
+
+impl Wave1HostPortAdapter {
+    pub fn new(
+        research: Arc<dyn Wave1ResearchOwner>,
+        knowledge: Arc<dyn Wave1KnowledgeOwner>,
+        memory: Arc<dyn Wave1MemoryOwner>,
+        skills: Arc<dyn Wave1SkillOwner>,
+    ) -> Self {
+        Self {
+            research,
+            knowledge,
+            memory,
+            skills,
+        }
+    }
+}
+
+#[async_trait]
+impl Wave1HostPort for Wave1HostPortAdapter {
+    async fn invoke(
+        &self,
+        request: Wave1HostRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError> {
+        let Wave1HostRequest { context, operation } = request;
+        if context.capability_id != operation.capability_id()
+            || context.action_id != operation.action_id()
+        {
+            return Err(Wave1HostPortError::invalid_request(
+                "operation identity does not match its capability/action",
+            ));
+        }
+
+        match operation {
+            Wave1CapabilityOperation::ResearchSearch(request) => {
+                self.research.research_search(context, request).await
+            }
+            Wave1CapabilityOperation::ResearchFetch(request) => {
+                self.research.research_fetch(context, request).await
+            }
+            Wave1CapabilityOperation::KnowledgeSearch(request) => {
+                self.knowledge.knowledge_search(context, request).await
+            }
+            Wave1CapabilityOperation::KnowledgeRead(request) => {
+                self.knowledge.knowledge_read(context, request).await
+            }
+            Wave1CapabilityOperation::KnowledgeWrite(request) => {
+                self.knowledge.knowledge_write(context, request).await
+            }
+            Wave1CapabilityOperation::KnowledgeAutogen(request) => {
+                self.knowledge.knowledge_autogen(context, request).await
+            }
+            Wave1CapabilityOperation::KnowledgeEmbedding(request) => {
+                self.knowledge.knowledge_embedding(context, request).await
+            }
+            Wave1CapabilityOperation::KnowledgeRerank(request) => {
+                self.knowledge.knowledge_rerank(context, request).await
+            }
+            Wave1CapabilityOperation::ProjectMemoryWrite(request) => {
+                self.memory.project_memory_write(context, request).await
+            }
+            Wave1CapabilityOperation::ProjectMemoryDistill(request) => {
+                self.memory.project_memory_distill(context, request).await
+            }
+            Wave1CapabilityOperation::CompanionMemoryWrite(request) => {
+                self.memory.companion_memory_write(context, request).await
+            }
+            Wave1CapabilityOperation::CompanionMemoryMerge(request) => {
+                self.memory.companion_memory_merge(context, request).await
+            }
+            Wave1CapabilityOperation::CompanionMemoryEvolve(request) => {
+                self.memory.companion_memory_evolve(context, request).await
+            }
+            Wave1CapabilityOperation::SkillInvoke(request) => {
+                self.skills.skill_invoke(context, request).await
+            }
+        }
+    }
 }
 
 struct UnconfiguredWave1HostPort;
@@ -729,9 +980,24 @@ pub fn capability_ids_by_package() -> BTreeMap<PackageId, BTreeSet<CapabilityId>
 
 /// Return the canonical action identity for an action-bearing capability.
 pub fn action_id(capability_id: &str) -> Option<ActionId> {
-    capability_for(capability_id)
-        .filter(|capability| capability.kind == CapabilityKind::Tool)
-        .map(|_| ActionId::from(format!("{capability_id}.invoke")))
+    let action = match capability_id {
+        WEB_SEARCH => WEB_SEARCH_ACTION,
+        WEB_FETCH => WEB_FETCH_ACTION,
+        KNOWLEDGE_SEARCH => KNOWLEDGE_SEARCH_ACTION,
+        KNOWLEDGE_READ => KNOWLEDGE_READ_ACTION,
+        KNOWLEDGE_WRITE => KNOWLEDGE_WRITE_ACTION,
+        KNOWLEDGE_AUTOGEN => KNOWLEDGE_AUTOGEN_ACTION,
+        KNOWLEDGE_EMBEDDING => KNOWLEDGE_EMBEDDING_ACTION,
+        KNOWLEDGE_RERANK => KNOWLEDGE_RERANK_ACTION,
+        MEMORY_PROJECT_WRITE => MEMORY_PROJECT_WRITE_ACTION,
+        MEMORY_PROJECT_DISTILL => MEMORY_PROJECT_DISTILL_ACTION,
+        MEMORY_COMPANION_WRITE => MEMORY_COMPANION_WRITE_ACTION,
+        MEMORY_COMPANION_MERGE => MEMORY_COMPANION_MERGE_ACTION,
+        MEMORY_COMPANION_EVOLVE => MEMORY_COMPANION_EVOLVE_ACTION,
+        SKILL_INVOKE => SKILL_INVOKE_ACTION,
+        _ => return None,
+    };
+    Some(ActionId::from(action))
 }
 
 /// Resolve a deletion-manifest family to the canonical IDs owned by this
@@ -1170,14 +1436,13 @@ impl CapabilityHandler for Wave1CapabilityHandler {
                 action_id: context.action_id,
             });
         }
-        validate_action_input(self.capability_id.as_ref(), &input.0)?;
         let resource_bindings = validate_resource_bindings(
             &self.capability_id,
             &context.principal.principal_id,
             self.requirements,
             &context.resource_bindings,
         )?;
-        let operation = operation_from_input(&self.capability_id, &input.0)?;
+        let operation = operation_from_action(&self.action_id, input)?;
         self.host_port
             .invoke(Wave1HostRequest {
                 context: Wave1HostContext {
@@ -1191,6 +1456,7 @@ impl CapabilityHandler for Wave1CapabilityHandler {
                     capability_id: self.capability_id.clone(),
                     action_id: self.action_id.clone(),
                     state_scope_key: context.state_scope_key,
+                    state: Wave1StateHandle::new(context.state),
                     resource_bindings: resource_bindings.into_iter().cloned().collect(),
                 },
                 operation,
@@ -1200,6 +1466,28 @@ impl CapabilityHandler for Wave1CapabilityHandler {
                 reason: error.to_string(),
             })
     }
+}
+
+/// Decode and validate one canonical action into its unique typed operation.
+///
+/// The action ID, rather than only the capability ID, is the dispatch key so
+/// a future capability cannot accidentally share a generic operation variant.
+pub fn operation_from_action(
+    action: &ActionId,
+    input: StrictJsonValue,
+) -> Result<Wave1CapabilityOperation, KernelError> {
+    let capability_id = CAPABILITY_IDS
+        .iter()
+        .find(|capability_id| {
+            action_id(capability_id)
+                .is_some_and(|expected| expected.as_ref() == action.as_ref())
+        })
+        .map(|capability_id| CapabilityId::from(*capability_id))
+        .ok_or_else(|| KernelError::CapabilityExecution {
+            reason: format!("unknown Wave 1 action {}", action.as_ref()),
+        })?;
+    validate_action_input(capability_id.as_ref(), &input.0)?;
+    operation_from_input(&capability_id, &input.0)
 }
 
 fn operation_from_input(
@@ -1292,27 +1580,27 @@ fn operation_from_input(
         | MEMORY_COMPANION_WRITE
         | MEMORY_COMPANION_MERGE
         | MEMORY_COMPANION_EVOLVE => {
-            let scope = if id.starts_with("memory.project.") {
-                Wave1MemoryScope::Project
-            } else {
-                Wave1MemoryScope::Companion
+            let request = Wave1MemoryMutationRequest {
+                content: optional("content"),
+                title: optional("title"),
+                items: input.get("items").and_then(Value::as_array).cloned(),
             };
-            let operation = match id {
-                MEMORY_PROJECT_WRITE | MEMORY_COMPANION_WRITE => Wave1MemoryOperation::Write,
-                MEMORY_PROJECT_DISTILL => Wave1MemoryOperation::Distill,
-                MEMORY_COMPANION_MERGE => Wave1MemoryOperation::Merge,
-                MEMORY_COMPANION_EVOLVE => Wave1MemoryOperation::Evolve,
+            match id {
+                MEMORY_PROJECT_WRITE => Ok(Wave1CapabilityOperation::ProjectMemoryWrite(request)),
+                MEMORY_PROJECT_DISTILL => {
+                    Ok(Wave1CapabilityOperation::ProjectMemoryDistill(request))
+                }
+                MEMORY_COMPANION_WRITE => {
+                    Ok(Wave1CapabilityOperation::CompanionMemoryWrite(request))
+                }
+                MEMORY_COMPANION_MERGE => {
+                    Ok(Wave1CapabilityOperation::CompanionMemoryMerge(request))
+                }
+                MEMORY_COMPANION_EVOLVE => {
+                    Ok(Wave1CapabilityOperation::CompanionMemoryEvolve(request))
+                }
                 _ => unreachable!("all memory mutation capabilities are listed above"),
-            };
-            Ok(Wave1CapabilityOperation::MemoryMutation(
-                Wave1MemoryMutationRequest {
-                    scope,
-                    operation,
-                    content: optional("content"),
-                    title: optional("title"),
-                    items: input.get("items").and_then(Value::as_array).cloned(),
-                },
-            ))
+            }
         }
         SKILL_INVOKE => Ok(Wave1CapabilityOperation::SkillInvoke(
             Wave1SkillInvokeRequest {
@@ -1547,11 +1835,16 @@ fn validate_action_input(capability_id: &str, input: &Value) -> Result<(), Kerne
                         reason: format!("{capability_id} field `{key}` must not be empty"),
                     });
                 }
-                let max_chars = match key.as_str() {
-                    "content" => 65_536,
-                    "text" | "query" => 16_384,
-                    "url" | "rel_path" => 4_096,
-                    _ => 512,
+                let max_chars = match (capability_id, key.as_str()) {
+                    (_, "content") => 65_536,
+                    (_, "url") => 4_096,
+                    (_, "rel_path") => 1_024,
+                    (_, "base") => 256,
+                    (_, "handle" | "title") => 512,
+                    (_, "skill_id") => 256,
+                    (KNOWLEDGE_EMBEDDING | KNOWLEDGE_RERANK, "text" | "query") => 16_384,
+                    (_, "query") => 2_048,
+                    _ => unreachable!("all string input fields are listed above"),
                 };
                 if value.chars().count() > max_chars {
                     return Err(KernelError::CapabilityExecution {
@@ -1857,7 +2150,7 @@ mod tests {
     use nomifun_agent_contracts::{
         AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, CapabilityExposure,
         CapabilityRef, CapabilitySelection, DigestHex, OperationId, PresetRevisionRef,
-        PrincipalRef, ResourceBindingId, RuntimeProfileKind, RuntimeTarget, ScopeKey,
+        PrincipalRef, ResourceBindingId, RuntimeProfileKind, RuntimeTarget, ScopeKey, StateKey,
         TypedResourceBinding, UserId,
     };
     use nomifun_agent_kernel::{
@@ -1887,6 +2180,35 @@ mod tests {
                     "test expects a knowledge.search operation",
                 ));
             };
+            assert_eq!(
+                request.context.state.descriptor().package_id.as_ref(),
+                KNOWLEDGE_PACKAGE_ID
+            );
+            let state_key = StateKey::from("wave1-test-state");
+            let current = request
+                .context
+                .state
+                .get(&request.context.state_scope_key, &state_key)
+                .await
+                .expect("read authorized plugin state");
+            let expected_revision = current.as_ref().map(|entry| entry.revision).unwrap_or(0);
+            let next = request
+                .context
+                .state
+                .compare_and_swap(
+                    &request.context.state_scope_key,
+                    &state_key,
+                    expected_revision,
+                    &VersionString::from(CONTRACT_VERSION),
+                    Some(StrictJsonValue(json!({"revision": expected_revision + 1}))),
+                )
+                .await
+                .expect("CAS authorized plugin state");
+            assert!(matches!(
+                next,
+                PluginStateCompareAndSwapOutcome::Applied { revision }
+                    if revision == expected_revision + 1
+            ));
             Ok(StrictJsonValue(json!({
                 "host_port_invoked": true,
                 "capability_id": request.context.capability_id,
@@ -2105,6 +2427,66 @@ mod tests {
             }
         };
         assert!(registry.invoke(&snapshot, &active, invalid).await.is_err());
+    }
+
+    #[test]
+    fn every_action_decodes_to_one_matching_typed_operation() {
+        let cases = [
+            (WEB_SEARCH, json!({"query": "rust"})),
+            (WEB_FETCH, json!({"url": "https://example.com"})),
+            (KNOWLEDGE_SEARCH, json!({"query": "rust"})),
+            (KNOWLEDGE_READ, json!({"handle": "doc-1"})),
+            (KNOWLEDGE_WRITE, json!({"content": "entry"})),
+            (KNOWLEDGE_AUTOGEN, json!({"overwrite_readme": true})),
+            (KNOWLEDGE_EMBEDDING, json!({"text": "entry"})),
+            (KNOWLEDGE_RERANK, json!({"query": "entry"})),
+            (MEMORY_PROJECT_WRITE, json!({"content": "entry"})),
+            (MEMORY_PROJECT_DISTILL, json!({"items": [{"text": "entry"}]})),
+            (MEMORY_COMPANION_WRITE, json!({"content": "entry"})),
+            (MEMORY_COMPANION_MERGE, json!({"items": [{"text": "entry"}]})),
+            (MEMORY_COMPANION_EVOLVE, json!({"content": "entry"})),
+            (SKILL_INVOKE, json!({"skill_id": "skill.example"})),
+        ];
+        let mut operation_ids = BTreeSet::new();
+
+        for (capability_id, input) in &cases {
+            let action = action_id(capability_id).expect("action-bearing capability");
+            let operation = operation_from_action(&action, StrictJsonValue(input.clone()))
+                .expect("canonical action input");
+            assert_eq!(operation.capability_id().as_ref(), *capability_id);
+            assert_eq!(operation.action_id(), action);
+            assert!(operation_ids.insert(operation.action_id()));
+        }
+        assert_eq!(operation_ids.len(), cases.len());
+    }
+
+    #[test]
+    fn action_input_validation_matches_declared_schema_limits() {
+        let oversized_query = "q".repeat(2_049);
+        let error = operation_from_action(
+            &action_id(WEB_SEARCH).unwrap(),
+            StrictJsonValue(json!({"query": oversized_query})),
+        )
+        .expect_err("web.search query must use its declared 2048 character limit");
+        assert!(error.to_string().contains("exceeds 2048 characters"));
+
+        let oversized_rel_path = "p".repeat(1_025);
+        let error = operation_from_action(
+            &action_id(KNOWLEDGE_WRITE).unwrap(),
+            StrictJsonValue(json!({
+                "content": "entry",
+                "rel_path": oversized_rel_path
+            })),
+        )
+        .expect_err("knowledge.write rel_path must use its declared 1024 character limit");
+        assert!(error.to_string().contains("exceeds 1024 characters"));
+    }
+
+    #[test]
+    fn host_port_errors_use_canonical_codes_and_no_synthetic_success() {
+        let error = Wave1HostPortError::unavailable("owner is not mounted");
+        assert_eq!(error.code.as_ref(), "CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("not mounted"));
     }
 
     #[test]

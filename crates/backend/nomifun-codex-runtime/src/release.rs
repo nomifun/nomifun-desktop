@@ -15,7 +15,7 @@ pub const FROZEN_PROTOCOL_VERSION: &str = "1.0.0";
 pub const FROZEN_PROTOCOL_SCHEMA_DIGEST: &str =
     "f1c0422f04c9de923e18c7df40d814d3c9f5b2db5f1c5fef2745e77e6d62590f";
 pub const FROZEN_RUNTIME_RELEASE_DIGEST: &str =
-    "8709f4d33e9c49fe780eadeb9be17e878530791d77c1ddc3561696fe343b51a0";
+    "b9dce00732f6d1c45cb20fc30e7a286518d505d7faeb2d94b6cc70d9e107289d";
 
 pub const RUNTIME_HELLO_METHOD: &str = "runtime/hello";
 pub const RPC_METHODS: [&str; 8] = [
@@ -286,6 +286,20 @@ mod tests {
             descriptor
                 .sidecar_digest_for_target("windows_arm64")
                 .is_err()
+        );
+        assert_eq!(
+            descriptor
+                .sidecar_digest_for_target("macos_desktop_arm64")
+                .unwrap()
+                .as_ref(),
+            "7863db3a77545eec8966483f26fb5b493aea6e285ac35b5c29d0920342438060"
+        );
+        assert_eq!(
+            descriptor
+                .sidecar_digest_for_target("macos_desktop_x64")
+                .unwrap()
+                .as_ref(),
+            "aa072d7500db44f6f905d9208551c3ee9c1cd37dabaffff0ab69d503c2a18446"
         );
     }
 

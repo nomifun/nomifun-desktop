@@ -3176,7 +3176,10 @@ impl StreamRelay {
                                 runtime_state
                                     .add_turn_tokens(&self.conversation_id, turn_tokens as i64);
                             }
-                            self.forward_to_websocket(&event);
+                            // Runtime telemetry is not a lifecycle terminal.
+                            // `ConversationService` publishes the sole
+                            // `turn.completed` projection only after durable
+                            // receipt finalization and exact turn release.
                         }
                         _ => {
                             self.forward_to_websocket(&event);
@@ -8383,12 +8386,20 @@ mod tests {
 
         let repo = Arc::new(RecordingRepo::new());
         let bus = Arc::new(TestUserEventBus::new(64));
+        let mut ws_rx = bus.subscribe();
         let (tx, _) = broadcast::channel(64);
         let runtime_state = Arc::new(ConversationRuntimeStateService::default());
 
         let conversation_id = test_conversation_id();
-        let relay = StreamRelay::new(conversation_id.clone(), TEST_ASSISTANT_MESSAGE_ID.into(), TEST_USER_ID.into(), repo, bus, None)
-            .with_runtime_state(runtime_state.clone());
+        let relay = StreamRelay::new(
+            conversation_id.clone(),
+            TEST_ASSISTANT_MESSAGE_ID.into(),
+            TEST_USER_ID.into(),
+            repo,
+            bus,
+            None,
+        )
+        .with_runtime_state(runtime_state.clone());
         let rx = tx.subscribe();
 
         // Two TurnCompleted events (e.g. a continuation) then Finish.
@@ -8410,6 +8421,12 @@ mod tests {
 
         // (100+40) + (30+10) = 180, keyed by the relay's conversation id.
         assert_eq!(runtime_state.take_turn_tokens(&conversation_id), Some(180));
+        assert!(
+            std::iter::from_fn(|| ws_rx.try_recv().ok()).all(|event| {
+                !(event.name == "message.stream" && event.data["type"] == "turn_completed")
+            }),
+            "runtime telemetry must not become a second completion projection"
+        );
     }
 
     // Zero-regression: a relay WITHOUT runtime state wired (the default chat path)
