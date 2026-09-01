@@ -137,9 +137,321 @@ impl Wave2ApplicationHost {
                     "deleted": true
                 })))
             }
+            "fs.search" => {
+                let params: SearchParams = decode(input)?;
+                let query = params.query.trim();
+                if query.is_empty() {
+                    return Err(Wave2HostPortError::invalid_payload(
+                        "fs.search query must not be empty",
+                    ));
+                }
+                let limit = params.limit.unwrap_or(100);
+                if !(1..=200).contains(&limit) {
+                    return Err(Wave2HostPortError::invalid_payload(
+                        "fs.search limit must be between 1 and 200",
+                    ));
+                }
+                let prefix = params
+                    .path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(|path| {
+                        scope
+                            .resolve_relative_path(path)
+                            .and_then(|resolved| {
+                                resolved
+                                    .strip_prefix(scope.workspace_root())
+                                    .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+                                    .map_err(|_| {
+                                        AppError::BadRequest(
+                                            "fs.search path is outside the workspace".to_owned(),
+                                        )
+                                    })
+                            })
+                    })
+                    .transpose()
+                    .map_err(|error| operation_error(capability_id, error))?;
+                let files = self
+                    .files
+                    .list_workspace_files_for_agent_session(&scope)
+                    .await
+                    .map_err(|error| operation_error(capability_id, error))?;
+                let mut matches = Vec::new();
+                let mut truncated = false;
+                for file in files {
+                    let relative_path = file.relative_path.replace('\\', "/");
+                    if prefix
+                        .as_deref()
+                        .is_some_and(|prefix| {
+                            !relative_path
+                                .strip_prefix(prefix)
+                                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+                        })
+                    {
+                        continue;
+                    }
+                    let Some(content) = self
+                        .files
+                        .read_file_for_agent_session(&scope, &relative_path)
+                        .await
+                        .map_err(|error| operation_error(capability_id, error))?
+                    else {
+                        continue;
+                    };
+                    for (line_index, line) in content.lines().enumerate() {
+                        if !line.contains(query) {
+                            continue;
+                        }
+                        if matches.len() == limit {
+                            truncated = true;
+                            break;
+                        }
+                        matches.push(json!({
+                            "path": &relative_path,
+                            "line": line_index + 1,
+                            "text": line
+                        }));
+                    }
+                    if truncated {
+                        break;
+                    }
+                }
+                Ok(StrictJsonValue(json!({
+                    "query": query,
+                    "matches": matches,
+                    "truncated": truncated
+                })))
+            }
+            "vcs.status" => self.invoke_vcs_status(&scope, capability_id).await,
+            "vcs.diff" => {
+                let params: VcsPathParams = decode(input)?;
+                self.invoke_vcs_diff(&scope, capability_id, params.path.as_deref())
+                    .await
+            }
+            "vcs.stage" => {
+                let params: PathParams = decode(input)?;
+                self.invoke_vcs_stage(&scope, capability_id, &params.path)
+                    .await
+            }
             _ => Err(unavailable(capability_id)),
         }
     }
+
+    async fn invoke_vcs_status(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        capability_id: &str,
+    ) -> Result<StrictJsonValue, Wave2HostPortError> {
+        let workspace = scope.workspace_root().to_path_buf();
+        let capability_id = capability_id.to_owned();
+        let worker_capability_id = capability_id.clone();
+        let status = tokio::task::spawn_blocking(move || {
+            let repository = git2::Repository::discover(&workspace).map_err(|error| {
+                Wave2HostPortError::new(
+                    "RESOURCE_NOT_FOUND",
+                    format!("workspace is not a Git repository: {error}"),
+                )
+            })?;
+            let mut options = git2::StatusOptions::new();
+            options
+                .include_untracked(true)
+                .recurse_untracked_dirs(true)
+                .include_ignored(false);
+            let statuses = repository.statuses(Some(&mut options)).map_err(|error| {
+                Wave2HostPortError::new(
+                    "CAPABILITY_UNAVAILABLE",
+                    format!(
+                        "{worker_capability_id} could not read Git status: {error}"
+                    ),
+                )
+            })?;
+            let mut entries = Vec::new();
+            for entry in statuses.iter() {
+                let Some(path) = entry.path() else {
+                    continue;
+                };
+                entries.push(json!({
+                    "path": path.replace('\\', "/"),
+                    "status": git_status_name(entry.status())
+                }));
+            }
+            Ok::<_, Wave2HostPortError>(StrictJsonValue(json!({
+                "repository": "workspace",
+                "entries": entries
+            })))
+        })
+        .await
+        .map_err(|error| {
+            Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!("{capability_id} status worker failed: {error}"),
+            )
+        })??;
+        Ok(status)
+    }
+
+    async fn invoke_vcs_diff(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        capability_id: &str,
+        path: Option<&str>,
+    ) -> Result<StrictJsonValue, Wave2HostPortError> {
+        let workspace = scope.workspace_root().to_path_buf();
+        let capability_id = capability_id.to_owned();
+        let worker_capability_id = capability_id.clone();
+        let path = path
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                scope
+                    .resolve_relative_path(path)
+                    .and_then(|resolved| {
+                        resolved
+                            .strip_prefix(scope.workspace_root())
+                            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+                            .map_err(|_| {
+                                AppError::BadRequest(
+                                    "vcs.diff path is outside the workspace".to_owned(),
+                                )
+                            })
+                    })
+            })
+            .transpose()
+            .map_err(|error| operation_error(&capability_id, error))?;
+        tokio::task::spawn_blocking(move || {
+            let repository = git2::Repository::discover(&workspace).map_err(|error| {
+                Wave2HostPortError::new(
+                    "RESOURCE_NOT_FOUND",
+                    format!("workspace is not a Git repository: {error}"),
+                )
+            })?;
+            let mut options = git2::DiffOptions::new();
+            if let Some(path) = &path {
+                options.pathspec(path);
+            }
+            let diff = repository
+                .diff_index_to_workdir(None, Some(&mut options))
+                .map_err(|error| {
+                    Wave2HostPortError::new(
+                        "CAPABILITY_UNAVAILABLE",
+                        format!(
+                            "{worker_capability_id} could not read Git diff: {error}"
+                        ),
+                    )
+            })?;
+            let mut patch = String::new();
+            diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+                if line.origin() != '\0' {
+                    patch.push(line.origin());
+                }
+                patch.push_str(&String::from_utf8_lossy(line.content()));
+                true
+            })
+            .map_err(|error| {
+                Wave2HostPortError::new(
+                    "CAPABILITY_UNAVAILABLE",
+                    format!(
+                        "{worker_capability_id} could not render Git diff: {error}"
+                    ),
+                )
+            })?;
+            Ok::<_, Wave2HostPortError>(StrictJsonValue(json!({
+                "path": path,
+                "patch": patch
+            })))
+        })
+        .await
+        .map_err(|error| {
+            Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!("{capability_id} diff worker failed: {error}"),
+            )
+        })?
+    }
+
+    async fn invoke_vcs_stage(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        capability_id: &str,
+        path: &str,
+    ) -> Result<StrictJsonValue, Wave2HostPortError> {
+        let relative = scope
+            .resolve_relative_path(path)
+            .and_then(|resolved| {
+                resolved
+                    .strip_prefix(scope.workspace_root())
+                    .map(|relative| relative.to_path_buf())
+                    .map_err(|_| {
+                        AppError::BadRequest(
+                            "vcs.stage path is outside the workspace".to_owned(),
+                        )
+                    })
+            })
+            .map_err(|error| operation_error(capability_id, error))?;
+        let workspace = scope.workspace_root().to_path_buf();
+        let path_label = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let repository = git2::Repository::discover(&workspace).map_err(|error| {
+                Wave2HostPortError::new(
+                    "RESOURCE_NOT_FOUND",
+                    format!("workspace is not a Git repository: {error}"),
+                )
+            })?;
+            let mut index = repository.index().map_err(|error| {
+                Wave2HostPortError::new(
+                    "CAPABILITY_UNAVAILABLE",
+                    format!("vcs.stage could not open the Git index: {error}"),
+                )
+            })?;
+            index.add_path(&relative).map_err(|error| {
+                Wave2HostPortError::new(
+                    "CAPABILITY_UNAVAILABLE",
+                    format!("vcs.stage could not stage {}: {error}", path_label),
+                )
+            })?;
+            index.write().map_err(|error| {
+                Wave2HostPortError::new(
+                    "CAPABILITY_UNAVAILABLE",
+                    format!("vcs.stage could not persist the Git index: {error}"),
+                )
+            })?;
+            Ok::<_, Wave2HostPortError>(StrictJsonValue(json!({
+                "path": path_label,
+                "staged": true
+            })))
+        })
+        .await
+        .map_err(|error| {
+            Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!("{capability_id} stage worker failed: {error}"),
+            )
+        })?
+    }
+}
+
+fn git_status_name(status: git2::Status) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    for (flag, name) in [
+        (git2::Status::INDEX_NEW, "index_new"),
+        (git2::Status::INDEX_MODIFIED, "index_modified"),
+        (git2::Status::INDEX_DELETED, "index_deleted"),
+        (git2::Status::INDEX_RENAMED, "index_renamed"),
+        (git2::Status::INDEX_TYPECHANGE, "index_typechange"),
+        (git2::Status::WT_NEW, "worktree_new"),
+        (git2::Status::WT_MODIFIED, "worktree_modified"),
+        (git2::Status::WT_DELETED, "worktree_deleted"),
+        (git2::Status::WT_RENAMED, "worktree_renamed"),
+        (git2::Status::WT_TYPECHANGE, "worktree_typechange"),
+        (git2::Status::CONFLICTED, "conflicted"),
+        (git2::Status::IGNORED, "ignored"),
+    ] {
+        if status.contains(flag) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 #[derive(Deserialize)]
@@ -153,6 +465,23 @@ struct PathParams {
 struct WriteParams {
     path: String,
     content: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchParams {
+    query: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VcsPathParams {
+    #[serde(default)]
+    path: Option<String>,
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(
@@ -411,5 +740,87 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, "PRESET_RESOURCE_NOT_BOUND");
+    }
+
+    #[tokio::test]
+    async fn workspace_search_returns_real_content_matches() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("needle.txt"), "before\nneedle line\nafter\n")
+            .unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let result = invoke(
+            &host,
+            context(directory.path()),
+            "fs.search",
+            json!({"query": "needle"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.0["matches"][0]["path"], "needle.txt");
+        assert_eq!(result.0["matches"][0]["line"], 2);
+        assert_eq!(result.0["truncated"], false);
+    }
+
+    fn initialize_git_repository(root: &Path) -> git2::Repository {
+        let repository = git2::Repository::init(root).unwrap();
+        std::fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        let mut index = repository.index().unwrap();
+        index.add_path(Path::new("tracked.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repository.find_tree(tree_id).unwrap();
+        let signature = git2::Signature::now("NomiFun test", "test@nomifun.invalid").unwrap();
+        repository
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "initial",
+                &tree,
+                &[],
+            )
+            .unwrap();
+        drop(tree);
+        repository
+    }
+
+    #[tokio::test]
+    async fn vcs_status_diff_and_stage_use_the_bound_repository() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        std::fs::write(directory.path().join("tracked.txt"), "base\nchanged\n").unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let base_context = context(directory.path());
+
+        let status = invoke(&host, base_context.clone(), "vcs.status", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(status.0["entries"][0]["path"], "tracked.txt");
+        assert!(
+            status.0["entries"][0]["status"]
+                .as_array()
+                .is_some_and(|values| values.iter().any(|value| value == "worktree_modified"))
+        );
+
+        let diff = invoke(&host, base_context.clone(), "vcs.diff", json!({}))
+            .await
+            .unwrap();
+        assert!(diff.0["patch"].as_str().unwrap().contains("changed"));
+
+        let staged = invoke(
+            &host,
+            base_context,
+            "vcs.stage",
+            json!({"path": "tracked.txt"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(staged.0["staged"], true);
+        let status_after = repository.statuses(None).unwrap();
+        assert!(
+            status_after
+                .iter()
+                .any(|entry| entry.status().contains(git2::Status::INDEX_MODIFIED))
+        );
     }
 }

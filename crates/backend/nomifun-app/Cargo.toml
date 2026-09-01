@@ -254,6 +254,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
 sqlx.workspace = true
+git2.workspace = true
 # Network-interface enumeration for desktop LAN-IP detection (WebUI remote access).
 if-addrs = "0.13"
 # Decode request paths before matching the immutable embedded WebUI asset map.
@@ -297,7 +298,6 @@ reqwest.workspace = true
 # through the trait-object escape hatch without spawning real CLI processes.
 nomifun-ai-agent = { workspace = true, features = ["test-support"] }
 async-trait.workspace = true
-git2.workspace = true
 http-body-util.workspace = true
 tempfile = "3"
 tower = { workspace = true, features = ["util"] }
