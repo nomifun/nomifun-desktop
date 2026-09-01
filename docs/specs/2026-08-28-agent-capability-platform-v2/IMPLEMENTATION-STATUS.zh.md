@@ -25,10 +25,11 @@
   - 状态：匹配调查基线
 - Codex：
   - frozen investigation SHA：`dc2ccc6843abb09c9d297862dc10b6bd12a3935d`
-  - sibling checkout SHA：`4ee04c0aa5833ac39b1763f6ea44c7bc777c83dd`
-  - 状态：当前 checkout 比冻结基线前进 16 commits；冻结 SHA 仍在本地对象库中且
-    是当前 HEAD 的祖先。C0/C4 必须显式 pin 冻结 SHA，不得把当前 HEAD 静默当作
-    调查基线。
+  - sibling checkout：当前工作区不存在 `../codex`；未发现可验证的
+    `4ee04c0aa5833ac39b1763f6ea44c7bc777c83dd` checkout。
+  - 状态：冻结调查 SHA 及其 ancestor 关系当前不可由本地对象库复核；C0/C4
+    仍必须显式 pin 冻结 SHA，不得把当前 HEAD 静默当作调查基线。实际 sidecar
+    仍需按 release input 单独提供和验证。
 
 ## 当前阶段
 
@@ -252,6 +253,10 @@ C0 contract/golden digests（历史基线；不是当前 C8 cohort tuple）：
 
 ## Closed Slices / Commits / Evidence
 
+以下 evidence 路径是历史 run 的引用；`build.noindex/` 属于 ignored
+本地产物，当前 checkout 不保证这些文件存在。它们未被本轮重新生成，不作为
+当前 C8/native 验证依据。
+
 - C0 六个 contract slices：closed
 - 设计基线 commit：`7a2ade3c49374add25a35565265399c57729a8b9`
 - C0 implementation commit：`84da71b7377967726552b7f80ce54ff1e4433feb`
@@ -283,19 +288,27 @@ C0 contract/golden digests（历史基线；不是当前 C8 cohort tuple）：
 - C7 implementation candidate: `c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6`
 - C7 manifest: `docs/specs/2026-08-28-agent-capability-platform-v2/C7-WRITE-MANIFESTS.json`
 - C7 closure record: `docs/specs/2026-08-28-agent-capability-platform-v2/C7-CLOSURE.json`
-- C7 gate: PASS
+- C7 gate historical claim: PASS
   `build.noindex/agent-capability-v2/c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6/c7-domain-waves/summary.json`
+- 上述 C7 summary 当前不在本 checkout；不能把该历史声明当作当前
+  `0bacc9ab...` source 的可复验 evidence。
 - Five domain registration waves plus model-media publish exactly 26 packages and 137 capabilities.
 - Focused domain tests: PASS; Fresh-v4 root tests: PASS; production host tests: PASS.
 - Windows startup smoke: PASS for absent and pre-created empty roots; canonical `/api/capabilities` returned 137 entries.
 - Workspace `cargo test` remains intentionally deferred to `C8-WIN-PRE`.
 - macOS and Linux native verification remains `pending_native_verification`.
-- Known forward work: compose the production ChatModelBroker factory and complete the global legacy residual gate.
+- Known forward work: 在最终 clean source 上重新冻结/对账 C8 tuple，完成真实
+  provider/credential/sidecar lifecycle 验证，并通过 global legacy residual
+  gate；不能把已有 provider factory 的存在解释为 live provider 已验证。
 
 ## Next Directly Executable Batch
 
-1. Freeze the C8-WIN-PRE verification tuple from C7 candidate `c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6`.
-2. Run the Windows whole-candidate preflight, including workspace Cargo validation, UI check/build, seven-template/resource coverage, lifecycle/fault, and package checks.
+1. 在最终 clean source `0bacc9ab...`（及其后续 status-only 文档提交完成后）
+   重新生成并对账 `PlatformValidationManifest`/runtime tuple；不要直接从历史
+   C7 candidate `c5e1015f...` 继承 tuple。
+2. 在新的 frozen tuple 上运行 Windows whole-candidate preflight，包括 workspace
+   Cargo validation、UI check/build、七模板/resource coverage、
+   lifecycle/fault 与 package checks。
 3. Keep macOS/Linux native rows pending until the Windows pre-candidate exits at HP-1.
 
 ## Blocking Status
@@ -304,7 +317,9 @@ C0 contract/golden digests（历史基线；不是当前 C8 cohort tuple）：
   artifact and four required native hosts are still unavailable in this
   workspace. They block full C8/native release evidence, but do not block the
   local implementation and targeted checks.
-- Codex sibling drift is recorded; the frozen investigation SHA remains locally available and does not block C7.
+- Codex sibling checkout 与冻结对象当前不可本地复核；这不改变 release input
+  的 pinned commit 要求，但会阻塞需要真实 sidecar/source 的 native/lifecycle
+  证据。
 - Repository-wide React/Arco typecheck baseline debt is recorded; focused UI tests and production build pass.
 
 ## 恢复更新（2026-08-31）
@@ -418,7 +433,7 @@ candidate evidence。
 
 1. **Windows Codex sidecar runtime**
    - 需要提供与 `runtime_release_digest =
-     b9dce00732f6d1c45cb20fc30e7a286518d505d7faeb2d94b6cc70d9e107289d`
+     c4075b2f7c118fa5eeeb6fc4a0b21cf940d5af6a8acc080e1c8721a8a738a380`
      对应的 `windows_desktop_x64` sidecar 可执行文件路径。
    - 该可执行文件的预期 SHA-256 是
      `36f175f56e065560749fcc16caffbe06639eece66e19b655ea9104052d85cab4`；
@@ -528,7 +543,7 @@ drain；只有 C8-MERGE 和 exact-zero 通过后才进入 C9 physical deletion�
 
 1. Windows `windows_desktop_x64` Codex sidecar 与 hello metadata。当前
    `runtime_release_digest` 为
-   `b9dce00732f6d1c45cb20fc30e7a286518d505d7faeb2d94b6cc70d9e107289d`；
+   `c4075b2f7c118fa5eeeb6fc4a0b21cf940d5af6a8acc080e1c8721a8a738a380`；
    提供 sidecar 绝对路径、`Get-FileHash -Algorithm SHA256` 输出和 hello metadata
    后，执行一次真实 `open -> ready -> initial turn -> observe -> cancel -> dispose`。
 2. 真实 macOS arm64/x64、Linux Desktop x64、Linux Headless x64 主机仍为
@@ -900,21 +915,21 @@ owner-backed `fs.search`、`vcs.status`、`vcs.diff` 与 `vcs.stage`：
 - `cargo check --locked -p nomifun-app`、app rustfmt/check 与 `git diff --check`：
   通过。
 
-该增量只关闭 Wave 2 的一部分 workspace/VCS action gap；`fs.patch`、
-`fs.snapshot`、`process.exec`、SSH/MCP/Browser/Computer 仍需各自真实 owner
+该增量（截至 `043c9d5ba`）只关闭 Wave 2 的一部分 workspace/VCS action gap；
+`fs.patch`、`fs.snapshot`、`process.exec`、SSH/MCP/Browser/Computer 仍需各自真实 owner
 与 lifecycle seam，不能由本实现推断为 Wave 2 或 C8 全部通过。当前 SHA 变化也
 使此前以 `3b7236f13...` 为 source 的任何 native/tuple evidence 失效，待最终
 候选冻结后重新生成。
 
 ## 增量实现记录（2026-09-01，Wave 1 Web Fetch 与 Host 组合）
 
-随后又完成并普通推送：
+随后又完成并普通推送（以下为该轮历史记录）：
 
 - `e12f0ede4a7894e23f4b3441a4a60918fe3cbd00`
   `feat(agent): mount partial Fresh-v4 capability owners`
 - 当前 local/remote SHA 均为该值。
 
-Fresh-v4 中央 `AgentDomainHostPorts` 现在为 Wave 1 挂载一个真实的
+截至该轮，Fresh-v4 中央 `AgentDomainHostPorts` 为 Wave 1 挂载一个真实的
 `HttpFetcher` owner：`web.fetch` 通过既有 SSRF/DNS 校验、重定向/大小限制和
 HTML→Markdown 归一化返回真实页面结果；Research search、Knowledge、Memory
 和 Skill actions 在没有对应 v4 owner 时仍显式返回 `CAPABILITY_UNAVAILABLE`，
