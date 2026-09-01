@@ -1177,3 +1177,8 @@ HP-1 通过。
   `PlatformCellEvidence` PASS，也没有运行 workspace-wide `cargo test`；
   缺少 sidecar/Universal 双架构包/真实 binding、token、provider 资源及
   其它 native Host，仍是外部阻塞。
+- 已生成 Windows 连续验收交接包：
+  `MACOS-ARM64-ENGINEERING-HANDOFF.zh.md` /
+  `MACOS-ARM64-ENGINEERING-HANDOFF.json`。其状态为
+  `ready_for_windows_continuation`，明确标记 C8-MA/HP-2 未通过，不是 native
+  PASS evidence。
