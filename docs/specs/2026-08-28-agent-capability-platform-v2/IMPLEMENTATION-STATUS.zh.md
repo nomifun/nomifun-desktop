@@ -779,3 +779,91 @@ sidecar 与 hello metadata 前，真实
 路径/权限、bundle、进程树与 target-specific adapter 补齐；它不是正式 HP-1。
 正式 HP-1 仍要求 Windows 全场景功能、sidecar/native Gate 和 clean remote SHA
 全部闭合。
+
+## 本轮继续实施记录（2026-09-01，macOS arm64 Host）
+
+本轮从远端候选 `0f9dfd63d9c6a1630620096e088d3ffcde77fc81` 继续，先核对了
+branch、HEAD、origin、worktree、Git identity 与远端 SHA。当前已形成并普通推送的
+实现提交为：
+
+- branch：`rf/agent-capability-platform-v2`
+- current/last verified remote SHA：
+  `3b7236f13c3120b3fabfdab2f43d56cf1795b28b`
+- origin：`git@github.com:nomifun/nomifun-desktop.git`
+- native host：`Darwin` / `arm64`，`sysctl.proc_translated=0`，
+  `rustc host=aarch64-apple-darwin`
+- `../codex`、`../deepseek-harness` 与要求的 MACOS arm64 handoff 文件在本机均
+  不存在；没有偷偷改用其他 checkout。
+
+本提交 `feat(agent): harden domain host boundaries and macOS preflight` 已完成：
+
+1. 五个 Domain Wave 增加逐 action typed operation、capability/action identity
+   校验、资源 owner/operation/cardinality 检查、canonical fail-closed error
+   传播和可组合 host-port seam；Wave 5 保持 Remote 四操作 transport 与 action
+   host 严格分离，Wave 1/5 只透传 Kernel 授权的 namespace state handle。
+2. Fresh-v4 中央组合增加显式 `AgentDomainHostPorts` 五波次注入 seam；未有真实
+   v4 owner 的波次仍使用 fail-closed port，未以 composed metadata 或测试返回
+   冒充业务 owner。
+3. Conversation relay 删除 duplicate runtime completion projection 和
+   failover teardown waiting tip；保留 service-owned durable completion/receipt。
+4. Codex Runtime process pin 拒绝 symlink、非 regular file、不可执行或
+   group/world-writable sidecar；release input、runtime digest 与当前冻结 cohort
+   对齐。
+5. macOS 构建脚本要求真实 arm64/x64 sidecar、固定 SHA、Mach-O 架构、权限、
+   大小写路径、hello/profile/RPC metadata，并为 Universal app 预留两个 Darwin
+   sidecar；缺制品时直接失败，不复制伪制品。新增独立 arm64 native helper，
+   不写入或提升 PlatformCellEvidence。
+
+已通过的本轮验证：
+
+- `cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check`
+- `cargo fmt --all -- --check`、`git diff --check`
+- 五个 Wave 定向 tests：`6 + 8 + 9 + 16 + 11 = 50 passed`
+- `cargo test --locked -p nomifun-conversation --lib -- --test-threads=1`：
+  `323 passed`
+- `cargo test --locked -p nomifun-codex-runtime --lib -- --test-threads=1`：
+  `31 passed`
+- `cargo test --locked -p nomi-tools --lib -- --test-threads=1`：
+  `311 passed`
+- `cargo test --locked -p nomifun-app --lib router::agent_platform_host
+  -- --test-threads=1`：`9 passed`
+- `cargo check --locked -p nomifun-app -p nomifun-web -p nomifun-desktop`
+- `bun run check:i18n`：`7078 keys / 33 modules`
+- `bun run build:ui`
+- `bun run gate:agent-v2 -- --self-test`
+- `bun run gate:agent-v2 -- c7-domain-waves`
+- `bun test scripts/validation/check-macos-arm64-native.test.mjs`：`2 passed`
+- `bash -n scripts/desktop-build-mac.sh scripts/release-mac.sh`
+
+macOS arm64 native helper 实际结果（当前 source `3b7236f13...`）：
+
+- 当前编译的 `target/debug/nomicore` 可在 absent root 与 pre-created empty root
+  启动；`/health` 与 137 条 canonical capability inventory 检查通过，进程树
+  清理检查通过。
+- `universal-app` 当前仅观察到 `arm64`，尚未生成要求的 `arm64+x86_64`
+  Universal app/DMG。
+- 缺少真实 macOS arm64 Codex sidecar，固定期望 SHA-256：
+  `7863db3a77545eec8966483f26fb5b493aea6e285ac35b5c29d0920342438060`。
+- 因 sidecar、hello metadata、真实 binding/token 不存在，尚未执行真实
+  `open → ready → initial turn → observe → cancel → dispose`；helper 将该项
+  保持 `blocked`，没有生成 PASS evidence。
+
+当前状态仍为 `C8-WIN-PRE/C8-MA pending`，不是 HP-1、C8-MERGE 或 Stable PASS。
+继续实施前的真实阻塞为：
+
+1. Windows x64 sidecar 与 hello metadata 缺失（期望 SHA-256：
+   `36f175f56e065560749fcc16caffbe06639eece66e19b655ea9104052d85cab4`），因此
+   Windows 最终 C8-WIN-PRE 和 HP-1 不能由本机代验；
+2. macOS arm64/x64 sidecar、hello metadata、Universal signed package 与真实
+   provider/binding 资源缺失；
+3. Wave 1、Wave 3、Wave 5 仍没有可由当前 Fresh-v4 schema 验证的完整真实业务
+   owner；Wave 4 仍明确没有 v4-native Channel/Companion/Customer/Robot owner。
+   这些 action 继续 typed fail-closed，不能改成 mock/synthetic success；
+4. repository-wide UI typecheck 仍保留既有 React/Arco/implicit-any baseline，
+   但本轮 i18n、生产 UI build 与受影响 focused checks 通过。
+
+下一可执行批次：在取得真实 sidecar/hello 与业务 owner 后，先执行对应
+`runtime/hello`、`open → ready → initial turn → observe → cancel → dispose`、
+Universal package/path/permission/process checks，再由对应原生 Host 生成
+PlatformCellEvidence；在此之前不运行 `c8-ma` 或 `c8-ma` 的 PASS 结论，也不把
+本提交的静态/target-specific checks提升为 C8 正式通过。
