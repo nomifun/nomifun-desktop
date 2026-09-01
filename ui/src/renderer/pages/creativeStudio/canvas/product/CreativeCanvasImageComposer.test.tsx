@@ -291,6 +291,36 @@ describe('CreativeCanvasImageComposer', () => {
     expect(html.includes('请输入你想要把这张图修改成什么')).toBe(false);
   });
 
+  test('shows a configured alias first and keeps the exact model id available', () => {
+    const html = renderToStaticMarkup(
+      <CreativeCanvasImageComposer
+        {...props({
+          modelOptions: [
+            {
+              providerId: 'provider-a',
+              model: 'ep-20260826130358-long-model-id',
+              label: '人像精修',
+              rawModelId: 'ep-20260826130358-long-model-id',
+              providerLabel: 'Provider A',
+            },
+          ],
+          settings: {
+            ...props().settings,
+            model: {
+              providerId: 'provider-a',
+              model: 'ep-20260826130358-long-model-id',
+            },
+          },
+        })}
+      />
+    );
+
+    expect(html.includes('人像精修')).toBe(true);
+    expect(html.includes('ep-20260826130358-long-model-id')).toBe(true);
+    expect(html.includes('Provider A')).toBe(true);
+    expect(html.includes('arco-select-show-search')).toBe(true);
+  });
+
   test('uses the shared compact shell while keeping image-specific controls', () => {
     const css = readFileSync(
       new URL('./CreativeCanvasImageComposer.module.css', import.meta.url),
@@ -316,6 +346,9 @@ describe('CreativeCanvasImageComposer', () => {
     expect(promptCss.includes('min-height: 104px')).toBe(true);
     expect(css.includes('height: 160px')).toBe(false);
     expect(shellCss.includes('flex: 0 1 156px')).toBe(true);
+    expect(
+      /\.selectedModelLabel\s*\{[\s\S]*?display:\s*inline-flex;/.test(shellCss)
+    ).toBe(true);
     expect(shellCss.includes('min-width: 124px')).toBe(true);
     expect(shellCss.includes('min-width: 48px')).toBe(true);
     expect(shellCss.includes('.footer :global(.i-icon)')).toBe(true);

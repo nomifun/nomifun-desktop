@@ -162,6 +162,10 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     ? !disabled && onRetrySubmission !== undefined
     : !disabled && !generateBlocked && !busy && prompt.trim().length > 0 && settings.model !== null;
   const modelValue = settings.model ? imageWorkbenchModelKey(settings.model) : undefined;
+  const modelOptionByKey = useMemo(
+    () => new Map(modelOptions.map((option) => [imageWorkbenchModelKey(option), option])),
+    [modelOptions]
+  );
   const selectedSizeOption =
     aspectRatioOptions.find(
       (option) => !option.disabled && option.value === settings.aspectRatio
@@ -360,6 +364,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
             <Select
               className={composerStyles.modelSelect}
               size='mini'
+              showSearch
               value={modelValue}
               placeholder={
                 modelOptions.length > 0
@@ -389,6 +394,35 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
               }
               disabled={disabled || modelOptions.length === 0}
               getPopupContainer={popupContainer}
+              dropdownMenuClassName={composerStyles.modelMenu}
+              triggerProps={{
+                autoAlignPopupWidth: false,
+                popupStyle: {
+                  width: 'min(440px, calc(100vw - 24px))',
+                  maxWidth: 'calc(100vw - 24px)',
+                },
+              }}
+              filterOption={(input, candidate) => {
+                const key = (candidate as React.ReactElement<{ value?: unknown }>).props.value;
+                const option = typeof key === 'string' ? modelOptionByKey.get(key) : undefined;
+                if (!option) return false;
+                const query = input.trim().toLocaleLowerCase();
+                return [option.label, option.model, option.providerLabel]
+                  .filter((part): part is string => Boolean(part))
+                  .some((part) => part.toLocaleLowerCase().includes(query));
+              }}
+              renderFormat={(_candidate, key) => {
+                const option = typeof key === 'string' ? modelOptionByKey.get(key) : undefined;
+                if (!option) return typeof key === 'string' ? key : '';
+                const title = [option.label, option.rawModelId, option.providerLabel]
+                  .filter(Boolean)
+                  .join(' · ');
+                return (
+                  <span className={composerStyles.selectedModelLabel} title={title}>
+                    {option.label}
+                  </span>
+                );
+              }}
               onChange={(key) =>
                 onModelChange(
                   typeof key === 'string'
@@ -403,8 +437,23 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                   value={imageWorkbenchModelKey(option)}
                   disabled={option.disabled}
                 >
-                  {option.label}
-                  {option.providerLabel ? ` · ${option.providerLabel}` : ''}
+                  <span className={composerStyles.modelOption}>
+                    <span className={composerStyles.modelOptionIdentity}>
+                      <span className={composerStyles.modelOptionLabel} title={option.label}>
+                        {option.label}
+                      </span>
+                      {option.rawModelId ? (
+                        <span className={composerStyles.modelOptionId} title={option.rawModelId}>
+                          <span aria-hidden='true'>·</span> {option.rawModelId}
+                        </span>
+                      ) : null}
+                    </span>
+                    {option.providerLabel ? (
+                      <span className={composerStyles.modelOptionProvider}>
+                        {option.providerLabel}
+                      </span>
+                    ) : null}
+                  </span>
                 </Select.Option>
               ))}
             </Select>
