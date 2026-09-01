@@ -4,6 +4,7 @@
 //! configured here. Unsupported families fail closed instead of delegating to
 //! the legacy Gateway or manufacturing an acknowledgement.
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -21,6 +22,7 @@ use nomifun_api_types::{TypedResourceBindingDto, WebSocketMessage};
 use nomifun_common::AppError;
 use nomifun_file::{
     AgentSessionPatchRequest, AgentSessionWorkspaceBinding, FileService,
+    ISnapshotService, SnapshotInfo, SnapshotMode, SnapshotService,
     WORKSPACE_READ_OPERATION, WORKSPACE_RESOURCE_KIND, WORKSPACE_ROOT_PARAMETER,
     WORKSPACE_WRITE_OPERATION,
 };
@@ -31,6 +33,8 @@ use serde_json::{Value, json};
 const MAX_SEARCH_QUERY_CHARS: usize = 1024;
 const MAX_SEARCH_LINE_CHARS: usize = 4096;
 const MAX_DIFF_BYTES: usize = 1024 * 1024;
+const MAX_SNAPSHOT_CHANGES: usize = 512;
+const MAX_SNAPSHOT_BASELINE_BYTES: usize = 1024 * 1024;
 const WAVE2_EFFECT_STATE_FORMAT: &str = "1.0.0";
 const MAX_WAVE2_EFFECT_RECORDS: usize = 128;
 const MAX_WAVE2_EFFECT_CAS_ATTEMPTS: usize = 8;
@@ -39,6 +43,8 @@ const MAX_WAVE2_IDEMPOTENCY_KEY_BYTES: usize = 128;
 #[derive(Clone)]
 pub(crate) struct Wave2ApplicationHost {
     files: Arc<FileService>,
+    snapshots: Arc<SnapshotService>,
+    snapshot_sessions: Arc<tokio::sync::Mutex<BTreeSet<(String, String)>>>,
     configured_workspace_root: PathBuf,
 }
 
@@ -74,6 +80,8 @@ impl Wave2ApplicationHost {
                 Arc::new(NullUserEvents),
                 vec![workspace_root.clone()],
             )),
+            snapshots: Arc::new(SnapshotService::new()),
+            snapshot_sessions: Arc::new(tokio::sync::Mutex::new(BTreeSet::new())),
             configured_workspace_root: workspace_root,
         }
     }
@@ -855,6 +863,14 @@ impl Wave2ApplicationHost {
                     "truncated": truncated
                 })))
             }
+            "fs.snapshot" => {
+                scope
+                    .require_operation(WORKSPACE_READ_OPERATION)
+                    .map_err(|error| operation_error(capability_id, error))?;
+                let params: SnapshotParams = decode(input)?;
+                self.invoke_snapshot(context, &scope, capability_id, params)
+                    .await
+            }
             "vcs.status" => {
                 scope
                     .require_operation(WORKSPACE_READ_OPERATION)
@@ -1004,6 +1020,119 @@ impl Wave2ApplicationHost {
             )
         })??;
         Ok(status)
+    }
+
+    async fn invoke_snapshot(
+        &self,
+        context: &Wave2HostContext,
+        scope: &AgentSessionWorkspaceBinding,
+        capability_id: &str,
+        params: SnapshotParams,
+    ) -> Result<StrictJsonValue, Wave2HostPortError> {
+        let workspace = scope.workspace_root().to_string_lossy().into_owned();
+        let session_key = snapshot_session_key(context, scope);
+        match params.operation {
+            SnapshotOperation::Init => {
+                let mut sessions = self.snapshot_sessions.lock().await;
+                let info = if sessions.contains(&session_key) && self.snapshots.is_tracked(&workspace) {
+                    self.snapshots
+                        .info(&workspace)
+                        .await
+                        .map_err(|error| operation_error(capability_id, error))?
+                } else {
+                    let info = self
+                        .snapshots
+                        .init(&workspace)
+                        .await
+                        .map_err(|error| operation_error(capability_id, error))?;
+                    sessions.insert(session_key);
+                    info
+                };
+                Ok(StrictJsonValue(snapshot_info_value(info)))
+            }
+            SnapshotOperation::Compare => {
+                let owned = self.snapshot_sessions.lock().await.contains(&session_key);
+                if !owned || !self.snapshots.is_tracked(&workspace) {
+                    return Err(Wave2HostPortError::new(
+                        "CAPABILITY_UNAVAILABLE",
+                        "fs.snapshot compare requires a snapshot initialized by this AgentSession",
+                    ));
+                }
+                let compare = self
+                    .snapshots
+                    .compare(&workspace)
+                    .await
+                    .map_err(|error| operation_error(capability_id, error))?;
+                Ok(StrictJsonValue(snapshot_compare_value(compare)?))
+            }
+            SnapshotOperation::Baseline => {
+                let path = params.path.as_deref().ok_or_else(|| {
+                    Wave2HostPortError::invalid_payload(
+                        "fs.snapshot baseline requires a workspace-relative path",
+                    )
+                })?;
+                let path = path.trim();
+                if path.is_empty() {
+                    return Err(Wave2HostPortError::invalid_payload(
+                        "fs.snapshot baseline path must not be empty",
+                    ));
+                }
+                let path = scope
+                    .resolve_relative_path(path)
+                    .and_then(|resolved| {
+                        resolved
+                            .strip_prefix(scope.workspace_root())
+                            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+                            .map_err(|_| {
+                                AppError::BadRequest(
+                                    "fs.snapshot baseline path is outside the workspace"
+                                        .to_owned(),
+                                )
+                            })
+                    })
+                    .map_err(|error| operation_error(capability_id, error))?;
+                let owned = self.snapshot_sessions.lock().await.contains(&session_key);
+                if !owned || !self.snapshots.is_tracked(&workspace) {
+                    return Err(Wave2HostPortError::new(
+                        "CAPABILITY_UNAVAILABLE",
+                        "fs.snapshot baseline requires a snapshot initialized by this AgentSession",
+                    ));
+                }
+                let content = self
+                    .snapshots
+                    .get_baseline_content(&workspace, &path)
+                    .await
+                    .map_err(|error| operation_error(capability_id, error))?;
+                let found = content.is_some();
+                let (content, truncated) = match content {
+                    Some(content) if content.len() > MAX_SNAPSHOT_BASELINE_BYTES => {
+                        let mut end = MAX_SNAPSHOT_BASELINE_BYTES;
+                        while end > 0 && !content.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        (content[..end].to_owned(), true)
+                    }
+                    Some(content) => (content, false),
+                    None => (String::new(), false),
+                };
+                Ok(StrictJsonValue(json!({
+                    "path": path,
+                    "content": content,
+                    "found": found,
+                    "truncated": truncated
+                })))
+            }
+            SnapshotOperation::Dispose => {
+                let mut sessions = self.snapshot_sessions.lock().await;
+                if sessions.remove(&session_key) {
+                    self.snapshots
+                        .dispose(&workspace)
+                        .await
+                        .map_err(|error| operation_error(capability_id, error))?;
+                }
+                Ok(StrictJsonValue(json!({"disposed": true})))
+            }
+        }
     }
 
     async fn invoke_vcs_diff(
@@ -1475,6 +1604,23 @@ struct VcsCommitParams {
     message: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotParams {
+    operation: SnapshotOperation,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SnapshotOperation {
+    Init,
+    Compare,
+    Baseline,
+    Dispose,
+}
+
 fn decode<T: for<'de> Deserialize<'de>>(
     input: StrictJsonValue,
 ) -> Result<T, Wave2HostPortError> {
@@ -1484,6 +1630,59 @@ fn decode<T: for<'de> Deserialize<'de>>(
             format!("Wave 2 filesystem input is invalid: {error}"),
         )
     })
+}
+
+fn snapshot_session_key(
+    context: &Wave2HostContext,
+    scope: &AgentSessionWorkspaceBinding,
+) -> (String, String) {
+    (
+        context.agent_session_id.as_ref().to_owned(),
+        scope.workspace_root().to_string_lossy().into_owned(),
+    )
+}
+
+fn snapshot_info_value(info: SnapshotInfo) -> Value {
+    let (mode, reason) = match info.mode {
+        SnapshotMode::GitRepo => ("git-repo", None),
+        SnapshotMode::Snapshot => ("snapshot", None),
+        SnapshotMode::Disabled { reason } => ("disabled", Some(reason)),
+    };
+    json!({
+        "mode": mode,
+        "branch": info.branch,
+        "reason": reason,
+    })
+}
+
+fn snapshot_compare_value(
+    compare: nomifun_file::CompareResult,
+) -> Result<Value, Wave2HostPortError> {
+    if compare.staged.len() > MAX_SNAPSHOT_CHANGES
+        || compare.unstaged.len() > MAX_SNAPSHOT_CHANGES
+    {
+        return Err(Wave2HostPortError::new(
+            "CAPABILITY_UNAVAILABLE",
+            format!(
+                "fs.snapshot compare exceeds the {MAX_SNAPSHOT_CHANGES}-entry result limit"
+            ),
+        ));
+    }
+    let convert = |changes: Vec<nomifun_file::FileChangeInfo>| {
+        changes
+            .into_iter()
+            .map(|change| {
+                json!({
+                    "relative_path": change.relative_path.replace('\\', "/"),
+                    "operation": change.operation,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    Ok(json!({
+        "staged": convert(compare.staged),
+        "unstaged": convert(compare.unstaged),
+    }))
 }
 
 impl Wave2ApplicationHost {
@@ -2000,6 +2199,150 @@ mod tests {
         assert_eq!(result.0["matches"][0]["path"], "needle.txt");
         assert_eq!(result.0["matches"][0]["line"], 2);
         assert_eq!(result.0["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn workspace_snapshot_is_session_scoped_and_returns_bounded_real_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let session_context = context(directory.path());
+
+        let initialized = invoke(
+            &host,
+            session_context.clone(),
+            "fs.snapshot",
+            json!({"operation": "init"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(initialized.0["mode"], "git-repo");
+        assert!(initialized.0["branch"].is_string());
+        assert_eq!(host.snapshots.workspace_count(), 1);
+
+        let initialized_again = invoke(
+            &host,
+            session_context.clone(),
+            "fs.snapshot",
+            json!({"operation": "init"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(initialized_again, initialized);
+        assert_eq!(
+            host.snapshots.workspace_count(),
+            1,
+            "same AgentSession init must not leak a second snapshot reference"
+        );
+
+        let other_session = context(directory.path());
+        let other_session_error = invoke(
+            &host,
+            other_session.clone(),
+            "fs.snapshot",
+            json!({"operation": "compare"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(other_session_error.code, "CAPABILITY_UNAVAILABLE");
+
+        std::fs::write(directory.path().join("tracked.txt"), "changed\n").unwrap();
+        let compared = invoke(
+            &host,
+            session_context.clone(),
+            "fs.snapshot",
+            json!({"operation": "compare"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(compared.0["unstaged"][0]["relative_path"], "tracked.txt");
+        assert_eq!(compared.0["unstaged"][0]["operation"], "modify");
+
+        let baseline = invoke(
+            &host,
+            session_context.clone(),
+            "fs.snapshot",
+            json!({"operation": "baseline", "path": "tracked.txt"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(baseline.0["found"], true);
+        assert_eq!(baseline.0["content"], "base\n");
+        assert_eq!(baseline.0["truncated"], false);
+
+        let disposed = invoke(
+            &host,
+            session_context.clone(),
+            "fs.snapshot",
+            json!({"operation": "dispose"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(disposed.0["disposed"], true);
+        assert_eq!(host.snapshots.workspace_count(), 0);
+
+        let compare_after_dispose = invoke(
+            &host,
+            session_context,
+            "fs.snapshot",
+            json!({"operation": "compare"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(compare_after_dispose.code, "CAPABILITY_UNAVAILABLE");
+        drop(repository);
+    }
+
+    #[tokio::test]
+    async fn workspace_snapshot_uses_real_temporary_baseline_for_non_git_workspace() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("note.txt"), "initial\n").unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let context = context(directory.path());
+
+        let initialized = invoke(
+            &host,
+            context.clone(),
+            "fs.snapshot",
+            json!({"operation": "init"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(initialized.0["mode"], "snapshot");
+        let snapshot_repo = host.snapshots.repo_path_for(
+            directory.path().to_str().unwrap(),
+        ).unwrap();
+        assert!(snapshot_repo.exists());
+
+        std::fs::write(directory.path().join("note.txt"), "updated\n").unwrap();
+        let compare = invoke(
+            &host,
+            context.clone(),
+            "fs.snapshot",
+            json!({"operation": "compare"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(compare.0["unstaged"][0]["relative_path"], "note.txt");
+        let baseline = invoke(
+            &host,
+            context.clone(),
+            "fs.snapshot",
+            json!({"operation": "baseline", "path": "note.txt"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(baseline.0["content"], "initial\n");
+
+        invoke(
+            &host,
+            context,
+            "fs.snapshot",
+            json!({"operation": "dispose"}),
+        )
+        .await
+        .unwrap();
+        assert!(!snapshot_repo.exists());
     }
 
     #[tokio::test]
