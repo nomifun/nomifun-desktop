@@ -928,3 +928,55 @@ Companion/Customer/Robot 的真实持久化与 effect owner；真实 Codex sidec
 Universal package、Windows pre candidate 和五格 native evidence。当前
 `PlatformValidationManifest` 仍需在最终候选冻结时按新 source SHA 生成/对账；
 旧 tuple evidence 不可沿用。
+
+## 增量实现记录（2026-09-01，Wave 1 PluginState memory mutation）
+
+在上述部分 owner closure 之后，已提交并普通推送：
+
+- `3c095d98c` — `feat(agent): persist bounded memory mutations via plugin state`
+- 远端分支 `rf/agent-capability-platform-v2` 已核对指向该提交；
+  代码提交前的远端 SHA 为 `3303f93ab53de78e85edac6381e0b25c00107179`。
+
+本提交把 Wave 1 的五个**写入/变换 action**接到一个真实的
+Kernel `PluginState` CAS owner：
+
+- `memory.project.write`、`memory.project.distill`；
+- `memory.companion.write`、`memory.companion.merge`、
+  `memory.companion.evolve`。
+
+实现边界保持明确：
+
+1. 状态使用完整四元 identity
+   `(package_id,mount_id,scope_key,state_key)`；`scope_key` 由唯一、已通过
+   owner/operation 校验的 typed resource 派生为 `resource:<resource_id>`，不会
+   回退到 Session scope，也不会跨 project/companion package 或资源串写。
+2. 每条 mutation 先 canonicalize request 并保存 request digest；同一资源、
+   同一 idempotency key 且同一请求会返回原结果，不同请求返回
+   `IDEMPOTENCY_CONFLICT`，不会追加第二条记录。
+3. Read/modify/write 只使用 Host `get` + bounded CAS；CAS conflict 只做有限
+   次重试。单条 entry、总 PluginState bytes、entry count、revision、state
+   format 和 stored JSON shape 都有上限/校验，容量、损坏或未知 format 均
+   fail-closed，不隐式迁移或覆盖原状态。
+4. 这只是**bounded mutation owner**，不是完整 Memory domain closure：
+   `memory.project.read`、`memory.project.citation`、
+   `memory.companion.recall`、Knowledge、Research search 和 Skill invoke
+   仍按未接入真实 owner 的既有语义返回 typed unavailable；当前不能据此宣称
+   Wave 1 全部可执行、七模板/all-scene、C8/HP-1、native evidence 或发布完成。
+
+新增定向回归（均在 macOS arm64 host 执行）：
+
+- `cargo test --locked -p nomifun-app --lib router::agent_platform_host
+  -- --test-threads=1`：18 passed；
+- 覆盖 Kernel→host→PluginState 的 project/companion variant dispatch、
+  resource/package/mount isolation、same-key replay/conflict、并发 CAS、
+  bounded state/no-partial-append、损坏 state、unsupported format；
+- Fresh-v4 SQLite-backed platform restart/reopen 后的 state restore/replay：
+  通过；
+- `cargo check --locked -p nomifun-app -p nomifun-web -p nomifun-desktop`、
+  `cargo fmt --package nomifun-app -- --check`、`git diff --check`、
+  `cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check`：
+  通过。
+
+本次代码变化使此前以 `3303f93ab...` 为 source 的任何 candidate tuple/evidence
+失效；最终代码稳定后仍需由中央 owner 更新/重新生成
+`candidate_source_sha`、platform validation manifest digest 和 cohort tuple。
