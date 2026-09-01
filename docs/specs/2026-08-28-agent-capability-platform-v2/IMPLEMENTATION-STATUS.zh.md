@@ -867,3 +867,64 @@ macOS arm64 native helper 实际结果（当前 source `3b7236f13...`）：
 Universal package/path/permission/process checks，再由对应原生 Host 生成
 PlatformCellEvidence；在此之前不运行 `c8-ma` 或 `c8-ma` 的 PASS 结论，也不把
 本提交的静态/target-specific checks提升为 C8 正式通过。
+
+## 增量实现记录（2026-09-01，Wave 2 workspace/VCS）
+
+在上述提交之后又完成并普通推送：
+
+- `5aa3d9930c8e27dd1af9b50e0229c47aa08c1c97`
+  `feat(agent): confine workspace vcs actions to bound roots`
+- 当前 local/remote SHA 均为该值，worktree 在本记录开始时 clean。
+
+`Wave2ApplicationHost` 现在除真实 `fs.read/fs.write/fs.delete` 外，增加了真实
+owner-backed `fs.search`、`vcs.status`、`vcs.diff` 与 `vcs.stage`：
+
+- 所有操作仍先验证同一 immutable workspace binding、owner 和 operation grant；
+- Git 仓库可位于绑定 workspace 的祖先目录，但 status/diff/stage 均按绑定
+  workspace 前缀投影和限制，不泄漏或修改 workspace 外文件；
+- 搜索行、diff 输出和结果集合有明确大小/数量上限，路径输出保持逻辑相对路径，
+  不把本机绝对 repository path 写入结果；
+- 非 Git workspace、越界路径、非法输入和 worker 失败均返回 typed error，
+  不 fallback 到其他根或成功回显。
+
+新增的 targeted regression：
+
+- `cargo test --locked -p nomifun-app --lib router::agent_wave2_host
+  -- --test-threads=1`：`5 passed`
+- `cargo check --locked -p nomifun-app`、app rustfmt/check 与 `git diff --check`：
+  通过。
+
+该增量只关闭 Wave 2 的一部分 workspace/VCS action gap；`fs.patch`、
+`fs.snapshot`、`process.exec`、SSH/MCP/Browser/Computer 仍需各自真实 owner
+与 lifecycle seam，不能由本实现推断为 Wave 2 或 C8 全部通过。当前 SHA 变化也
+使此前以 `3b7236f13...` 为 source 的任何 native/tuple evidence 失效，待最终
+候选冻结后重新生成。
+
+## 增量实现记录（2026-09-01，Wave 1 Web Fetch 与 Host 组合）
+
+随后又完成并普通推送：
+
+- `e12f0ede4a7894e23f4b3441a4a60918fe3cbd00`
+  `feat(agent): mount partial Fresh-v4 capability owners`
+- 当前 local/remote SHA 均为该值。
+
+Fresh-v4 中央 `AgentDomainHostPorts` 现在为 Wave 1 挂载一个真实的
+`HttpFetcher` owner：`web.fetch` 通过既有 SSRF/DNS 校验、重定向/大小限制和
+HTML→Markdown 归一化返回真实页面结果；Research search、Knowledge、Memory
+和 Skill actions 在没有对应 v4 owner 时仍显式返回 `CAPABILITY_UNAVAILABLE`，
+没有把未实现操作伪装成成功。Wave 2 的 workspace/VCS owner 同时继续由同一
+显式组合 seam 注入。
+
+本轮中央 Host 回归验证：
+
+- `cargo test --locked -p nomifun-app --lib router::agent_platform_host
+  -- --test-threads=1`：`10 passed`
+- app rustfmt、`git diff --check` 与 `cargo check --locked -p nomifun-app`：
+  通过。
+
+该提交仍是**部分 owner closure**，不是 Wave 1/3/4/5 全量业务 owner，也不改变
+以下待办：Fresh-v4 Knowledge/Memory/Skill/Creative/Automation/Channel/
+Companion/Customer/Robot 的真实持久化与 effect owner；真实 Codex sidecar、
+Universal package、Windows pre candidate 和五格 native evidence。当前
+`PlatformValidationManifest` 仍需在最终候选冻结时按新 source SHA 生成/对账；
+旧 tuple evidence 不可沿用。
