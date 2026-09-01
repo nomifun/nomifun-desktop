@@ -41,6 +41,24 @@ impl SnapshotService {
         }
     }
 
+    /// Inspect the current snapshot information for an initialized workspace.
+    ///
+    /// This is deliberately read-only: it only clones the existing tracked
+    /// state and opens its backing repository to derive the current branch.
+    /// Unlike [`crate::traits::ISnapshotService::init`], it never initializes
+    /// a workspace or changes its reference count. Uninitialized workspaces
+    /// fail closed with `AppError::BadRequest`.
+    pub async fn info(&self, workspace: &str) -> Result<SnapshotInfo, AppError> {
+        let state = get_state(&self.workspaces, workspace)?;
+
+        tokio::task::spawn_blocking(move || {
+            let repo = open_repo(&state)?;
+            Ok(build_info(state.mode, &repo))
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Blocking task failed: {}", e)))?
+    }
+
     /// Number of currently-tracked workspaces. Test/observability helper.
     #[doc(hidden)]
     pub fn workspace_count(&self) -> usize {
@@ -96,6 +114,68 @@ impl SnapshotService {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::{Repository, Signature};
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    use crate::traits::ISnapshotService;
+
+    fn init_empty_repo(path: &Path) {
+        let repo = Repository::init(path).expect("init repo");
+        let mut index = repo.index().expect("index");
+        let tree_oid = index.write_tree().expect("write tree");
+        let tree = repo.find_tree(tree_oid).expect("find tree");
+        let signature = Signature::now("test", "test@example.com").expect("signature");
+        repo.commit(Some("HEAD"), &signature, &signature, "init", &tree, &[])
+            .expect("initial commit");
+    }
+
+    #[tokio::test]
+    async fn info_returns_tracked_workspace_without_changing_refcount() {
+        let tmp = tempdir().expect("tempdir");
+        init_empty_repo(tmp.path());
+
+        let service = SnapshotService::new();
+        let workspace = tmp.path().to_str().expect("workspace path");
+        service.init(workspace).await.expect("init workspace");
+        assert_eq!(service.workspace_count(), 1);
+
+        let alternate_workspace = format!("{}{}", workspace, std::path::MAIN_SEPARATOR);
+        let info = service.info(&alternate_workspace).await.expect("inspect workspace");
+
+        assert_eq!(info.mode, SnapshotMode::GitRepo);
+        assert!(info.branch.is_some());
+        assert_eq!(
+            service.workspace_count(),
+            1,
+            "read-only inspection must not add a tracked entry"
+        );
+
+        service.dispose(workspace).await.expect("dispose workspace");
+        assert_eq!(
+            service.workspace_count(),
+            0,
+            "inspection must not increment the init reference count"
+        );
+    }
+
+    #[tokio::test]
+    async fn info_rejects_untracked_workspace_without_initializing_it() {
+        let tmp = tempdir().expect("tempdir");
+        let service = SnapshotService::new();
+        let workspace = tmp.path().to_str().expect("workspace path");
+
+        let error = service.info(workspace).await.expect_err("workspace is untracked");
+
+        assert!(matches!(error, AppError::BadRequest(message) if message.contains("Workspace not initialized")));
+        assert_eq!(service.workspace_count(), 0);
+        assert!(!service.is_tracked(workspace));
     }
 }
 
