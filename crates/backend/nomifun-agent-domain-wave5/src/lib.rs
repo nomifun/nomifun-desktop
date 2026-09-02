@@ -30,12 +30,14 @@ use nomifun_agent_contracts::{
     PluginRegistrarDescriptor, PluginRegistrarOperation, PluginRegistrationMetadata,
     PluginSourceKind, PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod,
     RemoteAuthMutation, RemoteOperation, ResourceBindingId, ResourceId, ResourceKind, ScopeKey,
-    StrictJsonValue, TypedCommandPortDescriptor, TypedResourceBinding, TypedResourceBindings,
-    RuntimeTarget, VersionString, REMOTE_AUTH_REQUIRED,
+    ServiceHandleDescriptor, ServiceKeyRef, ServiceRequirement, StrictJsonValue,
+    TypedCommandPortDescriptor, TypedResourceBinding, TypedResourceBindings, RuntimeTarget,
+    VersionString, REMOTE_AUTH_REQUIRED, agent_core_mount_id, agent_core_package_ref,
+    agent_session_command_service_ref, agent_session_query_service_ref,
 };
 use nomifun_agent_kernel::{
-    CapabilityHandler, CapabilityInvocationContext, KernelError, PluginRegistration,
-    PluginStateHandle,
+    CapabilityHandler, CapabilityInvocationContext, DeclaredServiceView, KernelError,
+    PluginRegistration, PluginStateHandle,
 };
 
 pub const VERSION: &str = "1.0.0";
@@ -228,6 +230,7 @@ pub struct Wave5HostContext {
     pub action_id: ActionId,
     pub state_scope_key: ScopeKey,
     pub state: PluginStateHandle,
+    pub services: DeclaredServiceView,
     pub resource_bindings: TypedResourceBindings,
 }
 
@@ -1502,6 +1505,16 @@ fn registration_for(
     action_host_port: Option<Arc<dyn Wave5HostPort>>,
 ) -> Result<PluginRegistration, String> {
     let package = package_ref(package_id);
+    let required_service_refs = required_agent_session_services(package_id);
+    let required_service_handles = required_service_refs
+        .iter()
+        .cloned()
+        .map(|service| ServiceHandleDescriptor {
+            service,
+            provider_package: agent_core_package_ref(),
+            provider_mount_id: agent_core_mount_id(),
+        })
+        .collect();
     let port_ids = all_port_ids(&ports);
     let capability_manifests = capabilities
         .iter()
@@ -1518,7 +1531,11 @@ fn registration_for(
         requires_runtime_features: Vec::new(),
         config_schema: config_schema.clone(),
         provides_services: Vec::new(),
-        requires_services: Vec::new(),
+        requires_services: required_service_refs
+            .iter()
+            .cloned()
+            .map(|service| ServiceRequirement { service })
+            .collect(),
         entrypoint: InProcessEntrypointMetadata {
             entrypoint_profile: "trusted-in-process".to_owned(),
             entrypoint_id: format!("{package_id}.entrypoint"),
@@ -1580,7 +1597,10 @@ fn registration_for(
                 mount_id: identity.mount_id.clone(),
                 methods: PluginStateMethod::REQUIRED.into_iter().collect(),
             },
-            declared_services: DeclaredServiceViewDescriptor::default(),
+            declared_services: DeclaredServiceViewDescriptor {
+                provided_services: Vec::new(),
+                required_service_handles,
+            },
             host_ports: ports
                 .host_ports
                 .iter()
@@ -1633,6 +1653,21 @@ fn registration_for(
             .map_err(|error| error.to_string())?;
     }
     Ok(registration)
+}
+
+fn required_agent_session_services(package_id: &str) -> Vec<ServiceKeyRef> {
+    match package_id {
+        AGENT_EXECUTION_PACKAGE | AUTOWORK_SCHEDULER_PACKAGE => {
+            vec![agent_session_command_service_ref()]
+        }
+        IDMM_PACKAGE => vec![agent_session_query_service_ref()],
+        REMOTE_INGRESS_PACKAGE => vec![
+            agent_session_command_service_ref(),
+            agent_session_query_service_ref(),
+        ],
+        REQUIREMENTS_PACKAGE => Vec::new(),
+        _ => Vec::new(),
+    }
 }
 
 fn capability_manifest(
@@ -1742,6 +1777,7 @@ impl CapabilityHandler for Wave5CapabilityHandler {
                     action_id: context.action_id,
                     state_scope_key: context.state_scope_key,
                     state: context.state,
+                    services: context.services,
                     resource_bindings: context.resource_bindings,
                 },
                 operation: operation_from_input(&self.capability_id, input)?,
@@ -2058,7 +2094,7 @@ mod tests {
     use nomifun_agent_kernel::{
         AgentPresetCompiler, CapabilityInvocationRequest, CompileRequest, CompilerEnvironment,
         HostPluginStateApi, InMemoryPluginStatePersistence, KernelRegistry,
-        MaterializationPolicy, SessionCapabilityState,
+        MaterializationPolicy, ServiceKey, SessionCapabilityState,
     };
 
     fn principal() -> PrincipalRef {
@@ -2066,6 +2102,143 @@ mod tests {
             principal_kind: "user".to_owned(),
             principal_id: "wave5-test-owner".to_owned(),
         }
+    }
+
+    trait TestAgentSessionService: Send + Sync {}
+
+    struct TestAgentSessionServiceImpl;
+
+    impl TestAgentSessionService for TestAgentSessionServiceImpl {}
+
+    fn test_agent_core_registration() -> PluginRegistration {
+        let package = agent_core_package_ref();
+        let mount_id = agent_core_mount_id();
+        let command_ref = agent_session_command_service_ref();
+        let query_ref = agent_session_query_service_ref();
+        let config_schema = schema_value();
+        let source = PluginSourceMetadata {
+            source_kind: PluginSourceKind::Bundled,
+            source_identity: package.id.as_ref().to_owned(),
+            source_digest: None,
+        };
+        let identity = PluginIdentityDescriptor {
+            package: package.clone(),
+            mount_id: mount_id.clone(),
+        };
+        let cancellation_port = host_port("host.plugin.cancel");
+        let task_port = host_port("host.plugin.tasks");
+        let manifest = PackageManifest {
+            schema_version: VersionString::from(VERSION),
+            host_contract_version: VersionString::from(VERSION),
+            package_id: package.id.clone(),
+            package_version: package.version.clone(),
+            display: display(
+                "Test Agent Session Core",
+                "Test-only provider for Wave 5 ServiceKey materialization.",
+            ),
+            package_dependencies: Vec::new(),
+            requires_runtime_features: Vec::new(),
+            config_schema: config_schema.clone(),
+            provides_services: vec![
+                nomifun_agent_contracts::ServiceProvision {
+                    service: command_ref.clone(),
+                },
+                nomifun_agent_contracts::ServiceProvision {
+                    service: query_ref.clone(),
+                },
+            ],
+            requires_services: Vec::new(),
+            entrypoint: InProcessEntrypointMetadata {
+                entrypoint_profile: "trusted-in-process".to_owned(),
+                entrypoint_id: "platform.agent-core.test".to_owned(),
+                contract_version: VersionString::from(VERSION),
+            },
+            contributions: PackageContributions::default(),
+        };
+        let metadata = PluginRegistrationMetadata {
+            manifest: ArtifactEnvelope::new(manifest).expect("test provider manifest"),
+            mount_id: mount_id.clone(),
+            source: source.clone(),
+            boot_state: PluginBootState {
+                criticality: PluginBootCriticality::Required,
+                desired_state: PluginDesiredState::Enabled,
+                effective_state: PluginEffectiveState::Active,
+                diagnostic_code: None,
+            },
+            registrar: PluginRegistrarDescriptor {
+                identity: identity.clone(),
+                allowed_operations: BTreeSet::from([
+                    PluginRegistrarOperation::ProvideService,
+                    PluginRegistrarOperation::BindHostPort,
+                ]),
+                declared_capability_ids: BTreeSet::new(),
+                declared_skill_ids: BTreeSet::new(),
+                declared_mcp_tool_keys: BTreeSet::new(),
+                declared_service_keys: BTreeSet::from([
+                    command_ref.id.clone(),
+                    query_ref.id.clone(),
+                ]),
+                declared_host_ports: BTreeSet::from([
+                    cancellation_port.id.clone(),
+                    task_port.id.clone(),
+                ]),
+            },
+            context: PluginContextDescriptor {
+                identity,
+                source,
+                validated_config: nomifun_agent_contracts::ValidatedPluginConfig {
+                    schema_digest: nomifun_agent_contracts::digest_payload(&config_schema)
+                        .expect("test provider config digest"),
+                    config_revision: 1,
+                    value: empty_object(),
+                },
+                state: PluginStateHandleDescriptor {
+                    package_id: package.id,
+                    mount_id: mount_id.clone(),
+                    methods: PluginStateMethod::REQUIRED.into_iter().collect(),
+                },
+                declared_services: DeclaredServiceViewDescriptor {
+                    provided_services: vec![command_ref.clone(), query_ref.clone()],
+                    required_service_handles: Vec::new(),
+                },
+                host_ports: Vec::new(),
+                typed_command_ports: Vec::new(),
+                domain_outbox_ports: Vec::new(),
+                cancellation: CancellationDescriptor {
+                    cancellation_port,
+                    scope_key: ScopeKey::from(format!("mount:{}", mount_id.as_ref())),
+                },
+                managed_task_registration: ManagedTaskRegistrationDescriptor {
+                    registrar_port: task_port,
+                    scope_key: ScopeKey::from(format!("mount:{}", mount_id.as_ref())),
+                },
+            },
+        };
+        let command_key =
+            ServiceKey::<dyn TestAgentSessionService>::from_ref(command_ref);
+        let query_key =
+            ServiceKey::<dyn TestAgentSessionService>::from_ref(query_ref);
+        let service =
+            Arc::new(TestAgentSessionServiceImpl) as Arc<dyn TestAgentSessionService>;
+        let mut registration = PluginRegistration::new(metadata);
+        registration
+            .provide_service(&command_key, Arc::clone(&service))
+            .expect("test command service");
+        registration
+            .provide_service(&query_key, service)
+            .expect("test query service");
+        registration
+    }
+
+    fn materializable_registrations(
+        host: Arc<dyn Wave5HostPort>,
+    ) -> Vec<PluginRegistration> {
+        let mut registrations = vec![test_agent_core_registration()];
+        registrations.extend(
+            registrations_with_host_port(host)
+                .expect("Wave 5 registrations should build"),
+        );
+        registrations
     }
 
     fn compiled_schedule(
@@ -2157,6 +2330,7 @@ mod tests {
         {
             Box::pin(async move {
                 request.validate()?;
+                let services = request.context.services.descriptors();
                 let state = request.context.state;
                 let scope = request.context.state_scope_key;
                 let key = StateKey::from("wave5-test-state");
@@ -2170,7 +2344,15 @@ mod tests {
                     "mount_id": descriptor.mount_id,
                     "state_scope": scope,
                     "state_key": key,
-                    "present": entry.is_some()
+                    "present": entry.is_some(),
+                    "service_ids": services
+                        .iter()
+                        .map(|service| service.service.id.as_ref())
+                        .collect::<Vec<_>>(),
+                    "service_provider_mounts": services
+                        .iter()
+                        .map(|service| service.provider_mount_id.as_ref())
+                        .collect::<Vec<_>>(),
                 })))
             })
         }
@@ -2330,6 +2512,55 @@ mod tests {
                         .any(|port| port.id.as_ref() == WAVE5_CAPABILITY_HOST_PORT_ID));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn agent_session_service_dependencies_match_the_target_map() {
+        let registrations = registrations().expect("Wave 5 registrations");
+        let expected = [
+            (
+                AGENT_EXECUTION_PACKAGE,
+                vec![agent_session_command_service_ref()],
+            ),
+            (
+                AUTOWORK_SCHEDULER_PACKAGE,
+                vec![agent_session_command_service_ref()],
+            ),
+            (IDMM_PACKAGE, vec![agent_session_query_service_ref()]),
+            (
+                REMOTE_INGRESS_PACKAGE,
+                vec![
+                    agent_session_command_service_ref(),
+                    agent_session_query_service_ref(),
+                ],
+            ),
+            (REQUIREMENTS_PACKAGE, Vec::new()),
+        ];
+
+        for (registration, (package_id, expected_services)) in
+            registrations.iter().zip(expected)
+        {
+            let manifest = &registration.metadata.manifest.payload;
+            assert_eq!(manifest.package_id.as_ref(), package_id);
+            assert_eq!(
+                manifest
+                    .requires_services
+                    .iter()
+                    .map(|requirement| requirement.service.clone())
+                    .collect::<Vec<_>>(),
+                expected_services
+            );
+            assert!(registration
+                .metadata
+                .context
+                .declared_services
+                .required_service_handles
+                .iter()
+                .all(|handle| {
+                    handle.provider_package == agent_core_package_ref()
+                        && handle.provider_mount_id == agent_core_mount_id()
+                }));
         }
     }
 
@@ -2527,10 +2758,10 @@ mod tests {
         )
         .expect("state persistence should initialize");
         let materialized = registry
-            .replace_all(registrations().expect("registrations should build"))
+            .replace_all(materializable_registrations(unconfigured_host_port()))
             .expect("Wave 5 metadata should materialize");
 
-        assert_eq!(materialized.packages.len(), PACKAGE_IDS.len());
+        assert_eq!(materialized.packages.len(), PACKAGE_IDS.len() + 1);
         assert_eq!(materialized.capabilities.len(), TARGET_CAPABILITY_IDS.len());
         for registration in registrations().expect("registrations should rebuild") {
             let declared_actions = registration
@@ -2584,7 +2815,7 @@ mod tests {
         )
         .expect("state persistence should initialize");
         registry
-            .replace_all(registrations().expect("registrations should build"))
+            .replace_all(materializable_registrations(unconfigured_host_port()))
             .expect("Wave 5 metadata should materialize");
         let owner = principal();
         let (snapshot, active) = compiled_schedule(&registry, &owner);
@@ -2628,10 +2859,7 @@ mod tests {
         )
         .expect("state persistence should initialize");
         registry
-            .replace_all(
-                registrations_with_host_port(Arc::new(StateBackedHost))
-                    .expect("registrations should build"),
-            )
+            .replace_all(materializable_registrations(Arc::new(StateBackedHost)))
             .expect("Wave 5 metadata should materialize");
         let owner = principal();
         let (snapshot, active) = compiled_schedule(&registry, &owner);
@@ -2670,6 +2898,14 @@ mod tests {
         );
         assert_eq!(result.0["state_key"], serde_json::json!("wave5-test-state"));
         assert_eq!(result.0["present"], serde_json::json!(false));
+        assert_eq!(
+            result.0["service_ids"],
+            serde_json::json!(["service.agent-session-command.v1"])
+        );
+        assert_eq!(
+            result.0["service_provider_mounts"],
+            serde_json::json!(["platform-agent-core"])
+        );
     }
 
     #[tokio::test]
@@ -2680,10 +2916,9 @@ mod tests {
         )
         .expect("state persistence should initialize");
         registry
-            .replace_all(
-                registrations_with_host_port(Arc::new(CanonicalErrorHost))
-                    .expect("registrations should build"),
-            )
+            .replace_all(materializable_registrations(Arc::new(
+                CanonicalErrorHost,
+            )))
             .expect("Wave 5 metadata should materialize");
         let owner = principal();
         let (snapshot, active) = compiled_schedule(&registry, &owner);

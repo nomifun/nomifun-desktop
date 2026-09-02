@@ -2141,6 +2141,8 @@ impl AgentPlatform {
     pub async fn from_pool(
         config: AgentPlatformConfig,
     ) -> Result<Arc<Self>, AgentPlatformError> {
+        let (agent_core_registration, agent_session_services) =
+            crate::session_services::agent_session_service_registration()?;
         let state_persistence = Arc::new(
             SqlitePluginStatePersistence::from_pool(config.pool.clone()).await?,
         );
@@ -2158,7 +2160,8 @@ impl AgentPlatform {
             PresetPreviewCompiler::new(config.control_plane_release, templates),
         ));
         let sessions = Arc::new(AgentSessionStore::from_pool(config.pool.clone()).await?);
-        let initial_plugins = config.initial_plugins;
+        let mut initial_plugins = config.initial_plugins;
+        initial_plugins.push(agent_core_registration);
         let platform = Arc::new(Self {
             pool: config.pool,
             control_store,
@@ -2176,6 +2179,7 @@ impl AgentPlatform {
             shutdown_lock: Mutex::new(()),
             closed: AtomicBool::new(false),
         });
+        agent_session_services.bind(&platform)?;
         if !initial_plugins.is_empty() {
             platform.publish_plugins(initial_plugins).await?;
         }
