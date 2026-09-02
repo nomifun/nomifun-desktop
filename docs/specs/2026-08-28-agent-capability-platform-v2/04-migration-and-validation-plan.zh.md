@@ -158,17 +158,19 @@ Clean start 同时约束代码施工起点和 fresh-v4 数据起点。
 
 ### 3.1 代码施工起点
 
-每个本地或远程任务开始时：
+当前主机的每个任务或并发 lane 开始时：
 
 1. 记录明确的 base commit 和分支；
 2. 检查 `git status --short`，保留并识别已有用户改动；
 3. 声明本任务写集和中央文件接入需求；
 4. 先运行能证明基线可工作的最小检查；
 5. 不把 dirty worktree 当作无法开发的理由，但 dirty 结果只能作为诊断；
-6. release attestation、候选制品和跨 writer checkpoint 必须来自 clean commit。
+6. 候选制品和正式 release evidence 必须来自 clean commit。
 
 阶段性 checkpoint 应是可审查的普通 commit，包含一个完整切片或一个可编译的基础边界。
-本机 writer 通过普通 commit 和主机串行合流传递，不依赖绝对路径、临时压缩包或未推送 SHA。
+本机 lane 可以直接在当前工作树或可选的本地临时 worktree 中施工，由集成 Owner 按写集
+串行审查和合流。lane 不使用远端 SHA、临时压缩包、专用 Prompt、manifest 或 result
+template 传递工作。
 
 ### 3.2 Fresh-v4 数据起点
 
@@ -206,13 +208,13 @@ Provider 合同都会被迫承担兼容语义，clean cut 就会退化为长期�
 
 - 发布 05 的新边界；
 - 停止扩张旧 Gate、发布证明、通用 Effect 和平台矩阵系统；
-- 让所有施工机器从同一权威文档重新领取任务。
+- 让当前主机的所有并发 lane 从同一权威文档重新校准任务。
 
 退出依据：
 
 - 不再由旧 inventory 数量和旧台账驱动实现；
 - 当前状态只有 GLOBAL TODO 一份；
-- 远程任务不再使用过期 Prompt。
+- 跨机开发任务及其 Prompt、清单、结果模板和远端 SHA 要求已经撤销。
 
 ### S1：Revert/Keep 审计
 
@@ -369,11 +371,19 @@ duplicate/cycle 与 cleanup；不再手写第二份 operations/declared metadata
 
 ### 5.4 Sidecar Upstream Spike
 
-先验证 official app-server 已有 initialize/version、thread/turn、cancel、event、
-Host-managed Tool 和进程关闭能力。一个 Runtime binding 可以先独占一个受管进程。
+official app-server 的 pinned source spike 已确认以下 upstream surface：
 
-只有 upstream 无法提供必要的调用前接缝时，才提出一个窄 patch。不得先假设历史自定义
-RPC 必须存在，再要求 Host、fixture 和发布合同围绕它扩张。
+- `initialize` / `initialized`；
+- `thread/start`、`thread/resume`、`thread/fork`；
+- `turn/start`、`turn/steer`、`turn/interrupt` 及对应 lifecycle events；
+- `item/tool/call` Host-managed dynamic Tool callback；
+- stdin EOF 后的 bounded process shutdown。
+
+pinned schema 没有独立 `version` RPC，也没有历史假设的 `runtime/hello`、
+`native_action/start` 或 `runtime/session/dispose`。静态 source review 和 fake transport
+harness 只冻结最小协议方向，不是 live PASS。只有取得 exact pinned binary 和隔离的 live
+credential 后，才能关闭真实 initialize/turn/interrupt/Tool/process-tree 验证；在此之前
+不提出 patch，也不重复无输入变化的 live 探测。
 
 ## 6. S3 的 Browser/Computer 子阶段
 
@@ -507,7 +517,7 @@ opening/ready/failed 结果，不创建第二 Session；token revoke 提交后�
 - fresh-v4 schema/migration registry；
 - central composition root、`AppServices`/`GatewayDeps` 拆除入口；
 - workspace manifest、`Cargo.lock`、根 Gate 和 release scripts；
-- GLOBAL TODO 与本机 writer 任务分配。
+- GLOBAL TODO 与本机 lane 调度。
 
 其他任务通过窄 patch 或独立 commit 接入，不并发编辑这些中央文件。
 
@@ -517,45 +527,49 @@ opening/ready/failed 结果，不创建第二 Session；token revoke 提交后�
 
 | 区域 | 并发边界 | 合流规则 |
 |---|---|---|
-| Session Projection 与 Effect | 同一 Session crate 内由一个 writer 串行 | 先 Projection，后 Effect；分别定向测试 |
+| Session Projection 与 Effect | 同一 Session crate 内由一个 lane 串行 | 先 Projection，后 Effect；分别定向测试 |
 | SSH owner | 只修改 SSH crates 和专用 tests | 不改 Compiler、Kernel、App composition 或 lockfile |
 | Sidecar upstream spike | 只写 spike 记录、trace 和专用验证 | 结论被接受前不改生产 Runtime |
 | Browser first-party Provider | 只改 Browser implementation/adapter | 公共 Role/Dispatcher 由中央 Owner 接入 |
 | Computer first-party Provider | 只改 Computer implementation/adapter | 与 Browser 分离，公共 arbiter 由中央 Owner 接入 |
 | UI 产品化 | DTO/Compiler contract 稳定后修改 UI 与定向 tests | 不自行发明后端兼容字段 |
-| 原生平台 smoke | 候选冻结后在真实目标机执行 | 修复按普通 commit 回主机合流 |
+| 原生平台 smoke | 候选冻结后在真实目标环境执行 | 外部环境只返回原始结果；代码修复仍由当前主机实施 |
 
 ### 8.3 单机多并发
 
-当前主机是唯一实现与集成主机。多个 writer 可以在本机并行，但必须满足：
+当前主机是唯一实现与集成主机。多个 lane 可以在本机并行，但必须满足：
 
-1. 每个 writer 有明确且互斥的写集；
+1. 每个 lane 有明确且互斥的路径写集；
 2. 需要共享数据库、固定端口、Cargo build directory 或进程树的测试不得同时运行；
 3. Session Projection 与 Effect 在同一 crate 内按依赖串行；
 4. Compiler、Snapshot、Kernel Registry、Composition Root、Gate、锁文件和 GLOBAL TODO
    由主机单一集成 Owner 串行修改；
-5. 每个 writer 形成独立普通 checkpoint，记录 changed paths、验证命令、未运行项和 blocker；
-6. 未完成实验、长日志、凭据和本机绝对路径不进入提交。
+5. 每个 lane 在当前会话中记录 changed paths、验证命令、未运行项和 blocker，稳定边界由
+   集成 Owner 统一形成普通 checkpoint；
+6. 所有开发、修复和 merge 都在当前主机完成，不建立跨机分支、远端 SHA、交接包或证明
+   协议；
+7. 未完成实验、长日志、凭据和本机绝对路径不进入提交。
 
 ### 8.4 合流纪律
 
-- 每个 writer 只提交自己的写集；
+- 每个 lane 只修改自己的写集；
 - 合流前检查 `git status --short`、`git diff --check` 和 staged paths；
 - 同一中央文件的变更由集成 Owner 串行处理；
 - 不让多个 Agent 同时运行会争用相同 DB、固定端口或 Cargo build directory 的重测试；
 - 合并冲突按当前 canonical contract 解决，不为两个分支同时存活增加 adapter。
 
-### 8.5 本机 writer 回传协议
+### 8.5 本机 lane 记录与收口
 
-本机 writer 不需要长期分支或跨机 handoff 包。每个 writer 完成后回传：
+本机 lane 不维护独立交付协议。开始前只需登记互斥写集，完成后在当前会话中记录：
 
-1. 当前基线 SHA 和普通 checkpoint SHA；
-2. changed paths 与未触碰的中央路径；
-3. 实际验证命令、结果和首个未运行/阻塞原因；
-4. 需要主机集成的最小接线；
-5. 主机审查 staged paths、`git diff --check` 和依赖影响后再普通合流。
+1. changed paths 与未触碰的中央路径；
+2. 实际验证命令、结果和首个未运行/阻塞原因；
+3. 需要集成 Owner 串行完成的最小中央接线。
 
-本机临时分支/worktree 只用于隔离并发写集；完成合流后不作为长期任务入口保留。
+集成 Owner 直接审查工作树 diff、`git diff --check` 和依赖影响，再形成普通 checkpoint。
+可选的本地临时分支/worktree 只用于隔离并发写集；完成合流后删除，不作为任务入口。
+不生成机器专用 Prompt、handoff、manifest、result template、远端 SHA 清单或跨机
+attestation。
 
 ## 9. 验证策略
 
@@ -671,7 +685,8 @@ Windows Desktop x64 是主开发和完整核心闭环平台。候选至少验证
 
 ### 10.2 macOS 与 Linux 原生 Smoke
 
-Windows 候选冻结后，macOS Desktop arm64 与 Linux Desktop x64 可以在两台真实机器并行：
+Windows 候选冻结后，macOS Desktop arm64 与 Linux Desktop x64 仍需在对应真实原生环境
+执行外部验证：
 
 - 构建并打包当前候选；
 - install、fresh、launch；
@@ -680,8 +695,9 @@ Windows 候选冻结后，macOS Desktop arm64 与 Linux Desktop x64 可以在两
 - 记录平台明确 available/unavailable 的能力。
 
 cross-compile、WSL、VM、emulation 或 Rosetta 可以作为开发预检，但不能代替目标平台结果。
-平台发现的共享修复通过普通 commit 回主机；只重跑被实际制品或协议变化影响的检查，不启动
-全平台全功能排列组合。
+这些外部环境不领取开发任务、不编辑代码、不 merge 分支，只提供实际命令、原始日志和
+结果。发现缺陷后由当前主机修复并形成新候选，外部环境只重跑被实际制品或协议变化影响的
+检查，不启动全平台全功能排列组合。
 
 ### 10.3 一次性 C9 Clean Cut
 
@@ -724,8 +740,8 @@ RC bytes 执行 package/install/fresh/critical E2E/lifecycle。Stable 只提升�
 - 只改某个产品流程：重跑该流程的成功、失败和清理路径；只有制品或共享 ABI 变化才扩大到
   其他平台。
 
-修复应先在主机合流并形成新的 clean checkpoint，再分发目标平台验证。不得按固定次数全量
-复验，也不得因一个局部修复恢复旧的全平台全功能笛卡尔积。
+修复应先在当前主机合流并形成新的 clean checkpoint，再由目标平台环境验证同一冻结候选。
+不得按固定次数全量复验，也不得因一个局部修复恢复旧的全平台全功能笛卡尔积。
 
 ## 11. 回滚与失败语义
 
@@ -763,7 +779,7 @@ RC bytes 执行 package/install/fresh/critical E2E/lifecycle。Stable 只提升�
 - 需要 alias、fallback 或双写才能让测试通过；
 - 没有真实 owner 和消费者，却要先冻结大批 DTO；
 - 同一失败在环境未变化时只能靠不断重试；
-- 需要修改未授权中央文件或与其他 writer 争用同一写集。
+- 需要修改未授权中央文件或与其他 lane 争用同一写集。
 
 处理方式是回到 05 核对产品价值、所有权和最小合同，而不是在旧设计上增加例外。
 

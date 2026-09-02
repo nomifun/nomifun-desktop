@@ -396,6 +396,7 @@ pub(crate) fn agent_session_service_registration(
             declared_capability_ids: BTreeSet::new(),
             declared_skill_ids: BTreeSet::new(),
             declared_mcp_tool_keys: BTreeSet::new(),
+            declared_role_ids: BTreeSet::new(),
             declared_service_keys: BTreeSet::from([
                 command_ref.id.clone(),
                 query_ref.id.clone(),

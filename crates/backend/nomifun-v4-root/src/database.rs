@@ -577,6 +577,8 @@ struct ExpectedPackage {
     capabilities: BTreeMap<(String, String), CapabilityKind>,
     skills: BTreeSet<(String, String)>,
     mcp_tools: Vec<nomifun_agent_contracts::McpToolCapabilityMapping>,
+    role_contracts: Vec<nomifun_agent_contracts::RoleContractManifest>,
+    role_providers: Vec<nomifun_agent_contracts::RoleProviderContribution>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -672,6 +674,8 @@ fn expected_materialization(
                 })
                 .collect(),
             mcp_tools: package.mcp_tools.clone(),
+            role_contracts: package.role_contracts.clone(),
+            role_providers: package.role_providers.clone(),
         });
         mounts.push(ExpectedMount {
             mount_id: package_id.clone(),
@@ -902,7 +906,10 @@ fn runtime_package_matches(
             )
         })
         .collect::<BTreeSet<_>>();
-    skills == expected.skills && manifest.contributions.mcp_tools == expected.mcp_tools
+    skills == expected.skills
+        && manifest.contributions.mcp_tools == expected.mcp_tools
+        && manifest.contributions.role_contracts == expected.role_contracts
+        && manifest.contributions.role_providers == expected.role_providers
 }
 
 fn runtime_capability_matches(

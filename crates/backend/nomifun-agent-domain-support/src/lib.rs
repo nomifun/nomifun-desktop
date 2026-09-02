@@ -385,6 +385,8 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
             capabilities: capability_manifests,
             skills: Vec::<SkillDefinition>::new(),
             mcp_tools: Vec::new(),
+            role_contracts: Vec::new(),
+            role_providers: Vec::new(),
         },
     };
     let manifest_artifact = ArtifactEnvelope::new(manifest).map_err(digest_error)?;
@@ -414,6 +416,7 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
             declared_capability_ids: seen,
             declared_skill_ids: BTreeSet::new(),
             declared_mcp_tool_keys: BTreeSet::new(),
+            declared_role_ids: BTreeSet::new(),
             declared_service_keys: BTreeSet::new(),
             declared_host_ports: BTreeSet::from([
                 cancellation_port.id.clone(),
@@ -556,7 +559,19 @@ pub fn validate_inventory(
         let mut manifest_capability_ids = BTreeSet::new();
         let mut manifest_skill_ids = BTreeSet::new();
         let mut manifest_mcp_tool_keys = BTreeSet::new();
+        let mut manifest_role_ids = BTreeSet::new();
         let mut manifest_service_ids = BTreeSet::new();
+        let role_member_ids = manifest
+            .contributions
+            .role_contracts
+            .iter()
+            .flat_map(|contract| {
+                contract
+                    .members
+                    .iter()
+                    .map(|member| member.capability.id.clone())
+            })
+            .collect::<BTreeSet<_>>();
         for capability in &manifest.contributions.capabilities {
             if !capabilities.insert(capability.id.clone()) {
                 return Err(invalid_registration(
@@ -595,7 +610,9 @@ pub fn validate_inventory(
             }
             match capability.kind {
                 CapabilityKind::Tool if capability.contributions.actions.len() == 1 => {
-                    expected_handlers.insert(capability.id.clone());
+                    if !role_member_ids.contains(&capability.id) {
+                        expected_handlers.insert(capability.id.clone());
+                    }
                 }
                 CapabilityKind::Tool => {
                     return Err(invalid_registration(
@@ -617,6 +634,56 @@ pub fn validate_inventory(
                     ));
                 }
             }
+        }
+        for contract in &manifest.contributions.role_contracts {
+            if !manifest_role_ids.insert(contract.key.role_id.clone()) {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    "execution-role contract declarations are duplicated",
+                ));
+            }
+            if contract.members.is_empty() {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    "execution-role contract must contain members",
+                ));
+            }
+            for member in &contract.members {
+                if !manifest
+                    .contributions
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability.id == member.capability.id)
+                {
+                    return Err(invalid_registration(
+                        &manifest.package_id,
+                        format!(
+                            "role member {} is not declared by the package",
+                            member.capability.id.as_ref()
+                        ),
+                    ));
+                }
+            }
+        }
+        for provider in &manifest.contributions.role_providers {
+            if !manifest_role_ids.contains(&provider.role.key.role_id) {
+                return Err(invalid_registration(
+                    &manifest.package_id,
+                    "role provider references an undeclared role contract",
+                ));
+            }
+        }
+        let provider_role_ids = manifest
+            .contributions
+            .role_providers
+            .iter()
+            .map(|provider| provider.role.key.role_id.clone())
+            .collect::<BTreeSet<_>>();
+        if provider_role_ids != manifest_role_ids {
+            return Err(invalid_registration(
+                &manifest.package_id,
+                "role contracts and role providers must have the same role identity set",
+            ));
         }
         for skill in &manifest.contributions.skills {
             if !manifest_skill_ids.insert(skill.id.clone()) || skill.package != package_ref {
@@ -663,12 +730,14 @@ pub fn validate_inventory(
             !manifest_capability_ids.is_empty(),
             !manifest_skill_ids.is_empty(),
             !manifest_mcp_tool_keys.is_empty(),
+            !manifest_role_ids.is_empty(),
             !manifest_service_ids.is_empty(),
             !declared_host_ports.is_empty(),
         );
         if metadata.registrar.declared_capability_ids != manifest_capability_ids
             || metadata.registrar.declared_skill_ids != manifest_skill_ids
             || metadata.registrar.declared_mcp_tool_keys != manifest_mcp_tool_keys
+            || metadata.registrar.declared_role_ids != manifest_role_ids
             || metadata.registrar.declared_service_keys != manifest_service_ids
             || metadata.registrar.declared_host_ports != declared_host_ports
             || metadata.registrar.allowed_operations != expected_registrar_operations
@@ -678,7 +747,28 @@ pub fn validate_inventory(
                 "registrar declarations do not match manifest and context",
             ));
         }
-        if registration.handler_ids() != expected_handlers {
+        let actual_role_handlers = registration
+            .role_action_handler_ids()
+            .into_iter()
+            .map(|(_, capability_id)| capability_id)
+            .collect::<BTreeSet<_>>();
+        let expected_role_handlers = role_member_ids
+            .iter()
+            .filter(|capability_id| {
+                manifest
+                    .contributions
+                    .capabilities
+                    .iter()
+                    .any(|capability| {
+                        &capability.id == *capability_id
+                            && !capability.contributions.actions.is_empty()
+                    })
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if registration.handler_ids() != expected_handlers
+            || actual_role_handlers != expected_role_handlers
+        {
             return Err(invalid_registration(
                 &manifest.package_id,
                 "capability handler exports differ from Tool actions",
@@ -717,6 +807,7 @@ fn required_registrar_operations(
     capabilities: bool,
     skills: bool,
     mcp: bool,
+    role_providers: bool,
     services: bool,
     host_ports: bool,
 ) -> BTreeSet<PluginRegistrarOperation> {
@@ -729,6 +820,9 @@ fn required_registrar_operations(
     }
     if mcp {
         operations.insert(PluginRegistrarOperation::ContributeMcpToolMapping);
+    }
+    if role_providers {
+        operations.insert(PluginRegistrarOperation::ContributeRoleProvider);
     }
     if services {
         operations.insert(PluginRegistrarOperation::ProvideService);
@@ -963,7 +1057,7 @@ pub fn c7_package_specs() -> Vec<PackageSpec> {
             description: "Use the process-wide managed browser resource.",
             mount_id: "domain-browser",
             capabilities: &BROWSER_CAPABILITIES,
-            supported_surfaces: &["desktop"],
+            supported_surfaces: &["desktop", "headless"],
         },
         PackageSpec {
             id: "nomifun.computer-a11y",
@@ -1098,18 +1192,6 @@ const ASSET_LIBRARY: &[&str] = &["asset_library"];
 const GENERATION_PROVIDER: &[&str] = &["generation_provider"];
 const MINIAPP: &[&str] = &["miniapp"];
 const MCP_SERVER: &[&str] = &["mcp_server"];
-const BROWSER_DESKTOP_TARGETS: &[&str] = &[
-    "x86_64-pc-windows-msvc",
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "x86_64-unknown-linux-gnu",
-];
-const COMPUTER_DESKTOP_TARGETS: &[&str] = &[
-    "x86_64-pc-windows-msvc",
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-];
-const DESKTOP_SURFACE: &[&str] = &["desktop"];
 
 const WEB_RESEARCH_CAPABILITIES: [CapabilitySpec; 3] = [
     CapabilitySpec::tool("web.search", EffectClass::ExternalTransmit, &[]),
@@ -1200,35 +1282,27 @@ const MCP_CAPABILITIES: [CapabilitySpec; 6] = [
     CapabilitySpec::tool("connector.data.read", EffectClass::ReadSensitive, MCP_SERVER),
     CapabilitySpec::tool("connector.data.write", EffectClass::WriteDurable, MCP_SERVER),
 ];
-const BROWSER_CAPABILITIES: [CapabilitySpec; 9] = [
-    CapabilitySpec::resource_provider("browser.identity", BROWSER)
-        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
-    CapabilitySpec::context("browser.observe")
-        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
-    CapabilitySpec::tool("browser.navigate", EffectClass::ExternalTransmit, BROWSER)
-        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
-    CapabilitySpec::tool("browser.act", EffectClass::WriteReversible, BROWSER)
-        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
-    CapabilitySpec::tool("browser.download", EffectClass::WriteDurable, BROWSER)
-        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
-    CapabilitySpec::tool("browser.upload", EffectClass::ExternalTransmit, BROWSER)
-        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
-    CapabilitySpec::tool("browser.evaluate", EffectClass::ExecuteLocal, BROWSER)
-        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
-    CapabilitySpec::context("browser.site_memory")
-        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
-    CapabilitySpec::tool("browser.takeover", EffectClass::WriteReversible, BROWSER)
-        .on_hosts(BROWSER_DESKTOP_TARGETS, DESKTOP_SURFACE),
+const BROWSER_CAPABILITIES: [CapabilitySpec; 10] = [
+    CapabilitySpec::resource_provider("browser.identity", BROWSER),
+    CapabilitySpec::context("browser.observe"),
+    CapabilitySpec::tool("browser.navigate", EffectClass::ExternalTransmit, BROWSER),
+    CapabilitySpec::tool("browser.act", EffectClass::WriteReversible, BROWSER),
+    CapabilitySpec::tool(
+        "browser.render_content",
+        EffectClass::ExternalTransmit,
+        BROWSER,
+    ),
+    CapabilitySpec::tool("browser.download", EffectClass::WriteDurable, BROWSER),
+    CapabilitySpec::tool("browser.upload", EffectClass::ExternalTransmit, BROWSER),
+    CapabilitySpec::tool("browser.evaluate", EffectClass::ExecuteLocal, BROWSER),
+    CapabilitySpec::context("browser.site_memory"),
+    CapabilitySpec::tool("browser.takeover", EffectClass::WriteReversible, BROWSER),
 ];
 const COMPUTER_CAPABILITIES: [CapabilitySpec; 4] = [
-    CapabilitySpec::context("computer.observe")
-        .on_hosts(COMPUTER_DESKTOP_TARGETS, DESKTOP_SURFACE),
-    CapabilitySpec::tool("computer.input", EffectClass::Physical, COMPUTER)
-        .on_hosts(COMPUTER_DESKTOP_TARGETS, DESKTOP_SURFACE),
-    CapabilitySpec::tool("computer.launch", EffectClass::ExecuteLocal, COMPUTER)
-        .on_hosts(COMPUTER_DESKTOP_TARGETS, DESKTOP_SURFACE),
-    CapabilitySpec::context("a11y.observe")
-        .on_hosts(COMPUTER_DESKTOP_TARGETS, DESKTOP_SURFACE),
+    CapabilitySpec::context("computer.observe"),
+    CapabilitySpec::tool("computer.input", EffectClass::Physical, COMPUTER),
+    CapabilitySpec::tool("computer.launch", EffectClass::ExecuteLocal, COMPUTER),
+    CapabilitySpec::context("a11y.observe"),
 ];
 const REQUIREMENT_CAPABILITIES: [CapabilitySpec; 4] = [
     CapabilitySpec::tool("requirements.read", EffectClass::ReadSensitive, &[]),

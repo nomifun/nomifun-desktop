@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   asAgentPresetId,
   asCapabilityId,
+  asDigestHex,
   capabilityPlacement,
   createEmptyAgentPresetDocument,
   placeCapability,
@@ -50,7 +51,7 @@ describe('AgentPreset draft model', () => {
         model: 'model',
         protocol: 'openai_chat' as const,
         connection_config_ref: 'default',
-        config_revision_digest: 'a'.repeat(64),
+        config_revision_digest: asDigestHex('a'.repeat(64)),
         credential_ref: 'credential',
         features: ['text_input', 'text_output'],
       },
@@ -67,8 +68,6 @@ describe('AgentPreset draft model', () => {
     };
     const cloned = structuredClone(draft);
     expect(cloned.document.model_route_refs.agent_chat).toBe('opaque-route');
-    expect(cloned.document.chat_route_records.agent_chat?.primary.provider_id).toBe(
-      'provider'
-    );
+    expect(cloned.document.chat_route_records.agent_chat?.primary.provider_id).toBe('provider');
   });
 });

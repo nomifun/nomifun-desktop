@@ -2,7 +2,7 @@ use nomifun_agent_contracts::{
     AgentSessionId, SessionEventPayloadRef, SessionEventRecord, digest_bytes, digest_payload,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 
 use crate::error::SessionStoreError;
 use crate::types::{MessageProjection, SessionHeadProjection};
@@ -13,7 +13,6 @@ struct ProjectionDocument {
     projection_id: String,
     correlation_id: String,
     presentation_intent: String,
-    events: Vec<ProjectionEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -22,14 +21,22 @@ struct ProjectionDocument {
     content_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     part_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_summary: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reference: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal_effect: Option<Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProjectionEvent {
-    seq: u64,
+struct LegacyProjectionEvent {
+    #[serde(rename = "seq")]
+    _seq: u64,
     kind: String,
-    kind_version: u32,
+    #[serde(rename = "kind_version")]
+    _kind_version: u32,
     payload: Value,
 }
 
@@ -136,26 +143,24 @@ pub(crate) fn reduce_message_projection(
     let (projection_id, presentation_intent) = projection_identity(event);
     let mut document = match existing.as_ref() {
         Some(existing) => {
-            serde_json::from_value::<ProjectionDocument>(existing.projection.clone())?
+            let (document, legacy_events) =
+                decode_projection_document(existing.projection.clone())?;
+            normalize_legacy_projection(document, legacy_events)?
         }
         None => ProjectionDocument {
             projection_id: projection_id.clone(),
             correlation_id: event.correlation_id.0.clone(),
             presentation_intent: presentation_intent.clone(),
-            events: Vec::new(),
             state: None,
             content: None,
             content_digest: None,
             part_count: None,
+            tool_summary: None,
+            reference: None,
+            terminal_effect: None,
         },
     };
 
-    document.events.push(ProjectionEvent {
-        seq: event.seq,
-        kind: event.kind.0.clone(),
-        kind_version: event.kind_version,
-        payload: payload.clone(),
-    });
     apply_projection_semantics(&mut document, event, payload)?;
     let semantic_digest = digest_payload(&document)?.0;
     let first_seq = existing.as_ref().map_or(event.seq, |row| row.first_seq);
@@ -212,9 +217,13 @@ fn apply_projection_semantics(
         "turn/completed" => document.state = Some("completed".to_owned()),
         "turn/failed" => document.state = Some("failed".to_owned()),
         "turn/cancelled" => document.state = Some("cancelled".to_owned()),
-        "message/user-accepted" => document.state = Some("accepted".to_owned()),
+        "message/user-accepted" => {
+            document.state = Some("accepted".to_owned());
+            if let Some(content) = payload.get("content").and_then(Value::as_str) {
+                document.content = Some(content.to_owned());
+            }
+        }
         "message/content-part" => {
-            document.state = Some("streaming".to_owned());
             let content = payload
                 .get("content")
                 .and_then(Value::as_str)
@@ -223,17 +232,20 @@ fn apply_projection_semantics(
                         "message/content-part requires bounded content".to_owned(),
                     )
                 })?;
+            document.state = Some("streaming".to_owned());
             document
                 .content
                 .get_or_insert_with(String::new)
                 .push_str(content);
+            document.part_count = Some(
+                document
+                    .part_count
+                    .unwrap_or_default()
+                    .saturating_add(1),
+            );
         }
         "message/completed" => {
-            let expected_part_count = document
-                .events
-                .iter()
-                .filter(|event| event.kind == "message/content-part")
-                .count() as u64;
+            let expected_part_count = document.part_count.unwrap_or_default();
             let part_count = optional_u64(payload, "part_count").ok_or_else(|| {
                 SessionStoreError::InvalidEvent("message/completed requires part_count".to_owned())
             })?;
@@ -283,8 +295,228 @@ fn apply_projection_semantics(
         "session/forked" => document.state = Some("forked".to_owned()),
         _ => {}
     }
+    apply_projection_summaries(
+        document,
+        event.kind.0.as_str(),
+        Some(event.event_id.0.as_str()),
+        payload,
+    )?;
     Ok(())
 }
+
+fn decode_projection_document(
+    mut value: Value,
+) -> Result<(ProjectionDocument, Option<Vec<LegacyProjectionEvent>>), SessionStoreError> {
+    let legacy_events = value
+        .as_object_mut()
+        .and_then(|object| object.remove("events"))
+        .map(serde_json::from_value)
+        .transpose()?;
+    let document = serde_json::from_value(value)?;
+    Ok((document, legacy_events))
+}
+
+fn normalize_legacy_projection(
+    mut document: ProjectionDocument,
+    legacy_events: Option<Vec<LegacyProjectionEvent>>,
+) -> Result<ProjectionDocument, SessionStoreError> {
+    let Some(events) = legacy_events else {
+        return Ok(document);
+    };
+
+    if document.part_count.is_none() {
+        let part_count = events
+            .iter()
+            .filter(|event| event.kind == "message/content-part")
+            .count() as u64;
+        if part_count > 0 {
+            document.part_count = Some(part_count);
+        }
+    }
+
+    if document.content.is_none() {
+        let mut content = String::new();
+        for event in &events {
+            match event.kind.as_str() {
+                "message/user-accepted" => {
+                    if let Some(value) = event.payload.get("content").and_then(Value::as_str) {
+                        content = value.to_owned();
+                    }
+                }
+                "message/content-part" => {
+                    if let Some(value) = event.payload.get("content").and_then(Value::as_str) {
+                        content.push_str(value);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !content.is_empty() {
+            document.content = Some(content);
+        }
+    }
+
+    for event in &events {
+        apply_projection_summaries(&mut document, &event.kind, None, &event.payload)?;
+    }
+    Ok(document)
+}
+
+fn apply_projection_summaries(
+    document: &mut ProjectionDocument,
+    kind: &str,
+    event_id: Option<&str>,
+    payload: &Value,
+) -> Result<(), SessionStoreError> {
+    match kind {
+        "tool/call-started" | "tool/result-recorded" => {
+            let summary = object_slot(&mut document.tool_summary);
+            for key in [
+                "operation_id",
+                "capability_id",
+                "action_id",
+                "name",
+                "tool",
+                "coding_surface",
+            ] {
+                copy_scalar(payload, summary, key);
+            }
+            if kind == "tool/result-recorded" {
+                summary.insert("result_state".to_owned(), json!("recorded"));
+                copy_digest(payload, summary, "output", "result_digest")?;
+                copy_bounded_error(payload, summary);
+            }
+        }
+        "effect/started"
+        | "effect/succeeded"
+        | "effect/failed"
+        | "effect/uncertain"
+        | "effect/reconciled" => {
+            let effect = object_slot(&mut document.terminal_effect);
+            for key in [
+                "effect_id",
+                "operation_id",
+                "capability_id",
+                "action_id",
+                "effect",
+                "coding_surface",
+            ] {
+                copy_scalar(payload, effect, key);
+            }
+            let state = match kind {
+                "effect/started" => "started",
+                "effect/succeeded" => "succeeded",
+                "effect/failed" => "failed",
+                "effect/uncertain" => "uncertain",
+                "effect/reconciled" => payload
+                    .get("outcome")
+                    .and_then(Value::as_str)
+                    .unwrap_or("reconciled"),
+                _ => unreachable!("effect event was matched above"),
+            };
+            effect.insert("state".to_owned(), json!(state));
+            copy_digest(payload, effect, "output", "result_digest")?;
+            copy_digest(payload, effect, "receipt", "result_digest")?;
+            copy_bounded_error(payload, effect);
+        }
+        _ => {}
+    }
+
+    copy_references(document, event_id, payload)?;
+    Ok(())
+}
+
+fn object_slot(slot: &mut Option<Value>) -> &mut Map<String, Value> {
+    if !matches!(slot, Some(Value::Object(_))) {
+        *slot = Some(Value::Object(Map::new()));
+    }
+    slot.as_mut()
+        .and_then(Value::as_object_mut)
+        .expect("object slot was initialized above")
+}
+
+fn copy_scalar(payload: &Value, target: &mut Map<String, Value>, key: &str) {
+    let Some(value) = payload.get(key) else {
+        return;
+    };
+    match value {
+        Value::String(value) => {
+            if value.len() <= MAX_SUMMARY_STRING_BYTES {
+                target.insert(key.to_owned(), Value::String(value.clone()));
+            }
+        }
+        Value::Bool(_) | Value::Number(_) => {
+            target.insert(key.to_owned(), value.clone());
+        }
+        Value::Null | Value::Array(_) | Value::Object(_) => {}
+    }
+}
+
+fn copy_digest(
+    payload: &Value,
+    target: &mut Map<String, Value>,
+    source_key: &str,
+    target_key: &str,
+) -> Result<(), SessionStoreError> {
+    if let Some(value) = payload.get(source_key) {
+        target.insert(
+            target_key.to_owned(),
+            Value::String(digest_payload(value)?.0),
+        );
+    }
+    Ok(())
+}
+
+fn copy_bounded_error(payload: &Value, target: &mut Map<String, Value>) {
+    let Some(error) = payload.get("error").and_then(Value::as_str) else {
+        return;
+    };
+    if error.len() <= MAX_SUMMARY_STRING_BYTES {
+        target.insert("error".to_owned(), Value::String(error.to_owned()));
+    }
+}
+
+fn copy_references(
+    document: &mut ProjectionDocument,
+    event_id: Option<&str>,
+    payload: &Value,
+) -> Result<(), SessionStoreError> {
+    let reference = object_slot(&mut document.reference);
+    if let Some(event_id) = event_id {
+        reference.insert("last_event_id".to_owned(), json!(event_id));
+    }
+    for key in [
+        "reference",
+        "ref",
+        "result_ref",
+        "output_ref",
+        "receipt_ref",
+        "artifact_ref",
+        "locator",
+        "response_id",
+        "runtime_binding_id",
+        "snapshot_digest",
+        "effect_id",
+        "resource_binding_ids",
+    ] {
+        let Some(value) = payload.get(key) else {
+            continue;
+        };
+        let serialized_len = serde_json::to_vec(value)?.len();
+        if serialized_len <= MAX_REFERENCE_BYTES {
+            reference.insert(key.to_owned(), value.clone());
+        } else {
+            reference.insert(
+                format!("{key}_digest"),
+                Value::String(digest_payload(value)?.0),
+            );
+        }
+    }
+    Ok(())
+}
+
+const MAX_SUMMARY_STRING_BYTES: usize = 1024;
+const MAX_REFERENCE_BYTES: usize = 4096;
 
 fn clear_checkpoint(head: &mut SessionHeadProjection) {
     head.runtime_checkpoint_locator = None;

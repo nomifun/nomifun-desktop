@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -289,6 +290,7 @@ async fn build_platform(pool: SqlitePool) -> Arc<AgentPlatform> {
             .runtime_feature_inventory_digest
             .clone(),
         available_runtime_features: runtime_inventory.runtime_features,
+        installation_role_bindings: BTreeMap::new(),
         canonical_schema_manifest_digest: schema_digest,
         target_contribution_manifest_digest: release
             .target_contribution_manifest_digest

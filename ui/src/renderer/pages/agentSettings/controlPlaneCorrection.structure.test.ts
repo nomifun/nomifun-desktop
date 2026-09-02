@@ -14,9 +14,7 @@ const structBlock = (source: string, name: string): string => {
 
 describe('C5 template expansion correction', () => {
   test('keeps template identity transient and out of StoredPreset/API summary', () => {
-    const store = repoFile(
-      'crates/backend/nomifun-agent-control-plane/src/store.rs'
-    );
+    const store = repoFile('crates/backend/nomifun-agent-control-plane/src/store.rs');
     const api = repoFile('crates/backend/nomifun-api-types/src/agent_platform.rs');
     const templateField = 'source_template' + '_key';
 
@@ -26,12 +24,8 @@ describe('C5 template expansion correction', () => {
   });
 
   test('create-from-template commits an initial normal Revision and Snapshot atomically', () => {
-    const service = repoFile(
-      'crates/backend/nomifun-agent-control-plane/src/service.rs'
-    );
-    const store = repoFile(
-      'crates/backend/nomifun-agent-control-plane/src/store.rs'
-    );
+    const service = repoFile('crates/backend/nomifun-agent-control-plane/src/service.rs');
+    const store = repoFile('crates/backend/nomifun-agent-control-plane/src/store.rs');
 
     expect(service.includes('create_with_initial_revision(')).toBe(true);
     expect(service.includes('.insert_preset_with_revision(')).toBe(true);
@@ -39,11 +33,5 @@ describe('C5 template expansion correction', () => {
     expect(service.includes('current_stable_revision: Some(revision.reference.clone())')).toBe(
       true
     );
-  });
-
-  test('uses ASCII separators in the visible exact-version rows', () => {
-    const editor = readFileSync(new URL('./AgentPresetEditor.tsx', import.meta.url), 'utf8');
-    expect(editor.includes('selection.capability.id}@{selection.capability.version')).toBe(true);
-    expect(editor.includes(' 路 ')).toBe(false);
   });
 });

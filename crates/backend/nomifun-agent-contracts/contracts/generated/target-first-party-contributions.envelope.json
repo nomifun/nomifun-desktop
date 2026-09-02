@@ -671,6 +671,13 @@
           },
           {
             "capability": {
+              "id": "browser.render_content",
+              "version": "1.0.0"
+            },
+            "kind": "tool"
+          },
+          {
+            "capability": {
               "id": "browser.download",
               "version": "1.0.0"
             },
@@ -706,7 +713,304 @@
           }
         ],
         "skills": [],
-        "mcp_tools": []
+        "mcp_tools": [],
+        "role_contracts": [
+          {
+            "key": {
+              "role_id": "system.browser_use",
+              "contract_version": "1.0.0"
+            },
+            "members": [
+              {
+                "capability": {
+                  "id": "browser.observe",
+                  "version": "1.0.0"
+                },
+                "capability_manifest_digest": "b298ada8d1ae3a1e22f484aa781bfef49df7a02e1e0edd569025bbd189df580b",
+                "requirement": "required"
+              },
+              {
+                "capability": {
+                  "id": "browser.navigate",
+                  "version": "1.0.0"
+                },
+                "capability_manifest_digest": "bf6b1d2b0755ccc2ed1c8a783ec4da1df9b8ebe4972267ceacf95dc3f7b1a3b8",
+                "requirement": "required"
+              },
+              {
+                "capability": {
+                  "id": "browser.act",
+                  "version": "1.0.0"
+                },
+                "capability_manifest_digest": "716fb74fefa8a4127ff7f68157842cce7649d646e3b6c70972fae7aa788e824a",
+                "requirement": "required"
+              },
+              {
+                "capability": {
+                  "id": "browser.identity",
+                  "version": "1.0.0"
+                },
+                "capability_manifest_digest": "58e5a0bf3914404fa064b46c61b39e53f1066cb20a1ed787d40a7b7f8674ab5f",
+                "requirement": "optional"
+              },
+              {
+                "capability": {
+                  "id": "browser.render_content",
+                  "version": "1.0.0"
+                },
+                "capability_manifest_digest": "59cb4fbc75eb451f98e3ec1e0d4a31a9833c81c6fb90d4777dddb284c9d5210d",
+                "requirement": "optional"
+              },
+              {
+                "capability": {
+                  "id": "browser.download",
+                  "version": "1.0.0"
+                },
+                "capability_manifest_digest": "65ae691c35cf9e723625534df3b46a7d32c0aa057d5c6b0044eed65d576ce54e",
+                "requirement": "optional"
+              },
+              {
+                "capability": {
+                  "id": "browser.upload",
+                  "version": "1.0.0"
+                },
+                "capability_manifest_digest": "d3719f71ee8f38c1e0d80ee2a9a136cb4122b52e973f4012d0ce4ab7197c0111",
+                "requirement": "optional"
+              },
+              {
+                "capability": {
+                  "id": "browser.evaluate",
+                  "version": "1.0.0"
+                },
+                "capability_manifest_digest": "19ddbede3e3d77db61d7c2820fc7b77024b175fbc72fdc698c1bb865a1150ca9",
+                "requirement": "optional"
+              },
+              {
+                "capability": {
+                  "id": "browser.site_memory",
+                  "version": "1.0.0"
+                },
+                "capability_manifest_digest": "f6bce6a3f5e9ef23aa32aaa234e08059faccef2dbf14ac1c22cafc50350231fc",
+                "requirement": "optional"
+              },
+              {
+                "capability": {
+                  "id": "browser.takeover",
+                  "version": "1.0.0"
+                },
+                "capability_manifest_digest": "dde4c52154629abc64f380c431593224af544ea2708353d2d738c777a04bd7a8",
+                "requirement": "optional"
+              }
+            ]
+          }
+        ],
+        "role_providers": [
+          {
+            "role": {
+              "key": {
+                "role_id": "system.browser_use",
+                "contract_version": "1.0.0"
+              },
+              "contract_digest": "05c47b0fc7ab7ee1f723ba9fd82c28774ca930644fbe02099496b6a94a834543"
+            },
+            "display": {
+              "name": "Browser Use",
+              "description": "Bundled first-party execution-role provider."
+            },
+            "members": {
+              "browser.act": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc",
+                      "x86_64-unknown-linux-gnu"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "browser"
+                ]
+              },
+              "browser.download": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc",
+                      "x86_64-unknown-linux-gnu"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "browser"
+                ]
+              },
+              "browser.evaluate": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc",
+                      "x86_64-unknown-linux-gnu"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "browser"
+                ]
+              },
+              "browser.identity": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc",
+                      "x86_64-unknown-linux-gnu"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "browser"
+                ]
+              },
+              "browser.navigate": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc",
+                      "x86_64-unknown-linux-gnu"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "browser"
+                ]
+              },
+              "browser.observe": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc",
+                      "x86_64-unknown-linux-gnu"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "browser"
+                ]
+              },
+              "browser.render_content": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc",
+                      "x86_64-unknown-linux-gnu"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "browser"
+                ]
+              },
+              "browser.site_memory": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc",
+                      "x86_64-unknown-linux-gnu"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "browser"
+                ]
+              },
+              "browser.takeover": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc",
+                      "x86_64-unknown-linux-gnu"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "browser"
+                ]
+              },
+              "browser.upload": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc",
+                      "x86_64-unknown-linux-gnu"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "browser"
+                ]
+              }
+            }
+          }
+        ]
       },
       {
         "package": {
@@ -748,7 +1052,139 @@
           }
         ],
         "skills": [],
-        "mcp_tools": []
+        "mcp_tools": [],
+        "role_contracts": [
+          {
+            "key": {
+              "role_id": "system.computer_use",
+              "contract_version": "1.0.0"
+            },
+            "members": [
+              {
+                "capability": {
+                  "id": "computer.observe",
+                  "version": "1.0.0"
+                },
+                "capability_manifest_digest": "293d30c9dbdbac575babc04ede07418984c9a249d86301a5f871dfc550df0818",
+                "requirement": "required"
+              },
+              {
+                "capability": {
+                  "id": "computer.input",
+                  "version": "1.0.0"
+                },
+                "capability_manifest_digest": "9a48382e830771f801cb2747d34457d61122285abbf71fb32be1365ec6bf492e",
+                "requirement": "required"
+              },
+              {
+                "capability": {
+                  "id": "computer.launch",
+                  "version": "1.0.0"
+                },
+                "capability_manifest_digest": "a8449dd77cf9b5c3c8342c59d19e96d9f9056d6efcaced057c107463983a28dc",
+                "requirement": "optional"
+              },
+              {
+                "capability": {
+                  "id": "a11y.observe",
+                  "version": "1.0.0"
+                },
+                "capability_manifest_digest": "0df42ea63d094f27483c5ac0a6d9b2c339dab412eef9c92eb4d13bb1436a4644",
+                "requirement": "optional"
+              }
+            ],
+            "serialized_target_resource_kind": "computer"
+          }
+        ],
+        "role_providers": [
+          {
+            "role": {
+              "key": {
+                "role_id": "system.computer_use",
+                "contract_version": "1.0.0"
+              },
+              "contract_digest": "270f0d8a5504a16a0f72508438e64ab4a3098ce43bf46409544ffbcfb6067c05"
+            },
+            "display": {
+              "name": "Computer Use",
+              "description": "Bundled first-party execution-role provider."
+            },
+            "members": {
+              "a11y.observe": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "computer"
+                ]
+              },
+              "computer.input": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "computer"
+                ]
+              },
+              "computer.launch": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "computer"
+                ]
+              },
+              "computer.observe": {
+                "supported_platforms": [
+                  {
+                    "constraint": "targets",
+                    "host_targets": [
+                      "aarch64-apple-darwin",
+                      "x86_64-apple-darwin",
+                      "x86_64-pc-windows-msvc"
+                    ],
+                    "host_surfaces": [
+                      "desktop"
+                    ]
+                  }
+                ],
+                "required_resource_kinds": [
+                  "computer"
+                ]
+              }
+            }
+          }
+        ]
       },
       {
         "package": {
@@ -1333,5 +1769,5 @@
       }
     ]
   },
-  "payload_digest": "85e250015c78291091a11a68e5205b62a6fb510ed98f5536c2eb1fe351e536f2"
+  "payload_digest": "f8b5460165689bb463bd286573b5b2731a20803107e2b27ca3d86420dad62d1b"
 }

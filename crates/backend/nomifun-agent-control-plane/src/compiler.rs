@@ -1,18 +1,22 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nomifun_agent_contracts::{
-    AgentPresetRevision, AgentPresetRevisionPayload, CanonicalErrorCode, CapabilityId,
-    CapabilityManifest, CapabilityRef, ChatRouteIdentity, CompactOnDemandCapabilityEntry, DigestHex,
-    McpToolCapabilityMapping, OfficialPresetKey, OperationId, PrecomputedActivationPlan,
-    PresetRevisionRef, PrincipalRef, ResolvedCapability, ResolvedMcpToolLock, ResolvedSkillLock,
-    ResolvedSnapshotContent, ResolvedSnapshotEnvelope, ResolvedSnapshotId, ResolvedSnapshotRef,
-    RuntimeFeatureId, RuntimeProfileKind, SkillRef, UserId, VersionString, digest_payload,
+    AgentPresetRevision, AgentPresetRevisionPayload, CanonicalErrorCode, DigestHex,
+    McpToolCapabilityMapping, OfficialPresetKey, OperationId, PresetRevisionRef, PrincipalRef,
+    ResolvedCapability, ResolvedSnapshotEnvelope, SkillRef, UserId, VersionString,
+    digest_payload,
+};
+use nomifun_agent_kernel::{
+    AgentPresetCompiler as KernelAgentPresetCompiler, CompileRequest, CompilerEnvironment,
+    KernelError, KernelRegistry, MaterializedRegistry,
 };
 use nomifun_api_types::{
     AgentPresetRevisionDto, McpToolCatalogItemDto, PreviewCapabilityDto, PreviewDiagnosticDto,
-    PreviewDiagnosticSeverityDto, PreviewStatusDto, PreviewSummaryDto, ResolveAgentPresetPreviewRequest,
-    ResolveAgentPresetPreviewResponse, RevisionDiffDto, SnapshotInspectorDto,
+    PreviewDiagnosticSeverityDto, PreviewStatusDto, PreviewSummaryDto,
+    ResolveAgentPresetPreviewRequest, ResolveAgentPresetPreviewResponse, RevisionDiffDto,
+    SnapshotInspectorDto,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -20,6 +24,39 @@ use uuid::Uuid;
 use crate::catalog::{CatalogSnapshot, OfficialTemplateCatalog};
 use crate::error::ControlPlaneError;
 use crate::wire::{wire_cast, wire_name};
+
+/// Supplies the exact materialized registry used by the Kernel execution path.
+///
+/// The provider is intentionally lazy because the platform constructs the
+/// Control Plane before publishing its initial plugin registrations.
+pub trait CanonicalRegistryProvider: Send + Sync {
+    fn snapshot(&self) -> Result<Arc<MaterializedRegistry>, ControlPlaneError>;
+}
+
+impl<F> CanonicalRegistryProvider for F
+where
+    F: Fn() -> Result<Arc<MaterializedRegistry>, ControlPlaneError> + Send + Sync,
+{
+    fn snapshot(&self) -> Result<Arc<MaterializedRegistry>, ControlPlaneError> {
+        self()
+    }
+}
+
+impl CanonicalRegistryProvider for KernelRegistry {
+    fn snapshot(&self) -> Result<Arc<MaterializedRegistry>, ControlPlaneError> {
+        KernelRegistry::snapshot(self).map_err(|error| ControlPlaneError::Wire(error.to_string()))
+    }
+}
+
+struct StaticCanonicalRegistryProvider {
+    registry: Arc<MaterializedRegistry>,
+}
+
+impl CanonicalRegistryProvider for StaticCanonicalRegistryProvider {
+    fn snapshot(&self) -> Result<Arc<MaterializedRegistry>, ControlPlaneError> {
+        Ok(Arc::clone(&self.registry))
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct CompilerReleaseInputs {
@@ -29,12 +66,6 @@ pub struct CompilerReleaseInputs {
     pub canonical_schema_manifest_digest: DigestHex,
     pub target_contribution_manifest_digest: DigestHex,
     pub availability_evidence_revision: String,
-}
-
-#[derive(Clone, Debug)]
-struct ResolvedNode {
-    manifest: CapabilityManifest,
-    dependency_path: Vec<CapabilityId>,
 }
 
 #[derive(Clone, Debug)]
@@ -49,6 +80,8 @@ pub struct PreviewCompilation {
 pub struct PresetPreviewCompiler {
     release: CompilerReleaseInputs,
     official_templates: OfficialTemplateCatalog,
+    canonical_registry: Option<Arc<dyn CanonicalRegistryProvider>>,
+    canonical_environment: Option<CompilerEnvironment>,
 }
 
 impl PresetPreviewCompiler {
@@ -59,7 +92,35 @@ impl PresetPreviewCompiler {
         Self {
             release,
             official_templates,
+            canonical_registry: None,
+            canonical_environment: None,
         }
+    }
+
+    /// Bind Preview/Save/Test to the exact registry and environment used by
+    /// Session Open. The provider is evaluated for every dirty compile.
+    pub fn with_canonical_registry<P>(
+        mut self,
+        provider: Arc<P>,
+        environment: CompilerEnvironment,
+    ) -> Self
+    where
+        P: CanonicalRegistryProvider + 'static,
+    {
+        self.canonical_registry = Some(provider);
+        self.canonical_environment = Some(environment);
+        self
+    }
+
+    pub fn with_materialized_registry(
+        self,
+        registry: Arc<MaterializedRegistry>,
+        environment: CompilerEnvironment,
+    ) -> Self {
+        self.with_canonical_registry(
+            Arc::new(StaticCanonicalRegistryProvider { registry }),
+            environment,
+        )
     }
 
     pub fn compile(
@@ -74,8 +135,7 @@ impl PresetPreviewCompiler {
         let payload: AgentPresetRevisionPayload = wire_cast(&request.draft.document)?;
         let draft_digest = digest_payload(&payload)
             .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
-        let clean = current_revision
-            .is_some_and(|current| current.payload == payload);
+        let clean = current_revision.is_some_and(|current| current.payload == payload);
         let candidate_revision_ref = if clean {
             current_revision
                 .expect("clean draft has a current revision")
@@ -91,7 +151,6 @@ impl PresetPreviewCompiler {
             }
         };
 
-        let mut diagnostics = Vec::new();
         let candidate_revision = AgentPresetRevision {
             reference: candidate_revision_ref.clone(),
             payload: payload.clone(),
@@ -99,6 +158,7 @@ impl PresetPreviewCompiler {
             created_at_ms: now_ms(),
             reason: None,
         };
+        let mut diagnostics = Vec::new();
         if let Err(violation) = candidate_revision.validate() {
             diagnostics.push(error_diagnostic(
                 violation.code,
@@ -106,43 +166,12 @@ impl PresetPreviewCompiler {
                 None,
             ));
         }
-
-        validate_resource_bindings(owner, &payload, &mut diagnostics);
-        let directly_selected = payload
-            .initial_capabilities
-            .iter()
-            .chain(&payload.on_demand_capabilities)
-            .map(|selection| selection.capability.id.clone())
-            .collect::<BTreeSet<_>>();
-
-        let initial_root_nodes = resolve_roots(
-            catalog,
-            payload
-                .initial_capabilities
-                .iter()
-                .map(|selection| &selection.capability),
-            &directly_selected,
-            &payload,
-            &mut diagnostics,
-        );
-        let initial_nodes = merge_root_nodes(&initial_root_nodes, &mut diagnostics);
-        let on_demand_nodes = resolve_roots(
-            catalog,
-            payload
-                .on_demand_capabilities
-                .iter()
-                .map(|selection| &selection.capability),
-            &directly_selected,
-            &payload,
-            &mut diagnostics,
-        );
-        validate_skills(catalog, &payload, &directly_selected, &mut diagnostics);
-        validate_coding_baseline(
+        validate_direct_catalog_availability(&payload, catalog, &mut diagnostics);
+        validate_template_baseline(
             transient_template_key,
             &self.official_templates,
-            &directly_selected,
-            &initial_nodes,
-            &on_demand_nodes,
+            &payload,
+            catalog,
             &mut diagnostics,
         );
         if clean && current_snapshot.is_none() {
@@ -153,34 +182,61 @@ impl PresetPreviewCompiler {
             ));
         }
 
-        let has_errors = diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.severity == PreviewDiagnosticSeverityDto::Error);
-        let revision_diff = revision_diff(current_revision, &payload);
-        let snapshot = if has_errors {
+        let compiled = if clean || has_errors(&diagnostics) {
+            None
+        } else {
+            let (registry, mut environment) = self.canonical_inputs()?;
+            let selected_capabilities = payload
+                .initial_capabilities
+                .iter()
+                .chain(&payload.on_demand_capabilities)
+                .map(|selection| selection.capability.id.clone())
+                .collect::<BTreeSet<_>>();
+            environment.required_runtime_profile = runtime_profile_for_compile(
+                environment.required_runtime_profile,
+                transient_template_key,
+                current_snapshot.map(|snapshot| snapshot.content.required_runtime_profile),
+                &selected_capabilities,
+                &self
+                    .official_templates
+                    .required_capability_ids(OfficialPresetKey::CodingCodex)
+                    .unwrap_or_default(),
+            );
+            let request = CompileRequest {
+                revision: candidate_revision,
+                principal: PrincipalRef {
+                    principal_kind: "user".to_owned(),
+                    principal_id: owner.as_ref().to_owned(),
+                },
+                scene: request.scene.clone(),
+                surface: request.surface.clone(),
+                audience: request.audience.clone(),
+                created_at_ms: now_ms(),
+                resolver_run_id: OperationId::from(Uuid::now_v7().to_string()),
+            };
+            match KernelAgentPresetCompiler::compile(&registry, &environment, request) {
+                Ok(snapshot) => Some(snapshot),
+                Err(error) => {
+                    diagnostics.push(kernel_error_diagnostic(&error));
+                    None
+                }
+            }
+        };
+
+        let snapshot = if has_errors(&diagnostics) {
             None
         } else if clean {
             current_snapshot.cloned()
         } else {
-            Some(self.build_snapshot(
-                owner,
-                request,
-                &candidate_revision_ref,
-                &payload,
-                catalog,
-                &initial_nodes,
-                &on_demand_nodes,
-            )?)
+            compiled.as_ref().map(|compiled| compiled.envelope.clone())
         };
-
-        let summary = preview_summary(&payload, catalog, &initial_nodes, &snapshot);
+        let revision_diff = revision_diff(current_revision, &payload);
+        let summary = preview_summary(&payload, catalog, snapshot.as_ref());
         let inspector = preview_inspector(
             &self.release,
             &candidate_revision_ref,
             &payload,
             catalog,
-            &initial_nodes,
-            &on_demand_nodes,
             snapshot.as_ref(),
         )?;
         let resolved_snapshot_ref = snapshot
@@ -194,7 +250,7 @@ impl PresetPreviewCompiler {
             "diagnostics": &diagnostics,
         }))
         .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
-        let ready = snapshot.is_some() && !has_errors;
+        let ready = snapshot.is_some() && !has_errors(&diagnostics);
         let response = ResolveAgentPresetPreviewResponse {
             status: if ready {
                 PreviewStatusDto::Ready
@@ -221,410 +277,84 @@ impl PresetPreviewCompiler {
         })
     }
 
-    fn build_snapshot(
+    fn canonical_inputs(
         &self,
-        owner: &UserId,
-        request: &ResolveAgentPresetPreviewRequest,
-        candidate_revision_ref: &PresetRevisionRef,
-        payload: &AgentPresetRevisionPayload,
-        catalog: &CatalogSnapshot,
-        initial_nodes: &BTreeMap<CapabilityId, ResolvedNode>,
-        on_demand_nodes: &BTreeMap<CapabilityId, Vec<ResolvedNode>>,
-    ) -> Result<ResolvedSnapshotEnvelope, ControlPlaneError> {
-        let initial_capabilities = initial_nodes
-            .values()
-            .map(resolved_capability)
-            .collect::<Result<Vec<_>, _>>()?;
-        let on_demand_capabilities = payload
-            .on_demand_capabilities
-            .iter()
-            .filter_map(|selection| {
-                catalog
-                    .find_capability(&selection.capability)
-                    .map(|manifest| ResolvedNode {
-                        manifest: manifest.clone(),
-                        dependency_path: vec![manifest.id.clone()],
-                    })
-            })
-            .map(|node| resolved_capability(&node))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut activation_plans = BTreeMap::new();
-        let mut compact_index = Vec::new();
-        for selection in &payload.on_demand_capabilities {
-            let Some(nodes) = on_demand_nodes.get(&selection.capability.id) else {
-                continue;
-            };
-            let plan = activation_plan(nodes, payload);
-            let plan_digest = digest_payload(&plan)
-                .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
-            let display = catalog
-                .find_capability(&selection.capability)
-                .expect("validated on-demand capability exists")
-                .display
-                .clone();
-            let terms = search_terms(
-                selection.capability.id.as_ref(),
-                &display.name,
-                &display.description,
-            );
-            compact_index.push(CompactOnDemandCapabilityEntry {
-                capability_id: selection.capability.id.clone(),
-                display_name: display.name.clone(),
-                short_description: display.description.clone(),
-                search_terms: terms,
-                activation_plan_digest: plan_digest,
-            });
-            activation_plans.insert(selection.capability.id.clone(), plan);
+    ) -> Result<(Arc<MaterializedRegistry>, CompilerEnvironment), ControlPlaneError> {
+        match (&self.canonical_registry, &self.canonical_environment) {
+            (Some(provider), Some(environment)) => Ok((provider.snapshot()?, environment.clone())),
+            (None, None) => Err(ControlPlaneError::Wire(
+                "canonical compiler registry and environment are not configured".to_owned(),
+            )),
+            _ => Err(ControlPlaneError::Wire(
+                "canonical compiler registry and environment must be configured together"
+                    .to_owned(),
+            )),
         }
-
-        let capability_allowlist = initial_nodes
-            .keys()
-            .cloned()
-            .chain(
-                on_demand_nodes
-                    .values()
-                    .flat_map(|nodes| nodes.iter().map(|node| node.manifest.id.clone())),
-            )
-            .collect::<BTreeSet<_>>();
-        let required_runtime_features = initial_nodes
-            .values()
-            .chain(on_demand_nodes.values().flatten())
-            .flat_map(|node| {
-                node.manifest
-                    .requires_runtime_features
-                    .iter()
-                    .map(|feature| feature.id.clone())
-            })
-            .collect::<BTreeSet<_>>();
-        let required_runtime_profile = runtime_profile(&required_runtime_features);
-        let compiled_runtime_profile_digest = digest_payload(&json!({
-            "profile": &required_runtime_profile,
-            "initial": initial_nodes.keys().collect::<Vec<_>>(),
-            "on_demand": &payload.on_demand_capabilities,
-            "persona": &payload.persona,
-            "instructions": &payload.instructions,
-            "context_policy": &payload.context_policy,
-            "execution_constraints": &payload.execution_constraints,
-            "runtime_budget": &payload.runtime_budget,
-        }))
-        .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
-        let skill_locks = payload
-            .skill_bindings
-            .iter()
-            .filter_map(|reference| catalog.find_skill(reference))
-            .map(|skill| ResolvedSkillLock {
-                skill: SkillRef {
-                    id: skill.id.clone(),
-                    version: skill.version.clone(),
-                },
-                body_digest: skill.body_ref.digest.clone(),
-                required_capabilities: skill
-                    .requires_capabilities
-                    .iter()
-                    .map(|reference| reference.id.clone())
-                    .collect(),
-            })
-            .collect();
-        let mcp_tool_locks = catalog
-            .mcp_tools
-            .iter()
-            .filter(|mapping| capability_allowlist.contains(&mapping.capability.id))
-            .map(|mapping| ResolvedMcpToolLock {
-                server_id: mapping.server_id.clone(),
-                canonical_tool_key: mapping.canonical_tool_key.clone(),
-                capability_id: mapping.capability.id.clone(),
-                schema_digest: mapping.schema_digest.clone(),
-                materialization_revision: materialization_revision(mapping),
-            })
-            .collect();
-        let chat_route_identity = payload
-            .model_route_refs
-            .get(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT)
-            .zip(
-                payload
-                    .chat_route_records
-                    .get(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT),
-            )
-            .map(|(route_id, record)| {
-                ChatRouteIdentity::new(
-                    candidate_revision_ref.revision_id(),
-                    nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
-                    route_id.clone(),
-                    record.primary.model_route_revision,
-                )
-            });
-        let content = ResolvedSnapshotContent {
-            schema_version: VersionString::from("1.0.0"),
-            resolver_version: self.release.resolver_version.clone(),
-            preset_revision_ref: candidate_revision_ref.clone(),
-            required_runtime_protocol_version: self.release.runtime_protocol_version.clone(),
-            required_runtime_profile,
-            runtime_feature_inventory_digest: self
-                .release
-                .runtime_feature_inventory_digest
-                .clone(),
-            required_runtime_features,
-            compiled_runtime_profile_digest,
-            model_route_refs: payload.model_route_refs.clone(),
-            chat_route_identity,
-            initial_capabilities,
-            on_demand_capabilities,
-            on_demand_activation_plans: activation_plans,
-            compact_on_demand_index: compact_index,
-            capability_allowlist,
-            skill_locks,
-            mcp_tool_locks,
-            typed_resource_bindings: payload.resource_bindings.clone(),
-            canonical_schema_manifest_digest: self
-                .release
-                .canonical_schema_manifest_digest
-                .clone(),
-            target_contribution_manifest_digest: self
-                .release
-                .target_contribution_manifest_digest
-                .clone(),
-        };
-        let snapshot_ref = ResolvedSnapshotRef {
-            snapshot_id: ResolvedSnapshotId::from(Uuid::now_v7().to_string()),
-            snapshot_digest: digest_payload(&content)
-                .map_err(|error| ControlPlaneError::Wire(error.to_string()))?,
-        };
-        let snapshot = ResolvedSnapshotEnvelope {
-            snapshot_ref,
-            content,
-            actor: PrincipalRef {
-                principal_kind: "user".into(),
-                principal_id: owner.as_ref().to_owned(),
-            },
-            scene: request.scene.clone(),
-            surface: request.surface.clone(),
-            audience: request.audience.clone(),
-            created_at_ms: now_ms(),
-            resolver_run_id: OperationId::from(Uuid::now_v7().to_string()),
-            availability_evidence_revision: self
-                .release
-                .availability_evidence_revision
-                .clone(),
-        };
-        snapshot.validate().map_err(|violation| {
-            ControlPlaneError::canonical(
-                violation.code,
-                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                violation.message,
-            )
-        })?;
-        Ok(snapshot)
     }
 }
 
-fn resolve_roots<'a>(
-    catalog: &CatalogSnapshot,
-    roots: impl Iterator<Item = &'a CapabilityRef>,
-    directly_selected: &BTreeSet<CapabilityId>,
-    payload: &AgentPresetRevisionPayload,
-    diagnostics: &mut Vec<PreviewDiagnosticDto>,
-) -> BTreeMap<CapabilityId, Vec<ResolvedNode>> {
-    let mut resolved = BTreeMap::new();
-    for root in roots {
-        let mut visiting = BTreeSet::new();
-        let mut visited = BTreeSet::new();
-        let mut nodes = Vec::new();
-        resolve_node(
-            catalog,
-            root,
-            vec![root.id.clone()],
-            &mut visiting,
-            &mut visited,
-            &mut nodes,
-            diagnostics,
-        );
-        validate_capability_contracts(
-            catalog,
-            &nodes,
-            directly_selected,
-            payload,
-            diagnostics,
-        );
-        resolved.insert(root.id.clone(), nodes);
-    }
-    resolved
-}
-
-fn merge_root_nodes(
-    roots: &BTreeMap<CapabilityId, Vec<ResolvedNode>>,
-    diagnostics: &mut Vec<PreviewDiagnosticDto>,
-) -> BTreeMap<CapabilityId, ResolvedNode> {
-    let mut merged: BTreeMap<CapabilityId, ResolvedNode> = BTreeMap::new();
-    for node in roots.values().flatten() {
-        if let Some(existing) = merged.get(&node.manifest.id) {
-            if existing.manifest.version != node.manifest.version {
-                diagnostics.push(error_diagnostic(
-                    CanonicalErrorCode::from("CAPABILITY_NOT_MATERIALIZED"),
-                    "dependency closure selected two exact versions for one capability id",
-                    Some(node.manifest.id.as_ref().to_owned()),
-                ));
-            }
-            continue;
-        }
-        merged.insert(node.manifest.id.clone(), node.clone());
-    }
-    merged
-}
-
-#[allow(clippy::too_many_arguments)]
-fn resolve_node(
-    catalog: &CatalogSnapshot,
-    reference: &CapabilityRef,
-    path: Vec<CapabilityId>,
-    visiting: &mut BTreeSet<CapabilityId>,
-    visited: &mut BTreeSet<CapabilityId>,
-    output: &mut Vec<ResolvedNode>,
-    diagnostics: &mut Vec<PreviewDiagnosticDto>,
-) {
-    if visited.contains(&reference.id) {
-        return;
-    }
-    if !visiting.insert(reference.id.clone()) {
-        diagnostics.push(error_diagnostic(
-            CanonicalErrorCode::from("CAPABILITY_NOT_MATERIALIZED"),
-            "capability dependency cycle detected",
-            Some(reference.id.as_ref().to_owned()),
-        ));
-        return;
-    }
-    let Some(manifest) = catalog.find_capability(reference) else {
-        diagnostics.push(error_diagnostic(
-            CanonicalErrorCode::from("CAPABILITY_NOT_MATERIALIZED"),
-            format!(
-                "capability {}@{} is not materialized",
-                reference.id.as_ref(),
-                reference.version.as_ref()
-            ),
-            Some(reference.id.as_ref().to_owned()),
-        ));
-        visiting.remove(&reference.id);
-        return;
-    };
-    if let Some(code) = catalog.unavailable_capabilities.get(&manifest.id) {
-        diagnostics.push(error_diagnostic(
-            code.clone(),
-            format!("capability {} is unavailable on this host", manifest.id.as_ref()),
-            Some(manifest.id.as_ref().to_owned()),
-        ));
-    }
-    for dependency in &manifest.requires {
-        let mut dependency_path = path.clone();
-        dependency_path.push(dependency.id.clone());
-        resolve_node(
-            catalog,
-            dependency,
-            dependency_path,
-            visiting,
-            visited,
-            output,
-            diagnostics,
-        );
-    }
-    visiting.remove(&reference.id);
-    visited.insert(reference.id.clone());
-    output.push(ResolvedNode {
-        manifest: manifest.clone(),
-        dependency_path: path,
-    });
-}
-
-fn validate_capability_contracts(
-    catalog: &CatalogSnapshot,
-    nodes: &[ResolvedNode],
-    directly_selected: &BTreeSet<CapabilityId>,
-    payload: &AgentPresetRevisionPayload,
-    diagnostics: &mut Vec<PreviewDiagnosticDto>,
-) {
-    let resource_bindings = payload
-        .resource_bindings
+fn has_errors(diagnostics: &[PreviewDiagnosticDto]) -> bool {
+    diagnostics
         .iter()
-        .map(|binding| binding.resource_kind.clone())
-        .collect::<BTreeSet<_>>();
-    for node in nodes {
-        for conflict in &node.manifest.conflicts {
-            if directly_selected.contains(&conflict.capability.id) {
-                diagnostics.push(error_diagnostic(
-                    CanonicalErrorCode::from("PRESET_CAPABILITY_SET_OVERLAP"),
-                    conflict.reason.clone(),
-                    Some(node.manifest.id.as_ref().to_owned()),
-                ));
-            }
-        }
-        for resource_kind in &node.manifest.contributions.resource_kinds {
-            if !resource_bindings.contains(resource_kind) {
-                diagnostics.push(error_diagnostic(
-                    CanonicalErrorCode::from("PRESET_RESOURCE_NOT_BOUND"),
-                    format!(
-                        "capability {} requires a {} resource binding",
-                        node.manifest.id.as_ref(),
-                        resource_kind.as_ref()
-                    ),
-                    Some(node.manifest.id.as_ref().to_owned()),
-                ));
-            }
-        }
-        if catalog
-            .unavailable_capabilities
-            .contains_key(&node.manifest.id)
-        {
-            continue;
-        }
+        .any(|diagnostic| diagnostic.severity == PreviewDiagnosticSeverityDto::Error)
+}
+
+fn runtime_profile_for_compile(
+    default_profile: nomifun_agent_contracts::RuntimeProfileKind,
+    template_key: Option<OfficialPresetKey>,
+    current_profile: Option<nomifun_agent_contracts::RuntimeProfileKind>,
+    selected_capabilities: &BTreeSet<nomifun_agent_contracts::CapabilityId>,
+    coding_required_capabilities: &BTreeSet<nomifun_agent_contracts::CapabilityId>,
+) -> nomifun_agent_contracts::RuntimeProfileKind {
+    if template_key == Some(OfficialPresetKey::CodingCodex)
+        || current_profile == Some(nomifun_agent_contracts::RuntimeProfileKind::CodingNative)
+        || (!coding_required_capabilities.is_empty()
+            && coding_required_capabilities.is_subset(selected_capabilities))
+    {
+        nomifun_agent_contracts::RuntimeProfileKind::CodingNative
+    } else {
+        default_profile
     }
 }
 
-fn validate_resource_bindings(
-    owner: &UserId,
+fn validate_direct_catalog_availability(
     payload: &AgentPresetRevisionPayload,
+    catalog: &CatalogSnapshot,
     diagnostics: &mut Vec<PreviewDiagnosticDto>,
 ) {
-    let mut binding_ids = BTreeSet::new();
-    for binding in &payload.resource_bindings {
-        if !binding_ids.insert(binding.binding_id.clone()) {
-            diagnostics.push(error_diagnostic(
-                CanonicalErrorCode::from("PRESET_RESOURCE_NOT_BOUND"),
-                "typed resource binding ids must be unique",
-                Some(binding.binding_id.as_ref().to_owned()),
-            ));
-        }
-        if binding.owner_id != owner.as_ref() {
-            diagnostics.push(error_diagnostic(
-                CanonicalErrorCode::from("RESOURCE_OWNER_MISMATCH"),
-                "typed resource binding owner does not match the authenticated owner",
-                Some(binding.binding_id.as_ref().to_owned()),
-            ));
-        }
-    }
+    let mut seen = BTreeSet::new();
     for selection in payload
         .initial_capabilities
         .iter()
         .chain(&payload.on_demand_capabilities)
     {
-        for binding_ref in &selection.resource_binding_refs {
-            if !binding_ids.contains(binding_ref) {
-                diagnostics.push(error_diagnostic(
-                    CanonicalErrorCode::from("PRESET_RESOURCE_NOT_BOUND"),
-                    "capability references a resource binding that is not present",
-                    Some(binding_ref.as_ref().to_owned()),
-                ));
-            }
+        let reference = &selection.capability;
+        if !seen.insert(reference.id.clone()) {
+            continue;
+        }
+        if catalog.find_capability(reference).is_none() {
+            diagnostics.push(error_diagnostic(
+                CanonicalErrorCode::from("CAPABILITY_NOT_MATERIALIZED"),
+                format!(
+                    "capability {}@{} is not materialized",
+                    reference.id.as_ref(),
+                    reference.version.as_ref()
+                ),
+                Some(reference.id.as_ref().to_owned()),
+            ));
+            continue;
+        }
+        if let Some(code) = catalog.unavailable_capabilities.get(&reference.id) {
+            diagnostics.push(error_diagnostic(
+                code.clone(),
+                format!("capability {} is unavailable on this host", reference.id.as_ref()),
+                Some(reference.id.as_ref().to_owned()),
+            ));
         }
     }
-}
 
-fn validate_skills(
-    catalog: &CatalogSnapshot,
-    payload: &AgentPresetRevisionPayload,
-    directly_selected: &BTreeSet<CapabilityId>,
-    diagnostics: &mut Vec<PreviewDiagnosticDto>,
-) {
     for reference in &payload.skill_bindings {
-        let Some(skill) = catalog.find_skill(reference) else {
+        if catalog.find_skill(reference).is_none() {
             diagnostics.push(error_diagnostic(
                 CanonicalErrorCode::from("CAPABILITY_NOT_MATERIALIZED"),
                 format!(
@@ -634,168 +364,107 @@ fn validate_skills(
                 ),
                 Some(reference.id.as_ref().to_owned()),
             ));
-            continue;
-        };
-        for capability in &skill.requires_capabilities {
-            if !directly_selected.contains(&capability.id) {
-                diagnostics.push(error_diagnostic(
-                    CanonicalErrorCode::from("SKILL_REQUIRES_CAPABILITY"),
-                    format!(
-                        "skill {} requires directly selected capability {}",
-                        skill.id.as_ref(),
-                        capability.id.as_ref()
-                    ),
-                    Some(skill.id.as_ref().to_owned()),
-                ));
-            }
         }
     }
 }
 
-fn validate_coding_baseline(
-    transient_template_key: Option<OfficialPresetKey>,
-    official_templates: &OfficialTemplateCatalog,
-    directly_selected: &BTreeSet<CapabilityId>,
-    initial_nodes: &BTreeMap<CapabilityId, ResolvedNode>,
-    on_demand_nodes: &BTreeMap<CapabilityId, Vec<ResolvedNode>>,
+fn validate_template_baseline(
+    template_key: Option<OfficialPresetKey>,
+    templates: &OfficialTemplateCatalog,
+    payload: &AgentPresetRevisionPayload,
+    catalog: &CatalogSnapshot,
     diagnostics: &mut Vec<PreviewDiagnosticDto>,
 ) {
-    if transient_template_key != Some(OfficialPresetKey::CodingCodex) {
+    if template_key != Some(OfficialPresetKey::CodingCodex) {
         return;
     }
-    let required_ids = official_templates
+    let selected = payload
+        .initial_capabilities
+        .iter()
+        .chain(&payload.on_demand_capabilities)
+        .map(|selection| selection.capability.id.clone())
+        .collect::<BTreeSet<_>>();
+    let missing_capabilities = templates
         .required_capability_ids(OfficialPresetKey::CodingCodex)
-        .unwrap_or_default();
-    let missing_ids = required_ids
-        .difference(directly_selected)
+        .unwrap_or_default()
+        .difference(&selected)
         .map(|id| id.as_ref().to_owned())
         .collect::<Vec<_>>();
-    let actual_features = initial_nodes
-        .values()
-        .chain(on_demand_nodes.values().flatten())
-        .flat_map(|node| {
-            node.manifest
-                .requires_runtime_features
+    let available_features = selected
+        .iter()
+        .filter_map(|id| {
+            catalog
+                .capabilities
                 .iter()
-                .map(|feature| feature.id.clone())
+                .find(|capability| &capability.id == id)
         })
+        .flat_map(|capability| capability.requires_runtime_features.iter())
+        .map(|feature| feature.id.clone())
         .collect::<BTreeSet<_>>();
-    let required_features = official_templates
+    let missing_features = templates
         .required_runtime_features(OfficialPresetKey::CodingCodex)
-        .unwrap_or_default();
-    let missing_features = required_features
-        .difference(&actual_features)
+        .unwrap_or_default()
+        .difference(&available_features)
         .map(|feature| feature.as_ref().to_owned())
         .collect::<Vec<_>>();
-    if !missing_ids.is_empty() || !missing_features.is_empty() {
+    if !missing_capabilities.is_empty() || !missing_features.is_empty() {
         diagnostics.push(PreviewDiagnosticDto {
             severity: PreviewDiagnosticSeverityDto::Error,
             code: "CODING_CODEX_NATIVE_INCOMPLETE".into(),
             message: "coding.codex must retain the complete frozen Coding capability and runtime-feature baseline".into(),
             subject: Some("coding.codex".into()),
             details: Some(json!({
-                "missing_capability_ids": missing_ids,
+                "missing_capability_ids": missing_capabilities,
                 "missing_runtime_features": missing_features,
             })),
         });
     }
 }
 
-fn resolved_capability(node: &ResolvedNode) -> Result<ResolvedCapability, ControlPlaneError> {
-    Ok(ResolvedCapability {
-        capability: CapabilityRef {
-            id: node.manifest.id.clone(),
-            version: node.manifest.version.clone(),
-        },
-        source_package: node.manifest.package.clone(),
-        schema_digest: digest_payload(&node.manifest)
-            .map_err(|error| ControlPlaneError::Wire(error.to_string()))?,
-        dependency_path: node.dependency_path.clone(),
-        required_runtime_features: node
-            .manifest
-            .requires_runtime_features
-            .iter()
-            .map(|feature| feature.id.clone())
-            .collect(),
-    })
-}
-
-fn activation_plan(
-    nodes: &[ResolvedNode],
-    payload: &AgentPresetRevisionPayload,
-) -> PrecomputedActivationPlan {
-    let resource_kinds = nodes
-        .iter()
-        .flat_map(|node| node.manifest.contributions.resource_kinds.iter().cloned())
-        .collect::<BTreeSet<_>>();
-    PrecomputedActivationPlan {
-        root_capability_id: nodes
-            .last()
-            .expect("validated activation plan has a root")
-            .manifest
-            .id
-            .clone(),
-        capability_bundle: nodes
-            .iter()
-            .map(|node| node.manifest.id.clone())
-            .collect(),
-        tool_schema_refs: nodes
-            .iter()
-            .flat_map(|node| {
-                node.manifest
-                    .contributions
-                    .actions
-                    .iter()
-                    .flat_map(|action| [action.input_schema.clone(), action.output_schema.clone()])
-            })
-            .collect(),
-        context_schema_refs: nodes
-            .iter()
-            .flat_map(|node| {
-                node.manifest
-                    .contributions
-                    .context_schema_refs
-                    .iter()
-                    .cloned()
-            })
-            .collect(),
-        resource_binding_refs: payload
-            .resource_bindings
-            .iter()
-            .filter(|binding| resource_kinds.contains(&binding.resource_kind))
-            .map(|binding| binding.binding_id.clone())
-            .collect(),
-        model_route_refs: payload.model_route_refs.values().cloned().collect(),
-    }
-}
-
-fn runtime_profile(features: &BTreeSet<RuntimeFeatureId>) -> RuntimeProfileKind {
-    if features
-        .iter()
-        .any(|feature| matches!(feature.as_ref(), "code_mode" | "review.workflow"))
-    {
-        RuntimeProfileKind::CodingNative
-    } else {
-        RuntimeProfileKind::ManagedMinimal
-    }
+fn kernel_error_diagnostic(error: &KernelError) -> PreviewDiagnosticDto {
+    error_diagnostic(
+        error.canonical_code(),
+        error.to_string(),
+        None,
+    )
 }
 
 fn preview_summary(
     payload: &AgentPresetRevisionPayload,
     catalog: &CatalogSnapshot,
-    initial_nodes: &BTreeMap<CapabilityId, ResolvedNode>,
-    _snapshot: &Option<ResolvedSnapshotEnvelope>,
+    snapshot: Option<&ResolvedSnapshotEnvelope>,
 ) -> PreviewSummaryDto {
-    let initial_manifests = initial_nodes
-        .values()
-        .map(|node| &node.manifest)
-        .collect::<Vec<_>>();
-    let selected_ids = payload
-        .initial_capabilities
+    let initial_ids = snapshot
+        .map(|snapshot| {
+            snapshot
+                .content
+                .initial_capabilities
+                .iter()
+                .map(|capability| capability.capability.id.clone())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_else(|| {
+            payload
+                .initial_capabilities
+                .iter()
+                .map(|selection| selection.capability.id.clone())
+                .collect()
+        });
+    let selected_ids = snapshot
+        .map(|snapshot| snapshot.content.capability_allowlist.clone())
+        .unwrap_or_else(|| {
+            payload
+                .initial_capabilities
+                .iter()
+                .chain(&payload.on_demand_capabilities)
+                .map(|selection| selection.capability.id.clone())
+                .collect()
+        });
+    let initial_manifests = catalog
+        .capabilities
         .iter()
-        .chain(&payload.on_demand_capabilities)
-        .map(|selection| selection.capability.id.clone())
-        .collect::<BTreeSet<_>>();
+        .filter(|capability| initial_ids.contains(&capability.id))
+        .collect::<Vec<_>>();
     PreviewSummaryDto {
         initial_count: payload.initial_capabilities.len() as u32,
         on_demand_count: payload.on_demand_capabilities.len() as u32,
@@ -808,7 +477,9 @@ fn preview_summary(
             .iter()
             .map(|manifest| manifest.contributions.context_schema_refs.len() as u32)
             .sum(),
-        on_demand_index_count: payload.on_demand_capabilities.len() as u32,
+        on_demand_index_count: snapshot
+            .map(|snapshot| snapshot.content.compact_on_demand_index.len() as u32)
+            .unwrap_or(payload.on_demand_capabilities.len() as u32),
         skill_count: payload.skill_bindings.len() as u32,
         mcp_count: catalog
             .mcp_tools
@@ -830,57 +501,94 @@ fn preview_inspector(
     candidate_revision_ref: &PresetRevisionRef,
     payload: &AgentPresetRevisionPayload,
     catalog: &CatalogSnapshot,
-    initial_nodes: &BTreeMap<CapabilityId, ResolvedNode>,
-    on_demand_nodes: &BTreeMap<CapabilityId, Vec<ResolvedNode>>,
     snapshot: Option<&ResolvedSnapshotEnvelope>,
 ) -> Result<SnapshotInspectorDto, ControlPlaneError> {
-    let initial = initial_nodes
-        .values()
-        .map(preview_capability)
-        .collect();
-    let on_demand = on_demand_nodes
-        .values()
-        .filter_map(|nodes| nodes.last())
-        .map(preview_capability)
-        .collect();
-    let selected_ids = payload
-        .initial_capabilities
+    let initial_refs = snapshot
+        .map(|snapshot| snapshot.content.initial_capabilities.clone())
+        .unwrap_or_else(|| {
+            payload
+                .initial_capabilities
+                .iter()
+                .map(|selection| ResolvedCapability {
+                    capability: selection.capability.clone(),
+                    source_package: catalog
+                        .find_capability(&selection.capability)
+                        .map(|capability| capability.package.clone())
+                        .unwrap_or_else(|| {
+                            nomifun_agent_contracts::PackageRef {
+                                id: "unmaterialized".into(),
+                                version: "0.0.0".into(),
+                            }
+                        }),
+                    schema_digest: DigestHex::from("unmaterialized"),
+                    dependency_path: vec![selection.capability.id.clone()],
+                    required_runtime_features: BTreeSet::new(),
+                })
+                .collect()
+        });
+    let on_demand_refs = snapshot
+        .map(|snapshot| snapshot.content.on_demand_capabilities.clone())
+        .unwrap_or_else(|| {
+            payload
+                .on_demand_capabilities
+                .iter()
+                .map(|selection| ResolvedCapability {
+                    capability: selection.capability.clone(),
+                    source_package: catalog
+                        .find_capability(&selection.capability)
+                        .map(|capability| capability.package.clone())
+                        .unwrap_or_else(|| {
+                            nomifun_agent_contracts::PackageRef {
+                                id: "unmaterialized".into(),
+                                version: "0.0.0".into(),
+                            }
+                        }),
+                    schema_digest: DigestHex::from("unmaterialized"),
+                    dependency_path: vec![selection.capability.id.clone()],
+                    required_runtime_features: BTreeSet::new(),
+                })
+                .collect()
+        });
+    let selected_ids = snapshot
+        .map(|snapshot| snapshot.content.capability_allowlist.clone())
+        .unwrap_or_else(|| {
+            payload
+                .initial_capabilities
+                .iter()
+                .chain(&payload.on_demand_capabilities)
+                .map(|selection| selection.capability.id.clone())
+                .collect()
+        });
+    let mut tool_schema_refs = BTreeSet::new();
+    let mut context_schema_refs = BTreeSet::new();
+    for reference in initial_refs.iter().chain(on_demand_refs.iter()) {
+        if let Some(capability) = catalog.find_capability(&reference.capability) {
+            for action in &capability.contributions.actions {
+                tool_schema_refs.insert(action.input_schema.as_ref().to_owned());
+                tool_schema_refs.insert(action.output_schema.as_ref().to_owned());
+            }
+            context_schema_refs.extend(
+                capability
+                    .contributions
+                    .context_schema_refs
+                    .iter()
+                    .map(|reference| reference.as_ref().to_owned()),
+            );
+        }
+    }
+    let initial = initial_refs
         .iter()
-        .chain(&payload.on_demand_capabilities)
-        .map(|selection| selection.capability.id.clone())
-        .collect::<BTreeSet<_>>();
+        .map(|reference| preview_capability(reference, catalog))
+        .collect();
+    let on_demand = on_demand_refs
+        .iter()
+        .map(|reference| preview_capability(reference, catalog))
+        .collect();
     let mcp_materializations = catalog
         .mcp_tools
         .iter()
         .filter(|mapping| selected_ids.contains(&mapping.capability.id))
         .map(mcp_mapping_api)
-        .collect();
-    let tool_schema_refs = initial_nodes
-        .values()
-        .chain(on_demand_nodes.values().flatten())
-        .flat_map(|node| {
-            node.manifest
-                .contributions
-                .actions
-                .iter()
-                .flat_map(|action| {
-                    [
-                        action.input_schema.as_ref().to_owned(),
-                        action.output_schema.as_ref().to_owned(),
-                    ]
-                })
-        })
-        .collect();
-    let context_schema_refs = initial_nodes
-        .values()
-        .chain(on_demand_nodes.values().flatten())
-        .flat_map(|node| {
-            node.manifest
-                .contributions
-                .context_schema_refs
-                .iter()
-                .map(|reference| reference.as_ref().to_owned())
-        })
         .collect();
     Ok(SnapshotInspectorDto {
         snapshot_ref: snapshot
@@ -903,40 +611,67 @@ fn preview_inspector(
             .unwrap_or_default(),
         initial_capabilities: initial,
         on_demand_capabilities: on_demand,
-        compact_on_demand_index: payload
-            .on_demand_capabilities
-            .iter()
-            .map(|selection| selection.capability.id.as_ref().to_owned())
-            .collect(),
-        tool_schema_refs,
-        context_schema_refs,
+        compact_on_demand_index: snapshot
+            .map(|snapshot| {
+                snapshot
+                    .content
+                    .compact_on_demand_index
+                    .iter()
+                    .map(|entry| entry.capability_id.as_ref().to_owned())
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                payload
+                    .on_demand_capabilities
+                    .iter()
+                    .map(|selection| selection.capability.id.as_ref().to_owned())
+                    .collect()
+            }),
+        tool_schema_refs: tool_schema_refs.into_iter().collect(),
+        context_schema_refs: context_schema_refs.into_iter().collect(),
         mcp_materializations,
         typed_resource_bindings: wire_cast(&payload.resource_bindings)?,
         service_key_diagnostics: catalog.service_key_diagnostics.clone(),
     })
 }
 
-fn preview_capability(node: &ResolvedNode) -> PreviewCapabilityDto {
+fn preview_capability(
+    reference: &ResolvedCapability,
+    catalog: &CatalogSnapshot,
+) -> PreviewCapabilityDto {
+    let (display_name, source_package) = catalog
+        .find_capability(&reference.capability)
+        .map(|capability| {
+            (
+                capability.display.name.clone(),
+                capability.package.clone(),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                reference.capability.id.as_ref().to_owned(),
+                reference.source_package.clone(),
+            )
+        });
     PreviewCapabilityDto {
         capability: nomifun_api_types::ExactCatalogRefDto {
-            id: node.manifest.id.as_ref().to_owned(),
-            version: node.manifest.version.as_ref().to_owned(),
+            id: reference.capability.id.as_ref().to_owned(),
+            version: reference.capability.version.as_ref().to_owned(),
         },
-        display_name: node.manifest.display.name.clone(),
+        display_name,
         source_package: nomifun_api_types::ExactCatalogRefDto {
-            id: node.manifest.package.id.as_ref().to_owned(),
-            version: node.manifest.package.version.as_ref().to_owned(),
+            id: source_package.id.as_ref().to_owned(),
+            version: source_package.version.as_ref().to_owned(),
         },
-        dependency_path: node
+        dependency_path: reference
             .dependency_path
             .iter()
             .map(|id| id.as_ref().to_owned())
             .collect(),
-        required_runtime_features: node
-            .manifest
-            .requires_runtime_features
+        required_runtime_features: reference
+            .required_runtime_features
             .iter()
-            .map(|feature| feature.id.as_ref().to_owned())
+            .map(|feature| feature.as_ref().to_owned())
             .collect(),
     }
 }
@@ -1028,33 +763,65 @@ fn error_diagnostic(
     }
 }
 
-fn materialization_revision(mapping: &McpToolCapabilityMapping) -> u64 {
-    mapping
-        .materialization_version
-        .as_ref()
-        .split('.')
-        .next()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(1)
-}
-
-fn search_terms(id: &str, name: &str, description: &str) -> Vec<String> {
-    let mut terms = BTreeSet::from([id.to_lowercase(), name.to_lowercase()]);
-    terms.extend(
-        description
-            .split(|character: char| !character.is_alphanumeric())
-            .filter(|term| term.len() >= 3)
-            .map(str::to_lowercase),
-    );
-    terms.into_iter().collect()
-}
-
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
         .min(i64::MAX as u128) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nomifun_agent_contracts::{CapabilityId, RuntimeProfileKind};
+
+    #[test]
+    fn coding_profile_survives_template_provenance_and_saved_snapshot_reloads() {
+        let coding_required =
+            BTreeSet::from([CapabilityId::from("fs.read"), CapabilityId::from("process.exec")]);
+
+        assert_eq!(
+            runtime_profile_for_compile(
+                RuntimeProfileKind::ManagedMinimal,
+                Some(OfficialPresetKey::CodingCodex),
+                None,
+                &BTreeSet::new(),
+                &coding_required,
+            ),
+            RuntimeProfileKind::CodingNative
+        );
+        assert_eq!(
+            runtime_profile_for_compile(
+                RuntimeProfileKind::ManagedMinimal,
+                None,
+                Some(RuntimeProfileKind::CodingNative),
+                &BTreeSet::new(),
+                &coding_required,
+            ),
+            RuntimeProfileKind::CodingNative
+        );
+        assert_eq!(
+            runtime_profile_for_compile(
+                RuntimeProfileKind::ManagedMinimal,
+                None,
+                None,
+                &coding_required,
+                &coding_required,
+            ),
+            RuntimeProfileKind::CodingNative
+        );
+        assert_eq!(
+            runtime_profile_for_compile(
+                RuntimeProfileKind::ManagedMinimal,
+                None,
+                None,
+                &BTreeSet::from([CapabilityId::from("fs.read")]),
+                &coding_required,
+            ),
+            RuntimeProfileKind::ManagedMinimal
+        );
+    }
 }
 
 pub fn revision_api(

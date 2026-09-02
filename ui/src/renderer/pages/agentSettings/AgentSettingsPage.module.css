@@ -5,7 +5,6 @@
   --agent-inset: var(--color-fill-1);
 }
 
-.freshStart,
 .pageError {
   margin-bottom: 14px;
   border-radius: 8px;
@@ -60,13 +59,6 @@
   font-size: 14px;
   font-weight: 600;
   line-height: 20px;
-}
-
-.librarySubtitle {
-  margin-top: 2px;
-  color: var(--agent-muted);
-  font-size: 11px;
-  line-height: 16px;
 }
 
 .librarySection {
@@ -297,6 +289,19 @@
   gap: 5px;
 }
 
+.modelPicker {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.fieldHint {
+  color: var(--agent-muted);
+  font-size: 10px;
+  line-height: 15px;
+}
+
 .field > span {
   color: var(--color-text-2);
   font-size: 11px;
@@ -397,6 +402,23 @@
   margin-top: 12px;
 }
 
+.enabledSummary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: 7px;
+  background: var(--agent-surface);
+  color: var(--agent-muted);
+  font-size: 11px;
+}
+
+.enabledSummary strong {
+  color: var(--color-text-1);
+  font-size: 14px;
+}
+
 .catalogRow {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -411,7 +433,6 @@
 }
 
 .catalogTitle,
-.catalogMeta,
 .tagRow {
   display: flex;
   align-items: center;
@@ -425,10 +446,8 @@
   line-height: 18px;
 }
 
-.catalogTitle code,
 .previewStatus code,
-.inspectorRows code,
-.testResult code {
+.inspectorRows code {
   max-width: 100%;
   overflow: hidden;
   color: var(--color-text-3);
@@ -443,12 +462,6 @@
   color: var(--color-text-3);
   font-size: 11px;
   line-height: 16px;
-}
-
-.catalogMeta {
-  color: var(--color-text-4);
-  font-size: 10px;
-  line-height: 15px;
 }
 
 .skillRow,
@@ -501,20 +514,25 @@
   background: var(--agent-surface);
 }
 
-.templateResourceInput {
-  width: min(260px, 100%);
-  margin-left: auto;
+.resourcePicker {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
-.templateResourcePath {
+.resourcePicker > * {
   min-width: 0;
-  max-width: min(360px, 100%);
-  overflow: hidden;
+  flex: 1;
+}
+
+.managedResource {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--agent-muted);
-  font-size: 10px;
-  line-height: 15px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 11px;
 }
 
 .resourceEditorHeader {
@@ -541,16 +559,83 @@
   font-size: 10px;
 }
 
-.resourceFields {
-  display: grid;
-  grid-template-columns: 1.2fr 1fr 1fr;
-  gap: 10px;
-}
-
 .advancedCollapse,
+.technicalCollapse,
 .inspectorCollapse {
   border: 0;
   background: transparent;
+}
+
+.collapseHint {
+  margin: 0 0 10px;
+  color: var(--agent-muted);
+  font-size: 11px;
+  line-height: 17px;
+}
+
+.technicalStack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.technicalHeader,
+.technicalGroupHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.technicalHeader > div,
+.technicalGroupHeader {
+  min-width: 0;
+}
+
+.technicalHeader strong,
+.technicalGroupHeader strong {
+  display: block;
+  color: var(--color-text-2);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.technicalHeader span,
+.technicalGroupHeader span {
+  display: block;
+  margin-top: 2px;
+  color: var(--agent-muted);
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.technicalGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-top: 10px;
+  border-top: 1px solid var(--agent-border);
+}
+
+.technicalBindingList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.technicalBinding {
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  padding: 9px;
+  border-radius: 6px;
+  background: var(--color-fill-1);
+  color: var(--color-text-3);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  line-height: 15px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .previewEmpty,
@@ -631,6 +716,10 @@
   color: rgb(var(--danger-6));
 }
 
+.previewNotice {
+  padding: 12px 20px 0;
+}
+
 .metricGrid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -672,8 +761,7 @@
   font-weight: 600;
 }
 
-.inspectorRows > div,
-.testResult > div {
+.inspectorRows > div {
   min-width: 0;
   display: grid;
   grid-template-columns: 150px minmax(0, 1fr);
@@ -681,8 +769,7 @@
   align-items: center;
 }
 
-.inspectorRows span,
-.testResult span {
+.inspectorRows span {
   color: var(--agent-muted);
   font-size: 11px;
 }
@@ -695,14 +782,17 @@
   margin-top: 10px;
 }
 
-.testResult {
+.testResultSummary {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   margin-top: 10px;
   padding: 10px;
   border-radius: 7px;
   background: var(--agent-surface);
+  color: var(--color-text-2);
+  font-size: 11px;
 }
 
 .actionBar {
@@ -719,15 +809,6 @@
   border-top: 1px solid var(--agent-border);
   background: color-mix(in srgb, var(--color-bg-1) 94%, transparent);
   backdrop-filter: blur(10px);
-}
-
-.actionStatus {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--agent-muted);
-  font-size: 11px;
 }
 
 .actionButtons {
@@ -793,7 +874,6 @@
   .formGrid,
   .dualGrid,
   .diffGrid,
-  .resourceFields,
   .metricGrid {
     grid-template-columns: 1fr;
   }
@@ -811,24 +891,16 @@
 
   .actionButtons {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .actionButtons :global(.arco-btn) {
     min-width: 0;
   }
 
-  .resourceDefaultRow {
+  .resourceDefaultRow,
+  .resourcePicker {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .templateResourceInput {
-    width: 100%;
-    margin-left: 0;
-  }
-
-  .templateResourcePath {
-    max-width: 100%;
   }
 }

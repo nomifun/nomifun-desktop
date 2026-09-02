@@ -27,6 +27,128 @@ pub type PackageManifestArtifact = ArtifactEnvelope<PackageManifest>;
 pub type ServiceKeyDagArtifact = ArtifactEnvelope<ServiceKeyDagPayload>;
 pub type TargetPackageInventoryArtifact = ArtifactEnvelope<TargetPackageInventoryPayload>;
 
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(transparent)]
+pub struct ExecutionRoleId(pub String);
+
+impl From<&str> for ExecutionRoleId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl From<String> for ExecutionRoleId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl AsRef<str> for ExecutionRoleId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoleContractKey {
+    pub role_id: ExecutionRoleId,
+    pub contract_version: VersionString,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExactRoleContractRef {
+    pub key: RoleContractKey,
+    pub contract_digest: DigestHex,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExactRoleProviderRef {
+    pub role: ExactRoleContractRef,
+    pub package: PackageRef,
+    pub mount_id: PluginMountId,
+    pub contribution_digest: DigestHex,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoleProviderSelection {
+    pub role: ExactRoleContractRef,
+    pub provider_mount_id: PluginMountId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InstallationRoleBinding {
+    pub selection: RoleProviderSelection,
+    pub binding_version: u64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RoleMemberRequirement {
+    Required,
+    Optional,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoleMemberContract {
+    pub capability: CapabilityRef,
+    pub capability_manifest_digest: DigestHex,
+    pub requirement: RoleMemberRequirement,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoleContractManifest {
+    pub key: RoleContractKey,
+    pub members: Vec<RoleMemberContract>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serialized_target_resource_kind: Option<ResourceKind>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoleProviderMemberContribution {
+    pub supported_platforms: Vec<PlatformConstraint>,
+    pub required_resource_kinds: BTreeSet<ResourceKind>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RoleProviderContribution {
+    pub role: ExactRoleContractRef,
+    pub display: LocalizedMetadata,
+    pub members: BTreeMap<CapabilityId, RoleProviderMemberContribution>,
+}
+
 pub const AGENT_CORE_PACKAGE_ID: &str = "platform.agent-core";
 pub const AGENT_CORE_MOUNT_ID: &str = "platform-agent-core";
 pub const AGENT_SESSION_COMMAND_SERVICE_ID: &str =
@@ -200,6 +322,10 @@ pub struct PackageContributions {
     pub capabilities: Vec<CapabilityManifest>,
     pub skills: Vec<SkillDefinition>,
     pub mcp_tools: Vec<McpToolCapabilityMapping>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub role_contracts: Vec<RoleContractManifest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub role_providers: Vec<RoleProviderContribution>,
 }
 
 #[derive(
@@ -627,6 +753,7 @@ pub enum PluginRegistrarOperation {
     ContributeCapability,
     ContributeSkill,
     ContributeMcpToolMapping,
+    ContributeRoleProvider,
     BindHostPort,
 }
 
@@ -638,6 +765,8 @@ pub struct PluginRegistrarDescriptor {
     pub declared_capability_ids: BTreeSet<CapabilityId>,
     pub declared_skill_ids: BTreeSet<SkillId>,
     pub declared_mcp_tool_keys: BTreeSet<McpToolKey>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub declared_role_ids: BTreeSet<ExecutionRoleId>,
     pub declared_service_keys: BTreeSet<ServiceKeyId>,
     pub declared_host_ports: BTreeSet<HostPortId>,
 }
@@ -695,6 +824,10 @@ pub struct TargetPackageContribution {
     pub capabilities: Vec<TargetCapabilityContribution>,
     pub skills: Vec<SkillRef>,
     pub mcp_tools: Vec<McpToolCapabilityMapping>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub role_contracts: Vec<RoleContractManifest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub role_providers: Vec<RoleProviderContribution>,
 }
 
 /// Digest input for the target first-party contribution inventory.

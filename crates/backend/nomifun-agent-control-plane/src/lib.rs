@@ -14,7 +14,9 @@ mod wire;
 pub use catalog::{
     CatalogProvider, CatalogSnapshot, OfficialTemplateCatalog, StaticCatalogProvider,
 };
-pub use compiler::{CompilerReleaseInputs, PresetPreviewCompiler, PreviewCompilation};
+pub use compiler::{
+    CanonicalRegistryProvider, CompilerReleaseInputs, PresetPreviewCompiler, PreviewCompilation,
+};
 pub use continuation::{
     AGENT_SESSION_CREATE_PATH, continuation_view, editor_test_plan,
     installation_token_state, remote_credential_continuation, revoked_installation_token,

@@ -154,15 +154,21 @@ describe('D-022 Agent Settings Test orchestration', () => {
       },
     };
 
-    await expect(
-      runAgentPresetTest({
+    let failure: unknown;
+    try {
+      await runAgentPresetTest({
         draft,
         dirty: true,
         input: 'Run',
         idempotencyKey: 'editor-test-2',
         ports,
-      })
-    ).rejects.toThrow('PRESET_REVISION_SAVE_FAILED');
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure instanceof Error).toBe(true);
+    expect((failure as Error).message).toBe('PRESET_REVISION_SAVE_FAILED');
     expect(calls).toEqual(['save']);
   });
 });

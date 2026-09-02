@@ -15,10 +15,11 @@ use std::sync::Arc;
 
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, ArtifactEnvelope, CapabilityActionDescriptor,
-    CapabilityContributions, CapabilityId, CapabilityKind, CapabilityManifest,
+    CapabilityContributions, CapabilityId, CapabilityKind, CapabilityManifest, CapabilityRef,
     CanonicalErrorCode, CanonicalSchemaRef, CancellationDescriptor,
-    CorrelationId, DeclaredServiceViewDescriptor, EffectClass, HostPortBindingDescriptor,
-    HostPortId, HostPortRef, IdempotencyKey, InProcessEntrypointMetadata,
+    CorrelationId, DeclaredServiceViewDescriptor, EffectClass, ExactRoleContractRef,
+    ExecutionRoleId, HostPortBindingDescriptor, HostPortId, HostPortRef, IdempotencyKey,
+    InProcessEntrypointMetadata,
     LocalizedMetadata, ManagedTaskRegistrationDescriptor, PackageContributions,
     PackageId, PackageManifest, PackageRef, PlatformConstraint, PluginBootCriticality,
     PluginBootState, PluginContextDescriptor, PluginDesiredState, PluginEffectiveState,
@@ -26,14 +27,19 @@ use nomifun_agent_contracts::{
     PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind,
     PluginSourceMetadata, PluginStateCompareAndSwapOutcome, PluginStateEntry,
     PluginStateHandleDescriptor, PluginStateMethod, OperationId, PrincipalRef,
-    ResolvedSnapshotRef, ResourceKind, RuntimeTarget, ScopeKey, StateKey, StrictJsonValue,
+    ExactRoleProviderRef, ResolvedSnapshotRef, ResourceKind, RoleContractKey, RoleContractManifest,
+    RoleMemberContract, RoleMemberRequirement, RoleProviderContribution,
+    RoleProviderMemberContribution, RuntimeTarget, ScopeKey, StateKey, StrictJsonValue,
     ToolPresentationKind, TypedResourceBindings, ValidatedPluginConfig, VersionString,
     CAPABILITY_UNAVAILABLE_ON_PLATFORM, PRESET_RESOURCE_NOT_BOUND, RESOURCE_OWNER_MISMATCH,
     digest_payload,
 };
 use nomifun_agent_kernel::{
-    CapabilityHandler, CapabilityInvocationContext, HostPluginStateApi, KernelError,
-    PluginRegistration, PluginStateError, PluginStateHandle,
+    CapabilityHandler, CapabilityInvocationContext, ContextContributionFactory,
+    HostPluginStateApi, KernelError, PluginRegistration, PluginStateError,
+    PluginStateHandle, ResourceProviderFactory,
+    ResourceProviderRequest, ResourceProviderResult, ResolvedRoleMemberContext,
+    ContextContributionRequest, ContextContributionResult,
 };
 
 pub const CONTRACT_VERSION: &str = "1.0.0";
@@ -51,6 +57,8 @@ pub const SSH_MOUNT_ID: &str = "domain-ssh";
 pub const MCP_CONNECTORS_MOUNT_ID: &str = "domain-mcp-connectors";
 pub const BROWSER_MOUNT_ID: &str = "domain-browser";
 pub const COMPUTER_A11Y_MOUNT_ID: &str = "domain-computer-a11y";
+pub const BROWSER_EXECUTION_ROLE_ID: &str = "system.browser_use";
+pub const COMPUTER_EXECUTION_ROLE_ID: &str = "system.computer_use";
 
 pub const PACKAGE_IDS: [&str; 5] = [
     WORKSPACE_EXECUTION_PACKAGE_ID,
@@ -103,6 +111,7 @@ pub const BROWSER_CAPABILITY_IDS: &[&str] = &[
     "browser.observe",
     "browser.navigate",
     "browser.act",
+    "browser.render_content",
     "browser.download",
     "browser.upload",
     "browser.evaluate",
@@ -117,7 +126,7 @@ pub const COMPUTER_A11Y_CAPABILITY_IDS: &[&str] = &[
     "a11y.observe",
 ];
 
-pub const ALL_CAPABILITY_IDS: [&str; 41] = [
+pub const ALL_CAPABILITY_IDS: [&str; 42] = [
     "fs.read",
     "fs.search",
     "fs.write",
@@ -150,6 +159,7 @@ pub const ALL_CAPABILITY_IDS: [&str; 41] = [
     "browser.observe",
     "browser.navigate",
     "browser.act",
+    "browser.render_content",
     "browser.download",
     "browser.upload",
     "browser.evaluate",
@@ -160,7 +170,7 @@ pub const ALL_CAPABILITY_IDS: [&str; 41] = [
     "computer.launch",
     "a11y.observe",
 ];
-pub const TARGET_CAPABILITY_IDS: [&str; 41] = ALL_CAPABILITY_IDS;
+pub const TARGET_CAPABILITY_IDS: [&str; 42] = ALL_CAPABILITY_IDS;
 
 pub const TARGET_CAPABILITY_FAMILIES: [&str; 11] = [
     "browser",
@@ -303,6 +313,7 @@ pub struct Wave2HostContext {
     pub registry_generation: u64,
     pub capability_id: CapabilityId,
     pub action_id: ActionId,
+    pub role_provider: Option<ExactRoleProviderRef>,
     /// The frozen, authorization-bearing host bindings selected for this
     /// invocation. The application resolves these bindings; the adapter
     /// receives them without any pool or service-bag access.
@@ -358,6 +369,7 @@ pub enum Wave2TypedCapabilityOperation {
     ConnectorDataWrite { input: StrictJsonValue },
     BrowserNavigate { input: StrictJsonValue },
     BrowserAct { input: StrictJsonValue },
+    BrowserRenderContent { input: StrictJsonValue },
     BrowserDownload { input: StrictJsonValue },
     BrowserUpload { input: StrictJsonValue },
     BrowserEvaluate { input: StrictJsonValue },
@@ -390,6 +402,7 @@ impl Wave2TypedCapabilityOperation {
             Self::ConnectorDataWrite { .. } => "connector.data.write",
             Self::BrowserNavigate { .. } => "browser.navigate",
             Self::BrowserAct { .. } => "browser.act",
+            Self::BrowserRenderContent { .. } => "browser.render_content",
             Self::BrowserDownload { .. } => "browser.download",
             Self::BrowserUpload { .. } => "browser.upload",
             Self::BrowserEvaluate { .. } => "browser.evaluate",
@@ -426,6 +439,7 @@ impl Wave2TypedCapabilityOperation {
             }
             Self::BrowserNavigate { input }
             | Self::BrowserAct { input }
+            | Self::BrowserRenderContent { input }
             | Self::BrowserDownload { input }
             | Self::BrowserUpload { input }
             | Self::BrowserEvaluate { input }
@@ -560,6 +574,93 @@ pub trait Wave2HostPort: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'a>>;
 }
 
+/// Trusted facts projected to non-action Role members.
+#[derive(Clone)]
+pub struct Wave2RoleMemberContext {
+    pub principal: PrincipalRef,
+    pub agent_session_id: AgentSessionId,
+    pub operation_id: OperationId,
+    pub correlation_id: CorrelationId,
+    pub resolved_snapshot_ref: ResolvedSnapshotRef,
+    pub registry_generation: u64,
+    pub capability_id: CapabilityId,
+    pub role_provider: ExactRoleProviderRef,
+    pub state_scope_key: ScopeKey,
+    pub state: Wave2StateHandle,
+    pub resource_bindings: TypedResourceBindings,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Wave2ContextCapabilityOperation {
+    BrowserObserve,
+    BrowserSiteMemory,
+    ComputerObserve,
+    A11yObserve,
+}
+
+impl Wave2ContextCapabilityOperation {
+    pub fn capability_id(&self) -> &'static str {
+        match self {
+            Self::BrowserObserve => "browser.observe",
+            Self::BrowserSiteMemory => "browser.site_memory",
+            Self::ComputerObserve => "computer.observe",
+            Self::A11yObserve => "a11y.observe",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Wave2ResourceCapabilityOperation {
+    BrowserIdentity,
+}
+
+impl Wave2ResourceCapabilityOperation {
+    pub fn capability_id(&self) -> &'static str {
+        match self {
+            Self::BrowserIdentity => "browser.identity",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Wave2ContextHostRequest {
+    pub context: Wave2RoleMemberContext,
+    pub operation: Wave2ContextCapabilityOperation,
+    pub schema_ref: CanonicalSchemaRef,
+}
+
+#[derive(Clone)]
+pub struct Wave2ResourceHostRequest {
+    pub context: Wave2RoleMemberContext,
+    pub operation: Wave2ResourceCapabilityOperation,
+}
+
+pub trait Wave2ContextHostPort: Send + Sync {
+    fn contribute<'a>(
+        &'a self,
+        request: Wave2ContextHostRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ContextContributionResult, Wave2HostPortError>>
+                + Send
+                + 'a,
+        >,
+    >;
+}
+
+pub trait Wave2ResourceHostPort: Send + Sync {
+    fn acquire<'a>(
+        &'a self,
+        request: Wave2ResourceHostRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ResourceProviderResult, Wave2HostPortError>>
+                + Send
+                + 'a,
+        >,
+    >;
+}
+
 /// An exact-operation adapter used by [`Wave2HostPortDispatcher`].
 pub trait Wave2TypedOperationAdapter: Send + Sync {
     fn supports(&self, operation: &Wave2TypedCapabilityOperation) -> bool;
@@ -686,6 +787,226 @@ impl Wave2HostPort for UnconfiguredWave2HostPort {
 /// It deliberately fails closed; it never fabricates an action result.
 pub fn unconfigured_host_port() -> Arc<dyn Wave2HostPort> {
     Arc::new(UnconfiguredWave2HostPort)
+}
+
+struct UnconfiguredWave2ContextHostPort;
+
+impl Wave2ContextHostPort for UnconfiguredWave2ContextHostPort {
+    fn contribute<'a>(
+        &'a self,
+        request: Wave2ContextHostRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ContextContributionResult, Wave2HostPortError>>
+                + Send
+                + 'a,
+        >,
+    >
+    {
+        Box::pin(async move {
+            Err(Wave2HostPortError::unavailable(format!(
+                "no production context owner is bound for {}",
+                request.context.capability_id.as_ref()
+            )))
+        })
+    }
+}
+
+struct UnconfiguredWave2ResourceHostPort;
+
+impl Wave2ResourceHostPort for UnconfiguredWave2ResourceHostPort {
+    fn acquire<'a>(
+        &'a self,
+        request: Wave2ResourceHostRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<ResourceProviderResult, Wave2HostPortError>>
+                + Send
+                + 'a,
+        >,
+    >
+    {
+        Box::pin(async move {
+            Err(Wave2HostPortError::unavailable(format!(
+                "no production resource owner is bound for {}",
+                request.context.capability_id.as_ref()
+            )))
+        })
+    }
+}
+
+pub fn unconfigured_context_host_port() -> Arc<dyn Wave2ContextHostPort> {
+    Arc::new(UnconfiguredWave2ContextHostPort)
+}
+
+pub fn unconfigured_resource_host_port() -> Arc<dyn Wave2ResourceHostPort> {
+    Arc::new(UnconfiguredWave2ResourceHostPort)
+}
+
+#[derive(Clone)]
+pub struct Wave2RoleHostPorts {
+    pub actions: Arc<dyn Wave2HostPort>,
+    pub browser_actions: Arc<dyn Wave2HostPort>,
+    pub computer_actions: Arc<dyn Wave2HostPort>,
+    pub browser_contexts: Arc<dyn Wave2ContextHostPort>,
+    pub computer_contexts: Arc<dyn Wave2ContextHostPort>,
+    pub browser_resources: Arc<dyn Wave2ResourceHostPort>,
+}
+
+impl Wave2RoleHostPorts {
+    pub fn with_actions(actions: Arc<dyn Wave2HostPort>) -> Self {
+        Self {
+            browser_actions: Arc::clone(&actions),
+            computer_actions: Arc::clone(&actions),
+            actions,
+            browser_contexts: unconfigured_context_host_port(),
+            computer_contexts: unconfigured_context_host_port(),
+            browser_resources: unconfigured_resource_host_port(),
+        }
+    }
+
+    fn action_port(&self, package_id: &str) -> Arc<dyn Wave2HostPort> {
+        match package_id {
+            BROWSER_PACKAGE_ID => Arc::clone(&self.browser_actions),
+            COMPUTER_A11Y_PACKAGE_ID => Arc::clone(&self.computer_actions),
+            _ => Arc::clone(&self.actions),
+        }
+    }
+
+    fn context_port(
+        &self,
+        role_id: &ExecutionRoleId,
+    ) -> Arc<dyn Wave2ContextHostPort> {
+        match role_id.as_ref() {
+            BROWSER_EXECUTION_ROLE_ID => Arc::clone(&self.browser_contexts),
+            COMPUTER_EXECUTION_ROLE_ID => Arc::clone(&self.computer_contexts),
+            _ => unconfigured_context_host_port(),
+        }
+    }
+
+    fn resource_port(
+        &self,
+        role_id: &ExecutionRoleId,
+    ) -> Arc<dyn Wave2ResourceHostPort> {
+        match role_id.as_ref() {
+            BROWSER_EXECUTION_ROLE_ID => Arc::clone(&self.browser_resources),
+            _ => unconfigured_resource_host_port(),
+        }
+    }
+}
+
+struct Wave2ContextFactory {
+    role_id: ExecutionRoleId,
+    capability_id: CapabilityId,
+    host_port: Arc<dyn Wave2ContextHostPort>,
+}
+
+#[async_trait::async_trait]
+impl ContextContributionFactory for Wave2ContextFactory {
+    async fn contribute(
+        &self,
+        request: ContextContributionRequest,
+    ) -> Result<ContextContributionResult, KernelError> {
+        if request.context.provider_lock.provider.role.key.role_id != self.role_id
+            || request.context.member_id != self.capability_id
+        {
+            return Err(KernelError::RoleProviderMemberUnavailable {
+                role_id: self.role_id.clone(),
+                capability_id: self.capability_id.clone(),
+            });
+        }
+        let operation = match self.capability_id.as_ref() {
+            "browser.observe" => Wave2ContextCapabilityOperation::BrowserObserve,
+            "browser.site_memory" => Wave2ContextCapabilityOperation::BrowserSiteMemory,
+            "computer.observe" => Wave2ContextCapabilityOperation::ComputerObserve,
+            "a11y.observe" => Wave2ContextCapabilityOperation::A11yObserve,
+            _ => {
+                return Err(KernelError::RoleProviderMemberUnavailable {
+                    role_id: self.role_id.clone(),
+                    capability_id: self.capability_id.clone(),
+                });
+            }
+        };
+        self.host_port
+            .contribute(Wave2ContextHostRequest {
+                context: role_member_context(request.context)?,
+                operation,
+                schema_ref: request.schema_ref,
+            })
+            .await
+            .map_err(|error| KernelError::CapabilityExecution {
+                reason: error.to_string(),
+            })
+    }
+}
+
+struct Wave2ResourceFactory {
+    role_id: ExecutionRoleId,
+    capability_id: CapabilityId,
+    host_port: Arc<dyn Wave2ResourceHostPort>,
+}
+
+#[async_trait::async_trait]
+impl ResourceProviderFactory for Wave2ResourceFactory {
+    async fn acquire(
+        &self,
+        request: ResourceProviderRequest,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        if request.context.provider_lock.provider.role.key.role_id != self.role_id
+            || request.context.member_id != self.capability_id
+        {
+            return Err(KernelError::RoleProviderMemberUnavailable {
+                role_id: self.role_id.clone(),
+                capability_id: self.capability_id.clone(),
+            });
+        }
+        let operation = match self.capability_id.as_ref() {
+            "browser.identity" => Wave2ResourceCapabilityOperation::BrowserIdentity,
+            _ => {
+                return Err(KernelError::RoleProviderMemberUnavailable {
+                    role_id: self.role_id.clone(),
+                    capability_id: self.capability_id.clone(),
+                });
+            }
+        };
+        self.host_port
+            .acquire(Wave2ResourceHostRequest {
+                context: role_member_context(request.context)?,
+                operation,
+            })
+            .await
+            .map_err(|error| KernelError::CapabilityExecution {
+                reason: error.to_string(),
+            })
+    }
+}
+
+fn role_member_context(
+    context: ResolvedRoleMemberContext,
+) -> Result<Wave2RoleMemberContext, KernelError> {
+    let agent_session_id = context
+        .agent_session_id
+        .ok_or_else(|| KernelError::CapabilityExecution {
+            reason: "role member context requires an AgentSession".to_owned(),
+        })?;
+    let resolved_snapshot_ref = context
+        .resolved_snapshot_ref
+        .ok_or_else(|| KernelError::CapabilityExecution {
+            reason: "role member context requires a frozen Snapshot".to_owned(),
+        })?;
+    Ok(Wave2RoleMemberContext {
+        principal: context.principal,
+        agent_session_id,
+        operation_id: context.operation_id,
+        correlation_id: context.correlation_id,
+        resolved_snapshot_ref,
+        registry_generation: context.registry_generation,
+        capability_id: context.member_id,
+        role_provider: context.provider_lock.provider,
+        state_scope_key: context.state_scope_key,
+        state: Wave2StateHandle::new(context.mount.state),
+        resource_bindings: context.resource_bindings,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -869,6 +1190,10 @@ const BROWSER_CAPABILITIES: &[CapabilityDefinition] = &[
     ),
     CapabilityDefinition::browser_tool("browser.navigate", EffectClass::ExternalTransmit),
     CapabilityDefinition::browser_tool("browser.act", EffectClass::WriteReversible),
+    CapabilityDefinition::browser_tool(
+        "browser.render_content",
+        EffectClass::ExternalTransmit,
+    ),
     CapabilityDefinition::browser_tool("browser.download", EffectClass::WriteDurable),
     CapabilityDefinition::browser_tool("browser.upload", EffectClass::ExternalTransmit),
     CapabilityDefinition::browser_tool("browser.evaluate", EffectClass::ExecuteLocal),
@@ -966,6 +1291,14 @@ pub fn registrations() -> Result<Vec<PluginRegistration>, String> {
 pub fn registrations_with_host_port(
     action_host_port: Arc<dyn Wave2HostPort>,
 ) -> Result<Vec<PluginRegistration>, String> {
+    registrations_with_role_host_ports(Wave2RoleHostPorts::with_actions(action_host_port))
+}
+
+/// Build the complete Wave 2 registration inventory with independently typed
+/// action, context, and resource host ports.
+pub fn registrations_with_role_host_ports(
+    role_host_ports: Wave2RoleHostPorts,
+) -> Result<Vec<PluginRegistration>, String> {
     let mut registrations = Vec::with_capacity(PACKAGE_DEFINITIONS.len());
     let mut packages = BTreeSet::new();
     let mut mounts = BTreeSet::new();
@@ -978,7 +1311,7 @@ pub fn registrations_with_host_port(
         if !mounts.insert(package.mount_id) {
             return Err(format!("duplicate Wave 2 mount {}", package.mount_id));
         }
-        let registration = build_registration(package, Arc::clone(&action_host_port))?;
+        let registration = build_registration(package, role_host_ports.clone())?;
         for capability in &registration
             .metadata
             .manifest
@@ -1009,27 +1342,39 @@ pub fn registrations_with_host_port(
 
 fn build_registration(
     package: &PackageDefinition,
-    action_host_port: Arc<dyn Wave2HostPort>,
+    role_host_ports: Wave2RoleHostPorts,
 ) -> Result<PluginRegistration, String> {
+    let action_host_port = role_host_ports.action_port(package.id);
     let package_ref = PackageRef {
         id: PackageId::from(package.id),
         version: VersionString::from(CONTRACT_VERSION),
     };
     let mut capability_manifests = Vec::with_capacity(package.capabilities.len());
     let mut handlers = Vec::new();
+    let mut role_handlers = Vec::new();
 
     for definition in package.capabilities {
         let capability = build_capability(&package_ref, *definition)?;
         if definition.is_tool() {
             let capability_id = CapabilityId::from(definition.id);
-            handlers.push((
-                capability_id.clone(),
-                ActionId::from(format!("{}.invoke", definition.id)),
-            ));
+            if let Some(role_id) = role_id_for_capability(definition.id) {
+                role_handlers.push((
+                    role_id,
+                    capability_id.clone(),
+                    ActionId::from(format!("{}.invoke", definition.id)),
+                ));
+            } else {
+                handlers.push((
+                    capability_id.clone(),
+                    ActionId::from(format!("{}.invoke", definition.id)),
+                ));
+            }
         }
         capability_manifests.push(capability);
     }
 
+    let role_contracts = role_contracts_for_package(package, &capability_manifests)?;
+    let role_providers = role_providers_for_package(package, &role_contracts)?;
     let config_schema = object_schema();
     let manifest = PackageManifest {
         schema_version: VersionString::from(CONTRACT_VERSION),
@@ -1051,6 +1396,8 @@ fn build_registration(
             capabilities: capability_manifests,
             skills: Vec::new(),
             mcp_tools: Vec::new(),
+            role_contracts: role_contracts.clone(),
+            role_providers,
         },
     };
 
@@ -1066,7 +1413,15 @@ fn build_registration(
     let cancellation_port = host_port(PLUGIN_CANCEL_PORT);
     let tasks_port = host_port(PLUGIN_TASKS_PORT);
     let action_port = host_port(WAVE2_CAPABILITY_HOST_PORT_ID);
-    let has_action_handler = !handlers.is_empty();
+    let has_action_handler = !handlers.is_empty() || !role_handlers.is_empty();
+    let has_role_handler = !role_handlers.is_empty()
+        || package.capabilities.iter().any(|definition| {
+            role_id_for_capability(definition.id).is_some()
+                && matches!(
+                    definition.kind,
+                    CapabilityKind::ContextContributor | CapabilityKind::ResourceProvider
+                )
+        });
     let mut declared_host_ports =
         BTreeSet::from([cancellation_port.id.clone(), tasks_port.id.clone()]);
     if has_action_handler {
@@ -1093,7 +1448,13 @@ fn build_registration(
             allowed_operations: BTreeSet::from([
                 PluginRegistrarOperation::BindHostPort,
                 PluginRegistrarOperation::ContributeCapability,
-            ]),
+            ])
+            .into_iter()
+            .chain(
+                has_role_handler
+                    .then_some(PluginRegistrarOperation::ContributeRoleProvider),
+            )
+            .collect(),
             declared_capability_ids: package
                 .capabilities
                 .iter()
@@ -1101,6 +1462,10 @@ fn build_registration(
                 .collect(),
             declared_skill_ids: BTreeSet::new(),
             declared_mcp_tool_keys: BTreeSet::new(),
+            declared_role_ids: role_contracts
+                .iter()
+                .map(|contract| contract.key.role_id.clone())
+                .collect(),
             declared_service_keys: BTreeSet::new(),
             declared_host_ports,
         },
@@ -1146,6 +1511,58 @@ fn build_registration(
             )
             .map_err(|error| format!("register {} handler: {error}", package.id))?;
     }
+    for (role_id, capability_id, action_id) in role_handlers {
+        registration
+            .add_role_action_handler(
+                role_id,
+                capability_id.clone(),
+                Arc::new(Wave2CapabilityHandler {
+                    capability_id,
+                    action_id,
+                    host_port: Arc::clone(&action_host_port),
+                }),
+            )
+            .map_err(|error| format!("register {} role handler: {error}", package.id))?;
+    }
+    for definition in package.capabilities {
+        let Some(role_id) = role_id_for_capability(definition.id) else {
+            continue;
+        };
+        let capability_id = CapabilityId::from(definition.id);
+        match definition.kind {
+            CapabilityKind::ContextContributor => {
+                registration
+                    .add_role_context_factory(
+                        role_id.clone(),
+                        capability_id.clone(),
+                        Arc::new(Wave2ContextFactory {
+                            host_port: role_host_ports.context_port(&role_id),
+                            role_id,
+                            capability_id,
+                        }),
+                    )
+                    .map_err(|error| {
+                        format!("register {} context factory: {error}", package.id)
+                    })?;
+            }
+            CapabilityKind::ResourceProvider => {
+                registration
+                    .add_role_resource_factory(
+                        role_id.clone(),
+                        capability_id.clone(),
+                        Arc::new(Wave2ResourceFactory {
+                            host_port: role_host_ports.resource_port(&role_id),
+                            role_id,
+                            capability_id,
+                        }),
+                    )
+                    .map_err(|error| {
+                        format!("register {} resource factory: {error}", package.id)
+                    })?;
+            }
+            _ => {}
+        }
+    }
     Ok(registration)
 }
 
@@ -1161,7 +1578,11 @@ fn build_capability(
             effect_class: definition
                 .effect_class
                 .expect("tool definitions always carry an effect class"),
-            presentation: ToolPresentationKind::FunctionTool,
+            presentation: if definition.id == "browser.render_content" {
+                ToolPresentationKind::Hidden
+            } else {
+                ToolPresentationKind::FunctionTool
+            },
         }]
     } else {
         Vec::new()
@@ -1177,11 +1598,21 @@ fn build_capability(
         .into_iter()
         .collect();
 
-    let supported_surfaces = match definition.platform_scope {
-        PlatformScope::Any => AGENT_SURFACES,
-        PlatformScope::BrowserDesktop | PlatformScope::ComputerDesktop => {
-            BROWSER_COMPUTER_SURFACES
-        }
+    let supported_surfaces = match role_id_for_capability(definition.id).as_ref().map(AsRef::as_ref)
+    {
+        Some(BROWSER_EXECUTION_ROLE_ID) => AGENT_SURFACES,
+        Some(COMPUTER_EXECUTION_ROLE_ID) => BROWSER_COMPUTER_SURFACES,
+        _ => match definition.platform_scope {
+            PlatformScope::Any => AGENT_SURFACES,
+            PlatformScope::BrowserDesktop | PlatformScope::ComputerDesktop => {
+                BROWSER_COMPUTER_SURFACES
+            }
+        },
+    };
+    let supported_platforms = if role_id_for_capability(definition.id).is_some() {
+        vec![PlatformConstraint::Any]
+    } else {
+        platform_constraints(definition.platform_scope)
     };
 
     Ok(CapabilityManifest {
@@ -1200,7 +1631,7 @@ fn build_capability(
             .map(|surface| (*surface).to_owned())
             .collect(),
         requires_runtime_features: Vec::new(),
-        supported_platforms: platform_constraints(definition.platform_scope),
+        supported_platforms,
         config_schema: object_schema(),
         contributions: CapabilityContributions {
             actions,
@@ -1279,6 +1710,10 @@ impl CapabilityHandler for Wave2CapabilityHandler {
                         registry_generation: context.registry_generation,
                         capability_id: self.capability_id.clone(),
                         action_id: context.action_id,
+                        role_provider: context
+                            .role_provider
+                            .as_ref()
+                            .map(|provider| provider.provider.clone()),
                         state: Wave2StateHandle::new(context.state),
                         resource_bindings: context.resource_bindings,
                     },
@@ -1330,6 +1765,9 @@ pub fn typed_operation_for(
         "connector.data.write" => Wave2TypedCapabilityOperation::ConnectorDataWrite { input },
         "browser.navigate" => Wave2TypedCapabilityOperation::BrowserNavigate { input },
         "browser.act" => Wave2TypedCapabilityOperation::BrowserAct { input },
+        "browser.render_content" => {
+            Wave2TypedCapabilityOperation::BrowserRenderContent { input }
+        }
         "browser.download" => Wave2TypedCapabilityOperation::BrowserDownload { input },
         "browser.upload" => Wave2TypedCapabilityOperation::BrowserUpload { input },
         "browser.evaluate" => Wave2TypedCapabilityOperation::BrowserEvaluate { input },
@@ -1396,7 +1834,7 @@ pub fn required_resource_operation(capability_id: &CapabilityId) -> Option<&'sta
         "process.exec" | "ssh.exec" | "ssh.sudo" => Some("execute"),
         "ssh.fs.read" | "connector.data.read" => Some("read"),
         "mcp.tool_proxy" => Some("invoke"),
-        "browser.navigate" | "browser.upload" => Some("navigate"),
+        "browser.navigate" | "browser.upload" | "browser.render_content" => Some("navigate"),
         "browser.act" | "browser.takeover" => Some("interact"),
         "browser.download" => Some("download"),
         "browser.evaluate" => Some("evaluate"),
@@ -1570,27 +2008,166 @@ pub fn unavailable_on_platform_code() -> CanonicalErrorCode {
 /// Build one package registration from the same factory used by
 /// [`registrations`].
 pub fn workspace_execution_registration() -> Result<PluginRegistration, String> {
-    build_registration(&PACKAGE_DEFINITIONS[0], unconfigured_host_port())
+    build_registration(
+        &PACKAGE_DEFINITIONS[0],
+        Wave2RoleHostPorts::with_actions(unconfigured_host_port()),
+    )
 }
 
 /// Build the bundled SSH registration.
 pub fn ssh_registration() -> Result<PluginRegistration, String> {
-    build_registration(&PACKAGE_DEFINITIONS[1], unconfigured_host_port())
+    build_registration(
+        &PACKAGE_DEFINITIONS[1],
+        Wave2RoleHostPorts::with_actions(unconfigured_host_port()),
+    )
 }
 
 /// Build the bundled MCP/connectors registration.
 pub fn mcp_connectors_registration() -> Result<PluginRegistration, String> {
-    build_registration(&PACKAGE_DEFINITIONS[2], unconfigured_host_port())
+    build_registration(
+        &PACKAGE_DEFINITIONS[2],
+        Wave2RoleHostPorts::with_actions(unconfigured_host_port()),
+    )
 }
 
 /// Build the bundled Browser registration.
 pub fn browser_registration() -> Result<PluginRegistration, String> {
-    build_registration(&PACKAGE_DEFINITIONS[3], unconfigured_host_port())
+    build_registration(
+        &PACKAGE_DEFINITIONS[3],
+        Wave2RoleHostPorts::with_actions(unconfigured_host_port()),
+    )
 }
 
 /// Build the bundled Computer/A11y registration.
 pub fn computer_a11y_registration() -> Result<PluginRegistration, String> {
-    build_registration(&PACKAGE_DEFINITIONS[4], unconfigured_host_port())
+    build_registration(
+        &PACKAGE_DEFINITIONS[4],
+        Wave2RoleHostPorts::with_actions(unconfigured_host_port()),
+    )
+}
+
+fn role_id_for_capability(capability_id: &str) -> Option<ExecutionRoleId> {
+    if capability_id.starts_with("browser.") {
+        Some(ExecutionRoleId::from(BROWSER_EXECUTION_ROLE_ID))
+    } else if capability_id.starts_with("computer.") || capability_id == "a11y.observe" {
+        Some(ExecutionRoleId::from(COMPUTER_EXECUTION_ROLE_ID))
+    } else {
+        None
+    }
+}
+
+fn role_contracts_for_package(
+    package: &PackageDefinition,
+    capabilities: &[CapabilityManifest],
+) -> Result<Vec<RoleContractManifest>, String> {
+    let role_id = match package.id {
+        BROWSER_PACKAGE_ID => BROWSER_EXECUTION_ROLE_ID,
+        COMPUTER_A11Y_PACKAGE_ID => COMPUTER_EXECUTION_ROLE_ID,
+        _ => return Ok(Vec::new()),
+    };
+    let member_ids = match role_id {
+        BROWSER_EXECUTION_ROLE_ID => [
+            ("browser.observe", RoleMemberRequirement::Required),
+            ("browser.navigate", RoleMemberRequirement::Required),
+            ("browser.act", RoleMemberRequirement::Required),
+            ("browser.identity", RoleMemberRequirement::Optional),
+            ("browser.render_content", RoleMemberRequirement::Optional),
+            ("browser.download", RoleMemberRequirement::Optional),
+            ("browser.upload", RoleMemberRequirement::Optional),
+            ("browser.evaluate", RoleMemberRequirement::Optional),
+            ("browser.site_memory", RoleMemberRequirement::Optional),
+            ("browser.takeover", RoleMemberRequirement::Optional),
+        ]
+        .as_slice(),
+        COMPUTER_EXECUTION_ROLE_ID => [
+            ("computer.observe", RoleMemberRequirement::Required),
+            ("computer.input", RoleMemberRequirement::Required),
+            ("computer.launch", RoleMemberRequirement::Optional),
+            ("a11y.observe", RoleMemberRequirement::Optional),
+        ]
+        .as_slice(),
+        _ => &[],
+    };
+    let mut by_id = capabilities
+        .iter()
+        .map(|capability| (capability.id.as_ref(), capability))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut members = Vec::with_capacity(member_ids.len());
+    for (capability_id, requirement) in member_ids {
+        let capability = by_id.remove(capability_id).ok_or_else(|| {
+            format!(
+                "role {} references missing capability {}",
+                role_id, capability_id
+            )
+        })?;
+        members.push(RoleMemberContract {
+            capability: CapabilityRef {
+                id: capability.id.clone(),
+                version: capability.version.clone(),
+            },
+            capability_manifest_digest: digest_payload(capability)
+                .map_err(|error| format!("digest role member {capability_id}: {error}"))?,
+            requirement: *requirement,
+        });
+    }
+    Ok(vec![RoleContractManifest {
+        key: RoleContractKey {
+            role_id: ExecutionRoleId::from(role_id),
+            contract_version: VersionString::from(CONTRACT_VERSION),
+        },
+        members,
+        serialized_target_resource_kind: (role_id == COMPUTER_EXECUTION_ROLE_ID)
+            .then(|| ResourceKind::from("computer")),
+    }])
+}
+
+fn role_providers_for_package(
+    package: &PackageDefinition,
+    contracts: &[RoleContractManifest],
+) -> Result<Vec<RoleProviderContribution>, String> {
+    let Some(contract) = contracts.first() else {
+        return Ok(Vec::new());
+    };
+    let supported_platforms = match contract.key.role_id.as_ref() {
+        BROWSER_EXECUTION_ROLE_ID => platform_constraints(PlatformScope::BrowserDesktop),
+        COMPUTER_EXECUTION_ROLE_ID => platform_constraints(PlatformScope::ComputerDesktop),
+        _ => vec![PlatformConstraint::Any],
+    };
+    let mut members = std::collections::BTreeMap::new();
+    for member in &contract.members {
+        let required_resource_kinds = definition_for(member.capability.id.as_ref())
+            .map(|definition| {
+                definition
+                    .resource_kinds
+                    .iter()
+                    .map(|kind| ResourceKind::from(*kind))
+                    .collect()
+            })
+            .unwrap_or_default();
+        members.insert(
+            member.capability.id.clone(),
+            RoleProviderMemberContribution {
+                supported_platforms: supported_platforms.clone(),
+                required_resource_kinds,
+            },
+        );
+    }
+    Ok(vec![RoleProviderContribution {
+        role: ExactRoleContractRef {
+            key: contract.key.clone(),
+            contract_digest: digest_payload(contract)
+                .map_err(|error| format!("digest {} role contract: {error}", package.id))?,
+        },
+        display: localized(
+            match contract.key.role_id.as_ref() {
+                BROWSER_EXECUTION_ROLE_ID => "Browser Use",
+                COMPUTER_EXECUTION_ROLE_ID => "Computer Use",
+                _ => "System Capability",
+            },
+            "Bundled first-party execution-role provider.",
+        ),
+        members,
+    }])
 }
 
 fn definition_for(capability_id: &str) -> Option<CapabilityDefinition> {
@@ -1720,23 +2297,121 @@ fn host_port_binding() -> Result<HostPortBindingDescriptor, String> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::task::{Context, Poll, Waker};
 
     use super::*;
+    use serde_json::json;
     use nomifun_agent_kernel::{
         AgentPresetCompiler, CapabilityInvocationRequest, CompileRequest, CompilerEnvironment,
+        ContextContributionFactory, ContextContributionRequest, ContextContributionResult,
         InMemoryPluginStatePersistence, KernelRegistry, MaterializationPolicy, Materializer,
+        ResourceHandle, ResourceHandleIdentity, ResourceProviderFactory, ResourceProviderRequest,
+        ResourceProviderResult, RoleMemberAdmission, RoleMemberInvocationRequest,
         SessionCapabilityState,
     };
     use nomifun_agent_contracts::{
         AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, CapabilityExposure,
         CapabilityRef, CapabilitySelection, DigestHex, PresetRevisionRef, ResourceBindingId,
-        RuntimeProfileKind, UserId, TypedResourceBinding,
+        RoleProviderSelection, RuntimeProfileKind, UserId, TypedResourceBinding,
     };
 
     struct StateCaptureHostPort {
         captured: Arc<Mutex<Option<Wave2StateHandle>>>,
+    }
+
+    struct AlternateBrowserHandler {
+        captured_mount: Arc<Mutex<Option<String>>>,
+    }
+
+    struct AlternateBrowserContextFactory;
+
+    #[async_trait::async_trait]
+    impl ContextContributionFactory for AlternateBrowserContextFactory {
+        async fn contribute(
+            &self,
+            request: ContextContributionRequest,
+        ) -> Result<ContextContributionResult, KernelError> {
+            Ok(ContextContributionResult {
+                value: Some(StrictJsonValue(json!({
+                    "provider_mount": request.context.mount.identity.mount_id,
+                    "capability": request.context.member_id,
+                }))),
+            })
+        }
+    }
+
+    struct AlternateBrowserResourceFactory {
+        releases: Arc<AtomicUsize>,
+    }
+
+    struct AlternateBrowserResourceHandle {
+        identity: ResourceHandleIdentity,
+        releases: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ResourceHandle for AlternateBrowserResourceHandle {
+        fn identity(&self) -> &ResourceHandleIdentity {
+            &self.identity
+        }
+
+        async fn release(&self) -> Result<(), KernelError> {
+            self.releases.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ResourceProviderFactory for AlternateBrowserResourceFactory {
+        async fn acquire(
+            &self,
+            request: ResourceProviderRequest,
+        ) -> Result<ResourceProviderResult, KernelError> {
+            let binding = request
+                .context
+                .resource_bindings
+                .first()
+                .ok_or_else(|| KernelError::ResourceBindingMissing {
+                    binding_id: ResourceBindingId::from("browser"),
+                })?;
+            Ok(ResourceProviderResult {
+                handle: Arc::new(AlternateBrowserResourceHandle {
+                    identity: ResourceHandleIdentity {
+                        binding_id: binding.binding_id.clone(),
+                        resource_kind: binding.resource_kind.clone(),
+                        resource_id: binding.resource_id.clone(),
+                    },
+                    releases: Arc::clone(&self.releases),
+                }),
+            })
+        }
+    }
+
+    impl CapabilityHandler for AlternateBrowserHandler {
+        fn invoke<'life0, 'async_trait>(
+            &'life0 self,
+            context: CapabilityInvocationContext,
+            _input: StrictJsonValue,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<StrictJsonValue, KernelError>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: Sync + 'async_trait,
+        {
+            let captured_mount = Arc::clone(&self.captured_mount);
+            Box::pin(async move {
+                *captured_mount.lock().expect("alternate provider capture") =
+                    Some(context.state.descriptor().mount_id.as_ref().to_owned());
+                Ok(empty_object())
+            })
+        }
     }
 
     impl Wave2HostPort for StateCaptureHostPort {
@@ -1767,6 +2442,149 @@ mod tests {
     fn test_state_handle() -> Wave2StateHandle {
         static HANDLE: OnceLock<Wave2StateHandle> = OnceLock::new();
         HANDLE.get_or_init(capture_state_handle).clone()
+    }
+
+    fn alternate_browser_registration_with_capture(
+        captured_mount: Arc<Mutex<Option<String>>>,
+        releases: Arc<AtomicUsize>,
+    ) -> PluginRegistration {
+        let first_party = browser_registration().expect("first-party Browser registration");
+        let provider = first_party.metadata.manifest.payload.contributions.role_providers[0].clone();
+        let package = PackageRef {
+            id: PackageId::from("fixture.browser-provider"),
+            version: VersionString::from(CONTRACT_VERSION),
+        };
+        let mount_id = PluginMountId::from("fixture-browser-provider");
+        let source = PluginSourceMetadata {
+            source_kind: PluginSourceKind::TestFixture,
+            source_identity: "fixture.browser-provider".to_owned(),
+            source_digest: None,
+        };
+        let config_schema = object_schema();
+        let cancellation_port = host_port("host.plugin.cancel");
+        let task_port = host_port("host.plugin.tasks");
+        let manifest = PackageManifest {
+            schema_version: VersionString::from(CONTRACT_VERSION),
+            host_contract_version: VersionString::from(CONTRACT_VERSION),
+            package_id: package.id.clone(),
+            package_version: package.version.clone(),
+            display: localized("Alternate Browser", "Test-only Browser role provider."),
+            package_dependencies: Vec::new(),
+            requires_runtime_features: Vec::new(),
+            config_schema: config_schema.clone(),
+            provides_services: Vec::new(),
+            requires_services: Vec::new(),
+            entrypoint: InProcessEntrypointMetadata {
+                entrypoint_profile: "trusted-in-process".to_owned(),
+                entrypoint_id: "fixture.browser-provider.entrypoint".to_owned(),
+                contract_version: VersionString::from(CONTRACT_VERSION),
+            },
+            contributions: PackageContributions {
+                capabilities: Vec::new(),
+                skills: Vec::new(),
+                mcp_tools: Vec::new(),
+                role_contracts: Vec::new(),
+                role_providers: vec![provider.clone()],
+            },
+        };
+        let identity = PluginIdentityDescriptor {
+            package: package.clone(),
+            mount_id: mount_id.clone(),
+        };
+        let metadata = PluginRegistrationMetadata {
+            manifest: ArtifactEnvelope::new(manifest).expect("alternate Browser manifest"),
+            mount_id: mount_id.clone(),
+            source: source.clone(),
+            boot_state: PluginBootState {
+                criticality: PluginBootCriticality::Required,
+                desired_state: PluginDesiredState::Enabled,
+                effective_state: PluginEffectiveState::Active,
+                diagnostic_code: None,
+            },
+            registrar: PluginRegistrarDescriptor {
+                identity: identity.clone(),
+                allowed_operations: BTreeSet::from([
+                    PluginRegistrarOperation::ContributeRoleProvider,
+                    PluginRegistrarOperation::BindHostPort,
+                ]),
+                declared_capability_ids: BTreeSet::new(),
+                declared_skill_ids: BTreeSet::new(),
+                declared_mcp_tool_keys: BTreeSet::new(),
+                declared_role_ids: BTreeSet::from([provider.role.key.role_id.clone()]),
+                declared_service_keys: BTreeSet::new(),
+                declared_host_ports: BTreeSet::from([
+                    cancellation_port.id.clone(),
+                    task_port.id.clone(),
+                ]),
+            },
+            context: PluginContextDescriptor {
+                identity,
+                source,
+                validated_config: ValidatedPluginConfig {
+                    schema_digest: digest_payload(&config_schema).expect("config digest"),
+                    config_revision: 1,
+                    value: empty_object(),
+                },
+                state: PluginStateHandleDescriptor {
+                    package_id: package.id,
+                    mount_id: mount_id.clone(),
+                    methods: PluginStateMethod::REQUIRED.into_iter().collect(),
+                },
+                declared_services: DeclaredServiceViewDescriptor::default(),
+                host_ports: Vec::new(),
+                typed_command_ports: Vec::new(),
+                domain_outbox_ports: Vec::new(),
+                cancellation: CancellationDescriptor {
+                    cancellation_port,
+                    scope_key: ScopeKey::from("mount:fixture-browser-provider"),
+                },
+                managed_task_registration: ManagedTaskRegistrationDescriptor {
+                    registrar_port: task_port,
+                    scope_key: ScopeKey::from("mount:fixture-browser-provider"),
+                },
+            },
+        };
+        let mut registration = PluginRegistration::new(metadata);
+        for capability_id in provider.members.keys() {
+            let Some(definition) = definition_for(capability_id.as_ref()) else {
+                continue;
+            };
+            match definition.kind {
+                CapabilityKind::Tool => {
+                    registration
+                        .add_role_action_handler(
+                            provider.role.key.role_id.clone(),
+                            capability_id.clone(),
+                            Arc::new(AlternateBrowserHandler {
+                                captured_mount: Arc::clone(&captured_mount),
+                            }),
+                        )
+                        .expect("alternate Browser role handler");
+                }
+                CapabilityKind::ContextContributor => {
+                    registration
+                        .add_role_context_factory(
+                            provider.role.key.role_id.clone(),
+                            capability_id.clone(),
+                            Arc::new(AlternateBrowserContextFactory),
+                        )
+                        .expect("alternate Browser context factory");
+                }
+                CapabilityKind::ResourceProvider => {
+                    registration
+                        .add_role_resource_factory(
+                            provider.role.key.role_id.clone(),
+                            capability_id.clone(),
+                            Arc::new(AlternateBrowserResourceFactory {
+                                releases: Arc::clone(&releases),
+                            }),
+                        )
+                        .expect("alternate Browser resource factory");
+                }
+                _ => {}
+            }
+        }
+        registration
     }
 
     fn capture_state_handle() -> Wave2StateHandle {
@@ -1821,6 +2639,7 @@ mod tests {
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
             resource_bindings: vec![binding],
+            system_role_provider_overrides: BTreeMap::new(),
             persona: "Wave 2 state test".to_owned(),
             instructions: "Invoke the selected capability.".to_owned(),
             context_policy: empty_object(),
@@ -1846,6 +2665,7 @@ mod tests {
                 required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
                 runtime_feature_inventory_digest: DigestHex::from("runtime"),
                 available_runtime_features: BTreeSet::new(),
+                installation_role_bindings: BTreeMap::new(),
                 canonical_schema_manifest_digest: DigestHex::from("schema"),
                 target_contribution_manifest_digest: DigestHex::from("target"),
                 host_target: RuntimeTarget::from("windows-desktop-x64"),
@@ -1977,7 +2797,34 @@ mod tests {
                 .filter(|capability| !capability.contributions.actions.is_empty())
                 .map(|capability| capability.id.clone())
                 .collect::<BTreeSet<_>>();
-            assert_eq!(registration.handler_ids(), action_capabilities);
+            let role_capabilities = manifest
+                .contributions
+                .role_contracts
+                .iter()
+                .flat_map(|contract| {
+                    contract
+                        .members
+                        .iter()
+                        .map(|member| member.capability.id.clone())
+                })
+                .collect::<BTreeSet<_>>();
+            let ordinary_action_capabilities = action_capabilities
+                .difference(&role_capabilities)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            assert_eq!(registration.handler_ids(), ordinary_action_capabilities);
+            let role_action_capabilities = registration
+                .role_action_handler_ids()
+                .into_iter()
+                .map(|(_, capability_id)| capability_id)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                role_action_capabilities,
+                action_capabilities
+                    .intersection(&role_capabilities)
+                    .cloned()
+                    .collect()
+            );
             for capability in &manifest.contributions.capabilities {
                 if capability.kind == CapabilityKind::Tool {
                     assert_eq!(capability.contributions.actions.len(), 1);
@@ -2025,7 +2872,9 @@ mod tests {
         )
         .expect("Wave 2 metadata materializes");
         assert_eq!(materialized.packages.len(), 5);
-        assert_eq!(materialized.capabilities.len(), 41);
+        assert_eq!(materialized.capabilities.len(), 42);
+        assert_eq!(materialized.role_contracts.len(), 2);
+        assert_eq!(materialized.role_providers.len(), 2);
         assert_eq!(
             required_resource_kinds("process.exec"),
             Some(BTreeSet::from([ResourceKind::from("process_session")]))
@@ -2043,6 +2892,254 @@ mod tests {
         registry
             .replace_all(registrations)
             .expect("all action handlers are declared");
+    }
+
+    #[test]
+    fn explicit_browser_provider_lock_dispatches_once_without_fallback() {
+        let first_party = browser_registration().expect("first-party Browser registration");
+        let captured_mount = Arc::new(Mutex::new(None));
+        let releases = Arc::new(AtomicUsize::new(0));
+        let alternate =
+            alternate_browser_registration_with_capture(
+                Arc::clone(&captured_mount),
+                Arc::clone(&releases),
+            );
+        let registry = KernelRegistry::new(
+            MaterializationPolicy::stable_with_test_fixtures(CONTRACT_VERSION),
+            Arc::new(InMemoryPluginStatePersistence::new()),
+        )
+        .expect("kernel registry");
+        let materialized = registry
+            .replace_all(vec![first_party, alternate])
+            .expect("publish two Browser providers");
+        let role_id = ExecutionRoleId::from(BROWSER_EXECUTION_ROLE_ID);
+        let contract = materialized
+            .role_contract(&role_id)
+            .expect("Browser role contract");
+        let principal = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: "browser-provider-owner".to_owned(),
+        };
+        let binding = TypedResourceBinding {
+            binding_id: ResourceBindingId::from("browser-provider-binding"),
+            resource_kind: ResourceKind::from("browser"),
+            resource_id: nomifun_agent_contracts::ResourceId::from("browser-target"),
+            owner_id: principal.principal_id.clone(),
+            operations: BTreeSet::from([
+                "navigate".to_owned(),
+                "observe".to_owned(),
+            ]),
+            connection_config_ref: None,
+            typed_parameters: BTreeMap::new(),
+        };
+        let revision = |overrides: BTreeMap<ExecutionRoleId, RoleProviderSelection>| {
+            let payload = AgentPresetRevisionPayload {
+                schema_version: VersionString::from(CONTRACT_VERSION),
+                surfaces: BTreeSet::from(["desktop".to_owned()]),
+                model_route_refs: BTreeMap::new(),
+                chat_route_records: BTreeMap::new(),
+                initial_capabilities: vec![
+                    CapabilitySelection {
+                        capability: CapabilityRef {
+                            id: CapabilityId::from("browser.navigate"),
+                            version: VersionString::from(CONTRACT_VERSION),
+                        },
+                        required: true,
+                        exposure: CapabilityExposure::Advertised,
+                        action_allowlist: BTreeSet::from([ActionId::from(
+                            "browser.navigate.invoke",
+                        )]),
+                        resource_binding_refs: vec![binding.binding_id.clone()],
+                        destination_constraints: BTreeSet::new(),
+                        context_budget_override: None,
+                        tool_budget_override: None,
+                        config: empty_object(),
+                    },
+                    CapabilitySelection {
+                        capability: CapabilityRef {
+                            id: CapabilityId::from("browser.observe"),
+                            version: VersionString::from(CONTRACT_VERSION),
+                        },
+                        required: true,
+                        exposure: CapabilityExposure::Hidden,
+                        action_allowlist: BTreeSet::new(),
+                        resource_binding_refs: vec![binding.binding_id.clone()],
+                        destination_constraints: BTreeSet::new(),
+                        context_budget_override: None,
+                        tool_budget_override: None,
+                        config: empty_object(),
+                    },
+                    CapabilitySelection {
+                        capability: CapabilityRef {
+                            id: CapabilityId::from("browser.identity"),
+                            version: VersionString::from(CONTRACT_VERSION),
+                        },
+                        required: true,
+                        exposure: CapabilityExposure::Hidden,
+                        action_allowlist: BTreeSet::new(),
+                        resource_binding_refs: vec![binding.binding_id.clone()],
+                        destination_constraints: BTreeSet::new(),
+                        context_budget_override: None,
+                        tool_budget_override: None,
+                        config: empty_object(),
+                    },
+                ],
+                on_demand_capabilities: Vec::new(),
+                skill_bindings: Vec::new(),
+                resource_bindings: vec![binding.clone()],
+                system_role_provider_overrides: overrides,
+                persona: "Browser provider fixture".to_owned(),
+                instructions: "Navigate with the selected Browser provider.".to_owned(),
+                context_policy: empty_object(),
+                execution_constraints: empty_object(),
+                runtime_budget: empty_object(),
+            };
+            AgentPresetRevision {
+                reference: PresetRevisionRef {
+                    preset_id: AgentPresetId::from("browser-provider-fixture"),
+                    revision: 1,
+                    revision_digest: digest_payload(&payload).expect("revision digest"),
+                },
+                payload,
+                created_by: UserId::from(principal.principal_id.clone()),
+                created_at_ms: 1,
+                reason: None,
+            }
+        };
+        let environment = CompilerEnvironment {
+            resolver_version: VersionString::from(CONTRACT_VERSION),
+            required_runtime_protocol_version: VersionString::from(CONTRACT_VERSION),
+            required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+            runtime_feature_inventory_digest: DigestHex::from("runtime"),
+            available_runtime_features: BTreeSet::new(),
+            installation_role_bindings: BTreeMap::new(),
+            canonical_schema_manifest_digest: DigestHex::from("schema"),
+            target_contribution_manifest_digest: DigestHex::from("target"),
+            host_target: RuntimeTarget::from("x86_64-pc-windows-msvc"),
+            host_surface: "desktop".to_owned(),
+            availability_evidence_revision: "browser-provider-test".to_owned(),
+        };
+        assert!(matches!(
+            AgentPresetCompiler::compile(
+                &materialized,
+                &environment,
+                CompileRequest {
+                    revision: revision(BTreeMap::new()),
+                    principal: principal.clone(),
+                    scene: "test".to_owned(),
+                    surface: "desktop".to_owned(),
+                    audience: "test".to_owned(),
+                    created_at_ms: 2,
+                    resolver_run_id: OperationId::from("browser-provider-no-selection"),
+                },
+            ),
+            Err(KernelError::RoleProviderNotBound { .. })
+        ));
+
+        let selected = RoleProviderSelection {
+            role: ExactRoleContractRef {
+                key: contract.manifest.key.clone(),
+                contract_digest: contract.contract_digest.clone(),
+            },
+            provider_mount_id: PluginMountId::from("fixture-browser-provider"),
+        };
+        let compiled = AgentPresetCompiler::compile(
+            &materialized,
+            &environment,
+            CompileRequest {
+                revision: revision(BTreeMap::from([(role_id.clone(), selected)])),
+                principal: principal.clone(),
+                scene: "test".to_owned(),
+                surface: "desktop".to_owned(),
+                audience: "test".to_owned(),
+                created_at_ms: 2,
+                resolver_run_id: OperationId::from("browser-provider-selected"),
+            },
+        )
+        .expect("compile selected alternate Browser provider");
+        assert_eq!(
+            compiled
+                .role_provider(&role_id)
+                .expect("frozen Browser provider")
+                .provider
+                .mount_id
+                .as_ref(),
+            "fixture-browser-provider"
+        );
+        let active = SessionCapabilityState::new(&compiled)
+            .snapshot()
+            .expect("initial active set");
+        poll_ready(registry.invoke(
+            &compiled,
+            &active,
+            CapabilityInvocationRequest {
+                principal: principal.clone(),
+                session_owner: principal.clone(),
+                agent_session_id: AgentSessionId::from("browser-provider-session"),
+                operation_id: OperationId::from("browser-provider-invoke"),
+                idempotency_key: IdempotencyKey::from("browser-provider-invoke"),
+                correlation_id: CorrelationId::from("browser-provider-invoke"),
+                resolved_snapshot_ref: compiled.snapshot_ref().clone(),
+                active_set_generation: active.generation,
+                capability_id: CapabilityId::from("browser.navigate"),
+                action_id: ActionId::from("browser.navigate.invoke"),
+                resource_binding_ids: BTreeSet::from([binding.binding_id.clone()]),
+                state_scope_key: ScopeKey::from("session:browser-provider"),
+                input: empty_object(),
+            },
+        ))
+        .expect("alternate Browser invocation");
+        assert_eq!(
+            captured_mount
+                .lock()
+                .expect("alternate provider capture")
+                .as_deref(),
+            Some("fixture-browser-provider")
+        );
+        let role_member_request = |capability_id: &str| RoleMemberInvocationRequest {
+            principal: principal.clone(),
+            session_owner: principal.clone(),
+            operation_id: OperationId::from(format!("{capability_id}:operation")),
+            correlation_id: CorrelationId::from(format!("{capability_id}:correlation")),
+            capability_id: CapabilityId::from(capability_id),
+            resource_binding_ids: BTreeSet::from([binding.binding_id.clone()]),
+            state_scope_key: ScopeKey::from("session:browser-provider"),
+            admission: RoleMemberAdmission::Agent {
+                agent_session_id: AgentSessionId::from("browser-provider-session"),
+                resolved_snapshot_ref: compiled.snapshot_ref().clone(),
+                active_set_generation: active.generation,
+            },
+        };
+        let context = poll_ready(registry.contribute_role_context(
+            &compiled,
+            &active,
+            role_member_request("browser.observe"),
+        ))
+        .expect("alternate Browser context");
+        assert_eq!(
+            context.value.expect("context value").0["provider_mount"],
+            "fixture-browser-provider"
+        );
+
+        let first_handle = poll_ready(registry.acquire_role_resource(
+            &compiled,
+            &active,
+            role_member_request("browser.identity"),
+        ))
+        .expect("first Browser resource acquisition");
+        let replay_handle = poll_ready(registry.acquire_role_resource(
+            &compiled,
+            &active,
+            role_member_request("browser.identity"),
+        ))
+        .expect("replayed Browser resource acquisition");
+        assert!(Arc::ptr_eq(&first_handle.handle, &replay_handle.handle));
+        assert_eq!(releases.load(Ordering::Acquire), 1);
+        poll_ready(registry.release_role_resources(&ScopeKey::from(
+            "session:browser-provider",
+        )))
+        .expect("release Browser resource");
+        assert_eq!(releases.load(Ordering::Acquire), 2);
     }
 
     #[test]
@@ -2112,6 +3209,7 @@ mod tests {
             registry_generation: 7,
             capability_id: CapabilityId::from("fs.read"),
             action_id: ActionId::from("fs.read.invoke"),
+            role_provider: None,
             state: test_state_handle(),
             resource_bindings: vec![binding.clone()],
         };
@@ -2257,6 +3355,7 @@ mod tests {
                 registry_generation: 11,
                 capability_id: CapabilityId::from("fs.read"),
                 action_id: ActionId::from("fs.read.invoke"),
+                role_provider: None,
                 state: test_state_handle(),
                 resource_bindings: vec![nomifun_agent_contracts::TypedResourceBinding {
                     binding_id: "binding".into(),
@@ -2322,6 +3421,7 @@ mod tests {
                         registry_generation: 11,
                         capability_id: CapabilityId::from("fs.write"),
                         action_id: ActionId::from("fs.write.invoke"),
+                        role_provider: None,
                         state: test_state_handle(),
                         resource_bindings: Vec::new(),
                     }
@@ -2362,6 +3462,7 @@ mod tests {
                     registry_generation: 1,
                     capability_id: CapabilityId::from("fs.read"),
                     action_id: ActionId::from("fs.read.invoke"),
+                    role_provider: None,
                     state: test_state_handle(),
                     resource_bindings: Vec::new(),
                 },
@@ -2397,16 +3498,13 @@ mod tests {
             let capability = materialized
                 .capability(&CapabilityId::from(*capability_id))
                 .expect("Browser capability");
-            assert!(capability.manifest.supported_platforms.iter().all(
-                |constraint| matches!(
-                    constraint,
-                    PlatformConstraint::Targets { host_surfaces, .. }
-                        if host_surfaces == &BTreeSet::from(["desktop".to_owned()])
-                )
-            ));
+            assert_eq!(
+                capability.manifest.supported_platforms,
+                vec![PlatformConstraint::Any]
+            );
             assert_eq!(
                 capability.manifest.supported_surfaces,
-                BTreeSet::from(["desktop".to_owned()])
+                BTreeSet::from(["desktop".to_owned(), "headless".to_owned()])
             );
             assert!(check_platform_availability(
                 &CapabilityId::from(*capability_id),
@@ -2427,13 +3525,10 @@ mod tests {
             let capability = materialized
                 .capability(&CapabilityId::from(*capability_id))
                 .expect("Computer/A11y capability");
-            assert!(capability.manifest.supported_platforms.iter().all(
-                |constraint| matches!(
-                    constraint,
-                    PlatformConstraint::Targets { host_surfaces, .. }
-                        if host_surfaces == &BTreeSet::from(["desktop".to_owned()])
-                )
-            ));
+            assert_eq!(
+                capability.manifest.supported_platforms,
+                vec![PlatformConstraint::Any]
+            );
             assert_eq!(
                 capability.manifest.supported_surfaces,
                 BTreeSet::from(["desktop".to_owned()])
@@ -2456,6 +3551,44 @@ mod tests {
                 "desktop",
             )
             .is_ok());
+        }
+
+        for (role_id, expected_targets) in [
+            (
+                BROWSER_EXECUTION_ROLE_ID,
+                BROWSER_DESKTOP_HOST_TARGETS,
+            ),
+            (
+                COMPUTER_EXECUTION_ROLE_ID,
+                COMPUTER_DESKTOP_HOST_TARGETS,
+            ),
+        ] {
+            let provider = materialized
+                .role_provider(
+                    &ExecutionRoleId::from(role_id),
+                    &PluginMountId::from(if role_id == BROWSER_EXECUTION_ROLE_ID {
+                        BROWSER_MOUNT_ID
+                    } else {
+                        COMPUTER_A11Y_MOUNT_ID
+                    }),
+                )
+                .expect("first-party role provider");
+            for member in provider.contribution.members.values() {
+                assert!(member.supported_platforms.iter().all(|constraint| {
+                    matches!(
+                        constraint,
+                        PlatformConstraint::Targets {
+                            host_targets,
+                            host_surfaces,
+                        } if host_targets
+                            == &expected_targets
+                                .iter()
+                                .map(|target| RuntimeTarget::from(*target))
+                                .collect()
+                            && host_surfaces == &BTreeSet::from(["desktop".to_owned()])
+                    )
+                }));
+            }
         }
     }
 }

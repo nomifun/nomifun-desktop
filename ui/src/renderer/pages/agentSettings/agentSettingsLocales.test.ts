@@ -15,9 +15,9 @@ describe('Agent Settings locale contract', () => {
   });
 
   test('contains fresh-start and real-effect disclosure in both locales', () => {
-    expect(en.freshStart.body).toContain('not imported');
-    expect(zh.freshStart.body).toContain('不会导入');
-    expect(en.test.realEffectWarning).toContain('real resources');
-    expect(zh.test.realEffectWarning).toContain('真实资源');
+    expect(en.freshStart.body.includes('not imported')).toBe(true);
+    expect(zh.freshStart.body.includes('不会导入')).toBe(true);
+    expect(en.test.realEffectWarning.includes('real resources')).toBe(true);
+    expect(zh.test.realEffectWarning.includes('真实资源')).toBe(true);
   });
 });

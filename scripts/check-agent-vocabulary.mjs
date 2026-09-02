@@ -28,7 +28,7 @@ const SOURCE_EXTENSIONS = new Set([
 // Collaboration has one runtime aggregate: AgentExecution. These terms are
 // retired as active product, API, configuration, path, and code identities.
 const RETIRED_TERM =
-  /orchestrat|sub[-_ ]?agent|agent[-_ ]?cluster|\bfleet(?:s|[_-]?[a-z0-9]+)*\b|orch[_-]?(?:run|fleet|workspace)/i;
+  /agent[-_ ]?cluster|\bfleet(?:s|[_-]?[a-z0-9]+)*\b|orch[_-]?(?:run|fleet|workspace)/i;
 
 // These exact implementation and wire identities previously exposed two
 // delegation stacks to configuration/model callers. Internal deployment
@@ -186,6 +186,17 @@ for (const retiredSample of [
   invariant(
     RETIRED_EXACT_IDENTITY.test(retiredSample),
     `retired-identity scanner must reject embedded form ${retiredSample}`,
+  );
+}
+for (const activeSample of [
+  'subagent.send',
+  'subagent.spawn',
+  'subagents',
+  'orchestration',
+]) {
+  invariant(
+    !RETIRED_TERM.test(activeSample) && !RETIRED_EXACT_IDENTITY.test(activeSample),
+    `active Codex/AgentExecution vocabulary must remain allowed: ${activeSample}`,
   );
 }
 invariant(

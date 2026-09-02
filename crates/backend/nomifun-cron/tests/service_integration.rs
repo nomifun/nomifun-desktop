@@ -314,7 +314,7 @@ impl IConversationRepository for StubConvRepo {
                     })
                     .to_string(),
                 ),
-                status: Some("active".into()),
+                status: Some("finished".into()),
                 source: None,
                 channel_chat_id: None,
                 extra: serde_json::json!({
@@ -353,7 +353,7 @@ impl IConversationRepository for StubConvRepo {
                     })
                     .to_string(),
                 ),
-                status: Some("active".into()),
+                status: Some("finished".into()),
                 source: None,
                 channel_chat_id: None,
                 extra: serde_json::json!({
@@ -392,7 +392,7 @@ impl IConversationRepository for StubConvRepo {
                     })
                     .to_string(),
                 ),
-                status: Some("active".into()),
+                status: Some("finished".into()),
                 source: None,
                 channel_chat_id: None,
                 extra: serde_json::json!({
@@ -431,7 +431,7 @@ impl IConversationRepository for StubConvRepo {
                     })
                     .to_string(),
                 ),
-                status: Some("active".into()),
+                status: Some("finished".into()),
                 source: None,
                 channel_chat_id: None,
                 extra: serde_json::json!({
@@ -470,7 +470,7 @@ impl IConversationRepository for StubConvRepo {
                     })
                     .to_string(),
                 ),
-                status: Some("active".into()),
+                status: Some("finished".into()),
                 source: None,
                 channel_chat_id: None,
                 extra: serde_json::json!({
@@ -508,7 +508,7 @@ impl IConversationRepository for StubConvRepo {
                     })
                     .to_string(),
                 ),
-                status: Some("active".into()),
+                status: Some("finished".into()),
                 source: None,
                 channel_chat_id: None,
                 extra: r#"{"workspace":"/tmp/cron-test-workspace"}"#.into(),
@@ -572,7 +572,7 @@ impl IConversationRepository for StubConvRepo {
                     })
                     .to_string(),
                 ),
-                status: Some("active".into()),
+                status: Some("finished".into()),
                 source: None,
                 channel_chat_id: None,
                 extra: r#"{"workspace":"/tmp/cron-test-workspace"}"#.into(),
@@ -2015,7 +2015,32 @@ async fn cj7b_add_job_binds_existing_conversation_to_job() {
 }
 
 #[tokio::test]
-async fn cj7c_existing_conversation_binding_is_one_to_one_and_fail_closed() {
+async fn cj7c_list_conversations_uses_session_port_and_preserves_owner_check() {
+    let (svc, _, _, _, _, _) = setup_with_conv_repo().await;
+
+    let mut req = make_create_req("Port Listed Conversation", every_60s());
+    req.conversation_id = Some(CONV_4.to_owned());
+    let job = svc.add_job(TEST_USER_ID, req).await.unwrap();
+
+    let conversations = svc
+        .list_conversations_by_cron_job(TEST_USER_ID, &job.cron_job_id)
+        .await
+        .unwrap();
+    assert_eq!(conversations.len(), 1);
+    assert_eq!(conversations[0].conversation_id, CONV_4);
+
+    let error = svc
+        .list_conversations_by_cron_job(SECONDARY_USER_ID, &job.cron_job_id)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        nomifun_cron::error::CronError::JobNotFound(_)
+    ));
+}
+
+#[tokio::test]
+async fn cj7d_existing_conversation_binding_is_one_to_one_and_fail_closed() {
     let (svc, _, _, conv_repo, _, _) = setup_with_conv_repo().await;
 
     let mut first_request = make_create_req("First binding", every_60s());

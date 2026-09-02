@@ -13,9 +13,7 @@
   },
   "source_checkpoint": {
     "local_head": "resolved_at_run",
-    "verified_remote_sha": "optional_single_host_observation",
-    "clean_worktree_required": true,
-    "shared_ref": "refs/heads/rf/agent-capability-platform-v2"
+    "clean_worktree_required": true
   },
   "target_cell": {
     "cell_id": "windows_desktop_x64",
@@ -34,24 +32,24 @@
     },
     "canonical_schema_manifest": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/canonical-v4-schema-manifest.envelope.json",
-      "digest": "e7eb4d3d1cde70a8ae66c9b20836ff33abf1b710dc73d2a0b88393a9c8bfcc46"
+      "digest": "f8eb056bfd49e5330603ad36b284ed3269c34e1301db74ba33a0bec861e9573a"
     },
     "target_first_party_inventory": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/target-first-party-contributions.envelope.json",
-      "digest": "85e250015c78291091a11a68e5205b62a6fb510ed98f5536c2eb1fe351e536f2"
+      "digest": "f8b5460165689bb463bd286573b5b2731a20803107e2b27ca3d86420dad62d1b"
     },
     "official_seed": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/official-preset-seed-manifest.envelope.json",
-      "digest": "c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8"
+      "digest": "d15da58409cb096d0a1a5cc8c60534bf378500ecfc697789a5d0ecec85e56582"
     },
     "platform_validation_contract": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/canonical-v4-schema-manifest.envelope.json",
       "field": "payload.platform_validation_contract_digest",
-      "digest": "32a18fc0f7b921c0e8157e5b8183dbe645a806e70ccd1c26de30ff75b03a9422"
+      "digest": "a3f5180906c239d791a03281199d80f2ea957dbe8382fb849dc2926935672a9c"
     },
     "cargo_lock": {
       "path": "Cargo.lock",
-      "digest": "792362a8edf3e7994a59c89c182698fe1d4661fec5d04409e960a4185663acc9"
+      "digest": "51629196c5d1c2940e9ac748e095bbdbd621ba5788a0afa3af5181f0714db22d"
     }
   },
   "required_checks": [
@@ -170,36 +168,9 @@
       "late_callback_after_delete"
     ]
   },
-  "pending_native_verification_points": [
-    {
-      "verification_point_id": "c8-macos-arm64",
-      "target_cell": "macos_desktop_arm64",
-      "status": "pending_native_verification",
-      "exact_check_id": "c8_ma_full_gate"
-    },
-    {
-      "verification_point_id": "c8-macos-x64",
-      "target_cell": "macos_desktop_x64",
-      "status": "pending_native_verification",
-      "exact_check_id": "c8_mx_full_gate"
-    },
-    {
-      "verification_point_id": "c8-linux-desktop-x64",
-      "target_cell": "linux_desktop_x64",
-      "status": "pending_native_verification",
-      "exact_check_id": "c8_ld_full_gate"
-    },
-    {
-      "verification_point_id": "c8-linux-headless-x64",
-      "target_cell": "linux_headless_x64",
-      "status": "pending_native_verification",
-      "exact_check_id": "c8_lh_full_gate"
-    }
-  ],
   "closure_requirements": {
     "status_transition": "active -> closed",
     "windows_status": "pass",
-    "non_windows_status": "pending_native_verification",
     "workspace_cargo_test_must_be_serialized": true,
     "global_legacy_residual_must_be_zero": true
   }

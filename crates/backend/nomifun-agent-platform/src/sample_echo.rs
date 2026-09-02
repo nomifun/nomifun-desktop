@@ -46,7 +46,7 @@ use nomifun_agent_kernel::{
     PluginStatePersistence, SessionCapabilityState,
 };
 use nomifun_agent_session::{
-    AgentSessionStore, CreateSessionRequest, EffectEventRequest, EffectTerminalState,
+    AgentSessionStore, CreateSessionRequest, EffectEventRequest, EffectStrategy, EffectTerminalState,
     RuntimeAppendContext, SessionStoreError,
 };
 use nomifun_api_types::{
@@ -519,6 +519,8 @@ fn sample_registration(
             capabilities: vec![capability_manifest],
             skills: vec![skill],
             mcp_tools: vec![mcp],
+            role_contracts: Vec::new(),
+            role_providers: Vec::new(),
         },
     };
     let source = PluginSourceMetadata {
@@ -555,6 +557,7 @@ fn sample_registration(
             declared_mcp_tool_keys: BTreeSet::from([McpToolKey::from(
                 "sample.echo.server.echo",
             )]),
+            declared_role_ids: BTreeSet::new(),
             declared_service_keys: BTreeSet::new(),
             declared_host_ports: BTreeSet::from([
                 cancellation_port.id.clone(),
@@ -711,6 +714,7 @@ fn sample_document(owner_id: &str, instructions: &str) -> AgentPresetDocumentDto
             version: VERSION.to_owned(),
         }],
         resource_bindings: vec![resource_binding_dto(owner_id)],
+        system_role_provider_overrides: BTreeMap::new(),
         persona: "Echo fixture".to_owned(),
         instructions: instructions.to_owned(),
         context_policy: json!({}),
@@ -788,8 +792,30 @@ async fn build_revisions(
     let catalog_snapshot = catalog_from_registry(registry);
     let catalog = Arc::new(StaticCatalogProvider::new(catalog_snapshot.clone()));
     let templates = OfficialTemplateCatalog::load()?;
-    let compiler =
-        PresetPreviewCompiler::new(compiler_release_inputs(registry)?, templates.clone());
+    let release = compiler_release_inputs(registry)?;
+    let compiler = PresetPreviewCompiler::new(release.clone(), templates.clone())
+        .with_materialized_registry(
+            Arc::new(registry.clone()),
+            CompilerEnvironment {
+                resolver_version: release.resolver_version.clone(),
+                required_runtime_protocol_version: release.runtime_protocol_version.clone(),
+                required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+                runtime_feature_inventory_digest: release
+                    .runtime_feature_inventory_digest
+                    .clone(),
+                available_runtime_features: BTreeSet::new(),
+                installation_role_bindings: BTreeMap::new(),
+                canonical_schema_manifest_digest: release
+                    .canonical_schema_manifest_digest
+                    .clone(),
+                target_contribution_manifest_digest: release
+                    .target_contribution_manifest_digest
+                    .clone(),
+                host_target: RuntimeTarget::from(native_target_id()),
+                host_surface: "desktop".to_owned(),
+                availability_evidence_revision: BUILD_IDENTITY.to_owned(),
+            },
+        );
     let control_plane = Arc::new(AgentControlPlane::new(
         store.clone(),
         catalog,
@@ -986,6 +1012,7 @@ fn compile_kernel_snapshot(
             )
             .map_err(digest_error)?,
             available_runtime_features: BTreeSet::new(),
+            installation_role_bindings: BTreeMap::new(),
             canonical_schema_manifest_digest: canonical_schema_manifest_digest()?,
             target_contribution_manifest_digest: registry.registry_digest.clone(),
             host_target: RuntimeTarget::from(native_target_id()),
@@ -1389,6 +1416,7 @@ impl RuntimeIngressPort for SampleEchoIngress {
                 producer_id: EventProducerId::from("capability-host"),
                 idempotency_key: start.idempotency_key.clone(),
                 correlation_id: CorrelationId::from(start.effect_id.as_ref().to_owned()),
+                strategy: EffectStrategy::ManagedEffect,
                 causation_event_id: Some(tool_event),
                 payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
                     "effect_id": start.effect_id,
@@ -1892,6 +1920,7 @@ async fn execute_tool(
                         correlation_id: CorrelationId::from(
                             effect.start.effect_id.as_ref().to_owned(),
                         ),
+                        strategy: EffectStrategy::ManagedEffect,
                         causation_event_id: Some(effect.started_event_id.clone()),
                         payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
                             "receipt": output
@@ -1930,6 +1959,7 @@ async fn execute_tool(
                         correlation_id: CorrelationId::from(
                             effect.start.effect_id.as_ref().to_owned(),
                         ),
+                        strategy: EffectStrategy::ManagedEffect,
                         causation_event_id: Some(effect.started_event_id),
                         payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
                             "reason": "plugin_panic"

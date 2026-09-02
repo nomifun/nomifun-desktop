@@ -17,22 +17,93 @@ export interface SessionCardModel {
   lastSeq: number;
 }
 
+type LegacyProjectionEvent = {
+  kind: string;
+  payload: unknown;
+};
+
+type ProjectionDocument = Omit<
+  IAgentSessionProjectionDocument,
+  'events'
+> & {
+  events?: LegacyProjectionEvent[];
+  tool_summary?: unknown;
+  reference?: unknown;
+  terminal_effect?: unknown;
+};
+
 export const inlinePayload = (payload: unknown): unknown => {
   if (!payload || typeof payload !== 'object') return payload;
   const record = payload as Record<string, unknown>;
   return record.encoding === 'inline_json' ? record.value : payload;
 };
 
-const latestPayload = (document: IAgentSessionProjectionDocument): unknown =>
-  inlinePayload(document.events.at(-1)?.payload);
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+
+const legacyEvents = (document: ProjectionDocument): LegacyProjectionEvent[] =>
+  Array.isArray(document.events) ? document.events : [];
+
+const legacyLatestPayload = (document: ProjectionDocument): unknown =>
+  inlinePayload(legacyEvents(document).at(-1)?.payload);
+
+const legacyMessageContent = (document: ProjectionDocument): string | undefined => {
+  let content: string | undefined;
+  for (const event of legacyEvents(document)) {
+    const payload = asRecord(inlinePayload(event.payload));
+    if (
+      (event.kind === 'message/user-accepted' || event.kind === 'message/content-part') &&
+      typeof payload?.content === 'string'
+    ) {
+      content =
+        event.kind === 'message/user-accepted'
+          ? payload.content
+          : `${content ?? ''}${payload.content}`;
+    }
+  }
+  return content;
+};
+
+const firstSummaryString = (
+  summary: unknown,
+  keys: string[]
+): string | undefined => {
+  const record = asRecord(summary);
+  for (const key of keys) {
+    if (typeof record?.[key] === 'string' && record[key]) return record[key] as string;
+  }
+  return undefined;
+};
+
+const latestKind = (document: ProjectionDocument, fallback: string): string =>
+  legacyEvents(document).at(-1)?.kind ?? document.state ?? fallback;
+
+const projectionDetails = (
+  document: ProjectionDocument,
+  intent: string
+): unknown => {
+  const summary =
+    intent === 'tool'
+      ? document.tool_summary
+      : intent === 'effect'
+        ? document.terminal_effect
+        : document.reference;
+  return summary ?? legacyLatestPayload(document);
+};
 
 export function projectionCard(projection: IAgentSessionMessageProjection): SessionCardModel {
-  const document = projection.projection;
-  const latestKind = document.events.at(-1)?.kind ?? projection.presentation_intent;
-  const payload = latestPayload(document);
+  // The IPC interface still accepts the legacy shape, while new projections
+  // intentionally omit events and expose bounded summaries instead.
+  const document = projection.projection as unknown as ProjectionDocument;
+  const intent = projection.presentation_intent;
+  const payload = projectionDetails(document, intent);
+  const payloadRecord = asRecord(payload);
   if (projection.presentation_intent === 'message') {
-    const user = document.events.some((event) => event.kind === 'message/user-accepted');
-    const record = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : null;
+    const user =
+      document.state === 'accepted' ||
+      legacyEvents(document).some((event) => event.kind === 'message/user-accepted');
     return {
       id: projection.projection_id,
       kind: 'message',
@@ -41,21 +112,25 @@ export function projectionCard(projection: IAgentSessionMessageProjection): Sess
       title: user ? 'user' : 'assistant',
       content:
         document.content ??
-        (typeof record?.content === 'string' ? record.content : undefined),
+        (typeof payloadRecord?.content === 'string'
+          ? payloadRecord.content
+          : legacyMessageContent(document)),
       firstSeq: projection.first_seq,
       lastSeq: projection.last_seq,
     };
   }
   if (projection.presentation_intent === 'tool') {
-    const record = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : null;
     return {
       id: projection.projection_id,
       kind: 'tool',
       state: document.state,
       title:
-        (typeof record?.action_id === 'string' && record.action_id) ||
-        (typeof record?.capability_id === 'string' && record.capability_id) ||
-        latestKind,
+        firstSummaryString(document.tool_summary, [
+          'action_id',
+          'capability_id',
+          'name',
+          'tool',
+        ]) ?? latestKind(document, intent),
       details: payload,
       firstSeq: projection.first_seq,
       lastSeq: projection.last_seq,
@@ -66,7 +141,12 @@ export function projectionCard(projection: IAgentSessionMessageProjection): Sess
       id: projection.projection_id,
       kind: 'effect',
       state: document.state,
-      title: latestKind,
+      title:
+        firstSummaryString(document.terminal_effect, [
+          'action_id',
+          'capability_id',
+          'effect',
+        ]) ?? latestKind(document, intent),
       details: payload,
       firstSeq: projection.first_seq,
       lastSeq: projection.last_seq,
@@ -76,7 +156,7 @@ export function projectionCard(projection: IAgentSessionMessageProjection): Sess
     id: projection.projection_id,
     kind: 'status',
     state: document.state,
-    title: latestKind,
+    title: latestKind(document, intent),
     details: payload,
     firstSeq: projection.first_seq,
     lastSeq: projection.last_seq,

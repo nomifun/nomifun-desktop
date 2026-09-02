@@ -140,6 +140,7 @@ fn resolved_content(contract: &CodingCodexContract) -> ResolvedSnapshotContent {
         capability_allowlist: contract.ceiling_ids(),
         skill_locks: Vec::new(),
         mcp_tool_locks: Vec::new(),
+        resolved_role_providers: BTreeMap::new(),
         typed_resource_bindings: vec![workspace_binding()],
         canonical_schema_manifest_digest: DigestHex::from("schema"),
         target_contribution_manifest_digest: contract

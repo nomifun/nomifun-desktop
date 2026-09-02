@@ -3,14 +3,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use nomifun_agent_contracts::{
     ActionId, AgentBindingValue, AgentPresetId, AgentSessionId, AgentSessionLiveRecord,
     AgentSessionMetadata, ArtifactId, CapabilityId, CompactionCompletedPayload, CorrelationId,
-    ChatRouteIdentity, DeleteAgentSessionCommand, DigestHex, EventId, EventProducerId,
+    ChatRouteIdentity, DeleteAgentSessionCommand, DigestHex, EffectClass, EventId, EventProducerId,
     IdempotencyKey, LogicalArtifactRef, OperationId, PresetRevisionRef, PrincipalRef,
     RemoteBindingId, RemoteBindingProvenance, ResolvedSnapshotId, ResolvedSnapshotRef,
     RuntimeBindingId, RuntimeCapabilityExecutionContract,
     RuntimeCheckpointBinding, RuntimeCheckpointValidationInput, RuntimeCheckpointValidationResult,
     RuntimeEventEnvelope, RuntimeExecutionCeiling, RuntimeExecutorSupport, RuntimeProfileKind,
     SemanticSessionEventDraft, SessionEventAppend, SessionEventKind, SessionEventPayloadRef,
-    SessionPayloadBody, SessionPayloadRecord, SnapshotCompatibilityAdmissionInput,
+    SessionEventRecord, SessionPayloadBody, SessionPayloadRecord, SnapshotCompatibilityAdmissionInput,
     SnapshotCompatibilityAdmissionResult, StrictJsonValue, VersionString, canonical_json_bytes,
     digest_bytes,
 };
@@ -19,9 +19,10 @@ use uuid::Uuid;
 
 use crate::{
     AgentSessionStore, ChatOperationClaimRequest, CreateSessionRequest, EffectEventRequest,
-    EffectReconcileOutcome, EffectTerminalState, ForkRequest, RuntimeAppendContext,
+    EffectReconcileOutcome, EffectStrategy, EffectTerminalState, ForkRequest, RuntimeAppendContext,
     SessionStoreError, evaluate_snapshot_compatibility, validate_checkpoint,
 };
+use crate::projector::reduce_message_projection;
 
 fn session_id() -> AgentSessionId {
     AgentSessionId(Uuid::now_v7().to_string())
@@ -33,6 +34,38 @@ fn event_id(value: &str) -> EventId {
 
 fn digest(byte: char) -> DigestHex {
     DigestHex(byte.to_string().repeat(64))
+}
+
+#[test]
+fn effect_classes_collapse_to_exactly_three_lifecycle_strategies() {
+    for class in [
+        EffectClass::Pure,
+        EffectClass::ReadLocal,
+        EffectClass::ReadSensitive,
+    ] {
+        assert_eq!(
+            EffectStrategy::from_effect_class(class),
+            EffectStrategy::ReadOnly
+        );
+    }
+    for class in [
+        EffectClass::WriteReversible,
+        EffectClass::WriteDurable,
+        EffectClass::ExecuteLocal,
+        EffectClass::Destructive,
+        EffectClass::Irreversible,
+    ] {
+        assert_eq!(
+            EffectStrategy::from_effect_class(class),
+            EffectStrategy::ManagedEffect
+        );
+    }
+    for class in [EffectClass::ExternalTransmit, EffectClass::Physical] {
+        assert_eq!(
+            EffectStrategy::from_effect_class(class),
+            EffectStrategy::ExternalUncertainEffect
+        );
+    }
 }
 
 fn owner() -> PrincipalRef {
@@ -118,6 +151,30 @@ fn append(
             causation_event_id: causation,
             payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(payload)),
         },
+    }
+}
+
+fn projection_event(
+    session_id: &AgentSessionId,
+    seq: u64,
+    event: &str,
+    kind: &str,
+    correlation: &str,
+    payload: serde_json::Value,
+) -> SessionEventRecord {
+    SessionEventRecord {
+        agent_session_id: session_id.clone(),
+        seq,
+        event_id: event_id(event),
+        producer_id: EventProducerId("projection-test".to_owned()),
+        idempotency_key: IdempotencyKey(format!("projection-{event}")),
+        runtime_binding_id: None,
+        runtime_producer_seq: None,
+        kind: SessionEventKind(kind.to_owned()),
+        kind_version: 1,
+        correlation_id: CorrelationId(correlation.to_owned()),
+        causation_event_id: None,
+        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(payload)),
     }
 }
 
@@ -440,6 +497,8 @@ async fn append_projection_cursor_and_rebuild_are_one_deterministic_chain() {
         .find(|projection| projection.projection_id == "message:message-1")
         .unwrap();
     assert_eq!(message.projection["content"], "hello");
+    assert_eq!(message.projection["part_count"], 1);
+    assert!(message.projection.get("events").is_none());
 
     sqlx::query("DELETE FROM message_projection WHERE session_id = ?")
         .bind(session.agent_session_id.as_ref())
@@ -483,6 +542,155 @@ async fn append_projection_cursor_and_rebuild_are_one_deterministic_chain() {
             .await
             .unwrap(),
         before_cursor
+    );
+}
+
+#[test]
+fn projection_reads_legacy_events_once_and_rewrites_compactly() {
+    let session_id = session_id();
+    let existing = crate::MessageProjection {
+        session_id: session_id.clone(),
+        projection_id: "message:legacy-message".to_owned(),
+        first_seq: 3,
+        last_seq: 3,
+        presentation_intent: "message".to_owned(),
+        projection: json!({
+            "projection_id": "message:legacy-message",
+            "correlation_id": "legacy-message",
+            "presentation_intent": "message",
+            "events": [{
+                "seq": 3,
+                "kind": "message/content-part",
+                "kind_version": 1,
+                "payload": {"content": "hello"}
+            }],
+            "state": "streaming",
+            "content": "hello"
+        }),
+        semantic_digest: "legacy-digest".to_owned(),
+    };
+    let payload = json!({
+        "content_digest": digest_bytes(b"hello"),
+        "part_count": 1
+    });
+    let completed = projection_event(
+        &session_id,
+        4,
+        "event-legacy-message-completed",
+        "message/completed",
+        "legacy-message",
+        payload.clone(),
+    );
+
+    let projection =
+        reduce_message_projection(Some(existing), &completed, &payload).unwrap();
+
+    assert_eq!(projection.projection["state"], "completed");
+    assert_eq!(projection.projection["content"], "hello");
+    assert_eq!(projection.projection["part_count"], 1);
+    assert!(projection.projection.get("events").is_none());
+}
+
+#[test]
+fn projection_keeps_tool_references_and_terminal_effect_summary_without_events() {
+    let session_id = session_id();
+    let started_payload = json!({
+        "operation_id": "operation-1",
+        "capability_id": "coding.workspace",
+        "action_id": "workspace.write",
+        "input": {"content": "not copied into the projection"}
+    });
+    let started = projection_event(
+        &session_id,
+        3,
+        "event-tool-started",
+        "tool/call-started",
+        "tool-1",
+        started_payload.clone(),
+    );
+    let tool =
+        reduce_message_projection(None, &started, &started_payload).unwrap();
+    let result_payload = json!({
+        "operation_id": "operation-1",
+        "capability_id": "coding.workspace",
+        "action_id": "workspace.write",
+        "output": {"content": "not copied into the projection"},
+        "output_ref": {
+            "artifact_id": "artifact-1",
+            "normalized_relative_path": "results/artifact-1",
+            "digest": "abc123"
+        }
+    });
+    let result = projection_event(
+        &session_id,
+        4,
+        "event-tool-result",
+        "tool/result-recorded",
+        "tool-1",
+        result_payload.clone(),
+    );
+    let tool =
+        reduce_message_projection(Some(tool), &result, &result_payload).unwrap();
+
+    assert!(tool.projection.get("events").is_none());
+    assert_eq!(
+        tool.projection["tool_summary"]["action_id"],
+        "workspace.write"
+    );
+    assert!(
+        tool.projection["tool_summary"]["result_digest"].is_string(),
+        "tool output must be summarized by digest"
+    );
+    assert!(tool.projection["tool_summary"].get("input").is_none());
+    assert!(tool.projection["tool_summary"].get("output").is_none());
+    assert_eq!(
+        tool.projection["reference"]["output_ref"]["artifact_id"],
+        "artifact-1"
+    );
+
+    let effect_started_payload = json!({
+        "effect_id": "effect-1",
+        "operation_id": "operation-1",
+        "capability_id": "coding.workspace",
+        "action_id": "workspace.write"
+    });
+    let effect_started = projection_event(
+        &session_id,
+        5,
+        "event-effect-started",
+        "effect/started",
+        "effect-1",
+        effect_started_payload.clone(),
+    );
+    let effect =
+        reduce_message_projection(None, &effect_started, &effect_started_payload).unwrap();
+    let effect_succeeded_payload = json!({
+        "receipt": {"artifact_id": "artifact-1"}
+    });
+    let effect_succeeded = projection_event(
+        &session_id,
+        6,
+        "event-effect-succeeded",
+        "effect/succeeded",
+        "effect-1",
+        effect_succeeded_payload.clone(),
+    );
+    let effect = reduce_message_projection(
+        Some(effect),
+        &effect_succeeded,
+        &effect_succeeded_payload,
+    )
+    .unwrap();
+
+    assert!(effect.projection.get("events").is_none());
+    assert_eq!(effect.projection["terminal_effect"]["state"], "succeeded");
+    assert!(
+        effect.projection["terminal_effect"]["result_digest"].is_string(),
+        "effect receipt must be summarized by digest"
+    );
+    assert_eq!(
+        effect.projection["reference"]["last_event_id"],
+        "event-effect-succeeded"
     );
 }
 
@@ -964,7 +1172,95 @@ async fn runtime_events_require_contiguous_binding_sequence_and_replay_original_
 }
 
 #[tokio::test]
-async fn uncertain_effect_is_terminal_until_owning_plugin_reconciles() {
+async fn effect_store_rejects_read_only_lifecycles_and_managed_uncertainty() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, ready_event) = create_ready(&store, "effect-strategy").await;
+    let turn = append(
+        &session.agent_session_id,
+        "event-effect-strategy-turn",
+        "session-api",
+        "effect-strategy-turn",
+        "turn/started",
+        "turn-effect-strategy",
+        Some(ready_event),
+        json!({}),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    let tool = append(
+        &session.agent_session_id,
+        "event-effect-strategy-tool",
+        "runtime-supervisor",
+        "effect-strategy-tool",
+        "tool/call-started",
+        "tool-effect-strategy",
+        Some(turn_ack.event_id),
+        json!({"tool": "files.write"}),
+    );
+    let tool_ack = store.append_event(&tool).await.unwrap().ack.unwrap();
+
+    let read_only = EffectEventRequest {
+        agent_session_id: session.agent_session_id.clone(),
+        event_id: event_id("event-effect-read-only-started"),
+        producer_id: EventProducerId("capability-host".to_owned()),
+        idempotency_key: IdempotencyKey("effect-read-only".to_owned()),
+        correlation_id: CorrelationId("effect-read-only".to_owned()),
+        strategy: EffectStrategy::ReadOnly,
+        causation_event_id: Some(tool_ack.event_id.clone()),
+        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+    };
+    assert!(matches!(
+        store.record_effect_started(read_only).await,
+        Err(SessionStoreError::InvalidEvent(message))
+            if message == "read-only operations must not emit effect lifecycle events"
+    ));
+
+    let managed = EffectEventRequest {
+        agent_session_id: session.agent_session_id.clone(),
+        event_id: event_id("event-effect-managed-started"),
+        producer_id: EventProducerId("capability-host".to_owned()),
+        idempotency_key: IdempotencyKey("effect-managed".to_owned()),
+        correlation_id: CorrelationId("effect-managed".to_owned()),
+        strategy: EffectStrategy::ManagedEffect,
+        causation_event_id: Some(tool_ack.event_id),
+        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({}))),
+    };
+    let started_ack = store
+        .record_effect_started(managed.clone())
+        .await
+        .unwrap()
+        .ack
+        .unwrap();
+    let uncertain = EffectEventRequest {
+        event_id: event_id("event-effect-managed-uncertain"),
+        producer_id: EventProducerId("capability-owner".to_owned()),
+        causation_event_id: Some(started_ack.event_id.clone()),
+        ..managed.clone()
+    };
+    assert!(matches!(
+        store
+            .record_effect_terminal(uncertain, EffectTerminalState::Uncertain)
+            .await,
+        Err(SessionStoreError::InvalidEvent(message))
+            if message == "only external_uncertain_effect may end as uncertain"
+    ));
+
+    let failed = EffectEventRequest {
+        event_id: event_id("event-effect-managed-failed"),
+        producer_id: EventProducerId("capability-owner".to_owned()),
+        causation_event_id: Some(started_ack.event_id),
+        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+            "error": "known local failure"
+        }))),
+        ..managed
+    };
+    store
+        .record_effect_terminal(failed, EffectTerminalState::Failed)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn external_uncertain_effect_is_terminal_until_owning_plugin_reconciles() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
     let (session, ready_event) = create_ready(&store, "effect").await;
     let turn = append(
@@ -996,9 +1292,10 @@ async fn uncertain_effect_is_terminal_until_owning_plugin_reconciles() {
         producer_id: EventProducerId("capability-host".to_owned()),
         idempotency_key: IdempotencyKey("effect-idem".to_owned()),
         correlation_id: CorrelationId("effect-1".to_owned()),
+        strategy: EffectStrategy::ExternalUncertainEffect,
         causation_event_id: Some(tool_ack.event_id),
         payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-            "effect": "write"
+            "strategy": "external_uncertain_effect"
         }))),
     };
     let started_ack = store
@@ -1028,6 +1325,7 @@ async fn uncertain_effect_is_terminal_until_owning_plugin_reconciles() {
         event_id: event_id("event-effect-retry"),
         producer_id: EventProducerId("capability-host-retry".to_owned()),
         idempotency_key: IdempotencyKey("effect-retry".to_owned()),
+        strategy: EffectStrategy::ExternalUncertainEffect,
         ..started.clone()
     };
     assert!(store.record_effect_started(retry).await.is_err());
@@ -1035,13 +1333,27 @@ async fn uncertain_effect_is_terminal_until_owning_plugin_reconciles() {
     let reconcile = EffectEventRequest {
         event_id: event_id("event-effect-reconciled"),
         producer_id: EventProducerId("owning-plugin".to_owned()),
-        causation_event_id: Some(uncertain_ack.event_id),
-        ..started
+        causation_event_id: Some(uncertain_ack.event_id.clone()),
+        ..started.clone()
     };
     store
         .reconcile_effect(reconcile, EffectReconcileOutcome::StillUncertain)
         .await
         .unwrap();
+    let repeated_reconcile = EffectEventRequest {
+        event_id: event_id("event-effect-reconciled-again"),
+        producer_id: EventProducerId("owning-plugin".to_owned()),
+        idempotency_key: IdempotencyKey("effect-reconcile-again".to_owned()),
+        causation_event_id: Some(uncertain_ack.event_id),
+        ..started
+    };
+    assert!(matches!(
+        store
+            .reconcile_effect(repeated_reconcile, EffectReconcileOutcome::StillUncertain)
+            .await,
+        Err(SessionStoreError::InvalidEvent(message))
+            if message == "effect reconciliation is already committed"
+    ));
     let projections = store
         .message_projections_after(&session.agent_session_id, 0)
         .await

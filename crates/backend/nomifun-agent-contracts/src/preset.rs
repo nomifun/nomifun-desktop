@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::digest_payload;
 use crate::package::{
-    CapabilityRef, PackageRef, SkillRef, TargetPackageInventoryPayload,
+    CapabilityRef, ExactRoleProviderRef, PackageRef, PluginSourceMetadata,
+    RoleProviderSelection, SkillRef, TargetPackageInventoryPayload,
 };
 use crate::runtime::RuntimeProfileKind;
 use crate::{
@@ -161,6 +162,9 @@ pub struct AgentPresetRevisionPayload {
     pub on_demand_capabilities: Vec<CapabilitySelection>,
     pub skill_bindings: Vec<SkillRef>,
     pub resource_bindings: TypedResourceBindings,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub system_role_provider_overrides:
+        BTreeMap<crate::ExecutionRoleId, RoleProviderSelection>,
     pub persona: String,
     pub instructions: String,
     pub context_policy: StrictJsonValue,
@@ -188,6 +192,7 @@ impl AgentPresetRevision {
             &self.payload.initial_capabilities,
             &self.payload.on_demand_capabilities,
         )?;
+        validate_role_provider_overrides(&self.payload.system_role_provider_overrides)?;
         let digest = digest_payload(&self.payload).map_err(|error| PresetContractViolation {
             code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
             message: error.to_string(),
@@ -353,6 +358,15 @@ pub struct ResolvedMcpToolLock {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct ResolvedRoleProviderLock {
+    pub provider: ExactRoleProviderRef,
+    pub source: PluginSourceMetadata,
+    pub supported_members: BTreeSet<crate::CapabilityId>,
+    pub resource_binding_refs: Vec<ResourceBindingId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedSnapshotContent {
     pub schema_version: VersionString,
     pub resolver_version: VersionString,
@@ -373,6 +387,9 @@ pub struct ResolvedSnapshotContent {
     pub capability_allowlist: BTreeSet<crate::CapabilityId>,
     pub skill_locks: Vec<ResolvedSkillLock>,
     pub mcp_tool_locks: Vec<ResolvedMcpToolLock>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resolved_role_providers:
+        BTreeMap<crate::ExecutionRoleId, ResolvedRoleProviderLock>,
     pub typed_resource_bindings: TypedResourceBindings,
     pub canonical_schema_manifest_digest: DigestHex,
     pub target_contribution_manifest_digest: DigestHex,
@@ -399,6 +416,9 @@ impl ResolvedSnapshotEnvelope {
             &self.content.on_demand_capabilities,
         )?;
         validate_snapshot_chat_route_identity(&self.content)?;
+        validate_resolved_role_provider_locks(
+            &self.content.resolved_role_providers,
+        )?;
         let digest = digest_payload(&self.content).map_err(|error| PresetContractViolation {
             code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
             message: error.to_string(),
@@ -411,6 +431,40 @@ impl ResolvedSnapshotEnvelope {
         }
         Ok(())
     }
+}
+
+fn validate_resolved_role_provider_locks(
+    locks: &BTreeMap<crate::ExecutionRoleId, ResolvedRoleProviderLock>,
+) -> Result<(), PresetContractViolation> {
+    for (role_id, lock) in locks {
+        if role_id != &lock.provider.role.key.role_id
+            || lock.provider.mount_id.as_ref().trim().is_empty()
+            || lock.provider.package.id.as_ref().trim().is_empty()
+            || lock.supported_members.is_empty()
+        {
+            return Err(PresetContractViolation {
+                code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
+                message: format!(
+                    "resolved role provider lock {} has inconsistent identity",
+                    role_id.as_ref()
+                ),
+            });
+        }
+        if lock
+            .resource_binding_refs
+            .windows(2)
+            .any(|window| window[0] >= window[1])
+        {
+            return Err(PresetContractViolation {
+                code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
+                message: format!(
+                    "resolved role provider lock {} has unsorted resource bindings",
+                    role_id.as_ref()
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_snapshot_chat_route_identity(
@@ -906,6 +960,76 @@ fn validate_capability_selections(
             .iter()
             .map(|selection| &selection.capability.id),
     )
+}
+
+fn validate_role_provider_overrides(
+    overrides: &BTreeMap<crate::ExecutionRoleId, RoleProviderSelection>,
+) -> Result<(), PresetContractViolation> {
+    for (role_id, selection) in overrides {
+        if role_id.as_ref().trim().is_empty() || !role_id.as_ref().contains('.') {
+            return Err(PresetContractViolation {
+                code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
+                message: format!(
+                    "role provider override key {} must be a namespaced execution role",
+                    role_id.as_ref()
+                ),
+            });
+        }
+        if &selection.role.key.role_id != role_id
+            || selection.provider_mount_id.as_ref().trim().is_empty()
+        {
+            return Err(PresetContractViolation {
+                code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
+                message: format!(
+                    "role provider override {} has inconsistent role or mount identity",
+                    role_id.as_ref()
+                ),
+            });
+        }
+        if !looks_like_semver(selection.role.key.contract_version.as_ref()) {
+            return Err(PresetContractViolation {
+                code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
+                message: format!(
+                    "role provider override {} has an invalid contract version",
+                    role_id.as_ref()
+                ),
+            });
+        }
+        if selection.role.contract_digest.as_ref().len() != 64
+            || !selection
+                .role
+                .contract_digest
+                .as_ref()
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(PresetContractViolation {
+                code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
+                message: format!(
+                    "role provider override {} has an invalid contract digest",
+                    role_id.as_ref()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn looks_like_semver(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let Some(major) = parts.next() else {
+        return false;
+    };
+    let Some(minor) = parts.next() else {
+        return false;
+    };
+    let Some(patch) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && [major, minor, patch]
+            .into_iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn validate_resolved_capability_sets(

@@ -240,6 +240,7 @@ mod tests {
                     capability_allowlist: BTreeSet::from([capability]),
                     skill_locks: Vec::new(),
                     mcp_tool_locks: Vec::new(),
+                    resolved_role_providers: BTreeMap::new(),
                     typed_resource_bindings: Vec::new(),
                     canonical_schema_manifest_digest: DigestHex::from("schema"),
                     target_contribution_manifest_digest: DigestHex::from("target"),

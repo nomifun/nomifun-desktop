@@ -18,6 +18,12 @@ use nomifun_conversation::{ConversationService, IdempotentMessageDelivery};
 /// Exact Session operations needed by the Cron domain.
 #[async_trait]
 pub trait CronSessionPort: Send + Sync {
+    async fn list_by_cron_job(
+        &self,
+        user_id: &str,
+        cron_job_id: &str,
+    ) -> Result<Vec<ConversationResponse>, AppError>;
+
     async fn public_turn_delivery_state(
         &self,
         user_id: &str,
@@ -72,6 +78,14 @@ struct ConversationCronSessionPort {
 
 #[async_trait]
 impl CronSessionPort for ConversationCronSessionPort {
+    async fn list_by_cron_job(
+        &self,
+        user_id: &str,
+        cron_job_id: &str,
+    ) -> Result<Vec<ConversationResponse>, AppError> {
+        self.service.list_by_cron_job(user_id, cron_job_id).await
+    }
+
     async fn public_turn_delivery_state(
         &self,
         user_id: &str,

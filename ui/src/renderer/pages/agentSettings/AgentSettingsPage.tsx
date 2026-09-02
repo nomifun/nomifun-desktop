@@ -1,6 +1,6 @@
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
 import { Alert, Button, Spin } from '@arco-design/web-react';
-import { Info, Refresh } from '@icon-park/react';
+import { Refresh } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useKnowledgeBases } from '@/renderer/pages/knowledge/useKnowledge';
@@ -13,42 +13,22 @@ import styles from './AgentSettingsPage.module.css';
 const AgentSettingsPage: React.FC = () => {
   const { t } = useTranslation();
   const controller = useAgentSettingsController();
-  const {
-    bases: knowledgeBases,
-    loading: knowledgeBasesLoading,
-  } = useKnowledgeBases();
+  const { bases: knowledgeBases, loading: knowledgeBasesLoading } = useKnowledgeBases();
   const sourceTemplate =
     controller.draft?.source_template_key == null
       ? undefined
       : controller.library?.official_templates.find(
-          (template) =>
-            template.template_key === controller.draft?.source_template_key
+          (template) => template.template_key === controller.draft?.source_template_key
         );
   const selectedTemplate =
-    controller.selection?.kind === 'template'
-      ? controller.selection.template
-      : null;
+    controller.selection?.kind === 'template' ? controller.selection.template : null;
 
   return (
     <HubPageShell
       title={t('agentSettings.title')}
-      subtitle={t('agentSettings.subtitle')}
       maxWidthClass='md:max-w-1440px'
       className={styles.pageShell}
     >
-      {controller.library && (
-        <Alert
-          type='info'
-          showIcon
-          icon={<Info theme='outline' size='16' />}
-          title={t('agentSettings.freshStart.title')}
-          content={t('agentSettings.freshStart.body', {
-            count: controller.library.fresh_start.official_template_count,
-          })}
-          className={styles.freshStart}
-        />
-      )}
-
       {controller.error && (
         <Alert
           type='error'
@@ -92,6 +72,9 @@ const AgentSettingsPage: React.FC = () => {
               template={selectedTemplate}
               busy={controller.busyAction === 'fork'}
               hostWorkDir={controller.hostWorkDir}
+              knowledgeBases={knowledgeBases}
+              knowledgeBasesLoading={knowledgeBasesLoading}
+              connectors={controller.connectors}
               onFork={(displayName, resources, modelRoutes, routeRecords) =>
                 void controller.forkTemplate(
                   selectedTemplate.template_key,
@@ -111,10 +94,10 @@ const AgentSettingsPage: React.FC = () => {
               testResult={controller.testResult}
               tokenState={controller.tokenState}
               hostWorkDir={controller.hostWorkDir}
+              connectors={controller.connectors}
               knowledgeBases={knowledgeBases}
               knowledgeBasesLoading={knowledgeBasesLoading}
               sourceTemplate={sourceTemplate}
-              dirty={controller.dirty}
               busyAction={controller.busyAction}
               onDraftChange={controller.setDraft}
               onPreview={() => void controller.runPreview()}

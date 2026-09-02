@@ -5987,8 +5987,10 @@ dependencies = [
 name = "nomifun-agent-domain-wave2"
 version = "0.7.4"
 dependencies = [
+ "async-trait",
  "nomifun-agent-contracts",
  "nomifun-agent-kernel",
+ "serde_json",
 ]
 
 [[package]]

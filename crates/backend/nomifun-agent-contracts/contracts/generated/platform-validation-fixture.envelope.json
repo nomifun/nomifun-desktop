@@ -3,10 +3,10 @@
   "payload": {
     "manifest_version": "1.0.0",
     "confirmed_decision_contract_digest": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5",
-    "canonical_schema_manifest_digest": "e7eb4d3d1cde70a8ae66c9b20836ff33abf1b710dc73d2a0b88393a9c8bfcc46",
-    "cargo_lock_digest": "792362a8edf3e7994a59c89c182698fe1d4661fec5d04409e960a4185663acc9",
-    "official_preset_seed_manifest_digest": "c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8",
-    "capability_availability_manifest_digest": "8fb55c4765eefc59e67e686dfcc1858898c75893b64f353249a2e3d5e705cb68",
+    "canonical_schema_manifest_digest": "f8eb056bfd49e5330603ad36b284ed3269c34e1301db74ba33a0bec861e9573a",
+    "cargo_lock_digest": "51629196c5d1c2940e9ac748e095bbdbd621ba5788a0afa3af5181f0714db22d",
+    "official_preset_seed_manifest_digest": "d15da58409cb096d0a1a5cc8c60534bf378500ecfc697789a5d0ecec85e56582",
+    "capability_availability_manifest_digest": "70ab40f20452974594d897cbf32bcbcb3b030a77b9708534aa5e93c1b76eaa8c",
     "coding_codex_native_contract_digest": "f699f376a9414b7830b90a68c890d39010687499e6d16ee1687f5c370cd0127a",
     "platform_matrix": {
       "target_cells": {
@@ -48,25 +48,6 @@
             }
           }
         },
-        "macos_desktop_x64": {
-          "host_os": "macos",
-          "host_arch": "x86_64",
-          "host_target": "x86_64-apple-darwin",
-          "runtime_target": "x86_64-apple-darwin",
-          "host_surface": "desktop",
-          "package_format": "universal-app",
-          "capability_availability": {
-            "coding_codex_native": {
-              "availability": "required_exact_set"
-            },
-            "browser": {
-              "availability": "release_manifest_defined"
-            },
-            "computer": {
-              "availability": "release_manifest_defined"
-            }
-          }
-        },
         "linux_desktop_x64": {
           "host_os": "linux",
           "host_arch": "x86_64",
@@ -85,27 +66,6 @@
               "availability": "independent_partial_or_exact_unavailable"
             }
           }
-        },
-        "linux_headless_x64": {
-          "host_os": "linux",
-          "host_arch": "x86_64",
-          "host_target": "x86_64-unknown-linux-gnu",
-          "runtime_target": "x86_64-unknown-linux-musl",
-          "host_surface": "headless",
-          "package_format": "headless-service",
-          "capability_availability": {
-            "coding_codex_native": {
-              "availability": "required_exact_set"
-            },
-            "browser": {
-              "availability": "exact_unavailable",
-              "error_code": "CAPABILITY_UNAVAILABLE_ON_PLATFORM"
-            },
-            "computer": {
-              "availability": "exact_unavailable",
-              "error_code": "CAPABILITY_UNAVAILABLE_ON_PLATFORM"
-            }
-          }
         }
       },
       "unsupported_local_targets": [
@@ -117,91 +77,7 @@
         "web_browser_client",
         "robot_firmware",
         "im_client"
-      ],
-      "relay_order": [
-        {
-          "stage_kind": "boundary",
-          "boundary": "windows-c1-c7-continuous"
-        },
-        {
-          "stage_kind": "boundary",
-          "boundary": "c8-win-pre"
-        },
-        {
-          "stage_kind": "boundary",
-          "boundary": "hp-1"
-        },
-        {
-          "stage_kind": "boundary",
-          "boundary": "c8-ma"
-        },
-        {
-          "stage_kind": "boundary",
-          "boundary": "hp-2"
-        },
-        {
-          "stage_kind": "parallel_boundaries",
-          "boundaries": [
-            "c8-mx",
-            "c8-ld",
-            "c8-lh"
-          ]
-        },
-        {
-          "stage_kind": "boundary",
-          "boundary": "merge-c8-whole-batch-fixes"
-        },
-        {
-          "stage_kind": "repeatable_whole_cohort_recheck",
-          "family": "c8"
-        },
-        {
-          "stage_kind": "boundary",
-          "boundary": "c8-merge"
-        },
-        {
-          "stage_kind": "boundary",
-          "boundary": "d027-final-drain-exact-zero"
-        },
-        {
-          "stage_kind": "boundary",
-          "boundary": "c9-nomi-hard-delete"
-        },
-        {
-          "stage_kind": "parallel_boundaries",
-          "boundaries": [
-            "c10-win",
-            "c10-ma",
-            "c10-mx",
-            "c10-ld",
-            "c10-lh"
-          ]
-        },
-        {
-          "stage_kind": "boundary",
-          "boundary": "merge-c10-whole-batch-fixes"
-        },
-        {
-          "stage_kind": "repeatable_whole_cohort_recheck",
-          "family": "c10"
-        },
-        {
-          "stage_kind": "boundary",
-          "boundary": "c10-merge"
-        },
-        {
-          "stage_kind": "boundary",
-          "boundary": "c11-same-digest-stable"
-        }
-      ],
-      "recheck_policy": {
-        "only_after_complete_round_returns": true,
-        "merge_fixes_before_freezing_new_tuple": true,
-        "affected_cells_run_full_gate": true,
-        "unaffected_cells_run_native_scoped_attestation": true,
-        "central_owner_cannot_attest_for_native_host": true,
-        "single_fix_platform_handoff_forbidden": true
-      }
+      ]
     },
     "required_checks": [
       {
@@ -221,27 +97,11 @@
         "required_execution_kind": "native"
       },
       {
-        "check_id": "c8_mx_full_gate",
-        "target_cells": [
-          "macos_desktop_x64"
-        ],
-        "command": "bun run gate:agent-v2 -- c8-mx",
-        "required_execution_kind": "native"
-      },
-      {
         "check_id": "c8_ld_full_gate",
         "target_cells": [
           "linux_desktop_x64"
         ],
         "command": "bun run gate:agent-v2 -- c8-ld",
-        "required_execution_kind": "native"
-      },
-      {
-        "check_id": "c8_lh_full_gate",
-        "target_cells": [
-          "linux_headless_x64"
-        ],
-        "command": "bun run gate:agent-v2 -- c8-lh",
         "required_execution_kind": "native"
       }
     ],
@@ -261,25 +121,11 @@
         "exact_check_id": "c8_ma_full_gate"
       },
       {
-        "verification_point_id": "macos_x64_native_not_rosetta",
-        "owning_module": "packaging/macos",
-        "target_cell": "macos_desktop_x64",
-        "behavior_to_observe": "Intel host runs the native x64 runtime and package Gate",
-        "exact_check_id": "c8_mx_full_gate"
-      },
-      {
         "verification_point_id": "linux_desktop_gnu_host_musl_runtime",
         "owning_module": "runtime-supervisor/linux",
         "target_cell": "linux_desktop_x64",
         "behavior_to_observe": "GNU desktop Host launches the musl x64 runtime and fails closed for unavailable Computer capability",
         "exact_check_id": "c8_ld_full_gate"
-      },
-      {
-        "verification_point_id": "linux_headless_browser_computer_unavailable",
-        "owning_module": "capability-availability/linux",
-        "target_cell": "linux_headless_x64",
-        "behavior_to_observe": "Browser and Computer remain exact-unavailable while full Coding remains available",
-        "exact_check_id": "c8_lh_full_gate"
       }
     ],
     "decision_fixture_refs": {
@@ -310,9 +156,9 @@
       "d028_platform_matrix": {
         "artifact_id": "d028_platform_matrix",
         "normalized_relative_path": "contracts/validation/d028-platform-matrix.json",
-        "digest": "8fb55c4765eefc59e67e686dfcc1858898c75893b64f353249a2e3d5e705cb68"
+        "digest": "70ab40f20452974594d897cbf32bcbcb3b030a77b9708534aa5e93c1b76eaa8c"
       }
     }
   },
-  "payload_digest": "766b667840a3230d7fe9061bc27fe4cd89ed9de94124389bd243e55525f88dc7"
+  "payload_digest": "532ddc92bfd874da4fdf792a246c9bf7b6e2334cd4e16e202f1db6a21d058d12"
 }

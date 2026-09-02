@@ -108,6 +108,27 @@ pub struct CapabilitySelectionDto {
     pub config: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleContractKeyDto {
+    pub role_id: String,
+    pub contract_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExactRoleContractRefDto {
+    pub key: RoleContractKeyDto,
+    pub contract_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleProviderSelectionDto {
+    pub role: ExactRoleContractRefDto,
+    pub provider_mount_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPresetDocumentDto {
@@ -123,6 +144,8 @@ pub struct AgentPresetDocumentDto {
     pub on_demand_capabilities: Vec<CapabilitySelectionDto>,
     pub skill_bindings: Vec<ExactCatalogRefDto>,
     pub resource_bindings: Vec<TypedResourceBindingDto>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub system_role_provider_overrides: BTreeMap<String, RoleProviderSelectionDto>,
     pub persona: String,
     pub instructions: String,
     pub context_policy: Value,

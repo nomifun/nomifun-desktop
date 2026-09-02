@@ -2,7 +2,7 @@
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
     "manifest_version": "1.0.0",
-    "target_first_party_contribution_digest": "85e250015c78291091a11a68e5205b62a6fb510ed98f5536c2eb1fe351e536f2",
+    "target_first_party_contribution_digest": "f8b5460165689bb463bd286573b5b2731a20803107e2b27ca3d86420dad62d1b",
     "target_runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
     "templates": {
       "chat.minimal": {
@@ -970,5 +970,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8"
+  "payload_digest": "d15da58409cb096d0a1a5cc8c60534bf378500ecfc697789a5d0ecec85e56582"
 }
