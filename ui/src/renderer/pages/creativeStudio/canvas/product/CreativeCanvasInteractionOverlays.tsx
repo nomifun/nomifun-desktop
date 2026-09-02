@@ -20,6 +20,7 @@ export interface CreativeCanvasContextMenuState {
   target: CanvasContextTarget;
   clientPosition: CanvasPoint;
   nodeLocked?: boolean;
+  selectedEdgeCount?: number;
 }
 
 export interface CreativeCanvasCreateNodeMenuState {
@@ -143,7 +144,9 @@ const CreativeCanvasInteractionOverlays: React.FC<CreativeCanvasInteractionOverl
           ) : null}
           {contextMenu.target.kind === 'edge' ? (
             <MenuButton danger onClick={() => onContextAction('delete')}>
-              {t('creativeStudio.canvas.contextMenu.deleteConnection', {
+              {(contextMenu.selectedEdgeCount ?? 0) > 1
+                ? t('creativeStudio.canvas.connection.deleteSelected', { count: contextMenu.selectedEdgeCount })
+                : t('creativeStudio.canvas.contextMenu.deleteConnection', {
                 defaultValue: '删除连接',
               })}
             </MenuButton>

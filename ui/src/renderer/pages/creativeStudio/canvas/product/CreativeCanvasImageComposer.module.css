@@ -8,8 +8,9 @@
 
 .referenceStrip {
   display: flex;
+  flex: 1;
   min-width: 0;
-  gap: 7px;
+  gap: 6px;
   overflow-x: auto;
   padding: 1px;
   scrollbar-color: color-mix(in srgb, var(--color-text-3) 28%, transparent) transparent;
@@ -19,9 +20,10 @@
 .referenceItem {
   position: relative;
   display: grid;
-  width: 54px;
-  min-width: 54px;
-  gap: 3px;
+  width: 44px;
+  flex: 0 0 44px;
+  min-width: 0;
+  gap: 2px;
 }
 
 .referencePreview {
@@ -29,8 +31,9 @@
   position: relative;
   display: grid;
   box-sizing: border-box;
-  width: 54px;
-  height: 42px;
+  width: 44px;
+  height: 44px;
+  aspect-ratio: 1;
   overflow: hidden;
   place-items: center;
   padding: 0;
@@ -55,20 +58,40 @@
   font-weight: 700;
 }
 
+.referenceItem[data-reference-kind='text'] .referencePreview {
+  padding: 4px;
+}
+
+.referencePreview > .referenceText {
+  display: -webkit-box;
+  overflow: hidden;
+  width: 100%;
+  color: var(--color-text-2);
+  font-size: 9px;
+  font-weight: 400;
+  line-height: 12px;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
 .referencePreview > strong {
   position: absolute;
   bottom: 3px;
   left: 3px;
   display: grid;
-  min-width: 16px;
-  height: 16px;
+  box-sizing: border-box;
+  min-width: 13px;
+  height: 13px;
   place-items: center;
-  padding: 0 3px;
+  padding: 0 2px;
   border-radius: 999px;
   background: color-mix(in srgb, #000 68%, transparent);
   color: #fff;
-  font-size: 9px;
-  line-height: 16px;
+  font-size: 8px;
+  line-height: 13px;
 }
 
 .referencePreview:hover:not(:disabled),
@@ -81,7 +104,7 @@
   overflow: hidden;
   color: var(--color-text-3);
   font-size: 9px;
-  line-height: 13px;
+  line-height: 12px;
   text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -90,28 +113,137 @@
 .referenceRemove {
   appearance: none;
   position: absolute;
-  top: -4px;
-  right: -4px;
+  top: 0;
+  right: 0;
   display: grid;
-  width: 18px;
-  height: 18px;
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   place-items: center;
+  margin: 0;
   padding: 0;
-  border: 1px solid var(--color-border-2);
+  border: 0;
   border-radius: 50%;
-  background: var(--color-bg-popup);
+  background: transparent;
   color: var(--color-text-2);
   cursor: pointer;
+  line-height: 0;
+}
+
+.referenceRemove :global(.i-icon),
+.referenceRemove :global(svg) {
+  display: block;
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  padding: 0;
+}
+
+/* CloseOne's 48-unit viewBox surrounds a 43-unit stroked circle. Crop that
+ * built-in whitespace so the visible icon fills the 12px button exactly. */
+.referenceRemove :global(svg) {
+  transform: scale(calc(48 / 43));
+  transform-origin: center;
 }
 
 .referenceRemove:hover:not(:disabled),
 .referenceRemove:focus-visible {
-  border-color: rgb(var(--danger-6));
   color: rgb(var(--danger-6));
+}
+
+.referenceRemove:focus-visible {
+  outline: 1px solid rgb(var(--danger-6));
+  outline-offset: 0;
 }
 
 .referenceItem[data-unavailable='true'] {
   opacity: 0.55;
+}
+
+.referenceRow {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.referenceBatchButton {
+  appearance: none;
+  flex: 0 0 auto;
+  min-height: 26px;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-2);
+  font: inherit;
+  font-size: 10px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.referenceBatchButton:hover:not(:disabled) {
+  background: var(--color-fill-2);
+}
+
+.referenceBatchButton:focus-visible {
+  outline: 2px solid rgb(var(--primary-6));
+  outline-offset: 1px;
+}
+
+.referenceBatchButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.referenceBatchActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  color: var(--color-text-3);
+  font-size: 10px;
+}
+
+.referenceBatchButton[data-danger] {
+  margin-left: auto;
+  color: rgb(var(--danger-6));
+}
+
+.referencePreview[aria-pressed='true'] {
+  border-color: rgb(var(--primary-6));
+  box-shadow: 0 0 0 1px rgb(var(--primary-6));
+}
+
+.referencePreview > .referenceCheck {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  display: grid;
+  box-sizing: border-box;
+  width: 13px;
+  height: 13px;
+  place-items: center;
+  border: 1px solid var(--color-border-3);
+  border-radius: 4px;
+  background: var(--color-bg-popup);
+  color: var(--color-text-1);
+  font-size: 10px;
+  line-height: 11px;
+}
+
+.referencePreview[aria-pressed='true'] > .referenceCheck {
+  border-color: rgb(var(--primary-6));
+  background: rgb(var(--primary-6));
+  color: var(--color-white);
+}
+
+.referenceSection[data-reference-batch] .referenceItem[data-unavailable='true'] {
+  opacity: 1;
 }
 
 .settingsHost {

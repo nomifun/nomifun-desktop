@@ -5,12 +5,27 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { canvasReducer, createInitialCanvasState } from '../core';
-import { sequentialTestIdFactory, testDocument, testNode } from '../core/testFixtures';
+import { canvasCommands, canvasReducer, createInitialCanvasState } from '../core';
+import { sequentialTestIdFactory, testDocument, testEdge, testNode } from '../core/testFixtures';
 import { resolveCanvasContextAction, resolveCanvasDoubleClick } from './context';
 import { validateCanvasDropImport } from './drop';
 
 describe('canvas context, double-click and drop intents', () => {
+  test('deletes selected connections together and leaves unrelated edges and nodes intact', () => {
+    const nodes = [testNode('image', 201), testNode('text', 202), testNode('video', 203)];
+    const edges = [testEdge(211, nodes[0].id, nodes[2].id), testEdge(212, nodes[1].id, nodes[2].id), testEdge(213, nodes[0].id, nodes[1].id)];
+    let state = createInitialCanvasState({ document: testDocument(nodes, edges) });
+    state = canvasReducer(state, canvasCommands.setSelection([nodes[0].id], [edges[0].id, edges[1].id]));
+    const result = resolveCanvasContextAction(state, { kind: 'edge', edgeId: edges[1].id }, 'delete');
+    expect(result.commands).toHaveLength(1);
+    const deleted = canvasReducer(state, result.commands[0]);
+    expect(deleted.document.nodes).toEqual(nodes);
+    expect(deleted.document.connections).toEqual([edges[2]]);
+    expect(canvasReducer(deleted, canvasCommands.undo()).document.connections).toEqual(edges);
+    const unselected = resolveCanvasContextAction(state, { kind: 'edge', edgeId: edges[2].id }, 'delete');
+    expect(canvasReducer(state, unselected.commands[0]).document.connections).toEqual(edges.slice(0, 2));
+  });
+
   test('uses canonical update/paste commands for lock and duplicate actions', () => {
     const node = testNode('text', 1);
     const state = createInitialCanvasState({ document: testDocument([node]) });

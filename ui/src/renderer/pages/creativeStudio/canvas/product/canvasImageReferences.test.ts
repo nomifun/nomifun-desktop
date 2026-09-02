@@ -55,6 +55,44 @@ const panoramaNode = (index: number, assetId: string | null) => {
 };
 
 describe('canvas image reference resolution', () => {
+  test('uses connected text as prompt input without consuming image ordinals or limits', () => {
+    const target = imageNode(40, null);
+    const text = testNode('text', 41);
+    text.data.text = '一只猫，水彩风格';
+    const image = imageNode(42, testUuid(43));
+    const document = testDocument([target, text, image], [testEdge(44, text.id, target.id)]);
+    const resolve = () => resolveCanvasImageReferences({ document }, target.id, [asset(43)]);
+    const resolution = resolve();
+    expect(resolution.issues).toEqual([]);
+    expect(resolution.references).toEqual([]);
+    expect(resolution.textReferences[0]).toMatchObject({ sourceNodeId: text.id, ordinal: 1, text: text.data.text });
+    const compile = (prompt: string, mentions: AuthoredCanvasImagePromptMention[] = []) =>
+      compileCanvasImageReferencePrompt(prompt, mentions, resolve().references, resolve().textReferences);
+    expect(compile('').providerPrompt).toBe(text.data.text);
+    expect(compile('白色背景').providerPrompt).toBe(`${text.data.text}\n\n白色背景`);
+    expect(evaluateCanvasImageGenerationGate({ resolution, compilation: compile(''), maxInputImages: 0 })).toMatchObject({
+      allowed: true, operation: 't2i', referenceCount: 0,
+    });
+    document.connections.push(testEdge(45, image.id, target.id));
+    const prompt = '@文本1 和 @图片1';
+    const mentions = [mentionAt(prompt, '@文本1', text.id), mentionAt(prompt, '@图片1', image.id)];
+    expect(compile(prompt, mentions).providerPrompt).toBe(`${text.data.text} 和 Reference 1`);
+    text.data.text = '修改后的文字';
+    expect(compile(prompt, mentions).providerPrompt).toBe('修改后的文字 和 Reference 1');
+    document.connections = document.connections.filter((edge) => edge.sourceNodeId !== text.id);
+    expect(compile(prompt, mentions).issues).toMatchObject([{ code: 'mention_reference_disconnected' }]);
+  });
+
+  test('reports empty connected text with a text-specific blocker', () => {
+    const target = imageNode(46, null);
+    const text = testNode('text', 47);
+    const resolution = resolveCanvasImageReferences({ document: testDocument([target, text], [testEdge(48, text.id, target.id)]) }, target.id, []);
+    expect(resolution.issues).toMatchObject([{ code: 'source_text_empty' }]);
+    expect(evaluateCanvasImageGenerationGate({
+      resolution, compilation: compileCanvasImageReferencePrompt('画猫', [], [], resolution.textReferences), maxInputImages: 0,
+    }).allowed).toBe(false);
+  });
+
   test('derives direct image and panorama inputs in durable connection order', () => {
     const personAsset = asset(101, { title: '人物图' });
     const panoramaAsset = asset(102, { title: '   ' });
@@ -113,7 +151,7 @@ describe('canvas image reference resolution', () => {
 
   test('reports every invalid inbound edge and rejects later duplicate assets', () => {
     const target = imageNode(20, null);
-    const unsupported = testNode('text', 21);
+    const unsupported = testNode('video', 21);
     const missingAssetId = imageNode(22, null);
     const unresolved = imageNode(23, testUuid(303));
     const wrongKindAsset = asset(304, { kind: 'video', mimeType: 'video/mp4' });

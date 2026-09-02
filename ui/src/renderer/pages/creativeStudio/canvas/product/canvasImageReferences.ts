@@ -43,7 +43,15 @@ export interface CanvasImageReference {
   displayName: string;
 }
 
+export interface CanvasTextReference {
+  sourceNodeId: string;
+  connection: CreativeCanvasConnection;
+  ordinal: number;
+  text: string;
+}
+
 export type CanvasImageReferenceIssue =
+  | { code: 'source_text_empty'; connectionId: string; sourceNodeId: string }
   | {
       code: 'target_node_missing';
       targetNodeId: string;
@@ -108,6 +116,7 @@ export interface CanvasImageReferenceResolution {
   /** Number of direct inbound connections, including invalid ones. */
   inboundConnectionCount: number;
   references: CanvasImageReference[];
+  textReferences: CanvasTextReference[];
   issues: CanvasImageReferenceIssue[];
 }
 
@@ -162,6 +171,7 @@ export function resolveCanvasImageReferences(
       targetNodeId,
       inboundConnectionCount: 0,
       references: [],
+      textReferences: [],
       issues: [{ code: 'target_node_missing', targetNodeId }],
     };
   }
@@ -170,6 +180,7 @@ export function resolveCanvasImageReferences(
       targetNodeId,
       inboundConnectionCount: 0,
       references: [],
+      textReferences: [],
       issues: [
         {
           code: 'target_node_kind_unsupported',
@@ -186,6 +197,7 @@ export function resolveCanvasImageReferences(
     (connection) => connection.targetNodeId === targetNodeId
   );
   const references: CanvasImageReference[] = [];
+  const textReferences: CanvasTextReference[] = [];
   const issues: CanvasImageReferenceIssue[] = [];
   const firstReferenceByAssetId = new Map<string, CanvasImageReference>();
 
@@ -229,6 +241,12 @@ export function resolveCanvasImageReferences(
         connectionId: connection.id,
         sourceNodeId: connection.sourceNodeId,
       });
+      continue;
+    }
+    if (source.type === 'text') {
+      const text = source.data.text.trim();
+      textReferences.push({ sourceNodeId: source.id, connection, ordinal: textReferences.length + 1, text });
+      if (!text) issues.push({ code: 'source_text_empty', connectionId: connection.id, sourceNodeId: source.id });
       continue;
     }
     if (!isReferenceNode(source)) {
@@ -314,6 +332,7 @@ export function resolveCanvasImageReferences(
     targetNodeId,
     inboundConnectionCount: inboundConnections.length,
     references,
+    textReferences,
     issues,
   };
 }
@@ -377,14 +396,21 @@ interface IndexedMention {
   mentionIndex: number;
 }
 
-/** Replace validated mention chips with their ordered provider labels. */
+/** Resolve image mentions and connected text into the provider prompt. */
 export function compileCanvasImageReferencePrompt(
   authoredPrompt: string,
   mentions: readonly AuthoredCanvasImagePromptMention[],
-  references: readonly CanvasImageReference[]
+  references: readonly CanvasImageReference[],
+  textReferences: readonly CanvasTextReference[] = []
 ): CanvasImagePromptCompilation {
   const referencesBySourceNodeId = new Map(
-    references.map((reference) => [reference.sourceNodeId, reference])
+    [
+      ...references,
+      ...textReferences.map((reference) => ({
+        sourceNodeId: reference.sourceNodeId,
+        providerLabel: reference.text,
+      })),
+    ].map((reference) => [reference.sourceNodeId, reference])
   );
   const sorted: IndexedMention[] = mentions
     .map((mention, mentionIndex) => ({ mention, mentionIndex }))
@@ -395,7 +421,7 @@ export function compileCanvasImageReferencePrompt(
         left.mentionIndex - right.mentionIndex
     );
   const issues: CanvasImagePromptCompilationIssue[] = [];
-  const valid: Array<IndexedMention & { reference: CanvasImageReference }> = [];
+  const valid: Array<IndexedMention & { reference: { providerLabel: string } }> = [];
   let previous: IndexedMention | null = null;
 
   for (const indexed of sorted) {
@@ -471,6 +497,18 @@ export function compileCanvasImageReferencePrompt(
     cursor = mention.end;
   }
   providerPrompt += authoredPrompt.slice(cursor);
+
+  // Connected text is prompt input, not an image attachment. Explicit mentions
+  // place it inline; otherwise include it once before the authored instruction.
+  const mentionedNodeIds = new Set(referencedSourceNodeIds);
+  const unmentionedText = textReferences.filter(
+    (reference) => !mentionedNodeIds.has(reference.sourceNodeId) && reference.text
+  );
+  if (unmentionedText.length > 0) {
+    providerPrompt = [...unmentionedText.map((reference) => reference.text), providerPrompt]
+      .filter(Boolean).join('\n\n');
+    referencedSourceNodeIds.push(...unmentionedText.map((reference) => reference.sourceNodeId));
+  }
 
   return {
     ok: true,

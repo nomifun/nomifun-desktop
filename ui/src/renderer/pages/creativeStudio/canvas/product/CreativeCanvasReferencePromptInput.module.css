@@ -252,3 +252,15 @@
     min-height: 52px;
   }
 }
+.thumbnailText {
+  display: -webkit-box;
+  overflow: hidden;
+  padding: 4px;
+  color: var(--color-text-2);
+  font-size: 9px;
+  line-height: 12px;
+  text-align: left;
+  overflow-wrap: anywhere;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}

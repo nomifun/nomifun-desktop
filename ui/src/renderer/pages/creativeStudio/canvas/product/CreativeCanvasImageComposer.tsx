@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ArrowUp, BookOne, CloseOne, Down, Loading, SettingTwo } from '@icon-park/react';
+import { ArrowUp, BookOne, Down, Loading, SettingTwo } from '@icon-park/react';
 import { InputNumber, Radio, Select } from '@arco-design/web-react';
 import { autoUpdate, flip, offset, shift, size, useFloating } from '@floating-ui/react';
 import React, {
@@ -35,19 +35,16 @@ import ImageSizePicker from '../../workbenches/image/ImageSizePicker';
 import CreativeCanvasReferencePromptInput, {
   relabelCreativeCanvasPromptMentions,
   type CreativeCanvasPromptMentionBinding,
-  type CreativeCanvasPromptReferenceOption,
   type CreativeCanvasReferencePromptChange,
 } from './CreativeCanvasReferencePromptInput';
 import CreativeCanvasComposerShell from './CreativeCanvasComposerShell';
+import CreativeCanvasReferenceList, {
+  type CreativeCanvasImageComposerReference,
+} from './CreativeCanvasReferenceList';
 import composerStyles from './CreativeCanvasComposerShell.module.css';
 import styles from './CreativeCanvasImageComposer.module.css';
 
-export interface CreativeCanvasImageComposerReference
-  extends CreativeCanvasPromptReferenceOption {
-  assetId: string | null;
-  connectionId: string | null;
-  base: boolean;
-}
+export type { CreativeCanvasImageComposerReference } from './CreativeCanvasReferenceList';
 
 export interface CreativeCanvasImageComposerProps {
   nodeId: string;
@@ -67,6 +64,7 @@ export interface CreativeCanvasImageComposerProps {
   onPromptChange?(change: CreativeCanvasReferencePromptChange): void;
   onReferenceActivate?(sourceNodeId: string): void;
   onReferenceDisconnect?(connectionId: string): void;
+  onReferencesDisconnect?(connectionIds: readonly string[]): void;
   onOpenPromptLibrary(): void;
   onModelChange(model: ImageWorkbenchModelIdentity | null): void;
   onInterfaceModeChange(mode: ImageWorkbenchInterfaceMode): void;
@@ -108,6 +106,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
   onPromptChange,
   onReferenceActivate,
   onReferenceDisconnect,
+  onReferencesDisconnect,
   onOpenPromptLibrary,
   onModelChange,
   onInterfaceModeChange,
@@ -130,7 +129,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
   const referenceAliasSignature = `${i18n.resolvedLanguage ?? i18n.language}:${references
     .map(
       (reference) =>
-        `${reference.nodeId}:${reference.ordinal}:${reference.disabledReason ? 'disabled' : 'enabled'}`
+        `${reference.nodeId}:${reference.ordinal}:${reference.mentionLabel ?? ''}:${reference.disabledReason ? 'disabled' : 'enabled'}`
     )
     .join(',')}`;
   const normalizedInitialDraft = useMemo(
@@ -169,9 +168,12 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     whileElementsMounted: autoUpdate,
   });
   const busy = task.state === 'queued' || task.state === 'running';
+  const hasTextInput = references.some((reference) =>
+    reference.kind === 'text' && reference.textContent?.trim() && !reference.disabledReason
+  );
   const canGenerate = retrySubmission
     ? !disabled && onRetrySubmission !== undefined
-    : !disabled && !generateBlocked && !busy && prompt.trim().length > 0 && settings.model !== null;
+    : !disabled && !generateBlocked && !busy && (prompt.trim().length > 0 || hasTextInput) && settings.model !== null;
   const modelValue = settings.model ? imageWorkbenchModelKey(settings.model) : undefined;
   const modelOptionByKey = useMemo(
     () => new Map(modelOptions.map((option) => [imageWorkbenchModelKey(option), option])),
@@ -240,7 +242,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
       onRetrySubmission();
       return;
     }
-    if (!canGenerate || !change.value.trim()) return;
+    if (!canGenerate || (!change.value.trim() && !hasTextInput)) return;
     // Mention offsets are relative to the authored string. Preserve it exactly;
     // trimming here would make otherwise valid UTF-16 ranges stale.
     onGenerate(change.value, change.mentions);
@@ -253,60 +255,14 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
       kind='image'
       nodeId={nodeId}
     >
-        {references.length > 0 ? (
-          <div className={styles.referenceSection}>
-            <div
-              className={styles.referenceStrip}
-              role='list'
-              aria-label={t('creativeStudio.canvas.image.connectedReferences', {
-                defaultValue: '已连接参考',
-              })}
-            >
-              {references.map((reference) => (
-                <div
-                  key={reference.nodeId}
-                  className={styles.referenceItem}
-                  role='listitem'
-                  data-base={reference.base || undefined}
-                  data-unavailable={Boolean(reference.disabledReason) || undefined}
-                >
-                  <button
-                    type='button'
-                    className={styles.referencePreview}
-                    aria-label={t('creativeStudio.canvas.image.locateReference', {
-                      name: reference.label,
-                      defaultValue: `定位参考图 ${reference.label}`,
-                    })}
-                    disabled={disabled}
-                    onClick={() => onReferenceActivate?.(reference.nodeId)}
-                  >
-                    {reference.thumbnailUrl ? (
-                      <img src={reference.thumbnailUrl} alt='' />
-                    ) : (
-                      <span aria-hidden='true'>{reference.ordinal}</span>
-                    )}
-                    <strong>{reference.disabledReason ? '!' : reference.ordinal}</strong>
-                  </button>
-                  <span className={styles.referenceName}>{reference.label}</span>
-                  {!reference.base && reference.connectionId && onReferenceDisconnect ? (
-                    <button
-                      type='button'
-                      className={styles.referenceRemove}
-                      aria-label={t('creativeStudio.canvas.image.disconnectReference', {
-                        name: reference.label,
-                        defaultValue: `断开参考图 ${reference.label}`,
-                      })}
-                      disabled={disabled}
-                      onClick={() => onReferenceDisconnect(reference.connectionId as string)}
-                    >
-                      <CloseOne theme='outline' size={11} fill='currentColor' />
-                    </button>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : null}
+        <CreativeCanvasReferenceList
+          key={nodeId}
+          references={references}
+          disabled={disabled}
+          onActivate={onReferenceActivate}
+          onDisconnect={onReferenceDisconnect}
+          onDisconnectMany={onReferencesDisconnect}
+        />
 
         <CreativeCanvasReferencePromptInput
           value={prompt}
