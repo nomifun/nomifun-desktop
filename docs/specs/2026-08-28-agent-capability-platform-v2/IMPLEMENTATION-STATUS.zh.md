@@ -1246,9 +1246,10 @@ ServiceKey。Windows sidecar 和其余 native cell 证据仍是外部阻塞；�
 
 ### 当前真实 owner 阻塞
 
-- Wave 1：只有 `web.fetch` 有真实 HTTP owner，Knowledge/Memory/Skill 仍缺
-  Fresh-v4 resource schema、owner repository 和 typed receipt；`web.fetch`
-  也尚未闭合 ExternalTransmit idempotency/receipt。
+- Wave 1：已有真实 `web.fetch`、五个 PluginState memory mutation owner，以及
+  binding-backed `knowledge.search/read`。仍缺 `web.search`、
+  `knowledge.write/autogen/embedding/rerank` 与 `skill.invoke` 的完整 owner；
+  `web.fetch` 也尚未闭合 ExternalTransmit idempotency/receipt。
 - Wave 3：19 个 action 尚无 action-specific DTO/outcome，Fresh-v4 也没有
   Canvas/Asset/CreationTask/TemplateRun/MiniApp schema，因此不能直接挂旧 service。
 - Wave 4：缺 typed `succeeded | failed | uncertain` effect outcome 和四域 v4
@@ -1321,3 +1322,38 @@ Evidence：
 新增 test deadline 与本状态更新产生后续 source SHA，因此 `b849e2ac` 的 Gate
 证据只能作为诊断 evidence，不能提升为最终 C8 pass。真实 owner 与 sidecar
 阻塞未改变。
+
+## 增量实现记录（2026-09-02，Wave 1 Knowledge search/read owner）
+
+Fresh-v4 `Wave1ApplicationHost` 已接入数据库无关、binding-backed 的只读
+Knowledge owner：
+
+- typed binding 必须恰好包含一个 `knowledge_base`，owner 与 principal 相同，
+  并分别授予 `search` 或 `read`；
+- `resource_id` 必须是 canonical lowercase UUIDv7；
+- `typed_parameters.knowledge_root` 必须是绝对 host path，可选
+  `knowledge_name` 不得为空；
+- 每次调用都会重新验证物理 root，拒绝相对路径、`..`、非 Markdown、
+  symlink、junction 与 name-surrogate reparse point；
+- search 返回 opaque handle、resource ID、相对路径、heading、snippet 和 score，
+  不暴露绝对路径，并限制 4096 个文档、单文件 8 MiB、总内容 64 MiB；
+- read 复核 handle 中的 KB ID 与 binding resource 一致，返回相对路径、正文、
+  byte size 与 SHA-256，并设置 8 MiB 读取上限；底层 root/path 错误会脱敏，
+  不把绝对 host path 返回给 action caller。
+
+该 owner 复用 `nomifun-knowledge` 已有的 root/path 安全策略、Markdown walker、
+keyword scorer 与 document handle codec，不访问旧 Conversation/Nomi runtime，
+也不修改 Fresh-v4 baseline/schema。
+
+Windows 定向验证：
+
+- `cargo test -p nomifun-knowledge bound_knowledge --lib`：`3 passed`；
+- `cargo test -p nomifun-app --lib router::agent_platform_host
+  -- --test-threads=1`：`22 passed`；
+- `cargo check -p nomifun-knowledge`、`cargo check -p nomifun-app`：通过；
+- 受影响 package `cargo fmt --check` 与 `git diff --check`：通过。
+
+C8 production owner coverage 仍按设计 FAIL。`Wave1ApplicationHost` 的统一
+fail-closed fallback 仍服务于 `web.search`、
+`knowledge.write/autogen/embedding/rerank` 和 `skill.invoke`；在这些 action
+获得真实 owner 前不得删除 fallback、放宽 Gate，或宣称 Wave 1/C8/HP-1 完成。

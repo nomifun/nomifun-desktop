@@ -22,7 +22,8 @@ use nomifun_agent_contracts::{
 use nomifun_agent_control_plane::CompilerReleaseInputs;
 use nomifun_agent_domain_wave1::{
     Wave1CapabilityOperation, Wave1FetchRequest, Wave1HostPort, Wave1HostPortError,
-    Wave1HostRequest, Wave1MemoryMutationRequest,
+    Wave1HostRequest, Wave1KnowledgeReadRequest, Wave1MemoryMutationRequest,
+    Wave1SearchRequest,
 };
 use nomifun_agent_kernel::{
     CompilerEnvironment, MaterializationPolicy, MAX_PLUGIN_STATE_BYTES,
@@ -69,14 +70,19 @@ const RUNTIME_FEATURE_INVENTORY_JSON: &str = include_str!(
 /// The first concrete Wave 1 owner mounted by the Fresh-v4 host.
 ///
 /// URL fetching already has a standalone, SSRF-checked domain owner. This
-/// adapter exposes that real operation and a bounded first-party memory
-/// mutation owner backed by the Kernel PluginState API. Search, Knowledge and
-/// Skill actions remain fail-closed until their v4 owners are available.
+/// adapter exposes that real operation, binding-backed Knowledge reads, and a
+/// bounded first-party memory mutation owner backed by the Kernel PluginState
+/// API. Research search, Knowledge mutations, and Skill actions remain
+/// fail-closed until their v4 owners are available.
 #[derive(Clone, Default)]
 struct Wave1ApplicationHost {
     fetcher: nomifun_knowledge::source_url::HttpFetcher,
+    knowledge_reader: nomifun_knowledge::BoundKnowledgeReadService,
 }
 
+const KNOWLEDGE_ROOT_PARAMETER: &str = "knowledge_root";
+const KNOWLEDGE_NAME_PARAMETER: &str = "knowledge_name";
+const DEFAULT_KNOWLEDGE_SEARCH_LIMIT: usize = 20;
 const MEMORY_STATE_KEY: &str = "memory.entries";
 const MEMORY_STATE_FORMAT_VERSION: &str = "1.0.0";
 const MAX_MEMORY_ENTRIES: usize = 128;
@@ -183,6 +189,12 @@ impl Wave1HostPort for Wave1ApplicationHost {
                     "truncated": page.truncated
                 })))
             }
+            Wave1CapabilityOperation::KnowledgeSearch(request) => {
+                self.search_knowledge(context, request).await
+            }
+            Wave1CapabilityOperation::KnowledgeRead(request) => {
+                self.read_knowledge(context, request).await
+            }
             Wave1CapabilityOperation::ProjectMemoryWrite(request) => {
                 self.persist_memory(
                     context,
@@ -232,6 +244,70 @@ impl Wave1HostPort for Wave1ApplicationHost {
 }
 
 impl Wave1ApplicationHost {
+    async fn search_knowledge(
+        &self,
+        context: nomifun_agent_domain_wave1::Wave1HostContext,
+        request: Wave1SearchRequest,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, Wave1HostPortError> {
+        let knowledge_base = resolve_bound_knowledge_base(
+            &context,
+            nomifun_agent_domain_wave1::KNOWLEDGE_SEARCH,
+            "search",
+        )?;
+        let hits = self
+            .knowledge_reader
+            .search(
+                &knowledge_base,
+                &request.query,
+                request.limit.unwrap_or(DEFAULT_KNOWLEDGE_SEARCH_LIMIT),
+            )
+            .await
+            .map_err(wave1_bound_knowledge_error)?;
+        Ok(nomifun_agent_contracts::StrictJsonValue(
+            serde_json::json!({
+                "resource_id": knowledge_base.knowledge_base_id(),
+                "total": hits.len(),
+                "hits": hits,
+            }),
+        ))
+    }
+
+    async fn read_knowledge(
+        &self,
+        context: nomifun_agent_domain_wave1::Wave1HostContext,
+        request: Wave1KnowledgeReadRequest,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, Wave1HostPortError> {
+        let knowledge_base = resolve_bound_knowledge_base(
+            &context,
+            nomifun_agent_domain_wave1::KNOWLEDGE_READ,
+            "read",
+        )?;
+        let handle_resource_id = nomifun_knowledge::decode_doc_handle(
+            &request.handle,
+        )
+        .map(|(knowledge_base_id, _)| knowledge_base_id)
+        .ok_or_else(|| {
+            Wave1HostPortError::new(
+                "INVALID_PAYLOAD",
+                "invalid knowledge document handle",
+            )
+        })?;
+        if &handle_resource_id != knowledge_base.knowledge_base_id() {
+            return Err(Wave1HostPortError::new(
+                "PRESET_RESOURCE_NOT_BOUND",
+                "knowledge document handle points to a different bound resource",
+            ));
+        }
+        let document = self
+            .knowledge_reader
+            .read(&knowledge_base, &request.handle)
+            .await
+            .map_err(wave1_bound_knowledge_error)?;
+        Ok(nomifun_agent_contracts::StrictJsonValue(
+            serde_json::json!(document),
+        ))
+    }
+
     /// Persist the bounded memory mutation in the package's namespace-scoped
     /// PluginState store. This is a real v4-owned state transition, not a
     /// synthetic action receipt; the operation is retried only on a bounded
@@ -510,6 +586,136 @@ impl Wave1ApplicationHost {
             "memory state changed concurrently; bounded CAS retry exhausted",
         ))
     }
+}
+
+fn resolve_bound_knowledge_base(
+    context: &nomifun_agent_domain_wave1::Wave1HostContext,
+    capability_id: &str,
+    operation: &str,
+) -> Result<nomifun_knowledge::BoundKnowledgeBase, Wave1HostPortError> {
+    resolve_bound_knowledge_base_parts(
+        &context.principal.principal_id,
+        &context.capability_id,
+        &context.action_id,
+        &context.resource_bindings,
+        capability_id,
+        operation,
+    )
+}
+
+fn resolve_bound_knowledge_base_parts(
+    principal_id: &str,
+    actual_capability_id: &nomifun_agent_contracts::CapabilityId,
+    actual_action_id: &nomifun_agent_contracts::ActionId,
+    resource_bindings: &[nomifun_agent_contracts::TypedResourceBinding],
+    capability_id: &str,
+    operation: &str,
+) -> Result<nomifun_knowledge::BoundKnowledgeBase, Wave1HostPortError> {
+    let expected_action = nomifun_agent_domain_wave1::action_id(capability_id)
+        .expect("every Knowledge owner capability has a canonical action");
+    if actual_capability_id.as_ref() != capability_id
+        || actual_action_id != &expected_action
+    {
+        return Err(Wave1HostPortError::new(
+            "INVALID_PAYLOAD",
+            format!(
+                "{capability_id} operation identity does not match the host context"
+            ),
+        ));
+    }
+
+    let matching_bindings = resource_bindings
+        .iter()
+        .filter(|binding| {
+            binding.resource_kind.as_ref()
+                == nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND
+        })
+        .collect::<Vec<_>>();
+    let binding = match matching_bindings.as_slice() {
+        [binding] => *binding,
+        [] => {
+            return Err(Wave1HostPortError::new(
+                "PRESET_RESOURCE_NOT_BOUND",
+                format!(
+                    "{capability_id} has no bound {} resource",
+                    nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND
+                ),
+            ));
+        }
+        _ => {
+            return Err(Wave1HostPortError::new(
+                "PRESET_RESOURCE_NOT_BOUND",
+                format!(
+                    "{capability_id} requires exactly one bound {} resource",
+                    nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND
+                ),
+            ));
+        }
+    };
+    if binding.owner_id != principal_id {
+        return Err(Wave1HostPortError::new(
+            "RESOURCE_OWNER_MISMATCH",
+            format!(
+                "knowledge resource {} is owned by a different principal",
+                binding.resource_id.as_ref()
+            ),
+        ));
+    }
+    if !binding.operations.contains(operation) {
+        return Err(Wave1HostPortError::new(
+            "PRESET_RESOURCE_NOT_BOUND",
+            format!(
+                "knowledge resource binding {} does not grant {operation}",
+                binding.binding_id.as_ref()
+            ),
+        ));
+    }
+
+    let knowledge_base_id = nomifun_common::KnowledgeBaseId::parse(
+        binding.resource_id.as_ref().to_owned(),
+    )
+    .map_err(|error| {
+        Wave1HostPortError::new(
+            "INVALID_PAYLOAD",
+            format!(
+                "knowledge resource ID must be a canonical UUIDv7: {error}"
+            ),
+        )
+    })?;
+    let root = binding
+        .typed_parameters
+        .get(KNOWLEDGE_ROOT_PARAMETER)
+        .map(String::as_str)
+        .filter(|root| !root.trim().is_empty())
+        .ok_or_else(|| {
+            Wave1HostPortError::new(
+                "PRESET_RESOURCE_NOT_BOUND",
+                format!(
+                    "knowledge resource binding {} has no {KNOWLEDGE_ROOT_PARAMETER}",
+                    binding.binding_id.as_ref()
+                ),
+            )
+        })?;
+    let name = match binding.typed_parameters.get(KNOWLEDGE_NAME_PARAMETER) {
+        Some(name) if name.trim().is_empty() => {
+            return Err(Wave1HostPortError::new(
+                "INVALID_PAYLOAD",
+                format!(
+                    "knowledge resource binding {} has a blank {KNOWLEDGE_NAME_PARAMETER}",
+                    binding.binding_id.as_ref()
+                ),
+            ));
+        }
+        Some(name) => name.trim().to_owned(),
+        None => knowledge_base_id.as_str().to_owned(),
+    };
+
+    nomifun_knowledge::BoundKnowledgeBase::new(
+        knowledge_base_id,
+        name,
+        PathBuf::from(root),
+    )
+    .map_err(wave1_application_error)
 }
 
 fn validate_memory_request(
@@ -907,6 +1113,36 @@ fn wave1_application_error(error: nomifun_common::AppError) -> Wave1HostPortErro
         CanonicalErrorCode::from(code),
         error.to_string(),
     )
+}
+
+fn wave1_bound_knowledge_error(
+    error: nomifun_common::AppError,
+) -> Wave1HostPortError {
+    use nomifun_agent_contracts::CanonicalErrorCode;
+
+    let (code, message) = match error {
+        nomifun_common::AppError::BadRequest(_) => (
+            "INVALID_PAYLOAD",
+            "bound knowledge request is invalid",
+        ),
+        nomifun_common::AppError::NotFound(_) => (
+            "RESOURCE_NOT_FOUND",
+            "bound knowledge document was not found",
+        ),
+        nomifun_common::AppError::Forbidden(_) => (
+            "PRESET_RESOURCE_NOT_BOUND",
+            "bound knowledge resource is outside the authorized scope",
+        ),
+        nomifun_common::AppError::Timeout(_) => (
+            "CAPABILITY_UNAVAILABLE",
+            "bound knowledge operation timed out",
+        ),
+        _ => (
+            "CAPABILITY_UNAVAILABLE",
+            "bound knowledge resource is unavailable",
+        ),
+    };
+    Wave1HostPortError::new(CanonicalErrorCode::from(code), message)
 }
 
 /// All domain action hosts mounted into one Fresh-v4 AgentPlatform
@@ -1718,7 +1954,7 @@ mod tests {
         ChatModelErrorCode, ChatProtocol, ProviderIdRef,
         ProductionProviderRepository as ProductionProviderRepositoryPort,
     };
-    use nomifun_common::encrypt_string;
+    use nomifun_common::{KnowledgeBaseId, encrypt_string};
     use nomifun_db::{
         CreateProviderParams, IProviderRepository, NewProviderModel,
         NewProviderModelCapability, SqliteProviderRepository,
@@ -1748,6 +1984,239 @@ mod tests {
             principal_kind: "user".to_owned(),
             principal_id: "wave1-memory-owner".to_owned(),
         }
+    }
+
+    struct KnowledgeKernelFixture {
+        registry: Arc<KernelRegistry>,
+    }
+
+    impl KnowledgeKernelFixture {
+        fn new() -> Self {
+            let registry = Arc::new(
+                KernelRegistry::new(
+                    MaterializationPolicy::stable(CONTRACT_VERSION),
+                    Arc::new(InMemoryPluginStatePersistence::new()),
+                )
+                .expect("kernel registry"),
+            );
+            registry
+                .replace_all(
+                    nomifun_agent_domain_wave1::registrations_with_host_port(
+                        Arc::new(Wave1ApplicationHost::default()),
+                    )
+                    .expect("Wave 1 registrations"),
+                )
+                .expect("publish Wave 1 registrations");
+            Self { registry }
+        }
+
+        fn compile_snapshot(
+            &self,
+            binding: TypedResourceBinding,
+        ) -> (
+            Arc<CompiledSnapshot>,
+            ActiveCapabilitySetSnapshot,
+            TypedResourceBinding,
+        ) {
+            compile_wave1_snapshot_for_registry(
+                &self.registry,
+                &[
+                    nomifun_agent_domain_wave1::KNOWLEDGE_SEARCH,
+                    nomifun_agent_domain_wave1::KNOWLEDGE_READ,
+                ],
+                binding,
+                "knowledge",
+            )
+        }
+
+        async fn invoke(
+            &self,
+            snapshot: &CompiledSnapshot,
+            active: &ActiveCapabilitySetSnapshot,
+            binding: &TypedResourceBinding,
+            capability_id: &str,
+            input: serde_json::Value,
+            request_id: &str,
+        ) -> Result<
+            StrictJsonValue,
+            nomifun_agent_kernel::KernelError,
+        > {
+            self.registry
+                .invoke(
+                    snapshot,
+                    active,
+                    knowledge_invocation(
+                        snapshot,
+                        active,
+                        binding,
+                        capability_id,
+                        input,
+                        request_id,
+                    ),
+                )
+                .await
+        }
+    }
+
+    fn knowledge_binding(
+        knowledge_base_id: &KnowledgeBaseId,
+        root: &Path,
+    ) -> TypedResourceBinding {
+        TypedResourceBinding {
+            binding_id: ResourceBindingId::from("knowledge-primary"),
+            resource_kind: ResourceKind::from(
+                nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND,
+            ),
+            resource_id: ResourceId::from(knowledge_base_id.as_str()),
+            owner_id: principal().principal_id,
+            operations: BTreeSet::from([
+                "read".to_owned(),
+                "search".to_owned(),
+            ]),
+            connection_config_ref: None,
+            typed_parameters: BTreeMap::from([
+                (
+                    KNOWLEDGE_ROOT_PARAMETER.to_owned(),
+                    root.to_string_lossy().into_owned(),
+                ),
+                (
+                    KNOWLEDGE_NAME_PARAMETER.to_owned(),
+                    "Release runbooks".to_owned(),
+                ),
+            ]),
+        }
+    }
+
+    fn knowledge_invocation(
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        binding: &TypedResourceBinding,
+        capability_id: &str,
+        input: serde_json::Value,
+        request_id: &str,
+    ) -> CapabilityInvocationRequest {
+        let owner = principal();
+        CapabilityInvocationRequest {
+            principal: owner.clone(),
+            session_owner: owner,
+            agent_session_id: AgentSessionId::from(
+                "wave1-knowledge-session",
+            ),
+            operation_id: OperationId::from(format!(
+                "wave1-knowledge-operation-{request_id}"
+            )),
+            idempotency_key: IdempotencyKey::from(format!(
+                "wave1-knowledge-key-{request_id}"
+            )),
+            correlation_id: CorrelationId::from(format!(
+                "wave1-knowledge-correlation-{request_id}"
+            )),
+            resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
+            active_set_generation: active.generation,
+            capability_id: CapabilityId::from(capability_id),
+            action_id: nomifun_agent_domain_wave1::action_id(capability_id)
+                .expect("Knowledge capability action"),
+            resource_binding_ids: BTreeSet::from([binding.binding_id.clone()]),
+            state_scope_key: ScopeKey::from(
+                "session:wave1-knowledge-session",
+            ),
+            input: StrictJsonValue(input),
+        }
+    }
+
+    fn compile_wave1_snapshot_for_registry(
+        registry: &KernelRegistry,
+        capability_ids: &[&str],
+        binding: TypedResourceBinding,
+        fixture_name: &str,
+    ) -> (
+        Arc<CompiledSnapshot>,
+        ActiveCapabilitySetSnapshot,
+        TypedResourceBinding,
+    ) {
+        let owner = principal();
+        let initial_capabilities = capability_ids
+            .iter()
+            .copied()
+            .map(|capability_id| CapabilitySelection {
+                capability: CapabilityRef {
+                    id: capability_id.into(),
+                    version: VersionString::from(CONTRACT_VERSION),
+                },
+                required: true,
+                exposure: CapabilityExposure::Advertised,
+                action_allowlist: BTreeSet::from([
+                    nomifun_agent_domain_wave1::action_id(capability_id)
+                        .expect("Wave 1 capability has an action"),
+                ]),
+                resource_binding_refs: vec![binding.binding_id.clone()],
+                destination_constraints: BTreeSet::new(),
+                context_budget_override: None,
+                tool_budget_override: None,
+                config: StrictJsonValue(serde_json::json!({})),
+            })
+            .collect();
+        let payload = AgentPresetRevisionPayload {
+            schema_version: VersionString::from(CONTRACT_VERSION),
+            surfaces: BTreeSet::from(["desktop".to_owned()]),
+            model_route_refs: BTreeMap::new(),
+            chat_route_records: BTreeMap::new(),
+            initial_capabilities,
+            on_demand_capabilities: Vec::new(),
+            skill_bindings: Vec::new(),
+            resource_bindings: vec![binding.clone()],
+            persona: format!("Wave 1 {fixture_name} test"),
+            instructions: format!("Exercise the Wave 1 {fixture_name} owner."),
+            context_policy: StrictJsonValue(serde_json::json!({})),
+            execution_constraints: StrictJsonValue(serde_json::json!({})),
+            runtime_budget: StrictJsonValue(serde_json::json!({})),
+        };
+        let revision = AgentPresetRevision {
+            reference: PresetRevisionRef {
+                preset_id: AgentPresetId::from(format!("wave1-{fixture_name}")),
+                revision: 1,
+                revision_digest: digest_payload(&payload)
+                    .expect("revision digest"),
+            },
+            payload,
+            created_by: UserId::from(owner.principal_id.clone()),
+            created_at_ms: 1,
+            reason: None,
+        };
+        let snapshot = AgentPresetCompiler::compile(
+            &registry.snapshot().expect("registry snapshot"),
+            &CompilerEnvironment {
+                resolver_version: VersionString::from(CONTRACT_VERSION),
+                required_runtime_protocol_version: VersionString::from(
+                    CONTRACT_VERSION,
+                ),
+                required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+                runtime_feature_inventory_digest: DigestHex::from("runtime"),
+                available_runtime_features: BTreeSet::new(),
+                canonical_schema_manifest_digest: DigestHex::from("schema"),
+                target_contribution_manifest_digest: DigestHex::from("target"),
+                host_target: RuntimeTarget::from("test-target"),
+                host_surface: "desktop".to_owned(),
+                availability_evidence_revision:
+                    format!("wave1-{fixture_name}-test"),
+            },
+            CompileRequest {
+                revision,
+                principal: owner,
+                scene: format!("wave1-{fixture_name}-test"),
+                surface: "desktop".to_owned(),
+                audience: "test".to_owned(),
+                created_at_ms: 2,
+                resolver_run_id: OperationId::from(format!(
+                    "wave1-{fixture_name}-resolve"
+                )),
+            },
+        )
+        .expect("compile Wave 1 capabilities");
+        let active = SessionCapabilityState::new(&snapshot)
+            .snapshot()
+            .expect("initial active set");
+        (Arc::new(snapshot), active, binding)
     }
 
     struct MemoryKernelFixture {
@@ -1811,7 +2280,6 @@ mod tests {
         ActiveCapabilitySetSnapshot,
         TypedResourceBinding,
     ) {
-        let owner = principal();
         let binding = TypedResourceBinding {
             binding_id: ResourceBindingId::from(format!(
                 "binding-{}",
@@ -1825,85 +2293,19 @@ mod tests {
                 },
             ),
             resource_id: ResourceId::from(resource_id),
-            owner_id: owner.principal_id.clone(),
+            owner_id: principal().principal_id,
             operations: BTreeSet::from(["read".to_owned(), "write".to_owned()]),
             connection_config_ref: None,
             typed_parameters: BTreeMap::new(),
         };
-        let action = nomifun_agent_domain_wave1::action_id(capability_id)
-            .expect("memory capability has an action");
-        let payload = AgentPresetRevisionPayload {
-            schema_version: VersionString::from(CONTRACT_VERSION),
-            surfaces: BTreeSet::from(["desktop".to_owned()]),
-            model_route_refs: BTreeMap::new(),
-            chat_route_records: BTreeMap::new(),
-            initial_capabilities: vec![CapabilitySelection {
-                capability: CapabilityRef {
-                    id: capability_id.into(),
-                    version: VersionString::from(CONTRACT_VERSION),
-                },
-                required: true,
-                exposure: CapabilityExposure::Advertised,
-                action_allowlist: BTreeSet::from([action]),
-                resource_binding_refs: vec![binding.binding_id.clone()],
-                destination_constraints: BTreeSet::new(),
-                context_budget_override: None,
-                tool_budget_override: None,
-                config: StrictJsonValue(serde_json::json!({})),
-            }],
-            on_demand_capabilities: Vec::new(),
-            skill_bindings: Vec::new(),
-            resource_bindings: vec![binding.clone()],
-            persona: "Wave 1 memory test".to_owned(),
-            instructions: "Persist bounded memory.".to_owned(),
-            context_policy: StrictJsonValue(serde_json::json!({})),
-            execution_constraints: StrictJsonValue(serde_json::json!({})),
-            runtime_budget: StrictJsonValue(serde_json::json!({})),
-        };
-        let revision = AgentPresetRevision {
-            reference: PresetRevisionRef {
-                preset_id: AgentPresetId::from(format!(
-                    "wave1-memory-{}",
-                    capability_id.replace('.', "-")
-                )),
-                revision: 1,
-                revision_digest: digest_payload(&payload)
-                    .expect("revision digest"),
-            },
-            payload,
-            created_by: UserId::from(owner.principal_id.clone()),
-            created_at_ms: 1,
-            reason: None,
-        };
-        let snapshot = AgentPresetCompiler::compile(
-            &registry.snapshot().expect("registry snapshot"),
-            &CompilerEnvironment {
-                resolver_version: VersionString::from(CONTRACT_VERSION),
-                required_runtime_protocol_version: VersionString::from(CONTRACT_VERSION),
-                required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
-                runtime_feature_inventory_digest: DigestHex::from("runtime"),
-                available_runtime_features: BTreeSet::new(),
-                canonical_schema_manifest_digest: DigestHex::from("schema"),
-                target_contribution_manifest_digest: DigestHex::from("target"),
-                host_target: RuntimeTarget::from("test-target"),
-                host_surface: "desktop".to_owned(),
-                availability_evidence_revision: "wave1-memory-test".to_owned(),
-            },
-            CompileRequest {
-                revision,
-                principal: owner,
-                scene: "wave1-memory-test".to_owned(),
-                surface: "desktop".to_owned(),
-                audience: "test".to_owned(),
-                created_at_ms: 2,
-                resolver_run_id: OperationId::from("wave1-memory-resolve"),
-            },
+        let fixture_name =
+            format!("memory-{}", capability_id.replace('.', "-"));
+        compile_wave1_snapshot_for_registry(
+            registry,
+            &[capability_id],
+            binding,
+            &fixture_name,
         )
-        .expect("compile memory capability");
-        let active = SessionCapabilityState::new(&snapshot)
-            .snapshot()
-            .expect("initial active set");
-        (Arc::new(snapshot), active, binding)
     }
 
     fn memory_invocation(
@@ -2404,6 +2806,258 @@ mod tests {
         assert_eq!(
             server.received_requests().await.expect("requests").len(),
             1
+        );
+    }
+
+    #[test]
+    fn wave1_knowledge_binding_resolution_rechecks_host_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        std::fs::create_dir_all(&root).unwrap();
+        let knowledge_base_id = KnowledgeBaseId::new();
+        let binding = knowledge_binding(&knowledge_base_id, &root);
+        let capability_id =
+            CapabilityId::from(nomifun_agent_domain_wave1::KNOWLEDGE_SEARCH);
+        let action_id = nomifun_agent_domain_wave1::action_id(
+            nomifun_agent_domain_wave1::KNOWLEDGE_SEARCH,
+        )
+        .unwrap();
+        let principal_id = principal().principal_id;
+        let resolve = |bindings: &[TypedResourceBinding]| {
+            resolve_bound_knowledge_base_parts(
+                &principal_id,
+                &capability_id,
+                &action_id,
+                bindings,
+                nomifun_agent_domain_wave1::KNOWLEDGE_SEARCH,
+                "search",
+            )
+        };
+        let error_code = |bindings: &[TypedResourceBinding]| {
+            resolve(bindings).unwrap_err().code.as_ref().to_owned()
+        };
+
+        let resolved =
+            resolve(std::slice::from_ref(&binding)).expect("valid binding");
+        assert_eq!(
+            resolved.knowledge_base_id().as_str(),
+            knowledge_base_id.as_str()
+        );
+
+        let mut wrong_owner = binding.clone();
+        wrong_owner.owner_id = "different-owner".to_owned();
+        assert_eq!(
+            error_code(&[wrong_owner]),
+            "RESOURCE_OWNER_MISMATCH"
+        );
+
+        let mut missing_grant = binding.clone();
+        missing_grant.operations.remove("search");
+        assert_eq!(
+            error_code(&[missing_grant]),
+            "PRESET_RESOURCE_NOT_BOUND"
+        );
+
+        let mut invalid_id = binding.clone();
+        invalid_id.resource_id = ResourceId::from("not-a-uuidv7");
+        assert_eq!(error_code(&[invalid_id]), "INVALID_PAYLOAD");
+
+        let mut missing_root = binding.clone();
+        missing_root
+            .typed_parameters
+            .remove(KNOWLEDGE_ROOT_PARAMETER);
+        assert_eq!(
+            error_code(&[missing_root]),
+            "PRESET_RESOURCE_NOT_BOUND"
+        );
+
+        let mut second_binding = binding.clone();
+        second_binding.binding_id = ResourceBindingId::from("knowledge-secondary");
+        assert_eq!(
+            error_code(&[binding, second_binding]),
+            "PRESET_RESOURCE_NOT_BOUND"
+        );
+    }
+
+    #[tokio::test]
+    async fn wave1_knowledge_owner_searches_and_reads_real_bound_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        std::fs::create_dir_all(root.join("release")).unwrap();
+        let content = "# Release rollback\nRun the signed rollback plan.";
+        std::fs::write(root.join("release").join("rollback.md"), content)
+            .unwrap();
+
+        let fixture = KnowledgeKernelFixture::new();
+        let knowledge_base_id = KnowledgeBaseId::new();
+        let binding = knowledge_binding(&knowledge_base_id, &root);
+        let (snapshot, active, binding) =
+            fixture.compile_snapshot(binding);
+        let search = fixture
+            .invoke(
+                &snapshot,
+                &active,
+                &binding,
+                nomifun_agent_domain_wave1::KNOWLEDGE_SEARCH,
+                serde_json::json!({
+                    "query": "rollback",
+                    "limit": 5,
+                }),
+                "search",
+            )
+            .await
+            .expect("bound Knowledge search");
+        assert_eq!(search.0["total"], serde_json::json!(1));
+        assert_eq!(
+            search.0["hits"][0]["resource_id"],
+            serde_json::json!(knowledge_base_id)
+        );
+        assert_eq!(
+            search.0["hits"][0]["relative_path"],
+            serde_json::json!("release/rollback.md")
+        );
+        assert!(
+            !search
+                .0
+                .to_string()
+                .contains(&root.to_string_lossy().to_string()),
+            "Knowledge search must not expose an absolute host path"
+        );
+        let handle = search.0["hits"][0]["handle"]
+            .as_str()
+            .expect("search handle")
+            .to_owned();
+
+        let read = fixture
+            .invoke(
+                &snapshot,
+                &active,
+                &binding,
+                nomifun_agent_domain_wave1::KNOWLEDGE_READ,
+                serde_json::json!({ "handle": handle }),
+                "read",
+            )
+            .await
+            .expect("bound Knowledge read");
+        assert_eq!(read.0["content"], serde_json::json!(content));
+        assert_eq!(
+            read.0["relative_path"],
+            serde_json::json!("release/rollback.md")
+        );
+        assert_eq!(
+            read.0["content_sha256"],
+            serde_json::json!(digest_bytes(content.as_bytes()))
+        );
+    }
+
+    #[tokio::test]
+    async fn wave1_knowledge_owner_rejects_scope_escape_and_missing_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.md"), "# In scope").unwrap();
+        std::fs::write(directory.path().join("outside.md"), "# Outside")
+            .unwrap();
+
+        let fixture = KnowledgeKernelFixture::new();
+        let knowledge_base_id = KnowledgeBaseId::new();
+        let binding = knowledge_binding(&knowledge_base_id, &root);
+        let (snapshot, active, binding) =
+            fixture.compile_snapshot(binding);
+
+        let wrong_resource = nomifun_knowledge::encode_doc_handle(
+            &KnowledgeBaseId::new(),
+            "note.md",
+        );
+        let wrong_resource_error = fixture
+            .invoke(
+                &snapshot,
+                &active,
+                &binding,
+                nomifun_agent_domain_wave1::KNOWLEDGE_READ,
+                serde_json::json!({ "handle": wrong_resource }),
+                "wrong-resource",
+            )
+            .await
+            .expect_err("a handle cannot widen the bound resource scope");
+        assert!(
+            wrong_resource_error
+                .to_string()
+                .contains("PRESET_RESOURCE_NOT_BOUND"),
+            "unexpected wrong-resource error: {wrong_resource_error}"
+        );
+
+        let traversal = nomifun_knowledge::encode_doc_handle(
+            &knowledge_base_id,
+            "../outside.md",
+        );
+        let traversal_error = fixture
+            .invoke(
+                &snapshot,
+                &active,
+                &binding,
+                nomifun_agent_domain_wave1::KNOWLEDGE_READ,
+                serde_json::json!({ "handle": traversal }),
+                "traversal",
+            )
+            .await
+            .expect_err("a handle cannot traverse outside its bound root");
+        assert!(
+            traversal_error.to_string().contains("INVALID_PAYLOAD"),
+            "unexpected traversal error: {traversal_error}"
+        );
+
+        let missing = nomifun_knowledge::encode_doc_handle(
+            &knowledge_base_id,
+            "missing.md",
+        );
+        let missing_error = fixture
+            .invoke(
+                &snapshot,
+                &active,
+                &binding,
+                nomifun_agent_domain_wave1::KNOWLEDGE_READ,
+                serde_json::json!({ "handle": missing }),
+                "missing-file",
+            )
+            .await
+            .expect_err("a missing file must not produce synthetic content");
+        assert!(
+            missing_error.to_string().contains("RESOURCE_NOT_FOUND"),
+            "unexpected missing-file error: {missing_error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wave1_knowledge_owner_fails_closed_for_missing_bound_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("missing-knowledge-root");
+        let fixture = KnowledgeKernelFixture::new();
+        let knowledge_base_id = KnowledgeBaseId::new();
+        let binding = knowledge_binding(&knowledge_base_id, &root);
+        let (snapshot, active, binding) =
+            fixture.compile_snapshot(binding);
+
+        let error = fixture
+            .invoke(
+                &snapshot,
+                &active,
+                &binding,
+                nomifun_agent_domain_wave1::KNOWLEDGE_SEARCH,
+                serde_json::json!({ "query": "anything" }),
+                "missing-root",
+            )
+            .await
+            .expect_err("a missing root must fail instead of returning no hits");
+        assert!(
+            error.to_string().contains("CAPABILITY_UNAVAILABLE"),
+            "unexpected missing-root error: {error}"
+        );
+        assert!(
+            !error
+                .to_string()
+                .contains(&root.to_string_lossy().to_string()),
+            "Knowledge errors must not expose an absolute host path"
         );
     }
 
@@ -3049,5 +3703,15 @@ mod tests {
             "network timeout".to_owned(),
         ));
         assert_eq!(unavailable.code.as_ref(), "CAPABILITY_UNAVAILABLE");
+
+        let hidden_path = PathBuf::from(r"C:\Users\owner\private-knowledge");
+        let knowledge = wave1_bound_knowledge_error(
+            nomifun_common::AppError::Internal(format!(
+                "failed to inspect {}",
+                hidden_path.display()
+            )),
+        );
+        assert_eq!(knowledge.code.as_ref(), "CAPABILITY_UNAVAILABLE");
+        assert!(!knowledge.message.contains("private-knowledge"));
     }
 }

@@ -75,6 +75,12 @@ use crate::source_url::{self, HttpFetcher, PageFetcher};
 use crate::workpath::{WORKPATH_BINDING_KIND, workpath_key};
 use crate::{KB_MANAGED_REL_DIR, KB_MOUNT_REL_DIR};
 
+mod bound;
+pub use bound::{
+    BoundKnowledgeBase, BoundKnowledgeDocument, BoundKnowledgeReadService,
+    BoundKnowledgeSearchHit,
+};
+
 /// Binding target kinds accepted by the API. `workpath` is the primary kind
 /// for conversation/terminal sessions since the session-list unification
 /// (its `target_id` is a normalized [`workpath_key`]); the remaining kinds use
@@ -650,6 +656,13 @@ struct RetrievalDocument {
     rel_path: String,
     heading: String,
     content: Arc<str>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RetrievalLoadLimits {
+    max_documents: usize,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -9079,16 +9092,36 @@ fn load_one_knowledge_root(
     root: PathBuf,
     cache: Arc<RwLock<SearchCacheInner>>,
 ) -> Vec<RetrievalDocument> {
-    if let Err(error) = validate_knowledge_root(&root) {
-        tracing::warn!(
-            knowledge_base_id = %kb_id,
-            root = %root.display(),
-            %error,
-            "skipping unavailable or unsafe knowledge search root"
-        );
-        return Vec::new();
+    match load_one_knowledge_root_checked(
+        kb_id.clone(),
+        kb_name,
+        root.clone(),
+        cache,
+        None,
+    ) {
+        Ok(documents) => documents,
+        Err(error) => {
+            tracing::warn!(
+                knowledge_base_id = %kb_id,
+                root = %root.display(),
+                %error,
+                "skipping unavailable or unsafe knowledge search root"
+            );
+            Vec::new()
+        }
     }
+}
+
+fn load_one_knowledge_root_checked(
+    kb_id: KnowledgeBaseId,
+    kb_name: String,
+    root: PathBuf,
+    cache: Arc<RwLock<SearchCacheInner>>,
+    limits: Option<RetrievalLoadLimits>,
+) -> Result<Vec<RetrievalDocument>, AppError> {
+    validate_knowledge_root(&root)?;
     let mut documents = Vec::new();
+    let mut total_bytes = 0u64;
     for entry in vault_walker(&root) {
         if !entry.file_type().is_file() {
             continue;
@@ -9121,6 +9154,20 @@ fn load_one_knowledge_root(
             ),
             Err(_) => (0, 0),
         };
+        if let Some(limits) = limits {
+            if documents.len() >= limits.max_documents {
+                return Err(AppError::BadRequest(format!(
+                    "knowledge search exceeds the {} document limit",
+                    limits.max_documents
+                )));
+            }
+            if size > limits.max_file_bytes {
+                return Err(AppError::BadRequest(format!(
+                    "knowledge search document exceeds the {} MiB file limit",
+                    limits.max_file_bytes / 1024 / 1024
+                )));
+            }
+        }
         let absolute = path.to_path_buf();
         let cached = {
             let guard =
@@ -9173,6 +9220,32 @@ fn load_one_knowledge_root(
                 }
                 (content, heading)
             };
+        let document_bytes = u64::try_from(content.len()).map_err(|_| {
+            AppError::Internal(
+                "knowledge search document size cannot be represented".into(),
+            )
+        })?;
+        if let Some(limits) = limits {
+            if document_bytes > limits.max_file_bytes {
+                return Err(AppError::BadRequest(format!(
+                    "knowledge search document exceeds the {} MiB file limit",
+                    limits.max_file_bytes / 1024 / 1024
+                )));
+            }
+            total_bytes = total_bytes
+                .checked_add(document_bytes)
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "knowledge search content size overflowed".into(),
+                    )
+                })?;
+            if total_bytes > limits.max_total_bytes {
+                return Err(AppError::BadRequest(format!(
+                    "knowledge search exceeds the {} MiB total content limit",
+                    limits.max_total_bytes / 1024 / 1024
+                )));
+            }
+        }
         documents.push(RetrievalDocument {
             kb_id: kb_id.clone(),
             kb_name: kb_name.clone(),
@@ -9181,7 +9254,7 @@ fn load_one_knowledge_root(
             content,
         });
     }
-    documents
+    Ok(documents)
 }
 
 fn local_keyword_candidates(
@@ -20242,6 +20315,125 @@ mod tests {
         assert_eq!(decode_doc_handle("not-a-handle"), None);
         assert_eq!(decode_doc_handle("kdoc_!!!notbase64"), None);
         assert_eq!(decode_doc_handle("kdoc_"), None);
+    }
+
+    fn bound_knowledge_base(
+        kb_id: KnowledgeBaseId,
+        root: &Path,
+    ) -> BoundKnowledgeBase {
+        BoundKnowledgeBase::new(kb_id, "Bound test base", root)
+            .expect("bound knowledge base")
+    }
+
+    #[tokio::test]
+    async fn bound_knowledge_search_and_read_use_opaque_scoped_handles() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        std::fs::create_dir_all(root.join("runbooks")).unwrap();
+        std::fs::write(
+            root.join("runbooks").join("rollback.md"),
+            "# Rollback\nUse the verified rollback checklist.",
+        )
+        .unwrap();
+        std::fs::write(root.join("ignored.txt"), "rollback").unwrap();
+
+        let kb_id = KnowledgeBaseId::new();
+        let base = bound_knowledge_base(kb_id.clone(), &root);
+        let service = BoundKnowledgeReadService::default();
+        let hits = service.search(&base, "rollback", 5).await.unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].resource_id, kb_id);
+        assert_eq!(hits[0].relative_path, "runbooks/rollback.md");
+        assert_eq!(hits[0].heading, "Rollback");
+        assert_eq!(
+            decode_doc_handle(&hits[0].handle),
+            Some((
+                hits[0].resource_id.clone(),
+                "runbooks/rollback.md".to_owned()
+            ))
+        );
+        let rendered = serde_json::to_string(&hits).unwrap();
+        assert!(
+            !rendered.contains(&root.to_string_lossy().to_string()),
+            "bound search must not expose its absolute root"
+        );
+
+        let document = service.read(&base, &hits[0].handle).await.unwrap();
+        assert_eq!(document.resource_id, hits[0].resource_id);
+        assert_eq!(document.relative_path, "runbooks/rollback.md");
+        assert_eq!(
+            document.content,
+            "# Rollback\nUse the verified rollback checklist."
+        );
+        assert_eq!(document.size, document.content.len() as u64);
+        assert_eq!(document.content_sha256, sha256_text(&document.content));
+    }
+
+    #[tokio::test]
+    async fn bound_knowledge_search_rejects_an_oversized_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        std::fs::create_dir_all(&root).unwrap();
+        let oversized = std::fs::File::create(root.join("oversized.md")).unwrap();
+        oversized
+            .set_len(bound::MAX_BOUND_KNOWLEDGE_SEARCH_FILE_BYTES + 1)
+            .unwrap();
+
+        let base =
+            bound_knowledge_base(KnowledgeBaseId::new(), &root);
+        assert!(matches!(
+            BoundKnowledgeReadService::default()
+                .search(&base, "anything", 5)
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bound_knowledge_read_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        let outside = directory.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.md"), "# Secret").unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+
+        let kb_id = KnowledgeBaseId::new();
+        let base = bound_knowledge_base(kb_id.clone(), &root);
+        let handle = encode_doc_handle(&kb_id, "escape/secret.md");
+        assert!(matches!(
+            BoundKnowledgeReadService::default()
+                .read(&base, &handle)
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn bound_knowledge_read_rejects_junction_escape() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        let outside = directory.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.md"), "# Secret").unwrap();
+        junction::create(&outside, root.join("escape")).unwrap();
+
+        let kb_id = KnowledgeBaseId::new();
+        let base = bound_knowledge_base(kb_id.clone(), &root);
+        let handle = encode_doc_handle(&kb_id, "escape/secret.md");
+        assert!(matches!(
+            BoundKnowledgeReadService::default()
+                .read(&base, &handle)
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
     }
 
     // ── write target resolver + path de-confusion (P1) ────────────────
