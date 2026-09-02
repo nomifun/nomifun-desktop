@@ -17,6 +17,7 @@ use std::sync::Arc;
 use nomi_ssh::connection::{HostKeyPolicy, SshConnection, SshError};
 use nomi_ssh::credential::{Auth, SshCredential};
 use nomi_ssh::fs::RemoteFs;
+use nomi_ssh::limits::validate_path;
 use nomi_ssh::responder::AnswerRule;
 use nomi_ssh::shell::{RemoteShell, ShellOutcome};
 use nomifun_ai_agent::{RemoteCommandOutput, RemoteFileStat, SshBackend};
@@ -38,6 +39,8 @@ pub enum SshDialError {
     /// build does not implement, or the host row is gone.
     #[error("ssh credential is unusable: {0}")]
     Credential(String),
+    #[error("invalid SSH input: {0}")]
+    InvalidInput(String),
     #[error("ssh authentication failed: {0}")]
     Auth(String),
     #[error("ssh host key rejected: {0}")]
@@ -64,6 +67,7 @@ impl SshDialError {
         match self {
             SshDialError::Unreachable(_) | SshDialError::Protocol(_) => true,
             SshDialError::Credential(_)
+            | SshDialError::InvalidInput(_)
             | SshDialError::Auth(_)
             | SshDialError::HostKey(_)
             | SshDialError::ShuttingDown => false,
@@ -79,6 +83,8 @@ impl From<SshError> for SshDialError {
             // never reached: the host, not the credential.
             SshError::Disconnected(m) => SshDialError::Unreachable(m),
             SshError::AuthFailed(m) => SshDialError::Auth(m),
+            SshError::TimedOut(m) => SshDialError::Unreachable(m),
+            SshError::InvalidInput(m) => SshDialError::InvalidInput(m),
             SshError::HostKeyUnknown { host, fingerprint } => SshDialError::HostKey(format!(
                 "host key for {host} is unknown (fingerprint {fingerprint})"
             )),
@@ -246,7 +252,8 @@ impl SshLinkBackend {
     /// next liveness tick.
     async fn run(&self, command: &str, timeout_ms: u64) -> Result<RemoteCommandOutput, String> {
         let handle = self.handle().await?;
-        match run_with_budget(handle.shell(), command, timeout_ms).await {
+        let shell = Arc::clone(handle.shell());
+        match run_with_budget(&shell, command, timeout_ms).await {
             Ok(outcome) => {
                 if outcome.timed_out && outcome.cwd.is_empty() {
                     // `RemoteShell::run` only withholds the cwd on a timeout it
@@ -263,6 +270,16 @@ impl SshLinkBackend {
                     self.link.remember_cwd(&outcome.cwd);
                 }
                 Ok(remote_output(outcome))
+            }
+            Err(e) if !shell.is_reusable().await && !handle.is_transport_closed() => {
+                let detail = e.to_string();
+                self.pool
+                    .recycle_shell(
+                        &self.link,
+                        "remote shell channel was retired after cancellation or failed recovery",
+                    )
+                    .await;
+                Err(detail)
             }
             Err(e @ SshError::Disconnected(_)) => {
                 let detail = e.to_string();
@@ -303,6 +320,7 @@ impl SshBackend for SshLinkBackend {
     }
 
     async fn grep(&self, pattern: &str, path: &str) -> Result<String, String> {
+        validate_backend_path(path)?;
         let out = self
             .run(&grep_command(pattern, path), GREP_TIMEOUT_MS)
             .await?;
@@ -310,6 +328,7 @@ impl SshBackend for SshLinkBackend {
     }
 
     async fn list_files(&self, glob: &str) -> Result<Vec<String>, String> {
+        validate_backend_path(glob)?;
         let out = self.run(&list_command(glob), LIST_TIMEOUT_MS).await?;
         Ok(list_lines(&out.stdout))
     }
@@ -351,6 +370,10 @@ fn remote_output(outcome: ShellOutcome) -> RemoteCommandOutput {
         exit_code: outcome.exit_code,
         timed_out: outcome.timed_out,
     }
+}
+
+fn validate_backend_path(path: &str) -> Result<(), String> {
+    validate_path(path).map_err(|error| SshError::InvalidInput(error.to_string()).to_string())
 }
 
 /// ripgrep if present, else `grep -rn`. Pattern and path are single-quoted to
@@ -528,5 +551,12 @@ mod tests {
         assert_eq!(sh_quote_glob("$(id)"), r#"'$(id)'"#);
         assert!(grep_command("x", "/srv").starts_with("rg --color=never -n -- 'x' '/srv'"));
         assert_eq!(list_command("*.rs"), "ls -1d *.rs 2>/dev/null || true");
+    }
+
+    #[test]
+    fn generated_commands_reject_invalid_paths_before_shell_submission() {
+        assert!(validate_backend_path("/srv/**/*.rs").is_ok());
+        let error = validate_backend_path("bad\npath").expect_err("control characters are invalid");
+        assert!(error.contains("invalid SSH input"), "{error}");
     }
 }

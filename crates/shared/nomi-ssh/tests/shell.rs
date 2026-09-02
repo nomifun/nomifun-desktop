@@ -93,6 +93,36 @@ async fn timeout_is_recoverable() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_a_run_retires_the_channel_instead_of_reusing_it() {
+    let Some(sshd) = support::start_pubkey_sshd() else {
+        eprintln!("SKIP: no usable sshd");
+        return;
+    };
+    let sh = support::connect(&sshd)
+        .await
+        .open_shell("/tmp")
+        .await
+        .unwrap();
+
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(100),
+        sh.run("sleep 30", Duration::from_secs(30)),
+    )
+    .await;
+    assert!(cancelled.is_err(), "outer cancellation budget must fire");
+    assert!(
+        !sh.is_reusable().await,
+        "a cancelled command leaves an unknown remote outcome and its channel must be retired"
+    );
+
+    let next = sh.run("echo must_not_run", T).await;
+    assert!(
+        matches!(next, Err(SshError::Protocol(_))),
+        "the next command must fail before submission so a caller can replace the channel: {next:?}"
+    );
+}
+
 /// A shell that is gone is not a shell that is slow. Reporting the conventional
 /// timeout code for a dead channel makes liveness detection and teardown
 /// forensics impossible: the pool cannot tell "still running, be patient" from

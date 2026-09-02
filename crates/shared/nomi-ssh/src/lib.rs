@@ -11,5 +11,6 @@
 pub mod connection;
 pub mod credential;
 pub mod fs;
+pub mod limits;
 pub mod responder;
 pub mod shell;
