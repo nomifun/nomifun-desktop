@@ -1394,3 +1394,76 @@ Knowledge 下拉选择保留为人工交互验收项。
 Windows/macOS/Linux 的 root-anchored no-follow filesystem primitive、明确
 create-vs-append DTO，以及 typed publication outcome 和 durable
 `started -> succeeded|failed|uncertain -> reconciled` 记录。
+
+### Knowledge search/read anchored filesystem 加固（2026-09-02）
+
+后续只读安全审计确认，原先 `safe_md_path` 检查后再按绝对路径执行
+`WalkDir` / `File::open` 仍存在本地外部进程替换 parent 为
+symlink/junction 的 TOCTOU 窗口。因此 search/read 已改为
+`cap-std 4.0.3` + `cap-fs-ext 4.0.3` 的 root-anchored capability：
+
+- 从 `/`、Windows drive root 或 UNC share root 建立初始 handle；
+- 每个 Knowledge root component 都单独 `open_dir_nofollow`；
+- search 通过已打开的 `Dir` handle 流式枚举，每个 child directory 和最终
+  Markdown file 都再次 no-follow open，不再使用路径式 `WalkDir`；
+- read 只通过 parent `Dir` 的 relative no-follow open 获取最终 file handle，
+  检查、大小限制和读取都在同一已打开对象上完成；
+- binding search 不再跨调用缓存路径对应的正文，避免 root 被替换后因相同
+  mtime/size 复用旧对象内容；
+- 新增 32768 filesystem entries、4096 documents、128 directory depth、
+  单文件 8 MiB 和总正文 64 MiB 上限。
+
+Windows fault tests 证明：
+
+- root component 为 junction 时 capability 建立失败；
+- root 内 linked directory 的 Markdown 不会被 search/read 打开；
+- child directory handle 存活时，Windows 拒绝 rename/path replacement。
+
+同一 fault test 已包含 Unix 分支：如果 pathname replacement 成功，后续读取必须
+仍绑定原 directory handle；该分支尚需 macOS/Linux 原生执行，不能由 Windows
+结果代替。
+
+定向验证：
+
+- anchored filesystem tests：`3 passed`；
+- bound Knowledge tests：`3 passed`；
+- Kernel→Host Knowledge tests：`4 passed`；
+- Codex runtime release tests：`2 passed`；
+- macOS helper tests：`2 passed`；
+- `cargo check --locked -p nomifun-knowledge -p nomifun-app
+  -p nomifun-codex-runtime`：通过；
+- Agent v2 contract check、C8 Gate self-test、C7 domain-wave Gate：通过。
+- `bun run dev`：2026-09-02 16:00 本地完成编译并启动，desktop 进程响应正常，
+  canonical dev root 无 startup panic；烟测后进程树已清理。
+
+`cargo clippy -p nomifun-knowledge --lib --tests -D warnings` 仍被该 crate 及
+`nomifun-common` 的既有 broker/routes/service warning 基线阻断。本批新增的
+collector 参数过多、single-match 和 unit-struct Default warning 已修复；未扩大
+到无关 clippy 清理。
+
+新增依赖改变 `Cargo.lock`，canonical generator 和机器镜像已同步：
+
+- `Cargo.lock`：
+  `792362a8edf3e7994a59c89c182698fe1d4661fec5d04409e960a4185663acc9`
+- runtime release：
+  `7d86f492219867e52b35db103a8df8282ba0fd1acc0079b8c5d01b3236a7e17f`
+- platform validation：
+  `fe631261c82226d5d824bd2ee35e1195c9eefb8afdc1522790b825ca9258305c`
+- contract digest ledger：
+  `79aaa49f672c844bb65cf50564dc9964bf11fc46a1b064a7761b75554e5e049f`
+
+这只关闭 search/read 的 path-replacement 风险，不解决跨外部编辑器的原子
+compare-and-replace；`knowledge.write` 仍保持 fail-closed。macOS arm64/x64 和
+Linux x64 还必须在原生主机复验 anchored handle、symlink replacement 与
+目录枚举行为；本轮 Windows 结果不能写成 C8-MA/C8-MX/C8-LD/C8-LH PASS。
+
+原生主机接手后优先执行：
+
+```bash
+cargo test --locked -p nomifun-knowledge service::anchored_fs::tests --lib -- --test-threads=1
+cargo test --locked -p nomifun-knowledge bound_knowledge --lib -- --test-threads=1
+cargo test --locked -p nomifun-app wave1_knowledge --lib -- --test-threads=1
+cargo check --locked -p nomifun-knowledge -p nomifun-app -p nomifun-codex-runtime
+cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check
+bun run gate:agent-v2 -- c7-domain-waves
+```

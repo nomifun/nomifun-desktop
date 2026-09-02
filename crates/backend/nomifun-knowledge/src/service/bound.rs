@@ -1,9 +1,10 @@
 use serde::Serialize;
-use tokio::io::AsyncReadExt;
 
 use super::*;
+use super::anchored_fs::AnchoredKnowledgeFs;
 
 const MAX_BOUND_KNOWLEDGE_READ_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_BOUND_KNOWLEDGE_SEARCH_ENTRIES: usize = 32_768;
 const MAX_BOUND_KNOWLEDGE_SEARCH_DOCUMENTS: usize = 4_096;
 pub(super) const MAX_BOUND_KNOWLEDGE_SEARCH_FILE_BYTES: u64 =
     8 * 1024 * 1024;
@@ -78,7 +79,7 @@ pub struct BoundKnowledgeDocument {
 /// already been selected by a Fresh-v4 typed resource binding.
 #[derive(Clone, Default)]
 pub struct BoundKnowledgeReadService {
-    search_cache: Arc<RwLock<SearchCacheInner>>,
+    _private: (),
 }
 
 impl BoundKnowledgeReadService {
@@ -104,7 +105,6 @@ impl BoundKnowledgeReadService {
         let kb_name = knowledge_base.name.clone();
         let root = knowledge_base.root.clone();
         let lock_root = root.clone();
-        let cache = Arc::clone(&self.search_cache);
         let timeout = AppError::Timeout(format!(
             "bound knowledge search timed out for {}",
             knowledge_base.knowledge_base_id
@@ -114,19 +114,19 @@ impl BoundKnowledgeReadService {
             SEARCH_WALK_BUDGET,
             Err(timeout),
             move || {
-                load_one_knowledge_root_checked(
-                    kb_id,
-                    kb_name,
-                    root,
-                    cache,
-                    Some(RetrievalLoadLimits {
+                AnchoredKnowledgeFs::open(&root)?.search_documents(
+                    &kb_id,
+                    &kb_name,
+                    RetrievalLoadLimits {
+                        max_entries:
+                            MAX_BOUND_KNOWLEDGE_SEARCH_ENTRIES,
                         max_documents:
                             MAX_BOUND_KNOWLEDGE_SEARCH_DOCUMENTS,
                         max_file_bytes:
                             MAX_BOUND_KNOWLEDGE_SEARCH_FILE_BYTES,
                         max_total_bytes:
                             MAX_BOUND_KNOWLEDGE_SEARCH_TOTAL_BYTES,
-                    }),
+                    },
                 )
             },
         )
@@ -164,85 +164,32 @@ impl BoundKnowledgeReadService {
         }
 
         let root = knowledge_base.root.clone();
-        let path = safe_md_path_bounded(root.clone(), rel_path).await?;
-        let metadata = tokio::time::timeout(
-            KNOWLEDGE_PATH_INSPECTION_TIMEOUT,
-            tokio::fs::symlink_metadata(&path),
-        )
-        .await
-        .map_err(|_| AppError::Timeout("knowledge file inspection timed out".into()))?
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                AppError::NotFound("knowledge document was not found".into())
-            } else {
-                AppError::Internal(format!(
-                    "failed to inspect bound knowledge document: {error}"
-                ))
-            }
-        })?;
-        if metadata_is_link_or_reparse(&path, &metadata) || !metadata.is_file() {
-            return Err(AppError::BadRequest(
-                "knowledge document must be a real Markdown file".into(),
-            ));
-        }
-        if metadata.len() > MAX_BOUND_KNOWLEDGE_READ_BYTES {
-            return Err(AppError::BadRequest(format!(
-                "knowledge document exceeds the {} MiB read limit",
-                MAX_BOUND_KNOWLEDGE_READ_BYTES / 1024 / 1024
-            )));
-        }
-
-        let read = async {
-            let file = tokio::fs::File::open(&path).await.map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    AppError::NotFound("knowledge document was not found".into())
-                } else {
-                    AppError::Internal(format!(
-                        "failed to open bound knowledge document: {error}"
-                    ))
-                }
-            })?;
-            let mut bytes = Vec::with_capacity(metadata.len() as usize);
-            file.take(MAX_BOUND_KNOWLEDGE_READ_BYTES + 1)
-                .read_to_end(&mut bytes)
-                .await
-                .map_err(|error| {
-                    AppError::Internal(format!(
-                        "failed to read bound knowledge document: {error}"
-                    ))
-                })?;
-            if bytes.len() as u64 > MAX_BOUND_KNOWLEDGE_READ_BYTES {
-                return Err(AppError::BadRequest(format!(
-                    "knowledge document exceeds the {} MiB read limit",
-                    MAX_BOUND_KNOWLEDGE_READ_BYTES / 1024 / 1024
-                )));
-            }
-            String::from_utf8(bytes).map_err(|_| {
-                AppError::BadRequest(
-                    "knowledge document must contain valid UTF-8 text".into(),
+        let lock_root = root.clone();
+        let file = bounded_root_blocking(
+            &lock_root,
+            KNOWLEDGE_FILE_IO_TIMEOUT,
+            Err(AppError::Timeout(
+                "knowledge file read timed out".into(),
+            )),
+            move || {
+                AnchoredKnowledgeFs::open(&root)?.read_markdown(
+                    &rel_path,
+                    MAX_BOUND_KNOWLEDGE_READ_BYTES,
                 )
-            })
-        };
-        let content = tokio::time::timeout(KNOWLEDGE_FILE_IO_TIMEOUT, read)
-            .await
-            .map_err(|_| AppError::Timeout("knowledge file read timed out".into()))??;
-        let relative_path = tree_relative_path(&root, &path)?;
-        let size = u64::try_from(content.len()).map_err(|_| {
-            AppError::Internal(
-                "knowledge document size cannot be represented".into(),
-            )
-        })?;
+            },
+        )
+        .await?;
 
         Ok(BoundKnowledgeDocument {
             handle: encode_doc_handle(
                 &knowledge_base.knowledge_base_id,
-                &relative_path,
+                &file.rel_path,
             ),
             resource_id: knowledge_base.knowledge_base_id.clone(),
-            relative_path,
-            content_sha256: sha256_text(&content),
-            content,
-            size,
+            relative_path: file.rel_path,
+            content_sha256: sha256_text(&file.content),
+            content: file.content,
+            size: file.size,
         })
     }
 }

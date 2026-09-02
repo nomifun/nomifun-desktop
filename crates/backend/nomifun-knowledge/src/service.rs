@@ -75,6 +75,7 @@ use crate::source_url::{self, HttpFetcher, PageFetcher};
 use crate::workpath::{WORKPATH_BINDING_KIND, workpath_key};
 use crate::{KB_MANAGED_REL_DIR, KB_MOUNT_REL_DIR};
 
+mod anchored_fs;
 mod bound;
 pub use bound::{
     BoundKnowledgeBase, BoundKnowledgeDocument, BoundKnowledgeReadService,
@@ -660,6 +661,7 @@ struct RetrievalDocument {
 
 #[derive(Clone, Copy, Debug)]
 struct RetrievalLoadLimits {
+    max_entries: usize,
     max_documents: usize,
     max_file_bytes: u64,
     max_total_bytes: u64,
@@ -9097,7 +9099,6 @@ fn load_one_knowledge_root(
         kb_name,
         root.clone(),
         cache,
-        None,
     ) {
         Ok(documents) => documents,
         Err(error) => {
@@ -9117,11 +9118,9 @@ fn load_one_knowledge_root_checked(
     kb_name: String,
     root: PathBuf,
     cache: Arc<RwLock<SearchCacheInner>>,
-    limits: Option<RetrievalLoadLimits>,
 ) -> Result<Vec<RetrievalDocument>, AppError> {
     validate_knowledge_root(&root)?;
     let mut documents = Vec::new();
-    let mut total_bytes = 0u64;
     for entry in vault_walker(&root) {
         if !entry.file_type().is_file() {
             continue;
@@ -9154,20 +9153,6 @@ fn load_one_knowledge_root_checked(
             ),
             Err(_) => (0, 0),
         };
-        if let Some(limits) = limits {
-            if documents.len() >= limits.max_documents {
-                return Err(AppError::BadRequest(format!(
-                    "knowledge search exceeds the {} document limit",
-                    limits.max_documents
-                )));
-            }
-            if size > limits.max_file_bytes {
-                return Err(AppError::BadRequest(format!(
-                    "knowledge search document exceeds the {} MiB file limit",
-                    limits.max_file_bytes / 1024 / 1024
-                )));
-            }
-        }
         let absolute = path.to_path_buf();
         let cached = {
             let guard =
@@ -9220,32 +9205,6 @@ fn load_one_knowledge_root_checked(
                 }
                 (content, heading)
             };
-        let document_bytes = u64::try_from(content.len()).map_err(|_| {
-            AppError::Internal(
-                "knowledge search document size cannot be represented".into(),
-            )
-        })?;
-        if let Some(limits) = limits {
-            if document_bytes > limits.max_file_bytes {
-                return Err(AppError::BadRequest(format!(
-                    "knowledge search document exceeds the {} MiB file limit",
-                    limits.max_file_bytes / 1024 / 1024
-                )));
-            }
-            total_bytes = total_bytes
-                .checked_add(document_bytes)
-                .ok_or_else(|| {
-                    AppError::BadRequest(
-                        "knowledge search content size overflowed".into(),
-                    )
-                })?;
-            if total_bytes > limits.max_total_bytes {
-                return Err(AppError::BadRequest(format!(
-                    "knowledge search exceeds the {} MiB total content limit",
-                    limits.max_total_bytes / 1024 / 1024
-                )));
-            }
-        }
         documents.push(RetrievalDocument {
             kb_id: kb_id.clone(),
             kb_name: kb_name.clone(),

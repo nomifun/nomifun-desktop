@@ -127,9 +127,9 @@ const C8_EXPECTED_DIGESTS = {
   platform_validation_contract:
     '78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9',
   platform_validation_manifest:
-    '885ad04ecbd798ae5285d956fe25cb6d3426b1f66244a33ac42db87c732687eb',
+    'fe631261c82226d5d824bd2ee35e1195c9eefb8afdc1522790b825ca9258305c',
   runtime_release:
-    '7c0c297dd0dd7c11c71cd589965e930ddec0008bebaaf510eabcd0c597358838',
+    '7d86f492219867e52b35db103a8df8282ba0fd1acc0079b8c5d01b3236a7e17f',
   runtime_feature_inventory:
     'bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee',
   canonical_schema_manifest:
@@ -143,9 +143,9 @@ const C8_EXPECTED_DIGESTS = {
   coding_codex_native:
     'f699f376a9414b7830b90a68c890d39010687499e6d16ee1687f5c370cd0127a',
   cargo_lock:
-    '8542e44b505368b7ae19e9ce064c2b9726bba6db5d597495e9899e868637a52c',
+    '792362a8edf3e7994a59c89c182698fe1d4661fec5d04409e960a4185663acc9',
   platform_fixture:
-    '885ad04ecbd798ae5285d956fe25cb6d3426b1f66244a33ac42db87c732687eb',
+    'fe631261c82226d5d824bd2ee35e1195c9eefb8afdc1522790b825ca9258305c',
 };
 const C8_EXPECTED_TEMPLATES = [
   'chat.minimal',

@@ -146,6 +146,8 @@ sys-locale = "0.3"
 include_dir = "0.7"
 notify = "8"
 walkdir = "2"
+cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
 ignore = "0.4"
 # Unified-diff computation for the knowledge-base inbox review panel (P4).
 zip = "2"
