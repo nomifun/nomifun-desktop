@@ -1079,6 +1079,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canonical_host_can_restart_after_platform_materialization() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = crate::AppConfig {
+            data_dir: directory.path().to_path_buf(),
+            work_dir: directory.path().to_path_buf(),
+            auth_policy: AuthPolicy::NoAuth,
+            ..crate::AppConfig::default()
+        };
+        let outcome = nomifun_v4_root::FreshV4Coordinator::default()
+            .bootstrap(
+                directory.path(),
+                APPLICATION_BUILD_IDENTITY,
+                &[],
+            )
+            .await
+            .unwrap();
+        let host = CanonicalHost::from_bootstrap(outcome);
+        let application = host.compose(&config).await.unwrap();
+        application.close().await.unwrap();
+
+        let outcome = nomifun_v4_root::FreshV4Coordinator::default()
+            .bootstrap(
+                directory.path(),
+                APPLICATION_BUILD_IDENTITY,
+                &[],
+            )
+            .await
+            .expect("a composed Fresh-v4 root must remain restartable");
+        let host = CanonicalHost::from_bootstrap(outcome);
+        let application = host.compose(&config).await.unwrap();
+        application.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn canonical_host_retains_coordinator_identity_and_fails_closed_explicitly() {
         let directory = tempfile::tempdir().unwrap();
         let outcome = nomifun_v4_root::FreshV4Coordinator::default()
