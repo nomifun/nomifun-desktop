@@ -18,7 +18,7 @@
 
 - Thin Kernel、统一 Plugin/Capability 主链、单一 AgentSession、Codex-derived Runtime 和 clean v4 等总目标继续有效；
 - 本文明确列出的 Gate、Evidence、生命周期、Compiler、Snapshot、Effect、文件边界、产品 UI 与平台矩阵改用本文的新策略；
-- `DECISIONS.zh.md`、01～04、`GLOBAL-CLOSURE-TODO.zh.md` 和各 Machine Prompt 与本文冲突时，以本文为准；旧文件在后续统一收口前只作历史背景，不能继续扩大任务；
+- 旧 `DECISIONS`、01～04、旧 `README/START-PROMPT/IMPLEMENTATION-STATUS` 和过期 handoff 已从当前工作树删除，只能通过 Git 历史审计；当前人工入口仅为本文件、`GLOBAL-CLOSURE-TODO.zh.md`、当前 Machine Prompt 和精简索引；
 - `GLOBAL-CLOSURE-TODO` 的 84 个工作包不再是一期必须逐个关闭的阻断清单；只把其中仍属于本文最小交付的项目迁入新的收口清单；
 - 已生成的 Manifest、fixture、digest 或结构测试不能因为自身存在而阻止删除；证明系统不具有高于产品系统的优先级；
 - 实施只采用普通 commit/revert/merge，不使用 reset、force-push 或历史重写；回滚前先检查下游消费，保留真实用户功能和无争议的基础正确性。
@@ -297,9 +297,10 @@ Manifest 是声明事实源，Registration builder 从实际 handlers/services �
 
 首版不保证抵御同权限恶意本地进程在每个 syscall 之间替换 symlink/junction。已完成的 anchored Knowledge read 可保留真实功能，但应 forward 简化；不要继续为 macOS 系统目录别名、每个 component handle 和极端 TOCTOU 扩大专用平台层。`knowledge.write` 按基本 containment + atomic replace 实现，不再等待分布式式可证明 CAS/uncertain 协议。
 
-### 6.2 机器 2 SSH lane 立即缩减
+### 6.2 机器 2 中的 SSH slice
 
-旧 `MACHINE-2-W2-SSH-START-PROMPT.zh.md` 被本文覆盖。机器 2 保留：
+旧单 SSH Prompt 已删除，机器 2 只在当前 Batch Prompt 能一次承载多项并行工作时启动。
+其中 SSH writer 保留：
 
 - 真实 SSH connection/host binding；
 - read/write/exec/sudo 最小 typed command/outcome；
@@ -317,7 +318,8 @@ Manifest 是声明事实源，Registration builder 从实际 handlers/services �
 - 为即将删除的旧 API 设计长期兼容层；
 - 无真实 SSH 环境时构造大规模模拟证明。
 
-如果当前机器 2 尚未产生新 SSH commit，应先拉取本文再继续；若已经产生提交，主机只挑选符合上述最小合同的部分。
+机器 2 的启用门槛、独占写集和回传格式以当前
+`MACHINE-2-PHASE1-BATCH-A-START-PROMPT.zh.md` 为准；若只剩 SSH 单项，不启动独立机器。
 
 ## 7. Browser/Computer 可替换能力不得在止损中缩水
 

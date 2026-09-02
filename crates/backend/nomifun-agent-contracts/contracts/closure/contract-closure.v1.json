@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0.0",
-  "decision_revision": "2026-08-28-agent-capability-platform-v2",
+  "decision_revision": "2026-09-02-phase1-stop-loss",
   "decisions": [
     {"decision_id":"D-001","status":"confirmed","contract":"Product uses Agent Preset; runtime instance uses AgentSession."},
     {"decision_id":"D-002","status":"confirmed","contract":"FullAuto is the only execution behavior; no product approval modes."},
@@ -16,20 +16,20 @@
     {"decision_id":"D-012","status":"confirmed","contract":"v4 is a clean start with no legacy data conversion or compatibility read."},
     {"decision_id":"D-013","status":"confirmed","contract":"First v4 cutover performs one same-filesystem whole-root rename before creating an empty v4 root."},
     {"decision_id":"D-014","status":"confirmed","contract":"Every migration slice switches all direct consumers and deletes the replaced legacy surface in the same change."},
-    {"decision_id":"D-015","status":"confirmed","contract":"Canonical semantic SessionEvent facts are authoritative; projections rebuild and checkpoints are disposable."},
+    {"decision_id":"D-015","status":"confirmed","contract":"Canonical semantic SessionEvent facts are authoritative; projections contain only UI state and never duplicate the Event Log."},
     {"decision_id":"D-016","status":"confirmed","contract":"Stable freezes a vendor-neutral seam; local install and one SDK begin only in Phase N1."},
     {"decision_id":"D-017","status":"confirmed","contract":"RemoteBinding selects an exact AgentBindingValue and uses explicit open, turn, observe, and cancel."},
     {"decision_id":"D-018","status":"confirmed","contract":"Lightweight Chat and complete Coding are structural conformance requirements, not a performance benchmark program."},
-    {"decision_id":"D-019","status":"confirmed","contract":"Five owner workstreams, six to eight coding agents, disjoint writes, staged gates, and 213/314 EW are fixed."},
-    {"decision_id":"D-020","status":"confirmed","contract":"Internal sticky canary precedes physical Nomi deletion, Nomi-free RC, and same-artifact Stable promotion."},
+    {"decision_id":"D-019","status":"confirmed","contract":"Parallel work is enabled only for multi-task batches with disjoint writes and net speedup; no fixed agent count or EW estimate is a delivery contract."},
+    {"decision_id":"D-020","status":"confirmed","contract":"Nomi is removed by one bounded C9 shutdown after the three release-blocking platform candidates; no sticky canary or durable handoff platform is required."},
     {"decision_id":"D-021","status":"confirmed","contract":"AgentSessionId UUIDv7 is the only product and execution session identity; Conversation is absent from v4."},
     {"decision_id":"D-022","status":"confirmed","contract":"Editor Test saves or reuses an ordinary revision, creates an ordinary persistent Session, and performs real FullAuto effects."},
     {"decision_id":"D-023","status":"confirmed","contract":"Official seeds are role-complete and context-minimal; G0 freezes their exact contribution manifest."},
-    {"decision_id":"D-024","status":"confirmed","contract":"One irreversible delete closure purges Session content and leaves only the four-field tombstone semantics."},
-    {"decision_id":"D-025","status":"confirmed","contract":"Exact complete-ceiling compatibility continues the same Session; incompatibility is read-only and requires explicit fork."},
-    {"decision_id":"D-026","status":"confirmed","contract":"Remote token rotate or revoke fences new request admission and never cascades to existing Sessions."},
-    {"decision_id":"D-027","status":"confirmed","contract":"Nomi drain uses existing finite deadlines, forced cleanup, uncertain handoff, exact zero, and D-024 delete."},
-    {"decision_id":"D-028","status":"confirmed","contract":"Five required native cells use Windows-first whole-candidate handoff and whole-cohort recheck."}
+    {"decision_id":"D-024","status":"confirmed","contract":"One irreversible delete closure uses the real Runtime dispose result, purges Session-owned content, and leaves only the four-field tombstone; callers provide no synthetic zero proof."},
+    {"decision_id":"D-025","status":"confirmed","contract":"Compatibility compares only the frozen selected execution closure; incompatibility leaves the existing Session read-only and requires an explicit fork."},
+    {"decision_id":"D-026","status":"confirmed","contract":"Remote token mutation atomically publishes generation and hash; requests authenticated before publication may finish, later old-token requests fail, and existing Sessions are not cascaded."},
+    {"decision_id":"D-027","status":"confirmed","contract":"C9 performs one bounded shutdown, descendant-process cleanup, and explicit unknown handling before physical Nomi deletion; no online drain or exact-zero proof platform is required."},
+    {"decision_id":"D-028","status":"confirmed","contract":"The release-blocking native platforms are Windows Desktop x64, macOS Desktop arm64, and Linux Desktop x64; additional targets are non-blocking engineering work."}
   ],
   "canonical_sources": [
     {
@@ -51,101 +51,51 @@
   "closure_resolutions": [
     {
       "resolution_id": "CR-001",
-      "canonical_rule": "Markdown explains generated artifacts; Rust types, fresh-v4 schema, and SessionEvent Registry are the only machine owners.",
-      "superseded_descriptions": [
-        {"repository_alias":"current","revision":"7a2ade3c49374add25a35565265399c57729a8b9","normalized_relative_path":"docs/specs/2026-08-28-agent-capability-platform-v2/03-target-architecture.zh.md"}
-      ]
+      "canonical_rule": "Markdown explains generated artifacts; Rust types, fresh-v4 schema, and SessionEvent Registry are the only machine owners."
     },
     {
       "resolution_id": "CR-002",
-      "canonical_rule": "Every digest artifact is payload plus envelope; payload digest excludes itself, status, evidence, logs, and summary.",
-      "superseded_descriptions": [
-        {"repository_alias":"current","revision":"7a2ade3c49374add25a35565265399c57729a8b9","normalized_relative_path":"docs/specs/2026-08-28-agent-capability-platform-v2/02-capability-catalog-and-agent-presets.zh.md"}
-      ]
+      "canonical_rule": "Every digest artifact is payload plus envelope; payload digest excludes itself, status, evidence, logs, and summary."
     },
     {
       "resolution_id": "CR-003",
-      "canonical_rule": "Capability search and activation are internal Runtime control operations, not Capabilities and not initial selections.",
-      "superseded_descriptions": [
-        {"repository_alias":"current","revision":"7a2ade3c49374add25a35565265399c57729a8b9","normalized_relative_path":"docs/specs/2026-08-28-agent-capability-platform-v2/03-target-architecture.zh.md"}
-      ]
+      "canonical_rule": "Capability search and activation are internal Runtime control operations, not Capabilities and not initial selections."
     },
     {
       "resolution_id": "CR-004",
-      "canonical_rule": "capability/active-set-committed is the only persistent activation event; requested and failed are transient diagnostics.",
-      "superseded_descriptions": [
-        {"repository_alias":"current","revision":"7a2ade3c49374add25a35565265399c57729a8b9","normalized_relative_path":"docs/specs/2026-08-28-agent-capability-platform-v2/01-current-state-and-harness-findings.zh.md"}
-      ]
+      "canonical_rule": "capability/active-set-committed is the only persistent activation event; requested and failed are transient diagnostics."
     },
     {
       "resolution_id": "CR-005",
-      "canonical_rule": "Snapshot stores Runtime protocol, profile, release constraints, and feature inventory; actual build identity exists only in runtime/bound.",
-      "superseded_descriptions": [
-        {"repository_alias":"current","revision":"7a2ade3c49374add25a35565265399c57729a8b9","normalized_relative_path":"docs/specs/2026-08-28-agent-capability-platform-v2/03-target-architecture.zh.md"}
-      ]
+      "canonical_rule": "Snapshot freezes only the selected capability, provider, tool, model, resource, and Runtime execution closure; actual build identity exists only in runtime/bound."
     },
     {
       "resolution_id": "CR-006",
-      "canonical_rule": "Plugins receive only PluginRegistrar and narrow PluginContext with declared ports, state, services, cancellation, and managed tasks.",
-      "superseded_descriptions": [
-        {"repository_alias":"current","revision":"7a2ade3c49374add25a35565265399c57729a8b9","normalized_relative_path":"docs/specs/2026-08-28-agent-capability-platform-v2/02-capability-catalog-and-agent-presets.zh.md"}
-      ]
+      "canonical_rule": "Manifest is the declaration source; registration metadata is derived from real handlers and services, and plugins receive only narrow declared context."
     },
     {
       "resolution_id": "CR-007",
-      "canonical_rule": "Cutover archive basename is <canonical>.pre-v4-archive-<UTC timestamp>.",
-      "superseded_descriptions": [
-        {"repository_alias":"current","revision":"7a2ade3c49374add25a35565265399c57729a8b9","normalized_relative_path":"docs/specs/2026-08-28-agent-capability-platform-v2/DECISIONS.zh.md"}
-      ]
+      "canonical_rule": "Cutover archive basename is <canonical>.pre-v4-archive-<UTC timestamp>."
     },
     {
       "resolution_id": "CR-008",
-      "canonical_rule": "Once durable, the immutable parent marker survives mkdir or rename failure and is removed only after ready and metadata exact-match.",
-      "superseded_descriptions": [
-        {"repository_alias":"current","revision":"7a2ade3c49374add25a35565265399c57729a8b9","normalized_relative_path":"docs/specs/2026-08-28-agent-capability-platform-v2/04-migration-and-validation-plan.zh.md"}
-      ]
+      "canonical_rule": "Once durable, the immutable parent marker survives mkdir or rename failure and is removed only after ready and metadata exact-match."
     },
     {
       "resolution_id": "CR-009",
-      "canonical_rule": "Fresh initialization order is schema and schema_metadata, bundled Package materialization, seven authoring seeds, ready, then marker removal.",
-      "superseded_descriptions": [
-        {"repository_alias":"current","revision":"7a2ade3c49374add25a35565265399c57729a8b9","normalized_relative_path":"docs/specs/2026-08-28-agent-capability-platform-v2/README.zh.md"}
-      ]
+      "canonical_rule": "Fresh initialization order is schema and schema_metadata, bundled Package materialization, seven authoring seeds, ready, then marker removal."
     },
     {
       "resolution_id": "CR-010",
-      "canonical_rule": "Canonical errors are uppercase; missing catalog materialization is CAPABILITY_NOT_MATERIALIZED and outside-ceiling is CAPABILITY_NOT_IN_PRESET.",
-      "superseded_descriptions": [
-        {"repository_alias":"current","revision":"7a2ade3c49374add25a35565265399c57729a8b9","normalized_relative_path":"docs/specs/2026-08-28-agent-capability-platform-v2/04-migration-and-validation-plan.zh.md"}
-      ]
+      "canonical_rule": "Canonical errors are uppercase; missing catalog materialization is CAPABILITY_NOT_MATERIALIZED and outside-ceiling is CAPABILITY_NOT_IN_PRESET."
     },
     {
       "resolution_id": "CR-011",
-      "canonical_rule": "Stable promotes the exact signed RC artifact and signature envelope; any signed-envelope or content change is a new candidate.",
-      "superseded_descriptions": [
-        {"repository_alias":"current","revision":"7a2ade3c49374add25a35565265399c57729a8b9","normalized_relative_path":"docs/specs/2026-08-28-agent-capability-platform-v2/03-target-architecture.zh.md"}
-      ]
+      "canonical_rule": "Stable promotes the exact signed RC artifact and signature envelope; any signed-envelope or content change is a new candidate."
     },
     {
       "resolution_id": "CR-012",
-      "canonical_rule": "Stable may edit schema-backed config of already mounted bundled Packages but provides no user install, lifecycle, SDK, or market.",
-      "superseded_descriptions": [
-        {"repository_alias":"current","revision":"7a2ade3c49374add25a35565265399c57729a8b9","normalized_relative_path":"docs/specs/2026-08-28-agent-capability-platform-v2/01-current-state-and-harness-findings.zh.md"}
-      ]
-    }
-  ],
-  "reference_baselines": [
-    {
-      "repository_alias": "../deepseek-harness",
-      "frozen_revision": "cd5ef8148158c3a752a658978873241fdf8e2bbc",
-      "observed_revision": "cd5ef8148158c3a752a658978873241fdf8e2bbc",
-      "relationship": "exact"
-    },
-    {
-      "repository_alias": "../codex",
-      "frozen_revision": "dc2ccc6843abb09c9d297862dc10b6bd12a3935d",
-      "observed_revision": "4ee04c0aa5833ac39b1763f6ea44c7bc777c83dd",
-      "relationship": "observed_is_16_commits_descendant; c0_pins_frozen_revision"
+      "canonical_rule": "Stable may edit schema-backed config of already mounted bundled Packages but provides no user install, lifecycle, SDK, or market."
     }
   ],
   "production_behavior_included": false,

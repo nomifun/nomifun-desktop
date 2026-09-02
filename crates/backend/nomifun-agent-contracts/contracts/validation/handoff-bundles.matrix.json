@@ -8,7 +8,7 @@
       "boundary": "hp-1",
       "cohort_tuple": {
         "candidate_source_sha": "0123456789abcdef0123456789abcdef01234567",
-        "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+        "confirmed_decision_contract_digest": "1111111111111111111111111111111111111111111111111111111111111111",
         "platform_validation_manifest_digest": "5ae861c85ac12a5afa2743847b1212b97b37b462c827534bf4238cb1391cb645",
         "runtime_release_digest": "98ddabe09bcbcdfcccb3d3b9fd3fc87d818c8276f60baa9fee3697308027cc3d"
       },
@@ -67,7 +67,7 @@
       "boundary": "hp-2",
       "cohort_tuple": {
         "candidate_source_sha": "0123456789abcdef0123456789abcdef01234567",
-        "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+        "confirmed_decision_contract_digest": "1111111111111111111111111111111111111111111111111111111111111111",
         "platform_validation_manifest_digest": "5ae861c85ac12a5afa2743847b1212b97b37b462c827534bf4238cb1391cb645",
         "runtime_release_digest": "98ddabe09bcbcdfcccb3d3b9fd3fc87d818c8276f60baa9fee3697308027cc3d"
       },
@@ -147,7 +147,7 @@
       "boundary": "c8-recheck-n",
       "cohort_tuple": {
         "candidate_source_sha": "0123456789abcdef0123456789abcdef01234567",
-        "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+        "confirmed_decision_contract_digest": "1111111111111111111111111111111111111111111111111111111111111111",
         "platform_validation_manifest_digest": "5ae861c85ac12a5afa2743847b1212b97b37b462c827534bf4238cb1391cb645",
         "runtime_release_digest": "98ddabe09bcbcdfcccb3d3b9fd3fc87d818c8276f60baa9fee3697308027cc3d"
       },

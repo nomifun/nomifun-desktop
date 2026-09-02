@@ -2,8 +2,8 @@
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
     "manifest_version": "1.0.0",
-    "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
-    "canonical_schema_manifest_digest": "003e2e2164f180d40546d0678483ed0dac22c3634af1031d2a05da5022a64317",
+    "confirmed_decision_contract_digest": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5",
+    "canonical_schema_manifest_digest": "e7eb4d3d1cde70a8ae66c9b20836ff33abf1b710dc73d2a0b88393a9c8bfcc46",
     "cargo_lock_digest": "792362a8edf3e7994a59c89c182698fe1d4661fec5d04409e960a4185663acc9",
     "official_preset_seed_manifest_digest": "c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8",
     "capability_availability_manifest_digest": "8fb55c4765eefc59e67e686dfcc1858898c75893b64f353249a2e3d5e705cb68",
@@ -314,5 +314,5 @@
       }
     }
   },
-  "payload_digest": "a7a25387450c1f3b1ebccde7d87925267043a0c6a592f5df08b0be3a16b4a3a7"
+  "payload_digest": "766b667840a3230d7fe9061bc27fe4cd89ed9de94124389bd243e55525f88dc7"
 }

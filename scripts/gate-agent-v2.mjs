@@ -55,7 +55,9 @@ const requiredFiles = [
   'crates/backend/nomifun-agent-contracts/contracts/generated/contract-digest-ledger.envelope.json',
   'crates/backend/nomifun-agent-contracts/contracts/validation/d025-compatibility-fixture-reference.envelope.json',
   'docs/specs/2026-08-28-agent-capability-platform-v2/C0-WRITE-MANIFESTS.json',
-  'docs/specs/2026-08-28-agent-capability-platform-v2/IMPLEMENTATION-STATUS.zh.md',
+  'docs/specs/2026-08-28-agent-capability-platform-v2/README.zh.md',
+  'docs/specs/2026-08-28-agent-capability-platform-v2/05-system-capability-replacement-foundation.zh.md',
+  'docs/specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md',
 ];
 
 const commands = [];
@@ -124,13 +126,13 @@ const C8_C7_MIGRATION_CHECKPOINT =
   '253e850b44bce83fa9b785dc6805c431201f6c91';
 const C8_EXPECTED_DIGESTS = {
   confirmed_decision_contract:
-    'b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5',
+    'b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5',
   platform_validation_contract:
     '32a18fc0f7b921c0e8157e5b8183dbe645a806e70ccd1c26de30ff75b03a9422',
   runtime_feature_inventory:
     'bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee',
   canonical_schema_manifest:
-    '003e2e2164f180d40546d0678483ed0dac22c3634af1031d2a05da5022a64317',
+    'e7eb4d3d1cde70a8ae66c9b20836ff33abf1b710dc73d2a0b88393a9c8bfcc46',
   official_seed:
     'c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8',
   target_inventory:

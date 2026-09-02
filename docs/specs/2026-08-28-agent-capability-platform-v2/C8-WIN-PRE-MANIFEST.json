@@ -5,7 +5,7 @@
   "branch": "rf/agent-capability-platform-v2",
   "candidate_source_policy": "resolve_clean_git_head_at_run",
   "candidate_inputs": {
-    "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5"
+    "confirmed_decision_contract_digest": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5"
   },
   "post_build_artifacts": {
     "release_lock": "release-lock.json",
@@ -30,11 +30,11 @@
   "immutable_inputs": {
     "decision_contract": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/contract-closure.envelope.json",
-      "digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5"
+      "digest": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5"
     },
     "canonical_schema_manifest": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/canonical-v4-schema-manifest.envelope.json",
-      "digest": "003e2e2164f180d40546d0678483ed0dac22c3634af1031d2a05da5022a64317"
+      "digest": "e7eb4d3d1cde70a8ae66c9b20836ff33abf1b710dc73d2a0b88393a9c8bfcc46"
     },
     "target_first_party_inventory": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/target-first-party-contributions.envelope.json",
