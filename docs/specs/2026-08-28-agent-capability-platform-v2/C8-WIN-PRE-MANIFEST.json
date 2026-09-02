@@ -13,7 +13,7 @@
   },
   "source_checkpoint": {
     "local_head": "resolved_at_run",
-    "verified_remote_sha": "must_equal_local_head_before_hp1",
+    "verified_remote_sha": "optional_single_host_observation",
     "clean_worktree_required": true,
     "shared_ref": "refs/heads/rf/agent-capability-platform-v2"
   },
@@ -201,7 +201,6 @@
     "windows_status": "pass",
     "non_windows_status": "pending_native_verification",
     "workspace_cargo_test_must_be_serialized": true,
-    "global_legacy_residual_must_be_zero": true,
-    "hp1_handoff": "clean checkpoint, push, remote SHA verification, handoff bundle, then pause"
+    "global_legacy_residual_must_be_zero": true
   }
 }

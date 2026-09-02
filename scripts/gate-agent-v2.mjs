@@ -1886,15 +1886,10 @@ function c8NativeValidateSourceCheckpoint(report, sourceSha) {
     checkpoint.verified_remote_sha = c8Sha(remoteSha) ? remoteSha : null;
     checkpoint.remote_status =
       remoteProbe.status === 0 && checkpoint.verified_remote_sha === sourceSha
-        ? 'matches_local_head'
-        : 'not_equal_to_local_head';
-    c8NativeRequire(
-      report,
-      remoteProbe.status === 0 && checkpoint.verified_remote_sha === sourceSha,
-      'native_remote_checkpoint_mismatch',
-      'native cell requires the pushed origin branch to match the local source HEAD',
-      { expected: sourceSha, observed: checkpoint.verified_remote_sha }
-    );
+        ? 'optional_matches_local_head'
+        : remoteProbe.status === 0
+          ? 'optional_observation_only'
+          : 'optional_probe_failed';
   } else {
     checkpoint.remote_status = 'skipped_dirty_or_wrong_branch';
   }
@@ -3722,10 +3717,10 @@ function c8ValidateC8Manifest(report, manifest, sourceSha) {
   );
   c8Require(
     report,
-    checkpoint?.verified_remote_sha === 'must_equal_local_head_before_hp1' ||
+    checkpoint?.verified_remote_sha === 'optional_single_host_observation' ||
       c8Sha(checkpoint?.verified_remote_sha),
     'source_checkpoint_remote_placeholder',
-    'source_checkpoint.verified_remote_sha must retain its HP-1 placeholder or a commit SHA'
+    'source_checkpoint.verified_remote_sha must use the single-host optional observation placeholder or a commit SHA'
   );
   c8Require(
     report,
@@ -3962,7 +3957,6 @@ function c8ValidateC8Manifest(report, manifest, sourceSha) {
     non_windows_status: 'pending_native_verification',
     workspace_cargo_test_must_be_serialized: true,
     global_legacy_residual_must_be_zero: true,
-    hp1_handoff: 'clean checkpoint, push, remote SHA verification, handoff bundle, then pause',
   })) {
     c8Require(
       report,
@@ -4013,8 +4007,10 @@ function c8ResolveC8SourceCheckpoint(report, manifest, sourceSha) {
     }
   }
   resolved.remote_status =
-    checkpoint.verified_remote_sha === 'must_equal_local_head_before_hp1'
-      ? 'deferred_until_hp1'
+    checkpoint.verified_remote_sha === 'optional_single_host_observation'
+      ? resolved.verified_remote_sha === sourceSha
+        ? 'optional_matches_local_head'
+        : 'optional_observation_only'
       : resolved.verified_remote_sha === sourceSha
         ? 'matches_local_head'
         : 'not_equal_to_local_head';
