@@ -1395,7 +1395,7 @@ Windows/macOS/Linux 的 root-anchored no-follow filesystem primitive、明确
 create-vs-append DTO，以及 typed publication outcome 和 durable
 `started -> succeeded|failed|uncertain -> reconciled` 记录。
 
-### Knowledge search/read anchored filesystem 加固（2026-09-02）
+### Knowledge search/read anchored filesystem 加固（2026-09-02，Windows 基线记录）
 
 后续只读安全审计确认，原先 `safe_md_path` 检查后再按绝对路径执行
 `WalkDir` / `File::open` 仍存在本地外部进程替换 parent 为
@@ -1413,20 +1413,20 @@ symlink/junction 的 TOCTOU 窗口。因此 search/read 已改为
 - 新增 32768 filesystem entries、4096 documents、128 directory depth、
   单文件 8 MiB 和总正文 64 MiB 上限。
 
-Windows fault tests 证明：
+Windows 基线 fault tests 证明：
 
 - root component 为 junction 时 capability 建立失败；
 - root 内 linked directory 的 Markdown 不会被 search/read 打开；
 - child directory handle 存活时，Windows 拒绝 rename/path replacement。
 
-同一 fault test 已包含 Unix 分支：如果 pathname replacement 成功，后续读取必须
-仍绑定原 directory handle；该分支尚需 macOS/Linux 原生执行，不能由 Windows
-结果代替。
+同一 fault test 包含 Unix 分支：如果 pathname replacement 成功，后续读取必须
+仍绑定原 directory handle；在该 Windows 基线记录形成时，Unix 分支尚需原生
+执行，不能由 Windows 结果代替。当前 macOS 结果见下方续记。
 
-定向验证：
+Windows 基线定向验证：
 
 - anchored filesystem tests：`3 passed`；
-- bound Knowledge tests：`4 passed`；
+- bound Knowledge tests：`3 passed`；
 - Kernel→Host Knowledge tests：`4 passed`；
 - Codex runtime release tests：`2 passed`；
 - macOS helper tests：`2 passed`；
@@ -1453,11 +1453,11 @@ collector 参数过多、single-match 和 unit-struct Default warning 已修复�
   `79aaa49f672c844bb65cf50564dc9964bf11fc46a1b064a7761b75554e5e049f`
 
 这只关闭 search/read 的 path-replacement 风险，不解决跨外部编辑器的原子
-compare-and-replace；`knowledge.write` 仍保持 fail-closed。macOS arm64/x64 和
-Linux x64 还必须在原生主机复验 anchored handle、symlink replacement 与
-目录枚举行为；本轮 Windows 结果不能写成 C8-MA/C8-MX/C8-LD/C8-LH PASS。
+compare-and-replace；`knowledge.write` 仍保持 fail-closed。该段 Windows 基线
+结果不能写成 C8-MA/C8-MX/C8-LD/C8-LH PASS；当前 macOS arm64 定向复验结果见
+下方续记。
 
-原生主机接手后优先执行：
+原生主机复验命令（本轮已执行，供 Windows 复现）：
 
 ```bash
 cargo test --locked -p nomifun-knowledge service::anchored_fs::tests --lib -- --test-threads=1
@@ -1484,10 +1484,14 @@ bun run gate:agent-v2 -- c7-domain-waves
   Knowledge root 之前错误拒绝了系统 `/var` 别名；
 - 结果为 `1 passed / 2 failed`，不是测试环境豁免。
 
-修复提交：
+修复与回归提交：
 
 - `efbcb598191e66f953b84b8f0dfeb128010d9695`
-  `fix(knowledge): accept macos system alias roots safely`
+  `fix(knowledge): accept macos system alias roots safely`；
+- `1a547f3a1ef25d56b799cca1cd429ba22ce764ff`
+  `fix(knowledge): verify macos system root aliases`；
+- `23e039ff0262d11f6085dea27d4019da15ff4412`
+  `test(knowledge): cover replaced bound root reads`。
 
 修复范围只包含
 `crates/backend/nomifun-knowledge/src/service/anchored_fs.rs`：
@@ -1512,7 +1516,7 @@ bun run gate:agent-v2 -- c7-domain-waves
 最终定向验证：
 
 - anchored filesystem tests：`9 passed`；
-- bound Knowledge tests：`3 passed`；
+- bound Knowledge tests：`4 passed`；
 - Kernel→Host `wave1_knowledge` tests：`4 passed`；
 - `cargo check --locked -p nomifun-knowledge -p nomifun-app
   -p nomifun-codex-runtime`：通过；
@@ -1525,6 +1529,9 @@ bun run gate:agent-v2 -- c7-domain-waves
 - `cargo fmt -p nomifun-knowledge -p nomifun-codex-runtime -- --check` 与
   `git diff --check`：通过；
 - `Cargo.lock` 未变化，因此未运行 canonical contract `write`。
+- 在 `1a547f3a...` 的 alias-target guard 之后，anchored/bound/app 三组
+  Knowledge 测试再次通过（`9 + 4 + 4`）；该 guard 只拒绝不符合固定系统别名
+  target 的重写，不改变用户路径的 no-follow 行为。
 
 桌面烟测执行了一次 `bun run dev`：完成 debug 编译并启动
 `target/debug/nomifun-desktop`，WindowServer 观察到一个 on-screen
@@ -1540,7 +1547,9 @@ panic；随后使用 Ctrl-C 正常结束，desktop/Vite/Tauri 进程和 5173 lis
 - `typed_parameters.knowledge_name = name`；
 - canonical Agent Settings route 存在。
 
-macOS arm64 helper 只运行一次，最终状态为 FAIL（不是 C8-MA evidence）：
+macOS arm64 helper 只运行一次（在 clean `efbcb598...` code checkpoint），
+最终状态为 FAIL（不是 C8-MA evidence）；后续 `1a547f3a...` 只增加 alias
+target guard，未重新运行 helper：
 
 - native Darwin arm64 / 非 Rosetta：pass；
 - app 仅包含 `arm64`，缺少 `x86_64` Universal slice；
