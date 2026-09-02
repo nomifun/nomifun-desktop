@@ -27,6 +27,39 @@ pub type PackageManifestArtifact = ArtifactEnvelope<PackageManifest>;
 pub type ServiceKeyDagArtifact = ArtifactEnvelope<ServiceKeyDagPayload>;
 pub type TargetPackageInventoryArtifact = ArtifactEnvelope<TargetPackageInventoryPayload>;
 
+pub const AGENT_CORE_PACKAGE_ID: &str = "platform.agent-core";
+pub const AGENT_CORE_MOUNT_ID: &str = "platform-agent-core";
+pub const AGENT_SESSION_COMMAND_SERVICE_ID: &str =
+    "service.agent-session-command.v1";
+pub const AGENT_SESSION_QUERY_SERVICE_ID: &str =
+    "service.agent-session-query.v1";
+pub const AGENT_SESSION_SERVICE_VERSION: &str = "1.0.0";
+
+pub fn agent_core_package_ref() -> PackageRef {
+    PackageRef {
+        id: PackageId::from(AGENT_CORE_PACKAGE_ID),
+        version: VersionString::from(AGENT_SESSION_SERVICE_VERSION),
+    }
+}
+
+pub fn agent_core_mount_id() -> PluginMountId {
+    PluginMountId::from(AGENT_CORE_MOUNT_ID)
+}
+
+pub fn agent_session_command_service_ref() -> ServiceKeyRef {
+    ServiceKeyRef {
+        id: ServiceKeyId::from(AGENT_SESSION_COMMAND_SERVICE_ID),
+        version: VersionString::from(AGENT_SESSION_SERVICE_VERSION),
+    }
+}
+
+pub fn agent_session_query_service_ref() -> ServiceKeyRef {
+    ServiceKeyRef {
+        id: ServiceKeyId::from(AGENT_SESSION_QUERY_SERVICE_ID),
+        version: VersionString::from(AGENT_SESSION_SERVICE_VERSION),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LocalizedMetadata {
