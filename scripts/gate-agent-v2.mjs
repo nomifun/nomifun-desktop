@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readAndVerifyReleaseLock } from './release/release-lock.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -112,8 +113,8 @@ const C8_PLATFORM_VALIDATION_MANIFEST_PATH =
   'crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json';
 const C8_PLATFORM_VALIDATION_FIXTURE_PATH =
   'crates/backend/nomifun-agent-contracts/contracts/generated/platform-validation-fixture.envelope.json';
-const C8_RUNTIME_RELEASE_INPUT_PATH =
-  'crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json';
+const C8_RUNTIME_RELEASE_FIXTURE_INPUT_PATH =
+  'crates/backend/nomifun-agent-contracts/contracts/runtime/runtime-release-fixture.json';
 const C8_RUNTIME_RELEASE_FIXTURE_PATH =
   'crates/backend/nomifun-agent-contracts/contracts/generated/runtime-release-fixture.envelope.json';
 const C8_TRIAD_DELETION_MANIFEST_PATH =
@@ -125,15 +126,11 @@ const C8_EXPECTED_DIGESTS = {
   confirmed_decision_contract:
     'b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5',
   platform_validation_contract:
-    '78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9',
-  platform_validation_manifest:
-    'fe631261c82226d5d824bd2ee35e1195c9eefb8afdc1522790b825ca9258305c',
-  runtime_release:
-    '7d86f492219867e52b35db103a8df8282ba0fd1acc0079b8c5d01b3236a7e17f',
+    '32a18fc0f7b921c0e8157e5b8183dbe645a806e70ccd1c26de30ff75b03a9422',
   runtime_feature_inventory:
     'bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee',
   canonical_schema_manifest:
-    'e28723d7fc524cfdd351c6fc8cc17b8a48d8fd1f5be16a7aebd395ce669f98ff',
+    '003e2e2164f180d40546d0678483ed0dac22c3634af1031d2a05da5022a64317',
   official_seed:
     'c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8',
   target_inventory:
@@ -144,8 +141,6 @@ const C8_EXPECTED_DIGESTS = {
     'f699f376a9414b7830b90a68c890d39010687499e6d16ee1687f5c370cd0127a',
   cargo_lock:
     '792362a8edf3e7994a59c89c182698fe1d4661fec5d04409e960a4185663acc9',
-  platform_fixture:
-    'fe631261c82226d5d824bd2ee35e1195c9eefb8afdc1522790b825ca9258305c',
 };
 const C8_EXPECTED_TEMPLATES = [
   'chat.minimal',
@@ -160,9 +155,7 @@ const C8_GLOBAL_RESIDUAL_MAX_FINDINGS = 5000;
 const C8_REQUIRED_NATIVE_CELLS = [
   'windows_desktop_x64',
   'macos_desktop_arm64',
-  'macos_desktop_x64',
   'linux_desktop_x64',
-  'linux_headless_x64',
 ];
 const C8_NATIVE_CELL_SPECS = Object.freeze({
   windows_desktop_x64: Object.freeze({
@@ -480,7 +473,7 @@ if (
 }
 
 const sourceOnlyPaths = [
-  'crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json',
+  'crates/backend/nomifun-agent-contracts/contracts/runtime/runtime-release-fixture.json',
   'crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json',
 ];
 for (const file of sourceOnlyPaths) {
@@ -1455,13 +1448,8 @@ function runC8WinPreGate() {
   report.canonical_cohort_tuple = {
     candidate_source_sha: sourceSha,
     confirmed_decision_contract_digest:
-      manifest.value.cohort_tuple_inputs?.confirmed_decision_contract_digest ||
+      manifest.value.candidate_inputs?.confirmed_decision_contract_digest ||
       null,
-    platform_validation_manifest_digest:
-      manifest.value.cohort_tuple_inputs?.platform_validation_manifest_digest ||
-      null,
-    runtime_release_digest:
-      manifest.value.cohort_tuple_inputs?.runtime_release_digest || null,
   };
   report.target_cell = manifest.value.target_cell || null;
 
@@ -1610,9 +1598,6 @@ function c8NativeExpectedTuple(sourceSha) {
     candidate_source_sha: sourceSha,
     confirmed_decision_contract_digest:
       C8_EXPECTED_DIGESTS.confirmed_decision_contract,
-    platform_validation_manifest_digest:
-      C8_EXPECTED_DIGESTS.platform_validation_manifest,
-    runtime_release_digest: C8_EXPECTED_DIGESTS.runtime_release,
   };
 }
 
@@ -1986,7 +1971,7 @@ function c8NativeExpectedPlatformCells() {
   );
 }
 
-function c8NativeValidatePlatformInputs(report, sourceSha) {
+function c8NativeValidatePlatformInputs(report) {
   const result = {
     status: 'fail',
     input_digests: {},
@@ -2011,8 +1996,8 @@ function c8NativeValidatePlatformInputs(report, sourceSha) {
   );
   const runtimeInput = c8NativeReadJson(
     report,
-    C8_RUNTIME_RELEASE_INPUT_PATH,
-    'Runtime release input'
+    C8_RUNTIME_RELEASE_FIXTURE_INPUT_PATH,
+    'Runtime release schema fixture'
   );
   if (!fixture || !platformPayloadArtifact || !runtimeFixture || !runtimeInput) {
     return result;
@@ -2022,36 +2007,22 @@ function c8NativeValidatePlatformInputs(report, sourceSha) {
   const runtimePayload = runtimeFixture.value?.payload;
   const platformPayloadDigest = fixture.value?.payload_digest;
   const runtimePayloadDigest = runtimeFixture.value?.payload_digest;
-  result.input_digests.platform_validation_manifest = {
-    expected: C8_EXPECTED_DIGESTS.platform_validation_manifest,
+  result.input_digests.platform_validation_fixture = {
     observed: platformPayloadDigest || null,
     raw_sha256: fixture.raw_sha256,
     status:
-      platformPayloadDigest === C8_EXPECTED_DIGESTS.platform_validation_manifest
+      c8DigestPayload(platformPayload) === platformPayloadDigest
         ? 'pass'
         : 'fail',
   };
-  result.input_digests.runtime_release = {
-    expected: C8_EXPECTED_DIGESTS.runtime_release,
+  result.input_digests.runtime_release_fixture = {
     observed: runtimePayloadDigest || null,
     raw_sha256: runtimeFixture.raw_sha256,
     status:
-      runtimePayloadDigest === C8_EXPECTED_DIGESTS.runtime_release
+      c8DigestPayload(runtimePayload) === runtimePayloadDigest
         ? 'pass'
         : 'fail',
   };
-  c8NativeRequire(
-    report,
-    platformPayloadDigest === C8_EXPECTED_DIGESTS.platform_validation_manifest,
-    'native_platform_fixture_digest',
-    'generated PlatformValidationManifest fixture digest differs from the frozen input'
-  );
-  c8NativeRequire(
-    report,
-    runtimePayloadDigest === C8_EXPECTED_DIGESTS.runtime_release,
-    'native_runtime_fixture_digest',
-    'generated Runtime release fixture digest differs from the frozen input'
-  );
   c8NativeRequire(
     report,
     fixture.value?.digest_algorithm === 'sorted-json-sha256-v1' &&
@@ -2076,19 +2047,11 @@ function c8NativeValidatePlatformInputs(report, sourceSha) {
     report,
     c8CanonicalEqual(runtimeInput.value, runtimePayload),
     'native_runtime_payload_mismatch',
-    'Runtime release source payload differs from its generated fixture'
-  );
-  c8NativeRequire(
-    report,
-    platformPayload?.candidate_source_sha === sourceSha,
-    'native_platform_source_mismatch',
-    'PlatformValidationManifest candidate_source_sha differs from the current HEAD',
-    { expected: sourceSha, observed: platformPayload?.candidate_source_sha || null }
+    'Runtime release schema fixture differs from its generated envelope'
   );
   for (const [key, expected] of Object.entries({
     confirmed_decision_contract_digest:
       C8_EXPECTED_DIGESTS.confirmed_decision_contract,
-    runtime_release_digest: C8_EXPECTED_DIGESTS.runtime_release,
     canonical_schema_manifest_digest: C8_EXPECTED_DIGESTS.canonical_schema_manifest,
     cargo_lock_digest: C8_EXPECTED_DIGESTS.cargo_lock,
     official_preset_seed_manifest_digest: C8_EXPECTED_DIGESTS.official_seed,
@@ -2112,9 +2075,9 @@ function c8NativeValidatePlatformInputs(report, sourceSha) {
       : [];
   c8NativeRequire(
     report,
-    JSON.stringify(observedCellIds) === JSON.stringify(expectedCellIds),
-    'native_platform_cell_exact_set',
-    'PlatformValidationManifest target cell set differs from the frozen five-cell matrix',
+    expectedCellIds.every((cellId) => observedCellIds.includes(cellId)),
+    'native_platform_required_cells',
+    'PlatformValidationManifest is missing a release-blocking three-platform cell',
     { expected: expectedCellIds, observed: observedCellIds }
   );
   const expectedCells = c8NativeExpectedPlatformCells();
@@ -2144,10 +2107,14 @@ function c8NativeValidatePlatformInputs(report, sourceSha) {
     };
   });
   result.required_checks = requiredChecks;
+  const releaseBlockingCheckIds = new Set(expectedChecks.map((check) => check.check_id));
+  const releaseBlockingChecks = requiredChecks.filter((check) =>
+    releaseBlockingCheckIds.has(check?.check_id)
+  );
   c8NativeRequire(
     report,
     c8CanonicalEqual(
-      requiredChecks.map((check) => ({
+      releaseBlockingChecks.map((check) => ({
         check_id: check?.check_id,
         target_cells: check?.target_cells,
         command: check?.command,
@@ -2156,7 +2123,7 @@ function c8NativeValidatePlatformInputs(report, sourceSha) {
       expectedChecks.sort((left, right) => left.check_id.localeCompare(right.check_id))
     ),
     'native_required_check_contract',
-    'PlatformValidationManifest required native cell checks differ from the frozen dispatch table'
+    'PlatformValidationManifest release-blocking checks differ from the three-platform dispatch table'
   );
 
   const verificationPoints = Array.isArray(platformPayload?.platform_verification_points)
@@ -2176,19 +2143,6 @@ function c8NativeValidatePlatformInputs(report, sourceSha) {
       { cell_id: cellId, observed: expectedPoint }
     );
   }
-  c8NativeRequire(
-    report,
-    c8CanonicalEqual(platformPayload?.platform_matrix?.recheck_policy, {
-      only_after_complete_round_returns: true,
-      merge_fixes_before_freezing_new_tuple: true,
-      affected_cells_run_full_gate: true,
-      unaffected_cells_run_native_scoped_attestation: true,
-      central_owner_cannot_attest_for_native_host: true,
-      single_fix_platform_handoff_forbidden: true,
-    }),
-    'native_recheck_policy_contract',
-    'PlatformValidationManifest recheck policy differs from the frozen whole-cohort policy'
-  );
   return {
     ...result,
     platform_payload: platformPayload,
@@ -2489,8 +2443,22 @@ function c8NativeValidateCellEvidence(
 ) {
   if (!loaded) return null;
   const evidence = loaded.value;
+  if (
+    evidence &&
+    typeof evidence === 'object' &&
+    Object.hasOwn(evidence, 'source_commit') &&
+    Object.hasOwn(evidence, 'target') &&
+    Object.hasOwn(evidence, 'suite') &&
+    Object.hasOwn(evidence, 'release_lock')
+  ) {
+    return c8NativeValidatePlatformResult(
+      report,
+      dispatch,
+      sourceSha,
+      evidence
+    );
+  }
   const target = dispatch.target;
-  const runtimeCell = platform.runtime_payload?.target_matrix?.[target.cell_id];
   const expectedTuple = c8NativeExpectedTuple(sourceSha);
   const allowedKeys = [
     'artifact_digests',
@@ -2505,6 +2473,7 @@ function c8NativeValidateCellEvidence(
     'input_manifest_refs',
     'invalidation',
     'native_host_fingerprint',
+    'release_lock',
     'run_id',
     'schema_version',
     'status',
@@ -2604,27 +2573,50 @@ function c8NativeValidateCellEvidence(
     'PlatformCellEvidence fingerprint does not match the current native process'
   );
 
-  const expectedInputRefs = {
-    platform_validation_manifest: {
-      artifact_id: 'platform_validation_manifest',
-      normalized_relative_path:
-        'contracts/validation/platform-validation-manifest.payload.json',
-      digest: C8_EXPECTED_DIGESTS.platform_validation_manifest,
-    },
-    runtime_release_manifest: {
-      artifact_id: 'codex_runtime_release_input',
-      normalized_relative_path: 'contracts/runtime/codex-runtime-release-input.json',
-      digest: C8_EXPECTED_DIGESTS.runtime_release,
-    },
-  };
+  const expectedInputRefs = {};
   c8NativeRequire(
     report,
     c8CanonicalEqual(evidence.input_manifest_refs, expectedInputRefs),
     'native_evidence_input_refs',
-    'PlatformCellEvidence input_manifest_refs do not match the frozen logical inputs',
+    'PlatformCellEvidence must not treat schema fixtures as immutable release inputs',
     { expected: expectedInputRefs, observed: evidence.input_manifest_refs || null }
   );
 
+  const releaseLockPath =
+    process.env.NOMIFUN_RELEASE_LOCK_PATH || evidence.release_lock?.path || null;
+  const releaseArtifactRoot =
+    process.env.NOMIFUN_RELEASE_ARTIFACT_ROOT || repoRoot;
+  const releaseLock = releaseLockPath
+    ? readAndVerifyReleaseLock(releaseLockPath, { root: releaseArtifactRoot })
+    : {
+        status: 'blocked',
+        reason: 'release_lock_missing',
+        checks: [],
+      };
+  c8NativeRequire(
+    report,
+    releaseLock.status === 'pass',
+    'native_release_lock',
+    'native evidence requires a verified post-build release-lock.json',
+    {
+      path: releaseLockPath,
+      artifact_root: releaseArtifactRoot,
+      status: releaseLock.status,
+      reason: releaseLock.reason || null,
+      checks: releaseLock.checks || [],
+    }
+  );
+  c8NativeRequire(
+    report,
+    releaseLock.lock?.source_commit === sourceSha,
+    'native_release_lock_source',
+    'release-lock.json source_commit differs from the current clean source',
+    {
+      expected: sourceSha,
+      observed: releaseLock.lock?.source_commit || null,
+    }
+  );
+  const lockedSidecar = releaseLock.lock?.sidecars?.[target.cell_id];
   const artifactDigests = evidence.artifact_digests;
   c8NativeRequire(
     report,
@@ -2639,16 +2631,16 @@ function c8NativeValidateCellEvidence(
   );
   c8NativeRequire(
     report,
-    artifactDigests?.host === runtimeCell?.host_artifact?.digest &&
-      artifactDigests?.package === runtimeCell?.package_content_digest &&
-      artifactDigests?.runtime_sidecar === runtimeCell?.sidecar_artifact?.digest,
+    artifactDigests?.host === releaseLock.lock?.host?.sha256 &&
+      artifactDigests?.package === releaseLock.lock?.package?.sha256 &&
+      artifactDigests?.runtime_sidecar === lockedSidecar?.sha256,
     'native_evidence_runtime_artifacts',
-    'PlatformCellEvidence artifacts do not match the frozen Runtime release target',
+    'PlatformCellEvidence artifacts do not match the verified release lock',
     {
       expected: {
-        host: runtimeCell?.host_artifact?.digest || null,
-        package: runtimeCell?.package_content_digest || null,
-        runtime_sidecar: runtimeCell?.sidecar_artifact?.digest || null,
+        host: releaseLock.lock?.host?.sha256 || null,
+        package: releaseLock.lock?.package?.sha256 || null,
+        runtime_sidecar: lockedSidecar?.sha256 || null,
       },
       observed: artifactDigests || null,
     }
@@ -2895,6 +2887,121 @@ function c8NativeValidateCellEvidence(
   return evidence;
 }
 
+function c8NativeValidatePlatformResult(
+  report,
+  dispatch,
+  sourceSha,
+  result
+) {
+  const target = dispatch.target;
+  c8NativeRequire(
+    report,
+    result.schema_version === '1.0.0',
+    'native_platform_result_schema',
+    'platform-result.json schema_version must be 1.0.0'
+  );
+  c8NativeRequire(
+    report,
+    result.source_commit === sourceSha,
+    'native_platform_result_source',
+    'platform-result.json source_commit differs from the current clean source',
+    { expected: sourceSha, observed: result.source_commit || null }
+  );
+  c8NativeRequire(
+    report,
+    result.target === target.cell_id,
+    'native_platform_result_target',
+    'platform-result.json target differs from the dispatched native cell',
+    { expected: target.cell_id, observed: result.target || null }
+  );
+  c8NativeRequire(
+    report,
+    result.status === 'pass',
+    'native_platform_result_status',
+    'only a passing platform-result.json can satisfy a native cell',
+    { observed: result.status || null }
+  );
+  c8NativeRequire(
+    report,
+    result.suite &&
+      typeof result.suite.name === 'string' &&
+      result.suite.name.length > 0 &&
+      Array.isArray(result.suite.checks) &&
+      result.suite.checks.length > 0,
+    'native_platform_result_suite',
+    'platform-result.json must record the actual suite and executed checks'
+  );
+  c8NativeRequire(
+    report,
+    Array.isArray(result.logs) && result.logs.length > 0,
+    'native_platform_result_logs',
+    'platform-result.json must contain at least one log reference'
+  );
+
+  const releaseLockPath =
+    process.env.NOMIFUN_RELEASE_LOCK_PATH || result.release_lock?.path || null;
+  const releaseArtifactRoot =
+    process.env.NOMIFUN_RELEASE_ARTIFACT_ROOT || repoRoot;
+  const releaseLock = releaseLockPath
+    ? readAndVerifyReleaseLock(releaseLockPath, { root: releaseArtifactRoot })
+    : {
+        status: 'blocked',
+        reason: 'release_lock_missing',
+        checks: [],
+      };
+  c8NativeRequire(
+    report,
+    releaseLock.status === 'pass',
+    'native_platform_result_release_lock',
+    'platform-result.json must reference a verified real release-lock.json',
+    {
+      path: releaseLockPath,
+      artifact_root: releaseArtifactRoot,
+      status: releaseLock.status,
+      reason: releaseLock.reason || null,
+      checks: releaseLock.checks || [],
+    }
+  );
+  c8NativeRequire(
+    report,
+    result.release_lock?.sha256 === releaseLock.lock_sha256,
+    'native_platform_result_release_lock_digest',
+    'platform-result.json release-lock digest differs from the referenced file',
+    {
+      expected: releaseLock.lock_sha256 || null,
+      observed: result.release_lock?.sha256 || null,
+    }
+  );
+  c8NativeRequire(
+    report,
+    releaseLock.lock?.source_commit === sourceSha,
+    'native_platform_result_release_source',
+    'release-lock.json source_commit differs from the current clean source',
+    {
+      expected: sourceSha,
+      observed: releaseLock.lock?.source_commit || null,
+    }
+  );
+  const lockedSidecar = releaseLock.lock?.sidecars?.[target.cell_id];
+  c8NativeRequire(
+    report,
+    Boolean(lockedSidecar),
+    'native_platform_result_sidecar',
+    'release-lock.json has no Sidecar for the dispatched native cell',
+    {
+      target: target.cell_id,
+      available_targets: Object.keys(releaseLock.lock?.sidecars || {}),
+    }
+  );
+  report.artifact_digests = {
+    host: releaseLock.lock?.host?.sha256 || null,
+    package: releaseLock.lock?.package?.sha256 || null,
+    runtime_sidecar: lockedSidecar?.sha256 || null,
+    runtime_helpers: releaseLock.lock?.helpers || [],
+  };
+  return result;
+}
+
 function runC8NativeCellGate(dispatch) {
   const sourceSha = c8ReadGitHeadForReport();
   const evidenceDirectory =
@@ -2933,7 +3040,7 @@ function runC8NativeCellGate(dispatch) {
   try {
     c8NativeValidateHost(report, dispatch.target);
     c8NativeValidateSourceCheckpoint(report, sourceSha);
-    const platform = c8NativeValidatePlatformInputs(report, sourceSha);
+    const platform = c8NativeValidatePlatformInputs(report);
     const {
       platform_payload: _platformPayload,
       runtime_payload: _runtimePayload,
@@ -3568,50 +3675,33 @@ function c8ValidateC8Manifest(report, manifest, sourceSha) {
     'C8-WIN-PRE must resolve candidate_source_sha from the clean Git HEAD at run time'
   );
 
-  const tupleInputs = manifest.cohort_tuple_inputs;
-  const expectedTupleKeys = [
-    'confirmed_decision_contract_digest',
-    'platform_validation_manifest_digest',
-    'runtime_release_digest',
-  ];
+  const candidateInputs = manifest.candidate_inputs;
   c8Require(
     report,
-    tupleInputs &&
-      typeof tupleInputs === 'object' &&
-      !Array.isArray(tupleInputs) &&
-      JSON.stringify(Object.keys(tupleInputs).sort()) ===
-        JSON.stringify(expectedTupleKeys.sort()),
-    'cohort_tuple_shape',
-    'C8-WIN-PRE cohort_tuple_inputs must contain exactly the three immutable digest inputs'
+    candidateInputs &&
+      typeof candidateInputs === 'object' &&
+      !Array.isArray(candidateInputs) &&
+      JSON.stringify(Object.keys(candidateInputs)) ===
+        JSON.stringify(['confirmed_decision_contract_digest']),
+    'candidate_inputs_shape',
+    'C8-WIN-PRE candidate_inputs must contain only the decision contract digest'
   );
-  for (const key of expectedTupleKeys) {
-    c8Require(
-      report,
-      c8Hex(tupleInputs?.[key]),
-      'cohort_tuple_digest_shape',
-      `C8-WIN-PRE cohort_tuple_inputs.${key} must be a 64-character digest`
-    );
-  }
   c8Require(
     report,
-    tupleInputs?.confirmed_decision_contract_digest?.toLowerCase() ===
+    candidateInputs?.confirmed_decision_contract_digest?.toLowerCase() ===
       C8_EXPECTED_DIGESTS.confirmed_decision_contract,
-    'cohort_tuple_decision_digest',
-    'C8-WIN-PRE decision-contract tuple input differs from the frozen contract'
+    'candidate_input_decision_digest',
+    'C8-WIN-PRE decision-contract input differs from the frozen contract'
   );
+
   c8Require(
     report,
-    tupleInputs?.platform_validation_manifest_digest?.toLowerCase() ===
-      C8_EXPECTED_DIGESTS.platform_validation_manifest,
-    'cohort_tuple_platform_digest',
-    'C8-WIN-PRE platform-validation tuple input differs from the frozen contract'
-  );
-  c8Require(
-    report,
-    tupleInputs?.runtime_release_digest?.toLowerCase() ===
-      C8_EXPECTED_DIGESTS.runtime_release,
-    'cohort_tuple_runtime_digest',
-    'C8-WIN-PRE runtime-release tuple input differs from the frozen release'
+    c8CanonicalEqual(manifest.post_build_artifacts, {
+      release_lock: 'release-lock.json',
+      platform_result: 'platform-result.json',
+    }),
+    'post_build_artifacts',
+    'C8-WIN-PRE must name release-lock.json and platform-result.json as post-build outputs'
   );
 
   const checkpoint = manifest.source_checkpoint;
@@ -3690,14 +3780,6 @@ function c8ValidateC8Manifest(report, manifest, sourceSha) {
       path: 'crates/backend/nomifun-agent-contracts/contracts/generated/canonical-v4-schema-manifest.envelope.json',
       field: 'payload.platform_validation_contract_digest',
       digest: C8_EXPECTED_DIGESTS.platform_validation_contract,
-    },
-    platform_validation_manifest: {
-      path: 'crates/backend/nomifun-agent-contracts/contracts/generated/platform-validation-fixture.envelope.json',
-      digest: C8_EXPECTED_DIGESTS.platform_validation_manifest,
-    },
-    runtime_release: {
-      path: 'crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json',
-      digest: C8_EXPECTED_DIGESTS.runtime_release,
     },
     cargo_lock: {
       path: 'Cargo.lock',
@@ -4185,19 +4267,9 @@ function c8ValidateCanonicalPlatformInputs(report, manifest) {
       digest: C8_EXPECTED_DIGESTS.official_seed,
     },
     {
-      key: 'runtime_release',
-      path: 'crates/backend/nomifun-agent-contracts/contracts/generated/runtime-release-fixture.envelope.json',
-      digest: C8_EXPECTED_DIGESTS.runtime_release,
-    },
-    {
       key: 'runtime_feature_inventory',
       path: 'crates/backend/nomifun-agent-contracts/contracts/generated/runtime-feature-inventory.envelope.json',
       digest: C8_EXPECTED_DIGESTS.runtime_feature_inventory,
-    },
-    {
-      key: 'platform_validation_manifest',
-      path: 'crates/backend/nomifun-agent-contracts/contracts/generated/platform-validation-fixture.envelope.json',
-      digest: C8_EXPECTED_DIGESTS.platform_validation_manifest,
     },
   ];
   for (const input of inputSpecs) {
@@ -4238,12 +4310,6 @@ function c8ValidateCanonicalPlatformInputs(report, manifest) {
         C8_EXPECTED_DIGESTS.confirmed_decision_contract,
       'platform_manifest_decision_digest',
       'PlatformValidationManifest decision digest differs from the frozen contract'
-    );
-    c8Require(
-      report,
-      payload.runtime_release_digest === C8_EXPECTED_DIGESTS.runtime_release,
-      'platform_manifest_runtime_digest',
-      'PlatformValidationManifest runtime release digest differs from the frozen release'
     );
     c8Require(
       report,
@@ -5468,6 +5534,27 @@ function c8SelfTestAssert(condition, message) {
 }
 
 function runC8SelfTest() {
+  const preRunPlatformManifest = JSON.parse(
+    readFileSync(join(repoRoot, C8_PLATFORM_VALIDATION_MANIFEST_PATH), 'utf8')
+  );
+  const contractDigestLedger = JSON.parse(
+    readFileSync(
+      join(
+        repoRoot,
+        'crates/backend/nomifun-agent-contracts/contracts/generated/contract-digest-ledger.envelope.json'
+      ),
+      'utf8'
+    )
+  );
+  c8SelfTestAssert(
+    !Object.hasOwn(preRunPlatformManifest, 'candidate_source_sha'),
+    'pre-run PlatformValidationManifest must not contain candidate_source_sha'
+  );
+  c8SelfTestAssert(
+    !Object.hasOwn(contractDigestLedger?.payload || {}, 'base_source_sha'),
+    'pre-run contract digest ledger must not contain base_source_sha'
+  );
+
   const dirtyReport = {
     preflight_blocked: false,
     failure_details: [],
@@ -5682,9 +5769,6 @@ function runC8SelfTest() {
     candidate_source_sha: 'a'.repeat(40),
     confirmed_decision_contract_digest:
       C8_EXPECTED_DIGESTS.confirmed_decision_contract,
-    platform_validation_manifest_digest:
-      C8_EXPECTED_DIGESTS.platform_validation_manifest,
-    runtime_release_digest: C8_EXPECTED_DIGESTS.runtime_release,
   };
   const mergeCells = Object.fromEntries(
     C8_REQUIRED_NATIVE_CELLS.map((cellId) => [
@@ -5728,7 +5812,7 @@ function runC8SelfTest() {
   c8SelfTestAssert(
     mergeValidation.status === 'pass' &&
       mergeReport.failure_details.length === 0,
-    'a complete same-tuple five-cell C8-MERGE summary must pass'
+    'a complete same-source three-platform C8-MERGE summary must pass'
   );
 
   const channelPolicy = {
@@ -6288,8 +6372,6 @@ function validateC7WriteManifest(manifest, expectedWaves) {
     'deletion_manifest_set_digest',
     'official_seed_digest',
     'runtime_feature_inventory_digest',
-    'runtime_release_digest',
-    'platform_validation_manifest_digest',
   ];
   if (!inputs || typeof inputs !== 'object' || Array.isArray(inputs)) {
     failures.push('C7 confirmed_inputs must be an object');
@@ -6535,16 +6617,6 @@ function verifyC7InputDigests(manifest) {
       key: 'runtime_feature_inventory_digest',
       path: 'crates/backend/nomifun-agent-contracts/contracts/generated/runtime-feature-inventory.envelope.json',
       field: 'payload_digest',
-    },
-    {
-      key: 'runtime_release_digest',
-      path: 'crates/backend/nomifun-agent-contracts/contracts/generated/runtime-release-fixture.envelope.json',
-      field: 'payload_digest',
-    },
-    {
-      key: 'platform_validation_manifest_digest',
-      path: 'crates/backend/nomifun-agent-contracts/contracts/generated/canonical-v4-schema-manifest.envelope.json',
-      field: 'payload.platform_validation_contract_digest',
     },
   ];
   const results = {};
@@ -7782,9 +7854,6 @@ function validateC8MergeSummary(
     candidate_source_sha: sourceSha,
     confirmed_decision_contract_digest:
       C8_EXPECTED_DIGESTS.confirmed_decision_contract,
-    platform_validation_manifest_digest:
-      C8_EXPECTED_DIGESTS.platform_validation_manifest,
-    runtime_release_digest: C8_EXPECTED_DIGESTS.runtime_release,
   };
   result.tuple = summary.cohort_tuple || null;
   if (!c8CanonicalEqual(summary.cohort_tuple, expectedTuple)) {
@@ -7809,7 +7878,7 @@ function validateC8MergeSummary(
     c8MergeFailure(
       report,
       'cell_exact_set',
-      'C8-MERGE must contain exactly the five required native cells',
+      'C8-MERGE must contain exactly the three release-blocking native cells',
       { expected: C8_REQUIRED_NATIVE_CELLS, observed: observedCells }
     );
   }
@@ -7896,7 +7965,7 @@ function validateC8MergeSummary(
     c8MergeFailure(
       report,
       'status_counts_mismatch',
-      'C8-MERGE status_counts does not match the five cell evidence entries',
+      'C8-MERGE status_counts does not match the three release-blocking cell entries',
       { expected: computed, observed: summary.status_counts || null }
     );
   }

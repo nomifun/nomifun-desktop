@@ -145,7 +145,7 @@
       "docs/specs/2026-08-28-agent-capability-platform-v2/",
       "crates/backend/nomifun-agent-contracts/contracts/deletion/triad-core.json",
       "crates/backend/nomifun-agent-contracts/contracts/generated/",
-      "crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json",
+      "crates/backend/nomifun-agent-contracts/contracts/runtime/runtime-release-fixture.json",
       "crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json"
     ]
   },

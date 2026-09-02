@@ -33,10 +33,11 @@ impl RuntimeProcessConfig {
         executable: impl Into<PathBuf>,
         working_directory: impl Into<PathBuf>,
         target_id: impl Into<String>,
+        expected_executable_digest: DigestHex,
         release: &RuntimeReleaseDescriptor,
     ) -> Result<Self, RuntimeError> {
         let target_id = target_id.into();
-        let expected_executable_digest = release.sidecar_digest_for_target(&target_id)?;
+        release.runtime_target_for_target(&target_id)?;
         let config = Self {
             executable: executable.into(),
             working_directory: working_directory.into(),
@@ -87,12 +88,7 @@ impl RuntimeProcessConfig {
         &self,
         release: &RuntimeReleaseDescriptor,
     ) -> Result<(), RuntimeError> {
-        let expected = release.sidecar_digest_for_target(&self.target_id)?;
-        if self.expected_executable_digest.as_ref() != Some(&expected) {
-            return Err(RuntimeError::ReleaseManifest(
-                "runtime process pin differs from the release target artifact".to_owned(),
-            ));
-        }
+        release.runtime_target_for_target(&self.target_id)?;
         Ok(())
     }
 
@@ -489,31 +485,31 @@ mod tests {
     #[test]
     fn pinned_config_rejects_relative_paths_and_secret_environment() {
         let cwd = std::env::current_dir().unwrap();
-        let release = RuntimeReleaseDescriptor::frozen_from_fixture().unwrap();
+        let release = RuntimeReleaseDescriptor::pinned_contract().unwrap();
         assert!(
             RuntimeProcessConfig::pinned_app_server(
                 "relative.exe",
                 &cwd,
                 "windows_desktop_x64",
+                DigestHex::from("0".repeat(64)),
                 &release,
             )
             .is_err()
         );
         let executable = std::env::current_exe().unwrap();
+        let executable_digest = sha256_path(&executable);
         let release_pinned = RuntimeProcessConfig::pinned_app_server(
             &executable,
             &cwd,
             "windows_desktop_x64",
+            executable_digest.clone(),
             &release,
         )
         .unwrap();
         release_pinned.validate_release(&release).unwrap();
-        let release_digest = release
-            .sidecar_digest_for_target("windows_desktop_x64")
-            .unwrap();
         assert_eq!(
             release_pinned.expected_executable_digest(),
-            Some(&release_digest)
+            Some(&executable_digest)
         );
         let digest = sha256_path(&executable);
         let config = RuntimeProcessConfig {
@@ -552,12 +548,13 @@ mod tests {
         std::fs::write(&executable, b"not a real executable").unwrap();
         let link = root.path().join("runtime-link");
         std::os::unix::fs::symlink(&executable, &link).unwrap();
-        let release = RuntimeReleaseDescriptor::frozen_from_fixture().unwrap();
+        let release = RuntimeReleaseDescriptor::pinned_contract().unwrap();
 
         let error = RuntimeProcessConfig::pinned_app_server(
             &link,
             root.path(),
             "macos_desktop_arm64",
+            DigestHex::from("0".repeat(64)),
             &release,
         )
         .unwrap_err();
@@ -573,12 +570,13 @@ mod tests {
         let executable = root.path().join("runtime");
         std::fs::write(&executable, b"not executable").unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let release = RuntimeReleaseDescriptor::frozen_from_fixture().unwrap();
+        let release = RuntimeReleaseDescriptor::pinned_contract().unwrap();
 
         let error = RuntimeProcessConfig::pinned_app_server(
             &executable,
             root.path(),
             "macos_desktop_arm64",
+            DigestHex::from("0".repeat(64)),
             &release,
         )
         .unwrap_err();
@@ -598,12 +596,13 @@ mod tests {
             std::fs::Permissions::from_mode(0o755 | 0o020),
         )
         .unwrap();
-        let release = RuntimeReleaseDescriptor::frozen_from_fixture().unwrap();
+        let release = RuntimeReleaseDescriptor::pinned_contract().unwrap();
 
         let error = RuntimeProcessConfig::pinned_app_server(
             &executable,
             root.path(),
             "macos_desktop_arm64",
+            DigestHex::from("0".repeat(64)),
             &release,
         )
         .unwrap_err();
@@ -621,11 +620,12 @@ mod tests {
 
         let metadata = std::fs::symlink_metadata(&alias).unwrap();
         assert!(metadata_is_windows_reparse_point(&metadata));
-        let release = RuntimeReleaseDescriptor::frozen_from_fixture().unwrap();
+        let release = RuntimeReleaseDescriptor::pinned_contract().unwrap();
         let error = RuntimeProcessConfig::pinned_app_server(
             &alias,
             root.path(),
             "windows_desktop_x64",
+            DigestHex::from("0".repeat(64)),
             &release,
         )
         .unwrap_err();

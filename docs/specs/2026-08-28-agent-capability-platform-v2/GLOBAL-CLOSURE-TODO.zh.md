@@ -70,12 +70,12 @@ Linux Desktop 和一次性 C9 clean cut。
 | 阶段 | closed | open | blocked | external | pending-validation | 合计 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | S0 止损发布 | 3 | 0 | 0 | 0 | 0 | 3 |
-| S1 Revert/keep 审计 | 2 | 1 | 0 | 0 | 0 | 3 |
-| S2 P0 与基础收缩 | 1 | 9 | 0 | 0 | 0 | 10 |
+| S1 Revert/keep 审计 | 3 | 0 | 0 | 0 | 0 | 3 |
+| S2 P0 与基础收缩 | 3 | 7 | 0 | 0 | 0 | 10 |
 | S3 Role seam 与核心 owner | 0 | 4 | 8 | 0 | 0 | 12 |
 | S4 产品 UI | 0 | 1 | 1 | 0 | 0 | 2 |
 | S5 三平台、C9 与 RC | 0 | 0 | 3 | 2 | 0 | 5 |
-| **总计** | **6** | **15** | **12** | **2** | **0** | **35** |
+| **总计** | **9** | **12** | **12** | **2** | **0** | **35** |
 
 旧台账 84 项现已收敛为 35 项。任务数量不是质量指标；只有完成定义和最小验证满足后
 才能修改状态。
@@ -94,14 +94,25 @@ Linux Desktop 和一次性 C9 clean cut。
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `SL-S1-01` | closed | 主机 | 审计并处理 `d1acccf6` Wave 3 批量合同 | `SL-S0-01` | 无真实 owner/repository/入口的批量合同已普通 revert；未来只按真实场景重新加入最小 DTO，不保留 alias | `git show --stat 2ad8ca12` | 无 |
 | `SL-S1-02` | closed | 主机 | 审计并普通 revert `765d1953` Wave 4 通用 Effect 合同 | `SL-S0-01` | 过度 receipt/reconcile 状态机已从主线撤销，未回滚真实用户功能 | `git show --stat 8f4ba1d9` | 无 |
-| `SL-S1-03` | open | 主机 | 完成保留提交的 forward-simplify 清单 | `SL-S1-01` | 对 Session ServiceKey、Knowledge、VCS、Remote、lifecycle、Gate 分别标记 keep/delete/simplify；没有“因已有代码而继续兼容”的项目 | `git diff --check; rg -n "ZeroOutstandingProof|fixture_digest|candidate_source_sha" crates scripts` | 无 |
+| `SL-S1-03` | closed | 主机 | 完成保留提交的 forward-simplify 清单 | `SL-S1-01` | 对 Session ServiceKey、Knowledge、VCS、Remote、lifecycle、Gate 分别标记 keep/delete/simplify；没有“因已有代码而继续兼容”的项目 | 下方 forward-simplify 决策表；`git diff --check` | 无 |
+
+### Forward-simplify 决策
+
+| 范围 | 决策 | 后续边界 |
+| --- | --- | --- |
+| AgentSession command/query ServiceKey | keep | 继续作为单一 Session authority，不再新增第二套 Remote/automation Session API |
+| Knowledge search/read 与 anchored 文件访问 | keep + simplify | 保留真实 owner 和基本 containment；停止扩张极端本机 TOCTOU 证明 |
+| VCS status/diff/stage/commit/push | keep + simplify | 保留真实 owner；外部 push 只保留 idempotency 与 unknown no-retry |
+| Remote open/turn/observe/cancel | keep + simplify | 保留显式 Session 主链；删除跨 Response Body auth permit 和旧 selector 旁路 |
+| Session delete/dispose lifecycle | simplify | 由 `SL-S2-04` 删除调用者伪造的 zero proof，保留真实 dispose report 与幂等 tombstone |
+| Gate、manifest 与 native evidence | delete + simplify | 删除 source SHA 自引用、fixture release digest、五格首发阻断；只保留三平台 RC 所需的 source input、真实 release lock/result |
 
 ## S2：P0 与基础收缩
 
 | ID | 状态 | Owner | 目标 | 依赖 | 完成定义 | 最小测试 | 人工 / 外部输入 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `SL-S2-01` | open | 主机 | 删除 candidate source SHA 自引用 | `SL-S1-03` | pre-run input 不写其自身 commit SHA；Gate 运行时读取 clean HEAD；post-run result 记录 source commit 与 Artifact digest | Gate generator 定向测试；在临时 clean commit 连续生成两次并比较输入稳定性 | 无 |
-| `SL-S2-02` | open | 主机 | 物理分离 schema fixture 与真实 release lock/result | `SL-S2-01` | fixture 明示假 digest；`release-lock.json` 只含真实制品 digest；`platform-result.json` 只含目标、suite、结果和日志引用；删除 `fixture_digest` 发布输入 | `cargo test -p nomifun-agent-contracts validation --lib; rg -n "agent-v2-contract-fixture" crates scripts` | 最终真实 lock 需要打包制品 |
+| `SL-S2-01` | closed | 主机 | 删除 candidate source SHA 自引用 | `SL-S1-03` | pre-run input 不写其自身 commit SHA；Gate 运行时读取 clean HEAD；post-run result 记录 source commit 与 Artifact digest | `cargo test --locked -p nomifun-agent-contracts --lib`; `cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check`; `bun run gate:agent-v2 -- --self-test` | 无 |
+| `SL-S2-02` | closed | 主机 | 物理分离 schema fixture 与真实 release lock/result | `SL-S2-01` | fixture 明示 `fixture_only=true` 并使用假 digest；`release-lock.json` 只记录真实制品 digest；`platform-result.json` 只记录 source、target、suite、结果和日志引用；Runtime、Gate 与 macOS build 不再把 fixture digest 当发布输入 | `cargo test --locked -p nomifun-codex-runtime --lib`; `bun test scripts/release/release-lock.test.mjs scripts/validation/check-macos-arm64-native.test.mjs`; `bun run gate:agent-v2 -- c7-domain-waves` | 首个真实 lock/result 随 S5 候选打包生成，不阻塞本项实现关闭 |
 | `SL-S2-03` | closed | 主机 | 修复 Remote token rotate/revoke Response Body 卡死 | 无 | validator generation/hash 是认证线性化点；请求只持有短生命周期同步状态锁，不跨 Response Body 持有 auth permit；mint/revoke 仅由 mutation gate 串行；旧 token 后续请求立即失败 | `cargo test --locked -p nomifun-auth remote_admission --lib`; `cargo test --locked -p nomifun-public --lib`; `cargo test --locked -p nomifun-app bootstrap::canonical_host::tests::canonical_remote_rest_freezes_binding_and_auth_fence --lib -- --exact --test-threads=1` | 无 |
 | `SL-S2-04` | open | 主机 | 简化 D-024 delete/dispose | `SL-S1-03` | 删除调用者填写的 `ZeroOutstandingProof`；使用真实 `RuntimeDisposeReport`；`deleting` 重启后幂等完成 tombstone | `cargo test -p nomifun-agent-session delete --lib -- --test-threads=1` | 无 |
 | `SL-S2-05` | open | 主机 | 收缩 SessionEvent 与 Projection | `SL-S2-04` | Event Log 保留唯一语义事实；Projection 不复制完整 `events[]`；正常完成只持久化最终 assistant message，中断最多一份 bounded partial | `cargo test -p nomifun-agent-session projection --lib` | 无 |

@@ -1,8 +1,8 @@
 //! Resolution and validation of the packaged Codex Runtime sidecar.
 //!
-//! The release contract owns logical artifact identities and digests. This
-//! module only resolves those logical references at the host I/O boundary; no
-//! machine-local path is persisted or included in a contract digest.
+//! The source-controlled Runtime contract owns protocol identity. Real
+//! artifact digests remain in external post-build release locks; this module
+//! observes the packaged Sidecar bytes immediately before process admission.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,9 +11,7 @@ use anyhow::{Context, Result};
 use nomifun_agent_contracts::{
     RuntimeHelloPayload, RuntimeTarget, digest_bytes,
 };
-use nomifun_codex_runtime::{
-    RuntimeHelloExpectation, RuntimeReleaseDescriptor,
-};
+use nomifun_codex_runtime::{RuntimeHelloExpectation, RuntimeReleaseDescriptor};
 
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedRuntimeArtifact {
@@ -26,25 +24,14 @@ pub(crate) struct ResolvedRuntimeArtifact {
 }
 
 pub(crate) fn resolve() -> Result<ResolvedRuntimeArtifact> {
-    let release = RuntimeReleaseDescriptor::frozen_from_fixture()
-        .context("load the pinned Codex Runtime release input")?;
+    let release = RuntimeReleaseDescriptor::pinned_contract()
+        .context("load the pinned Codex Runtime contract")?;
     let target_id = current_target_id();
     let runtime_target = release_target(&release, &target_id)?;
     let executable = resolve_executable(&target_id)?;
     let bytes = fs::read(&executable)
         .with_context(|| format!("read Codex Runtime sidecar {}", executable.display()))?;
     let executable_digest = digest_bytes(&bytes);
-    let expected_digest = release
-        .sidecar_digest_for_target(&target_id)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    if executable_digest != expected_digest {
-        anyhow::bail!(
-            "Codex Runtime sidecar digest mismatch for {target_id}: expected {}, got {} ({})",
-            expected_digest.as_ref(),
-            executable_digest.as_ref(),
-            executable.display()
-        );
-    }
 
     let hello_path = resolve_hello_path(&executable)?;
     let hello: RuntimeHelloPayload = serde_json::from_slice(
@@ -93,16 +80,9 @@ fn release_target(
     release: &RuntimeReleaseDescriptor,
     target_id: &str,
 ) -> Result<RuntimeTarget> {
-    let Some(target) = release.payload.target_matrix.get(target_id) else {
-        anyhow::bail!("Codex Runtime release has no target matrix row {target_id}");
-    };
-    match target {
-        nomifun_agent_contracts::RuntimeReleaseTargetPayload::Required {
-            runtime_target,
-            ..
-        } => Ok(runtime_target.clone()),
-        _ => anyhow::bail!("Codex Runtime target {target_id} is not locally executable"),
-    }
+    release
+        .runtime_target_for_target(target_id)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
 fn resolve_executable(target_id: &str) -> Result<PathBuf> {
@@ -182,11 +162,11 @@ fn validate_hello(
     hello: &RuntimeHelloPayload,
     runtime_target: &RuntimeTarget,
 ) -> Result<()> {
-    if hello.runtime_release_digest != release.payload_digest {
+    if hello.runtime_release_digest != release.contract_digest {
         anyhow::bail!(
-            "Runtime hello release digest {} differs from pinned release {}",
+            "Runtime hello contract digest {} differs from pinned contract {}",
             hello.runtime_release_digest.as_ref(),
-            release.payload_digest.as_ref()
+            release.contract_digest.as_ref()
         );
     }
     if hello.runtime_target != *runtime_target {
@@ -196,11 +176,11 @@ fn validate_hello(
             runtime_target.as_ref()
         );
     }
-    if hello.protocol_version != release.payload.protocol_version
-        || hello.protocol_schema_digest != release.payload.protocol_schema_digest
-        || hello.supported_profiles != release.payload.supported_profiles
-        || hello.full_auto != release.payload.full_auto
-        || hello.rpc_allowlist != release.payload.rpc_allowlist
+    if hello.protocol_version != release.contract.protocol_version
+        || hello.protocol_schema_digest != release.contract.protocol_schema_digest
+        || hello.supported_profiles != release.contract.supported_profiles
+        || hello.full_auto != release.contract.full_auto
+        || hello.rpc_allowlist != release.contract.rpc_allowlist
     {
         anyhow::bail!("Runtime hello does not match the pinned release protocol contract");
     }
@@ -231,7 +211,7 @@ mod tests {
 
     #[test]
     fn target_matrix_rejects_unsupported_rows() {
-        let release = RuntimeReleaseDescriptor::frozen_from_fixture().unwrap();
+        let release = RuntimeReleaseDescriptor::pinned_contract().unwrap();
         assert!(release_target(&release, "windows_arm64").is_err());
     }
 }

@@ -9,8 +9,8 @@
  * pending/blocked check to pass.
  *
  * Usage:
- *   bun scripts/validation/check-macos-arm64-native.mjs
- *   bun scripts/validation/check-macos-arm64-native.mjs --sidecar /abs/runtime
+ *   bun scripts/validation/check-macos-arm64-native.mjs \
+ *     --release-lock /abs/release-lock.json
  *
  * Optional live checks:
  *   --host-binary /abs/nomicore --run-startup
@@ -19,7 +19,6 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import {
   chmodSync,
   lstatSync,
@@ -35,11 +34,15 @@ import { tmpdir } from 'node:os';
 import { dirname, join, parse, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  readAndVerifyReleaseLock,
+  resolveReleaseArtifactPath,
+  sha256File,
+} from '../release/release-lock.mjs';
+
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export const TARGET_ID = 'macos_desktop_arm64';
 export const EXPECTED_TARGET = 'aarch64-apple-darwin';
-export const EXPECTED_SIDECAR_SHA256 =
-  '7863db3a77545eec8966483f26fb5b493aea6e285ac35b5c29d0920342438060';
 export const EXPECTED_CAPABILITY_COUNT = 137;
 export const EXPECTED_PROFILES = ['coding_native', 'managed_minimal'];
 export const EXPECTED_RPC_METHODS = [
@@ -56,34 +59,15 @@ export const EXPECTED_FORK_COMMIT = 'dc2ccc6843abb09c9d297862dc10b6bd12a3935d';
 export const EXPECTED_PROTOCOL_VERSION = '1.0.0';
 export const EXPECTED_PROTOCOL_SCHEMA_DIGEST =
   'f1c0422f04c9de923e18c7df40d814d3c9f5b2db5f1c5fef2745e77e6d62590f';
-export const EXPECTED_RUNTIME_RELEASE_DIGEST =
-  '7d86f492219867e52b35db103a8df8282ba0fd1acc0079b8c5d01b3236a7e17f';
-
-const RUNTIME_INPUT = join(
-  REPO_ROOT,
-  'crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json',
-);
-const PLATFORM_INPUT = join(
-  REPO_ROOT,
-  'crates/backend/nomifun-agent-contracts/contracts/validation/platform-validation-manifest.payload.json',
-);
-const APP_CANDIDATES = [
-  join(REPO_ROOT, 'target/universal-apple-darwin/release/bundle/macos/NomiFun.app'),
-  join(REPO_ROOT, 'target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app'),
-  join(REPO_ROOT, 'target/x86_64-apple-darwin/release/bundle/macos/NomiFun.app'),
-];
-const DMG_CANDIDATES = [
-  join(REPO_ROOT, 'target/universal-apple-darwin/release/bundle/dmg'),
-  join(REPO_ROOT, 'target/aarch64-apple-darwin/release/bundle/dmg'),
-  join(REPO_ROOT, 'target/x86_64-apple-darwin/release/bundle/dmg'),
-  join(REPO_ROOT, 'dist/desktop'),
-];
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 function parseArgs(argv) {
   const options = {
-    sidecar: process.env.NOMIFUN_CODEX_RUNTIME_PATH || null,
-    hello: process.env.NOMIFUN_CODEX_RUNTIME_HELLO_PATH || null,
-    sidecarDir: process.env.NOMIFUN_CODEX_RUNTIME_DIR || null,
+    releaseLock: process.env.NOMIFUN_RELEASE_LOCK_PATH || null,
+    artifactRoot: process.env.NOMIFUN_RELEASE_ARTIFACT_ROOT || REPO_ROOT,
+    sidecar: null,
+    hello: null,
+    sidecarDir: null,
     app: null,
     dmg: null,
     hostBinary: null,
@@ -92,6 +76,7 @@ function parseArgs(argv) {
     token: process.env.NOMIFUN_ACCESS_TOKEN || null,
     credentialFile: null,
     report: null,
+    logs: [],
     runStartup: false,
     runLifecycle: false,
     runSidecarRpc: false,
@@ -135,9 +120,13 @@ function parseArgs(argv) {
       token: 'token',
       credentialfile: 'credentialFile',
       report: 'report',
+      releaselock: 'releaseLock',
+      artifactroot: 'artifactRoot',
+      log: 'logs',
     };
     if (!(key in mapping)) throw new Error(`unknown argument: ${token}`);
-    options[mapping[key]] = value;
+    if (mapping[key] === 'logs') options.logs.push(value);
+    else options[mapping[key]] = value;
   }
   if (options.runLifecycle && (!options.endpoint || !options.bindingId)) {
     throw new Error('--run-lifecycle requires --endpoint and --binding-id');
@@ -166,12 +155,6 @@ function command(command, args, timeout = 10_000) {
   };
 }
 
-function sha256File(path) {
-  const hash = createHash('sha256');
-  hash.update(readFileSync(path));
-  return hash.digest('hex');
-}
-
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
@@ -179,6 +162,20 @@ function readJson(path) {
 function check(report, id, status, details = {}) {
   report.checks.push({ id, status, ...details });
   if (status === 'fail' || status === 'blocked') report.failures.push({ id, ...details });
+}
+
+function finishReport(report, options) {
+  report.suite.checks = report.checks.map((entry) => entry.id);
+  report.status = report.checks.some((entry) => entry.status === 'fail')
+    ? 'fail'
+    : report.checks.some((entry) => entry.status === 'blocked')
+      ? 'blocked'
+      : 'pass';
+  if (options.report) {
+    mkdirSync(dirname(resolve(options.report)), { recursive: true });
+    writeFileSync(resolve(options.report), `${JSON.stringify(report, null, 2)}\n`);
+  }
+  return report;
 }
 
 function existingFile(path) {
@@ -223,43 +220,32 @@ function isExecutableMode(mode) {
   return (mode & 0o111) !== 0 && (mode & 0o022) === 0;
 }
 
-function findSidecar(options, appPath) {
-  const candidates = [];
-  if (options.sidecar) candidates.push(resolve(options.sidecar));
-  if (options.sidecarDir) {
-    candidates.push(join(resolve(options.sidecarDir), 'runtime/macos/arm64/nomifun-codex-runtime'));
-  }
-  if (appPath) {
-    candidates.push(join(appPath, 'Contents/Resources/runtime/macos/arm64/nomifun-codex-runtime'));
-  }
-  candidates.push(
-    join(REPO_ROOT, 'target/universal-apple-darwin/release/bundle/macos/NomiFun.app/Contents/Resources/runtime/macos/arm64/nomifun-codex-runtime'),
-    join(REPO_ROOT, 'target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app/Contents/Resources/runtime/macos/arm64/nomifun-codex-runtime'),
-  );
-  const unique = [...new Set(candidates)];
-  return {
-    candidates: unique,
-    selected: unique.find((candidate) => existingFile(candidate)),
-  };
+function appFromHostBinary(hostBinary) {
+  const macosDirectory = dirname(hostBinary);
+  const contentsDirectory = dirname(macosDirectory);
+  const app = dirname(contentsDirectory);
+  return macosDirectory === join(contentsDirectory, 'MacOS') &&
+    contentsDirectory === join(app, 'Contents')
+    ? app
+    : null;
 }
 
-function findApp(options) {
-  if (options.app) return resolve(options.app);
-  return APP_CANDIDATES.find((candidate) => existingFile(candidate)?.isDirectory()) || null;
+function checkOptionalArtifactOverride(report, id, override, lockedPath) {
+  if (!override) return;
+  const observed = resolve(override);
+  check(report, id, observed === lockedPath ? 'pass' : 'fail', {
+    expected_from_release_lock: lockedPath,
+    observed,
+  });
 }
 
-function findDmg(options) {
-  if (options.dmg) return resolve(options.dmg);
-  for (const directory of DMG_CANDIDATES) {
-    if (!existingFile(directory)?.isDirectory()) continue;
-    const file = readdirSync(directory)
-      .filter((name) => name.toLowerCase().endsWith('.dmg'))
-      .sort()
-      .map((name) => join(directory, name))
-      .find((candidate) => existingFile(candidate)?.isFile());
-    if (file) return file;
+function logReference(report, path) {
+  const absolute = resolve(path);
+  const shape = validatePathShape(absolute);
+  check(report, `log:${absolute}`, shape.status, shape);
+  if (shape.status === 'pass') {
+    report.logs.push({ kind: 'file', path: absolute, sha256: sha256File(absolute) });
   }
-  return null;
 }
 
 async function waitForHttp(url, timeoutMs = 30_000) {
@@ -553,9 +539,14 @@ export function validatePathShape(path, { kind = 'file', requireExecutable = fal
   return { status: 'pass', path, mode: metadata.mode.toString(8) };
 }
 
-export function validateHelloPayload(hello, expectedRuntimeReleaseDigest = EXPECTED_RUNTIME_RELEASE_DIGEST) {
+export function validateHelloPayload(hello) {
   const mismatches = [];
-  if (hello?.runtime_release_digest !== expectedRuntimeReleaseDigest) mismatches.push('runtime_release_digest');
+  if (!SHA256_PATTERN.test(hello?.runtime_release_digest || '')) {
+    mismatches.push('runtime_release_digest');
+  }
+  if (!SHA256_PATTERN.test(hello?.runtime_build_digest || '')) {
+    mismatches.push('runtime_build_digest');
+  }
   if (hello?.fork_commit !== EXPECTED_FORK_COMMIT) mismatches.push('fork_commit');
   if (hello?.tracked_upstream_commit !== EXPECTED_FORK_COMMIT) mismatches.push('tracked_upstream_commit');
   if (hello?.protocol_version !== EXPECTED_PROTOCOL_VERSION) mismatches.push('protocol_version');
@@ -574,6 +565,16 @@ export function validateHelloPayload(hello, expectedRuntimeReleaseDigest = EXPEC
 export async function runValidation(options = parseArgs(process.argv.slice(2))) {
   const report = {
     schema_version: '1.0.0',
+    source_commit: null,
+    platform: null,
+    target: TARGET_ID,
+    suite: {
+      name: 'macos-arm64-native',
+      checks: [],
+    },
+    status: 'blocked',
+    release_lock: null,
+    logs: [{ kind: 'embedded_checks', reference: '#/checks' }],
     gate_name: 'c8-ma-macos-arm64-helper',
     execution_kind: 'native',
     target_cell: TARGET_ID,
@@ -588,6 +589,10 @@ export async function runValidation(options = parseArgs(process.argv.slice(2))) 
     failures: [],
     blockers: [],
     artifacts: {},
+  };
+  const finish = () => {
+    for (const path of options.logs || []) logReference(report, path);
+    return finishReport(report, options);
   };
 
   if (process.platform !== 'darwin' || process.arch !== 'arm64') {
@@ -604,141 +609,197 @@ export async function runValidation(options = parseArgs(process.argv.slice(2))) 
     });
   }
 
-  let runtimeInput = null;
-  try {
-    runtimeInput = readJson(RUNTIME_INPUT);
-    const target = runtimeInput.target_matrix?.[TARGET_ID];
-    check(report, 'frozen-runtime-input', target?.sidecar_artifact?.digest === EXPECTED_SIDECAR_SHA256 &&
-      target?.runtime_target === EXPECTED_TARGET ? 'pass' : 'fail', {
-      expected: { sidecar_sha256: EXPECTED_SIDECAR_SHA256, runtime_target: EXPECTED_TARGET },
-      observed: {
-        sidecar_sha256: target?.sidecar_artifact?.digest || null,
-        runtime_target: target?.runtime_target || null,
-      },
+  if (!options.releaseLock) {
+    check(report, 'release-lock', 'blocked', {
+      reason: 'A real release-lock.json is required; provide --release-lock or NOMIFUN_RELEASE_LOCK_PATH',
     });
-  } catch (error) {
-    check(report, 'frozen-runtime-input', 'fail', { reason: error.message, path: RUNTIME_INPUT });
-  }
-  try {
-    const platform = readJson(PLATFORM_INPUT);
-    const target = platform.platform_matrix?.target_cells?.[TARGET_ID];
-    check(report, 'frozen-platform-input', target?.host_target === EXPECTED_TARGET &&
-      target?.runtime_target === EXPECTED_TARGET ? 'pass' : 'fail', {
-      expected: { host_target: EXPECTED_TARGET, runtime_target: EXPECTED_TARGET },
-      observed: target || null,
-    });
-  } catch (error) {
-    check(report, 'frozen-platform-input', 'fail', { reason: error.message, path: PLATFORM_INPUT });
+    report.blockers.push('missing release-lock.json');
+    return finish();
   }
 
-  const appPath = findApp(options);
+  const artifactRoot = resolve(options.artifactRoot || REPO_ROOT);
+  const release = readAndVerifyReleaseLock(options.releaseLock, { root: artifactRoot });
+  report.release_lock = {
+    path: release.lock_path || resolve(options.releaseLock),
+    ...(release.lock_sha256 ? { sha256: release.lock_sha256 } : {}),
+  };
+  if (release.lock) {
+    report.source_commit = release.lock.source_commit || null;
+    report.platform = release.lock.platform || null;
+  }
+  check(report, 'release-lock:real-artifacts', release.status, {
+    reason: release.reason || null,
+    lock_path: report.release_lock.path,
+    artifact_root: artifactRoot,
+    artifact_checks: release.checks,
+  });
+  if (release.status !== 'pass') {
+    if (release.status === 'blocked') report.blockers.push(release.reason || 'release lock blocked');
+    return finish();
+  }
+
+  const lock = release.lock;
+  const supportedPlatform =
+    lock.platform === EXPECTED_TARGET || lock.platform === 'universal-apple-darwin';
+  check(report, 'release-lock:platform', supportedPlatform ? 'pass' : 'fail', {
+    expected: [EXPECTED_TARGET, 'universal-apple-darwin'],
+    observed: lock.platform,
+  });
+
+  const worktree = command('git', ['status', '--porcelain', '--untracked-files=no']);
+  const head = command('git', ['rev-parse', 'HEAD']);
+  const trackedDirty = worktree.status === 0 && worktree.stdout.trim().length > 0;
+  const observedHead = head.status === 0 ? head.stdout.trim() : null;
+  check(
+    report,
+    'release-lock:source-commit',
+    worktree.status !== 0 || head.status !== 0
+      ? 'blocked'
+      : trackedDirty || observedHead !== lock.source_commit
+        ? 'fail'
+        : 'pass',
+    {
+      expected: lock.source_commit,
+      observed: observedHead,
+      tracked_worktree_dirty: trackedDirty,
+      status_error: worktree.stderr.trim() || null,
+      head_error: head.stderr.trim() || null,
+    },
+  );
+
+  const lockedSidecar = lock.sidecars[TARGET_ID];
+  if (!lockedSidecar) {
+    check(report, 'release-lock:arm64-sidecar', 'blocked', {
+      reason: `release lock has no ${TARGET_ID} sidecar`,
+      available_targets: Object.keys(lock.sidecars),
+    });
+    report.blockers.push(`release lock has no ${TARGET_ID} sidecar`);
+    return finish();
+  }
+
+  let lockedHostPath;
+  let lockedPackagePath;
+  let lockedSidecarPath;
+  try {
+    lockedHostPath = resolveReleaseArtifactPath(artifactRoot, lock.host.path);
+    lockedPackagePath = resolveReleaseArtifactPath(artifactRoot, lock.package.path);
+    lockedSidecarPath = resolveReleaseArtifactPath(artifactRoot, lockedSidecar.path);
+  } catch (error) {
+    check(report, 'release-lock:artifact-paths', 'fail', { reason: error.message });
+    return finish();
+  }
+
+  const lockedAppPath = appFromHostBinary(lockedHostPath);
+  checkOptionalArtifactOverride(report, 'override:app', options.app, lockedAppPath);
+  checkOptionalArtifactOverride(report, 'override:dmg', options.dmg, lockedPackagePath);
+  checkOptionalArtifactOverride(report, 'override:sidecar', options.sidecar, lockedSidecarPath);
+  if (options.sidecarDir) {
+    checkOptionalArtifactOverride(
+      report,
+      'override:sidecar-dir',
+      join(resolve(options.sidecarDir), 'runtime/macos/arm64/nomifun-codex-runtime'),
+      lockedSidecarPath,
+    );
+  }
+
+  const appPath = lockedAppPath;
   report.artifacts.app = appPath;
   if (appPath) {
     const appShape = validatePathShape(appPath, { kind: 'directory' });
-    check(report, 'universal-app:path-case-permissions', appShape.status === 'pass' ? 'pass' : 'fail', appShape);
+    check(report, 'macos-app:path-case-permissions', appShape.status === 'pass' ? 'pass' : 'fail', appShape);
     const executable = join(appPath, 'Contents/MacOS/nomifun-desktop');
     const executableShape = validatePathShape(executable, { requireExecutable: true });
-    check(report, 'universal-app:executable', executableShape.status === 'pass' ? 'pass' : 'fail', executableShape);
+    check(
+      report,
+      'macos-app:locked-host',
+      executableShape.status === 'pass' && executable === lockedHostPath ? 'pass' : 'fail',
+      {
+        ...executableShape,
+        expected_from_release_lock: lockedHostPath,
+      },
+    );
     if (executableShape.status === 'pass') {
       const archs = command('lipo', ['-archs', executable]);
       const observedArchs = archs.stdout.trim().split(/\s+/).filter(Boolean).sort();
-      check(report, 'universal-app:architectures', observedArchs.includes('arm64') && observedArchs.includes('x86_64') ? 'pass' : 'fail', {
-        expected: ['arm64', 'x86_64'],
+      const expectedArchs = lock.platform === 'universal-apple-darwin'
+        ? ['arm64', 'x86_64']
+        : ['arm64'];
+      const architectureMatches = expectedArchs.every((arch) => observedArchs.includes(arch)) &&
+        (lock.platform === 'universal-apple-darwin' || observedArchs.length === 1);
+      check(report, 'macos-app:architectures', architectureMatches ? 'pass' : 'fail', {
+        expected: expectedArchs,
         observed: observedArchs,
         stderr: archs.stderr.trim(),
       });
       const signature = command('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath], 120_000);
-      check(report, 'universal-app:codesign', signature.status === 0 ? 'pass' : 'fail', {
+      check(report, 'macos-app:codesign', signature.status === 0 ? 'pass' : 'fail', {
         exit_code: signature.status,
         stdout_tail: signature.stdout.slice(-2_000),
         stderr_tail: signature.stderr.slice(-2_000),
       });
     }
   } else {
-    check(report, 'universal-app:artifact', 'blocked', {
-      reason: 'No macOS app artifact found; provide --app /absolute/path/to/NomiFun.app',
-      candidates: APP_CANDIDATES,
+    check(report, 'macos-app:artifact', 'blocked', {
+      reason: 'release-lock host path is not inside NomiFun.app/Contents/MacOS',
+      host_path: lockedHostPath,
     });
-    report.blockers.push('missing macOS app artifact');
+    report.blockers.push('release-lock host path does not identify a macOS app');
   }
 
-  const dmgPath = findDmg(options);
+  const dmgPath = lockedPackagePath;
   report.artifacts.dmg = dmgPath;
-  if (dmgPath) {
-    const dmgShape = validatePathShape(dmgPath);
-    check(report, 'universal-dmg:path-case-permissions', dmgShape.status === 'pass' ? 'pass' : 'fail', dmgShape);
-    if (dmgShape.status === 'pass') {
-      const verify = command('hdiutil', ['verify', dmgPath], 120_000);
-      check(report, 'universal-dmg:hdiutil-verify', verify.status === 0 ? 'pass' : 'fail', {
-        command: verify.command,
-        exit_code: verify.status,
-        stdout_tail: verify.stdout.slice(-2_000),
-        stderr_tail: verify.stderr.slice(-2_000),
-      });
-    }
-  } else {
-    check(report, 'universal-dmg:artifact', 'blocked', {
-      reason: 'Universal DMG not found; provide --dmg /absolute/path/to/NomiFun_universal.dmg',
-      candidates: DMG_CANDIDATES,
+  const dmgShape = validatePathShape(dmgPath);
+  check(report, 'macos-package:path-case-permissions', dmgShape.status, dmgShape);
+  if (dmgShape.status === 'pass') {
+    const verify = command('hdiutil', ['verify', dmgPath], 120_000);
+    check(report, 'macos-package:hdiutil-verify', verify.status === 0 ? 'pass' : 'fail', {
+      command: verify.command,
+      exit_code: verify.status,
+      stdout_tail: verify.stdout.slice(-2_000),
+      stderr_tail: verify.stderr.slice(-2_000),
     });
-    report.blockers.push('missing Universal DMG artifact');
   }
 
-  const sidecar = findSidecar(options, appPath);
-  report.artifacts.sidecar_candidates = sidecar.candidates;
-  report.artifacts.sidecar = sidecar.selected || null;
-  if (!sidecar.selected) {
-    const blocker = {
-      code: 'MACOS_ARM64_SIDECAR_MISSING',
-      expected_sha256: EXPECTED_SIDECAR_SHA256,
-      expected_target: EXPECTED_TARGET,
-      logical_path: 'runtime/macos/arm64/nomifun-codex-runtime',
-      remediation: 'provide the real signed/pinned arm64 sidecar via --sidecar or NOMIFUN_CODEX_RUNTIME_PATH',
-      searched: sidecar.candidates,
-    };
-    check(report, 'sidecar:artifact-sha-target-permissions', 'blocked', blocker);
-    report.blockers.push(blocker);
-  } else {
-    const sidecarShape = validatePathShape(sidecar.selected, { requireExecutable: true });
-    check(report, 'sidecar:artifact-sha-target-permissions', sidecarShape.status === 'pass' ? 'pass' : 'fail', sidecarShape);
-    if (sidecarShape.status === 'pass') {
-      const observedSha = sha256File(sidecar.selected);
-      check(report, 'sidecar:sha256', observedSha === EXPECTED_SIDECAR_SHA256 ? 'pass' : 'fail', {
-        expected: EXPECTED_SIDECAR_SHA256,
-        observed: observedSha,
-        path: sidecar.selected,
-      });
-      const fileType = command('file', [sidecar.selected]);
-      const archs = command('lipo', ['-archs', sidecar.selected]);
-      check(report, 'sidecar:native-arm64', fileType.stdout.includes('arm64') && archs.stdout.trim() === 'arm64' ? 'pass' : 'fail', {
-        file: fileType.stdout.trim(),
-        lipo_archs: archs.stdout.trim(),
-      });
+  report.artifacts.sidecar = lockedSidecarPath;
+  const sidecarShape = validatePathShape(lockedSidecarPath, { requireExecutable: true });
+  check(report, 'sidecar:artifact-target-permissions', sidecarShape.status, sidecarShape);
+  if (sidecarShape.status === 'pass') {
+    const observedSha = sha256File(lockedSidecarPath);
+    check(report, 'sidecar:release-lock-sha256', observedSha === lockedSidecar.sha256 ? 'pass' : 'fail', {
+      expected: lockedSidecar.sha256,
+      observed: observedSha,
+      path: lockedSidecarPath,
+    });
+    const fileType = command('file', [lockedSidecarPath]);
+    const archs = command('lipo', ['-archs', lockedSidecarPath]);
+    check(report, 'sidecar:native-arm64', fileType.stdout.includes('arm64') && archs.stdout.trim() === 'arm64' ? 'pass' : 'fail', {
+      file: fileType.stdout.trim(),
+      lipo_archs: archs.stdout.trim(),
+    });
 
-      const helloPath = options.hello || `${sidecar.selected}.hello.json`;
-      report.artifacts.hello = helloPath;
-      try {
-        const helloShape = validatePathShape(helloPath);
-        if (helloShape.status !== 'pass') {
-          throw new Error(`hello metadata path rejected: ${JSON.stringify(helloShape)}`);
-        }
-        const hello = readJson(helloPath);
-        const helloResult = validateHelloPayload(hello, EXPECTED_RUNTIME_RELEASE_DIGEST);
-        check(report, 'sidecar:hello-profile-rpc-contract', helloResult.status, {
-          mismatches: helloResult.mismatches,
-          path: helloPath,
-        });
-        if (options.runSidecarRpc) await sidecarRpc(options, sidecar.selected, report, hello);
-        else check(report, 'sidecar:live-hello-rpc', 'blocked', {
-          reason: 'live hello/RPC probe not run; rerun with --run-sidecar-rpc --credential-file <path>',
-        });
-      } catch (error) {
-        check(report, 'sidecar:hello-profile-rpc-contract', 'blocked', {
-          reason: `hello metadata unavailable or invalid: ${error.message}`,
-          path: helloPath,
-        });
-        report.blockers.push(`missing/invalid hello metadata: ${helloPath}`);
+    const helloPath = options.hello || `${lockedSidecarPath}.hello.json`;
+    report.artifacts.hello = helloPath;
+    try {
+      const helloShape = validatePathShape(helloPath);
+      if (helloShape.status !== 'pass') {
+        throw new Error(`hello metadata path rejected: ${JSON.stringify(helloShape)}`);
       }
+      const hello = readJson(helloPath);
+      const helloResult = validateHelloPayload(hello);
+      check(report, 'sidecar:hello-profile-rpc-contract', helloResult.status, {
+        mismatches: helloResult.mismatches,
+        path: helloPath,
+      });
+      if (options.runSidecarRpc) await sidecarRpc(options, lockedSidecarPath, report, hello);
+      else check(report, 'sidecar:live-hello-rpc', 'blocked', {
+        reason: 'live hello/RPC probe not run; rerun with --run-sidecar-rpc --credential-file <path>',
+      });
+    } catch (error) {
+      check(report, 'sidecar:hello-profile-rpc-contract', 'blocked', {
+        reason: `hello metadata unavailable or invalid: ${error.message}`,
+        path: helloPath,
+      });
+      report.blockers.push(`missing/invalid hello metadata: ${helloPath}`);
     }
   }
 
@@ -770,16 +831,7 @@ export async function runValidation(options = parseArgs(process.argv.slice(2))) 
     });
   }
 
-  report.status = report.failures.some((failure) => report.checks.find((entry) => entry.id === failure.id)?.status === 'fail')
-    ? 'fail'
-    : report.failures.length > 0
-      ? 'blocked'
-      : 'pass';
-  if (options.report) {
-    mkdirSync(dirname(resolve(options.report)), { recursive: true });
-    writeFileSync(resolve(options.report), `${JSON.stringify(report, null, 2)}\n`);
-  }
-  return report;
+  return finish();
 }
 
 export function assertSelfTest() {
@@ -810,7 +862,8 @@ export function assertSelfTest() {
     const symlink = validatePathShape(link, { kind: 'directory' });
     if (symlink.reason !== 'symlink_not_allowed') throw new Error('symlink must fail closed');
     const hello = validateHelloPayload({
-      runtime_release_digest: EXPECTED_RUNTIME_RELEASE_DIGEST,
+      runtime_release_digest: 'a'.repeat(64),
+      runtime_build_digest: 'b'.repeat(64),
       fork_commit: EXPECTED_FORK_COMMIT,
       tracked_upstream_commit: EXPECTED_FORK_COMMIT,
       protocol_version: EXPECTED_PROTOCOL_VERSION,

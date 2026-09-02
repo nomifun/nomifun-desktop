@@ -332,9 +332,10 @@ impl ManagedRuntimeSession {
         context: RuntimeCommandContext,
     ) -> Result<Arc<Self>, RuntimeError> {
         request.process.validate_release(&request.release)?;
-        if request.hello_expectation.runtime_release_digest != request.release.payload_digest {
+        if request.hello_expectation.runtime_release_digest != request.release.contract_digest {
             return Err(RuntimeError::ReleaseManifest(
-                "runtime hello expectation is not bound to the selected release input".to_owned(),
+                "runtime hello expectation is not bound to the selected Runtime contract"
+                    .to_owned(),
             ));
         }
         if let RuntimeCommand::Create(params) = &request.open_command {

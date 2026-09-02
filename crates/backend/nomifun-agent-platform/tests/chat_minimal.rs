@@ -14,12 +14,12 @@ use nomifun_agent_contracts::{
     AgentSessionMetadata, ArtifactId, CanonicalErrorCode, CompactionCompletedPayload,
     ChatRouteIdentity, ConnectionConfigRef, CorrelationId, DeleteAgentSessionCommand, DigestHex,
     EventId,
-    EventProducerId, FullAutoExecutionWire, IdempotencyKey, LogicalArtifactRef, ModelRouteId,
+    EventProducerId, FullAutoExecutionWire, IdempotencyKey, ModelRouteId,
     NativeActionStart, NativeActionStartAck, OperationId, PackageId, PrincipalRef,
     RuntimeBindingContract,
     RuntimeBindingId, RuntimeCancelParams, RuntimeCommand, RuntimeCommandContext,
     RuntimeCreateParams, RuntimeEventAck, RuntimeEventEnvelope, RuntimeHelloPayload,
-    RuntimeReleaseTargetPayload, RuntimeResumeParams, RuntimeSessionDisposeParams,
+    RuntimeResumeParams, RuntimeSessionDisposeParams,
     RuntimeStartTurnParams, SemanticSessionEventDraft, SessionEventAck, SessionEventAppend,
     SessionEventKind, SessionEventPayloadRef, SessionPayloadBody, SessionPayloadRecord,
     ChatRouteLookupKey, StrictJsonValue, UserId, VersionString, canonical_json_bytes, digest_bytes,
@@ -319,6 +319,7 @@ impl RuntimeIngressPort for SessionRuntimeIngress {
 struct RuntimeFixture {
     release: RuntimeReleaseDescriptor,
     hello: RuntimeHelloPayload,
+    executable_digest: DigestHex,
     target_id: String,
 }
 
@@ -1180,12 +1181,12 @@ async fn launch_runtime(
 ) -> TestResult<OpenRuntime> {
     let runtime_binding_id = RuntimeBindingId::from(new_id("runtime-binding"));
     let runtime_bound_event_id = EventId::from(new_id("runtime-bound"));
-    let placeholder_release = RuntimeReleaseDescriptor::frozen_from_fixture()?;
+    let placeholder_release = RuntimeReleaseDescriptor::pinned_contract()?;
     let mut binding = RuntimeBindingContract {
         runtime_binding_id: runtime_binding_id.clone(),
         agent_session_id: session_id.clone(),
         resolved_snapshot_ref: compiled.snapshot_ref().clone(),
-        runtime_release_digest: placeholder_release.payload_digest,
+        runtime_release_digest: placeholder_release.contract_digest,
         runtime_build_digest: DigestHex::from("0".repeat(64)),
         protocol_version: VersionString::from(VERSION),
         profile_kind: nomifun_agent_contracts::RuntimeProfileKind::ManagedMinimal,
@@ -1204,7 +1205,7 @@ async fn launch_runtime(
         &binding,
         opening_event_id,
     )?;
-    binding.runtime_release_digest = fixture.release.payload_digest.clone();
+    binding.runtime_release_digest = fixture.release.contract_digest.clone();
     binding.runtime_build_digest = fixture.hello.runtime_build_digest.clone();
     let fixture = prepare_runtime_fixture(
         runtime_directory,
@@ -1246,6 +1247,7 @@ async fn launch_runtime(
         node_executable,
         runtime_directory,
         &fixture.target_id,
+        fixture.executable_digest.clone(),
         &fixture.release,
     )?;
     let managed = platform
@@ -1306,27 +1308,8 @@ fn prepare_runtime_fixture(
     let script_digest = digest_bytes(RECORDED_RUNTIME_SCRIPT.as_bytes());
     let build_digest = digest_payload(&(node_digest.clone(), script_digest.clone()))?;
     let target_id = native_target_id().to_owned();
-    let mut payload = RuntimeReleaseDescriptor::frozen_from_fixture()?.payload;
-    let runtime_target = match payload.target_matrix.get_mut(&target_id) {
-        Some(RuntimeReleaseTargetPayload::Required {
-            runtime_target,
-            sidecar_artifact,
-            helper_artifacts,
-            package_content_digest,
-            ..
-        }) => {
-            sidecar_artifact.digest = node_digest;
-            *helper_artifacts = vec![LogicalArtifactRef {
-                artifact_id: ArtifactId::from("chat-minimal-recorded-app-server"),
-                normalized_relative_path: "fixtures/chat-minimal/app-server".to_owned(),
-                digest: script_digest,
-            }];
-            *package_content_digest = build_digest.clone();
-            runtime_target.clone()
-        }
-        _ => return Err(format!("runtime release has no required target {target_id}").into()),
-    };
-    let release = RuntimeReleaseDescriptor::from_payload(payload)?;
+    let release = RuntimeReleaseDescriptor::pinned_contract()?;
+    let runtime_target = release.runtime_target_for_target(&target_id)?;
     let expectation = release.hello_expectation(
         build_digest,
         runtime_target,
@@ -1380,6 +1363,7 @@ fn prepare_runtime_fixture(
     Ok(RuntimeFixture {
         release,
         hello,
+        executable_digest: node_digest,
         target_id,
     })
 }

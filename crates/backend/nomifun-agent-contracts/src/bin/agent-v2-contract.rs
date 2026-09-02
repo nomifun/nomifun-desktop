@@ -23,8 +23,6 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-const BASE_SHA: &str = "7a2ade3c49374add25a35565265399c57729a8b9";
-
 fn main() {
     if let Err(error) = run() {
         eprintln!("agent-v2 contract tool failed: {error}");
@@ -53,7 +51,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let event_path = contracts.join("events/session-event-registry.json");
     let error_path = contracts.join("events/error-registry.json");
     let runtime_release_path =
-        contracts.join("runtime/codex-runtime-release-input.json");
+        contracts.join("runtime/runtime-release-fixture.json");
     let d026_path = contracts.join("validation/d026-ordering-outcomes.matrix.json");
     let d027_path = contracts.join("validation/d027-terminal-sequences.matrix.json");
     let d028_path = contracts.join("validation/d028-platform-matrix.json");
@@ -207,12 +205,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     runtime_release.native_action_contract_digest =
         digest_payload(&feature_inventory.native_actions)?;
     runtime_release.validate().map_err(|error| error.message)?;
-    let runtime_release_digest = runtime_release.runtime_release_digest()?;
-
     let mut platform: PlatformValidationManifestPayload = read_json(&platform_path)?;
-    platform.candidate_source_sha.0 = BASE_SHA.to_owned();
     platform.confirmed_decision_contract_digest.0 = closure_digest.clone();
-    platform.runtime_release_digest.0 = runtime_release_digest.clone();
     platform.canonical_schema_manifest_digest = canonical_manifest_digest.clone();
     platform.cargo_lock_digest = cargo_lock_digest.clone();
     platform.official_preset_seed_manifest_digest = seed_digest.clone();
@@ -232,6 +226,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     platform.validate_contract()?;
     let platform_fixture_digest = digest_payload(&platform)?;
     let runtime_release_envelope = ArtifactEnvelope::new(runtime_release.clone())?;
+    let runtime_release_fixture_digest = runtime_release_envelope.payload_digest.clone();
     let platform_envelope = ArtifactEnvelope::new(platform.clone())?;
 
     let mut digest_map = BTreeMap::new();
@@ -263,7 +258,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     digest_map.insert("runtime_protocol".to_owned(), runtime_protocol_digest);
     digest_map.insert(
         "runtime_release_fixture".to_owned(),
-        runtime_release_digest.clone(),
+        runtime_release_fixture_digest,
     );
     digest_map.insert("rust_contract_schema".to_owned(), rust_contract_schema_digest);
     digest_map.insert("session_event_registry".to_owned(), event_digest);
@@ -271,7 +266,6 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let ledger = ArtifactEnvelope::new(ContractDigestLedgerPayload {
         ledger_version: VersionString("1.0.0".to_owned()),
-        base_source_sha: BASE_SHA.to_owned(),
         artifacts: digest_map,
     })?;
 
@@ -332,33 +326,9 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let fixture_replacements = BTreeMap::from([
         (
-            "0123456789abcdef0123456789abcdef01234567".to_owned(),
-            BASE_SHA.to_owned(),
-        ),
-        (
             "1111111111111111111111111111111111111111111111111111111111111111"
                 .to_owned(),
             closure_digest.0.clone(),
-        ),
-        (
-            "61a7308b2039375815b7156aedf0bd65869d151079c38e4e04bbd69fdd41a2d4"
-                .to_owned(),
-            platform_fixture_digest.0.clone(),
-        ),
-        (
-            "3e7cba2eedc96ebce62ae97cd7d0f247bb60d78662b615e3d32bf3f1bbbc3457"
-                .to_owned(),
-            platform_fixture_digest.0.clone(),
-        ),
-        (
-            "b2dac7a888a1be84e184e627028fbc6c35ae8895159d9fdd704e20a7ebd24a32"
-                .to_owned(),
-            runtime_release_digest.0.clone(),
-        ),
-        (
-            "2222222222222222222222222222222222222222222222222222222222222222"
-                .to_owned(),
-            runtime_release_digest.0.clone(),
         ),
         (
             "b5987fa1c71d3a04ca6df2f4c216f418adc04ccc7495edc74d99085e35db9556"

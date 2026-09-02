@@ -27,7 +27,7 @@ use nomifun_agent_contracts::{
     ResourceBindingId, ResourceKind, RuntimeBindingContract, RuntimeBindingId,
     RuntimeCommand, RuntimeCommandContext, RuntimeCreateParams, RuntimeEventAck,
     RuntimeEventEnvelope, RuntimeFeatureId, RuntimeHelloPayload, RuntimeProfileKind,
-    RuntimeReleaseTargetPayload, RuntimeSessionDisposeParams, RuntimeStartTurnParams,
+    RuntimeSessionDisposeParams, RuntimeStartTurnParams,
     RuntimeTarget, ScopeKey, SemanticSessionEventDraft, SessionEventAppend, SessionEventKind,
     SessionEventPayloadRef, SkillDefinition, SkillId, StateKey, StrictJsonValue,
     ToolPresentationKind, UserId, ValidatedPluginConfig, VersionString, digest_bytes,
@@ -1429,6 +1429,7 @@ struct RuntimeFixture {
     release: RuntimeReleaseDescriptor,
     hello: RuntimeHelloPayload,
     build_digest: DigestHex,
+    executable_digest: DigestHex,
     target_id: String,
 }
 
@@ -1447,31 +1448,8 @@ fn prepare_runtime_fixture(
     let build_digest = digest_payload(&(node_digest.clone(), script_digest.clone()))
         .map_err(digest_error)?;
     let target_id = native_target_id().to_owned();
-    let mut payload = RuntimeReleaseDescriptor::frozen_from_fixture()?.payload;
-    let runtime_target = match payload.target_matrix.get_mut(&target_id) {
-        Some(RuntimeReleaseTargetPayload::Required {
-            runtime_target,
-            sidecar_artifact,
-            helper_artifacts,
-            package_content_digest,
-            ..
-        }) => {
-            sidecar_artifact.digest = node_digest.clone();
-            *helper_artifacts = vec![LogicalArtifactRef {
-                artifact_id: ArtifactId::from("sample-echo-recorded-app-server"),
-                normalized_relative_path: "fixtures/sample-echo/app-server".to_owned(),
-                digest: script_digest,
-            }];
-            *package_content_digest = build_digest.clone();
-            runtime_target.clone()
-        }
-        _ => {
-            return Err(SampleEchoGateError::Invariant(format!(
-                "runtime release has no required target {target_id}"
-            )));
-        }
-    };
-    let release = RuntimeReleaseDescriptor::from_payload(payload)?;
+    let release = RuntimeReleaseDescriptor::pinned_contract()?;
+    let runtime_target = release.runtime_target_for_target(&target_id)?;
     let native_features = compiled.content().required_runtime_features.clone();
     let native_actions = BTreeSet::from([ActionId::from(SAMPLE_ACTION)]);
     let expectation = release.hello_expectation(
@@ -1535,6 +1513,7 @@ fn prepare_runtime_fixture(
         release,
         hello,
         build_digest,
+        executable_digest: node_digest,
         target_id,
     })
 }
@@ -1632,12 +1611,12 @@ async fn open_persistent_session(
     let create = session_store.create_session(create_request).await?;
     let runtime_binding_id = RuntimeBindingId::from(new_id("runtime-binding"));
     let runtime_bound_event_id = EventId::from(new_id("runtime-bound"));
-    let placeholder_release = RuntimeReleaseDescriptor::frozen_from_fixture()?;
+    let placeholder_release = RuntimeReleaseDescriptor::pinned_contract()?;
     let runtime_binding = RuntimeBindingContract {
         runtime_binding_id: runtime_binding_id.clone(),
         agent_session_id: session_id.clone(),
         resolved_snapshot_ref: compiled.snapshot_ref().clone(),
-        runtime_release_digest: placeholder_release.payload_digest,
+        runtime_release_digest: placeholder_release.contract_digest,
         runtime_build_digest: DigestHex::from("0".repeat(64)),
         protocol_version: VersionString::from(VERSION),
         profile_kind: RuntimeProfileKind::ManagedMinimal,
@@ -1658,7 +1637,7 @@ async fn open_persistent_session(
         dispose_mode,
     )?;
     let runtime_binding = RuntimeBindingContract {
-        runtime_release_digest: fixture.release.payload_digest.clone(),
+        runtime_release_digest: fixture.release.contract_digest.clone(),
         runtime_build_digest: fixture.build_digest.clone(),
         ..runtime_binding
     };
@@ -1709,6 +1688,7 @@ async fn open_persistent_session(
         node_executable,
         runtime_directory,
         &fixture.target_id,
+        fixture.executable_digest.clone(),
         &fixture.release,
     )?;
     let runtime = supervisor

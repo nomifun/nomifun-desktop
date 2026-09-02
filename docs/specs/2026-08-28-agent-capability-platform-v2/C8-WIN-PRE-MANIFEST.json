@@ -4,10 +4,12 @@
   "status": "active",
   "branch": "rf/agent-capability-platform-v2",
   "candidate_source_policy": "resolve_clean_git_head_at_run",
-  "cohort_tuple_inputs": {
-    "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
-    "platform_validation_manifest_digest": "fe631261c82226d5d824bd2ee35e1195c9eefb8afdc1522790b825ca9258305c",
-    "runtime_release_digest": "7d86f492219867e52b35db103a8df8282ba0fd1acc0079b8c5d01b3236a7e17f"
+  "candidate_inputs": {
+    "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5"
+  },
+  "post_build_artifacts": {
+    "release_lock": "release-lock.json",
+    "platform_result": "platform-result.json"
   },
   "source_checkpoint": {
     "local_head": "resolved_at_run",
@@ -32,7 +34,7 @@
     },
     "canonical_schema_manifest": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/canonical-v4-schema-manifest.envelope.json",
-      "digest": "e28723d7fc524cfdd351c6fc8cc17b8a48d8fd1f5be16a7aebd395ce669f98ff"
+      "digest": "003e2e2164f180d40546d0678483ed0dac22c3634af1031d2a05da5022a64317"
     },
     "target_first_party_inventory": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/target-first-party-contributions.envelope.json",
@@ -45,15 +47,7 @@
     "platform_validation_contract": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/canonical-v4-schema-manifest.envelope.json",
       "field": "payload.platform_validation_contract_digest",
-      "digest": "78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9"
-    },
-    "platform_validation_manifest": {
-      "path": "crates/backend/nomifun-agent-contracts/contracts/generated/platform-validation-fixture.envelope.json",
-      "digest": "fe631261c82226d5d824bd2ee35e1195c9eefb8afdc1522790b825ca9258305c"
-    },
-    "runtime_release": {
-      "path": "crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json",
-      "digest": "7d86f492219867e52b35db103a8df8282ba0fd1acc0079b8c5d01b3236a7e17f"
+      "digest": "32a18fc0f7b921c0e8157e5b8183dbe645a806e70ccd1c26de30ff75b03a9422"
     },
     "cargo_lock": {
       "path": "Cargo.lock",
