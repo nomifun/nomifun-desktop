@@ -4,9 +4,10 @@
 >
 > 适用分支：`rf/agent-capability-platform-v2`
 
-本目录保留经当前修订仍有效的核心设计、唯一执行台账、当前机器 Prompt，以及仍被
-Gate/Generator 使用的机器文件。设计文档不能因为形成时间较早而整体删除；发生方向修订时，
-应在原设计中删除或改写错误条款，并保留仍有效的目标、边界、理由和演进依据。
+本目录保留经当前修订仍有效的核心设计、唯一执行台账，以及仍被 Gate/Generator 使用的
+机器文件。设计文档不能因为形成时间较早而整体删除；发生方向修订时，应在原设计中删除
+或改写错误条款，并保留仍有效的目标、边界、理由和演进依据。本轮所有可执行任务统一在
+当前主机以互斥写集多并发推进，不再维护机器 2 执行入口。
 
 ## 阅读顺序
 
@@ -24,26 +25,23 @@ Gate/Generator 使用的机器文件。设计文档不能因为形成时间较�
    - 经修订的迁移纪律、依赖顺序和验证方法；不记录实时完成状态。
 7. `DECISIONS.zh.md`
    - 经修订的决策及理由；被 05 撤销的旧要求不再作为可执行设计保留。
-8. `MACHINE-2-PHASE1-BATCH-A-START-PROMPT.zh.md`
-   - 仅在机器 2 能完整承担 Batch A 时使用。
-9. `MACHINE-2-PHASE1-BATCH-A-MANIFEST.json`
-   - 机器 2 的机器可读任务、写集、禁区和定向检查清单。
-10. `MACHINE-2-PHASE1-BATCH-A-RESULT-TEMPLATE.json`
-    - 机器 2 的结构化结果回传模板。
-11. `MACHINE-2-PHASE1-BATCH-A-RESULT-TEMPLATE.zh.md`
-    - 机器 2 的人工结果回传模板；不作为实时状态源。
-
 发生冲突时：
 
 ```text
 canonical Rust / SQL / generated schema / behavior tests
 > 05-system-capability-replacement-foundation.zh.md
 > 01～04 与 DECISIONS 中经修订的设计
-> 当前 Machine Prompt
+> GLOBAL-CLOSURE-TODO.zh.md 中的当前主机任务分配
 ```
 
-`GLOBAL-CLOSURE-TODO.zh.md` 只决定任务状态，不反向改写架构合同；Machine Prompt 只分派
-任务，不能覆盖 05 或核心设计。
+`GLOBAL-CLOSURE-TODO.zh.md` 只决定任务状态，不反向改写架构合同；当前主机的 writer
+只按其中声明的写集分派任务，不能覆盖 05 或核心设计。
+
+## 单机多并发规则
+
+当前主机是唯一集成主机。多个 writer 可以在本机并行，但必须使用互斥写集和独立临时
+worktree/分支；中央合同、组合根、Gate、锁文件和 GLOBAL TODO 由主机串行合流。多个
+writer 不得同时直接编辑同一工作树或共享同一未提交状态。
 
 ## 机器文件
 
@@ -63,10 +61,9 @@ canonical Rust / SQL / generated schema / behavior tests
 
 ## 已删除的过期执行文件
 
-`IMPLEMENTATION-STATUS`、旧 `START-PROMPT`、旧 macOS handoff、旧单 SSH Prompt 和
-不再消费的旧 C8 migration batch manifests 只存在于 Git 历史。这些文件记录过期状态、
-交接或已撤销执行批次，不属于当前机器 2 的执行材料；当前批次使用上面的 manifest、
-Prompt 和结果模板。
+`IMPLEMENTATION-STATUS`、旧 `START-PROMPT`、旧 macOS handoff、旧跨机批次 Prompt/清单/
+结果模板和不再消费的旧 C8 migration batch manifests 只存在于 Git 历史。这些文件记录
+过期状态、跨机交接或已撤销执行批次，不属于当前主机的执行材料。
 
 需要审计时使用 `git show <commit>:<path>`；不要据此恢复过期任务状态或覆盖 GLOBAL TODO。
 

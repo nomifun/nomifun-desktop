@@ -6,7 +6,8 @@
 >
 > 审计基线：`f6e05d617e09eb71ebb11fababde46bb65039651`
 >
-> 适用范围：正在进行的 Agent Capability Platform v2 一期重构，包括主集成分支、机器 2 SSH lane、后续 Browser/Computer、Sidecar 与原生平台验证任务。
+> 适用范围：正在进行的 Agent Capability Platform v2 一期重构，包括当前主机的多并发
+> 集成主线、后续 Browser/Computer、Sidecar 与原生平台验证任务。
 >
 > 明确排除：二期 `06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md` 继续保持本地未提交，不得随本文发布、引用为一期合同或带入实施分支。
 
@@ -27,7 +28,7 @@
 
 施工机器的最短阅读路径：先读第一部分 §0、§1、§3、§10、§12、§14，立即停止错误方向；随后完整读取第二部分，按保留的一期 Role/Provider 合同实施 Browser/Computer。产品与架构复核应阅读全文。
 
-## 1. 所有正在施工的机器先做什么
+## 1. 所有正在施工的 writer 先做什么
 
 读取本文后，先保存当前工作，不丢弃未提交内容，然后按下列边界重新领取任务。
 
@@ -44,7 +45,8 @@
 7. 读取 JSX/Rust 源码字符串并锁死组件、方法名、固定 Capability 数量的结构测试；
 8. Codex fork 新 patch，直至 §3.4 的最小 Sidecar 协议重新确认；
 9. Browser/Computer 具体 owner 的中央接线，直至 §7 的 Role seam 先落地；
-10. 机器 2 旧 SSH Prompt 中“可证明原子覆盖、通用 uncertain receipt、中央 Effect journal 和旧 API 长期兼容”的扩张。
+10. 为并发 writer 预建跨任务的通用 uncertain receipt、中央 Effect journal 和旧 API
+    长期兼容层。
 
 ### 1.2 可以继续
 
@@ -297,10 +299,10 @@ Manifest 是声明事实源，Registration builder 从实际 handlers/services �
 
 首版不保证抵御同权限恶意本地进程在每个 syscall 之间替换 symlink/junction。已完成的 anchored Knowledge read 可保留真实功能，但应 forward 简化；不要继续为 macOS 系统目录别名、每个 component handle 和极端 TOCTOU 扩大专用平台层。`knowledge.write` 按基本 containment + atomic replace 实现，不再等待分布式式可证明 CAS/uncertain 协议。
 
-### 6.2 机器 2 中的 SSH slice
+### 6.2 单机多并发中的 SSH slice
 
-旧单 SSH Prompt 已删除，机器 2 只在当前 Batch Prompt 能一次承载多项并行工作时启动。
-其中 SSH writer 保留：
+SSH owner 作为当前主机的一个独立写集推进，与 Session/Effect、Compiler 和 Sidecar
+writer 并行；它不再需要第二台机器或专用交接文件。SSH slice 保留：
 
 - 真实 SSH connection/host binding；
 - read/write/exec/sudo 最小 typed command/outcome；
@@ -318,8 +320,8 @@ Manifest 是声明事实源，Registration builder 从实际 handlers/services �
 - 为即将删除的旧 API 设计长期兼容层；
 - 无真实 SSH 环境时构造大规模模拟证明。
 
-机器 2 的启用门槛、独占写集和回传格式以当前
-`MACHINE-2-PHASE1-BATCH-A-START-PROMPT.zh.md` 为准；若只剩 SSH 单项，不启动独立机器。
+当前主机的 writer 写集和回传格式以 `GLOBAL-CLOSURE-TODO.zh.md` 及本节为准。若某项
+只有一个很小写集，仍由主机串行排期，不创建额外机器或长期交接材料。
 
 ## 7. Browser/Computer 可替换能力不得在止损中缩水
 
@@ -457,7 +459,7 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 - 不回滚包含真实用户功能的整批提交，只因其中部分设计复杂；
 - 不通过兼容 alias 保留被删除合同；
 - 不把 06 加入任何 commit；
-- 不在机器 2 分支盲目 merge 主分支；主机发布本文后，由任务 owner 明确通知它更新基线或重新领取精简 lane。
+- 不在未审查的临时 writer 分支之间盲目 merge；主机按写集审查后再普通合流。
 
 ## 11. Release-required 产品闭环
 
@@ -495,8 +497,8 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 
 - 提交并推送本文、经本文修订的 01～04/`DECISIONS`、README 和 GLOBAL TODO；
 - 二期 06 仍保持本地未提交，不得随一期核心设计发布；
-- 主机和机器 2 在新 commit 后重新读取本文；
-- 旧 GLOBAL TODO/Machine Prompt 冲突部分停止执行。
+- 所有本机 writer 在新 checkpoint 后重新读取本文与 GLOBAL TODO；
+- 旧跨机 Prompt 或历史分配冲突部分停止执行。
 
 ### S1：Revert/keep 审计
 
@@ -573,7 +575,7 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 3. 保存当前 WIP，先执行 S1 Revert/keep 审计；
 4. 立即处理 P0，再完成单 Compiler/小 Snapshot/Effect 分级；
 5. Browser/Computer 先做 Role seam，再做具体 owner；
-6. 机器 2 SSH lane 按 §6.2 缩减，旧 Prompt 不再是完成标准；
+6. SSH、Session/Effect 和 Sidecar writer 按 §6.2 及 GLOBAL TODO 的本机写集推进；
 7. 不等待五格两轮 Gate，不为未交付平台生成 synthetic evidence；
 8. 不读取、提交或实现本地 06；
 9. 每个提交说明它删除了什么旧复杂度，不能只增加新 abstraction；

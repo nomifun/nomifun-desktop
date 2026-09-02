@@ -165,10 +165,10 @@ Clean start 同时约束代码施工起点和 fresh-v4 数据起点。
 3. 声明本任务写集和中央文件接入需求；
 4. 先运行能证明基线可工作的最小检查；
 5. 不把 dirty worktree 当作无法开发的理由，但 dirty 结果只能作为诊断；
-6. release attestation、候选制品和跨机交接必须来自 clean commit。
+6. release attestation、候选制品和跨 writer checkpoint 必须来自 clean commit。
 
 阶段性 checkpoint 应是可审查的普通 commit，包含一个完整切片或一个可编译的基础边界。
-跨机协作通过普通 push/fetch/merge 传递，不依赖本机绝对路径、临时压缩包或未推送 SHA。
+本机 writer 通过普通 commit 和主机串行合流传递，不依赖绝对路径、临时压缩包或未推送 SHA。
 
 ### 3.2 Fresh-v4 数据起点
 
@@ -507,9 +507,9 @@ opening/ready/failed 结果，不创建第二 Session；token revoke 提交后�
 - fresh-v4 schema/migration registry；
 - central composition root、`AppServices`/`GatewayDeps` 拆除入口；
 - workspace manifest、`Cargo.lock`、根 Gate 和 release scripts；
-- GLOBAL TODO 与跨机任务分配。
+- GLOBAL TODO 与本机 writer 任务分配。
 
-其他任务通过窄 patch 或独立 commit 请求接入，不并发编辑这些中央文件。
+其他任务通过窄 patch 或独立 commit 接入，不并发编辑这些中央文件。
 
 ### 8.2 可并行区域
 
@@ -525,13 +525,17 @@ opening/ready/failed 结果，不创建第二 Session；token revoke 提交后�
 | UI 产品化 | DTO/Compiler contract 稳定后修改 UI 与定向 tests | 不自行发明后端兼容字段 |
 | 原生平台 smoke | 候选冻结后在真实目标机执行 | 修复按普通 commit 回主机合流 |
 
-### 8.3 多机启用门槛
+### 8.3 单机多并发
 
-独立机器只有在能承担多个互不冲突的开发、修复或验证任务时才值得启动。只有一个很小任务
-时由主机正常排期，避免交接成本高于并行收益。
+当前主机是唯一实现与集成主机。多个 writer 可以在本机并行，但必须满足：
 
-当前机器分配、Batch 内容和状态只查看 GLOBAL TODO 及其链接的当前 Prompt。跨机回传至少
-包含 base SHA、commit SHA、changed paths、实际验证命令、未运行项和主机接线说明。
+1. 每个 writer 有明确且互斥的写集；
+2. 需要共享数据库、固定端口、Cargo build directory 或进程树的测试不得同时运行；
+3. Session Projection 与 Effect 在同一 crate 内按依赖串行；
+4. Compiler、Snapshot、Kernel Registry、Composition Root、Gate、锁文件和 GLOBAL TODO
+   由主机单一集成 Owner 串行修改；
+5. 每个 writer 形成独立普通 checkpoint，记录 changed paths、验证命令、未运行项和 blocker；
+6. 未完成实验、长日志、凭据和本机绝对路径不进入提交。
 
 ### 8.4 合流纪律
 
@@ -541,24 +545,17 @@ opening/ready/failed 结果，不创建第二 Session；token revoke 提交后�
 - 不让多个 Agent 同时运行会争用相同 DB、固定端口或 Cargo build directory 的重测试；
 - 合并冲突按当前 canonical contract 解决，不为两个分支同时存活增加 adapter。
 
-### 8.5 多机分支与回传协议
+### 8.5 本机 writer 回传协议
 
-多机协作以 Git 中可检出的 clean commit/ref 为边界，不建立长期 handoff 包：
+本机 writer 不需要长期分支或跨机 handoff 包。每个 writer 完成后回传：
 
-1. 主机先推送 clean base，并在 GLOBAL TODO 或其当前任务说明中声明多个任务、互斥写集、
-   依赖和中央文件接入点；
-2. 远端机器 fetch 后核对 base SHA，再创建自己的普通分支/worktree；未核对成功不得施工；
-3. 远端只提交已分配写集中的完整切片，不盲目 merge 主分支，也不 rebase/force-push
-   共享历史；基线变化由集成 Owner 明确决定继续、普通 merge 更新或重新领取任务；
-4. 每个可独立审查的切片形成普通 checkpoint commit；未完成实验与本地大型日志不进入提交；
-5. 回传时 push 分支，并报告 base/head、commit 列表、changed paths、实际验证、未运行项、
-   blocker、人工步骤和中央接线需求；
-6. 主机 fetch 后验证 ancestry、工作树、diff 和写集，再以普通 merge 合流；中央文件和冲突
-   只由集成 Owner 修改；
-7. 合流后只重跑受影响检查；发现共享合同或制品变化时，再按 §10.5 扩大验证。
+1. 当前基线 SHA 和普通 checkpoint SHA；
+2. changed paths 与未触碰的中央路径；
+3. 实际验证命令、结果和首个未运行/阻塞原因；
+4. 需要主机集成的最小接线；
+5. 主机审查 staged paths、`git diff --check` 和依赖影响后再普通合流。
 
-远端分支没有新提交时可以 fast-forward 到主线；已有远端提交时不得为了“同步”覆盖或重写
-它们。任何机器都不能依赖另一台机器的绝对路径、脏工作树、未推送 SHA 或临时压缩包。
+本机临时分支/worktree 只用于隔离并发写集；完成合流后不作为长期任务入口保留。
 
 ## 9. 验证策略
 
