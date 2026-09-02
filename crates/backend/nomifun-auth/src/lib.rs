@@ -29,7 +29,7 @@ pub use instance_token::{InstanceTokenValidator, token_sha256_hex};
 
 // D-026 Remote request-admission fence
 pub use remote_admission::{
-    RemoteAuthAdmissionFence, RemoteAuthMutationPermit, RemoteRequestAdmissionPermit,
+    RemoteAuthAdmissionFence, RemoteAuthMutationPermit,
 };
 
 // Password service

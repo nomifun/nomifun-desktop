@@ -17,7 +17,6 @@ pub use canonical::{
 };
 pub use result::build_tool_result;
 pub use router::{
-    PublicMcpAdmissionState, PublicMcpState, RemoteInstanceOwner,
-    instance_token_middleware, instance_token_middleware_with_admission,
+    PublicMcpState, RemoteInstanceOwner, instance_token_middleware,
 };
 pub use session::RemoteMcpSessionAdmissionAuthority;

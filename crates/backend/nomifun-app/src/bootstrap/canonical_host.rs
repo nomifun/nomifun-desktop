@@ -388,7 +388,6 @@ impl FreshV4Host {
             remote_session_query.clone(),
             remote_token_validator,
             owner_user_id.clone(),
-            remote_auth_admission.clone(),
             remote_runtime.clone(),
         );
         let remote_mcp_router = nomifun_public::canonical_remote_mcp_router(
@@ -398,7 +397,6 @@ impl FreshV4Host {
             token_state.token_validator.clone(),
             owner_user_id,
             remote_runtime.clone(),
-            (*remote_auth_admission).clone(),
         );
         let token_state = instance_token_routes::InstanceTokenRouterState {
             admission: remote_auth_admission,

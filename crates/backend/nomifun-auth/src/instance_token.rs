@@ -30,19 +30,31 @@ fn ct_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+#[derive(Debug, Default)]
+struct TokenState {
+    generation: u64,
+    token_hash: Option<String>,
+}
+
 /// In-memory validator for the single installation-scoped Remote token.
 ///
 /// An empty value closes the Remote front door. Mint/rotate/revoke updates this
 /// cache immediately, so request authentication does not need a database read.
+/// Guards are held only for one synchronous validation or state mutation.
 #[derive(Debug, Default)]
 pub struct InstanceTokenValidator {
-    token_hash: RwLock<Option<String>>,
+    state: RwLock<TokenState>,
 }
 
 impl InstanceTokenValidator {
     /// Build a validator from the optional persisted token hash.
     pub fn new(initial: Option<String>) -> Self {
-        Self { token_hash: RwLock::new(initial) }
+        Self {
+            state: RwLock::new(TokenState {
+                generation: 0,
+                token_hash: initial,
+            }),
+        }
     }
 
     /// Validate a presented bearer token against the installation token.
@@ -51,26 +63,43 @@ impl InstanceTokenValidator {
             return false;
         }
         let presented_hash = token_sha256_hex(presented_token);
-        self.token_hash
+        self.state
             .read()
             .expect("instance token lock poisoned")
+            .token_hash
             .as_deref()
             .is_some_and(|stored| ct_eq(&presented_hash, stored))
     }
 
     /// Mint or rotate the installation token.
     pub fn set_token(&self, token_hash: String) {
-        *self.token_hash.write().expect("instance token lock poisoned") = Some(token_hash);
+        let mut state = self.state.write().expect("instance token lock poisoned");
+        state.generation = state.generation.saturating_add(1);
+        state.token_hash = Some(token_hash);
     }
 
     /// Revoke the installation token.
     pub fn clear_token(&self) {
-        *self.token_hash.write().expect("instance token lock poisoned") = None;
+        let mut state = self.state.write().expect("instance token lock poisoned");
+        state.generation = state.generation.saturating_add(1);
+        state.token_hash = None;
     }
 
     /// Whether the installation currently has a Remote token configured.
     pub fn is_configured(&self) -> bool {
-        self.token_hash.read().expect("instance token lock poisoned").is_some()
+        self.state
+            .read()
+            .expect("instance token lock poisoned")
+            .token_hash
+            .is_some()
+    }
+
+    /// Monotonic generation of the currently published token state.
+    pub fn generation(&self) -> u64 {
+        self.state
+            .read()
+            .expect("instance token lock poisoned")
+            .generation
     }
 }
 
@@ -85,16 +114,19 @@ mod tests {
         let validator = InstanceTokenValidator::new(Some(token_sha256_hex(&old)));
 
         assert!(validator.is_configured());
+        assert_eq!(validator.generation(), 0);
         assert!(validator.validate(&old));
         assert!(!validator.validate(&new));
         assert!(!validator.validate("wrong"));
         assert!(!validator.validate(""));
 
         validator.set_token(token_sha256_hex(&new));
+        assert_eq!(validator.generation(), 1);
         assert!(!validator.validate(&old));
         assert!(validator.validate(&new));
 
         validator.clear_token();
+        assert_eq!(validator.generation(), 2);
         assert!(!validator.is_configured());
         assert!(!validator.validate(&new));
     }

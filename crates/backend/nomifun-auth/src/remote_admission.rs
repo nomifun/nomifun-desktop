@@ -1,11 +1,9 @@
-//! In-process linearization fence for D-026 Remote authentication admission.
+//! In-process mutation gate for Remote authentication.
 //!
-//! A Remote request holds a shared permit from credential validation through
-//! its durable admission commit. Token rotate or revoke holds an exclusive
-//! permit through its durable commit and publication of the new authentication
-//! state. Work that was durably admitted first may continue after releasing
-//! its permit; a mutation that commits first is observed by every later
-//! admission.
+//! Request authentication is linearized by the short-lived synchronous
+//! [`crate::InstanceTokenValidator`] state. Only token mint/rotate/revoke
+//! operations need serialization around their durable repository mutation and
+//! publication of the new validator state.
 //!
 //! This primitive owns no token, owner, Session, or repository state. Callers
 //! remain responsible for authentication, persistence, and mapping a rejected
@@ -14,15 +12,12 @@
 use std::fmt;
 use std::sync::Arc;
 
-use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
-/// Shared request-admission versus exclusive authentication-mutation fence.
-///
-/// The underlying Tokio lock is fair and write-preferring, so a queued auth
-/// mutation cannot be starved by later request admissions.
+/// Serializes token mint/rotate/revoke mutations.
 #[derive(Clone, Default)]
 pub struct RemoteAuthAdmissionFence {
-    gate: Arc<RwLock<()>>,
+    gate: Arc<Mutex<()>>,
 }
 
 impl RemoteAuthAdmissionFence {
@@ -30,25 +25,13 @@ impl RemoteAuthAdmissionFence {
         Self::default()
     }
 
-    /// Acquire shared authority for one Remote request admission.
+    /// Acquire exclusive authority for a token mutation.
     ///
-    /// The caller should validate the presented credential while holding this
-    /// permit and retain it until the request's durable admission transaction
-    /// commits. The permit is not needed for work after durable admission.
-    pub async fn acquire_request_admission(&self) -> RemoteRequestAdmissionPermit {
-        RemoteRequestAdmissionPermit {
-            _guard: self.gate.clone().read_owned().await,
-        }
-    }
-
-    /// Acquire exclusive authority for a token rotate or revoke mutation.
-    ///
-    /// The caller should retain this permit until the auth mutation commits
-    /// durably and the corresponding in-process authentication state has been
-    /// published.
+    /// The caller retains this permit until the repository mutation commits and
+    /// the corresponding in-process authentication state has been published.
     pub async fn acquire_auth_mutation(&self) -> RemoteAuthMutationPermit {
         RemoteAuthMutationPermit {
-            _guard: self.gate.clone().write_owned().await,
+            _guard: self.gate.clone().lock_owned().await,
         }
     }
 }
@@ -61,24 +44,10 @@ impl fmt::Debug for RemoteAuthAdmissionFence {
     }
 }
 
-/// Shared capability held while a Remote request is being durably admitted.
-#[must_use = "dropping the permit releases the request-admission fence"]
-pub struct RemoteRequestAdmissionPermit {
-    _guard: OwnedRwLockReadGuard<()>,
-}
-
-impl fmt::Debug for RemoteRequestAdmissionPermit {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RemoteRequestAdmissionPermit")
-            .finish_non_exhaustive()
-    }
-}
-
 /// Exclusive capability held while Remote authentication is mutated.
 #[must_use = "dropping the permit releases the auth-mutation fence"]
 pub struct RemoteAuthMutationPermit {
-    _guard: OwnedRwLockWriteGuard<()>,
+    _guard: OwnedMutexGuard<()>,
 }
 
 impl fmt::Debug for RemoteAuthMutationPermit {
@@ -91,7 +60,6 @@ impl fmt::Debug for RemoteAuthMutationPermit {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -107,128 +75,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_first_holds_mutation_until_durable_admission_commits() {
+    async fn token_mutations_are_serialized() {
         let fence = Arc::new(RemoteAuthAdmissionFence::new());
         let order = Arc::new(Mutex::new(Vec::new()));
 
-        let request_permit = fence.acquire_request_admission().await;
-        record(&order, "request_authenticated");
+        let first = fence.acquire_auth_mutation().await;
+        record(&order, "first_mutation_started");
 
-        let (mutation_started_tx, mutation_started_rx) = oneshot::channel();
-        let (mutation_committed_tx, mut mutation_committed_rx) = oneshot::channel();
-        let mutation = {
+        let (second_started_tx, second_started_rx) = oneshot::channel();
+        let (second_committed_tx, mut second_committed_rx) = oneshot::channel();
+        let second = {
             let fence = Arc::clone(&fence);
             let order = Arc::clone(&order);
             tokio::spawn(async move {
-                mutation_started_tx
+                second_started_tx
                     .send(())
-                    .expect("request-first test receiver dropped");
+                    .expect("mutation test receiver dropped");
                 let _permit = fence.acquire_auth_mutation().await;
-                record(&order, "auth_mutation_committed");
-                mutation_committed_tx
+                record(&order, "second_mutation_committed");
+                second_committed_tx
                     .send(())
-                    .expect("request-first test receiver dropped");
+                    .expect("mutation test receiver dropped");
             })
         };
 
-        mutation_started_rx
+        second_started_rx
             .await
-            .expect("auth mutation task did not start");
+            .expect("second mutation task did not start");
         assert!(
-            tokio::time::timeout(BLOCKED_CHECK, &mut mutation_committed_rx)
+            tokio::time::timeout(BLOCKED_CHECK, &mut second_committed_rx)
                 .await
                 .is_err(),
-            "auth mutation committed while request admission held a shared permit"
+            "second mutation committed while the first mutation held the gate"
         );
 
-        tokio::task::yield_now().await;
-        record(&order, "request_admission_committed");
-        drop(request_permit);
+        record(&order, "first_mutation_committed");
+        drop(first);
 
-        tokio::time::timeout(TEST_DEADLINE, &mut mutation_committed_rx)
+        tokio::time::timeout(TEST_DEADLINE, &mut second_committed_rx)
             .await
-            .expect("auth mutation did not acquire the exclusive permit")
-            .expect("auth mutation task dropped its completion signal");
-        mutation.await.expect("auth mutation task panicked");
+            .expect("second mutation did not acquire the gate")
+            .expect("second mutation task dropped its completion signal");
+        second.await.expect("second mutation task panicked");
 
         assert_eq!(
             *order.lock().expect("ordering lock poisoned"),
             [
-                "request_authenticated",
-                "request_admission_committed",
-                "auth_mutation_committed",
+                "first_mutation_started",
+                "first_mutation_committed",
+                "second_mutation_committed",
             ]
         );
     }
 
     #[tokio::test]
-    async fn auth_first_rejects_old_credential_before_downstream_lookup() {
-        let fence = Arc::new(RemoteAuthAdmissionFence::new());
-        let old_credential_valid = Arc::new(AtomicBool::new(true));
-        let downstream_lookups = Arc::new(AtomicUsize::new(0));
-        let order = Arc::new(Mutex::new(Vec::new()));
-
-        let mutation_permit = fence.acquire_auth_mutation().await;
-        let (request_started_tx, request_started_rx) = oneshot::channel();
-        let (request_finished_tx, mut request_finished_rx) = oneshot::channel();
-        let request = {
-            let fence = Arc::clone(&fence);
-            let old_credential_valid = Arc::clone(&old_credential_valid);
-            let downstream_lookups = Arc::clone(&downstream_lookups);
-            let order = Arc::clone(&order);
-            tokio::spawn(async move {
-                request_started_tx
-                    .send(())
-                    .expect("auth-first test receiver dropped");
-                let _permit = fence.acquire_request_admission().await;
-                let admitted = old_credential_valid.load(Ordering::Acquire);
-                if admitted {
-                    downstream_lookups.fetch_add(1, Ordering::AcqRel);
-                    record(&order, "request_admission_committed");
-                } else {
-                    record(&order, "old_credential_rejected");
-                }
-                request_finished_tx
-                    .send(admitted)
-                    .expect("auth-first test receiver dropped");
-            })
-        };
-
-        request_started_rx
-            .await
-            .expect("request admission task did not start");
-        assert!(
-            tokio::time::timeout(BLOCKED_CHECK, &mut request_finished_rx)
-                .await
-                .is_err(),
-            "request admission passed an exclusive auth mutation permit"
-        );
-
-        old_credential_valid.store(false, Ordering::Release);
-        record(&order, "auth_mutation_committed");
-        drop(mutation_permit);
-
-        let admitted = tokio::time::timeout(TEST_DEADLINE, &mut request_finished_rx)
-            .await
-            .expect("request did not acquire a shared permit after auth mutation")
-            .expect("request task dropped its completion signal");
-        request.await.expect("request admission task panicked");
-
-        assert!(!admitted);
-        assert_eq!(downstream_lookups.load(Ordering::Acquire), 0);
-        assert_eq!(
-            *order.lock().expect("ordering lock poisoned"),
-            ["auth_mutation_committed", "old_credential_rejected"]
-        );
-    }
-
-    #[tokio::test]
-    async fn request_admission_permits_are_shared() {
+    async fn a_dropped_mutation_permit_reopens_the_gate() {
         let fence = RemoteAuthAdmissionFence::new();
-        let _first = fence.acquire_request_admission().await;
-
-        let _second = tokio::time::timeout(TEST_DEADLINE, fence.acquire_request_admission())
+        let first = fence.acquire_auth_mutation().await;
+        drop(first);
+        let _second = tokio::time::timeout(TEST_DEADLINE, fence.acquire_auth_mutation())
             .await
-            .expect("a request admission permit blocked another reader");
+            .expect("dropping a mutation permit did not reopen the gate");
     }
 }
