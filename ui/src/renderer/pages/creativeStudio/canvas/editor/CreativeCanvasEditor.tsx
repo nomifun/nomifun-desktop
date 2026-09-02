@@ -46,6 +46,7 @@ import {
   finishCanvasConnectionDrag,
   finishCanvasResize,
   openCanvasContextMenu,
+  planCanvasConnectionDrop,
   resolveCanvasContextAction,
   resolveCanvasDoubleClick,
   resolveCanvasKeyboardInput,
@@ -111,7 +112,7 @@ export interface CreativeCanvasEdgeRenderContext {
   selected: boolean;
   highlighted: boolean;
   dimmed: boolean;
-  onActivate(): void;
+  onActivate(additive?: boolean): void;
   onContextMenu: React.MouseEventHandler<SVGElement>;
 }
 
@@ -261,13 +262,23 @@ const connectionAnchor = (
 
 const connectionPreviewPath = (
   state: CanvasState,
-  gesture: CanvasConnectionDragGesture
+  gesture: CanvasConnectionDragGesture,
+  fixedNodeId: string
 ): string | null => {
-  const fixed = state.document.nodes.find((node) => node.id === gesture.fixedNodeId);
+  const fixed = state.document.nodes.find((node) => node.id === fixedNodeId);
   if (!fixed) return null;
   const fixedPoint = connectionAnchor(fixed, gesture.fixedHandle);
-  const source = gesture.fixedHandle === 'source' ? fixedPoint : gesture.worldPosition;
-  const target = gesture.fixedHandle === 'target' ? fixedPoint : gesture.worldPosition;
+  const hovered = state.document.nodes.find((node) => node.id === gesture.hoverNodeId);
+  const canConnect = hovered && planCanvasConnectionDrop(
+    state.document,
+    { ...gesture, fixedNodeId, fixedNodeIds: [fixedNodeId] },
+    hovered.id
+  ).candidates.length > 0;
+  const freePoint = canConnect
+    ? connectionAnchor(hovered, gesture.fixedHandle === 'source' ? 'target' : 'source')
+    : gesture.worldPosition;
+  const source = gesture.fixedHandle === 'source' ? fixedPoint : freePoint;
+  const target = gesture.fixedHandle === 'target' ? fixedPoint : freePoint;
   const control = Math.max(40, Math.abs(target.x - source.x) * 0.45);
   return `M ${source.x} ${source.y} C ${source.x + control} ${source.y}, ${target.x - control} ${target.y}, ${target.x} ${target.y}`;
 };
@@ -933,13 +944,14 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
           pointerId: event.pointerId,
           clientPosition: localClientPoint(event.clientX, event.clientY),
           viewport: stateRef.current.viewport,
+          selectedNodeIds: stateRef.current.selection.nodeIds,
         });
         if (!started.ok) return;
-        // A connection handle is an interaction control, not node activation.
-        // Clear selection so product composers keyed to a single selected node
-        // stay closed throughout the drag and only reopen after an explicit
-        // node click.
-        applyCommand(canvasCommands.clearSelection());
+        surfaceRef.current?.focus({ preventScroll: true });
+        // Keep a batch selected; single-node composers must close for the drag.
+        if ((started.gesture.fixedNodeIds?.length ?? 1) === 1) {
+          applyCommand(canvasCommands.clearSelection());
+        }
         setInteraction({ type: 'gesture/start', gesture: started.gesture });
         capturePointer(event.currentTarget, event.pointerId);
       },
@@ -980,6 +992,25 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       [applyCommand, capturePointer, localClientPoint, setInteraction, tool]
     );
 
+    const connectionDropTarget = useCallback(
+      (gesture: CanvasConnectionDragGesture, clientX: number, clientY: number) => {
+        const element = document.elementFromPoint(clientX, clientY);
+        const placement = element?.closest<HTMLElement>('[data-canvas-node-kind]');
+        if (!placement || !surfaceRef.current?.contains(placement)) {
+          return { nodeId: null };
+        }
+        const handleElement = element?.closest<HTMLElement>('[data-canvas-connection-handle]');
+        const opposite = gesture.fixedHandle === 'source' ? 'target' : 'source';
+        return {
+          nodeId: placement.dataset.canvasNodeId ?? null,
+          handleId: handleElement?.dataset.canvasConnectionHandle === opposite
+            ? handleElement.dataset.canvasHandleId ?? opposite
+            : opposite,
+        };
+      },
+      []
+    );
+
     const handleSurfacePointerMove = useCallback(
       (event: React.PointerEvent<HTMLDivElement>) => {
         const gesture = interactionRef.current.gesture;
@@ -999,7 +1030,13 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
             stateRef.current.viewport
           );
           if (next !== gesture) {
-            setInteraction({ type: 'gesture/replace', gesture: next });
+            setInteraction({
+              type: 'gesture/replace',
+              gesture: {
+                ...next,
+                hoverNodeId: connectionDropTarget(next, event.clientX, event.clientY).nodeId,
+              },
+            });
           }
           return;
         }
@@ -1026,27 +1063,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         }
         setInteraction({ type: 'gesture/update', pointerId: event.pointerId, client });
       },
-      [applyCommand, localClientPoint, setInteraction]
-    );
-
-    const connectionDropTarget = useCallback(
-      (gesture: CanvasConnectionDragGesture, clientX: number, clientY: number) => {
-        const element = document.elementFromPoint(clientX, clientY);
-        const handleElement = element?.closest<HTMLElement>('[data-canvas-connection-handle]');
-        const nodeElement = element?.closest<HTMLElement>('[data-canvas-node-id]');
-        const nodeId = handleElement?.dataset.canvasNodeId?.trim() ?? null;
-        const handle = handleElement?.dataset.canvasConnectionHandle;
-        const opposite = gesture.fixedHandle === 'source' ? 'target' : 'source';
-        if (nodeId && handle === opposite) {
-          return {
-            nodeId,
-            handleId: handleElement?.dataset.canvasHandleId ?? handle,
-            isNearNode: true,
-          };
-        }
-        return { nodeId: null, isNearNode: Boolean(nodeElement) };
-      },
-      []
+      [applyCommand, connectionDropTarget, localClientPoint, setInteraction]
     );
 
     const finishPointer = useCallback(
@@ -1147,6 +1164,14 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
 
     const handleKeyDown = useCallback(
       (event: React.KeyboardEvent<HTMLDivElement>) => {
+        const gesture = interactionRef.current.gesture;
+        if (event.key === 'Escape' && gesture?.kind === 'connection') {
+          event.preventDefault();
+          event.stopPropagation();
+          setInteraction({ type: 'gesture/end', pointerId: gesture.pointerId });
+          releasePointer(gesture.pointerId);
+          return;
+        }
         const modifier = event.ctrlKey || event.metaKey;
         const key = event.key.toLowerCase();
         const pasteSequence = pasteSequenceRef.current + 1;
@@ -1182,7 +1207,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         }
         applyInteractionResolution(resolution);
       },
-      [applyInteractionResolution, isNodeVisible]
+      [applyInteractionResolution, isNodeVisible, releasePointer, setInteraction]
     );
 
     const handleCanvasContextMenu = useCallback(
@@ -1329,7 +1354,16 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         ),
       [presentationState.document, presentationState.selection.nodeIds]
     );
-    const hasGraphHighlight = graphHighlight.rootNodeIds.size > 0;
+    const connectionGesture = interaction.gesture?.kind === 'connection'
+      ? interaction.gesture
+      : null;
+    const hasGraphHighlight = !connectionGesture && graphHighlight.rootNodeIds.size > 0;
+    const connectionTargetState = connectionGesture?.hoverNodeId
+      ? planCanvasConnectionDrop(state.document, connectionGesture, connectionGesture.hoverNodeId)
+          .candidates.length > 0
+        ? 'valid'
+        : 'invalid'
+      : undefined;
     // Culling only affects mounted world layers. Slots receive the full state
     // below, so minimap and outline consumers remain document-complete.
     const nodeLayer = useMemo(
@@ -1351,6 +1385,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
               }}
               data-canvas-node-id={node.id}
               data-canvas-node-kind={node.type}
+              data-connection-target={connectionGesture?.hoverNodeId === node.id ? connectionTargetState : undefined}
               data-selected={selectedNodeIds.has(node.id) || undefined}
               data-highlighted={highlighted || undefined}
               data-dimmed={hasGraphHighlight && !highlighted ? true : undefined}
@@ -1419,6 +1454,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
                   type='button'
                   className={`${styles.connectionHandle} ${styles.connectionHandleOutput}`}
                   aria-label={t('creativeStudio.canvas.editor.connectionOutput')}
+                  title={t('creativeStudio.canvas.editor.connectionOutputHint')}
                   data-canvas-connection-handle='source'
                   data-canvas-handle-id='source'
                   data-canvas-node-id={node.id}
@@ -1448,6 +1484,8 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         beginConnectionDrag,
         beginNodePointer,
         beginNodeResize,
+        connectionGesture,
+        connectionTargetState,
         graphHighlight,
         hasGraphHighlight,
         localClientPoint,
@@ -1473,11 +1511,20 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
                 highlighted: graphHighlight.edgeIds.has(connection.id),
                 dimmed:
                   hasGraphHighlight && !graphHighlight.edgeIds.has(connection.id),
-                onActivate: () =>
-                  applyCommand(canvasCommands.setSelection([], [connection.id])),
+                onActivate: (additive = false) => {
+                  const edgeIds = stateRef.current.selection.edgeIds;
+                  applyCommand(canvasCommands.setSelection([], additive
+                    ? edgeIds.includes(connection.id)
+                      ? edgeIds.filter((id) => id !== connection.id)
+                      : [...edgeIds, connection.id]
+                    : [connection.id]));
+                },
                 onContextMenu: (event) => {
                   event.preventDefault();
                   event.stopPropagation();
+                  if (!stateRef.current.selection.edgeIds.includes(connection.id)) {
+                    applyCommand(canvasCommands.setSelection([], [connection.id]));
+                  }
                   applyInteractionResolution(
                     openCanvasContextMenu(
                       { kind: 'edge', edgeId: connection.id },
@@ -1594,10 +1641,11 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       </div>
     );
     const resolvedTopDock = resolveSlot(topDock, context);
-    const previewPath =
-      interaction.gesture?.kind === 'connection'
-        ? connectionPreviewPath(state, interaction.gesture)
-        : null;
+    const previewPaths = connectionGesture
+      ? (connectionGesture.fixedNodeIds ?? [connectionGesture.fixedNodeId])
+          .map((nodeId) => connectionPreviewPath(state, connectionGesture, nodeId))
+          .filter((path): path is string => path !== null)
+      : [];
     const resolvedWorldOverlay = resolveSlot(worldOverlay, context);
 
     return (
@@ -1619,12 +1667,14 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         nodeLayer={nodeLayer}
         edgeLayer={edgeLayer}
         worldOverlay={
-          resolvedWorldOverlay || previewPath ? (
+          resolvedWorldOverlay || previewPaths.length > 0 ? (
             <>
               {resolvedWorldOverlay}
-              {previewPath ? (
+              {previewPaths.length > 0 ? (
                 <svg className={styles.connectionPreview} aria-hidden='true'>
-                  <path d={previewPath} vectorEffect='non-scaling-stroke' />
+                  {previewPaths.map((path, index) => (
+                    <path key={index} d={path} vectorEffect='non-scaling-stroke' />
+                  ))}
                 </svg>
               ) : null}
             </>

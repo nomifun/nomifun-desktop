@@ -97,6 +97,37 @@ const props = (
 });
 
 describe('CreativeCanvasImageComposer', () => {
+  test('previews text as text, inserts a text alias and permits text-only input', () => {
+    const submitted: string[] = [];
+    const disconnected: string[] = [];
+    const text = '一只猫，水彩风格';
+    const componentProps = props({
+      hasImageContent: false,
+      initialPrompt: '',
+      references: [{
+        nodeId: 'text-node', assetId: null, connectionId: 'text-edge', base: false,
+        kind: 'text', textContent: text, label: text, mentionLabel: '文本1', ordinal: 1,
+      }],
+      onGenerate: (prompt) => submitted.push(prompt),
+      onReferenceDisconnect: (edgeId) => disconnected.push(edgeId),
+    });
+    const { getByRole } = render(withCanvasTestI18n(<CreativeCanvasImageComposer {...componentProps} />));
+    const list = getByRole('list', { name: '已连接参考' });
+    expect(list.textContent?.includes(text)).toBe(true);
+    expect(list.textContent?.includes('文本1')).toBe(true);
+    expect(list.querySelector('img')).toBeNull();
+    fireEvent.click(getByRole('button', { name: '生成图片' }));
+    expect(submitted).toEqual(['']);
+    fireEvent.click(getByRole('button', { name: '引用已连接素材' }));
+    const option = getByRole('option', { name: /@文本1/ });
+    expect(option.textContent?.includes(text)).toBe(true);
+    expect(option.textContent?.includes('图 1')).toBe(false);
+    fireEvent.click(option);
+    expect((getByRole('combobox', { name: '图片创作提示词' }) as HTMLTextAreaElement).value).toBe('@文本1 ');
+    fireEvent.click(getByRole('button', { name: `断开参考 ${text}` }));
+    expect(disconnected).toEqual(['text-edge']);
+  });
+
   test('renders the focused reference-style node composer', () => {
     const html = renderToStaticMarkup(
       <CreativeCanvasImageComposer {...props({ initialPrompt: '改成清晨' })} />
@@ -221,7 +252,7 @@ describe('CreativeCanvasImageComposer', () => {
     expect(referenceList.textContent?.includes('人物图')).toBe(true);
     expect(referenceList.textContent?.includes('服装图')).toBe(true);
     expect(document.body.textContent?.includes('已连接参考')).toBe(false);
-    fireEvent.click(getByRole('button', { name: '断开参考图 服装图' }));
+    fireEvent.click(getByRole('button', { name: '断开参考 服装图' }));
     expect(disconnected).toEqual(['edge-clothes']);
 
     fireEvent.click(getByRole('button', { name: '引用已连接素材' }));

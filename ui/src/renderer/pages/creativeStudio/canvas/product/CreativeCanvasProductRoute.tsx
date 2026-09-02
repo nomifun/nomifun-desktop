@@ -107,6 +107,7 @@ import {
 } from '../editor';
 import { CanvasMiniMap, type CanvasMiniMapNavigationRequest } from '../graph';
 import {
+  finishCanvasConnectionDrag,
   resolveCanvasContextAction,
   type CanvasContextAction,
   type CanvasIntegrationIntent,
@@ -180,6 +181,7 @@ import {
   type CanvasImageGenerationBlocker,
   type CanvasImageReference,
   type CanvasImageReferenceResolution,
+  type CanvasTextReference,
 } from './canvasImageReferences';
 import CanvasImageTaskRuntimeBridge, {
   canvasImageTaskReferenceFromPlan,
@@ -453,7 +455,7 @@ const invalidCanvasImageComposerReferences = (
     if (validConnectionIds.has(connection.id)) continue;
     const source = nodesById.get(connection.sourceNodeId);
     const issue = issueByConnectionId.get(connection.id);
-    if (!issue) continue;
+    if (!issue || source?.type === 'text') continue;
     const assetId =
       source && (source.type === 'image' || source.type === 'panorama')
         ? source.data.assetId
@@ -516,6 +518,25 @@ const invalidCanvasImageComposerReferences = (
   return items;
 };
 
+const canvasTextComposerReferences = (
+  references: readonly CanvasTextReference[],
+  t: TFunction
+): CreativeCanvasImageComposerReference[] => references.map((reference) => {
+  const mentionLabel = t('creativeStudio.canvas.image.textReferenceLabel', { index: reference.ordinal });
+  return {
+    nodeId: reference.sourceNodeId,
+    kind: 'text',
+    assetId: null,
+    connectionId: reference.connection.id,
+    base: false,
+    label: reference.text.replace(/\s+/gu, ' ').slice(0, 64) || mentionLabel,
+    textContent: reference.text,
+    mentionLabel,
+    ordinal: reference.ordinal,
+    disabledReason: reference.text ? undefined : t('creativeStudio.canvas.image.textReferenceEmpty'),
+  };
+});
+
 const canvasImageWorkbenchReferences = (
   resolution: CanvasImageReferenceResolution
 ): CreativeWorkbenchReferences => ({
@@ -562,6 +583,8 @@ const canvasImageGenerationBlockerMessage = (
         });
   }
   switch (blocker.issue.code) {
+    case 'source_text_empty':
+      return t('creativeStudio.canvas.image.textReferenceEmpty');
     case 'duplicate_asset':
       return t('creativeStudio.canvas.image.duplicateReferenceAsset', {
         defaultValue: '同一图片通过多个节点重复接入，请断开重复连线。',
@@ -651,7 +674,7 @@ const connectionErrorMessage = (
       });
     case 'no_valid_drop_target':
       return t('creativeStudio.canvas.connection.errors.invalidDropTarget', {
-        defaultValue: '请将连接拖到对端节点的有效连接点',
+        defaultValue: '请将连接拖到目标节点卡片上',
       });
   }
 };
@@ -3081,7 +3104,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
             end: mention.end,
             tokenText: `@${mention.fallbackLabel}`,
           })),
-          referenceResolution.references
+          referenceResolution.references,
+          referenceResolution.textReferences
         );
         const inputPolicy = imageReferenceInputPolicy(
           selectedModel.protocol,
@@ -4111,6 +4135,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
             target: intent.target,
             clientPosition: { ...intent.clientPosition },
             ...(node ? { nodeLocked: node.locked } : {}),
+            selectedEdgeCount: editorRef.current?.getState().selection.edgeIds.length ?? 0,
           });
           return;
         }
@@ -4127,6 +4152,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
               defaultValue: '无法创建连接：{{reason}}。',
             })
           );
+          return;
+        case 'connection/batch-created':
+          setNotice(t('creativeStudio.canvas.notices.connectionsCreated', {
+            count: intent.count,
+            skipped: intent.skippedCount,
+          }));
           return;
         case 'connection/created':
           setNotice(
@@ -4301,56 +4332,39 @@ const CreativeCanvasProductRoute: React.FC = () => {
         );
 
       if (menu.connection) {
-        const sourceNodeId =
-          menu.connection.fixedHandle === 'source'
-            ? menu.connection.fixedNodeId
-            : node.id;
-        const targetNodeId =
-          menu.connection.fixedHandle === 'source'
-            ? node.id
-            : menu.connection.fixedNodeId;
         const candidateDocument = {
           ...state.document,
           nodes: reusedDirector
             ? state.document.nodes
             : [...state.document.nodes, node],
         };
-        const validation = validateCanvasConnection(candidateDocument, {
-          sourceNodeId,
-          targetNodeId,
-        });
-        if (!validation.ok) {
+        const at = Date.now();
+        const mergeKey = `create-connected:${node.id}`;
+        const resolution = finishCanvasConnectionDrag(candidateDocument, {
+          ...menu.connection,
+          kind: 'connection',
+          pointerId: 0,
+          clientPosition: { x: 0, y: 0 },
+        }, 0, { nodeId: node.id }, { at, mergeKey });
+        const rejection = resolution.intents.find((intent) => intent.type === 'connection/rejected');
+        if (rejection) {
           setNotice(
             t('creativeStudio.canvas.connection.createFailed', {
-              reason: connectionErrorMessage(validation.code, t),
+              reason: connectionErrorMessage(rejection.code, t),
               defaultValue: '无法创建连接：{{reason}}。',
             })
           );
           return;
         }
 
-        const at = Date.now();
-        const mergeKey = `create-connected:${node.id}`;
         if (!reusedDirector) {
           editor.dispatch(canvasCommands.addNode(node, { at, mergeKey }));
         }
-        editor.dispatch(
-          canvasCommands.connect(sourceNodeId, targetNodeId, {
-            at,
-            mergeKey,
-            sourceHandle:
-              menu.connection.fixedHandle === 'source'
-                ? menu.connection.fixedHandleId
-                : 'source',
-            targetHandle:
-              menu.connection.fixedHandle === 'target'
-                ? menu.connection.fixedHandleId
-                : 'target',
-          })
-        );
+        for (const command of resolution.commands) editor.dispatch(command);
         editor.dispatch(canvasCommands.setSelection([node.id]));
+        const batch = resolution.intents.find((intent) => intent.type === 'connection/batch-created');
         setNotice(
-          reusedDirector
+          batch ? t('creativeStudio.canvas.notices.connectionsCreated', { count: batch.count, skipped: batch.skippedCount }) : reusedDirector
             ? t('creativeStudio.canvas.notices.directorReusedAndConnected', {
                 defaultValue: '已复用画布唯一的导演节点并完成连接。',
               })
@@ -5160,6 +5174,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                         targetNodeId: node.id,
                         inboundConnectionCount: 0,
                         references: [],
+                        textReferences: [],
                         issues: [],
                       };
                   const baseComposeModelOptions = hasReferenceIntent
@@ -5208,7 +5223,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       end: mention.end,
                       tokenText: `@${mention.fallbackLabel}`,
                     })),
-                    referenceResolution.references
+                    referenceResolution.references,
+                    referenceResolution.textReferences
                   );
                   const generationGate = evaluateCanvasImageGenerationGate({
                     resolution: referenceResolution,
@@ -5222,6 +5238,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                   );
                   const composerReferences = [
                     ...canvasImageComposerReferences(referenceResolution.references),
+                    ...canvasTextComposerReferences(referenceResolution.textReferences, t),
                     ...(canvasState
                       ? invalidCanvasImageComposerReferences(
                           canvasState,
@@ -5332,6 +5349,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           }
                           onReferenceDisconnect={(connectionId) =>
                             dispatch(canvasCommands.deleteEdges([connectionId]))
+                          }
+                          onReferencesDisconnect={(connectionIds) =>
+                            dispatch(canvasCommands.deleteEdges(connectionIds))
                           }
                           onOpenPromptLibrary={() =>
                             openPromptLibrary()
@@ -5522,9 +5542,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 }}
               />
               <ProductToolbarButton
-                label={t('creativeStudio.canvas.toolbar.deleteSelection', {
-                  defaultValue: '删除所选节点或连接',
-                })}
+                label={canvasState?.selection.nodeIds.length === 0 && canvasState.selection.edgeIds.length > 0
+                  ? t('creativeStudio.canvas.connection.deleteSelected', { count: canvasState.selection.edgeIds.length })
+                  : t('creativeStudio.canvas.toolbar.deleteSelection', {
+                      defaultValue: '删除所选节点或连接',
+                    })}
                 icon={<Delete {...iconProps} />}
                 danger
                 disabled={productDisabled || !selection.hasSelection}

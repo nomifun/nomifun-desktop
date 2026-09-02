@@ -21,7 +21,7 @@ export interface CreativeCanvasConnectionEdgeProps {
   selected: boolean;
   highlighted?: boolean;
   dimmed?: boolean;
-  onActivate(): void;
+  onActivate(additive?: boolean): void;
   onContextMenu?: React.MouseEventHandler<SVGElement>;
   ariaLabel?: string;
 }
@@ -56,7 +56,7 @@ const CreativeCanvasConnectionEdge: React.FC<CreativeCanvasConnectionEdgeProps> 
     event: React.MouseEvent<SVGPathElement> | React.KeyboardEvent<SVGPathElement>
   ) => {
     event.stopPropagation();
-    onActivate();
+    onActivate(event.shiftKey || event.ctrlKey || event.metaKey);
   };
 
   return (
@@ -71,6 +71,7 @@ const CreativeCanvasConnectionEdge: React.FC<CreativeCanvasConnectionEdgeProps> 
       data-edge-dimmed={dimmed || undefined}
       onContextMenu={onContextMenu}
     >
+      <title>{t('creativeStudio.canvas.connection.selectionHint')}</title>
       <path
         className={styles.visiblePath}
         d={geometry.path}
