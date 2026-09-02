@@ -22,60 +22,21 @@ pub(super) struct AnchoredMarkdownFile {
 
 impl AnchoredKnowledgeFs {
     pub(super) fn open(root: &Path) -> Result<Self, AppError> {
-        if !root.is_absolute() {
-            return Err(AppError::BadRequest(
-                "bound knowledge root must be absolute".into(),
-            ));
-        }
-        let mut anchor = PathBuf::new();
-        let mut components = Vec::new();
-        let mut saw_root = false;
-        for component in root.components() {
-            match component {
-                Component::Prefix(_) | Component::RootDir => {
-                    if !components.is_empty() {
-                        return Err(AppError::BadRequest(
-                            "bound knowledge root is not canonical".into(),
-                        ));
-                    }
-                    anchor.push(component.as_os_str());
-                    saw_root = true;
-                }
-                Component::Normal(component) => {
-                    components.push(component.to_owned());
-                }
-                Component::CurDir | Component::ParentDir => {
-                    return Err(AppError::BadRequest(
-                        "bound knowledge root is not canonical".into(),
-                    ));
-                }
-            }
-        }
-        if !saw_root || components.is_empty() {
-            return Err(AppError::BadRequest(
-                "a filesystem, drive, or network-share root cannot be used as a knowledge base"
-                    .into(),
-            ));
-        }
-        let mut directory = Dir::open_ambient_dir(
-            &anchor,
-            ambient_authority(),
-        )
-        .map_err(|_| {
-            AppError::Conflict(
-                "bound knowledge root is unavailable".into(),
-            )
-        })?;
-        for component in components {
-            directory = directory
-                .open_dir_nofollow(Path::new(&component))
-                .map_err(|_| {
-                    AppError::Conflict(
-                        "bound knowledge root contains an unavailable or unsafe directory"
-                            .into(),
-                    )
-                })?;
-        }
+        validate_bound_knowledge_root(root)?;
+
+        #[cfg(target_os = "macos")]
+        let directory = {
+            // macOS exposes ordinary temporary paths through fixed system
+            // aliases such as /var -> /private/var. Rewrite only those known
+            // aliases lexically; every user-controlled component is still
+            // opened with no-follow semantics, so an intermediate symlink is
+            // rejected rather than silently canonicalized.
+            open_absolute_directory_nofollow(&macos_system_alias_path(root))?
+        };
+
+        #[cfg(not(target_os = "macos"))]
+        let directory = open_absolute_directory_nofollow(root)?;
+
         Ok(Self { root: directory })
     }
 
@@ -147,6 +108,113 @@ impl AnchoredKnowledgeFs {
         collector.collect(&self.root, "", 0)?;
         Ok(collector.documents)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_system_alias_path(path: &Path) -> PathBuf {
+    const ALIASES: &[(&str, &str)] = &[
+        ("/var", "/private/var"),
+        ("/tmp", "/private/tmp"),
+        ("/etc", "/private/etc"),
+        ("/home", "/System/Volumes/Data/home"),
+    ];
+
+    for (alias, target) in ALIASES {
+        let alias_path = Path::new(alias);
+        if path == alias_path {
+            return PathBuf::from(target);
+        }
+        if let Ok(suffix) = path.strip_prefix(alias_path) {
+            return Path::new(target).join(suffix);
+        }
+    }
+    path.to_owned()
+}
+
+fn validate_bound_knowledge_root(root: &Path) -> Result<(), AppError> {
+    if !root.is_absolute() {
+        return Err(AppError::BadRequest(
+            "bound knowledge root must be absolute".into(),
+        ));
+    }
+    let mut normal_components = 0usize;
+    let mut saw_root = false;
+    for component in root.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                if normal_components != 0 {
+                    return Err(AppError::BadRequest(
+                        "bound knowledge root is not canonical".into(),
+                    ));
+                }
+                saw_root = true;
+            }
+            Component::Normal(_) => {
+                normal_components = normal_components.saturating_add(1);
+            }
+            Component::CurDir | Component::ParentDir => {
+                return Err(AppError::BadRequest(
+                    "bound knowledge root is not canonical".into(),
+                ));
+            }
+        }
+    }
+    if !saw_root || normal_components == 0 {
+        return Err(AppError::BadRequest(
+            "a filesystem, drive, or network-share root cannot be used as a knowledge base"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn open_absolute_directory_nofollow(path: &Path) -> Result<Dir, AppError> {
+    let mut anchor = PathBuf::new();
+    let mut components = Vec::new();
+    let mut saw_root = false;
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                if !components.is_empty() {
+                    return Err(AppError::Conflict(
+                        "bound knowledge root path is unavailable".into(),
+                    ));
+                }
+                anchor.push(component.as_os_str());
+                saw_root = true;
+            }
+            Component::Normal(component) => {
+                components.push(component.to_owned());
+            }
+            Component::CurDir | Component::ParentDir => {
+                return Err(AppError::Conflict(
+                    "bound knowledge root path is unavailable".into(),
+                ));
+            }
+        }
+    }
+    if !saw_root {
+        return Err(AppError::Conflict(
+            "bound knowledge root path is unavailable".into(),
+        ));
+    }
+    let mut directory =
+        Dir::open_ambient_dir(&anchor, ambient_authority()).map_err(|_| {
+            AppError::Conflict(
+                "bound knowledge root is unavailable".into(),
+            )
+        })?;
+    for component in components {
+        directory = directory
+            .open_dir_nofollow(Path::new(&component))
+            .map_err(|_| {
+                AppError::Conflict(
+                    "bound knowledge root contains an unavailable or unsafe directory"
+                        .into(),
+                )
+            })?;
+    }
+    Ok(directory)
 }
 
 fn validate_relative_markdown_path(
@@ -386,9 +454,35 @@ mod tests {
         std::os::unix::fs::symlink(source, target).unwrap();
     }
 
+    #[cfg(unix)]
+    fn link_file(source: &Path, target: &Path) {
+        std::os::unix::fs::symlink(source, target).unwrap();
+    }
+
     #[cfg(windows)]
     fn link_directory(source: &Path, target: &Path) {
         junction::create(source, target).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn anchored_knowledge_root_accepts_the_macos_var_system_alias() {
+        let directory = tempfile::Builder::new()
+            .prefix("nomifun-anchored-knowledge-")
+            .tempdir_in("/var/tmp")
+            .unwrap();
+        let root = directory.path().join("knowledge");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("visible.md"), "# Visible").unwrap();
+
+        let anchored = AnchoredKnowledgeFs::open(&root).unwrap();
+        assert_eq!(
+            anchored
+                .read_markdown("visible.md", 1024)
+                .unwrap()
+                .content,
+            "# Visible"
+        );
     }
 
     #[test]
@@ -420,6 +514,29 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn anchored_knowledge_search_and_read_reject_a_linked_markdown_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        let outside = directory.path().join("outside.md");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("visible.md"), "# Visible\ninside").unwrap();
+        std::fs::write(&outside, "# Secret\noutside").unwrap();
+        link_file(&outside, &root.join("secret.md"));
+
+        let anchored = AnchoredKnowledgeFs::open(&root).unwrap();
+        let documents = anchored
+            .search_documents(&KnowledgeBaseId::new(), "test", limits())
+            .unwrap();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].rel_path, "visible.md");
+        assert!(
+            anchored.read_markdown("secret.md", 1024).is_err(),
+            "an anchored read must not follow a linked Markdown file"
+        );
+    }
+
     #[test]
     fn anchored_knowledge_root_rejects_a_linked_component() {
         let directory = tempfile::tempdir().unwrap();
@@ -432,6 +549,20 @@ mod tests {
         assert!(
             AnchoredKnowledgeFs::open(&linked_root).is_err(),
             "the root capability must not be established through a link or junction"
+        );
+    }
+
+    #[test]
+    fn anchored_knowledge_root_rejects_an_intermediate_linked_component() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = directory.path().join("outside");
+        let linked_parent = directory.path().join("linked-parent");
+        std::fs::create_dir_all(outside.join("knowledge")).unwrap();
+        link_directory(&outside, &linked_parent);
+
+        assert!(
+            AnchoredKnowledgeFs::open(&linked_parent.join("knowledge")).is_err(),
+            "a symlink in the root path must not be canonicalized into an accepted root"
         );
     }
 
@@ -471,5 +602,93 @@ mod tests {
             !replaced,
             "the Windows directory capability must deny path replacement while open"
         );
+    }
+
+    #[test]
+    fn anchored_root_handle_survives_or_blocks_root_path_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        let moved_root = directory.path().join("knowledge-original");
+        let outside = directory.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("note.md"), "# Original").unwrap();
+        std::fs::write(outside.join("note.md"), "# Outside").unwrap();
+
+        let anchored = AnchoredKnowledgeFs::open(&root).unwrap();
+        let replaced = std::fs::rename(&root, &moved_root).is_ok();
+        if replaced {
+            link_directory(&outside, &root);
+        }
+
+        assert_eq!(
+            anchored.read_markdown("note.md", 1024).unwrap().content,
+            "# Original"
+        );
+
+        #[cfg(windows)]
+        assert!(
+            !replaced,
+            "the Windows root directory capability must deny root replacement while open"
+        );
+    }
+
+    #[test]
+    fn anchored_knowledge_search_limits_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("one.md"), "# One\ncontent").unwrap();
+        std::fs::write(root.join("two.md"), "# Two\ncontent").unwrap();
+        let anchored = AnchoredKnowledgeFs::open(&root).unwrap();
+        let kb_id = KnowledgeBaseId::new();
+
+        for limits in [
+            RetrievalLoadLimits {
+                max_entries: 0,
+                ..limits()
+            },
+            RetrievalLoadLimits {
+                max_documents: 0,
+                ..limits()
+            },
+            RetrievalLoadLimits {
+                max_file_bytes: 1,
+                ..limits()
+            },
+            RetrievalLoadLimits {
+                max_total_bytes: 1,
+                ..limits()
+            },
+        ] {
+            assert!(matches!(
+                anchored.search_documents(&kb_id, "test", limits),
+                Err(AppError::BadRequest(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn anchored_knowledge_search_depth_limit_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        let mut nested = root.clone();
+        for _ in 0..=MAX_ANCHORED_KNOWLEDGE_DEPTH {
+            nested.push("d");
+        }
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let anchored = AnchoredKnowledgeFs::open(&root).unwrap();
+        assert!(matches!(
+            anchored.search_documents(
+                &KnowledgeBaseId::new(),
+                "test",
+                RetrievalLoadLimits {
+                    max_entries: MAX_ANCHORED_KNOWLEDGE_DEPTH + 2,
+                    ..limits()
+                },
+            ),
+            Err(AppError::BadRequest(_))
+        ));
     }
 }
