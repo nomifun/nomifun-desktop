@@ -3,11 +3,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use nomifun_agent_contracts::{
-    AgentPresetSource, DigestHex, FreshV4SchemaMetadata, LocalizedMetadata,
-    OfficialPresetKey, OfficialPresetSeed, PrincipalRef, TargetPackageContribution,
-    TargetPackageInventoryPayload,
-    canonical_json_bytes, digest_payload, fresh_v4_schema_manifest_payload,
-    FRESH_V4_BASELINE_SQL,
+    AgentPresetSource, CapabilityKind, CapabilityManifest, DigestHex,
+    FreshV4SchemaMetadata, LocalizedMetadata, OfficialPresetKey, OfficialPresetSeed,
+    PackageManifest, PrincipalRef, SkillDefinition, TargetPackageContribution,
+    TargetPackageInventoryPayload, canonical_json_bytes, digest_payload,
+    fresh_v4_schema_manifest_payload, FRESH_V4_BASELINE_SQL,
 };
 use serde::Serialize;
 use sqlx::sqlite::{
@@ -574,6 +574,9 @@ struct ExpectedPackage {
     manifest_json: String,
     manifest_digest: String,
     display_json: String,
+    capabilities: BTreeMap<(String, String), CapabilityKind>,
+    skills: BTreeSet<(String, String)>,
+    mcp_tools: Vec<nomifun_agent_contracts::McpToolCapabilityMapping>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -588,6 +591,7 @@ struct ExpectedMount {
 struct ExpectedCapability {
     capability_id: String,
     capability_version: String,
+    kind: CapabilityKind,
     package_id: String,
     package_version: String,
     manifest_json: String,
@@ -644,6 +648,30 @@ fn expected_materialization(
                 localized_names: BTreeMap::new(),
                 localized_descriptions: BTreeMap::new(),
             })?,
+            capabilities: package
+                .capabilities
+                .iter()
+                .map(|capability| {
+                    (
+                        (
+                            capability.capability.id.as_ref().to_owned(),
+                            capability.capability.version.as_ref().to_owned(),
+                        ),
+                        capability.kind,
+                    )
+                })
+                .collect(),
+            skills: package
+                .skills
+                .iter()
+                .map(|skill| {
+                    (
+                        skill.id.as_ref().to_owned(),
+                        skill.version.as_ref().to_owned(),
+                    )
+                })
+                .collect(),
+            mcp_tools: package.mcp_tools.clone(),
         });
         mounts.push(ExpectedMount {
             mount_id: package_id.clone(),
@@ -655,6 +683,7 @@ fn expected_materialization(
             capabilities.push(ExpectedCapability {
                 capability_id: capability.capability.id.as_ref().to_owned(),
                 capability_version: capability.capability.version.as_ref().to_owned(),
+                kind: capability.kind,
                 package_id: package_id.clone(),
                 package_version: package_version.clone(),
                 manifest_json: canonical_json_string(capability)?,
@@ -711,7 +740,11 @@ async fn validate_materialization(
             row.manifest_digest.clone(),
             row.display_json.clone(),
         ));
-        if actual != wanted {
+        if actual != wanted
+            && !actual
+                .as_ref()
+                .is_some_and(|value| runtime_package_matches(value, row))
+        {
             return Err(FreshV4RootError::State(format!(
                 "bundled package materialization mismatch for {}@{}",
                 row.package_id, row.package_version
@@ -772,7 +805,11 @@ async fn validate_materialization(
             row.manifest_json.clone(),
             row.manifest_digest.clone(),
         ));
-        if actual != wanted {
+        if actual != wanted
+            && !actual
+                .as_ref()
+                .is_some_and(|value| runtime_capability_matches(value, row))
+        {
             return Err(FreshV4RootError::State(format!(
                 "capability materialization mismatch for {}@{}",
                 row.capability_id, row.capability_version
@@ -794,7 +831,11 @@ async fn validate_materialization(
             row.definition_json.clone(),
             row.definition_digest.clone(),
         ));
-        if actual != wanted {
+        if actual != wanted
+            && !actual
+                .as_ref()
+                .is_some_and(|value| runtime_skill_matches(value, row))
+        {
             return Err(FreshV4RootError::State(format!(
                 "skill materialization mismatch for {}@{}",
                 row.skill_id, row.skill_version
@@ -802,6 +843,105 @@ async fn validate_materialization(
         }
     }
     Ok(())
+}
+
+/// Bootstrap initially writes the compact target-inventory projection. The
+/// composed AgentPlatform then replaces those rows with the full canonical
+/// runtime manifests. Both representations must validate at this boundary;
+/// the runtime representation still proves its own digest and exact inventory
+/// identity instead of being accepted as arbitrary JSON.
+fn runtime_package_matches(
+    actual: &(String, String, String),
+    expected: &ExpectedPackage,
+) -> bool {
+    let Ok(manifest) = serde_json::from_str::<PackageManifest>(&actual.0) else {
+        return false;
+    };
+    if manifest.package_id.as_ref() != expected.package_id
+        || manifest.package_version.as_ref() != expected.package_version
+    {
+        return false;
+    }
+    let Ok(digest) = digest_payload(&manifest) else {
+        return false;
+    };
+    if digest.as_ref() != actual.1 {
+        return false;
+    }
+    let Ok(display) = canonical_json_string(&manifest.display) else {
+        return false;
+    };
+    if display != actual.2 {
+        return false;
+    }
+    let capabilities = manifest
+        .contributions
+        .capabilities
+        .iter()
+        .map(|capability| {
+            (
+                (
+                    capability.id.as_ref().to_owned(),
+                    capability.version.as_ref().to_owned(),
+                ),
+                capability.kind,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if capabilities != expected.capabilities {
+        return false;
+    }
+    let skills = manifest
+        .contributions
+        .skills
+        .iter()
+        .map(|skill| {
+            (
+                skill.id.as_ref().to_owned(),
+                skill.version.as_ref().to_owned(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    skills == expected.skills && manifest.contributions.mcp_tools == expected.mcp_tools
+}
+
+fn runtime_capability_matches(
+    actual: &(String, String, String, String),
+    expected: &ExpectedCapability,
+) -> bool {
+    let Ok(manifest) = serde_json::from_str::<CapabilityManifest>(&actual.2) else {
+        return false;
+    };
+    if manifest.id.as_ref() != expected.capability_id
+        || manifest.version.as_ref() != expected.capability_version
+        || manifest.kind != expected.kind
+        || manifest.package.id.as_ref() != expected.package_id
+        || manifest.package.version.as_ref() != expected.package_version
+    {
+        return false;
+    }
+    digest_payload(&manifest)
+        .map(|digest| digest.as_ref() == actual.3)
+        .unwrap_or(false)
+}
+
+fn runtime_skill_matches(
+    actual: &(String, String, String, String),
+    expected: &ExpectedSkill,
+) -> bool {
+    let Ok(skill) = serde_json::from_str::<SkillDefinition>(&actual.2) else {
+        return false;
+    };
+    if skill.id.as_ref() != expected.skill_id
+        || skill.version.as_ref() != expected.skill_version
+        || skill.package.id.as_ref() != expected.package_id
+        || skill.package.version.as_ref() != expected.package_version
+    {
+        return false;
+    }
+    digest_payload(&skill)
+        .map(|digest| digest.as_ref() == actual.3)
+        .unwrap_or(false)
 }
 
 #[derive(Debug, PartialEq, Eq)]
