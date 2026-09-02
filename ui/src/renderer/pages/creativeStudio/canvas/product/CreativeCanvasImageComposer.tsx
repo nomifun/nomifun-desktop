@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ArrowUp, BookOne, Check, CloseOne, Down, Loading, SettingTwo } from '@icon-park/react';
+import { ArrowUp, BookOne, CloseOne, Down, Loading, SettingTwo } from '@icon-park/react';
 import { InputNumber, Radio, Select } from '@arco-design/web-react';
+import { autoUpdate, flip, offset, shift, size, useFloating } from '@floating-ui/react';
 import React, {
   useCallback,
   useEffect,
@@ -17,8 +18,10 @@ import { useTranslation } from 'react-i18next';
 
 import {
   IMAGE_WORKBENCH_QUALITY_OPTIONS,
-  imageWorkbenchSizeDimensionsLabel,
+  imageWorkbenchAspectRatioValue,
   imageWorkbenchModelKey,
+  imageWorkbenchResolutionLabel,
+  imageWorkbenchSizeOptionForSettings,
   parseImageWorkbenchModelKey,
   type ImageWorkbenchAspectRatioOption,
   type ImageWorkbenchInterfaceMode,
@@ -28,6 +31,7 @@ import {
   type ImageWorkbenchSettings,
   type ImageWorkbenchTaskSummary,
 } from '../../workbenches/image';
+import ImageSizePicker from '../../workbenches/image/ImageSizePicker';
 import CreativeCanvasReferencePromptInput, {
   relabelCreativeCanvasPromptMentions,
   type CreativeCanvasPromptMentionBinding,
@@ -115,7 +119,6 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
 }) => {
   const { t, i18n } = useTranslation();
   const settingsHostRef = useRef<HTMLDivElement>(null);
-  const sizeSelectRef = useRef<HTMLDivElement>(null);
   const referenceMentionLabel = useCallback(
     (ordinal: number) =>
       t('creativeStudio.canvas.image.referenceMentionLabel', {
@@ -147,15 +150,25 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     () => structuredClone(normalizedInitialDraft.mentions)
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [sizeMenuOpen, setSizeMenuOpen] = useState(false);
+  const { refs: settingsRefs, floatingStyles: settingsPosition, placement: settingsPlacement } = useFloating({
+    open: settingsOpen,
+    placement: 'top-end',
+    middleware: [
+      offset(10),
+      flip({ padding: 12 }),
+      shift({ padding: 12 }),
+      size({
+        padding: 12,
+        apply({ availableHeight, elements }) {
+          elements.floating.style.setProperty(
+            '--creative-image-settings-available-height', `${Math.max(0, availableHeight)}px`
+          );
+        },
+      }),
+    ],
+    whileElementsMounted: autoUpdate,
+  });
   const busy = task.state === 'queued' || task.state === 'running';
-  const qualityLabel =
-    IMAGE_WORKBENCH_QUALITY_OPTIONS.find(
-      (option) => option.value === settings.quality
-    )?.label ??
-    t('creativeStudio.canvas.image.autoQuality', {
-      defaultValue: '自动',
-    });
   const canGenerate = retrySubmission
     ? !disabled && onRetrySubmission !== undefined
     : !disabled && !generateBlocked && !busy && prompt.trim().length > 0 && settings.model !== null;
@@ -164,10 +177,17 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     () => new Map(modelOptions.map((option) => [imageWorkbenchModelKey(option), option])),
     [modelOptions]
   );
-  const selectedSizeOption =
-    aspectRatioOptions.find(
-      (option) => !option.disabled && option.value === settings.aspectRatio
-    ) ?? aspectRatioOptions.find((option) => !option.disabled) ?? null;
+  const selectedSizeOption = imageWorkbenchSizeOptionForSettings(aspectRatioOptions, settings);
+  const selectedAspectRatio = selectedSizeOption
+    ? selectedSizeOption.value === 'auto'
+      ? selectedSizeOption.label
+      : imageWorkbenchAspectRatioValue(selectedSizeOption)
+    : '';
+  const selectedResolution = selectedSizeOption
+    ? imageWorkbenchResolutionLabel(selectedSizeOption)
+    : '';
+  const sizeSummary = [...new Set([selectedAspectRatio, selectedResolution])]
+    .filter(Boolean).join(' · ');
 
   useEffect(() => {
     setPrompt(normalizedInitialDraft.value);
@@ -185,14 +205,10 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
 
   useEffect(() => {
     setSettingsOpen(false);
-    setSizeMenuOpen(false);
   }, [nodeId]);
 
   useEffect(() => {
-    if (disabled) {
-      setSettingsOpen(false);
-      setSizeMenuOpen(false);
-    }
+    if (disabled) setSettingsOpen(false);
   }, [disabled]);
 
   useEffect(() => {
@@ -200,9 +216,6 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (target instanceof Node) {
-        if (sizeMenuOpen && !sizeSelectRef.current?.contains(target)) {
-          setSizeMenuOpen(false);
-        }
         if (!settingsHostRef.current?.contains(target)) {
           setSettingsOpen(false);
         }
@@ -210,8 +223,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
-      if (sizeMenuOpen) setSizeMenuOpen(false);
-      else setSettingsOpen(false);
+      setSettingsOpen(false);
     };
     document.addEventListener('pointerdown', handlePointerDown, true);
     document.addEventListener('keydown', handleKeyDown);
@@ -219,7 +231,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
       document.removeEventListener('pointerdown', handlePointerDown, true);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [settingsOpen, sizeMenuOpen]);
+  }, [settingsOpen]);
 
   const submit = (
     change: CreativeCanvasReferencePromptChange = { value: prompt, mentions }
@@ -453,6 +465,9 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                 <div
                   id={`canvas-image-settings-${nodeId}`}
                   className={styles.settingsPopover}
+                  ref={settingsRefs.setFloating}
+                  style={settingsPosition}
+                  data-placement={settingsPlacement}
                   role='dialog'
                   aria-label={t('creativeStudio.canvas.image.settingsLabel', {
                     defaultValue: '图片生成设置',
@@ -506,86 +521,12 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                       <Down theme='outline' size={12} fill='currentColor' />
                     </span>
                   </label>
-                  <div className={composerStyles.field}>
-                    <span>
-                      {t('creativeStudio.canvas.image.aspectRatioLabel', {
-                        defaultValue: '宽高比',
-                      })}
-                    </span>
-                    <div ref={sizeSelectRef} className={styles.sizeSelect}>
-                      <button
-                        type='button'
-                        className={styles.sizeSelectTrigger}
-                        aria-label={t('creativeStudio.canvas.image.aspectRatioLabel', {
-                          defaultValue: '宽高比',
-                        })}
-                        aria-haspopup='listbox'
-                        aria-expanded={sizeMenuOpen}
-                        data-open={sizeMenuOpen || undefined}
-                        aria-controls={`canvas-image-size-options-${nodeId}`}
-                        disabled={disabled || !selectedSizeOption}
-                        onClick={() => setSizeMenuOpen((open) => !open)}
-                      >
-                        <span>{selectedSizeOption?.label ?? settings.aspectRatio}</span>
-                        <small>
-                          {selectedSizeOption
-                            ? imageWorkbenchSizeDimensionsLabel(selectedSizeOption)
-                            : null}
-                        </small>
-                        <Down theme='outline' size={12} fill='currentColor' />
-                      </button>
-                      {sizeMenuOpen ? (
-                        <div
-                          id={`canvas-image-size-options-${nodeId}`}
-                          className={styles.sizeMenu}
-                          role='listbox'
-                          aria-label={t('creativeStudio.canvas.image.aspectRatioLabel', {
-                            defaultValue: '宽高比',
-                          })}
-                        >
-                          {aspectRatioOptions.map((option) => {
-                            const selected = option.value === selectedSizeOption?.value;
-                            return (
-                              <button
-                                key={option.value}
-                                type='button'
-                                className={styles.sizeMenuOption}
-                                role='option'
-                                aria-selected={selected}
-                                disabled={option.disabled}
-                                onClick={() => {
-                                  onAspectRatioChange(option);
-                                  setSizeMenuOpen(false);
-                                }}
-                              >
-                                <span className={styles.sizeMenuIdentity}>
-                                  <span className={styles.sizeMenuCheck} aria-hidden='true'>
-                                    {selected ? (
-                                      <Check theme='outline' size={11} fill='currentColor' />
-                                    ) : null}
-                                  </span>
-                                  <span
-                                    className={styles.sizeMenuShape}
-                                    data-auto={option.value === 'auto' || undefined}
-                                    style={
-                                      option.width && option.height
-                                        ? {
-                                            aspectRatio: `${option.width} / ${option.height}`,
-                                          }
-                                        : undefined
-                                    }
-                                    aria-hidden='true'
-                                  />
-                                  <span>{option.label}</span>
-                                </span>
-                                <small>{imageWorkbenchSizeDimensionsLabel(option)}</small>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
+                  <ImageSizePicker
+                    options={aspectRatioOptions}
+                    value={settings.aspectRatio}
+                    disabled={disabled}
+                    onChange={onAspectRatioChange}
+                  />
                   <label className={composerStyles.field}>
                     <span>
                       {t('creativeStudio.canvas.image.countLabel', {
@@ -605,6 +546,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
               ) : null}
               <button
                 type='button'
+                ref={settingsRefs.setReference}
                 className={`${composerStyles.controlButton} ${composerStyles.settingsButton}`}
                 aria-label={t('creativeStudio.canvas.image.settingsLabel', {
                   defaultValue: '图片生成设置',
@@ -612,20 +554,14 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
                 aria-expanded={settingsOpen}
                 aria-controls={`canvas-image-settings-${nodeId}`}
                 disabled={disabled}
-                onClick={() =>
-                  setSettingsOpen((open) => {
-                    if (open) setSizeMenuOpen(false);
-                    return !open;
-                  })
-                }
+                onClick={() => setSettingsOpen((open) => !open)}
               >
                 <SettingTwo theme='outline' size={15} fill='currentColor' />
                 <span className={composerStyles.settingsSummary}>
                   {t('creativeStudio.canvas.image.settingsSummary', {
-                    quality: qualityLabel,
-                    aspectRatio: settings.aspectRatio,
+                    size: sizeSummary,
                     count: settings.count,
-                    defaultValue: `${qualityLabel} · ${settings.aspectRatio} · ${settings.count} 张`,
+                    defaultValue: `${sizeSummary} · ${settings.count} 张`,
                   })}
                 </span>
               </button>

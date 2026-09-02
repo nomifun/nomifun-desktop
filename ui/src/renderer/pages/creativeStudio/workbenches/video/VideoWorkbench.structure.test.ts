@@ -110,6 +110,9 @@ describe('VideoWorkbench controlled boundary', () => {
     expect(productRoute.includes('Message.info({')).toBe(true);
     expect(productRoute.includes('duration: 2600')).toBe(true);
     expect(productRoute.includes("position: 'top'")).toBe(true);
+    expect(composer.includes("'creativeStudio.video.settings.aspectRatio'")).toBe(true);
+    expect(productRoute.includes('sizeOptions: ASPECTS')).toBe(true);
+    expect(productRoute.includes('videoWorkbenchSizeOptionLabel')).toBe(false);
     expect(
       productRoute.includes("onOpenParameters: () =>\n      setError(")
     ).toBe(false);

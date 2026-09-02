@@ -39,17 +39,6 @@ export function videoWorkbenchDimensions(
   return null;
 }
 
-export function videoWorkbenchSizeOptionLabel(
-  resolution: string,
-  aspectRatio: string,
-  label = aspectRatio
-): string {
-  const dimensions = videoWorkbenchDimensions(resolution, aspectRatio);
-  return dimensions
-    ? `${label} · ${dimensions.width} × ${dimensions.height}`
-    : label;
-}
-
 export const toggleVideoTaskSelection = (
   selectedIds: readonly string[],
   taskId: string,

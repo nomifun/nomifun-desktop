@@ -13,7 +13,6 @@ import type {
   CreativeModelOption,
   CreativeModelSelectionRef,
 } from '../../models';
-import { videoWorkbenchSizeOptionLabel } from '../../workbenches/video';
 import type {
   CanvasVideoComposeSettings,
   CanvasVideoComposeTaskSummary,
@@ -327,14 +326,14 @@ const CreativeCanvasVideoComposer: React.FC<
                   <label className={composerStyles.field}>
                     <span>
                       {t('creativeStudio.canvas.video.aspectRatioLabel', {
-                        defaultValue: '画幅',
+                        defaultValue: '宽高比',
                       })}
                     </span>
                     <select
                       className={composerStyles.settingsControl}
                       value={settings.aspectRatio}
                       aria-label={t('creativeStudio.canvas.video.aspectRatioAriaLabel', {
-                        defaultValue: '视频画幅',
+                        defaultValue: '视频宽高比',
                       })}
                       disabled={interactionDisabled}
                       onChange={(event) =>
@@ -343,10 +342,7 @@ const CreativeCanvasVideoComposer: React.FC<
                     >
                       {ASPECT_RATIO_OPTIONS.map((option) => (
                         <option key={option} value={option}>
-                          {videoWorkbenchSizeOptionLabel(
-                            settings.resolution,
-                            option
-                          )}
+                          {option}
                         </option>
                       ))}
                     </select>

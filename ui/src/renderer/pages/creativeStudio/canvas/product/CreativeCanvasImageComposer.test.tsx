@@ -60,6 +60,24 @@ const props = (
       requestSize: '1920x1080',
     },
     {
+      value: '2048x2048',
+      label: '1:1 · 2K',
+      aspectRatio: '1:1',
+      resolution: '2K',
+      width: 2048,
+      height: 2048,
+      requestSize: '2048x2048',
+    },
+    {
+      value: '2048x1152',
+      label: '16:9 · 2K',
+      aspectRatio: '16:9',
+      resolution: '2K',
+      width: 2048,
+      height: 1152,
+      requestSize: '2048x1152',
+    },
+    {
       value: 'auto',
       label: '自动',
       width: null,
@@ -91,20 +109,19 @@ describe('CreativeCanvasImageComposer', () => {
     expect(html.includes('arco-select-size-mini')).toBe(true);
     expect(html.includes('图片生成设置')).toBe(true);
     expect(html.includes('生成图片')).toBe(true);
-    expect(html.includes('自动 · 1:1 · 1 张')).toBe(true);
+    expect(html.includes('1:1 · 标准 · 1 张')).toBe(true);
   });
 
-  test('opens stable in-flow quality and aspect-ratio selectors', async () => {
+  test('opens separate quality, aspect-ratio and resolution selectors', async () => {
     const qualityChanges: string[] = [];
     const aspectRatioChanges: string[] = [];
-    const { getByRole } = render(
+    const componentProps = props({
+      onQualityChange: (quality) => qualityChanges.push(quality),
+      onAspectRatioChange: (option) => aspectRatioChanges.push(option.value),
+    });
+    const { getByRole, rerender } = render(
       withCanvasTestI18n(
-        <CreativeCanvasImageComposer
-          {...props({
-            onQualityChange: (quality) => qualityChanges.push(quality),
-            onAspectRatioChange: (option) => aspectRatioChanges.push(option.value),
-          })}
-        />
+        <CreativeCanvasImageComposer {...componentProps} />
       )
     );
 
@@ -114,22 +131,23 @@ describe('CreativeCanvasImageComposer', () => {
     await waitFor(() => {
       expect(document.querySelectorAll('select').length).toBe(1);
     });
-    const [qualitySelect] = Array.from(
-      document.querySelectorAll<HTMLSelectElement>('select')
-    );
+    const qualitySelect = getByRole('combobox', { name: '质量' });
+    const aspectRatioSelect = getByRole('group', { name: '宽高比' });
+    const resolutionSelect = getByRole('group', { name: '分辨率' });
 
     expect(qualitySelect.closest('[data-canvas-image-composer]')).not.toBeNull();
     fireEvent.change(qualitySelect, { target: { value: 'high' } });
-    fireEvent.click(getByRole('button', { name: '宽高比' }));
-    const sizeListbox = getByRole('listbox', { name: '宽高比' });
-    const sizeOption = getByRole('option', {
-      name: /16:9.*1920 × 1080/,
-    });
-    expect(within(sizeListbox).getByRole('option', { name: '自动' })).not.toBeNull();
-    expect(sizeOption.lastElementChild?.textContent).toBe('1920 × 1080');
-    fireEvent.click(sizeOption);
+    expect(within(aspectRatioSelect).getByRole('button', { name: '16:9' })).not.toBeNull();
+    fireEvent.click(within(resolutionSelect).getByRole('button', { name: '2K' }));
+    rerender(withCanvasTestI18n(
+      <CreativeCanvasImageComposer {...componentProps} settings={{
+        ...componentProps.settings, aspectRatio: '2048x2048', width: 2048, height: 2048,
+      }} />
+    ));
+    expect(within(resolutionSelect).getByRole('button', { name: '2K' }).getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(within(aspectRatioSelect).getByRole('button', { name: '16:9' }));
     expect(qualityChanges).toEqual(['high']);
-    expect(aspectRatioChanges).toEqual(['16:9']);
+    expect(aspectRatioChanges).toEqual(['2048x2048', '2048x1152']);
     expect(settingsButton.getAttribute('aria-expanded')).toBe('true');
 
     fireEvent.keyDown(document, { key: 'Escape' });
@@ -359,9 +377,9 @@ describe('CreativeCanvasImageComposer', () => {
     expect(shellCss.includes(".positioner[data-overlay='true']")).toBe(true);
     expect(css.includes('.settingsPopover')).toBe(true);
     expect(css.includes('.settingsSelect select')).toBe(true);
-    expect(
-      /\.sizeMenuOption\s*\{[\s\S]*?justify-content:\s*space-between;/.test(css)
-    ).toBe(true);
+    expect(css.includes('.sizeMenuOption')).toBe(false);
+    expect(css.includes('--creative-image-settings-available-height')).toBe(true);
+    expect(css.includes(".settingsPopover[data-placement^='bottom']::after")).toBe(true);
     expect(css.includes('appearance: none')).toBe(true);
     expect(css.includes('pointer-events: none')).toBe(true);
   });

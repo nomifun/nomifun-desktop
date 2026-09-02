@@ -680,7 +680,7 @@
       "selectEditModel": "选择图片编辑模型",
       "selectGenerateModel": "选择图片生成模型",
       "settingsLabel": "图片生成设置",
-      "settingsSummary": "{{quality}} · {{aspectRatio}} · {{count}} 张",
+      "settingsSummary": "{{size}} · {{count}} 张",
       "unavailableReference": "不可用参考",
       "widthLabel": "宽度"
     },
@@ -1154,8 +1154,8 @@
       "yes": "是"
     },
     "video": {
-      "aspectRatioAriaLabel": "视频画幅",
-      "aspectRatioLabel": "画幅",
+      "aspectRatioAriaLabel": "视频宽高比",
+      "aspectRatioLabel": "宽高比",
       "connectedImage": "已连接图片",
       "durationAriaLabel": "视频时长",
       "durationLabel": "时长",
@@ -1649,6 +1649,8 @@
       "noModel": "没有可用生图模型",
       "outputCount": "生成张数",
       "quality": "质量",
+      "resolution": "分辨率",
+      "standardResolution": "标准",
       "width": "宽度",
       "widthShort": "W"
     },
@@ -1912,10 +1914,10 @@
       "waitingForModel": "等待模型开始处理"
     },
     "settings": {
+      "aspectRatio": "宽高比",
       "duration": "时长",
       "model": "模型",
-      "resolution": "清晰度",
-      "size": "尺寸",
+      "resolution": "分辨率",
       "taskCount": "任务数量"
     },
     "task": {

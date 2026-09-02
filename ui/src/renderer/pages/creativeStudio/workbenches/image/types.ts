@@ -39,6 +39,9 @@ export interface ImageWorkbenchModelOption extends ImageWorkbenchModelIdentity {
 export interface ImageWorkbenchAspectRatioOption {
   value: string;
   label: string;
+  /** Presentation metadata only; value/requestSize remain the saved/wire identity. */
+  aspectRatio?: string;
+  resolution?: string;
   width: number | null;
   height: number | null;
   /**
@@ -48,6 +51,15 @@ export interface ImageWorkbenchAspectRatioOption {
    */
   requestSize?: string;
   disabled?: boolean;
+}
+
+/** Presentation-only ratio group derived from provider-safe exact size options. */
+export interface ImageWorkbenchAspectRatioChoice {
+  value: string;
+  label: string;
+  width: number | null;
+  height: number | null;
+  disabled: boolean;
 }
 
 export interface ImageWorkbenchSizePolicy {
@@ -190,11 +202,11 @@ export const DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS: readonly ImageWorkbenchAspec
   { value: '16:9', label: '16:9', width: 1920, height: 1080, requestSize: '1920x1080' },
   { value: '9:16', label: '9:16', width: 1080, height: 1920, requestSize: '1080x1920' },
   { value: '21:9', label: '21:9', width: 1568, height: 672, requestSize: '1568x672' },
-  { value: '2048x2048', label: '1:1 · 2K', width: 2048, height: 2048, requestSize: '2048x2048' },
-  { value: '2048x1152', label: '16:9 · 2K', width: 2048, height: 1152, requestSize: '2048x1152' },
-  { value: '1152x2048', label: '9:16 · 2K', width: 1152, height: 2048, requestSize: '1152x2048' },
-  { value: '3840x2160', label: '16:9 · 4K', width: 3840, height: 2160, requestSize: '3840x2160' },
-  { value: '2160x3840', label: '9:16 · 4K', width: 2160, height: 3840, requestSize: '2160x3840' },
+  { value: '2048x2048', label: '1:1 · 2K', aspectRatio: '1:1', resolution: '2K', width: 2048, height: 2048, requestSize: '2048x2048' },
+  { value: '2048x1152', label: '16:9 · 2K', aspectRatio: '16:9', resolution: '2K', width: 2048, height: 1152, requestSize: '2048x1152' },
+  { value: '1152x2048', label: '9:16 · 2K', aspectRatio: '9:16', resolution: '2K', width: 1152, height: 2048, requestSize: '1152x2048' },
+  { value: '3840x2160', label: '16:9 · 4K', aspectRatio: '16:9', resolution: '4K', width: 3840, height: 2160, requestSize: '3840x2160' },
+  { value: '2160x3840', label: '9:16 · 4K', aspectRatio: '9:16', resolution: '4K', width: 2160, height: 3840, requestSize: '2160x3840' },
   {
     value: 'auto',
     get label() {
@@ -213,11 +225,96 @@ export function imageWorkbenchSizeDimensionsLabel(
     : null;
 }
 
-export function imageWorkbenchSizeOptionLabel(
-  option: Pick<ImageWorkbenchAspectRatioOption, 'label' | 'width' | 'height'>
+/** Group by explicit metadata or the existing ratio key, never translated labels. */
+export function imageWorkbenchAspectRatioValue(
+  option: ImageWorkbenchAspectRatioOption
+): string {
+  return option.aspectRatio ?? option.value;
+}
+
+function imageWorkbenchResolutionValue(option: ImageWorkbenchAspectRatioOption): string {
+  return option.value === 'auto' ? 'auto' : option.resolution ?? 'standard';
+}
+
+/** The existing base presets vary in pixels; do not misrepresent them all as 1K. */
+export function imageWorkbenchResolutionLabel(
+  option: ImageWorkbenchAspectRatioOption
+): string {
+  const resolution = imageWorkbenchResolutionValue(option);
+  if (resolution === 'auto') return option.label;
+  if (resolution === 'standard') {
+    return localizedOptionLabel('creativeStudio.image.settings.standardResolution', '标准');
+  }
+  return /^\d+$/.test(resolution) ? `${resolution} px` : resolution;
+}
+
+export function imageWorkbenchResolutionOptionLabel(
+  option: ImageWorkbenchAspectRatioOption
 ): string {
   const dimensions = imageWorkbenchSizeDimensionsLabel(option);
-  return dimensions ? `${option.label} · ${dimensions}` : option.label;
+  const resolution = imageWorkbenchResolutionLabel(option);
+  return dimensions ? `${resolution} · ${dimensions}` : resolution;
+}
+
+export function imageWorkbenchAspectRatioChoices(
+  options: readonly ImageWorkbenchAspectRatioOption[]
+): ImageWorkbenchAspectRatioChoice[] {
+  const choices = new Map<string, ImageWorkbenchAspectRatioChoice>();
+  for (const option of options) {
+    const value = imageWorkbenchAspectRatioValue(option);
+    const current = choices.get(value);
+    if (!current) {
+      choices.set(value, {
+        value,
+        label: value === 'auto' ? option.label : value,
+        width: option.width,
+        height: option.height,
+        disabled: Boolean(option.disabled),
+      });
+      continue;
+    }
+    if (current.disabled && !option.disabled) {
+      choices.set(value, {
+        ...current,
+        width: option.width,
+        height: option.height,
+        disabled: false,
+      });
+    }
+  }
+  return [...choices.values()];
+}
+
+export function imageWorkbenchResolutionOptions(
+  options: readonly ImageWorkbenchAspectRatioOption[],
+  aspectRatio: string
+): ImageWorkbenchAspectRatioOption[] {
+  return options.filter(
+    (option) => imageWorkbenchAspectRatioValue(option) === aspectRatio
+  );
+}
+
+/**
+ * Pick the exact provider option for a ratio change while retaining the current
+ * resolution tier when that ratio supports it.
+ */
+export function imageWorkbenchSizeOptionForAspectRatio(
+  options: readonly ImageWorkbenchAspectRatioOption[],
+  current: ImageWorkbenchAspectRatioOption | null,
+  aspectRatio: string
+): ImageWorkbenchAspectRatioOption | null {
+  const candidates = imageWorkbenchResolutionOptions(options, aspectRatio).filter(
+    (option) => !option.disabled
+  );
+  if (candidates.length === 0) return null;
+  if (current) {
+    const resolution = imageWorkbenchResolutionValue(current);
+    const sameResolution = candidates.find(
+      (option) => imageWorkbenchResolutionValue(option) === resolution
+    );
+    if (sameResolution) return sameResolution;
+  }
+  return candidates[0] ?? null;
 }
 
 export function imageWorkbenchFixedSizeOptions(
@@ -333,6 +430,8 @@ const STEPFUN_STEP_2X_LARGE_ASPECT_RATIOS: readonly ImageWorkbenchAspectRatioOpt
   {
     value: '1:1-256',
     label: '1:1 · 256',
+    aspectRatio: '1:1',
+    resolution: '256',
     width: 256,
     height: 256,
     requestSize: '256x256',
@@ -340,6 +439,8 @@ const STEPFUN_STEP_2X_LARGE_ASPECT_RATIOS: readonly ImageWorkbenchAspectRatioOpt
   {
     value: '1:1-512',
     label: '1:1 · 512',
+    aspectRatio: '1:1',
+    resolution: '512',
     width: 512,
     height: 512,
     requestSize: '512x512',
