@@ -3134,12 +3134,12 @@ mod tests {
         ))
         .expect("replayed Browser resource acquisition");
         assert!(Arc::ptr_eq(&first_handle.handle, &replay_handle.handle));
-        assert_eq!(releases.load(Ordering::Acquire), 1);
+        assert_eq!(releases.load(Ordering::Acquire), 0);
         poll_ready(registry.release_role_resources(&ScopeKey::from(
             "session:browser-provider",
         )))
         .expect("release Browser resource");
-        assert_eq!(releases.load(Ordering::Acquire), 2);
+        assert_eq!(releases.load(Ordering::Acquire), 1);
     }
 
     #[test]

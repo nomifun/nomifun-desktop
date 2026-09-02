@@ -299,6 +299,36 @@ impl KernelRegistry {
         request: CapabilityInvocationRequest,
     ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
         ThinAuthority::enforce(snapshot, active, &request)?;
+        let role_request = RoleMemberInvocationRequest {
+            principal: request.principal.clone(),
+            session_owner: request.session_owner.clone(),
+            operation_id: request.operation_id.clone(),
+            correlation_id: request.correlation_id.clone(),
+            capability_id: request.capability_id.clone(),
+            resource_binding_ids: request.resource_binding_ids.clone(),
+            state_scope_key: request.state_scope_key.clone(),
+            admission: RoleMemberAdmission::Agent {
+                agent_session_id: request.agent_session_id.clone(),
+                resolved_snapshot_ref: request.resolved_snapshot_ref.clone(),
+                active_set_generation: request.active_set_generation,
+            },
+        };
+        if snapshot
+            .content()
+            .resolved_role_providers
+            .values()
+            .any(|provider| {
+                provider.supported_members.contains(&request.capability_id)
+            })
+        {
+            self.ensure_role_resources_for_member(
+                snapshot,
+                active,
+                &role_request,
+                CapabilityKind::Tool,
+            )
+            .await?;
+        }
         let (handler, context) = {
             let published = self
                 .published
@@ -313,20 +343,7 @@ impl KernelRegistry {
                     &published,
                     snapshot,
                     active,
-                    &RoleMemberInvocationRequest {
-                        principal: request.principal.clone(),
-                        session_owner: request.session_owner.clone(),
-                        operation_id: request.operation_id.clone(),
-                        correlation_id: request.correlation_id.clone(),
-                        capability_id: request.capability_id.clone(),
-                        resource_binding_ids: request.resource_binding_ids.clone(),
-                        state_scope_key: request.state_scope_key.clone(),
-                        admission: RoleMemberAdmission::Agent {
-                            agent_session_id: request.agent_session_id.clone(),
-                            resolved_snapshot_ref: request.resolved_snapshot_ref.clone(),
-                            active_set_generation: request.active_set_generation,
-                        },
-                    },
+                    &role_request,
                     CapabilityKind::Tool,
                 )?;
                 let binding = published
@@ -434,6 +451,13 @@ impl KernelRegistry {
         active: &ActiveCapabilitySetSnapshot,
         request: RoleMemberInvocationRequest,
     ) -> Result<ContextContributionResult, KernelError> {
+        self.ensure_role_resources_for_member(
+            snapshot,
+            active,
+            &request,
+            CapabilityKind::ContextContributor,
+        )
+        .await?;
         let (factory, context, schema_ref) = {
             let published = self
                 .published
@@ -514,11 +538,23 @@ impl KernelRegistry {
                 })?;
             (factory, resolved.context)
         };
+        let key = resource_handle_key(&context)?;
+        if let Some(handle) = self.resource_handles.lock().await.get(&key).cloned() {
+            return Ok(ResourceProviderResult { handle });
+        }
         let result = factory
             .acquire(ResourceProviderRequest {
                 context: context.clone(),
             })
             .await?;
+        self.retain_resource_handle(&context, result).await
+    }
+
+    async fn retain_resource_handle(
+        &self,
+        context: &ResolvedRoleMemberContext,
+        result: ResourceProviderResult,
+    ) -> Result<ResourceProviderResult, KernelError> {
         let identity = result.handle.identity();
         let Some(binding) = context
             .resource_bindings
@@ -538,21 +574,128 @@ impl KernelRegistry {
                     .to_owned(),
             });
         }
-        let key = ResourceHandleKey {
-            scope_key: context.state_scope_key.clone(),
-            role_id: context.role_id.clone(),
-            mount_id: context.provider_lock.provider.mount_id.clone(),
-            contribution_digest: context.provider_lock.provider.contribution_digest.clone(),
-            binding_id: identity.binding_id.clone(),
-        };
+        let key = resource_handle_key(context)?;
         let mut handles = self.resource_handles.lock().await;
         if let Some(existing) = handles.get(&key).cloned() {
             drop(handles);
-            result.handle.release().await?;
+            if !Arc::ptr_eq(&existing, &result.handle) {
+                result.handle.release().await?;
+            }
             return Ok(ResourceProviderResult { handle: existing });
         }
         handles.insert(key, Arc::clone(&result.handle));
         Ok(result)
+    }
+
+    async fn ensure_role_resources_for_member(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: &RoleMemberInvocationRequest,
+        expected_kind: CapabilityKind,
+    ) -> Result<(), KernelError> {
+        let acquisitions = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            let resolved = resolve_role_member(
+                &published,
+                snapshot,
+                active,
+                request,
+                expected_kind,
+            )?;
+            let provider = published
+                .materialized
+                .role_provider(
+                    &resolved.role_id,
+                    &resolved.provider_lock.provider.mount_id,
+                )
+                .ok_or_else(|| KernelError::RoleProviderUnavailable {
+                    role_id: resolved.role_id.clone(),
+                    mount_id: resolved.provider_lock.provider.mount_id.clone(),
+                })?;
+            let target_member = provider
+                .contribution
+                .members
+                .get(&request.capability_id)
+                .ok_or_else(|| KernelError::RoleProviderMemberUnavailable {
+                    role_id: resolved.role_id.clone(),
+                    capability_id: request.capability_id.clone(),
+                })?;
+            let mut acquisitions = Vec::new();
+            for (resource_capability_id, resource_member) in
+                &provider.contribution.members
+            {
+                let Some(resource_capability) = published
+                    .materialized
+                    .capability(resource_capability_id)
+                else {
+                    continue;
+                };
+                if resource_capability.manifest.kind != CapabilityKind::ResourceProvider
+                    || resource_member
+                        .required_resource_kinds
+                        .is_disjoint(&target_member.required_resource_kinds)
+                {
+                    continue;
+                }
+                let factory = published
+                    .role_resource_factories
+                    .get(&(
+                        resolved.role_id.clone(),
+                        resolved.provider_lock.provider.mount_id.clone(),
+                        resource_capability_id.clone(),
+                    ))
+                    .cloned()
+                    .ok_or_else(|| KernelError::RoleProviderMemberUnavailable {
+                        role_id: resolved.role_id.clone(),
+                        capability_id: resource_capability_id.clone(),
+                    })?;
+                let resource_bindings = resolved
+                    .context
+                    .resource_bindings
+                    .iter()
+                    .filter(|binding| {
+                        resource_member
+                            .required_resource_kinds
+                            .contains(&binding.resource_kind)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if resource_bindings.is_empty() {
+                    return Err(KernelError::ResourceBindingMissing {
+                        binding_id: ResourceBindingId::from(
+                            resource_member
+                                .required_resource_kinds
+                                .iter()
+                                .next()
+                                .map(AsRef::as_ref)
+                                .unwrap_or("resource"),
+                        ),
+                    });
+                }
+                let mut context = resolved.context.clone();
+                context.member_id = resource_capability_id.clone();
+                context.resource_bindings = resource_bindings;
+                acquisitions.push((factory, context));
+            }
+            acquisitions
+        };
+        for (factory, context) in acquisitions {
+            let key = resource_handle_key(&context)?;
+            if self.resource_handles.lock().await.contains_key(&key) {
+                continue;
+            }
+            let result = factory
+                .acquire(ResourceProviderRequest {
+                    context: context.clone(),
+                })
+                .await?;
+            self.retain_resource_handle(&context, result).await?;
+        }
+        Ok(())
     }
 
     /// Release all lazily acquired handles for one session scope. Providers
@@ -591,6 +734,26 @@ impl KernelRegistry {
         }
         Ok(())
     }
+}
+
+fn resource_handle_key(
+    context: &ResolvedRoleMemberContext,
+) -> Result<ResourceHandleKey, KernelError> {
+    let [binding] = context.resource_bindings.as_slice() else {
+        return Err(KernelError::InvalidPresetRevision {
+            reason: format!(
+                "resource provider {} requires exactly one frozen resource binding",
+                context.member_id.as_ref()
+            ),
+        });
+    };
+    Ok(ResourceHandleKey {
+        scope_key: context.state_scope_key.clone(),
+        role_id: context.role_id.clone(),
+        mount_id: context.provider_lock.provider.mount_id.clone(),
+        contribution_digest: context.provider_lock.provider.contribution_digest.clone(),
+        binding_id: binding.binding_id.clone(),
+    })
 }
 
 fn validate_role_exports(
