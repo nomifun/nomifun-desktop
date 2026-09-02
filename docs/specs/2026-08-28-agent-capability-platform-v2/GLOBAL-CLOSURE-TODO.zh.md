@@ -2,7 +2,7 @@
 
 > 盘点日期：2026-09-02
 > 基线分支：`rf/agent-capability-platform-v2`
-> 代码基线 HEAD：`7d6863d63bb1bd120671b0d61c680a1d17db71a1`
+> 代码基线 HEAD：`f97b281c669d9298413008921a2d65407473ffa9`
 > 当前结论：`C8-WIN-PRE`、`HP-1`、`C8-MA`、`C8-MERGE`、`C9` 和发布均未完成。
 
 本文档是当前重构的全局执行台账。稳定 TODO ID 不因排序、负责人或提交变化而复用；
@@ -37,7 +37,7 @@ storage generation 崩溃。它们不代表 `knowledge.write`、整个 Wave 1、
 | `765d1953` | Wave 4 的 11 个 action-specific DTO、effect route、`succeeded/failed/uncertain/reconciled` receipt 状态机及 20 个合同测试 | `W4-001`：领域 repository、事务 outbox/inbox、reconciliation persistence 和真实 owner 尚未实现 |
 | `d1acccf6` | Wave 3 的 19 个 typed operation/outcome 映射；其中 15 个合同冻结，13 个测试通过 | `W3-001`：`workshop.director` 与 3 个 Office edit mutation contract 仍显式 fail-closed |
 | `8aade375` | `vcs.push` 接入 Wave 2 production host；真实 local/file bare remote、failure replay、同 key no-repeat 共 11 个测试 | `W2-001`：SSH/HTTPS credential authority、网络 remote live evidence 与显式 reconcile 尚未完成 |
-| `efbcb598`、`23e039ff` | macOS system alias root 安全处理与 replaced-root read fault test 已从远端合流 | `TST-003`：仍需按最终候选在全部要求的 macOS/Linux native cell 复验 |
+| `efbcb598`、`23e039ff`、`1a547f3a`、`f46cc017` | macOS system alias/target guard、replaced-root fault test 与 arm64 原生记录已合流；anchored/bound/app tests 为 `9 + 4 + 4` | `TST-003`：macOS x64 与 Linux 仍待复验；`SCN-012`：arm64 helper 因无 Universal x64 slice、真实 Sidecar 和运行资源而 FAIL |
 
 本轮额外验证：`cargo check -p nomifun-app`、SQLite AgentPlatform restart、Fresh-v4
 canonical host 双启动、Windows anchored Knowledge 7 项测试均通过。完整 C8 未运行。
@@ -348,8 +348,8 @@ macOS x64、Linux Desktop x64、Linux Headless x64。当前正式 C8 final-cohor
 | --- | --- | --- | --- | --- | --- | --- |
 | TST-001 | open | 清理 repository-wide UI typecheck baseline | 无；按 changed surface 分批 | React/Arco/implicit-any baseline 为 0，`bun run check` 不再产生 `baseline_fail`；production build 保持通过 | `bun run typecheck` | 否 |
 | TST-002 | open | 定位 `canonical_remote_rest_freezes_binding_and_auth_fence` 挂起 | 禁止直接重跑 workspace Gate | 使用现有 60 秒总 deadline 单独运行一次可得到 PASS 或确定失败点；compose/open/revoke/close 每段有诊断；不以 timeout 当 PASS | `cargo test --locked -p nomifun-app bootstrap::canonical_host::tests::canonical_remote_rest_freezes_binding_and_auth_fence --lib -- --exact --test-threads=1` | 如需要真实 Sidecar 才能复现，转交用户提供 SCN-011 输入 |
-| TST-003 | pending-validation | 在 macOS/Linux 原生复验 anchored Knowledge handle | `5d691824`、对应 native host | symlink/path replacement、directory handle、enumeration 和 limits 在 macOS arm64/x64、Linux x64 通过；Windows 不能代签 | `cargo test --locked -p nomifun-knowledge service::anchored_fs::tests --lib -- --test-threads=1` | 需要对应真实主机 |
-| TST-004 | pending-validation | 完成 Agent Preset Knowledge binding UI 交互 evidence | `280841b3` | 真实 KnowledgeBase 可选、Draft/Preview 正确、无 UUID/path/owner error；Desktop 不崩溃；可用人工结果替代当前损坏的 Playwright harness | `bun run dev` | 需要用户人工操作，或修复本地 Playwright ESM 装载 |
+| TST-003 | pending-validation | 完成 macOS x64 与 Linux 的 anchored Knowledge 原生复验；macOS arm64 已在 `f46cc017` 记录通过 | `1a547f3a`、对应 native host | symlink/path replacement、directory handle、enumeration 和 limits 在 macOS arm64/x64、Linux x64 全通过；Windows 不能代签；最终候选变更后按 affected-cell 规则复验 | `cargo test --locked -p nomifun-knowledge service::anchored_fs::tests --lib -- --test-threads=1` | 仍需要 Intel Mac 与 Linux x64；Apple Silicon 定向 evidence 已有 |
+| TST-004 | pending-validation | 完成 Agent Preset Knowledge binding UI 交互 evidence | `280841b3` | 真实 KnowledgeBase 可选、Draft/Preview 正确、无 UUID/path/owner error；Desktop 不崩溃；可用人工结果替代当前损坏的 Playwright harness | `bun run dev` | 需要用户人工操作；macOS 当前缺 Accessibility/Screen Recording TCC 权限 |
 | TST-005 | blocked | 七个官方模板和全部 required domains 的代表性 all-scene E2E | Wave 1～5 owners、SCN-011 | chat/assistant/coding/companion/robot/customer-service/creative-studio 均通过真实 owner、真实 resource/provider failure 和 Session lifecycle；无 metadata-only success | `bun run gate:agent-v2 -- c8-win-pre` | 需要测试 provider、资源和设备/Channel 按场景提供 |
 | TST-006 | blocked | 完成 Effect、receipt、uncertain/reconcile、replay-no-effect fault matrix | INF-003、W1/W2/W3/W4 effect owners | crash 点、unknown result、restart、same-key replay、conflicting key、EventBus drop 均有确定结果；外部 Effect 执行次数可证明 | `cargo test --locked -p nomifun-agent-session --lib effect -- --test-threads=1` | 某些 live Effect 需要外部 sandbox 资源 |
 | TST-007 | open | 复核 D-024 unified delete/tombstone/late-callback matrix | canonical Session delete 已存在 | fence→cancel/dispose→zero handles→private purge→四字段 tombstone；deleted ID 全操作稳定 `SESSION_DELETED`；domain receipt/outbox non-cascade | `cargo test --locked -p nomifun-agent-session --lib delete -- --test-threads=1` | 否 |
