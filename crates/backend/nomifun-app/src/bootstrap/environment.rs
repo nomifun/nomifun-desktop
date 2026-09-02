@@ -670,7 +670,7 @@ fn install_storage_generation_environment(config: &AppConfig) -> Result<()> {
     // dataset marker and the caller has committed to bootstrapping/opening the
     // data layer. Browser-local state is outside SQLite, so the value scopes
     // every entity cache key to exactly this post-reset generation.
-    let storage_generation = load_or_create_storage_generation(&config.data_dir)?;
+    let storage_generation = load_and_publish_storage_generation(&config.data_dir)?;
     let receipt_status =
         nomifun_common::factory_reset::inspect_v3_dataset_receipt(
             &config.data_dir,
@@ -690,11 +690,6 @@ fn install_storage_generation_environment(config: &AppConfig) -> Result<()> {
             &storage_generation,
         )?;
     }
-    // SAFETY: initialization is still single-threaded and happens before any
-    // service or route can read this variable.
-    unsafe {
-        std::env::set_var("NOMIFUN_STORAGE_GENERATION", &storage_generation);
-    }
     if receipt_status
         != nomifun_common::factory_reset::DatasetReceiptStatus::Current
     {
@@ -705,6 +700,26 @@ fn install_storage_generation_environment(config: &AppConfig) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// Publish the persisted dataset identity before any Fresh-v4 route can serve
+/// `/api/system/info`. The system crate intentionally reads this process-level
+/// value so all hosts expose the same generation without opening another store.
+pub(crate) fn install_fresh_v4_storage_generation_environment(
+    config: &AppConfig,
+) -> Result<()> {
+    let _ = load_and_publish_storage_generation(&config.data_dir)?;
+    Ok(())
+}
+
+fn load_and_publish_storage_generation(data_dir: &Path) -> Result<String> {
+    let storage_generation = load_or_create_storage_generation(data_dir)?;
+    // SAFETY: host bootstrap is single-threaded before services and routes are
+    // published; system-info is the only later reader of this variable.
+    unsafe {
+        std::env::set_var("NOMIFUN_STORAGE_GENERATION", &storage_generation);
+    }
+    Ok(storage_generation)
 }
 
 impl ServerEnvironment {

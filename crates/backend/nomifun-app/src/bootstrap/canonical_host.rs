@@ -223,6 +223,8 @@ impl FreshV4Host {
         {
             anyhow::bail!("TrustLocalToken requires a per-boot local trust secret");
         }
+        super::environment::install_fresh_v4_storage_generation_environment(config)
+            .context("initialize Fresh-v4 storage generation")?;
 
         let database_path = self
             .canonical_root()
@@ -1065,6 +1067,13 @@ mod tests {
                 .is_file()
         );
         assert!(!config.database_path().exists());
+        let storage_generation =
+            fs::read_to_string(directory.path().join("storage-generation")).unwrap();
+        assert!(nomifun_common::validate_uuidv7(&storage_generation).is_ok());
+        assert_eq!(
+            nomifun_system::sysinfo::get_system_info().storage_generation,
+            storage_generation
+        );
         assert_eq!(FRESH_V4_DATA_GENERATION, 4);
         application.close().await.unwrap();
     }
