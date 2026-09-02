@@ -2554,7 +2554,31 @@ mod tests {
 
         let registry = platform.materialized_registry().unwrap();
         assert_eq!(registry.generation, 1);
-        assert_eq!(registry.packages.len(), 26);
+        let expected_product_packages = nomifun_agent_domain_support::c7_package_specs()
+            .into_iter()
+            .map(|spec| spec.id.to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            registry.packages.len(),
+            expected_product_packages.len() + 1
+        );
+        assert!(registry.packages.contains_key(
+            &nomifun_agent_contracts::PackageId::from(
+                nomifun_agent_contracts::AGENT_CORE_PACKAGE_ID,
+            ),
+        ));
+        assert_eq!(
+            registry
+                .packages
+                .keys()
+                .filter(|package_id| {
+                    package_id.as_ref()
+                        != nomifun_agent_contracts::AGENT_CORE_PACKAGE_ID
+                })
+                .map(|package_id| package_id.as_ref().to_owned())
+                .collect::<BTreeSet<_>>(),
+            expected_product_packages
+        );
         assert_eq!(registry.capabilities.len(), 137);
         let package_rows: Vec<String> = sqlx::query_scalar(
             "SELECT package_id FROM plugin_packages \
@@ -2564,7 +2588,10 @@ mod tests {
         .fetch_all(platform.pool())
         .await
         .unwrap();
-        assert_eq!(package_rows.len(), 26);
+        assert_eq!(package_rows.len(), expected_product_packages.len() + 1);
+        assert!(package_rows
+            .iter()
+            .any(|package_id| package_id == nomifun_agent_contracts::AGENT_CORE_PACKAGE_ID));
         assert_eq!(
             package_rows.iter().collect::<BTreeSet<_>>().len(),
             package_rows.len()
