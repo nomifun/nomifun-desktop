@@ -1244,6 +1244,11 @@ impl AgentSessionStore {
         }
 
         let parent_head = head_by_id_tx(&mut tx, parent_session_id.as_ref()).await?;
+        if request.parent_through_seq > parent_head.last_seq {
+            return Err(SessionStoreError::InvalidSession(
+                "fork parent_through_seq exceeds the committed Session cursor".to_owned(),
+            ));
+        }
         let payload = build_payload_record(
             request.base_payload_id.clone(),
             request.child_session_id.clone(),
@@ -1284,6 +1289,7 @@ impl AgentSessionStore {
                     "operation_id": request.operation_id.as_ref(),
                     "agent_binding": &request.child_agent_binding,
                     "parent_session_id": parent_session_id,
+                    "parent_through_seq": request.parent_through_seq,
                     "fork_base_payload_id": &request.base_payload_id
                 }))),
             },
@@ -1327,7 +1333,7 @@ impl AgentSessionStore {
 
         let fork_payload = SessionForkPayload {
             parent_session_id: parent_session_id.clone(),
-            parent_through_seq: parent_head.last_seq,
+            parent_through_seq: request.parent_through_seq,
             child_session_id: request.child_session_id.clone(),
             child_base_payload_id: request.base_payload_id.clone(),
             child_base_digest: payload.digest.clone(),
@@ -3305,6 +3311,7 @@ async fn replay_fork(
     };
     let fork: SessionForkPayload = serde_json::from_value(value.0.clone())?;
     if fork.parent_session_id != *parent_session_id
+        || fork.parent_through_seq != request.parent_through_seq
         || fork.child_agent_binding != request.child_agent_binding
     {
         return Err(SessionStoreError::IdempotencyConflict(

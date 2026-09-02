@@ -447,6 +447,7 @@ async fn fork_agent_session(
                     pinned: false,
                 },
                 child_agent_binding: child_binding,
+                parent_through_seq: request.parent_through_seq,
                 created_at: now_ms(),
                 producer_id: EventProducerId::from("session_api"),
                 operation_id: OperationId::from(format!(
