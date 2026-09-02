@@ -164,6 +164,11 @@ export interface CreativeCanvasEditorProps {
   tool: CanvasInteractionTool;
   /** Freeze every local mutation while an external CAS writer owns the project. */
   disabled?: boolean;
+  /**
+   * Presentation-only node filter. Hidden nodes remain canonical and are still
+   * persisted, but cannot be rendered, selected, copied, deleted, or fitted.
+   */
+  isNodeVisible?: (node: CreativeCanvasNode) => boolean;
   renderNode(context: CreativeCanvasNodeRenderContext): React.ReactNode;
   renderEdge(context: CreativeCanvasEdgeRenderContext): React.ReactNode;
   repository?: CreativeProjectRepository;
@@ -291,12 +296,65 @@ const canvasSizeEqual = (left: CanvasSize | null, right: CanvasSize | null): boo
     left.width === right.width &&
     left.height === right.height);
 
+const canvasPresentationState = (
+  state: CanvasState,
+  isNodeVisible: CreativeCanvasEditorProps['isNodeVisible']
+): CanvasState => {
+  if (!isNodeVisible) return state;
+  const nodes = state.document.nodes.filter(isNodeVisible);
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const connections = state.document.connections.filter(
+    (connection) =>
+      nodeIds.has(connection.sourceNodeId) && nodeIds.has(connection.targetNodeId)
+  );
+  const connectionIds = new Set(connections.map((connection) => connection.id));
+  const selectedNodeIds = state.selection.nodeIds.filter((nodeId) => nodeIds.has(nodeId));
+  const selectedEdgeIds = state.selection.edgeIds.filter((edgeId) =>
+    connectionIds.has(edgeId)
+  );
+  return {
+    ...state,
+    document: { nodes, connections },
+    selection: {
+      ...state.selection,
+      nodeIds: selectedNodeIds,
+      edgeIds: selectedEdgeIds,
+      box: state.selection.box
+        ? {
+            ...state.selection.box,
+            initialNodeIds: state.selection.box.initialNodeIds.filter((nodeId) =>
+              nodeIds.has(nodeId)
+            ),
+          }
+        : null,
+    },
+  };
+};
+
+const normalizeCanvasPresentationSelection = (
+  state: CanvasState,
+  isNodeVisible: CreativeCanvasEditorProps['isNodeVisible']
+): CanvasState => {
+  if (!isNodeVisible) return state;
+  const presented = canvasPresentationState(state, isNodeVisible);
+  const selection = presented.selection;
+  if (
+    selection.nodeIds.length === state.selection.nodeIds.length &&
+    selection.edgeIds.length === state.selection.edgeIds.length &&
+    selection.box?.initialNodeIds.length === state.selection.box?.initialNodeIds.length
+  ) {
+    return state;
+  }
+  return { ...state, selection };
+};
+
 const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, CreativeCanvasEditorProps>(
   (
     {
       projectId,
       tool,
       disabled = false,
+      isNodeVisible,
       renderNode,
       renderEdge,
       repository,
@@ -510,7 +568,10 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
           onPendingTaskCommandBlocked?.(guard.orphanedTaskIds);
           return current;
         }
-        const next = canvasReducer(current, command);
+        const next = normalizeCanvasPresentationSelection(
+          canvasReducer(current, command),
+          isNodeVisible
+        );
         if (next === current) return current;
         stateRef.current = next;
         setState(next);
@@ -531,6 +592,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       [
         cancelScheduledPersistence,
         disabled,
+        isNodeVisible,
         onPendingTaskCommandBlocked,
         saveController,
         schedulePersistence,
@@ -1072,13 +1134,16 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       const rect = surfaceRef.current?.getBoundingClientRect();
       applyCommand(
         canvasCommands.setViewport(
-          fitCanvasViewport(stateRef.current, {
-            width: rect?.width ?? 1,
-            height: rect?.height ?? 1,
-          })
+          fitCanvasViewport(
+            canvasPresentationState(stateRef.current, isNodeVisible),
+            {
+              width: rect?.width ?? 1,
+              height: rect?.height ?? 1,
+            }
+          )
         )
       );
-    }, [applyCommand]);
+    }, [applyCommand, isNodeVisible]);
 
     const handleKeyDown = useCallback(
       (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -1087,7 +1152,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         const pasteSequence = pasteSequenceRef.current + 1;
         const rect = surfaceRef.current?.getBoundingClientRect();
         const resolution = resolveCanvasKeyboardInput(
-          stateRef.current,
+          canvasPresentationState(stateRef.current, isNodeVisible),
           {
             key: event.key,
             ctrlKey: event.ctrlKey,
@@ -1117,7 +1182,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
         }
         applyInteractionResolution(resolution);
       },
-      [applyInteractionResolution]
+      [applyInteractionResolution, isNodeVisible]
     );
 
     const handleCanvasContextMenu = useCallback(
@@ -1192,17 +1257,24 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
       isLoading: project.isLoading,
       error: project.error,
     });
+    const presentationState = useMemo(
+      () => canvasPresentationState(state, isNodeVisible),
+      [isNodeVisible, state]
+    );
     const nodeById = useMemo(
-      () => new Map(state.document.nodes.map((node) => [node.id, node])),
-      [state.document.nodes]
+      () =>
+        new Map(
+          presentationState.document.nodes.map((node) => [node.id, node])
+        ),
+      [presentationState.document.nodes]
     );
     const selectedNodeIds = useMemo(
-      () => new Set(state.selection.nodeIds),
-      [state.selection.nodeIds]
+      () => new Set(presentationState.selection.nodeIds),
+      [presentationState.selection.nodeIds]
     );
     const selectedEdgeIds = useMemo(
-      () => new Set(state.selection.edgeIds),
-      [state.selection.edgeIds]
+      () => new Set(presentationState.selection.edgeIds),
+      [presentationState.selection.edgeIds]
     );
     const gestureRequiredNodeId =
       interaction.gesture?.kind === 'resize'
@@ -1213,20 +1285,20 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
     const viewportCulling = useMemo(
       () =>
         computeCanvasViewportCulling({
-          nodes: state.document.nodes,
-          connections: state.document.connections,
+          nodes: presentationState.document.nodes,
+          connections: presentationState.document.connections,
           viewport: state.viewport,
           containerSize: surfaceSize,
-          selectedNodeIds: state.selection.nodeIds,
-          selectedEdgeIds: state.selection.edgeIds,
+          selectedNodeIds: presentationState.selection.nodeIds,
+          selectedEdgeIds: presentationState.selection.edgeIds,
           requiredNodeIds: gestureRequiredNodeId ? [gestureRequiredNodeId] : [],
         }),
       [
         gestureRequiredNodeId,
-        state.document.connections,
-        state.document.nodes,
-        state.selection.edgeIds,
-        state.selection.nodeIds,
+        presentationState.document.connections,
+        presentationState.document.nodes,
+        presentationState.selection.edgeIds,
+        presentationState.selection.nodeIds,
         state.viewport,
         surfaceSize,
       ]
@@ -1234,22 +1306,28 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
     const renderedNodes = useMemo(
       () =>
         viewportCulling.renderAll
-          ? state.document.nodes
-          : state.document.nodes.filter((node) => viewportCulling.nodeIds.has(node.id)),
-      [state.document.nodes, viewportCulling]
+          ? presentationState.document.nodes
+          : presentationState.document.nodes.filter((node) =>
+              viewportCulling.nodeIds.has(node.id)
+            ),
+      [presentationState.document.nodes, viewportCulling]
     );
     const renderedConnections = useMemo(
       () =>
         viewportCulling.renderAll
-          ? state.document.connections
-          : state.document.connections.filter((connection) =>
+          ? presentationState.document.connections
+          : presentationState.document.connections.filter((connection) =>
               viewportCulling.connectionIds.has(connection.id)
             ),
-      [state.document.connections, viewportCulling]
+      [presentationState.document.connections, viewportCulling]
     );
     const graphHighlight = useMemo(
-      () => deriveCanvasGraphHighlight(state.document, state.selection.nodeIds),
-      [state.document, state.selection.nodeIds]
+      () =>
+        deriveCanvasGraphHighlight(
+          presentationState.document,
+          presentationState.selection.nodeIds
+        ),
+      [presentationState.document, presentationState.selection.nodeIds]
     );
     const hasGraphHighlight = graphHighlight.rootNodeIds.size > 0;
     // Culling only affects mounted world layers. Slots receive the full state

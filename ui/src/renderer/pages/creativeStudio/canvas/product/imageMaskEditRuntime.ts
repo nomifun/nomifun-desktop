@@ -213,7 +213,7 @@ export async function settleCanvasImageMaskEditTask(input: {
           throw new Error(
             creativeStudioProductText(
               'creativeStudio.canvas.errors.mask.configRemoved',
-              '局部编辑配置节点在结果写入前被移除。'
+              '局部编辑任务记录在结果写入前丢失。'
             )
           );
         }

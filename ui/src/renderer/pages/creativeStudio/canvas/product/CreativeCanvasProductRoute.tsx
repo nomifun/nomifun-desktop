@@ -46,8 +46,9 @@ import {
 } from '../../app/routes';
 import {
   DEFAULT_CREATIVE_STUDIO_PANELS,
+  isCreativeCanvasUserNode,
   type CreativeCanvasNode,
-  type CreativeCanvasNodeKind,
+  type CreativeCanvasUserNodeKind,
   type CreativeChatSessionReference,
   type CreativeImagePromptMention,
   type CreativeSize,
@@ -593,7 +594,7 @@ const canvasImageGenerationBlockerMessage = (
 };
 
 const centeredNodePosition = (
-  kind: CreativeCanvasNodeKind,
+  kind: CreativeCanvasUserNodeKind,
   worldPosition: CanvasPoint
 ): CanvasPoint => {
   const size = CREATIVE_CANVAS_PRODUCT_NODE_SIZES[kind];
@@ -638,7 +639,7 @@ const connectionErrorMessage = (
       });
     case 'config_to_config':
       return t('creativeStudio.canvas.connection.errors.configToConfig', {
-        defaultValue: '两个配置节点不能直接连接',
+        defaultValue: '两个生成任务记录不能直接连接',
       });
     case 'director_output_not_supported':
       return t('creativeStudio.canvas.connection.errors.directorInputOnly', {
@@ -1461,7 +1462,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, []);
 
   const addNode = useCallback(
-    (kind: CreativeCanvasNodeKind) => {
+    (kind: CreativeCanvasUserNodeKind) => {
       if (save.revision === null) return;
       const insertion = prepareCenteredInsertion();
       if (!insertion) return;
@@ -2614,7 +2615,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setNotice(
           t('creativeStudio.canvas.notices.maskTaskSubmitted', {
             defaultValue:
-              '局部编辑任务已安全提交；配置节点会持续显示真实后端状态。',
+              '局部编辑任务已安全提交；对应输入节点会持续显示真实后端状态。',
           })
         );
         return;
@@ -2747,7 +2748,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
             mergeKey,
           })
         );
-        editor.dispatch(canvasCommands.setSelection([prepared.configNode.id]));
         canvasOwned = true;
 
         const result = await runtime.submit(prepared.plan);
@@ -2863,7 +2863,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
       setNotice(
         t('creativeStudio.canvas.notices.taskConfirmedMissing', {
           defaultValue:
-            '已确认服务器不存在该任务；配置节点记录为失败并清理恢复标记。',
+            '已确认服务器不存在该任务；任务状态已记录为失败并清理恢复标记。',
         })
       );
     } catch (error) {
@@ -2918,7 +2918,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setNotice(
           t('creativeStudio.canvas.notices.imageTaskSubmitted', {
             defaultValue:
-              '图片创作任务已安全提交；配置节点会持续显示真实后端状态。',
+              '图片创作任务已安全提交；对应输入节点会持续显示真实后端状态。',
           })
         );
         return;
@@ -3254,7 +3254,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setNotice(
           t('creativeStudio.canvas.notices.videoTaskSubmitted', {
             defaultValue:
-              '视频创作任务已安全提交；配置节点会持续显示真实后端状态。',
+              '视频创作任务已安全提交；对应输入节点会持续显示真实后端状态。',
           })
         );
         return;
@@ -3630,7 +3630,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setNotice(
           t('creativeStudio.canvas.notices.audioTaskSubmitted', {
             defaultValue:
-              '音频创作任务已安全提交；配置节点会持续显示真实后端状态。',
+              '音频创作任务已安全提交；对应输入节点会持续显示真实后端状态。',
           })
         );
         return;
@@ -4267,7 +4267,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, [contextMenu, dismissInteractionOverlays, readSystemClipboard]);
 
   const handleSelectCreatedNode = useCallback(
-    (kind: CreativeCanvasNodeKind) => {
+    (kind: CreativeCanvasUserNodeKind) => {
       const editor = editorRef.current;
       const menu = createNodeMenu;
       if (!editor || !menu || save.revision === null) return;
@@ -4510,7 +4510,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
             asset,
             state,
             viewportSize,
-            { cascadeIndex: state.document.nodes.length }
+            {
+              cascadeIndex: state.document.nodes.filter(
+                isCreativeCanvasUserNode
+              ).length,
+            }
           );
           state = editor.dispatch(canvasCommands.addNode(node));
           inserted += 1;
@@ -4785,6 +4789,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 projectId={projectId}
                 tool={tool}
                 disabled={productDisabled}
+                isNodeVisible={isCreativeCanvasUserNode}
                 showSaveState={false}
                 isMiniMapOpen={miniMapOpen}
                 onToggleMiniMap={() => setMiniMapOpen((open) => !open)}
@@ -4795,7 +4800,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                   setNotice(
                     t('creativeStudio.canvas.errors.pendingTaskProtected', {
                       defaultValue:
-                        '运行中的生成任务必须保留配置节点；请等待任务结束后再删除或撤销。',
+                        '运行中的生成任务受保护；请等待任务结束后再删除或撤销。',
                     })
                   )
                 }
@@ -5439,7 +5444,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 }
                 miniMap={({ state }) => (
                   <CanvasMiniMap
-                    nodes={state.document.nodes}
+                    nodes={state.document.nodes.filter(isCreativeCanvasUserNode)}
                     viewport={state.viewport}
                     viewportSize={viewportSize}
                     selectedNodeIds={new Set(state.selection.nodeIds)}
