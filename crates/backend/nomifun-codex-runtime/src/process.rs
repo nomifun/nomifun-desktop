@@ -112,11 +112,14 @@ impl RuntimeProcessConfig {
                 ),
             ))
         })?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        if metadata.file_type().is_symlink()
+            || metadata_is_windows_reparse_point(&metadata)
+            || !metadata.is_file()
+        {
             return Err(RuntimeError::Process(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "runtime executable must be a regular non-symlink file: {}",
+                    "runtime executable must be a regular non-symlink, non-reparse file: {}",
                     self.executable.display()
                 ),
             )));
@@ -216,6 +219,19 @@ impl fmt::Debug for RuntimeProcessConfig {
             )
             .finish()
     }
+}
+
+#[cfg(windows)]
+fn metadata_is_windows_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_windows_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -592,6 +608,30 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("group/world writable"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pinned_config_rejects_a_windows_reparse_point() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("runtime-target");
+        std::fs::create_dir(&target).unwrap();
+        let alias = root.path().join("runtime-alias");
+        junction::create(&target, &alias).unwrap();
+
+        let metadata = std::fs::symlink_metadata(&alias).unwrap();
+        assert!(metadata_is_windows_reparse_point(&metadata));
+        let release = RuntimeReleaseDescriptor::frozen_from_fixture().unwrap();
+        let error = RuntimeProcessConfig::pinned_app_server(
+            &alias,
+            root.path(),
+            "windows_desktop_x64",
+            &release,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("non-reparse"));
+
+        junction::delete(&alias).unwrap();
     }
 
     fn sha256_path(path: &Path) -> DigestHex {

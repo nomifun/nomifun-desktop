@@ -4,11 +4,12 @@
 //! configured here. Unsupported families fail closed instead of delegating to
 //! the legacy Gateway or manufacturing an acknowledgement.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use nomifun_agent_contracts::{
     DigestHex, PluginStateCompareAndSwapOutcome, ScopeKey, StateKey, StrictJsonValue,
@@ -27,6 +28,7 @@ use nomifun_file::{
     WORKSPACE_WRITE_OPERATION,
 };
 use nomifun_realtime::UserEventSink;
+use nomifun_terminal::pty::{PtyExit, PtyHandle, SpawnParams};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -39,12 +41,23 @@ const WAVE2_EFFECT_STATE_FORMAT: &str = "1.0.0";
 const MAX_WAVE2_EFFECT_RECORDS: usize = 128;
 const MAX_WAVE2_EFFECT_CAS_ATTEMPTS: usize = 8;
 const MAX_WAVE2_IDEMPOTENCY_KEY_BYTES: usize = 128;
+const PROCESS_SESSION_RESOURCE_KIND: &str = "process_session";
+const PROCESS_EXECUTE_OPERATION: &str = "execute";
+const DEFAULT_PROCESS_TIMEOUT_MS: u64 = 30_000;
+const MAX_PROCESS_TIMEOUT_MS: u64 = 10 * 60 * 1000;
+const MAX_PROCESS_COMMAND_CHARS: usize = 32 * 1024;
+const MAX_PROCESS_ARGUMENTS: usize = 256;
+const MAX_PROCESS_ARGUMENT_CHARS: usize = 64 * 1024;
+const MAX_PROCESS_ENVIRONMENT_ENTRIES: usize = 128;
+const MAX_PROCESS_OUTPUT_BYTES: usize = 256 * 1024;
+const MAX_VCS_STAGE_ENTRIES: usize = 100_000;
 
 #[derive(Clone)]
 pub(crate) struct Wave2ApplicationHost {
     files: Arc<FileService>,
     snapshots: Arc<SnapshotService>,
     snapshot_sessions: Arc<tokio::sync::Mutex<BTreeSet<(String, String)>>>,
+    workspace_write_lock: Arc<tokio::sync::Mutex<()>>,
     configured_workspace_root: PathBuf,
 }
 
@@ -82,6 +95,7 @@ impl Wave2ApplicationHost {
             )),
             snapshots: Arc::new(SnapshotService::new()),
             snapshot_sessions: Arc::new(tokio::sync::Mutex::new(BTreeSet::new())),
+            workspace_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             configured_workspace_root: workspace_root,
         }
     }
@@ -610,6 +624,10 @@ impl Wave2ApplicationHost {
         capability_id: &str,
         input: StrictJsonValue,
     ) -> Result<StrictJsonValue, Wave2HostPortError> {
+        if capability_id == "process.exec" {
+            return self.invoke_process_exec(context, input).await;
+        }
+
         let scope = self.workspace_scope(context)?;
         match capability_id {
             "fs.read" => {
@@ -644,6 +662,7 @@ impl Wave2ApplicationHost {
                 match begin_wave2_effect(context, binding, &effect_input).await? {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
+                        let _write_guard = self.workspace_write_lock.lock().await;
                         let result = self
                             .files
                             .write_file_for_agent_session(
@@ -693,6 +712,7 @@ impl Wave2ApplicationHost {
                 match begin_wave2_effect(context, binding, &effect_input).await? {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
+                        let _write_guard = self.workspace_write_lock.lock().await;
                         let result = self.files.apply_patch_for_agent_session(&scope, request).await;
                         match result {
                             Ok(result) => {
@@ -740,6 +760,7 @@ impl Wave2ApplicationHost {
                 match begin_wave2_effect(context, binding, &effect_input).await? {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
+                        let _write_guard = self.workspace_write_lock.lock().await;
                         let result = self
                             .files
                             .remove_entry_for_agent_session(&scope, &params.path)
@@ -971,6 +992,121 @@ impl Wave2ApplicationHost {
         }
     }
 
+    async fn invoke_process_exec(
+        &self,
+        context: &Wave2HostContext,
+        input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, Wave2HostPortError> {
+        let binding = self.process_binding(context)?;
+        let process_session_id = binding.resource_id.as_ref().to_owned();
+        let requested_root = binding
+            .typed_parameters
+            .get(WORKSPACE_ROOT_PARAMETER)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                Wave2HostPortError::new(
+                    "PRESET_RESOURCE_NOT_BOUND",
+                    format!(
+                        "process_session binding {} has no host-resolved {} parameter",
+                        binding.binding_id.as_ref(),
+                        WORKSPACE_ROOT_PARAMETER
+                    ),
+                )
+            })?;
+        let process_root = resolve_allowed_workspace_root(
+            &self.configured_workspace_root,
+            requested_root,
+        )?;
+        let params: ProcessExecParams = decode(input)?;
+        validate_process_exec_params(&params)?;
+        let (cwd, cwd_label) =
+            resolve_process_cwd(&process_root, params.cwd.as_deref())?;
+        let timeout = Duration::from_millis(
+            params.timeout_ms.unwrap_or(DEFAULT_PROCESS_TIMEOUT_MS),
+        );
+        let capture = Arc::new(Mutex::new(ProcessOutputCapture::default()));
+        let capture_output = Arc::clone(&capture);
+        let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+        let process = PtyHandle::spawn(
+            SpawnParams {
+                program: params.command,
+                args: params.args,
+                cwd: cwd.to_string_lossy().into_owned(),
+                env: params.env,
+                cols: 120,
+                rows: 40,
+            },
+            1,
+            move |chunk| append_process_output(&capture_output, &chunk),
+            move |exit, _scrollback| {
+                let _ = exit_tx.send(exit);
+            },
+        )
+        .await
+        .map_err(|error| {
+            Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!("process.exec could not start a managed process: {error}"),
+            )
+        })?;
+        process.activate();
+
+        // The coordinator owns the process even if the capability request is
+        // cancelled. It always observes an exit or times out and reaps the
+        // complete process tree through the existing Windows/Unix owner.
+        let worker = tokio::spawn(async move {
+            match tokio::time::timeout(timeout, exit_rx).await {
+                Ok(Ok(exit)) => Ok((exit, finish_process_output(&capture))),
+                Ok(Err(_)) => Err(Wave2HostPortError::new(
+                    "CAPABILITY_UNAVAILABLE",
+                    "process.exec lost its managed exit observation",
+                )),
+                Err(_) => match process.kill().await {
+                    Ok(()) => Err(Wave2HostPortError::new(
+                        "CAPABILITY_UNAVAILABLE",
+                        format!(
+                            "process.exec timed out after {}ms; the managed process tree was reaped",
+                            timeout.as_millis()
+                        ),
+                    )),
+                    Err(error) => Err(Wave2HostPortError::new(
+                        "CAPABILITY_UNAVAILABLE",
+                        format!(
+                            "process.exec timed out after {}ms and process-tree cleanup is unproven: {error}",
+                            timeout.as_millis()
+                        ),
+                    )),
+                },
+            }
+        });
+        let (exit, output) = worker.await.map_err(|error| {
+            Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!("process.exec coordinator failed: {error}"),
+            )
+        })??;
+        match exit {
+            PtyExit::Exited(exit_code) => Ok(StrictJsonValue(json!({
+                "process_session_id": process_session_id,
+                "cwd": cwd_label,
+                "success": exit_code == Some(0),
+                "exit_code": exit_code,
+                "output": output.text,
+                "truncated": output.truncated
+            }))),
+            PtyExit::Lost {
+                message,
+                cleanup_reaped,
+            } => Err(Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!(
+                    "process.exec lost managed process ownership \
+                     (cleanup_reaped={cleanup_reaped}): {message}"
+                ),
+            )),
+        }
+    }
+
     async fn invoke_vcs_status(
         &self,
         scope: &AgentSessionWorkspaceBinding,
@@ -1168,53 +1304,66 @@ impl Wave2ApplicationHost {
         tokio::task::spawn_blocking(move || {
             let (repository, actual_prefix) = scoped_repository(&workspace)?;
             debug_assert_eq!(actual_prefix, repository_prefix);
-            let mut options = git2::DiffOptions::new();
             let scope_pathspec = pathspec
                 .as_deref()
                 .or_else(|| (!repository_prefix.is_empty()).then_some(repository_prefix.as_str()));
+            let head_tree = repository
+                .head()
+                .ok()
+                .and_then(|head| head.peel_to_tree().ok());
+            let mut staged_options = git2::DiffOptions::new();
             if let Some(pathspec) = scope_pathspec {
-                options.pathspec(pathspec);
+                staged_options.pathspec(pathspec);
             }
-            let diff = repository
-                .diff_index_to_workdir(None, Some(&mut options))
+            let staged = repository
+                .diff_tree_to_index(
+                    head_tree.as_ref(),
+                    None,
+                    Some(&mut staged_options),
+                )
                 .map_err(|error| {
                     Wave2HostPortError::new(
                         "CAPABILITY_UNAVAILABLE",
                         format!(
-                            "{worker_capability_id} could not read Git diff: {error}"
+                            "{worker_capability_id} could not read staged Git diff: {error}"
                         ),
                     )
-            })?;
-            let mut patch = String::new();
+                })?;
+            let mut unstaged_options = git2::DiffOptions::new();
+            if let Some(pathspec) = scope_pathspec {
+                unstaged_options.pathspec(pathspec);
+            }
+            let unstaged = repository
+                .diff_index_to_workdir(None, Some(&mut unstaged_options))
+                .map_err(|error| {
+                    Wave2HostPortError::new(
+                        "CAPABILITY_UNAVAILABLE",
+                        format!(
+                            "{worker_capability_id} could not read unstaged Git diff: {error}"
+                        ),
+                    )
+                })?;
+            let mut staged_patch = String::new();
             let mut truncated = false;
-            diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
-                if line.origin() != '\0' {
-                    patch.push(line.origin());
-                }
-                patch.push_str(&String::from_utf8_lossy(line.content()));
-                if patch.len() > MAX_DIFF_BYTES {
-                    let mut end = MAX_DIFF_BYTES;
-                    while end > 0 && !patch.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    patch.truncate(end);
-                    truncated = true;
-                    false
-                } else {
-                    true
-                }
-            })
-            .map_err(|error| {
-                Wave2HostPortError::new(
-                    "CAPABILITY_UNAVAILABLE",
-                    format!(
-                        "{worker_capability_id} could not render Git diff: {error}"
-                    ),
-                )
-            })?;
+            append_diff_patch(
+                &staged,
+                &mut staged_patch,
+                &mut truncated,
+                &worker_capability_id,
+            )?;
+            let mut unstaged_patch = String::new();
+            append_diff_patch(
+                &unstaged,
+                &mut unstaged_patch,
+                &mut truncated,
+                &worker_capability_id,
+            )?;
+            let patch = format!("{staged_patch}{unstaged_patch}");
             Ok::<_, Wave2HostPortError>(StrictJsonValue(json!({
                 "path": path,
                 "patch": patch,
+                "staged_patch": staged_patch,
+                "unstaged_patch": unstaged_patch,
                 "truncated": truncated
             })))
         })
@@ -1233,19 +1382,50 @@ impl Wave2ApplicationHost {
         capability_id: &str,
         path: &str,
     ) -> Result<StrictJsonValue, Wave2HostPortError> {
-        let relative = scope
+        let path = path.trim();
+        if path.is_empty() {
+            return Err(Wave2HostPortError::invalid_payload(
+                "vcs.stage path must not be empty",
+            ));
+        }
+        let resolved = scope
             .resolve_relative_path(path)
-            .and_then(|resolved| {
-                resolved
-                    .strip_prefix(scope.workspace_root())
-                    .map(|relative| relative.to_path_buf())
-                    .map_err(|_| {
-                        AppError::BadRequest(
-                            "vcs.stage path is outside the workspace".to_owned(),
-                        )
-                    })
-            })
             .map_err(|error| operation_error(capability_id, error))?;
+        let relative = resolved
+            .strip_prefix(scope.workspace_root())
+            .map(|relative| relative.to_path_buf())
+            .map_err(|_| {
+                operation_error(
+                    capability_id,
+                    AppError::BadRequest(
+                        "vcs.stage path is outside the workspace".to_owned(),
+                    ),
+                )
+            })?;
+        let target_exists = resolved.exists();
+        let target_is_dir = resolved.is_dir();
+        if target_exists {
+            let canonical_workspace =
+                std::fs::canonicalize(scope.workspace_root()).map_err(|error| {
+                    Wave2HostPortError::new(
+                        "PRESET_RESOURCE_NOT_BOUND",
+                        format!("vcs.stage workspace is unavailable: {error}"),
+                    )
+                })?;
+            let canonical_target = std::fs::canonicalize(&resolved).map_err(|error| {
+                Wave2HostPortError::new(
+                    "RESOURCE_NOT_FOUND",
+                    format!("vcs.stage target is unavailable: {error}"),
+                )
+            })?;
+            if !canonical_target.starts_with(&canonical_workspace) {
+                return Err(Wave2HostPortError::new(
+                    "PRESET_RESOURCE_NOT_BOUND",
+                    format!("vcs.stage path '{path}' escapes the workspace"),
+                ));
+            }
+        }
+        let _write_guard = self.workspace_write_lock.lock().await;
         let workspace = scope.workspace_root().to_path_buf();
         let path_label = path.to_owned();
         tokio::task::spawn_blocking(move || {
@@ -1260,12 +1440,65 @@ impl Wave2ApplicationHost {
                     format!("vcs.stage could not open the Git index: {error}"),
                 )
             })?;
-            index.add_path(Path::new(&repo_path)).map_err(|error| {
-                Wave2HostPortError::new(
-                    "CAPABILITY_UNAVAILABLE",
-                    format!("vcs.stage could not stage {}: {error}", path_label),
-                )
-            })?;
+            if target_exists && target_is_dir {
+                let mut stage_paths = Vec::new();
+                collect_directory_stage_paths(
+                    &resolved,
+                    &repo_path,
+                    &mut stage_paths,
+                )?;
+                for indexed_path in indexed_paths_for_target(&index, &repo_path)? {
+                    index.remove_path(&indexed_path).map_err(|error| {
+                        Wave2HostPortError::new(
+                            "CAPABILITY_UNAVAILABLE",
+                            format!(
+                                "vcs.stage could not refresh {}: {error}",
+                                path_label
+                            ),
+                        )
+                    })?;
+                }
+                for stage_path in stage_paths {
+                    index.add_path(&stage_path).map_err(|error| {
+                        Wave2HostPortError::new(
+                            "CAPABILITY_UNAVAILABLE",
+                            format!(
+                                "vcs.stage could not stage {}: {error}",
+                                stage_path.display()
+                            ),
+                        )
+                    })?;
+                }
+            } else if target_exists {
+                index.add_path(Path::new(&repo_path)).map_err(|error| {
+                    Wave2HostPortError::new(
+                        "CAPABILITY_UNAVAILABLE",
+                        format!(
+                            "vcs.stage could not stage {}: {error}",
+                            path_label
+                        ),
+                    )
+                })?;
+            } else {
+                let indexed_paths = indexed_paths_for_target(&index, &repo_path)?;
+                if indexed_paths.is_empty() {
+                    return Err(Wave2HostPortError::new(
+                        "RESOURCE_NOT_FOUND",
+                        format!("vcs.stage path '{}' is not tracked", path_label),
+                    ));
+                }
+                for indexed_path in indexed_paths {
+                    index.remove_path(&indexed_path).map_err(|error| {
+                        Wave2HostPortError::new(
+                            "CAPABILITY_UNAVAILABLE",
+                            format!(
+                                "vcs.stage could not stage deletion {}: {error}",
+                                indexed_path.display()
+                            ),
+                        )
+                    })?;
+                }
+            }
             index.write().map_err(|error| {
                 Wave2HostPortError::new(
                     "CAPABILITY_UNAVAILABLE",
@@ -1461,6 +1694,169 @@ impl Wave2ApplicationHost {
     }
 }
 
+fn append_diff_patch(
+    diff: &git2::Diff<'_>,
+    patch: &mut String,
+    truncated: &mut bool,
+    capability_id: &str,
+) -> Result<(), Wave2HostPortError> {
+    if *truncated {
+        return Ok(());
+    }
+    diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+        if line.origin() != '\0' {
+            patch.push(line.origin());
+        }
+        patch.push_str(&String::from_utf8_lossy(line.content()));
+        if patch.len() > MAX_DIFF_BYTES {
+            let mut end = MAX_DIFF_BYTES;
+            while end > 0 && !patch.is_char_boundary(end) {
+                end -= 1;
+            }
+            patch.truncate(end);
+            *truncated = true;
+            false
+        } else {
+            true
+        }
+    })
+    .map_err(|error| {
+        Wave2HostPortError::new(
+            "CAPABILITY_UNAVAILABLE",
+            format!("{capability_id} could not render Git diff: {error}"),
+        )
+    })
+}
+
+fn repo_path_component_matches(left: &str, right: &str) -> bool {
+    #[cfg(windows)]
+    {
+        left.eq_ignore_ascii_case(right)
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+fn path_relative_to_workspace(path: &str, prefix: &str) -> Option<String> {
+    let path = path.replace('\\', "/");
+    let prefix = prefix.replace('\\', "/");
+    if prefix.is_empty() {
+        return Some(path);
+    }
+    let mut path_components = path.split('/');
+    for expected in prefix.split('/') {
+        let actual = path_components.next()?;
+        if !repo_path_component_matches(actual, expected) {
+            return None;
+        }
+    }
+    Some(path_components.collect::<Vec<_>>().join("/"))
+}
+
+fn indexed_paths_for_target(
+    index: &git2::Index,
+    repo_path: &str,
+) -> Result<Vec<PathBuf>, Wave2HostPortError> {
+    let mut paths = Vec::new();
+    for entry in index.iter() {
+        let candidate = std::str::from_utf8(&entry.path).map_err(|_| {
+            Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                "vcs.stage encountered a non-UTF-8 Git index path",
+            )
+        })?;
+        if path_relative_to_workspace(candidate, repo_path).is_some() {
+            paths.push(PathBuf::from(candidate));
+        }
+    }
+    Ok(paths)
+}
+
+fn collect_directory_stage_paths(
+    directory: &Path,
+    repo_path: &str,
+    output: &mut Vec<PathBuf>,
+) -> Result<(), Wave2HostPortError> {
+    let mut entries = std::fs::read_dir(directory)
+        .map_err(|error| {
+            Wave2HostPortError::new(
+                "RESOURCE_NOT_FOUND",
+                format!(
+                    "vcs.stage could not read directory '{}': {error}",
+                    directory.display()
+                ),
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            Wave2HostPortError::new(
+                "RESOURCE_NOT_FOUND",
+                format!(
+                    "vcs.stage could not enumerate directory '{}': {error}",
+                    directory.display()
+                ),
+            )
+        })?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        if output.len() == MAX_VCS_STAGE_ENTRIES {
+            return Err(Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!(
+                    "vcs.stage directory exceeds {MAX_VCS_STAGE_ENTRIES} entries"
+                ),
+            ));
+        }
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
+            Wave2HostPortError::new(
+                "RESOURCE_NOT_FOUND",
+                format!(
+                    "vcs.stage could not inspect '{}': {error}",
+                    entry.path().display()
+                ),
+            )
+        })?;
+        let entry_repo_path = join_repo_path(
+            repo_path,
+            &entry.file_name().to_string_lossy().replace('\\', "/"),
+        );
+        if metadata_is_windows_reparse_point(&metadata) {
+            return Err(Wave2HostPortError::new(
+                "PRESET_RESOURCE_NOT_BOUND",
+                format!(
+                    "vcs.stage refuses Windows reparse entry '{}'",
+                    entry.path().display()
+                ),
+            ));
+        }
+        if metadata.is_dir() {
+            collect_directory_stage_paths(
+                &entry.path(),
+                &entry_repo_path,
+                output,
+            )?;
+        } else {
+            output.push(PathBuf::from(entry_repo_path));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_windows_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_windows_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
 /// Open the repository containing the bound workspace and return the
 /// repository-relative prefix of that workspace. Git status/index APIs operate
 /// from the repository root, so every result and mutation must be projected
@@ -1534,17 +1930,6 @@ fn join_repo_path(prefix: &str, relative: &str) -> String {
     }
 }
 
-fn path_relative_to_workspace(path: &str, prefix: &str) -> Option<String> {
-    let path = normalize_git_path(path.to_owned());
-    let prefix = normalize_git_path(prefix.to_owned());
-    if prefix.is_empty() {
-        return Some(path);
-    }
-    path.strip_prefix(prefix.as_str())
-        .and_then(|rest| rest.strip_prefix('/'))
-        .map(str::to_owned)
-}
-
 fn git_status_name(status: git2::Status) -> Vec<&'static str> {
     let mut names = Vec::new();
     for (flag, name) in [
@@ -1581,7 +1966,7 @@ struct WriteParams {
     content: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SearchParams {
     query: String,
@@ -1619,6 +2004,31 @@ enum SnapshotOperation {
     Compare,
     Baseline,
     Dispose,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessExecParams {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Default)]
+struct ProcessOutputCapture {
+    bytes: Vec<u8>,
+    total_bytes: usize,
+}
+
+struct FinishedProcessOutput {
+    text: String,
+    truncated: bool,
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(
@@ -1685,7 +2095,206 @@ fn snapshot_compare_value(
     }))
 }
 
+fn validate_process_exec_params(
+    params: &ProcessExecParams,
+) -> Result<(), Wave2HostPortError> {
+    if params.command.trim().is_empty()
+        || params.command.trim() != params.command
+        || params.command.contains('\0')
+    {
+        return Err(Wave2HostPortError::invalid_payload(
+            "process.exec command must be a non-empty executable without edge whitespace or NUL bytes",
+        ));
+    }
+    if params.command.chars().count() > MAX_PROCESS_COMMAND_CHARS {
+        return Err(Wave2HostPortError::invalid_payload(format!(
+            "process.exec command must not exceed {MAX_PROCESS_COMMAND_CHARS} characters"
+        )));
+    }
+    if params.args.len() > MAX_PROCESS_ARGUMENTS {
+        return Err(Wave2HostPortError::invalid_payload(format!(
+            "process.exec args must not contain more than {MAX_PROCESS_ARGUMENTS} entries"
+        )));
+    }
+    if params.args.iter().any(|argument| {
+        argument.contains('\0')
+            || argument.chars().count() > MAX_PROCESS_ARGUMENT_CHARS
+    }) {
+        return Err(Wave2HostPortError::invalid_payload(format!(
+            "process.exec arguments must not contain NUL bytes or exceed \
+             {MAX_PROCESS_ARGUMENT_CHARS} characters"
+        )));
+    }
+    if params.env.len() > MAX_PROCESS_ENVIRONMENT_ENTRIES {
+        return Err(Wave2HostPortError::invalid_payload(format!(
+            "process.exec env must not contain more than \
+             {MAX_PROCESS_ENVIRONMENT_ENTRIES} entries"
+        )));
+    }
+    if params.env.iter().any(|(key, value)| {
+        key.is_empty()
+            || key.contains(['=', '\0'])
+            || value.contains('\0')
+    }) {
+        return Err(Wave2HostPortError::invalid_payload(
+            "process.exec env contains an invalid key or NUL byte",
+        ));
+    }
+    let timeout_ms = params.timeout_ms.unwrap_or(DEFAULT_PROCESS_TIMEOUT_MS);
+    if !(1..=MAX_PROCESS_TIMEOUT_MS).contains(&timeout_ms) {
+        return Err(Wave2HostPortError::invalid_payload(format!(
+            "process.exec timeout_ms must be between 1 and {MAX_PROCESS_TIMEOUT_MS}"
+        )));
+    }
+    Ok(())
+}
+
+fn resolve_process_cwd(
+    configured_root: &Path,
+    requested_cwd: Option<&str>,
+) -> Result<(PathBuf, String), Wave2HostPortError> {
+    let configured_root = std::fs::canonicalize(configured_root).map_err(|error| {
+        Wave2HostPortError::new(
+            "PRESET_RESOURCE_NOT_BOUND",
+            format!(
+                "configured process workspace root '{}' is unavailable: {error}",
+                configured_root.display()
+            ),
+        )
+    })?;
+    let requested_cwd = requested_cwd.unwrap_or("").trim();
+    if requested_cwd.is_empty() {
+        return Ok((configured_root, ".".to_owned()));
+    }
+    let relative = Path::new(requested_cwd);
+    if relative.is_absolute()
+        || requested_cwd.starts_with('/')
+        || requested_cwd.starts_with('\\')
+        || requested_cwd.contains('\\')
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(Wave2HostPortError::invalid_payload(
+            "process.exec cwd must be a normalized workspace-relative path",
+        ));
+    }
+    let resolved = std::fs::canonicalize(configured_root.join(relative))
+        .map_err(|error| {
+            Wave2HostPortError::new(
+                "RESOURCE_NOT_FOUND",
+                format!("process.exec cwd '{requested_cwd}' is unavailable: {error}"),
+            )
+        })?;
+    if !resolved.is_dir() {
+        return Err(Wave2HostPortError::new(
+            "RESOURCE_NOT_FOUND",
+            format!("process.exec cwd '{requested_cwd}' is not a directory"),
+        ));
+    }
+    if !resolved.starts_with(&configured_root) {
+        return Err(Wave2HostPortError::new(
+            "PRESET_RESOURCE_NOT_BOUND",
+            format!("process.exec cwd '{requested_cwd}' escapes the configured workspace"),
+        ));
+    }
+    let label = resolved
+        .strip_prefix(&configured_root)
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    Ok((
+        resolved,
+        if label.is_empty() {
+            ".".to_owned()
+        } else {
+            label
+        },
+    ))
+}
+
+fn append_process_output(
+    capture: &Arc<Mutex<ProcessOutputCapture>>,
+    chunk: &[u8],
+) {
+    let mut capture = capture
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    capture.total_bytes = capture.total_bytes.saturating_add(chunk.len());
+    if chunk.len() >= MAX_PROCESS_OUTPUT_BYTES {
+        capture.bytes.clear();
+        capture
+            .bytes
+            .extend_from_slice(&chunk[chunk.len() - MAX_PROCESS_OUTPUT_BYTES..]);
+        return;
+    }
+    let required = capture
+        .bytes
+        .len()
+        .saturating_add(chunk.len())
+        .saturating_sub(MAX_PROCESS_OUTPUT_BYTES);
+    if required > 0 {
+        capture.bytes.drain(..required);
+    }
+    capture.bytes.extend_from_slice(chunk);
+}
+
+fn finish_process_output(
+    capture: &Arc<Mutex<ProcessOutputCapture>>,
+) -> FinishedProcessOutput {
+    let mut capture = capture
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let bytes = std::mem::take(&mut capture.bytes);
+    FinishedProcessOutput {
+        truncated: capture.total_bytes > bytes.len(),
+        text: nomifun_terminal::strip_ansi(&bytes),
+    }
+}
+
 impl Wave2ApplicationHost {
+    fn process_binding<'a>(
+        &self,
+        context: &'a Wave2HostContext,
+    ) -> Result<&'a TypedResourceBinding, Wave2HostPortError> {
+        let mut bindings = context.resource_bindings.iter().filter(|binding| {
+            binding.resource_kind.as_ref() == PROCESS_SESSION_RESOURCE_KIND
+        });
+        let binding = bindings.next().ok_or_else(|| {
+            Wave2HostPortError::new(
+                "PRESET_RESOURCE_NOT_BOUND",
+                "process.exec requires one process_session resource binding",
+            )
+        })?;
+        if bindings.next().is_some() {
+            return Err(Wave2HostPortError::new(
+                "PRESET_RESOURCE_NOT_BOUND",
+                "process.exec received more than one process_session resource binding",
+            ));
+        }
+        if binding.owner_id != context.principal.principal_id {
+            return Err(Wave2HostPortError::new(
+                "RESOURCE_OWNER_MISMATCH",
+                format!(
+                    "process_session binding {} belongs to a different principal",
+                    binding.binding_id.as_ref()
+                ),
+            ));
+        }
+        if !binding.operations.contains(PROCESS_EXECUTE_OPERATION) {
+            return Err(Wave2HostPortError::new(
+                "PRESET_RESOURCE_NOT_BOUND",
+                format!(
+                    "process_session binding {} does not allow execute",
+                    binding.binding_id.as_ref()
+                ),
+            ));
+        }
+        Ok(binding)
+    }
+
     fn workspace_scope(
         &self,
         context: &Wave2HostContext,
@@ -2076,6 +2685,104 @@ mod tests {
         }
     }
 
+    fn process_context(root: &std::path::Path) -> Wave2HostContext {
+        let mut context = context(root);
+        context.resource_bindings = vec![TypedResourceBinding {
+            binding_id: ResourceBindingId::from("process-session-binding"),
+            resource_kind: ResourceKind::from(PROCESS_SESSION_RESOURCE_KIND),
+            resource_id: ResourceId::from("process-session-resource"),
+            owner_id: "owner-1".to_owned(),
+            operations: BTreeSet::from([PROCESS_EXECUTE_OPERATION.to_owned()]),
+            connection_config_ref: None,
+            typed_parameters: BTreeMap::from([(
+                WORKSPACE_ROOT_PARAMETER.to_owned(),
+                root.to_string_lossy().into_owned(),
+            )]),
+        }];
+        context
+    }
+
+    const PROCESS_TREE_FIXTURE_MODE_ENV: &str =
+        "NOMIFUN_WAVE2_PROCESS_TREE_FIXTURE_MODE";
+    const PROCESS_TREE_FIXTURE_ROOT_ENV: &str =
+        "NOMIFUN_WAVE2_PROCESS_TREE_FIXTURE_ROOT";
+    const PROCESS_TREE_FIXTURE_TEST: &str =
+        "router::agent_wave2_host::tests::managed_process_tree_fixture";
+
+    fn process_tree_request(
+        root: &Path,
+        timeout_ms: u64,
+    ) -> Value {
+        let environment = HashMap::from([
+            (
+                PROCESS_TREE_FIXTURE_MODE_ENV.to_owned(),
+                "parent".to_owned(),
+            ),
+            (
+                PROCESS_TREE_FIXTURE_ROOT_ENV.to_owned(),
+                root.to_string_lossy().into_owned(),
+            ),
+        ]);
+        json!({
+            "command": std::env::current_exe().unwrap(),
+            "args": [
+                "--exact",
+                PROCESS_TREE_FIXTURE_TEST,
+                "--nocapture"
+            ],
+            "env": environment,
+            "timeout_ms": timeout_ms
+        })
+    }
+
+    async fn wait_for_fixture_file(path: &Path) -> bool {
+        for _ in 0..60 {
+            if path.exists() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    #[test]
+    fn managed_process_tree_fixture() {
+        let Ok(mode) = std::env::var(PROCESS_TREE_FIXTURE_MODE_ENV) else {
+            return;
+        };
+        let root = PathBuf::from(
+            std::env::var(PROCESS_TREE_FIXTURE_ROOT_ENV)
+                .expect("process-tree fixture root"),
+        );
+        match mode.as_str() {
+            "parent" => {
+                let child = std::process::Command::new(
+                    std::env::current_exe().expect("fixture executable"),
+                )
+                .args([
+                    "--exact",
+                    PROCESS_TREE_FIXTURE_TEST,
+                    "--nocapture",
+                ])
+                .env(PROCESS_TREE_FIXTURE_MODE_ENV, "child")
+                .env(PROCESS_TREE_FIXTURE_ROOT_ENV, &root)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn process-tree fixture child");
+                std::fs::write(root.join("started.txt"), child.id().to_string())
+                    .expect("write process-tree start marker");
+                std::thread::sleep(Duration::from_secs(30));
+            }
+            "child" => {
+                std::thread::sleep(Duration::from_secs(3));
+                std::fs::write(root.join("survived.txt"), "survived")
+                    .expect("write process-tree survival marker");
+            }
+            other => panic!("unknown process-tree fixture mode {other}"),
+        }
+    }
+
     async fn invoke(
         host: &Wave2ApplicationHost,
         mut context: Wave2HostContext,
@@ -2129,6 +2836,284 @@ mod tests {
         .unwrap();
         assert_eq!(deleted.0["deleted"], true);
         assert!(!directory.path().join("test.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn workspace_patch_replaces_exact_content_and_rejects_stale_context() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("patch.txt"),
+            "before\nold value\nafter\n",
+        )
+        .unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let context = context(directory.path());
+
+        let patched = invoke(
+            &host,
+            context.clone(),
+            "fs.patch",
+            json!({
+                "path": "patch.txt",
+                "old_content": "old value",
+                "new_content": "new value"
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(patched.0["patched"], true);
+        assert_eq!(patched.0["replacements"], 1);
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("patch.txt")).unwrap(),
+            "before\nnew value\nafter\n"
+        );
+
+        let stale = invoke(
+            &host,
+            context,
+            "fs.patch",
+            json!({
+                "path": "patch.txt",
+                "old_content": "old value",
+                "new_content": "another value"
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(stale.code, "INVALID_PAYLOAD");
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("patch.txt")).unwrap(),
+            "before\nnew value\nafter\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_workspace_patches_do_not_overwrite_each_other() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("patch.txt"), "alpha beta\n")
+            .unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let context = context(directory.path());
+
+        let first = invoke(
+            &host,
+            context.clone(),
+            "fs.patch",
+            json!({
+                "path": "patch.txt",
+                "old_content": "alpha",
+                "new_content": "ALPHA"
+            }),
+        );
+        let second = invoke(
+            &host,
+            context,
+            "fs.patch",
+            json!({
+                "path": "patch.txt",
+                "old_content": "beta",
+                "new_content": "BETA"
+            }),
+        );
+        let (first, second) = tokio::join!(first, second);
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("patch.txt")).unwrap(),
+            "ALPHA BETA\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_snapshot_uses_the_existing_snapshot_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("tracked.txt"), "baseline\n").unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let context = context(directory.path());
+
+        let snapshot = invoke(&host, context, "fs.snapshot", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(snapshot.0["mode"], "snapshot");
+        assert_eq!(snapshot.0["branch"], Value::Null);
+        assert!(host.snapshots.is_tracked(&directory.path().to_string_lossy()));
+
+        std::fs::write(directory.path().join("tracked.txt"), "changed\n").unwrap();
+        let comparison = host
+            .snapshots
+            .compare(&directory.path().to_string_lossy())
+            .await
+            .unwrap();
+        assert!(
+            comparison
+                .unstaged
+                .iter()
+                .any(|change| change.relative_path == "tracked.txt")
+        );
+        host.snapshots
+            .dispose(&directory.path().to_string_lossy())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn process_exec_uses_the_managed_process_owner_and_confined_cwd() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("nested")).unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        #[cfg(windows)]
+        let (command, args) = (
+            std::env::var("ComSpec")
+                .unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".to_owned()),
+            vec![
+                "/d".to_owned(),
+                "/c".to_owned(),
+                "echo executed>marker.txt".to_owned(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (command, args) = (
+            "/bin/sh".to_owned(),
+            vec![
+                "-c".to_owned(),
+                "printf executed > marker.txt".to_owned(),
+            ],
+        );
+
+        let result = invoke(
+            &host,
+            process_context(directory.path()),
+            "process.exec",
+            json!({
+                "command": command,
+                "args": args,
+                "cwd": "nested",
+                "timeout_ms": 10_000
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.0["success"], true);
+        assert_eq!(result.0["exit_code"], 0);
+        assert_eq!(result.0["cwd"], "nested");
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("nested/marker.txt"))
+                .unwrap()
+                .trim(),
+            "executed"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_exec_rejects_workspace_escape_before_spawn() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let error = invoke(
+            &host,
+            process_context(directory.path()),
+            "process.exec",
+            json!({
+                "command": "unused",
+                "cwd": "../outside"
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "INVALID_PAYLOAD");
+    }
+
+    #[tokio::test]
+    async fn process_exec_requires_a_host_resolved_process_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let mut context = process_context(directory.path());
+        context.resource_bindings[0].typed_parameters.clear();
+        let error = invoke(
+            &host,
+            context,
+            "process.exec",
+            json!({"command": "unused"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "PRESET_RESOURCE_NOT_BOUND");
+        assert!(error.message.contains(WORKSPACE_ROOT_PARAMETER));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn process_exec_rejects_junction_cwd_escape_on_windows() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        junction::create(
+            outside.path(),
+            directory.path().join("outside-junction"),
+        )
+        .unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let error = invoke(
+            &host,
+            process_context(directory.path()),
+            "process.exec",
+            json!({
+                "command": "unused",
+                "cwd": "outside-junction"
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "PRESET_RESOURCE_NOT_BOUND");
+    }
+
+    #[tokio::test]
+    async fn process_exec_timeout_reaps_the_managed_process_tree() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let error = invoke(
+            &host,
+            process_context(directory.path()),
+            "process.exec",
+            process_tree_request(directory.path(), 1_500),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("process tree was reaped"));
+        assert!(directory.path().join("started.txt").exists());
+
+        tokio::time::sleep(Duration::from_millis(3_500)).await;
+        assert!(
+            !directory.path().join("survived.txt").exists(),
+            "a timed-out process.exec left its descendant alive"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_process_exec_keeps_cleanup_coordinator_alive() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let root = directory.path().to_path_buf();
+        let task = tokio::spawn(async move {
+            invoke(
+                &host,
+                process_context(&root),
+                "process.exec",
+                process_tree_request(&root, 1_500),
+            )
+            .await
+        });
+        assert!(
+            wait_for_fixture_file(&directory.path().join("started.txt")).await,
+            "process-tree fixture did not start"
+        );
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        tokio::time::sleep(Duration::from_millis(3_500)).await;
+        assert!(
+            !directory.path().join("survived.txt").exists(),
+            "cancelling process.exec abandoned its descendant process"
+        );
     }
 
     #[tokio::test]
@@ -2585,7 +3570,7 @@ mod tests {
 
         let staged = invoke(
             &host,
-            base_context,
+            base_context.clone(),
             "vcs.stage",
             json!({"path": "tracked.txt"}),
         )
@@ -2597,6 +3582,73 @@ mod tests {
             status_after
                 .iter()
                 .any(|entry| entry.status().contains(git2::Status::INDEX_MODIFIED))
+        );
+        let staged_diff = invoke(&host, base_context, "vcs.diff", json!({}))
+            .await
+            .unwrap();
+        assert!(
+            staged_diff.0["staged_patch"]
+                .as_str()
+                .unwrap()
+                .contains("changed")
+        );
+        assert_eq!(staged_diff.0["unstaged_patch"], "");
+    }
+
+    #[tokio::test]
+    async fn vcs_stage_recurses_directories_and_records_deletions() {
+        let directory = tempfile::tempdir().unwrap();
+        let _repository = initialize_git_repository(directory.path());
+        let batch = directory.path().join("batch");
+        std::fs::create_dir(&batch).unwrap();
+        std::fs::write(batch.join("keep.txt"), "keep\n").unwrap();
+        std::fs::write(batch.join("remove.txt"), "remove\n").unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path());
+        let context = context(directory.path());
+
+        invoke(
+            &host,
+            context.clone(),
+            "vcs.stage",
+            json!({"path": "batch"}),
+        )
+        .await
+        .unwrap();
+        let index = git2::Repository::open(directory.path())
+            .unwrap()
+            .index()
+            .unwrap();
+        assert!(index.get_path(Path::new("batch/keep.txt"), 0).is_some());
+        assert!(index.get_path(Path::new("batch/remove.txt"), 0).is_some());
+        drop(index);
+
+        std::fs::remove_file(batch.join("remove.txt")).unwrap();
+        invoke(&host, context, "vcs.stage", json!({"path": "batch"}))
+            .await
+            .unwrap();
+        let index = git2::Repository::open(directory.path())
+            .unwrap()
+            .index()
+            .unwrap();
+        assert!(index.get_path(Path::new("batch/keep.txt"), 0).is_some());
+        assert!(index.get_path(Path::new("batch/remove.txt"), 0).is_none());
+    }
+
+    #[test]
+    fn vcs_workspace_prefix_projection_matches_host_path_semantics() {
+        assert_eq!(
+            path_relative_to_workspace("nested/file.txt", "nested"),
+            Some("file.txt".to_owned())
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            path_relative_to_workspace("Nested/File.txt", "nested"),
+            Some("File.txt".to_owned())
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            path_relative_to_workspace("Nested/File.txt", "nested"),
+            None
         );
     }
 

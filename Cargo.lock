@@ -6307,6 +6307,7 @@ name = "nomifun-codex-runtime"
 version = "0.7.4"
 dependencies = [
  "async-trait",
+ "junction",
  "nomi-process-runtime",
  "nomifun-agent-contracts",
  "serde",

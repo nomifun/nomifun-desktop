@@ -1429,6 +1429,11 @@ pub fn validate_action_resource_bindings(
         });
     }
 
+    let declared_resource_kinds = definition
+        .resource_kinds
+        .iter()
+        .map(|kind| ResourceKind::from(*kind))
+        .collect::<BTreeSet<_>>();
     let mut binding_ids = BTreeSet::new();
     for binding in bindings {
         if binding.binding_id.as_ref().is_empty() || binding.resource_id.as_ref().is_empty() {
@@ -1451,6 +1456,13 @@ pub fn validate_action_resource_bindings(
         if binding.owner_id != principal.principal_id {
             return Err(KernelError::ResourceOwnerMismatch {
                 binding_id: binding.binding_id.clone(),
+            });
+        }
+        if !declared_resource_kinds.contains(&binding.resource_kind) {
+            return Err(KernelError::UnexpectedResourceBinding {
+                capability_id: capability_id.clone(),
+                binding_id: binding.binding_id.clone(),
+                resource_kind: binding.resource_kind.as_ref().to_owned(),
             });
         }
     }
@@ -2151,6 +2163,34 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(wrong_owner.code, RESOURCE_OWNER_MISMATCH);
+
+        let unexpected_binding = match (Wave2HostRequest {
+            context: Wave2HostContext {
+                resource_bindings: vec![
+                    binding.clone(),
+                    nomifun_agent_contracts::TypedResourceBinding {
+                        binding_id: "ssh-binding".into(),
+                        resource_kind: "ssh_host".into(),
+                        resource_id: "ssh-resource".into(),
+                        owner_id: "owner".to_owned(),
+                        operations: BTreeSet::from(["read".to_owned()]),
+                        connection_config_ref: None,
+                        typed_parameters: Default::default(),
+                    },
+                ],
+                ..context.clone()
+            },
+            operation: Wave2CapabilityOperation::WorkspaceExecution {
+                input: empty_object(),
+            },
+        })
+         .into_typed()
+        {
+            Ok(_) => panic!("owner adapters must not receive undeclared resource bindings"),
+            Err(error) => error,
+        };
+        assert_eq!(unexpected_binding.code, PRESET_RESOURCE_NOT_BOUND);
+        assert!(unexpected_binding.message.contains("ssh_host"));
 
         let missing_grant = match (Wave2HostRequest {
             context: Wave2HostContext {

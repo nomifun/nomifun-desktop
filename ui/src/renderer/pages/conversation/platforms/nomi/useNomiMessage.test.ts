@@ -54,7 +54,7 @@ describe('useNomiMessage live event subscriptions', () => {
   test('treats output_discarded as an in-turn rollback boundary without clearing valid prefixes', () => {
     const source = readFileSync(fileURLToPath(import.meta.resolve('./useNomiMessage.ts')), 'utf8');
     const start = source.indexOf("case 'output_discarded':");
-    const end = source.indexOf("case 'turn_completed':", start);
+    const end = source.indexOf("case 'turn_metrics':", start);
     const handler = source.slice(start, end);
 
     expect(start).toBeGreaterThan(-1);
@@ -63,5 +63,13 @@ describe('useNomiMessage live event subscriptions', () => {
     expect(handler.includes("setThought({ subject: '', description: '' })")).toBe(true);
     expect(handler.includes('resetState')).toBe(false);
     expect(handler.includes('clearNomiMessageBuffer')).toBe(false);
+  });
+
+  test('consumes token telemetry without restoring relay-owned completion authority', () => {
+    const source = readFileSync(fileURLToPath(import.meta.resolve('./useNomiMessage.ts')), 'utf8');
+
+    expect(source.includes("case 'turn_metrics':")).toBe(true);
+    expect(source.includes("case 'turn_completed':")).toBe(false);
+    expect(source.includes('ipcBridge.conversation.turnCompleted.on')).toBe(true);
   });
 });

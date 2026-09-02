@@ -28,10 +28,11 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve, sep } from 'node:path';
+import { dirname, join, parse, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -56,7 +57,7 @@ export const EXPECTED_PROTOCOL_VERSION = '1.0.0';
 export const EXPECTED_PROTOCOL_SCHEMA_DIGEST =
   'f1c0422f04c9de923e18c7df40d814d3c9f5b2db5f1c5fef2745e77e6d62590f';
 export const EXPECTED_RUNTIME_RELEASE_DIGEST =
-  'c4075b2f7c118fa5eeeb6fc4a0b21cf940d5af6a8acc080e1c8721a8a738a380';
+  '7c0c297dd0dd7c11c71cd589965e930ddec0008bebaaf510eabcd0c597358838';
 
 const RUNTIME_INPUT = join(
   REPO_ROOT,
@@ -190,9 +191,12 @@ function existingFile(path) {
 
 function exactCasePath(path) {
   const absolute = resolve(path);
-  const parsed = absolute.split(sep);
-  let current = parsed[0] === '' ? sep : parsed[0];
-  const components = parsed[0] === '' ? parsed.slice(1) : parsed.slice(1);
+  const root = parse(absolute).root;
+  let current = root;
+  const components = absolute
+    .slice(root.length)
+    .split(sep)
+    .filter(Boolean);
   for (const component of components) {
     if (!component) continue;
     let entries;
@@ -784,16 +788,26 @@ export function assertSelfTest() {
     const file = join(temporary, 'ExactName');
     writeFileSync(file, 'fixture');
     chmodSync(file, 0o755);
-    const valid = validatePathShape(file, { requireExecutable: true });
+    const valid = validatePathShape(file, {
+      requireExecutable: process.platform !== 'win32',
+    });
     if (valid.status !== 'pass') throw new Error(`path fixture should pass: ${JSON.stringify(valid)}`);
+    if (
+      !isExecutableMode(0o100755) ||
+      isExecutableMode(0o100644) ||
+      isExecutableMode(0o100777)
+    ) {
+      throw new Error('executable mode predicate must require execute bits and reject writable artifacts');
+    }
     const wrongCase = validatePathShape(join(temporary, 'exactname'));
     if (wrongCase.status !== 'fail' || wrongCase.reason !== 'path_case_mismatch') {
       throw new Error('wrong path casing must fail closed');
     }
+    const linkTarget = join(temporary, 'link-target');
+    mkdirSync(linkTarget);
     const link = join(temporary, 'link');
-    const linkResult = command('ln', ['-s', file, link]);
-    if (linkResult.status !== 0) throw new Error(linkResult.stderr);
-    const symlink = validatePathShape(link);
+    symlinkSync(linkTarget, link, process.platform === 'win32' ? 'junction' : 'dir');
+    const symlink = validatePathShape(link, { kind: 'directory' });
     if (symlink.reason !== 'symlink_not_allowed') throw new Error('symlink must fail closed');
     const hello = validateHelloPayload({
       runtime_release_digest: EXPECTED_RUNTIME_RELEASE_DIGEST,
