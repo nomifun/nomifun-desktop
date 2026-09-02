@@ -190,13 +190,19 @@ const CreativeModelSelect: React.FC<CreativeModelSelectProps> = ({
         {groups.map((group) => (
           <NomiSelect.OptGroup key={group.providerId} label={group.providerName}>
             {group.models.map((option) => (
-              <NomiSelect.Option key={optionKey(option)} value={optionKey(option)}>
+              <NomiSelect.Option
+                key={optionKey(option)}
+                value={optionKey(option)}
+                className={styles.menuOption}
+              >
                 <span className={styles.option}>
-                  <span className={styles.optionModel} title={option.rawModelId ?? option.model}>
+                  <span className={styles.optionModel} title={option.displayName ?? option.model}>
                     {option.displayName ?? option.model}
                   </span>
                   {option.rawModelId && (
-                    <span className={styles.optionRawModel}>{option.rawModelId}</span>
+                    <span className={styles.optionRawModel} title={option.rawModelId}>
+                      {option.rawModelId}
+                    </span>
                   )}
                   <span className={styles.optionProtocol}>{option.protocol}</span>
                 </span>
