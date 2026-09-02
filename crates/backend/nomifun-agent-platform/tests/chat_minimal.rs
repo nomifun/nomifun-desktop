@@ -15,14 +15,15 @@ use nomifun_agent_contracts::{
     ChatRouteIdentity, ConnectionConfigRef, CorrelationId, DeleteAgentSessionCommand, DigestHex,
     EventId,
     EventProducerId, FullAutoExecutionWire, IdempotencyKey, LogicalArtifactRef, ModelRouteId,
-    NativeActionStart, NativeActionStartAck, OperationId, PrincipalRef, RuntimeBindingContract,
+    NativeActionStart, NativeActionStartAck, OperationId, PackageId, PrincipalRef,
+    RuntimeBindingContract,
     RuntimeBindingId, RuntimeCancelParams, RuntimeCommand, RuntimeCommandContext,
     RuntimeCreateParams, RuntimeEventAck, RuntimeEventEnvelope, RuntimeHelloPayload,
     RuntimeReleaseTargetPayload, RuntimeResumeParams, RuntimeSessionDisposeParams,
     RuntimeStartTurnParams, SemanticSessionEventDraft, SessionEventAck, SessionEventAppend,
     SessionEventKind, SessionEventPayloadRef, SessionPayloadBody, SessionPayloadRecord,
     ChatRouteLookupKey, StrictJsonValue, UserId, VersionString, canonical_json_bytes, digest_bytes,
-    digest_payload, official_preset_seed_manifest_payload,
+    digest_payload, official_preset_seed_manifest_payload, AGENT_CORE_PACKAGE_ID,
 };
 use nomifun_agent_control_plane::{
     CompilerReleaseInputs, ControlPlaneStore,
@@ -523,10 +524,21 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
     );
     contract.validate_snapshot(&snapshot.content)?;
     let registry = platform.materialized_registry()?;
-    assert!(registry.packages.is_empty());
+    assert_eq!(
+        registry.packages.keys().cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([PackageId::from(AGENT_CORE_PACKAGE_ID)])
+    );
     assert!(registry.capabilities.is_empty());
     assert!(registry.skills.is_empty());
     assert!(registry.mcp_tools.is_empty());
+    let core_services = registry
+        .service_dag
+        .nodes
+        .iter()
+        .find(|node| node.package.id.as_ref() == AGENT_CORE_PACKAGE_ID)
+        .expect("chat.minimal retains the canonical Session service provider");
+    assert_eq!(core_services.provides.len(), 2);
+    assert!(core_services.requires.is_empty());
     let compiled = CompiledSnapshot {
         envelope: snapshot.clone(),
         authority_policies: BTreeMap::new(),

@@ -13,7 +13,12 @@ use axum::routing::get;
 use axum::{Json, Router};
 use tower_http::cors::{Any, CorsLayer};
 
-use nomifun_agent_platform::AgentPlatform;
+use nomifun_agent_contracts::PluginMountId;
+use nomifun_agent_domain_wave5::REMOTE_INGRESS_MOUNT_ID;
+use nomifun_agent_platform::{
+    AgentPlatform, agent_session_command_service_key,
+    agent_session_query_service_key,
+};
 use nomifun_auth::{
     AuthPolicy, AuthRouterState, AuthState, CookieConfig, JwtService, QrTokenStore, TrustState,
     auth_middleware, auth_routes, csrf_middleware, require_instance_owner_middleware,
@@ -365,8 +370,22 @@ impl FreshV4Host {
         }
         let owner_user_id = UserId::parse(owner_id.as_ref())
             .map_err(|error| anyhow::anyhow!("invalid Fresh-v4 owner id: {error}"))?;
+        let remote_services = platform
+            .kernel_registry()
+            .declared_service_view(&PluginMountId::from(REMOTE_INGRESS_MOUNT_ID))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Remote ingress mount has no declared AgentSession service view"
+                )
+            })?;
+        let remote_session_command =
+            remote_services.require(&agent_session_command_service_key())?;
+        let remote_session_query =
+            remote_services.require(&agent_session_query_service_key())?;
         let remote_router = remote_rest::build(
             platform.clone(),
+            remote_session_command.clone(),
+            remote_session_query.clone(),
             remote_token_validator,
             owner_user_id.clone(),
             remote_auth_admission.clone(),
@@ -374,6 +393,8 @@ impl FreshV4Host {
         );
         let remote_mcp_router = nomifun_public::canonical_remote_mcp_router(
             platform.clone(),
+            remote_session_command,
+            remote_session_query,
             token_state.token_validator.clone(),
             owner_user_id,
             remote_runtime.clone(),

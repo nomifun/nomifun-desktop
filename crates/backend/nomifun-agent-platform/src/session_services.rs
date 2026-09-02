@@ -49,6 +49,13 @@ pub trait CanonicalAgentSessionCommandPort:
         target_operation_id: OperationId,
         idempotency_key: IdempotencyKey,
     ) -> Result<SessionEventAppendResult, AgentPlatformError>;
+
+    async fn cancel_remote_turn(
+        &self,
+        principal: &PrincipalRef,
+        session_id: &AgentSessionId,
+        idempotency_key: IdempotencyKey,
+    ) -> Result<SessionEventAppendResult, AgentPlatformError>;
 }
 
 pub fn agent_session_command_service_key(
@@ -268,6 +275,17 @@ impl CanonicalAgentSessionCommandPort for AgentSessionServiceProxy {
             )
             .await
     }
+
+    async fn cancel_remote_turn(
+        &self,
+        principal: &PrincipalRef,
+        session_id: &AgentSessionId,
+        idempotency_key: IdempotencyKey,
+    ) -> Result<SessionEventAppendResult, AgentPlatformError> {
+        self.platform()?
+            .cancel_remote_turn(principal, session_id, idempotency_key)
+            .await
+    }
 }
 
 #[async_trait]
@@ -284,6 +302,21 @@ impl CanonicalAgentSessionCommandPort for AgentPlatform {
             principal,
             session_id,
             target_operation_id,
+            idempotency_key,
+        )
+        .await
+    }
+
+    async fn cancel_remote_turn(
+        &self,
+        principal: &PrincipalRef,
+        session_id: &AgentSessionId,
+        idempotency_key: IdempotencyKey,
+    ) -> Result<SessionEventAppendResult, AgentPlatformError> {
+        AgentPlatform::cancel_remote_turn(
+            self,
+            principal,
+            session_id,
             idempotency_key,
         )
         .await

@@ -423,16 +423,6 @@ async fn fork_agent_session(
             .map_err(AgentPlatformError::from)?,
     )
     .map_err(AgentPlatformError::from)?;
-    let child_compiled = state
-        .platform
-        .compile_saved_binding(
-            &principal,
-            &child_binding,
-            "fork",
-            "desktop",
-            "owner",
-        )
-        .await?;
     let child_session_id = AgentSessionId::from(Uuid::now_v7().to_string());
     let fork = state
         .platform
@@ -473,12 +463,7 @@ async fn fork_agent_session(
                         .collect::<Vec<_>>()
                 }))),
                 base_media_type: "application/json".to_owned(),
-                child_initial_active_capability_ids: child_compiled
-                    .content()
-                    .initial_capabilities
-                    .iter()
-                    .map(|capability| capability.capability.id.as_ref().to_owned())
-                    .collect(),
+                child_initial_active_capability_ids: Vec::new(),
             },
         )
         .await?;

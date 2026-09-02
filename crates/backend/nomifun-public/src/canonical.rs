@@ -13,10 +13,11 @@ use axum::Router;
 use axum::middleware::from_fn_with_state;
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentSessionId, CorrelationId, EventProducerId, IdempotencyKey,
-    OperationId, PrincipalRef, RemoteBindingId, RemoteBindingProvenance, StrictJsonValue,
+    OperationId, PrincipalRef, RemoteBindingId, RemoteBindingProvenance, SessionEventCursor,
+    StrictJsonValue,
 };
 use nomifun_agent_platform::{
-    AgentPlatform, AgentPlatformError, AgentSessionCommandPort, AgentSessionQueryPort,
+    AgentPlatform, AgentPlatformError, AgentSessionQueryPort, CanonicalAgentSessionCommandPort,
     OpenAgentSessionRequest, StartAgentTurnRequest,
 };
 use nomifun_api_types::{
@@ -66,15 +67,24 @@ pub trait CanonicalRemoteRuntimeAdmission: Send + Sync {
 #[derive(Clone)]
 pub struct CanonicalRemoteMcpHandler {
     platform: Arc<AgentPlatform>,
+    commands: Arc<dyn CanonicalAgentSessionCommandPort>,
+    queries: Arc<dyn AgentSessionQueryPort>,
     runtime: Arc<dyn CanonicalRemoteRuntimeAdmission>,
 }
 
 impl CanonicalRemoteMcpHandler {
     pub fn new(
         platform: Arc<AgentPlatform>,
+        commands: Arc<dyn CanonicalAgentSessionCommandPort>,
+        queries: Arc<dyn AgentSessionQueryPort>,
         runtime: Arc<dyn CanonicalRemoteRuntimeAdmission>,
     ) -> Self {
-        Self { platform, runtime }
+        Self {
+            platform,
+            commands,
+            queries,
+            runtime,
+        }
     }
 }
 
@@ -82,9 +92,12 @@ impl CanonicalRemoteMcpHandler {
 ///
 /// `RemoteSessionManager` only bounds rmcp transport sessions and pins the
 /// authenticated installation owner. All product work is delegated to the
-/// injected `AgentPlatform` and Runtime admission port.
+/// injected AgentSession ports and Runtime admission port. `AgentPlatform`
+/// remains available only for RemoteBinding control-plane lookup.
 pub fn canonical_remote_mcp_router(
     platform: Arc<AgentPlatform>,
+    commands: Arc<dyn CanonicalAgentSessionCommandPort>,
+    queries: Arc<dyn AgentSessionQueryPort>,
     validator: Arc<InstanceTokenValidator>,
     authoritative_user_id: UserId,
     runtime: Arc<dyn CanonicalRemoteRuntimeAdmission>,
@@ -99,10 +112,14 @@ pub fn canonical_remote_mcp_router(
     let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
         {
             let platform = Arc::clone(&platform);
+            let commands = Arc::clone(&commands);
+            let queries = Arc::clone(&queries);
             let runtime = Arc::clone(&runtime);
             move || {
                 Ok(CanonicalRemoteMcpHandler::new(
                     Arc::clone(&platform),
+                    Arc::clone(&commands),
+                    Arc::clone(&queries),
                     Arc::clone(&runtime),
                 ))
             }
@@ -284,7 +301,7 @@ impl CanonicalRemoteMcpHandler {
         open.initial_input = initial_input.map(StrictJsonValue);
 
         let created = self
-            .platform
+            .commands
             .open_session(open)
             .await
             .map_err(CanonicalRemoteError::from)?;
@@ -293,7 +310,7 @@ impl CanonicalRemoteMcpHandler {
         let admission_error = self.runtime.ensure_started(session_id.clone()).await.err();
         let (status, last_seq) = if created.duplicate || admission_error.is_some() {
             let head = self
-                .platform
+                .queries
                 .session_head(&principal, &session_id)
                 .await
                 .map_err(CanonicalRemoteError::from)?;
@@ -334,16 +351,16 @@ impl CanonicalRemoteMcpHandler {
         let idempotency_key = nonempty(&request.idempotency_key, "idempotency_key")?;
         let session_id = parse_session_id(&request.agent_session_id)?;
         let input = bounded_json(request.input, "input")?;
-        ensure_remote_session(&self.platform, owner, &session_id).await?;
+        ensure_remote_session(self.queries.as_ref(), owner, &session_id).await?;
         let mut head = self
-            .platform
+            .queries
             .session_head(&user_principal(&contract_user_id(owner)), &session_id)
             .await
             .map_err(CanonicalRemoteError::from)?;
         if head.status == "opening" {
             if let Err(error) = self.runtime.ensure_started(session_id.clone()).await {
                 head = self
-                    .platform
+                    .queries
                     .session_head(&user_principal(&contract_user_id(owner)), &session_id)
                     .await
                     .map_err(CanonicalRemoteError::from)?;
@@ -361,7 +378,7 @@ impl CanonicalRemoteMcpHandler {
                 }
             }
             head = self
-                .platform
+                .queries
                 .session_head(&user_principal(&contract_user_id(owner)), &session_id)
                 .await
                 .map_err(CanonicalRemoteError::from)?;
@@ -379,7 +396,7 @@ impl CanonicalRemoteMcpHandler {
             ));
         }
         let dispatch = self
-            .platform
+            .commands
             .start_turn(StartAgentTurnRequest {
                 agent_session_id: session_id.clone(),
                 principal: user_principal(&contract_user_id(owner)),
@@ -391,7 +408,7 @@ impl CanonicalRemoteMcpHandler {
             .await
             .map_err(CanonicalRemoteError::from)?;
         let head = self
-            .platform
+            .queries
             .session_head(&user_principal(&contract_user_id(owner)), &session_id)
             .await
             .map_err(CanonicalRemoteError::from)?;
@@ -416,17 +433,17 @@ impl CanonicalRemoteMcpHandler {
                 "after_cursor must reference the same AgentSession",
             ));
         }
-        ensure_remote_session(&self.platform, owner, &session_id).await?;
+        ensure_remote_session(self.queries.as_ref(), owner, &session_id).await?;
         let principal = user_principal(&contract_user_id(owner));
         let head = self
-            .platform
+            .queries
             .session_head(&principal, &session_id)
             .await
             .map_err(CanonicalRemoteError::from)?;
         if head.status == "opening" {
             if let Err(error) = self.runtime.ensure_started(session_id.clone()).await {
                 let latest = self
-                    .platform
+                    .queries
                     .session_head(&principal, &session_id)
                     .await
                     .map_err(CanonicalRemoteError::from)?;
@@ -444,14 +461,13 @@ impl CanonicalRemoteMcpHandler {
                 }
             }
         }
+        let after = SessionEventCursor {
+            agent_session_id: session_id.clone(),
+            seq: request.after_cursor.seq,
+        };
         let observation = self
-            .platform
-            .observe_from_cursor(
-                &contract_user_id(owner),
-                session_id.as_ref(),
-                Some(request.after_cursor),
-                request.limit,
-            )
+            .queries
+            .observe_session(&principal, &session_id, Some(&after), request.limit)
             .await
             .map_err(CanonicalRemoteError::from)?;
         let events = observation
@@ -483,20 +499,9 @@ impl CanonicalRemoteMcpHandler {
     ) -> Result<Value, CanonicalRemoteError> {
         let idempotency_key = nonempty(&request.idempotency_key, "idempotency_key")?;
         let session_id = parse_session_id(&request.agent_session_id)?;
-        ensure_remote_session(&self.platform, owner, &session_id).await?;
+        ensure_remote_session(self.queries.as_ref(), owner, &session_id).await?;
         let principal = user_principal(&contract_user_id(owner));
-        let head = self
-            .platform
-            .session_head(&principal, &session_id)
-            .await
-            .map_err(CanonicalRemoteError::from)?;
-        if head.status != "running" || head.active_turn_id.is_none() {
-            return Err(CanonicalRemoteError::new(
-                "REMOTE_SESSION_BUSY",
-                "AgentSession has no cancellable active turn",
-            ));
-        }
-        self.platform
+        self.commands
             .cancel_remote_turn(
                 &principal,
                 &session_id,
@@ -505,7 +510,7 @@ impl CanonicalRemoteMcpHandler {
             .await
             .map_err(CanonicalRemoteError::from)?;
         let head = self
-            .platform
+            .queries
             .session_head(&principal, &session_id)
             .await
             .map_err(CanonicalRemoteError::from)?;
@@ -716,20 +721,21 @@ fn error_result(code: &str, message: impl Into<String>) -> CallToolResult {
 }
 
 fn ensure_remote_session<'a>(
-    platform: &'a AgentPlatform,
+    queries: &'a dyn AgentSessionQueryPort,
     owner: &'a UserId,
     session_id: &'a AgentSessionId,
 ) -> impl Future<Output = Result<(), CanonicalRemoteError>> + 'a {
     async move {
-        let session = platform
-            .session_store()
-            .get_live_session(session_id)
+        let principal = user_principal(&contract_user_id(owner));
+        let observation = queries
+            .observe_session(&principal, session_id, None, 1)
             .await
-            .map_err(AgentPlatformError::from)
-            .map_err(CanonicalRemoteError::from)?;
-        if session.owner_ref != user_principal(&contract_user_id(owner))
-            || session.remote_binding_provenance.is_none()
-        {
+            .map_err(remote_session_lookup_error)?;
+        if !is_owned_remote_session(
+            &observation.session.owner_ref,
+            observation.session.remote_binding_provenance.is_some(),
+            &principal,
+        ) {
             return Err(CanonicalRemoteError::new(
                 "REMOTE_SESSION_NOT_FOUND",
                 "AgentSession is not a Remote session owned by the authenticated installation",
@@ -737,6 +743,38 @@ fn ensure_remote_session<'a>(
         }
         Ok(())
     }
+}
+
+fn remote_session_lookup_error(error: AgentPlatformError) -> CanonicalRemoteError {
+    match &error {
+        AgentPlatformError::Session(session)
+            if session.code() == Some("SESSION_NOT_FOUND") =>
+        {
+            CanonicalRemoteError::new(
+                "REMOTE_SESSION_NOT_FOUND",
+                "AgentSession is not a Remote session owned by the authenticated installation",
+            )
+        }
+        AgentPlatformError::Contract(message)
+            if message
+                .to_ascii_lowercase()
+                .contains("ownership check") =>
+        {
+            CanonicalRemoteError::new(
+                "REMOTE_SESSION_NOT_FOUND",
+                "AgentSession is not a Remote session owned by the authenticated installation",
+            )
+        }
+        _ => error.into(),
+    }
+}
+
+fn is_owned_remote_session(
+    session_owner: &PrincipalRef,
+    has_remote_binding_provenance: bool,
+    principal: &PrincipalRef,
+) -> bool {
+    session_owner == principal && has_remote_binding_provenance
 }
 
 fn parse_session_id(value: &str) -> Result<AgentSessionId, CanonicalRemoteError> {
@@ -863,5 +901,29 @@ mod tests {
     fn observe_limit_zero_is_rejected_before_platform_access() {
         let error = validate_observe_limit(0).expect_err("zero observe limit must fail");
         assert_eq!(error.code, "REMOTE_INVALID_REQUEST");
+    }
+
+    #[test]
+    fn remote_session_requires_exact_owner_and_remote_provenance() {
+        let owner = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: "owner-a".to_owned(),
+        };
+        let other_owner = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: "owner-b".to_owned(),
+        };
+
+        assert!(is_owned_remote_session(&owner, true, &owner));
+        assert!(!is_owned_remote_session(&other_owner, true, &owner));
+        assert!(!is_owned_remote_session(&owner, false, &owner));
+    }
+
+    #[test]
+    fn remote_session_owner_mismatch_remains_non_enumerating() {
+        let error = remote_session_lookup_error(AgentPlatformError::Contract(
+            "AgentSession principal ownership check failed".to_owned(),
+        ));
+        assert_eq!(error.code, "REMOTE_SESSION_NOT_FOUND");
     }
 }
