@@ -41,7 +41,7 @@ import './styles/modal-contract.css';
 import { configService } from '@/common/config/configService';
 import { application } from '@/common/adapter/ipcBridge';
 import { isHandledAuthExpiredHttpError } from '@/common/adapter/httpBridge';
-import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
+import { initializeBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 configService.initialize().catch((err) => {
   console.error('Failed to initialize config:', err);
 });
@@ -123,7 +123,7 @@ const Main = () => {
     void Promise.all([
       application.systemInfo
         .invoke()
-        .then((info) => setBrowserStorageGeneration(info.storageGeneration))
+        .then((info) => initializeBrowserStorageGeneration(info.storageGeneration))
         .catch((err) => {
           console.error('Failed to initialize browser storage generation:', err);
           throw err;
