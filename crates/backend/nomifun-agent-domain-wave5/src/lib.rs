@@ -56,6 +56,7 @@ pub const AUTOWORK_SCHEDULER_PACKAGE_ID: &str = AUTOWORK_SCHEDULER_PACKAGE;
 pub const IDMM_PACKAGE_ID: &str = IDMM_PACKAGE;
 pub const REMOTE_INGRESS_PACKAGE_ID: &str = REMOTE_INGRESS_PACKAGE;
 pub const REQUIREMENTS_PACKAGE_ID: &str = REQUIREMENTS_PACKAGE;
+pub const REMOTE_INGRESS_MOUNT_ID: &str = "nomifun-remote-ingress";
 
 pub const AGENT_DELEGATE: &str = "agent.delegate";
 pub const AGENT_FORK: &str = "agent.fork";
@@ -697,7 +698,7 @@ pub fn registrations_with_host_port(
         )?,
         registration_for(
             REMOTE_INGRESS_PACKAGE,
-            "nomifun-remote-ingress",
+            REMOTE_INGRESS_MOUNT_ID,
             remote_capabilities(),
             remote_ports(),
             None,
@@ -745,7 +746,7 @@ pub fn idmm_registration() -> Result<PluginRegistration, String> {
 pub fn remote_ingress_registration() -> Result<PluginRegistration, String> {
     registration_for(
         REMOTE_INGRESS_PACKAGE,
-        "nomifun-remote-ingress",
+        REMOTE_INGRESS_MOUNT_ID,
         remote_capabilities(),
         remote_ports(),
         None,

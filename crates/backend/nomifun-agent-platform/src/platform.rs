@@ -21,8 +21,9 @@ use nomifun_agent_contracts::{
     RemoteBindingProvenance, ResolvedSnapshotEnvelope, ResolvedSnapshotRef,
     RuntimeBindingContract, RuntimeBindingId, RuntimeCancelParams, RuntimeCommand,
     RuntimeCommandContext, RuntimeCreateParams, RuntimeEventEnvelope, RuntimeEventWireAck,
-    RuntimeEventWireEnvelope, RuntimeProfileKind, RuntimeSessionDisposeParams, RuntimeStartTurnParams,
-    ScopeKey, SemanticSessionEventDraft, SessionEventAppend, SessionEventCursor, SessionEventKind,
+    RuntimeEventWireEnvelope, RuntimeProfileKind, RuntimeSessionDisposeParams,
+    RuntimeStartTurnParams, ScopeKey, SemanticSessionEventDraft, SessionEventAppend,
+    SessionEventCursor, SessionEventKind,
     SessionEventPayloadRef, StrictJsonValue, TypedResourceBindings, UserId, VersionString,
     canonical_json_bytes, digest_payload, resolve_exact_chat_route_record,
 };
@@ -3627,7 +3628,7 @@ impl AgentSessionCommandPort for AgentPlatform {
     async fn fork_session(
         &self,
         parent_session_id: &AgentSessionId,
-        request: ForkRequest,
+        mut request: ForkRequest,
     ) -> Result<ForkResult, AgentPlatformError> {
         let parent = self.sessions.get_live_session(parent_session_id).await?;
         if parent.owner_ref != request.child_owner_ref {
@@ -3635,15 +3636,22 @@ impl AgentSessionCommandPort for AgentPlatform {
                 "fork child owner differs from the parent Session owner".to_owned(),
             ));
         }
+        let parent_execution = self.execution_for(parent_session_id).await?;
         let compiled = self
             .compile_saved_binding(
                 &request.child_owner_ref,
                 &request.child_agent_binding,
-                "fork",
-                "desktop",
-                "owner",
+                parent_execution.compiled.envelope.scene.clone(),
+                parent_execution.compiled.envelope.surface.clone(),
+                parent_execution.compiled.envelope.audience.clone(),
             )
             .await?;
+        request.child_initial_active_capability_ids = compiled
+            .content()
+            .initial_capabilities
+            .iter()
+            .map(|capability| capability.capability.id.as_ref().to_owned())
+            .collect();
         let result = self.sessions.fork_session(parent_session_id, request).await?;
         self.executions.write().await.insert(
             result.child_session.agent_session_id.clone(),

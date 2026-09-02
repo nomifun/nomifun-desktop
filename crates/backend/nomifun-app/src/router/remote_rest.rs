@@ -2,8 +2,9 @@
 //!
 //! This adapter deliberately owns no Remote state. It authenticates the
 //! installation owner, converts the four wire DTOs, and delegates all
-//! persistence, ownership, idempotency, and runtime admission to
-//! `AgentPlatform`.
+//! persistence, ownership, idempotency, and runtime admission to the Remote
+//! package's manifest-declared AgentSession command/query ports. The concrete
+//! platform is retained only for RemoteBinding control-plane lookup.
 
 use std::sync::Arc;
 
@@ -20,8 +21,8 @@ use nomifun_agent_contracts::{
 };
 use nomifun_agent_control_plane::ControlPlaneError;
 use nomifun_agent_platform::{
-    AgentPlatform, AgentPlatformError, AgentSessionCommandPort, AgentSessionQueryPort,
-    OpenAgentSessionRequest, StartAgentTurnRequest,
+    AgentPlatform, AgentPlatformError, AgentSessionQueryPort,
+    CanonicalAgentSessionCommandPort, OpenAgentSessionRequest, StartAgentTurnRequest,
 };
 use nomifun_api_types::{
     ErrorResponse, RemoteCancelRequestDto, RemoteMutationResponseDto, RemoteObserveResponseDto,
@@ -45,6 +46,8 @@ use super::remote_runtime::RemoteRuntimeCoordinator;
 #[derive(Clone)]
 struct RemoteRestState {
     platform: Arc<AgentPlatform>,
+    session_command: Arc<dyn CanonicalAgentSessionCommandPort>,
+    session_query: Arc<dyn AgentSessionQueryPort>,
     runtime: Arc<RemoteRuntimeCoordinator>,
 }
 
@@ -205,12 +208,19 @@ impl From<AgentPlatformError> for RemoteHttpError {
 /// Build the four canonical Remote REST operations.
 pub fn build(
     platform: Arc<AgentPlatform>,
+    session_command: Arc<dyn CanonicalAgentSessionCommandPort>,
+    session_query: Arc<dyn AgentSessionQueryPort>,
     validator: Arc<nomifun_auth::InstanceTokenValidator>,
     authoritative_user_id: UserId,
     admission: Arc<RemoteAuthAdmissionFence>,
     runtime: Arc<RemoteRuntimeCoordinator>,
 ) -> Router {
-    let state = RemoteRestState { platform, runtime };
+    let state = RemoteRestState {
+        platform,
+        session_command,
+        session_query,
+        runtime,
+    };
     Router::new()
         .route("/api/remote/open", post(open))
         .route("/api/remote/turn", post(turn))
@@ -293,12 +303,15 @@ async fn open(
     open.audience = "owner".to_owned();
     open.initial_input = initial_input.map(StrictJsonValue);
 
-    let created = state.platform.open_session(open).await?;
+    let created = state.session_command.open_session(open).await?;
     let session_id = created.session.agent_session_id.clone();
     let principal = user_principal(&owner);
     let admission_error = state.runtime.ensure_started(session_id.clone()).await.err();
     let (status, last_seq) = if created.duplicate || admission_error.is_some() {
-        let head = state.platform.session_head(&principal, &session_id).await?;
+        let head = state
+            .session_query
+            .session_head(&principal, &session_id)
+            .await?;
         if let Some(error) = admission_error {
             if head.status == "opening" {
                 return Err(RemoteHttpError::canonical_with_details(
@@ -338,15 +351,15 @@ async fn turn(
     let idempotency_key = nonempty(&request.idempotency_key, "idempotency_key")?;
     let session_id = parse_session_id(&request.agent_session_id)?;
     let input = bounded_json(request.input, "input")?;
-    ensure_remote_session(&state.platform, &owner, &session_id).await?;
+    ensure_remote_session(state.session_query.as_ref(), &owner, &session_id).await?;
     let mut current_head = state
-        .platform
+        .session_query
         .session_head(&user_principal(&owner), &session_id)
         .await?;
     if current_head.status == "opening" {
         if let Err(error) = state.runtime.ensure_started(session_id.clone()).await {
             current_head = state
-                .platform
+                .session_query
                 .session_head(&user_principal(&owner), &session_id)
                 .await?;
             if current_head.status == "opening" {
@@ -354,7 +367,7 @@ async fn turn(
             }
         }
         current_head = state
-            .platform
+            .session_query
             .session_head(&user_principal(&owner), &session_id)
             .await?;
     }
@@ -373,7 +386,7 @@ async fn turn(
         ));
     }
     let dispatch = state
-        .platform
+        .session_command
         .start_turn(StartAgentTurnRequest {
             agent_session_id: session_id.clone(),
             principal: user_principal(&owner),
@@ -382,7 +395,7 @@ async fn turn(
         })
         .await?;
     let head = state
-        .platform
+        .session_query
         .session_head(&user_principal(&owner), &session_id)
         .await?;
     Ok(Json(RemoteMutationResponseDto {
@@ -399,15 +412,15 @@ async fn observe(
 ) -> Result<Json<RemoteObserveResponseDto>, RemoteHttpError> {
     validate_observe_limit(request.limit)?;
     let session_id = parse_session_id(&request.agent_session_id)?;
-    ensure_remote_session(&state.platform, &owner, &session_id).await?;
+    ensure_remote_session(state.session_query.as_ref(), &owner, &session_id).await?;
     let current_head = state
-        .platform
+        .session_query
         .session_head(&user_principal(&owner), &session_id)
         .await?;
     if current_head.status == "opening" {
         if let Err(error) = state.runtime.ensure_started(session_id.clone()).await {
             let latest_head = state
-                .platform
+                .session_query
                 .session_head(&user_principal(&owner), &session_id)
                 .await?;
             if latest_head.status == "opening" {
@@ -420,14 +433,11 @@ async fn observe(
         seq: request.after_seq,
     };
     let observation = state
-        .platform
-        .observe_from_cursor(
-            &contract_user_id(&owner),
-            session_id.as_ref(),
-            Some(SessionCursorDto {
-                agent_session_id: after.agent_session_id.as_ref().to_owned(),
-                seq: after.seq,
-            }),
+        .session_query
+        .observe_session(
+            &user_principal(&owner),
+            &session_id,
+            Some(&after),
             request.limit,
         )
         .await?;
@@ -456,20 +466,9 @@ async fn cancel(
 ) -> Result<Json<RemoteMutationResponseDto>, RemoteHttpError> {
     let idempotency_key = nonempty(&request.idempotency_key, "idempotency_key")?;
     let session_id = parse_session_id(&request.agent_session_id)?;
-    ensure_remote_session(&state.platform, &owner, &session_id).await?;
-    let current_head = state
-        .platform
-        .session_head(&user_principal(&owner), &session_id)
-        .await?;
-    if current_head.status != "running" || current_head.active_turn_id.is_none() {
-        return Err(RemoteHttpError::canonical(
-            "REMOTE_SESSION_BUSY",
-            StatusCode::CONFLICT,
-            "AgentSession has no cancellable active turn",
-        ));
-    }
+    ensure_remote_session(state.session_query.as_ref(), &owner, &session_id).await?;
     state
-        .platform
+        .session_command
         .cancel_remote_turn(
             &user_principal(&owner),
             &session_id,
@@ -477,7 +476,7 @@ async fn cancel(
         )
         .await?;
     let head = state
-        .platform
+        .session_query
         .session_head(&user_principal(&owner), &session_id)
         .await?;
     Ok(Json(RemoteMutationResponseDto {
@@ -488,17 +487,16 @@ async fn cancel(
 }
 
 async fn ensure_remote_session(
-    platform: &AgentPlatform,
+    session_query: &dyn AgentSessionQueryPort,
     owner: &UserId,
     session_id: &AgentSessionId,
 ) -> Result<(), RemoteHttpError> {
-    let session = platform
-        .session_store()
-        .get_live_session(session_id)
-        .await
-        .map_err(AgentPlatformError::from)?;
     let expected = user_principal(owner);
-    if session.owner_ref != expected || session.remote_binding_provenance.is_none() {
+    let observation = session_query
+        .observe_session(&expected, session_id, None, 1)
+        .await
+        .map_err(remote_session_lookup_error)?;
+    if observation.session.remote_binding_provenance.is_none() {
         return Err(RemoteHttpError::canonical(
             "REMOTE_SESSION_NOT_FOUND",
             StatusCode::NOT_FOUND,
@@ -506,6 +504,32 @@ async fn ensure_remote_session(
         ));
     }
     Ok(())
+}
+
+fn remote_session_lookup_error(error: AgentPlatformError) -> RemoteHttpError {
+    match &error {
+        AgentPlatformError::Session(session)
+            if session.code() == Some("SESSION_NOT_FOUND") =>
+        {
+            RemoteHttpError::canonical(
+                "REMOTE_SESSION_NOT_FOUND",
+                StatusCode::NOT_FOUND,
+                "AgentSession is not a Remote session owned by the authenticated installation",
+            )
+        }
+        AgentPlatformError::Contract(message)
+            if message
+                .to_ascii_lowercase()
+                .contains("ownership check") =>
+        {
+            RemoteHttpError::canonical(
+                "REMOTE_SESSION_NOT_FOUND",
+                StatusCode::NOT_FOUND,
+                "AgentSession is not a Remote session owned by the authenticated installation",
+            )
+        }
+        _ => error.into(),
+    }
 }
 
 fn open_state(status: &str) -> Result<RemoteOpenStateViewDto, RemoteHttpError> {
