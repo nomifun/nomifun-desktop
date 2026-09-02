@@ -60,7 +60,7 @@ describe('CreativeCanvasVideoComposer', () => {
     );
     expect(html.includes('data-canvas-video-composer="true"')).toBe(true);
     expect(html.includes('data-mode="t2v"')).toBe(true);
-    expect(html.includes('文生视频')).toBe(true);
+    expect(html.includes('文生视频')).toBe(false);
     expect(html.includes('视频创作提示词')).toBe(true);
     expect(html.includes('描述要生成的视频内容、动作与镜头')).toBe(true);
     expect(html.includes('打开视频提示词库')).toBe(true);
@@ -83,7 +83,7 @@ describe('CreativeCanvasVideoComposer', () => {
       />
     );
     expect(html.includes('data-mode="i2v"')).toBe(true);
-    expect(html.includes('图生视频·1张参考图')).toBe(true);
+    expect(html.includes('图生视频·1张参考图')).toBe(false);
     expect(html.includes('晨雾参考图.png')).toBe(true);
     expect(html.includes('reference.png')).toBe(true);
     expect(html.includes('描述参考图要如何运动、变化与运镜')).toBe(true);
@@ -213,7 +213,7 @@ describe('CreativeCanvasVideoComposer', () => {
     expect(shellCss.includes(":global([data-theme='dark']) .positioner")).toBe(true);
     expect(shellCss.includes('background: color-mix(in srgb, var(--color-bg-2)')).toBe(true);
     expect(shellCss.includes('background: rgb(var(--primary-6))')).toBe(true);
-    expect(shellCss.includes('height: 104px')).toBe(true);
+    expect(shellCss.includes('height: 92px')).toBe(true);
     expect(shellCss.includes('height: 30px')).toBe(true);
     expect(shellCss.includes(".positioner[data-placement='above']")).toBe(true);
     expect(shellCss.includes('--creative-canvas-composer-offset-x')).toBe(true);

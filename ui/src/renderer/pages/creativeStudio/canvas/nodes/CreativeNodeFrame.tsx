@@ -27,9 +27,7 @@ export interface CreativeNodeStatusLabels {
 
 export interface CreativeNodeFrameProps {
   node: CreativeCanvasNode;
-  icon: React.ReactNode;
   title: string;
-  subtitle?: string;
   children?: React.ReactNode;
   footer?: React.ReactNode;
   selected?: boolean;
@@ -81,9 +79,7 @@ const finiteOr = (value: number, fallback: number) => (Number.isFinite(value) ? 
 
 const CreativeNodeFrame: React.FC<CreativeNodeFrameProps> = ({
   node,
-  icon,
   title,
-  subtitle,
   children,
   footer,
   selected = false,
@@ -160,48 +156,43 @@ const CreativeNodeFrame: React.FC<CreativeNodeFrameProps> = ({
       {inputHandle ? <div className={styles.inputHandle}>{inputHandle}</div> : null}
       {outputHandle ? <div className={styles.outputHandle}>{outputHandle}</div> : null}
 
-      <header className={styles.header}>
-        <span className={styles.kindIcon} aria-hidden='true'>
-          {icon}
-        </span>
-        <span className={styles.titleBlock}>
-          <strong className={styles.title}>{title}</strong>
-          {subtitle ? <span className={styles.subtitle}>{subtitle}</span> : null}
-        </span>
-        {status !== 'idle' ? (
-          <span className={styles.status} data-status={status} title={runtime?.label ?? statusLabels[status]}>
-            <span className={styles.statusIcon} aria-hidden='true'>
-              {statusIcon(status)}
+      {status !== 'idle' || headerActions || onToggleLock || node.locked ? (
+        <header className={styles.header}>
+          {status !== 'idle' ? (
+            <span className={styles.status} data-status={status} title={runtime?.label ?? statusLabels[status]}>
+              <span className={styles.statusIcon} aria-hidden='true'>
+                {statusIcon(status)}
+              </span>
+              <span>{runtime?.label ?? statusLabels[status]}</span>
             </span>
-            <span>{runtime?.label ?? statusLabels[status]}</span>
-          </span>
-        ) : null}
-        {headerActions ? <div className={styles.actions}>{headerActions}</div> : null}
-        {onToggleLock ? (
-          <button
-            type='button'
-            className={styles.lockButton}
-            title={node.locked ? statusLabels.unlock : statusLabels.lock}
-            aria-label={node.locked ? statusLabels.unlock : statusLabels.lock}
-            aria-pressed={node.locked}
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onToggleLock();
-            }}
-          >
-            {node.locked ? (
-              <Lock theme='outline' size={14} fill='currentColor' strokeWidth={3} />
-            ) : (
-              <Unlock theme='outline' size={14} fill='currentColor' strokeWidth={3} />
-            )}
-          </button>
-        ) : node.locked ? (
-          <span className={styles.lockedIndicator} title={statusLabels.locked} aria-label={statusLabels.locked}>
-            <Lock theme='outline' size={13} fill='currentColor' strokeWidth={3} />
-          </span>
-        ) : null}
-      </header>
+          ) : null}
+          {headerActions ? <div className={styles.actions}>{headerActions}</div> : null}
+          {onToggleLock ? (
+            <button
+              type='button'
+              className={styles.lockButton}
+              title={node.locked ? statusLabels.unlock : statusLabels.lock}
+              aria-label={node.locked ? statusLabels.unlock : statusLabels.lock}
+              aria-pressed={node.locked}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleLock();
+              }}
+            >
+              {node.locked ? (
+                <Lock theme='outline' size={14} fill='currentColor' strokeWidth={3} />
+              ) : (
+                <Unlock theme='outline' size={14} fill='currentColor' strokeWidth={3} />
+              )}
+            </button>
+          ) : node.locked ? (
+            <span className={styles.lockedIndicator} title={statusLabels.locked} aria-label={statusLabels.locked}>
+              <Lock theme='outline' size={13} fill='currentColor' strokeWidth={3} />
+            </span>
+          ) : null}
+        </header>
+      ) : null}
 
       <div className={styles.body}>{children}</div>
 

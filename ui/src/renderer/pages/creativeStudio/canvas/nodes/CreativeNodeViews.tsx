@@ -6,11 +6,8 @@
 
 import {
   Camera,
-  Group,
-  MovieBoard,
   PanoramaHorizontal,
   Pic,
-  Text,
   VideoTwo,
   Voice,
 } from '@icon-park/react';
@@ -102,13 +99,7 @@ export const CreativeTextNode: React.FC<CreativeTextNodeProps> = ({
   return (
     <CreativeNodeFrame
       node={node}
-      icon={<Text theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={resolvedTitle}
-      subtitle={t(
-        node.data.format === 'markdown'
-          ? 'creativeStudio.canvas.nodes.text.formats.markdown'
-          : 'creativeStudio.canvas.nodes.text.formats.plainText'
-      )}
       {...sharedFrameProps(props)}
     >
       {editing && !node.locked ? (
@@ -196,9 +187,7 @@ export const CreativeImageNode: React.FC<CreativeImageNodeProps> = ({
   return (
     <CreativeNodeFrame
       node={node}
-      icon={<Pic theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={resolvedTitle}
-      subtitle={(asset?.label ?? node.data.caption) || undefined}
       footer={node.data.naturalSize ? `${node.data.naturalSize.width} × ${node.data.naturalSize.height}` : undefined}
       {...sharedFrameProps(props)}
     >
@@ -241,9 +230,7 @@ export const CreativeVideoNode: React.FC<CreativeVideoNodeProps> = ({
   return (
     <CreativeNodeFrame
       node={node}
-      icon={<VideoTwo theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={resolvedTitle}
-      subtitle={asset?.label}
       footer={resolved ? trimLabel : undefined}
       {...sharedFrameProps(props)}
     >
@@ -291,9 +278,7 @@ export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
   return (
     <CreativeNodeFrame
       node={node}
-      icon={<Voice theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={node.data.title || resolvedTitle}
-      subtitle={asset?.label}
       footer={resolved ? trimLabel : undefined}
       {...sharedFrameProps(props)}
     >
@@ -347,11 +332,7 @@ export const CreativePanoramaNode: React.FC<CreativePanoramaNodeProps> = ({
   return (
     <CreativeNodeFrame
       node={node}
-      icon={<PanoramaHorizontal theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={resolvedTitle}
-      subtitle={t('creativeStudio.canvas.nodes.panorama.fieldOfView', {
-        value: Math.round(node.data.fieldOfView),
-      })}
       footer={t('creativeStudio.canvas.nodes.panorama.orientation', {
         yaw: Math.round(node.data.yaw),
         pitch: Math.round(node.data.pitch),
@@ -403,9 +384,7 @@ export const CreativeDirectorNode: React.FC<CreativeDirectorNodeProps> = ({
   return (
     <CreativeNodeFrame
       node={node}
-      icon={<MovieBoard theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={resolvedTitle}
-      subtitle={node.data.sceneId ?? resolvedEmptyLabel}
       footer={`${formatMilliseconds(timeline)} / ${formatMilliseconds(duration)}`}
       {...sharedFrameProps(props)}
     >
@@ -449,13 +428,7 @@ export const CreativeGroupNode: React.FC<CreativeGroupNodeProps> = ({
   return (
     <CreativeNodeFrame
       node={node}
-      icon={<Group theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={node.data.title || resolvedTitleFallback}
-      subtitle={
-        node.data.collapsed
-          ? t('creativeStudio.canvas.nodes.group.collapsed')
-          : undefined
-      }
       variant='group'
       {...sharedFrameProps({ ...props, style: groupStyle })}
     >
