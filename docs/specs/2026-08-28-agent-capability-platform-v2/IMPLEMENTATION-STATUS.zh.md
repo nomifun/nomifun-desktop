@@ -1426,7 +1426,7 @@ Windows fault tests 证明：
 定向验证：
 
 - anchored filesystem tests：`3 passed`；
-- bound Knowledge tests：`3 passed`；
+- bound Knowledge tests：`4 passed`；
 - Kernel→Host Knowledge tests：`4 passed`；
 - Codex runtime release tests：`2 passed`；
 - macOS helper tests：`2 passed`；
@@ -1467,3 +1467,89 @@ cargo check --locked -p nomifun-knowledge -p nomifun-app -p nomifun-codex-runtim
 cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check
 bun run gate:agent-v2 -- c7-domain-waves
 ```
+
+## macOS arm64 Knowledge anchored filesystem 原生复验（2026-09-02）
+
+本轮从 Windows 已推送的
+`5d6918241115daa6fb875bb463847ee934f6c482` 开始；local/remote exact-equal，
+`git merge-base --is-ancestor 5d691824... HEAD` 退出 `0`，启动工作树 clean。
+原生环境为 Darwin 25.5.0 / arm64，`sysctl.proc_translated=0`，
+`rustc host=aarch64-apple-darwin`。
+
+首次执行 anchored filesystem tests 时出现 macOS 特有失败：
+
+- `tempfile` 暴露 `/var/folders/...` 路径；
+- macOS 的 `/var` 是固定系统别名，目标为 `/private/var`；
+- 原实现从 `/` 对每个词法 component 执行 `open_dir_nofollow`，因而在真正的
+  Knowledge root 之前错误拒绝了系统 `/var` 别名；
+- 结果为 `1 passed / 2 failed`，不是测试环境豁免。
+
+修复提交：
+
+- `efbcb598191e66f953b84b8f0dfeb128010d9695`
+  `fix(knowledge): accept macos system alias roots safely`
+
+修复范围只包含
+`crates/backend/nomifun-knowledge/src/service/anchored_fs.rs`：
+
+- macOS 仅对 `/var`、`/tmp`、`/etc`、`/home` 的固定系统别名做词法映射；
+- 映射后的每个 component 仍通过 `open_dir_nofollow` 打开；
+- 用户控制的中间 symlink 和最终 Knowledge root symlink 仍 fail-closed；
+- search/read 的 child directory 与最终 Markdown file 仍只相对于已打开
+  `Dir` handle 执行 no-follow open，没有恢复绝对路径 `File::open`；
+- `BoundKnowledgeReadService` 仍不复用旧 `safe_md_path`、`WalkDir` 或
+  pathname+mtime 正文缓存；每次调用建立新的 root capability。
+
+新增/原生闭合的 fault evidence：
+
+1. macOS `/var` 系统别名下的真实 root 可以建立 capability；
+2. linked Knowledge root、intermediate linked component、root 内 linked
+   directory 和 linked Markdown file 均被拒绝，search 不读取外部正文；
+3. Unix child handle 与 root handle 在 pathname rename/replacement 后仍读取原
+   directory object；
+4. entry/document/depth/per-file/total-byte limits 均返回 fail-closed error。
+
+最终定向验证：
+
+- anchored filesystem tests：`9 passed`；
+- bound Knowledge tests：`3 passed`；
+- Kernel→Host `wave1_knowledge` tests：`4 passed`；
+- `cargo check --locked -p nomifun-knowledge -p nomifun-app
+  -p nomifun-codex-runtime`：通过；
+- Agent v2 contract check、C7 domain-wave Gate：通过；
+- `bun run check:i18n`：`7082 keys / 33 modules`；
+- `bun run build:ui`：`7720 modules transformed`；
+- Agent Settings binding/navigation focused tests：`6 passed`；
+- bound root pathname replacement regression：替换 root 后重新 search/read
+  得到新目录对象内容，未复用旧正文；
+- `cargo fmt -p nomifun-knowledge -p nomifun-codex-runtime -- --check` 与
+  `git diff --check`：通过；
+- `Cargo.lock` 未变化，因此未运行 canonical contract `write`。
+
+桌面烟测执行了一次 `bun run dev`：完成 debug 编译并启动
+`target/debug/nomifun-desktop`，WindowServer 观察到一个 on-screen
+`nomifun-desktop` 窗口（1280x832），Vite dev surface 返回 HTTP 200，启动日志无
+panic；随后使用 Ctrl-C 正常结束，desktop/Vite/Tauri 进程和 5173 listener 均已
+清理。当前执行环境没有 macOS Accessibility/Screen Recording TCC 权限：
+`osascript` 返回辅助访问拒绝，ScreenCaptureKit 返回 `-3801`。因此不能把
+“窗口非空白”以及 Agent Presets 中的实际点击、KnowledgeBase 下拉选择和 Preview
+视觉结果记为人工 PASS。对应数据映射由 focused UI test 证明：
+
+- `resource_id = knowledge_base_id`；
+- `typed_parameters.knowledge_root = root_path`；
+- `typed_parameters.knowledge_name = name`；
+- canonical Agent Settings route 存在。
+
+macOS arm64 helper 只运行一次，最终状态为 FAIL（不是 C8-MA evidence）：
+
+- native Darwin arm64 / 非 Rosetta：pass；
+- app 仅包含 `arm64`，缺少 `x86_64` Universal slice；
+- 真实 arm64 sidecar 缺失，期望 SHA-256：
+  `7863db3a77545eec8966483f26fb5b493aea6e285ac35b5c29d0920342438060`；
+- 缺 endpoint/binding/token/provider/credential，未执行
+  `open -> ready -> initial turn -> observe -> cancel -> dispose`。
+
+本轮没有运行完整 `c8-ma` Gate，没有生成 synthetic
+`PlatformCellEvidence`，没有恢复 `knowledge.write` 原型，也没有放宽 Gate
+allowlist。当前只能声明 Knowledge search/read 的 macOS anchored filesystem
+定向行为通过；不能声明 C8-MA、HP-1 或发布完成。
