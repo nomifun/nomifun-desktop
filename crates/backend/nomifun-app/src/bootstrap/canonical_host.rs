@@ -1345,6 +1345,15 @@ mod tests {
 
     #[tokio::test]
     async fn canonical_remote_rest_freezes_binding_and_auth_fence() {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            canonical_remote_rest_freezes_binding_and_auth_fence_body(),
+        )
+        .await
+        .expect("canonical Remote REST integration exceeded its 60 second test deadline");
+    }
+
+    async fn canonical_remote_rest_freezes_binding_and_auth_fence_body() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
         use nomifun_agent_contracts::UserId as ContractUserId;
