@@ -20349,6 +20349,38 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn bound_knowledge_reopens_replaced_root_without_cross_call_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("knowledge");
+        let original = directory.path().join("knowledge-original");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.md"), "# Marker\nold").unwrap();
+
+        let kb_id = KnowledgeBaseId::new();
+        let base = bound_knowledge_base(kb_id.clone(), &root);
+        let service = BoundKnowledgeReadService::default();
+        let first = service.search(&base, "marker", 5).await.unwrap();
+        assert_eq!(first.len(), 1);
+        let handle = first[0].handle.clone();
+        assert_eq!(
+            service.read(&base, &handle).await.unwrap().content,
+            "# Marker\nold"
+        );
+
+        std::fs::rename(&root, &original).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.md"), "# Marker\nnew").unwrap();
+
+        let second = service.search(&base, "marker", 5).await.unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].handle, handle);
+        assert_eq!(
+            service.read(&base, &second[0].handle).await.unwrap().content,
+            "# Marker\nnew"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn bound_knowledge_read_rejects_symlink_escape() {
