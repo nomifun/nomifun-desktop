@@ -2676,6 +2676,7 @@ mod tests {
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
             resource_bindings: vec![binding],
+            system_role_provider_overrides: BTreeMap::new(),
             persona: "Wave 2 host test".to_owned(),
             instructions: "Invoke the selected capability.".to_owned(),
             context_policy: StrictJsonValue(json!({})),
@@ -2702,6 +2703,7 @@ mod tests {
                 required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
                 runtime_feature_inventory_digest: DigestHex::from("runtime"),
                 available_runtime_features: BTreeSet::new(),
+                installation_role_bindings: BTreeMap::new(),
                 canonical_schema_manifest_digest: DigestHex::from("schema"),
                 target_contribution_manifest_digest: DigestHex::from("target"),
                 host_target: RuntimeTarget::from("test-target"),
@@ -2768,6 +2770,7 @@ mod tests {
             registry_generation: 1,
             capability_id: CapabilityId::from("fs.write"),
             action_id: ActionId::from("fs.write.invoke"),
+            role_provider: None,
             state: test_state_handle(),
             resource_bindings: vec![TypedResourceBinding {
                 binding_id: ResourceBindingId::from("workspace-binding"),

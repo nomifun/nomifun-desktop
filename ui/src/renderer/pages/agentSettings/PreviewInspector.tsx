@@ -43,9 +43,7 @@ const PreviewInspector: React.FC<PreviewInspectorProps> = ({ preview, tokenState
     <div className={styles.previewStack}>
       <div className={styles.previewStatus}>
         <span
-          className={
-            preview.status === 'ready' ? styles.statusIconReady : styles.statusIconBlocked
-          }
+          className={preview.status === 'ready' ? styles.statusIconReady : styles.statusIconBlocked}
         >
           {preview.status === 'ready' ? (
             <CheckOne theme='filled' size='16' />
@@ -93,11 +91,8 @@ const PreviewInspector: React.FC<PreviewInspectorProps> = ({ preview, tokenState
         </div>
       )}
 
-      <Collapse defaultActiveKey={['diff']} className={styles.inspectorCollapse}>
-        <Collapse.Item
-          name='diff'
-          header={t('agentSettings.inspector.revisionDiff')}
-        >
+      <Collapse defaultActiveKey={[]} className={styles.inspectorCollapse}>
+        <Collapse.Item name='diff' header={t('agentSettings.inspector.revisionDiff')}>
           <div className={styles.diffGrid}>
             <div>
               <span>{t('agentSettings.capabilities.initial')}</span>
@@ -140,10 +135,7 @@ const PreviewInspector: React.FC<PreviewInspectorProps> = ({ preview, tokenState
           </div>
         </Collapse.Item>
 
-        <Collapse.Item
-          name='snapshot'
-          header={t('agentSettings.inspector.snapshot')}
-        >
+        <Collapse.Item name='snapshot' header={t('agentSettings.inspector.snapshot')}>
           <div className={styles.inspectorRows}>
             <div>
               <span>{t('agentSettings.inspector.snapshotDigest')}</span>
@@ -155,8 +147,7 @@ const PreviewInspector: React.FC<PreviewInspectorProps> = ({ preview, tokenState
             <div>
               <span>{t('agentSettings.inspector.runtimeProfile')}</span>
               <code>
-                {preview.inspector.runtime_profile ??
-                  t('agentSettings.common.unavailable')}
+                {preview.inspector.runtime_profile ?? t('agentSettings.common.unavailable')}
               </code>
             </div>
             <div>

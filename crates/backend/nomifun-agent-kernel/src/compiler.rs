@@ -2,10 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nomifun_agent_contracts::{
     ActionId, AgentPresetRevision, CapabilityId, CapabilityRef, CapabilitySelection,
-    CanonicalSchemaRef, CompactOnDemandCapabilityEntry, DigestHex, ModelRouteId,
-    OperationId, PlatformConstraint, PrecomputedActivationPlan, PrincipalRef, ResolvedCapability,
-    ResolvedMcpToolLock, ResolvedSkillLock, ResolvedSnapshotContent, ResolvedSnapshotEnvelope,
-    ResolvedSnapshotId, ResolvedSnapshotRef, ResourceBindingId, ResourceKind, RuntimeFeatureId,
+    CanonicalSchemaRef, CompactOnDemandCapabilityEntry, DigestHex, ExecutionRoleId,
+    InstallationRoleBinding, ModelRouteId, OperationId, PlatformConstraint,
+    PrecomputedActivationPlan, PrincipalRef, ResolvedCapability, ResolvedMcpToolLock,
+    ResolvedRoleProviderLock, ResolvedSkillLock, ResolvedSnapshotContent,
+    ResolvedSnapshotEnvelope, ResolvedSnapshotId, ResolvedSnapshotRef, ResourceBindingId,
+    ResourceKind, RoleProviderSelection, RuntimeFeatureId,
     RuntimeProfileKind, RuntimeTarget, SkillId, TypedResourceBinding, VersionString,
     digest_payload,
 };
@@ -24,6 +26,8 @@ pub struct CompilerEnvironment {
     pub required_runtime_profile: RuntimeProfileKind,
     pub runtime_feature_inventory_digest: DigestHex,
     pub available_runtime_features: BTreeSet<RuntimeFeatureId>,
+    pub installation_role_bindings:
+        BTreeMap<ExecutionRoleId, InstallationRoleBinding>,
     pub canonical_schema_manifest_digest: DigestHex,
     pub target_contribution_manifest_digest: DigestHex,
     pub host_target: RuntimeTarget,
@@ -83,11 +87,19 @@ impl CompiledSnapshot {
             .iter()
             .find(|binding| &binding.binding_id == binding_id)
     }
+
+    pub fn role_provider(
+        &self,
+        role_id: &ExecutionRoleId,
+    ) -> Option<&ResolvedRoleProviderLock> {
+        self.envelope.content.resolved_role_providers.get(role_id)
+    }
 }
 
 #[derive(Serialize)]
 struct CompiledRuntimeProfileDigestInput {
     profile_kind: RuntimeProfileKind,
+    required_runtime_features: BTreeSet<RuntimeFeatureId>,
     registry_digest: DigestHex,
     initial_capabilities: Vec<CapabilityId>,
     on_demand_capabilities: Vec<CapabilityId>,
@@ -95,6 +107,7 @@ struct CompiledRuntimeProfileDigestInput {
     authority_policies: BTreeMap<CapabilityId, CompiledCapabilityPolicy>,
     skill_ids: Vec<SkillId>,
     model_route_refs: BTreeMap<String, ModelRouteId>,
+    resolved_role_providers: BTreeMap<ExecutionRoleId, ResolvedRoleProviderLock>,
 }
 
 pub struct AgentPresetCompiler;
@@ -201,7 +214,15 @@ impl AgentPresetCompiler {
             &direct_ids,
         )?;
         let mcp_tool_locks = compile_mcp_locks(registry, &ceiling);
-        let required_runtime_features = ceiling
+        let resolved_role_providers = compile_role_provider_locks(
+            registry,
+            &request.revision.payload.system_role_provider_overrides,
+            &environment.installation_role_bindings,
+            &ceiling,
+            &bindings,
+            environment,
+        )?;
+        let capability_runtime_features = ceiling
             .iter()
             .flat_map(|capability_id| {
                 registry.capabilities[capability_id]
@@ -211,6 +232,13 @@ impl AgentPresetCompiler {
                     .map(|feature| feature.id.clone())
             })
             .collect::<BTreeSet<_>>();
+        let required_runtime_features = if environment.required_runtime_profile
+            == RuntimeProfileKind::CodingNative
+        {
+            environment.available_runtime_features.clone()
+        } else {
+            capability_runtime_features
+        };
         let mut typed_resource_bindings = bindings.into_values().collect::<Vec<_>>();
         typed_resource_bindings.sort_by(|left, right| {
             left.binding_id.cmp(&right.binding_id)
@@ -219,6 +247,7 @@ impl AgentPresetCompiler {
         let compiled_runtime_profile_digest =
             digest_payload(&CompiledRuntimeProfileDigestInput {
                 profile_kind: environment.required_runtime_profile,
+                required_runtime_features: required_runtime_features.clone(),
                 registry_digest: registry.registry_digest.clone(),
                 initial_capabilities: initial_ids.iter().cloned().collect(),
                 on_demand_capabilities: on_demand_ids.iter().cloned().collect(),
@@ -229,6 +258,7 @@ impl AgentPresetCompiler {
                     .map(|lock| lock.skill.id.clone())
                     .collect(),
                 model_route_refs: request.revision.payload.model_route_refs.clone(),
+                resolved_role_providers: resolved_role_providers.clone(),
             })
             .map_err(|error| KernelError::Digest {
                 reason: error.to_string(),
@@ -262,6 +292,7 @@ impl AgentPresetCompiler {
             capability_allowlist: ceiling,
             skill_locks,
             mcp_tool_locks,
+            resolved_role_providers,
             typed_resource_bindings,
             canonical_schema_manifest_digest: environment
                 .canonical_schema_manifest_digest
@@ -837,4 +868,138 @@ fn compile_mcp_locks(
             .cmp(&(&right.server_id, &right.canonical_tool_key))
     });
     locks
+}
+
+fn compile_role_provider_locks(
+    registry: &MaterializedRegistry,
+    overrides: &BTreeMap<ExecutionRoleId, RoleProviderSelection>,
+    installation_bindings: &BTreeMap<ExecutionRoleId, InstallationRoleBinding>,
+    ceiling: &BTreeSet<CapabilityId>,
+    bindings: &BTreeMap<ResourceBindingId, TypedResourceBinding>,
+    environment: &CompilerEnvironment,
+) -> Result<
+    BTreeMap<ExecutionRoleId, ResolvedRoleProviderLock>,
+    KernelError,
+> {
+    let required_roles = ceiling
+        .iter()
+        .filter_map(|capability_id| registry.role_for_capability(capability_id).cloned())
+        .collect::<BTreeSet<_>>();
+    let mut locks = BTreeMap::new();
+    for role_id in required_roles {
+        let contract = registry
+            .role_contract(&role_id)
+            .ok_or_else(|| KernelError::RoleProviderNotBound {
+                role_id: role_id.clone(),
+            })?;
+        let selection = overrides
+            .get(&role_id)
+            .or_else(|| {
+                installation_bindings
+                    .get(&role_id)
+                    .map(|binding| &binding.selection)
+            })
+            .ok_or_else(|| KernelError::RoleProviderNotBound {
+                role_id: role_id.clone(),
+            })?;
+        let mount_id = {
+            if selection.role.key != contract.manifest.key
+                || selection.role.contract_digest != contract.contract_digest
+            {
+                return Err(KernelError::RoleProviderUnavailable {
+                    role_id: role_id.clone(),
+                    mount_id: selection.provider_mount_id.clone(),
+                });
+            }
+            selection.provider_mount_id.clone()
+        };
+        let provider = registry
+            .role_provider(&contract.manifest.key.role_id, &mount_id)
+            .ok_or_else(|| KernelError::RoleProviderUnavailable {
+                role_id: contract.manifest.key.role_id.clone(),
+                mount_id: mount_id.clone(),
+            })?;
+        let selected_members = contract
+            .manifest
+            .members
+            .iter()
+            .filter(|member| ceiling.contains(&member.capability.id))
+            .map(|member| member.capability.id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut resource_binding_refs = BTreeSet::new();
+        for capability_id in &selected_members {
+            let member = provider
+                .contribution
+                .members
+                .get(capability_id)
+                .ok_or_else(|| KernelError::RoleProviderMemberUnavailable {
+                    role_id: role_id.clone(),
+                    capability_id: capability_id.clone(),
+                })?;
+            if !member.supported_platforms.is_empty()
+                && !member.supported_platforms.iter().any(|constraint| {
+                    provider_platform_supported(
+                        constraint,
+                        &environment.host_target,
+                        &environment.host_surface,
+                    )
+                })
+            {
+                return Err(KernelError::CapabilityUnavailableOnPlatform {
+                    capability_id: capability_id.clone(),
+                    target: environment.host_target.as_ref().to_owned(),
+                    surface: environment.host_surface.clone(),
+                });
+            }
+            for resource_kind in &member.required_resource_kinds {
+                let matching = bindings
+                    .values()
+                    .filter(|binding| &binding.resource_kind == resource_kind)
+                    .collect::<Vec<_>>();
+                if matching.is_empty() {
+                    return Err(KernelError::CapabilityResourceNotBound {
+                        capability_id: capability_id.clone(),
+                        resource_kind: resource_kind.as_ref().to_owned(),
+                    });
+                }
+                if matching.len() > 1 {
+                    return Err(KernelError::InvalidPresetRevision {
+                        reason: format!(
+                            "role {} has multiple bindings for resource kind {}",
+                            role_id.as_ref(),
+                            resource_kind.as_ref()
+                        ),
+                    });
+                }
+                resource_binding_refs.insert(matching[0].binding_id.clone());
+            }
+        }
+        locks.insert(
+            role_id.clone(),
+            ResolvedRoleProviderLock {
+                provider: provider.provider.clone(),
+                source: provider.source.clone(),
+                supported_members: provider.contribution.members.keys().cloned().collect(),
+                resource_binding_refs: resource_binding_refs.into_iter().collect(),
+            },
+        );
+    }
+    Ok(locks)
+}
+
+fn provider_platform_supported(
+    constraint: &PlatformConstraint,
+    target: &RuntimeTarget,
+    surface: &str,
+) -> bool {
+    match constraint {
+        PlatformConstraint::Any => true,
+        PlatformConstraint::Targets {
+            host_targets,
+            host_surfaces,
+        } => {
+            host_targets.contains(target)
+                && (host_surfaces.is_empty() || host_surfaces.contains(surface))
+        }
+    }
 }

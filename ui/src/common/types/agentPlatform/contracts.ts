@@ -114,6 +114,19 @@ export interface CapabilitySelection {
   config: unknown;
 }
 
+export interface ExactRoleContractRef {
+  key: {
+    role_id: string;
+    contract_version: string;
+  };
+  contract_digest: DigestHex;
+}
+
+export interface RoleProviderSelection {
+  role: ExactRoleContractRef;
+  provider_mount_id: string;
+}
+
 export interface AgentPresetDocument {
   schema_version: string;
   surfaces: string[];
@@ -123,6 +136,7 @@ export interface AgentPresetDocument {
   on_demand_capabilities: CapabilitySelection[];
   skill_bindings: ExactCatalogRef<'skill'>[];
   resource_bindings: TypedResourceBinding[];
+  system_role_provider_overrides: Record<string, RoleProviderSelection>;
   persona: string;
   instructions: string;
   context_policy: Record<string, unknown>;

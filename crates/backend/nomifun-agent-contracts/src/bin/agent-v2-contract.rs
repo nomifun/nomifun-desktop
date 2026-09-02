@@ -9,10 +9,8 @@ use nomifun_agent_contracts::{
     CodexRuntimeReleaseManifestPayload, CodingRuntimeFeatureInventoryPayload,
     ContractClosurePayload, ContractDigestLedgerPayload, D025FixtureContractReferencePayload,
     D025FixtureEnvelopeReference, D026OrderingOutcomeMatrix, D027TerminalSequenceMatrix,
-    D028PlatformMatrix, DeletionManifest, DigestHex, EvidenceInvalidationPlanMatrix,
-    EvidenceSummary, FRESH_V4_BASELINE_SQL, HandoffBundleMatrix, OfficialPresetKey,
-    OfficialPresetSeedManifestPayload, PackageManifest, PlatformCellEvidence,
-    PlatformHandoffBundle, PlatformValidationLedgerMatrix, PlatformValidationManifestPayload,
+    D028PlatformMatrix, DeletionManifest, DigestHex, FRESH_V4_BASELINE_SQL, OfficialPresetKey,
+    OfficialPresetSeedManifestPayload, PackageManifest, PlatformValidationManifestPayload,
     PluginRegistrationMetadata, RemoteBinding, ResolvedSnapshotContent, RuntimeCommand,
     RuntimeHelloPayload, SessionEventRegistryPayload, TargetPackageInventoryPayload, VersionString,
     FreshV4ParentOperationMarker, FreshV4ReadyMarker, FreshV4SchemaMetadata, digest_bytes,
@@ -154,12 +152,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     ))?;
     let platform_contract_digest = digest_payload(&schema_subset(
         &schemas,
-        &[
-            "platform_validation_manifest",
-            "platform_cell_evidence",
-            "platform_handoff_bundle",
-            "evidence_summary",
-        ],
+        &["platform_validation_manifest"],
     ))?;
 
     let coding_seed = seed
@@ -324,30 +317,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         ),
     ]);
 
-    let fixture_replacements = BTreeMap::from([
-        (
-            "b5987fa1c71d3a04ca6df2f4c216f418adc04ccc7495edc74d99085e35db9556"
-                .to_owned(),
-            d025_reference.fixture_envelope.digest.0.clone(),
-        ),
-    ]);
-    let fixture_paths = [
-        contracts.join("validation/evidence-summary.example.json"),
-        contracts.join("validation/handoff-bundles.matrix.json"),
-        contracts.join("validation/invalidation.matrix.json"),
-        contracts.join("validation/ledger-status.matrix.json"),
-        contracts.join("validation/platform-cell-evidence.example.json"),
-    ];
-    let normalized_fixtures = fixture_paths
-        .iter()
-        .map(|path| {
-            let mut value: Value = read_json(path)?;
-            replace_fixture_strings(&mut value, &fixture_replacements);
-            Ok((path.clone(), value))
-        })
-        .collect::<Result<BTreeMap<_, _>, Box<dyn Error>>>()?;
-    validate_post_run_fixtures(&normalized_fixtures)?;
-
     if mode == "write" {
         fs::create_dir_all(&generated)?;
         write_json(&seed_path, &seed)?;
@@ -356,9 +325,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         write_json(&d025_payload_path, &d025_payload)?;
         write_json(&d025_reference_path, &d025_reference)?;
         fs::write(&d025_envelope_path, &d025_envelope_contents)?;
-        for (path, value) in &normalized_fixtures {
-            write_json(path, value)?;
-        }
         for (name, contents) in &outputs {
             fs::write(generated.join(name), contents)?;
         }
@@ -375,9 +341,6 @@ fn run() -> Result<(), Box<dyn Error>> {
             )
             .into());
         }
-        for (path, value) in &normalized_fixtures {
-            check_json(path, value)?;
-        }
         for (name, contents) in &outputs {
             let path = generated.join(name);
             let existing = fs::read_to_string(&path)
@@ -393,29 +356,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
-}
-
-fn replace_fixture_strings(value: &mut Value, replacements: &BTreeMap<String, String>) {
-    match value {
-        Value::String(text) => {
-            for (source, replacement) in replacements {
-                if text.contains(source) {
-                    *text = text.replace(source, replacement);
-                }
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                replace_fixture_strings(value, replacements);
-            }
-        }
-        Value::Object(values) => {
-            for value in values.values_mut() {
-                replace_fixture_strings(value, replacements);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn normalize_runtime_fixture_digests(
@@ -460,47 +400,6 @@ fn normalize_runtime_fixture_digests(
 
 fn fixture_digest(label: &str) -> DigestHex {
     digest_bytes(format!("agent-v2-contract-fixture:{label}").as_bytes())
-}
-
-fn validate_post_run_fixtures(
-    fixtures: &BTreeMap<PathBuf, Value>,
-) -> Result<(), Box<dyn Error>> {
-    for (path, value) in fixtures {
-        let name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default();
-        match name {
-            "evidence-summary.example.json" => {
-                let summary: EvidenceSummary = serde_json::from_value(value.clone())?;
-                if !summary.is_merge_ready() {
-                    return Err("evidence summary fixture is not merge-ready".into());
-                }
-            }
-            "handoff-bundles.matrix.json" => {
-                let matrix: HandoffBundleMatrix = serde_json::from_value(value.clone())?;
-                for bundle in matrix.bundles {
-                    bundle.validate()?;
-                }
-            }
-            "invalidation.matrix.json" => {
-                let matrix: EvidenceInvalidationPlanMatrix =
-                    serde_json::from_value(value.clone())?;
-                for plan in matrix.plans {
-                    if plan.previous_tuple.changed_components(&plan.next_tuple)
-                        != plan.changed_components
-                    {
-                        return Err("invalidation matrix changed-component drift".into());
-                    }
-                }
-            }
-            "ledger-status.matrix.json" => {
-                let _: PlatformValidationLedgerMatrix = serde_json::from_value(value.clone())?;
-            }
-            "platform-cell-evidence.example.json" => {
-                let _: PlatformCellEvidence = serde_json::from_value(value.clone())?;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, Box<dyn Error>> {
@@ -633,9 +532,6 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
         &mut schemas,
         "platform_validation_manifest",
     )?;
-    add_schema::<PlatformCellEvidence>(&mut schemas, "platform_cell_evidence")?;
-    add_schema::<PlatformHandoffBundle>(&mut schemas, "platform_handoff_bundle")?;
-    add_schema::<EvidenceSummary>(&mut schemas, "evidence_summary")?;
     Ok(schemas)
 }
 

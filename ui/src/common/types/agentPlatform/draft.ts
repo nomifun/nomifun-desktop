@@ -41,6 +41,7 @@ export const createEmptyAgentPresetDocument = (): AgentPresetDocument => ({
   on_demand_capabilities: [],
   skill_bindings: [],
   resource_bindings: [],
+  system_role_provider_overrides: {},
   persona: '',
   instructions: '',
   context_policy: {

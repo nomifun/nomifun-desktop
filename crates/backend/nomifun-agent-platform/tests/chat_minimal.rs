@@ -361,6 +361,7 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
             .runtime_feature_inventory_digest
             .clone(),
         available_runtime_features: BTreeSet::new(),
+        installation_role_bindings: BTreeMap::new(),
         canonical_schema_manifest_digest: release_inputs
             .canonical_schema_manifest_digest
             .clone(),

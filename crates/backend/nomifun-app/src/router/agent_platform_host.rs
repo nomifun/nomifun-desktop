@@ -29,7 +29,7 @@ use nomifun_agent_kernel::{
     CompilerEnvironment, MaterializationPolicy, MAX_PLUGIN_STATE_BYTES,
     MAX_PLUGIN_STATE_KEY_BYTES,
 };
-use nomifun_agent_domain_wave2::Wave2HostPort;
+use nomifun_agent_domain_wave2::{Wave2HostPort, Wave2RoleHostPorts};
 use nomifun_agent_domain_wave3::Wave3HostPort;
 use nomifun_agent_domain_wave4::Wave4HostPort;
 use nomifun_agent_domain_wave5::Wave5HostPort;
@@ -49,6 +49,8 @@ use nomifun_v4_root::{
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
+#[cfg(feature = "computer-use")]
+use super::agent_role_host::RoleHostPortAdapter;
 use super::agent_wave2_host::Wave2ApplicationHost;
 use super::agent_wave4_host::Wave4ApplicationHost;
 use super::chat_broker_host::{
@@ -1157,7 +1159,7 @@ fn wave1_bound_knowledge_error(
 #[derive(Clone)]
 pub(crate) struct AgentDomainHostPorts {
     pub wave1: Arc<dyn Wave1HostPort>,
-    pub wave2: Arc<dyn Wave2HostPort>,
+    pub wave2_roles: Wave2RoleHostPorts,
     pub wave3: Arc<dyn Wave3HostPort>,
     pub wave4: Arc<dyn Wave4HostPort>,
     pub wave5: Arc<dyn Wave5HostPort>,
@@ -1165,9 +1167,27 @@ pub(crate) struct AgentDomainHostPorts {
 
 impl AgentDomainHostPorts {
     fn for_workspace_root(workspace_root: PathBuf) -> Self {
+        let wave2: Arc<dyn Wave2HostPort> =
+            Arc::new(Wave2ApplicationHost::for_workspace_root(workspace_root));
+        let mut wave2_roles = Wave2RoleHostPorts::with_actions(Arc::clone(&wave2));
+        wave2_roles.browser_actions = nomifun_agent_domain_wave2::unconfigured_host_port();
+        #[cfg(feature = "computer-use")]
+        {
+            let computer_invoker: Arc<super::agent_role_host::ComputerRoleInvoker> = Arc::new(
+                super::agent_role_host::ComputerRoleInvoker::new(Arc::new(
+                    nomi_computer::tool::ComputerTool::new(
+                        &nomi_config::config::ComputerConfig::default(),
+                    ),
+                )),
+            );
+            wave2_roles.computer_actions = Arc::new(RoleHostPortAdapter::new(
+                Arc::clone(&computer_invoker) as Arc<dyn super::agent_role_host::RoleHostInvoker>,
+            ));
+            wave2_roles.computer_contexts = computer_invoker;
+        }
         Self {
             wave1: Arc::new(Wave1ApplicationHost::default()),
-            wave2: Arc::new(Wave2ApplicationHost::for_workspace_root(workspace_root)),
+            wave2_roles,
             wave3: nomifun_agent_domain_wave3::unconfigured_host_port(),
             wave4: Arc::new(Wave4ApplicationHost),
             wave5: nomifun_agent_domain_wave5::unconfigured_host_port(),
@@ -1181,7 +1201,7 @@ impl AgentDomainHostPorts {
     ) -> Self {
         Self {
             wave1,
-            wave2,
+            wave2_roles: Wave2RoleHostPorts::with_actions(Arc::clone(&wave2)),
             wave3: nomifun_agent_domain_wave3::unconfigured_host_port(),
             wave4: Arc::new(Wave4ApplicationHost),
             wave5: nomifun_agent_domain_wave5::unconfigured_host_port(),
@@ -1358,6 +1378,7 @@ async fn initialize_platform(
         required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
         runtime_feature_inventory_digest: feature_digest.clone(),
         available_runtime_features: feature_inventory.runtime_features,
+        installation_role_bindings: BTreeMap::new(),
         canonical_schema_manifest_digest: expected_schema_digest.clone(),
         target_contribution_manifest_digest: seed.target_first_party_contribution_digest.clone(),
         host_target: current_runtime_target(),
@@ -1475,7 +1496,7 @@ fn bundled_registrations_with_host_ports(
         &mut registrations,
         "Wave 2",
         &nomifun_agent_domain_wave2::PACKAGE_IDS,
-        nomifun_agent_domain_wave2::registrations_with_host_port(host_ports.wave2),
+        nomifun_agent_domain_wave2::registrations_with_role_host_ports(host_ports.wave2_roles),
     )?;
     append_wave_registrations(
         &mut registrations,
@@ -2165,6 +2186,7 @@ mod tests {
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
             resource_bindings: vec![binding.clone()],
+            system_role_provider_overrides: BTreeMap::new(),
             persona: format!("Wave 1 {fixture_name} test"),
             instructions: format!("Exercise the Wave 1 {fixture_name} owner."),
             context_policy: StrictJsonValue(serde_json::json!({})),
@@ -2193,6 +2215,7 @@ mod tests {
                 required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
                 runtime_feature_inventory_digest: DigestHex::from("runtime"),
                 available_runtime_features: BTreeSet::new(),
+                installation_role_bindings: BTreeMap::new(),
                 canonical_schema_manifest_digest: DigestHex::from("schema"),
                 target_contribution_manifest_digest: DigestHex::from("target"),
                 host_target: RuntimeTarget::from("test-target"),
@@ -2445,7 +2468,10 @@ mod tests {
                         .len()
                 })
                 .sum::<usize>(),
-            137
+            target_specs
+                .iter()
+                .map(|spec| spec.capabilities.len())
+                .sum::<usize>()
         );
     }
 
@@ -2554,8 +2580,9 @@ mod tests {
 
         let registry = platform.materialized_registry().unwrap();
         assert_eq!(registry.generation, 1);
-        let expected_product_packages = nomifun_agent_domain_support::c7_package_specs()
-            .into_iter()
+        let target_specs = nomifun_agent_domain_support::c7_package_specs();
+        let expected_product_packages = target_specs
+            .iter()
             .map(|spec| spec.id.to_owned())
             .collect::<BTreeSet<_>>();
         assert_eq!(
@@ -2579,7 +2606,15 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             expected_product_packages
         );
-        assert_eq!(registry.capabilities.len(), 137);
+        let expected_capabilities = target_specs
+            .iter()
+            .flat_map(|spec| spec.capabilities.iter())
+            .map(|capability| CapabilityId::from(capability.id))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            registry.capabilities.keys().cloned().collect::<BTreeSet<_>>(),
+            expected_capabilities
+        );
         let package_rows: Vec<String> = sqlx::query_scalar(
             "SELECT package_id FROM plugin_packages \
              WHERE package_version = ? ORDER BY package_id",

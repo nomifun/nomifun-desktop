@@ -1085,6 +1085,8 @@ fn registration_for(
             capabilities,
             skills: Vec::new(),
             mcp_tools: Vec::new(),
+            role_contracts: Vec::new(),
+            role_providers: Vec::new(),
         },
     };
     let metadata = PluginRegistrationMetadata {
@@ -1110,6 +1112,7 @@ fn registration_for(
                 .collect(),
             declared_skill_ids: BTreeSet::<SkillId>::new(),
             declared_mcp_tool_keys: BTreeSet::new(),
+            declared_role_ids: BTreeSet::new(),
             declared_service_keys: BTreeSet::new(),
             declared_host_ports,
         },

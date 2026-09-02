@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { projectionCard } from './model';
 
 describe('AgentSession projection cards', () => {
-  test('renders canonical message content without a legacy chat-container fallback', () => {
+  test('renders canonical message content without a legacy events projection', () => {
     const card = projectionCard({
       session_id: 'session' as never,
       projection_id: 'message:m1',
@@ -16,11 +16,39 @@ describe('AgentSession projection cards', () => {
         presentation_intent: 'message',
         state: 'completed',
         content: 'hello',
-        events: [{ seq: 3, kind: 'message/content-part', kind_version: 1, payload: null }],
-      },
+      } as never,
     });
     expect(card.kind).toBe('message');
+    expect(card.role).toBe('assistant');
     expect(card.content).toBe('hello');
+  });
+
+  test('uses the bounded tool summary when the projection has no events', () => {
+    const card = projectionCard({
+      session_id: 'session' as never,
+      projection_id: 'tool:t1',
+      first_seq: 5,
+      last_seq: 6,
+      presentation_intent: 'tool',
+      semantic_digest: 'digest',
+      projection: {
+        projection_id: 'tool:t1',
+        correlation_id: 't1',
+        presentation_intent: 'tool',
+        state: 'recorded',
+        tool_summary: {
+          action_id: 'files.read',
+          result_state: 'recorded',
+          result_digest: 'digest',
+        },
+      } as never,
+    });
+    expect(card.title).toBe('files.read');
+    expect(card.details).toEqual({
+      action_id: 'files.read',
+      result_state: 'recorded',
+      result_digest: 'digest',
+    });
   });
 
   test('keeps uncertain effects explicit', () => {
@@ -36,10 +64,36 @@ describe('AgentSession projection cards', () => {
         correlation_id: 'e1',
         presentation_intent: 'effect',
         state: 'uncertain',
-        events: [{ seq: 8, kind: 'effect/uncertain', kind_version: 1, payload: null }],
-      },
+        terminal_effect: { effect: 'workspace.write', state: 'uncertain' },
+      } as never,
     });
     expect(card.kind).toBe('effect');
     expect(card.state).toBe('uncertain');
+    expect(card.title).toBe('workspace.write');
+  });
+
+  test('reads legacy events only as a compatibility fallback', () => {
+    const card = projectionCard({
+      session_id: 'session' as never,
+      projection_id: 'message:legacy',
+      first_seq: 2,
+      last_seq: 3,
+      presentation_intent: 'message',
+      semantic_digest: 'digest',
+      projection: {
+        projection_id: 'message:legacy',
+        correlation_id: 'legacy',
+        presentation_intent: 'message',
+        state: 'streaming',
+        events: [
+          {
+            kind: 'message/user-accepted',
+            payload: { content: 'hello' },
+          },
+        ],
+      } as never,
+    });
+    expect(card.role).toBe('user');
+    expect(card.content).toBe('hello');
   });
 });

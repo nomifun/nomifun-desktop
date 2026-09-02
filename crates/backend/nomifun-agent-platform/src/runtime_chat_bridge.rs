@@ -17,7 +17,7 @@ use nomifun_agent_contracts::{
     OperationId, RuntimeBindingContract, RuntimeBindingId, RuntimeCommand,
     RuntimeSessionDisposeParams, RuntimeStartTurnParams, SemanticSessionEventDraft,
     SessionEventAppend, SessionEventKind, SessionEventPayloadRef, SessionEventRecord,
-    StrictJsonValue,
+    StrictJsonValue, canonical_json_bytes,
 };
 use nomifun_agent_session::{AgentSessionStore, ChatCausalityFacts, SessionStoreError};
 use nomifun_chat_model_broker::{
@@ -37,6 +37,7 @@ use tokio::sync::Mutex;
 use crate::platform::CodexRuntimePort;
 
 const RUNTIME_SUPERVISOR: &str = "runtime_supervisor";
+const MAX_CONTEXT_INSTRUCTION_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Error)]
 pub enum RuntimeChatBridgeError {
@@ -381,6 +382,7 @@ impl RuntimeStartTurnBrokerBridge {
                 "active turn carries more than one model route identity",
             ));
         }
+        let instructions = context_instructions(turn_payload)?;
 
         Ok(AdmittedTurn {
             session_id: context.agent_session_id.clone(),
@@ -388,6 +390,7 @@ impl RuntimeStartTurnBrokerBridge {
             turn_event_id: turn_event.event_id.clone(),
             route_identity,
             input_text,
+            instructions,
         })
     }
 
@@ -600,6 +603,7 @@ struct AdmittedTurn {
     turn_event_id: EventId,
     route_identity: ChatRouteIdentity,
     input_text: String,
+    instructions: Vec<String>,
 }
 
 struct ProjectionState {
@@ -636,6 +640,55 @@ fn model_operation_id(turn_operation_id: &OperationId) -> OperationId {
     OperationId::from(format!("runtime-chat:model:{}", turn_operation_id.as_ref()))
 }
 
+fn context_instructions(payload: &Value) -> Result<Vec<String>, RuntimeChatBridgeError> {
+    let Some(raw) = payload.get("context_contributions") else {
+        return Ok(Vec::new());
+    };
+    let entries = raw.as_array().ok_or(RuntimeChatBridgeError::Admission(
+        "turn context contributions are not an array",
+    ))?;
+    let mut total = 0usize;
+    let mut instructions = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let object = entry.as_object().ok_or(RuntimeChatBridgeError::Admission(
+            "turn context contribution is not an object",
+        ))?;
+        let capability_id = object
+            .get("capability_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(RuntimeChatBridgeError::Admission(
+                "turn context contribution has no capability identity",
+            ))?;
+        let value = object
+            .get("value")
+            .ok_or(RuntimeChatBridgeError::Admission(
+                "turn context contribution has no value",
+            ))?;
+        let bytes = canonical_json_bytes(value).map_err(|_| {
+            RuntimeChatBridgeError::Admission(
+                "turn context contribution could not be canonically encoded",
+            )
+        })?;
+        let instruction = format!(
+            "Canonical context contribution from {capability_id}: {}",
+            String::from_utf8(bytes).map_err(|_| {
+                RuntimeChatBridgeError::Admission(
+                    "turn context contribution is not valid UTF-8 JSON",
+                )
+            })?
+        );
+        total = total.saturating_add(instruction.len());
+        if total > MAX_CONTEXT_INSTRUCTION_BYTES {
+            return Err(RuntimeChatBridgeError::Admission(
+                "turn context contributions exceed the model context limit",
+            ));
+        }
+        instructions.push(instruction);
+    }
+    Ok(instructions)
+}
+
 fn responses_request(params: &RuntimeStartTurnParams, admitted: &AdmittedTurn) -> ResponsesBridgeRequest {
     ResponsesBridgeRequest {
         bridge_version: nomifun_agent_contracts::VersionString::from(
@@ -651,7 +704,7 @@ fn responses_request(params: &RuntimeStartTurnParams, admitted: &AdmittedTurn) -
         },
         model_route_id: admitted.route_identity.route_id.clone(),
         model_route_revision: admitted.route_identity.route_revision,
-        instructions: Vec::new(),
+        instructions: admitted.instructions.clone(),
         input: vec![ResponsesInputItem::Message {
             role: nomifun_chat_model_broker::ResponsesRole::User,
             content: vec![ResponsesInputContent::InputText {

@@ -1,13 +1,13 @@
 # NomiFun 一期止损修订：简化重构与可替换系统能力基础
 
-> 状态：**USER-CONFIRMED PHASE 1 STOP-LOSS DIRECTIVE / 立即执行 / 尚未完成代码实施**
+> 状态：**CURRENT USER-CONFIRMED PHASE 1 ARCHITECTURE DIRECTIVE**
 >
 > 发布日期：2026-09-02
 >
 > 审计基线：`f6e05d617e09eb71ebb11fababde46bb65039651`
 >
-> 适用范围：正在进行的 Agent Capability Platform v2 一期重构，包括当前主机的多并发
-> 集成主线、后续 Browser/Computer、Sidecar 与原生平台验证任务。
+> 适用范围：正在进行的 Agent Capability Platform v2 一期重构，包括当前主机的互斥写集
+> 多并发集成主线、后续 Browser/Computer、Sidecar 与外部原生平台验证。
 >
 > 明确排除：二期 `06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md` 继续保持本地未提交，不得随本文发布、引用为一期合同或带入实施分支。
 
@@ -19,24 +19,24 @@
 
 - Thin Kernel、统一 Plugin/Capability 主链、单一 AgentSession、Codex-derived Runtime 和 clean v4 等总目标继续有效；
 - 本文明确列出的 Gate、Evidence、生命周期、Compiler、Snapshot、Effect、文件边界、产品 UI 与平台矩阵改用本文的新策略；
-- 01～04 与 `DECISIONS` 保留为核心设计依据，并按本文删除或改写其中已经判定错误的条款；不得因局部设计被止损而整体删除这些文档。旧 `IMPLEMENTATION-STATUS`、旧 `START-PROMPT` 和过期 handoff 只保留在 Git 历史；当前状态只由 `GLOBAL-CLOSURE-TODO.zh.md` 记录；
+- 01～04 与 `DECISIONS` 保留为核心设计依据，并按本文删除或改写其中已经判定错误的条款；不得因局部设计被止损而整体删除这些文档。旧 `IMPLEMENTATION-STATUS`、旧 `START-PROMPT` 和过期 handoff 只保留在 Git 历史，且仅用于说明已撤销方案；当前状态只由 `GLOBAL-CLOSURE-TODO.zh.md` 记录；
 - `GLOBAL-CLOSURE-TODO` 的 84 个工作包不再是一期必须逐个关闭的阻断清单；只把其中仍属于本文最小交付的项目迁入新的收口清单；
 - 已生成的 Manifest、fixture、digest 或结构测试不能因为自身存在而阻止删除；证明系统不具有高于产品系统的优先级；
 - 实施只采用普通 commit/revert/merge，不使用 reset、force-push 或历史重写；回滚前先检查下游消费，保留真实用户功能和无争议的基础正确性。
 
 本文中的伪代码和字段名是设计输入。实施后仍以 canonical Rust、SQL、API schema 和行为测试为机器事实；不得复制第二套文档结构并要求逐字段长期同步。
 
-施工机器的最短阅读路径：先读第一部分 §0、§1、§3、§10、§12、§14，立即停止错误方向；随后完整读取第二部分，按保留的一期 Role/Provider 合同实施 Browser/Computer。产品与架构复核应阅读全文。
+当前主机的最短阅读路径：先读第一部分 §0、§1、§3、§10、§12、§14，立即停止错误方向；随后完整读取第二部分，按保留的一期 Role/Provider 合同实施 Browser/Computer。产品与架构复核应阅读全文。
 
-## 1. 所有正在施工的 writer 先做什么
+## 1. 当前主机所有并发 lane 先做什么
 
-读取本文后，先保存当前工作，不丢弃未提交内容，然后按下列边界重新领取任务。
+读取本文后，先保存当前工作，不丢弃未提交内容，然后按下列边界重新校准任务。
 
 ### 1.1 立即暂停
 
 以下方向在完成本文对应简化前不得继续扩张：
 
-1. C8/C10 Evidence、四元 cohort tuple、handoff、recheck、digest envelope 和 residual 分类系统；
+1. 已废弃的 C8/C10 Evidence、四元 cohort tuple、跨机 handoff、recheck、digest envelope 和 residual 分类系统；
 2. D-027 在线 canary drain、祖先 deadline、durable handoff 和多维 exact-zero proof；
 3. 为所有本地写入统一增加 `started/succeeded/failed/uncertain/reconciled`、receipt、outbox 和 replay matrix；
 4. 为防御同权限恶意本地进程而继续扩张逐组件 no-follow、系统目录别名和 TOCTOU 证明；
@@ -45,7 +45,7 @@
 7. 读取 JSX/Rust 源码字符串并锁死组件、方法名、固定 Capability 数量的结构测试；
 8. Codex fork 新 patch，直至 §3.4 的最小 Sidecar 协议重新确认；
 9. Browser/Computer 具体 owner 的中央接线，直至 §7 的 Role seam 先落地；
-10. 为并发 writer 预建跨任务的通用 uncertain receipt、中央 Effect journal 和旧 API
+10. 为并发 lane 预建跨任务的通用 uncertain receipt、中央 Effect journal 和旧 API
     长期兼容层。
 
 ### 1.2 可以继续
@@ -134,17 +134,24 @@ Post-run release lock/platform result 属于外部或发布附件证据，不写
 
 ### 3.4 重开 Codex Sidecar 最小协议
 
-当前计划依赖仓库外尚不存在的 `runtime/hello`、`native_action/start`、`runtime/session/dispose` patch source，导致真实 Sidecar 成为整个一期的外部硬阻塞。
+此前计划依赖仓库外尚不存在的 `runtime/hello`、`native_action/start`、
+`runtime/session/dispose` patch source，导致真实 Sidecar 成为整个一期的外部硬阻塞。
 
-立即停止继续围绕缺失 patch 扩大 Host contract，先验证最小方案：
+official app-server pinned source spike 已确认可直接采用：
 
-1. 优先复用官方 Codex app-server 已有 initialize/version、thread/turn、cancel 和 event 协议；
-2. 一个 Runtime binding 当前独占一个受管进程，正常结束可先关闭协议，再由 Host 终止整棵进程树；如果没有真实资源必须在进程内复用，不要求自定义 `session_dispose` ACK；
-3. Host-managed Tool 的请求到达 Host 时，先写必要的外部 Effect reservation，再执行并返回结果，不再额外发送一次 `native_action/start`；
-4. 只有 Codex-native file/shell action 确实无法用现有 upstream callback/Tool seam 获得最小调用前通知时，才保留一个窄 patch；
-5. hello 只校验协议 major、build identity 和支持的必要 feature，不携带整个产品/平台合同镜像。
+1. `initialize` request 后发送 `initialized` notification；
+2. `thread/start`、`thread/resume`、`thread/fork`；
+3. `turn/start`、`turn/steer`、`turn/interrupt`，取消终态以随后到达的
+   `turn/completed(status=interrupted)` 为准；
+4. `item/tool/call` Host-managed dynamic Tool callback；
+5. stdin EOF、bounded wait 与 Host whole-process-tree cleanup。
 
-完成一个真实 upstream spike 后再确定是否保留浅 fork。不得因为已写 Host adapter 就假设三项自定义 RPC 都必须存在。
+pinned schema 没有独立 `version` RPC，也没有上述三个历史自定义 RPC。一个 Runtime binding
+可以先独占一个受管进程；Host-managed Tool 在执行真实外部 Effect 前写最小 reservation，
+不额外复制一套调用前 RPC。静态 source review 与 fake transport harness 已冻结协议方向，
+但 exact pinned binary、隔离 live credential、真实 turn/interrupt/Tool 顺序和 Windows
+process-tree cleanup 仍必须实际验证，不能由 harness 结果冒充 PASS。只有 live 证据表明
+upstream 缺少必要 pre-effect seam 时，才提出一个窄 patch。
 
 ## 4. 生命周期与数据正确性的止损
 
@@ -301,8 +308,9 @@ Manifest 是声明事实源，Registration builder 从实际 handlers/services �
 
 ### 6.2 单机多并发中的 SSH slice
 
-SSH owner 作为当前主机的一个独立写集推进，与 Session/Effect、Compiler 和 Sidecar
-writer 并行；它不再需要第二台机器或专用交接文件。SSH slice 保留：
+SSH owner 是当前主机中的独立写集，可与不重叠的 Session/Effect、Compiler 和 Sidecar
+lane 并行。它只通过当前工作树和集成 Owner 收口，不建立第二台开发机或专用交接文件。
+SSH slice 保留：
 
 - 真实 SSH connection/host binding；
 - read/write/exec/sudo 最小 typed command/outcome；
@@ -320,8 +328,8 @@ writer 并行；它不再需要第二台机器或专用交接文件。SSH slice 
 - 为即将删除的旧 API 设计长期兼容层；
 - 无真实 SSH 环境时构造大规模模拟证明。
 
-当前主机的 writer 写集和回传格式以 `GLOBAL-CLOSURE-TODO.zh.md` 及本节为准。若某项
-只有一个很小写集，仍由主机串行排期，不创建额外机器或长期交接材料。
+当前主机的 lane 写集、依赖和状态以 `GLOBAL-CLOSURE-TODO.zh.md` 及本节为准。若某项
+只有一个很小写集，仍由主机串行排期；所有开发、修复和 merge 都留在当前主机。
 
 ## 7. Browser/Computer 可替换能力不得在止损中缩水
 
@@ -425,7 +433,7 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 ### 9.4 测试执行
 
 - dirty worktree 可以运行完整 verify，但结果只是诊断；
-- 只有 release attestation 要求 clean commit 和真实 Artifact；
+- 只有正式 release evidence 要求 clean commit 和真实 Artifact；
 - Cargo 默认并行，只有共享 DB、固定端口和进程树测试单独串行；
 - 每个可能挂起的 E2E 有自身 deadline；
 - 全仓 broad test 只在主要合流和最终 RC 执行；
@@ -459,7 +467,7 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 - 不回滚包含真实用户功能的整批提交，只因其中部分设计复杂；
 - 不通过兼容 alias 保留被删除合同；
 - 不把 06 加入任何 commit；
-- 不在未审查的临时 writer 分支之间盲目 merge；主机按写集审查后再普通合流。
+- 不在未审查的本机临时 lane/worktree 之间盲目 merge；主机按写集审查后再普通合流。
 
 ## 11. Release-required 产品闭环
 
@@ -497,8 +505,9 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 
 - 提交并推送本文、经本文修订的 01～04/`DECISIONS`、README 和 GLOBAL TODO；
 - 二期 06 仍保持本地未提交，不得随一期核心设计发布；
-- 所有本机 writer 在新 checkpoint 后重新读取本文与 GLOBAL TODO；
-- 旧跨机 Prompt 或历史分配冲突部分停止执行。
+- 所有本机 lane 在新 checkpoint 后重新读取本文与 GLOBAL TODO；
+- 旧跨机 Prompt、manifest、result template、远端 SHA 和历史分配只作已废弃记录，
+  不再形成执行入口。
 
 ### S1：Revert/keep 审计
 
@@ -543,7 +552,7 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 - 不可闭合 Gate 和 Remote hang 已修复；
 - 两个 revert 候选已有明确 keep/revert 结果；
 - 84 项旧 TODO 已缩减为 release-required 清单；
-- 旧机器 Prompt 不再驱动新复杂度；
+- 旧跨机执行材料只存在于 Git 历史，不再驱动新复杂度；
 - 06 未发布。
 
 ### 13.2 一期功能完成
@@ -568,14 +577,14 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 - 不包含 Nomi Runtime/fallback；
 - macOS x64/Linux Headless 未交付时在产品和发布说明中明确，不伪装支持。
 
-## 14. 给正在重构机器的最终指令
+## 14. 当前主机执行指令
 
 1. 拉取包含本文的最新 `rf/agent-capability-platform-v2`；
 2. 不再按照 84 项 GLOBAL TODO 顺序继续施工；
 3. 保存当前 WIP，先执行 S1 Revert/keep 审计；
 4. 立即处理 P0，再完成单 Compiler/小 Snapshot/Effect 分级；
 5. Browser/Computer 先做 Role seam，再做具体 owner；
-6. SSH、Session/Effect 和 Sidecar writer 按 §6.2 及 GLOBAL TODO 的本机写集推进；
+6. SSH、Session/Effect 和 Sidecar lane 按 §6.2 及 GLOBAL TODO 的本机互斥写集推进；
 7. 不等待五格两轮 Gate，不为未交付平台生成 synthetic evidence；
 8. 不读取、提交或实现本地 06；
 9. 每个提交说明它删除了什么旧复杂度，不能只增加新 abstraction；
@@ -1251,18 +1260,21 @@ P1-R2/C8 的 residual-zero 只针对新的 v4/Codex、Knowledge、Gateway 和 st
 9. 把 Skill 当成可执行 Provider，或让 Skill 自动扩张 Snapshot；
 10. 因为未来可能支持更多 Role，提前建设通用 Hook/Graph/Policy Engine。
 
-### 11. 对一期进度和远程开发的影响
+### 11. 对一期进度和单机实施的影响
 
-当前一期处于 C8-WIN-PRE，正式全量证据尚未闭合，Browser/Computer 真实 owner 仍为 typed unavailable。本变更会修改 canonical contract、Snapshot、Materializer 和 Browser/Computer 接线，因此不能作为 C8 之后的小补丁混入：
+本变更涉及 canonical contract、Snapshot、Materializer 和 Browser/Computer 接线，必须由
+当前主机的单一集成 Owner 按中央写集串行合流，不能作为无审查的小补丁混入：
 
 - 应先完成本文验收；
 - 再把 05 作为独立 Phase 1 amendment 提交；
-- 远程 Windows 实施任务在冻结最终 candidate 前完整接收该提交；
-- 一次完成 P1-R0～P1-R3，并重新生成受影响合同和 Gate tuple；
-- 完成 clean Windows checkpoint 后，再按原计划进入 macOS arm64；
+- 当前主机一次完成 P1-R0～P1-R3，并重新生成受影响合同和必要 Gate 输入；
+- 完成 clean Windows checkpoint 后，冻结候选供 macOS arm64 与 Linux Desktop x64
+  外部原生验证；
 - 不把未提交的二期 06 带入一期实施分支或提交。
 
-如果远程任务已经开始直接接线 Browser/Computer，应暂停该局部接线并按本文重新划分依赖；不在现有直连上继续叠加 Provider Adapter。
+外部原生环境只验证冻结候选，不领取开发任务、不编辑代码或 merge 分支。发现问题时返回
+实际命令、原始日志和结果，由当前主机修复并生成新候选；不建立机器专用 Prompt、
+handoff、manifest、result template、远端 SHA 清单或跨机 attestation。
 
 ### 12. 完成定义
 
@@ -1271,7 +1283,7 @@ P1-R2/C8 的 residual-zero 只针对新的 v4/Codex、Knowledge、Gateway 和 st
 - 用户已经确认本文方案和一期/二期边界；
 - 05 单独进入版本控制；
 - 不修改或提交 06；
-- 远程实施 Prompt 明确从 05 开始，不从聊天摘要猜测合同。
+- 当前主机所有 lane 只从 05 与 GLOBAL TODO 领取合同和状态，不使用机器专用执行材料。
 
 #### 12.2 一期功能完成
 

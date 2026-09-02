@@ -20,16 +20,13 @@ if (
     'c8-win-pre',
     'c8-native',
     'c8-ma',
-    'c8-mx',
     'c8-ld',
-    'c8-lh',
-    'c8-win-scoped-attestation',
     'c8-merge',
     'c9-hard-delete',
   ].includes(gateName)
 ) {
   console.error(
-    'usage: bun run gate:agent-v2 -- <contract-closure|c1-fullauto|c2-c5-foundations|c6-triad|c7-domain-waves|c8-win-pre|c8-native|c8-ma|c8-mx|c8-ld|c8-lh|c8-win-scoped-attestation|c8-merge|c9-hard-delete> [--evidence <path>] [--cell <cell_id>] [--mode full|scoped] [--self-test]'
+    'usage: bun run gate:agent-v2 -- <contract-closure|c1-fullauto|c2-c5-foundations|c6-triad|c7-domain-waves|c8-win-pre|c8-native|c8-ma|c8-ld|c8-merge|c9-hard-delete> [--evidence <platform-result.json>] [--cell <cell_id>] [--self-test]'
   );
   process.exit(2);
 }
@@ -128,21 +125,21 @@ const C8_EXPECTED_DIGESTS = {
   confirmed_decision_contract:
     'b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5',
   platform_validation_contract:
-    '32a18fc0f7b921c0e8157e5b8183dbe645a806e70ccd1c26de30ff75b03a9422',
+    'a3f5180906c239d791a03281199d80f2ea957dbe8382fb849dc2926935672a9c',
   runtime_feature_inventory:
     'bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee',
   canonical_schema_manifest:
-    'e7eb4d3d1cde70a8ae66c9b20836ff33abf1b710dc73d2a0b88393a9c8bfcc46',
+    'f8eb056bfd49e5330603ad36b284ed3269c34e1301db74ba33a0bec861e9573a',
   official_seed:
-    'c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8',
+    'd15da58409cb096d0a1a5cc8c60534bf378500ecfc697789a5d0ecec85e56582',
   target_inventory:
-    '85e250015c78291091a11a68e5205b62a6fb510ed98f5536c2eb1fe351e536f2',
+    'f8b5460165689bb463bd286573b5b2731a20803107e2b27ca3d86420dad62d1b',
   capability_availability:
-    '8fb55c4765eefc59e67e686dfcc1858898c75893b64f353249a2e3d5e705cb68',
+    '70ab40f20452974594d897cbf32bcbcb3b030a77b9708534aa5e93c1b76eaa8c',
   coding_codex_native:
     'f699f376a9414b7830b90a68c890d39010687499e6d16ee1687f5c370cd0127a',
   cargo_lock:
-    '792362a8edf3e7994a59c89c182698fe1d4661fec5d04409e960a4185663acc9',
+    '51629196c5d1c2940e9ac748e095bbdbd621ba5788a0afa3af5181f0714db22d',
 };
 const C8_EXPECTED_TEMPLATES = [
   'chat.minimal',
@@ -184,18 +181,6 @@ const C8_NATIVE_CELL_SPECS = Object.freeze({
     check_id: 'c8_ma_full_gate',
     command: 'bun run gate:agent-v2 -- c8-ma',
   }),
-  macos_desktop_x64: Object.freeze({
-    cell_id: 'macos_desktop_x64',
-    host_os: 'macos',
-    host_arch: 'x86_64',
-    host_target: 'x86_64-apple-darwin',
-    runtime_target: 'x86_64-apple-darwin',
-    host_surface: 'desktop',
-    package_format: 'universal-app',
-    gate_name: 'c8-mx',
-    check_id: 'c8_mx_full_gate',
-    command: 'bun run gate:agent-v2 -- c8-mx',
-  }),
   linux_desktop_x64: Object.freeze({
     cell_id: 'linux_desktop_x64',
     host_os: 'linux',
@@ -208,72 +193,17 @@ const C8_NATIVE_CELL_SPECS = Object.freeze({
     check_id: 'c8_ld_full_gate',
     command: 'bun run gate:agent-v2 -- c8-ld',
   }),
-  linux_headless_x64: Object.freeze({
-    cell_id: 'linux_headless_x64',
-    host_os: 'linux',
-    host_arch: 'x86_64',
-    host_target: 'x86_64-unknown-linux-gnu',
-    runtime_target: 'x86_64-unknown-linux-musl',
-    host_surface: 'headless',
-    package_format: 'headless-service',
-    gate_name: 'c8-lh',
-    check_id: 'c8_lh_full_gate',
-    command: 'bun run gate:agent-v2 -- c8-lh',
-  }),
 });
 const C8_NATIVE_GATE_DISPATCH = Object.freeze({
   'c8-ma': Object.freeze({
     ...C8_NATIVE_CELL_SPECS.macos_desktop_arm64,
-    mode: 'full',
-  }),
-  'c8-mx': Object.freeze({
-    ...C8_NATIVE_CELL_SPECS.macos_desktop_x64,
-    mode: 'full',
   }),
   'c8-ld': Object.freeze({
     ...C8_NATIVE_CELL_SPECS.linux_desktop_x64,
-    mode: 'full',
-  }),
-  'c8-lh': Object.freeze({
-    ...C8_NATIVE_CELL_SPECS.linux_headless_x64,
-    mode: 'full',
-  }),
-  'c8-win-scoped-attestation': Object.freeze({
-    ...C8_NATIVE_CELL_SPECS.windows_desktop_x64,
-    gate_name: 'c8-win-scoped-attestation',
-    check_id: null,
-    command: null,
-    mode: 'scoped',
   }),
 });
 const C8_NATIVE_GATE_NAMES = Object.keys(C8_NATIVE_GATE_DISPATCH);
 let c8ConfirmationPolicyCache = null;
-const C8_PENDING_NATIVE_POINTS = [
-  {
-    verification_point_id: 'c8-macos-arm64',
-    target_cell: 'macos_desktop_arm64',
-    status: 'pending_native_verification',
-    exact_check_id: 'c8_ma_full_gate',
-  },
-  {
-    verification_point_id: 'c8-macos-x64',
-    target_cell: 'macos_desktop_x64',
-    status: 'pending_native_verification',
-    exact_check_id: 'c8_mx_full_gate',
-  },
-  {
-    verification_point_id: 'c8-linux-desktop-x64',
-    target_cell: 'linux_desktop_x64',
-    status: 'pending_native_verification',
-    exact_check_id: 'c8_ld_full_gate',
-  },
-  {
-    verification_point_id: 'c8-linux-headless-x64',
-    target_cell: 'linux_headless_x64',
-    status: 'pending_native_verification',
-    exact_check_id: 'c8_lh_full_gate',
-  },
-];
 
 if (args.includes('--self-test')) {
   runC8SelfTest();
@@ -350,7 +280,6 @@ if (gateName === 'c8-win-pre') {
       evidence_kind: 'native',
       source_sha: sourceSha,
       candidate_source_sha: sourceSha,
-      canonical_cohort_tuple: null,
       target_cell: null,
       manifest_path:
         'docs/specs/2026-08-28-agent-capability-platform-v2/C8-WIN-PRE-MANIFEST.json',
@@ -361,7 +290,6 @@ if (gateName === 'c8-win-pre') {
       residual_reachability: { status: 'not_evaluated' },
       checks: [],
       statuses: {},
-      pending_non_windows_points: c8DefaultPendingNativePoints(),
       artifact_digests: {},
       failure_details: [{ code: 'gate_crash', message: error.message }],
     };
@@ -1398,7 +1326,6 @@ function runC8WinPreGate() {
       native_windows_x64:
         process.platform === 'win32' && process.arch === 'x64',
     },
-    canonical_cohort_tuple: null,
     source_checkpoint: null,
     target_cell: null,
     c7: { status: 'not_evaluated' },
@@ -1408,7 +1335,6 @@ function runC8WinPreGate() {
     residual_reachability: { status: 'not_evaluated' },
     checks: [],
     statuses: {},
-    pending_non_windows_points: c8DefaultPendingNativePoints(),
     artifact_digests: {},
     failure_details: [],
     preflight_blocked: false,
@@ -1447,12 +1373,6 @@ function runC8WinPreGate() {
     manifest.value,
     sourceSha
   );
-  report.canonical_cohort_tuple = {
-    candidate_source_sha: sourceSha,
-    confirmed_decision_contract_digest:
-      manifest.value.candidate_inputs?.confirmed_decision_contract_digest ||
-      null,
-  };
   report.target_cell = manifest.value.target_cell || null;
 
   report.c7 = c8ValidateC7State(report, sourceSha);
@@ -1496,25 +1416,15 @@ function runC8WinPreGate() {
 function c8ParseNativeDispatchArgs(name, argv) {
   const explicit = C8_NATIVE_GATE_DISPATCH[name] || null;
   let cellId = explicit?.cell_id || null;
-  let mode = explicit?.mode || 'full';
   let evidencePath = null;
   let sawCell = false;
-  let sawMode = false;
 
   for (let index = 1; index < argv.length; index += 1) {
     const token = argv[index];
     const [flag, inlineValue] = token.includes('=')
       ? [token.slice(0, token.indexOf('=')), token.slice(token.indexOf('=') + 1)]
       : [token, null];
-    if (
-      ![
-        '--cell',
-        '--mode',
-        '--evidence',
-        '--attestation',
-        '--attest',
-      ].includes(flag)
-    ) {
+    if (!['--cell', '--evidence'].includes(flag)) {
       throw new Error(`unknown ${name} option: ${token}`);
     }
     let value = inlineValue;
@@ -1529,13 +1439,9 @@ function c8ParseNativeDispatchArgs(name, argv) {
       if (sawCell) throw new Error('--cell may be specified only once');
       sawCell = true;
       cellId = value;
-    } else if (flag === '--mode') {
-      if (sawMode) throw new Error('--mode may be specified only once');
-      sawMode = true;
-      mode = value;
     } else {
       if (evidencePath !== null) {
-        throw new Error('--evidence/--attestation may be specified only once');
+        throw new Error('--evidence may be specified only once');
       }
       evidencePath = value;
     }
@@ -1547,22 +1453,13 @@ function c8ParseNativeDispatchArgs(name, argv) {
   if (!Object.hasOwn(C8_NATIVE_CELL_SPECS, cellId)) {
     throw new Error(`unsupported native cell: ${cellId || '(missing)'}`);
   }
-  if (!['full', 'scoped'].includes(mode)) {
-    throw new Error(`--mode must be full or scoped, got ${mode}`);
-  }
-  if (explicit && explicit.mode !== mode) {
-    throw new Error(`${name} is fixed to --mode ${explicit.mode}`);
-  }
   if (explicit && explicit.cell_id !== cellId) {
     throw new Error(`${name} is fixed to --cell ${explicit.cell_id}`);
-  }
-  if (mode === 'scoped' && name !== 'c8-native' && name !== 'c8-win-scoped-attestation') {
-    throw new Error(`${name} is a full native gate and cannot run scoped attestation`);
   }
 
   const spec = C8_NATIVE_CELL_SPECS[cellId];
   const defaultEvidencePath =
-    `build.noindex/agent-capability-v2/${c8ReadGitHeadForReport()}/${cellId}/cell-evidence.json`;
+    `build.noindex/agent-capability-v2/${c8ReadGitHeadForReport()}/${cellId}/platform-result.json`;
   const suppliedEvidencePath =
     evidencePath ||
     (typeof process.env.AGENT_V2_CELL_EVIDENCE === 'string'
@@ -1571,15 +1468,14 @@ function c8ParseNativeDispatchArgs(name, argv) {
   return {
     gate_name: name,
     cell_id: cellId,
-    mode,
     evidence_path: suppliedEvidencePath || defaultEvidencePath,
     evidence_path_source: suppliedEvidencePath
       ? evidencePath
         ? 'argument'
         : 'environment'
       : 'canonical_default',
-    check_id: mode === 'full' ? spec.check_id : null,
-    command: mode === 'full' ? spec.command : null,
+    check_id: spec.check_id,
+    command: spec.command,
     target: spec,
   };
 }
@@ -1593,14 +1489,6 @@ function c8NativeFailure(report, code, message, details = {}) {
 
 function c8NativeRequire(report, condition, code, message, details = {}) {
   return condition ? true : c8NativeFailure(report, code, message, details);
-}
-
-function c8NativeExpectedTuple(sourceSha) {
-  return {
-    candidate_source_sha: sourceSha,
-    confirmed_decision_contract_digest:
-      C8_EXPECTED_DIGESTS.confirmed_decision_contract,
-  };
 }
 
 function c8NativeRunProbe(command, commandArgs, timeout = 5000) {
@@ -1821,11 +1709,6 @@ function c8NativeGitProbe(report, checkId, commandArgs, timeout = 10000) {
 }
 
 function c8NativeValidateSourceCheckpoint(report, sourceSha) {
-  const branchProbe = c8NativeGitProbe(report, 'source_branch', [
-    'branch',
-    '--show-current',
-  ]);
-  const branch = branchProbe.stdout.trim();
   const statusProbe = c8NativeGitProbe(report, 'source_worktree', [
     'status',
     '--porcelain',
@@ -1838,22 +1721,11 @@ function c8NativeValidateSourceCheckpoint(report, sourceSha) {
   ]);
   const observedHead = headProbe.stdout.trim();
   const checkpoint = {
-    branch,
     local_head: sourceSha,
     observed_head: observedHead,
-    shared_ref: `refs/heads/${C8_BRANCH}`,
     clean_worktree: statusProbe.status === 0 && !worktreeStatus,
-    verified_remote_sha: null,
-    remote_status: 'not_checked',
   };
   report.source_checkpoint = checkpoint;
-  c8NativeRequire(
-    report,
-    branch === C8_BRANCH,
-    'native_branch_mismatch',
-    `native cell must run on ${C8_BRANCH}`,
-    { expected: C8_BRANCH, observed: branch }
-  );
   c8NativeRequire(
     report,
     statusProbe.status === 0,
@@ -1875,24 +1747,6 @@ function c8NativeValidateSourceCheckpoint(report, sourceSha) {
     'native cell source HEAD changed during dispatch',
     { expected: sourceSha, observed: observedHead }
   );
-
-  if (checkpoint.clean_worktree && branch === C8_BRANCH) {
-    const remoteProbe = c8NativeGitProbe(
-      report,
-      'source_remote_sha',
-      ['ls-remote', 'origin', `refs/heads/${C8_BRANCH}`]
-    );
-    const remoteSha = remoteProbe.stdout.trim().split(/\s+/)[0] || null;
-    checkpoint.verified_remote_sha = c8Sha(remoteSha) ? remoteSha : null;
-    checkpoint.remote_status =
-      remoteProbe.status === 0 && checkpoint.verified_remote_sha === sourceSha
-        ? 'optional_matches_local_head'
-        : remoteProbe.status === 0
-          ? 'optional_observation_only'
-          : 'optional_probe_failed';
-  } else {
-    checkpoint.remote_status = 'skipped_dirty_or_wrong_branch';
-  }
   return checkpoint;
 }
 
@@ -1938,19 +1792,7 @@ function c8NativeExpectedPlatformCells() {
         host_surface: spec.host_surface,
         package_format: spec.package_format,
         capability_availability:
-          cellId === 'linux_headless_x64'
-            ? {
-                coding_codex_native: { availability: 'required_exact_set' },
-                browser: {
-                  availability: 'exact_unavailable',
-                  error_code: 'CAPABILITY_UNAVAILABLE_ON_PLATFORM',
-                },
-                computer: {
-                  availability: 'exact_unavailable',
-                  error_code: 'CAPABILITY_UNAVAILABLE_ON_PLATFORM',
-                },
-              }
-            : cellId === 'linux_desktop_x64'
+          cellId === 'linux_desktop_x64'
               ? {
                   coding_codex_native: { availability: 'required_exact_set' },
                   browser: { availability: 'release_manifest_defined' },
@@ -2072,9 +1914,9 @@ function c8NativeValidatePlatformInputs(report) {
       : [];
   c8NativeRequire(
     report,
-    expectedCellIds.every((cellId) => observedCellIds.includes(cellId)),
+    c8CanonicalEqual(observedCellIds, expectedCellIds),
     'native_platform_required_cells',
-    'PlatformValidationManifest is missing a release-blocking three-platform cell',
+    'PlatformValidationManifest must contain exactly the three release-blocking platform cells',
     { expected: expectedCellIds, observed: observedCellIds }
   );
   const expectedCells = c8NativeExpectedPlatformCells();
@@ -2104,14 +1946,10 @@ function c8NativeValidatePlatformInputs(report) {
     };
   });
   result.required_checks = requiredChecks;
-  const releaseBlockingCheckIds = new Set(expectedChecks.map((check) => check.check_id));
-  const releaseBlockingChecks = requiredChecks.filter((check) =>
-    releaseBlockingCheckIds.has(check?.check_id)
-  );
   c8NativeRequire(
     report,
     c8CanonicalEqual(
-      releaseBlockingChecks.map((check) => ({
+      requiredChecks.map((check) => ({
         check_id: check?.check_id,
         target_cells: check?.target_cells,
         command: check?.command,
@@ -2359,7 +2197,7 @@ function c8NativeLoadCellEvidence(report, dispatch) {
     c8NativeFailure(
       report,
       'native_evidence_required',
-      `${dispatch.gate_name} requires --evidence <PlatformCellEvidence.json>; no native evidence was supplied`
+      `${dispatch.gate_name} requires --evidence <platform-result.json>; no native evidence was supplied`
     );
     return null;
   }
@@ -2368,11 +2206,11 @@ function c8NativeLoadCellEvidence(report, dispatch) {
     c8NativeFailure(
       report,
       'native_evidence_missing',
-      'the selected PlatformCellEvidence file does not exist',
+      'the selected platform-result.json file does not exist',
       {
         source_kind: dispatch.evidence_path_source,
         configured_path: dispatch.evidence_path_source === 'canonical_default'
-          ? 'canonical cell evidence path'
+          ? 'canonical platform-result path'
           : 'user-supplied path',
       }
     );
@@ -2387,7 +2225,7 @@ function c8NativeLoadCellEvidence(report, dispatch) {
     c8NativeFailure(
       report,
       'native_evidence_invalid_json',
-      `the supplied PlatformCellEvidence is invalid JSON: ${error.message}`
+      `the supplied platform-result.json is invalid JSON: ${error.message}`
     );
     return null;
   }
@@ -2402,7 +2240,7 @@ function c8NativeLoadCellEvidence(report, dispatch) {
     c8NativeFailure(
       report,
       'native_evidence_shape',
-      'PlatformCellEvidence must be a JSON object'
+      'platform-result.json must be a JSON object'
     );
     return null;
   }
@@ -2410,7 +2248,7 @@ function c8NativeLoadCellEvidence(report, dispatch) {
     repoRoot,
     report.evidence_directory
   );
-  const canonicalPath = join(evidenceDirectory, 'cell-evidence.json');
+  const canonicalPath = join(evidenceDirectory, 'platform-result.json');
   try {
     mkdirSync(evidenceDirectory, { recursive: true });
     writeFileSync(canonicalPath, source);
@@ -2435,453 +2273,32 @@ function c8NativeValidateCellEvidence(
   report,
   dispatch,
   sourceSha,
-  platform,
   loaded
 ) {
   if (!loaded) return null;
   const evidence = loaded.value;
-  if (
+  const platformResult =
     evidence &&
     typeof evidence === 'object' &&
     Object.hasOwn(evidence, 'source_commit') &&
     Object.hasOwn(evidence, 'target') &&
     Object.hasOwn(evidence, 'suite') &&
-    Object.hasOwn(evidence, 'release_lock')
-  ) {
-    return c8NativeValidatePlatformResult(
+    Object.hasOwn(evidence, 'release_lock');
+  if (!platformResult) {
+    c8NativeFailure(
       report,
-      dispatch,
-      sourceSha,
-      evidence
+      'native_platform_result_required',
+      'native gates accept only platform-result.json backed by a real release-lock.json'
     );
+    return null;
   }
-  const target = dispatch.target;
-  const expectedTuple = c8NativeExpectedTuple(sourceSha);
-  const allowedKeys = [
-    'artifact_digests',
-    'capability_availability_manifest_digest',
-    'cell_id',
-    'coding_codex_native_exact_set_digest',
-    'coding_codex_native_result',
-    'cohort_tuple',
-    'evidence_bundle',
-    'executed_checks',
-    'gate_suite_digest',
-    'input_manifest_refs',
-    'invalidation',
-    'native_host_fingerprint',
-    'release_lock',
-    'run_id',
-    'schema_version',
-    'status',
-    'unexecuted_check_reasons',
-    'verification_point_results',
-  ];
-  const unknownKeys = Object.keys(evidence)
-    .filter((key) => !allowedKeys.includes(key))
-    .sort();
-  c8NativeRequire(
+  return c8NativeValidatePlatformResult(
     report,
-    unknownKeys.length === 0,
-    'native_evidence_unknown_fields',
-    'PlatformCellEvidence contains fields outside the frozen schema',
-    { fields: unknownKeys }
-  );
-  c8NativeRequire(
-    report,
-    evidence.schema_version === '1.0.0',
-    'native_evidence_schema',
-    'PlatformCellEvidence schema_version must be 1.0.0'
-  );
-  c8NativeRequire(
-    report,
-    typeof evidence.run_id === 'string' && evidence.run_id.length > 0,
-    'native_evidence_run_id',
-    'PlatformCellEvidence requires a non-empty run_id'
-  );
-  c8NativeRequire(
-    report,
-    evidence.cell_id === target.cell_id,
-    'native_evidence_cell_mismatch',
-    'PlatformCellEvidence cell_id does not match the dispatched cell',
-    { expected: target.cell_id, observed: evidence.cell_id || null }
-  );
-  c8NativeRequire(
-    report,
-    evidence.status === 'pass',
-    'native_evidence_not_pass',
-    'only a pass PlatformCellEvidence can be consumed',
-    { observed: evidence.status || null }
-  );
-  c8NativeRequire(
-    report,
-    c8CanonicalEqual(evidence.cohort_tuple, expectedTuple),
-    'native_evidence_tuple_mismatch',
-    'PlatformCellEvidence does not match the current frozen cohort tuple',
-    { expected: expectedTuple, observed: evidence.cohort_tuple || null }
+    dispatch,
+    sourceSha,
+    evidence
   );
 
-  const fingerprint = evidence.native_host_fingerprint;
-  const fingerprintUnknownKeys =
-    fingerprint &&
-    typeof fingerprint === 'object' &&
-    !Array.isArray(fingerprint)
-      ? Object.keys(fingerprint)
-          .filter(
-            (key) =>
-              ![
-                'host_os',
-                'host_arch',
-                'host_target',
-                'runtime_target',
-                'toolchain_fingerprint_digest',
-              ].includes(key)
-          )
-          .sort()
-      : [];
-  c8NativeRequire(
-    report,
-    fingerprintUnknownKeys.length === 0,
-    'native_evidence_host_unknown_fields',
-    'native_host_fingerprint contains fields outside the frozen schema',
-    { fields: fingerprintUnknownKeys }
-  );
-  c8NativeRequire(
-    report,
-    fingerprint &&
-      typeof fingerprint === 'object' &&
-      !Array.isArray(fingerprint) &&
-      fingerprint.host_os === target.host_os &&
-      fingerprint.host_arch === target.host_arch &&
-      fingerprint.host_target === target.host_target &&
-      fingerprint.runtime_target === target.runtime_target &&
-      c8Hex(fingerprint.toolchain_fingerprint_digest),
-    'native_evidence_host_fingerprint',
-    'PlatformCellEvidence native_host_fingerprint does not match the target cell',
-    { expected: target, observed: fingerprint || null }
-  );
-  c8NativeRequire(
-    report,
-    fingerprint?.host_os === report.execution_host.host_os &&
-      fingerprint?.host_arch === report.execution_host.host_arch &&
-      fingerprint?.host_target === target.host_target &&
-      fingerprint?.runtime_target === target.runtime_target,
-    'native_evidence_host_probe_mismatch',
-    'PlatformCellEvidence fingerprint does not match the current native process'
-  );
-
-  const expectedInputRefs = {};
-  c8NativeRequire(
-    report,
-    c8CanonicalEqual(evidence.input_manifest_refs, expectedInputRefs),
-    'native_evidence_input_refs',
-    'PlatformCellEvidence must not treat schema fixtures as immutable release inputs',
-    { expected: expectedInputRefs, observed: evidence.input_manifest_refs || null }
-  );
-
-  const releaseLockPath =
-    process.env.NOMIFUN_RELEASE_LOCK_PATH || evidence.release_lock?.path || null;
-  const releaseArtifactRoot =
-    process.env.NOMIFUN_RELEASE_ARTIFACT_ROOT || repoRoot;
-  const releaseLock = releaseLockPath
-    ? readAndVerifyReleaseLock(releaseLockPath, { root: releaseArtifactRoot })
-    : {
-        status: 'blocked',
-        reason: 'release_lock_missing',
-        checks: [],
-      };
-  c8NativeRequire(
-    report,
-    releaseLock.status === 'pass',
-    'native_release_lock',
-    'native evidence requires a verified post-build release-lock.json',
-    {
-      path: releaseLockPath,
-      artifact_root: releaseArtifactRoot,
-      status: releaseLock.status,
-      reason: releaseLock.reason || null,
-      checks: releaseLock.checks || [],
-    }
-  );
-  c8NativeRequire(
-    report,
-    releaseLock.lock?.source_commit === sourceSha,
-    'native_release_lock_source',
-    'release-lock.json source_commit differs from the current clean source',
-    {
-      expected: sourceSha,
-      observed: releaseLock.lock?.source_commit || null,
-    }
-  );
-  const lockedSidecar = releaseLock.lock?.sidecars?.[target.cell_id];
-  const artifactDigests = evidence.artifact_digests;
-  c8NativeRequire(
-    report,
-    artifactDigests &&
-      typeof artifactDigests === 'object' &&
-      !Array.isArray(artifactDigests) &&
-      ['host', 'package', 'runtime_helpers', 'runtime_sidecar'].every((key) =>
-        c8Hex(artifactDigests[key])
-      ),
-    'native_evidence_artifact_digests',
-    'PlatformCellEvidence must provide host/package/helper/sidecar digests'
-  );
-  c8NativeRequire(
-    report,
-    artifactDigests?.host === releaseLock.lock?.host?.sha256 &&
-      artifactDigests?.package === releaseLock.lock?.package?.sha256 &&
-      artifactDigests?.runtime_sidecar === lockedSidecar?.sha256,
-    'native_evidence_runtime_artifacts',
-    'PlatformCellEvidence artifacts do not match the verified release lock',
-    {
-      expected: {
-        host: releaseLock.lock?.host?.sha256 || null,
-        package: releaseLock.lock?.package?.sha256 || null,
-        runtime_sidecar: lockedSidecar?.sha256 || null,
-      },
-      observed: artifactDigests || null,
-    }
-  );
-  c8NativeRequire(
-    report,
-    evidence.coding_codex_native_exact_set_digest ===
-      C8_EXPECTED_DIGESTS.coding_codex_native &&
-      evidence.coding_codex_native_result === 'pass',
-    'native_evidence_coding_contract',
-    'PlatformCellEvidence does not prove the frozen complete coding.codex-native surface'
-  );
-  c8NativeRequire(
-    report,
-    evidence.capability_availability_manifest_digest ===
-      C8_EXPECTED_DIGESTS.capability_availability,
-    'native_evidence_availability_digest',
-    'PlatformCellEvidence capability availability digest differs from D-028'
-  );
-  c8NativeRequire(
-    report,
-    c8Hex(evidence.gate_suite_digest),
-    'native_evidence_gate_suite_digest',
-    'PlatformCellEvidence gate_suite_digest must be a 64-character digest'
-  );
-  c8NativeRequire(
-    report,
-    evidence.invalidation === undefined || evidence.invalidation === null,
-    'native_evidence_invalidated',
-    'invalidated PlatformCellEvidence cannot be consumed',
-    { invalidation: evidence.invalidation || null }
-  );
-
-  const unexecuted =
-    evidence.unexecuted_check_reasons &&
-    typeof evidence.unexecuted_check_reasons === 'object' &&
-    !Array.isArray(evidence.unexecuted_check_reasons)
-      ? evidence.unexecuted_check_reasons
-      : null;
-  c8NativeRequire(
-    report,
-    unexecuted !== null,
-    'native_evidence_unexecuted_shape',
-    'unexecuted_check_reasons must be an object'
-  );
-  if (dispatch.mode === 'full') {
-    c8NativeRequire(
-      report,
-      unexecuted && Object.keys(unexecuted).length === 0,
-      'native_full_gate_unexecuted_checks',
-      'a full native cell gate cannot contain unexecuted checks',
-      { observed: unexecuted || null }
-    );
-  } else {
-    c8NativeRequire(
-      report,
-      unexecuted && Object.keys(unexecuted).length > 0,
-      'native_scoped_attestation_scope',
-      'a scoped attestation must state why checks outside its scope were not executed'
-    );
-  }
-
-  const executed = Array.isArray(evidence.executed_checks)
-    ? evidence.executed_checks
-    : [];
-  report.artifact_digests = {
-    ...(artifactDigests && typeof artifactDigests === 'object'
-      ? artifactDigests
-      : {}),
-  };
-  const expectedCheck = platform.required_checks.find(
-    (check) => check?.check_id === target.check_id
-  );
-  const executedIds = executed.map((check) => check?.check_id).filter(Boolean);
-  c8NativeRequire(
-    report,
-    new Set(executedIds).size === executedIds.length,
-    'native_evidence_check_duplicates',
-    'PlatformCellEvidence executed_checks contains duplicate or invalid check IDs'
-  );
-  if (dispatch.mode === 'full') {
-    c8NativeRequire(
-      report,
-      executedIds.length === 1 && executedIds[0] === target.check_id,
-      'native_full_gate_check_exact_set',
-      `full native evidence must execute exactly ${target.check_id}`,
-      { expected: [target.check_id], observed: executedIds }
-    );
-  } else {
-    c8NativeRequire(
-      report,
-      executed.length > 0,
-      'native_scoped_attestation_empty',
-      'scoped native attestation must execute at least one native check'
-    );
-  }
-  for (const check of executed) {
-    const checkUnknownKeys =
-      check && typeof check === 'object' && !Array.isArray(check)
-        ? Object.keys(check)
-            .filter(
-              (key) =>
-                ![
-                  'check_id',
-                  'command',
-                  'evidence_kind',
-                  'exit_code',
-                  'output_artifact',
-                ].includes(key)
-            )
-            .sort()
-        : [];
-    c8NativeRequire(
-      report,
-      checkUnknownKeys.length === 0,
-      'native_evidence_check_unknown_fields',
-      `native evidence check ${check?.check_id || '(missing)'} contains fields outside the frozen schema`,
-      { fields: checkUnknownKeys }
-    );
-    const isFullCheck = check?.check_id === target.check_id;
-    const commandMatches = isFullCheck
-      ? c8NormalizeCommand(check?.command) === c8NormalizeCommand(expectedCheck?.command)
-      : typeof check?.command === 'string' && check.command.trim().length > 0;
-    c8NativeRequire(
-      report,
-      typeof check?.check_id === 'string' &&
-        check.check_id.length > 0 &&
-        commandMatches &&
-        check.evidence_kind === 'native' &&
-        check.exit_code === 0,
-      'native_evidence_check_invalid',
-      `native evidence check ${check?.check_id || '(missing)'} is not a passing native check`,
-      { observed: check || null }
-    );
-    c8NativeValidateArtifactRef(
-      report,
-      check?.output_artifact,
-      `executed check ${check?.check_id || '(missing)'} output_artifact`
-    );
-  }
-  report.checks = executed.map((check) => ({
-    check_id: check?.check_id || null,
-    command: check?.command || null,
-    execution_kind: check?.evidence_kind || null,
-    exit_code: typeof check?.exit_code === 'number' ? check.exit_code : null,
-    status: check?.exit_code === 0 ? 'pass' : 'fail',
-    output_artifact: check?.output_artifact || null,
-  }));
-  report.statuses = Object.fromEntries(
-    report.checks
-      .filter((check) => check.check_id)
-      .map((check) => [check.check_id, check.status])
-  );
-
-  const expectedPoints = platform.verification_points.filter(
-    (point) => point?.target_cell === target.cell_id
-  );
-  const pointResults = Array.isArray(evidence.verification_point_results)
-    ? evidence.verification_point_results
-    : [];
-  const pointIds = pointResults
-    .map((point) => point?.verification_point_id)
-    .filter(Boolean);
-  c8NativeRequire(
-    report,
-    new Set(pointIds).size === pointIds.length,
-    'native_evidence_point_duplicates',
-    'verification_point_results contains duplicate or invalid IDs'
-  );
-  if (dispatch.mode === 'full') {
-    c8NativeRequire(
-      report,
-      c8CanonicalEqual(
-        [...pointIds].sort(),
-        expectedPoints.map((point) => point.verification_point_id).sort()
-      ),
-      'native_full_gate_point_exact_set',
-      'full native evidence must close the exact verification-point set for its cell',
-      { expected: expectedPoints, observed: pointResults }
-    );
-  } else {
-    c8NativeRequire(
-      report,
-      pointResults.length > 0,
-      'native_scoped_attestation_no_points',
-      'scoped native attestation must include at least one verification point'
-    );
-  }
-  for (const point of pointResults) {
-    const pointUnknownKeys =
-      point && typeof point === 'object' && !Array.isArray(point)
-        ? Object.keys(point)
-            .filter(
-              (key) =>
-                ![
-                  'verification_point_id',
-                  'status',
-                  'evidence_ref',
-                ].includes(key)
-            )
-            .sort()
-        : [];
-    c8NativeRequire(
-      report,
-      pointUnknownKeys.length === 0,
-      'native_evidence_point_unknown_fields',
-      `verification point ${point?.verification_point_id || '(missing)'} contains fields outside the frozen schema`,
-      { fields: pointUnknownKeys }
-    );
-    c8NativeRequire(
-      report,
-      expectedPoints.some(
-        (expected) => expected.verification_point_id === point?.verification_point_id
-      ) && point?.status === 'pass',
-      'native_evidence_point_invalid',
-      `verification point ${point?.verification_point_id || '(missing)'} is not a passing point for this cell`
-    );
-    c8NativeValidateArtifactRef(
-      report,
-      point?.evidence_ref,
-      `verification point ${point?.verification_point_id || '(missing)'} evidence_ref`
-    );
-  }
-
-  const bundleRef = c8NativeValidateArtifactRef(
-    report,
-    evidence.evidence_bundle,
-    'PlatformCellEvidence evidence_bundle'
-  );
-  report.cell_evidence = {
-    status: report.failure_details.length === 0 ? 'pass' : 'fail',
-    run_id: evidence.run_id || null,
-    source_path: report.input_evidence?.normalized_relative_path || null,
-    evidence_bundle: bundleRef
-      ? {
-          artifact_id: bundleRef.artifact_id,
-          digest: bundleRef.digest,
-          normalized_relative_path: bundleRef.normalized_relative_path,
-        }
-      : null,
-    executed_check_ids: executedIds,
-    verification_point_ids: pointIds,
-  };
-  return evidence;
 }
 
 function c8NativeValidatePlatformResult(
@@ -2996,6 +2413,16 @@ function c8NativeValidatePlatformResult(
     runtime_sidecar: lockedSidecar?.sha256 || null,
     runtime_helpers: releaseLock.lock?.helpers || [],
   };
+  report.release_lock = {
+    path: releaseLockPath,
+    sha256: releaseLock.lock_sha256 || null,
+  };
+  report.platform_result = {
+    source_commit: result.source_commit,
+    target: result.target,
+    suite: result.suite,
+    logs: result.logs,
+  };
   return result;
 }
 
@@ -3013,20 +2440,17 @@ function runC8NativeCellGate(dispatch) {
     evidence_directory: evidenceDirectory,
     dispatch: {
       cell_id: dispatch.cell_id,
-      mode: dispatch.mode,
       required_check_id: dispatch.check_id,
       required_command: dispatch.command,
       evidence_supplied: dispatch.evidence_path_source !== 'canonical_default',
       evidence_path_source: dispatch.evidence_path_source,
     },
     execution_host: c8NativeHostProbe(),
-    canonical_cohort_tuple: c8NativeExpectedTuple(sourceSha),
     source_checkpoint: null,
     target_cell: dispatch.target,
     platform_validation: { status: 'not_evaluated' },
     checks: [],
     statuses: {},
-    pending_native_verification_points: [],
     artifact_digests: {},
     metadata_commands: [],
     commands: [],
@@ -3044,24 +2468,12 @@ function runC8NativeCellGate(dispatch) {
       ...platformSummary
     } = platform;
     report.platform_validation = platformSummary;
-    const pendingPoints = (platform.verification_points || [])
-      .filter((point) => point?.target_cell === dispatch.cell_id)
-      .map((point) => ({
-        verification_point_id: point.verification_point_id,
-        target_cell: point.target_cell,
-        status: 'pending_native_verification',
-        exact_check_id: point.exact_check_id,
-      }));
-    report.pending_native_verification_points =
-      report.failure_details.length === 0 ? pendingPoints : [];
-
     const loaded = c8NativeLoadCellEvidence(report, dispatch);
     if (loaded) {
       c8NativeValidateCellEvidence(
         report,
         dispatch,
         sourceSha,
-        platform,
         loaded
       );
     }
@@ -3073,26 +2485,12 @@ function runC8NativeCellGate(dispatch) {
     );
   }
 
-  if (report.platform_validation?.verification_points?.length) {
-    const targetPendingPoints = report.platform_validation.verification_points
-      .filter((point) => point?.target_cell === dispatch.cell_id)
-      .map((point) => ({
-        verification_point_id: point.verification_point_id,
-        target_cell: point.target_cell,
-        status: 'pending_native_verification',
-        exact_check_id: point.exact_check_id,
-      }));
-    report.pending_native_verification_points =
-      report.failure_details.length === 0 ? [] : targetPendingPoints;
-  }
   report.preflight_blocked = report.failure_details.some((failure) =>
     [
       'native_host_',
-      'native_branch_',
       'native_worktree_',
       'native_dirty_',
       'native_head_',
-      'native_remote_',
       'native_platform_',
       'native_runtime_',
       'native_required_',
@@ -3127,10 +2525,6 @@ function writeC8NativeCellReport(report) {
     join(reportDir, 'summary.json'),
     `${JSON.stringify(output, null, 2)}\n`
   );
-}
-
-function c8DefaultPendingNativePoints() {
-  return C8_PENDING_NATIVE_POINTS.map((point) => ({ ...point }));
 }
 
 function c8ReadGitHeadForReport() {
@@ -3717,22 +3111,18 @@ function c8ValidateC8Manifest(report, manifest, sourceSha) {
   );
   c8Require(
     report,
-    checkpoint?.verified_remote_sha === 'optional_single_host_observation' ||
-      c8Sha(checkpoint?.verified_remote_sha),
-    'source_checkpoint_remote_placeholder',
-    'source_checkpoint.verified_remote_sha must use the single-host optional observation placeholder or a commit SHA'
-  );
-  c8Require(
-    report,
     checkpoint?.clean_worktree_required === true,
     'source_checkpoint_clean_worktree',
     'C8-WIN-PRE requires a clean worktree'
   );
   c8Require(
     report,
-    checkpoint?.shared_ref === `refs/heads/${C8_BRANCH}`,
-    'source_checkpoint_ref',
-    `source_checkpoint.shared_ref must be refs/heads/${C8_BRANCH}`
+    c8CanonicalEqual(Object.keys(checkpoint || {}).sort(), [
+      'clean_worktree_required',
+      'local_head',
+    ]),
+    'source_checkpoint_fields',
+    'C8-WIN-PRE source_checkpoint must contain only local_head and clean_worktree_required'
   );
 
   const target = manifest.target_cell;
@@ -3926,35 +3316,17 @@ function c8ValidateC8Manifest(report, manifest, sourceSha) {
     );
   }
 
-  const pending = Array.isArray(manifest.pending_native_verification_points)
-    ? manifest.pending_native_verification_points
-    : [];
   c8Require(
     report,
-    JSON.stringify(
-      pending
-        .map((point) => ({
-          verification_point_id: point?.verification_point_id,
-          target_cell: point?.target_cell,
-          status: point?.status,
-          exact_check_id: point?.exact_check_id,
-        }))
-        .sort((a, b) => a.verification_point_id?.localeCompare(b.verification_point_id))
-    ) ===
-      JSON.stringify(
-        c8DefaultPendingNativePoints().sort((a, b) =>
-          a.verification_point_id.localeCompare(b.verification_point_id)
-        )
-      ),
-    'pending_native_exact_set',
-    'C8-WIN-PRE must keep all four non-Windows native points pending'
+    !Object.hasOwn(manifest, 'pending_native_verification_points'),
+    'pending_native_removed',
+    'C8-WIN-PRE must not embed non-Windows pending evidence; macOS arm64 and Linux Desktop use their own native Gate'
   );
 
   const closure = manifest.closure_requirements;
   for (const [key, expected] of Object.entries({
     status_transition: 'active -> closed',
     windows_status: 'pass',
-    non_windows_status: 'pending_native_verification',
     workspace_cargo_test_must_be_serialized: true,
     global_legacy_residual_must_be_zero: true,
   })) {
@@ -3978,11 +3350,8 @@ function c8ResolveC8SourceCheckpoint(report, manifest, sourceSha) {
   const checkpoint = manifest.source_checkpoint || {};
   const resolved = {
     local_head: sourceSha,
-    verified_remote_sha: null,
     clean_worktree_required: checkpoint.clean_worktree_required === true,
-    shared_ref: checkpoint.shared_ref || null,
     local_head_placeholder: checkpoint.local_head || null,
-    remote_sha_placeholder: checkpoint.verified_remote_sha || null,
   };
   const statusResult = c8GitProbe(
     report,
@@ -3990,30 +3359,6 @@ function c8ResolveC8SourceCheckpoint(report, manifest, sourceSha) {
     ['status', '--porcelain', '--untracked-files=all']
   );
   c8ApplyWorktreeCheckpointProbe(report, resolved, statusResult);
-  if (report.preflight_blocked) {
-    resolved.remote_status = 'skipped_preflight_failure';
-    return resolved;
-  }
-
-  const remoteResult = c8GitProbe(
-    report,
-    'source_checkpoint_remote_sha',
-    ['ls-remote', 'origin', `refs/heads/${C8_BRANCH}`]
-  );
-  if (remoteResult.status === 0 && remoteResult.stdout.trim()) {
-    resolved.verified_remote_sha = remoteResult.stdout.trim().split(/\s+/)[0];
-    if (!c8Sha(resolved.verified_remote_sha)) {
-      resolved.verified_remote_sha = null;
-    }
-  }
-  resolved.remote_status =
-    checkpoint.verified_remote_sha === 'optional_single_host_observation'
-      ? resolved.verified_remote_sha === sourceSha
-        ? 'optional_matches_local_head'
-        : 'optional_observation_only'
-      : resolved.verified_remote_sha === sourceSha
-        ? 'matches_local_head'
-        : 'not_equal_to_local_head';
   return resolved;
 }
 
@@ -4207,25 +3552,6 @@ function c8ValidateC7State(report, sourceSha) {
       'C7 domain-wave gate evidence is not pass'
     );
   }
-
-  const expectedInventory = {
-    packages: 26,
-    capabilities: 137,
-  };
-  const hostSource = readFileSafe(
-    join(repoRoot, 'crates/backend/nomifun-app/src/router/agent_platform_host.rs')
-  );
-  const inventoryShape = {
-    packages: hostSource?.match(/packages\.len\(\),\s*26/g)?.length || 0,
-    capabilities: hostSource?.match(/capabilities\.len\(\),\s*137/g)?.length || 0,
-  };
-  result.inventory_shape = inventoryShape;
-  c8Require(
-    report,
-    inventoryShape.packages > 0 && inventoryShape.capabilities > 0,
-    'c7_inventory_shape_missing',
-    `C7 production host does not retain the ${expectedInventory.packages}-package/${expectedInventory.capabilities}-capability assertion`
-  );
 
   result.status =
     report.failure_details.some((failure) =>
@@ -5532,6 +4858,15 @@ function c8SelfTestAssert(condition, message) {
 }
 
 function runC8SelfTest() {
+  c8SelfTestAssert(
+    c8CanonicalEqual(C8_REQUIRED_NATIVE_CELLS, [
+      'windows_desktop_x64',
+      'macos_desktop_arm64',
+      'linux_desktop_x64',
+    ]),
+    'C8 release blocking must be limited to Windows x64, macOS arm64, and Linux Desktop x64'
+  );
+
   const preRunPlatformManifest = JSON.parse(
     readFileSync(join(repoRoot, C8_PLATFORM_VALIDATION_MANIFEST_PATH), 'utf8')
   );
@@ -5763,17 +5098,19 @@ function runC8SelfTest() {
     'an allowlist outside the C8 boundary must remain blocking'
   );
 
-  const mergeTuple = {
-    candidate_source_sha: 'a'.repeat(40),
-    confirmed_decision_contract_digest:
-      C8_EXPECTED_DIGESTS.confirmed_decision_contract,
-  };
+  const mergeSource = 'a'.repeat(40);
   const mergeCells = Object.fromEntries(
     C8_REQUIRED_NATIVE_CELLS.map((cellId) => [
       cellId,
       {
         status: 'pass',
-        cohort_tuple: mergeTuple,
+        source_commit: mergeSource,
+        release_lock_sha256: 'd'.repeat(64),
+        artifact_digests: {
+          host: 'b'.repeat(64),
+          package: 'c'.repeat(64),
+          runtime_sidecar: 'e'.repeat(64),
+        },
         evidence: {
           digest: 'e'.repeat(64),
           normalized_relative_path: `build/evidence/${cellId}.json`,
@@ -5788,13 +5125,11 @@ function runC8SelfTest() {
   const mergeValidation = validateC8MergeSummary(
     mergeReport,
     {
-      cohort_tuple: mergeTuple,
+      source_commit: mergeSource,
       cell_evidence: mergeCells,
       status_counts: {
-        pending_native_verification: 0,
         pass: C8_REQUIRED_NATIVE_CELLS.length,
         fail: 0,
-        stale: 0,
       },
       all_verification_points_closed: true,
       global_residual_reachability_zero: true,
@@ -5804,7 +5139,7 @@ function runC8SelfTest() {
         normalized_relative_path: 'build/evidence/d027-zero.json',
       },
     },
-    mergeTuple.candidate_source_sha,
+    mergeSource,
     false
   );
   c8SelfTestAssert(
@@ -5936,40 +5271,37 @@ function runC8SelfTest() {
   );
   c8SelfTestAssert(
     nativeSpec.cell_id === 'macos_desktop_arm64' &&
-      nativeSpec.mode === 'full' &&
       nativeSpec.check_id === 'c8_ma_full_gate',
     'c8-ma must dispatch to the exact arm64 macOS full-gate check'
   );
   const genericNativeSpec = c8ParseNativeDispatchArgs('c8-native', [
     'c8-native',
     '--cell',
-    'linux_headless_x64',
-    '--mode',
-    'scoped',
-    '--attestation',
+    'linux_desktop_x64',
+    '--evidence',
     'build/evidence.json',
   ]);
   c8SelfTestAssert(
-    genericNativeSpec.cell_id === 'linux_headless_x64' &&
-      genericNativeSpec.mode === 'scoped' &&
+    genericNativeSpec.cell_id === 'linux_desktop_x64' &&
+      genericNativeSpec.check_id === 'c8_ld_full_gate' &&
       genericNativeSpec.evidence_path === 'build/evidence.json',
-    'parameterized native dispatch must require and preserve the selected cell/mode'
+    'parameterized native dispatch must require an allowed release platform cell'
   );
-  let wrongModeRejected = false;
+  let retiredCellRejected = false;
   try {
-    c8ParseNativeDispatchArgs('c8-lh', [
-      'c8-lh',
-      '--mode',
-      'scoped',
+    c8ParseNativeDispatchArgs('c8-native', [
+      'c8-native',
+      '--cell',
+      'linux_headless_x64',
       '--evidence',
       'build/evidence.json',
     ]);
   } catch {
-    wrongModeRejected = true;
+    retiredCellRejected = true;
   }
   c8SelfTestAssert(
-    wrongModeRejected,
-    'full native cell gates must reject scoped mode'
+    retiredCellRejected,
+    'macOS x64 and Linux Headless must not be native C8 dispatch cells'
   );
 
   const nonNativeReport = {
@@ -6155,7 +5487,16 @@ try {
   $capabilities = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/api/capabilities" -TimeoutSec 5
   $payload = $capabilities.Content | ConvertFrom-Json
   if (-not $payload.success) { throw 'canonical capabilities endpoint returned failure' }
-  if (@($payload.data).Count -ne 137) { throw "canonical capabilities endpoint returned $(@($payload.data).Count) entries; expected 137" }
+  $items = @($payload.data)
+  if ($items.Count -eq 0) { throw 'canonical capabilities endpoint returned an empty catalog' }
+  $ids = @($items | ForEach-Object {
+    if ($_.capability_id) { $_.capability_id }
+    elseif ($_.capability -and $_.capability.id) { $_.capability.id }
+    elseif ($_.id) { $_.id }
+  })
+  foreach ($required in @('fs.read', 'browser.render_content', 'computer.input')) {
+    if ($ids -notcontains $required) { throw "canonical capabilities endpoint is missing $required" }
+  }
 } finally {
   if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
 }
@@ -6358,10 +5699,6 @@ function validateC7WriteManifest(manifest, expectedWaves) {
       failures.push(`C7 execution_policy.${key} must be ${JSON.stringify(expected)}`);
     }
   }
-  if (policy?.agent_count_target !== '6-8') {
-    failures.push('C7 execution_policy.agent_count_target must be 6-8');
-  }
-
   const inputs = manifest.confirmed_inputs;
   const requiredInputKeys = [
     'decision_contract_digest',
@@ -7701,27 +7038,11 @@ function c7PendingNativePoints() {
       reason: 'C7 is Windows-first; non-Windows behavior is not closed by cross-compilation or static inspection',
     },
     {
-      verification_point_id: 'c7-macos-x64-domain-waves',
-      target_cell: 'macos_desktop_x64',
-      status: 'pending_native_verification',
-      required_execution_kind: 'native',
-      exact_check_id: 'c8_mx_full_gate',
-      reason: 'C7 is Windows-first; non-Windows behavior is not closed by cross-compilation or static inspection',
-    },
-    {
       verification_point_id: 'c7-linux-desktop-x64-domain-waves',
       target_cell: 'linux_desktop_x64',
       status: 'pending_native_verification',
       required_execution_kind: 'native',
       exact_check_id: 'c8_ld_full_gate',
-      reason: 'C7 is Windows-first; non-Windows behavior is not closed by cross-compilation or static inspection',
-    },
-    {
-      verification_point_id: 'c7-linux-headless-x64-domain-waves',
-      target_cell: 'linux_headless_x64',
-      status: 'pending_native_verification',
-      required_execution_kind: 'native',
-      exact_check_id: 'c8_lh_full_gate',
       reason: 'C7 is Windows-first; non-Windows behavior is not closed by cross-compilation or static inspection',
     },
   ];
@@ -7768,7 +7089,7 @@ function currentC8MergeEvidencePath() {
   const configured = process.env.AGENT_V2_C8_MERGE_SUMMARY;
   if (configured) return normalizeRepoPath(configured);
   const sourceSha = c8ReadGitHeadForReport();
-  return `build.noindex/agent-capability-v2/${sourceSha}/c8-merge/evidence-summary.json`;
+  return `build.noindex/agent-capability-v2/${sourceSha}/c8-merge/release-summary.json`;
 }
 
 function readC8MergeSummary(report, path) {
@@ -7839,8 +7160,9 @@ function validateC8MergeSummary(
     status: 'fail',
     required_cells: [...C8_REQUIRED_NATIVE_CELLS],
     observed_cells: [],
-    tuple: null,
     status_counts: null,
+    verified_artifact_cells: [],
+    same_input_digests: null,
     failures: [],
   };
   if (!summary || typeof summary !== 'object' || Array.isArray(summary)) {
@@ -7848,18 +7170,12 @@ function validateC8MergeSummary(
     return result;
   }
 
-  const expectedTuple = {
-    candidate_source_sha: sourceSha,
-    confirmed_decision_contract_digest:
-      C8_EXPECTED_DIGESTS.confirmed_decision_contract,
-  };
-  result.tuple = summary.cohort_tuple || null;
-  if (!c8CanonicalEqual(summary.cohort_tuple, expectedTuple)) {
+  if (summary.source_commit !== sourceSha) {
     c8MergeFailure(
       report,
-      'tuple_mismatch',
-      'C8-MERGE evidence tuple does not exactly match the current source and frozen inputs',
-      { expected: expectedTuple, observed: summary.cohort_tuple || null }
+      'source_commit_mismatch',
+      'C8-MERGE evidence must match the current clean local HEAD',
+      { expected: sourceSha, observed: summary.source_commit || null }
     );
   }
 
@@ -7881,12 +7197,9 @@ function validateC8MergeSummary(
     );
   }
 
-  const computed = {
-    pending_native_verification: 0,
-    pass: 0,
-    fail: 0,
-    stale: 0,
-  };
+  const computed = { pass: 0, fail: 0 };
+  const platformInputDigests = new Set();
+  const runtimeInputDigests = new Set();
   for (const cellId of observedCells) {
     const cell = cells[cellId];
     const status = cell?.status;
@@ -7899,11 +7212,26 @@ function validateC8MergeSummary(
         { cell_id: cellId, status: status || null }
       );
     }
-    if (!c8CanonicalEqual(cell?.cohort_tuple, expectedTuple)) {
+    if (cell?.source_commit !== sourceSha) {
       c8MergeFailure(
         report,
-        'cell_tuple_mismatch',
-        `C8-MERGE cell ${cellId} has a different cohort tuple`,
+        'cell_source_commit_mismatch',
+        `C8-MERGE cell ${cellId} does not match the current clean local HEAD`,
+        { cell_id: cellId, expected: sourceSha, observed: cell?.source_commit || null }
+      );
+    }
+    const artifactDigests = cell?.artifact_digests;
+    if (
+      !c8Hex(cell?.release_lock_sha256) ||
+      !artifactDigests ||
+      !c8Hex(artifactDigests.host) ||
+      !c8Hex(artifactDigests.package) ||
+      !c8Hex(artifactDigests.runtime_sidecar)
+    ) {
+      c8MergeFailure(
+        report,
+        'cell_artifact_digests_invalid',
+        `C8-MERGE cell ${cellId} must provide release-lock, host, package, and Sidecar digests`,
         { cell_id: cellId }
       );
     }
@@ -7933,12 +7261,31 @@ function validateC8MergeSummary(
         );
       } else {
         try {
+          const observedEvidenceDigest = sha256File(join(repoRoot, evidencePath));
           const parsed = JSON.parse(evidenceSource);
           const evidence = parsed?.payload || parsed;
+          const evidenceArtifacts = evidence?.artifact_digests || {};
+          const platformInputDigest =
+            evidence?.platform_validation?.input_digests
+              ?.platform_validation_fixture?.observed;
+          const runtimeInputDigest =
+            evidence?.platform_validation?.input_digests
+              ?.runtime_release_fixture?.observed;
+          if (c8Hex(platformInputDigest)) {
+            platformInputDigests.add(platformInputDigest);
+          }
+          if (c8Hex(runtimeInputDigest)) {
+            runtimeInputDigests.add(runtimeInputDigest);
+          }
           if (
+            observedEvidenceDigest !== cell.evidence.digest ||
             evidence?.status !== 'pass' ||
-            evidence?.cell_id !== cellId ||
-            !c8CanonicalEqual(evidence?.cohort_tuple, expectedTuple)
+            evidence?.source_sha !== sourceSha ||
+            evidence?.target_cell?.cell_id !== cellId ||
+            evidence?.release_lock?.sha256 !== cell.release_lock_sha256 ||
+            evidenceArtifacts.host !== artifactDigests?.host ||
+            evidenceArtifacts.package !== artifactDigests?.package ||
+            evidenceArtifacts.runtime_sidecar !== artifactDigests?.runtime_sidecar
           ) {
             c8MergeFailure(
               report,
@@ -7947,6 +7294,7 @@ function validateC8MergeSummary(
               { cell_id: cellId, path: evidencePath }
             );
           }
+          result.verified_artifact_cells.push(cellId);
         } catch (error) {
           c8MergeFailure(
             report,
@@ -7959,6 +7307,26 @@ function validateC8MergeSummary(
     }
   }
   result.status_counts = computed;
+  result.same_input_digests = {
+    platform_validation:
+      platformInputDigests.size === 1 ? [...platformInputDigests][0] : null,
+    runtime_release:
+      runtimeInputDigests.size === 1 ? [...runtimeInputDigests][0] : null,
+  };
+  if (
+    verifyEvidenceArtifacts &&
+    (platformInputDigests.size !== 1 || runtimeInputDigests.size !== 1)
+  ) {
+    c8MergeFailure(
+      report,
+      'same_input_bytes_mismatch',
+      'C8-MERGE requires all three native results to reference the same platform and Runtime candidate input bytes',
+      {
+        platform_validation_digests: [...platformInputDigests].sort(),
+        runtime_release_digests: [...runtimeInputDigests].sort(),
+      }
+    );
+  }
   if (!c8CanonicalEqual(summary.status_counts, computed)) {
     c8MergeFailure(
       report,
@@ -7967,11 +7335,11 @@ function validateC8MergeSummary(
       { expected: computed, observed: summary.status_counts || null }
     );
   }
-  if (computed.pending_native_verification !== 0 || computed.fail !== 0 || computed.stale !== 0) {
+  if (computed.fail !== 0) {
     c8MergeFailure(
       report,
       'non_pass_status_count',
-      'C8-MERGE requires pending/fail/stale counts to be zero',
+      'C8-MERGE requires all three native cells to pass',
       { counts: computed }
     );
   }
@@ -8043,7 +7411,7 @@ function runC8MergeGate() {
       status: 'fail',
       required_cells: [...C8_REQUIRED_NATIVE_CELLS],
       observed_cells: [],
-      tuple: null,
+      source_commit: null,
       status_counts: null,
       failures: ['missing evidence summary'],
     };

@@ -1250,6 +1250,8 @@ fn registration_for(
             capabilities,
             skills: Vec::<SkillDefinition>::new(),
             mcp_tools: Vec::new(),
+            role_contracts: Vec::new(),
+            role_providers: Vec::new(),
         },
     };
 
@@ -1299,6 +1301,7 @@ fn registration_for(
                 .collect(),
             declared_skill_ids: BTreeSet::new(),
             declared_mcp_tool_keys: BTreeSet::new(),
+            declared_role_ids: BTreeSet::new(),
             declared_service_keys: BTreeSet::new(),
             declared_host_ports,
         },
@@ -2333,6 +2336,7 @@ mod tests {
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
             resource_bindings: vec![binding],
+            system_role_provider_overrides: BTreeMap::new(),
             persona: "Wave 1 test".to_owned(),
             instructions: "Invoke the selected capability.".to_owned(),
             context_policy: StrictJsonValue(json!({})),
@@ -2358,6 +2362,7 @@ mod tests {
                 required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
                 runtime_feature_inventory_digest: DigestHex::from("runtime"),
                 available_runtime_features: BTreeSet::new(),
+                installation_role_bindings: BTreeMap::new(),
                 canonical_schema_manifest_digest: DigestHex::from("schema"),
                 target_contribution_manifest_digest: DigestHex::from("target"),
                 host_target: RuntimeTarget::from("windows-desktop-x64"),

@@ -68,6 +68,21 @@ CREATE TABLE plugin_states (
         ON UPDATE RESTRICT ON DELETE CASCADE
 ) STRICT;
 
+CREATE TABLE installation_role_bindings (
+    role_id TEXT PRIMARY KEY CHECK (trim(role_id) <> ''),
+    role_contract_ref_json TEXT NOT NULL CHECK (
+        json_valid(role_contract_ref_json)
+        AND json_type(role_contract_ref_json) = 'object'
+        AND json_type(role_contract_ref_json, '$.key') = 'object'
+        AND json_extract(role_contract_ref_json, '$.key.role_id') = role_id
+        AND trim(json_extract(role_contract_ref_json, '$.key.contract_version')) <> ''
+        AND length(json_extract(role_contract_ref_json, '$.contract_digest')) = 64
+    ),
+    provider_mount_id TEXT NOT NULL,
+    binding_version INTEGER NOT NULL CHECK (binding_version >= 1),
+    updated_at INTEGER NOT NULL
+) STRICT;
+
 CREATE TABLE capability_definitions (
     capability_id TEXT NOT NULL,
     capability_version TEXT NOT NULL,
@@ -78,35 +93,6 @@ CREATE TABLE capability_definitions (
     PRIMARY KEY (capability_id, capability_version),
     FOREIGN KEY (package_id, package_version)
         REFERENCES plugin_packages (package_id, package_version)
-        ON UPDATE RESTRICT ON DELETE RESTRICT
-) STRICT;
-
-CREATE TABLE capability_packs (
-    pack_id TEXT NOT NULL,
-    pack_version TEXT NOT NULL,
-    package_id TEXT NOT NULL,
-    package_version TEXT NOT NULL,
-    manifest_json TEXT NOT NULL CHECK (json_valid(manifest_json)),
-    manifest_digest TEXT NOT NULL CHECK (length(manifest_digest) = 64),
-    PRIMARY KEY (pack_id, pack_version),
-    FOREIGN KEY (package_id, package_version)
-        REFERENCES plugin_packages (package_id, package_version)
-        ON UPDATE RESTRICT ON DELETE RESTRICT
-) STRICT;
-
-CREATE TABLE capability_pack_items (
-    pack_id TEXT NOT NULL,
-    pack_version TEXT NOT NULL,
-    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-    capability_id TEXT NOT NULL,
-    capability_version TEXT NOT NULL,
-    PRIMARY KEY (pack_id, pack_version, ordinal),
-    UNIQUE (pack_id, pack_version, capability_id),
-    FOREIGN KEY (pack_id, pack_version)
-        REFERENCES capability_packs (pack_id, pack_version)
-        ON UPDATE RESTRICT ON DELETE CASCADE,
-    FOREIGN KEY (capability_id, capability_version)
-        REFERENCES capability_definitions (capability_id, capability_version)
         ON UPDATE RESTRICT ON DELETE RESTRICT
 ) STRICT;
 
@@ -425,50 +411,8 @@ CREATE TABLE system_settings (
 CREATE TABLE agent_runtime_snapshots (
     snapshot_id TEXT PRIMARY KEY,
     snapshot_digest TEXT NOT NULL UNIQUE CHECK (length(snapshot_digest) = 64),
-    preset_id TEXT NOT NULL,
-    revision_no INTEGER NOT NULL,
-    revision_digest TEXT NOT NULL CHECK (length(revision_digest) = 64),
     content_json TEXT NOT NULL CHECK (json_valid(content_json)),
-    envelope_json TEXT NOT NULL CHECK (json_valid(envelope_json)),
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (preset_id, revision_no)
-        REFERENCES agent_preset_revisions (preset_id, revision_no)
-        ON UPDATE RESTRICT ON DELETE RESTRICT
-) STRICT;
-
-CREATE TABLE agent_runtime_snapshot_capabilities (
-    snapshot_id TEXT NOT NULL,
-    capability_id TEXT NOT NULL,
-    capability_version TEXT NOT NULL,
-    set_kind TEXT NOT NULL CHECK (set_kind IN ('initial', 'on_demand')),
-    activation_plan_json TEXT CHECK (
-        activation_plan_json IS NULL OR json_valid(activation_plan_json)
-    ),
-    PRIMARY KEY (snapshot_id, capability_id),
-    FOREIGN KEY (snapshot_id) REFERENCES agent_runtime_snapshots (snapshot_id)
-        ON UPDATE RESTRICT ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE agent_runtime_profiles (
-    snapshot_id TEXT PRIMARY KEY,
-    profile_kind TEXT NOT NULL CHECK (profile_kind IN ('coding_native', 'managed_minimal')),
-    profile_json TEXT NOT NULL CHECK (json_valid(profile_json)),
-    profile_digest TEXT NOT NULL CHECK (length(profile_digest) = 64),
-    FOREIGN KEY (snapshot_id) REFERENCES agent_runtime_snapshots (snapshot_id)
-        ON UPDATE RESTRICT ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE agent_preset_audit_events (
-    audit_event_id TEXT PRIMARY KEY,
-    preset_id TEXT NOT NULL,
-    revision_no INTEGER,
-    actor_ref_json TEXT NOT NULL CHECK (json_valid(actor_ref_json)),
-    action TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    revision_digest TEXT CHECK (revision_digest IS NULL OR length(revision_digest) = 64),
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (preset_id) REFERENCES agent_presets (preset_id)
-        ON UPDATE RESTRICT ON DELETE RESTRICT
+    envelope_json TEXT NOT NULL CHECK (json_valid(envelope_json))
 ) STRICT;
 
 CREATE TABLE agent_sessions (

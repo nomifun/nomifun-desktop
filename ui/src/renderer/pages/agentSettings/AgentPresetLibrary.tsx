@@ -5,16 +5,7 @@ import type {
   OfficialPresetTemplate,
 } from '@/common/types/agentPlatform';
 import { Button, Empty, Tooltip } from '@arco-design/web-react';
-import {
-  AddOne,
-  Code,
-  Customer,
-  Edit,
-  Magic,
-  MessageOne,
-  Robot,
-  User,
-} from '@icon-park/react';
+import { AddOne, Code, Customer, Edit, Magic, MessageOne, Robot, User } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { TEMPLATE_I18N_PATH, templateCapabilityCount } from './model';
@@ -68,8 +59,7 @@ const AgentPresetLibrary: React.FC<AgentPresetLibraryProps> = ({
     <aside className={styles.library} aria-label={t('agentSettings.library.ariaLabel')}>
       <div className={styles.libraryHeader}>
         <div>
-          <div className={styles.libraryTitle}>{t('agentSettings.library.title')}</div>
-          <div className={styles.librarySubtitle}>{t('agentSettings.library.subtitle')}</div>
+          <div className={styles.libraryTitle}>{t('agentSettings.title')}</div>
         </div>
         <Tooltip content={createLabel}>
           <Button
@@ -128,16 +118,12 @@ const AgentPresetLibrary: React.FC<AgentPresetLibraryProps> = ({
           <span>{library.user_presets.length}</span>
         </div>
         {library.user_presets.length === 0 ? (
-          <Empty
-            className={styles.libraryEmpty}
-            description={t('agentSettings.library.empty')}
-          />
+          <Empty className={styles.libraryEmpty} description={t('agentSettings.library.empty')} />
         ) : (
           <div className={styles.libraryList}>
             {library.user_presets.map((preset) => {
               const selected =
-                selection?.kind === 'preset' &&
-                selection.preset.preset_id === preset.preset_id;
+                selection?.kind === 'preset' && selection.preset.preset_id === preset.preset_id;
               return (
                 <div
                   key={preset.preset_id}
@@ -153,18 +139,9 @@ const AgentPresetLibrary: React.FC<AgentPresetLibraryProps> = ({
                     </span>
                     <span className={styles.libraryCopy}>
                       <span className={styles.libraryName}>{preset.display_name}</span>
-                      <span className={styles.libraryMeta}>
-                        {preset.current_stable_revision
-                          ? t('agentSettings.library.revision', {
-                              revision: preset.current_stable_revision.revision,
-                            })
-                          : t('agentSettings.library.unsaved')}
-                        {preset.bound_target_count > 0
-                          ? ` · ${t('agentSettings.library.bindingCount', {
-                              count: preset.bound_target_count,
-                            })}`
-                          : ''}
-                      </span>
+                      {preset.description && (
+                        <span className={styles.libraryMeta}>{preset.description}</span>
+                      )}
                     </span>
                   </button>
                 </div>

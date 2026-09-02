@@ -201,6 +201,7 @@ impl AgentControlPlane {
                 .map(exact_ref_api)
                 .collect(),
             resource_bindings,
+            system_role_provider_overrides: BTreeMap::new(),
             persona: String::new(),
             instructions: String::new(),
             context_policy: json!({
@@ -812,6 +813,7 @@ fn empty_document() -> nomifun_api_types::AgentPresetDocumentDto {
         on_demand_capabilities: Vec::new(),
         skill_bindings: Vec::new(),
         resource_bindings: Vec::new(),
+        system_role_provider_overrides: BTreeMap::new(),
         persona: String::new(),
         instructions: String::new(),
         context_policy: json!({
@@ -1062,7 +1064,41 @@ mod tests {
         CompilerReleaseInputs, InMemoryControlPlaneStore, OfficialTemplateCatalog,
         PresetPreviewCompiler, StaticCatalogProvider,
     };
-    use nomifun_agent_contracts::{DigestHex, VersionString};
+    use nomifun_agent_contracts::{DigestHex, RuntimeProfileKind, RuntimeTarget, VersionString};
+    use nomifun_agent_kernel::{CompilerEnvironment, MaterializedRegistry};
+
+    fn test_compiler(templates: &OfficialTemplateCatalog) -> PresetPreviewCompiler {
+        let release = CompilerReleaseInputs {
+            resolver_version: VersionString::from("1.0.0"),
+            runtime_protocol_version: VersionString::from("1.0.0"),
+            runtime_feature_inventory_digest: DigestHex::from("runtime-features"),
+            canonical_schema_manifest_digest: DigestHex::from("schema"),
+            target_contribution_manifest_digest: DigestHex::from("contributions"),
+            availability_evidence_revision: "fixture".into(),
+        };
+        PresetPreviewCompiler::new(release.clone(), templates.clone()).with_materialized_registry(
+            Arc::new(MaterializedRegistry::empty()),
+            CompilerEnvironment {
+                resolver_version: release.resolver_version.clone(),
+                required_runtime_protocol_version: release.runtime_protocol_version.clone(),
+                required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+                runtime_feature_inventory_digest: release
+                    .runtime_feature_inventory_digest
+                    .clone(),
+                available_runtime_features: BTreeSet::new(),
+                installation_role_bindings: BTreeMap::new(),
+                canonical_schema_manifest_digest: release
+                    .canonical_schema_manifest_digest
+                    .clone(),
+                target_contribution_manifest_digest: release
+                    .target_contribution_manifest_digest
+                    .clone(),
+                host_target: RuntimeTarget::from("test"),
+                host_surface: "desktop".into(),
+                availability_evidence_revision: release.availability_evidence_revision,
+            },
+        )
+    }
 
     #[test]
     fn official_key_parser_is_exactly_the_frozen_seven() {
@@ -1079,17 +1115,7 @@ mod tests {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
         let templates = OfficialTemplateCatalog::load().unwrap();
-        let compiler = PresetPreviewCompiler::new(
-            CompilerReleaseInputs {
-                resolver_version: VersionString::from("1.0.0"),
-                runtime_protocol_version: VersionString::from("1.0.0"),
-                runtime_feature_inventory_digest: DigestHex::from("runtime-features"),
-                canonical_schema_manifest_digest: DigestHex::from("schema"),
-                target_contribution_manifest_digest: DigestHex::from("contributions"),
-                availability_evidence_revision: "fixture".into(),
-            },
-            templates.clone(),
-        );
+        let compiler = test_compiler(&templates);
         let control_plane = AgentControlPlane::new(
             store.clone(),
             catalog,
@@ -1158,17 +1184,7 @@ mod tests {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
         let templates = OfficialTemplateCatalog::load().unwrap();
-        let compiler = PresetPreviewCompiler::new(
-            CompilerReleaseInputs {
-                resolver_version: VersionString::from("1.0.0"),
-                runtime_protocol_version: VersionString::from("1.0.0"),
-                runtime_feature_inventory_digest: DigestHex::from("runtime-features"),
-                canonical_schema_manifest_digest: DigestHex::from("schema"),
-                target_contribution_manifest_digest: DigestHex::from("contributions"),
-                availability_evidence_revision: "fixture".into(),
-            },
-            templates.clone(),
-        );
+        let compiler = test_compiler(&templates);
         let control_plane = AgentControlPlane::new(
             store.clone(),
             catalog,

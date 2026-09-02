@@ -1,6 +1,6 @@
 use nomifun_agent_contracts::{
-    ActionId, CapabilityId, CanonicalErrorCode, DigestHex, McpServerId, McpToolKey, PackageId,
-    PluginMountId, ResourceBindingId, ServiceKeyId, SkillId, VersionString,
+    ActionId, CapabilityId, CanonicalErrorCode, DigestHex, ExecutionRoleId, McpServerId,
+    McpToolKey, PackageId, PluginMountId, ResourceBindingId, ServiceKeyId, SkillId, VersionString,
 };
 use thiserror::Error;
 
@@ -50,6 +50,36 @@ pub enum KernelError {
     },
     #[error("MCP capability {capability_id:?} has more than one tool mapping")]
     DuplicateMcpCapability { capability_id: CapabilityId },
+    #[error("duplicate execution-role contract {role_id:?}")]
+    DuplicateRoleContract { role_id: ExecutionRoleId },
+    #[error("execution-role contract {role_id:?} is invalid: {reason}")]
+    InvalidRoleContract {
+        role_id: ExecutionRoleId,
+        reason: String,
+    },
+    #[error("execution-role provider {role_id:?} is not bound")]
+    RoleProviderNotBound { role_id: ExecutionRoleId },
+    #[error("execution-role provider {role_id:?} is unavailable on mount {mount_id:?}")]
+    RoleProviderUnavailable {
+        role_id: ExecutionRoleId,
+        mount_id: PluginMountId,
+    },
+    #[error("execution-role member {capability_id:?} is not provided by {role_id:?}")]
+    RoleProviderMemberUnavailable {
+        role_id: ExecutionRoleId,
+        capability_id: CapabilityId,
+    },
+    #[error("duplicate role provider for {role_id:?} on mount {mount_id:?}")]
+    DuplicateRoleProvider {
+        role_id: ExecutionRoleId,
+        mount_id: PluginMountId,
+    },
+    #[error("role provider for {role_id:?} on mount {mount_id:?} is invalid: {reason}")]
+    InvalidRoleProvider {
+        role_id: ExecutionRoleId,
+        mount_id: PluginMountId,
+        reason: String,
+    },
     #[error(
         "package {package_id:?} requires missing package {dependency_id:?}@{dependency_version:?}"
     )]

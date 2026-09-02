@@ -2,12 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use jsonschema::Validator;
 use nomifun_agent_contracts::{
-    CapabilityId, CapabilityManifest, DigestHex, McpServerId, McpToolCapabilityMapping, McpToolKey,
-    PackageId, PackageManifest, PackageRef, PluginBootCriticality, PluginDesiredState,
-    PluginEffectiveState, PluginMountId, PluginRegistrarOperation, PluginRegistrationMetadata,
-    PluginSourceKind, PluginSourceMetadata, PluginStateMethod, ServiceHandleDescriptor,
-    ServiceKeyDagEdge, ServiceKeyDagNode, ServiceKeyDagPayload, ServiceKeyId, ServiceKeyRef,
-    SkillDefinition, SkillId, VersionString, digest_payload,
+    CapabilityId, CapabilityManifest, DigestHex, ExactRoleProviderRef, ExecutionRoleId,
+    McpServerId, McpToolCapabilityMapping, McpToolKey, PackageId, PackageManifest, PackageRef,
+    PluginBootCriticality, PluginDesiredState, PluginEffectiveState, PluginMountId,
+    PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
+    PluginStateMethod, RoleContractManifest, RoleMemberRequirement, RoleProviderContribution,
+    ServiceHandleDescriptor, ServiceKeyDagEdge, ServiceKeyDagNode, ServiceKeyDagPayload,
+    ServiceKeyId, ServiceKeyRef, SkillDefinition, SkillId, VersionString, digest_payload,
 };
 use semver::Version;
 use serde::Serialize;
@@ -73,6 +74,20 @@ pub struct MaterializedMcpTool {
 }
 
 #[derive(Clone, Debug)]
+pub struct MaterializedRoleContract {
+    pub manifest: RoleContractManifest,
+    pub contract_digest: DigestHex,
+    pub mount_id: PluginMountId,
+}
+
+#[derive(Clone, Debug)]
+pub struct MaterializedRoleProvider {
+    pub provider: ExactRoleProviderRef,
+    pub contribution: RoleProviderContribution,
+    pub source: PluginSourceMetadata,
+}
+
+#[derive(Clone, Debug)]
 pub struct MaterializedRegistry {
     pub generation: u64,
     pub registry_digest: DigestHex,
@@ -82,6 +97,10 @@ pub struct MaterializedRegistry {
     pub skills: BTreeMap<SkillId, MaterializedSkill>,
     pub mcp_tools: BTreeMap<(McpServerId, McpToolKey), MaterializedMcpTool>,
     pub mcp_by_capability: BTreeMap<CapabilityId, (McpServerId, McpToolKey)>,
+    pub role_contracts: BTreeMap<ExecutionRoleId, MaterializedRoleContract>,
+    pub role_providers:
+        BTreeMap<(ExecutionRoleId, PluginMountId), MaterializedRoleProvider>,
+    pub capability_roles: BTreeMap<CapabilityId, ExecutionRoleId>,
     pub package_start_order: Vec<PluginMountId>,
     pub service_dag: ServiceKeyDagPayload,
 }
@@ -108,6 +127,9 @@ impl MaterializedRegistry {
             skills: BTreeMap::new(),
             mcp_tools: BTreeMap::new(),
             mcp_by_capability: BTreeMap::new(),
+            role_contracts: BTreeMap::new(),
+            role_providers: BTreeMap::new(),
+            capability_roles: BTreeMap::new(),
             package_start_order: Vec::new(),
             service_dag,
         }
@@ -136,6 +158,29 @@ impl MaterializedRegistry {
             .get(capability_id)
             .and_then(|key| self.mcp_tools.get(key))
     }
+
+    pub fn role_for_capability(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Option<&ExecutionRoleId> {
+        self.capability_roles.get(capability_id)
+    }
+
+    pub fn role_contract(
+        &self,
+        role_id: &ExecutionRoleId,
+    ) -> Option<&MaterializedRoleContract> {
+        self.role_contracts.get(role_id)
+    }
+
+    pub fn role_provider(
+        &self,
+        role_id: &ExecutionRoleId,
+        mount_id: &PluginMountId,
+    ) -> Option<&MaterializedRoleProvider> {
+        self.role_providers
+            .get(&(role_id.clone(), mount_id.clone()))
+    }
 }
 
 #[derive(Serialize)]
@@ -155,6 +200,18 @@ pub struct Materializer;
 
 impl Materializer {
     pub fn materialize(
+        policy: &MaterializationPolicy,
+        registrations: &[PluginRegistration],
+        generation: u64,
+    ) -> Result<MaterializedRegistry, KernelError> {
+        let canonical_registrations = registrations
+            .iter()
+            .map(PluginRegistration::canonicalized)
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::materialize_canonical(policy, &canonical_registrations, generation)
+    }
+
+    pub(crate) fn materialize_canonical(
         policy: &MaterializationPolicy,
         registrations: &[PluginRegistration],
         generation: u64,
@@ -289,6 +346,10 @@ impl Materializer {
         validate_capability_dependencies(&capabilities)?;
         validate_skills(&skills, &capabilities)?;
         validate_mcp_mappings(&mcp_tools, &capabilities)?;
+        let (role_contracts, capability_roles) =
+            materialize_role_contracts(&ordered, &capabilities)?;
+        let role_providers =
+            materialize_role_providers(&ordered, &role_contracts)?;
         let service_dag = build_service_dag(&ordered)?;
 
         let registry_digest = digest_payload(&RegistryDigestPayload {
@@ -310,6 +371,9 @@ impl Materializer {
             skills,
             mcp_tools,
             mcp_by_capability,
+            role_contracts,
+            role_providers,
+            capability_roles,
             package_start_order,
             service_dag,
         })
@@ -438,6 +502,12 @@ fn validate_registration(
         .iter()
         .map(|mapping| mapping.canonical_tool_key.clone())
         .collect::<BTreeSet<_>>();
+    let role_ids = manifest
+        .contributions
+        .role_providers
+        .iter()
+        .map(|provider| provider.role.key.role_id.clone())
+        .collect::<BTreeSet<_>>();
     let provided_service_refs = manifest
         .provides_services
         .iter()
@@ -450,6 +520,7 @@ fn validate_registration(
     if capability_ids.len() != manifest.contributions.capabilities.len()
         || skill_ids.len() != manifest.contributions.skills.len()
         || mcp_keys.len() != manifest.contributions.mcp_tools.len()
+        || role_ids.len() != manifest.contributions.role_providers.len()
         || provided_service_refs.len() != manifest.provides_services.len()
     {
         return invalid_registration(registration, "duplicate declaration within manifest");
@@ -459,12 +530,14 @@ fn validate_registration(
         !capability_ids.is_empty(),
         !skill_ids.is_empty(),
         !mcp_keys.is_empty(),
+        !role_ids.is_empty(),
         !provided_service_ids.is_empty(),
         !declared_host_ports(&registration.context).is_empty(),
     );
     if registration.registrar.declared_capability_ids != capability_ids
         || registration.registrar.declared_skill_ids != skill_ids
         || registration.registrar.declared_mcp_tool_keys != mcp_keys
+        || registration.registrar.declared_role_ids != role_ids
         || registration.registrar.declared_service_keys != provided_service_ids
         || registration.registrar.declared_host_ports
             != declared_host_ports(&registration.context)
@@ -619,6 +692,7 @@ fn required_registrar_operations(
     capabilities: bool,
     skills: bool,
     mcp: bool,
+    role_providers: bool,
     services: bool,
     host_ports: bool,
 ) -> BTreeSet<PluginRegistrarOperation> {
@@ -631,6 +705,9 @@ fn required_registrar_operations(
     }
     if mcp {
         operations.insert(PluginRegistrarOperation::ContributeMcpToolMapping);
+    }
+    if role_providers {
+        operations.insert(PluginRegistrarOperation::ContributeRoleProvider);
     }
     if services {
         operations.insert(PluginRegistrarOperation::ProvideService);
@@ -758,6 +835,226 @@ fn validate_mcp_mappings(
         }
     }
     Ok(())
+}
+
+fn materialize_role_contracts(
+    registrations: &[PluginRegistrationMetadata],
+    capabilities: &BTreeMap<CapabilityId, MaterializedCapability>,
+) -> Result<
+    (
+        BTreeMap<ExecutionRoleId, MaterializedRoleContract>,
+        BTreeMap<CapabilityId, ExecutionRoleId>,
+    ),
+    KernelError,
+> {
+    let mut contracts = BTreeMap::new();
+    let mut capability_roles = BTreeMap::new();
+    for registration in registrations {
+        for contract in &registration.manifest.payload.contributions.role_contracts {
+            let role_id = contract.key.role_id.clone();
+            validate_version("role contract version", &contract.key.contract_version)?;
+            if role_id.as_ref().trim().is_empty() || !role_id.as_ref().contains('.') {
+                return Err(KernelError::InvalidRoleContract {
+                    role_id,
+                    reason: "execution-role IDs must be non-empty and namespaced".to_owned(),
+                });
+            }
+            if contract.members.is_empty() {
+                return Err(KernelError::InvalidRoleContract {
+                    role_id,
+                    reason: "role contract must declare at least one member".to_owned(),
+                });
+            }
+
+            let mut member_ids = BTreeSet::new();
+            let mut required = 0usize;
+            for member in &contract.members {
+                if !member_ids.insert(member.capability.id.clone()) {
+                    return Err(KernelError::InvalidRoleContract {
+                        role_id: role_id.clone(),
+                        reason: format!(
+                            "duplicate role member {}",
+                            member.capability.id.as_ref()
+                        ),
+                    });
+                }
+                if member.requirement == RoleMemberRequirement::Required {
+                    required += 1;
+                }
+                let Some(capability) = capabilities.get(&member.capability.id) else {
+                    return Err(KernelError::InvalidRoleContract {
+                        role_id: role_id.clone(),
+                        reason: format!(
+                            "role member {} is not materialized",
+                            member.capability.id.as_ref()
+                        ),
+                    });
+                };
+                if capability.manifest.version != member.capability.version
+                    || capability.schema_digest != member.capability_manifest_digest
+                {
+                    return Err(KernelError::InvalidRoleContract {
+                        role_id: role_id.clone(),
+                        reason: format!(
+                            "role member {} does not match its exact capability manifest",
+                            member.capability.id.as_ref()
+                        ),
+                    });
+                }
+                if let Some(existing) = capability_roles
+                    .insert(member.capability.id.clone(), role_id.clone())
+                {
+                    return Err(KernelError::InvalidRoleContract {
+                        role_id: role_id.clone(),
+                        reason: format!(
+                            "capability {} is already owned by execution role {}",
+                            member.capability.id.as_ref(),
+                            existing.as_ref()
+                        ),
+                    });
+                }
+            }
+            if required == 0 {
+                return Err(KernelError::InvalidRoleContract {
+                    role_id: role_id.clone(),
+                    reason: "role contract must declare at least one required member".to_owned(),
+                });
+            }
+            if let Some(resource_kind) = &contract.serialized_target_resource_kind {
+                if !contract.members.iter().any(|member| {
+                    capabilities[&member.capability.id]
+                        .manifest
+                        .contributions
+                        .resource_kinds
+                        .contains(resource_kind)
+                }) {
+                    return Err(KernelError::InvalidRoleContract {
+                        role_id: role_id.clone(),
+                        reason: format!(
+                            "serialized target resource kind {} is unused by every role member",
+                            resource_kind.as_ref()
+                        ),
+                    });
+                }
+            }
+            let contract_digest =
+                digest_payload(contract).map_err(|error| KernelError::Digest {
+                    reason: error.to_string(),
+                })?;
+            if contracts
+                .insert(
+                    role_id.clone(),
+                    MaterializedRoleContract {
+                        manifest: contract.clone(),
+                        contract_digest,
+                        mount_id: registration.mount_id.clone(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(KernelError::DuplicateRoleContract { role_id });
+            }
+        }
+    }
+    Ok((contracts, capability_roles))
+}
+
+fn materialize_role_providers(
+    registrations: &[PluginRegistrationMetadata],
+    contracts: &BTreeMap<ExecutionRoleId, MaterializedRoleContract>,
+) -> Result<
+    BTreeMap<(ExecutionRoleId, PluginMountId), MaterializedRoleProvider>,
+    KernelError,
+> {
+    let mut providers = BTreeMap::new();
+    for registration in registrations {
+        let manifest = &registration.manifest.payload;
+        let package = PackageRef {
+            id: manifest.package_id.clone(),
+            version: manifest.package_version.clone(),
+        };
+        for contribution in &manifest.contributions.role_providers {
+            let role_id = contribution.role.key.role_id.clone();
+            let Some(contract) = contracts.get(&role_id) else {
+                return Err(KernelError::InvalidRoleProvider {
+                    role_id,
+                    mount_id: registration.mount_id.clone(),
+                    reason: "referenced role contract is not materialized".to_owned(),
+                });
+            };
+            if contribution.role.key != contract.manifest.key
+                || contribution.role.contract_digest != contract.contract_digest
+            {
+                return Err(KernelError::InvalidRoleProvider {
+                    role_id,
+                    mount_id: registration.mount_id.clone(),
+                    reason: "provider references a different role contract".to_owned(),
+                });
+            }
+            let contract_members = contract
+                .manifest
+                .members
+                .iter()
+                .map(|member| (member.capability.id.clone(), member.requirement))
+                .collect::<BTreeMap<_, _>>();
+            if contribution
+                .members
+                .keys()
+                .any(|capability_id| !contract_members.contains_key(capability_id))
+            {
+                return Err(KernelError::InvalidRoleProvider {
+                    role_id,
+                    mount_id: registration.mount_id.clone(),
+                    reason: "provider contributes a capability outside the role contract"
+                        .to_owned(),
+                });
+            }
+            if let Some(missing) = contract_members.iter().find_map(
+                |(capability_id, requirement)| {
+                    (*requirement == RoleMemberRequirement::Required
+                        && !contribution.members.contains_key(capability_id))
+                    .then_some(capability_id)
+                },
+            ) {
+                return Err(KernelError::InvalidRoleProvider {
+                    role_id,
+                    mount_id: registration.mount_id.clone(),
+                    reason: format!(
+                        "provider is missing required role member {}",
+                        missing.as_ref()
+                    ),
+                });
+            }
+            let contribution_digest =
+                digest_payload(contribution).map_err(|error| KernelError::Digest {
+                    reason: error.to_string(),
+                })?;
+            let provider = ExactRoleProviderRef {
+                role: contribution.role.clone(),
+                package: package.clone(),
+                mount_id: registration.mount_id.clone(),
+                contribution_digest,
+            };
+            let key = (role_id.clone(), registration.mount_id.clone());
+            if providers
+                .insert(
+                    key,
+                    MaterializedRoleProvider {
+                        provider,
+                        contribution: contribution.clone(),
+                        source: registration.source.clone(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(KernelError::DuplicateRoleProvider {
+                    role_id,
+                    mount_id: registration.mount_id.clone(),
+                });
+            }
+        }
+    }
+    Ok(providers)
 }
 
 fn build_service_dag(

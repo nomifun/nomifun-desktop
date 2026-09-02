@@ -141,6 +141,14 @@ impl JobExecutor {
             .controls_host()
     }
 
+    pub(crate) async fn list_conversations_by_cron_job(
+        &self,
+        user_id: &str,
+        cron_job_id: &str,
+    ) -> Result<Vec<nomifun_api_types::ConversationResponse>, AppError> {
+        self.sessions.list_by_cron_job(user_id, cron_job_id).await
+    }
+
     /// Normalize the job's persisted `agent_type` selector to its canonical
     /// serde name, rejecting a selector the executor cannot run.
     pub(crate) fn canonicalize_new_conversation_agent(

@@ -1129,7 +1129,7 @@ impl AgentSessionStore {
         &self,
         request: EffectEventRequest,
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
-        self.append_event(&effect_append(request, "effect/started"))
+        self.append_event(&effect_append(request, "effect/started")?)
             .await
     }
 
@@ -1143,7 +1143,7 @@ impl AgentSessionStore {
             EffectTerminalState::Failed => "effect/failed",
             EffectTerminalState::Uncertain => "effect/uncertain",
         };
-        self.append_event(&effect_append(request, kind)).await
+        self.append_event(&effect_append(request, kind)?).await
     }
 
     pub async fn reconcile_effect(
@@ -1153,7 +1153,7 @@ impl AgentSessionStore {
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
         request.payload =
             SessionEventPayloadRef::InlineJson(StrictJsonValue(serde_json::to_value(outcome)?));
-        self.append_event(&effect_append(request, "effect/reconciled"))
+        self.append_event(&effect_append(request, "effect/reconciled")?)
             .await
     }
 
@@ -2595,11 +2595,25 @@ async fn validate_effect_transition_tx(
     let reconciled = events
         .iter()
         .find(|event| event.kind.0 == "effect/reconciled");
+    let started_strategy = started
+        .map(effect_strategy_from_event)
+        .transpose()?;
 
     match append.semantic_event.kind.0.as_str() {
-        "effect/started" if started.is_some() || terminal.is_some() || reconciled.is_some() => Err(
-            SessionStoreError::InvalidEvent("effect cannot be started more than once".to_owned()),
-        ),
+        "effect/started" => {
+            if started.is_some() || terminal.is_some() || reconciled.is_some() {
+                return Err(SessionStoreError::InvalidEvent(
+                    "effect cannot be started more than once".to_owned(),
+                ));
+            }
+            let strategy = effect_strategy_from_append(append)?;
+            if strategy == crate::types::EffectStrategy::ReadOnly {
+                return Err(SessionStoreError::InvalidEvent(
+                    "read-only operations must not emit effect lifecycle events".to_owned(),
+                ));
+            }
+            Ok(())
+        }
         "effect/succeeded" | "effect/failed" | "effect/uncertain" => {
             let Some(started) = started else {
                 return Err(SessionStoreError::InvalidEvent(
@@ -2616,6 +2630,19 @@ async fn validate_effect_transition_tx(
                     "effect lifecycle must retain the original idempotency key".to_owned(),
                 ));
             }
+            let strategy = started_strategy.ok_or_else(|| {
+                SessionStoreError::InvalidEvent(
+                    "effect/started must declare a lifecycle strategy".to_owned(),
+                )
+            })?;
+            let terminal_kind = append.semantic_event.kind.0.as_str();
+            if terminal_kind == "effect/uncertain"
+                && strategy != crate::types::EffectStrategy::ExternalUncertainEffect
+            {
+                return Err(SessionStoreError::InvalidEvent(
+                    "only external_uncertain_effect may end as uncertain".to_owned(),
+                ));
+            }
             Ok(())
         }
         "effect/reconciled" => {
@@ -2627,6 +2654,11 @@ async fn validate_effect_transition_tx(
             if terminal.is_none_or(|event| event.kind.0 != "effect/uncertain") {
                 return Err(SessionStoreError::InvalidEvent(
                     "only an uncertain effect may be reconciled".to_owned(),
+                ));
+            }
+            if started_strategy != Some(crate::types::EffectStrategy::ExternalUncertainEffect) {
+                return Err(SessionStoreError::InvalidEvent(
+                    "only external_uncertain_effect may be reconciled".to_owned(),
                 ));
             }
             if reconciled.is_some() {
@@ -2655,8 +2687,34 @@ fn event_uses_message_projection(
         .any(|reducer| reducer.as_ref() == "message-projection")
 }
 
-fn effect_append(request: EffectEventRequest, kind: &str) -> SessionEventAppend {
-    SessionEventAppend {
+fn effect_append(
+    mut request: EffectEventRequest,
+    kind: &str,
+) -> Result<SessionEventAppend, SessionStoreError> {
+    let SessionEventPayloadRef::InlineJson(mut payload) = request.payload else {
+        return Err(SessionStoreError::InvalidEvent(
+            "effect lifecycle payload must be inline canonical JSON".to_owned(),
+        ));
+    };
+    let object = payload.0.as_object_mut().ok_or_else(|| {
+        SessionStoreError::InvalidEvent(
+            "effect lifecycle payload must be a JSON object".to_owned(),
+        )
+    })?;
+    if let Some(existing) = object.get("strategy").and_then(Value::as_str) {
+        if existing != request.strategy.as_str() {
+            return Err(SessionStoreError::InvalidEvent(
+                "effect lifecycle strategy changed between events".to_owned(),
+            ));
+        }
+    } else {
+        object.insert(
+            "strategy".to_owned(),
+            Value::String(request.strategy.as_str().to_owned()),
+        );
+    }
+    request.payload = SessionEventPayloadRef::InlineJson(payload);
+    Ok(SessionEventAppend {
         agent_session_id: request.agent_session_id,
         event_id: request.event_id,
         producer_id: request.producer_id,
@@ -2670,6 +2728,46 @@ fn effect_append(request: EffectEventRequest, kind: &str) -> SessionEventAppend 
             causation_event_id: request.causation_event_id,
             payload: request.payload,
         },
+    })
+}
+
+fn effect_strategy_from_append(
+    append: &SessionEventAppend,
+) -> Result<crate::types::EffectStrategy, SessionStoreError> {
+    let SessionEventPayloadRef::InlineJson(payload) = &append.semantic_event.payload else {
+        return Err(SessionStoreError::InvalidEvent(
+            "effect lifecycle payload must be inline canonical JSON".to_owned(),
+        ));
+    };
+    effect_strategy_from_payload(&payload.0)
+}
+
+fn effect_strategy_from_event(
+    event: &SessionEventRecord,
+) -> Result<crate::types::EffectStrategy, SessionStoreError> {
+    let SessionEventPayloadRef::InlineJson(payload) = &event.payload else {
+        return Err(SessionStoreError::InvalidEvent(
+            "effect lifecycle payload must be inline canonical JSON".to_owned(),
+        ));
+    };
+    effect_strategy_from_payload(&payload.0)
+}
+
+fn effect_strategy_from_payload(
+    payload: &Value,
+) -> Result<crate::types::EffectStrategy, SessionStoreError> {
+    match payload.get("strategy").and_then(Value::as_str) {
+        Some("read_only") => Ok(crate::types::EffectStrategy::ReadOnly),
+        Some("managed_effect") => Ok(crate::types::EffectStrategy::ManagedEffect),
+        Some("external_uncertain_effect") => {
+            Ok(crate::types::EffectStrategy::ExternalUncertainEffect)
+        }
+        Some(other) => Err(SessionStoreError::InvalidEvent(format!(
+            "unknown effect lifecycle strategy {other:?}"
+        ))),
+        None => Err(SessionStoreError::InvalidEvent(
+            "effect lifecycle payload must declare strategy".to_owned(),
+        )),
     }
 }
 

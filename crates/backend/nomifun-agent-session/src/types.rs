@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata,
     AgentSessionTombstone,
-    CanonicalErrorCode, ChatRouteIdentity, CompactionCompletedPayload, CorrelationId, EventId,
+    CanonicalErrorCode, ChatRouteIdentity, CompactionCompletedPayload, CorrelationId, EffectClass,
+    EventId,
     EventProducerId, IdempotencyKey, OperationId, PrincipalRef, ResolvedSnapshotRef,
     RuntimeCheckpointValidationResult, RuntimeEventAck, RuntimeEventEnvelope, SessionEventAck,
     SessionEventCursor, SessionEventPayloadRef, SessionEventRecord, SessionForkContract,
@@ -176,9 +177,59 @@ pub struct EffectEventRequest {
     pub producer_id: EventProducerId,
     pub idempotency_key: IdempotencyKey,
     pub correlation_id: CorrelationId,
+    pub strategy: EffectStrategy,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub causation_event_id: Option<EventId>,
     pub payload: SessionEventPayloadRef,
+}
+
+/// The only lifecycle policies supported by the first release.
+///
+/// `read_only` has no durable effect lifecycle. `managed_effect` is owned by
+/// this process and can report a known failure. `external_uncertain_effect`
+/// crosses a boundary where a transport failure cannot prove whether the
+/// remote side ran, so the terminal state is `uncertain` and is never retried
+/// implicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectStrategy {
+    ReadOnly,
+    ManagedEffect,
+    ExternalUncertainEffect,
+}
+
+impl EffectStrategy {
+    pub const fn from_effect_class(effect_class: EffectClass) -> Self {
+        match effect_class {
+            EffectClass::Pure | EffectClass::ReadLocal | EffectClass::ReadSensitive => {
+                Self::ReadOnly
+            }
+            EffectClass::ExternalTransmit | EffectClass::Physical => {
+                Self::ExternalUncertainEffect
+            }
+            EffectClass::WriteReversible
+            | EffectClass::WriteDurable
+            | EffectClass::ExecuteLocal
+            | EffectClass::Destructive
+            | EffectClass::Irreversible => Self::ManagedEffect,
+        }
+    }
+
+    pub const fn requires_lifecycle(self) -> bool {
+        !matches!(self, Self::ReadOnly)
+    }
+
+    pub const fn is_external_uncertain(self) -> bool {
+        matches!(self, Self::ExternalUncertainEffect)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::ManagedEffect => "managed_effect",
+            Self::ExternalUncertainEffect => "external_uncertain_effect",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

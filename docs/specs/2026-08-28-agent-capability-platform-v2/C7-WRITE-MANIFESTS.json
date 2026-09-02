@@ -12,15 +12,14 @@
     "native_non_windows_status": "pending_native_verification",
     "workspace_cargo_test": "forbidden_during_c7",
     "central_validation_owner": "main-agent",
-    "agent_count_target": "6-8",
     "same_change_demolition": true
   },
   "confirmed_inputs": {
     "decision_contract_digest": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5",
-    "schema_manifest_digest": "e7eb4d3d1cde70a8ae66c9b20836ff33abf1b710dc73d2a0b88393a9c8bfcc46",
-    "contract_ledger_digest": "2cf1431409924b6a7391eeeacf9fe2a18daa87a7b31c410a6cc923694349b0b5",
+    "schema_manifest_digest": "f8eb056bfd49e5330603ad36b284ed3269c34e1301db74ba33a0bec861e9573a",
+    "contract_ledger_digest": "67ba988a0f1d7b88b928be0ea4f794378c6177d85011cfe39873706716d68bdc",
     "deletion_manifest_set_digest": "0fb2e5abf2638e3c3352d4549ddb6a46b5a29ee7d62d35aedd9319a8fb5feecb",
-    "official_seed_digest": "c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8",
+    "official_seed_digest": "d15da58409cb096d0a1a5cc8c60534bf378500ecfc697789a5d0ecec85e56582",
     "runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee"
   },
   "preserve_exact": [

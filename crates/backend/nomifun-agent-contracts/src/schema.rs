@@ -58,13 +58,12 @@ const TABLES: &[(&str, &str, &str)] = &[
     ("plugin_configs", "platform.plugin-manager", "fact"),
     ("plugin_states", "platform.plugin-manager", "fact"),
     (
-        "capability_definitions",
+        "installation_role_bindings",
         "platform.capability-registry",
         "fact",
     ),
-    ("capability_packs", "platform.capability-registry", "fact"),
     (
-        "capability_pack_items",
+        "capability_definitions",
         "platform.capability-registry",
         "fact",
     ),
@@ -133,21 +132,6 @@ const TABLES: &[(&str, &str, &str)] = &[
         "platform.agent-preset-compiler",
         "fact",
     ),
-    (
-        "agent_runtime_snapshot_capabilities",
-        "platform.agent-preset-compiler",
-        "fact",
-    ),
-    (
-        "agent_runtime_profiles",
-        "platform.agent-preset-compiler",
-        "fact",
-    ),
-    (
-        "agent_preset_audit_events",
-        "platform.agent-preset",
-        "fact",
-    ),
     ("agent_sessions", "platform.agent-session", "fact"),
     ("session_events", "platform.agent-session", "fact"),
     ("session_payloads", "platform.agent-session", "fact"),
@@ -174,6 +158,11 @@ const FORBIDDEN_TABLE_NAMES: &[&str] = &[
     "runtime_event_store",
     "legacy_imports",
     "migration_reports",
+    "capability_packs",
+    "capability_pack_items",
+    "agent_runtime_snapshot_capabilities",
+    "agent_runtime_profiles",
+    "agent_preset_audit_events",
 ];
 
 #[cfg(test)]
@@ -231,6 +220,65 @@ mod tests {
                 .iter()
                 .all(|(_, owner, class)| !owner.is_empty() && !class.is_empty())
         );
+    }
+
+    #[test]
+    fn runtime_snapshot_stores_only_canonical_content_and_envelope() {
+        let database = Connection::open_in_memory().expect("in-memory SQLite");
+        database
+            .execute_batch(FRESH_V4_BASELINE_SQL)
+            .expect("fresh-v4 baseline");
+
+        let columns = database
+            .prepare("PRAGMA table_info(agent_runtime_snapshots)")
+            .expect("snapshot table info")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("snapshot columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("snapshot column names");
+        assert_eq!(
+            columns,
+            [
+                "snapshot_id",
+                "snapshot_digest",
+                "content_json",
+                "envelope_json"
+            ]
+        );
+    }
+
+    #[test]
+    fn installation_role_binding_is_one_exact_selection_per_role() {
+        let database = Connection::open_in_memory().expect("in-memory SQLite");
+        database
+            .execute_batch(FRESH_V4_BASELINE_SQL)
+            .expect("fresh-v4 baseline");
+
+        let columns = database
+            .prepare("PRAGMA table_info(installation_role_bindings)")
+            .expect("role binding table info")
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+            })
+            .expect("role binding columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("role binding column names");
+        assert_eq!(
+            columns,
+            [
+                ("role_id".to_owned(), 1),
+                ("role_contract_ref_json".to_owned(), 0),
+                ("provider_mount_id".to_owned(), 0),
+                ("binding_version".to_owned(), 0),
+                ("updated_at".to_owned(), 0),
+            ]
+        );
+        let row_count: i64 = database
+            .query_row("SELECT COUNT(*) FROM installation_role_bindings", [], |row| {
+                row.get(0)
+            })
+            .expect("role binding row count");
+        assert_eq!(row_count, 0);
     }
 
     #[test]

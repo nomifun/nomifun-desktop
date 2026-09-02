@@ -13,15 +13,16 @@ use axum::http::StatusCode;
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentPreset, AgentPresetId, AgentPresetRevision, AgentPresetSource,
     AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata, CanonicalDigestError,
-    CapabilityId, ChatRouteIdentity, ChatRouteLookupError, ChatRouteLookupKey, ChatRouteRecord,
-    ChatRouteRecordRow, CompactOnDemandCapabilityEntry, CorrelationId,
-    DeleteAgentSessionCommand, DigestHex, EffectClass, EventId, EventProducerId,
-    FullAutoExecutionWire, IdempotencyKey, ModelRouteId, NativeActionStart, NativeActionStartAck,
-    OperationId, PluginStateEntry, PresetRevisionRef, PrincipalRef, RemoteBinding, RemoteBindingId,
-    RemoteBindingProvenance, ResolvedSnapshotEnvelope, ResolvedSnapshotRef,
+    CapabilityId, CapabilityKind, ChatRouteIdentity, ChatRouteLookupError, ChatRouteLookupKey,
+    ChatRouteRecord, ChatRouteRecordRow, CompactOnDemandCapabilityEntry, CorrelationId,
+    DeleteAgentSessionCommand, DigestHex, EventId, EventProducerId,
+    ExactRoleContractRef, ExecutionRoleId, FullAutoExecutionWire, IdempotencyKey,
+    InstallationRoleBinding, ModelRouteId, NativeActionStart, NativeActionStartAck, OperationId,
+    PluginStateEntry, PluginMountId, PresetRevisionRef, PrincipalRef, RemoteBinding, RemoteBindingId,
+    RemoteBindingProvenance, ResolvedSnapshotEnvelope, ResolvedSnapshotRef, RoleProviderSelection,
     RuntimeBindingContract, RuntimeBindingId, RuntimeCancelParams, RuntimeCommand,
     RuntimeCommandContext, RuntimeCreateParams, RuntimeEventEnvelope, RuntimeEventWireAck,
-    RuntimeEventWireEnvelope, RuntimeProfileKind, RuntimeSessionDisposeParams,
+    RuntimeEventWireEnvelope, RuntimeSessionDisposeParams,
     RuntimeStartTurnParams, ScopeKey, SemanticSessionEventDraft, SessionEventAppend,
     SessionEventCursor, SessionEventKind,
     SessionEventPayloadRef, StrictJsonValue, TypedResourceBindings, UserId, VersionString,
@@ -37,11 +38,11 @@ use nomifun_agent_kernel::{
     CapabilityInvocationRequest, CompileRequest, CompiledSnapshot, CompilerEnvironment,
     CompletedTurnBoundary, KernelError, KernelRegistry, MaterializationPolicy, PluginRegistration,
     PluginStateError, PluginStatePersistence, PluginStateSnapshot, SessionCapabilityState,
-    StateIdentity, ThinAuthority,
+    RoleMemberAdmission, RoleMemberInvocationRequest, StateIdentity, ThinAuthority,
 };
 use nomifun_agent_session::{
     AgentSessionStore, CreateSessionRequest, DeleteResult, EffectEventRequest, ForkRequest,
-    EffectTerminalState, ForkResult, RuntimeAppendContext, SessionCreateResult,
+    EffectStrategy, EffectTerminalState, ForkResult, RuntimeAppendContext, SessionCreateResult,
     SessionEventAppendResult, SessionEventPage, SessionHeadProjection, SessionObservation,
     SessionRehydrationInput, SessionStoreError,
 };
@@ -63,6 +64,9 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
+
+const ROLE_CONTEXT_CONTRIBUTION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(15);
 
 #[derive(Debug, Error)]
 pub enum AgentPlatformError {
@@ -743,17 +747,6 @@ struct PersistedPresetDisplay {
     description: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersistedRuntimeProfile {
-    profile_kind: RuntimeProfileKind,
-    runtime_protocol_version: VersionString,
-    enabled_runtime_features: BTreeSet<nomifun_agent_contracts::RuntimeFeatureId>,
-    initial_capabilities: BTreeSet<CapabilityId>,
-    on_demand_capabilities: BTreeSet<CapabilityId>,
-    typed_resource_bindings: TypedResourceBindings,
-}
-
 #[async_trait]
 impl ControlPlaneStore for SqliteControlPlaneStore {
     async fn list_presets(
@@ -934,7 +927,8 @@ impl ControlPlaneStore for SqliteControlPlaneStore {
     ) -> Result<Option<ResolvedSnapshotEnvelope>, ControlPlaneError> {
         let row: Option<String> = sqlx::query_scalar(
             "SELECT envelope_json FROM agent_runtime_snapshots \
-             WHERE preset_id = ? AND revision_no = ?",
+             WHERE json_extract(content_json, '$.preset_revision_ref.preset_id') = ? \
+               AND json_extract(content_json, '$.preset_revision_ref.revision') = ?",
         )
         .bind(reference.preset_id.as_ref())
         .bind(i64_from_u64(reference.revision, "revision")?)
@@ -1238,15 +1232,6 @@ fn encode_control_json<T: Serialize>(value: &T) -> Result<String, ControlPlaneEr
     .map_err(|error| ControlPlaneError::Wire(error.to_string()))
 }
 
-fn wire_string<T: Serialize>(value: &T) -> Result<String, ControlPlaneError> {
-    match serde_json::to_value(value).map_err(ControlPlaneError::from)? {
-        Value::String(value) => Ok(value),
-        _ => Err(ControlPlaneError::Wire(
-            "wire enum did not serialize to a string".to_owned(),
-        )),
-    }
-}
-
 fn i64_from_u64(value: u64, field: &str) -> Result<i64, ControlPlaneError> {
     i64::try_from(value).map_err(|_| {
         ControlPlaneError::Wire(format!("{field} exceeds the SQLite i64 range"))
@@ -1538,66 +1523,13 @@ async fn insert_revision_snapshot_tx(
 
     sqlx::query(
         "INSERT INTO agent_runtime_snapshots \
-         (snapshot_id, snapshot_digest, preset_id, revision_no, revision_digest, \
-          content_json, envelope_json, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         (snapshot_id, snapshot_digest, content_json, envelope_json) \
+         VALUES (?, ?, ?, ?)",
     )
     .bind(snapshot.snapshot_ref.snapshot_id.as_ref())
     .bind(snapshot.snapshot_ref.snapshot_digest.as_ref())
-    .bind(revision.reference.preset_id.as_ref())
-    .bind(i64_from_u64(revision.reference.revision, "revision")?)
-    .bind(revision.reference.revision_digest.as_ref())
     .bind(encode_control_json(&snapshot.content)?)
     .bind(encode_control_json(snapshot)?)
-    .bind(snapshot.created_at_ms)
-    .execute(&mut **tx)
-    .await
-    .map_err(control_sql)?;
-
-    for capability in &snapshot.content.initial_capabilities {
-        insert_snapshot_capability_tx(
-            tx,
-            snapshot,
-            capability,
-            "initial",
-        )
-        .await?;
-    }
-    for capability in &snapshot.content.on_demand_capabilities {
-        insert_snapshot_capability_tx(
-            tx,
-            snapshot,
-            capability,
-            "on_demand",
-        )
-        .await?;
-    }
-    let profile = PersistedRuntimeProfile {
-        profile_kind: snapshot.content.required_runtime_profile,
-        runtime_protocol_version: snapshot.content.required_runtime_protocol_version.clone(),
-        enabled_runtime_features: snapshot.content.required_runtime_features.clone(),
-        initial_capabilities: snapshot
-            .content
-            .initial_capabilities
-            .iter()
-            .map(|capability| capability.capability.id.clone())
-            .collect(),
-        on_demand_capabilities: snapshot
-            .content
-            .on_demand_capabilities
-            .iter()
-            .map(|capability| capability.capability.id.clone())
-            .collect(),
-        typed_resource_bindings: snapshot.content.typed_resource_bindings.clone(),
-    };
-    sqlx::query(
-        "INSERT INTO agent_runtime_profiles \
-         (snapshot_id, profile_kind, profile_json, profile_digest) VALUES (?, ?, ?, ?)",
-    )
-    .bind(snapshot.snapshot_ref.snapshot_id.as_ref())
-    .bind(wire_string(&snapshot.content.required_runtime_profile)?)
-    .bind(encode_control_json(&profile)?)
-    .bind(snapshot.content.compiled_runtime_profile_digest.as_ref())
     .execute(&mut **tx)
     .await
     .map_err(control_sql)?;
@@ -1745,34 +1677,6 @@ async fn load_chat_route_record_for_id(
         .validate_for(&identity)
         .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
     Ok(Some(record))
-}
-
-async fn insert_snapshot_capability_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    snapshot: &ResolvedSnapshotEnvelope,
-    capability: &nomifun_agent_contracts::ResolvedCapability,
-    set_kind: &str,
-) -> Result<(), ControlPlaneError> {
-    let activation_plan_json = snapshot
-        .content
-        .on_demand_activation_plans
-        .get(&capability.capability.id)
-        .map(encode_control_json)
-        .transpose()?;
-    sqlx::query(
-        "INSERT INTO agent_runtime_snapshot_capabilities \
-         (snapshot_id, capability_id, capability_version, set_kind, activation_plan_json) \
-         VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(snapshot.snapshot_ref.snapshot_id.as_ref())
-    .bind(capability.capability.id.as_ref())
-    .bind(capability.capability.version.as_ref())
-    .bind(set_kind)
-    .bind(activation_plan_json)
-    .execute(&mut **tx)
-    .await
-    .map_err(control_sql)?;
-    Ok(())
 }
 
 async fn load_revision(
@@ -2140,10 +2044,20 @@ impl CatalogProvider for KernelCatalogProvider {
 
 impl AgentPlatform {
     pub async fn from_pool(
-        config: AgentPlatformConfig,
+        mut config: AgentPlatformConfig,
     ) -> Result<Arc<Self>, AgentPlatformError> {
         let (agent_core_registration, agent_session_services) =
             crate::session_services::agent_session_service_registration()?;
+        let mut initial_plugins = config.initial_plugins;
+        initial_plugins.push(agent_core_registration);
+        let mut installation_role_bindings =
+            load_installation_role_bindings(&config.pool).await?;
+        let derived_defaults = installation_role_defaults(&initial_plugins)?;
+        for (role_id, binding) in derived_defaults {
+            installation_role_bindings.entry(role_id).or_insert(binding);
+        }
+        config.kernel_environment.installation_role_bindings =
+            installation_role_bindings;
         let state_persistence = Arc::new(
             SqlitePluginStatePersistence::from_pool(config.pool.clone()).await?,
         );
@@ -2154,16 +2068,16 @@ impl AgentPlatform {
         let control_store = Arc::new(SqliteControlPlaneStore::new(config.pool.clone()));
         let templates = OfficialTemplateCatalog::load()?;
         let catalog = Arc::new(KernelCatalogProvider::new(Arc::clone(&kernel)));
+        let compiler = PresetPreviewCompiler::new(config.control_plane_release, templates.clone())
+            .with_canonical_registry(Arc::clone(&kernel), config.kernel_environment.clone());
         let control_plane = Arc::new(AgentControlPlane::new(
             Arc::clone(&control_store) as Arc<dyn ControlPlaneStore>,
             catalog,
             templates.clone(),
-            PresetPreviewCompiler::new(config.control_plane_release, templates),
+            compiler,
         ));
         let sessions = Arc::new(AgentSessionStore::from_pool(config.pool.clone()).await?);
         sessions.recover_deleting_sessions(now_ms()).await?;
-        let mut initial_plugins = config.initial_plugins;
-        initial_plugins.push(agent_core_registration);
         let platform = Arc::new(Self {
             pool: config.pool,
             control_store,
@@ -2229,6 +2143,10 @@ impl AgentPlatform {
             self.closed.store(false, Ordering::Release);
             return Err(error.into());
         }
+        if let Err(error) = self.kernel.release_all_role_resources().await {
+            self.closed.store(false, Ordering::Release);
+            return Err(error.into());
+        }
         self.executions.write().await.clear();
         self.opening_bindings
             .lock()
@@ -2251,6 +2169,10 @@ impl AgentPlatform {
         &self,
         registrations: Vec<PluginRegistration>,
     ) -> Result<Arc<nomifun_agent_kernel::MaterializedRegistry>, AgentPlatformError> {
+        let registrations = registrations
+            .into_iter()
+            .map(|registration| registration.canonicalized())
+            .collect::<Result<Vec<_>, _>>()?;
         let _guard = self.publish_lock.lock().await;
         let previous = self.registrations.read().await.clone();
         let mut tx = self.pool.begin().await?;
@@ -3073,6 +2995,91 @@ impl AgentPlatform {
             .clone())
     }
 
+    async fn assemble_role_context(
+        &self,
+        principal: &PrincipalRef,
+        agent_session_id: &AgentSessionId,
+        operation_id: &OperationId,
+        compiled: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+    ) -> Result<Vec<Value>, AgentPlatformError> {
+        let registry = self.kernel.snapshot()?;
+        let mut capabilities = active
+            .active
+            .iter()
+            .filter_map(|capability_id| {
+                registry
+                    .capability(capability_id)
+                    .filter(|capability| {
+                        capability.manifest.kind == CapabilityKind::ContextContributor
+                    })
+                    .map(|_| capability_id.clone())
+            })
+            .collect::<Vec<_>>();
+        capabilities.sort();
+        let mut contributions = Vec::new();
+        for capability_id in capabilities {
+            let policy = compiled
+                .policy(&capability_id)
+                .ok_or_else(|| {
+                    AgentPlatformError::Contract(format!(
+                        "ContextContributor {} has no compiled authority policy",
+                        capability_id.as_ref()
+                    ))
+                })?;
+            let result = tokio::time::timeout(
+                ROLE_CONTEXT_CONTRIBUTION_TIMEOUT,
+                self.kernel.contribute_role_context(
+                    compiled,
+                    active,
+                    RoleMemberInvocationRequest {
+                        principal: principal.clone(),
+                        session_owner: principal.clone(),
+                        operation_id: operation_id.clone(),
+                        correlation_id: CorrelationId::from(format!(
+                            "context:{}:{}",
+                            operation_id.as_ref(),
+                            capability_id.as_ref()
+                        )),
+                        capability_id: capability_id.clone(),
+                        resource_binding_ids: policy.resource_binding_ids.clone(),
+                        state_scope_key: ScopeKey::from(format!(
+                            "session:{}",
+                            agent_session_id.as_ref()
+                        )),
+                        admission: RoleMemberAdmission::Agent {
+                            agent_session_id: agent_session_id.clone(),
+                            resolved_snapshot_ref: compiled.snapshot_ref().clone(),
+                            active_set_generation: active.generation,
+                        },
+                    },
+                ),
+            )
+            .await
+            .map_err(|_| {
+                AgentPlatformError::Contract(format!(
+                    "ContextContributor {} exceeded its {} second deadline",
+                    capability_id.as_ref(),
+                    ROLE_CONTEXT_CONTRIBUTION_TIMEOUT.as_secs()
+                ))
+            })??;
+            if let Some(value) = result.value {
+                let bytes = canonical_json_bytes(&value.0)?;
+                if bytes.len() > 64 * 1024 {
+                    return Err(AgentPlatformError::Contract(format!(
+                        "ContextContributor {} exceeded the 64 KiB model context limit",
+                        capability_id.as_ref()
+                    )));
+                }
+                contributions.push(json!({
+                    "capability_id": capability_id,
+                    "value": value.0,
+                }));
+            }
+        }
+        Ok(contributions)
+    }
+
     async fn require_owned_session(
         &self,
         principal: &PrincipalRef,
@@ -3202,6 +3209,16 @@ impl AgentSessionCommandPort for AgentPlatform {
             &request.agent_session_id,
             request.idempotency_key.as_ref(),
         );
+        let active = execution.capabilities.snapshot()?;
+        let context_contributions = self
+            .assemble_role_context(
+                &request.principal,
+                &request.agent_session_id,
+                &operation_id,
+                &execution.compiled,
+                &active,
+            )
+            .await?;
         let turn_payload = {
             let mut payload = serde_json::Map::from_iter([
                 ("operation_id".to_owned(), json!(&operation_id)),
@@ -3230,6 +3247,10 @@ impl AgentSessionCommandPort for AgentPlatform {
             payload.insert(
                 "resolved_snapshot_ref".to_owned(),
                 json!(execution.compiled.snapshot_ref()),
+            );
+            payload.insert(
+                "context_contributions".to_owned(),
+                json!(context_contributions),
             );
             Value::Object(payload)
         };
@@ -3272,7 +3293,6 @@ impl AgentSessionCommandPort for AgentPlatform {
                 },
             })
             .await?;
-        let active = execution.capabilities.snapshot()?;
         let command = RuntimeCommand::StartTurn(RuntimeStartTurnParams {
             context: RuntimeCommandContext {
                 agent_session_id: request.agent_session_id.clone(),
@@ -3472,8 +3492,8 @@ impl AgentSessionCommandPort for AgentPlatform {
                 },
             })
             .await?;
-        let effectful = is_effectful(effect_class);
-        let effect_started = if effectful {
+        let effect_strategy = EffectStrategy::from_effect_class(effect_class);
+        let effect_started = if effect_strategy.requires_lifecycle() {
             Some(
                 self.sessions
                     .record_effect_started(EffectEventRequest {
@@ -3485,10 +3505,11 @@ impl AgentSessionCommandPort for AgentPlatform {
                         ),
                         producer_id: EventProducerId::from("capability_host"),
                         idempotency_key: IdempotencyKey::from(format!(
-                            "{}:effect-started",
+                            "{}:effect",
                             command.idempotency_key.as_ref()
                         )),
                         correlation_id: command.correlation_id.clone(),
+                        strategy: effect_strategy,
                         causation_event_id: Some(tool_event_id.clone()),
                         payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
                             "operation_id": &command.operation_id,
@@ -3519,12 +3540,13 @@ impl AgentSessionCommandPort for AgentPlatform {
                                     &command.agent_session_id,
                                     command.idempotency_key.as_ref(),
                                 ),
-                                producer_id: EventProducerId::from("capability_host"),
+                                producer_id: EventProducerId::from("capability_owner"),
                                 idempotency_key: IdempotencyKey::from(format!(
-                                    "{}:effect-failed",
+                                    "{}:effect",
                                     command.idempotency_key.as_ref()
                                 )),
                                 correlation_id: command.correlation_id.clone(),
+                                strategy: effect_strategy,
                                 causation_event_id: effect_started
                                     .as_ref()
                                     .and_then(|event| event.ack.as_ref())
@@ -3533,7 +3555,11 @@ impl AgentSessionCommandPort for AgentPlatform {
                                     json!({"error": error.to_string()}),
                                 )),
                             },
-                            EffectTerminalState::Failed,
+                            if effect_strategy.is_external_uncertain() {
+                                EffectTerminalState::Uncertain
+                            } else {
+                                EffectTerminalState::Failed
+                            },
                         )
                         .await;
                 }
@@ -3548,7 +3574,7 @@ impl AgentSessionCommandPort for AgentPlatform {
                 return Err(error.into());
             }
         };
-        let terminal_cause = if effectful {
+        let terminal_cause = if effect_strategy.requires_lifecycle() {
             let terminal = self
                 .sessions
                 .record_effect_terminal(
@@ -3559,12 +3585,13 @@ impl AgentSessionCommandPort for AgentPlatform {
                             &command.agent_session_id,
                             command.idempotency_key.as_ref(),
                         ),
-                        producer_id: EventProducerId::from("capability_host"),
+                        producer_id: EventProducerId::from("capability_owner"),
                         idempotency_key: IdempotencyKey::from(format!(
-                            "{}:effect-succeeded",
+                            "{}:effect",
                             command.idempotency_key.as_ref()
                         )),
                         correlation_id: command.correlation_id.clone(),
+                        strategy: effect_strategy,
                         causation_event_id: effect_started
                             .as_ref()
                             .and_then(|event| event.ack.as_ref())
@@ -3592,12 +3619,13 @@ impl AgentSessionCommandPort for AgentPlatform {
                                     &command.agent_session_id,
                                     command.idempotency_key.as_ref(),
                                 ),
-                                producer_id: EventProducerId::from("capability_host"),
+                                producer_id: EventProducerId::from("capability_owner"),
                                 idempotency_key: IdempotencyKey::from(format!(
-                                    "{}:effect-uncertain",
+                                    "{}:effect",
                                     command.idempotency_key.as_ref()
                                 )),
                                 correlation_id: command.correlation_id.clone(),
+                                strategy: effect_strategy,
                                 causation_event_id: effect_started
                                     .as_ref()
                                     .and_then(|event| event.ack.as_ref())
@@ -3754,6 +3782,12 @@ impl AgentSessionDeletePort for AgentPlatform {
                 ));
             }
         }
+        self.kernel
+            .release_role_resources(&ScopeKey::from(format!(
+                "session:{}",
+                command.agent_session_id.as_ref()
+            )))
+            .await?;
         self.executions
             .write()
             .await
@@ -3839,13 +3873,6 @@ async fn append_tool_result(
         .await
 }
 
-fn is_effectful(effect_class: EffectClass) -> bool {
-    !matches!(
-        effect_class,
-        EffectClass::Pure | EffectClass::ReadLocal | EffectClass::ReadSensitive
-    )
-}
-
 fn validate_compiler_convergence(
     persisted: &ResolvedSnapshotEnvelope,
     compiled: &CompiledSnapshot,
@@ -3865,6 +3892,8 @@ fn validate_compiler_convergence(
         || persisted_content.capability_allowlist != compiled_content.capability_allowlist
         || persisted_content.typed_resource_bindings
             != compiled_content.typed_resource_bindings
+        || persisted_content.resolved_role_providers
+            != compiled_content.resolved_role_providers
         || persisted_content.canonical_schema_manifest_digest
             != compiled_content.canonical_schema_manifest_digest
         || persisted_content.target_contribution_manifest_digest
@@ -4094,6 +4123,32 @@ impl RuntimeIngressPort for AgentPlatform {
         }
         ThinAuthority::enforce(&execution.compiled, &active, &invocation)
             .map_err(|error| RuntimeError::NativeActionAck(error.to_string()))?;
+        let registry = self
+            .kernel
+            .snapshot()
+            .map_err(|error| RuntimeError::NativeActionAck(error.to_string()))?;
+        let effect_class = registry
+            .capability(&start.capability_id)
+            .and_then(|capability| {
+                capability
+                    .manifest
+                    .contributions
+                    .actions
+                    .iter()
+                    .find(|action| action.action_id == start.action_id)
+                    .map(|action| action.effect_class)
+            })
+            .ok_or_else(|| {
+                RuntimeError::NativeActionAck(
+                    "native action is not declared by the frozen capability".to_owned(),
+                )
+            })?;
+        let effect_strategy = EffectStrategy::from_effect_class(effect_class);
+        if !effect_strategy.requires_lifecycle() {
+            return Err(RuntimeError::NativeActionAck(
+                "native action/start cannot be used for a read-only action".to_owned(),
+            ));
+        }
 
         let effect_started_event_id = stable_event_id(
             "effect-started",
@@ -4111,6 +4166,7 @@ impl RuntimeIngressPort for AgentPlatform {
                     start.idempotency_key.as_ref()
                 )),
                 correlation_id: CorrelationId::from(start.effect_id.as_ref().to_owned()),
+                strategy: effect_strategy,
                 causation_event_id: None,
                 payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(
                     serde_json::to_value(&start)
@@ -4303,7 +4359,112 @@ async fn persist_plugin_registrations_tx(
             .await?;
         }
     }
+    insert_installation_role_defaults_tx(tx, registrations).await?;
     Ok(())
+}
+
+async fn insert_installation_role_defaults_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    registrations: &[PluginRegistration],
+) -> Result<(), AgentPlatformError> {
+    for (role_id, binding) in installation_role_defaults(registrations)? {
+        let selection = binding.selection;
+        sqlx::query(
+            "INSERT INTO installation_role_bindings \
+             (role_id, role_contract_ref_json, provider_mount_id, binding_version, updated_at) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT (role_id) DO NOTHING",
+        )
+        .bind(role_id.as_ref())
+        .bind(platform_json(&selection.role)?)
+        .bind(selection.provider_mount_id.as_ref())
+        .bind(i64::try_from(binding.binding_version).map_err(|_| {
+            AgentPlatformError::Contract(
+                "installation role binding version exceeds SQLite i64".to_owned(),
+            )
+        })?)
+        .bind(binding.updated_at_ms)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+fn installation_role_defaults(
+    registrations: &[PluginRegistration],
+) -> Result<BTreeMap<ExecutionRoleId, InstallationRoleBinding>, AgentPlatformError> {
+    let mut defaults =
+        BTreeMap::<ExecutionRoleId, InstallationRoleBinding>::new();
+    for registration in registrations {
+        let manifest = &registration.metadata.manifest.payload;
+        if registration.metadata.source.source_kind
+            != nomifun_agent_contracts::PluginSourceKind::Bundled
+        {
+            continue;
+        }
+        for provider in &manifest.contributions.role_providers {
+            let role_id = provider.role.key.role_id.clone();
+            let candidate = InstallationRoleBinding {
+                selection: RoleProviderSelection {
+                    role: provider.role.clone(),
+                    provider_mount_id: registration.metadata.mount_id.clone(),
+                },
+                binding_version: 1,
+                updated_at_ms: now_ms(),
+            };
+            if let Some(existing) = defaults.get(&role_id) {
+                if existing.selection != candidate.selection {
+                    return Err(AgentPlatformError::Contract(format!(
+                        "multiple bundled installation defaults are declared for execution role {}",
+                        role_id.as_ref()
+                    )));
+                }
+            } else {
+                defaults.insert(role_id, candidate);
+            }
+        }
+    }
+    Ok(defaults)
+}
+
+async fn load_installation_role_bindings(
+    pool: &SqlitePool,
+) -> Result<BTreeMap<ExecutionRoleId, InstallationRoleBinding>, AgentPlatformError> {
+    let rows: Vec<(String, String, String, i64, i64)> = sqlx::query_as(
+        "SELECT role_id, role_contract_ref_json, provider_mount_id, \
+                binding_version, updated_at \
+         FROM installation_role_bindings ORDER BY role_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut bindings = BTreeMap::new();
+    for (role_id, role_json, provider_mount_id, binding_version, updated_at) in rows {
+        let role: ExactRoleContractRef = serde_json::from_str(&role_json)?;
+        if role.key.role_id.as_ref() != role_id {
+            return Err(AgentPlatformError::Contract(format!(
+                "installation role binding {} has mismatched role identity",
+                role_id
+            )));
+        }
+        let binding_version = u64::try_from(binding_version).map_err(|_| {
+            AgentPlatformError::Contract(format!(
+                "installation role binding {} has a negative version",
+                role_id
+            ))
+        })?;
+        bindings.insert(
+            ExecutionRoleId::from(role_id),
+            InstallationRoleBinding {
+                selection: RoleProviderSelection {
+                    role,
+                    provider_mount_id: PluginMountId::from(provider_mount_id),
+                },
+                binding_version,
+                updated_at_ms: updated_at,
+            },
+        );
+    }
+    Ok(bindings)
 }
 
 fn materialization_revision(version: &VersionString) -> i64 {
@@ -4356,6 +4517,7 @@ mod route_writer_tests {
                 on_demand_capabilities: Vec::new(),
                 skill_bindings: Vec::new(),
                 resource_bindings: Vec::new(),
+                system_role_provider_overrides: BTreeMap::new(),
                 persona: String::new(),
                 instructions: String::new(),
                 context_policy: StrictJsonValue(Value::Object(Default::default())),

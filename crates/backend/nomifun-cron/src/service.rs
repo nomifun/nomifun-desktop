@@ -718,6 +718,20 @@ impl CronService {
         cron_job_from_row(row)
     }
 
+    pub async fn list_conversations_by_cron_job(
+        &self,
+        user_id: &str,
+        job_id: &str,
+    ) -> Result<Vec<nomifun_api_types::ConversationResponse>, CronError> {
+        let user_id = validate_cron_user_id(user_id)?;
+        let job_id = validate_cron_job_id(job_id)?;
+        self.get_job(user_id, &job_id).await?;
+        self.executor
+            .list_conversations_by_cron_job(user_id, &job_id)
+            .await
+            .map_err(CronError::from)
+    }
+
     pub async fn list_jobs(
         &self,
         user_id: &str,

@@ -10,7 +10,7 @@
     "fork_commit": "dc2ccc6843abb09c9d297862dc10b6bd12a3935d",
     "tracked_upstream_commit": "dc2ccc6843abb09c9d297862dc10b6bd12a3935d",
     "patch_series_digest": "d4343bd392203dfc9ba52b716b0420cbd846ec9d3924a388f7102ff84356ea9e",
-    "cargo_lock_digest": "792362a8edf3e7994a59c89c182698fe1d4661fec5d04409e960a4185663acc9",
+    "cargo_lock_digest": "51629196c5d1c2940e9ac748e095bbdbd621ba5788a0afa3af5181f0714db22d",
     "protocol_version": "1.0.0",
     "protocol_schema_digest": "f1c0422f04c9de923e18c7df40d814d3c9f5b2db5f1c5fef2745e77e6d62590f",
     "rpc_allowlist": {
@@ -34,7 +34,7 @@
       "coding_native",
       "managed_minimal"
     ],
-    "runtime_profile_contract_digest": "2eed4d2aedef5955a3497129a286e808b4ed42f1eb7ab80da0230ae651a24321",
+    "runtime_profile_contract_digest": "b7a71802132caef0078513a6cbeb4187ab04597b8184f46dad6c0779ce7ebb7a",
     "coding_capability_pack_digest": "f699f376a9414b7830b90a68c890d39010687499e6d16ee1687f5c370cd0127a",
     "native_feature_contract_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
     "native_action_contract_digest": "ae08f636e6c349505d95281e93279427641399e7fff498c30b85760b2c415665",
@@ -163,5 +163,5 @@
       "digest": "99fe64193883d1fd84dc939207839c080a45bd166d2eb6a7759d42b58d59448b"
     }
   },
-  "payload_digest": "3644b1c98865166ff0a225b520110dc765cfe6e036d1b3be16885e4683bcdefd"
+  "payload_digest": "f0a119cfde96840a678721f88fb588ef93f393d577fffac0026371478a06eea1"
 }

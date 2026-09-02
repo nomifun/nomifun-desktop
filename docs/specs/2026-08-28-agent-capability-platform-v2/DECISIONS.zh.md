@@ -287,21 +287,23 @@ Browser/Computer 的一期增补合同：
 
 理由：轻量和完整都可以由结构与功能直接证明。量化性能计划在当前阶段成本高，且不决定架构正确性。
 
-### D-019：实施并行、机器分工与估算
+### D-019：实施并行与估算
 
 - 状态：`已修订（05）`
 - 不固定五条 workstream、ROM、coding agent 数、工程周数、HP-1/HP-2 或 whole-cohort recheck 日历。
 - 工作分解以 `GLOBAL-CLOSURE-TODO` 当前开放项、真实依赖和独占写集为准。
 - 并发只在写集明确分离且能减少关键路径时使用；中央 schema、Composition Root、共享 Gate 等文件由单一 integration owner 串行合流。
-- 当前主机是唯一实现与 merge 主机。多个 writer 只在本机互斥写集明确分离时并行；
+- 当前主机是唯一实现与 merge 主机。多个 lane 只在本机互斥写集明确分离时并行；
   中央合同、组合根、Gate、锁文件和 GLOBAL TODO 由主机串行合流。
+- 不建立跨机开发任务、机器专用 Prompt/manifest/result template、远端 SHA 同步或跨机
+  attestation。外部原生环境只验证冻结候选，不承担代码开发和 merge。
 - 每批运行最小定向检查；broad checks 只在主要合流、Windows 核心闭环和最终 RC 执行。
 - 遇到环境、真实凭据、原生主机或 harness 障碍时记录阻塞原因和人工步骤，不反复重试，也不写不优雅的测试绕过。
 
 原固定“五流、213/314 EW、6～8 agents、29/42 周及两次 HP”的计划已撤销，因为估算和组织假设被误用为必须实现的产品合同。
 
-理由：并发度应由当前可独立任务决定。本机互斥写集可以获得并发收益，同时避免跨机器
-交接、分支同步和共享构建资源争用。
+理由：并发度应由当前可独立任务决定。本机互斥写集可以获得并发收益。曾考虑的跨机器
+开发交接、分支同步和专用证明材料已经撤销；它们不是当前执行方式。
 
 ### D-020：Codex 最终切换与 Nomi 删除门禁
 
@@ -496,12 +498,16 @@ S0 STOP-LOSS
 - Stable 原样提升已验证的 RC bytes，不重新构建另一份制品。
 - `release-lock.json` 只记录真实 Host/Sidecar/Package digest；`platform-result.json` 记录目标平台、实际 suite、结果和日志引用。
 - 相同 Artifact digest 可以复用仍相关的证据；只有产品 ABI、Runtime protocol、Package 或目标平台 Artifact 改变才使对应结果 stale。
-- dirty worktree 可运行 verify 作为诊断；只有 release attestation 要求 clean commit 和真实 Artifact。
+- dirty worktree 可运行 verify 作为诊断；只有正式 release evidence 要求 clean commit 和真实 Artifact。
 - 原生平台结论必须来自对应真实 Host；cross-compile、Rosetta、VM、容器或静态检查只能作为 preflight。
+- macOS arm64 与 Linux Desktop x64 Host 只执行冻结候选的外部原生验证；发现缺陷后由
+  当前主机修复，不建立跨机开发分支或交接协议。
 
 原“五个 native cells、固定 HP、四元 tuple、whole-cohort exact evidence 和两轮全量 Gate”已撤销，因为其验证成本超过首发产品风险，并造成反复换机和证据失效。
 
-理由：三平台覆盖当前首发桌面用户，Windows 承担完整核心验证，另外两台真实 Host 验证平台制品和关键能力。这样保留发布可信度，又避免把所有内部测试复制成五平台笛卡尔积。
+理由：三平台覆盖当前首发桌面用户，Windows 承担完整核心验证，另外两个真实目标环境
+验证平台制品和关键能力。这样保留发布可信度，又避免把外部原生验证变成跨机开发流程，
+或把所有内部测试复制成五平台笛卡尔积。
 
 ## 当前阅读与实施规则
 

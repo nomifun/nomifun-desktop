@@ -16,7 +16,7 @@ use nomifun_agent_contracts::{
     PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
     PluginStateCompareAndSwapOutcome, PluginStateHandleDescriptor, PluginStateMethod,
     PresetRevisionRef, PrincipalRef, ResourceBindingId, ResourceId, ResourceKind,
-    RuntimeProfileKind, RuntimeTarget, ScopeKey, ServiceHandleDescriptor, ServiceKeyRef,
+    RuntimeFeatureId, RuntimeProfileKind, RuntimeTarget, ScopeKey, ServiceHandleDescriptor, ServiceKeyRef,
     ServiceProvision, ServiceRequirement, SkillDefinition, SkillId, SkillRef, StrictJsonValue,
     ToolPresentationKind, TypedResourceBinding, UserId, ValidatedPluginConfig, VersionString,
     digest_bytes, digest_payload,
@@ -193,6 +193,8 @@ fn registration_for(
             capabilities: vec![capability],
             skills: vec![skill],
             mcp_tools: vec![mcp_mapping],
+            role_contracts: Vec::new(),
+            role_providers: Vec::new(),
         },
     };
     let source = PluginSourceMetadata {
@@ -229,6 +231,7 @@ fn registration_for(
             declared_mcp_tool_keys: BTreeSet::from([McpToolKey::from(format!(
                 "{server_id}.echo"
             ))]),
+            declared_role_ids: BTreeSet::new(),
             declared_service_keys: BTreeSet::new(),
             declared_host_ports: BTreeSet::from([
                 cancellation_port.id.clone(),
@@ -421,6 +424,7 @@ fn sample_revision(owner_id: &str) -> AgentPresetRevision {
             version: VersionString::from(VERSION),
         }],
         resource_bindings: vec![resource_binding(owner_id)],
+        system_role_provider_overrides: BTreeMap::new(),
         persona: "Echo fixture".to_owned(),
         instructions: "Use the selected echo capability.".to_owned(),
         context_policy: StrictJsonValue(json!({})),
@@ -448,6 +452,7 @@ fn compiler_environment(target_digest: DigestHex) -> CompilerEnvironment {
         required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
         runtime_feature_inventory_digest: DigestHex::from("runtime-features"),
         available_runtime_features: BTreeSet::new(),
+        installation_role_bindings: BTreeMap::new(),
         canonical_schema_manifest_digest: DigestHex::from("schema-manifest"),
         target_contribution_manifest_digest: target_digest,
         host_target: RuntimeTarget::from("windows-desktop-x64"),
@@ -682,6 +687,47 @@ async fn sample_echo_uses_materialize_compile_activate_authorize_invoke_and_rest
         .await
         .unwrap();
     assert_eq!(second.0, json!({"echo": "prefix:again", "count": 2}));
+}
+
+#[test]
+fn coding_profile_freezes_the_exact_available_runtime_feature_set() {
+    let materialized = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap()
+    .replace_all(vec![sample_registration("")])
+    .unwrap();
+    let owner = principal("coding-owner");
+    let revision = sample_revision(&owner.principal_id);
+    let mut coding_environment = compiler_environment(materialized.registry_digest.clone());
+    coding_environment.required_runtime_profile = RuntimeProfileKind::CodingNative;
+    coding_environment.available_runtime_features = BTreeSet::from([
+        RuntimeFeatureId::from("code_mode"),
+        RuntimeFeatureId::from("turn.cancel"),
+    ]);
+    let coding = AgentPresetCompiler::compile(
+        &materialized,
+        &coding_environment,
+        compile_request(revision.clone(), owner.clone()),
+    )
+    .unwrap();
+    assert_eq!(
+        coding.content().required_runtime_features,
+        coding_environment.available_runtime_features
+    );
+
+    let managed = AgentPresetCompiler::compile(
+        &materialized,
+        &compiler_environment(materialized.registry_digest.clone()),
+        compile_request(revision, owner),
+    )
+    .unwrap();
+    assert!(managed.content().required_runtime_features.is_empty());
+    assert_ne!(
+        coding.content().compiled_runtime_profile_digest,
+        managed.content().compiled_runtime_profile_digest
+    );
 }
 
 #[tokio::test]
@@ -958,6 +1004,47 @@ fn materialization_is_order_independent_and_stable_policy_excludes_test_fixture(
         production.replace_all(vec![sample_registration("")]),
         Err(KernelError::SourceNotAllowed { .. })
     ));
+}
+
+#[test]
+fn published_registration_metadata_is_derived_from_manifest_and_exports() {
+    let mut registration = sample_registration("");
+    registration.metadata.registrar.allowed_operations.clear();
+    registration
+        .metadata
+        .registrar
+        .declared_capability_ids
+        .clear();
+    registration
+        .metadata
+        .context
+        .declared_services
+        .provided_services
+        .clear();
+
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry.replace_all(vec![registration]).unwrap();
+    let metadata = materialized
+        .plugins
+        .get(&PluginMountId::from(SAMPLE_MOUNT))
+        .expect("published plugin metadata");
+
+    assert!(metadata
+        .registrar
+        .allowed_operations
+        .contains(&PluginRegistrarOperation::ContributeCapability));
+    assert_eq!(
+        metadata.registrar.declared_capability_ids,
+        BTreeSet::from([CapabilityId::from(SAMPLE_CAPABILITY)])
+    );
+    assert_eq!(
+        metadata.context.identity,
+        metadata.registrar.identity
+    );
 }
 
 #[test]
