@@ -5,7 +5,7 @@
   "closed_at": "2026-08-29",
   "branch": "rf/agent-capability-platform-v2",
   "candidate_source_sha": "1dedfedc782b81389ead27858963d0a943f4d142",
-  "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+  "confirmed_decision_contract_digest": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5",
   "implementation_commit": "04bb08f9",
   "follow_up_validation_commits": [
     "45f54046",

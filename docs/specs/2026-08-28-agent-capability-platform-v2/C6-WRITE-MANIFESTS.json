@@ -5,7 +5,7 @@
   "code_base_sha": "6e1b7338ae3c3181d14366cc3d52d30f64b45285",
   "branch": "rf/agent-capability-platform-v2",
   "status": "closed",
-  "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+  "confirmed_decision_contract_digest": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5",
   "shared_cargo_policy": "agents-must-not-run-workspace-cargo-test-or-edit-root-lockfiles; central-validation-owner-only",
   "required_final_gates": [
     "gate-chat-minimal-final",

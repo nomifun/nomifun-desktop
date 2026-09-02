@@ -13,7 +13,7 @@
     "runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
     "deletion_manifest_set_digest": "0fb2e5abf2638e3c3352d4549ddb6a46b5a29ee7d62d35aedd9319a8fb5feecb",
     "platform_validation_contract_digest": "32a18fc0f7b921c0e8157e5b8183dbe645a806e70ccd1c26de30ff75b03a9422",
-    "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5"
+    "confirmed_decision_contract_digest": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5"
   },
-  "payload_digest": "003e2e2164f180d40546d0678483ed0dac22c3634af1031d2a05da5022a64317"
+  "payload_digest": "e7eb4d3d1cde70a8ae66c9b20836ff33abf1b710dc73d2a0b88393a9c8bfcc46"
 }

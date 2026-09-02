@@ -326,11 +326,6 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let fixture_replacements = BTreeMap::from([
         (
-            "1111111111111111111111111111111111111111111111111111111111111111"
-                .to_owned(),
-            closure_digest.0.clone(),
-        ),
-        (
             "b5987fa1c71d3a04ca6df2f4c216f418adc04ccc7495edc74d99085e35db9556"
                 .to_owned(),
             d025_reference.fixture_envelope.digest.0.clone(),

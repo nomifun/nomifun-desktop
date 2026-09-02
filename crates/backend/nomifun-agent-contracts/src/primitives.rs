@@ -129,11 +129,3 @@ pub struct LogicalArtifactRef {
     pub normalized_relative_path: String,
     pub digest: DigestHex,
 }
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SourceLocation {
-    pub repository_alias: String,
-    pub revision: String,
-    pub normalized_relative_path: String,
-}

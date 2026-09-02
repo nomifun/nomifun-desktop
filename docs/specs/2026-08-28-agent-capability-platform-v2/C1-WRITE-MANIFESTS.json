@@ -7,7 +7,7 @@
   "closed_at": "2026-08-29",
   "implementation_commit": "ab6166e2c33758a560e2cd7f98f6e7bc0a39aeb1",
   "gate_evidence": "build.noindex/agent-capability-v2/ab6166e2c33758a560e2cd7f98f6e7bc0a39aeb1/c1-fullauto/summary.json",
-  "confirmed_decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
+  "confirmed_decision_contract_digest": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5",
   "shared_cargo_policy": "agents-must-not-run-cargo; central-validation-owner-only",
   "preserve_exact": [
     "Coding code review, diff review, review comments, and review workflow",

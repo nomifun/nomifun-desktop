@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{ArtifactEnvelope, SourceLocation, VersionString};
+use crate::{ArtifactEnvelope, VersionString};
 
 pub type ContractClosureArtifact = ArtifactEnvelope<ContractClosurePayload>;
 
@@ -32,16 +32,6 @@ pub struct CanonicalSourceOwner {
 pub struct ContractClosureResolution {
     pub resolution_id: String,
     pub canonical_rule: String,
-    pub superseded_descriptions: Vec<SourceLocation>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ReferenceBaseline {
-    pub repository_alias: String,
-    pub frozen_revision: String,
-    pub observed_revision: String,
-    pub relationship: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -52,7 +42,6 @@ pub struct ContractClosurePayload {
     pub decisions: Vec<ConfirmedDecision>,
     pub canonical_sources: Vec<CanonicalSourceOwner>,
     pub closure_resolutions: Vec<ContractClosureResolution>,
-    pub reference_baselines: Vec<ReferenceBaseline>,
     pub production_behavior_included: bool,
     pub unresolved_decisions: Vec<String>,
 }
