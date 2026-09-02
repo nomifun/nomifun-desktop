@@ -71,11 +71,11 @@ Linux Desktop 和一次性 C9 clean cut。
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | S0 止损发布 | 3 | 0 | 0 | 0 | 0 | 3 |
 | S1 Revert/keep 审计 | 3 | 0 | 0 | 0 | 0 | 3 |
-| S2 P0 与基础收缩 | 4 | 6 | 0 | 0 | 0 | 10 |
-| S3 Role seam 与核心 owner | 0 | 4 | 8 | 0 | 0 | 12 |
-| S4 产品 UI | 0 | 1 | 1 | 0 | 0 | 2 |
+| S2 P0 与基础收缩 | 4 | 4 | 2 | 0 | 0 | 10 |
+| S3 Role seam 与核心 owner | 0 | 1 | 11 | 0 | 0 | 12 |
+| S4 产品 UI | 0 | 0 | 2 | 0 | 0 | 2 |
 | S5 三平台、C9 与 RC | 0 | 0 | 3 | 2 | 0 | 5 |
-| **总计** | **10** | **11** | **12** | **2** | **0** | **35** |
+| **总计** | **10** | **5** | **18** | **2** | **0** | **35** |
 
 旧台账 84 项现已收敛为 35 项。任务数量不是质量指标；只有完成定义和最小验证满足后
 才能修改状态。
@@ -86,15 +86,16 @@ Linux Desktop 和一次性 C9 clean cut。
 
 | 分类 | 数量 | TODO |
 | --- | ---: | --- |
-| 主机可直接实施 | 10 | `SL-S2-05`～`SL-S2-10`、`SL-S3-01`、`SL-S3-07`、`SL-S3-08`、`SL-S4-01` |
-| 机器 2 独立实施 | 1 | `SL-S3-09` 精简 SSH owner；远端分支 `rf/m2-w2-ssh-owner` 已准备 |
-| 依赖阻塞 | 12 | `SL-S3-02`～`SL-S3-06`、`SL-S3-10`～`SL-S3-12`、`SL-S4-02`、`SL-S5-01`、`SL-S5-04`、`SL-S5-05` |
+| 主机当前实施 | 1 | `SL-S2-07` canonical Compiler |
+| 机器 2 批次实施 | 4 | `SL-S2-05`、`SL-S2-06`、`SL-S2-10`、`SL-S3-09`；必须作为完整批次启动，不为单项 SSH 单独启机 |
+| 依赖阻塞 | 18 | `SL-S2-08`、`SL-S2-09`、`SL-S3-01`～`SL-S3-08`、`SL-S3-10`～`SL-S3-12`、`SL-S4-01`、`SL-S4-02`、`SL-S5-01`、`SL-S5-04`、`SL-S5-05` |
 | 外部原生环境 | 2 | `SL-S5-02` macOS arm64、`SL-S5-03` Linux Desktop x64 |
 
-主机下一阶段不应同时展开全部 10 项。关键路径是
-`SL-S2-07 -> SL-S2-08/SL-S2-09 -> SL-S3-01 -> SL-S3-02 -> SL-S3-03`；
-`SL-S2-05`、`SL-S2-06`、`SL-S2-10`、`SL-S3-07`、`SL-S3-08` 和机器 2
-`SL-S3-09` 可作为边界清晰的并行 lane。
+主机关键路径是
+`SL-S2-07 -> SL-S2-08/SL-S2-09 -> SL-S3-01 -> SL-S3-02 -> SL-S3-03`。
+机器 2 只有在能完整领取四项 Batch A 时才启用：Session Projection 与 Effect 由一个
+writer 串行处理，SSH owner 与 Sidecar upstream spike 使用另外两个互不冲突的 lane。
+如果其中只剩一项可执行，机器 2 保持停用，由主机正常排期处理。
 
 ## S0：止损发布
 
@@ -131,26 +132,26 @@ Linux Desktop 和一次性 C9 clean cut。
 | `SL-S2-02` | closed | 主机 | 物理分离 schema fixture 与真实 release lock/result | `SL-S2-01` | fixture 明示 `fixture_only=true` 并使用假 digest；`release-lock.json` 只记录真实制品 digest；`platform-result.json` 只记录 source、target、suite、结果和日志引用；Runtime、Gate 与 macOS build 不再把 fixture digest 当发布输入 | `cargo test --locked -p nomifun-codex-runtime --lib`; `bun test scripts/release/release-lock.test.mjs scripts/validation/check-macos-arm64-native.test.mjs`; `bun run gate:agent-v2 -- c7-domain-waves` | 首个真实 lock/result 随 S5 候选打包生成，不阻塞本项实现关闭 |
 | `SL-S2-03` | closed | 主机 | 修复 Remote token rotate/revoke Response Body 卡死 | 无 | validator generation/hash 是认证线性化点；请求只持有短生命周期同步状态锁，不跨 Response Body 持有 auth permit；mint/revoke 仅由 mutation gate 串行；旧 token 后续请求立即失败 | `cargo test --locked -p nomifun-auth remote_admission --lib`; `cargo test --locked -p nomifun-public --lib`; `cargo test --locked -p nomifun-app bootstrap::canonical_host::tests::canonical_remote_rest_freezes_binding_and_auth_fence --lib -- --exact --test-threads=1` | 无 |
 | `SL-S2-04` | closed | 主机 | 简化 D-024 delete/dispose | `SL-S1-03` | 已删除调用者填写的 `ZeroOutstandingProof`；平台删除路径校验真实 `RuntimeDisposeReport` 身份；启动时发现 `deleting` 会幂等清理 Session 自有内容并完成 tombstone | `cargo test --locked -p nomifun-agent-session delete --lib -- --test-threads=1`; `cargo test --locked -p nomifun-agent-platform --test chat_minimal -- --test-threads=1`; `cargo check --locked -p nomifun-app` | 无 |
-| `SL-S2-05` | open | 主机 | 收缩 SessionEvent 与 Projection | `SL-S2-04` | Event Log 保留唯一语义事实；Projection 不复制完整 `events[]`；正常完成只持久化最终 assistant message，中断最多一份 bounded partial | `cargo test -p nomifun-agent-session projection --lib` | 无 |
-| `SL-S2-06` | open | 主机 | 把 Effect 生命周期收敛为三种策略 | `SL-S1-01`、`SL-S1-02` | 仅保留 `read_only`、`managed_effect`、`external_uncertain_effect`；本地操作使用事务/CAS/原子文件；外部 unknown 不自动 retry；删除 Wave 级通用 journal/coordinator | `cargo test -p nomifun-agent-session effect --lib -- --test-threads=1` | live 外部 Effect 只在可丢弃 sandbox 验证 |
+| `SL-S2-05` | open | 机器2 Batch A | 收缩 SessionEvent 与 Projection | `SL-S2-04` | Event Log 保留唯一语义事实；Projection 不复制完整 `events[]`；正常完成只持久化最终 assistant message，中断最多一份 bounded partial | `cargo test -p nomifun-agent-session projection --lib` | 无 |
+| `SL-S2-06` | open | 机器2 Batch A | 把 Effect 生命周期收敛为三种策略 | `SL-S1-01`、`SL-S1-02` | 仅保留 `read_only`、`managed_effect`、`external_uncertain_effect`；本地操作使用事务/CAS/原子文件；外部 unknown 不自动 retry；删除 Wave 级通用 journal/coordinator | `cargo test -p nomifun-agent-session effect --lib -- --test-threads=1` | live 外部 Effect 只在可丢弃 sandbox 验证 |
 | `SL-S2-07` | open | 主机 | 合并为一个 canonical Compiler | `SL-S1-03` | Preview/Save/Test 共用同一纯函数 Compiler；Session Open 读取已保存 Snapshot，只做当前执行兼容检查；删除第二份 closure/digest 算法 | Compiler 定向 unit tests；同一输入的 Preview/Save/Test Snapshot digest 相同 | 无 |
-| `SL-S2-08` | open | 主机 | 缩小 Snapshot、CapabilitySelection 和 Fresh-v4 投影 | `SL-S2-07` | Snapshot 只锁实际 Capability/Provider/Tool/Model/resource/runtime 闭包；删除未执行 selection 字段和只写不读的重复投影；fresh-v4 fixture 可双启动 | `cargo test -p nomifun-v4-root -- --test-threads=1; cargo test -p nomifun-agent-kernel compiler --lib` | 无 |
-| `SL-S2-09` | open | 主机 | 简化 PluginRegistration | `SL-S2-07` | Manifest 是声明事实源；registration metadata 从真实 handler/service exports 派生；保留 namespace、schema、typed dependency、duplicate/cycle 和 cleanup | `cargo test -p nomifun-agent-kernel materialize --lib` | 无 |
-| `SL-S2-10` | open | 主机 | 完成 Codex official app-server upstream spike并冻结最小 Sidecar 协议 | 无 | 验证 initialize/version、thread/turn/cancel/event、Host-managed Tool 和进程关闭；只在 upstream 无法提供必要 pre-effect seam 时提出一个窄 patch；不预设三项自定义 RPC | 在 pinned upstream 上运行 app-server 协议 smoke，并提交 spike 记录、调用 trace 和 patch/no-patch 结论 | 如需 live model，使用本机 secret store 注入测试 credential |
+| `SL-S2-08` | blocked | 主机 | 缩小 Snapshot、CapabilitySelection 和 Fresh-v4 投影 | `SL-S2-07` | Snapshot 只锁实际 Capability/Provider/Tool/Model/resource/runtime 闭包；删除未执行 selection 字段和只写不读的重复投影；fresh-v4 fixture 可双启动 | `cargo test -p nomifun-v4-root -- --test-threads=1; cargo test -p nomifun-agent-kernel compiler --lib` | 无 |
+| `SL-S2-09` | blocked | 主机 | 简化 PluginRegistration | `SL-S2-07` | Manifest 是声明事实源；registration metadata 从真实 handler/service exports 派生；保留 namespace、schema、typed dependency、duplicate/cycle 和 cleanup | `cargo test -p nomifun-agent-kernel materialize --lib` | 无 |
+| `SL-S2-10` | open | 机器2 Batch A | 完成 Codex official app-server upstream spike并冻结最小 Sidecar 协议 | 无 | 验证 initialize/version、thread/turn/cancel/event、Host-managed Tool 和进程关闭；只在 upstream 无法提供必要 pre-effect seam 时提出一个窄 patch；不预设三项自定义 RPC | 在 pinned upstream 上运行 app-server 协议 smoke，并提交 spike 记录、调用 trace 和 patch/no-patch 结论 | 如需 live model，使用本机 secret store 注入测试 credential |
 
 ## S3：Role seam 与核心 owner
 
 | ID | 状态 | Owner | 目标 | 依赖 | 完成定义 | 最小测试 | 人工 / 外部输入 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `SL-S3-01` | open | 主机 | 冻结 Browser/Computer versioned Role 合同 | `SL-S2-09` | `ExecutionRoleId`、Role Contract、source-neutral Provider contribution、required/optional member、typed Context/Resource exports 只有一套 canonical Rust/schema 定义 | `cargo test -p nomifun-agent-contracts role --lib; cargo run -p nomifun-agent-contracts --bin agent-v2-contract -- check` | 无 |
+| `SL-S3-01` | blocked | 主机 | 冻结 Browser/Computer versioned Role 合同 | `SL-S2-09` | `ExecutionRoleId`、Role Contract、source-neutral Provider contribution、required/optional member、typed Context/Resource exports 只有一套 canonical Rust/schema 定义 | `cargo test -p nomifun-agent-contracts role --lib; cargo run -p nomifun-agent-contracts --bin agent-v2-contract -- check` | 无 |
 | `SL-S3-02` | blocked | 主机 | 实现 installation binding、Revision override、Resolver 和 Snapshot exact lock | `SL-S2-07`、`SL-S2-08`、`SL-S3-01` | override 优先、缺省继承 installation default；精确 Provider/contract/contribution/resource 进入 Snapshot digest；缺失明确失败且不 fallback | Compiler/Resolver tests：first-party 与 alternate fixture 生成不同且自洽的 Snapshot | 无 |
 | `SL-S3-03` | blocked | 主机 | 实现单一 RoleDispatcher 与 Tool/Context/Resource runtime seam | `SL-S3-02` | Kernel 第一次路由直接选 frozen Provider Mount；使用 Provider config/state/service/resource；不 façade 二次调用、不重选、不 retry/fallback | `cargo test -p nomifun-agent-kernel role_dispatch --lib` | 无 |
 | `SL-S3-04` | blocked | 主机 | 第一方 Browser dogfood 同一 Role 主链 | `SL-S3-03` | observe/navigate/act 和 hidden `browser.render_content` 经同一 Provider lock；保留 owner/lane/close/process cleanup；Provider 平台约束不写死在 façade | Browser owner/lifecycle tests；alternate Provider parity test | Browser live E2E 需要可访问测试页 |
 | `SL-S3-05` | blocked | 主机 | 第一方 Computer/A11y dogfood 同一 Role 主链 | `SL-S3-03` | observe/input 基线和可选 launch/a11y 经 exact Provider；按 target resource 串行；observation generation 过期 typed fail；无具体 Registry 旁路 | Computer serialization/generation/platform-unavailable tests | Windows/macOS input 权限由原生测试用户授予 |
 | `SL-S3-06` | blocked | 主机 | 删除 Browser/Computer production concrete bypass | `SL-S3-04`、`SL-S3-05` | Wave 2 不再 unavailable；Knowledge hidden render、Gateway、stdio、v4/Codex/automation 只走 canonical route；Nomi-only allowlist 不增长并等待 C9 | production dependency scan；Knowledge render、Gateway、stdio 代表性 integration tests | 无 |
-| `SL-S3-07` | open | 主机 | 收口真实核心本地 owner | `SL-S2-06` | Chat、Workspace/File、Process、VCS、Knowledge search/read 保持真实调用；Coding 读写/patch/shell/diff/commit 接入同一 Session 主链；非首批 Wave 3/4 不注册默认模板 | `cargo test -p nomifun-app agent_platform_host --lib; bun run dev` | Chat/Coding live 验证需要已配置 model/provider |
-| `SL-S3-08` | open | 主机 | 接入一个真实 MCP Tool 调用 | `SL-S2-06` | MCP server/resource binding、exact tool/schema 和 credential authority 经 canonical capability；连接失败 typed fail；没有 Gateway/legacy fallback | `cargo test -p nomifun-mcp --lib; cargo test -p nomifun-app mcp --lib -- --test-threads=1` | 需要一个可丢弃 MCP 测试服务 |
-| `SL-S3-09` | open | 机器2 | 实现精简 SSH read/write/exec/sudo owner primitive | `SL-S0-03` | 真实 host binding；最小 typed command/outcome；path/payload/output/timeout 有界；exec/sudo credential 分离；host-key changed fail；cancel 后回收且不自动重放 | `cargo check --locked -p nomi-ssh -p nomifun-ssh; cargo test --locked -p nomifun-ssh --lib` | live sshd/sudo 不可用时只记录未运行，不构造 PASS |
+| `SL-S3-07` | blocked | 主机 | 收口真实核心本地 owner | `SL-S2-06` | Chat、Workspace/File、Process、VCS、Knowledge search/read 保持真实调用；Coding 读写/patch/shell/diff/commit 接入同一 Session 主链；非首批 Wave 3/4 不注册默认模板 | `cargo test -p nomifun-app agent_platform_host --lib; bun run dev` | Chat/Coding live 验证需要已配置 model/provider |
+| `SL-S3-08` | blocked | 主机 | 接入一个真实 MCP Tool 调用 | `SL-S2-06` | MCP server/resource binding、exact tool/schema 和 credential authority 经 canonical capability；连接失败 typed fail；没有 Gateway/legacy fallback | `cargo test -p nomifun-mcp --lib; cargo test -p nomifun-app mcp --lib -- --test-threads=1` | 需要一个可丢弃 MCP 测试服务 |
+| `SL-S3-09` | open | 机器2 Batch A | 实现精简 SSH read/write/exec/sudo owner primitive | `SL-S0-03` | 真实 host binding；最小 typed command/outcome；path/payload/output/timeout 有界；exec/sudo credential 分离；host-key changed fail；cancel 后回收且不自动重放 | `cargo check --locked -p nomi-ssh -p nomifun-ssh; cargo test --locked -p nomifun-ssh --lib` | live sshd/sudo 不可用时只记录未运行，不构造 PASS |
 | `SL-S3-10` | blocked | 主机 | 完成一个真实 scheduled/automation AgentSession | `SL-S2-07`、`SL-S3-07` | Schedule/Cron/AutoWork/Requirement 复用 canonical Session command/query；计划、执行、取消、恢复不构造 ConversationService/Nomi runtime | 对应 automation crate 定向 tests；一次短周期真实 schedule E2E | 用户人工确认通知或任务结果可作为 UI evidence |
 | `SL-S3-11` | blocked | 主机 | 闭合 Remote open/turn/observe/cancel 产品主链 | `SL-S2-03`、`SL-S3-07`、`SL-S3-12` | explicit AgentSession ID；binding/owner/provenance 不漂移；rotate/revoke 不挂起；cancel/delete/cursor/idempotency 明确；无最近会话或旧 selector 旁路 | Remote REST/MCP 定向 tests；真实 `open -> turn -> observe -> cancel` | 需要 installation token 和 live model，均通过现有 secret authority |
 | `SL-S3-12` | blocked | 主机 | 按 spike 结果实现最小 Codex-derived Sidecar 与 Model Bridge | `SL-S2-02`、`SL-S2-10`、`SL-S3-07` | Runtime input 含真实 input/route/instructions/context/tools/history；真实 model step 只经 loopback Bridge；binding 独占进程；cancel/dispose 后整棵进程树清理；无 Host 并行文本模型 | `cargo test -p nomifun-codex-runtime --lib; cargo test -p nomifun-agent-platform coding_codex --test coding_codex -- --test-threads=1` | live E2E 需要构建出的 Sidecar 和测试 model credential |
@@ -159,7 +160,7 @@ Linux Desktop 和一次性 C9 clean cut。
 
 | ID | 状态 | Owner | 目标 | 依赖 | 完成定义 | 最小测试 | 人工 / 外部输入 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `SL-S4-01` | open | 主机 | 把 Agent 编辑器收缩为产品语言 | `SL-S2-07`、`SL-S2-08` | 默认只展示名称/用途、模型、能力开关、Workspace/Knowledge/Connector picker、保存和试用；内部 ID/digest/JSON 默认折叠；Save/Test 自动 Preview | `bun run typecheck; bun run test -- <相关 UI 定向测试>` | 无 |
+| `SL-S4-01` | blocked | 主机 | 把 Agent 编辑器收缩为产品语言 | `SL-S2-07`、`SL-S2-08` | 默认只展示名称/用途、模型、能力开关、Workspace/Knowledge/Connector picker、保存和试用；内部 ID/digest/JSON 默认折叠；Save/Test 自动 Preview | `bun run typecheck; bun run test -- <相关 UI 定向测试>` | 无 |
 | `SL-S4-02` | blocked | 主机 | 关闭四条真实用户流程 | `SL-S3-04`～`SL-S3-12`、`SL-S4-01` | 从模板创建；修改并保存；选择资源并试用；Snapshot 不兼容时在新会话继续。Desktop 不崩溃，不要求用户填写 UUID/operation/raw JSON | `bun run dev` 后执行四流程；保留截图、console 和 backend 日志 | 用户可直接人工验收，通常优先于不稳定 Playwright harness |
 
 ## S5：三平台、C9 与 RC
@@ -172,27 +173,29 @@ Linux Desktop 和一次性 C9 clean cut。
 | `SL-S5-04` | blocked | 主机 | 执行一次性 C9 shutdown 与 Nomi 物理删除 | `SL-S5-01`～`SL-S5-03` | 停止 Nomi admission；取消内部工作；bounded shutdown；kill descendants；unknown 外部 Effect 记 uncertain；删除 Nomi runtime/factory/route/artifact；production/release residual 为 0 | `bun run gate:agent-v2 -- c9-hard-delete` 及 Nomi production/release dependency scan | 进入删除窗口前需要用户确认三平台候选已冻结 |
 | `SL-S5-05` | blocked | 主机 | 对同一 Nomi-free RC 完成三平台最终验证并原样提升 Stable | `SL-S5-04` | Windows、macOS arm64、Linux Desktop 对同一 RC bytes 完成 package/install/fresh/critical E2E/lifecycle；release lock/result 可追溯；Stable 不重建 | 三平台 final RC suite；Artifact digest exact-match | 需要三台真实主机和发布/签名负责人执行最终 promotion |
 
-## 机器 2 唯一 Lane
+## 机器 2 Batch A
 
-机器 2 当前只领取 `SL-S3-09`，不再领取 MCP、Browser、Computer、Wave 3/4、
-Sidecar 或 native Gate。允许写集仅为：
+机器 2 不因单个 SSH 任务启动。只有以下四项能作为完整批次领取时才启用：
 
-- `crates/backend/nomifun-ssh/src/**`
-- `crates/backend/nomifun-ssh/tests/**`
-- `crates/shared/nomi-ssh/src/**`
-- `crates/shared/nomi-ssh/tests/**`
+1. `SL-S2-05` SessionEvent/Projection 收缩；
+2. `SL-S2-06` 三类 Effect 策略收缩；
+3. `SL-S2-10` official app-server upstream spike；
+4. `SL-S3-09` 精简 SSH owner。
 
-机器 2 不修改 `Cargo.lock`、canonical contracts、Fresh-v4 schema、Wave domain、app host、
-Gateway、Gate、manifest 或本文。完成后以独立分支普通 push，回传 base SHA、commit SHA、
-changed paths、每条验证命令、未运行项和主机接线说明。主机在机器 2 开发期间继续 S1、S2、
-S3 非 SSH 工作，不等待 SSH lane 才推进。
+内部并发分为三个互不争抢的 writer：
+
+- Session Data writer：`SL-S2-05 -> SL-S2-06` 串行，独占 `nomifun-agent-session`；
+- SSH writer：独占 `nomi-ssh` 与 `nomifun-ssh`；
+- Sidecar Spike writer：只写新的 spike 记录和专用 validation script，不改生产 Runtime。
+
+机器 2 不修改 `Cargo.lock`、Compiler、Snapshot、Kernel Registry、Fresh-v4 schema、
+`nomifun-app`、Gateway、Gate、GLOBAL TODO 或 Browser/Computer Role 合同。每项独立提交，
+回传 base SHA、commit SHA、changed paths、验证命令、未运行项和主机接线说明。
 
 ## 推荐顺序
 
-1. 主机优先完成 `SL-S2-07`，随后并行收口 `SL-S2-08` 与 `SL-S2-09`；
-   机器 2 独立推进 `SL-S3-09`，主机不等待 SSH lane。
-2. 同时以不争抢 Compiler/Registry 文件的批次推进 `SL-S2-05`、`SL-S2-06`、
-   `SL-S2-10`、`SL-S3-07` 和 `SL-S3-08`。
+1. 主机独占推进 `SL-S2-07`；机器 2 仅在 Batch A 四项全部可领取时并行启动。
+2. Batch A 返回后，主机先合并 Session/Effect，再按独立提交审查 SSH 与 Sidecar spike。
 3. 单 Compiler、小 Snapshot 和 Role 合同稳定后，按
    `SL-S3-01 -> SL-S3-02 -> SL-S3-03` 串行落主链。
 4. Browser 与 Computer first-party provider 可并行实现，随后统一清除旁路。
@@ -203,7 +206,7 @@ S3 非 SSH 工作，不等待 SSH lane 才推进。
 
 ## 阶段退出条件
 
-- **S0 完成**：本文审查提交，机器 2 使用精简 Prompt，旧 84 项不再驱动施工。
+- **S0 完成**：本文审查提交，机器 2 服从批次启用门槛，旧 84 项不再驱动施工。
 - **S1 完成**：Wave 3/4 都有明确 keep/revert 结果，保留代码都有真实用户价值。
 - **S2 完成**：三个 P0 关闭；单 Compiler、小 Snapshot、三类 Effect 生效；Sidecar 最小协议
   基于真实 upstream spike，而不是历史假设。
