@@ -3,6 +3,7 @@
 mod agent_platform;
 pub(crate) mod agent_platform_host;
 pub(crate) mod agent_wave2_host;
+pub(crate) mod agent_wave2_vcs_push;
 pub(crate) mod agent_wave4_host;
 pub(crate) mod chat_broker_host;
 pub(crate) mod fresh_v4_system;
