@@ -20,7 +20,7 @@ use axum::{
     middleware::from_fn,
 };
 use http_body_util::BodyExt;
-use nomifun_auth::{InstanceTokenValidator, RemoteAuthAdmissionFence};
+use nomifun_auth::InstanceTokenValidator;
 use nomifun_common::UserId;
 
 use crate::session::{
@@ -41,13 +41,6 @@ pub struct RemoteInstanceOwner(pub UserId);
 pub struct PublicMcpState {
     pub validator: Arc<InstanceTokenValidator>,
     pub authoritative_user_id: UserId,
-}
-
-/// State for a middleware that also participates in the D-026 auth fence.
-#[derive(Clone)]
-pub struct PublicMcpAdmissionState {
-    pub public: PublicMcpState,
-    pub admission: RemoteAuthAdmissionFence,
 }
 
 /// Authenticate an installation owner and attach it to the request.
@@ -75,32 +68,6 @@ pub async fn instance_token_middleware(
     next.run(request).await
 }
 
-/// Authenticate while holding the shared side of the D-026 request fence.
-pub async fn instance_token_middleware_with_admission(
-    State(state): State<PublicMcpAdmissionState>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let admission = state.admission.acquire_request_admission().await;
-    let presented = presented_token(&request);
-    if !state.public.validator.validate(presented) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({
-                "success": false,
-                "error": "Remote installation authentication is required",
-                "code": "REMOTE_AUTH_REQUIRED"
-            })),
-        )
-            .into_response();
-    }
-    let mut request = request;
-    request
-        .extensions_mut()
-        .insert(RemoteInstanceOwner(state.public.authoritative_user_id));
-    response_with_auth_admission(next.run(request).await, admission)
-}
-
 fn presented_token(request: &Request) -> &str {
     request
         .headers()
@@ -108,18 +75,6 @@ fn presented_token(request: &Request) -> &str {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .unwrap_or("")
-}
-
-fn response_with_auth_admission(
-    response: Response,
-    admission: nomifun_auth::RemoteRequestAdmissionPermit,
-) -> Response {
-    let (parts, body) = response.into_parts();
-    let guarded = body.map_frame(move |frame| {
-        let _keep_alive = &admission;
-        frame
-    });
-    Response::from_parts(parts, Body::new(guarded))
 }
 
 #[derive(Clone)]

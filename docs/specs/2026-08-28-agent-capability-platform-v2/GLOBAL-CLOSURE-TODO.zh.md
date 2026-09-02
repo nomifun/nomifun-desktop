@@ -69,13 +69,13 @@ Linux Desktop 和一次性 C9 clean cut。
 
 | 阶段 | closed | open | blocked | external | pending-validation | 合计 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| S0 止损发布 | 2 | 0 | 0 | 0 | 1 | 3 |
+| S0 止损发布 | 3 | 0 | 0 | 0 | 0 | 3 |
 | S1 Revert/keep 审计 | 2 | 1 | 0 | 0 | 0 | 3 |
-| S2 P0 与基础收缩 | 0 | 10 | 0 | 0 | 0 | 10 |
+| S2 P0 与基础收缩 | 1 | 9 | 0 | 0 | 0 | 10 |
 | S3 Role seam 与核心 owner | 0 | 4 | 8 | 0 | 0 | 12 |
 | S4 产品 UI | 0 | 1 | 1 | 0 | 0 | 2 |
 | S5 三平台、C9 与 RC | 0 | 0 | 3 | 2 | 0 | 5 |
-| **总计** | **4** | **16** | **12** | **2** | **1** | **35** |
+| **总计** | **6** | **15** | **12** | **2** | **0** | **35** |
 
 旧台账 84 项现已收敛为 35 项。任务数量不是质量指标；只有完成定义和最小验证满足后
 才能修改状态。
@@ -85,7 +85,7 @@ Linux Desktop 和一次性 C9 clean cut。
 | ID | 状态 | Owner | 目标 | 依赖 | 完成定义 | 最小测试 | 人工 / 外部输入 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `SL-S0-01` | closed | 主机 | 发布 05 并停止旧 84 项驱动的扩张 | 无 | 05 独立提交，明确覆盖旧 Gate、Effect、平台矩阵和 TODO 口径 | `git show --stat d6de5170` | 无 |
-| `SL-S0-02` | pending-validation | 主机 | 用本文替换旧 84 项阻断台账 | `SL-S0-01` | 只保留 S0-S5 stable ID、状态、owner、依赖、完成定义、最小测试和人工输入；统计自洽 | `git diff --check -- docs/specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md` | 需要主集成 owner 审查并提交 |
+| `SL-S0-02` | closed | 主机 | 用本文替换旧 84 项阻断台账 | `SL-S0-01` | 只保留 S0-S5 stable ID、状态、owner、依赖、完成定义、最小测试和人工输入；统计自洽 | `df4bdf56`; `git diff --check -- docs/specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md` | 无 |
 | `SL-S0-03` | closed | 主机 | 把机器 2 收缩为唯一精简 SSH lane | `SL-S0-01` | Prompt 删除绝对原子覆盖、通用 uncertain/reconcile、中央 Effect journal 和长期旧 API 兼容要求 | `git show --stat b13a8164` | 机器 2 开始前需拉取包含 05 和新 Prompt 的基线 |
 
 ## S1：Revert/keep 审计
@@ -102,7 +102,7 @@ Linux Desktop 和一次性 C9 clean cut。
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `SL-S2-01` | open | 主机 | 删除 candidate source SHA 自引用 | `SL-S1-03` | pre-run input 不写其自身 commit SHA；Gate 运行时读取 clean HEAD；post-run result 记录 source commit 与 Artifact digest | Gate generator 定向测试；在临时 clean commit 连续生成两次并比较输入稳定性 | 无 |
 | `SL-S2-02` | open | 主机 | 物理分离 schema fixture 与真实 release lock/result | `SL-S2-01` | fixture 明示假 digest；`release-lock.json` 只含真实制品 digest；`platform-result.json` 只含目标、suite、结果和日志引用；删除 `fixture_digest` 发布输入 | `cargo test -p nomifun-agent-contracts validation --lib; rg -n "agent-v2-contract-fixture" crates scripts` | 最终真实 lock 需要打包制品 |
-| `SL-S2-03` | open | 主机 | 修复 Remote token rotate/revoke Response Body 卡死 | 无 | validator generation/hash 是认证线性化点；请求 admission 后释放 permit，不跨 Response Body 持有异步读锁；旧 token 后续请求立即失败 | `cargo test -p nomifun-auth remote_admission --lib; cargo test -p nomifun-app canonical_remote_rest_freezes_binding_and_auth_fence --lib -- --exact --test-threads=1` | 若 harness 仍挂起，用户可按记录步骤人工执行 rotate/revoke |
+| `SL-S2-03` | closed | 主机 | 修复 Remote token rotate/revoke Response Body 卡死 | 无 | validator generation/hash 是认证线性化点；请求只持有短生命周期同步状态锁，不跨 Response Body 持有 auth permit；mint/revoke 仅由 mutation gate 串行；旧 token 后续请求立即失败 | `cargo test --locked -p nomifun-auth remote_admission --lib`; `cargo test --locked -p nomifun-public --lib`; `cargo test --locked -p nomifun-app bootstrap::canonical_host::tests::canonical_remote_rest_freezes_binding_and_auth_fence --lib -- --exact --test-threads=1` | 无 |
 | `SL-S2-04` | open | 主机 | 简化 D-024 delete/dispose | `SL-S1-03` | 删除调用者填写的 `ZeroOutstandingProof`；使用真实 `RuntimeDisposeReport`；`deleting` 重启后幂等完成 tombstone | `cargo test -p nomifun-agent-session delete --lib -- --test-threads=1` | 无 |
 | `SL-S2-05` | open | 主机 | 收缩 SessionEvent 与 Projection | `SL-S2-04` | Event Log 保留唯一语义事实；Projection 不复制完整 `events[]`；正常完成只持久化最终 assistant message，中断最多一份 bounded partial | `cargo test -p nomifun-agent-session projection --lib` | 无 |
 | `SL-S2-06` | open | 主机 | 把 Effect 生命周期收敛为三种策略 | `SL-S1-01`、`SL-S1-02` | 仅保留 `read_only`、`managed_effect`、`external_uncertain_effect`；本地操作使用事务/CAS/原子文件；外部 unknown 不自动 retry；删除 Wave 级通用 journal/coordinator | `cargo test -p nomifun-agent-session effect --lib -- --test-threads=1` | live 外部 Effect 只在可丢弃 sandbox 验证 |

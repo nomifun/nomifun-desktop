@@ -77,7 +77,6 @@ async fn revoke(
 async fn status(
     State(state): State<InstanceTokenRouterState>,
 ) -> Result<Json<ApiResponse<AccessTokenStatusResponse>>, AppError> {
-    let _admission = state.admission.acquire_request_admission().await;
     Ok(Json(ApiResponse::ok(AccessTokenStatusResponse {
         configured: state.token_validator.is_configured(),
     })))

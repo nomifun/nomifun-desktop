@@ -25,7 +25,7 @@ use nomifun_api_types::{
     RemoteObserveResponseDto, RemoteOpenRequestDto, RemoteOpenResponseDto, RemoteOpenStateViewDto,
     RemoteTurnRequestDto, SessionCursorDto,
 };
-use nomifun_auth::{InstanceTokenValidator, RemoteAuthAdmissionFence};
+use nomifun_auth::InstanceTokenValidator;
 use nomifun_common::{UserId, validate_uuidv7};
 use rmcp::ServerHandler;
 use rmcp::model::{
@@ -101,7 +101,6 @@ pub fn canonical_remote_mcp_router(
     validator: Arc<InstanceTokenValidator>,
     authoritative_user_id: UserId,
     runtime: Arc<dyn CanonicalRemoteRuntimeAdmission>,
-    auth_fence: RemoteAuthAdmissionFence,
 ) -> Router {
     let transport_admission =
         RemoteMcpSessionAdmissionAuthority::for_owner(&authoritative_user_id);
@@ -138,22 +137,12 @@ pub fn canonical_remote_mcp_router(
         .layer(from_fn_with_state(
             McpAuthState {
                 public: crate::router::PublicMcpState {
-                    validator: validator.clone(),
-                    authoritative_user_id: authoritative_user_id.clone(),
+                    validator,
+                    authoritative_user_id,
                 },
                 sessions,
             },
             mcp_instance_token_middleware,
-        ))
-        .layer(from_fn_with_state(
-            crate::router::PublicMcpAdmissionState {
-                public: crate::router::PublicMcpState {
-                    validator,
-                    authoritative_user_id,
-                },
-                admission: auth_fence,
-            },
-            crate::router::instance_token_middleware_with_admission,
         ))
 }
 

@@ -29,11 +29,9 @@ use nomifun_api_types::{
     RemoteOpenRequestDto, RemoteOpenResponseDto,
     RemoteOpenStateViewDto, RemoteTurnRequestDto, SessionCursorDto,
 };
-use nomifun_auth::RemoteAuthAdmissionFence;
 use nomifun_common::UserId;
 use nomifun_public::{
-    PublicMcpAdmissionState, PublicMcpState, RemoteInstanceOwner,
-    instance_token_middleware_with_admission,
+    PublicMcpState, RemoteInstanceOwner, instance_token_middleware,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -212,7 +210,6 @@ pub fn build(
     session_query: Arc<dyn AgentSessionQueryPort>,
     validator: Arc<nomifun_auth::InstanceTokenValidator>,
     authoritative_user_id: UserId,
-    admission: Arc<RemoteAuthAdmissionFence>,
     runtime: Arc<RemoteRuntimeCoordinator>,
 ) -> Router {
     let state = RemoteRestState {
@@ -229,14 +226,11 @@ pub fn build(
         .with_state(state)
         .layer(from_fn(reject_undeclared_query_parameters))
         .layer(from_fn_with_state(
-            PublicMcpAdmissionState {
-                public: PublicMcpState {
-                    validator,
-                    authoritative_user_id,
-                },
-                admission: (*admission).clone(),
+            PublicMcpState {
+                validator,
+                authoritative_user_id,
             },
-            instance_token_middleware_with_admission,
+            instance_token_middleware,
         ))
 }
 
