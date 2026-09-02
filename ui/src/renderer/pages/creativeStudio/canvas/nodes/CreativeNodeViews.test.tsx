@@ -11,7 +11,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { CreativeCanvasNode, CreativeCanvasNodeKind } from '../../domain/schema';
 import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
-import { CREATIVE_NODE_VIEW_KINDS, CreativeNodeView } from './CreativeNodeViews';
+import {
+  CREATIVE_NODE_VIEW_KINDS,
+  CreativeImageNode,
+  CreativeNodeView,
+} from './CreativeNodeViews';
 
 const base = {
   position: { x: 48, y: -24 },
@@ -140,6 +144,22 @@ describe('Creative Studio canonical node views', () => {
     expect(html.includes('data-node-status="running"')).toBe(true);
     expect(html.includes('aria-valuenow="42"')).toBe(true);
     expect(html.includes('width:42%')).toBe(true);
+  });
+
+  test('keeps node names accessible without rendering descriptions above cards', () => {
+    const imageNode = nodes.find((node): node is Extract<CreativeCanvasNode, { type: 'image' }> => node.type === 'image');
+    if (!imageNode) throw new Error('image fixture is missing');
+    const accessibleName = 'Image node accessible name';
+    const html = renderCanvas(
+      <CreativeImageNode
+        node={imageNode}
+        title={accessibleName}
+        runtime={{ status: 'running', progress: 42 }}
+      />
+    );
+
+    expect(html.includes(`aria-label="${accessibleName}"`)).toBe(true);
+    expect(html.includes(`>${accessibleName}<`)).toBe(false);
   });
 
   test('stays headless and imports the canonical schema instead of defining document fields', () => {

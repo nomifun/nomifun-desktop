@@ -5232,9 +5232,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
                         )
                       : []),
                   ].sort((left, right) => left.ordinal - right.ordinal);
-                  const referenceCapacityLabel = effectiveReferenceLimit !== null
-                    ? `${referenceResolution.references.length}/${effectiveReferenceLimit}`
-                    : `${referenceResolution.references.length}`;
                   const composeSizePolicy = imageWorkbenchSizePolicyForModel(resolvedModel);
                   const composeSizeOptions = imageWorkbenchSelectableSizeOptions(
                     composeSizePolicy.options
@@ -5296,7 +5293,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           initialPrompt={composeDraft.prompt}
                           initialMentions={composeMentions}
                           references={composerReferences}
-                          referenceCapacityLabel={referenceCapacityLabel}
                           settings={composeSettings}
                           aspectRatioOptions={composeSizeOptions}
                           maxCount={composeSizePolicy.maxCount}

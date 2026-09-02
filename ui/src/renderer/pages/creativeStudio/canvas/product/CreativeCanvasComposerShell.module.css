@@ -3,7 +3,7 @@
   top: calc(100% + 16px * var(--creative-canvas-inverse-zoom));
   left: 50%;
   z-index: 35;
-  width: 580px;
+  width: 540px;
   color: var(--color-text-1);
   pointer-events: auto;
   transform:
@@ -41,7 +41,7 @@
 
 .panel {
   box-sizing: border-box;
-  padding: 10px;
+  padding: 8px;
   border: 1px solid color-mix(in srgb, var(--color-border-2) 86%, transparent);
   border-radius: 16px;
   background: color-mix(in srgb, var(--color-bg-2) 94%, transparent);
@@ -53,7 +53,7 @@
   display: block;
   box-sizing: border-box;
   width: 100%;
-  height: 104px;
+  height: 92px;
   resize: none;
   padding: 7px 10px;
   border: 0;
@@ -90,7 +90,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  margin-top: 6px;
+  margin-top: 4px;
 }
 
 .controls {
@@ -448,7 +448,7 @@ select.settingsControl {
 
 @media (max-width: 760px) {
   .positioner {
-    width: min(580px, calc(100vw - 32px));
+    width: min(540px, calc(100vw - 32px));
   }
 
   .modelSelect {

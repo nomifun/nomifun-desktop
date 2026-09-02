@@ -51,7 +51,6 @@ export interface CreativeCanvasImageComposerProps {
   initialPrompt: string;
   initialMentions?: readonly CreativeCanvasPromptMentionBinding[];
   references?: readonly CreativeCanvasImageComposerReference[];
-  referenceCapacityLabel?: string | null;
   settings: ImageWorkbenchSettings;
   aspectRatioOptions: readonly ImageWorkbenchAspectRatioOption[];
   maxCount: number;
@@ -93,7 +92,6 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
   initialPrompt,
   initialMentions = EMPTY_MENTIONS,
   references = EMPTY_REFERENCES,
-  referenceCapacityLabel = null,
   settings,
   aspectRatioOptions,
   maxCount,
@@ -245,14 +243,6 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     >
         {references.length > 0 ? (
           <div className={styles.referenceSection}>
-            <div className={styles.referenceHeader}>
-              <span>
-                {t('creativeStudio.canvas.image.connectedReferences', {
-                  defaultValue: '已连接参考',
-                })}
-              </span>
-              {referenceCapacityLabel ? <small>{referenceCapacityLabel}</small> : null}
-            </div>
             <div
               className={styles.referenceStrip}
               role='list'

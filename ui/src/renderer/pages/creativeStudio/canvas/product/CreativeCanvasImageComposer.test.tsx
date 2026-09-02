@@ -192,7 +192,6 @@ describe('CreativeCanvasImageComposer', () => {
                 ordinal: 2,
               },
             ],
-            referenceCapacityLabel: '2/3',
             onReferenceDisconnect: (connectionId) => disconnected.push(connectionId),
             onPromptChange: (change) => promptChanges.push(change),
           })}
@@ -200,8 +199,10 @@ describe('CreativeCanvasImageComposer', () => {
       )
     );
 
-    expect(getByRole('list').textContent?.includes('人物图')).toBe(true);
-    expect(getByRole('list').textContent?.includes('服装图')).toBe(true);
+    const referenceList = getByRole('list', { name: '已连接参考' });
+    expect(referenceList.textContent?.includes('人物图')).toBe(true);
+    expect(referenceList.textContent?.includes('服装图')).toBe(true);
+    expect(document.body.textContent?.includes('已连接参考')).toBe(false);
     fireEvent.click(getByRole('button', { name: '断开参考图 服装图' }));
     expect(disconnected).toEqual(['edge-clothes']);
 
@@ -342,8 +343,9 @@ describe('CreativeCanvasImageComposer', () => {
     expect(shellCss.includes('background: color-mix(in srgb, var(--color-bg-2)')).toBe(true);
     expect(shellCss.includes('background: rgb(var(--primary-6))')).toBe(true);
     expect(shellCss.includes('@media (prefers-color-scheme: dark)')).toBe(false);
-    expect(shellCss.includes('width: 580px')).toBe(true);
-    expect(promptCss.includes('min-height: 104px')).toBe(true);
+    expect(shellCss.includes('width: 540px')).toBe(true);
+    expect(promptCss.includes('min-height: 92px')).toBe(true);
+    expect(css.includes('padding: 0 4px 4px')).toBe(true);
     expect(css.includes('height: 160px')).toBe(false);
     expect(shellCss.includes('flex: 0 1 156px')).toBe(true);
     expect(
