@@ -121,6 +121,24 @@ fn macos_system_alias_path(path: &Path) -> PathBuf {
 
     for (alias, target) in ALIASES {
         let alias_path = Path::new(alias);
+        let Some(observed_target) = std::fs::read_link(alias_path)
+            .ok()
+            .map(|observed| {
+                if observed.is_absolute() {
+                    observed
+                } else {
+                    alias_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("/"))
+                        .join(observed)
+                }
+            })
+        else {
+            continue;
+        };
+        if observed_target != Path::new(target) {
+            continue;
+        }
         if path == alias_path {
             return PathBuf::from(target);
         }
