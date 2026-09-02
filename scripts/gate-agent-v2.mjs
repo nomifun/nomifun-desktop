@@ -127,9 +127,9 @@ const C8_EXPECTED_DIGESTS = {
   platform_validation_contract:
     '78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9',
   platform_validation_manifest:
-    'fa3cd9c542bab988afc366d512c279e34f33bef07bf2546a78094845f81bb948',
+    '885ad04ecbd798ae5285d956fe25cb6d3426b1f66244a33ac42db87c732687eb',
   runtime_release:
-    'c4075b2f7c118fa5eeeb6fc4a0b21cf940d5af6a8acc080e1c8721a8a738a380',
+    '7c0c297dd0dd7c11c71cd589965e930ddec0008bebaaf510eabcd0c597358838',
   runtime_feature_inventory:
     'bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee',
   canonical_schema_manifest:
@@ -143,9 +143,9 @@ const C8_EXPECTED_DIGESTS = {
   coding_codex_native:
     'f699f376a9414b7830b90a68c890d39010687499e6d16ee1687f5c370cd0127a',
   cargo_lock:
-    '26e121277eb2054fc43f80dbfc72b7a8ee4fc2cebcc8294752217944989dfb14',
+    '8542e44b505368b7ae19e9ce064c2b9726bba6db5d597495e9899e868637a52c',
   platform_fixture:
-    'fa3cd9c542bab988afc366d512c279e34f33bef07bf2546a78094845f81bb948',
+    '885ad04ecbd798ae5285d956fe25cb6d3426b1f66244a33ac42db87c732687eb',
 };
 const C8_EXPECTED_TEMPLATES = [
   'chat.minimal',
@@ -4358,6 +4358,7 @@ function c8ValidateAllSceneCoverage(report, manifest, platformValidation) {
     session_operations: {},
     fault_classes: {},
     resource_slots: {},
+    production_owner_coverage: null,
   };
   const seedArtifact = c8ReadJsonArtifact(
     report,
@@ -4426,6 +4427,41 @@ function c8ValidateAllSceneCoverage(report, manifest, platformValidation) {
       `C8 all-scene inventory is missing required ${domain} capability coverage`
     );
   }
+
+  const ownerSources = {
+    host: readFileSafe(
+      join(
+        repoRoot,
+        'crates/backend/nomifun-app/src/router/agent_platform_host.rs'
+      )
+    ) || '',
+    wave2: readFileSafe(
+      join(
+        repoRoot,
+        'crates/backend/nomifun-app/src/router/agent_wave2_host.rs'
+      )
+    ) || '',
+    wave4: readFileSafe(
+      join(
+        repoRoot,
+        'crates/backend/nomifun-app/src/router/agent_wave4_host.rs'
+      )
+    ) || '',
+  };
+  const ownerBlockers = c8ProductionOwnerBlockers(ownerSources);
+  result.production_owner_coverage = {
+    status: ownerBlockers.length === 0 ? 'pass' : 'fail',
+    blockers: ownerBlockers,
+  };
+  c8Require(
+    report,
+    ownerBlockers.length === 0,
+    'scene_production_owner_coverage',
+    `C8 production action owners are incomplete: ${
+      ownerBlockers.map((blocker) => blocker.domain).join(', ') || 'unknown'
+    }`,
+    { blockers: ownerBlockers }
+  );
 
   const runtimeArtifact = c8ReadJsonArtifact(
     report,
@@ -4569,6 +4605,49 @@ function c8ValidateAllSceneCoverage(report, manifest, platformValidation) {
     ? 'fail'
     : 'pass';
   return result;
+}
+
+function c8ProductionOwnerBlockers({ host, wave2, wave4 }) {
+  const blockers = [];
+  if (host.includes('no Fresh-v4 Wave 1 owner is wired for')) {
+    blockers.push({
+      domain: 'wave1',
+      reason: 'partial_owner_fallback_reachable',
+    });
+  }
+  if (wave2.includes('no canonical application owner is wired for')) {
+    blockers.push({
+      domain: 'wave2',
+      reason: 'partial_owner_fallback_reachable',
+    });
+  }
+  if (
+    /wave3:\s*nomifun_agent_domain_wave3::unconfigured_host_port\s*\(/m.test(
+      host
+    )
+  ) {
+    blockers.push({
+      domain: 'wave3',
+      reason: 'unconfigured_production_host',
+    });
+  }
+  if (wave4.includes('Fresh-v4 has no native owner for')) {
+    blockers.push({
+      domain: 'wave4',
+      reason: 'unavailable_production_host',
+    });
+  }
+  if (
+    /wave5:\s*nomifun_agent_domain_wave5::unconfigured_host_port\s*\(/m.test(
+      host
+    )
+  ) {
+    blockers.push({
+      domain: 'wave5',
+      reason: 'unconfigured_production_host',
+    });
+  }
+  return blockers;
 }
 
 function c8ValidateC8ResidualReachability(report, c7, manifest) {
@@ -5744,6 +5823,29 @@ function runC8SelfTest() {
     ambiguousChannel.confirmation_classification === 'ambiguous_confirmation' &&
       ambiguousChannel.classification === 'blocking_unclassified_residual',
     'insufficient channel ownership evidence must remain blocking'
+  );
+
+  const ownerBlockers = c8ProductionOwnerBlockers({
+    host: `
+      match operation { _ => "no Fresh-v4 Wave 1 owner is wired for {}" }
+      wave3: nomifun_agent_domain_wave3::unconfigured_host_port(),
+      wave5: nomifun_agent_domain_wave5::unconfigured_host_port(),
+    `,
+    wave2: 'no canonical application owner is wired for {capability_id}',
+    wave4: 'Fresh-v4 has no native owner for {} resource action',
+  });
+  c8SelfTestAssert(
+    JSON.stringify(ownerBlockers.map((blocker) => blocker.domain)) ===
+      JSON.stringify(['wave1', 'wave2', 'wave3', 'wave4', 'wave5']),
+    'C8 owner coverage must fail closed for every partial or unconfigured production wave'
+  );
+  c8SelfTestAssert(
+    c8ProductionOwnerBlockers({
+      host: 'all domain owners are explicitly mounted',
+      wave2: 'all Wave 2 operations have exact owners',
+      wave4: 'all Wave 4 operations have exact owners',
+    }).length === 0,
+    'C8 owner coverage must accept a production graph without fallback markers'
   );
 
   const nativeSpec = c8ParseNativeDispatchArgs(

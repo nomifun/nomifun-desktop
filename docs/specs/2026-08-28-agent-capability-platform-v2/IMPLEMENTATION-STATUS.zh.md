@@ -1,6 +1,6 @@
 # Agent Capability Platform v2 实施状态
 
-> 最后更新：2026-09-01
+> 最后更新：2026-09-02
 >
 > 本文件是跨任务、跨机器继续实施的唯一人工可读状态入口。机器契约、
 > Gate input 与 evidence 仍分别由 canonical contract、manifest 和 ledger
@@ -10,16 +10,13 @@
 
 - branch：`rf/agent-capability-platform-v2`
 - base SHA：`7a2ade3c49374add25a35565265399c57729a8b9`
-- last clean C8 execution SHA / current fix base：
-  `4de100692983cb0e4e81091d60456dc26a9d8e69`
-- current/last verified remote implementation SHA：
-  `0bacc9ab1628315b8dbc61e03c1643c77ca39c0e`
-- origin：`git@github.com:nomifun/nomifun-desktop.git`
-- worktree：clean；当前 source 已可用于定向工程验证，但尚未形成 C8 native
-  candidate evidence checkpoint。`0bacc9ab` 包含 C8 immutable input reference
-  的语义校正，不等同于 C8/HP-1 通过。
-- current branch/remote HEAD（包含本轮 handoff 文档）：
-  `e43afe44c26db7a68d489ae6724c1852cfd86022`
+- last clean C8 execution SHA（Windows 合流前历史 evidence）：
+  `b849e2ac7c3356468f86064a47180f5442a8e0a6`
+- 本轮合流前已核对的 remote SHA：
+  `45655e80d3e4fd534e2903d2059a75748af6c5a4`
+- origin：`https://github.com/nomifun/nomifun-desktop.git`
+- current implementation checkpoint：以本分支完成合流后的 clean Git HEAD 为准；
+  C8 evidence 只接受 clean source checkpoint，历史 SHA 不得冒充当前候选。
 - Git identity：`colir0 <colir0@qq.com>`
 - DeepSeek Harness：
   - expected/current：`cd5ef8148158c3a752a658978873241fdf8e2bbc`
@@ -27,11 +24,10 @@
   - 状态：匹配调查基线
 - Codex：
   - frozen investigation SHA：`dc2ccc6843abb09c9d297862dc10b6bd12a3935d`
-  - sibling checkout：当前工作区不存在 `../codex`；未发现可验证的
-    `4ee04c0aa5833ac39b1763f6ea44c7bc777c83dd` checkout。
-  - 状态：冻结调查 SHA 及其 ancestor 关系当前不可由本地对象库复核；C0/C4
-    仍必须显式 pin 冻结 SHA，不得把当前 HEAD 静默当作调查基线。实际 sidecar
-    仍需按 release input 单独提供和验证。
+  - sibling checkout：Windows 工作区存在 `../codex`，冻结 SHA 可达。
+  - 状态：冻结 upstream 不包含 NomiFun 所需的 `runtime/hello`、
+    `runtime/session/dispose` 和 `native_action/start`；实际 sidecar 仍需按
+    release input 单独提供和验证，普通 `codex.exe` 不得冒充。
 
 ## 当前阶段
 
@@ -1186,3 +1182,50 @@ HP-1 通过。
   `MACOS-ARM64-ENGINEERING-HANDOFF.json`。其状态为
   `ready_for_windows_continuation`，明确标记 C8-MA/HP-2 未通过，不是 native
   PASS evidence。
+
+## macOS 回传后的 Windows 合流（2026-09-02）
+
+远端 `45655e80...` 的 16 个提交已作为合流基线，包含 PluginState memory
+mutation owner、workspace patch/VCS owner、snapshot owner、契约 tuple 刷新和
+macOS 到 Windows 的验证交接。Windows 侧两个尚未发布的提交在该基线上重放；
+冲突按 owner 语义合并，不使用 force-push、mock success 或放宽 Gate。
+
+合流后的 Wave 2 主线同时保留：
+
+- 远端的持久化 effect journal、完整 `fs.snapshot`
+  `init/compare/baseline/dispose` 生命周期和 `vcs.commit`；
+- Windows 的受监管 `process.exec`、timeout/cancel 后进程树回收、
+  `process_session.workspace_root` 强制绑定和 junction escape 拒绝；
+- staged/unstaged `vcs.diff`、目录/新文件/删除 `vcs.stage`、Windows Git
+  路径逐组件大小写无关投影和 reparse entry 拒绝；
+- capability 未声明额外 resource binding 的 fail-closed 校验；
+- 非权威 `turn_metrics` token telemetry、唯一 `turn.completed` lifecycle
+  authority，以及无调用方 Conversation test-only legacy wrapper 删除；
+- C8 production owner coverage：Wave 1～5 owner 未物理闭合时保持失败。
+
+合并后的 canonical 产物由 `agent-v2-contract write` 生成：
+
+- confirmed decision contract：
+  `b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5`
+- canonical schema：
+  `e28723d7fc524cfdd351c6fc8cc17b8a48d8fd1f5be16a7aebd395ce669f98ff`
+- contract digest ledger：
+  `cf11cc4feb9b0d64d85759f90bd9fed36d1feeea6b3e48bc92bb641f5bfee54b`
+- runtime release：
+  `7c0c297dd0dd7c11c71cd589965e930ddec0008bebaaf510eabcd0c597358838`
+- platform validation：
+  `885ad04ecbd798ae5285d956fe25cb6d3426b1f66244a33ac42db87c732687eb`
+- `Cargo.lock`：
+  `8542e44b505368b7ae19e9ce064c2b9726bba6db5d597495e9899e868637a52c`
+
+历史 C8-WIN-PRE 在 clean `b849e2ac...` 上运行一次：owner coverage 按设计
+列出 Wave 1～5 未闭合项；workspace test 停在
+`canonical_remote_rest_freezes_binding_and_auth_fence`，单独子进程在无进展后
+终止，未盲目重试。该 evidence 仅用于障碍记录，不属于当前合流 SHA，也不构成
+C8/HP-1 PASS。
+
+当前真实剩余项仍包括 Wave 1 Knowledge/Memory/Skill 完整 v4 resource owner，
+Wave 2 `vcs.push`、SSH、MCP/Connector、Browser、Computer owner，Wave 3/4 的
+typed effect/resource/outbox，以及 Wave 5 canonical AgentSession command/query
+ServiceKey。Windows sidecar 和其余 native cell 证据仍是外部阻塞；在这些项完成前
+不能宣称 C8-WIN-PRE、C8-MA、C8-MERGE 或发布完成。

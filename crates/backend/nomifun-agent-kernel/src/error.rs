@@ -176,6 +176,14 @@ pub enum KernelError {
     ResourceBindingMissing {
         binding_id: ResourceBindingId,
     },
+    #[error(
+        "capability {capability_id:?} received undeclared resource binding {binding_id:?} of kind {resource_kind}"
+    )]
+    UnexpectedResourceBinding {
+        capability_id: CapabilityId,
+        binding_id: ResourceBindingId,
+        resource_kind: String,
+    },
     #[error("resource binding {binding_id:?} belongs to another principal")]
     ResourceOwnerMismatch {
         binding_id: ResourceBindingId,
@@ -233,9 +241,9 @@ impl KernelError {
             Self::CapabilityUnavailableOnPlatform { .. }
             | Self::CapabilityUnavailableOnSurface { .. } => CAPABILITY_UNAVAILABLE_ON_PLATFORM,
             Self::ResourceOwnerMismatch { .. } => RESOURCE_OWNER_MISMATCH,
-            Self::ResourceBindingMissing { .. } | Self::CapabilityResourceNotBound { .. } => {
-                PRESET_RESOURCE_NOT_BOUND
-            }
+            Self::ResourceBindingMissing { .. }
+            | Self::UnexpectedResourceBinding { .. }
+            | Self::CapabilityResourceNotBound { .. } => PRESET_RESOURCE_NOT_BOUND,
             Self::InvalidPresetRevision { .. }
             | Self::Digest { .. }
             | Self::SnapshotValidation { .. } => PRESET_REVISION_DIGEST_MISMATCH,

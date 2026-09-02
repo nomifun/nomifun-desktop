@@ -869,12 +869,12 @@ export const useNomiMessage = (
           dispatchTurnIfOpen({ type: 'activity' });
           setThought({ subject: '', description: '' });
           break;
-        case 'turn_completed':
+        case 'turn_metrics':
           {
-            // Phase 3 observability: the engine emits one turn_completed per turn
-            // carrying real aggregate metrics. This is the genuine source of token
-            // usage for nomi turns (the finish event has never carried usage) —
-            // it updates the send-box metrics chip and persists for rehydration.
+            // Non-authoritative runtime telemetry. Lifecycle completion remains
+            // owned exclusively by the conversation-scoped `turn.completed`
+            // event; this frame only updates the metrics chip and rehydration
+            // snapshot.
             const metrics = message.data as
               | {
                   input_tokens?: number;

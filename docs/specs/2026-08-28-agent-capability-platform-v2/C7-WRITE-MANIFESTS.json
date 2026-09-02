@@ -18,11 +18,11 @@
   "confirmed_inputs": {
     "decision_contract_digest": "b45efce157933d72671a9158ff87d4a84b5b288bc8ec6bf3688226497c6e0cf5",
     "schema_manifest_digest": "e28723d7fc524cfdd351c6fc8cc17b8a48d8fd1f5be16a7aebd395ce669f98ff",
-    "contract_ledger_digest": "de0e564866d0d0ffc896eeaabc0d9ec629f25884ef5055cf35354f4fd653e8a2",
+    "contract_ledger_digest": "cf11cc4feb9b0d64d85759f90bd9fed36d1feeea6b3e48bc92bb641f5bfee54b",
     "deletion_manifest_set_digest": "0fb2e5abf2638e3c3352d4549ddb6a46b5a29ee7d62d35aedd9319a8fb5feecb",
     "official_seed_digest": "c2684efb05f8540c3f61da95e6cee9f8d6f1bab7867ae405819efc568e8449d8",
     "runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
-    "runtime_release_digest": "c4075b2f7c118fa5eeeb6fc4a0b21cf940d5af6a8acc080e1c8721a8a738a380",
+    "runtime_release_digest": "7c0c297dd0dd7c11c71cd589965e930ddec0008bebaaf510eabcd0c597358838",
     "platform_validation_manifest_digest": "78f264e177efafceb5ca55e4642fead82fa56e5e92bce355ccc79b774126f5f9"
   },
   "preserve_exact": [

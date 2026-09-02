@@ -3177,9 +3177,19 @@ impl StreamRelay {
                                     .add_turn_tokens(&self.conversation_id, turn_tokens as i64);
                             }
                             // Runtime telemetry is not a lifecycle terminal.
-                            // `ConversationService` publishes the sole
-                            // `turn.completed` projection only after durable
-                            // receipt finalization and exact turn release.
+                            // Publish it under a distinct projection type so UI
+                            // metrics keep updating without restoring the old
+                            // relay-owned `turn_completed` authority.
+                            self.broadcast_stream_payload(json!({
+                                "conversation_id": self.conv_id(),
+                                "msg_id": self.msg_id,
+                                "type": "turn_metrics",
+                                "data": metrics,
+                                "hidden": true,
+                            }));
+                            // `ConversationService` still publishes the sole
+                            // `turn.completed` lifecycle projection only after
+                            // durable receipt finalization and exact turn release.
                         }
                         _ => {
                             self.forward_to_websocket(&event);
@@ -8421,12 +8431,22 @@ mod tests {
 
         // (100+40) + (30+10) = 180, keyed by the relay's conversation id.
         assert_eq!(runtime_state.take_turn_tokens(&conversation_id), Some(180));
+        let events = std::iter::from_fn(|| ws_rx.try_recv().ok()).collect::<Vec<_>>();
         assert!(
-            std::iter::from_fn(|| ws_rx.try_recv().ok()).all(|event| {
+            events.iter().all(|event| {
                 !(event.name == "message.stream" && event.data["type"] == "turn_completed")
             }),
             "runtime telemetry must not become a second completion projection"
         );
+        let metrics = events
+            .iter()
+            .filter(|event| {
+                event.name == "message.stream" && event.data["type"] == "turn_metrics"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(metrics.len(), 2);
+        assert_eq!(metrics[0].data["data"]["input_tokens"], 100);
+        assert_eq!(metrics[1].data["data"]["output_tokens"], 10);
     }
 
     // Zero-regression: a relay WITHOUT runtime state wired (the default chat path)
@@ -8437,6 +8457,7 @@ mod tests {
 
         let repo = Arc::new(RecordingRepo::new());
         let bus = Arc::new(TestUserEventBus::new(64));
+        let mut ws_rx = bus.subscribe();
         let (tx, _) = broadcast::channel(64);
         let observer = Arc::new(ConversationRuntimeStateService::default());
 
@@ -8456,6 +8477,13 @@ mod tests {
 
         // The relay was never given this runtime state, so it cannot have written.
         assert_eq!(observer.take_turn_tokens(&conversation_id), None);
+        let metrics = std::iter::from_fn(|| ws_rx.try_recv().ok())
+            .find(|event| {
+                event.name == "message.stream" && event.data["type"] == "turn_metrics"
+            })
+            .expect("ordinary chat still receives non-authoritative turn metrics");
+        assert_eq!(metrics.data["data"]["input_tokens"], 999);
+        assert_eq!(metrics.data["data"]["output_tokens"], 1);
     }
 
     #[tokio::test]

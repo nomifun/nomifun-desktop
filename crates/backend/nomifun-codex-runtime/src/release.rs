@@ -15,7 +15,7 @@ pub const FROZEN_PROTOCOL_VERSION: &str = "1.0.0";
 pub const FROZEN_PROTOCOL_SCHEMA_DIGEST: &str =
     "f1c0422f04c9de923e18c7df40d814d3c9f5b2db5f1c5fef2745e77e6d62590f";
 pub const FROZEN_RUNTIME_RELEASE_DIGEST: &str =
-    "c4075b2f7c118fa5eeeb6fc4a0b21cf940d5af6a8acc080e1c8721a8a738a380";
+    "7c0c297dd0dd7c11c71cd589965e930ddec0008bebaaf510eabcd0c597358838";
 
 pub const RUNTIME_HELLO_METHOD: &str = "runtime/hello";
 pub const RPC_METHODS: [&str; 8] = [
