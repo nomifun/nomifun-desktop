@@ -254,67 +254,6 @@ pub struct DeleteResult {
     pub operation_id: OperationId,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ZeroOutstandingProof {
-    #[serde(default)]
-    pub counts: BTreeMap<String, u64>,
-}
-
-impl ZeroOutstandingProof {
-    pub fn verified() -> Self {
-        Self {
-            counts: [
-                "runtime_binding",
-                "runtime_ack",
-                "turn",
-                "tool_dispatch",
-                "effect_dispatch",
-                "capability_instance_handle",
-                "resource_handle",
-                "task",
-                "descendant_process",
-            ]
-            .into_iter()
-            .map(|kind| (kind.to_owned(), 0))
-            .collect(),
-        }
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), String> {
-        let expected = [
-            "runtime_binding",
-            "runtime_ack",
-            "turn",
-            "tool_dispatch",
-            "effect_dispatch",
-            "capability_instance_handle",
-            "resource_handle",
-            "task",
-            "descendant_process",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<std::collections::BTreeSet<_>>();
-        let actual = self
-            .counts
-            .keys()
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>();
-        if actual != expected {
-            return Err(format!(
-                "zero proof must contain the exact D-024 outstanding set; expected {expected:?}, found {actual:?}"
-            ));
-        }
-        if let Some((kind, count)) = self.counts.iter().find(|(_, count)| **count != 0) {
-            return Err(format!(
-                "delete requires zero outstanding {kind}, found {count}"
-            ));
-        }
-        Ok(())
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeAppendContext {

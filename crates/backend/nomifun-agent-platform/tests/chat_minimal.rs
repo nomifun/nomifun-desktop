@@ -36,7 +36,7 @@ use nomifun_agent_platform::{
     ChatMinimalHiddenInitialization,
 };
 use nomifun_agent_session::{
-    CreateSessionRequest, RuntimeAppendContext, SessionStoreError, ZeroOutstandingProof,
+    CreateSessionRequest, RuntimeAppendContext, SessionStoreError,
 };
 use nomifun_api_types::{
     CreateAgentPresetFromTemplateRequest, ResolveSavedRevisionPreviewRequest,
@@ -912,7 +912,6 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
         .session_store()
         .delete_session(
             &delete_command,
-            &ZeroOutstandingProof::verified(),
             delete_command.requested_at.saturating_add(1),
         )
         .await?;

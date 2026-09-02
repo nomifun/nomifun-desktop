@@ -47,7 +47,7 @@ use nomifun_agent_kernel::{
 };
 use nomifun_agent_session::{
     AgentSessionStore, CreateSessionRequest, EffectEventRequest, EffectTerminalState,
-    RuntimeAppendContext, SessionStoreError, ZeroOutstandingProof,
+    RuntimeAppendContext, SessionStoreError,
 };
 use nomifun_api_types::{
     AgentPresetDocumentDto, AgentPresetDraftDto, CapabilityExposureDto,
@@ -2247,7 +2247,6 @@ async fn dispose_and_delete(
     let deleted = store
         .delete_session(
             &command,
-            &ZeroOutstandingProof::verified(),
             now_ms().saturating_add(1),
         )
         .await?;
