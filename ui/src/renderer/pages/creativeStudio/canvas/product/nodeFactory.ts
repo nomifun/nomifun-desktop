@@ -5,12 +5,13 @@
  */
 
 import type { CreativeAsset } from '../../assets';
-import type {
-  CreativeCanvasNode,
-  CreativeCanvasNodeDataByKind,
-  CreativeCanvasNodeKind,
-  CreativePoint,
-  CreativeSize,
+import {
+  isCreativeCanvasUserNode,
+  type CreativeCanvasNode,
+  type CreativeCanvasNodeDataByKind,
+  type CreativeCanvasNodeKind,
+  type CreativePoint,
+  type CreativeSize,
 } from '../../domain';
 import type { PromptLibrarySelection } from '../../prompts';
 import {
@@ -188,7 +189,7 @@ export function creativeCanvasProductNodePosition(
   state: CreativeCanvasProductState,
   viewportSize: CreativeSize,
   nodeSize: CreativeSize,
-  cascadeIndex = state.document.nodes.length
+  cascadeIndex = state.document.nodes.filter(isCreativeCanvasUserNode).length
 ): CreativePoint {
   const width = positiveFinite(viewportSize.width, 1);
   const height = positiveFinite(viewportSize.height, 1);

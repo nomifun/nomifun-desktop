@@ -24,6 +24,12 @@ export type CreativeCanvasNodeKind =
   | 'director'
   | 'group';
 
+/** Node kinds that belong to the user-authored canvas surface. */
+export type CreativeCanvasUserNodeKind = Exclude<
+  CreativeCanvasNodeKind,
+  'config'
+>;
+
 export interface CreativePoint {
   x: number;
   y: number;
@@ -241,6 +247,20 @@ export interface CreativeCanvasNodeBase<K extends CreativeCanvasNodeKind> {
 export type CreativeCanvasNode = {
   [K in CreativeCanvasNodeKind]: CreativeCanvasNodeBase<K>;
 }[CreativeCanvasNodeKind];
+
+/**
+ * Generation config nodes are durable task records, not user-authored cards.
+ * Keep this distinction explicit so product surfaces cannot offer them as
+ * creatable or selectable content while task recovery remains canonical.
+ */
+export type CreativeCanvasUserNode = Exclude<
+  CreativeCanvasNode,
+  { type: 'config' }
+>;
+
+export const isCreativeCanvasUserNode = (
+  node: CreativeCanvasNode
+): node is CreativeCanvasUserNode => node.type !== 'config';
 
 export interface CreativeCanvasConnection {
   id: string;

@@ -130,7 +130,6 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
       'audio',
       'panorama',
       'director',
-      'config',
     ]);
     for (const label of [
       'creativeStudio.canvas.nodeKinds.text',
@@ -139,7 +138,6 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
       'creativeStudio.canvas.nodeKinds.audio',
       'creativeStudio.canvas.nodeKinds.panorama',
       'creativeStudio.canvas.nodeKinds.director',
-      'creativeStudio.canvas.nodeKinds.config',
     ]) {
       expect(html.includes(`aria-label="${label}"`)).toBe(true);
     }
@@ -212,16 +210,17 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
 });
 
 describe('CreativeCanvasChrome controlled menus', () => {
-  test('offers exactly the eight canonical node kinds', () => {
+  test('offers exactly the seven user-facing node kinds', () => {
     const html = renderToStaticMarkup(
       withCanvasTestI18n(<CreativeCanvasNodeMenu onSelect={noop} />)
     );
 
-    expect(CREATIVE_CANVAS_CHROME_NODE_KINDS).toHaveLength(8);
-    expect((html.match(/data-node-kind=/g) ?? []).length).toBe(8);
+    expect(CREATIVE_CANVAS_CHROME_NODE_KINDS).toHaveLength(7);
+    expect((html.match(/data-node-kind=/g) ?? []).length).toBe(7);
     for (const kind of CREATIVE_CANVAS_CHROME_NODE_KINDS) {
       expect(html.includes(`data-node-kind="${kind}"`)).toBe(true);
     }
+    expect(html.includes('data-node-kind="config"')).toBe(false);
   });
 
   test('offers only dots, lines, and blank background modes', () => {

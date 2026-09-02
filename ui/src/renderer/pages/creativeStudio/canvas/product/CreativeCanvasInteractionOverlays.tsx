@@ -8,7 +8,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { CreativeCanvasNodeMenu } from '../chrome';
-import type { CreativeCanvasNodeKind, CreativeSize } from '../../domain';
+import type { CreativeCanvasUserNodeKind, CreativeSize } from '../../domain';
 import type {
   CanvasContextAction,
   CanvasContextTarget,
@@ -34,7 +34,7 @@ export interface CreativeCanvasInteractionOverlaysProps {
   onContextAction(action: CanvasContextAction): void;
   onOpenCreateNodeMenu(): void;
   onPasteFromSystemClipboard(): void;
-  onSelectNode(kind: CreativeCanvasNodeKind): void;
+  onSelectNode(kind: CreativeCanvasUserNodeKind): void;
   onDismiss(): void;
 }
 

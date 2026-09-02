@@ -42,6 +42,31 @@ const textNode: Extract<CreativeCanvasNode, { type: 'text' }> = {
 
 const nodes: CreativeCanvasNode[] = [groupNode, textNode];
 
+const configNode: Extract<CreativeCanvasNode, { type: 'config' }> = {
+  id: '0190f5fe-7c00-7a00-8000-000000000104',
+  type: 'config',
+  position: { x: 440, y: 96 },
+  size: { width: 440, height: 240 },
+  groupId: null,
+  zIndex: 3,
+  locked: true,
+  data: {
+    task: 'image_generation',
+    capability: 't2i',
+    providerId: 'provider',
+    model: 'model',
+    prompt: '不应展示的任务记录',
+    negativePrompt: '',
+    operation: null,
+    parameters: {},
+    inputAssetIds: [],
+    taskId: 'task-id',
+    resultAssetIds: [],
+    status: 'running',
+    errorMessage: null,
+  },
+};
+
 const snapshot = { nodes: [], connections: [] };
 
 const state = (overrides: Partial<CanvasState> = {}): CanvasState => ({
@@ -80,6 +105,46 @@ describe('Creative Canvas product presentation panels', () => {
     expect(html.includes('data-node-grouped="true"')).toBe(true);
     expect(html.includes('data-selected="true"')).toBe(true);
     expect(html.includes('节点已锁定')).toBe(true);
+  });
+
+  test('omits internal generation task records from outline and properties', () => {
+    const document = {
+      nodes: [...nodes, configNode],
+      connections: [
+        ...state().document.connections,
+        {
+          id: '0190f5fe-7c00-7a00-8000-000000000105',
+          sourceNodeId: textNode.id,
+          targetNodeId: configNode.id,
+          sourceHandle: 'source',
+          targetHandle: 'target',
+        },
+      ],
+    };
+    const selectedConfig = state({
+      document,
+      selection: {
+        nodeIds: [configNode.id],
+        edgeIds: [],
+        marquee: null,
+        box: null,
+      },
+    });
+    const outline = renderToStaticMarkup(
+      <CreativeCanvasOutlinePanel
+        state={selectedConfig}
+        onSelectNode={noop}
+      />
+    );
+    const properties = renderToStaticMarkup(
+      <CreativeCanvasPropertiesPanel state={selectedConfig} />
+    );
+
+    expect(outline.includes('2 个节点 · 1 条连接')).toBe(true);
+    expect(outline.includes(configNode.id)).toBe(false);
+    expect(outline.includes(configNode.data.prompt)).toBe(false);
+    expect(properties.includes('未选择节点')).toBe(true);
+    expect(properties.includes(configNode.id)).toBe(false);
   });
 
   test('shows exact selected-node properties and canonical editable controls', () => {
@@ -153,8 +218,8 @@ describe('Creative Canvas product presentation panels', () => {
   });
 
   test('projects display names only from canonical node data', () => {
-    expect(creativeCanvasNodeDisplayName(nodes[0])).toBe('第一幕素材');
-    expect(creativeCanvasNodeDisplayName(nodes[1])).toBe('雨夜里的第一幕');
+    expect(creativeCanvasNodeDisplayName(groupNode)).toBe('第一幕素材');
+    expect(creativeCanvasNodeDisplayName(textNode)).toBe('雨夜里的第一幕');
     expect(
       creativeCanvasNodeDisplayName({
         ...textNode,

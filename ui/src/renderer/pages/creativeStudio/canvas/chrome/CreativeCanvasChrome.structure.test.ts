@@ -15,7 +15,7 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
   test('uses canonical product types, IconPark, Arco, and injected slots', () => {
     expect(component.includes("from '@icon-park/react'")).toBe(true);
     expect(component.includes("from '@arco-design/web-react'")).toBe(true);
-    expect(types.includes("CreativeCanvasNode['type']")).toBe(true);
+    expect(types.includes('CreativeCanvasUserNodeKind')).toBe(true);
     expect(types.includes('CreativeCanvasBackground')).toBe(true);
     expect(types.includes('CanvasInteractionTool')).toBe(true);
     expect(component.includes('props.slots?.canvas')).toBe(true);

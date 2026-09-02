@@ -133,64 +133,6 @@
   flex: 1;
 }
 
-.configContent {
-  display: flex;
-  height: 100%;
-  min-height: 0;
-  box-sizing: border-box;
-  flex-direction: column;
-  gap: 9px;
-  padding: 11px;
-}
-
-.modelRow {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 10px;
-}
-
-.modelRow span,
-.modelRow strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.modelRow span {
-  color: var(--color-text-3);
-}
-
-.modelRow strong {
-  color: var(--color-text-2);
-  font-weight: 650;
-}
-
-.prompt,
-.negativePrompt {
-  display: -webkit-box;
-  margin: 0;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  color: var(--color-text-2);
-  font-size: 11px;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
-
-.prompt {
-  -webkit-line-clamp: 4;
-}
-
-.negativePrompt {
-  padding-top: 8px;
-  border-top: 1px solid var(--color-border-2);
-  -webkit-line-clamp: 2;
-  color: var(--color-text-3);
-}
-
 .directorContent {
   display: flex;
   height: 100%;

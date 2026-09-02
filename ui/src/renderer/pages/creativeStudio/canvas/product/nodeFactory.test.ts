@@ -185,6 +185,21 @@ describe('createCreativeCanvasProductNode', () => {
       y: 80 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
     });
     expect(cascaded.zIndex).toBe(8);
+
+    const taskRecord = createCreativeCanvasProductNode(
+      'config',
+      populated,
+      VIEWPORT_SIZE,
+      { cascadeIndex: 0 }
+    );
+    const withTaskRecord = createInitialCanvasState({
+      document: { nodes: [high, low, taskRecord], connections: [] },
+      viewport: empty.viewport,
+    });
+    expect(
+      createCreativeCanvasProductNode('text', withTaskRecord, VIEWPORT_SIZE)
+        .position
+    ).toEqual(cascaded.position);
   });
 
   test('centers only the pristine server viewport before the first insertion', () => {

@@ -137,10 +137,10 @@ const CanvasAudioTaskRuntimeBridge = forwardRef<
           : task.status === 'failed'
             ? (task.error?.message ??
               t('creativeStudio.canvas.runtime.audio.failed', {
-                defaultValue: '音频创作失败，配置节点已保留。',
+                defaultValue: '音频创作失败。',
               }))
             : t('creativeStudio.canvas.runtime.audio.cancelled', {
-                defaultValue: '音频创作已取消，配置节点已保留。',
+                defaultValue: '音频创作已取消。',
               })
       );
     },

@@ -36,7 +36,10 @@ import {
   type PreparedCreativeWorkbenchRun,
 } from '../../workbenches/runtime';
 import { validateCanvasConnection, type CanvasState } from '../core';
-import { nextCanvasImageTaskPosition } from './imageTaskCanvasLayout';
+import {
+  canvasTaskResultPosition,
+  nextCanvasImageTaskPosition,
+} from './imageTaskCanvasLayout';
 import {
   createCreativeCanvasProductNode,
   CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
@@ -376,7 +379,7 @@ export function prepareCanvasImageCompose(input: {
     throw new Error(
       creativeStudioProductText(
         'creativeStudio.canvas.errors.image.connectConfigFailed',
-        '无法连接图片创作配置节点：{{code}}。',
+        '无法保存图片创作任务关联：{{code}}。',
         { code: validation.code }
       )
     );
@@ -420,7 +423,7 @@ export function canvasImageComposeConfigForReference(
     throw new Error(
       creativeStudioProductText(
         'creativeStudio.canvas.errors.image.missingConfig',
-        '图片创作任务缺少 canonical 配置节点。'
+        '图片创作任务缺少必要任务记录。'
       )
     );
   }
@@ -434,7 +437,7 @@ export function canvasImageComposeConfigForReference(
     throw new Error(
       creativeStudioProductText(
         'creativeStudio.canvas.errors.image.identityMismatch',
-        '图片创作任务与配置节点身份不一致。'
+        '图片创作任务与其任务记录身份不一致。'
       )
     );
   }
@@ -510,7 +513,7 @@ export function canvasImageComposeResultPosition(
   nodes: readonly CreativeCanvasNode[],
   config: ConfigNode
 ): { x: number; y: number } {
-  return nextCanvasImageTaskPosition(
+  return canvasTaskResultPosition(
     nodes,
     config,
     CREATIVE_CANVAS_PRODUCT_NODE_SIZES.image

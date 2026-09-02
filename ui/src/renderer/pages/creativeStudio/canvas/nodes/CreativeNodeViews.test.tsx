@@ -91,22 +91,23 @@ const renderCanvas = (content: React.ReactNode) =>
   renderToStaticMarkup(withCanvasTestI18n(content));
 
 describe('Creative Studio canonical node views', () => {
-  test('renders all eight canonical kinds through the discriminated-union dispatcher', () => {
+  test('renders the seven user-facing kinds and keeps config task records headless', () => {
     const html = renderCanvas(
       <>{nodes.map((node) => <CreativeNodeView key={node.id} node={node} selected={node.id === 'text-1'} />)}</>
     );
 
-    expect(CREATIVE_NODE_VIEW_KINDS.length).toBe(8);
+    expect(CREATIVE_NODE_VIEW_KINDS.length).toBe(7);
     for (const kind of CREATIVE_NODE_VIEW_KINDS) {
       expect(html.includes(`data-node-type="${kind}"`)).toBe(true);
     }
+    expect(html.includes('data-node-type="config"')).toBe(false);
     expect(html.includes('left:48px')).toBe(true);
     expect(html.includes('top:-24px')).toBe(true);
     expect(html.includes('data-node-selected="true"')).toBe(true);
     expect(html.includes('data-node-locked="true"')).toBe(true);
   });
 
-  test('shows honest empty media states and canonical failed-generation state', () => {
+  test('shows honest empty media states without exposing task-record status', () => {
     const html = renderCanvas(<>{nodes.map((node) => <CreativeNodeView key={node.id} node={node} />)}</>);
 
     expect(html.includes('data-node-empty-media="true"')).toBe(true);
@@ -117,9 +118,8 @@ describe('Creative Studio canonical node views', () => {
       html.includes('creativeStudio.canvas.nodes.audio.empty')
     ).toBe(true);
     expect(html.includes('0:00 – ∞ · 80%')).toBe(false);
-    expect(html.includes('data-node-status="failed"')).toBe(true);
-    expect(html.includes('role="alert"')).toBe(true);
-    expect(html.includes('服务暂时不可用')).toBe(true);
+    expect(html.includes('data-node-status="failed"')).toBe(false);
+    expect(html.includes('服务暂时不可用')).toBe(false);
     expect(html.includes('<img')).toBe(false);
     expect(html.includes('<video')).toBe(false);
   });

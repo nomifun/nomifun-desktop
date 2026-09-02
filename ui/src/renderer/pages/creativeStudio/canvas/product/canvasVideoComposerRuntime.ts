@@ -233,7 +233,7 @@ export async function settleCanvasVideoComposeTask(input: {
             throw new Error(
               creativeStudioProductText(
                 'creativeStudio.canvas.errors.video.configRemoved',
-                '视频创作配置节点在结果写入前被移除。'
+                '视频创作任务记录在结果写入前丢失。'
               )
             );
           }

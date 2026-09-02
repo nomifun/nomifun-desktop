@@ -10,7 +10,6 @@ import {
   MovieBoard,
   PanoramaHorizontal,
   Pic,
-  SettingConfig,
   Text,
   VideoTwo,
   Voice,
@@ -18,7 +17,7 @@ import {
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
-import type { CreativeCanvasNodeKind, CreativeGenerationStatus } from '../../domain/schema';
+import type { CreativeCanvasNodeKind } from '../../domain/schema';
 import CreativeNodeFrame from './CreativeNodeFrame';
 import type {
   CreativeNodeAssetPresentation,
@@ -381,60 +380,6 @@ export const CreativePanoramaNode: React.FC<CreativePanoramaNodeProps> = ({
   );
 };
 
-export interface CreativeConfigNodeProps extends CreativeNodePresentationProps<'config'> {
-  title?: string;
-  providerFallback?: string;
-  modelFallback?: string;
-  promptFallback?: string;
-}
-
-export const CreativeConfigNode: React.FC<CreativeConfigNodeProps> = ({
-  title,
-  providerFallback,
-  modelFallback,
-  promptFallback,
-  ...props
-}) => {
-  const { t } = useTranslation();
-  const { node } = props;
-  const resolvedTitle = title ?? t('creativeStudio.canvas.nodeKinds.config');
-  const resolvedProviderFallback =
-    providerFallback ??
-    t('creativeStudio.canvas.nodes.config.providerFallback');
-  const resolvedModelFallback =
-    modelFallback ?? t('creativeStudio.canvas.nodes.config.modelFallback');
-  const resolvedPromptFallback =
-    promptFallback ?? t('creativeStudio.canvas.nodes.config.promptFallback');
-  const canonicalRuntime = {
-    status: node.data.status,
-    errorMessage: node.data.errorMessage,
-  } satisfies { status: CreativeGenerationStatus; errorMessage: string | null };
-  return (
-    <CreativeNodeFrame
-      node={node}
-      icon={<SettingConfig theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
-      title={resolvedTitle}
-      subtitle={`${node.data.task} · ${node.data.capability}`}
-      footer={t('creativeStudio.canvas.nodes.config.summary', {
-        parameters: Object.keys(node.data.parameters).length,
-        inputs: node.data.inputAssetIds.length,
-      })}
-      {...sharedFrameProps({ ...props, runtime: props.runtime ?? canonicalRuntime })}
-    >
-      <div className={styles.configContent}>
-        <div className={styles.modelRow}>
-          <span>{node.data.providerId ?? resolvedProviderFallback}</span>
-          <strong>{node.data.model ?? resolvedModelFallback}</strong>
-        </div>
-        <p className={styles.prompt}>
-          {node.data.prompt || resolvedPromptFallback}
-        </p>
-        {node.data.negativePrompt ? <p className={styles.negativePrompt}>{node.data.negativePrompt}</p> : null}
-      </div>
-    </CreativeNodeFrame>
-  );
-};
-
 export interface CreativeDirectorNodeProps extends CreativeNodePresentationProps<'director'> {
   title?: string;
   emptyLabel?: string;
@@ -531,7 +476,7 @@ export type CreativeAnyNodeViewProps = CreativeNodePresentationProps<CreativeCan
   onTextEditingComplete?: () => void;
 };
 
-/** Canonical discriminated-union dispatcher for the eight persisted node kinds. */
+/** User-facing views for persisted canvas nodes; task-record configs stay headless. */
 export const CreativeNodeView: React.FC<CreativeAnyNodeViewProps> = (props) => {
   const { node } = props;
   switch (node.type) {
@@ -554,7 +499,7 @@ export const CreativeNodeView: React.FC<CreativeAnyNodeViewProps> = (props) => {
     case 'panorama':
       return <CreativePanoramaNode {...props} node={node} asset={props.asset} preview={props.panoramaPreview} />;
     case 'config':
-      return <CreativeConfigNode {...props} node={node} />;
+      return null;
     case 'director':
       return <CreativeDirectorNode {...props} node={node} preview={props.directorPreview} />;
     case 'group':
@@ -562,15 +507,12 @@ export const CreativeNodeView: React.FC<CreativeAnyNodeViewProps> = (props) => {
   }
 };
 
-// Ensure the canonical union cannot gain a new kind without making this module
-// visibly incomplete to consumers and tests.
 export const CREATIVE_NODE_VIEW_KINDS = [
   'image',
   'panorama',
   'text',
-  'config',
   'video',
   'audio',
   'director',
   'group',
-] as const satisfies readonly CreativeCanvasNodeKind[];
+] as const satisfies readonly Exclude<CreativeCanvasNodeKind, 'config'>[];

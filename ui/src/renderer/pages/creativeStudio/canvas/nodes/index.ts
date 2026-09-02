@@ -3,7 +3,6 @@ export type { CreativeNodeFrameProps, CreativeNodeStatusLabels } from './Creativ
 export {
   CREATIVE_NODE_VIEW_KINDS,
   CreativeAudioNode,
-  CreativeConfigNode,
   CreativeDirectorNode,
   CreativeGroupNode,
   CreativeImageNode,
@@ -15,7 +14,6 @@ export {
 export type {
   CreativeAnyNodeViewProps,
   CreativeAudioNodeProps,
-  CreativeConfigNodeProps,
   CreativeDirectorNodeProps,
   CreativeGroupNodeProps,
   CreativeImageNodeProps,
