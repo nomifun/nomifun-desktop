@@ -197,12 +197,20 @@
     "required_fields": [
       "base_sha",
       "batch_result_sha",
-      "writer_commits",
+      "writer_results",
+      "batch_checks",
+      "manual_follow_up",
+      "secret_scan"
+    ],
+    "writer_result_required_fields": [
+      "writer_id",
+      "task_ids",
+      "commit_shas",
       "changed_paths",
       "checks",
       "not_run_and_reason",
       "central_paths_touched",
-      "main_host_follow_up"
+      "blockers"
     ]
   }
 }
