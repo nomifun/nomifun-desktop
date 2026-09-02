@@ -2,7 +2,10 @@ import { describe, expect, test } from 'bun:test';
 import type { AgentPresetDraft } from '@/common/types/agentPlatform';
 import {
   DEFAULT_WORKSPACE_RESOURCE_ID,
+  KNOWLEDGE_NAME_PARAMETER,
+  KNOWLEDGE_ROOT_PARAMETER,
   WORKSPACE_ROOT_PARAMETER,
+  bindKnowledgeBaseResource,
   withHostResolvedWorkspaceBinding,
 } from './model';
 
@@ -36,6 +39,34 @@ const draft = (): AgentPresetDraft => ({
 });
 
 describe('Agent Settings host resource resolution', () => {
+  test('binds an existing knowledge base without treating its id as a path', () => {
+    const binding = bindKnowledgeBaseResource(
+      {
+        binding_id: 'knowledge-primary',
+        resource_kind: 'knowledge_base',
+        resource_id: '',
+        owner_id: 'owner',
+        operations: ['read', 'search'],
+        typed_parameters: {},
+      },
+      {
+        knowledge_base_id: '0190f5fe-7c00-7a00-8000-000000000002',
+        name: 'Release runbooks',
+        root_path: 'C:\\knowledge\\release',
+      }
+    );
+
+    expect(binding.resource_id).toBe(
+      '0190f5fe-7c00-7a00-8000-000000000002'
+    );
+    expect(binding.typed_parameters?.[KNOWLEDGE_NAME_PARAMETER]).toBe(
+      'Release runbooks'
+    );
+    expect(binding.typed_parameters?.[KNOWLEDGE_ROOT_PARAMETER]).toBe(
+      'C:\\knowledge\\release'
+    );
+  });
+
   test('adds the host workspace path without treating resource_id as a path', () => {
     const resolved = withHostResolvedWorkspaceBinding(
       draft(),

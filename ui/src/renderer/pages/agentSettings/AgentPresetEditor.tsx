@@ -9,6 +9,7 @@ import type {
   OfficialPresetTemplate,
   ResolveAgentPresetPreviewResponse,
 } from '@/common/types/agentPlatform';
+import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
 import {
   AGENT_CHAT_MODEL_TASK,
   CHAT_ROUTE_RECORD_SCHEMA,
@@ -26,6 +27,7 @@ import {
   Input,
   InputNumber,
   Radio,
+  Select,
   Tag,
   Tooltip,
 } from '@arco-design/web-react';
@@ -43,7 +45,10 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   DEFAULT_WORKSPACE_RESOURCE_ID,
+  KNOWLEDGE_NAME_PARAMETER,
+  KNOWLEDGE_ROOT_PARAMETER,
   WORKSPACE_ROOT_PARAMETER,
+  bindKnowledgeBaseResource,
   defaultResourceBinding,
   removeResourceBinding,
   resourceKindsForDraft,
@@ -61,6 +66,8 @@ type AgentPresetEditorProps = {
   testResult: RunAgentPresetTestResult | null;
   tokenState: InstallationTokenStateResponse | null;
   hostWorkDir: string | null;
+  knowledgeBases: IKnowledgeBase[];
+  knowledgeBasesLoading: boolean;
   sourceTemplate?: OfficialPresetTemplate;
   dirty: boolean;
   busyAction: 'preview' | 'save' | 'test' | 'fork' | 'create' | null;
@@ -146,6 +153,8 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   testResult,
   tokenState,
   hostWorkDir,
+  knowledgeBases,
+  knowledgeBasesLoading,
   sourceTemplate,
   dirty,
   busyAction,
@@ -567,20 +576,52 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                     )}
                   </div>
                   <div className={styles.resourceFields}>
-                    <label className={styles.field}>
-                      <span>{t('agentSettings.resources.resourceId')}</span>
-                      <Input
-                        value={binding.resource_id}
-                        onChange={(resourceId) =>
-                          onDraftChange(
-                            updateResourceBinding(draft, {
-                              ...binding,
-                              resource_id: resourceId,
-                            })
-                          )
-                        }
-                      />
-                    </label>
+                    {resourceKind === 'knowledge_base' ? (
+                      <label className={styles.field}>
+                        <span>{t('agentSettings.resources.knowledgeBase')}</span>
+                        <Select
+                          value={binding.resource_id || undefined}
+                          loading={knowledgeBasesLoading}
+                          showSearch
+                          placeholder={t(
+                            'agentSettings.resources.knowledgeBasePlaceholder'
+                          )}
+                          options={knowledgeBases.map((knowledgeBase) => ({
+                            label: knowledgeBase.name,
+                            value: knowledgeBase.knowledge_base_id,
+                            disabled: !knowledgeBase.root_exists,
+                          }))}
+                          onChange={(knowledgeBaseId) => {
+                            const knowledgeBase = knowledgeBases.find(
+                              (candidate) =>
+                                candidate.knowledge_base_id === knowledgeBaseId
+                            );
+                            if (!knowledgeBase) return;
+                            onDraftChange(
+                              updateResourceBinding(
+                                draft,
+                                bindKnowledgeBaseResource(binding, knowledgeBase)
+                              )
+                            );
+                          }}
+                        />
+                      </label>
+                    ) : (
+                      <label className={styles.field}>
+                        <span>{t('agentSettings.resources.resourceId')}</span>
+                        <Input
+                          value={binding.resource_id}
+                          onChange={(resourceId) =>
+                            onDraftChange(
+                              updateResourceBinding(draft, {
+                                ...binding,
+                                resource_id: resourceId,
+                              })
+                            )
+                          }
+                        />
+                      </label>
+                    )}
                     <label className={styles.field}>
                       <span>{t('agentSettings.resources.operations')}</span>
                       <Input
@@ -627,6 +668,35 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                           )}
                         />
                       </label>
+                    )}
+                    {resourceKind === 'knowledge_base' && (
+                      <>
+                        <label className={styles.field}>
+                          <span>{t('agentSettings.resources.knowledgeName')}</span>
+                          <Input
+                            value={
+                              binding.typed_parameters?.[
+                                KNOWLEDGE_NAME_PARAMETER
+                              ] ?? ''
+                            }
+                            disabled
+                          />
+                        </label>
+                        <label className={styles.field}>
+                          <span>{t('agentSettings.resources.knowledgeRoot')}</span>
+                          <Input
+                            value={
+                              binding.typed_parameters?.[
+                                KNOWLEDGE_ROOT_PARAMETER
+                              ] ?? ''
+                            }
+                            disabled
+                            placeholder={t(
+                              'agentSettings.resources.knowledgeBasePlaceholder'
+                            )}
+                          />
+                        </label>
+                      </>
                     )}
                   </div>
                 </div>

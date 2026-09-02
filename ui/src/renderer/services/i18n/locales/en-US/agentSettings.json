@@ -145,7 +145,11 @@
     "operations": "Operations",
     "connectionRef": "Connection reference",
     "hostPath": "Host workspace path",
-    "hostPathUnavailable": "Host workspace path unavailable"
+    "hostPathUnavailable": "Host workspace path unavailable",
+    "knowledgeBase": "Knowledge base",
+    "knowledgeBasePlaceholder": "Select a knowledge base with an available root",
+    "knowledgeName": "Knowledge base name",
+    "knowledgeRoot": "Knowledge base host path"
   },
   "advanced": {
     "systemTokens": "System context tokens",

@@ -3,6 +3,7 @@ import { Alert, Button, Spin } from '@arco-design/web-react';
 import { Info, Refresh } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { useKnowledgeBases } from '@/renderer/pages/knowledge/useKnowledge';
 import AgentPresetEditor from './AgentPresetEditor';
 import AgentPresetLibrary from './AgentPresetLibrary';
 import OfficialTemplateOverview from './OfficialTemplateOverview';
@@ -12,6 +13,10 @@ import styles from './AgentSettingsPage.module.css';
 const AgentSettingsPage: React.FC = () => {
   const { t } = useTranslation();
   const controller = useAgentSettingsController();
+  const {
+    bases: knowledgeBases,
+    loading: knowledgeBasesLoading,
+  } = useKnowledgeBases();
   const sourceTemplate =
     controller.draft?.source_template_key == null
       ? undefined
@@ -106,6 +111,8 @@ const AgentSettingsPage: React.FC = () => {
               testResult={controller.testResult}
               tokenState={controller.tokenState}
               hostWorkDir={controller.hostWorkDir}
+              knowledgeBases={knowledgeBases}
+              knowledgeBasesLoading={knowledgeBasesLoading}
               sourceTemplate={sourceTemplate}
               dirty={controller.dirty}
               busyAction={controller.busyAction}

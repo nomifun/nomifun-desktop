@@ -1357,3 +1357,40 @@ C8 production owner coverage 仍按设计 FAIL。`Wave1ApplicationHost` 的统�
 fail-closed fallback 仍服务于 `web.search`、
 `knowledge.write/autogen/embedding/rerank` 和 `skill.invoke`；在这些 action
 获得真实 owner 前不得删除 fallback、放宽 Gate，或宣称 Wave 1/C8/HP-1 完成。
+
+### Knowledge binding UI 与 write 安全审计（2026-09-02）
+
+Agent Preset 编辑器已直接接入现有 KnowledgeBase catalog。用户选择真实知识库后，
+Draft 自动写入：
+
+- `resource_id = knowledge_base_id`；
+- `typed_parameters.knowledge_root = root_path`；
+- `typed_parameters.knowledge_name = name`。
+
+根目录不存在的知识库不会作为可选项启用，用户无需手填 UUIDv7 或绝对路径。定向
+验证通过：
+
+- Agent Settings tests：`9 passed`；
+- `bun run check:i18n`：`7082 keys / 33 modules`；
+- `bun run build:ui`：`7720 modules transformed`，仅保留既有 chunk warning；
+- `bun run dev`：2026-09-02 15:02 本地启动完成，`NomiFun` desktop 窗口响应正常，
+  无启动 panic 或渲染崩溃。
+
+Playwright harness 未完成页面截图：当前 Node REPL 的全局 `playwright` 包发生
+ESM export 装载错误，仓库未安装本地 Playwright。已停止重试；Agent Preset 子页的
+Knowledge 下拉选择保留为人工交互验收项。
+
+本轮曾实现一个未提交的 `knowledge.write` 原型，但只读安全审计发现：
+
+- `safe_md_path` 校验与最终 open/rename 分离，无法阻止外部进程在窗口内替换
+  symlink/junction/reparse parent；
+- 现有“读取比较后 rename”不是面对外部编辑器的原子 CAS，可能覆盖竞争修改；
+- 仅观察最终 content hash 不能证明历史 Effect 归因，也不能替代
+  `uncertain -> reconciled` durable fact；
+- timeout-and-drop 的 blocking 目录创建不适用于 mutation。
+
+因此该原型未进入分支，生产 `knowledge.write` 继续 fail-closed。要恢复实现，
+必须先交付跨
+Windows/macOS/Linux 的 root-anchored no-follow filesystem primitive、明确
+create-vs-append DTO，以及 typed publication outcome 和 durable
+`started -> succeeded|failed|uncertain -> reconciled` 记录。

@@ -145,7 +145,11 @@
     "operations": "操作",
     "connectionRef": "连接引用",
     "hostPath": "主机工作区路径",
-    "hostPathUnavailable": "主机工作区路径不可用"
+    "hostPathUnavailable": "主机工作区路径不可用",
+    "knowledgeBase": "知识库",
+    "knowledgeBasePlaceholder": "选择一个根目录可用的知识库",
+    "knowledgeName": "知识库名称",
+    "knowledgeRoot": "知识库主机路径"
   },
   "advanced": {
     "systemTokens": "系统 Context tokens",
