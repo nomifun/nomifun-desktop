@@ -18,7 +18,7 @@
 
 - Thin Kernel、统一 Plugin/Capability 主链、单一 AgentSession、Codex-derived Runtime 和 clean v4 等总目标继续有效；
 - 本文明确列出的 Gate、Evidence、生命周期、Compiler、Snapshot、Effect、文件边界、产品 UI 与平台矩阵改用本文的新策略；
-- 旧 `DECISIONS`、01～04、旧 `README/START-PROMPT/IMPLEMENTATION-STATUS` 和过期 handoff 已从当前工作树删除，只能通过 Git 历史审计；当前人工入口仅为本文件、`GLOBAL-CLOSURE-TODO.zh.md`、当前 Machine Prompt 和精简索引；
+- 01～04 与 `DECISIONS` 保留为核心设计依据，并按本文删除或改写其中已经判定错误的条款；不得因局部设计被止损而整体删除这些文档。旧 `IMPLEMENTATION-STATUS`、旧 `START-PROMPT` 和过期 handoff 只保留在 Git 历史；当前状态只由 `GLOBAL-CLOSURE-TODO.zh.md` 记录；
 - `GLOBAL-CLOSURE-TODO` 的 84 个工作包不再是一期必须逐个关闭的阻断清单；只把其中仍属于本文最小交付的项目迁入新的收口清单；
 - 已生成的 Manifest、fixture、digest 或结构测试不能因为自身存在而阻止删除；证明系统不具有高于产品系统的优先级；
 - 实施只采用普通 commit/revert/merge，不使用 reset、force-push 或历史重写；回滚前先检查下游消费，保留真实用户功能和无争议的基础正确性。
@@ -493,8 +493,8 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 
 ### S0：发布与暂停
 
-- 只提交并推送本文；
-- README 和 06 保持本地未提交；
+- 提交并推送本文、经本文修订的 01～04/`DECISIONS`、README 和 GLOBAL TODO；
+- 二期 06 仍保持本地未提交，不得随一期核心设计发布；
 - 主机和机器 2 在新 commit 后重新读取本文；
 - 旧 GLOBAL TODO/Machine Prompt 冲突部分停止执行。
 
