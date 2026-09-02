@@ -14,10 +14,11 @@ ID 从现在起只作为历史审计索引，不再是一期必须逐项关闭�
 “81 个 action-bearing Capability 是否全部有 owner”、旧 residual 数量或五平台笛卡尔积
 衡量一期完成度。
 
-一期只追踪 05 要求的 S0-S5：先停止错误扩张和审计普通 revert，再关闭三个 P0、
+一期执行台账追踪 05 要求的 S0-S5：先停止错误扩张和审计普通 revert，再关闭三个 P0、
 单 Compiler、小 Snapshot、三类 Effect、Sidecar upstream spike，随后完成
 Browser/Computer Role seam、真实核心 owner、四条 UI 用户流程、Windows、macOS arm64、
-Linux Desktop 和一次性 C9 clean cut。
+Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成后的同制品发布提升
+动作，不新增一组开发任务。
 
 ## 状态与执行规则
 
@@ -31,7 +32,9 @@ Linux Desktop 和一次性 C9 clean cut。
 
 执行约束：
 
-1. 05 与本文冲突时以 05 为准；01-04、旧 GLOBAL TODO、旧 Machine Prompt 只作历史背景。
+1. 05 与本文冲突时以 05 为准；经修订的 01-04 与 `DECISIONS` 保留设计依据，但不记录实时
+   状态。旧 `IMPLEMENTATION-STATUS`、旧 GLOBAL TODO、旧 Machine Prompt 和 handoff 只作
+   Git 历史审计。
 2. 不使用 reset、force-push 或历史重写；revert 必须使用普通提交，并先检查真实消费者。
 3. 每个任务只实现一个实际闭环；需要第二份事实、新 coordinator、新全局 digest 或新状态机
    时先停止并重新核对 05。
@@ -214,7 +217,7 @@ writer 串行处理，SSH owner 与 Sidecar upstream spike 使用另外两个互
   owner、MCP、SSH、automation、Remote 和 Codex-derived Runtime 可真实执行；具体实现旁路为 0。
 - **S4 完成**：四条用户流程可从 `bun run dev` 正常验收，普通用户不接触内部标识和 JSON。
 - **S5 完成**：Windows、macOS arm64、Linux Desktop 的同一 Nomi-free RC 通过，C9 已物理删除
-  Nomi，Stable 原样提升同一制品。
+  Nomi，具备执行 05 `S6 Stable` 原样提升的条件。
 
 macOS x64、Linux Headless、Wave 3/4 非核心业务全覆盖、Knowledge 高级写入/embedding/rerank、
 所有 Channel/Robot/Customer 场景、性能 benchmark 和长观察窗口不阻塞首个 Stable。未来实际
