@@ -114,6 +114,7 @@ import {
 } from '../interactions';
 import {
   CreativeCanvasImageToolbar,
+  CreativeImagePreviewDialog,
   CreativeImageCropDialog,
   CreativeImageMaskEditDialog,
   CreativeImageSplitDialog,
@@ -970,6 +971,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [pendingPanoramaChoice, setPendingPanoramaChoice] =
     useState<PendingPanoramaChoice | null>(null);
   const [assetImportBusy, setAssetImportBusy] = useState(false);
+  const [previewImageNode, setPreviewImageNode] =
+    useState<Extract<CreativeCanvasNode, { type: 'image' }> | null>(null);
   const [pendingImageCrop, setPendingImageCrop] =
     useState<PendingImageCrop | null>(null);
   const [imageCropBusy, setImageCropBusy] = useState(false);
@@ -1209,6 +1212,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setCreateNodeMenu(null);
     setPendingPanoramaChoice(null);
     setAssetImportBusy(false);
+    setPreviewImageNode(null);
     setPendingImageCrop(null);
     setImageCropBusy(false);
     setImageCropProgress(null);
@@ -5297,6 +5301,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                         )
                       }
                       onUpload={() => openImageNodeUpload(node.id)}
+                      onPreview={() => setPreviewImageNode(node)}
                       onCrop={() => void handleOpenImageCrop(node)}
                       onDownload={() => void handleDownloadImage(node)}
                       onMaskEdit={() => void handleOpenImageMaskEdit(node)}
@@ -5725,6 +5730,14 @@ const CreativeCanvasProductRoute: React.FC = () => {
         }}
       />
       {templateAssetPicker.dialog}
+      {previewImageNode ? (
+        <CreativeImagePreviewDialog
+          key={`${projectId}:${previewImageNode.id}:${previewImageNode.data.assetId}`}
+          node={previewImageNode}
+          resolveAsset={resolveCanvasImageAsset}
+          onClose={() => setPreviewImageNode(null)}
+        />
+      ) : null}
       <CreativeImageCropDialog
         visible={pendingImageCrop !== null}
         asset={pendingImageCrop?.asset ?? null}

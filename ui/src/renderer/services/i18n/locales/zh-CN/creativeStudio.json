@@ -813,6 +813,9 @@
         "title": "切分图片",
         "uploadProgress": "切图结果上传进度"
       },
+      "preview": {
+        "loadFailed": "图片加载失败，请重试。"
+      },
       "toolbar": {
         "crop": "裁剪",
         "cropLabel": "裁剪并生成新节点",
@@ -825,6 +828,8 @@
         "label": "图片工具",
         "maskEdit": "局部编辑",
         "maskEditLabel": "对图片进行局部修改",
+        "preview": "预览",
+        "previewLabel": "预览图片",
         "split": "切图",
         "splitLabel": "切分并生成图片子节点",
         "upload": "上传图片",

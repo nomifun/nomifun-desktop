@@ -813,6 +813,9 @@
         "title": "Split image",
         "uploadProgress": "Split result upload progress"
       },
+      "preview": {
+        "loadFailed": "The image could not be loaded. Please try again."
+      },
       "toolbar": {
         "crop": "Crop",
         "cropLabel": "Crop into a new node",
@@ -825,6 +828,8 @@
         "label": "Image tools",
         "maskEdit": "Edit area",
         "maskEditLabel": "Edit part of the image",
+        "preview": "Preview",
+        "previewLabel": "Preview image",
         "split": "Split",
         "splitLabel": "Split the image into child nodes",
         "upload": "Upload image",

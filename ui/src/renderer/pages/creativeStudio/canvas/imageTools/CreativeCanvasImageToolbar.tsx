@@ -11,6 +11,7 @@ import {
   GridNine,
   Info,
   MagicWand,
+  PreviewOpen,
   Upload,
 } from "@icon-park/react";
 import React, { useLayoutEffect, useRef, useState } from "react";
@@ -28,6 +29,7 @@ export interface CreativeCanvasImageToolbarProps {
   onInfo(): void;
   onDelete(): void;
   onUpload(): void;
+  onPreview(): void;
   onCrop(): void;
   onDownload(): void;
   onMaskEdit?: () => void;
@@ -51,6 +53,7 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
   onInfo,
   onDelete,
   onUpload,
+  onPreview,
   onCrop,
   onDownload,
   onMaskEdit,
@@ -177,6 +180,19 @@ const CreativeCanvasImageToolbar: React.FC<CreativeCanvasImageToolbarProps> = ({
           </button>
         ) : (
           <>
+            <button
+              type="button"
+              aria-label={t("creativeStudio.canvas.imageTools.toolbar.previewLabel")}
+              onClick={(event) => {
+                event.stopPropagation();
+                onPreview();
+              }}
+            >
+              <PreviewOpen {...iconProps} />
+              <span className={styles.toolLabel}>
+                {t("creativeStudio.canvas.imageTools.toolbar.preview")}
+              </span>
+            </button>
             <button
               type="button"
               aria-label={t(
