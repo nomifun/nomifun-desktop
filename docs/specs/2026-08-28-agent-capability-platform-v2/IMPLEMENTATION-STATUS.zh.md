@@ -1229,3 +1229,95 @@ Wave 2 `vcs.push`、SSH、MCP/Connector、Browser、Computer owner，Wave 3/4 �
 typed effect/resource/outbox，以及 Wave 5 canonical AgentSession command/query
 ServiceKey。Windows sidecar 和其余 native cell 证据仍是外部阻塞；在这些项完成前
 不能宣称 C8-WIN-PRE、C8-MA、C8-MERGE 或发布完成。
+### Windows targeted validation before rebase（2026-09-02）
+- Windows `cargo check --locked -p nomifun-app -p nomifun-web
+  -p nomifun-desktop`
+- 五个 Wave boundary：`6 + 8 + 9 + 16 + 11 = 50 passed`
+- Wave 2 application host：`17 passed`
+- Agent Kernel：`12 passed`
+- Codex Runtime：`32 passed`
+- Conversation：`323 passed`
+- token telemetry/read-only UI focused tests：`10 passed`
+- macOS helper tests：`2 passed`，Windows `--self-test` PASS
+- Agent v2 contract check、C7 Gate、C8 Gate self-test
+- `bun run check:i18n`：`7078 keys / 33 modules`
+- `bun run build:ui`
+- 受影响 package rustfmt 与 `git diff --check`
+
+### 当前真实 owner 阻塞
+
+- Wave 1：只有 `web.fetch` 有真实 HTTP owner，Knowledge/Memory/Skill 仍缺
+  Fresh-v4 resource schema、owner repository 和 typed receipt；`web.fetch`
+  也尚未闭合 ExternalTransmit idempotency/receipt。
+- Wave 3：19 个 action 尚无 action-specific DTO/outcome，Fresh-v4 也没有
+  Canvas/Asset/CreationTask/TemplateRun/MiniApp schema，因此不能直接挂旧 service。
+- Wave 4：缺 typed `succeeded | failed | uncertain` effect outcome 和四域 v4
+  resource/outbox；旧 Channel/Companion/Customer/Robot graph 不能直接注入。
+- Wave 5：AgentExecution/Requirement/Schedule/IDMM 仍依赖旧 Conversation facts；
+  必须先导出同一 AgentPlatform 实例的 canonical Session command/query ServiceKey，
+  再实现各域 v4 repository/facade。
+- Wave 2 尚缺 `vcs.push`、SSH、MCP/Connector、Browser 和 Computer action
+  owners。`process.exec` 当前只对显式、host-resolved process binding 可用。
+
+### Windows sidecar 源码阻塞
+
+Windows `../codex` checkout 存在，HEAD 为 `4ee04c0...`，冻结 SHA
+`dc2ccc6843abb09c9d297862dc10b6bd12a3935d` 是其祖先。但冻结 upstream 中不存在：
+
+- `runtime/hello`
+- `runtime/session/dispose`
+- `native_action/start`
+
+`vendor/codex-runtime/patches/series.json` 只记录 6 个 patch ID/ownership，没有实际
+patch 源码，`upstream_source_files_in_vendor=[]`。因此普通构建或重命名
+`codex.exe` 不能成为符合 NomiFun wire/credential/dispose 合同的 sidecar。
+在取得 patch 源或实现等价可审计 sidecar 前，真实
+`open -> ready -> turn -> observe -> cancel -> dispose` 仍是明确外部/源码阻塞，
+不得用普通 upstream app-server 冒充。
+
+当前 Windows 属于 affected cell；最终 clean candidate 必须运行完整
+`C8-WIN-PRE`，不能使用 scoped attestation。但 C8 owner coverage 已按设计在上述
+Wave owner 未闭合时 fail-closed，因此当前不能宣称 C8/HP-1/C8-MA/C8-MERGE。
+
+### Windows C8 Gate 结果（2026-09-02）
+
+在 clean SHA `b849e2ac7c3356468f86064a47180f5442a8e0a6` 上执行了一次完整
+`bun run gate:agent-v2 -- c8-win-pre`。本轮未发生 ENOBUFS 或 access violation，
+最终按设计 FAIL：
+
+- PASS：toolchain、C7、contract、Domain registration、Fresh-v4 root、
+  production host、production broker、UI build、Windows startup smoke、
+  Windows installer contract；
+- `baseline_fail`：repository-wide React/Arco/implicit-any UI typecheck；
+- FAIL：production owner coverage 精确列出
+  `wave1,wave2,wave3,wave4,wave5`；
+- FAIL：workspace `cargo test` 在 app lib 的
+  `bootstrap::canonical_host::tests::canonical_remote_rest_freezes_binding_and_auth_fence`
+  开始后不再推进。该子进程运行 7.4 分钟、无子进程且 CPU 基本不增长后被本任务
+  单独终止；Gate/cargo 随后记录 exit `0xffffffff` 并继续完成后续检查。没有重跑。
+
+本轮 Gate residual：
+
+- source total：`556`
+- blocking：`0`
+- contract-allowed：`26`
+- deferred-to-C9：`530`
+- unclassified：`0`
+- canonical owner residual：`0`
+
+Evidence：
+
+- path：
+  `build.noindex/agent-capability-v2/b849e2ac7c3356468f86064a47180f5442a8e0a6/c8-win-pre/summary.json`
+- SHA-256：
+  `b3b6ac5a52642f3edcef1b459b450d84958b8ce6be7100297fec5000a1df3e77`
+
+生产 Remote Runtime 已有 35 秒 admission 与 45 秒 shutdown deadline；本轮日志
+无法确认测试卡在 compose/open/revoke/close 的哪一步。为防止后续 workspace Gate
+再次等待数分钟，该单一集成测试增加 60 秒总 test deadline，并把原 body 独立出来；
+这只使 harness fail-fast，不改变生产逻辑，也不把 timeout 视为 PASS。按用户要求，
+本轮只做后续 `--no-run` 编译，不再次执行该已知挂起测试。
+
+新增 test deadline 与本状态更新产生后续 source SHA，因此 `b849e2ac` 的 Gate
+证据只能作为诊断 evidence，不能提升为最终 C8 pass。真实 owner 与 sidecar
+阻塞未改变。
