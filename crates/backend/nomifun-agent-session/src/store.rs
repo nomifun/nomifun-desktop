@@ -34,7 +34,6 @@ use crate::types::{
     ChatCausalityFacts, RuntimeAppendContext, RuntimeEventAppendResult, SessionCreateResult,
     ChatOperationClaimRequest, SessionEventAppendResult, SessionEventPage,
     SessionHeadProjection, SessionObservation, SessionRehydrationInput,
-    ZeroOutstandingProof,
 };
 
 pub const MAX_INLINE_JSON_BYTES: usize = 64 * 1024;
@@ -1427,10 +1426,8 @@ impl AgentSessionStore {
     pub async fn complete_delete(
         &self,
         command: &DeleteAgentSessionCommand,
-        proof: &ZeroOutstandingProof,
         deleted_at: i64,
     ) -> Result<DeleteResult, SessionStoreError> {
-        proof.validate().map_err(SessionStoreError::Conflict)?;
         if deleted_at < command.requested_at {
             return Err(SessionStoreError::Conflict(
                 "deleted_at cannot precede delete requested_at".to_owned(),
@@ -1490,11 +1487,10 @@ impl AgentSessionStore {
     pub async fn delete_session(
         &self,
         command: &DeleteAgentSessionCommand,
-        proof: &ZeroOutstandingProof,
         deleted_at: i64,
     ) -> Result<DeleteResult, SessionStoreError> {
         self.fence_delete(command).await?;
-        self.complete_delete(command, proof, deleted_at).await
+        self.complete_delete(command, deleted_at).await
     }
 
     pub async fn deleting_sessions(
@@ -1510,6 +1506,32 @@ impl AgentSessionStore {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(live_from_row).collect()
+    }
+
+    /// Finish Session-owned cleanup left behind by an interrupted delete.
+    pub async fn recover_deleting_sessions(
+        &self,
+        deleted_at: i64,
+    ) -> Result<Vec<DeleteResult>, SessionStoreError> {
+        if deleted_at < 0 {
+            return Err(SessionStoreError::InvalidSession(
+                "delete recovery timestamp must not be negative".to_owned(),
+            ));
+        }
+        let mut recovered = Vec::new();
+        for session in self.deleting_sessions().await? {
+            let command = DeleteAgentSessionCommand {
+                operation_id: OperationId::from(format!(
+                    "delete-recovery:{}",
+                    session.agent_session_id.as_ref()
+                )),
+                agent_session_id: session.agent_session_id,
+                owner_ref: session.owner_ref,
+                requested_at: 0,
+            };
+            recovered.push(self.complete_delete(&command, deleted_at).await?);
+        }
+        Ok(recovered)
     }
 
     async fn append_event_tx(

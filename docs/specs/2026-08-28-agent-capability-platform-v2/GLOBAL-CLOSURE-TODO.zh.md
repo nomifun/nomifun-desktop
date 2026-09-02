@@ -71,14 +71,30 @@ Linux Desktop 和一次性 C9 clean cut。
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | S0 止损发布 | 3 | 0 | 0 | 0 | 0 | 3 |
 | S1 Revert/keep 审计 | 3 | 0 | 0 | 0 | 0 | 3 |
-| S2 P0 与基础收缩 | 3 | 7 | 0 | 0 | 0 | 10 |
+| S2 P0 与基础收缩 | 4 | 6 | 0 | 0 | 0 | 10 |
 | S3 Role seam 与核心 owner | 0 | 4 | 8 | 0 | 0 | 12 |
 | S4 产品 UI | 0 | 1 | 1 | 0 | 0 | 2 |
 | S5 三平台、C9 与 RC | 0 | 0 | 3 | 2 | 0 | 5 |
-| **总计** | **9** | **12** | **12** | **2** | **0** | **35** |
+| **总计** | **10** | **11** | **12** | **2** | **0** | **35** |
 
 旧台账 84 项现已收敛为 35 项。任务数量不是质量指标；只有完成定义和最小验证满足后
 才能修改状态。
+
+## 当前剩余 TODO 快照
+
+当前还剩 25 项未关闭：
+
+| 分类 | 数量 | TODO |
+| --- | ---: | --- |
+| 主机可直接实施 | 10 | `SL-S2-05`～`SL-S2-10`、`SL-S3-01`、`SL-S3-07`、`SL-S3-08`、`SL-S4-01` |
+| 机器 2 独立实施 | 1 | `SL-S3-09` 精简 SSH owner；远端分支 `rf/m2-w2-ssh-owner` 已准备 |
+| 依赖阻塞 | 12 | `SL-S3-02`～`SL-S3-06`、`SL-S3-10`～`SL-S3-12`、`SL-S4-02`、`SL-S5-01`、`SL-S5-04`、`SL-S5-05` |
+| 外部原生环境 | 2 | `SL-S5-02` macOS arm64、`SL-S5-03` Linux Desktop x64 |
+
+主机下一阶段不应同时展开全部 10 项。关键路径是
+`SL-S2-07 -> SL-S2-08/SL-S2-09 -> SL-S3-01 -> SL-S3-02 -> SL-S3-03`；
+`SL-S2-05`、`SL-S2-06`、`SL-S2-10`、`SL-S3-07`、`SL-S3-08` 和机器 2
+`SL-S3-09` 可作为边界清晰的并行 lane。
 
 ## S0：止损发布
 
@@ -114,7 +130,7 @@ Linux Desktop 和一次性 C9 clean cut。
 | `SL-S2-01` | closed | 主机 | 删除 candidate source SHA 自引用 | `SL-S1-03` | pre-run input 不写其自身 commit SHA；Gate 运行时读取 clean HEAD；post-run result 记录 source commit 与 Artifact digest | `cargo test --locked -p nomifun-agent-contracts --lib`; `cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check`; `bun run gate:agent-v2 -- --self-test` | 无 |
 | `SL-S2-02` | closed | 主机 | 物理分离 schema fixture 与真实 release lock/result | `SL-S2-01` | fixture 明示 `fixture_only=true` 并使用假 digest；`release-lock.json` 只记录真实制品 digest；`platform-result.json` 只记录 source、target、suite、结果和日志引用；Runtime、Gate 与 macOS build 不再把 fixture digest 当发布输入 | `cargo test --locked -p nomifun-codex-runtime --lib`; `bun test scripts/release/release-lock.test.mjs scripts/validation/check-macos-arm64-native.test.mjs`; `bun run gate:agent-v2 -- c7-domain-waves` | 首个真实 lock/result 随 S5 候选打包生成，不阻塞本项实现关闭 |
 | `SL-S2-03` | closed | 主机 | 修复 Remote token rotate/revoke Response Body 卡死 | 无 | validator generation/hash 是认证线性化点；请求只持有短生命周期同步状态锁，不跨 Response Body 持有 auth permit；mint/revoke 仅由 mutation gate 串行；旧 token 后续请求立即失败 | `cargo test --locked -p nomifun-auth remote_admission --lib`; `cargo test --locked -p nomifun-public --lib`; `cargo test --locked -p nomifun-app bootstrap::canonical_host::tests::canonical_remote_rest_freezes_binding_and_auth_fence --lib -- --exact --test-threads=1` | 无 |
-| `SL-S2-04` | open | 主机 | 简化 D-024 delete/dispose | `SL-S1-03` | 删除调用者填写的 `ZeroOutstandingProof`；使用真实 `RuntimeDisposeReport`；`deleting` 重启后幂等完成 tombstone | `cargo test -p nomifun-agent-session delete --lib -- --test-threads=1` | 无 |
+| `SL-S2-04` | closed | 主机 | 简化 D-024 delete/dispose | `SL-S1-03` | 已删除调用者填写的 `ZeroOutstandingProof`；平台删除路径校验真实 `RuntimeDisposeReport` 身份；启动时发现 `deleting` 会幂等清理 Session 自有内容并完成 tombstone | `cargo test --locked -p nomifun-agent-session delete --lib -- --test-threads=1`; `cargo test --locked -p nomifun-agent-platform --test chat_minimal -- --test-threads=1`; `cargo check --locked -p nomifun-app` | 无 |
 | `SL-S2-05` | open | 主机 | 收缩 SessionEvent 与 Projection | `SL-S2-04` | Event Log 保留唯一语义事实；Projection 不复制完整 `events[]`；正常完成只持久化最终 assistant message，中断最多一份 bounded partial | `cargo test -p nomifun-agent-session projection --lib` | 无 |
 | `SL-S2-06` | open | 主机 | 把 Effect 生命周期收敛为三种策略 | `SL-S1-01`、`SL-S1-02` | 仅保留 `read_only`、`managed_effect`、`external_uncertain_effect`；本地操作使用事务/CAS/原子文件；外部 unknown 不自动 retry；删除 Wave 级通用 journal/coordinator | `cargo test -p nomifun-agent-session effect --lib -- --test-threads=1` | live 外部 Effect 只在可丢弃 sandbox 验证 |
 | `SL-S2-07` | open | 主机 | 合并为一个 canonical Compiler | `SL-S1-03` | Preview/Save/Test 共用同一纯函数 Compiler；Session Open 读取已保存 Snapshot，只做当前执行兼容检查；删除第二份 closure/digest 算法 | Compiler 定向 unit tests；同一输入的 Preview/Save/Test Snapshot digest 相同 | 无 |
@@ -173,9 +189,10 @@ S3 非 SSH 工作，不等待 SSH lane 才推进。
 
 ## 推荐顺序
 
-1. 以已完成的 Wave 3/4 普通 revert 为基线，立即完成 `SL-S1-03`，同时并行执行三个 P0：
-   `SL-S2-01`、`SL-S2-02`、`SL-S2-03`。
-2. 并行推进 `SL-S2-04`～`SL-S2-10`；机器 2 独立推进 `SL-S3-09`。
+1. 主机优先完成 `SL-S2-07`，随后并行收口 `SL-S2-08` 与 `SL-S2-09`；
+   机器 2 独立推进 `SL-S3-09`，主机不等待 SSH lane。
+2. 同时以不争抢 Compiler/Registry 文件的批次推进 `SL-S2-05`、`SL-S2-06`、
+   `SL-S2-10`、`SL-S3-07` 和 `SL-S3-08`。
 3. 单 Compiler、小 Snapshot 和 Role 合同稳定后，按
    `SL-S3-01 -> SL-S3-02 -> SL-S3-03` 串行落主链。
 4. Browser 与 Computer first-party provider 可并行实现，随后统一清除旁路。

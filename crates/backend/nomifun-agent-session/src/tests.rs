@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::{
     AgentSessionStore, ChatOperationClaimRequest, CreateSessionRequest, EffectEventRequest,
     EffectReconcileOutcome, EffectTerminalState, ForkRequest, RuntimeAppendContext,
-    SessionStoreError, ZeroOutstandingProof, evaluate_snapshot_compatibility, validate_checkpoint,
+    SessionStoreError, evaluate_snapshot_compatibility, validate_checkpoint,
 };
 
 fn session_id() -> AgentSessionId {
@@ -1245,7 +1245,6 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
     store
         .delete_session(
             &delete,
-            &ZeroOutstandingProof::verified(),
             1_788_000_000_300,
         )
         .await
@@ -1288,18 +1287,9 @@ async fn deletion_fence_blocks_late_work_and_commits_exact_tombstone() {
         SessionStoreError::Deleted(_)
     ));
 
-    let mut nonzero = ZeroOutstandingProof::verified();
-    nonzero.counts.insert("runtime_binding".to_owned(), 1);
-    assert!(
-        store
-            .complete_delete(&command, &nonzero, 1_788_000_001_100)
-            .await
-            .is_err()
-    );
     let deleted = store
         .complete_delete(
             &command,
-            &ZeroOutstandingProof::verified(),
             1_788_000_001_200,
         )
         .await
@@ -1333,4 +1323,42 @@ async fn deletion_fence_blocks_late_work_and_commits_exact_tombstone() {
         store.fence_delete(&command).await.unwrap_err(),
         SessionStoreError::Deleted(_)
     ));
+}
+
+#[tokio::test]
+async fn interrupted_delete_recovery_finishes_tombstone_idempotently() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "delete-recovery").await;
+    let command = DeleteAgentSessionCommand {
+        operation_id: OperationId("delete-before-restart".to_owned()),
+        agent_session_id: session.agent_session_id.clone(),
+        owner_ref: owner(),
+        requested_at: 1_788_000_002_000,
+    };
+    store.fence_delete(&command).await.unwrap();
+
+    let recovered = store
+        .recover_deleting_sessions(1_788_000_002_100)
+        .await
+        .unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(
+        recovered[0].operation_id.as_ref(),
+        format!(
+            "delete-recovery:{}",
+            session.agent_session_id.as_ref()
+        )
+    );
+    assert_eq!(
+        recovered[0].tombstone.agent_session_id,
+        session.agent_session_id
+    );
+    assert!(store.deleting_sessions().await.unwrap().is_empty());
+    assert!(
+        store
+            .recover_deleting_sessions(1_788_000_002_200)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

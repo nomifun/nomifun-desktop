@@ -43,7 +43,7 @@ use nomifun_agent_session::{
     AgentSessionStore, CreateSessionRequest, DeleteResult, EffectEventRequest, ForkRequest,
     EffectTerminalState, ForkResult, RuntimeAppendContext, SessionCreateResult,
     SessionEventAppendResult, SessionEventPage, SessionHeadProjection, SessionObservation,
-    SessionRehydrationInput, SessionStoreError, ZeroOutstandingProof,
+    SessionRehydrationInput, SessionStoreError,
 };
 use nomifun_api_types::{
     CreateAgentSessionRequestDto, CreateAgentSessionResponseDto, CreateAgentSessionTurnRequestDto,
@@ -2161,6 +2161,7 @@ impl AgentPlatform {
             PresetPreviewCompiler::new(config.control_plane_release, templates),
         ));
         let sessions = Arc::new(AgentSessionStore::from_pool(config.pool.clone()).await?);
+        sessions.recover_deleting_sessions(now_ms()).await?;
         let mut initial_plugins = config.initial_plugins;
         initial_plugins.push(agent_core_registration);
         let platform = Arc::new(Self {
@@ -3729,7 +3730,9 @@ impl AgentSessionDeletePort for AgentPlatform {
         };
         self.sessions.fence_delete(&command).await?;
         if let Some(binding) = runtime_binding {
-            self.runtime
+            let expected_runtime_binding_id = binding.runtime_binding_id.clone();
+            let dispose = self
+                .runtime
                 .dispose(RuntimeSessionDisposeParams {
                     agent_session_id: command.agent_session_id.clone(),
                     runtime_binding_id: binding.runtime_binding_id,
@@ -3742,6 +3745,14 @@ impl AgentSessionDeletePort for AgentPlatform {
                     ),
                 })
                 .await?;
+            if dispose.agent_session_id != command.agent_session_id
+                || dispose.runtime_binding_id != expected_runtime_binding_id
+            {
+                return Err(AgentPlatformError::Contract(
+                    "Runtime dispose report does not match the deleting AgentSession binding"
+                        .to_owned(),
+                ));
+            }
         }
         self.executions
             .write()
@@ -3749,7 +3760,7 @@ impl AgentSessionDeletePort for AgentPlatform {
             .remove(&command.agent_session_id);
         Ok(self
             .sessions
-            .complete_delete(&command, &ZeroOutstandingProof::verified(), deleted_at)
+            .complete_delete(&command, deleted_at)
             .await?)
     }
 }
