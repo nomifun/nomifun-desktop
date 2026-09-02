@@ -26,6 +26,12 @@ Gate/Generator 使用的机器文件。设计文档不能因为形成时间较�
    - 经修订的决策及理由；被 05 撤销的旧要求不再作为可执行设计保留。
 8. `MACHINE-2-PHASE1-BATCH-A-START-PROMPT.zh.md`
    - 仅在机器 2 能完整承担 Batch A 时使用。
+9. `MACHINE-2-PHASE1-BATCH-A-MANIFEST.json`
+   - 机器 2 的机器可读任务、写集、禁区和定向检查清单。
+10. `MACHINE-2-PHASE1-BATCH-A-RESULT-TEMPLATE.json`
+    - 机器 2 的结构化结果回传模板。
+11. `MACHINE-2-PHASE1-BATCH-A-RESULT-TEMPLATE.zh.md`
+    - 机器 2 的人工结果回传模板；不作为实时状态源。
 
 发生冲突时：
 
@@ -58,8 +64,9 @@ canonical Rust / SQL / generated schema / behavior tests
 ## 已删除的过期执行文件
 
 `IMPLEMENTATION-STATUS`、旧 `START-PROMPT`、旧 macOS handoff、旧单 SSH Prompt 和
-不再消费的 C8 migration batch manifests 只存在于 Git 历史。这些文件记录过期状态、
-交接或已撤销执行批次，不属于需要持续维护的核心设计。
+不再消费的旧 C8 migration batch manifests 只存在于 Git 历史。这些文件记录过期状态、
+交接或已撤销执行批次，不属于当前机器 2 的执行材料；当前批次使用上面的 manifest、
+Prompt 和结果模板。
 
 需要审计时使用 `git show <commit>:<path>`；不要据此恢复过期任务状态或覆盖 GLOBAL TODO。
 

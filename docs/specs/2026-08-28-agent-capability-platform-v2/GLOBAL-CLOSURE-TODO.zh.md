@@ -98,6 +98,10 @@ Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成
 `SL-S2-07 -> SL-S2-08/SL-S2-09 -> SL-S3-01 -> SL-S3-02 -> SL-S3-03`。
 机器 2 只有在能完整领取四项 Batch A 时才启用：Session Projection 与 Effect 由一个
 writer 串行处理，SSH owner 与 Sidecar upstream spike 使用另外两个互不冲突的 lane。
+当前执行材料为 `MACHINE-2-PHASE1-BATCH-A-START-PROMPT.zh.md`、
+`MACHINE-2-PHASE1-BATCH-A-MANIFEST.json` 和两个
+`MACHINE-2-PHASE1-BATCH-A-RESULT-TEMPLATE*` 文件；旧 C8 migration manifests
+不再作为替代入口。
 如果其中只剩一项可执行，机器 2 保持停用，由主机正常排期处理。
 
 ## S0：止损发布
@@ -106,7 +110,7 @@ writer 串行处理，SSH owner 与 Sidecar upstream spike 使用另外两个互
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `SL-S0-01` | closed | 主机 | 发布 05 并停止旧 84 项驱动的扩张 | 无 | 05 独立提交，明确覆盖旧 Gate、Effect、平台矩阵和 TODO 口径 | `git show --stat d6de5170` | 无 |
 | `SL-S0-02` | closed | 主机 | 用本文替换旧 84 项阻断台账 | `SL-S0-01` | 只保留 S0-S5 stable ID、状态、owner、依赖、完成定义、最小测试和人工输入；统计自洽 | `df4bdf56`; `git diff --check -- docs/specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md` | 无 |
-| `SL-S0-03` | closed | 主机 | 建立机器 2 多任务批次门槛并保留精简 SSH slice | `SL-S0-01` | 单 SSH Prompt 已从主分支删除；只有 Batch A 四项完整可领取时才启机，SSH slice 不含绝对原子覆盖、通用 uncertain/reconcile、中央 Effect journal 或长期旧 API 兼容 | `6370c42a`; `fff87a18` | 机器 2 使用当前 Batch Prompt |
+| `SL-S0-03` | closed | 主机 | 建立机器 2 多任务批次门槛并保留精简 SSH slice | `SL-S0-01` | 单 SSH Prompt 已从主分支删除；只有 Batch A 四项完整可领取时才启机，SSH slice 不含绝对原子覆盖、通用 uncertain/reconcile、中央 Effect journal 或长期旧 API 兼容 | `6370c42a`; `fff87a18` | 机器 2 使用当前 Batch Prompt、Manifest 和 Result Template |
 
 ## S1：Revert/keep 审计
 

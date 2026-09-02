@@ -1,0 +1,72 @@
+{
+  "schema_version": "1.0.0",
+  "batch_id": "phase1-batch-a",
+  "source_branch": "rf/agent-capability-platform-v2",
+  "integration_branch": "rf/m2-phase1-batch-a",
+  "base_sha": null,
+  "batch_result_sha": null,
+  "integration_method": "ordinary_commit_or_fast_forward_merge_only",
+  "writer_results": [
+    {
+      "writer_id": "session-data",
+      "task_ids": [
+        "SL-S2-05",
+        "SL-S2-06"
+      ],
+      "commit_shas": [],
+      "changed_paths": [],
+      "checks": [
+        {
+          "command": "",
+          "status": "pass|fail|not_run",
+          "reason": ""
+        }
+      ],
+      "not_run_and_reason": [],
+      "central_paths_touched": [],
+      "blockers": []
+    },
+    {
+      "writer_id": "ssh-owner",
+      "task_ids": [
+        "SL-S3-09"
+      ],
+      "commit_shas": [],
+      "changed_paths": [],
+      "checks": [
+        {
+          "command": "",
+          "status": "pass|fail|not_run",
+          "reason": ""
+        }
+      ],
+      "not_run_and_reason": [],
+      "central_paths_touched": [],
+      "blockers": []
+    },
+    {
+      "writer_id": "sidecar-spike",
+      "task_ids": [
+        "SL-S2-10"
+      ],
+      "commit_shas": [],
+      "changed_paths": [],
+      "checks": [
+        {
+          "command": "",
+          "status": "pass|fail|not_run",
+          "reason": ""
+        }
+      ],
+      "not_run_and_reason": [],
+      "central_paths_touched": [],
+      "blockers": []
+    }
+  ],
+  "batch_checks": [],
+  "manual_follow_up": [],
+  "secret_scan": {
+    "status": "pass|fail|not_run",
+    "notes": ""
+  }
+}
