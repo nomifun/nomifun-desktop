@@ -680,7 +680,7 @@
       "selectEditModel": "Select an image editing model",
       "selectGenerateModel": "Select an image generation model",
       "settingsLabel": "Image generation settings",
-      "settingsSummary": "{{quality}} · {{aspectRatio}} · {{count}} images",
+      "settingsSummary": "{{size}} · {{count}} images",
       "unavailableReference": "Unavailable reference",
       "widthLabel": "Width"
     },
@@ -1649,6 +1649,8 @@
       "noModel": "No image-generation model available",
       "outputCount": "Number of images",
       "quality": "Quality",
+      "resolution": "Resolution",
+      "standardResolution": "Standard",
       "width": "Width",
       "widthShort": "W"
     },
@@ -1912,10 +1914,10 @@
       "waitingForModel": "Waiting for the model to start processing"
     },
     "settings": {
+      "aspectRatio": "Aspect ratio",
       "duration": "Duration",
       "model": "Model",
       "resolution": "Resolution",
-      "size": "Size",
       "taskCount": "Task count"
     },
     "task": {

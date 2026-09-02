@@ -11,8 +11,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import ImageWorkbench from './ImageWorkbench';
 import {
+  imageWorkbenchAspectRatioChoices,
+  imageWorkbenchResolutionLabel,
+  imageWorkbenchResolutionOptions,
   imageWorkbenchSizePolicyForModel,
-  imageWorkbenchSizeOptionLabel,
+  imageWorkbenchSizeOptionForAspectRatio,
   imageWorkbenchSelectableSizeOptions,
   normalizeImageWorkbenchSettingsSize,
   imageWorkbenchModelKey,
@@ -119,15 +122,17 @@ describe('ImageWorkbench visual states', () => {
 
   test('keeps side controls dense and both workbench panes inside their viewport', () => {
     const css = readFileSync(new URL('./ImageWorkbench.module.css', import.meta.url), 'utf8');
+    const pickerCss = readFileSync(new URL('./ImageSizePicker.module.css', import.meta.url), 'utf8');
 
     expect(/\.sideLayout,\s*\.bottomLayout\s*\{[\s\S]*?box-sizing:\s*border-box;[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;/.test(css)).toBe(true);
     expect(/\.sideLayout\s*\{[\s\S]*?grid-template-columns:\s*minmax\(330px, 380px\) minmax\(0, 1fr\);/.test(css)).toBe(true);
-    expect(/\.aspectGrid\s*\{[\s\S]*?grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\);[\s\S]*?gap:\s*4px;/.test(css)).toBe(true);
-    expect(/\.aspectOption\s*\{[\s\S]*?min-height:\s*58px;[\s\S]*?font-size:\s*9px;/.test(css)).toBe(true);
+    expect(pickerCss.includes('grid-template-columns: repeat(3, minmax(0, 1fr))')).toBe(true);
+    expect(pickerCss.includes('min-height: 30px')).toBe(true);
     expect(/\.aspectShape\s*\{[\s\S]*?width:\s*18px;[\s\S]*?max-height:\s*16px;/.test(css)).toBe(true);
+    expect(css.includes('.compactResolutionField')).toBe(true);
     expect(/\.optionPill\s*\{[\s\S]*?height:\s*28px;[\s\S]*?font-size:\s*10px;/.test(css)).toBe(true);
     expect(css.includes('.dimensionGrid')).toBe(false);
-    expect(css.includes('.sizeOption')).toBe(true);
+    expect(css.includes('.sizeOptionIdentity')).toBe(true);
   });
 
   test('renders the floating bottom composer with exact model and parameter controls', () => {
@@ -142,6 +147,7 @@ describe('ImageWorkbench visual states', () => {
     expect(html.includes('Images')).toBe(true);
     expect(html.includes('Responses')).toBe(true);
     expect(html.includes('宽高比')).toBe(true);
+    expect(html.includes('分辨率')).toBe(true);
     expect(html.includes('质量')).toBe(true);
     expect(html.includes('数量')).toBe(true);
     expect(html.includes('2 个生成中')).toBe(true);
@@ -362,11 +368,7 @@ describe('ImageWorkbench model size policies', () => {
       width: option.width,
       height: option.height,
     });
-    expect(
-      imageWorkbenchSizeOptionLabel(option).includes(
-        `${option.width} × ${option.height}`
-      )
-    ).toBe(true);
+    expect(option.requestSize).toBe(`${option.width}x${option.height}`);
   });
 
   test('keeps automatic sizing without restoring manual width and height inputs', () => {
@@ -379,6 +381,25 @@ describe('ImageWorkbench model size policies', () => {
         policy
       )
     ).toMatchObject({ aspectRatio: 'auto', width: null, height: null });
+  });
+
+  test('splits ratio and resolution while preserving the exact provider option', () => {
+    const policy = imageWorkbenchSizePolicyForModel(null);
+    const ratios = imageWorkbenchAspectRatioChoices(policy.options);
+    expect(ratios.filter((option) => option.value === '16:9')).toHaveLength(1);
+
+    const resolutions = imageWorkbenchResolutionOptions(policy.options, '16:9');
+    expect(resolutions.map(imageWorkbenchResolutionLabel)).toEqual(['标准', '2K', '4K']);
+
+    const current = policy.options.find((option) => option.value === '2048x2048')!;
+    expect(
+      imageWorkbenchSizeOptionForAspectRatio(policy.options, current, '16:9')
+    ).toMatchObject({
+      value: '2048x1152',
+      width: 2048,
+      height: 1152,
+      requestSize: '2048x1152',
+    });
   });
 });
 

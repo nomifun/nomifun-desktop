@@ -60,12 +60,15 @@ describe('Creative Template route composition', () => {
     );
   });
 
-  test('derives template image dimensions from one fixed size selection', () => {
+  test('derives template image dimensions from separate ratio and resolution selections', () => {
     expect(page.includes('modelCatalog={agentModelCatalog}')).toBe(true);
     expect(editorModal.includes('imageWorkbenchSizePolicyForModel')).toBe(true);
     expect(editorModal.includes('imageWorkbenchFixedSizeOptions')).toBe(true);
+    expect(editorModal.includes('<ImageSizePicker')).toBe(true);
+    expect(editorModal.includes('options={imageSizeContext?.sizeOptions ?? []}')).toBe(true);
+    expect(editorModal.includes('value={imageSizeContext?.selectedSize?.value')).toBe(true);
     expect(editorModal.includes("creativeStudio.templates.editor.width'")).toBe(false);
     expect(editorModal.includes("creativeStudio.templates.editor.height'")).toBe(false);
-    expect(editorModal.includes('sizeOptionRow')).toBe(true);
+    expect(editorModal.includes('sizeOptionRow')).toBe(false);
   });
 });

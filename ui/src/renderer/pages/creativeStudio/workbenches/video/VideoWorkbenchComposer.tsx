@@ -272,13 +272,13 @@ const SettingsGrid: React.FC<SettingsGridProps> = ({
         <div>{modelSlot}</div>
       </div>
       <QuickSelect
-        label={t('creativeStudio.video.settings.resolution', { defaultValue: '清晰度' })}
+        label={t('creativeStudio.video.settings.resolution', { defaultValue: '分辨率' })}
         value={resolution}
         options={resolutionOptions}
         onChange={onResolutionChange}
       />
       <QuickSelect
-        label={t('creativeStudio.video.settings.size', { defaultValue: '尺寸' })}
+        label={t('creativeStudio.video.settings.aspectRatio', { defaultValue: '宽高比' })}
         value={size}
         options={sizeOptions}
         onChange={onSizeChange}

@@ -192,6 +192,7 @@ describe('CreativeCanvasVideoComposer', () => {
     expect(component.includes("['720p', '1080p']")).toBe(true);
     expect(component.includes("'16:9',\n  '9:16',\n  '1:1'")).toBe(true);
     expect(component.includes('[5, 10]')).toBe(true);
+    expect(component.includes('videoWorkbenchSizeOptionLabel')).toBe(false);
     expect(component.includes('credits')).toBe(false);
     expect(component.includes('camera')).toBe(false);
     expect(component.includes("'v2v'")).toBe(false);

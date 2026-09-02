@@ -12,7 +12,6 @@ import {
   toggleAllVideoTasks,
   toggleVideoTaskSelection,
   videoWorkbenchDimensions,
-  videoWorkbenchSizeOptionLabel,
   videoResultsState,
 } from './presentation';
 import type { VideoWorkbenchTask } from './types';
@@ -96,14 +95,15 @@ describe('video workbench value guards', () => {
     expect(normalizeVideoTaskCount(Number.NaN)).toBe(1);
   });
 
-  test('presents final pixels beside every fixed aspect-ratio choice', () => {
+  test('derives final pixels independently from the selected aspect ratio', () => {
     expect(videoWorkbenchDimensions('1080p', '16:9')).toEqual({
       width: 1920,
       height: 1080,
     });
-    expect(videoWorkbenchSizeOptionLabel('720p', '9:16')).toBe(
-      '9:16 · 720 × 1280'
-    );
+    expect(videoWorkbenchDimensions('720p', '9:16')).toEqual({
+      width: 720,
+      height: 1280,
+    });
   });
 });
 

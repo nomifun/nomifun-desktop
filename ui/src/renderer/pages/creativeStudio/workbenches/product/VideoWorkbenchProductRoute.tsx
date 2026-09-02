@@ -54,7 +54,6 @@ import {
 import {
   VideoWorkbench,
   videoWorkbenchDimensions as resolveVideoWorkbenchDimensions,
-  videoWorkbenchSizeOptionLabel,
   type VideoWorkbenchLayout,
 } from '../video';
 import {
@@ -540,10 +539,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
     resolutionOptions: RESOLUTIONS,
     onResolutionChange: setResolution,
     size: aspect,
-    sizeOptions: ASPECTS.map((option) => ({
-      ...option,
-      label: videoWorkbenchSizeOptionLabel(resolution, option.value, option.label),
-    })),
+    sizeOptions: ASPECTS,
     onSizeChange: setAspect,
     duration,
     durationOptions,
