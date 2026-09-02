@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use nomifun_agent_contracts::{
@@ -31,6 +31,11 @@ use nomifun_realtime::UserEventSink;
 use nomifun_terminal::pty::{PtyExit, PtyHandle, SpawnParams};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+use super::agent_wave2_vcs_push::{
+    VcsPushActionInput, VcsPushEffectDisposition, VcsPushError, VcsPushOwner,
+    VcsPushRequest,
+};
 
 const MAX_SEARCH_QUERY_CHARS: usize = 1024;
 const MAX_SEARCH_LINE_CHARS: usize = 4096;
@@ -58,6 +63,7 @@ pub(crate) struct Wave2ApplicationHost {
     snapshots: Arc<SnapshotService>,
     snapshot_sessions: Arc<tokio::sync::Mutex<BTreeSet<(String, String)>>>,
     workspace_write_lock: Arc<tokio::sync::Mutex<()>>,
+    vcs_push_owner: Arc<OnceLock<Result<VcsPushOwner, VcsPushError>>>,
     configured_workspace_root: PathBuf,
 }
 
@@ -96,6 +102,7 @@ impl Wave2ApplicationHost {
             snapshots: Arc::new(SnapshotService::new()),
             snapshot_sessions: Arc::new(tokio::sync::Mutex::new(BTreeSet::new())),
             workspace_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            vcs_push_owner: Arc::new(OnceLock::new()),
             configured_workspace_root: workspace_root,
         }
     }
@@ -335,6 +342,23 @@ async fn begin_wave2_effect(
     binding: &TypedResourceBinding,
     input: &StrictJsonValue,
 ) -> Result<Wave2EffectAdmission, Wave2HostPortError> {
+    begin_wave2_effect_with_policy(context, binding, input, false).await
+}
+
+async fn begin_wave2_exclusive_effect(
+    context: &Wave2HostContext,
+    binding: &TypedResourceBinding,
+    input: &StrictJsonValue,
+) -> Result<Wave2EffectAdmission, Wave2HostPortError> {
+    begin_wave2_effect_with_policy(context, binding, input, true).await
+}
+
+async fn begin_wave2_effect_with_policy(
+    context: &Wave2HostContext,
+    binding: &TypedResourceBinding,
+    input: &StrictJsonValue,
+    block_on_other_started: bool,
+) -> Result<Wave2EffectAdmission, Wave2HostPortError> {
     let idempotency_key = context.idempotency_key.as_ref().trim();
     if idempotency_key.is_empty() {
         return Err(Wave2HostPortError::new(
@@ -427,6 +451,16 @@ async fn begin_wave2_effect(
                     ));
                 }
             }
+        }
+        if block_on_other_started
+            && entries.iter().any(|entry| {
+                entry.get("status").and_then(Value::as_str) == Some("started")
+            })
+        {
+            return Err(Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                "Wave 2 effect has another unresolved outcome; new executions are fenced",
+            ));
         }
         if entries.len() >= MAX_WAVE2_EFFECT_RECORDS {
             return Err(Wave2HostPortError::new(
@@ -977,6 +1011,74 @@ impl Wave2ApplicationHost {
                                 Ok(output)
                             }
                             Err(owner_error) => {
+                                let _ = finish_wave2_effect(
+                                    &reservation,
+                                    Wave2EffectCompletion::Failed(&owner_error),
+                                )
+                                .await;
+                                Err(owner_error)
+                            }
+                        }
+                    }
+                }
+            }
+            "vcs.push" => {
+                scope
+                    .require_operation(WORKSPACE_WRITE_OPERATION)
+                    .map_err(|error| operation_error(capability_id, error))?;
+                let params: VcsPushActionInput = decode(input)?;
+                let binding = workspace_typed_binding(context)?.clone();
+                let owner = self
+                    .vcs_push_owner
+                    .get_or_init(|| VcsPushOwner::new(&self.configured_workspace_root))
+                    .as_ref()
+                    .map_err(|error| vcs_push_error(error.clone()))?;
+                let effect_input = StrictJsonValue(
+                    serde_json::to_value(&params).map_err(|error| {
+                        Wave2HostPortError::new(
+                            "INVALID_PAYLOAD",
+                            format!("{capability_id} input could not be encoded: {error}"),
+                        )
+                    })?,
+                );
+                match begin_wave2_exclusive_effect(context, &binding, &effect_input).await? {
+                    Wave2EffectAdmission::Replay(output) => Ok(output),
+                    Wave2EffectAdmission::Reserved(reservation) => {
+                        let request = VcsPushRequest::from_action_input(
+                            context.principal.principal_id.clone(),
+                            scope.workspace_root().to_path_buf(),
+                            binding,
+                            params,
+                        );
+                        match owner.push(request).await {
+                            Ok(receipt) => {
+                                let output = StrictJsonValue(
+                                    serde_json::to_value(receipt).map_err(|error| {
+                                        Wave2HostPortError::new(
+                                            "CAPABILITY_UNAVAILABLE",
+                                            format!(
+                                                "{capability_id} result could not be encoded: {error}"
+                                            ),
+                                        )
+                                    })?,
+                                );
+                                finish_wave2_effect(
+                                    &reservation,
+                                    Wave2EffectCompletion::Succeeded(&output),
+                                )
+                                .await?;
+                                Ok(output)
+                            }
+                            Err(error)
+                                if error.disposition
+                                    == VcsPushEffectDisposition::OutcomeUnknown =>
+                            {
+                                // Keep the durable reservation in `started`: replay is
+                                // fenced until an explicit reconciliation path exists.
+                                Err(vcs_push_error(error))
+                            }
+                            Err(error) => {
+                                let owner_error = vcs_push_error(error);
                                 let _ = finish_wave2_effect(
                                     &reservation,
                                     Wave2EffectCompletion::Failed(&owner_error),
@@ -2448,6 +2550,10 @@ fn operation_error(capability_id: &str, error: AppError) -> Wave2HostPortError {
     Wave2HostPortError::new(code, format!("{capability_id} failed: {error}"))
 }
 
+fn vcs_push_error(error: VcsPushError) -> Wave2HostPortError {
+    Wave2HostPortError::new(error.code, error.message)
+}
+
 fn unavailable(capability_id: &str) -> Wave2HostPortError {
     Wave2HostPortError::unavailable(format!(
         "no canonical application owner is wired for {capability_id}"
@@ -3798,6 +3904,89 @@ mod tests {
         .unwrap();
         assert_eq!(replay, first);
         assert_eq!(repository.head().unwrap().target(), first.0["commit_id"].as_str().and_then(|id| git2::Oid::from_str(id).ok()));
+    }
+
+    #[tokio::test]
+    async fn vcs_push_updates_a_real_bare_remote_and_replays_the_receipt() {
+        let directory = tempfile::tempdir().unwrap();
+        let worktree = directory.path().join("worktree");
+        let remote_path = directory.path().join("remote.git");
+        std::fs::create_dir(&worktree).unwrap();
+        let repository = initialize_git_repository(&worktree);
+        git2::Repository::init_bare(&remote_path).unwrap();
+        repository
+            .remote("origin", remote_path.to_str().unwrap())
+            .unwrap();
+        let expected = repository.head().unwrap().target().unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(&worktree);
+        let context = context(&worktree);
+        let input = json!({
+            "remote": "origin",
+            "refspec": "HEAD:refs/heads/main"
+        });
+
+        let first = invoke(
+            &host,
+            context.clone(),
+            "vcs.push",
+            input.clone(),
+        )
+        .await
+        .unwrap();
+        let replay = invoke(&host, context, "vcs.push", input).await.unwrap();
+
+        assert_eq!(replay, first);
+        assert_eq!(first.0["remote"], "origin");
+        assert_eq!(first.0["remote_commit_after"], expected.to_string());
+        assert_eq!(
+            git2::Repository::open_bare(&remote_path)
+                .unwrap()
+                .find_reference("refs/heads/main")
+                .unwrap()
+                .target(),
+            Some(expected)
+        );
+    }
+
+    #[tokio::test]
+    async fn vcs_push_replays_a_not_applied_failure_without_late_execution() {
+        let directory = tempfile::tempdir().unwrap();
+        let worktree = directory.path().join("worktree");
+        let remote_path = directory.path().join("remote.git");
+        std::fs::create_dir(&worktree).unwrap();
+        let repository = initialize_git_repository(&worktree);
+        git2::Repository::init_bare(&remote_path).unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(&worktree);
+        let context = context(&worktree);
+        let input = json!({
+            "remote": "origin",
+            "refspec": "HEAD:refs/heads/main"
+        });
+
+        let first = invoke(
+            &host,
+            context.clone(),
+            "vcs.push",
+            input.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(first.code, "RESOURCE_NOT_FOUND");
+        repository
+            .remote("origin", remote_path.to_str().unwrap())
+            .unwrap();
+
+        let replay = invoke(&host, context, "vcs.push", input)
+            .await
+            .unwrap_err();
+        assert_eq!(replay.code, first.code);
+        assert_eq!(replay.message, first.message);
+        assert!(
+            git2::Repository::open_bare(&remote_path)
+                .unwrap()
+                .find_reference("refs/heads/main")
+                .is_err()
+        );
     }
 
     #[tokio::test]
