@@ -34,6 +34,29 @@ export const TEMPLATE_I18N_PATH: Record<OfficialPresetKey, string> = {
  */
 export const DEFAULT_WORKSPACE_RESOURCE_ID = 'workspace.default';
 export const WORKSPACE_ROOT_PARAMETER = 'workspace_root';
+export const KNOWLEDGE_ROOT_PARAMETER = 'knowledge_root';
+export const KNOWLEDGE_NAME_PARAMETER = 'knowledge_name';
+
+export type KnowledgeBindingSource = {
+  knowledge_base_id: string;
+  name: string;
+  root_path: string;
+};
+
+export function bindKnowledgeBaseResource(
+  binding: TypedResourceBinding,
+  knowledgeBase: KnowledgeBindingSource
+): TypedResourceBinding {
+  return {
+    ...binding,
+    resource_id: knowledgeBase.knowledge_base_id,
+    typed_parameters: {
+      ...(binding.typed_parameters ?? {}),
+      [KNOWLEDGE_ROOT_PARAMETER]: knowledgeBase.root_path,
+      [KNOWLEDGE_NAME_PARAMETER]: knowledgeBase.name,
+    },
+  };
+}
 
 export const selectedCapabilityCount = (document: AgentPresetDocument): number =>
   document.initial_capabilities.length + document.on_demand_capabilities.length;
