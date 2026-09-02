@@ -3260,10 +3260,6 @@
           }
         ]
       },
-      "CodexRuntimeReleaseDigestRef": {
-        "description": "Typed reference only. Runtime release fields remain owned by the runtime\ncontract and are not duplicated in this module.",
-        "type": "string"
-      },
       "D025FixtureEnvelopeReference": {
         "additionalProperties": false,
         "properties": {
@@ -3675,11 +3671,8 @@
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Pre-run immutable input. Its own digest, status, evidence, logs, and summary\nare structurally absent and therefore cannot participate in its digest.",
+    "description": "Pre-run immutable input. The source commit, its own digest, status, evidence,\nlogs, and summary are structurally absent and cannot participate in its\ndigest. The Gate attaches the clean source commit to post-run evidence.",
     "properties": {
-      "candidate_source_sha": {
-        "type": "string"
-      },
       "canonical_schema_manifest_digest": {
         "type": "string"
       },
@@ -3718,16 +3711,11 @@
           "$ref": "#/$defs/RequiredGateCheck"
         },
         "type": "array"
-      },
-      "runtime_release_digest": {
-        "$ref": "#/$defs/CodexRuntimeReleaseDigestRef"
       }
     },
     "required": [
       "manifest_version",
-      "candidate_source_sha",
       "confirmed_decision_contract_digest",
-      "runtime_release_digest",
       "canonical_schema_manifest_digest",
       "cargo_lock_digest",
       "official_preset_seed_manifest_digest",

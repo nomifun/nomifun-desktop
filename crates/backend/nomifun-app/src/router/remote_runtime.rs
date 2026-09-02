@@ -360,6 +360,7 @@ impl RemoteRuntimeCoordinator {
             artifact.executable,
             working_directory,
             artifact.target_id,
+            artifact.executable_digest,
             &artifact.release,
         )
         .map_err(AgentPlatformError::from)?;

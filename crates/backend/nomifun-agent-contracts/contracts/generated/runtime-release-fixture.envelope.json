@@ -2,6 +2,7 @@
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
     "manifest_version": "1.0.0",
+    "fixture_only": true,
     "pinned_source": {
       "repository_alias": "../codex",
       "pinned_commit": "dc2ccc6843abb09c9d297862dc10b6bd12a3935d"
@@ -33,7 +34,7 @@
       "coding_native",
       "managed_minimal"
     ],
-    "runtime_profile_contract_digest": "af9acd4f4cee6683dc43b943ad87f9e7e096c0bd656c42a0a9c840cf6101c3f4",
+    "runtime_profile_contract_digest": "2eed4d2aedef5955a3497129a286e808b4ed42f1eb7ab80da0230ae651a24321",
     "coding_capability_pack_digest": "f699f376a9414b7830b90a68c890d39010687499e6d16ee1687f5c370cd0127a",
     "native_feature_contract_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
     "native_action_contract_digest": "ae08f636e6c349505d95281e93279427641399e7fff498c30b85760b2c415665",
@@ -162,5 +163,5 @@
       "digest": "99fe64193883d1fd84dc939207839c080a45bd166d2eb6a7759d42b58d59448b"
     }
   },
-  "payload_digest": "7d86f492219867e52b35db103a8df8282ba0fd1acc0079b8c5d01b3236a7e17f"
+  "payload_digest": "3644b1c98865166ff0a225b520110dc765cfe6e036d1b3be16885e4683bcdefd"
 }

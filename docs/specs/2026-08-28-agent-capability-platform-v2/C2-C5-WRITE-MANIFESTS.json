@@ -203,7 +203,7 @@
       "crates/backend/nomifun-agent-contracts/src/lib.rs",
       "crates/backend/nomifun-agent-contracts/src/bin/agent-v2-contract.rs",
       "crates/backend/nomifun-agent-contracts/contracts/runtime/checkpoint-mismatch.json",
-      "crates/backend/nomifun-agent-contracts/contracts/runtime/codex-runtime-release-input.json",
+      "crates/backend/nomifun-agent-contracts/contracts/runtime/runtime-release-fixture.json",
       "crates/backend/nomifun-agent-contracts/contracts/validation/d025-compatibility-fixture-reference.envelope.json",
       "crates/backend/nomifun-agent-contracts/contracts/validation/d025-compatibility-fixture-reference.payload.json",
       "crates/backend/nomifun-agent-contracts/contracts/validation/d025-fixture-envelope-reference.json",

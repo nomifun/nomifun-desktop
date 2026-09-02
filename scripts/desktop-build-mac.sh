@@ -39,7 +39,7 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONF="apps/desktop/tauri.conf.json"
 MAC_CONF="apps/desktop/tauri.macos.conf.json"
 DIST="$ROOT/dist/desktop"
-RELEASE_INPUT="$ROOT/vendor/codex-runtime/release-input.json"
+RELEASE_LOCK_TOOL="$ROOT/scripts/release/release-lock.mjs"
 RUNTIME_STAGE="$ROOT/target/nomifun-runtime"
 CHECK_ONLY=0
 
@@ -72,12 +72,12 @@ require_tool() {
   }
 }
 
-for tool in bun rustup shasum file lipo install node; do
+for tool in bun git rustup shasum file lipo install node; do
   require_tool "$tool"
 done
 
-[[ -f "$RELEASE_INPUT" ]] || {
-  echo "❌ missing vendored Codex Runtime release input: $RELEASE_INPUT" >&2
+[[ -f "$RELEASE_LOCK_TOOL" ]] || {
+  echo "❌ missing release-lock tool: $RELEASE_LOCK_TOOL" >&2
   exit 1
 }
 [[ -f "$ROOT/$MAC_CONF" ]] || {
@@ -180,6 +180,14 @@ runtime_target_id() {
   esac
 }
 
+runtime_target_triple() {
+  case "$1" in
+    arm64) echo "aarch64-apple-darwin" ;;
+    x86_64) echo "x86_64-apple-darwin" ;;
+    *) echo "❌ unsupported macOS runtime architecture: $1" >&2; exit 1 ;;
+  esac
+}
+
 runtime_env_suffix() {
   case "$1" in
     arm64) echo "ARM64" ;;
@@ -230,25 +238,13 @@ runtime_hello_path() {
   printf '%s\n' "$value"
 }
 
-expected_sidecar_digest() {
-  local target_id="$1"
-  node - "$RELEASE_INPUT" "$target_id" <<'NODE'
-const fs = require('node:fs');
-const [manifestPath, targetId] = process.argv.slice(2);
-const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-const digest = manifest.target_matrix?.[targetId]?.sidecar_artifact?.digest;
-if (!digest) {
-  console.error(`release input has no required sidecar digest for ${targetId}`);
-  process.exit(1);
-}
-console.log(digest.toLowerCase());
-NODE
+runtime_staged_path() {
+  local arch="$1"
+  printf '%s\n' "$RUNTIME_STAGE/runtime/macos/$(runtime_resource_dir "$arch")/nomifun-codex-runtime"
 }
 
 validate_runtime_hello() {
   local arch="$1"
-  local target_id
-  target_id="$(runtime_target_id "$arch")"
   local hello_path
   hello_path="${2:-$(runtime_hello_path "$arch")}"
   [[ -f "$hello_path" && ! -L "$hello_path" ]] || {
@@ -256,32 +252,24 @@ validate_runtime_hello() {
     echo "   Set NOMIFUN_CODEX_RUNTIME_$(runtime_env_suffix "$arch")_HELLO_PATH or place the exact .hello.json beside the sidecar." >&2
     exit 1
   }
-  node - "$RELEASE_INPUT" "$hello_path" "$target_id" <<'NODE'
+  node - "$hello_path" "$(runtime_target_triple "$arch")" <<'NODE'
 const fs = require('node:fs');
-const crypto = require('node:crypto');
-const [releasePath, helloPath, targetId] = process.argv.slice(2);
-const release = JSON.parse(fs.readFileSync(releasePath, 'utf8'));
+const [helloPath, expectedTarget] = process.argv.slice(2);
 const hello = JSON.parse(fs.readFileSync(helloPath, 'utf8'));
+const sha256 = /^[0-9a-f]{64}$/;
+const gitSha = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
-function canonical(value) {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
-  }
-  return value;
-}
-function digest(value) {
-  return crypto.createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
-}
 function sortedStrings(value, field) {
   if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
     throw new Error(`${field} must be an array of strings`);
   }
-  return [...new Set(value)].sort();
+  const unique = [...new Set(value)];
+  if (unique.length !== value.length) throw new Error(`${field} must not contain duplicates`);
+  return unique.sort();
 }
 function exact(actual, expected, field) {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-    throw new Error(`${field} does not match the pinned release contract`);
+    throw new Error(`${field} does not match the runtime protocol contract`);
   }
 }
 
@@ -293,19 +281,25 @@ try {
     'full_auto', 'rpc_allowlist',
   ].sort();
   exact(Object.keys(hello).sort(), expectedKeys, 'hello fields');
-  const target = release.target_matrix?.[targetId];
-  if (!target?.runtime_target) throw new Error(`release input has no runtime target for ${targetId}`);
-  exact(hello.runtime_release_digest, digest(release), 'runtime_release_digest');
-  exact(hello.runtime_target, target.runtime_target, 'runtime_target');
-  exact(hello.fork_commit, release.fork_commit, 'fork_commit');
-  exact(hello.tracked_upstream_commit, release.tracked_upstream_commit, 'tracked_upstream_commit');
-  exact(hello.protocol_version, release.protocol_version, 'protocol_version');
-  exact(hello.protocol_schema_digest, release.protocol_schema_digest, 'protocol_schema_digest');
-  exact(sortedStrings(hello.supported_profiles, 'supported_profiles'), sortedStrings(release.supported_profiles, 'supported_profiles'), 'supported_profiles');
-  exact(hello.full_auto, release.full_auto, 'full_auto');
-  exact(sortedStrings(hello.rpc_allowlist.methods, 'rpc_allowlist.methods'), sortedStrings(release.rpc_allowlist.methods, 'rpc_allowlist.methods'), 'rpc_allowlist.methods');
+  if (!sha256.test(hello.runtime_release_digest)) throw new Error('runtime_release_digest must be canonical SHA-256');
+  if (!sha256.test(hello.runtime_build_digest)) throw new Error('runtime_build_digest must be canonical SHA-256');
+  if (!gitSha.test(hello.fork_commit)) throw new Error('fork_commit must be a canonical Git SHA');
+  exact(hello.tracked_upstream_commit, hello.fork_commit, 'tracked_upstream_commit');
+  if (!/^\d+\.\d+\.\d+$/.test(hello.protocol_version)) throw new Error('protocol_version must be semver');
+  if (!sha256.test(hello.protocol_schema_digest)) throw new Error('protocol_schema_digest must be canonical SHA-256');
+  exact(hello.runtime_target, expectedTarget, 'runtime_target');
+  exact(
+    sortedStrings(hello.supported_profiles, 'supported_profiles'),
+    ['coding_native', 'managed_minimal'],
+    'supported_profiles',
+  );
+  exact(hello.full_auto, { ask_for_approval: 'never', sandbox_policy: 'danger-full-access' }, 'full_auto');
+  exact(
+    sortedStrings(hello.rpc_allowlist.methods, 'rpc_allowlist.methods'),
+    ['cancel', 'create', 'follow_up', 'fork', 'resume', 'session_dispose', 'start_turn', 'steer'],
+    'rpc_allowlist.methods',
+  );
   exact(sortedStrings(hello.rpc_allowlist.experimental_methods, 'rpc_allowlist.experimental_methods'), [], 'rpc_allowlist.experimental_methods');
-  if (!/^[0-9a-f]{64}$/i.test(hello.runtime_build_digest)) throw new Error('runtime_build_digest must be a SHA-256 hex digest');
   sortedStrings(hello.native_features, 'native_features');
   sortedStrings(hello.native_actions, 'native_actions');
 } catch (error) {
@@ -341,21 +335,18 @@ stage_runtime_sidecar() {
   esac
   validate_runtime_hello "$arch" "$hello"
 
-  local expected actual destination destination_hello
-  expected="$(expected_sidecar_digest "$target_id")"
-  actual="$(shasum -a 256 "$source" | awk '{print tolower($1)}')"
-  [[ "$actual" == "$expected" ]] || {
-    echo "❌ Runtime sidecar SHA-256 mismatch for $target_id: expected $expected, got $actual" >&2
-    exit 1
-  }
-  destination="$RUNTIME_STAGE/runtime/macos/$(runtime_resource_dir "$arch")/nomifun-codex-runtime"
+  local source_digest staged_digest destination destination_hello
+  source_digest="$(shasum -a 256 "$source" | awk '{print tolower($1)}')"
+  destination="$(runtime_staged_path "$arch")"
   destination_hello="$destination.hello.json"
   mkdir -p "$(dirname "$destination")"
   install -m 755 "$source" "$destination"
   install -m 644 "$hello" "$destination_hello"
-  actual="$(shasum -a 256 "$destination" | awk '{print tolower($1)}')"
-  [[ "$actual" == "$expected" ]] || {
-    echo "❌ staged Runtime sidecar digest changed during copy: $destination" >&2
+  staged_digest="$(shasum -a 256 "$destination" | awk '{print tolower($1)}')"
+  [[ "$staged_digest" == "$source_digest" ]] || {
+    echo "❌ staged Runtime sidecar bytes differ from the supplied real artifact for $target_id" >&2
+    echo "   source: $source_digest" >&2
+    echo "   staged: $staged_digest" >&2
     exit 1
   }
   [[ -x "$destination" && ! -L "$destination" && ! -L "$destination_hello" ]] || {
@@ -405,11 +396,18 @@ verify_bundled_runtime() {
     exit 1
   }
   ensure_exact_case_path "$hello"
-  local expected actual
-  expected="$(expected_sidecar_digest "$target_id")"
-  actual="$(shasum -a 256 "$executable" | awk '{print tolower($1)}')"
-  [[ "$actual" == "$expected" ]] || {
-    echo "❌ packaged Runtime sidecar digest mismatch for $target_id: expected $expected, got $actual" >&2
+  local staged staged_digest packaged_digest
+  staged="$(runtime_staged_path "$arch")"
+  [[ -f "$staged" && ! -L "$staged" ]] || {
+    echo "❌ staged Runtime sidecar missing before package verification: $staged" >&2
+    exit 1
+  }
+  staged_digest="$(shasum -a 256 "$staged" | awk '{print tolower($1)}')"
+  packaged_digest="$(shasum -a 256 "$executable" | awk '{print tolower($1)}')"
+  [[ "$packaged_digest" == "$staged_digest" ]] || {
+    echo "❌ packaged Runtime sidecar bytes differ from staging for $target_id" >&2
+    echo "   staged:   $staged_digest" >&2
+    echo "   packaged: $packaged_digest" >&2
     exit 1
   }
   validate_runtime_hello "$arch" "$hello"
@@ -444,9 +442,51 @@ verify_macos_app() {
   fi
 }
 
+write_release_lock() {
+  local app="$1"
+  local target="$2"
+  local package="$3"
+  local output="$4"
+  local host="$app/Contents/MacOS/nomifun-desktop"
+  local license="$app/Contents/Resources/LICENSE"
+  local notice="$app/Contents/Resources/NOTICE"
+
+  for artifact in "$host" "$package" "$license" "$notice"; do
+    [[ -f "$artifact" && ! -L "$artifact" ]] || {
+      echo "❌ cannot create release lock; real packaged artifact is missing or symlinked: $artifact" >&2
+      exit 1
+    }
+  done
+
+  local args=(
+    "$RELEASE_LOCK_TOOL" create
+    --root "$ROOT"
+    --platform "$target"
+    --host "$host"
+    --package "$package"
+    --legal "$license"
+    --legal "$notice"
+    --output "$output"
+  )
+  if [[ "$target" == "universal-apple-darwin" || "$target" == "aarch64-apple-darwin" ]]; then
+    args+=(
+      --sidecar "macos_desktop_arm64=$app/Contents/Resources/runtime/macos/arm64/nomifun-codex-runtime"
+    )
+  fi
+  if [[ "$target" == "universal-apple-darwin" || "$target" == "x86_64-apple-darwin" ]]; then
+    args+=(
+      --sidecar "macos_desktop_x64=$app/Contents/Resources/runtime/macos/x64/nomifun-codex-runtime"
+    )
+  fi
+
+  echo "▶ 生成真实 release lock: $output"
+  bun "${args[@]}" >/dev/null
+  bun "$RELEASE_LOCK_TOOL" verify --root "$ROOT" --lock "$output" >/dev/null
+}
+
 stage_runtime_resources
 if [[ "$CHECK_ONLY" -eq 1 ]]; then
-  echo "✅ macOS Runtime packaging preflight passed; no app or DMG was built."
+  echo "✅ macOS Runtime packaging preflight passed; no app, DMG, or release lock was built."
   exit 0
 fi
 
@@ -473,6 +513,7 @@ echo "产物汇总目录: $DIST"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 COLLECTED=()
+COLLECTED_LOCKS=()
 for t in "${TRIPLES[@]}"; do
   echo ""
   echo "▶▶▶ 构建 $t ..."
@@ -492,8 +533,12 @@ for t in "${TRIPLES[@]}"; do
   notarize_dmg_dir "$dmg_dir"
 
   while IFS= read -r -d '' dmg; do
-    cp -f "$dmg" "$DIST/"
-    COLLECTED+=("$DIST/$(basename "$dmg")")
+    package="$DIST/$(basename "$dmg")"
+    lock="${package%.dmg}.release-lock.json"
+    cp -f "$dmg" "$package"
+    write_release_lock "$app" "$t" "$package" "$lock"
+    COLLECTED+=("$package")
+    COLLECTED_LOCKS+=("$lock")
   done < <(find "$dmg_dir" -maxdepth 1 -type f -name '*.dmg' -print0 2>/dev/null)
 done
 
@@ -514,5 +559,9 @@ echo "✅ 全部完成,DMG 已汇总到 $DIST :"
 for f in "${COLLECTED[@]}"; do
   size="$(du -h "$f" | cut -f1)"
   printf "   %-40s %s\n" "$(basename "$f")" "$size"
+done
+echo "Release locks:"
+for f in "${COLLECTED_LOCKS[@]}"; do
+  printf "   %s\n" "$(basename "$f")"
 done
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

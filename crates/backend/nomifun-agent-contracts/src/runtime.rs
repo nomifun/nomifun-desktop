@@ -26,6 +26,7 @@ pub const CODEX_BASELINE_PIN_MISMATCH: &str = "CODEX_BASELINE_PIN_MISMATCH";
 pub const CODEX_BASELINE_DRIFT_MISMATCH: &str = "CODEX_BASELINE_DRIFT_MISMATCH";
 pub const RUNTIME_RPC_ALLOWLIST_MISMATCH: &str = "RUNTIME_RPC_ALLOWLIST_MISMATCH";
 pub const RUNTIME_PROFILE_SET_MISMATCH: &str = "RUNTIME_PROFILE_SET_MISMATCH";
+pub const RUNTIME_RELEASE_FIXTURE_REQUIRED: &str = "RUNTIME_RELEASE_FIXTURE_REQUIRED";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -715,6 +716,7 @@ pub enum RuntimeReleaseTargetPayload {
 #[serde(deny_unknown_fields)]
 pub struct CodexRuntimeReleaseManifestPayload {
     pub manifest_version: VersionString,
+    pub fixture_only: bool,
     pub pinned_source: CodexPinnedSource,
     pub fork_commit: String,
     pub tracked_upstream_commit: String,
@@ -739,6 +741,13 @@ pub type CodexRuntimeReleaseManifest = ArtifactEnvelope<CodexRuntimeReleaseManif
 
 impl CodexRuntimeReleaseManifestPayload {
     pub fn validate(&self) -> Result<(), RuntimeContractViolation> {
+        if !self.fixture_only {
+            return Err(RuntimeContractViolation {
+                code: CanonicalErrorCode::from(RUNTIME_RELEASE_FIXTURE_REQUIRED),
+                message: "runtime release schema fixture must declare fixture_only=true"
+                    .to_owned(),
+            });
+        }
         self.pinned_source.validate_frozen_investigation_baseline()?;
         if self.tracked_upstream_commit != FROZEN_CODEX_INVESTIGATION_SHA {
             return Err(RuntimeContractViolation {

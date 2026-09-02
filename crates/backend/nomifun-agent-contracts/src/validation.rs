@@ -324,15 +324,14 @@ pub struct PlatformVerificationPoint {
     pub exact_check_id: GateCheckId,
 }
 
-/// Pre-run immutable input. Its own digest, status, evidence, logs, and summary
-/// are structurally absent and therefore cannot participate in its digest.
+/// Pre-run immutable input. The source commit, its own digest, status, evidence,
+/// logs, and summary are structurally absent and cannot participate in its
+/// digest. The Gate attaches the clean source commit to post-run evidence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlatformValidationManifestPayload {
     pub manifest_version: VersionString,
-    pub candidate_source_sha: CandidateSourceSha,
     pub confirmed_decision_contract_digest: ConfirmedDecisionContractDigestRef,
-    pub runtime_release_digest: CodexRuntimeReleaseDigestRef,
     pub canonical_schema_manifest_digest: DigestHex,
     pub cargo_lock_digest: DigestHex,
     pub official_preset_seed_manifest_digest: DigestHex,
@@ -1290,4 +1289,50 @@ pub enum ValidationContractError {
     HandoffBoundaryTargets,
     #[error("handoff contains a machine absolute or non-portable path")]
     NonPortableHandoffPath,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn pre_run_platform_manifest_rejects_source_commit() {
+        let mut value: Value = serde_json::from_str(include_str!(
+            "../contracts/validation/platform-validation-manifest.payload.json"
+        ))
+        .expect("parse pre-run PlatformValidationManifest fixture");
+
+        assert!(
+            value.get("candidate_source_sha").is_none(),
+            "pre-run PlatformValidationManifest must not contain a source commit"
+        );
+        serde_json::from_value::<PlatformValidationManifestPayload>(value.clone())
+            .expect("deserialize pre-run PlatformValidationManifest");
+
+        value
+            .as_object_mut()
+            .expect("PlatformValidationManifest must be an object")
+            .insert(
+                "candidate_source_sha".to_owned(),
+                json!("a".repeat(40)),
+            );
+        assert!(
+            serde_json::from_value::<PlatformValidationManifestPayload>(value).is_err(),
+            "legacy candidate_source_sha must be rejected"
+        );
+    }
+
+    #[test]
+    fn post_run_evidence_uses_a_synthetic_source_commit() {
+        let evidence: PlatformCellEvidence = serde_json::from_str(include_str!(
+            "../contracts/validation/platform-cell-evidence.example.json"
+        ))
+        .expect("deserialize post-run PlatformCellEvidence example");
+
+        assert_eq!(
+            evidence.cohort_tuple.candidate_source_sha.as_ref(),
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+    }
 }
