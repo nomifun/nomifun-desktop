@@ -4,10 +4,12 @@
 > 权威指令：`05-system-capability-replacement-foundation.zh.md` §6.2
 > Lane：`M2-W2-SSH`
 > 代码基线：`f97b281c669d9298413008921a2d65407473ffa9`
-> 指令基线：`d6de517056bb9d1b7eec1ec8e0c32e34cba97f40`
+> 主机指令来源：`4d1ea2b215794c7166c567f9e031a2bbbded8c92`
 > 分支：`rf/m2-w2-ssh-owner`
 
-旧 Prompt 已废止。将下方 Prompt 原样交给机器 2 的 coding agent。
+机器 2 分支只同步 05、本轮 GLOBAL TODO 和本 Prompt，不合并主机的中央
+Runtime/Gate/App 代码。旧 Prompt 已废止。将下方 Prompt 原样交给机器 2 的 coding
+agent。
 
 ```text
 你正在执行 NomiFun 一期止损后的机器 2 SSH 独立任务。
@@ -34,12 +36,18 @@
 git fetch origin --prune
 git switch --track -c rf/m2-w2-ssh-owner origin/rf/m2-w2-ssh-owner
 git status --porcelain
-git merge-base --is-ancestor d6de517056bb9d1b7eec1ec8e0c32e34cba97f40 HEAD
+git merge-base --is-ancestor f97b281c669d9298413008921a2d65407473ffa9 HEAD
+git diff --exit-code origin/rf/agent-capability-platform-v2 -- \
+  docs/specs/2026-08-28-agent-capability-platform-v2/05-system-capability-replacement-foundation.zh.md \
+  docs/specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md \
+  docs/specs/2026-08-28-agent-capability-platform-v2/MACHINE-2-W2-SSH-START-PROMPT.zh.md
 
 要求：
 
 - 工作树为空；
-- 最后一条命令退出码为 0；
+- 最后两条命令退出码为 0；
+- `f97b281c` 之后的既有提交在开始开发前只能是上述三份文档同步；
+- 不把主机 `4d1ea2b2` 的中央 Runtime/Gate/App 改动整体 merge/cherry-pick 到本分支；
 - 不 reset、不 force-push、不改写历史；
 - 若本地已有同名分支或未提交工作，使用新的 clean clone/worktree。
 
