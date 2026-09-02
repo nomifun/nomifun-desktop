@@ -224,6 +224,7 @@ pub struct ForkRequest {
     pub child_owner_ref: PrincipalRef,
     pub child_metadata: AgentSessionMetadata,
     pub child_agent_binding: AgentBindingValue,
+    pub parent_through_seq: u64,
     pub created_at: i64,
     pub producer_id: EventProducerId,
     pub operation_id: OperationId,

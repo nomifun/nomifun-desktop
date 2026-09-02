@@ -1177,6 +1177,7 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
             pinned: false,
         },
         child_agent_binding: binding(),
+        parent_through_seq: 1,
         created_at: 1_788_000_000_100,
         producer_id: EventProducerId("fork-coordinator".to_owned()),
         operation_id: OperationId("fork-operation-1".to_owned()),
@@ -1201,13 +1202,39 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
     );
     assert!(forked.contract.child_base_is_self_contained);
     assert!(!forked.contract.copies_full_transcript);
+    assert_eq!(forked.contract.fork.parent_through_seq, 1);
     assert_eq!(forked.child_cursor.seq, 2);
     let replay = store
-        .fork_session(&parent.agent_session_id, request)
+        .fork_session(&parent.agent_session_id, request.clone())
         .await
         .unwrap();
     assert_eq!(replay.child_session.agent_session_id, child_id);
     assert_eq!(replay.fork_ack, forked.fork_ack);
+
+    let mut changed_cursor = request.clone();
+    changed_cursor.parent_through_seq = 2;
+    assert_eq!(
+        store
+            .fork_session(&parent.agent_session_id, changed_cursor)
+            .await
+            .unwrap_err()
+            .code(),
+        Some("IDEMPOTENCY_CONFLICT")
+    );
+
+    let mut beyond_head = request;
+    beyond_head.child_session_id = session_id();
+    beyond_head.idempotency_key = IdempotencyKey("fork-idem-beyond-head".to_owned());
+    beyond_head.operation_id = OperationId("fork-operation-beyond-head".to_owned());
+    beyond_head.parent_through_seq = u64::MAX;
+    assert_eq!(
+        store
+            .fork_session(&parent.agent_session_id, beyond_head)
+            .await
+            .unwrap_err()
+            .code(),
+        Some("INVALID_SESSION")
+    );
 
     let delete = DeleteAgentSessionCommand {
         operation_id: OperationId("delete-parent".to_owned()),
