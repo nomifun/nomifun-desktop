@@ -7,6 +7,7 @@
 //! path. No legacy entry is enumerated, copied, imported, or restored.
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use nomifun_common::paths;
 use nomifun_v4_root::FreshV4OperationKind;
@@ -38,8 +39,35 @@ pub struct RelocationMarker {
 /// data-layer path to open or mutate the canonical root.
 pub fn resolve_startup_data_root(requested: PathBuf) -> PathBuf {
     let canonical = normalize_requested_startup_data_root(requested);
-    let outcome = super::v4_root::bootstrap_data_root(&canonical)
-        .unwrap_or_else(|error| panic!("{error:#}"));
+    let allow_dev_recovery = crate::channel::channel() != "stable"
+        && is_known_default_location(&canonical);
+    let outcome = match super::v4_root::bootstrap_data_root(&canonical) {
+        Ok(outcome) => outcome,
+        Err(error) if allow_dev_recovery && is_expected_dev_contract_drift(&error) => {
+            let archive = archive_stale_dev_root(&canonical)
+                .unwrap_or_else(|archive_error| {
+                    panic!(
+                        "{error:#}; stale development root could not be archived: \
+                         {archive_error:#}"
+                    )
+                });
+            record_boot_note(
+                BootNoteLevel::Warn,
+                format!(
+                    "archived stale development Fresh-v4 root at {}",
+                    archive.display()
+                ),
+            );
+            super::v4_root::bootstrap_data_root(&canonical).unwrap_or_else(|retry_error| {
+                panic!(
+                    "Fresh-v4 development root rebuild failed after archiving {}: \
+                     {retry_error:#}",
+                    archive.display()
+                )
+            })
+        }
+        Err(error) => panic!("{error:#}"),
+    };
 
     match outcome.operation_kind {
         Some(FreshV4OperationKind::Fresh) => record_boot_note(
@@ -59,6 +87,57 @@ pub fn resolve_startup_data_root(requested: PathBuf) -> PathBuf {
         None => {}
     }
     canonical
+}
+
+fn is_expected_dev_contract_drift(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}");
+    message.contains("ready root schema_metadata does not match the embedded Fresh-v4 contract")
+        || message.contains("Fresh-v4 ready marker application build digest does not match this build")
+}
+
+/// Preserve, then replace, only the active default development root whose
+/// Fresh-v4 contract predates the current pre-Stable source. This deliberately
+/// does not inspect, import, or delete descendants; the whole directory is
+/// moved as one sibling so the old dataset remains available for diagnosis.
+fn archive_stale_dev_root(data_root: &Path) -> anyhow::Result<PathBuf> {
+    let metadata = std::fs::symlink_metadata(data_root)
+        .map_err(|error| anyhow::anyhow!("inspect stale development root: {error}"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "stale development root is not a real directory: {}",
+            data_root.display()
+        );
+    }
+    let parent = data_root
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("stale development root has no parent"))?;
+    let basename = data_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty() && *value != "." && *value != "..")
+        .ok_or_else(|| anyhow::anyhow!("stale development root has an invalid basename"))?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let mut archive = parent.join(format!("{basename}.stale-v4-archive-{timestamp}"));
+    if archive.exists() {
+        archive = parent.join(format!(
+            "{basename}.stale-v4-archive-{timestamp}-{}",
+            uuid::Uuid::now_v7()
+        ));
+    }
+    if archive.parent() != Some(parent) || archive == *data_root {
+        anyhow::bail!("stale development archive target escaped the data root parent");
+    }
+    std::fs::rename(data_root, &archive).map_err(|error| {
+        anyhow::anyhow!(
+            "atomically archive stale development root {} -> {}: {error}",
+            data_root.display(),
+            archive.display()
+        )
+    })?;
+    Ok(archive)
 }
 
 pub(super) fn normalize_requested_startup_data_root(
@@ -95,6 +174,7 @@ fn known_default_locations() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn historical_self_exports_normalize_to_current_channel_root() {
@@ -133,5 +213,24 @@ mod tests {
                 PathBuf::from(format!(r"\\?\{}", legacy.display()));
             assert!(is_known_default_location(&verbatim));
         }
+    }
+
+    #[test]
+    fn stale_dev_root_archive_moves_the_whole_directory_without_deleting_it() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("NomiFun-dev");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("sentinel"), b"old").unwrap();
+
+        let archive = archive_stale_dev_root(&root).unwrap();
+        assert!(!root.exists());
+        assert_eq!(std::fs::read(archive.join("sentinel")).unwrap(), b"old");
+        assert!(
+            archive
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("NomiFun-dev.stale-v4-archive-")
+        );
     }
 }

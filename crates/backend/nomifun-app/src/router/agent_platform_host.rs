@@ -49,7 +49,7 @@ use nomifun_v4_root::{
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
-#[cfg(feature = "computer-use")]
+#[cfg(any(feature = "browser-use", feature = "computer-use"))]
 use super::agent_role_host::RoleHostPortAdapter;
 use super::agent_wave2_host::Wave2ApplicationHost;
 use super::agent_wave4_host::Wave4ApplicationHost;
@@ -1194,6 +1194,23 @@ impl AgentDomainHostPorts {
         }
     }
 
+    #[cfg(feature = "browser-use")]
+    fn with_browser_hub(
+        mut self,
+        hub: Arc<nomifun_browser_platform::BrowserSessionHub>,
+    ) -> Self {
+        let browser_runtime =
+            Arc::new(super::agent_role_host::BrowserRoleRuntime::new(hub));
+        self.wave2_roles.browser_actions = Arc::new(RoleHostPortAdapter::new(
+            Arc::clone(&browser_runtime) as Arc<dyn super::agent_role_host::RoleHostInvoker>,
+        ));
+        self.wave2_roles.browser_contexts = Arc::clone(&browser_runtime)
+            as Arc<dyn nomifun_agent_domain_wave2::Wave2ContextHostPort>;
+        self.wave2_roles.browser_resources =
+            browser_runtime as Arc<dyn nomifun_agent_domain_wave2::Wave2ResourceHostPort>;
+        self
+    }
+
     #[cfg(test)]
     fn with_wave1_and_wave2(
         wave1: Arc<dyn Wave1HostPort>,
@@ -1214,6 +1231,7 @@ impl AgentDomainHostPorts {
 /// provider/model/connection facts remain in the same canonical database; the
 /// explicit `None` path is retained for test fixtures that exercise the
 /// fail-closed unconfigured broker shape.
+#[cfg(not(feature = "browser-use"))]
 pub(crate) async fn build_from_open_pool(
     pool: SqlitePool,
     ready_path: PathBuf,
@@ -1233,6 +1251,130 @@ pub(crate) async fn build_from_open_pool(
         AgentDomainHostPorts::for_workspace_root(workspace_root),
     )
     .await
+}
+
+#[cfg(feature = "browser-use")]
+pub(crate) async fn build_from_open_pool_with_browser(
+    pool: SqlitePool,
+    ready_path: PathBuf,
+    marker: FreshV4ReadyMarker,
+    expected_schema_digest: DigestHex,
+    provider_pool: Option<SqlitePool>,
+    encryption_key: [u8; 32],
+    workspace_root: PathBuf,
+    browser_hub: Option<Arc<nomifun_browser_platform::BrowserSessionHub>>,
+) -> anyhow::Result<Arc<AgentPlatform>> {
+    let host_ports = AgentDomainHostPorts::for_workspace_root(workspace_root);
+    let host_ports = match browser_hub {
+        Some(hub) => host_ports.with_browser_hub(hub),
+        None => host_ports,
+    };
+    build_from_open_pool_with_host_ports(
+        pool,
+        ready_path,
+        marker,
+        expected_schema_digest,
+        provider_pool,
+        encryption_key,
+        host_ports,
+    )
+    .await
+}
+
+#[cfg(feature = "browser-use")]
+pub(crate) async fn build_browser_session_hub(
+    data_dir: &Path,
+    workspace_root: &Path,
+    encryption_key: [u8; 32],
+) -> anyhow::Result<Option<Arc<nomifun_browser_platform::BrowserSessionHub>>> {
+    let browser_data = data_dir.join("browser-data");
+    let platform_profiles = browser_data.join("platform-profiles");
+    let recovery = tokio::task::spawn_blocking(move || {
+        use nomi_browser_engine::profile::{
+            ProfileRecoveryMode, ProfileRecoveryReport, recover_owned_profiles,
+        };
+
+        let mut report = ProfileRecoveryReport::default();
+        for profiles_root in [
+            browser_data.join("profiles"),
+            platform_profiles.join("anonymous"),
+            platform_profiles.join("replica"),
+            platform_profiles.join("isolated"),
+        ] {
+            report.merge(recover_owned_profiles(
+                &profiles_root,
+                ProfileRecoveryMode::DeleteEphemeralProfile,
+            ));
+        }
+        for stable_root in [
+            browser_data.join("profile"),
+            platform_profiles.join("primary"),
+        ] {
+            report.merge(recover_owned_profiles(
+                &stable_root,
+                ProfileRecoveryMode::PreserveStableProfile,
+            ));
+        }
+        report
+    })
+    .await;
+    let recovery = match recovery {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::error!(
+                cancelled = error.is_cancelled(),
+                panic = error.is_panic(),
+                "Fresh-v4 Browser profile recovery worker failed; Browser remains unavailable"
+            );
+            return Ok(None);
+        }
+    };
+    if recovery.failures != 0 || recovery.profiles_preserved != 0 {
+        tracing::error!(
+            summary = %recovery.safety_summary(),
+            "Fresh-v4 Browser profile recovery was not proven safe; Browser remains unavailable"
+        );
+        return Ok(None);
+    }
+
+    let storage_state = nomi_browser_engine::load_storage_state(
+        &nomi_browser_engine::shared_storage_state_path(data_dir),
+        &encryption_key,
+    )
+    .map(nomi_browser_engine::StorageState::into_cookie_only)
+    .and_then(|state| state.to_json().ok());
+    let startup_identity_snapshot = storage_state.clone();
+    let engine_config = nomi_browser_engine::EngineConfig {
+        data_dir: data_dir.join("browser-data"),
+        bundled_dir: crate::browser_resource::bundled_chrome_dir(),
+        headful: false,
+        chrome_source: nomi_browser_engine::ChromeSource::System,
+        workspace_dir: Some(workspace_root.to_path_buf()),
+        evaluate_full_power: false,
+        evaluate_persistent_login: true,
+        storage_state,
+        ..Default::default()
+    };
+    let factory = nomi_browser::ManagedEngineHostFactory::new(engine_config)
+        .with_identity_vault(
+            nomi_browser_engine::shared_storage_state_path(data_dir),
+            encryption_key,
+        )
+        .with_lane_policy(Arc::new(move |tool| {
+            tool.persistent_login_key(encryption_key)
+        }));
+    let hub = Arc::new(nomifun_browser_platform::BrowserSessionHub::new(
+        Arc::new(factory),
+        nomifun_browser_platform::HubConfig::default(),
+    ));
+    if let Some(payload) = startup_identity_snapshot {
+        hub.publish_identity_snapshot(
+            nomifun_browser_platform::IdentitySnapshotPayload::from_json(payload),
+            nomifun_browser_platform::SnapshotCoverage::cookies_only(),
+        )
+        .map_err(|error| anyhow::anyhow!("seed Browser identity snapshot: {error}"))?;
+    }
+    Ok(Some(hub))
 }
 
 /// Build the canonical Agent platform with explicit domain action ports.

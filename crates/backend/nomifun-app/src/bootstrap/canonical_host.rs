@@ -58,6 +58,8 @@ pub enum CanonicalHost {
 pub struct FreshV4Application {
     pool: SqlitePool,
     platform: Arc<AgentPlatform>,
+    #[cfg(feature = "browser-use")]
+    browser_hub: Option<Arc<nomifun_browser_platform::BrowserSessionHub>>,
     remote_runtime: Arc<RemoteRuntimeCoordinator>,
     user_repo: Arc<dyn IUserRepository>,
     jwt_service: Arc<JwtService>,
@@ -161,13 +163,35 @@ impl FreshV4Application {
 
     pub async fn close(self) -> Result<()> {
         self.remote_runtime.shutdown().await;
-        let shutdown = self
+        let platform_shutdown = self
             .platform
             .shutdown()
             .await
             .context("shut down Fresh-v4 runtime bindings");
+        #[cfg(feature = "browser-use")]
+        let browser_shutdown = match self.browser_hub {
+            Some(hub) => hub
+                .close_all()
+                .await
+                .map(|_| ())
+                .map_err(|error| anyhow::anyhow!("shut down Fresh-v4 Browser Hub: {error}")),
+            None => Ok(()),
+        };
         self.platform.pool().close().await;
-        shutdown
+        #[cfg(feature = "browser-use")]
+        {
+            match (platform_shutdown, browser_shutdown) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+                (Err(error), Err(browser_error)) => Err(anyhow::anyhow!(
+                    "{error:#}; Browser cleanup also failed: {browser_error:#}"
+                )),
+            }
+        }
+        #[cfg(not(feature = "browser-use"))]
+        {
+            platform_shutdown
+        }
     }
 }
 
@@ -255,7 +279,38 @@ impl FreshV4Host {
                 return Err(error);
             }
         };
-        let platform = match agent_platform_host::build_from_open_pool(
+        #[cfg(feature = "browser-use")]
+        let browser_hub = match agent_platform_host::build_browser_session_hub(
+            self.canonical_root(),
+            &config.work_dir,
+            encryption_key,
+        )
+        .await
+        {
+            Ok(hub) => hub,
+            Err(error) => {
+                pool.close().await;
+                return Err(error);
+            }
+        };
+        #[cfg(feature = "browser-use")]
+        let platform_result = agent_platform_host::build_from_open_pool_with_browser(
+            pool.clone(),
+            self.canonical_root()
+                .join(nomifun_v4_root::FRESH_V4_READY_MARKER_FILE),
+            self.outcome.ready_marker.clone(),
+            self.outcome
+                .ready_marker
+                .canonical_schema_manifest_digest
+                .clone(),
+            Some(pool.clone()),
+            encryption_key,
+            config.work_dir.clone(),
+            browser_hub.clone(),
+        )
+        .await;
+        #[cfg(not(feature = "browser-use"))]
+        let platform_result = agent_platform_host::build_from_open_pool(
             pool.clone(),
             self.canonical_root()
                 .join(nomifun_v4_root::FRESH_V4_READY_MARKER_FILE),
@@ -268,10 +323,14 @@ impl FreshV4Host {
             encryption_key,
             config.work_dir.clone(),
         )
-        .await
-        {
+        .await;
+        let platform = match platform_result {
             Ok(platform) => platform,
             Err(error) => {
+                #[cfg(feature = "browser-use")]
+                if let Some(hub) = browser_hub {
+                    let _ = hub.close_all().await;
+                }
                 pool.close().await;
                 return Err(error);
             }
@@ -449,6 +508,8 @@ impl FreshV4Host {
         Ok(FreshV4Application {
             pool,
             platform,
+            #[cfg(feature = "browser-use")]
+            browser_hub,
             remote_runtime,
             user_repo,
             jwt_service,
@@ -1070,15 +1131,20 @@ mod tests {
         };
 
         let application = host.compose(&config).await.unwrap();
-        assert_eq!(
-            application
-                .platform()
-                .materialized_registry()
-                .unwrap()
-                .capabilities
-                .len(),
-            137
-        );
+        let actual_capabilities = application
+            .platform()
+            .materialized_registry()
+            .unwrap()
+            .capabilities
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected_capabilities = nomifun_agent_domain_support::c7_package_specs()
+            .into_iter()
+            .flat_map(|package| package.capabilities)
+            .map(|capability| nomifun_agent_contracts::CapabilityId::from(capability.id))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual_capabilities, expected_capabilities);
         assert!(
             directory
                 .path()

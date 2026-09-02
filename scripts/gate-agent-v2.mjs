@@ -60,6 +60,8 @@ const requiredFiles = [
 const commands = [];
 const failures = [];
 const COMMAND_MAX_BUFFER = 64 * 1024 * 1024;
+const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
+const WORKSPACE_COMMAND_TIMEOUT_MS = 15 * 60 * 1000;
 
 function run(command, commandArgs) {
   const startedAt = new Date().toISOString();
@@ -2619,15 +2621,16 @@ function c8RunCommand(
   } = {}
 ) {
   const startedAt = new Date().toISOString();
+  const effectiveTimeout = timeout ?? DEFAULT_COMMAND_TIMEOUT_MS;
   let result;
   try {
     result = spawnSync(command, commandArgs, {
       cwd: repoRoot,
       encoding: 'utf8',
-      shell: process.platform === 'win32',
+      shell: false,
       stdio: 'pipe',
       maxBuffer: COMMAND_MAX_BUFFER,
-      ...(timeout ? { timeout } : {}),
+      timeout: effectiveTimeout,
     });
   } catch (error) {
     result = {
@@ -2660,6 +2663,9 @@ function c8RunCommand(
     finished_at: new Date().toISOString(),
     exit_code: exitCode,
     status: exitCode === 0 ? 'pass' : 'fail',
+    timeout_ms: effectiveTimeout,
+    timed_out: result.error?.code === 'ETIMEDOUT',
+    signal: result.signal || null,
     stdout_log: stdoutRelative,
     stdout_sha256: sha256File(stdoutPath),
     stderr_log: stderrRelative,
@@ -2672,13 +2678,19 @@ function c8RunCommand(
   commands.push(entry);
   c8Check(report, checkId, entry.status, entry);
   if (entry.status === 'fail' && addFailure) {
-    c8Failure(report, 'command_failed', `${checkId} failed`, {
+    c8Failure(
+      report,
+      entry.timed_out ? 'command_timed_out' : 'command_failed',
+      entry.timed_out ? `${checkId} exceeded its deadline` : `${checkId} failed`,
+      {
       check_id: checkId,
       command: commandText,
       exit_code: exitCode,
+      timeout_ms: effectiveTimeout,
       stderr_tail: c8Tail(stderr),
       stdout_tail: c8Tail(stdout),
-    });
+      }
+    );
   }
   return { result, entry, stdout, stderr };
 }
@@ -5410,6 +5422,7 @@ function c8RunToolchainProbe(report) {
   for (const [checkId, command, args] of probes) {
     c8RunCommand(report, checkId, command, args, {
       addFailure: checkId === 'windows_target_installed',
+      timeout: 30 * 1000,
     });
   }
   const targetEntry = report.checks.find(
@@ -5562,7 +5575,7 @@ function c8RunDeclaredC8Checks(report, manifest) {
         {
           displayCommand: expected.command,
           addFailure: true,
-          timeout: 60 * 60 * 1000,
+          timeout: WORKSPACE_COMMAND_TIMEOUT_MS,
         }
       );
       if (run.entry.status === 'pass') {

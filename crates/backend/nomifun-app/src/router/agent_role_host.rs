@@ -30,6 +30,16 @@ use nomifun_agent_domain_wave2::{
 };
 #[cfg(feature = "computer-use")]
 use nomifun_agent_kernel::ContextContributionResult;
+#[cfg(feature = "browser-use")]
+use nomifun_agent_kernel::{
+    ContextContributionResult as BrowserContextContributionResult, ResourceProviderResult,
+};
+#[cfg(feature = "browser-use")]
+use nomifun_agent_domain_wave2::{
+    Wave2ContextCapabilityOperation as BrowserContextOperation, Wave2ContextHostPort as BrowserContextHostPort,
+    Wave2ContextHostRequest as BrowserContextHostRequest, Wave2ResourceCapabilityOperation,
+    Wave2ResourceHostPort, Wave2ResourceHostRequest,
+};
 
 pub(crate) const BROWSER_ROLE_ID: &str = "system.browser_use";
 pub(crate) const COMPUTER_ROLE_ID: &str = "system.computer_use";
@@ -204,11 +214,10 @@ impl RoleHostContext {
     }
 }
 
-fn exact_resource<'a>(
+fn exact_owned_resource<'a>(
     bindings: &'a [TypedResourceBinding],
     expected_kind: &'static str,
     principal: &PrincipalRef,
-    operation: &'static str,
 ) -> Result<&'a TypedResourceBinding, RoleHostError> {
     let matching = bindings
         .iter()
@@ -225,6 +234,16 @@ fn exact_resource<'a>(
     {
         return Err(RoleHostError::InvalidContext("resource identity"));
     }
+    Ok(binding)
+}
+
+fn exact_resource<'a>(
+    bindings: &'a [TypedResourceBinding],
+    expected_kind: &'static str,
+    principal: &PrincipalRef,
+    operation: &'static str,
+) -> Result<&'a TypedResourceBinding, RoleHostError> {
+    let binding = exact_owned_resource(bindings, expected_kind, principal)?;
     if !binding.operations.contains(operation) {
         return Err(RoleHostError::ResourceOperationDenied(operation));
     }
@@ -455,6 +474,7 @@ mod browser {
     /// adapter never opens a lane from a model selector.
     pub(crate) struct BrowserRoleHost {
         client: BrowserLaneClient,
+        lane_id: BrowserLaneId,
         expected_provider: ExactRoleProviderRef,
         expected_snapshot: ResolvedSnapshotRef,
         expected_registry_generation: u64,
@@ -463,12 +483,14 @@ mod browser {
     impl BrowserRoleHost {
         pub(crate) fn new(
             client: BrowserLaneClient,
+            lane_id: BrowserLaneId,
             expected_provider: ExactRoleProviderRef,
             expected_snapshot: ResolvedSnapshotRef,
             expected_registry_generation: u64,
         ) -> Self {
             Self {
                 client,
+                lane_id,
                 expected_provider,
                 expected_snapshot,
                 expected_registry_generation,
@@ -500,24 +522,26 @@ mod browser {
             {
                 return Err(RoleHostError::ResourceIdentityMismatch);
             }
-            if self.client.caller().surface != nomifun_browser_platform::BrowserSurface::Native {
+            if !matches!(
+                self.client.caller().surface,
+                nomifun_browser_platform::BrowserSurface::Native
+                    | nomifun_browser_platform::BrowserSurface::Acp
+            ) {
                 return Err(RoleHostError::ProviderUnavailable);
             }
-            let binding = exact_resource(
+            let _binding = exact_resource(
                 &context.resource_bindings,
                 BROWSER_RESOURCE_KIND,
                 &context.principal,
                 operation.resource_operation(),
             )?;
-            let lane_id = BrowserLaneId::parse(binding.resource_id.as_ref().to_owned())
-                .map_err(|_| RoleHostError::ResourceIdentityMismatch)?;
             let platform_operation = operation.into_platform_operation()?;
 
             // BrowserSessionHub owns exact-lane serialization. Adding an app
             // mutex here would either serialize unrelated lanes or hold a
             // synchronous guard across browser I/O.
             self.client
-                .execute(&lane_id, platform_operation)
+                .execute(&self.lane_id, platform_operation)
                 .await
                 .map_err(|error| RoleHostError::ProviderFailure(error.to_string()))
         }
@@ -541,12 +565,13 @@ pub(crate) struct BoundBrowserRoleInvoker {
 impl BoundBrowserRoleInvoker {
     pub(crate) fn new(
         client: nomifun_browser_platform::BrowserLaneClient,
+        lane_id: nomifun_browser_platform::BrowserLaneId,
         provider: ExactRoleProviderRef,
         snapshot: ResolvedSnapshotRef,
         registry_generation: u64,
     ) -> Self {
         Self {
-            host: BrowserRoleHost::new(client, provider, snapshot, registry_generation),
+            host: BrowserRoleHost::new(client, lane_id, provider, snapshot, registry_generation),
         }
     }
 }
@@ -641,6 +666,582 @@ impl RoleHostInvoker for BoundBrowserRoleInvoker {
             "active_frame_id": result.active_frame_id,
             "ref_generation": result.ref_generation
         })))
+    }
+}
+
+#[cfg(feature = "browser-use")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct BrowserResourceKey {
+    agent_session_id: String,
+    snapshot_digest: String,
+    binding_id: String,
+}
+
+#[cfg(feature = "browser-use")]
+struct BrowserRoleResource {
+    identity: nomifun_agent_kernel::ResourceHandleIdentity,
+    client: nomifun_browser_platform::BrowserLaneClient,
+    lane_id: nomifun_browser_platform::BrowserLaneId,
+    hub: Arc<nomifun_browser_platform::BrowserSessionHub>,
+    renewal: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    released: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "browser-use")]
+impl BrowserRoleResource {
+    fn key(
+        context: &nomifun_agent_domain_wave2::Wave2RoleMemberContext,
+        binding: &TypedResourceBinding,
+    ) -> BrowserResourceKey {
+        BrowserResourceKey {
+            agent_session_id: context.agent_session_id.as_ref().to_owned(),
+            snapshot_digest: context
+                .resolved_snapshot_ref
+                .snapshot_digest
+                .as_ref()
+                .to_owned(),
+            binding_id: binding.binding_id.as_ref().to_owned(),
+        }
+    }
+
+    fn action_key(
+        request: &Wave2TypedHostRequest,
+        binding: &TypedResourceBinding,
+    ) -> BrowserResourceKey {
+        BrowserResourceKey {
+            agent_session_id: request.context.agent_session_id.as_ref().to_owned(),
+            snapshot_digest: request
+                .context
+                .resolved_snapshot_ref
+                .snapshot_digest
+                .as_ref()
+                .to_owned(),
+            binding_id: binding.binding_id.as_ref().to_owned(),
+        }
+    }
+
+    fn start_renewal(
+        hub: Arc<nomifun_browser_platform::BrowserSessionHub>,
+        lease_id: nomifun_browser_platform::OwnerLeaseId,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                if hub.renew_owner_lease(&lease_id).is_err() {
+                    let _ = hub.revoke_owner_lease(&lease_id).await;
+                    break;
+                }
+            }
+        })
+    }
+}
+
+#[cfg(feature = "browser-use")]
+#[async_trait::async_trait]
+impl nomifun_agent_kernel::ResourceHandle for BrowserRoleResource {
+    fn identity(&self) -> &nomifun_agent_kernel::ResourceHandleIdentity {
+        &self.identity
+    }
+
+    async fn release(&self) -> Result<(), nomifun_agent_kernel::KernelError> {
+        use std::sync::atomic::Ordering;
+
+        if self.released.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        if let Some(task) = self
+            .renewal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            task.abort();
+        }
+        self.hub
+            .revoke_owner_lease(&self.client.caller().owner_lease_id)
+            .await
+            .map(|_| ())
+            .map_err(|error| nomifun_agent_kernel::KernelError::CapabilityExecution {
+                reason: format!("Browser resource cleanup failed: {error}"),
+            })
+    }
+}
+
+#[cfg(feature = "browser-use")]
+impl Drop for BrowserRoleResource {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        if self.released.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(task) = self
+            .renewal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            task.abort();
+        }
+        let _ = self
+            .client
+            .handoff_bound_lane_cleanup(self.lane_id.clone());
+    }
+}
+
+#[cfg(feature = "browser-use")]
+pub(crate) struct BrowserRoleRuntime {
+    hub: Arc<nomifun_browser_platform::BrowserSessionHub>,
+    resources: tokio::sync::Mutex<
+        std::collections::HashMap<
+            BrowserResourceKey,
+            std::sync::Weak<BrowserRoleResource>,
+        >,
+    >,
+}
+
+#[cfg(feature = "browser-use")]
+impl BrowserRoleRuntime {
+    pub(crate) fn new(hub: Arc<nomifun_browser_platform::BrowserSessionHub>) -> Self {
+        Self {
+            hub,
+            resources: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    async fn wait_until_running(
+        client: &nomifun_browser_platform::BrowserLaneClient,
+        lane_id: &nomifun_browser_platform::BrowserLaneId,
+    ) -> Result<(), RoleHostError> {
+        for _ in 0..120 {
+            let status = client
+                .status(lane_id)
+                .await
+                .map_err(|error| RoleHostError::ProviderFailure(error.to_string()))?;
+            match status.lifecycle_state {
+                nomifun_browser_platform::LaneLifecycleState::Running
+                | nomifun_browser_platform::LaneLifecycleState::Frozen => return Ok(()),
+                nomifun_browser_platform::LaneLifecycleState::Failed
+                | nomifun_browser_platform::LaneLifecycleState::Stopping => {
+                    return Err(RoleHostError::ProviderUnavailable);
+                }
+                nomifun_browser_platform::LaneLifecycleState::Queued
+                | nomifun_browser_platform::LaneLifecycleState::Starting => {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+            }
+        }
+        Err(RoleHostError::ProviderFailure(
+            "Browser lane did not become ready before its 30 second deadline".to_owned(),
+        ))
+    }
+
+    async fn acquire(
+        &self,
+        context: &nomifun_agent_domain_wave2::Wave2RoleMemberContext,
+    ) -> Result<Arc<BrowserRoleResource>, RoleHostError> {
+        let binding = exact_owned_resource(
+            &context.resource_bindings,
+            BROWSER_RESOURCE_KIND,
+            &context.principal,
+        )?;
+        let key = BrowserRoleResource::key(context, binding);
+        {
+            let mut resources = self.resources.lock().await;
+            resources.retain(|_, handle| handle.strong_count() > 0);
+            if let Some(handle) = resources.get(&key).and_then(std::sync::Weak::upgrade) {
+                return Ok(handle);
+            }
+        }
+
+        let runtime_instance_id =
+            format!("agent-session:{}", context.agent_session_id.as_ref());
+        let lease = self
+            .hub
+            .issue_owner_lease(
+                context.principal.principal_id.clone(),
+                Some(context.agent_session_id.as_ref().to_owned()),
+                runtime_instance_id.clone(),
+            )
+            .map_err(|error| RoleHostError::ProviderFailure(error.to_string()))?;
+        let caller = nomifun_browser_platform::CallerIdentity {
+            user_id: context.principal.principal_id.clone(),
+            conversation_id: Some(context.agent_session_id.as_ref().to_owned()),
+            runtime_instance_id,
+            agent_id: Some(context.agent_session_id.as_ref().to_owned()),
+            companion_id: None,
+            execution_id: None,
+            step_id: None,
+            attempt_id: None,
+            remote_connection_id: None,
+            surface: nomifun_browser_platform::BrowserSurface::Acp,
+            owner_lease_id: lease.lease_id.clone(),
+            capability_expires_at_ms: u64::MAX,
+            allowed_operations: std::collections::BTreeSet::from([
+                nomifun_browser_platform::BrowserOperationKind::Navigate,
+                nomifun_browser_platform::BrowserOperationKind::Observe,
+                nomifun_browser_platform::BrowserOperationKind::Act,
+                nomifun_browser_platform::BrowserOperationKind::Screenshot,
+                nomifun_browser_platform::BrowserOperationKind::Tabs,
+                nomifun_browser_platform::BrowserOperationKind::Download,
+                nomifun_browser_platform::BrowserOperationKind::Debug,
+                nomifun_browser_platform::BrowserOperationKind::Manage,
+                nomifun_browser_platform::BrowserOperationKind::Crawl,
+            ]),
+        };
+        let client = match self.hub.bind(caller) {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = self.hub.revoke_owner_lease(&lease.lease_id).await;
+                return Err(RoleHostError::ProviderFailure(error.to_string()));
+            }
+        };
+        let opened = match client
+            .open(
+                Some("default"),
+                nomifun_browser_platform::BrowserIdentityMode::Primary,
+                None,
+            )
+            .await
+        {
+            Ok(opened) => opened,
+            Err(error) => {
+                let _ = self.hub.revoke_owner_lease(&lease.lease_id).await;
+                return Err(RoleHostError::ProviderFailure(error.to_string()));
+            }
+        };
+        let lane_id = opened.lane().lane_id.clone();
+        if let Err(error) = Self::wait_until_running(&client, &lane_id).await {
+            let _ = self.hub.revoke_owner_lease(&lease.lease_id).await;
+            return Err(error);
+        }
+        let handle = Arc::new(BrowserRoleResource {
+            identity: nomifun_agent_kernel::ResourceHandleIdentity {
+                binding_id: binding.binding_id.clone(),
+                resource_kind: binding.resource_kind.clone(),
+                resource_id: binding.resource_id.clone(),
+            },
+            client,
+            lane_id,
+            hub: Arc::clone(&self.hub),
+            renewal: std::sync::Mutex::new(Some(BrowserRoleResource::start_renewal(
+                Arc::clone(&self.hub),
+                lease.lease_id,
+            ))),
+            released: std::sync::atomic::AtomicBool::new(false),
+        });
+
+        let mut resources = self.resources.lock().await;
+        if let Some(existing) = resources.get(&key).and_then(std::sync::Weak::upgrade) {
+            drop(resources);
+            nomifun_agent_kernel::ResourceHandle::release(handle.as_ref())
+                .await
+                .map_err(|error| RoleHostError::ProviderFailure(error.to_string()))?;
+            return Ok(existing);
+        }
+        resources.insert(key, Arc::downgrade(&handle));
+        Ok(handle)
+    }
+
+    async fn action_resource(
+        &self,
+        request: &Wave2TypedHostRequest,
+        operation: &'static str,
+    ) -> Result<Arc<BrowserRoleResource>, RoleHostError> {
+        let binding = exact_resource(
+            &request.context.resource_bindings,
+            BROWSER_RESOURCE_KIND,
+            &request.context.principal,
+            operation,
+        )?;
+        let key = BrowserRoleResource::action_key(request, binding);
+        self.resources
+            .lock()
+            .await
+            .get(&key)
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or(RoleHostError::ProviderUnavailable)
+    }
+
+    async fn context_resource(
+        &self,
+        context: &nomifun_agent_domain_wave2::Wave2RoleMemberContext,
+        operation: &'static str,
+    ) -> Result<Arc<BrowserRoleResource>, RoleHostError> {
+        let binding = exact_resource(
+            &context.resource_bindings,
+            BROWSER_RESOURCE_KIND,
+            &context.principal,
+            operation,
+        )?;
+        let key = BrowserRoleResource::key(context, binding);
+        self.resources
+            .lock()
+            .await
+            .get(&key)
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or(RoleHostError::ProviderUnavailable)
+    }
+}
+
+#[cfg(feature = "browser-use")]
+#[async_trait::async_trait]
+impl RoleHostInvoker for BrowserRoleRuntime {
+    async fn invoke(
+        &self,
+        request: Wave2TypedHostRequest,
+    ) -> Result<StrictJsonValue, RoleHostError> {
+        let provider = request
+            .context
+            .role_provider
+            .clone()
+            .ok_or(RoleHostError::ProviderUnavailable)?;
+        let required_operation = match &request.operation {
+            Wave2TypedCapabilityOperation::BrowserNavigate { .. }
+            | Wave2TypedCapabilityOperation::BrowserRenderContent { .. } => "navigate",
+            Wave2TypedCapabilityOperation::BrowserAct { .. } => "interact",
+            _ => {
+                return Err(RoleHostError::InvalidContext(
+                    "operation is not an implemented Browser role member",
+                ));
+            }
+        };
+        let resource = self
+            .action_resource(&request, required_operation)
+            .await?;
+        let status = resource
+            .client
+            .status(&resource.lane_id)
+            .await
+            .map_err(|error| RoleHostError::ProviderFailure(error.to_string()))?;
+        let host = BrowserRoleHost::new(
+            resource.client.clone(),
+            resource.lane_id.clone(),
+            provider.clone(),
+            request.context.resolved_snapshot_ref.clone(),
+            request.context.registry_generation,
+        );
+        let caller = host.caller();
+        let role_context = RoleHostContext {
+            principal: request.context.principal.clone(),
+            runtime_instance_id: caller.runtime_instance_id.clone(),
+            owner_lease_id: caller.owner_lease_id.as_str().to_owned(),
+            snapshot: request.context.resolved_snapshot_ref.clone(),
+            registry_generation: request.context.registry_generation,
+            provider,
+            resource_bindings: request.context.resource_bindings.clone(),
+        };
+
+        if let Wave2TypedCapabilityOperation::BrowserRenderContent { input } =
+            request.operation
+        {
+            let mut object = require_object(input.0)?;
+            reject_browser_control_fields(&object)?;
+            let url = object
+                .remove("url")
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .ok_or(RoleHostError::InvalidContext("browser URL"))?;
+            if !object.is_empty() {
+                return Err(RoleHostError::InvalidContext(
+                    "unsupported browser.render_content field",
+                ));
+            }
+            host.invoke(
+                role_context.clone(),
+                BrowserRoleOperation::Navigate(BrowserNavigate {
+                    url,
+                    new_tab: false,
+                    expected_browser_epoch: status.browser_epoch,
+                }),
+            )
+            .await?;
+            let current = resource
+                .client
+                .status(&resource.lane_id)
+                .await
+                .map_err(|error| RoleHostError::ProviderFailure(error.to_string()))?;
+            let rendered = host
+                .invoke(
+                    role_context,
+                    BrowserRoleOperation::RenderContent(BrowserRenderContent {
+                        expected_browser_epoch: current.browser_epoch,
+                    }),
+                )
+                .await?;
+            let final_url = current
+                .tabs
+                .iter()
+                .find(|tab| tab.active)
+                .and_then(|tab| tab.url.clone());
+            return Ok(StrictJsonValue(serde_json::json!({
+                "final_url": final_url,
+                "html": rendered.output.get("html").cloned().unwrap_or(serde_json::Value::Null),
+                "html_truncated": rendered.output
+                    .get("html_truncated")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Bool(false))
+            })));
+        }
+
+        let operation = match request.operation {
+            Wave2TypedCapabilityOperation::BrowserNavigate { input } => {
+                let mut object = require_object(input.0)?;
+                reject_browser_control_fields(&object)?;
+                let url = object
+                    .remove("url")
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .ok_or(RoleHostError::InvalidContext("browser URL"))?;
+                let new_tab = object
+                    .remove("new_tab")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                if !object.is_empty() {
+                    return Err(RoleHostError::InvalidContext(
+                        "unsupported browser.navigate field",
+                    ));
+                }
+                BrowserRoleOperation::Navigate(BrowserNavigate {
+                    url,
+                    new_tab,
+                    expected_browser_epoch: status.browser_epoch,
+                })
+            }
+            Wave2TypedCapabilityOperation::BrowserAct { input } => {
+                let mut object = require_object(input.0)?;
+                let action = object
+                    .remove("action")
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .ok_or(RoleHostError::InvalidContext("browser action"))?;
+                let ref_generation = object
+                    .remove("ref_generation")
+                    .and_then(|value| value.as_u64());
+                reject_browser_control_fields(&object)?;
+                BrowserRoleOperation::Act(BrowserAct {
+                    action,
+                    parameters: serde_json::Value::Object(object),
+                    expected_browser_epoch: status.browser_epoch,
+                    ref_generation,
+                })
+            }
+            _ => unreachable!("Browser operation was classified above"),
+        };
+        let result = host.invoke(role_context, operation).await?;
+        Ok(StrictJsonValue(serde_json::json!({
+            "output": result.output,
+            "tabs": result.tabs,
+            "active_tab_id": result.active_tab_id,
+            "active_frame_id": result.active_frame_id,
+            "ref_generation": result.ref_generation
+        })))
+    }
+}
+
+#[cfg(feature = "browser-use")]
+impl BrowserContextHostPort for BrowserRoleRuntime {
+    fn contribute<'a>(
+        &'a self,
+        request: BrowserContextHostRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<BrowserContextContributionResult, Wave2HostPortError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if matches!(request.operation, BrowserContextOperation::BrowserSiteMemory) {
+                return Ok(BrowserContextContributionResult { value: None });
+            }
+            if !matches!(request.operation, BrowserContextOperation::BrowserObserve) {
+                return Err(Wave2HostPortError::new(
+                    "ROLE_HOST_INVALID_CONTEXT",
+                    "Browser provider received an unsupported context member",
+                ));
+            }
+            let context = request.context;
+            let resource = self
+                .context_resource(&context, "observe")
+                .await
+                .map_err(|error| Wave2HostPortError::new(error.code(), error.to_string()))?;
+            let status = resource
+                .client
+                .status(&resource.lane_id)
+                .await
+                .map_err(|error| {
+                    Wave2HostPortError::new(
+                        "ROLE_HOST_PROVIDER_FAILURE",
+                        error.to_string(),
+                    )
+                })?;
+            let host = BrowserRoleHost::new(
+                resource.client.clone(),
+                resource.lane_id.clone(),
+                context.role_provider.clone(),
+                context.resolved_snapshot_ref.clone(),
+                context.registry_generation,
+            );
+            let caller = host.caller();
+            let result = host
+                .invoke(
+                    RoleHostContext {
+                        principal: context.principal,
+                        runtime_instance_id: caller.runtime_instance_id.clone(),
+                        owner_lease_id: caller.owner_lease_id.as_str().to_owned(),
+                        snapshot: context.resolved_snapshot_ref,
+                        registry_generation: context.registry_generation,
+                        provider: context.role_provider,
+                        resource_bindings: context.resource_bindings,
+                    },
+                    BrowserRoleOperation::Observe(BrowserObserve {
+                        max_depth: None,
+                        expected_browser_epoch: status.browser_epoch,
+                    }),
+                )
+                .await
+                .map_err(|error| Wave2HostPortError::new(error.code(), error.to_string()))?;
+            Ok(BrowserContextContributionResult {
+                value: Some(StrictJsonValue(serde_json::json!({
+                    "output": result.output,
+                    "tabs": result.tabs,
+                    "active_tab_id": result.active_tab_id,
+                    "active_frame_id": result.active_frame_id,
+                    "ref_generation": result.ref_generation
+                }))),
+            })
+        })
+    }
+}
+
+#[cfg(feature = "browser-use")]
+impl Wave2ResourceHostPort for BrowserRoleRuntime {
+    fn acquire<'a>(
+        &'a self,
+        request: Wave2ResourceHostRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<ResourceProviderResult, Wave2HostPortError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if !matches!(
+                request.operation,
+                Wave2ResourceCapabilityOperation::BrowserIdentity
+            ) {
+                return Err(Wave2HostPortError::new(
+                    "ROLE_HOST_INVALID_CONTEXT",
+                    "Browser provider received an unsupported resource member",
+                ));
+            }
+            let handle = self
+                .acquire(&request.context)
+                .await
+                .map_err(|error| Wave2HostPortError::new(error.code(), error.to_string()))?;
+            Ok(ResourceProviderResult { handle })
+        })
     }
 }
 

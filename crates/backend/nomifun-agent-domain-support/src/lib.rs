@@ -1517,11 +1517,15 @@ mod tests {
             "desktop",
             browser_capability,
         ));
-        assert!(!capability_available_on_host(
+        // Browser is source-neutral at the canonical Capability layer.
+        // First-party headless availability is a Provider concern.
+        assert!(capability_available_on_host(
             "x86_64-unknown-linux-gnu",
             "headless",
             browser_capability,
         ));
+        assert!(browser_capability.host_targets.is_empty());
+        assert!(browser_capability.host_surfaces.is_empty());
 
         let computer = specs
             .iter()
@@ -1532,11 +1536,12 @@ mod tests {
             .iter()
             .find(|capability| capability.id == "computer.input")
             .unwrap();
-        assert!(!capability_available_on_host(
-            "x86_64-unknown-linux-gnu",
-            "desktop",
-            computer_capability,
-        ));
+        // Computer's canonical capability is also source-neutral. Its
+        // canonical surface boundary is carried by the package; concrete
+        // target availability belongs to the selected Provider.
+        assert_eq!(computer.supported_surfaces, &["desktop"]);
+        assert!(computer_capability.host_targets.is_empty());
+        assert!(computer_capability.host_surfaces.is_empty());
         assert!(capability_available_on_host(
             "x86_64-pc-windows-msvc",
             "desktop",
@@ -1549,19 +1554,25 @@ mod tests {
         let registrations = registrations(c7_package_specs()).unwrap();
         assert_eq!(registrations.len(), 26);
         validate_inventory(&registrations).unwrap();
-        let capability_count = registrations
+        let capability_ids = registrations
             .iter()
-            .map(|registration| {
+            .flat_map(|registration| {
                 registration
                     .metadata
                     .manifest
                     .payload
                     .contributions
                     .capabilities
-                    .len()
+                    .iter()
+                    .map(|capability| capability.id.clone())
             })
-            .sum::<usize>();
-        assert_eq!(capability_count, 137);
+            .collect::<BTreeSet<_>>();
+        let expected_capability_ids = c7_package_specs()
+            .into_iter()
+            .flat_map(|package| package.capabilities)
+            .map(|capability| CapabilityId::from(capability.id))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(capability_ids, expected_capability_ids);
     }
 
     #[test]
