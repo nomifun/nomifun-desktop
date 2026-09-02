@@ -4,11 +4,15 @@
 >
 > 修订日期：2026-09-02
 >
-> 代码基线：`d1ae294bd9d8165d5606389665637b458055285c`
+> 代码基线：执行时从 `origin/rf/agent-capability-platform-v2` 解析 clean HEAD，并在结果中记录实际 SHA。
 >
 > 分支：`rf/m2-phase1-batch-a`
 >
 > 权威指令：`05-system-capability-replacement-foundation.zh.md`
+>
+> 机器清单：`MACHINE-2-PHASE1-BATCH-A-MANIFEST.json`
+>
+> 结果模板：`MACHINE-2-PHASE1-BATCH-A-RESULT-TEMPLATE.json`（另有人工填写版 `.zh.md`）
 
 只有在机器 2 能完整承担本文件的四项工作时才启动。不得只领取 SSH 或任意单项；
 如果可执行项不足，机器 2 保持停用，由主机继续排期。
@@ -23,19 +27,38 @@
 2. docs/specs/2026-08-28-agent-capability-platform-v2/05-system-capability-replacement-foundation.zh.md
 3. docs/specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md
 4. 本文件
+5. docs/specs/2026-08-28-agent-capability-platform-v2/MACHINE-2-PHASE1-BATCH-A-MANIFEST.json
 
 05 与旧设计、旧 Prompt、历史 Gate 或聊天摘要冲突时，以 05 为准。
 
 二、Git 基线
 
 git fetch origin --prune
-git switch --track -c rf/m2-phase1-batch-a origin/rf/m2-phase1-batch-a
 git status --porcelain
-git merge-base --is-ancestor d1ae294bd9d8165d5606389665637b458055285c HEAD
+
+如果工作树不是空的，立即停止并回传，不要在未审查的 WIP 上同步。
+
+git rev-list --left-right --count origin/rf/m2-phase1-batch-a...origin/rf/agent-capability-platform-v2
+
+如果上一个命令的左侧数字不是 `0`，说明机器 2 集成分支存在主机尚未审查的提交，
+立即停止并回传，不要强行同步。左侧为 `0` 后，使用普通 fast-forward 更新集成分支：
+
+git switch rf/m2-phase1-batch-a
+git merge --ff-only origin/rf/agent-capability-platform-v2
+git push origin rf/m2-phase1-batch-a
+
+如果本地没有该分支，先执行：
+
+git switch --track -c rf/m2-phase1-batch-a origin/rf/m2-phase1-batch-a
+
+随后为每个 writer 从更新后的集成分支创建独立 worktree/子分支。
+记录实际基线：
+
+git rev-parse HEAD
 
 要求：
 
-- 工作树为空，最后一条命令退出码为 0；
+- 工作树为空，实际基线 SHA 已记录；
 - 不 reset、不 force-push、不改写共享历史；
 - 不把其他开发分支整体 merge 进来；
 - API key、token、主机凭据和私钥不得进入 Git、日志、fixture 或 Prompt。
@@ -73,6 +96,9 @@ Writer C：Sidecar Upstream Spike
 - 不修改生产 Runtime、vendor fork、Cargo.lock、Gate 或 app composition；
 - 先验证官方 app-server，再决定是否需要窄 patch，不预设自定义 RPC 必须保留。
 
+Writer C 不得修改机器清单或结果模板。结果按
+`MACHINE-2-PHASE1-BATCH-A-RESULT-TEMPLATE.zh.md` 复制填写并回传。
+
 主机同时独占 `SL-S2-07` canonical Compiler。机器 2 禁止修改：
 
 - crates/backend/nomifun-agent-control-plane/**
@@ -82,6 +108,9 @@ Writer C：Sidecar Upstream Spike
 - crates/backend/nomifun-app/**
 - scripts/gate-agent-v2.mjs
 - GLOBAL-CLOSURE-TODO.zh.md
+- docs/specs/2026-08-28-agent-capability-platform-v2/MACHINE-2-PHASE1-BATCH-A-MANIFEST.json
+- docs/specs/2026-08-28-agent-capability-platform-v2/MACHINE-2-PHASE1-BATCH-A-RESULT-TEMPLATE.json
+- docs/specs/2026-08-28-agent-capability-platform-v2/MACHINE-2-PHASE1-BATCH-A-RESULT-TEMPLATE.zh.md
 - Cargo.toml、Cargo.lock
 
 四、Writer A 完成定义
