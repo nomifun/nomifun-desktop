@@ -259,6 +259,46 @@ async fn an_unrecoverable_shell_is_recycled_without_redialling() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_command_retires_then_recycles_the_shell_without_replay() {
+    const NAME: &str = "a_cancelled_command_retires_then_recycles_the_shell_without_replay";
+    let sshd = sshd_or_skip!(NAME);
+    let harness = support::harness(sshd.known_hosts_path(), support::brisk_tuning()).await;
+    let id = harness.add_fixture_host(&sshd).await;
+
+    let Some(link) = harness.open_or_skip(NAME, "conv-1", &id, "/tmp").await else {
+        return;
+    };
+    let backend = harness.pool.backend_for(&link);
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(100),
+        backend.run_command("sleep 30", 30_000),
+    )
+    .await;
+    assert!(cancelled.is_err(), "outer cancellation budget must fire");
+
+    let first_after = backend.run_command("echo must_not_run", 15_000).await;
+    assert!(
+        first_after.is_err(),
+        "the command that discovers the retired channel must not be submitted or replayed"
+    );
+    harness
+        .events
+        .await_phases_in_order(&["degraded", "connected"], SETTLE)
+        .await;
+
+    let recovered = backend
+        .run_command("echo recovered_after_cancel", 15_000)
+        .await
+        .expect("the replacement shell accepts the next explicit command");
+    assert!(recovered.stdout.contains("recovered_after_cancel"));
+    assert!(
+        !recovered.stdout.contains("must_not_run"),
+        "the rejected command must not be replayed on the replacement channel: {recovered:?}"
+    );
+    harness.pool.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn close_link_publishes_closed_with_a_reaped_teardown() {
     const NAME: &str = "close_link_publishes_closed_with_a_reaped_teardown";
     let sshd = sshd_or_skip!(NAME);

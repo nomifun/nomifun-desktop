@@ -24,6 +24,10 @@ use russh::keys::{
 };
 
 use crate::credential::{Auth, SshCredential};
+use crate::limits::{
+    MAX_SSH_AGENT_SOCKET_BYTES, MAX_SSH_HOST_BYTES, MAX_SSH_USERNAME_BYTES, SSH_CONNECT_TIMEOUT,
+    SSH_OPERATION_TIMEOUT, validate_credential, validate_endpoint_component,
+};
 
 /// How the server's host key is validated on connect.
 #[derive(Clone, Debug)]
@@ -62,6 +66,10 @@ pub enum SshError {
     HostKeyChanged { host: String, line: usize },
     #[error("ssh protocol error: {0}")]
     Protocol(String),
+    #[error("invalid SSH input: {0}")]
+    InvalidInput(String),
+    #[error("SSH operation timed out: {0}")]
+    TimedOut(String),
     /// The transport or shell channel went away mid-operation. Distinct from a
     /// slow command on purpose: there is no outcome to report, only a lost link,
     /// so the pool must redial rather than wait.
@@ -71,7 +79,15 @@ pub enum SshError {
 
 impl From<russh::Error> for SshError {
     fn from(e: russh::Error) -> Self {
-        SshError::Protocol(e.to_string())
+        match e {
+            russh::Error::Disconnect
+            | russh::Error::HUP
+            | russh::Error::SendError => SshError::Disconnected(e.to_string()),
+            russh::Error::ConnectionTimeout
+            | russh::Error::KeepaliveTimeout
+            | russh::Error::InactivityTimeout => SshError::TimedOut(e.to_string()),
+            other => SshError::Protocol(other.to_string()),
+        }
     }
 }
 
@@ -157,6 +173,20 @@ impl SshConnection {
     /// Connect to `cred.host:cred.port`, validate the host key per `policy`, and
     /// authenticate with whichever of the four methods `cred.auth` names.
     pub async fn connect(cred: &SshCredential, policy: HostKeyPolicy) -> Result<Self, SshError> {
+        validate_credential_input(cred)?;
+        match tokio::time::timeout(SSH_CONNECT_TIMEOUT, Self::connect_inner(cred, policy)).await {
+            Ok(result) => result,
+            Err(_) => Err(SshError::TimedOut(format!(
+                "SSH connect/authentication exceeded {}ms",
+                SSH_CONNECT_TIMEOUT.as_millis()
+            ))),
+        }
+    }
+
+    async fn connect_inner(
+        cred: &SshCredential,
+        policy: HostKeyPolicy,
+    ) -> Result<Self, SshError> {
         let config = Arc::new(client::Config::default());
         let state = Arc::new(Mutex::new(HandlerState {
             reject: None,
@@ -272,20 +302,87 @@ impl SshConnection {
     /// Round-trip liveness probe: sends a keepalive and waits for the peer's
     /// reply, so a half-open TCP connection is detected instead of looking idle.
     pub async fn ping(&self) -> Result<(), SshError> {
-        self.handle
-            .send_ping()
-            .await
-            .map_err(|e| SshError::Disconnected(e.to_string()))
+        match tokio::time::timeout(SSH_OPERATION_TIMEOUT, self.handle.send_ping()).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(SshError::from(e)),
+            Err(_) => Err(SshError::TimedOut(format!(
+                "SSH keepalive exceeded {}ms",
+                SSH_OPERATION_TIMEOUT.as_millis()
+            ))),
+        }
     }
 
     /// Send `SSH_MSG_DISCONNECT` so the server sees a deliberate close instead
     /// of a torn-down TCP connection.
     pub async fn disconnect(&self) -> Result<(), SshError> {
-        self.handle
-            .disconnect(russh::Disconnect::ByApplication, "", "en")
-            .await
-            .map_err(|e| SshError::Disconnected(e.to_string()))
+        match tokio::time::timeout(
+            SSH_OPERATION_TIMEOUT,
+            self.handle
+                .disconnect(russh::Disconnect::ByApplication, "", "en"),
+        )
+        .await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(SshError::from(e)),
+            Err(_) => Err(SshError::TimedOut(format!(
+                "SSH disconnect exceeded {}ms",
+                SSH_OPERATION_TIMEOUT.as_millis()
+            ))),
+        }
     }
+}
+
+fn validate_credential_input(cred: &SshCredential) -> Result<(), SshError> {
+    if cred.port == 0 {
+        return Err(SshError::InvalidInput(
+            "SSH port must be between 1 and 65535".to_string(),
+        ));
+    }
+    validate_endpoint_component("SSH host", &cred.host, MAX_SSH_HOST_BYTES)
+        .map_err(|e| SshError::InvalidInput(e.to_string()))?;
+    validate_endpoint_component("SSH username", &cred.username, MAX_SSH_USERNAME_BYTES)
+        .map_err(|e| SshError::InvalidInput(e.to_string()))?;
+
+    match &cred.auth {
+        Auth::Password(password) => {
+            validate_credential("SSH password", password.as_str())
+                .map_err(|e| SshError::InvalidInput(e.to_string()))?;
+        }
+        Auth::PrivateKey { pem, passphrase } => {
+            validate_credential("SSH private key", pem.as_str())
+                .map_err(|e| SshError::InvalidInput(e.to_string()))?;
+            if let Some(passphrase) = passphrase {
+                validate_credential("SSH key passphrase", passphrase.as_str())
+                    .map_err(|e| SshError::InvalidInput(e.to_string()))?;
+            }
+        }
+        Auth::Certificate {
+            key_pem,
+            cert,
+            passphrase,
+        } => {
+            validate_credential("SSH certificate key", key_pem.as_str())
+                .map_err(|e| SshError::InvalidInput(e.to_string()))?;
+            validate_credential("SSH certificate", cert)
+                .map_err(|e| SshError::InvalidInput(e.to_string()))?;
+            if let Some(passphrase) = passphrase {
+                validate_credential("SSH certificate passphrase", passphrase.as_str())
+                    .map_err(|e| SshError::InvalidInput(e.to_string()))?;
+            }
+        }
+        Auth::Agent { socket } => {
+            if let Some(socket) = socket {
+                let socket_len = socket.as_os_str().len();
+                if socket_len > MAX_SSH_AGENT_SOCKET_BYTES {
+                    return Err(SshError::InvalidInput(format!(
+                        "SSH agent socket path is {socket_len} bytes; maximum is {}",
+                        MAX_SSH_AGENT_SOCKET_BYTES
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Decode a private key plus the certificate issued for it, refusing up front the
