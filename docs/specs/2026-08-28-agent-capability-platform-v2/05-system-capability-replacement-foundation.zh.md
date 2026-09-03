@@ -74,15 +74,12 @@
 
 ## 2. 为什么必须现在止损
 
-最新全局台账显示：
+以下数字是 05 发布前的止损依据历史快照，不是当前状态台账；
+当前状态只以 `GLOBAL-CLOSURE-TODO.zh.md` 为准：
 
-- 128 个 Capability 中有 81 个 action-bearing，但真实 action owner 只有 20 个，仍缺 61 个；
-- Wave 3/4 当前 production owner 都是 0，却已经为 typed contract 与 Effect 状态新增约 8,300 行；
-- 当前台账有 84 个工作包，其中 33 blocked、15 external；
-- 最终 native evidence 仍是 0/5；
-- 最近 8 个提交新增约 11,100 行，主要仍是合同、DTO、receipt 和 owner scaffolding；
-- `gate-agent-v2.mjs` 已达到约 8,100 行，Rust validation contract、generator、macOS helper 和 9 份阶段 Manifest 又重复表达同一批事实；
-- 完整 C8 已出现 25 分钟运行、单测试挂住 7.4 分钟，以及小修复导致全部 evidence 失效。
+- Capability/owner 数量、旧台账工作包数量和 native evidence 数量均以当时的审计口径为准；
+- Wave 3/4、Gate、Manifest 和 receipt 的过度扩张是本次止损的历史原因；
+- 完整 C8 的超时、单测试长时间挂起和修改后 evidence 失效，是停止无界重试的 harness 依据。
 
 这表明主要瓶颈已经不是实现用户能力，而是满足一套过大的证明体系。继续按旧台账逐项补齐，会把一期拖成内部平台工程，并把同样复杂度传给二期 Plugin/MiniApp。
 
@@ -638,14 +635,14 @@ Role Binding 只回答“由谁实现”，不授予 Browser/Computer 能力。A
 
 | 当前事实 | 代码位置 | 对二期的影响 |
 |---|---|---|
-| Wave 2 Host 对 Browser、Computer 和 MCP 仍统一返回 unavailable | `crates/backend/nomifun-app/src/router/agent_wave2_host.rs` | Browser/Computer 的真实 canonical owner 尚未接通，现在仍有机会直接按最终结构完成 |
+| Wave 2 compatibility Host 仍保留通用 unavailable/旧 owner 路径；Fresh-v4 已增加 Browser/Computer Role host | `crates/backend/nomifun-app/src/router/agent_wave2_host.rs`、`agent_role_host.rs` | first-party Role owner 已接通，但 compatibility bypass、完整消费者迁移和 live E2E 仍需收口 |
 | legacy Nomi Factory 使用一次性 `BrowserLaneClientProviderSlot` 晚绑定具体 Provider | `crates/backend/nomifun-ai-agent/src/factory/browser_lane.rs` | 新 v4/Codex 主链不能复用；该 Nomi-only Slot 按 D-020 精确留到 C9 后整体删除，不值得再做过渡改造 |
 | Computer Gateway 直接持有并调用 `ComputerRegistry` | `crates/backend/nomifun-gateway/src/caps_computer.rs`、`computer_registry.rs` | 二期 Provider 选择只能覆盖部分路径，Gateway 和后台消费者仍可能绕过 |
 | `mcp-computer-stdio` 自行构造 `ComputerTool` | `crates/backend/nomifun-app/src/commands/computer_stdio.rs` | Codex/ACP 可以完全绕过 Snapshot Provider lock，是比 Gateway 更直接的第二执行主链 |
-| Knowledge URL 渲染通过 `BrowserFetcher` 直接调用 `BrowserSessionHub` 的 `navigate/rendered_html` | `crates/backend/nomifun-ai-agent/src/browser_fetcher.rs`、`nomifun-app/src/services.rs` | 只替换 Agent Tool 会留下“Chat 用第三方、Knowledge 仍启动第一方 Chromium”的隐藏旁路 |
-| `browser.*` / `computer.*` 的 `CapabilityManifest.supported_platforms` 当前直接承载第一方实现的平台范围 | `crates/backend/nomifun-agent-domain-wave2/src/lib.rs` | 未来远程 MCP/Plugin Provider 可能在 Provider 解析前就被第一方平台条件拒绝 |
-| Materialized Registry 只有 Package、Capability、Skill、MCP Tool，没有角色实现锁 | `crates/backend/nomifun-agent-kernel/src/materialize.rs` | Snapshot 无法表达“同一 canonical Browser 能力本次由哪个实现执行” |
-| Resolved Snapshot 冻结 Capability、Skill、MCP Tool 和资源，但不冻结 Browser/Computer Provider | `crates/backend/nomifun-agent-contracts/src/preset.rs` | 全局 Provider 改变后，旧 Session 的执行实现无法被准确恢复 |
+| legacy Knowledge URL 渲染仍有 `BrowserFetcher` 直接调用 Hub；Fresh-v4 已提供 non-Agent Role admission，但尚未接到该消费者 | `crates/backend/nomifun-ai-agent/src/browser_fetcher.rs`、`nomifun-app/src/services.rs`、`nomifun-agent-kernel/src/registry.rs` | 仍需把 Knowledge hidden render 接入同一 resolved Provider，避免 legacy 路径暗中启动第一方 Chromium |
+| canonical `CapabilityManifest` 已改为 source-neutral；具体平台范围由选定 Provider member 声明 | `crates/backend/nomifun-agent-domain-wave2/src/lib.rs`、`nomifun-agent-domain-support/src/lib.rs` | Provider 解析前不再被第一方平台条件提前拒绝，仍需完成各 Provider 的真实原生验证 |
+| Materialized Registry 已有 `(ExecutionRoleId, PluginMountId)` Provider 平表和 typed exports | `crates/backend/nomifun-agent-kernel/src/materialize.rs`、`registry.rs` | non-Agent operation 仍需由实际业务消费者使用该 exact dispatch |
+| Resolved Snapshot 已冻结 Browser/Computer Provider lock、member 和 typed resource refs | `crates/backend/nomifun-agent-contracts/src/preset.rs`、`nomifun-agent-kernel/src/compiler.rs` | 旧 Session 的实现恢复边界已具备，仍需完成生产消费者迁移和不可用场景验收 |
 
 #### 2.3 如果全部留到二期会发生什么
 
@@ -660,7 +657,9 @@ Role Binding 只回答“由谁实现”，不授予 Browser/Computer 能力。A
 - Browser lane 清理与 Computer 全局串行测试；
 - C8/C10 的 Browser/Computer 平台验证。
 
-这不是普通的二期增量，而是对一期核心调用链的第二次重构。当前正式 C8-WIN-PRE 证据尚未闭合，且 Browser/Computer 真实 owner 仍未接入，因此应在一期候选冻结前完成本接缝。
+这不是普通的二期增量，而是对一期核心调用链的第二次重构。当前正式 C8-WIN-PRE 证据尚未闭合；
+Browser/Computer 的 first-party Role owner 和 non-Agent exact dispatch 已形成，但消费者旁路、
+live page、原生权限和发布证据仍需在一期候选冻结前收口。
 
 ### 3. 概念模型
 
@@ -908,7 +907,10 @@ struct RoleProviderExports {
 
 Browser/Computer v1 只要求 Tool、ContextContributor、ResourceProvider 三类执行接缝；不为了未来角色预建 Event、Transport、Scheduler 或任意 Hook executor。未来 Node Host、MCP Adapter 或 managed CLI Host 都在 Kernel 外把自己的执行方式适配到对应 typed export。
 
-`ContextContributionFactory` 与 `ResourceProviderFactory` 是一期需要补齐的新 canonical runtime seam，不是对当前实现能力的描述：当前 Registry 只要求带 action 的 Capability 提供 handler，Context/Resource 主要仍是 manifest metadata。P1-R0/R1 必须先冻结并实现这两个最小接口，不能用现有 metadata-only 行为宣称 Role Provider 已覆盖三类 member。
+`ContextContributionFactory`、`ResourceProviderFactory` 与 non-Agent `RoleToolHandler` 已在当前
+Kernel 中形成 canonical runtime seam；Operation admission 也会携带 exact Provider lock 和
+typed resources。仍不能仅凭 seam 存在宣称 Role Provider 已完成：必须继续接入真实消费者并取得
+对应的行为/原生 evidence。
 
 只提供 action handler 不算完成 Browser/Computer 替换：`browser.identity` 的资源解析、`browser.observe` / `computer.observe` 的 Context 组装也必须读取同一个 frozen Provider lock。否则只会替换可见 Tool，Context 和 Resource 仍走第一方旁路。
 

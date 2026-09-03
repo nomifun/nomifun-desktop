@@ -7,6 +7,10 @@
   "candidate_source_sha": "c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6",
   "confirmed_decision_contract_digest": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5",
   "implementation_commit": "c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6",
+  "canonical_inputs": {
+    "target_first_party_inventory": "crates/backend/nomifun-agent-contracts/contracts/generated/target-first-party-contributions.envelope.json",
+    "platform_matrix": "crates/backend/nomifun-agent-contracts/contracts/generated/platform-validation-fixture.envelope.json"
+  },
   "follow_up_validation_commits": [
     "e6f789ca7f033be336745f81bbf06087b0cdbc75"
   ],
@@ -39,15 +43,15 @@
       "gate": "production-host-smoke",
       "status": "pass",
       "command": "target/debug/nomicore.exe --data-dir <temporary-root> --port <free-port> --local",
-      "summary": "Windows startup reached a live HTTP listener for an absent root and a pre-created empty root; /api/capabilities returned 137 entries."
+      "summary": "Windows startup reached a live HTTP listener for an absent root and a pre-created empty root; /api/capabilities matched the canonical capability ID set."
     }
   ],
   "invariants": [
     "published legacy migrations unchanged from the C1 checkpoint",
     "Fresh-v4 AgentPlatform uses a separately opened nomifun-v4.db pool and never receives the v3 AppServices pool",
-    "five C7 wave crates plus model-media publish exactly 26 packages and 137 capabilities",
+    "five C7 wave crates plus model-media publish the canonical 26-package capability inventory; validation compares the exact generated capability ID set rather than a fixed cardinality",
     "all action-bearing capabilities have deterministic typed handlers; transport, context, event, scheduler, and middleware contributions remain handler-free",
-    "Browser and Computer availability is represented by explicit platform constraints and typed unavailable errors",
+    "Browser and Computer canonical capabilities are source-neutral; selected Provider members declare platform availability and unavailable paths remain typed",
     "Channel pairing and ordinary product confirmations remain outside Agent execution authority",
     "C7 canonical-owner residual and reachability scans are zero; historical legacy roots remain recorded for the C8 global demolition gate",
     "non-Windows native verification remains pending and is not claimed by Windows"
@@ -63,19 +67,9 @@
       "exact_check_id": "c8_ma_full_gate"
     },
     {
-      "target_cell": "macos_desktop_x64",
-      "status": "pending_native_verification",
-      "exact_check_id": "c8_mx_full_gate"
-    },
-    {
       "target_cell": "linux_desktop_x64",
       "status": "pending_native_verification",
       "exact_check_id": "c8_ld_full_gate"
-    },
-    {
-      "target_cell": "linux_headless_x64",
-      "status": "pending_native_verification",
-      "exact_check_id": "c8_lh_full_gate"
     }
   ],
   "next_boundary": "C8-WIN-PRE",

@@ -97,23 +97,24 @@ Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成
 | S3 Role seam 与核心 owner | 1 | 3 | 8 | 0 | 0 | 12 |
 | S4 产品 UI | 0 | 1 | 1 | 0 | 0 | 2 |
 | S5 三平台、C9 与 RC | 0 | 0 | 3 | 2 | 0 | 5 |
-| **总计** | **16** | **4** | **12** | **2** | **0** | **34** |
+| **总计** | **19** | **2** | **10** | **2** | **1** | **34** |
 
 旧台账 84 项现已收敛为 34 项。任务数量不是质量指标；只有完成定义和最小验证满足后
 才能修改状态。
 
 ## 当前剩余 TODO 快照
 
-当前还剩 18 项未关闭：
+当前还剩 15 项未关闭：
 
 | 分类 | 数量 | TODO |
 | --- | ---: | --- |
-| 主机当前实施 | 4 | `SL-S3-01`、`SL-S3-07`、`SL-S3-08`、`SL-S4-01` |
-| 依赖阻塞 | 12 | `SL-S3-02`～`SL-S3-06`、`SL-S3-10`～`SL-S3-12`、`SL-S4-02`、`SL-S5-01`、`SL-S5-04`、`SL-S5-05` |
+| 主机当前实施 | 2 | `SL-S3-07`、`SL-S3-08` |
+| 依赖阻塞 | 10 | `SL-S3-04`～`SL-S3-06`、`SL-S3-10`～`SL-S3-12`、`SL-S4-02`、`SL-S5-01`、`SL-S5-04`、`SL-S5-05` |
 | 外部原生环境 | 2 | `SL-S5-02` macOS arm64、`SL-S5-03` Linux Desktop x64 |
+| 待提交/复核 | 1 | `SL-S4-01` |
 
-主机关键路径是
-`SL-S3-01 -> SL-S3-02 -> SL-S3-03 -> SL-S3-04/SL-S3-05 -> SL-S3-06`。
+主机关键路径已完成 `SL-S3-01 -> SL-S3-02 -> SL-S3-03`；
+当前主线是 `SL-S3-04/SL-S3-05 -> SL-S3-06`，再进入完整消费者和候选验证。
 上述主机项全部由当前主机执行。主机可以按互斥写集启用多个本机 lane；中央合同、
 组合根、Gate、锁文件和 GLOBAL TODO 由集成 Owner 串行合流。外部 macOS/Linux 只验证
 冻结候选，不领取开发任务，也不维护 Prompt、交接包、远端 SHA 或跨机 attestation。
@@ -163,9 +164,9 @@ Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成
 
 | ID | 状态 | Owner | 目标 | 依赖 | 完成定义 | 最小测试 | 人工 / 外部输入 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `SL-S3-01` | open | 主机 lane | 冻结 Browser/Computer versioned Role 合同 | `SL-S2-09` | `ExecutionRoleId`、Role Contract、source-neutral Provider contribution、required/optional member、typed Context/Resource exports 只有一套 canonical Rust/schema 定义 | `cargo test --locked -p nomifun-agent-contracts role --lib; cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check` | 无 |
-| `SL-S3-02` | blocked | 主机 | 实现 installation binding、Revision override、Resolver 和 Snapshot exact lock | `SL-S2-07`、`SL-S2-08`、`SL-S3-01` | override 优先、缺省继承 installation default；精确 Provider/contract/contribution/resource 进入 Snapshot digest；缺失明确失败且不 fallback | Compiler/Resolver tests：first-party 与 alternate fixture 生成不同且自洽的 Snapshot | 无 |
-| `SL-S3-03` | blocked | 主机 | 实现单一 RoleDispatcher 与 Tool/Context/Resource runtime seam | `SL-S3-02` | Kernel 第一次路由直接选 frozen Provider Mount；使用 Provider config/state/service/resource；不 façade 二次调用、不重选、不 retry/fallback | `cargo test -p nomifun-agent-kernel role_dispatch --lib` | 无 |
+| `SL-S3-01` | closed | 主机 | 冻结 Browser/Computer versioned Role 合同 | `SL-S2-09` | `ExecutionRoleId`、Role Contract、source-neutral Provider contribution、required/optional member、typed Context/Resource exports 只有一套 canonical Rust/schema 定义 | `cargo test --locked -p nomifun-agent-contracts role --lib`; `cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check`; `cargo test --locked -p nomifun-agent-kernel --lib` | 无 |
+| `SL-S3-02` | closed | 主机 | 实现 installation binding、Revision override、Resolver 和 Snapshot exact lock | `SL-S2-07`、`SL-S2-08`、`SL-S3-01` | override 优先、缺省继承 installation default；精确 Provider/contract/contribution/resource 进入 Snapshot digest；Operation admission 可携带独立 exact lock；缺失明确失败且不 fallback | `cargo test --locked -p nomifun-agent-control-plane --lib`; `cargo test --locked -p nomifun-agent-kernel --lib`（含 alternate/provider/registry/resource drift） | 无 |
+| `SL-S3-03` | closed | 主机 | 实现单一 RoleDispatcher 与 Tool/Context/Resource runtime seam | `SL-S3-02` | Kernel 第一次路由直接选 frozen Provider Mount；Agent 与 non-Agent Tool/Context/Resource 共用 exact resolver；使用 Provider config/state/service/resource；不 façade 二次调用、不重选、不 retry/fallback | `cargo test --locked -p nomifun-agent-kernel --lib`（18/18）; `cargo check --locked -p nomifun-app --features browser-use,computer-use` | 无 |
 | `SL-S3-04` | blocked | 主机 | 第一方 Browser dogfood 同一 Role 主链 | `SL-S3-03` | observe/navigate/act 和 hidden `browser.render_content` 经同一 Provider lock；保留 owner/lane/close/process cleanup；Provider 平台约束不写死在 façade | Browser owner/lifecycle tests；alternate Provider parity test | Browser live E2E 需要可访问测试页 |
 | `SL-S3-05` | blocked | 主机 | 第一方 Computer/A11y dogfood 同一 Role 主链 | `SL-S3-03` | observe/input 基线和可选 launch/a11y 经 exact Provider；按 target resource 串行；observation generation 过期 typed fail；无具体 Registry 旁路 | Computer serialization/generation/platform-unavailable tests | Windows/macOS input 权限由原生测试用户授予 |
 | `SL-S3-06` | blocked | 主机 | 删除 Browser/Computer production concrete bypass | `SL-S3-04`、`SL-S3-05` | Wave 2 不再 unavailable；Knowledge hidden render、Gateway、stdio、v4/Codex/automation 只走 canonical route；Nomi-only allowlist 不增长并等待 C9 | production dependency scan；Knowledge render、Gateway、stdio 代表性 integration tests | 无 |
@@ -180,7 +181,7 @@ Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成
 
 | ID | 状态 | Owner | 目标 | 依赖 | 完成定义 | 最小测试 | 人工 / 外部输入 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `SL-S4-01` | open | 主机 lane | 把 Agent 编辑器收缩为产品语言 | `SL-S2-07`、`SL-S2-08` | 默认只展示名称/用途、模型、能力开关、Workspace/Knowledge/Connector picker、保存和试用；内部 ID/digest/JSON 默认折叠；Save/Test 自动 Preview | `bun run typecheck`; `bun run test -- <相关 UI 定向测试>` | 无 |
+| `SL-S4-01` | pending-validation | 主机 lane | 把 Agent 编辑器收缩为产品语言 | `SL-S2-07`、`SL-S2-08` | canonical Agent Settings 已满足名称/用途、模型、能力开关、Workspace/Knowledge/Connector picker、保存和试用；内部 ID/digest/JSON 默认折叠；Save/Test 自动 Preview | PresetSettings/Agent Settings 定向测试通过；`bun run build:ui` 通过；全量 `bun run typecheck` 仍被既有 React 19/Arco 类型错误阻塞 | 无 |
 | `SL-S4-02` | blocked | 主机 | 关闭四条真实用户流程 | `SL-S3-04`～`SL-S3-12`、`SL-S4-01` | 从模板创建；修改并保存；选择资源并试用；Snapshot 不兼容时在新会话继续。Desktop 不崩溃，不要求用户填写 UUID/operation/raw JSON | `bun run dev` 后执行四流程；保留截图、console 和 backend 日志 | 用户可直接人工验收，通常优先于不稳定 Playwright harness |
 
 ## S5：三平台、C9 与 RC
@@ -207,10 +208,9 @@ Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成
 
 当前可实施或可并行准备的本机 lane：
 
-- Role contract lane：`SL-S3-01`，完成后串行进入 `SL-S3-02 -> SL-S3-03`；
 - Core owner lane：`SL-S3-07`，按消费者写集迁移，中央 composition 由集成 Owner 收口；
 - MCP lane：`SL-S3-08`，只修改 MCP owner 与专用测试，等待中央接线；
-- UI lane：`SL-S4-01`，只基于已冻结 DTO/Compiler contract 收缩产品界面和定向测试；
+- UI lane：`SL-S4-01`，实现已形成，等待 typecheck 基线治理/复核；
 - Role Provider lane：`SL-S3-04`、`SL-S3-05` 在 `SL-S3-03` 完成后分别推进；
 - Sidecar Runtime lane：`SL-S3-12` 继续实现，但 exact binary/live credential 缺失时只记录
   blocker，不构造 live PASS。
