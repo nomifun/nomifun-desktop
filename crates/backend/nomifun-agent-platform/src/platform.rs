@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use nomifun_agent_contracts::{
-    AgentBindingValue, AgentPreset, AgentPresetId, AgentPresetRevision, AgentPresetSource,
+    ActionId, AgentBindingValue, AgentPreset, AgentPresetId, AgentPresetRevision, AgentPresetSource,
     AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata, CanonicalDigestError,
     CapabilityId, CapabilityKind, ChatRouteIdentity, ChatRouteLookupError, ChatRouteLookupKey,
     ChatRouteRecord, ChatRouteRecordRow, CompactOnDemandCapabilityEntry, CorrelationId,
@@ -38,7 +38,8 @@ use nomifun_agent_kernel::{
     CapabilityInvocationRequest, CompileRequest, CompiledSnapshot, CompilerEnvironment,
     CompletedTurnBoundary, KernelError, KernelRegistry, MaterializationPolicy, PluginRegistration,
     PluginStateError, PluginStatePersistence, PluginStateSnapshot, SessionCapabilityState,
-    RoleMemberAdmission, RoleMemberInvocationRequest, StateIdentity, ThinAuthority,
+    RoleMemberAdmission, RoleMemberInvocationRequest, RoleToolOperationRequest,
+    StateIdentity, ThinAuthority, resolve_exact_role_provider_lock,
 };
 use nomifun_agent_session::{
     AgentSessionStore, CreateSessionRequest, DeleteResult, EffectEventRequest, ForkRequest,
@@ -307,6 +308,25 @@ pub struct StartAgentTurnRequest {
     pub principal: PrincipalRef,
     pub input: StrictJsonValue,
     pub idempotency_key: IdempotencyKey,
+}
+
+/// A non-Agent operation admitted against one exact installation Provider.
+///
+/// The operation carries its typed resource projection and never fabricates an
+/// AgentSession or persisted Snapshot. Provider selection happens once in
+/// [`AgentPlatform::invoke_role_operation`], before the request enters Kernel
+/// dispatch.
+#[derive(Clone, Debug)]
+pub struct RoleOperationRequest {
+    pub principal: PrincipalRef,
+    pub operation_id: OperationId,
+    pub correlation_id: CorrelationId,
+    pub idempotency_key: IdempotencyKey,
+    pub capability_id: CapabilityId,
+    pub action_id: ActionId,
+    pub state_scope_key: ScopeKey,
+    pub resource_bindings: TypedResourceBindings,
+    pub input: StrictJsonValue,
 }
 
 #[derive(Clone, Debug)]
@@ -2564,6 +2584,133 @@ impl AgentPlatform {
             registry_generation: compiled.registry_generation,
             registry_digest: compiled.registry_digest,
         }))
+    }
+
+    /// Admit one non-Agent Tool operation through the installation default
+    /// Provider and the same Kernel exact-dispatch primitive used by Sessions.
+    pub async fn invoke_role_operation(
+        &self,
+        request: RoleOperationRequest,
+    ) -> Result<StrictJsonValue, AgentPlatformError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(AgentPlatformError::Contract(
+                "AgentPlatform is shutting down".to_owned(),
+            ));
+        }
+        if request.principal.principal_kind.trim().is_empty()
+            || request.principal.principal_id.trim().is_empty()
+            || request.state_scope_key.as_ref().trim().is_empty()
+        {
+            return Err(AgentPlatformError::Contract(
+                "non-Agent role operation identity is incomplete".to_owned(),
+            ));
+        }
+        let mut bindings = BTreeMap::new();
+        for binding in request.resource_bindings {
+            if binding.owner_id != request.principal.principal_id {
+                return Err(AgentPlatformError::Kernel(
+                    KernelError::ResourceOwnerMismatch {
+                        binding_id: binding.binding_id,
+                    },
+                ));
+            }
+            if bindings.insert(binding.binding_id.clone(), binding).is_some() {
+                return Err(AgentPlatformError::Contract(
+                    "non-Agent role operation contains duplicate resource binding IDs"
+                        .to_owned(),
+                ));
+            }
+        }
+        let registry = self.kernel.snapshot()?;
+        let role_id = registry
+            .role_for_capability(&request.capability_id)
+            .cloned()
+            .ok_or_else(|| {
+                AgentPlatformError::Kernel(KernelError::RoleProviderNotBound {
+                    role_id: ExecutionRoleId::from(request.capability_id.as_ref()),
+                })
+            })?;
+        let selection = self
+            .kernel_environment
+            .installation_role_bindings
+            .get(&role_id)
+            .map(|binding| &binding.selection)
+            .ok_or_else(|| {
+                AgentPlatformError::Kernel(KernelError::RoleProviderNotBound {
+                    role_id: role_id.clone(),
+                })
+            })?;
+        let selected_members = BTreeSet::from([request.capability_id.clone()]);
+        let provider_lock = resolve_exact_role_provider_lock(
+            &registry,
+            &role_id,
+            selection,
+            &selected_members,
+            &bindings,
+            &self.kernel_environment,
+        )?;
+        let capability = registry
+            .capability(&request.capability_id)
+            .ok_or_else(|| {
+                AgentPlatformError::Kernel(KernelError::CapabilityNotMaterialized {
+                    capability_id: request.capability_id.clone(),
+                    version: VersionString::from("unknown"),
+                })
+            })?;
+        if !capability
+            .manifest
+            .contributions
+            .actions
+            .iter()
+            .any(|action| action.action_id == request.action_id)
+        {
+            return Err(AgentPlatformError::Kernel(KernelError::ActionNotDeclared {
+                capability_id: request.capability_id.clone(),
+                action_id: request.action_id,
+            }));
+        }
+        let resource_bindings = bindings.into_values().collect::<Vec<_>>();
+        let resource_binding_ids = resource_bindings
+            .iter()
+            .map(|binding| binding.binding_id.clone())
+            .collect::<BTreeSet<_>>();
+        let state_scope_key = request.state_scope_key.clone();
+        let result = self.kernel
+            .invoke_role_tool(RoleToolOperationRequest {
+                member: RoleMemberInvocationRequest {
+                    principal: request.principal.clone(),
+                    session_owner: request.principal,
+                    operation_id: request.operation_id,
+                    correlation_id: request.correlation_id,
+                    capability_id: request.capability_id,
+                    resource_binding_ids,
+                    state_scope_key: request.state_scope_key,
+                    admission: RoleMemberAdmission::Operation {
+                        provider_lock,
+                        registry_generation: registry.generation,
+                        registry_digest: registry.registry_digest.clone(),
+                        resource_bindings,
+                    },
+                },
+                action_id: request.action_id,
+                idempotency_key: request.idempotency_key,
+                input: request.input,
+            })
+            .await;
+        let cleanup = self
+            .kernel
+            .release_role_resources(&state_scope_key)
+            .await;
+        match (result, cleanup) {
+            (Ok(output), Ok(())) => Ok(output),
+            (Err(error), Ok(())) => Err(error.into()),
+            (Ok(_), Err(error)) => Err(error.into()),
+            (Err(error), Err(cleanup_error)) => Err(AgentPlatformError::Contract(
+                format!(
+                    "non-Agent role operation failed: {error}; resource cleanup also failed: {cleanup_error}"
+                ),
+            )),
+        }
     }
 
     pub async fn execution_snapshot(

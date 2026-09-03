@@ -40,6 +40,7 @@ use nomifun_agent_kernel::{
     PluginStateHandle, ResourceProviderFactory,
     ResourceProviderRequest, ResourceProviderResult, ResolvedRoleMemberContext,
     ContextContributionRequest, ContextContributionResult,
+    RoleToolHandler, RoleToolInvocationContext,
 };
 
 pub const CONTRACT_VERSION: &str = "1.0.0";
@@ -631,7 +632,7 @@ pub struct Wave2ContextHostRequest {
 
 #[derive(Clone)]
 pub struct Wave2ResourceHostRequest {
-    pub context: Wave2RoleMemberContext,
+    pub context: ResolvedRoleMemberContext,
     pub operation: Wave2ResourceCapabilityOperation,
 }
 
@@ -659,6 +660,24 @@ pub trait Wave2ResourceHostPort: Send + Sync {
                 + 'a,
         >,
     >;
+}
+
+/// Host boundary for a Tool invoked by a non-Agent operation.
+///
+/// The resolved Kernel context carries an exact Provider lock and typed
+/// resources, but intentionally has no fabricated AgentSession or Snapshot.
+pub struct Wave2OperationToolHostRequest {
+    pub context: ResolvedRoleMemberContext,
+    pub operation: Wave2TypedCapabilityOperation,
+    pub action_id: ActionId,
+    pub idempotency_key: IdempotencyKey,
+}
+
+pub trait Wave2OperationToolHostPort: Send + Sync {
+    fn invoke<'a>(
+        &'a self,
+        request: Wave2OperationToolHostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'a>>;
 }
 
 /// An exact-operation adapter used by [`Wave2HostPortDispatcher`].
@@ -829,7 +848,7 @@ impl Wave2ResourceHostPort for UnconfiguredWave2ResourceHostPort {
         Box::pin(async move {
             Err(Wave2HostPortError::unavailable(format!(
                 "no production resource owner is bound for {}",
-                request.context.capability_id.as_ref()
+                request.context.member_id.as_ref()
             )))
         })
     }
@@ -843,6 +862,27 @@ pub fn unconfigured_resource_host_port() -> Arc<dyn Wave2ResourceHostPort> {
     Arc::new(UnconfiguredWave2ResourceHostPort)
 }
 
+struct UnconfiguredWave2OperationToolHostPort;
+
+impl Wave2OperationToolHostPort for UnconfiguredWave2OperationToolHostPort {
+    fn invoke<'a>(
+        &'a self,
+        request: Wave2OperationToolHostRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave2HostPortError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            Err(Wave2HostPortError::unavailable(format!(
+                "no non-Agent operation owner is bound for {}",
+                request.context.member_id.as_ref()
+            )))
+        })
+    }
+}
+
+pub fn unconfigured_operation_tool_host_port() -> Arc<dyn Wave2OperationToolHostPort> {
+    Arc::new(UnconfiguredWave2OperationToolHostPort)
+}
+
 #[derive(Clone)]
 pub struct Wave2RoleHostPorts {
     pub actions: Arc<dyn Wave2HostPort>,
@@ -851,6 +891,7 @@ pub struct Wave2RoleHostPorts {
     pub browser_contexts: Arc<dyn Wave2ContextHostPort>,
     pub computer_contexts: Arc<dyn Wave2ContextHostPort>,
     pub browser_resources: Arc<dyn Wave2ResourceHostPort>,
+    pub browser_operation_tools: Arc<dyn Wave2OperationToolHostPort>,
 }
 
 impl Wave2RoleHostPorts {
@@ -862,6 +903,7 @@ impl Wave2RoleHostPorts {
             browser_contexts: unconfigured_context_host_port(),
             computer_contexts: unconfigured_context_host_port(),
             browser_resources: unconfigured_resource_host_port(),
+            browser_operation_tools: unconfigured_operation_tool_host_port(),
         }
     }
 
@@ -891,6 +933,16 @@ impl Wave2RoleHostPorts {
         match role_id.as_ref() {
             BROWSER_EXECUTION_ROLE_ID => Arc::clone(&self.browser_resources),
             _ => unconfigured_resource_host_port(),
+        }
+    }
+
+    fn operation_tool_port(
+        &self,
+        role_id: &ExecutionRoleId,
+    ) -> Arc<dyn Wave2OperationToolHostPort> {
+        match role_id.as_ref() {
+            BROWSER_EXECUTION_ROLE_ID => Arc::clone(&self.browser_operation_tools),
+            _ => unconfigured_operation_tool_host_port(),
         }
     }
 }
@@ -946,6 +998,50 @@ struct Wave2ResourceFactory {
     host_port: Arc<dyn Wave2ResourceHostPort>,
 }
 
+struct Wave2OperationToolFactory {
+    role_id: ExecutionRoleId,
+    capability_id: CapabilityId,
+    host_port: Arc<dyn Wave2OperationToolHostPort>,
+}
+
+#[async_trait::async_trait]
+impl RoleToolHandler for Wave2OperationToolFactory {
+    async fn invoke(
+        &self,
+        request: RoleToolInvocationContext,
+        input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, KernelError> {
+        if request.context.provider_lock.provider.role.key.role_id != self.role_id
+            || request.context.member_id != self.capability_id
+        {
+            return Err(KernelError::RoleProviderMemberUnavailable {
+                role_id: self.role_id.clone(),
+                capability_id: self.capability_id.clone(),
+            });
+        }
+        if !input.0.is_object() {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!(
+                    "{} input must be a JSON object",
+                    self.capability_id.as_ref()
+                ),
+            });
+        }
+        let operation = typed_operation_for(&self.capability_id, input)?;
+        self.host_port
+            .invoke(Wave2OperationToolHostRequest {
+                context: request.context,
+                operation,
+                action_id: request.action_id,
+                idempotency_key: request.idempotency_key,
+            })
+            .await
+            .map_err(|error| KernelError::CapabilityExecution {
+                reason: error.to_string(),
+            })
+    }
+}
+
 #[async_trait::async_trait]
 impl ResourceProviderFactory for Wave2ResourceFactory {
     async fn acquire(
@@ -971,7 +1067,7 @@ impl ResourceProviderFactory for Wave2ResourceFactory {
         };
         self.host_port
             .acquire(Wave2ResourceHostRequest {
-                context: role_member_context(request.context)?,
+                context: request.context,
                 operation,
             })
             .await
@@ -1523,6 +1619,26 @@ fn build_registration(
                 }),
             )
             .map_err(|error| format!("register {} role handler: {error}", package.id))?;
+    }
+    for definition in package.capabilities {
+        let Some(role_id) = role_id_for_capability(definition.id) else {
+            continue;
+        };
+        if definition.id != "browser.render_content" {
+            continue;
+        }
+        let capability_id = CapabilityId::from(definition.id);
+        registration
+            .add_role_tool_handler(
+                role_id.clone(),
+                capability_id.clone(),
+                Arc::new(Wave2OperationToolFactory {
+                    role_id: role_id.clone(),
+                    capability_id,
+                    host_port: role_host_ports.operation_tool_port(&role_id),
+                }),
+            )
+            .map_err(|error| format!("register {} operation tool: {error}", package.id))?;
     }
     for definition in package.capabilities {
         let Some(role_id) = role_id_for_capability(definition.id) else {
