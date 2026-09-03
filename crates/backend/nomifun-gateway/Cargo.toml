@@ -5,14 +5,6 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[features]
-# These names remain for nomifun-app feature forwarding. Gateway host tools
-# stay disabled until a canonical typed host-operation port is injected by
-# application composition. Enabling either feature adds no implementation
-# dependency and registers no browser/computer capability.
-browser-use = []
-computer-use = []
-
 [dependencies]
 nomifun-common.workspace = true
 nomifun-api-types.workspace = true
