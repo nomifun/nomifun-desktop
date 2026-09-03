@@ -9,6 +9,9 @@ import {
   EXPECTED_TARGET,
   TARGET_ID,
   assertSelfTest,
+  compareCapabilityInventory,
+  readCanonicalCapabilityIds,
+  readCanonicalCapabilityInventory,
   runValidation,
   validateHelloPayload,
 } from './check-macos-arm64-native.mjs';
@@ -55,6 +58,50 @@ describe('C8-MA macOS arm64 validation helper', () => {
       },
     });
     expect(result).toEqual({ status: 'pass', mismatches: [] });
+  });
+
+  test('loads the canonical capability ID set from the generated inventory', () => {
+    const inventory = readCanonicalCapabilityInventory();
+    const ids = readCanonicalCapabilityIds();
+
+    expect(inventory.packageCount).toBeGreaterThan(0);
+    expect(inventory.capabilityIds).toEqual(ids);
+    expect(ids.has('browser.render_content')).toBe(true);
+  });
+
+  test('compares the live catalog by exact canonical ID set', () => {
+    const canonical = new Set(['alpha.capability', 'browser.render_content']);
+    const passing = compareCapabilityInventory({
+      success: true,
+      data: [
+        { capability: { id: 'browser.render_content' } },
+        { capability: { id: 'alpha.capability' } },
+      ],
+    }, canonical);
+    expect(passing).toEqual(expect.objectContaining({
+      status: 'pass',
+      expectedCount: 2,
+      observedCount: 2,
+      missing: [],
+      unexpected: [],
+      duplicates: [],
+      malformed: [],
+    }));
+
+    const failing = compareCapabilityInventory({
+      success: true,
+      data: [
+        { capability: { id: 'alpha.capability' } },
+        { capability: { id: 'alpha.capability' } },
+        { capability: { id: 'unexpected.capability' } },
+        {},
+      ],
+    }, canonical);
+    expect(failing.status).toBe('fail');
+    expect(failing.missing).toEqual(['browser.render_content']);
+    expect(failing.unexpected).toEqual(['unexpected.capability']);
+    expect(failing.duplicates).toEqual(['alpha.capability']);
+    expect(failing.malformed).toEqual(['response.data[3].capability.id']);
   });
 
   test('emits a blocked platform-result shape when the real release lock is missing', async () => {

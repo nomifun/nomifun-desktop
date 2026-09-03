@@ -43,7 +43,8 @@ import {
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export const TARGET_ID = 'macos_desktop_arm64';
 export const EXPECTED_TARGET = 'aarch64-apple-darwin';
-export const EXPECTED_CAPABILITY_COUNT = 137;
+export const CANONICAL_CAPABILITY_INVENTORY_RELATIVE_PATH =
+  'crates/backend/nomifun-agent-contracts/contracts/generated/target-first-party-contributions.envelope.json';
 export const EXPECTED_PROFILES = ['coding_native', 'managed_minimal'];
 export const EXPECTED_RPC_METHODS = [
   'create',
@@ -65,6 +66,9 @@ function parseArgs(argv) {
   const options = {
     releaseLock: process.env.NOMIFUN_RELEASE_LOCK_PATH || null,
     artifactRoot: process.env.NOMIFUN_RELEASE_ARTIFACT_ROOT || REPO_ROOT,
+    capabilityInventory:
+      process.env.NOMIFUN_CAPABILITY_INVENTORY_PATH ||
+      join(REPO_ROOT, CANONICAL_CAPABILITY_INVENTORY_RELATIVE_PATH),
     sidecar: null,
     hello: null,
     sidecarDir: null,
@@ -122,6 +126,7 @@ function parseArgs(argv) {
       report: 'report',
       releaselock: 'releaseLock',
       artifactroot: 'artifactRoot',
+      capabilityinventory: 'capabilityInventory',
       log: 'logs',
     };
     if (!(key in mapping)) throw new Error(`unknown argument: ${token}`);
@@ -157,6 +162,120 @@ function command(command, args, timeout = 10_000) {
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
+}
+
+function canonicalInventoryPayload(artifact) {
+  const payload = artifact?.payload ?? artifact;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('canonical capability inventory payload must be an object');
+  }
+  return payload;
+}
+
+export function readCanonicalCapabilityInventory(
+  path = join(REPO_ROOT, CANONICAL_CAPABILITY_INVENTORY_RELATIVE_PATH),
+) {
+  const absolutePath = resolve(path);
+  const artifact = readJson(absolutePath);
+  const payload = canonicalInventoryPayload(artifact);
+  if (!Array.isArray(payload.packages) || payload.packages.length === 0) {
+    throw new Error('canonical capability inventory must contain a non-empty packages array');
+  }
+
+  const ids = [];
+  for (const [packageIndex, packageEntry] of payload.packages.entries()) {
+    if (!Array.isArray(packageEntry?.capabilities)) {
+      throw new Error(
+        `canonical capability inventory package ${packageIndex} must contain a capabilities array`,
+      );
+    }
+    for (const [capabilityIndex, capabilityEntry] of packageEntry.capabilities.entries()) {
+      const id = capabilityEntry?.capability?.id;
+      if (typeof id !== 'string' || id.length === 0) {
+        throw new Error(
+          `canonical capability inventory entry ${packageIndex}:${capabilityIndex} has no capability id`,
+        );
+      }
+      ids.push(id);
+    }
+  }
+
+  const uniqueIds = new Set(ids);
+  if (uniqueIds.size !== ids.length) {
+    const duplicates = [...new Set(ids.filter((id, index) => ids.indexOf(id) !== index))].sort();
+    throw new Error(
+      `canonical capability inventory contains duplicate ids: ${duplicates.join(', ')}`,
+    );
+  }
+
+  return {
+    path: absolutePath,
+    payloadDigest: typeof artifact?.payload_digest === 'string' ? artifact.payload_digest : null,
+    packageCount: payload.packages.length,
+    capabilityIds: new Set([...uniqueIds].sort()),
+  };
+}
+
+export function readCanonicalCapabilityIds(
+  path = join(REPO_ROOT, CANONICAL_CAPABILITY_INVENTORY_RELATIVE_PATH),
+) {
+  return readCanonicalCapabilityInventory(path).capabilityIds;
+}
+
+export function compareCapabilityInventory(body, canonicalInventory) {
+  const expectedIds =
+    canonicalInventory instanceof Set
+      ? canonicalInventory
+      : canonicalInventory?.capabilityIds instanceof Set
+        ? canonicalInventory.capabilityIds
+        : new Set();
+  const items = Array.isArray(body?.data) ? body.data : null;
+  if (!items) {
+    return {
+      status: 'fail',
+      expectedCount: expectedIds.size,
+      observedCount: null,
+      missing: [...expectedIds].sort(),
+      unexpected: [],
+      duplicates: [],
+      malformed: ['response.data must be an array'],
+    };
+  }
+
+  const observedIds = [];
+  const malformed = [];
+  for (const [index, item] of items.entries()) {
+    const id = item?.capability?.id;
+    if (typeof id !== 'string' || id.length === 0) {
+      malformed.push(`response.data[${index}].capability.id`);
+      continue;
+    }
+    observedIds.push(id);
+  }
+
+  const observedSet = new Set(observedIds);
+  const duplicates = [...new Set(
+    observedIds.filter((id, index) => observedIds.indexOf(id) !== index),
+  )].sort();
+  const missing = [...expectedIds].filter((id) => !observedSet.has(id)).sort();
+  const unexpected = [...observedSet].filter((id) => !expectedIds.has(id)).sort();
+  const status =
+    malformed.length === 0 &&
+    duplicates.length === 0 &&
+    missing.length === 0 &&
+    unexpected.length === 0
+      ? 'pass'
+      : 'fail';
+  return {
+    status,
+    expectedCount: expectedIds.size,
+    observedCount: observedIds.length,
+    uniqueObservedCount: observedSet.size,
+    missing,
+    unexpected,
+    duplicates,
+    malformed,
+  };
 }
 
 function check(report, id, status, details = {}) {
@@ -318,7 +437,7 @@ async function stopChild(child) {
   }
 }
 
-async function startupSmoke(binary, root, report, label) {
+async function startupSmoke(binary, root, report, label, canonicalInventory) {
   const port = 28000 + Math.floor(Math.random() * 1000);
   const child = spawn(
     binary,
@@ -337,14 +456,27 @@ async function startupSmoke(binary, root, report, label) {
     }
     const capabilities = await fetch(`http://127.0.0.1:${port}/api/capabilities`);
     const body = await capabilities.json().catch(() => null);
-    const count = Array.isArray(body?.data) ? body.data.length : null;
+    const inventory = compareCapabilityInventory(body, canonicalInventory);
     check(report, `${label}:health`, 'pass', { status_code: health.response.status });
-    check(report, `${label}:capability_inventory`, count === EXPECTED_CAPABILITY_COUNT ? 'pass' : 'fail', {
-      expected: EXPECTED_CAPABILITY_COUNT,
-      observed: count,
+    check(
+      report,
+      `${label}:capability_inventory`,
+      capabilities.status === 200 && body?.success === true && inventory.status === 'pass'
+        ? 'pass'
+        : 'fail',
+      {
+      source: canonicalInventory?.path || null,
+      payload_digest: canonicalInventory?.payloadDigest || null,
+      expected_count: inventory.expectedCount,
+      observed_count: inventory.observedCount,
+      unique_observed_count: inventory.uniqueObservedCount ?? null,
+      missing: inventory.missing,
+      unexpected: inventory.unexpected,
+      duplicates: inventory.duplicates,
+      malformed: inventory.malformed,
       status_code: capabilities.status,
-      response: body,
-    });
+      },
+    );
   } catch (error) {
     check(report, label, 'fail', { reason: error.message, stderr_tail: stderr.slice(-2_000) });
   } finally {
@@ -804,16 +936,54 @@ export async function runValidation(options = parseArgs(process.argv.slice(2))) 
   }
 
   const hostBinary = options.hostBinary || join(REPO_ROOT, 'target/debug/nomicore');
+  let canonicalInventory = null;
+  const capabilityInventoryPath =
+    options.capabilityInventory ||
+    join(REPO_ROOT, CANONICAL_CAPABILITY_INVENTORY_RELATIVE_PATH);
+  try {
+    canonicalInventory = readCanonicalCapabilityInventory(capabilityInventoryPath);
+    report.artifacts.capability_inventory = canonicalInventory.path;
+    check(report, 'canonical-capability-inventory', 'pass', {
+      source: canonicalInventory.path,
+      payload_digest: canonicalInventory.payloadDigest,
+      package_count: canonicalInventory.packageCount,
+      capability_count: canonicalInventory.capabilityIds.size,
+    });
+  } catch (error) {
+    check(report, 'canonical-capability-inventory', 'blocked', {
+      reason: error.message,
+      path: capabilityInventoryPath,
+    });
+    report.blockers.push(`missing/invalid canonical capability inventory: ${capabilityInventoryPath}`);
+  }
   if (options.runStartup || existingFile(hostBinary)?.isFile()) {
-    const rootParent = mkdtempSync(join(tmpdir(), 'nomifun-c8-ma-'));
-    try {
-      const absentRoot = join(rootParent, 'absent-root');
-      const emptyRoot = join(rootParent, 'precreated-empty-root');
-      mkdirSync(emptyRoot);
-      await startupSmoke(hostBinary, absentRoot, report, 'startup:absent-root');
-      await startupSmoke(hostBinary, emptyRoot, report, 'startup:precreated-empty-root');
-    } finally {
-      rmSync(rootParent, { recursive: true, force: true });
+    if (!canonicalInventory) {
+      check(report, 'startup:capability-inventory', 'blocked', {
+        reason: 'startup inventory comparison cannot run without the canonical capability inventory',
+      });
+    } else {
+      const rootParent = mkdtempSync(join(tmpdir(), 'nomifun-c8-ma-'));
+      try {
+        const absentRoot = join(rootParent, 'absent-root');
+        const emptyRoot = join(rootParent, 'precreated-empty-root');
+        mkdirSync(emptyRoot);
+        await startupSmoke(
+          hostBinary,
+          absentRoot,
+          report,
+          'startup:absent-root',
+          canonicalInventory,
+        );
+        await startupSmoke(
+          hostBinary,
+          emptyRoot,
+          report,
+          'startup:precreated-empty-root',
+          canonicalInventory,
+        );
+      } finally {
+        rmSync(rootParent, { recursive: true, force: true });
+      }
     }
   } else {
     check(report, 'startup:host-binary', 'blocked', {
