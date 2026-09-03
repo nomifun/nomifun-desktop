@@ -6,6 +6,7 @@ import { useExtensionSettingsTabs } from '@/renderer/hooks/system/useExtensionSe
 import {
   Computer,
   Cpu,
+  History,
   Info,
   Puzzle,
   Server,
@@ -25,6 +26,7 @@ export const BUILTIN_TAB_IDS = [
   'execution-engines',
   'ssh-hosts',
   'computer-use',
+  'computer-history',
   'about',
 ] as const;
 
@@ -79,6 +81,12 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
         label: t('settings.computerUseNav'),
         icon: <Computer />,
         path: 'computer-use',
+      },
+      'computer-history': {
+        id: 'computer-history',
+        label: t('computerHistory.navTitle'),
+        icon: <History />,
+        path: 'computer-history',
       },
       about: { id: 'about', label: t('settings.about'), icon: <Info />, path: 'about' },
     };

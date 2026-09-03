@@ -40,6 +40,11 @@ pub struct GatewayDeps {
     /// attachments; the bare singleton would error "not attached".
     pub requirement_service: Arc<RequirementService>,
     pub companion_service: Arc<CompanionService>,
+    /// Computer-history service (privacy-filtered activity observation).
+    /// `None` when the feature-local store failed to open this boot — the
+    /// `computer_history_*` capabilities then report the degraded state
+    /// instead of erroring every call.
+    pub computer_history: Option<Arc<nomifun_computer_history::ComputerHistoryService>>,
     /// Singleton terminal service (owns the live PTY map shared with the
     /// terminal routes + AutoWork runner).
     pub terminal_service: Arc<TerminalService>,

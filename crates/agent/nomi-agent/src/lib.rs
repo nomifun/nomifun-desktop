@@ -6,6 +6,7 @@ pub mod cache_diagnostics;
 pub mod commands;
 pub mod compact;
 pub mod companion_tools;
+pub mod computer_history_tools;
 pub mod confirm;
 pub mod context;
 pub mod context_contributor;
@@ -34,3 +35,4 @@ mod local_delegate_tool;
 pub use nomi_skills as skills;
 
 pub use knowledge_tools::{KnowledgeHit, KnowledgeReadTool, KnowledgeRetrievalSink, KnowledgeSearchTool};
+pub use computer_history_tools::{ComputerHistorySink, register_computer_history_tools};

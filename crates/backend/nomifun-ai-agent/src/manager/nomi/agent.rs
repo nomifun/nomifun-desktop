@@ -8,6 +8,7 @@ use nomi_agent::companion_tools::{
     CompanionMemorySink, CompanionSkillContributor, CompanionSkillSink, CompanionSkillTool, ListRecentEventsTool,
     RecallMemoriesTool, SaveMemoryTool,
 };
+use nomi_agent::computer_history_tools::register_computer_history_tools;
 use nomi_agent::summon_tools::{
     SummonContextContributor, SummonContextSink,
 };
@@ -955,6 +956,7 @@ impl NomiAgentManager {
             knowledge_write_bases,
             companion_skill_sink,
             None,
+            None,
             NomiHostWiring::default(),
         )
         .await
@@ -974,6 +976,7 @@ impl NomiAgentManager {
         knowledge_writeback_sink: Option<Arc<dyn nomi_agent::knowledge_tools::KnowledgeWritebackSink>>,
         knowledge_write_bases: Vec<(nomifun_common::KnowledgeBaseId, String)>,
         companion_skill_sink: Option<Arc<dyn CompanionSkillSink>>,
+        computer_history_sink: Option<Arc<dyn nomi_agent::computer_history_tools::ComputerHistorySink>>,
         summon_wiring: Option<NomiSummonWiring>,
         host_wiring: NomiHostWiring,
     ) -> Result<Self, AppError> {
@@ -1144,6 +1147,28 @@ impl NomiAgentManager {
         // the tool + the per-turn skill ContextContributor happens after build().
         if companion_skill_sink.is_some() {
             config.tools.allow_list.push("companion_skill".to_owned());
+        }
+
+        // Read-only computer-history tools (status/recent/apps/urls/find_chats/
+        // count_activity/get_settings) only read the local history store and
+        // bypass the approval lane like the knowledge tools above; the write
+        // tools (pause/resume/update_settings) stay behind the normal approval
+        // gate. Must be set BEFORE bootstrap so the advertised prompt and the
+        // later registration cannot drift.
+        if computer_history_sink.is_some() {
+            for tool_name in [
+                "computer_history_recent",
+                "computer_history_apps",
+                "computer_history_urls",
+                "computer_history_find_chats",
+                "computer_history_count_activity",
+                "computer_history_status",
+                "computer_history_get_settings",
+            ] {
+                if !config.tools.allow_list.iter().any(|name| name == tool_name) {
+                    config.tools.allow_list.push(tool_name.to_owned());
+                }
+            }
         }
 
         // Read-only knowledge tools must bypass the approval lane whenever the
@@ -1340,6 +1365,16 @@ impl NomiAgentManager {
                 .register(Box::new(CompanionSkillTool::new(skill_sink.clone())));
             engine.register_context_contributor(Arc::new(CompanionSkillContributor::new(skill_sink)));
             debug!(conversation_id = %conversation_id, "Registered companion skill tool + contributor");
+        }
+        // Computer-history native tools (design §4): read-only Info tools
+        // (status / recent / apps / urls / find_chats / count_activity /
+        // get_settings) plus write tools (pause / resume / update_settings)
+        // that ride the normal approval lane. Registered only when the host
+        // injected a sink (installation-owner sessions); hosts without one
+        // register nothing.
+        register_computer_history_tools(engine.registry_mut(), computer_history_sink.clone());
+        if computer_history_sink.is_some() {
+            debug!(conversation_id = %conversation_id, "Registered computer-history native tools");
         }
         // Capture a handle for proactive RAG before the sink/ids are consumed
         // by tool registration below (only when bound bases make search valid).
@@ -7285,6 +7320,7 @@ mod tests {
             None,
             None,
             Vec::new(),
+            None,
             None,
             Some(stub_summon_wiring()),
             NomiHostWiring::default(),

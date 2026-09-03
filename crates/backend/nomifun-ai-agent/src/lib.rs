@@ -10,6 +10,7 @@ pub mod runtime_handle;
 pub mod browser_fetcher;
 pub mod capability;
 pub mod cc_switch;
+pub mod computer_history_sink;
 pub mod factory;
 pub mod image_generation;
 pub mod knowledge_completer;
@@ -30,6 +31,7 @@ pub mod types;
 // Backend crates reach the agent (nomi-*) layer ONLY through nomifun-ai-agent.
 // When the agent layer is later extracted into its own repo, these re-exports
 // become the single integration surface.
+pub use nomi_agent::computer_history_tools::ComputerHistorySink;
 pub use nomi_agent::companion_tools::CompanionMemorySink;
 pub use nomi_agent::companion_tools::{CompanionSkillSink, SkillListing};
 pub use nomi_agent::summon_tools::SummonContextSink;
