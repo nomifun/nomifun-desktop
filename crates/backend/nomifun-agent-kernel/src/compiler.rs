@@ -887,11 +887,6 @@ fn compile_role_provider_locks(
         .collect::<BTreeSet<_>>();
     let mut locks = BTreeMap::new();
     for role_id in required_roles {
-        let contract = registry
-            .role_contract(&role_id)
-            .ok_or_else(|| KernelError::RoleProviderNotBound {
-                role_id: role_id.clone(),
-            })?;
         let selection = overrides
             .get(&role_id)
             .or_else(|| {
@@ -902,89 +897,130 @@ fn compile_role_provider_locks(
             .ok_or_else(|| KernelError::RoleProviderNotBound {
                 role_id: role_id.clone(),
             })?;
-        let mount_id = {
-            if selection.role.key != contract.manifest.key
-                || selection.role.contract_digest != contract.contract_digest
-            {
-                return Err(KernelError::RoleProviderUnavailable {
-                    role_id: role_id.clone(),
-                    mount_id: selection.provider_mount_id.clone(),
-                });
-            }
-            selection.provider_mount_id.clone()
-        };
-        let provider = registry
-            .role_provider(&contract.manifest.key.role_id, &mount_id)
-            .ok_or_else(|| KernelError::RoleProviderUnavailable {
-                role_id: contract.manifest.key.role_id.clone(),
-                mount_id: mount_id.clone(),
-            })?;
-        let selected_members = contract
-            .manifest
-            .members
+        let selected_members = ceiling
             .iter()
-            .filter(|member| ceiling.contains(&member.capability.id))
-            .map(|member| member.capability.id.clone())
+            .filter(|capability_id| {
+                registry.role_for_capability(capability_id) == Some(&role_id)
+            })
+            .cloned()
             .collect::<BTreeSet<_>>();
-        let mut resource_binding_refs = BTreeSet::new();
-        for capability_id in &selected_members {
-            let member = provider
-                .contribution
-                .members
-                .get(capability_id)
-                .ok_or_else(|| KernelError::RoleProviderMemberUnavailable {
-                    role_id: role_id.clone(),
-                    capability_id: capability_id.clone(),
-                })?;
-            if !member.supported_platforms.is_empty()
-                && !member.supported_platforms.iter().any(|constraint| {
-                    provider_platform_supported(
-                        constraint,
-                        &environment.host_target,
-                        &environment.host_surface,
-                    )
-                })
-            {
-                return Err(KernelError::CapabilityUnavailableOnPlatform {
-                    capability_id: capability_id.clone(),
-                    target: environment.host_target.as_ref().to_owned(),
-                    surface: environment.host_surface.clone(),
-                });
-            }
-            for resource_kind in &member.required_resource_kinds {
-                let matching = bindings
-                    .values()
-                    .filter(|binding| &binding.resource_kind == resource_kind)
-                    .collect::<Vec<_>>();
-                if matching.is_empty() {
-                    return Err(KernelError::CapabilityResourceNotBound {
-                        capability_id: capability_id.clone(),
-                        resource_kind: resource_kind.as_ref().to_owned(),
-                    });
-                }
-                if matching.len() > 1 {
-                    return Err(KernelError::InvalidPresetRevision {
-                        reason: format!(
-                            "role {} has multiple bindings for resource kind {}",
-                            role_id.as_ref(),
-                            resource_kind.as_ref()
-                        ),
-                    });
-                }
-                resource_binding_refs.insert(matching[0].binding_id.clone());
-            }
-        }
         locks.insert(
             role_id.clone(),
-            ResolvedRoleProviderLock {
-                provider: provider.provider.clone(),
-                source: provider.source.clone(),
-                supported_members: provider.contribution.members.keys().cloned().collect(),
-                resource_binding_refs: resource_binding_refs.into_iter().collect(),
-            },
+            resolve_exact_role_provider_lock(
+                registry,
+                &role_id,
+                selection,
+                &selected_members,
+                bindings,
+                environment,
+            )?,
         );
     }
     Ok(locks)
+}
+
+/// Resolve one exact Role Provider using the same rules as Agent compilation.
+///
+/// Non-Agent application operations call this at admission and persist/pass the
+/// returned lock with their typed resource set. Execution must not call this
+/// again or consult a newer installation default.
+pub fn resolve_exact_role_provider_lock(
+    registry: &MaterializedRegistry,
+    role_id: &ExecutionRoleId,
+    selection: &RoleProviderSelection,
+    selected_members: &BTreeSet<CapabilityId>,
+    bindings: &BTreeMap<ResourceBindingId, TypedResourceBinding>,
+    environment: &CompilerEnvironment,
+) -> Result<ResolvedRoleProviderLock, KernelError> {
+    let contract = registry
+        .role_contract(role_id)
+        .ok_or_else(|| KernelError::RoleProviderNotBound {
+            role_id: role_id.clone(),
+        })?;
+    if selection.role.key != contract.manifest.key
+        || selection.role.contract_digest != contract.contract_digest
+    {
+        return Err(KernelError::RoleProviderUnavailable {
+            role_id: role_id.clone(),
+            mount_id: selection.provider_mount_id.clone(),
+        });
+    }
+    let provider = registry
+        .role_provider(role_id, &selection.provider_mount_id)
+        .ok_or_else(|| KernelError::RoleProviderUnavailable {
+            role_id: role_id.clone(),
+            mount_id: selection.provider_mount_id.clone(),
+        })?;
+    let contract_members = contract
+        .manifest
+        .members
+        .iter()
+        .map(|member| member.capability.id.clone())
+        .collect::<BTreeSet<_>>();
+    if let Some(capability_id) = selected_members
+        .difference(&contract_members)
+        .next()
+    {
+        return Err(KernelError::RoleProviderMemberUnavailable {
+            role_id: role_id.clone(),
+            capability_id: capability_id.clone(),
+        });
+    }
+
+    let mut resource_binding_refs = BTreeSet::new();
+    for capability_id in selected_members {
+        let member = provider
+            .contribution
+            .members
+            .get(capability_id)
+            .ok_or_else(|| KernelError::RoleProviderMemberUnavailable {
+                role_id: role_id.clone(),
+                capability_id: capability_id.clone(),
+            })?;
+        if !member.supported_platforms.is_empty()
+            && !member.supported_platforms.iter().any(|constraint| {
+                provider_platform_supported(
+                    constraint,
+                    &environment.host_target,
+                    &environment.host_surface,
+                )
+            })
+        {
+            return Err(KernelError::CapabilityUnavailableOnPlatform {
+                capability_id: capability_id.clone(),
+                target: environment.host_target.as_ref().to_owned(),
+                surface: environment.host_surface.clone(),
+            });
+        }
+        for resource_kind in &member.required_resource_kinds {
+            let matching = bindings
+                .values()
+                .filter(|binding| &binding.resource_kind == resource_kind)
+                .collect::<Vec<_>>();
+            if matching.is_empty() {
+                return Err(KernelError::CapabilityResourceNotBound {
+                    capability_id: capability_id.clone(),
+                    resource_kind: resource_kind.as_ref().to_owned(),
+                });
+            }
+            if matching.len() > 1 {
+                return Err(KernelError::InvalidPresetRevision {
+                    reason: format!(
+                        "role {} has multiple bindings for resource kind {}",
+                        role_id.as_ref(),
+                        resource_kind.as_ref()
+                    ),
+                });
+            }
+            resource_binding_refs.insert(matching[0].binding_id.clone());
+        }
+    }
+    Ok(ResolvedRoleProviderLock {
+        provider: provider.provider.clone(),
+        source: provider.source.clone(),
+        supported_members: provider.contribution.members.keys().cloned().collect(),
+        resource_binding_refs: resource_binding_refs.into_iter().collect(),
+    })
 }
 
 fn provider_platform_supported(

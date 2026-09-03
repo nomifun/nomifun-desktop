@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
@@ -7,7 +10,7 @@ use nomifun_agent_contracts::{
     ArtifactEnvelope, CapabilityActionDescriptor, CapabilityContributions, CapabilityExposure,
     CapabilityId, CapabilityKind, CapabilityManifest, CapabilityRef, CancellationDescriptor,
     CanonicalSchemaRef, CorrelationId, DeclaredServiceViewDescriptor, DigestHex, EffectClass,
-    HostPortId, HostPortRef, IdempotencyKey,
+    ExactRoleContractRef, HostPortId, HostPortRef, IdempotencyKey,
     InProcessEntrypointMetadata, LocalizedMetadata, LogicalArtifactRef, ManagedTaskRegistrationDescriptor,
     McpServerId, McpToolCapabilityMapping, McpToolKey, OperationId, PackageContributions,
     PackageId, PackageManifest, PackageRef, PlatformConstraint, PluginBootCriticality,
@@ -15,8 +18,11 @@ use nomifun_agent_contracts::{
     PluginIdentityDescriptor, PluginMountId, PluginRegistrarDescriptor, PluginRegistrarOperation,
     PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
     PluginStateCompareAndSwapOutcome, PluginStateHandleDescriptor, PluginStateMethod,
-    PresetRevisionRef, PrincipalRef, ResourceBindingId, ResourceId, ResourceKind,
-    RuntimeFeatureId, RuntimeProfileKind, RuntimeTarget, ScopeKey, ServiceHandleDescriptor, ServiceKeyRef,
+    PresetRevisionRef, PrincipalRef, ResolvedRoleProviderLock, ResourceBindingId, ResourceId,
+    ResourceKind, RoleContractKey, RoleContractManifest, RoleMemberContract,
+    RoleMemberRequirement, RoleProviderContribution, RoleProviderMemberContribution,
+    ExecutionRoleId, RuntimeFeatureId, RuntimeProfileKind, RuntimeTarget, ScopeKey,
+    ServiceHandleDescriptor, ServiceKeyRef,
     ServiceProvision, ServiceRequirement, SkillDefinition, SkillId, SkillRef, StrictJsonValue,
     ToolPresentationKind, TypedResourceBinding, UserId, ValidatedPluginConfig, VersionString,
     digest_bytes, digest_payload,
@@ -26,9 +32,12 @@ use serde_json::json;
 use crate::{
     ActivationOutcome, AgentPresetCompiler, CapabilityHandler, CapabilityInvocationContext,
     CapabilityInvocationRequest, CompileRequest, CompilerEnvironment, CompletedTurnBoundary,
+    ContextContributionFactory, ContextContributionRequest, ContextContributionResult,
     HostPluginStateApi, InMemoryPluginStatePersistence, KernelError, KernelRegistry,
     MaterializationPolicy, PluginRegistration, PluginStatePersistence, ServiceKey,
-    SessionCapabilityState,
+    ResourceHandle, ResourceHandleIdentity, ResourceProviderFactory, ResourceProviderRequest,
+    ResourceProviderResult, RoleMemberAdmission, RoleMemberInvocationRequest, RoleToolHandler,
+    RoleToolInvocationContext, RoleToolOperationRequest, SessionCapabilityState,
 };
 
 const SAMPLE_PACKAGE: &str = "sample.echo";
@@ -42,6 +51,7 @@ const SAMPLE_AGENT_SESSION_ID: &str = "agent-session-sample-1";
 const SAMPLE_OPERATION_ID: &str = "operation-sample-1";
 const SAMPLE_IDEMPOTENCY_KEY: &str = "idempotency-sample-1";
 const SAMPLE_CORRELATION_ID: &str = "correlation-sample-1";
+const SAMPLE_ROLE: &str = "system.sample_echo";
 
 fn package_ref(package_id: &str) -> PackageRef {
     PackageRef {
@@ -377,6 +387,325 @@ impl CapabilityHandler for EchoHandler {
     }
 }
 
+const SAMPLE_ROLE_TOOL: &str = "sample.echo.role_tool";
+const SAMPLE_ROLE_CONTEXT: &str = "sample.echo.role_context";
+const SAMPLE_ROLE_RESOURCE: &str = "sample.echo.role_resource";
+const SAMPLE_ROLE_ACTION: &str = "sample.echo.role_tool.invoke";
+const SAMPLE_ROLE_RESOURCE_KIND: &str = "sample.echo.role_target";
+const SAMPLE_ROLE_BINDING: &str = "sample-echo-role-target";
+
+fn role_schema_ref(
+    capability_id: &str,
+    suffix: &str,
+    schema: &serde_json::Value,
+) -> CanonicalSchemaRef {
+    CanonicalSchemaRef::from(format!(
+        "schema://{capability_id}/{suffix}@1#{}",
+        digest_payload(schema).expect("role schema digest").as_ref()
+    ))
+}
+
+fn role_capability(
+    package: &PackageRef,
+    capability_id: &str,
+    kind: CapabilityKind,
+) -> CapabilityManifest {
+    let config_schema = StrictJsonValue(json!({
+        "type": "object",
+        "additionalProperties": false
+    }));
+    let resource_kind = ResourceKind::from(SAMPLE_ROLE_RESOURCE_KIND);
+    let action_input_schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "value": {"type": "string"}
+        }
+    });
+    let action_output_schema = json!({
+        "type": "object",
+        "additionalProperties": false
+    });
+    let context_schema = json!({
+        "type": "object",
+        "additionalProperties": false
+    });
+    let actions = (kind == CapabilityKind::Tool)
+        .then(|| CapabilityActionDescriptor {
+            action_id: ActionId::from(SAMPLE_ROLE_ACTION),
+            input_schema: role_schema_ref(
+                capability_id,
+                "input",
+                &action_input_schema,
+            ),
+            output_schema: role_schema_ref(
+                capability_id,
+                "output",
+                &action_output_schema,
+            ),
+            effect_class: EffectClass::ExternalTransmit,
+            presentation: ToolPresentationKind::FunctionTool,
+        })
+        .into_iter()
+        .collect();
+    let context_schema_refs = (kind == CapabilityKind::ContextContributor)
+        .then(|| role_schema_ref(capability_id, "context", &context_schema))
+        .into_iter()
+        .collect();
+    CapabilityManifest {
+        id: CapabilityId::from(capability_id),
+        version: VersionString::from(VERSION),
+        kind,
+        package: package.clone(),
+        display: display("Sample Role Member", "Kernel operation admission fixture."),
+        requires: Vec::new(),
+        conflicts: Vec::new(),
+        supported_surfaces: BTreeSet::from(["test".to_owned()]),
+        requires_runtime_features: Vec::new(),
+        supported_platforms: vec![PlatformConstraint::Any],
+        config_schema,
+        contributions: CapabilityContributions {
+            actions,
+            context_schema_refs,
+            event_schema_refs: Vec::new(),
+            resource_kinds: BTreeSet::from([resource_kind]),
+            host_ports: Vec::new(),
+        },
+    }
+}
+
+fn operation_role_registration(
+    captured_tool: Arc<Mutex<Option<RoleToolInvocationContext>>>,
+    releases: Arc<AtomicUsize>,
+) -> PluginRegistration {
+    let mut registration = sample_registration("");
+    let package = package_ref(SAMPLE_PACKAGE);
+    let tool = role_capability(
+        &package,
+        SAMPLE_ROLE_TOOL,
+        CapabilityKind::Tool,
+    );
+    let context = role_capability(
+        &package,
+        SAMPLE_ROLE_CONTEXT,
+        CapabilityKind::ContextContributor,
+    );
+    let resource = role_capability(
+        &package,
+        SAMPLE_ROLE_RESOURCE,
+        CapabilityKind::ResourceProvider,
+    );
+    let role_key = RoleContractKey {
+        role_id: ExecutionRoleId::from(SAMPLE_ROLE),
+        contract_version: VersionString::from(VERSION),
+    };
+    let members = vec![
+        RoleMemberContract {
+            capability: CapabilityRef {
+                id: tool.id.clone(),
+                version: tool.version.clone(),
+            },
+            capability_manifest_digest: digest_payload(&tool).unwrap(),
+            requirement: RoleMemberRequirement::Required,
+        },
+        RoleMemberContract {
+            capability: CapabilityRef {
+                id: context.id.clone(),
+                version: context.version.clone(),
+            },
+            capability_manifest_digest: digest_payload(&context).unwrap(),
+            requirement: RoleMemberRequirement::Optional,
+        },
+        RoleMemberContract {
+            capability: CapabilityRef {
+                id: resource.id.clone(),
+                version: resource.version.clone(),
+            },
+            capability_manifest_digest: digest_payload(&resource).unwrap(),
+            requirement: RoleMemberRequirement::Optional,
+        },
+    ];
+    let contract = RoleContractManifest {
+        key: role_key.clone(),
+        members,
+        serialized_target_resource_kind: Some(ResourceKind::from(
+            SAMPLE_ROLE_RESOURCE_KIND,
+        )),
+    };
+    let role = ExactRoleContractRef {
+        key: role_key,
+        contract_digest: digest_payload(&contract).unwrap(),
+    };
+    let required_resource_kinds =
+        BTreeSet::from([ResourceKind::from(SAMPLE_ROLE_RESOURCE_KIND)]);
+    let provider = RoleProviderContribution {
+        role,
+        display: display("Sample Role Provider", "Operation admission fixture."),
+        members: BTreeMap::from([
+            (
+                tool.id.clone(),
+                RoleProviderMemberContribution {
+                    supported_platforms: vec![PlatformConstraint::Any],
+                    required_resource_kinds: required_resource_kinds.clone(),
+                },
+            ),
+            (
+                context.id.clone(),
+                RoleProviderMemberContribution {
+                    supported_platforms: vec![PlatformConstraint::Any],
+                    required_resource_kinds: required_resource_kinds.clone(),
+                },
+            ),
+            (
+                resource.id.clone(),
+                RoleProviderMemberContribution {
+                    supported_platforms: vec![PlatformConstraint::Any],
+                    required_resource_kinds,
+                },
+            ),
+        ]),
+    };
+    {
+        let manifest = &mut registration.metadata.manifest.payload;
+        manifest
+            .contributions
+            .capabilities
+            .extend([tool, context, resource]);
+        manifest.contributions.role_contracts.push(contract);
+        manifest.contributions.role_providers.push(provider);
+    }
+    registration
+        .add_role_action_handler(
+            ExecutionRoleId::from(SAMPLE_ROLE),
+            CapabilityId::from(SAMPLE_ROLE_TOOL),
+            Arc::new(SampleRoleAgentHandler),
+        )
+        .unwrap();
+    registration
+        .add_role_tool_handler(
+            ExecutionRoleId::from(SAMPLE_ROLE),
+            CapabilityId::from(SAMPLE_ROLE_TOOL),
+            Arc::new(SampleRoleOperationToolHandler {
+                captured: captured_tool,
+            }),
+        )
+        .unwrap();
+    registration
+        .add_role_context_factory(
+            ExecutionRoleId::from(SAMPLE_ROLE),
+            CapabilityId::from(SAMPLE_ROLE_CONTEXT),
+            Arc::new(SampleRoleContextFactory),
+        )
+        .unwrap();
+    registration
+        .add_role_resource_factory(
+            ExecutionRoleId::from(SAMPLE_ROLE),
+            CapabilityId::from(SAMPLE_ROLE_RESOURCE),
+            Arc::new(SampleRoleResourceFactory { releases }),
+        )
+        .unwrap();
+    refresh_manifest(&mut registration);
+    registration
+}
+
+struct SampleRoleAgentHandler;
+
+#[async_trait]
+impl CapabilityHandler for SampleRoleAgentHandler {
+    async fn invoke(
+        &self,
+        _context: CapabilityInvocationContext,
+        _input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, KernelError> {
+        Ok(StrictJsonValue(json!({"agent_path": true})))
+    }
+}
+
+struct SampleRoleOperationToolHandler {
+    captured: Arc<Mutex<Option<RoleToolInvocationContext>>>,
+}
+
+#[async_trait]
+impl RoleToolHandler for SampleRoleOperationToolHandler {
+    async fn invoke(
+        &self,
+        context: RoleToolInvocationContext,
+        input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, KernelError> {
+        *self.captured.lock().expect("operation tool capture") =
+            Some(context.clone());
+        Ok(StrictJsonValue(json!({
+            "operation_path": true,
+            "input": input.0
+        })))
+    }
+}
+
+struct SampleRoleContextFactory;
+
+#[async_trait]
+impl ContextContributionFactory for SampleRoleContextFactory {
+    async fn contribute(
+        &self,
+        request: ContextContributionRequest,
+    ) -> Result<ContextContributionResult, KernelError> {
+        Ok(ContextContributionResult {
+            value: Some(StrictJsonValue(json!({
+                "operation_path": request.context.agent_session_id.is_none()
+                    && request.context.resolved_snapshot_ref.is_none(),
+                "mount_id": request.context.mount.identity.mount_id,
+            }))),
+        })
+    }
+}
+
+struct SampleRoleResourceFactory {
+    releases: Arc<AtomicUsize>,
+}
+
+struct SampleRoleResourceHandle {
+    identity: ResourceHandleIdentity,
+    releases: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl ResourceHandle for SampleRoleResourceHandle {
+    fn identity(&self) -> &ResourceHandleIdentity {
+        &self.identity
+    }
+
+    async fn release(&self) -> Result<(), KernelError> {
+        self.releases.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ResourceProviderFactory for SampleRoleResourceFactory {
+    async fn acquire(
+        &self,
+        request: ResourceProviderRequest,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        let binding = request
+            .context
+            .resource_bindings
+            .first()
+            .ok_or_else(|| KernelError::ResourceBindingMissing {
+                binding_id: ResourceBindingId::from(SAMPLE_ROLE_BINDING),
+            })?;
+        Ok(ResourceProviderResult {
+            handle: Arc::new(SampleRoleResourceHandle {
+                identity: ResourceHandleIdentity {
+                    binding_id: binding.binding_id.clone(),
+                    resource_kind: binding.resource_kind.clone(),
+                    resource_id: binding.resource_id.clone(),
+                },
+                releases: Arc::clone(&self.releases),
+            }),
+        })
+    }
+}
+
 fn principal(id: &str) -> PrincipalRef {
     PrincipalRef {
         principal_kind: "user".to_owned(),
@@ -393,6 +722,60 @@ fn resource_binding(owner_id: &str) -> TypedResourceBinding {
         operations: BTreeSet::from(["invoke".to_owned()]),
         connection_config_ref: None,
         typed_parameters: BTreeMap::new(),
+    }
+}
+
+fn role_resource_binding(owner_id: &str) -> TypedResourceBinding {
+    TypedResourceBinding {
+        binding_id: ResourceBindingId::from(SAMPLE_ROLE_BINDING),
+        resource_kind: ResourceKind::from(SAMPLE_ROLE_RESOURCE_KIND),
+        resource_id: ResourceId::from("role-target-1"),
+        owner_id: owner_id.to_owned(),
+        operations: BTreeSet::from(["invoke".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    }
+}
+
+fn role_operation_lock(
+    materialized: &crate::MaterializedRegistry,
+    binding_id: ResourceBindingId,
+) -> ResolvedRoleProviderLock {
+    let provider = materialized
+        .role_provider(
+            &ExecutionRoleId::from(SAMPLE_ROLE),
+            &PluginMountId::from(SAMPLE_MOUNT),
+        )
+        .expect("sample role provider");
+    ResolvedRoleProviderLock {
+        provider: provider.provider.clone(),
+        source: provider.source.clone(),
+        supported_members: provider.contribution.members.keys().cloned().collect(),
+        resource_binding_refs: vec![binding_id],
+    }
+}
+
+fn role_operation_request(
+    materialized: &crate::MaterializedRegistry,
+    owner: PrincipalRef,
+    capability_id: &str,
+    binding: TypedResourceBinding,
+) -> RoleMemberInvocationRequest {
+    let binding_id = binding.binding_id.clone();
+    RoleMemberInvocationRequest {
+        principal: owner.clone(),
+        session_owner: owner,
+        operation_id: OperationId::from(format!("operation:{capability_id}")),
+        correlation_id: CorrelationId::from(format!("correlation:{capability_id}")),
+        capability_id: CapabilityId::from(capability_id),
+        resource_binding_ids: BTreeSet::from([binding_id.clone()]),
+        state_scope_key: ScopeKey::from("operation:sample-role"),
+        admission: RoleMemberAdmission::Operation {
+            provider_lock: role_operation_lock(materialized, binding_id),
+            registry_generation: materialized.generation,
+            registry_digest: materialized.registry_digest.clone(),
+            resource_bindings: vec![binding],
+        },
     }
 }
 
@@ -687,6 +1070,229 @@ async fn sample_echo_uses_materialize_compile_activate_authorize_invoke_and_rest
         .await
         .unwrap();
     assert_eq!(second.0, json!({"echo": "prefix:again", "count": 2}));
+}
+
+#[tokio::test]
+async fn non_agent_role_operation_dispatches_exact_tool_context_and_resource() {
+    let captured_tool = Arc::new(Mutex::new(None));
+    let releases = Arc::new(AtomicUsize::new(0));
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry
+        .replace_all(vec![operation_role_registration(
+            Arc::clone(&captured_tool),
+            Arc::clone(&releases),
+        )])
+        .unwrap();
+    let owner = principal("operation-owner");
+    let binding = role_resource_binding(&owner.principal_id);
+
+    let tool_request = RoleToolOperationRequest {
+        member: role_operation_request(
+            &materialized,
+            owner.clone(),
+            SAMPLE_ROLE_TOOL,
+            binding.clone(),
+        ),
+        action_id: ActionId::from(SAMPLE_ROLE_ACTION),
+        idempotency_key: IdempotencyKey::from("operation-idempotency"),
+        input: StrictJsonValue(json!({"value": "hello"})),
+    };
+    let tool_result = registry.invoke_role_tool(tool_request).await.unwrap();
+    assert_eq!(
+        tool_result.0,
+        json!({
+            "operation_path": true,
+            "input": {"value": "hello"}
+        })
+    );
+    let captured = captured_tool
+        .lock()
+        .expect("operation tool capture")
+        .clone()
+        .expect("operation tool context");
+    assert!(captured.context.agent_session_id.is_none());
+    assert!(captured.context.resolved_snapshot_ref.is_none());
+    assert_eq!(
+        captured.context.mount.identity.mount_id,
+        PluginMountId::from(SAMPLE_MOUNT)
+    );
+    assert_eq!(
+        captured.context.provider_lock,
+        role_operation_lock(&materialized, ResourceBindingId::from(SAMPLE_ROLE_BINDING))
+    );
+    assert_eq!(
+        captured.action_id,
+        ActionId::from(SAMPLE_ROLE_ACTION)
+    );
+
+    let context = registry
+        .contribute_role_context_operation(role_operation_request(
+            &materialized,
+            owner.clone(),
+            SAMPLE_ROLE_CONTEXT,
+            binding.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        context.value.expect("operation context").0,
+        json!({
+            "operation_path": true,
+            "mount_id": SAMPLE_MOUNT
+        })
+    );
+
+    let first_handle = registry
+        .acquire_role_resource_operation(role_operation_request(
+            &materialized,
+            owner,
+            SAMPLE_ROLE_RESOURCE,
+            binding,
+        ))
+        .await
+        .unwrap();
+    let replay_handle = registry
+        .acquire_role_resource_operation(role_operation_request(
+            &materialized,
+            principal("operation-owner"),
+            SAMPLE_ROLE_RESOURCE,
+            role_resource_binding("operation-owner"),
+        ))
+        .await
+        .unwrap();
+    assert!(Arc::ptr_eq(&first_handle.handle, &replay_handle.handle));
+    assert_eq!(releases.load(Ordering::Acquire), 0);
+    registry
+        .release_role_resources(&ScopeKey::from("operation:sample-role"))
+        .await
+        .unwrap();
+    assert_eq!(releases.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn non_agent_role_operation_rejects_provider_drift_without_fallback() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry
+        .replace_all(vec![operation_role_registration(
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicUsize::new(0)),
+        )])
+        .unwrap();
+    let owner = principal("provider-drift-owner");
+    let binding = role_resource_binding(&owner.principal_id);
+    let mut request = role_operation_request(
+        &materialized,
+        owner,
+        SAMPLE_ROLE_TOOL,
+        binding,
+    );
+    if let RoleMemberAdmission::Operation { provider_lock, .. } =
+        &mut request.admission
+    {
+        provider_lock.provider.contribution_digest =
+            DigestHex::from("drifted-contribution");
+    }
+    let result = registry
+        .invoke_role_tool(RoleToolOperationRequest {
+            member: request,
+            action_id: ActionId::from(SAMPLE_ROLE_ACTION),
+            idempotency_key: IdempotencyKey::from("provider-drift"),
+            input: StrictJsonValue(json!({"value": "drift"})),
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(KernelError::RoleProviderUnavailable { .. })
+    ));
+}
+
+#[tokio::test]
+async fn non_agent_role_operation_rejects_registry_drift() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let first = registry
+        .replace_all(vec![operation_role_registration(
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicUsize::new(0)),
+        )])
+        .unwrap();
+    let owner = principal("registry-drift-owner");
+    let binding = role_resource_binding(&owner.principal_id);
+    let request = role_operation_request(
+        &first,
+        owner,
+        SAMPLE_ROLE_TOOL,
+        binding,
+    );
+    registry
+        .replace_all(vec![operation_role_registration(
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicUsize::new(0)),
+        )])
+        .unwrap();
+    let result = registry
+        .invoke_role_tool(RoleToolOperationRequest {
+            member: request,
+            action_id: ActionId::from(SAMPLE_ROLE_ACTION),
+            idempotency_key: IdempotencyKey::from("registry-drift"),
+            input: StrictJsonValue(json!({"value": "drift"})),
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(KernelError::RegistryGenerationMismatch {
+            expected_generation: 1,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn non_agent_role_operation_rejects_resource_binding_mismatch() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry
+        .replace_all(vec![operation_role_registration(
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicUsize::new(0)),
+        )])
+        .unwrap();
+    let owner = principal("resource-mismatch-owner");
+    let binding = role_resource_binding(&owner.principal_id);
+    let mut request = role_operation_request(
+        &materialized,
+        owner,
+        SAMPLE_ROLE_TOOL,
+        binding,
+    );
+    request.resource_binding_ids =
+        BTreeSet::from([ResourceBindingId::from("wrong-binding")]);
+    let result = registry
+        .invoke_role_tool(RoleToolOperationRequest {
+            member: request,
+            action_id: ActionId::from(SAMPLE_ROLE_ACTION),
+            idempotency_key: IdempotencyKey::from("resource-mismatch"),
+            input: StrictJsonValue(json!({"value": "drift"})),
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(KernelError::UnexpectedResourceBinding { .. })
+    ));
 }
 
 #[test]
