@@ -71,7 +71,10 @@ use crate::events::{
     KnowledgeEntryContentUpdatedEvent, KnowledgeEventEmitter, KnowledgeTreeChangedEvent,
 };
 use crate::mount::{self, MountSpec};
-use crate::source_url::{self, HttpFetcher, PageFetcher};
+use crate::source_url::{
+    self, BrowserRenderContentPort, BrowserRenderContentRequest, HttpFetcher, PageFetcher,
+    UnavailableBrowserRenderContentPort,
+};
 use crate::workpath::{WORKPATH_BINDING_KIND, workpath_key};
 use crate::{KB_MANAGED_REL_DIR, KB_MOUNT_REL_DIR};
 
@@ -752,21 +755,14 @@ pub struct KnowledgeService {
     /// stack is built after this service); `None` ⇒ autogen endpoints fail
     /// with a clear 409 and best-effort call sites skip silently.
     completer: RwLock<Option<Arc<dyn KnowledgeCompleter>>>,
-    /// Page-fetching backend for URL knowledge sources. A trait object so a
-    /// rendering backend (`BrowserFetcher`, late-wired from `nomifun-ai-agent`)
-    /// can replace the default HTTP fetcher without the knowledge crate
-    /// depending on the browser engine (P3 anti-cycle decision ②).
+    /// Page-fetching backend for ordinary (non-rendered) URL knowledge
+    /// sources. Rendered entries use the separate canonical operation port
+    /// below and never select this backend.
     fetcher: Arc<dyn PageFetcher>,
-    /// **P3-K2: optional rendering page-fetcher** (the engine-backed
-    /// `BrowserFetcher`, late-wired from `nomifun-ai-agent` when the `browser-use`
-    /// feature is on). `None` ⇒ no browser backend available; every source uses
-    /// [`Self::fetcher`] (the HTTP default — current behaviour, zero regression).
-    /// K2 only *provides* this backend; **per-source backend selection (the
-    /// `rendered` flag → pick this vs. the HTTP fetcher) is K3's job** and lives at
-    /// the [`Self::prepare_snapshot_body`] dispatch site, which K2 leaves untouched.
-    /// Behind a `RwLock` so it can be late-wired on the shared `Arc<KnowledgeService>`
-    /// after construction (same discipline as [`Self::completer`]).
-    render_fetcher: RwLock<Option<Arc<dyn PageFetcher>>>,
+    /// Consumer-owned typed port for the canonical hidden
+    /// `browser.render_content` operation. The default implementation fails
+    /// closed; it is never replaced by the ordinary HTTP fetcher.
+    browser_render_content_port: RwLock<Arc<dyn BrowserRenderContentPort>>,
     /// mtime-keyed content cache for `search_bases` (perf only; see
     /// [`SearchCacheInner`]). Cloned into the search `spawn_blocking` closure.
     search_cache: Arc<RwLock<SearchCacheInner>>,
@@ -907,7 +903,9 @@ impl KnowledgeService {
             emitter,
             completer: RwLock::new(None),
             fetcher: Arc::new(HttpFetcher::default()),
-            render_fetcher: RwLock::new(None),
+            browser_render_content_port: RwLock::new(Arc::new(
+                UnavailableBrowserRenderContentPort,
+            )),
             search_cache: Arc::new(RwLock::new(SearchCacheInner::default())),
             relocate_idempotency: Arc::new(StdMutex::new(
                 RelocateIdempotencyCache::default(),
@@ -1930,10 +1928,11 @@ impl KnowledgeService {
         session_workpath_key(path, &self.data_dir)
     }
 
-    /// Replace the URL fetcher. Accepts any [`PageFetcher`] (tests pass a
-    /// loopback-permitting [`HttpFetcher`]; the production rendering backend
-    /// late-wires its `BrowserFetcher`), wrapping it in the `Arc<dyn …>` the
-    /// service stores.
+    /// Replace the ordinary HTTP-side URL fetcher.
+    ///
+    /// This hook is intentionally unrelated to rendered sources. A
+    /// `rendered=true` entry can only use the canonical
+    /// [`BrowserRenderContentPort`].
     pub fn with_url_fetcher(mut self, fetcher: impl PageFetcher + 'static) -> Self {
         self.fetcher = Arc::new(fetcher);
         self
@@ -1945,40 +1944,27 @@ impl KnowledgeService {
         *self.completer.write().expect("knowledge completer lock poisoned") = Some(completer);
     }
 
-    /// **P3-K2: late-wire the rendering page-fetcher** (the engine-backed
-    /// `BrowserFetcher` from `nomifun-ai-agent`, wired by the app layer when the
-    /// `browser-use` feature is on). Interior-mutable so it can be set on the shared
-    /// `Arc<KnowledgeService>` after construction (the agent stack is built after
-    /// this service — same late-wire timing as [`Self::set_completer`]).
+    /// Late-wire the canonical hidden `browser.render_content` operation.
     ///
-    /// This only *registers* the backend. It does **not** change which sources use
-    /// it: the default [`Self::fetcher`] (HTTP) stays the active path for every
-    /// source, so HTTP knowledge sources are unaffected (zero regression). Routing
-    /// a source to this backend (the `rendered` flag) is K3.
-    pub fn set_render_fetcher(&self, fetcher: Arc<dyn PageFetcher>) {
-        *self.render_fetcher.write().expect("knowledge render fetcher lock poisoned") = Some(fetcher);
+    /// The application composition supplies an adapter that performs
+    /// non-Agent operation admission and dispatches against one exact
+    /// resolved Provider. Knowledge never receives a Hub, lane, profile, or
+    /// concrete Browser implementation.
+    pub fn set_browser_render_content_port(
+        &self,
+        port: Arc<dyn BrowserRenderContentPort>,
+    ) {
+        *self
+            .browser_render_content_port
+            .write()
+            .expect("knowledge browser render-content port lock poisoned") = port;
     }
 
-    /// The wired rendering page-fetcher, if any (K3 reads this to route `rendered`
-    /// sources). `None` ⇒ no browser backend → fall back to the HTTP [`Self::fetcher`].
-    fn render_fetcher(&self) -> Option<Arc<dyn PageFetcher>> {
-        self.render_fetcher.read().ok().and_then(|guard| guard.clone())
-    }
-
-    /// **P3-K3 backend selection**: pick the page-fetcher for one source entry.
-    /// `rendered == true` AND a [`Self::render_fetcher`] is wired ⇒ the browser
-    /// backend (`BrowserFetcher`); every other case ⇒ the default HTTP
-    /// [`Self::fetcher`]. In particular `rendered == true` with **no** render
-    /// backend wired (`browser-use` feature off / not injected) gracefully
-    /// degrades to HTTP rather than failing — the flag is best-effort, never a
-    /// hard requirement. Returns an owned `Arc` clone so the caller can `.await`
-    /// across the fetch without holding the `RwLock`.
-    fn fetcher_for(&self, rendered: bool) -> Arc<dyn PageFetcher> {
-        if rendered && let Some(render) = self.render_fetcher() {
-            render
-        } else {
-            Arc::clone(&self.fetcher)
-        }
+    fn browser_render_content_port(&self) -> Arc<dyn BrowserRenderContentPort> {
+        self.browser_render_content_port
+            .read()
+            .expect("knowledge browser render-content port lock poisoned")
+            .clone()
     }
 
     fn completer(&self) -> Option<Arc<dyn KnowledgeCompleter>> {
@@ -7256,25 +7242,43 @@ impl KnowledgeService {
     /// Fetch one source URL and condense/truncate the body to snapshot size.
     /// Errors come back as the ready-to-aggregate `"{url}: {error}"` line.
     ///
-    /// **P3-K3 backend selection**: when `rendered` is set AND a rendering
-    /// backend is wired ([`Self::render_fetcher`], the engine-backed
-    /// `BrowserFetcher`), the URL is fetched through the real browser so JS-heavy
-    /// pages yield their post-render content. Otherwise — `rendered == false`, or
-    /// `rendered == true` but no browser backend is available (`browser-use`
-    /// feature off / not injected) — it gracefully falls back to the default HTTP
-    /// [`Self::fetcher`] (no error: a missing browser backend degrades to HTTP,
-    /// never blocks the snapshot). See [`Self::fetcher_for`].
+    /// **P1-R2 canonical routing**: `rendered == true` is a non-Agent
+    /// `browser.render_content` operation and must go through the injected
+    /// typed port. If that port is unavailable, this entry fails closed; it
+    /// never falls back to the ordinary HTTP fetcher. Plain entries keep the
+    /// independent HTTP path.
     async fn prepare_snapshot_body(
         &self,
         url: &str,
         rendered: bool,
         completer: Option<&dyn KnowledgeCompleter>,
     ) -> Result<PreparedSnapshot, String> {
-        let fetcher = self.fetcher_for(rendered);
-        let page = fetcher.fetch_page(url).await.map_err(|e| {
-            tracing::warn!(url, rendered, error = %e, "knowledge source fetch failed");
-            format!("{url}: {e}")
-        })?;
+        let page = if rendered {
+            let port = self.browser_render_content_port();
+            let content = port
+                .render_content(BrowserRenderContentRequest::new(url))
+                .await
+                .map_err(|error| {
+                    tracing::warn!(
+                        url,
+                        error = %error,
+                        "canonical browser.render_content failed for knowledge source"
+                    );
+                    format!("{url}: {error}")
+                })?;
+            source_url::rendered_content_to_page(content)
+        } else {
+            let fetcher = Arc::clone(&self.fetcher);
+            fetcher.fetch_page(url).await.map_err(|error| {
+                tracing::warn!(
+                    url,
+                    rendered,
+                    error = %error,
+                    "knowledge source fetch failed"
+                );
+                format!("{url}: {error}")
+            })?
+        };
 
         let final_url = normalize_source_url(&page.final_url).map_err(|error| {
             format!("{url}: fetcher returned an invalid final URL: {error}")
@@ -9661,14 +9665,12 @@ fn derive_kind(managed: bool, source: Option<&KnowledgeSource>) -> &'static str 
 /// resolution happens per fetch, not here — live-mode URLs are stored
 /// without ever being fetched by us).
 ///
-/// **P3-K3**: the per-entry `rendered` flag is meaningful only for URL sources.
-/// It needs no dedicated check here because the `kind != "url"` guard below
-/// rejects every non-URL source outright (rendered or not), so a `rendered`
-/// entry can only ever reach storage on a `url` source. The flag must also be
-/// backed by a valid http(s) URL — already guaranteed by the per-entry URL
-/// validation in the loop. `rendered` is best-effort routing (browser backend
-/// when wired, HTTP otherwise), so an unsupported value can never make a config
-/// invalid; there is intentionally nothing to reject.
+/// The per-entry `rendered` flag is meaningful only for URL sources. It needs
+/// no dedicated syntactic check here because the `kind != "url"` guard below
+/// rejects every non-URL source outright (rendered or not), and the per-entry
+/// URL validation guarantees an http(s) URL. At fetch time, `rendered=true`
+/// requires the canonical `browser.render_content` port; a missing port is a
+/// visible fail-closed fetch error, never an HTTP fallback.
 fn validate_source(source: &KnowledgeSource) -> Result<(), AppError> {
     if source.kind != "url" {
         return Err(AppError::BadRequest(format!(
@@ -14502,24 +14504,27 @@ mod tests {
         );
     }
 
-    /// **P3-K2 seam**: the render fetcher is an OPTIONAL, late-wired backend. By
-    /// default it is absent (every source uses the HTTP `fetcher` — zero
-    /// regression); the app layer registers a `BrowserFetcher` via
-    /// [`KnowledgeService::set_render_fetcher`] when `browser-use` is on. K3 reads
-    /// it to route `rendered` sources; K2 only proves the seam wires.
+    /// The rendered path is a late-wired, consumer-owned typed port. Until the
+    /// composition root supplies a canonical operation adapter, its default is
+    /// an explicit unavailable result rather than an HTTP fallback.
     #[tokio::test]
-    async fn render_fetcher_seam_is_optional_and_late_wired() {
-        use crate::source_url::FetchedPage;
+    async fn browser_render_content_port_is_typed_and_late_wired() {
+        use crate::source_url::{
+            BrowserRenderContent, BrowserRenderContentRequest,
+        };
 
-        struct CannedRenderFetcher;
+        struct CannedRenderContentPort;
         #[async_trait::async_trait]
-        impl PageFetcher for CannedRenderFetcher {
-            async fn fetch_page(&self, _raw_url: &str) -> Result<FetchedPage, AppError> {
-                Ok(FetchedPage {
-                    final_url: "https://spa.example.com/app".into(),
-                    title: Some("Rendered".into()),
-                    markdown: "# Rendered\n\nonly a browser sees this".into(),
-                    truncated: false,
+        impl BrowserRenderContentPort for CannedRenderContentPort {
+            async fn render_content(
+                &self,
+                request: BrowserRenderContentRequest,
+            ) -> Result<BrowserRenderContent, AppError> {
+                Ok(BrowserRenderContent {
+                    final_url: request.url,
+                    html: "<html><title>Rendered</title><body>canonical port</body></html>"
+                        .into(),
+                    html_truncated: false,
                 })
             }
         }
@@ -14533,52 +14538,65 @@ mod tests {
             KnowledgeEventEmitter::new(events, Arc::from(TEST_OWNER_ID)),
         ));
 
-        // Default: no render backend → HTTP fetcher is the only path (zero regression).
-        assert!(service.render_fetcher().is_none(), "render fetcher must default to None");
+        let unavailable = service
+            .browser_render_content_port()
+            .render_content(BrowserRenderContentRequest::new(
+                "https://spa.example.com/app",
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&unavailable, AppError::Conflict(message) if message.contains("browser.render_content")),
+            "{unavailable}"
+        );
 
-        // Late-wire on the shared Arc (interior mutability, like set_completer).
-        service.set_render_fetcher(Arc::new(CannedRenderFetcher));
-        let rf = service.render_fetcher().expect("render fetcher wired");
-        let page = rf.fetch_page("https://spa.example.com/app").await.unwrap();
-        assert_eq!(page.title.as_deref(), Some("Rendered"));
-        assert!(page.markdown.contains("only a browser sees this"));
+        service.set_browser_render_content_port(Arc::new(CannedRenderContentPort));
+        let rendered = service
+            .browser_render_content_port()
+            .render_content(BrowserRenderContentRequest::new(
+                "https://spa.example.com/app",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rendered.final_url, "https://spa.example.com/app");
+        assert!(rendered.html.contains("canonical port"));
     }
 
-    /// **P3-K3 backend selection** (pure logic over `fetcher_for`): each fetcher
-    /// reports a distinctive marker so we can prove *which* backend a given
-    /// `(rendered, render-wired?)` combination selects.
-    ///   • `rendered == false`            → HTTP (default), even with a browser wired
-    ///   • `rendered == true`, browser ✓  → render backend
-    ///   • `rendered == true`, browser ✗  → graceful HTTP fallback (no error)
+    /// Plain entries stay on the HTTP seam; rendered entries use only the
+    /// canonical typed port.
     #[tokio::test]
-    async fn fetcher_for_selects_backend_by_rendered_flag() {
-        use crate::source_url::FetchedPage;
+    async fn rendered_path_does_not_use_http_fetcher() {
+        use crate::source_url::{
+            BrowserRenderContent, BrowserRenderContentPort, BrowserRenderContentRequest,
+            FetchedPage,
+        };
 
-        fn marked(marker: &str) -> FetchedPage {
-            FetchedPage {
-                final_url: "https://x".into(),
-                title: Some(marker.into()),
-                markdown: format!("via:{marker}"),
-                truncated: false,
-            }
-        }
-
-        struct Canned(&'static str);
+        struct CannedHttpFetcher;
         #[async_trait::async_trait]
-        impl PageFetcher for Canned {
+        impl PageFetcher for CannedHttpFetcher {
             async fn fetch_page(&self, _url: &str) -> Result<FetchedPage, AppError> {
-                Ok(marked(self.0))
+                Ok(FetchedPage {
+                    final_url: "https://x".into(),
+                    title: Some("http".into()),
+                    markdown: "HTTP-ONLY".into(),
+                    truncated: false,
+                })
             }
         }
 
-        async fn which(service: &KnowledgeService, rendered: bool) -> String {
-            service
-                .fetcher_for(rendered)
-                .fetch_page("https://x")
-                .await
-                .unwrap()
-                .title
-                .unwrap()
+        struct CannedRenderContentPort;
+        #[async_trait::async_trait]
+        impl BrowserRenderContentPort for CannedRenderContentPort {
+            async fn render_content(
+                &self,
+                request: BrowserRenderContentRequest,
+            ) -> Result<BrowserRenderContent, AppError> {
+                Ok(BrowserRenderContent {
+                    final_url: request.url,
+                    html: "<html><body>RENDERED-ONLY</body></html>".into(),
+                    html_truncated: false,
+                })
+            }
         }
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -14590,21 +14608,21 @@ mod tests {
                 Arc::from(TEST_OWNER_ID),
             ),
         )
-        .with_url_fetcher(Canned("http"));
+        .with_url_fetcher(CannedHttpFetcher);
+        service.set_browser_render_content_port(Arc::new(CannedRenderContentPort));
 
-        // No render backend wired: every flag value resolves to HTTP (graceful
-        // fallback for rendered=true — the flag is best-effort, never fails).
-        assert_eq!(which(&service, false).await, "http", "rendered=false → HTTP");
-        assert_eq!(
-            which(&service, true).await,
-            "http",
-            "rendered=true but no browser backend → graceful HTTP fallback"
-        );
+        let plain = service
+            .prepare_snapshot_body("https://plain.example", false, None)
+            .await
+            .unwrap();
+        assert_eq!(plain.body, "HTTP-ONLY");
 
-        // Wire a browser backend.
-        service.set_render_fetcher(Arc::new(Canned("browser")));
-        assert_eq!(which(&service, false).await, "http", "rendered=false → HTTP even with browser wired");
-        assert_eq!(which(&service, true).await, "browser", "rendered=true + browser wired → render backend");
+        let rendered = service
+            .prepare_snapshot_body("https://rendered.example", true, None)
+            .await
+            .unwrap();
+        assert!(rendered.body.contains("RENDERED-ONLY"));
+        assert!(!rendered.body.contains("HTTP-ONLY"));
     }
 
     #[test]
@@ -19053,27 +19071,33 @@ mod tests {
         assert!(!content.contains("xxxxxxxxxx"), "raw body must be replaced");
     }
 
-    /// **P3-K3 end-to-end routing**: a snapshot source with one `rendered`
-    /// entry and one plain entry must write the browser-backed body for the
-    /// rendered URL and the HTTP body for the plain one — proving the
-    /// `entry.rendered → fetcher_for → snapshot` chain selects per-entry.
-    /// Deterministic (canned render fetcher, mock HTTP server) — no real Chrome.
+    /// A snapshot source with one `rendered` entry and one plain entry must
+    /// write the canonical-port body for the rendered URL and the HTTP body
+    /// for the plain one. The test does not construct or reference a Browser
+    /// Hub.
     #[tokio::test]
-    async fn rendered_entry_uses_render_backend_per_source() {
-        use crate::source_url::FetchedPage;
+    async fn rendered_entry_uses_canonical_render_content_port_per_source() {
+        use crate::source_url::{
+            BrowserRenderContent, BrowserRenderContentPort, BrowserRenderContentRequest,
+        };
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        // Render backend stamps a marker no HTTP fetch could produce.
-        struct MarkerRenderFetcher;
+        // The canonical port returns raw HTML, as browser.render_content does.
+        struct MarkerRenderContentPort;
         #[async_trait::async_trait]
-        impl PageFetcher for MarkerRenderFetcher {
-            async fn fetch_page(&self, raw_url: &str) -> Result<FetchedPage, AppError> {
-                Ok(FetchedPage {
-                    final_url: raw_url.to_owned(),
-                    title: Some("Rendered".into()),
-                    markdown: "RENDERED-BY-BROWSER only a headless browser sees this".into(),
-                    truncated: false,
+        impl BrowserRenderContentPort for MarkerRenderContentPort {
+            async fn render_content(
+                &self,
+                request: BrowserRenderContentRequest,
+            ) -> Result<BrowserRenderContent, AppError> {
+                Ok(BrowserRenderContent {
+                    final_url: request.url,
+                    html: "<html><head><title>Rendered</title></head><body>\
+                        RENDERED-BY-CANONICAL-PORT\
+                        </body></html>"
+                        .into(),
+                    html_truncated: false,
                 })
             }
         }
@@ -19086,7 +19110,7 @@ mod tests {
 
         let dir = tempfile::TempDir::new().unwrap();
         let (service, _repo) = service_with_repo(&dir.path().join("data"));
-        service.set_render_fetcher(Arc::new(MarkerRenderFetcher));
+        service.set_browser_render_content_port(Arc::new(MarkerRenderContentPort));
 
         let plain_url = format!("{}/plain", server.uri());
         let rendered_url = format!("{}/spa", server.uri());
@@ -19115,16 +19139,15 @@ mod tests {
         assert!(plain_snap.contains("PLAIN-HTTP-BODY"), "rendered=false entry must use HTTP: {plain_snap}");
         assert!(!plain_snap.contains("RENDERED-BY-BROWSER"), "rendered=false must NOT use browser backend");
         assert!(
-            rendered_snap.contains("RENDERED-BY-BROWSER"),
-            "rendered=true entry must use the wired browser backend: {rendered_snap}"
+            rendered_snap.contains("RENDERED-BY-CANONICAL-PORT"),
+            "rendered=true entry must use the canonical render-content port: {rendered_snap}"
         );
     }
 
-    /// **P3-K3 graceful fallback**: a `rendered` entry with NO render backend
-    /// wired must silently fall back to HTTP and still snapshot — the flag is
-    /// best-effort, never a hard failure that blocks the fetch.
+    /// A rendered entry without the canonical operation port must fail closed.
+    /// In particular, the ordinary HTTP fetcher must not be consulted.
     #[tokio::test]
-    async fn rendered_entry_without_render_backend_falls_back_to_http() {
+    async fn rendered_entry_without_canonical_port_fails_closed() {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -19136,7 +19159,6 @@ mod tests {
 
         let dir = tempfile::TempDir::new().unwrap();
         let (service, _repo) = service_with_repo(&dir.path().join("data"));
-        // No set_render_fetcher → render backend absent.
 
         let url = format!("{}/spa", server.uri());
         let source = KnowledgeSource {
@@ -19146,12 +19168,34 @@ mod tests {
             last_fetched_at: None,
             ..Default::default()
         };
-        let kb = service.create_base("回退库", "", None, Some(source)).await.unwrap();
+        let kb = service
+            .create_base("缺少渲染端口库", "", None, Some(source))
+            .await
+            .unwrap();
 
-        let snap_dir = PathBuf::from(&kb.root_path).join(source_url::SNAPSHOT_REL_DIR);
-        let snap = std::fs::read_dir(&snap_dir).unwrap().flatten().next().expect("snapshot written despite no browser backend");
-        let content = std::fs::read_to_string(snap.path()).unwrap();
-        assert!(content.contains("HTTP-FALLBACK-BODY"), "rendered=true with no browser backend must degrade to HTTP: {content}");
+        let fetch = kb.source_fetch.expect("create result must expose fetch outcome");
+        assert_eq!(fetch.fetched, 0);
+        assert_eq!(fetch.failed, 1);
+        assert!(
+            fetch.errors.iter().any(|error| {
+                error.contains("browser.render_content")
+                    && error.contains("unavailable")
+            }),
+            "missing canonical port must be visible: {:?}",
+            fetch.errors
+        );
+
+        let snap_dir =
+            PathBuf::from(&kb.root_path).join(source_url::SNAPSHOT_REL_DIR);
+        let snapshot_count = std::fs::read_dir(&snap_dir)
+            .map(|entries| entries.flatten().count())
+            .unwrap_or(0);
+        assert_eq!(snapshot_count, 0, "failed rendered entry must not publish a snapshot");
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            requests.is_empty(),
+            "rendered=true must not silently use HTTP: {requests:?}"
+        );
     }
 
     #[tokio::test]
