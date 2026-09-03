@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CreativeAsset } from '../../assets';
+import { isCreativeAssetDeleted, type CreativeAsset } from '../../assets';
 import type {
   CreativeBottomPanelView,
   CreativeCanvasNode,
@@ -220,6 +220,9 @@ export function resolveCreativeNodeAssetPresentation(
   const assetId = referencedAssetId(node);
   if (!assetId) return null;
   const asset = assetsById.get(assetId);
+  if (asset && isCreativeAssetDeleted(asset)) {
+    return { src: '', label: asset.title, deleted: true };
+  }
   if (!asset || !assetKindMatchesNode(node, asset) || !asset.originalUrl) return null;
 
   return {

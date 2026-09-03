@@ -219,7 +219,11 @@ pub fn init_environment(cli: &Cli, merged_path: &str) -> Result<ServerEnvironmen
 enum ExistingV3DatabaseProbe {
     Missing,
     Current,
-    Incompatible(String),
+    /// A pre-v3 dataset without canonical v3 identity tables/columns.
+    Legacy(String),
+    /// Claimed v3 lineage, schema/data damage, or an incompatible binary.
+    /// This is never authority to retire or reset existing user data.
+    RequiresRepair(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -267,7 +271,7 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
             .fetch_all(pool)
             .await?;
     if quick_check.as_slice() != ["ok"] {
-        return Ok(ExistingV3DatabaseProbe::Incompatible(
+        return Ok(ExistingV3DatabaseProbe::RequiresRepair(
             format!("SQLite quick_check failed: {}", quick_check.join("; ")),
         ));
     }
@@ -288,15 +292,26 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
             "users",
         ]
     {
-        return Ok(ExistingV3DatabaseProbe::Incompatible(
-            "required v3 identity tables are missing".into(),
-        ));
+        let reason = "required v3 identity tables are missing".to_owned();
+        // Losing one identity table is damage to an existing v3 dataset,
+        // not proof of a legacy database. Canonical columns in either other
+        // identity table are sufficient evidence to preserve it for repair.
+        let has_v3_identity = required_tables.iter().any(|table| table == "installation_identity")
+            || (table_has_column_contract(pool, "users", "id", "INTEGER", false, true).await?
+                && table_has_column_contract(pool, "users", "user_id", "TEXT", true, false).await?)
+            || (table_has_column_contract(pool, "agent_metadata", "id", "INTEGER", false, true).await?
+                && table_has_column_contract(pool, "agent_metadata", "agent_id", "TEXT", true, false).await?);
+        return Ok(if has_v3_identity {
+            ExistingV3DatabaseProbe::RequiresRepair(reason)
+        } else {
+            ExistingV3DatabaseProbe::Legacy(reason)
+        });
     }
 
     let migration_status = match nomifun_db::inspect_supported_migration_lineage(pool).await {
         Ok(status) => status,
         Err(error) => {
-            return Ok(ExistingV3DatabaseProbe::Incompatible(format!(
+            return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
                 "database migration lineage is not a supported embedded prefix: {error}"
             )));
         }
@@ -308,12 +323,12 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
     // writable open.
     if migration_status == nomifun_db::MigrationLineageStatus::Current {
         if let Err(error) = nomifun_db::validate_id_schema_contract(pool).await {
-            return Ok(ExistingV3DatabaseProbe::Incompatible(format!(
+            return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
                 "database does not satisfy the complete v3 ID schema contract: {error}"
             )));
         }
         if let Err(error) = nomifun_db::validate_id_data_contract(pool).await {
-            return Ok(ExistingV3DatabaseProbe::Incompatible(format!(
+            return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
                 "database does not satisfy the complete v3 ID data contract: {error}"
             )));
         }
@@ -368,7 +383,7 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
         )
         .await?;
     if !schema_matches {
-        return Ok(ExistingV3DatabaseProbe::Incompatible(
+        return Ok(ExistingV3DatabaseProbe::RequiresRepair(
             "core database identity columns do not match the v3 schema".into(),
         ));
     }
@@ -379,18 +394,18 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
     .fetch_all(pool)
     .await?;
     let [(singleton_key, owner_user_id)] = identities.as_slice() else {
-        return Ok(ExistingV3DatabaseProbe::Incompatible(format!(
+        return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
             "expected one installation identity row, found {}",
             identities.len()
         )));
     };
     if singleton_key != "installation" {
-        return Ok(ExistingV3DatabaseProbe::Incompatible(
+        return Ok(ExistingV3DatabaseProbe::RequiresRepair(
             "installation identity singleton key is invalid".into(),
         ));
     }
     if nomifun_common::UserId::parse(owner_user_id.clone()).is_err() {
-        return Ok(ExistingV3DatabaseProbe::Incompatible(
+        return Ok(ExistingV3DatabaseProbe::RequiresRepair(
             "installation owner identity is not a canonical UUIDv7".into(),
         ));
     }
@@ -400,7 +415,7 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
             .fetch_one(pool)
             .await?;
     if owner_rows != 1 {
-        return Ok(ExistingV3DatabaseProbe::Incompatible(
+        return Ok(ExistingV3DatabaseProbe::RequiresRepair(
             "installation identity does not resolve to exactly one owner".into(),
         ));
     }
@@ -587,12 +602,17 @@ async fn prepare_v3_data_layer(config: &AppConfig) -> Result<V3DataLayerState> {
             }
             state
         }
-        ExistingV3DatabaseProbe::Incompatible(reason) => {
+        ExistingV3DatabaseProbe::RequiresRepair(reason) => {
+            return Err(nomifun_common::AppError::Conflict(format!(
+                "database compatibility validation failed; existing data preserved without automatic retirement: {reason}"
+            )).into());
+        }
+        ExistingV3DatabaseProbe::Legacy(reason) => {
             warn!(
                 target: "boot",
                 database = %config.database_path().display(),
                 reason,
-                "database failed the pre-open v3 identity probe; retiring the claimed dataset"
+                "database is a legacy dataset without v3 identity; checking retirement authority"
             );
             nomifun_common::factory_reset::retire_non_v3_dataset_after_probe(
                 &config.data_dir,
@@ -747,6 +767,9 @@ pub fn finalize_data_layer(config: &AppConfig) -> Result<()> {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha384};
+    use sqlx::migrate::{Migrate, Migrator};
+
+    static TEST_MIGRATOR: Migrator = sqlx::migrate!("../nomifun-db/migrations");
 
     const V3_BASELINE_SQL: &str =
         include_str!("../../../nomifun-db/migrations/001_v3_baseline.sql");
@@ -790,6 +813,223 @@ mod tests {
     async fn env_guard() -> tokio::sync::MutexGuard<'static, ()> {
         static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         LOCK.lock().await
+    }
+
+    fn finalize_test_dataset(data: &Path, generation: &str, retired_before: bool) {
+        std::fs::write(data.join("storage-generation"), generation).unwrap();
+        nomifun_common::factory_reset::write_v3_dataset_receipt(data, generation).unwrap();
+        if retired_before {
+            let retired = data.join(nomifun_common::factory_reset::RETIRED_DATASETS_DIR);
+            std::fs::create_dir_all(&retired).unwrap();
+            let root = data.canonicalize().unwrap();
+            let marker = serde_json::json!({
+                "version": 1,
+                "operation_id": uuid::Uuid::now_v7().to_string(),
+                "generation": generation,
+                "data_dir": root,
+                "work_dir": root,
+                "reason": "non_v3_dataset",
+                "requested_at": 1,
+                "completed_at": 2,
+            });
+            std::fs::write(
+                retired.join("automatic-legacy-retirement.completed.json"),
+                serde_json::to_vec(&marker).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn published_059_boots_and_upgrades_without_reusing_automatic_retirement() {
+        let _env = env_guard().await;
+        let data = tempfile::tempdir().unwrap();
+        let config = test_config(data.path(), data.path());
+        let pool = PoolOptions::<Sqlite>::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(config.database_path())
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        connection.ensure_migrations_table().await.unwrap();
+        for migration in TEST_MIGRATOR
+            .iter()
+            .filter(|migration| migration.version <= 59)
+        {
+            connection.apply(migration).await.unwrap();
+        }
+        drop(connection);
+        let owner = nomifun_common::UserId::new();
+        sqlx::query("INSERT INTO users (user_id, username, password_hash, created_at, updated_at) VALUES (?, 'admin', '', 1, 1)")
+            .bind(owner.as_str()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO installation_identity (singleton_key, owner_user_id) VALUES ('installation', ?)")
+            .bind(owner.as_str()).execute(&pool).await.unwrap();
+        let asset = nomifun_common::WorkshopAssetId::new();
+        sqlx::query("INSERT INTO workshop_assets (asset_id, kind, title, tags, text_content, in_library, created_at, updated_at) VALUES (?, 'text', 'keep history', '[]', 'original content', 1, 1, 1)")
+            .bind(asset.as_str()).execute(&pool).await.unwrap();
+        let checksum: Vec<u8> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 59")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let encoded = format!(
+            "{:x}",
+            Sha384::digest(include_bytes!(
+                "../../../nomifun-db/migrations/059_workshop_asset_content_deletion.sql"
+            ))
+        );
+        assert_eq!(
+            encoded,
+            "ae3e1cbb9d66050fc6c5c631b3f578cb15c12a4d7aaf6be284974765b050c91ab9d08ccdae271702b4cee36f9d536f65"
+        );
+        pool.close().await;
+        let generation = uuid::Uuid::now_v7().to_string();
+        finalize_test_dataset(data.path(), &generation, true);
+        let receipt = data
+            .path()
+            .join(nomifun_common::factory_reset::V3_DATASET_RECEIPT_FILE);
+        let receipt_before = std::fs::read(&receipt).unwrap();
+        let retired = data
+            .path()
+            .join(nomifun_common::factory_reset::RETIRED_DATASETS_DIR);
+        let marker = retired.join("automatic-legacy-retirement.completed.json");
+        let marker_before = std::fs::read(&marker).unwrap();
+
+        assert_eq!(
+            prepare_v3_data_layer(&config).await.unwrap(),
+            V3DataLayerState::FinalizedCurrent
+        );
+        let db = nomifun_db::init_database(&config.database_path())
+            .await
+            .unwrap();
+        nomifun_db::validate_id_schema_contract(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT MAX(version) FROM _sqlx_migrations")
+                .fetch_one(db.pool())
+                .await
+                .unwrap(),
+            60
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, Vec<u8>>(
+                "SELECT checksum FROM _sqlx_migrations WHERE version = 59"
+            )
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+            checksum
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT text_content FROM workshop_assets WHERE asset_id = ?"
+            )
+            .bind(asset.as_str())
+            .fetch_one(db.pool())
+            .await
+            .unwrap(),
+            "original content"
+        );
+        db.close().await;
+        assert_eq!(
+            prepare_v3_data_layer(&config).await.unwrap(),
+            V3DataLayerState::FinalizedCurrent
+        );
+        assert_eq!(std::fs::read(receipt).unwrap(), receipt_before);
+        assert_eq!(std::fs::read(marker).unwrap(), marker_before);
+        assert_eq!(std::fs::read_dir(retired).unwrap().count(), 1);
+        assert!(
+            !data
+                .path()
+                .join(nomifun_common::factory_reset::V3_DATASET_RESET_DIR)
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn v3_validation_failures_preserve_data_with_or_without_prior_retirement() {
+        let _env = env_guard().await;
+        for (corruption, expected) in [
+            (
+                "UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = 59",
+                "migration 59",
+            ),
+            (
+                "DROP TABLE installation_identity",
+                "identity tables are missing",
+            ),
+            (
+                "DROP TRIGGER restrict_template_run_deleted_assets_update",
+                "schema contract",
+            ),
+        ] {
+            for retired_before in [false, true] {
+                let data = tempfile::tempdir().unwrap();
+                let config = test_config(data.path(), data.path());
+                let db = nomifun_db::init_database(&config.database_path())
+                    .await
+                    .unwrap();
+                sqlx::query(corruption).execute(db.pool()).await.unwrap();
+                db.close().await;
+                let generation = uuid::Uuid::now_v7().to_string();
+                finalize_test_dataset(data.path(), &generation, retired_before);
+                let media = data.path().join("workshop/assets/keep.bin");
+                std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+                std::fs::write(&media, b"keep original media").unwrap();
+                let before = std::fs::read(config.database_path()).unwrap();
+                let receipt = data
+                    .path()
+                    .join(nomifun_common::factory_reset::V3_DATASET_RECEIPT_FILE);
+                let receipt_before = std::fs::read(&receipt).unwrap();
+                let retired = data
+                    .path()
+                    .join(nomifun_common::factory_reset::RETIRED_DATASETS_DIR);
+                let marker = retired.join("automatic-legacy-retirement.completed.json");
+                let marker_before = std::fs::read(&marker).ok();
+
+                let error = prepare_v3_data_layer(&config)
+                    .await
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(expected), "{error}");
+                assert!(
+                    error.contains("preserved without automatic retirement"),
+                    "{error}"
+                );
+                assert!(!error.contains("already consumed"), "{error}");
+                assert_eq!(std::fs::read(config.database_path()).unwrap(), before);
+                assert_eq!(std::fs::read(media).unwrap(), b"keep original media");
+                assert_eq!(std::fs::read(receipt).unwrap(), receipt_before);
+                assert_eq!(
+                    std::fs::read_to_string(data.path().join("storage-generation")).unwrap(),
+                    generation
+                );
+                assert_eq!(std::fs::read(marker).ok(), marker_before);
+                assert_eq!(
+                    std::fs::read_dir(retired)
+                        .map(|entries| entries.count())
+                        .unwrap_or(0),
+                    usize::from(retired_before)
+                );
+                assert!(
+                    !data
+                        .path()
+                        .join(nomifun_common::factory_reset::V3_DATASET_RESET_DIR)
+                        .exists()
+                );
+                assert!(
+                    !data
+                        .path()
+                        .join(nomifun_common::factory_reset::V3_DATASET_RESET_REQUEST_FILE)
+                        .exists()
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -895,7 +1135,7 @@ mod tests {
 
         assert!(matches!(
             probe_existing_v3_database(&path).await.unwrap(),
-            ExistingV3DatabaseProbe::Incompatible(reason)
+            ExistingV3DatabaseProbe::RequiresRepair(reason)
                 if reason.contains("migration lineage")
         ));
     }
@@ -975,7 +1215,7 @@ mod tests {
 
         assert!(matches!(
             probe_existing_v3_database(&path).await.unwrap(),
-            ExistingV3DatabaseProbe::Incompatible(reason)
+            ExistingV3DatabaseProbe::RequiresRepair(reason)
                 if reason.contains("core database identity columns")
         ));
     }
@@ -993,7 +1233,7 @@ mod tests {
 
         assert!(matches!(
             probe_existing_v3_database(&path).await.unwrap(),
-            ExistingV3DatabaseProbe::Incompatible(reason)
+            ExistingV3DatabaseProbe::RequiresRepair(reason)
                 if reason.contains("migration lineage")
         ));
     }
@@ -1030,7 +1270,7 @@ mod tests {
         assert!(
             matches!(
                 &probe,
-            ExistingV3DatabaseProbe::Incompatible(reason)
+            ExistingV3DatabaseProbe::RequiresRepair(reason)
                 if reason.contains("complete v3 ID data contract")
                     && reason.contains("origin.provider_id")
             ),

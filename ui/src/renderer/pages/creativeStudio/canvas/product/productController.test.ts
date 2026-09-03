@@ -171,6 +171,9 @@ describe('Creative Canvas product controller helpers', () => {
       label: imageAsset.title,
       alt: imageAsset.title,
     });
+    expect(resolveCreativeNodeAssetPresentation(connectedImage, new Map([
+      [imageAsset.id, { ...imageAsset, deletedAt: 50 }],
+    ]))).toEqual({ src: '', label: imageAsset.title, deleted: true });
 
     const audioAsset = asset({ kind: 'audio', mimeType: 'audio/wav' });
     expect(

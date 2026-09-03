@@ -5,6 +5,10 @@
  */
 
 export { CreativeAssetClient, creativeAssetClient } from './client';
+export { isCreativeAssetDeleted } from './types';
+export { CreativeAssetDeletedError, subscribeCreativeAssetDeletion } from './assetDeletion';
+export { useCreativeAssetAvailability } from './useCreativeAssetAvailability';
+export type { CreativeAssetAvailability } from './useCreativeAssetAvailability';
 export { CreativeAssetUploadError, workshopAssetApi } from './api';
 export { invalidateCreativeAssetQueryCache } from './creativeAssetQueryCache';
 export { CREATIVE_ASSET_PAGE_SIZE, creativeAssetMatchesQuery, useCreativeAssets } from './useCreativeAssets';

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CreativeAsset } from '../../assets';
+import { isCreativeAssetDeleted, type CreativeAsset } from '../../assets';
 import type {
   CreativeCanvasConnection,
   CreativeCanvasNodeKind,
@@ -62,7 +62,7 @@ export type CanvasImageReferenceIssue =
       targetNodeKind: CreativeCanvasNodeKind;
     }
   | {
-      code: 'target_asset_unresolved';
+      code: 'target_asset_unresolved' | 'target_asset_deleted';
       targetNodeId: string;
       assetId: string;
     }
@@ -90,7 +90,7 @@ export type CanvasImageReferenceIssue =
       sourceNodeKind: CanvasImageReferenceNodeKind;
     }
   | {
-      code: 'source_asset_unresolved';
+      code: 'source_asset_unresolved' | 'source_asset_deleted';
       connectionId: string;
       sourceNodeId: string;
       assetId: string;
@@ -204,9 +204,9 @@ export function resolveCanvasImageReferences(
   const targetAssetId = sourceAssetId(target);
   if (targetAssetId) {
     const asset = assetsById.get(targetAssetId);
-    if (!asset) {
+    if (!asset || isCreativeAssetDeleted(asset)) {
       issues.push({
-        code: 'target_asset_unresolved',
+        code: asset ? 'target_asset_deleted' : 'target_asset_unresolved',
         targetNodeId,
         assetId: targetAssetId,
       });
@@ -280,9 +280,9 @@ export function resolveCanvasImageReferences(
     }
 
     const asset = assetsById.get(assetId);
-    if (!asset) {
+    if (!asset || isCreativeAssetDeleted(asset)) {
       issues.push({
-        code: 'source_asset_unresolved',
+        code: asset ? 'source_asset_deleted' : 'source_asset_unresolved',
         connectionId: connection.id,
         sourceNodeId: source.id,
         assetId,

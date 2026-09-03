@@ -23,7 +23,7 @@ import {
   reconcileCanvasVideoComposeConfig,
 } from './canvasVideoComposerCanvas';
 import { creativeStudioProductText } from './i18n';
-import { creativeNodeFromAsset } from './nodeFactory';
+import { creativeNodeFromHistoricalAsset } from './nodeFactory';
 
 export type CanvasVideoComposerEditorPort = Pick<
   CreativeCanvasEditorHandle,
@@ -237,7 +237,7 @@ export async function settleCanvasVideoComposeTask(input: {
               )
             );
           }
-          const created = creativeNodeFromAsset(asset, state, input.viewportSize, {
+          const created = creativeNodeFromHistoricalAsset(asset, state, input.viewportSize, {
             position: canvasVideoComposeResultPosition(state.document.nodes, config),
           });
           if (created.type !== 'video') {

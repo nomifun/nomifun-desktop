@@ -70,6 +70,12 @@ export interface CreativeAsset {
   thumbnailUrl: string | null;
   createdAt: number;
   updatedAt: number;
+  /** Permanently deleted content retains its identity for historical references. */
+  deletedAt?: number | null;
+}
+
+export function isCreativeAssetDeleted(asset: Pick<CreativeAsset, 'deletedAt'>): boolean {
+  return asset.deletedAt !== null && asset.deletedAt !== undefined;
 }
 
 export interface CreativeAssetQuery {

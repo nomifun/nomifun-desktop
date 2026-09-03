@@ -26,7 +26,7 @@ import React, {
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams } from "react-router-dom";
 
-import { creativeAssetClient, type CreativeAsset } from "../../assets";
+import { creativeAssetClient, CreativeAssetDeletedError, isCreativeAssetDeleted, useCreativeAssetAvailability, type CreativeAsset } from "../../assets";
 import {
   CREATIVE_STUDIO_PROJECTS_PATH,
   creativeStudioCanvasProjectPath,
@@ -99,6 +99,7 @@ class DirectorRouteLoadError extends Error {
 }
 
 const isPanorama = (asset: CreativeAsset): boolean =>
+  !isCreativeAssetDeleted(asset) &&
   asset.kind === "image" &&
   asset.width !== null &&
   asset.height !== null &&
@@ -234,6 +235,9 @@ const runtimeErrorMessage = (
   error: DirectorRuntimeError,
   t: (key: string, options?: Record<string, unknown>) => string,
 ): string => {
+  if (error.cause instanceof CreativeAssetDeletedError) {
+    return t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' });
+  }
   switch (error.code) {
     case "asset-url":
       return t("creativeStudio.director.errors.assetUrl", {
@@ -262,6 +266,7 @@ const directorErrorMessage = (
   error: unknown,
   t: (key: string, options?: Record<string, unknown>) => string,
 ): string => {
+  if (error instanceof CreativeAssetDeletedError) return error.message;
   if (error instanceof DirectorRouteLoadError) {
     return t("creativeStudio.director.errors.missingCanvasId", {
       defaultValue: "缺少 Creative Studio 画布 ID。",
@@ -714,7 +719,15 @@ const CreativeDirectorProductRoute: React.FC = () => {
   }, [applyCommands, t]);
 
   const choosePanorama = useCallback(
-    (asset: CreativeAsset) => {
+    async (candidate: CreativeAsset) => {
+      let asset: CreativeAsset;
+      try {
+        asset = await creativeAssetClient.get(candidate.id);
+        if (isCreativeAssetDeleted(asset)) throw new CreativeAssetDeletedError(asset.id);
+      } catch (reason) {
+        setNotice(directorErrorMessage(reason, t));
+        return;
+      }
       if (!isPanorama(asset)) {
         setNotice(
           t("creativeStudio.director.notifications.panoramaInvalid", {
@@ -821,6 +834,13 @@ const CreativeDirectorProductRoute: React.FC = () => {
       ) {
         throw new Error("截图状态无效。");
       }
+      const sceneAssetIds = [
+        ...(current.scene.environment.panorama ? [current.scene.environment.panorama.assetId] : []),
+        ...[...current.characters, ...current.objects].flatMap((entity) => entity.asset ? [entity.asset.assetId] : []),
+      ];
+      const sceneAssets = await Promise.all(sceneAssetIds.map((id) => creativeAssetClient.get(id)));
+      const deleted = sceneAssets.find(isCreativeAssetDeleted);
+      if (deleted) throw new CreativeAssetDeletedError(deleted.id);
       const result = await runtimeRef.current?.captureImage(
         started.capture.operation.request,
       );
@@ -1033,6 +1053,12 @@ const CreativeDirectorProductRoute: React.FC = () => {
     [assets],
   );
   const panoramas = useMemo(() => assets.filter(isPanorama), [assets]);
+  const mediaAvailability = useCreativeAssetAvailability([
+    ...(state?.capture.records.map((capture) => capture.assetId) ?? []),
+    ...(state?.scene.environment.panorama ? [state.scene.environment.panorama.assetId] : []),
+    ...[...(state?.characters ?? []), ...(state?.objects ?? [])].flatMap((entity) => entity.asset ? [entity.asset.assetId] : []),
+  ]);
+  const assetResolutionRevision = JSON.stringify([...mediaAvailability.entries()].filter(([, value]) => value === 'deleted').map(([id]) => id).sort());
 
   if (load.status === "loading") {
     return (
@@ -1107,6 +1133,7 @@ const CreativeDirectorProductRoute: React.FC = () => {
     (assetId) => creativeAssetClient.url(assetId),
     cameraTab,
     t,
+    mediaAvailability,
   );
   const timeline = directorTimelinePresentation(state, {
     selectedTrackId,
@@ -1181,7 +1208,12 @@ const CreativeDirectorProductRoute: React.FC = () => {
           <DirectorRuntimeViewport
             ref={runtimeRef}
             state={state}
-            resolveAssetUrl={(assetId) => creativeAssetClient.url(assetId)}
+            assetResolutionRevision={assetResolutionRevision}
+            resolveAssetUrl={async (assetId) => {
+              const asset = await creativeAssetClient.get(assetId);
+              if (isCreativeAssetDeleted(asset)) throw new CreativeAssetDeletedError(assetId);
+              return asset.originalUrl;
+            }}
             showAxes
             onError={setRuntimeError}
           />

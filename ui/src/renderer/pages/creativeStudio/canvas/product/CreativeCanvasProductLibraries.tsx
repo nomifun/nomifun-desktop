@@ -19,6 +19,7 @@ import { useTranslation } from 'react-i18next';
 
 import {
   creativeAssetClient,
+  isCreativeAssetDeleted,
   type CreativeAsset,
   type CreativeAssetKind,
   type UseCreativeAssetsResult,
@@ -78,6 +79,10 @@ function assetIcon(kind: CreativeAssetKind): React.ReactNode {
 }
 
 const CreativeAssetPreview: React.FC<{ asset: CreativeAsset }> = ({ asset }) => {
+  const { t } = useTranslation();
+  if (isCreativeAssetDeleted(asset)) {
+    return <span>{t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })}</span>;
+  }
   const previewUrl = asset.thumbnailUrl ?? (asset.kind === 'image' ? asset.originalUrl : null);
   if (previewUrl) {
     return <img src={previewUrl} alt='' draggable={false} />;
@@ -106,7 +111,7 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
   const assetKindLabel = (value: CreativeCanvasAssetKindFilter): string =>
     t(ASSET_KIND_LABEL_KEYS[value], { defaultValue: assetKindFallbacks[value] });
   const selectedAssets = useMemo(
-    () => state.assets.filter((asset) => selectedIds.has(asset.id)),
+    () => state.assets.filter((asset) => !isCreativeAssetDeleted(asset) && selectedIds.has(asset.id)),
     [selectedIds, state.assets]
   );
 
@@ -234,7 +239,7 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
                   className={styles.assetCard}
                   data-selected={selected || undefined}
                   aria-pressed={selected}
-                  disabled={disabled}
+                  disabled={disabled || isCreativeAssetDeleted(asset)}
                   onClick={() => onToggleAsset(asset.id)}
                   role='listitem'
                 >

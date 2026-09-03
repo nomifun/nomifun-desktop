@@ -1164,6 +1164,9 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
     validate_json_logical_reference_registry(pool).await?;
     require_workshop_asset_origin_id_contract(pool).await?;
     require_prompt_library_asset_identity_contract(pool).await?;
+    require_column(pool, "workshop_assets", "deleted_at", "INTEGER", false).await?;
+    require_column(pool, "workshop_assets", "content_deleted_at", "INTEGER", false).await?;
+    require_workshop_asset_content_deletion_contract(pool).await?;
     for contract in PARTIAL_UNIQUE_INDEXES {
         require_partial_unique_index(
             pool,
@@ -1464,6 +1467,56 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             &[
                 "BEFORE UPDATE OF CHANNEL_PLUGIN_ID, CHANNEL_USER_ID, CHAT_ID, CHANNEL_SESSION_ID, CREATED_AT ON CHANNEL_SESSION_BINDINGS",
                 "RAISE(ABORT, 'CHANNEL SESSION BINDING IDENTITY IS IMMUTABLE')",
+            ],
+        ),
+        (
+            "prevent_workshop_asset_content_resurrection",
+            &[
+                "BEFORE UPDATE ON WORKSHOP_ASSETS",
+                "OLD.DELETED_AT IS NOT NULL",
+                "NEW.DELETED_AT IS NOT OLD.DELETED_AT",
+                "NEW.ASSET_ID IS NOT OLD.ASSET_ID",
+                "RAISE(ABORT, 'DELETED WORKSHOP ASSET CANNOT BE RESTORED')",
+            ],
+        ),
+        (
+            "restrict_creation_task_deleted_assets_insert",
+            &[
+                "BEFORE INSERT ON CREATION_TASKS",
+                "ASSET.DELETED_AT IS NOT NULL",
+                "JSON_EACH(NEW.INPUT_BINDINGS)",
+                "JSON_EACH(NEW.RESULT_ASSET_IDS)",
+                "RAISE(ABORT, 'CREATION TASK REFERENCES A DELETED WORKSHOP ASSET')",
+            ],
+        ),
+        (
+            "restrict_creation_task_deleted_assets_update",
+            &[
+                "BEFORE UPDATE OF INPUT_BINDINGS, RESULT_ASSET_IDS, STATUS ON CREATION_TASKS",
+                "ASSET.DELETED_AT IS NOT NULL",
+                "NEW.STATUS IN ('QUEUED', 'RUNNING')",
+                "JSON_EACH(OLD.INPUT_BINDINGS)",
+                "JSON_EACH(OLD.RESULT_ASSET_IDS)",
+                "RAISE(ABORT, 'CREATION TASK REFERENCES A DELETED WORKSHOP ASSET')",
+            ],
+        ),
+        (
+            "restrict_template_run_deleted_assets_insert",
+            &[
+                "BEFORE INSERT ON CREATIVE_STUDIO_TEMPLATE_RUNS",
+                "ASSET.DELETED_AT IS NOT NULL",
+                "JSON_TREE(NEW.AGGREGATE_JSON)",
+                "RAISE(ABORT, 'TEMPLATE RUN REFERENCES A DELETED WORKSHOP ASSET')",
+            ],
+        ),
+        (
+            "restrict_template_run_deleted_assets_update",
+            &[
+                "BEFORE UPDATE OF AGGREGATE_JSON, STATUS ON CREATIVE_STUDIO_TEMPLATE_RUNS",
+                "ASSET.DELETED_AT IS NOT NULL",
+                "NEW.STATUS NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')",
+                "JSON_TREE(OLD.AGGREGATE_JSON)",
+                "RAISE(ABORT, 'TEMPLATE RUN REFERENCES A DELETED WORKSHOP ASSET')",
             ],
         ),
         (
@@ -2168,6 +2221,7 @@ async fn require_prompt_library_asset_identity_contract(
         "JSON_EXTRACT(ORIGIN, '$.PROMPT_LIBRARY_SOURCE')",
         "JSON_EXTRACT(ORIGIN, '$.PROMPT_LIBRARY_ID')",
         "WHERE KIND = 'TEXT'",
+        "AND DELETED_AT IS NULL",
         "JSON_TYPE(ORIGIN, '$.PROMPT_LIBRARY_SOURCE') = 'TEXT'",
         "JSON_TYPE(ORIGIN, '$.PROMPT_LIBRARY_ID') = 'TEXT'",
     ] {
@@ -2175,6 +2229,33 @@ async fn require_prompt_library_asset_identity_contract(
             return Err(DbError::Init(format!(
                 "v3 prompt-library asset identity index {INDEX} is missing {fragment}"
             )));
+        }
+    }
+    Ok(())
+}
+
+async fn require_workshop_asset_content_deletion_contract(pool: &SqlitePool) -> Result<(), DbError> {
+    for (name, kind, fragments) in [
+        ("workshop_assets", "table", &[
+            "DELETED_AT IS NULL OR (TYPEOF(DELETED_AT) = 'INTEGER' AND DELETED_AT >= 0)",
+            "DELETED_AT IS NULL OR (IN_LIBRARY = 0 AND TEXT_CONTENT IS NULL)",
+            "CONTENT_DELETED_AT >= DELETED_AT",
+            "AND REL_PATH IS NULL AND THUMB_REL_PATH IS NULL",
+        ][..]),
+        ("idx_workshop_assets_pending_content_deletion", "index", &[
+            "ON WORKSHOP_ASSETS(DELETED_AT, ASSET_ID)",
+            "WHERE DELETED_AT IS NOT NULL AND CONTENT_DELETED_AT IS NULL",
+        ][..]),
+    ] {
+        let sql: Option<String> = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_schema WHERE name = ? AND type = ?",
+        ).bind(name).bind(kind).fetch_optional(pool).await?;
+        let sql = sql.ok_or_else(|| DbError::Init(format!("asset content deletion requires {name}")))?;
+        let normalized = normalize_sql(&sql);
+        for fragment in fragments {
+            if !normalized.contains(fragment) {
+                return Err(DbError::Init(format!("asset content deletion {name} is missing {fragment}")));
+            }
         }
     }
     Ok(())

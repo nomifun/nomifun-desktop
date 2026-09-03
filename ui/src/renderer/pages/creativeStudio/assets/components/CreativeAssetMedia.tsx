@@ -6,8 +6,9 @@
 
 import { FileText, Pic, VideoTwo, Voice } from '@icon-park/react';
 import React, { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
-import type { CreativeAsset, CreativeAssetKind } from '../types';
+import { isCreativeAssetDeleted, type CreativeAsset, type CreativeAssetKind } from '../types';
 import styles from './CreativeAssetLibrary.module.css';
 
 export interface CreativeAssetMediaProps {
@@ -31,15 +32,17 @@ export const creativeAssetKindIcon = (kind: CreativeAssetKind, size = 20): React
 };
 
 const CreativeAssetMedia: React.FC<CreativeAssetMediaProps> = ({ asset, unavailableLabel, compact = false }) => {
+  const { t } = useTranslation();
   const [failed, setFailed] = useState(false);
 
   useEffect(() => setFailed(false), [asset.id, asset.originalUrl, asset.thumbnailUrl]);
 
-  if (failed) {
+  const deleted = isCreativeAssetDeleted(asset);
+  if (deleted || failed) {
     return (
-      <div className={styles.mediaFallback} data-asset-media-state='missing' role='status'>
+      <div className={styles.mediaFallback} data-asset-media-state={deleted ? 'deleted' : 'missing'} role='status'>
         <span aria-hidden='true'>{creativeAssetKindIcon(asset.kind, compact ? 18 : 26)}</span>
-        <span>{unavailableLabel}</span>
+        <span>{deleted ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' }) : unavailableLabel}</span>
       </div>
     );
   }

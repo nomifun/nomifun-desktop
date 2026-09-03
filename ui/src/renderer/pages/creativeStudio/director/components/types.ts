@@ -47,6 +47,7 @@ export interface DirectorModelLibraryItem {
 
 /** Captures always point to real renderer output supplied by the controller. */
 export interface DirectorCapture {
+  availability?: import('../../assets').CreativeAssetAvailability;
   id: string;
   assetId: string;
   name: string;
@@ -56,6 +57,7 @@ export interface DirectorCapture {
 }
 
 export interface DirectorPanoramaAsset {
+  availability?: import('../../assets').CreativeAssetAvailability;
   assetId: string;
   name: string;
   thumbnailUrl: string;

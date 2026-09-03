@@ -235,10 +235,9 @@ pub fn workshop_public_routes(state: WorkshopRouterState) -> Router {
         .with_state(state)
 }
 
-/// `Cache-Control` for served binaries: privately cacheable for an hour. Ids are
-/// content-immutable capability URLs, but `private` keeps shared proxies from
-/// caching a user's media.
-const SERVE_CACHE_CONTROL: &str = "private, max-age=3600";
+/// User content can now be permanently deleted. Revalidate through the asset
+/// service instead of retaining deleted originals in HTTP caches.
+const SERVE_CACHE_CONTROL: &str = "private, no-store";
 
 // ── canonical Creative Studio Canvases ─────────────────────────────────────
 
@@ -1025,10 +1024,11 @@ async fn get_asset(
     State(state): State<WorkshopRouterState>,
     Extension(_user): Extension<CurrentUser>,
     Path(asset_id): Path<WorkshopAssetId>,
-) -> Result<Json<ApiResponse<WorkshopAsset>>, AppError> {
-    Ok(Json(ApiResponse::ok(
-        state.service.get_asset(asset_id.as_str()).await?,
-    )))
+) -> Result<impl IntoResponse, AppError> {
+    Ok((
+        [(header::CACHE_CONTROL, "private, no-store")],
+        Json(ApiResponse::ok(state.service.get_asset(asset_id.as_str()).await?)),
+    ))
 }
 
 /// Fields extracted from a `/api/creative-studio/assets/upload` multipart request.
@@ -1235,7 +1235,7 @@ async fn delete_asset(
     Extension(_user): Extension<CurrentUser>,
     Path(asset_id): Path<WorkshopAssetId>,
 ) -> Result<StatusCode, AppError> {
-    state.service.delete_asset(asset_id.as_str()).await?;
+    state.service.delete_asset_content(asset_id.as_str()).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3336,6 +3336,119 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn asset_delete_route_removes_content_and_preserves_explicit_history_tombstones() {
+        let (state, user, data_dir) = test_state().await;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let unrelated = state
+            .service
+            .ingest_asset_bytes(png.get_ref().clone(), "image/png", "unrelated", true, None)
+            .await
+            .unwrap();
+        let referenced = state
+            .service
+            .ingest_asset_bytes(png.into_inner(), "image/png", "history result", true, None)
+            .await
+            .unwrap();
+        let project = state
+            .service
+            .create_creative_project(Some("history without its source node".into()))
+            .await
+            .unwrap();
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(
+            serde_json::from_value(serde_json::json!({
+                "id": CreativeStudioNodeId::new().into_string(),
+                "type": "config",
+                "position": { "x": 0, "y": 0 },
+                "size": { "width": 320, "height": 180 },
+                "groupId": null,
+                "zIndex": 0,
+                "locked": false,
+                "data": {
+                    "task": "image_generation",
+                    "capability": "t2i",
+                    "providerId": null,
+                    "model": null,
+                    "prompt": "retained generation history",
+                    "negativePrompt": "",
+                    "operation": {
+                        "kind": "image-node-compose",
+                        "sourceNodeId": CreativeStudioNodeId::new().into_string(),
+                        "sourceAssetId": null
+                    },
+                    "parameters": {},
+                    "inputAssetIds": [],
+                    "taskId": null,
+                    "resultAssetIds": [referenced.asset_id],
+                    "status": "succeeded",
+                    "errorMessage": null
+                }
+            }))
+            .unwrap(),
+        );
+        let saved = state
+            .service
+            .save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+        let app = workshop_routes(state.clone()).layer(Extension(user));
+
+        for asset in [&unrelated, &referenced] {
+            assert!(asset.rel_path.is_some());
+            assert!(asset.thumb_rel_path.is_some());
+            let delete = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/api/creative-studio/assets/{}", asset.asset_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(delete.status(), StatusCode::NO_CONTENT);
+
+            let get = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/api/creative-studio/assets/{}", asset.asset_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(get.status(), StatusCode::OK);
+            assert_eq!(get.headers()[header::CACHE_CONTROL], "private, no-store");
+            let metadata = response_json(get).await;
+            assert!(metadata["data"]["deleted_at"].as_i64().is_some());
+            assert_eq!(metadata["data"]["in_library"], false);
+            assert!(matches!(state.service.serve_file(&asset.asset_id, false).await,
+                Err(AppError::NotFound(_))));
+            assert!(matches!(state.service.serve_file(&asset.asset_id, true).await,
+                Err(AppError::NotFound(_))));
+            for rel_path in [asset.rel_path.as_deref(), asset.thumb_rel_path.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                assert!(!data_dir.path().join(rel_path).exists());
+            }
+        }
+
+        let after = state
+            .service
+            .get_creative_project(&project.project_id)
+            .await
+            .unwrap();
+        assert_eq!(after.document, document);
+        assert_eq!(after.project.revision, saved.revision);
     }
 
     #[tokio::test]

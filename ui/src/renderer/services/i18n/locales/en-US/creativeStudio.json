@@ -103,11 +103,15 @@
       "renameTitle": "Rename collection"
     },
     "delete": {
+      "activeTask": "An active generation task is using this asset. Wait for it to finish or cancel it before deleting the asset.",
       "cancel": "Cancel",
-      "confirm": "Delete",
-      "description": "Delete “{{title}}”? The original file will also be permanently deleted and cannot be recovered.",
+      "confirm": "Permanently delete",
+      "retryCleanup": "Deletion or file cleanup has not completed. Please retry deleting this asset.",
+      "description": "Permanently delete “{{title}}”? The original file and thumbnail will be deleted and cannot be recovered. Canvases and generation history will retain their records and show “Asset deleted”.",
       "title": "Delete asset"
     },
+    "deleted": "Asset deleted",
+    "deletedReference": "A referenced asset was deleted. Select another asset before generating again.",
     "edit": {
       "cancel": "Cancel",
       "collectionLabel": "Collection",

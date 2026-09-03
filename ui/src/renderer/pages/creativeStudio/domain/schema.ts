@@ -129,7 +129,11 @@ export interface CreativeTextNodeData {
   textAlign: 'left' | 'center' | 'right';
 }
 
-/** Local graph identity never crosses the model-provider request boundary. */
+/**
+ * Generation provenance never crosses the model-provider request boundary.
+ * sourceNodeId can outlive a deleted source node; asset IDs remain owned
+ * references needed by the retained generation history.
+ */
 export type CreativeConfigOperation =
   | {
       kind: 'image-node-compose';

@@ -95,6 +95,17 @@ const renderCanvas = (content: React.ReactNode) =>
   renderToStaticMarkup(withCanvasTestI18n(content));
 
 describe('Creative Studio canonical node views', () => {
+  test('renders deleted media nodes without their original image, video, or audio URLs', () => {
+    for (const node of nodes.filter((node) => ['image', 'panorama', 'video', 'audio'].includes(node.type))) {
+      const html = renderToStaticMarkup(withCanvasTestI18n(
+        <CreativeNodeView node={node} asset={{ src: '', label: 'Deleted original', deleted: true }} />
+      ));
+      expect(html.includes('素材已删除')).toBe(true);
+      expect(html.includes('<img')).toBe(false);
+      expect(html.includes('<video')).toBe(false);
+      expect(html.includes('<audio')).toBe(false);
+    }
+  });
   test('renders the seven user-facing kinds and keeps config task records headless', () => {
     const html = renderCanvas(
       <>{nodes.map((node) => <CreativeNodeView key={node.id} node={node} selected={node.id === 'text-1'} />)}</>

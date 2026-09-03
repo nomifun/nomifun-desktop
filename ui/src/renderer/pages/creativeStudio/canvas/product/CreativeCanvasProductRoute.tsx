@@ -30,6 +30,8 @@ import { useNavigate, useParams } from 'react-router-dom';
 
 import {
   creativeAssetClient,
+  isCreativeAssetDeleted,
+  subscribeCreativeAssetDeletion,
   type CreativeAsset,
   type CreativeAssetKind,
   useCreativeAssetPickerDialog,
@@ -495,7 +497,7 @@ const invalidCanvasImageComposerReferences = (
       issue.code === 'target_asset_unresolved' ||
       issue.code === 'target_asset_kind_unsupported'
   );
-  if (targetIssue) {
+  if (targetIssue && 'assetId' in targetIssue) {
     const target = nodesById.get(targetNodeId);
     const asset = assetsById.get(targetIssue.assetId) ?? null;
     items.unshift({
@@ -599,6 +601,9 @@ const canvasImageGenerationBlockerMessage = (
       return t('creativeStudio.canvas.image.referenceAssetLoading', {
         defaultValue: '正在载入参考图片，请稍候。',
       });
+    case 'source_asset_deleted':
+    case 'target_asset_deleted':
+      return t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' });
     case 'source_asset_kind_unsupported':
     case 'target_asset_kind_unsupported':
       return t('creativeStudio.canvas.image.referenceKindUnsupported', {
@@ -1149,10 +1154,46 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, [canvasState]);
   const selectedCanvasImageReferenceAssetKey =
     selectedCanvasImageReferenceAssetIds.join('\u0000');
+  const canvasMediaAssetIds = useMemo(() => [...new Set([
+    ...selectedCanvasImageReferenceAssetIds,
+    ...(canvasState?.document.nodes.flatMap((node) =>
+      (node.type === 'image' || node.type === 'panorama' || node.type === 'video' || node.type === 'audio')
+        && node.data.assetId ? [node.data.assetId] : []
+    ) ?? []),
+  ])], [canvasState?.document.nodes, selectedCanvasImageReferenceAssetKey]);
+  const canvasMediaAssetKey = canvasMediaAssetIds.join('\u0000');
 
   useEffect(() => {
-    if (!projectId || selectedCanvasImageReferenceAssetIds.length === 0) return;
-    const missing = selectedCanvasImageReferenceAssetIds.filter(
+    let active = true;
+    const resolve = (ids: readonly string[]) => {
+      void Promise.allSettled(ids.map((id) => creativeAssetClient.get(id))).then((results) => {
+        if (!active) return;
+        setCanvasReferenceAssets((current) => {
+          const next = new Map(current);
+          for (const result of results) {
+            if (result.status === 'fulfilled') next.set(result.value.id, result.value);
+          }
+          return next;
+        });
+      });
+    };
+    const unsubscribe = subscribeCreativeAssetDeletion(creativeAssetClient, (assetId) => {
+      const known = knownAssetsRef.current.get(assetId);
+      if (known) {
+        const deleted = { ...known, deletedAt: Date.now(), textContent: null, originalUrl: '', thumbnailUrl: null, inLibrary: false };
+        knownAssetsRef.current = new Map(knownAssetsRef.current).set(assetId, deleted);
+        setCanvasReferenceAssets((current) => new Map(current).set(assetId, deleted));
+      }
+      resolve([assetId]);
+    });
+    const refresh = () => resolve(canvasMediaAssetIds);
+    window.addEventListener('focus', refresh);
+    return () => { active = false; unsubscribe(); window.removeEventListener('focus', refresh); };
+  }, [projectId, canvasMediaAssetKey]);
+
+  useEffect(() => {
+    if (!projectId || canvasMediaAssetIds.length === 0) return;
+    const missing = canvasMediaAssetIds.filter(
       (assetId) => !knownAssetsById.has(assetId)
     );
     if (missing.length === 0) return;
@@ -1161,7 +1202,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
       (results) => {
         if (!active || activeProjectIdRef.current !== projectId) return;
         const resolved = results.flatMap((result) =>
-          result.status === 'fulfilled' && result.value.kind === 'image'
+          result.status === 'fulfilled'
             ? [result.value]
             : []
         );
@@ -1176,7 +1217,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [knownAssetsById, projectId, selectedCanvasImageReferenceAssetKey]);
+  }, [knownAssetsById, projectId, canvasMediaAssetKey]);
 
   useLayoutEffect(() => {
     const host = canvasHostRef.current;
@@ -2086,7 +2127,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
 
   const resolveCanvasImageAsset = useCallback(
-    async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
+    async (node: Extract<CreativeCanvasNode, { type: 'image' }>, allowDeleted = false) => {
       const assetId = node.data.assetId?.trim();
       if (!assetId) {
         throw new Error(
@@ -2095,8 +2136,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
           })
         );
       }
-      const cached = knownAssetsRef.current.get(assetId);
-      const asset = cached ?? (await creativeAssetClient.get(assetId));
+      const asset = await creativeAssetClient.get(assetId);
+      if (!allowDeleted && isCreativeAssetDeleted(asset)) {
+        throw new Error(t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' }));
+      }
       if (asset.kind !== 'image') {
         throw new Error(
           t('creativeStudio.canvas.errors.imageAssetKindMismatch', {
@@ -2110,7 +2153,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
       );
       return asset;
     },
-    []
+    [t]
+  );
+
+  const resolveCanvasImagePreviewAsset = useCallback(
+    (node: Extract<CreativeCanvasNode, { type: 'image' }>) => resolveCanvasImageAsset(node, true),
+    [resolveCanvasImageAsset]
   );
 
   const handleOpenImageCrop = useCallback(
@@ -5734,7 +5782,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         <CreativeImagePreviewDialog
           key={`${projectId}:${previewImageNode.id}:${previewImageNode.data.assetId}`}
           node={previewImageNode}
-          resolveAsset={resolveCanvasImageAsset}
+          resolveAsset={resolveCanvasImagePreviewAsset}
           onClose={() => setPreviewImageNode(null)}
         />
       ) : null}

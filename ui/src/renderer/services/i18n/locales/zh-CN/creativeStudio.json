@@ -103,11 +103,15 @@
       "renameTitle": "重命名合集"
     },
     "delete": {
+      "activeTask": "素材仍被正在执行的生成任务使用，请等待任务结束或取消任务后再删除。",
       "cancel": "取消",
-      "confirm": "删除",
-      "description": "确定删除“{{title}}”吗？原始文件也会被永久删除，且无法恢复。",
+      "confirm": "永久删除",
+      "retryCleanup": "删除或文件清理尚未完成，请重试删除。",
+      "description": "确定永久删除“{{title}}”吗？原始文件及缩略图将被删除，且无法恢复。使用此素材的画布和生成历史会保留记录，并显示“素材已删除”。",
       "title": "删除素材"
     },
+    "deleted": "素材已删除",
+    "deletedReference": "引用素材已删除，请重新选择后再生成。",
     "edit": {
       "cancel": "取消",
       "collectionLabel": "合集",

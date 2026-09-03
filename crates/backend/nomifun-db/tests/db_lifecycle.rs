@@ -198,7 +198,7 @@ async fn v55_prefix_is_read_only_supported_then_file_init_applies_latest_suffix(
         .fetch_one(upgraded.pool())
         .await
         .unwrap();
-    assert_eq!(latest, 57);
+    assert_eq!(latest, 60);
     let checksum_after_upgrade: Vec<u8> =
         sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 55")
             .fetch_one(upgraded.pool())
@@ -556,7 +556,7 @@ async fn published_provider_output_limit_lineage_upgrades_in_place() {
         .fetch_one(upgraded.pool())
         .await
         .unwrap();
-    assert_eq!(latest, 57);
+    assert_eq!(latest, 60);
     let creative_studio_tables: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_schema \
          WHERE type = 'table' AND name IN (\

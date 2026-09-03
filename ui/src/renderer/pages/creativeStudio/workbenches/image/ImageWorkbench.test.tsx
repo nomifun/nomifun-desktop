@@ -91,6 +91,15 @@ const resultBase = {
 };
 
 describe('ImageWorkbench visual states', () => {
+  test('renders deleted history outputs as an explicit placeholder without media requests', () => {
+    const html = renderWorkbench({ results: [{ ...resultBase, status: 'succeeded', hasDeletedInputs: true,
+      outputs: [{ assetId: 'deleted-output', imageUrl: '/deleted-original', alt: 'Old result', availability: 'deleted' }],
+    }] });
+    expect(html.includes('素材已删除')).toBe(true);
+    expect(html.includes('引用素材已删除')).toBe(true);
+    expect(html.includes('<img')).toBe(false);
+    expect(html.includes('/deleted-original')).toBe(false);
+  });
   test('renders the side composer and a real empty result state', () => {
     const html = renderWorkbench();
 

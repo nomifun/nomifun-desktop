@@ -27,7 +27,7 @@ import {
   reconcileCanvasImageMaskEditConfig,
 } from './imageMaskEditCanvas';
 import { creativeStudioProductText } from './i18n';
-import { creativeNodeFromAsset } from './nodeFactory';
+import { creativeNodeFromHistoricalAsset } from './nodeFactory';
 
 export type CanvasImageMaskEditEditorPort = Pick<
   CreativeCanvasEditorHandle,
@@ -217,7 +217,7 @@ export async function settleCanvasImageMaskEditTask(input: {
             )
           );
         }
-        const created = creativeNodeFromAsset(
+        const created = creativeNodeFromHistoricalAsset(
           asset,
           state,
           input.viewportSize,

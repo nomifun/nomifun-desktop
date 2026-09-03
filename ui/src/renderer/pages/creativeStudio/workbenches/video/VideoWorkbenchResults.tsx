@@ -22,6 +22,7 @@ import {
 import { Button, Checkbox, Progress, Tag } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { CreativeAssetUnavailable } from '../../assets/components/CreativeAssetUnavailable';
 
 import {
   clampVideoProgress,
@@ -70,6 +71,7 @@ const TaskMeta: React.FC<{
   const { t } = useTranslation();
   return (
   <div className={styles.taskMeta}>
+    {task.hasDeletedInputs ? <p role='status'>{t('creativeStudio.assets.deletedReference', { defaultValue: '引用素材已删除，请重新选择后再生成。' })}</p> : null}
     <div className={styles.taskPromptRow}>
       <p title={task.prompt}>{task.prompt}</p>
       {onCopyPrompt ? (
@@ -168,7 +170,7 @@ const SuccessVisual: React.FC<{
   const { t } = useTranslation();
   return (
   <div className={styles.successVisual}>
-    <video
+    {task.availability && task.availability !== 'available' ? <CreativeAssetUnavailable status={task.availability} /> : <video
       src={task.videoUrl}
       poster={task.posterUrl}
       controls
@@ -177,7 +179,7 @@ const SuccessVisual: React.FC<{
         defaultValue: '生成视频：{{prompt}}',
         prompt: task.prompt,
       })}
-    />
+    />}
     <span className={styles.statusBadge} data-tone='success'>
       <Check size={11} />
       {t('creativeStudio.video.task.succeeded', { defaultValue: '成功' })}
@@ -276,6 +278,7 @@ const TaskActions: React.FC<{
           <Button
             size='mini'
             icon={<Download />}
+            disabled={Boolean(task.availability && task.availability !== 'available')}
             onClick={() => onDownloadTask(task.id)}
           >
             {t('creativeStudio.video.actions.download', { defaultValue: '下载' })}

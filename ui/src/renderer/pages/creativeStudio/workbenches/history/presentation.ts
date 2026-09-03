@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CreativeAssetPort } from '../../assets';
+import type { CreativeAssetPort, CreativeAssetAvailability } from '../../assets';
 import {
   creativeTaskReference,
   type CreativeTask,
@@ -45,7 +45,8 @@ export function standaloneHistoryRuntimeSnapshot(
   scope: StandaloneWorkbenchHistoryScope,
   durableTasks: readonly CreativeTask[],
   runtime: CreativeWorkbenchRuntimeSnapshot,
-  assets: CreativeAssetPort
+  assets: CreativeAssetPort,
+  availability?: ReadonlyMap<string, CreativeAssetAvailability>
 ): CreativeWorkbenchRuntimeSnapshot {
   const history = mergeStandaloneWorkbenchHistory({
     scope,
@@ -65,6 +66,13 @@ export function standaloneHistoryRuntimeSnapshot(
   });
   return {
     ...runtime,
-    entries,
+    entries: availability ? entries.map((entry) => ({
+      ...entry,
+      hasDeletedInputs: entry.task.inputs?.some((input) => availability.get(input.assetId) === 'deleted') ?? false,
+      outputs: entry.outputs.map((output) => ({
+        ...output,
+        availability: availability.get(output.assetId) ?? 'loading',
+      })),
+    })) : entries,
   };
 }

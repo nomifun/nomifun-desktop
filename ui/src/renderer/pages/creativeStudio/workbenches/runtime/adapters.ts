@@ -323,6 +323,7 @@ export function mapImageWorkbenchRuntimeResults(
   return snapshot.entries.map((entry): ImageWorkbenchResult => {
     const task = entry.task;
     const base = {
+      ...(entry.hasDeletedInputs !== undefined ? { hasDeletedInputs: entry.hasDeletedInputs } : {}),
       taskId: task.taskId,
       prompt: promptOf(task),
       model: { providerId: task.providerId, model: task.model },
@@ -330,6 +331,7 @@ export function mapImageWorkbenchRuntimeResults(
       createdAtLabel: formatters.createdAtLabel(task),
       durationLabel: formatters.durationLabel(task),
       retryable:
+        !entry.hasDeletedInputs &&
         !isDeterministicImageParameterFailure(task) &&
         task.inputs !== null &&
         (!options.catalog ||
@@ -348,6 +350,7 @@ export function mapImageWorkbenchRuntimeResults(
         return {
           assetId: output.assetId,
           imageUrl: requireMediaUrl(output),
+          ...(output.availability ? { availability: output.availability } : {}),
           alt: presentation.alt ?? promptOf(task),
           width: presentation.width,
           height: presentation.height,
@@ -500,6 +503,7 @@ export function mapVideoWorkbenchRuntimeTasks(
     const task = entry.task;
     const labels = videoLabels(task);
     const base = {
+      ...(entry.hasDeletedInputs !== undefined ? { hasDeletedInputs: entry.hasDeletedInputs } : {}),
       id: task.taskId,
       taskId: task.taskId,
       prompt: promptOf(task),
@@ -509,6 +513,7 @@ export function mapVideoWorkbenchRuntimeTasks(
       ...labels,
       taskCount: 1,
       retryable:
+        !entry.hasDeletedInputs &&
         task.inputs !== null &&
         (!options.catalog ||
           exactWorkbenchModelOptions(options.catalog, task.task).some(
@@ -537,6 +542,7 @@ export function mapVideoWorkbenchRuntimeTasks(
         status: "succeeded",
         assetId: output.assetId,
         videoUrl: requireMediaUrl(output),
+        ...(output.availability ? { availability: output.availability } : {}),
         posterUrl: presentation.posterUrl,
         mediaMetaLabel: presentation.mediaMetaLabel,
       };
@@ -605,6 +611,7 @@ export function mapAudioWorkbenchRuntimeResults(
     const task = entry.task;
     const text = promptOf(task);
     const base = {
+      ...(entry.hasDeletedInputs !== undefined ? { hasDeletedInputs: entry.hasDeletedInputs } : {}),
       taskId: task.taskId,
       title: text || task.taskId,
       text,
