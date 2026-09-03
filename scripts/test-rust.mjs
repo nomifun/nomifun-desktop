@@ -40,7 +40,7 @@ if (mode === 'crate') {
   // Integration-test-heavy crates are restricted to --lib: their gated
   // browser tests all live in the library, and this keeps the lane focused.
   run('cargo', ['test', '-p', 'nomifun-browser-platform', ...inputArgs]);
-  run('cargo', ['test', '-p', 'nomifun-gateway', '--features', 'browser-use', ...inputArgs]);
+  run('cargo', ['test', '-p', 'nomifun-gateway', ...inputArgs]);
   run('cargo', ['test', '-p', 'nomifun-ai-agent', '--features', 'browser-use', '--lib', ...inputArgs]);
   run('cargo', ['test', '-p', 'nomi-agent', '--features', 'browser-use', '--lib', ...inputArgs]);
   run('cargo', ['test', '-p', 'nomifun-app', '--features', 'browser-use', '--lib', ...inputArgs]);
