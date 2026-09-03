@@ -22,6 +22,8 @@ const ENGINE_BACKEND = 'crates/agent/nomi-browser-engine/src/backend/cdp.rs';
 const PLATFORM_ADAPTER = 'crates/agent/nomi-browser/src/platform_adapter.rs';
 const GATEWAY_REGISTRY = 'crates/backend/nomifun-gateway/src/browser_registry.rs';
 const HUB_COMPOSITION = 'crates/backend/nomifun-app/src/services.rs';
+const KNOWLEDGE_BROWSER_COMPOSITION =
+  'crates/backend/nomifun-app/src/services.rs';
 const FRESH_V4_HUB_COMPOSITION =
   'crates/backend/nomifun-app/src/router/agent_platform_host.rs';
 const HUB_COMPOSITION_ROOTS = new Set([
@@ -372,6 +374,10 @@ function isEngineProductionPath(path) {
 
 function browserToolConstructorPattern() {
   return /\b(?:[A-Za-z_]\w*\s*::\s*)*BrowserTool\s*::\s*(?:new|new_standalone|with_data_dir)\s*(?:::<[^;{}()]*>\s*)?\(/g;
+}
+
+function knowledgeBrowserBypassPattern() {
+  return /\b(?:nomifun_ai_agent\s*::\s*)?BrowserFetcher\b|\.set_render_fetcher\s*\(/g;
 }
 
 function browserPolicyConstructorPattern() {
@@ -730,6 +736,22 @@ function scanEntries(entries) {
       }
 
       maybeReportGatewayLegacyGate(path, entry.source, masked, report);
+    }
+
+    if (path === KNOWLEDGE_BROWSER_COMPOSITION) {
+      for (const match of findMatches(
+        masked,
+        knowledgeBrowserBypassPattern(),
+      )) {
+        report(
+          path,
+          entry.source,
+          masked,
+          match.index,
+          'knowledge-browser-provider-bypass',
+          'Knowledge rendered sources must use canonical browser.render_content rather than a Hub-backed BrowserFetcher',
+        );
+      }
     }
 
     maybeReportEngineState(path, entry.source, masked, report);
@@ -1098,6 +1120,19 @@ function selfTest() {
     }),
     'private-browser-tool',
     'failed to reject a factory-owned BrowserTool',
+  );
+  assertViolation(
+    baseline.map((entry) =>
+      entry.path === KNOWLEDGE_BROWSER_COMPOSITION
+        ? {
+            ...entry,
+            source:
+              `${entry.source}\nfn wire() { knowledge.set_render_fetcher(BrowserFetcher::new()); }`,
+          }
+        : entry,
+    ),
+    'knowledge-browser-provider-bypass',
+    'failed to reject a Knowledge BrowserFetcher bypass in the application composition root',
   );
   assertViolation(
     baseline.concat({
