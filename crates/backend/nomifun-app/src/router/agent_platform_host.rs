@@ -2138,8 +2138,9 @@ mod tests {
     use async_trait::async_trait;
     use futures_util::StreamExt;
     use nomifun_agent_contracts::{
-        AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, AgentSessionId,
-        CapabilityExposure, CapabilityId, CapabilityRef, CapabilitySelection, CorrelationId,
+        ActionId, AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload,
+        AgentSessionId, CapabilityExposure, CapabilityId, CapabilityRef, CapabilitySelection,
+        CorrelationId,
         ChatRouteCandidate, ChatRouteFeature, ChatRouteIdentity, ChatRouteProtocol,
         ChatRouteRecord, ChatRouteRecordSchema, ChatRouteTask, IdempotencyKey,
         OperationId, PluginStateEntry, PresetRevisionRef, ResourceBindingId, ResourceId,
@@ -2655,6 +2656,315 @@ mod tests {
                 .map(|spec| spec.capabilities.len())
                 .sum::<usize>()
         );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[tokio::test]
+    #[ignore = "requires a local system Chrome; run explicitly with --ignored"]
+    async fn browser_role_owner_runs_the_canonical_observe_navigate_act_render_chain() {
+        tokio::time::timeout(Duration::from_secs(90), async {
+            let directory = tempfile::tempdir().expect("browser role test root");
+            let data_dir = directory.path().join("data");
+            let bootstrap = nomifun_v4_root::FreshV4Coordinator::default()
+                .bootstrap(&data_dir, APPLICATION_BUILD_IDENTITY, &[])
+                .await
+                .expect("fresh v4 browser role root");
+            let pool = open_validated_pool(&data_dir.join(FRESH_V4_DATABASE_FILE))
+                .await
+                .expect("browser role v4 pool");
+            let encryption_key = [0x42; 32];
+            let browser_hub = build_browser_session_hub(
+                &data_dir,
+                &data_dir,
+                encryption_key,
+            )
+            .await
+            .expect("browser hub construction")
+            .expect("system Chrome must be available for this live role test");
+            let host_ports = AgentDomainHostPorts::for_workspace_root(
+                data_dir.clone(),
+                pool.clone(),
+            )
+            .with_browser_hub(browser_hub.clone());
+            let platform = initialize_platform_with_cleanup_and_host_ports(
+                pool,
+                data_dir.join(FRESH_V4_READY_MARKER_FILE),
+                bootstrap.ready_marker,
+                canonical_schema_manifest_digest().expect("browser role schema digest"),
+                None,
+                encryption_key,
+                host_ports,
+            )
+            .await
+            .expect("canonical browser role platform");
+
+            let owner = nomifun_agent_contracts::PrincipalRef {
+                principal_kind: "user".to_owned(),
+                principal_id: "browser-role-owner".to_owned(),
+            };
+            let binding = TypedResourceBinding {
+                binding_id: ResourceBindingId::from("browser-role-binding"),
+                resource_kind: ResourceKind::from("browser"),
+                resource_id: ResourceId::from("browser-role-target"),
+                owner_id: owner.principal_id.clone(),
+                operations: BTreeSet::from([
+                    "observe".to_owned(),
+                    "navigate".to_owned(),
+                    "interact".to_owned(),
+                ]),
+                connection_config_ref: None,
+                typed_parameters: BTreeMap::new(),
+            };
+            let materialized = platform
+                .materialized_registry()
+                .expect("browser role materialized registry");
+            let role_id = nomifun_agent_contracts::ExecutionRoleId::from(
+                nomifun_agent_domain_wave2::BROWSER_EXECUTION_ROLE_ID,
+            );
+            let provider_mount =
+                nomifun_agent_contracts::PluginMountId::from(
+                    nomifun_agent_domain_wave2::BROWSER_MOUNT_ID,
+                );
+            let provider = materialized
+                .role_provider(&role_id, &provider_mount)
+                .expect("bundled Browser provider");
+            let installation_binding =
+                nomifun_agent_contracts::InstallationRoleBinding {
+                    selection: nomifun_agent_contracts::RoleProviderSelection {
+                        role: provider.provider.role.clone(),
+                        provider_mount_id: provider_mount,
+                    },
+                    binding_version: 1,
+                    updated_at_ms: 1,
+                };
+            let inventory: CodingRuntimeFeatureInventoryPayload =
+                serde_json::from_str(RUNTIME_FEATURE_INVENTORY_JSON)
+                    .expect("runtime feature inventory");
+            let environment = CompilerEnvironment {
+                resolver_version: VersionString::from(CONTRACT_VERSION),
+                required_runtime_protocol_version: VersionString::from(CONTRACT_VERSION),
+                required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+                runtime_feature_inventory_digest: digest_payload(&inventory)
+                    .expect("runtime inventory digest"),
+                available_runtime_features: inventory.runtime_features.clone(),
+                installation_role_bindings: BTreeMap::from([(role_id.clone(), installation_binding)]),
+                canonical_schema_manifest_digest: canonical_schema_manifest_digest()
+                    .expect("browser role schema digest"),
+                target_contribution_manifest_digest: official_preset_seed_manifest_payload()
+                    .target_first_party_contribution_digest,
+                host_target: current_runtime_target(),
+                host_surface: "desktop".to_owned(),
+                availability_evidence_revision: "browser-role-live-2026-09-03".to_owned(),
+            };
+            let capability = |id: &str, required: bool, exposure: CapabilityExposure| {
+                let action_allowlist = matches!(
+                    id,
+                    "browser.navigate" | "browser.act" | "browser.render_content"
+                )
+                .then(|| BTreeSet::from([ActionId::from(format!("{id}.invoke"))]))
+                .unwrap_or_default();
+                CapabilitySelection {
+                    capability: CapabilityRef {
+                        id: CapabilityId::from(id),
+                        version: VersionString::from(CONTRACT_VERSION),
+                    },
+                    required,
+                    exposure,
+                    action_allowlist,
+                    resource_binding_refs: vec![binding.binding_id.clone()],
+                    destination_constraints: BTreeSet::new(),
+                    context_budget_override: None,
+                    tool_budget_override: None,
+                    config: StrictJsonValue(serde_json::json!({})),
+                }
+            };
+            let payload = AgentPresetRevisionPayload {
+                schema_version: VersionString::from(CONTRACT_VERSION),
+                surfaces: BTreeSet::from(["desktop".to_owned()]),
+                model_route_refs: BTreeMap::new(),
+                chat_route_records: BTreeMap::new(),
+                initial_capabilities: vec![
+                    capability("browser.identity", false, CapabilityExposure::Hidden),
+                    capability("browser.observe", true, CapabilityExposure::Hidden),
+                    capability("browser.navigate", true, CapabilityExposure::Advertised),
+                    capability("browser.act", true, CapabilityExposure::Advertised),
+                    capability("browser.render_content", false, CapabilityExposure::Hidden),
+                ],
+                on_demand_capabilities: Vec::new(),
+                skill_bindings: Vec::new(),
+                resource_bindings: vec![binding.clone()],
+                system_role_provider_overrides: BTreeMap::new(),
+                persona: "Browser role live test".to_owned(),
+                instructions: "Exercise the canonical Browser role owner.".to_owned(),
+                context_policy: StrictJsonValue(serde_json::json!({})),
+                execution_constraints: StrictJsonValue(serde_json::json!({})),
+                runtime_budget: StrictJsonValue(serde_json::json!({})),
+            };
+            let revision = AgentPresetRevision {
+                reference: PresetRevisionRef {
+                    preset_id: AgentPresetId::from("browser-role-live-test"),
+                    revision: 1,
+                    revision_digest: digest_payload(&payload).expect("browser role revision digest"),
+                },
+                payload,
+                created_by: UserId::from(owner.principal_id.clone()),
+                created_at_ms: 1,
+                reason: None,
+            };
+            let snapshot = AgentPresetCompiler::compile(
+                &materialized,
+                &environment,
+                CompileRequest {
+                    revision,
+                    principal: owner.clone(),
+                    scene: "browser-role-live-test".to_owned(),
+                    surface: "desktop".to_owned(),
+                    audience: "test".to_owned(),
+                    created_at_ms: 2,
+                    resolver_run_id: OperationId::from("browser-role-live-resolve"),
+                },
+            )
+            .expect("compile Browser role snapshot");
+            let snapshot = Arc::new(snapshot);
+            let active = SessionCapabilityState::new(&snapshot)
+                .snapshot()
+                .expect("Browser role active set");
+            let session_id = AgentSessionId::from(uuid::Uuid::now_v7().to_string());
+            let scope_key = ScopeKey::from(format!("session:{}", session_id.as_ref()));
+            let role_request = |capability_id: &str, suffix: &str| {
+                nomifun_agent_kernel::RoleMemberInvocationRequest {
+                    principal: owner.clone(),
+                    session_owner: owner.clone(),
+                    operation_id: OperationId::from(format!(
+                        "browser-role-{capability_id}-{suffix}"
+                    )),
+                    correlation_id: CorrelationId::from(format!(
+                        "browser-role-correlation-{capability_id}-{suffix}"
+                    )),
+                    capability_id: CapabilityId::from(capability_id),
+                    resource_binding_ids: BTreeSet::from([binding.binding_id.clone()]),
+                    state_scope_key: scope_key.clone(),
+                    admission: nomifun_agent_kernel::RoleMemberAdmission::Agent {
+                        agent_session_id: session_id.clone(),
+                        resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
+                        active_set_generation: active.generation,
+                    },
+                }
+            };
+
+            platform
+                .kernel_registry()
+                .acquire_role_resource(
+                    &snapshot,
+                    &active,
+                    role_request("browser.identity", "acquire"),
+                )
+                .await
+                .expect("Browser identity resource acquisition");
+            let observed = platform
+                .kernel_registry()
+                .contribute_role_context(
+                    &snapshot,
+                    &active,
+                    role_request("browser.observe", "before"),
+                )
+                .await
+                .expect("Browser observe context contribution")
+                .value
+                .expect("Browser observe must return a context value")
+                .0;
+            assert!(observed["ref_generation"].as_u64().unwrap_or_default() > 0);
+
+            let action_request = |capability_id: &str, suffix: &str, input: serde_json::Value| {
+                CapabilityInvocationRequest {
+                    principal: owner.clone(),
+                    session_owner: owner.clone(),
+                    agent_session_id: session_id.clone(),
+                    operation_id: OperationId::from(format!(
+                        "browser-role-action-{capability_id}-{suffix}"
+                    )),
+                    idempotency_key: IdempotencyKey::from(format!(
+                        "browser-role-key-{capability_id}-{suffix}"
+                    )),
+                    correlation_id: CorrelationId::from(format!(
+                        "browser-role-action-correlation-{capability_id}-{suffix}"
+                    )),
+                    resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
+                    active_set_generation: active.generation,
+                    capability_id: CapabilityId::from(capability_id),
+                    action_id: ActionId::from(format!("{capability_id}.invoke")),
+                    resource_binding_ids: BTreeSet::from([binding.binding_id.clone()]),
+                    state_scope_key: scope_key.clone(),
+                    input: StrictJsonValue(input),
+                }
+            };
+            let data_url = "data:text/html,<html><body><button id='toggle'>Toggle</button><p id='state'>before</p><script>document.getElementById('toggle').onclick=()=>document.getElementById('state').textContent='after'</script></body></html>";
+            platform
+                .kernel_registry()
+                .invoke(
+                    &snapshot,
+                    &active,
+                    action_request(
+                        "browser.navigate",
+                        "navigate",
+                        serde_json::json!({ "url": data_url, "new_tab": false }),
+                    ),
+                )
+                .await
+                .expect("Browser navigate action");
+            let after_navigate = platform
+                .kernel_registry()
+                .contribute_role_context(
+                    &snapshot,
+                    &active,
+                    role_request("browser.observe", "after-navigate"),
+                )
+                .await
+                .expect("Browser observe after navigation")
+                .value
+                .expect("Browser observe after navigation must return a value")
+                .0;
+            assert!(after_navigate["output"].is_object() || after_navigate["output"].is_string());
+            platform
+                .kernel_registry()
+                .invoke(
+                    &snapshot,
+                    &active,
+                    action_request(
+                        "browser.act",
+                        "wait",
+                        serde_json::json!({ "action": "wait", "ms": 0 }),
+                    ),
+                )
+                .await
+                .expect("Browser act action");
+            let rendered = platform
+                .kernel_registry()
+                .invoke(
+                    &snapshot,
+                    &active,
+                    action_request(
+                        "browser.render_content",
+                        "render",
+                        serde_json::json!({ "url": data_url }),
+                    ),
+                )
+                .await
+                .expect("Browser render_content action");
+            assert!(rendered.0["html"].as_str().is_some());
+            assert_eq!(rendered.0["html_truncated"], false);
+
+            platform
+                .kernel_registry()
+                .release_role_resources(&scope_key)
+                .await
+                .expect("Browser role resource release");
+            browser_hub.close_all().await.expect("Browser Hub close");
+            platform.shutdown().await.expect("Browser role platform shutdown");
+            platform.pool().close().await;
+        })
+        .await
+        .expect("Browser Role live chain exceeded its 90 second deadline");
     }
 
     #[test]
