@@ -2,15 +2,18 @@
 
 use std::sync::Arc;
 
+use nomifun_ai_agent::AgentService;
+use nomifun_common::{CompanionId, ConversationId, UserId};
 use nomifun_companion::CompanionService;
 use nomifun_cron::service::CronService;
 use nomifun_db::IProviderRepository;
 use nomifun_idmm::IdmmService;
 use nomifun_knowledge::KnowledgeService;
 use nomifun_requirement::{AutoWorkRunner, RequirementService};
-use nomifun_system::{ClientPrefService, ModelFetchService, ProviderService, SettingsService};
+use nomifun_system::{
+    ClientPrefService, ModelFetchService, ProviderService, SettingsService,
+};
 use nomifun_terminal::TerminalService;
-use nomifun_common::{CompanionId, ConversationId, UserId};
 
 use crate::conversation_port::ConversationCapabilityPort;
 
@@ -50,94 +53,58 @@ pub struct CompatibilityCapabilityHost {
     /// IDMM supervision config (same instance as `/api/idmm` so save also
     /// arms/stops the live supervisor).
     pub idmm_service: Arc<IdmmService>,
-    /// Canonical Creative Studio project/asset service — the SAME singleton the
-    /// `/api/creative-studio/*` routes use. Gateway graph writes therefore use
-    /// the product's revision CAS instead of a parallel document authority.
+    /// Canonical Creative Studio project/asset service, the same singleton the
+    /// `/api/creative-studio/*` routes use.
     pub workshop_service: Arc<nomifun_workshop::WorkshopService>,
-    /// Creative Studio generation task queue — the SAME singleton the
-    /// canonical task routes use.
+    /// Creative Studio generation task queue, the same singleton the canonical
+    /// task routes use.
     pub creation_service: Arc<nomifun_creation::CreationService>,
     /// Knowledge base registry + bindings (same instance the conversation
     /// service mounts from at task start).
     pub knowledge_service: Arc<KnowledgeService>,
-    /// AutoWork live-loop control. The REST `POST /api/requirements/autowork`
-    /// starts/stops this runner alongside persisting the config; the
-    /// gateway autowork tools must mirror that or an "enabled" toggle would
-    /// only take effect after the next desktop boot (boot-resume).
+    /// AutoWork live-loop control shared with the REST routes.
     pub auto_work_runner: Arc<AutoWorkRunner>,
-    /// System domain services (same instances the `/api/settings`,
-    /// `/api/settings/client`, `/api/providers` routes use — so a gateway theme /
-    /// toggle / provider change and a UI change act on identical state).
+    /// System domain services shared with the REST routes.
     pub settings_service: SettingsService,
     pub client_pref_service: ClientPrefService,
     pub provider_service: ProviderService,
     pub model_fetch_service: ModelFetchService,
-    /// Channel domain state (plugin manager + pairing + sessions + settings),
-    /// the same instances the `/api/channels` routes use. `Clone` (all Arc).
+    /// Channel domain state shared with the channel routes.
     pub channel_state: nomifun_channel::ChannelRouterState,
     /// Filesystem service (path-scoped to the configured allowed roots).
     pub file_service: nomifun_file::FileServiceRef,
     /// Shell-open service (OS ShellExecute / `open`).
-    pub shell_service: std::sync::Arc<nomifun_shell::ShellService>,
+    pub shell_service: Arc<nomifun_shell::ShellService>,
     /// MCP server CRUD (same instance as the `/api/mcp` routes).
     pub mcp_config_service: nomifun_mcp::McpConfigService,
-    /// Extension registry + hub + skills (same instances as the extension routes).
+    /// Extension registry + hub + skills.
     pub extension_registry: nomifun_extension::ExtensionRegistry,
     pub hub_index_manager: nomifun_extension::HubIndexManager,
     pub hub_installer: nomifun_extension::HubInstaller,
     pub skill_paths: nomifun_extension::SkillPaths,
     /// Agent catalog (same instance as the agent routes).
-    pub agent_service: std::sync::Arc<nomifun_ai_agent::AgentService>,
+    pub agent_service: Arc<AgentService>,
     /// Client-preference repo backing the global model-failover config.
-    pub client_pref_repo: std::sync::Arc<dyn nomifun_db::IClientPreferenceRepository>,
-    /// One shared persistent collaboration facade. REST, gateway tools, boot
-    /// recovery and scheduling all use this exact instance.
+    pub client_pref_repo: Arc<dyn nomifun_db::IClientPreferenceRepository>,
+    /// One shared persistent collaboration facade.
     pub agent_execution_engine: Arc<nomifun_agent_execution::AgentExecutionEngine>,
-    /// Gateway bridge to the application-owned [`BrowserSessionHub`]. `Some`
-    /// only when the `browser-use` feature is on and the app injected the shared
-    /// hub; the Gateway never owns a browser engine or Chromium process.
-    ///
-    /// [`BrowserSessionHub`]: nomifun_browser_platform::BrowserSessionHub
-    #[cfg(feature = "browser-use")]
-    pub browser_registry: Option<crate::browser_registry::BrowserRegistry>,
-    /// Shared desktop `ComputerTool` (one screen → one serialized instance).
-    /// `Some` only when the `computer-use` feature is on and the app wired it;
-    /// otherwise the gateway exposes no `nomi_computer_*` tools. See
-    /// [`crate::computer_registry`].
-    #[cfg(feature = "computer-use")]
-    pub computer_registry: Option<Arc<crate::computer_registry::ComputerRegistry>>,
 }
 
-/// Identity of the calling Agent session, reconstructed only from the validated
-/// signed Gateway child capability forwarded by the stdio bridge.
+/// Identity of the calling Agent session, reconstructed only from the
+/// validated signed Gateway child capability forwarded by the stdio bridge.
 #[derive(Debug, Clone)]
 pub struct CallerCtx {
-    /// The conversation the calling agent lives in. Used for self-protection
-    /// (a session may not message or delete itself) and as the default cron
-    /// binding target.
+    /// The conversation the calling agent lives in.
     pub conversation_id: Option<ConversationId>,
     /// The desktop user every tool scopes its data access to.
     pub user_id: UserId,
-    /// The companion the calling session is bound to (multi-companion upgrade). `None`
-    /// for sessions without a companion binding — memory/requirement tools are
-    /// deliberately companion-agnostic (memory is shared), so this is attribution
-    /// context, not an access scope.
+    /// The companion the calling session is bound to.
     pub companion_id: Option<CompanionId>,
-    /// IM platform when this is a Channel Agent session (e.g. "lark").
-    /// `None` for plain companion/desktop sessions. Used to resolve the write
-    /// surface (channel → write-disabled in P1).
+    /// IM platform when this is a Channel Agent session.
     pub channel_platform: Option<String>,
     /// Authenticated, transport-derived identity for the current mutating
-    /// operation. Conversation send capabilities fail closed when absent; it
-    /// is never read from model-visible tool arguments or a JSON-RPC request id.
+    /// operation.
     pub operation_id: Option<String>,
-    /// Main-process-resolved browser capability for this authenticated runtime.
-    ///
-    /// This value is attached by the app ingress after it validates the signed
-    /// Gateway capability. Model/tool arguments never populate it. Browser
-    /// capabilities fail closed when it is absent.
-    #[cfg(feature = "browser-use")]
-    pub browser_identity: Option<nomifun_browser_platform::CallerIdentity>,
 }
 
 impl Default for CallerCtx {
@@ -148,8 +115,6 @@ impl Default for CallerCtx {
             companion_id: None,
             channel_platform: None,
             operation_id: None,
-            #[cfg(feature = "browser-use")]
-            browser_identity: None,
         }
     }
 }

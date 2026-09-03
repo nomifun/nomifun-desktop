@@ -137,7 +137,6 @@ MCP 服务器对外暴露引擎可调用的工具与资源。当前 `nomifun-app
 - `mcp-knowledge-stdio`
 - `mcp-gateway-stdio`
 - `mcp-open-stdio`
-- `mcp-computer-stdio`
 
 同一二进制还提供 `terminal-hook`、`doctor`，以及
 `remote open/turn/observe/cancel` 等运维 / 调用子命令。

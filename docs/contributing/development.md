@@ -126,7 +126,6 @@ Current subcommands:
 - `mcp-knowledge-stdio`
 - `mcp-gateway-stdio`
 - `mcp-open-stdio`
-- `mcp-computer-stdio`
 - `terminal-hook --event <kind>`
 - `doctor`
 - `tools`

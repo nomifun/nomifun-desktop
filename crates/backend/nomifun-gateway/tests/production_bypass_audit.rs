@@ -1,11 +1,9 @@
 //! Static guard for the SL-S3-06 Browser/Computer bypass migration.
 //!
-//! This test does not claim the migration is complete. The compatibility
-//! Gateway and the standalone computer stdio bridge still contain known
-//! concrete implementation references while the central composition is being
-//! migrated. The passing guard keeps those references confined to the
-//! explicitly named migration surfaces. The ignored test is the eventual
-//! clean gate and is intentionally expected to fail until that migration lands.
+//! This test is the production bypass gate for SL-S3-06. Browser/Computer
+//! capability modules and the standalone computer stdio bridge are deleted;
+//! the scan remains to prevent concrete implementation dependencies from
+//! returning to the Gateway.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -49,18 +47,6 @@ const DIRECT_BYPASS_MARKERS: &[Marker] = &[
         name: "concrete browser dependency declaration",
         needle: "nomi-browser",
     },
-];
-
-const DECLARED_MIGRATION_SURFACES: &[&str] = &[
-    "gateway/Cargo.toml",
-    "gateway/browser_registry.rs",
-    "gateway/caps_browser.rs",
-    "gateway/caps_computer.rs",
-    "gateway/computer_registry.rs",
-    "gateway/deps.rs",
-    "gateway/lib.rs",
-    "gateway/server.rs",
-    "app/src/commands/computer_stdio.rs",
 ];
 
 fn gateway_root() -> PathBuf {
@@ -113,13 +99,6 @@ fn audited_sources() -> Vec<(String, String)> {
             .unwrap_or_else(|error| panic!("read {}: {error}", cargo_toml.display())),
     ));
 
-    let app_source = root.join("../nomifun-app/src/commands/computer_stdio.rs");
-    sources.push((
-        "app/src/commands/computer_stdio.rs".to_owned(),
-        fs::read_to_string(&app_source)
-            .unwrap_or_else(|error| panic!("read {}: {error}", app_source.display())),
-    ));
-
     sources.sort_by(|left, right| left.0.cmp(&right.0));
     sources
 }
@@ -146,36 +125,12 @@ fn bypass_hits() -> Vec<String> {
     hits
 }
 
-fn is_declared_migration_surface(path: &str) -> bool {
-    DECLARED_MIGRATION_SURFACES
-        .iter()
-        .any(|allowed| *allowed == path)
-}
-
 #[test]
-fn known_bypass_inventory_is_confined_to_declared_migration_surfaces() {
-    let unexpected = bypass_hits()
-        .into_iter()
-        .filter(|hit| {
-            let path = hit.split(':').next().unwrap_or_default();
-            !is_declared_migration_surface(path)
-        })
-        .collect::<Vec<_>>();
-
-    assert!(
-        unexpected.is_empty(),
-        "SL-S3-06 direct implementation references escaped the declared migration surfaces:\n{}",
-        unexpected.join("\n")
-    );
-}
-
-#[test]
-#[ignore = "SL-S3-06 blocked until central composition wires canonical Browser/Computer routes"]
 fn production_bypass_scan_is_clean() {
     let hits = bypass_hits();
     assert!(
         hits.is_empty(),
-        "SL-S3-06 is not closed; concrete Browser/Computer bypasses remain:\n{}",
+        "SL-S3-06 is open; concrete Browser/Computer bypasses returned:\n{}",
         hits.join("\n")
     );
 }

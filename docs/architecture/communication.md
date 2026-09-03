@@ -80,7 +80,6 @@ The current `nomicore` CLI subcommands include:
 - `mcp-knowledge-stdio`
 - `mcp-gateway-stdio`
 - `mcp-open-stdio`
-- `mcp-computer-stdio`
 - `terminal-hook`
 - `doctor`
 - `remote open`

@@ -96,26 +96,27 @@ Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成
 | S0 止损发布 | 2 | 0 | 0 | 0 | 0 | 2 |
 | S1 Revert/keep 审计 | 3 | 0 | 0 | 0 | 0 | 3 |
 | S2 P0 与基础收缩 | 10 | 0 | 0 | 0 | 0 | 10 |
-| S3 Role seam 与核心 owner | 7 | 1 | 4 | 0 | 0 | 12 |
+| S3 Role seam 与核心 owner | 8 | 1 | 3 | 0 | 0 | 12 |
 | S4 产品 UI | 1 | 0 | 1 | 0 | 0 | 2 |
 | S5 三平台、C9 与 RC | 0 | 0 | 3 | 2 | 0 | 5 |
-| **总计** | **23** | **1** | **8** | **2** | **0** | **34** |
+| **总计** | **24** | **1** | **7** | **2** | **0** | **34** |
 
 旧台账 84 项现已收敛为 34 项。任务数量不是质量指标；只有完成定义和最小验证满足后
 才能修改状态。
 
 ## 当前剩余 TODO 快照
 
-当前还剩 11 项未关闭：
+当前还剩 10 项未关闭：
 
 | 分类 | 数量 | TODO |
 | --- | ---: | --- |
 | 主机当前实施 | 1 | `SL-S3-07` |
-| 依赖阻塞 | 8 | `SL-S3-06`、`SL-S3-10`～`SL-S3-12`、`SL-S4-02`、`SL-S5-01`、`SL-S5-04`、`SL-S5-05` |
+| 依赖阻塞 | 7 | `SL-S3-10`～`SL-S3-12`、`SL-S4-02`、`SL-S5-01`、`SL-S5-04`、`SL-S5-05` |
 | 外部原生环境 | 2 | `SL-S5-02` macOS arm64、`SL-S5-03` Linux Desktop x64 |
 
 主机关键路径已完成 `SL-S3-01 -> SL-S3-02 -> SL-S3-03`，Browser/Computer
-first-party dogfood 也已完成；当前主线是 `SL-S3-06 -> SL-S3-07`，再进入完整消费者和候选验证。
+first-party dogfood 和具体实现旁路清理也已完成；当前主线是 `SL-S3-07`，再进入
+automation/Remote/Sidecar 和候选验证。
 上述主机项全部由当前主机执行。主机可以按互斥写集启用多个本机 lane；中央合同、
 组合根、Gate、锁文件和 GLOBAL TODO 由集成 Owner 串行合流。外部 macOS/Linux 只验证
 冻结候选，不领取开发任务，也不维护 Prompt、交接包、远端 SHA 或跨机 attestation。
@@ -170,7 +171,7 @@ first-party dogfood 也已完成；当前主线是 `SL-S3-06 -> SL-S3-07`，再�
 | `SL-S3-03` | closed | 主机 | 实现单一 RoleDispatcher 与 Tool/Context/Resource runtime seam | `SL-S3-02` | Kernel 第一次路由直接选 frozen Provider Mount；Agent 与 non-Agent Tool/Context/Resource 共用 exact resolver；使用 Provider config/state/service/resource；不 façade 二次调用、不重选、不 retry/fallback | `cargo test --locked -p nomifun-agent-kernel --lib`（18/18）; `cargo check --locked -p nomifun-app --features browser-use,computer-use` | 无 |
 | `SL-S3-04` | closed | 主机 | 第一方 Browser dogfood 同一 Role 主链 | `SL-S3-03` | observe/navigate/act 和 hidden `browser.render_content` 经同一 Provider lock；保留 owner/lane/close/process cleanup；Provider 平台约束不写死在 façade | `cargo test --locked -p nomifun-app --features browser-use --lib browser_role_owner_runs_the_canonical_observe_navigate_act_render_chain -- --ignored --test-threads=1`；Wave2 owner/lifecycle tests；alternate Provider parity test | 无；本机 data URL 作为可访问测试页 |
 | `SL-S3-05` | closed | 主机 | 第一方 Computer/A11y dogfood 同一 Role 主链 | `SL-S3-03` | observe/input 基线和可选 launch/a11y 经 exact Provider；按 target resource 串行；observation generation 过期 typed fail；无具体 Registry 旁路 | `cargo test --locked -p nomifun-app --features computer-use --lib computer_role_owner_runs_the_canonical_observe_input_chain -- --ignored --test-threads=1`；Computer serialization/generation/platform-unavailable tests；`cargo test --locked -p nomi-computer --lib -- --ignored --test-threads=1` | 本机 Windows Desktop/UI Automation 权限已通过；macOS 权限仍由外部主机验证 |
-| `SL-S3-06` | blocked | 主机 | 删除 Browser/Computer production concrete bypass | `SL-S3-04`、`SL-S3-05` | Wave 2 不再 unavailable；Knowledge hidden render、Gateway、stdio、v4/Codex/automation 只走 canonical route；Nomi-only allowlist 不增长并等待 C9 | Knowledge canonical render tests；Gateway 旁路未扩散审计；Browser boundary scanner | Gateway legacy Browser/Computer registry 与 standalone `mcp-computer-stdio` 仍待中央迁移或删除 |
+| `SL-S3-06` | closed | 主机 | 删除 Browser/Computer production concrete bypass | `SL-S3-04`、`SL-S3-05` | Wave 2 first-party Role owner 可用；Knowledge rendered source 只经 typed `browser.render_content`；Gateway Browser/Computer registry、capability module 和 standalone `mcp-computer-stdio` 已物理删除；Nomi-only legacy allowlist 不增长并等待 C9 | `cargo test --locked -p nomifun-knowledge --lib`（315）；`cargo test --locked -p nomifun-gateway --lib`（122）；`cargo test --locked -p nomifun-gateway --test production_bypass_audit`；`bun run check:browser-platform-boundary` | 无；旧 Gateway Browser/Computer 工具不再作为兼容入口提供 |
 | `SL-S3-07` | open | 主机 lane | 收口真实核心本地 owner | `SL-S2-06` | Chat、Workspace/File、Process、VCS、Knowledge search/read 保持真实调用；Coding 读写/patch/shell/diff/commit 接入同一 Session 主链；非首批 Wave 3/4 不注册默认模板 | `cargo test --locked -p nomifun-app --lib -- --test-threads=1`；`bun run build:ui`；`bun run dev` 启动烟测 | 2026-09-03 StepFun 代理 live：`gpt-5.5:stepfun-codex` 返回 503；`step-3.7-flash` 返回无可用 content，后续结构探测超过 60 秒；当前仍缺可重复的 Chat/Coding 语义 PASS |
 | `SL-S3-08` | closed | 主机 lane | 接入一个真实 MCP Tool 调用 | `SL-S2-06` | v4 `mcp_servers` identity、materialization、MCP package runtime catalog、exact tool/schema 和 credential authority 经 canonical capability；连接失败 typed fail；没有 Gateway/legacy fallback；owner 使用 no-redirect、bounded response 和一次 cleanup | `cargo test --locked -p nomifun-mcp --lib`（250）；`cargo test --locked -p nomifun-app --lib router::agent_wave2_mcp::tests -- --test-threads=1`（7）；`cargo test --locked -p nomifun-app --lib router::agent_wave2_host::tests -- --test-threads=1`（30） | 本机 disposable Streamable HTTP MCP fixture 已执行真实 `tools/call`；OAuth/stdio 仍明确 typed unavailable，不作为本项隐式扩张 |
 | `SL-S3-09` | closed | 主机 | 实现精简 SSH read/write/exec/sudo owner primitive | 无 | 真实 host binding；最小 typed command/outcome；path/payload/output/timeout 有界；exec/sudo credential 分离；host-key changed fail；cancel 后回收且不自动重放 | `77bd45279`; `cargo check --locked -p nomi-ssh -p nomifun-ssh`; `cargo test --locked -p nomifun-ssh --lib` | live sshd/sudo 未运行时只记录未运行，不构造 PASS |
@@ -241,9 +242,10 @@ first-party dogfood 也已完成；当前主线是 `SL-S3-06 -> SL-S3-07`，再�
   应用组合已移除旧 `BrowserFetcher -> Hub` 接线。新增
   `bun run check:automation-session-boundary` 审计六类 automation consumer 的旧依赖，
   当前仍明确记录为未安全迁移。
-- Gateway/stdio：新增旁路未扩散审计，当前已确认 Gateway 具体 Browser/Computer registry
-  和 standalone `mcp-computer-stdio` 仍是 S3-06 的唯一主机代码阻塞；ignored clean gate
-  首个命中为 `app/src/commands/computer_stdio.rs:157` 的直接执行，未重复盲跑。
+- Gateway/stdio：已物理删除具体 Browser/Computer registry、Gateway capability modules、
+  standalone `mcp-computer-stdio` 及其 `ComputerMcpConfig`。`production_bypass_audit`
+  和 Browser boundary scanner 均通过；Gateway 保留的 `nomi_*` 工具不再包含 Browser/
+  Computer 具体实现，canonical AgentPlatform Role 是唯一入口。
 - Desktop：`cargo check/build --locked -p nomifun-desktop --no-default-features` 通过；
   真实 `bun run dev` 已启动 `nomifun-desktop` 窗口，Vite 在 `127.0.0.1:5173` 监听，
   Chrome 加载后显示登录页，未出现 `storage generation must be a canonical lowercase
