@@ -2967,6 +2967,262 @@ mod tests {
         .expect("Browser Role live chain exceeded its 90 second deadline");
     }
 
+    #[cfg(feature = "computer-use")]
+    #[tokio::test]
+    #[ignore = "requires a local desktop and UI Automation; run explicitly with --ignored"]
+    async fn computer_role_owner_runs_the_canonical_observe_input_chain() {
+        tokio::time::timeout(Duration::from_secs(90), async {
+            let directory = tempfile::tempdir().expect("computer role test root");
+            let data_dir = directory.path().join("data");
+            let bootstrap = nomifun_v4_root::FreshV4Coordinator::default()
+                .bootstrap(&data_dir, APPLICATION_BUILD_IDENTITY, &[])
+                .await
+                .expect("fresh v4 computer role root");
+            let pool = open_validated_pool(&data_dir.join(FRESH_V4_DATABASE_FILE))
+                .await
+                .expect("computer role v4 pool");
+            let host_ports = AgentDomainHostPorts::for_workspace_root(
+                data_dir.clone(),
+                pool.clone(),
+            );
+            let platform = initialize_platform_with_cleanup_and_host_ports(
+                pool,
+                data_dir.join(FRESH_V4_READY_MARKER_FILE),
+                bootstrap.ready_marker,
+                canonical_schema_manifest_digest().expect("computer role schema digest"),
+                None,
+                [0x43; 32],
+                host_ports,
+            )
+            .await
+            .expect("canonical computer role platform");
+
+            let owner = nomifun_agent_contracts::PrincipalRef {
+                principal_kind: "user".to_owned(),
+                principal_id: "computer-role-owner".to_owned(),
+            };
+            let binding = TypedResourceBinding {
+                binding_id: ResourceBindingId::from("computer-role-binding"),
+                resource_kind: ResourceKind::from("computer"),
+                resource_id: ResourceId::from("computer-role-target"),
+                owner_id: owner.principal_id.clone(),
+                operations: BTreeSet::from([
+                    "observe".to_owned(),
+                    "input".to_owned(),
+                    "launch".to_owned(),
+                ]),
+                connection_config_ref: None,
+                typed_parameters: BTreeMap::new(),
+            };
+            let materialized = platform
+                .materialized_registry()
+                .expect("computer role materialized registry");
+            let role_id = nomifun_agent_contracts::ExecutionRoleId::from(
+                nomifun_agent_domain_wave2::COMPUTER_EXECUTION_ROLE_ID,
+            );
+            let provider_mount =
+                nomifun_agent_contracts::PluginMountId::from(
+                    nomifun_agent_domain_wave2::COMPUTER_A11Y_MOUNT_ID,
+                );
+            let provider = materialized
+                .role_provider(&role_id, &provider_mount)
+                .expect("bundled Computer provider");
+            let installation_binding =
+                nomifun_agent_contracts::InstallationRoleBinding {
+                    selection: nomifun_agent_contracts::RoleProviderSelection {
+                        role: provider.provider.role.clone(),
+                        provider_mount_id: provider_mount,
+                    },
+                    binding_version: 1,
+                    updated_at_ms: 1,
+                };
+            let inventory: CodingRuntimeFeatureInventoryPayload =
+                serde_json::from_str(RUNTIME_FEATURE_INVENTORY_JSON)
+                    .expect("runtime feature inventory");
+            let environment = CompilerEnvironment {
+                resolver_version: VersionString::from(CONTRACT_VERSION),
+                required_runtime_protocol_version: VersionString::from(CONTRACT_VERSION),
+                required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+                runtime_feature_inventory_digest: digest_payload(&inventory)
+                    .expect("runtime inventory digest"),
+                available_runtime_features: inventory.runtime_features.clone(),
+                installation_role_bindings: BTreeMap::from([(role_id.clone(), installation_binding)]),
+                canonical_schema_manifest_digest: canonical_schema_manifest_digest()
+                    .expect("computer role schema digest"),
+                target_contribution_manifest_digest: official_preset_seed_manifest_payload()
+                    .target_first_party_contribution_digest,
+                host_target: current_runtime_target(),
+                host_surface: "desktop".to_owned(),
+                availability_evidence_revision: "computer-role-live-2026-09-03".to_owned(),
+            };
+            let capability = |id: &str, required: bool, exposure: CapabilityExposure| {
+                let action_allowlist = (id == "computer.input")
+                    .then(|| BTreeSet::from([ActionId::from("computer.input.invoke")]))
+                    .unwrap_or_default();
+                CapabilitySelection {
+                    capability: CapabilityRef {
+                        id: CapabilityId::from(id),
+                        version: VersionString::from(CONTRACT_VERSION),
+                    },
+                    required,
+                    exposure,
+                    action_allowlist,
+                    resource_binding_refs: vec![binding.binding_id.clone()],
+                    destination_constraints: BTreeSet::new(),
+                    context_budget_override: None,
+                    tool_budget_override: None,
+                    config: StrictJsonValue(serde_json::json!({})),
+                }
+            };
+            let payload = AgentPresetRevisionPayload {
+                schema_version: VersionString::from(CONTRACT_VERSION),
+                surfaces: BTreeSet::from(["desktop".to_owned()]),
+                model_route_refs: BTreeMap::new(),
+                chat_route_records: BTreeMap::new(),
+                initial_capabilities: vec![
+                    capability("computer.observe", true, CapabilityExposure::Hidden),
+                    capability("computer.input", true, CapabilityExposure::Advertised),
+                ],
+                on_demand_capabilities: Vec::new(),
+                skill_bindings: Vec::new(),
+                resource_bindings: vec![binding.clone()],
+                system_role_provider_overrides: BTreeMap::new(),
+                persona: "Computer role live test".to_owned(),
+                instructions: "Exercise the canonical Computer role owner.".to_owned(),
+                context_policy: StrictJsonValue(serde_json::json!({})),
+                execution_constraints: StrictJsonValue(serde_json::json!({})),
+                runtime_budget: StrictJsonValue(serde_json::json!({})),
+            };
+            let revision = AgentPresetRevision {
+                reference: PresetRevisionRef {
+                    preset_id: AgentPresetId::from("computer-role-live-test"),
+                    revision: 1,
+                    revision_digest: digest_payload(&payload)
+                        .expect("computer role revision digest"),
+                },
+                payload,
+                created_by: UserId::from(owner.principal_id.clone()),
+                created_at_ms: 1,
+                reason: None,
+            };
+            let snapshot = AgentPresetCompiler::compile(
+                &materialized,
+                &environment,
+                CompileRequest {
+                    revision,
+                    principal: owner.clone(),
+                    scene: "computer-role-live-test".to_owned(),
+                    surface: "desktop".to_owned(),
+                    audience: "test".to_owned(),
+                    created_at_ms: 2,
+                    resolver_run_id: OperationId::from("computer-role-live-resolve"),
+                },
+            )
+            .expect("compile Computer role snapshot");
+            let snapshot = Arc::new(snapshot);
+            let active = SessionCapabilityState::new(&snapshot)
+                .snapshot()
+                .expect("Computer role active set");
+            let session_id = AgentSessionId::from(uuid::Uuid::now_v7().to_string());
+            let scope_key = ScopeKey::from(format!("session:{}", session_id.as_ref()));
+            let role_request = |capability_id: &str, suffix: &str| {
+                nomifun_agent_kernel::RoleMemberInvocationRequest {
+                    principal: owner.clone(),
+                    session_owner: owner.clone(),
+                    operation_id: OperationId::from(format!(
+                        "computer-role-{capability_id}-{suffix}"
+                    )),
+                    correlation_id: CorrelationId::from(format!(
+                        "computer-role-correlation-{capability_id}-{suffix}"
+                    )),
+                    capability_id: CapabilityId::from(capability_id),
+                    resource_binding_ids: BTreeSet::from([binding.binding_id.clone()]),
+                    state_scope_key: scope_key.clone(),
+                    admission: nomifun_agent_kernel::RoleMemberAdmission::Agent {
+                        agent_session_id: session_id.clone(),
+                        resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
+                        active_set_generation: active.generation,
+                    },
+                }
+            };
+
+            let observed = platform
+                .kernel_registry()
+                .contribute_role_context(
+                    &snapshot,
+                    &active,
+                    role_request("computer.observe", "before"),
+                )
+                .await
+                .expect("Computer observe context contribution")
+                .value
+                .expect("Computer observe must return a context value")
+                .0;
+            let first_generation = observed["generation"]
+                .as_u64()
+                .expect("Computer observe generation");
+            assert!(first_generation > 0);
+
+            let input = CapabilityInvocationRequest {
+                principal: owner.clone(),
+                session_owner: owner.clone(),
+                agent_session_id: session_id.clone(),
+                operation_id: OperationId::from("computer-role-action-computer.input-wait"),
+                idempotency_key: IdempotencyKey::from("computer-role-key-input-wait"),
+                correlation_id: CorrelationId::from(
+                    "computer-role-action-correlation-input-wait",
+                ),
+                resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
+                active_set_generation: active.generation,
+                capability_id: CapabilityId::from("computer.input"),
+                action_id: ActionId::from("computer.input.invoke"),
+                resource_binding_ids: BTreeSet::from([binding.binding_id.clone()]),
+                state_scope_key: scope_key.clone(),
+                input: StrictJsonValue(serde_json::json!({
+                    "action": "wait",
+                    "seconds": 0,
+                    "expected_generation": first_generation
+                })),
+            };
+            platform
+                .kernel_registry()
+                .invoke(&snapshot, &active, input)
+                .await
+                .expect("Computer input action");
+
+            let after_input = platform
+                .kernel_registry()
+                .contribute_role_context(
+                    &snapshot,
+                    &active,
+                    role_request("computer.observe", "after-input"),
+                )
+                .await
+                .expect("Computer observe after input")
+                .value
+                .expect("Computer observe after input must return a value")
+                .0;
+            assert!(
+                after_input["generation"]
+                    .as_u64()
+                    .is_some_and(|generation| generation > first_generation)
+            );
+
+            platform
+                .kernel_registry()
+                .release_role_resources(&scope_key)
+                .await
+                .expect("Computer role resource release");
+            platform
+                .shutdown()
+                .await
+                .expect("Computer role platform shutdown");
+            platform.pool().close().await;
+        })
+        .await
+        .expect("Computer Role live chain exceeded its 90 second deadline");
+    }
+
     #[test]
     fn ready_marker_requires_canonical_bytes_and_current_build() {
         let directory = tempfile::tempdir().unwrap();

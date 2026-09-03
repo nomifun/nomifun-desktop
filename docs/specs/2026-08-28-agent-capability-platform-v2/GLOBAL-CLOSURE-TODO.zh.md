@@ -96,26 +96,26 @@ Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成
 | S0 止损发布 | 2 | 0 | 0 | 0 | 0 | 2 |
 | S1 Revert/keep 审计 | 3 | 0 | 0 | 0 | 0 | 3 |
 | S2 P0 与基础收缩 | 10 | 0 | 0 | 0 | 0 | 10 |
-| S3 Role seam 与核心 owner | 5 | 1 | 6 | 0 | 0 | 12 |
+| S3 Role seam 与核心 owner | 7 | 1 | 4 | 0 | 0 | 12 |
 | S4 产品 UI | 1 | 0 | 1 | 0 | 0 | 2 |
 | S5 三平台、C9 与 RC | 0 | 0 | 3 | 2 | 0 | 5 |
-| **总计** | **21** | **1** | **10** | **2** | **0** | **34** |
+| **总计** | **23** | **1** | **8** | **2** | **0** | **34** |
 
 旧台账 84 项现已收敛为 34 项。任务数量不是质量指标；只有完成定义和最小验证满足后
 才能修改状态。
 
 ## 当前剩余 TODO 快照
 
-当前还剩 13 项未关闭：
+当前还剩 11 项未关闭：
 
 | 分类 | 数量 | TODO |
 | --- | ---: | --- |
 | 主机当前实施 | 1 | `SL-S3-07` |
-| 依赖阻塞 | 10 | `SL-S3-04`～`SL-S3-06`、`SL-S3-10`～`SL-S3-12`、`SL-S4-02`、`SL-S5-01`、`SL-S5-04`、`SL-S5-05` |
+| 依赖阻塞 | 8 | `SL-S3-06`、`SL-S3-10`～`SL-S3-12`、`SL-S4-02`、`SL-S5-01`、`SL-S5-04`、`SL-S5-05` |
 | 外部原生环境 | 2 | `SL-S5-02` macOS arm64、`SL-S5-03` Linux Desktop x64 |
 
-主机关键路径已完成 `SL-S3-01 -> SL-S3-02 -> SL-S3-03`，MCP slice 已完成；
-当前主线是 `SL-S3-04/SL-S3-05 -> SL-S3-06`，再进入完整消费者和候选验证。
+主机关键路径已完成 `SL-S3-01 -> SL-S3-02 -> SL-S3-03`，Browser/Computer
+first-party dogfood 也已完成；当前主线是 `SL-S3-06 -> SL-S3-07`，再进入完整消费者和候选验证。
 上述主机项全部由当前主机执行。主机可以按互斥写集启用多个本机 lane；中央合同、
 组合根、Gate、锁文件和 GLOBAL TODO 由集成 Owner 串行合流。外部 macOS/Linux 只验证
 冻结候选，不领取开发任务，也不维护 Prompt、交接包、远端 SHA 或跨机 attestation。
@@ -168,9 +168,9 @@ Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成
 | `SL-S3-01` | closed | 主机 | 冻结 Browser/Computer versioned Role 合同 | `SL-S2-09` | `ExecutionRoleId`、Role Contract、source-neutral Provider contribution、required/optional member、typed Context/Resource exports 只有一套 canonical Rust/schema 定义 | `cargo test --locked -p nomifun-agent-contracts role --lib`; `cargo run --locked -p nomifun-agent-contracts --bin agent-v2-contract -- check`; `cargo test --locked -p nomifun-agent-kernel --lib` | 无 |
 | `SL-S3-02` | closed | 主机 | 实现 installation binding、Revision override、Resolver 和 Snapshot exact lock | `SL-S2-07`、`SL-S2-08`、`SL-S3-01` | override 优先、缺省继承 installation default；精确 Provider/contract/contribution/resource 进入 Snapshot digest；Operation admission 可携带独立 exact lock；缺失明确失败且不 fallback | `cargo test --locked -p nomifun-agent-control-plane --lib`; `cargo test --locked -p nomifun-agent-kernel --lib`（含 alternate/provider/registry/resource drift） | 无 |
 | `SL-S3-03` | closed | 主机 | 实现单一 RoleDispatcher 与 Tool/Context/Resource runtime seam | `SL-S3-02` | Kernel 第一次路由直接选 frozen Provider Mount；Agent 与 non-Agent Tool/Context/Resource 共用 exact resolver；使用 Provider config/state/service/resource；不 façade 二次调用、不重选、不 retry/fallback | `cargo test --locked -p nomifun-agent-kernel --lib`（18/18）; `cargo check --locked -p nomifun-app --features browser-use,computer-use` | 无 |
-| `SL-S3-04` | blocked | 主机 | 第一方 Browser dogfood 同一 Role 主链 | `SL-S3-03` | observe/navigate/act 和 hidden `browser.render_content` 经同一 Provider lock；保留 owner/lane/close/process cleanup；Provider 平台约束不写死在 façade | Browser owner/lifecycle tests；alternate Provider parity test | Browser live E2E 需要可访问测试页 |
-| `SL-S3-05` | blocked | 主机 | 第一方 Computer/A11y dogfood 同一 Role 主链 | `SL-S3-03` | observe/input 基线和可选 launch/a11y 经 exact Provider；按 target resource 串行；observation generation 过期 typed fail；无具体 Registry 旁路 | Computer serialization/generation/platform-unavailable tests | Windows/macOS input 权限由原生测试用户授予 |
-| `SL-S3-06` | blocked | 主机 | 删除 Browser/Computer production concrete bypass | `SL-S3-04`、`SL-S3-05` | Wave 2 不再 unavailable；Knowledge hidden render、Gateway、stdio、v4/Codex/automation 只走 canonical route；Nomi-only allowlist 不增长并等待 C9 | production dependency scan；Knowledge render、Gateway、stdio 代表性 integration tests | 无 |
+| `SL-S3-04` | closed | 主机 | 第一方 Browser dogfood 同一 Role 主链 | `SL-S3-03` | observe/navigate/act 和 hidden `browser.render_content` 经同一 Provider lock；保留 owner/lane/close/process cleanup；Provider 平台约束不写死在 façade | `cargo test --locked -p nomifun-app --features browser-use --lib browser_role_owner_runs_the_canonical_observe_navigate_act_render_chain -- --ignored --test-threads=1`；Wave2 owner/lifecycle tests；alternate Provider parity test | 无；本机 data URL 作为可访问测试页 |
+| `SL-S3-05` | closed | 主机 | 第一方 Computer/A11y dogfood 同一 Role 主链 | `SL-S3-03` | observe/input 基线和可选 launch/a11y 经 exact Provider；按 target resource 串行；observation generation 过期 typed fail；无具体 Registry 旁路 | `cargo test --locked -p nomifun-app --features computer-use --lib computer_role_owner_runs_the_canonical_observe_input_chain -- --ignored --test-threads=1`；Computer serialization/generation/platform-unavailable tests；`cargo test --locked -p nomi-computer --lib -- --ignored --test-threads=1` | 本机 Windows Desktop/UI Automation 权限已通过；macOS 权限仍由外部主机验证 |
+| `SL-S3-06` | blocked | 主机 | 删除 Browser/Computer production concrete bypass | `SL-S3-04`、`SL-S3-05` | Wave 2 不再 unavailable；Knowledge hidden render、Gateway、stdio、v4/Codex/automation 只走 canonical route；Nomi-only allowlist 不增长并等待 C9 | Knowledge canonical render tests；Gateway 旁路未扩散审计；Browser boundary scanner | Gateway legacy Browser/Computer registry 与 standalone `mcp-computer-stdio` 仍待中央迁移或删除 |
 | `SL-S3-07` | open | 主机 lane | 收口真实核心本地 owner | `SL-S2-06` | Chat、Workspace/File、Process、VCS、Knowledge search/read 保持真实调用；Coding 读写/patch/shell/diff/commit 接入同一 Session 主链；非首批 Wave 3/4 不注册默认模板 | `cargo test --locked -p nomifun-app --lib -- --test-threads=1`；`bun run build:ui`；`bun run dev` 启动烟测 | 2026-09-03 StepFun 代理 live：`gpt-5.5:stepfun-codex` 返回 503；`step-3.7-flash` 返回无可用 content，后续结构探测超过 60 秒；当前仍缺可重复的 Chat/Coding 语义 PASS |
 | `SL-S3-08` | closed | 主机 lane | 接入一个真实 MCP Tool 调用 | `SL-S2-06` | v4 `mcp_servers` identity、materialization、MCP package runtime catalog、exact tool/schema 和 credential authority 经 canonical capability；连接失败 typed fail；没有 Gateway/legacy fallback；owner 使用 no-redirect、bounded response 和一次 cleanup | `cargo test --locked -p nomifun-mcp --lib`（250）；`cargo test --locked -p nomifun-app --lib router::agent_wave2_mcp::tests -- --test-threads=1`（7）；`cargo test --locked -p nomifun-app --lib router::agent_wave2_host::tests -- --test-threads=1`（30） | 本机 disposable Streamable HTTP MCP fixture 已执行真实 `tools/call`；OAuth/stdio 仍明确 typed unavailable，不作为本项隐式扩张 |
 | `SL-S3-09` | closed | 主机 | 实现精简 SSH read/write/exec/sudo owner primitive | 无 | 真实 host binding；最小 typed command/outcome；path/payload/output/timeout 有界；exec/sudo credential 分离；host-key changed fail；cancel 后回收且不自动重放 | `77bd45279`; `cargo check --locked -p nomi-ssh -p nomifun-ssh`; `cargo test --locked -p nomifun-ssh --lib` | live sshd/sudo 未运行时只记录未运行，不构造 PASS |
@@ -213,7 +213,7 @@ Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成
 - MCP lane：`SL-S3-08` 已关闭；后续 OAuth/stdio 扩展不进入本期隐式范围；
 - UI lane：`SL-S4-01` 已关闭；仓库级 React/Arco 类型基线不反向阻塞已通过定向验收的
   Agent Settings 产品切片；
-- Role Provider lane：`SL-S3-04`、`SL-S3-05` 在 `SL-S3-03` 完成后分别推进；
+- Role Provider lane：`SL-S3-04`、`SL-S3-05` 已关闭；后续只维护真实平台回归；
 - Sidecar Runtime lane：`SL-S3-12` 继续实现，但 exact binary/live credential 缺失时只记录
   blocker，不构造 live PASS。
 
@@ -227,11 +227,23 @@ Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成
   导致的幂等重放 409；现在同一 Remote open key 会重放同一 Session 及其 terminal
   `open_failed` 结果。`remote_rest_e2e` 两项测试均通过。
 - Browser 本机资源检查发现 Chrome `152.0.7977.65` 可用；执行了
-  `nomi-browser-engine` 的真实导航和 act fixtures（各 `1 passed`）。这证明 engine 资源可用，
-  且 observe/type/set_value/click/secret redaction 基线可执行，但尚不足以关闭同一 Role host
-  的完整 observe/navigate/act/render_content dogfood。
-- Computer crate 基础测试 `93 passed / 7 ignored`；被忽略项明确需要真实屏幕、输入设备或
-  窗口句柄，未把无交互环境结果冒充 Computer native PASS。
+  `nomi-browser-engine` 的真实导航和 act fixtures（各 `1 passed`）。随后通过 canonical
+  Role/Kernel/Host 链路完成了 `acquire -> observe -> navigate -> act -> render_content
+  -> release`，受控测试耗时约 2 秒；alternate Provider parity、owner/lifecycle 和
+  boundary scanner 也通过，`SL-S3-04` 已关闭。
+- Computer crate 基础测试 `93 passed / 7 ignored`，并在本机真实 Windows Desktop 上
+  运行 7 个 ignored 屏幕/输入测试全部通过。随后通过 canonical Role/Kernel/Host 链路完成
+  `computer.observe -> computer.input(wait, expected_generation) -> observe`，generation
+  单调递增且资源释放/平台关闭通过，`SL-S3-05` 已关闭。macOS TCC 和其他原生平台仍只
+  能由对应主机验证。
+- Knowledge：rendered URL 现在只接受 typed `BrowserRenderContentPort`，缺少 canonical
+  port 时显式失败且不回退 HTTP 或旧 Hub；`nomifun-knowledge` 全量 `315 passed`，
+  应用组合已移除旧 `BrowserFetcher -> Hub` 接线。新增
+  `bun run check:automation-session-boundary` 审计六类 automation consumer 的旧依赖，
+  当前仍明确记录为未安全迁移。
+- Gateway/stdio：新增旁路未扩散审计，当前已确认 Gateway 具体 Browser/Computer registry
+  和 standalone `mcp-computer-stdio` 仍是 S3-06 的唯一主机代码阻塞；ignored clean gate
+  首个命中为 `app/src/commands/computer_stdio.rs:157` 的直接执行，未重复盲跑。
 - Desktop：`cargo check/build --locked -p nomifun-desktop --no-default-features` 通过；
   真实 `bun run dev` 已启动 `nomifun-desktop` 窗口，Vite 在 `127.0.0.1:5173` 监听，
   Chrome 加载后显示登录页，未出现 `storage generation must be a canonical lowercase
