@@ -346,6 +346,40 @@ async fn canonical_fresh_v4_remote_rest_is_authenticated_owner_scoped_and_proven
         terminal_head.status, "open_failed",
         "the test host has no packaged Codex Runtime sidecar, so opening must fail closed"
     );
+    let open_failed_event_count: i64 = nomifun_db::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM session_events \
+         WHERE session_id = ? AND kind = 'session/open-failed'",
+    )
+    .bind(&session_id)
+    .fetch_one(application.pool())
+    .await
+    .expect("read persisted session/open-failed event");
+    assert_eq!(
+        open_failed_event_count, 1,
+        "a failed Remote open must converge through one durable terminal event"
+    );
+
+    let (status, replayed_open) = remote_json(
+        &router,
+        "POST",
+        "/api/remote/open",
+        Some(&token),
+        Some(json!({
+            "binding_id": binding.remote_binding_id,
+            "idempotency_key": "owner-scope-open-valid"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replayed_open["agent_session_id"], session_id);
+    assert_eq!(
+        replayed_open["open_state"],
+        json!({
+            "state": "failed",
+            "code": "REMOTE_OPEN_FAILED",
+            "recoverable": true
+        })
+    );
 
     let persisted: (String, i64, String) = nomifun_db::sqlx::query_as(
         "SELECT remote_binding_id, remote_binding_version, owner_ref_json \
@@ -445,6 +479,18 @@ async fn canonical_fresh_v4_remote_rest_is_authenticated_owner_scoped_and_proven
             .iter()
             .any(|event| event["kind"] == "session/opening"),
         "after_seq must not replay session/opening"
+    );
+    let open_failed_event_count_after_replay: i64 = nomifun_db::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM session_events \
+         WHERE session_id = ? AND kind = 'session/open-failed'",
+    )
+    .bind(&session_id)
+    .fetch_one(application.pool())
+    .await
+    .expect("read session/open-failed count after idempotent requests");
+    assert_eq!(
+        open_failed_event_count_after_replay, 1,
+        "replayed open/turn/observe requests must not launch another admission attempt"
     );
 
     // Deleting a mutable RemoteBinding prevents future opens but must not

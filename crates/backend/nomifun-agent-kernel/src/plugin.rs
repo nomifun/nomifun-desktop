@@ -7,7 +7,8 @@ use nomifun_agent_contracts::{
     ExecutionRoleId, HostPortId, IdempotencyKey, OperationId, PackageRef,
     PluginContextDescriptor, PluginIdentityDescriptor, PluginRegistrarDescriptor,
     PluginRegistrarOperation, PluginRegistrationMetadata, PrincipalRef,
-    ResolvedRoleProviderLock, ResolvedSnapshotRef, ResourceBindingId, ResourceId, ResourceKind,
+    ResolvedMcpToolLock, ResolvedRoleProviderLock, ResolvedSnapshotRef, ResourceBindingId,
+    ResourceId, ResourceKind,
     ScopeKey, ServiceKeyId, ServiceKeyRef, SkillId, StrictJsonValue, TypedResourceBindings,
     ValidatedPluginConfig,
 };
@@ -47,6 +48,10 @@ pub struct CapabilityInvocationContext {
     pub state_scope_key: ScopeKey,
     pub state: PluginStateHandle,
     pub services: DeclaredServiceView,
+    /// The exact MCP mapping frozen by the Agent Snapshot, when this
+    /// capability is MCP-backed. It is absent for ordinary capabilities and
+    /// is never reconstructed from model-visible input.
+    pub mcp_tool_lock: Option<ResolvedMcpToolLock>,
 }
 
 /// Host-owned admission for a role member.

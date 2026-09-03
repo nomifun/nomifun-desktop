@@ -29,6 +29,7 @@ const RUNTIME_OPEN_WORK_DIR: &str = "runtime-sessions";
 const REMOTE_OPEN_SCHEDULE_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_OPEN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(35);
 const OPEN_FAILURE_PERSIST_TIMEOUT: Duration = Duration::from_secs(10);
+const REMOTE_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 const OPEN_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_OPEN_FAILURE_MESSAGE_CHARS: usize = 2_000;
 
@@ -100,6 +101,13 @@ impl Drop for OpeningTaskLease {
         let registry = Arc::clone(&self.registry);
         let changed = Arc::clone(&self.changed);
         let Some(handle) = tokio::runtime::Handle::try_current().ok() else {
+            self.coordinator.mark_failure_persistence_blocker(
+                &self.session_id,
+                bounded_failure_message(
+                    "Remote Runtime admission was cancelled without a Tokio runtime; \
+                     session/open-failed could not be scheduled",
+                ),
+            );
             match self.registry.lock() {
                 Ok(mut registry) => {
                     registry.sessions.remove(&self.session_id);
@@ -234,12 +242,14 @@ impl RemoteRuntimeCoordinator {
             .catch_unwind()
             .await;
             if let Err(_) = result {
-                coordinator
-                    .record_failure_or_mark(
-                        &session_id,
-                        "Remote Runtime admission task panicked",
-                    )
-                    .await;
+                if !coordinator.failure_persistence_blocked(&session_id) {
+                    coordinator
+                        .record_failure_or_mark(
+                            &session_id,
+                            "Remote Runtime admission task panicked",
+                        )
+                        .await;
+                }
             }
             task_lease.complete();
         });
@@ -247,15 +257,42 @@ impl RemoteRuntimeCoordinator {
     }
 
     /// Recover Sessions that were committed before the previous host process
-    /// could schedule its post-commit launch task.
+    /// could schedule its post-commit launch task. The whole recovery pass is
+    /// bounded so a damaged store or an unexpectedly large stale set cannot
+    /// hold host startup forever.
     pub(crate) async fn reconcile_opening_sessions(
         self: &Arc<Self>,
     ) -> Result<(), AgentPlatformError> {
-        let sessions = self
-            .platform
-            .session_store()
-            .list_opening_remote_sessions()
-            .await?;
+        match tokio::time::timeout(
+            REMOTE_RECONCILE_TIMEOUT,
+            self.reconcile_opening_sessions_inner(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(AgentPlatformError::Contract(format!(
+                "Remote Runtime opening-session reconciliation exceeded its {} second deadline",
+                REMOTE_RECONCILE_TIMEOUT.as_secs()
+            ))),
+        }
+    }
+
+    async fn reconcile_opening_sessions_inner(
+        self: &Arc<Self>,
+    ) -> Result<(), AgentPlatformError> {
+        let sessions = tokio::time::timeout(
+            REMOTE_OPEN_SCHEDULE_TIMEOUT,
+            self.platform
+                .session_store()
+                .list_opening_remote_sessions(),
+        )
+        .await
+        .map_err(|_| {
+            AgentPlatformError::Contract(format!(
+                "Remote Runtime opening-session discovery exceeded its {} second deadline",
+                REMOTE_OPEN_SCHEDULE_TIMEOUT.as_secs()
+            ))
+        })??;
         for session_id in sessions {
             self.ensure_started(session_id).await?;
         }
@@ -381,8 +418,11 @@ impl RemoteRuntimeCoordinator {
     }
 
     async fn record_failure_or_mark(&self, session_id: &AgentSessionId, message: &str) {
+        if self.failure_persistence_blocked(session_id) {
+            return;
+        }
         let message = bounded_failure_message(message);
-        let result = tokio::time::timeout(
+        let result = std::panic::AssertUnwindSafe(tokio::time::timeout(
             OPEN_FAILURE_PERSIST_TIMEOUT,
             self.platform.session_store().append_open_failed(
                 session_id,
@@ -390,13 +430,14 @@ impl RemoteRuntimeCoordinator {
                 &message,
                 true,
             ),
-        )
+        ))
+        .catch_unwind()
         .await;
         match result {
-            Ok(Ok(Some(_))) | Ok(Ok(None)) => {
+            Ok(Ok(Ok(Some(_)))) | Ok(Ok(Ok(None))) => {
                 self.clear_failure_persistence_blocker(session_id);
             }
-            Ok(Err(error)) => {
+            Ok(Ok(Err(error))) => {
                 let reason = bounded_failure_message(&format!(
                     "{message}; durable session/open-failed append failed: {error}"
                 ));
@@ -407,7 +448,7 @@ impl RemoteRuntimeCoordinator {
                     "Remote Runtime failure could not be persisted as session/open-failed"
                 );
             }
-            Err(_) => {
+            Ok(Err(_)) => {
                 let reason = bounded_failure_message(&format!(
                     "{message}; durable session/open-failed append exceeded its {} second deadline",
                     OPEN_FAILURE_PERSIST_TIMEOUT.as_secs()
@@ -417,6 +458,16 @@ impl RemoteRuntimeCoordinator {
                     session_id = session_id.as_ref(),
                     timeout_seconds = OPEN_FAILURE_PERSIST_TIMEOUT.as_secs(),
                     "Remote Runtime failure persistence timed out"
+                );
+            }
+            Err(_) => {
+                let reason = bounded_failure_message(&format!(
+                    "{message}; durable session/open-failed append panicked"
+                ));
+                self.mark_failure_persistence_blocker(session_id, reason);
+                tracing::error!(
+                    session_id = session_id.as_ref(),
+                    "Remote Runtime failure persistence panicked"
                 );
             }
         }
@@ -554,5 +605,12 @@ mod tests {
             registry.failure_persistence_blockers.get(&session_id),
             Some(&"database is read-only".to_owned())
         );
+    }
+
+    #[test]
+    fn remote_open_and_reconcile_deadlines_are_explicitly_bounded() {
+        assert!(REMOTE_OPEN_SCHEDULE_TIMEOUT < REMOTE_OPEN_ATTEMPT_TIMEOUT);
+        assert!(OPEN_FAILURE_PERSIST_TIMEOUT < REMOTE_RECONCILE_TIMEOUT);
+        assert!(REMOTE_RECONCILE_TIMEOUT < OPEN_TASK_SHUTDOWN_TIMEOUT);
     }
 }

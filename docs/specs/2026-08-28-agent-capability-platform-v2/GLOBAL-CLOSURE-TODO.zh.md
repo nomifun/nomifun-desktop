@@ -1,12 +1,13 @@
 # Agent Capability Platform v2 一期精简闭合 TODO
 
-> 盘点日期：2026-09-02
+> 盘点日期：2026-09-03
 >
 > 基线分支：`rf/agent-capability-platform-v2`
 >
 > 权威来源：`05-system-capability-replacement-foundation.zh.md`
 >
-> 当前结论：S0-S2 的止损、P0 与基础收缩已按定向 evidence 收口；S3-S5 尚未完成。
+> 当前结论：S0-S2 的止损、P0 与基础收缩已按定向 evidence 收口；MCP canonical owner
+> 已在 S3 收口，Agent Settings 产品表面已在 S4 收口，其余 S3-S5 尚未完成。
 > Sidecar live binary/credential、Windows 完整候选、C8、C9、Stable 或 Browser/Computer
 > 可替换主链仍不得宣称完成。
 
@@ -86,6 +87,7 @@ Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成
 | `SL-S2-09` PluginRegistration | `cargo test --locked -p nomifun-agent-kernel materialize --lib` | metadata 从 Manifest 与真实 exports 派生，保留 typed dependency 与 cleanup |
 | `SL-S2-10` official app-server spike | `a7ac1d124`；`bun scripts/validation/codex-app-server-spike.mjs --self-test`；`bun test scripts/validation/codex-app-server-spike.test.mjs` | 已确认 pinned upstream 协议；不等同于 exact binary 或 live model 验证 |
 | `SL-S3-09` SSH owner primitive | `77bd45279`；`cargo check --locked -p nomi-ssh -p nomifun-ssh`；`cargo test --locked -p nomifun-ssh --lib` | 已实现有界输入、超时、取消回收和 no-retry；live sshd/sudo 未运行时不构造 PASS |
+| `SL-S3-08` MCP owner/source | `cargo test --locked -p nomifun-mcp --lib`；`cargo test --locked -p nomifun-app --lib router::agent_wave2_mcp::tests -- --test-threads=1`；`cargo test --locked -p nomifun-app --lib router::agent_wave2_host::tests -- --test-threads=1` | v4 source、exact lock、Streamable HTTP owner、typed failure、no-redirect 和 bounded cleanup 已通过；OAuth/stdio 不在本项隐式扩张 |
 
 ## 汇总
 
@@ -94,26 +96,25 @@ Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成
 | S0 止损发布 | 2 | 0 | 0 | 0 | 0 | 2 |
 | S1 Revert/keep 审计 | 3 | 0 | 0 | 0 | 0 | 3 |
 | S2 P0 与基础收缩 | 10 | 0 | 0 | 0 | 0 | 10 |
-| S3 Role seam 与核心 owner | 1 | 3 | 8 | 0 | 0 | 12 |
-| S4 产品 UI | 0 | 1 | 1 | 0 | 0 | 2 |
+| S3 Role seam 与核心 owner | 5 | 1 | 6 | 0 | 0 | 12 |
+| S4 产品 UI | 1 | 0 | 1 | 0 | 0 | 2 |
 | S5 三平台、C9 与 RC | 0 | 0 | 3 | 2 | 0 | 5 |
-| **总计** | **19** | **2** | **10** | **2** | **1** | **34** |
+| **总计** | **21** | **1** | **10** | **2** | **0** | **34** |
 
 旧台账 84 项现已收敛为 34 项。任务数量不是质量指标；只有完成定义和最小验证满足后
 才能修改状态。
 
 ## 当前剩余 TODO 快照
 
-当前还剩 15 项未关闭：
+当前还剩 13 项未关闭：
 
 | 分类 | 数量 | TODO |
 | --- | ---: | --- |
-| 主机当前实施 | 2 | `SL-S3-07`、`SL-S3-08` |
+| 主机当前实施 | 1 | `SL-S3-07` |
 | 依赖阻塞 | 10 | `SL-S3-04`～`SL-S3-06`、`SL-S3-10`～`SL-S3-12`、`SL-S4-02`、`SL-S5-01`、`SL-S5-04`、`SL-S5-05` |
 | 外部原生环境 | 2 | `SL-S5-02` macOS arm64、`SL-S5-03` Linux Desktop x64 |
-| 待提交/复核 | 1 | `SL-S4-01` |
 
-主机关键路径已完成 `SL-S3-01 -> SL-S3-02 -> SL-S3-03`；
+主机关键路径已完成 `SL-S3-01 -> SL-S3-02 -> SL-S3-03`，MCP slice 已完成；
 当前主线是 `SL-S3-04/SL-S3-05 -> SL-S3-06`，再进入完整消费者和候选验证。
 上述主机项全部由当前主机执行。主机可以按互斥写集启用多个本机 lane；中央合同、
 组合根、Gate、锁文件和 GLOBAL TODO 由集成 Owner 串行合流。外部 macOS/Linux 只验证
@@ -170,8 +171,8 @@ Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成
 | `SL-S3-04` | blocked | 主机 | 第一方 Browser dogfood 同一 Role 主链 | `SL-S3-03` | observe/navigate/act 和 hidden `browser.render_content` 经同一 Provider lock；保留 owner/lane/close/process cleanup；Provider 平台约束不写死在 façade | Browser owner/lifecycle tests；alternate Provider parity test | Browser live E2E 需要可访问测试页 |
 | `SL-S3-05` | blocked | 主机 | 第一方 Computer/A11y dogfood 同一 Role 主链 | `SL-S3-03` | observe/input 基线和可选 launch/a11y 经 exact Provider；按 target resource 串行；observation generation 过期 typed fail；无具体 Registry 旁路 | Computer serialization/generation/platform-unavailable tests | Windows/macOS input 权限由原生测试用户授予 |
 | `SL-S3-06` | blocked | 主机 | 删除 Browser/Computer production concrete bypass | `SL-S3-04`、`SL-S3-05` | Wave 2 不再 unavailable；Knowledge hidden render、Gateway、stdio、v4/Codex/automation 只走 canonical route；Nomi-only allowlist 不增长并等待 C9 | production dependency scan；Knowledge render、Gateway、stdio 代表性 integration tests | 无 |
-| `SL-S3-07` | open | 主机 lane | 收口真实核心本地 owner | `SL-S2-06` | Chat、Workspace/File、Process、VCS、Knowledge search/read 保持真实调用；Coding 读写/patch/shell/diff/commit 接入同一 Session 主链；非首批 Wave 3/4 不注册默认模板 | `cargo test --locked -p nomifun-app agent_platform_host --lib`; `bun run dev` | Chat/Coding live 验证需要已配置 model/provider |
-| `SL-S3-08` | open | 主机 lane | 接入一个真实 MCP Tool 调用 | `SL-S2-06` | MCP server/resource binding、exact tool/schema 和 credential authority 经 canonical capability；连接失败 typed fail；没有 Gateway/legacy fallback | `cargo test --locked -p nomifun-mcp --lib`; `cargo test --locked -p nomifun-app mcp --lib -- --test-threads=1` | 需要一个可丢弃 MCP 测试服务 |
+| `SL-S3-07` | open | 主机 lane | 收口真实核心本地 owner | `SL-S2-06` | Chat、Workspace/File、Process、VCS、Knowledge search/read 保持真实调用；Coding 读写/patch/shell/diff/commit 接入同一 Session 主链；非首批 Wave 3/4 不注册默认模板 | `cargo test --locked -p nomifun-app --lib -- --test-threads=1`；`bun run build:ui`；`bun run dev` 启动烟测 | 2026-09-03 StepFun 代理 live：`gpt-5.5:stepfun-codex` 返回 503；`step-3.7-flash` 返回无可用 content，后续结构探测超过 60 秒；当前仍缺可重复的 Chat/Coding 语义 PASS |
+| `SL-S3-08` | closed | 主机 lane | 接入一个真实 MCP Tool 调用 | `SL-S2-06` | v4 `mcp_servers` identity、materialization、MCP package runtime catalog、exact tool/schema 和 credential authority 经 canonical capability；连接失败 typed fail；没有 Gateway/legacy fallback；owner 使用 no-redirect、bounded response 和一次 cleanup | `cargo test --locked -p nomifun-mcp --lib`（250）；`cargo test --locked -p nomifun-app --lib router::agent_wave2_mcp::tests -- --test-threads=1`（7）；`cargo test --locked -p nomifun-app --lib router::agent_wave2_host::tests -- --test-threads=1`（30） | 本机 disposable Streamable HTTP MCP fixture 已执行真实 `tools/call`；OAuth/stdio 仍明确 typed unavailable，不作为本项隐式扩张 |
 | `SL-S3-09` | closed | 主机 | 实现精简 SSH read/write/exec/sudo owner primitive | 无 | 真实 host binding；最小 typed command/outcome；path/payload/output/timeout 有界；exec/sudo credential 分离；host-key changed fail；cancel 后回收且不自动重放 | `77bd45279`; `cargo check --locked -p nomi-ssh -p nomifun-ssh`; `cargo test --locked -p nomifun-ssh --lib` | live sshd/sudo 未运行时只记录未运行，不构造 PASS |
 | `SL-S3-10` | blocked | 主机 | 完成一个真实 scheduled/automation AgentSession | `SL-S2-07`、`SL-S3-07` | Schedule/Cron/AutoWork/Requirement 复用 canonical Session command/query；计划、执行、取消、恢复不构造 ConversationService/Nomi runtime | 对应 automation crate 定向 tests；一次短周期真实 schedule E2E | 用户人工确认通知或任务结果可作为 UI evidence |
 | `SL-S3-11` | blocked | 主机 | 闭合 Remote open/turn/observe/cancel 产品主链 | `SL-S2-03`、`SL-S3-07`、`SL-S3-12` | explicit AgentSession ID；binding/owner/provenance 不漂移；rotate/revoke 不挂起；cancel/delete/cursor/idempotency 明确；无最近会话或旧 selector 旁路 | Remote REST/MCP 定向 tests；真实 `open -> turn -> observe -> cancel` | 需要 installation token 和 live model，均通过现有 secret authority |
@@ -181,7 +182,7 @@ Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成
 
 | ID | 状态 | Owner | 目标 | 依赖 | 完成定义 | 最小测试 | 人工 / 外部输入 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `SL-S4-01` | pending-validation | 主机 lane | 把 Agent 编辑器收缩为产品语言 | `SL-S2-07`、`SL-S2-08` | canonical Agent Settings 已满足名称/用途、模型、能力开关、Workspace/Knowledge/Connector picker、保存和试用；内部 ID/digest/JSON 默认折叠；Save/Test 自动 Preview | PresetSettings/Agent Settings 定向测试通过；`bun run build:ui` 通过；全量 `bun run typecheck` 仍被既有 React 19/Arco 类型错误阻塞 | 无 |
+| `SL-S4-01` | closed | 主机 lane | 把 Agent 编辑器收缩为产品语言 | `SL-S2-07`、`SL-S2-08` | canonical Agent Settings 已满足名称/用途、模型、能力开关、Workspace/Knowledge/Connector picker、保存和试用；内部 ID/digest/JSON 默认折叠；Save/Test 自动 Preview | Agent Settings 定向测试 `10 passed`；`bun run build:ui` 通过；全量 `tsc` 中 `pages/agentSettings/**` 为 0 条诊断；仓库级 React 19/Arco 类型基线另行记录且未用 `any` 绕过 | 无 |
 | `SL-S4-02` | blocked | 主机 | 关闭四条真实用户流程 | `SL-S3-04`～`SL-S3-12`、`SL-S4-01` | 从模板创建；修改并保存；选择资源并试用；Snapshot 不兼容时在新会话继续。Desktop 不崩溃，不要求用户填写 UUID/operation/raw JSON | `bun run dev` 后执行四流程；保留截图、console 和 backend 日志 | 用户可直接人工验收，通常优先于不稳定 Playwright harness |
 
 ## S5：三平台、C9 与 RC
@@ -209,11 +210,41 @@ Linux Desktop 和一次性 C9 clean cut。05 中的 `S6 Stable` 只是 S5 完成
 当前可实施或可并行准备的本机 lane：
 
 - Core owner lane：`SL-S3-07`，按消费者写集迁移，中央 composition 由集成 Owner 收口；
-- MCP lane：`SL-S3-08`，只修改 MCP owner 与专用测试，等待中央接线；
-- UI lane：`SL-S4-01`，实现已形成，等待 typecheck 基线治理/复核；
+- MCP lane：`SL-S3-08` 已关闭；后续 OAuth/stdio 扩展不进入本期隐式范围；
+- UI lane：`SL-S4-01` 已关闭；仓库级 React/Arco 类型基线不反向阻塞已通过定向验收的
+  Agent Settings 产品切片；
 - Role Provider lane：`SL-S3-04`、`SL-S3-05` 在 `SL-S3-03` 完成后分别推进；
 - Sidecar Runtime lane：`SL-S3-12` 继续实现，但 exact binary/live credential 缺失时只记录
   blocker，不构造 live PASS。
+
+### 2026-09-03 本机 checkpoint
+
+- Rust/App 主线：`cargo test --locked -p nomifun-app --lib -- --test-threads=1`
+  `377 passed`；Kernel `18 passed`；Platform sample `2 passed`；Fresh-v4 root `11 passed`。
+- MCP：v4 source、host dispatch、owner protocol、strict transport parser 和 lock 校验已合流；
+  不读取 legacy `McpServerRow`，不生成 synthetic server/connection ref。
+- Remote：修复了无 `requested_session_id` 时由随机 Session ID 参与创建事件 identity
+  导致的幂等重放 409；现在同一 Remote open key 会重放同一 Session 及其 terminal
+  `open_failed` 结果。`remote_rest_e2e` 两项测试均通过。
+- Browser 本机资源检查发现 Chrome `152.0.7977.65` 可用；执行了
+  `nomi-browser-engine` 的真实导航和 act fixtures（各 `1 passed`）。这证明 engine 资源可用，
+  且 observe/type/set_value/click/secret redaction 基线可执行，但尚不足以关闭同一 Role host
+  的完整 observe/navigate/act/render_content dogfood。
+- Computer crate 基础测试 `93 passed / 7 ignored`；被忽略项明确需要真实屏幕、输入设备或
+  窗口句柄，未把无交互环境结果冒充 Computer native PASS。
+- Desktop：`cargo check/build --locked -p nomifun-desktop --no-default-features` 通过；
+  真实 `bun run dev` 已启动 `nomifun-desktop` 窗口，Vite 在 `127.0.0.1:5173` 监听，
+  Chrome 加载后显示登录页，未出现 `storage generation must be a canonical lowercase
+  UUIDv7 string` 或渲染崩溃页。一次在热重载期间触发的 Rust 编译器
+  `0xc0000005 STATUS_ACCESS_VIOLATION` 已记录为构建 harness 障碍；停止并发热重载后
+  的单独 build 通过，未继续盲目重试。
+- UI：`bun run build:ui` 通过；Agent Settings 定向测试 `10 passed`。全量
+  `bun run typecheck` 当前仍有 `446` 条 React 19/Arco 2.66.15 依赖类型诊断
+  （主要为 `Modal/Trigger` JSX 与回调上下文），Agent Settings 本身无诊断；
+  已清理唯一独立的未使用变量，未用 `any` 绕过依赖基线。
+- Automation 审计确认 Cron、AutoWork、AgentExecution 生产消费者仍经旧
+  `ConversationService`/Nomi runtime，不能把 typed delegator 单测当作 canonical Session close。
+- 当前所有开发、合流和验证继续在本机进行；没有机器 2 Prompt、handoff、压缩包或跨机 attestation。
 
 所有 lane 都在当前主机使用互斥路径写集；不得同时编辑同一文件或争用共享数据库、固定
 端口、Cargo 构建目录和进程树。`Cargo.lock`、中央 Compiler/Snapshot、Fresh-v4 schema、
@@ -223,7 +254,8 @@ handoff 或跨机 attestation。
 
 ## 推荐顺序
 
-1. 主机按互斥写集推进 `SL-S3-01`、`SL-S3-07`、`SL-S3-08` 和 `SL-S4-01`，共享中央文件串行合流。
+1. 主机按互斥写集推进 `SL-S3-07`；MCP `SL-S3-08` 与 Agent Settings `SL-S4-01`
+   已完成，中央文件串行合流。
 2. 单 Compiler、小 Snapshot、PluginRegistration 和 Role 合同稳定后，按
    `SL-S3-01 -> SL-S3-02 -> SL-S3-03` 串行落主链。
 3. Browser 与 Computer first-party Provider 在 RoleDispatcher 稳定后可并行实现，随后统一清除旁路。

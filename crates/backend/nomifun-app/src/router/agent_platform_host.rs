@@ -52,6 +52,9 @@ use sqlx::SqlitePool;
 #[cfg(any(feature = "browser-use", feature = "computer-use"))]
 use super::agent_role_host::RoleHostPortAdapter;
 use super::agent_wave2_host::Wave2ApplicationHost;
+use super::agent_wave2_mcp::{
+    McpOwnerAdapter, SqliteMcpRuntimeBindingSource,
+};
 use super::agent_wave4_host::Wave4ApplicationHost;
 use super::chat_broker_host::{
     ChatBrokerHostComposition, ConnectionCredentialLeaseRegistry,
@@ -1166,9 +1169,39 @@ pub(crate) struct AgentDomainHostPorts {
 }
 
 impl AgentDomainHostPorts {
-    fn for_workspace_root(workspace_root: PathBuf) -> Self {
-        let wave2: Arc<dyn Wave2HostPort> =
-            Arc::new(Wave2ApplicationHost::for_workspace_root(workspace_root));
+    fn for_workspace_root(workspace_root: PathBuf, pool: SqlitePool) -> Self {
+        let mcp_source = Arc::new(SqliteMcpRuntimeBindingSource::new(pool));
+        // Fresh-v4 intentionally does not carry the legacy `oauth_tokens`
+        // table. Keep this release's supported MCP owner anonymous and let
+        // credentialed/OAuth bindings fail with their typed unavailable
+        // result instead of reintroducing a legacy schema dependency.
+        let mcp_credentials: Arc<dyn nomifun_mcp::McpCredentialAuthority> =
+            Arc::new(nomifun_mcp::AnonymousMcpCredentialAuthority);
+        let mcp_owner = match nomifun_net::http_client_no_redirect() {
+            Ok(client) => Some(Arc::new(McpOwnerAdapter::new(Arc::new(
+                nomifun_mcp::McpOwner::new(
+                    mcp_credentials,
+                    client,
+                ),
+            )))),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "canonical MCP owner HTTP client could not be constructed; MCP remains unavailable"
+                );
+                None
+            }
+        };
+        let wave2: Arc<dyn Wave2HostPort> = match mcp_owner {
+            Some(owner) => Arc::new(Wave2ApplicationHost::for_workspace_root_with_mcp(
+                workspace_root.clone(),
+                owner,
+                mcp_source,
+            )),
+            None => Arc::new(Wave2ApplicationHost::for_workspace_root(
+                workspace_root.clone(),
+            )),
+        };
         let mut wave2_roles = Wave2RoleHostPorts::with_actions(Arc::clone(&wave2));
         wave2_roles.browser_actions = nomifun_agent_domain_wave2::unconfigured_host_port();
         #[cfg(feature = "computer-use")]
@@ -1243,6 +1276,10 @@ pub(crate) async fn build_from_open_pool(
     encryption_key: [u8; 32],
     workspace_root: PathBuf,
 ) -> anyhow::Result<Arc<AgentPlatform>> {
+    let host_ports = AgentDomainHostPorts::for_workspace_root(
+        workspace_root,
+        pool.clone(),
+    );
     build_from_open_pool_with_host_ports(
         pool,
         ready_path,
@@ -1250,7 +1287,7 @@ pub(crate) async fn build_from_open_pool(
         expected_schema_digest,
         provider_pool,
         encryption_key,
-        AgentDomainHostPorts::for_workspace_root(workspace_root),
+        host_ports,
     )
     .await
 }
@@ -1266,7 +1303,8 @@ pub(crate) async fn build_from_open_pool_with_browser(
     workspace_root: PathBuf,
     browser_hub: Option<Arc<nomifun_browser_platform::BrowserSessionHub>>,
 ) -> anyhow::Result<Arc<AgentPlatform>> {
-    let host_ports = AgentDomainHostPorts::for_workspace_root(workspace_root);
+    let host_ports =
+        AgentDomainHostPorts::for_workspace_root(workspace_root, pool.clone());
     let host_ports = match browser_hub {
         Some(hub) => host_ports.with_browser_hub(hub),
         None => host_ports,

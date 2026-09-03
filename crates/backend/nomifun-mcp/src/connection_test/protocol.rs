@@ -16,7 +16,7 @@ use std::time::Duration;
 // Constants
 // ---------------------------------------------------------------------------
 
-const PROTOCOL_VERSION: &str = "2024-11-05";
+const PROTOCOL_VERSION: &str = crate::owner::MCP_PROTOCOL_VERSION;
 const CLIENT_NAME: &str = "nomifun-mcp-test";
 const CLIENT_VERSION: &str = "1.0.0";
 

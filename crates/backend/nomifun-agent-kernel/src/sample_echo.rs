@@ -45,6 +45,7 @@ const SAMPLE_MOUNT: &str = "sample-echo";
 const SAMPLE_CAPABILITY: &str = "sample.echo";
 const SAMPLE_ACTION: &str = "sample.echo.invoke";
 const SAMPLE_SKILL: &str = "sample.echo-guidance";
+const SAMPLE_SERVER: &str = "sample.echo.server";
 const SAMPLE_RESOURCE_KIND: &str = "sample.echo.target";
 const VERSION: &str = "1.0.0";
 const SAMPLE_AGENT_SESSION_ID: &str = "agent-session-sample-1";
@@ -322,6 +323,21 @@ impl CapabilityHandler for EchoHandler {
             return Err(KernelError::ActionNotDeclared {
                 capability_id: context.capability_id,
                 action_id: context.action_id,
+            });
+        }
+        let mcp_lock = context.mcp_tool_lock.as_ref().ok_or_else(|| {
+            KernelError::CapabilityExecution {
+                reason: "sample.echo MCP mapping was not frozen into the invocation context"
+                    .to_owned(),
+            }
+        })?;
+        if mcp_lock.server_id.as_ref() != SAMPLE_SERVER
+            || mcp_lock.canonical_tool_key.as_ref() != format!("{SAMPLE_SERVER}.echo")
+            || mcp_lock.capability_id.as_ref() != SAMPLE_CAPABILITY
+            || mcp_lock.materialization_revision != 1
+        {
+            return Err(KernelError::CapabilityExecution {
+                reason: "sample.echo received a drifted MCP mapping lock".to_owned(),
             });
         }
         let object = input

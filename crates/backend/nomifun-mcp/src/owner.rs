@@ -13,7 +13,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout, timeout_at};
 
 use crate::oauth_service::McpOAuthService;
 use crate::types::McpServerTransport;
@@ -24,13 +24,13 @@ pub const MCP_INVOKE_OPERATION: &str = "invoke";
 pub const MCP_READ_OPERATION: &str = "read";
 pub const MCP_EXECUTION_OPERATION_META_KEY: &str = "com.nomifun.execution.operation_id";
 
-const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
+pub const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 const MCP_CLIENT_NAME: &str = "nomifun-agent-mcp-owner";
 const MCP_CLIENT_VERSION: &str = "1.0.0";
 const DEFAULT_OWNER_TIMEOUT: Duration = Duration::from_secs(30);
+const SESSION_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_ARGUMENT_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_ERROR_MESSAGE_BYTES: usize = 1024;
 const MAX_OPERATION_ID_BYTES: usize = 128;
 
 /// A typed error emitted by the MCP owner.
@@ -45,9 +45,10 @@ pub struct McpOwnerError {
 
 impl McpOwnerError {
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
             code: code.into(),
-            message: message.into(),
+            message: sanitize_diagnostic(&message),
         }
     }
 
@@ -71,17 +72,6 @@ impl McpOwnerError {
         Self::new("MCP_PROTOCOL_ERROR", message)
     }
 
-    fn bounded_message(message: impl Into<String>) -> String {
-        let message = message.into();
-        if message.len() <= MAX_ERROR_MESSAGE_BYTES {
-            return message;
-        }
-        message
-            .char_indices()
-            .take_while(|(index, _)| *index < MAX_ERROR_MESSAGE_BYTES)
-            .map(|(_, character)| character)
-            .collect()
-    }
 }
 
 impl fmt::Display for McpOwnerError {
@@ -274,10 +264,10 @@ impl McpCredentialAuthority for OAuthMcpCredentialAuthority {
         &self,
         lookup: McpCredentialLookup,
     ) -> Result<Option<McpCredential>, McpOwnerError> {
-        let token = self.oauth.get_token(&lookup.endpoint).await.map_err(|error| {
+        let token = self.oauth.get_token(&lookup.endpoint).await.map_err(|_| {
             McpOwnerError::new(
                 "MCP_CREDENTIAL_AUTHORITY_FAILED",
-                format!("credential authority failed for the bound MCP endpoint: {error}"),
+                "credential authority failed for the bound MCP endpoint",
             )
         })?;
         if token.is_some()
@@ -285,12 +275,10 @@ impl McpCredentialAuthority for OAuthMcpCredentialAuthority {
                 .oauth
                 .check_oauth_status(&lookup.endpoint)
                 .await
-                .map_err(|error| {
+                .map_err(|_| {
                     McpOwnerError::new(
                         "MCP_CREDENTIAL_AUTHORITY_FAILED",
-                        format!(
-                            "credential authority could not verify the bound MCP credential: {error}"
-                        ),
+                        "credential authority could not verify the bound MCP credential",
                     )
                 })?
                 .authenticated
@@ -310,24 +298,38 @@ impl McpCredentialAuthority for OAuthMcpCredentialAuthority {
 #[derive(Clone)]
 pub struct McpOwner {
     credentials: Arc<dyn McpCredentialAuthority>,
-    http_client: reqwest::Client,
+    http_client: Result<reqwest::Client, McpOwnerError>,
     timeout: Duration,
 }
 
 impl McpOwner {
+    /// Construct an owner with a caller-supplied client.
+    ///
+    /// Production callers should prefer [`Self::new_dynamic`] or
+    /// [`Self::try_new_dynamic`]. Injected clients must disable redirects.
     pub fn new(
         credentials: Arc<dyn McpCredentialAuthority>,
         http_client: reqwest::Client,
     ) -> Self {
         Self {
             credentials,
-            http_client,
+            http_client: Ok(http_client),
             timeout: DEFAULT_OWNER_TIMEOUT,
         }
     }
 
     pub fn new_dynamic(credentials: Arc<dyn McpCredentialAuthority>) -> Self {
-        Self::new(credentials, nomifun_net::http_client())
+        Self {
+            credentials,
+            http_client: build_dynamic_http_client(),
+            timeout: DEFAULT_OWNER_TIMEOUT,
+        }
+    }
+
+    pub fn try_new_dynamic(
+        credentials: Arc<dyn McpCredentialAuthority>,
+    ) -> Result<Self, McpOwnerError> {
+        Ok(Self::new(credentials, build_dynamic_http_client()?))
     }
 
     pub fn with_timeout(self, timeout: Duration) -> Self {
@@ -353,40 +355,8 @@ impl McpOwner {
                 ));
             }
         };
-        let parsed_url = reqwest::Url::parse(&url).map_err(|error| {
-            McpOwnerError::new(
-                "MCP_BINDING_INVALID",
-                format!("MCP endpoint URL is invalid: {error}"),
-            )
-        })?;
-        if !matches!(parsed_url.scheme(), "http" | "https") {
-            return Err(McpOwnerError::new(
-                "MCP_BINDING_INVALID",
-                "MCP endpoint URL must use http or https",
-            ));
-        }
-        if !parsed_url.username().is_empty() || parsed_url.password().is_some() {
-            return Err(McpOwnerError::new(
-                "MCP_CREDENTIAL_AUTHORITY_REQUIRED",
-                "MCP endpoint credentials must not be embedded in the URL",
-            ));
-        }
-
-        let operation = self.invoke_http(
-            &request,
-            parsed_url.to_string(),
-            static_headers,
-        );
-        match timeout(self.timeout, operation).await {
-            Ok(result) => result,
-            Err(_) => Err(McpOwnerError::new(
-                "MCP_TIMEOUT",
-                format!(
-                    "MCP invocation exceeded the {} second owner deadline",
-                    self.timeout.as_secs()
-                ),
-            )),
-        }
+        let endpoint = validate_http_endpoint(&url)?.to_string();
+        self.invoke_http(&request, endpoint, static_headers).await
     }
 
     async fn invoke_http(
@@ -395,92 +365,169 @@ impl McpOwner {
         endpoint: String,
         static_headers: HashMap<String, String>,
     ) -> Result<McpToolInvocationResult, McpOwnerError> {
-        let credential = self
-            .credentials
-            .resolve(McpCredentialLookup {
+        let http_client = match &self.http_client {
+            Ok(client) => client.clone(),
+            Err(error) => return Err(error.clone()),
+        };
+        let deadline = Instant::now() + self.timeout;
+        let credential = timeout_at(
+            deadline,
+            self.credentials.resolve(McpCredentialLookup {
                 server_id: request.server.server_id.clone(),
                 resource_id: request.server.resource_id.clone(),
                 connection_config_ref: request.server.connection_config_ref.clone(),
                 endpoint: endpoint.clone(),
-            })
-            .await?;
+            }),
+        )
+        .await
+        .map_err(|_| owner_timeout_error(self.timeout))??;
         let headers = build_headers(&static_headers, credential.as_ref())?;
-        let mut session = HttpMcpSession::new(self.http_client.clone(), endpoint, headers);
+        let mut session = HttpMcpSession::new(http_client, endpoint, headers);
 
-        let initialize = session
-            .request(initialize_request())
-            .await?;
-        ensure_response_id(&initialize, 1)?;
-        ensure_no_rpc_error("initialize", &initialize)?;
-        if initialize.result.is_none() {
-            return Err(McpOwnerError::protocol_failed(
-                "initialize response has no result",
-            ));
-        }
-        validate_initialize_result(
-            initialize
-                .result
-                .as_ref()
-                .expect("initialize result was checked"),
-        )?;
+        let transaction = async {
+            let initialize = session.request(initialize_request()).await?;
+            ensure_response_id(&initialize, 1)?;
+            ensure_no_rpc_error("initialize", &initialize)?;
+            if initialize.result.is_none() {
+                return Err(McpOwnerError::protocol_failed(
+                    "initialize response has no result",
+                ));
+            }
+            validate_initialize_result(
+                initialize
+                    .result
+                    .as_ref()
+                    .expect("initialize result was checked"),
+            )?;
 
-        session.notify(initialized_notification()).await?;
+            session.notify(initialized_notification()).await?;
 
-        let tools = session.request(tools_list_request()).await?;
-        ensure_response_id(&tools, 2)?;
-        ensure_no_rpc_error("tools/list", &tools)?;
-        let remote_tools = parse_tools(
-            tools
-                .result
-                .as_ref()
-                .ok_or_else(|| McpOwnerError::protocol_failed("tools/list response has no result"))?,
-        )?;
-        let remote_tool = remote_tools
-            .into_iter()
-            .find(|tool| tool.name == request.tool.remote_tool_name)
-            .ok_or_else(|| {
-                McpOwnerError::new(
-                    "MCP_TOOL_NOT_FOUND",
+            let tools = session.request(tools_list_request()).await?;
+            ensure_response_id(&tools, 2)?;
+            ensure_no_rpc_error("tools/list", &tools)?;
+            let remote_tools = parse_tools(tools.result.as_ref().ok_or_else(|| {
+                McpOwnerError::protocol_failed("tools/list response has no result")
+            })?)?;
+            let remote_tool = remote_tools
+                .into_iter()
+                .find(|tool| tool.name == request.tool.remote_tool_name)
+                .ok_or_else(|| {
+                    McpOwnerError::new(
+                        "MCP_TOOL_NOT_FOUND",
+                        format!(
+                            "the bound MCP server did not advertise tool '{}'",
+                            request.tool.remote_tool_name
+                        ),
+                    )
+                })?;
+            if remote_tool.input_schema != request.tool.input_schema {
+                return Err(McpOwnerError::new(
+                    "MCP_SCHEMA_MISMATCH",
                     format!(
-                        "the bound MCP server did not advertise tool '{}'",
-                        request.tool.remote_tool_name
+                        "advertised schema does not match frozen schema digest {}",
+                        request.tool.schema_digest
                     ),
-                )
-            })?;
-        if remote_tool.input_schema != request.tool.input_schema {
-            return Err(McpOwnerError::new(
-                "MCP_SCHEMA_MISMATCH",
-                format!(
-                    "advertised schema does not match frozen schema digest {}",
-                    request.tool.schema_digest
-                ),
-            ));
-        }
+                ));
+            }
 
-        let call = session
-            .request(
-                tool_call_request(
+            let call = session
+                .request(tool_call_request(
                     &request.tool.remote_tool_name,
                     &request.arguments,
                     &request.operation_id,
-                ),
-            )
-            .await?;
-        ensure_response_id(&call, 3)?;
-        ensure_no_rpc_error("tools/call", &call)?;
-        let result = call
-            .result
-            .ok_or_else(|| McpOwnerError::protocol_failed("tools/call response has no result"))?;
-        validate_tool_result(&result)?;
+                ))
+                .await?;
+            ensure_response_id(&call, 3)?;
+            ensure_no_rpc_error("tools/call", &call)?;
+            let result = call.result.ok_or_else(|| {
+                McpOwnerError::protocol_failed("tools/call response has no result")
+            })?;
+            validate_tool_result(&result)?;
 
-        Ok(McpToolInvocationResult {
-            server_id: request.server.server_id.clone(),
-            canonical_tool_key: request.tool.canonical_tool_key.clone(),
-            schema_digest: request.tool.schema_digest.clone(),
-            remote_tool_name: request.tool.remote_tool_name.clone(),
-            result,
-        })
+            Ok(McpToolInvocationResult {
+                server_id: request.server.server_id.clone(),
+                canonical_tool_key: request.tool.canonical_tool_key.clone(),
+                schema_digest: request.tool.schema_digest.clone(),
+                remote_tool_name: request.tool.remote_tool_name.clone(),
+                result,
+            })
+        };
+        let outcome = timeout_at(deadline, transaction)
+            .await
+            .unwrap_or_else(|_| Err(owner_timeout_error(self.timeout)));
+        let cleanup = timeout(SESSION_CLEANUP_TIMEOUT, session.close())
+            .await
+            .unwrap_or_else(|_| {
+                Err(McpOwnerError::new(
+                    "MCP_SESSION_CLEANUP_FAILED",
+                    "MCP session cleanup exceeded its bounded deadline",
+                ))
+            });
+
+        match (outcome, cleanup) {
+            (Ok(result), Ok(_)) => Ok(result),
+            (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+            (Err(operation_error), _) => Err(operation_error),
+        }
     }
+}
+
+fn build_dynamic_http_client() -> Result<reqwest::Client, McpOwnerError> {
+    nomifun_net::http_client_no_redirect().map_err(|_| {
+        McpOwnerError::new(
+            "MCP_HTTP_CLIENT_UNAVAILABLE",
+            "MCP HTTP client could not be initialized with redirects disabled",
+        )
+    })
+}
+
+fn owner_timeout_error(timeout: Duration) -> McpOwnerError {
+    McpOwnerError::new(
+        "MCP_TIMEOUT",
+        format!(
+            "MCP invocation exceeded the {} second owner deadline",
+            timeout.as_secs()
+        ),
+    )
+}
+
+fn sanitize_diagnostic(message: &str) -> String {
+    nomifun_net::secret_redaction::redact_url_queries(message)
+}
+
+fn validate_http_endpoint(raw_url: &str) -> Result<reqwest::Url, McpOwnerError> {
+    if raw_url.is_empty()
+        || raw_url.trim() != raw_url
+        || raw_url.chars().any(char::is_control)
+    {
+        return Err(McpOwnerError::invalid_binding(
+            "MCP endpoint URL is malformed",
+        ));
+    }
+    let url = reqwest::Url::parse(raw_url)
+        .map_err(|_| McpOwnerError::invalid_binding("MCP endpoint URL is malformed"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(McpOwnerError::invalid_binding(
+            "MCP endpoint URL must use http or https",
+        ));
+    }
+    if url.host_str().is_none() || url.port_or_known_default().is_none() {
+        return Err(McpOwnerError::invalid_binding(
+            "MCP endpoint URL requires a valid host and port",
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(McpOwnerError::new(
+            "MCP_CREDENTIAL_AUTHORITY_REQUIRED",
+            "MCP endpoint credentials must not be embedded in the URL",
+        ));
+    }
+    if url.fragment().is_some() {
+        return Err(McpOwnerError::invalid_binding(
+            "MCP endpoint URL must not contain a fragment",
+        ));
+    }
+    Ok(url)
 }
 
 fn validate_invocation(
@@ -723,6 +770,7 @@ struct JsonRpcResponse {
 #[derive(Debug, Deserialize)]
 struct JsonRpcError {
     code: i64,
+    #[allow(dead_code)]
     message: String,
 }
 
@@ -775,32 +823,87 @@ impl HttpMcpSession {
 
     async fn notify(&mut self, request: JsonRpcRequest) -> Result<(), McpOwnerError> {
         let response = self.send(request).await?;
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let status = response.status();
+        let session_id = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let session_id_error = match session_id {
+            Some(session_id) if session_id.trim().is_empty() => {
+                Some(McpOwnerError::protocol_failed(
+                    "MCP server returned an empty session ID",
+                ))
+            }
+            Some(session_id) => {
+                self.session_id = Some(session_id);
+                None
+            }
+            None => None,
+        };
+        let body_result = drain_response_body(response).await;
+        if let Some(error) = session_id_error {
+            return Err(error);
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(McpOwnerError::new(
                 "MCP_CREDENTIAL_REQUIRED",
                 "MCP server rejected the canonical credential authority",
             ));
         }
-        if !response.status().is_success() {
+        if !status.is_success() {
             return Err(McpOwnerError::new(
                 "MCP_HTTP_ERROR",
                 format!(
                     "MCP server returned HTTP {} for initialized notification",
-                    response.status().as_u16()
+                    status.as_u16()
                 ),
             ));
         }
-        if let Some(session_id) = response
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|value| value.to_str().ok())
-        {
-            if session_id.trim().is_empty() {
-                return Err(McpOwnerError::protocol_failed(
-                    "MCP server returned an empty session ID",
-                ));
-            }
-            self.session_id = Some(session_id.to_owned());
+        body_result?;
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<(), McpOwnerError> {
+        let Some(session_id) = self.session_id.take() else {
+            return Ok(());
+        };
+        let mut headers = self.headers.clone();
+        let value = reqwest::header::HeaderValue::from_str(&session_id).map_err(|_| {
+            McpOwnerError::new(
+                "MCP_SESSION_CLEANUP_FAILED",
+                "MCP session ID cannot be represented as a cleanup header",
+            )
+        })?;
+        headers.insert("mcp-session-id", value);
+        let response = self
+            .client
+            .delete(&self.endpoint)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|error| map_cleanup_request_error(error))?;
+        let status = response.status();
+        drain_response_body(response).await.map_err(|_| {
+            McpOwnerError::new(
+                "MCP_SESSION_CLEANUP_FAILED",
+                "MCP session cleanup response could not be consumed",
+            )
+        })?;
+        if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+            return Err(McpOwnerError::new(
+                "MCP_SESSION_CLEANUP_UNSUPPORTED",
+                "MCP server does not support explicit session cleanup",
+            ));
+        }
+        if !status.is_success() {
+            return Err(McpOwnerError::new(
+                "MCP_SESSION_CLEANUP_FAILED",
+                format!(
+                    "MCP server returned HTTP {} while closing the MCP session",
+                    status.as_u16()
+                ),
+            ));
         }
         Ok(())
     }
@@ -822,25 +925,60 @@ impl HttpMcpSession {
             .json(&request)
             .send()
             .await
-            .map_err(|error| {
-                McpOwnerError::connection_failed(format!("MCP request failed: {error}"))
-            })
+            .map_err(|error| map_request_error(error, "MCP request failed"))
     }
+}
+
+fn map_request_error(error: reqwest::Error, context: &str) -> McpOwnerError {
+    if error.is_timeout() {
+        McpOwnerError::connection_failed(format!("{context} before the response deadline"))
+    } else {
+        McpOwnerError::connection_failed(context)
+    }
+}
+
+fn map_cleanup_request_error(error: reqwest::Error) -> McpOwnerError {
+    let message = if error.is_timeout() {
+        "MCP session cleanup request exceeded its response deadline"
+    } else {
+        "MCP session cleanup request failed"
+    };
+    McpOwnerError::new("MCP_SESSION_CLEANUP_FAILED", message)
+}
+
+async fn drain_response_body(
+    mut response: reqwest::Response,
+) -> Result<(), McpOwnerError> {
+    let mut total = 0usize;
+    while let Some(chunk) = response.chunk().await.map_err(|_| {
+        McpOwnerError::connection_failed("MCP response body could not be consumed")
+    })? {
+        total = total.saturating_add(chunk.len());
+        if total > MAX_RESPONSE_BYTES {
+            return Err(McpOwnerError::protocol_failed(
+                "MCP response exceeds the bounded response limit",
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn parse_response(
     mut response: reqwest::Response,
 ) -> Result<JsonRpcResponse, McpOwnerError> {
-    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        let _ = drain_response_body(response).await;
         return Err(McpOwnerError::new(
             "MCP_CREDENTIAL_REQUIRED",
             "MCP server rejected the canonical credential authority",
         ));
     }
-    if !response.status().is_success() {
+    if !status.is_success() {
+        let _ = drain_response_body(response).await;
         return Err(McpOwnerError::new(
             "MCP_HTTP_ERROR",
-            format!("MCP server returned HTTP {}", response.status().as_u16()),
+            format!("MCP server returned HTTP {}", status.as_u16()),
         ));
     }
     if response
@@ -863,8 +1001,8 @@ async fn parse_response(
             .unwrap_or_default()
             .min(MAX_RESPONSE_BYTES as u64) as usize,
     );
-    while let Some(chunk) = response.chunk().await.map_err(|error| {
-        McpOwnerError::connection_failed(format!("MCP response body could not be read: {error}"))
+    while let Some(chunk) = response.chunk().await.map_err(|_| {
+        McpOwnerError::connection_failed("MCP response body could not be read")
     })? {
         if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
             return Err(McpOwnerError::protocol_failed(
@@ -951,11 +1089,7 @@ fn ensure_no_rpc_error(
     };
     Err(McpOwnerError::new(
         "MCP_RPC_ERROR",
-        format!(
-            "{method} returned JSON-RPC error {}: {}",
-            error.code,
-            McpOwnerError::bounded_message(&error.message)
-        ),
+        format!("{method} returned JSON-RPC error {}", error.code),
     ))
 }
 
@@ -1092,11 +1226,13 @@ fn tool_call_request(
 mod tests {
     use super::*;
     use axum::extract::State;
+    use axum::http::header::{HeaderValue, LOCATION};
     use axum::http::{HeaderMap, StatusCode};
     use axum::response::{IntoResponse, Response};
-    use axum::routing::post;
+    use axum::routing::{delete, get, post};
     use axum::{Json, Router};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
 
     fn schema() -> Value {
@@ -1141,6 +1277,17 @@ mod tests {
                 url: "http://127.0.0.1:1/mcp".to_owned(),
                 headers: HashMap::new(),
             },
+        }
+    }
+
+    fn invocation(server: McpServerBinding, operation_id: &str) -> McpToolInvocationRequest {
+        McpToolInvocationRequest {
+            principal_kind: "user".to_owned(),
+            principal_id: "owner".to_owned(),
+            operation_id: operation_id.to_owned(),
+            server,
+            tool: tool(),
+            arguments: json!({}),
         }
     }
 
@@ -1232,6 +1379,26 @@ mod tests {
     }
 
     #[test]
+    fn rpc_error_messages_never_echo_untrusted_remote_text() {
+        let response = JsonRpcResponse {
+            jsonrpc: "2.0".to_owned(),
+            id: Some(json!(1)),
+            result: None,
+            error: Some(JsonRpcError {
+                code: -32000,
+                message: "authorization=fixture-secret".to_owned(),
+            }),
+        };
+        let error = ensure_no_rpc_error("tools/call", &response).unwrap_err();
+        assert_eq!(error.code(), "MCP_RPC_ERROR");
+        assert!(!error.message().contains("fixture-secret"));
+        assert_eq!(
+            error.message(),
+            "tools/call returned JSON-RPC error -32000"
+        );
+    }
+
+    #[test]
     fn unsupported_transport_is_explicitly_not_a_fallback() {
         let transport = McpServerTransport::Stdio {
             command: "legacy-client".to_owned(),
@@ -1244,6 +1411,9 @@ mod tests {
     #[derive(Clone, Default)]
     struct FixtureState {
         requests: Arc<Mutex<Vec<(String, Value, Option<String>)>>>,
+        session_id: Option<String>,
+        cleanup_status: Option<StatusCode>,
+        cleanup_session_ids: Arc<Mutex<Vec<Option<String>>>>,
     }
 
     #[derive(Clone, Default)]
@@ -1320,7 +1490,57 @@ mod tests {
                 "error": {"code": -32601, "message": "method not found"}
             }),
         };
-        (StatusCode::OK, Json(body)).into_response()
+        let mut response = (StatusCode::OK, Json(body)).into_response();
+        if method == "initialize"
+            && let Some(session_id) = state.session_id.as_deref()
+        {
+            response.headers_mut().insert(
+                "mcp-session-id",
+                HeaderValue::from_str(session_id).expect("fixture session ID"),
+            );
+        }
+        response
+    }
+
+    async fn fixture_delete_handler(
+        State(state): State<FixtureState>,
+        headers: HeaderMap,
+    ) -> Response {
+        let session_id = headers
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        state
+            .cleanup_session_ids
+            .lock()
+            .await
+            .push(session_id);
+        let authorization = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        state
+            .requests
+            .lock()
+            .await
+            .push(("DELETE".to_owned(), Value::Null, authorization));
+        state
+            .cleanup_status
+            .unwrap_or(StatusCode::NO_CONTENT)
+            .into_response()
+    }
+
+    async fn redirect_source() -> Response {
+        let mut response = StatusCode::TEMPORARY_REDIRECT.into_response();
+        response
+            .headers_mut()
+            .insert(LOCATION, HeaderValue::from_static("/target"));
+        response
+    }
+
+    async fn redirect_target(State(hits): State<Arc<AtomicUsize>>) -> Response {
+        hits.fetch_add(1, Ordering::SeqCst);
+        StatusCode::NO_CONTENT.into_response()
     }
 
     #[tokio::test]
@@ -1388,6 +1608,144 @@ mod tests {
         assert_eq!(lookups[0].resource_id, "server-1");
         assert_eq!(lookups[0].connection_config_ref, "connection-1");
         assert_eq!(lookups[0].endpoint, endpoint);
+
+        server_task.abort();
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn dynamic_http_client_does_not_follow_redirects() {
+        let target_hits = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/source", listener.local_addr().unwrap());
+        let router = Router::new()
+            .route("/source", get(redirect_source))
+            .route("/target", get(redirect_target))
+            .with_state(target_hits.clone());
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        let client = build_dynamic_http_client().expect("dynamic client should build");
+        let response = client.get(endpoint).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(target_hits.load(Ordering::SeqCst), 0);
+
+        server_task.abort();
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn endpoint_validation_does_not_echo_url_credentials() {
+        let mut server = server();
+        let userinfo_secret = "fixture-userinfo-secret";
+        let query_secret = "fixture-query-secret";
+        if let McpServerTransport::Http { url, .. } = &mut server.transport {
+            *url = format!(
+                "http://user:{userinfo_secret}@127.0.0.1:1/mcp?access_token={query_secret}"
+            );
+        }
+        let owner = McpOwner::new(
+            Arc::new(AnonymousMcpCredentialAuthority),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+        );
+        let error = owner
+            .invoke(invocation(server, "operation-url-validation"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), "MCP_CREDENTIAL_AUTHORITY_REQUIRED");
+        assert!(!error.message().contains(userinfo_secret));
+        assert!(!error.message().contains(query_secret));
+        assert!(!error.message().contains("http://"));
+    }
+
+    #[tokio::test]
+    async fn established_session_is_closed_once_after_tool_call() {
+        let state = FixtureState {
+            session_id: Some("fixture-session".to_owned()),
+            ..FixtureState::default()
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let router = Router::new()
+            .route(
+                "/mcp",
+                post(fixture_handler).delete(fixture_delete_handler),
+            )
+            .with_state(state.clone());
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        let owner = McpOwner::new(
+            Arc::new(AnonymousMcpCredentialAuthority),
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+        )
+        .with_timeout(Duration::from_secs(5));
+        let mut request = invocation(server(), "operation-session-cleanup");
+        if let McpServerTransport::Http { url, .. } = &mut request.server.transport {
+            *url = endpoint;
+        }
+
+        owner.invoke(request).await.unwrap();
+
+        let requests = state.requests.lock().await.clone();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|(method, _, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "initialize",
+                "notifications/initialized",
+                "tools/list",
+                "tools/call",
+                "DELETE"
+            ]
+        );
+        assert_eq!(
+            state.cleanup_session_ids.lock().await.as_slice(),
+            &[Some("fixture-session".to_owned())]
+        );
+
+        server_task.abort();
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn session_cleanup_failure_is_typed_and_not_retried() {
+        let state = FixtureState {
+            cleanup_status: Some(StatusCode::INTERNAL_SERVER_ERROR),
+            ..FixtureState::default()
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let router = Router::new()
+            .route("/", delete(fixture_delete_handler))
+            .with_state(state.clone());
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut session = HttpMcpSession::new(
+            client,
+            endpoint,
+            reqwest::header::HeaderMap::new(),
+        );
+        session.session_id = Some("fixture-session".to_owned());
+        let error = session.close().await.unwrap_err();
+        assert_eq!(error.code(), "MCP_SESSION_CLEANUP_FAILED");
+        assert!(session.session_id.is_none());
+        assert_eq!(state.cleanup_session_ids.lock().await.len(), 1);
+
+        assert!(session.close().await.is_ok());
+        assert_eq!(state.cleanup_session_ids.lock().await.len(), 1);
 
         server_task.abort();
         let _ = server_task.await;

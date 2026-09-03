@@ -36,6 +36,9 @@ use super::agent_wave2_vcs_push::{
     VcsPushActionInput, VcsPushEffectDisposition, VcsPushError, VcsPushOwner,
     VcsPushRequest,
 };
+use super::agent_wave2_mcp::{
+    McpOwnerAdapter, McpOwnerInvocationInput, McpRuntimeBindingSource,
+};
 
 const MAX_SEARCH_QUERY_CHARS: usize = 1024;
 const MAX_SEARCH_LINE_CHARS: usize = 4096;
@@ -65,6 +68,8 @@ pub(crate) struct Wave2ApplicationHost {
     workspace_write_lock: Arc<tokio::sync::Mutex<()>>,
     vcs_push_owner: Arc<OnceLock<Result<VcsPushOwner, VcsPushError>>>,
     configured_workspace_root: PathBuf,
+    mcp_owner: Option<Arc<McpOwnerAdapter>>,
+    mcp_binding_source: Option<Arc<dyn McpRuntimeBindingSource>>,
 }
 
 #[derive(Clone)]
@@ -104,7 +109,20 @@ impl Wave2ApplicationHost {
             workspace_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             vcs_push_owner: Arc::new(OnceLock::new()),
             configured_workspace_root: workspace_root,
+            mcp_owner: None,
+            mcp_binding_source: None,
         }
+    }
+
+    pub(crate) fn for_workspace_root_with_mcp(
+        workspace_root: impl Into<PathBuf>,
+        mcp_owner: Arc<McpOwnerAdapter>,
+        mcp_binding_source: Arc<dyn McpRuntimeBindingSource>,
+    ) -> Self {
+        let mut host = Self::for_workspace_root(workspace_root);
+        host.mcp_owner = Some(mcp_owner);
+        host.mcp_binding_source = Some(mcp_binding_source);
+        host
     }
 }
 
@@ -640,6 +658,11 @@ impl Wave2HostPort for Wave2ApplicationHost {
                     self.invoke_workspace(&request.context, &capability_id, input)
                         .await
                 }
+                Wave2CapabilityOperation::McpConnectors { input }
+                    if capability_id == "mcp.tool_proxy" =>
+                {
+                    self.invoke_mcp(&request.context, input).await
+                }
                 Wave2CapabilityOperation::Ssh { .. }
                 | Wave2CapabilityOperation::McpConnectors { .. }
                 | Wave2CapabilityOperation::Browser { .. }
@@ -652,6 +675,97 @@ impl Wave2HostPort for Wave2ApplicationHost {
 }
 
 impl Wave2ApplicationHost {
+    async fn invoke_mcp(
+        &self,
+        context: &Wave2HostContext,
+        input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, Wave2HostPortError> {
+        let lock = context.mcp_tool_lock.as_ref().ok_or_else(|| {
+            Wave2HostPortError::new(
+                "MCP_MAPPING_NOT_FROZEN",
+                "mcp.tool_proxy requires an exact MCP mapping in the Snapshot",
+            )
+        })?;
+        if lock.capability_id != context.capability_id {
+            return Err(Wave2HostPortError::new(
+                "MCP_MAPPING_IDENTITY_MISMATCH",
+                "frozen MCP mapping capability differs from the host context",
+            ));
+        }
+        if lock.materialization_revision == 0 {
+            return Err(Wave2HostPortError::new(
+                "MCP_BINDING_INVALID",
+                "frozen MCP mapping has an invalid materialization revision",
+            ));
+        }
+
+        let mut bindings = context
+            .resource_bindings
+            .iter()
+            .filter(|binding| {
+                binding.resource_kind.as_ref()
+                    == nomifun_mcp::MCP_SERVER_RESOURCE_KIND
+            });
+        let binding = bindings.next().ok_or_else(|| {
+            Wave2HostPortError::new(
+                "PRESET_RESOURCE_NOT_BOUND",
+                "mcp.tool_proxy requires one mcp_server resource binding",
+            )
+        })?;
+        if bindings.next().is_some() {
+            return Err(Wave2HostPortError::new(
+                "PRESET_RESOURCE_NOT_BOUND",
+                "mcp.tool_proxy received more than one mcp_server resource binding",
+            ));
+        }
+        if binding.owner_id != context.principal.principal_id {
+            return Err(Wave2HostPortError::new(
+                "RESOURCE_OWNER_MISMATCH",
+                "MCP resource binding belongs to a different principal",
+            ));
+        }
+        for operation in [
+            nomifun_mcp::MCP_CONNECT_OPERATION,
+            nomifun_mcp::MCP_INVOKE_OPERATION,
+        ] {
+            if !binding.operations.contains(operation) {
+                return Err(Wave2HostPortError::new(
+                    "PRESET_RESOURCE_NOT_BOUND",
+                    format!("MCP resource binding does not grant {operation}"),
+                ));
+            }
+        }
+        if binding.connection_config_ref.is_none() {
+            return Err(Wave2HostPortError::new(
+                "PRESET_RESOURCE_NOT_BOUND",
+                "MCP resource binding has no connection configuration reference",
+            ));
+        }
+
+        let source = self.mcp_binding_source.as_ref().ok_or_else(|| {
+            Wave2HostPortError::unavailable(
+                "no canonical MCP runtime binding source is configured",
+            )
+        })?;
+        let resolved = source
+            .resolve(lock, binding, &context.principal)
+            .await?;
+        let owner = self.mcp_owner.as_ref().ok_or_else(|| {
+            Wave2HostPortError::unavailable("no canonical MCP owner is configured")
+        })?;
+        owner
+            .invoke(McpOwnerInvocationInput {
+                mcp_tool_lock: lock.clone(),
+                server: resolved.server,
+                resource_binding: binding.clone(),
+                remote_tool: resolved.remote_tool,
+                principal: context.principal.clone(),
+                operation_id: context.operation_id.clone(),
+                arguments: input,
+            })
+            .await
+    }
+
     async fn invoke_workspace(
         &self,
         context: &Wave2HostContext,
@@ -2575,18 +2689,27 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
     use std::task::{Context, Poll, Waker};
 
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::post;
+    use axum::{Json, Router};
     use nomifun_agent_contracts::{
-        ActionId, AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload,
-        AgentSessionId, CapabilityExposure, CapabilityId, CapabilityRef, CapabilitySelection,
-        CorrelationId, DigestHex, IdempotencyKey, OperationId, PresetRevisionRef,
-        PrincipalRef, ResolvedSnapshotRef, ResourceBindingId, ResourceId, ResourceKind,
-        RuntimeProfileKind, RuntimeTarget, ScopeKey, StrictJsonValue, TypedResourceBinding,
-        UserId, VersionString,
+        ActionId, AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, AgentSessionId,
+        CapabilityExposure, CapabilityId, CapabilityRef, CapabilitySelection, ConnectionConfigRef,
+        CorrelationId, DigestHex, IdempotencyKey, McpServerId, OperationId, PresetRevisionRef,
+        PrincipalRef, ResolvedMcpToolLock, ResolvedSnapshotRef, ResourceBindingId, ResourceId,
+        ResourceKind, RuntimeProfileKind, RuntimeTarget, ScopeKey, StrictJsonValue,
+        TypedResourceBinding, UserId, VersionString,
     };
     use nomifun_agent_kernel::{
         AgentPresetCompiler, CapabilityInvocationRequest, CompileRequest,
         CompilerEnvironment, InMemoryPluginStatePersistence, KernelRegistry,
         MaterializationPolicy, SessionCapabilityState,
+    };
+    use crate::router::agent_wave2_mcp::{
+        McpRemoteToolFacts, McpServerBindingFacts, ResolvedMcpRuntimeBinding,
+        StaticMcpRuntimeBindingSource,
     };
 
     struct StateCaptureHostPort {
@@ -2771,6 +2894,7 @@ mod tests {
             capability_id: CapabilityId::from("fs.write"),
             action_id: ActionId::from("fs.write.invoke"),
             role_provider: None,
+            mcp_tool_lock: None,
             state: test_state_handle(),
             resource_bindings: vec![TypedResourceBinding {
                 binding_id: ResourceBindingId::from("workspace-binding"),
@@ -2909,6 +3033,187 @@ mod tests {
         .await
     }
 
+    #[derive(Clone, Default)]
+    struct McpHostFixtureState {
+        requests: Arc<tokio::sync::Mutex<Vec<Value>>>,
+    }
+
+    async fn mcp_host_fixture(
+        State(state): State<McpHostFixtureState>,
+        Json(request): Json<Value>,
+    ) -> Response {
+        state.requests.lock().await.push(request.clone());
+        let method = request
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if method == "notifications/initialized" {
+            return StatusCode::NO_CONTENT.into_response();
+        }
+        let id = request.get("id").cloned().unwrap_or(Value::Null);
+        let body = match method {
+            "initialize" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "serverInfo": {"name": "wave2-fixture", "version": "1.0.0"}
+                }
+            }),
+            "tools/list" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "tools": [{
+                        "name": "remote.echo",
+                        "inputSchema": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {"message": {"type": "string"}},
+                            "required": ["message"]
+                        }
+                    }]
+                }
+            }),
+            "tools/call" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "content": [{"type": "text", "text": "host-dispatch-result"}],
+                    "isError": false
+                }
+            }),
+            _ => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32601, "message": "method not found"}
+            }),
+        };
+        (StatusCode::OK, Json(body)).into_response()
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_proxy_dispatches_through_the_canonical_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture_state = McpHostFixtureState::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("MCP fixture listener");
+        let endpoint = format!(
+            "http://{}/mcp",
+            listener.local_addr().expect("MCP fixture address")
+        );
+        let router = Router::new()
+            .route("/mcp", post(mcp_host_fixture))
+            .with_state(fixture_state.clone());
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {"message": {"type": "string"}},
+            "required": ["message"]
+        });
+        let lock = ResolvedMcpToolLock {
+            server_id: McpServerId::from("server-1"),
+            canonical_tool_key: "vendor.echo".into(),
+            capability_id: "mcp.tool_proxy".into(),
+            schema_digest: digest_payload(&schema).unwrap(),
+            materialization_revision: 1,
+        };
+        let mut context = context(directory.path());
+        context.capability_id = CapabilityId::from("mcp.tool_proxy");
+        context.action_id = ActionId::from("mcp.tool_proxy.invoke");
+        context.mcp_tool_lock = Some(lock.clone());
+        context.resource_bindings = vec![TypedResourceBinding {
+            binding_id: ResourceBindingId::from("mcp-binding"),
+            resource_kind: ResourceKind::from("mcp_server"),
+            resource_id: ResourceId::from("server-1"),
+            owner_id: "owner-1".to_owned(),
+            operations: BTreeSet::from([
+                "connect".to_owned(),
+                "invoke".to_owned(),
+            ]),
+            connection_config_ref: Some(ConnectionConfigRef::from("connection-1")),
+            typed_parameters: BTreeMap::new(),
+        }];
+        let resolved = ResolvedMcpRuntimeBinding {
+            server: McpServerBindingFacts {
+                server_id: McpServerId::from("server-1"),
+                server_owner_id: "system".to_owned(),
+                enabled: true,
+                connection_config_ref: ConnectionConfigRef::from("connection-1"),
+                transport: nomifun_mcp::McpServerTransport::Http {
+                    url: endpoint,
+                    headers: HashMap::new(),
+                },
+            },
+            remote_tool: McpRemoteToolFacts {
+                remote_tool_name: "remote.echo".to_owned(),
+                input_schema: schema,
+            },
+        };
+        let source = Arc::new(StaticMcpRuntimeBindingSource::for_mapping(
+            "server-1",
+            "vendor.echo",
+            resolved,
+        ));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("MCP fixture client");
+        let owner = Arc::new(McpOwnerAdapter::new(Arc::new(
+            nomifun_mcp::McpOwner::new(
+                Arc::new(nomifun_mcp::AnonymousMcpCredentialAuthority),
+                client,
+            ),
+        )));
+        let host = Wave2ApplicationHost::for_workspace_root_with_mcp(
+            directory.path(),
+            owner,
+            source,
+        );
+
+        let result = host
+            .invoke(Wave2HostRequest {
+                context,
+                operation: Wave2CapabilityOperation::McpConnectors {
+                    input: StrictJsonValue(json!({"message": "hello"})),
+                },
+            })
+            .await
+            .expect("canonical MCP host dispatch");
+        assert_eq!(result.0["content"][0]["text"], "host-dispatch-result");
+
+        let requests = fixture_state.requests.lock().await.clone();
+        assert_eq!(
+            requests
+                .iter()
+                .filter_map(|request| request.get("method").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            vec![
+                "initialize",
+                "notifications/initialized",
+                "tools/list",
+                "tools/call"
+            ]
+        );
+        assert_eq!(
+            requests[3]["params"]["name"],
+            "remote.echo"
+        );
+        assert_eq!(
+            requests[3]["params"]["arguments"],
+            json!({"message": "hello"})
+        );
+
+        server_task.abort();
+        let _ = server_task.await;
+    }
+
     #[tokio::test]
     async fn workspace_file_actions_use_the_typed_binding_root() {
         let directory = tempfile::tempdir().unwrap();
@@ -2963,28 +3268,51 @@ mod tests {
             context.clone(),
             "fs.patch",
             json!({
-                "path": "patch.txt",
-                "old_content": "old value",
-                "new_content": "new value"
+                "files": [{
+                    "path": "patch.txt",
+                    "hunks": [{
+                        "old_start": 2,
+                        "old_lines": 1,
+                        "new_start": 2,
+                        "new_lines": 1,
+                        "lines": [
+                            {"kind": "remove", "text": "old value"},
+                            {"kind": "add", "text": "new value"}
+                        ]
+                    }]
+                }]
             }),
         )
         .await
         .unwrap();
-        assert_eq!(patched.0["patched"], true);
-        assert_eq!(patched.0["replacements"], 1);
+        assert_eq!(patched.0["file_count"], 1);
+        assert_eq!(patched.0["files"][0]["path"], "patch.txt");
+        assert_eq!(patched.0["files"][0]["hunks_applied"], 1);
         assert_eq!(
             std::fs::read_to_string(directory.path().join("patch.txt")).unwrap(),
             "before\nnew value\nafter\n"
         );
 
+        let mut stale_context = context;
+        stale_context.idempotency_key = IdempotencyKey::from("patch-stale");
         let stale = invoke(
             &host,
-            context,
+            stale_context,
             "fs.patch",
             json!({
-                "path": "patch.txt",
-                "old_content": "old value",
-                "new_content": "another value"
+                "files": [{
+                    "path": "patch.txt",
+                    "hunks": [{
+                        "old_start": 2,
+                        "old_lines": 1,
+                        "new_start": 2,
+                        "new_lines": 1,
+                        "lines": [
+                            {"kind": "remove", "text": "old value"},
+                            {"kind": "add", "text": "another value"}
+                        ]
+                    }]
+                }]
             }),
         )
         .await
@@ -2999,37 +3327,65 @@ mod tests {
     #[tokio::test]
     async fn concurrent_workspace_patches_do_not_overwrite_each_other() {
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("patch.txt"), "alpha beta\n")
-            .unwrap();
+        std::fs::write(directory.path().join("first.txt"), "alpha\n").unwrap();
+        std::fs::write(directory.path().join("second.txt"), "beta\n").unwrap();
         let host = Wave2ApplicationHost::for_workspace_root(directory.path());
         let context = context(directory.path());
 
+        let mut first_context = context.clone();
+        first_context.idempotency_key = IdempotencyKey::from("patch-alpha");
         let first = invoke(
             &host,
-            context.clone(),
+            first_context,
             "fs.patch",
             json!({
-                "path": "patch.txt",
-                "old_content": "alpha",
-                "new_content": "ALPHA"
+                "files": [{
+                    "path": "first.txt",
+                    "hunks": [{
+                        "old_start": 1,
+                        "old_lines": 1,
+                        "new_start": 1,
+                        "new_lines": 1,
+                        "lines": [
+                            {"kind": "remove", "text": "alpha"},
+                            {"kind": "add", "text": "ALPHA"}
+                        ]
+                    }]
+                }]
             }),
         );
+        let mut second_context = context;
+        second_context.idempotency_key = IdempotencyKey::from("patch-beta");
         let second = invoke(
             &host,
-            context,
+            second_context,
             "fs.patch",
             json!({
-                "path": "patch.txt",
-                "old_content": "beta",
-                "new_content": "BETA"
+                "files": [{
+                    "path": "second.txt",
+                    "hunks": [{
+                        "old_start": 1,
+                        "old_lines": 1,
+                        "new_start": 1,
+                        "new_lines": 1,
+                        "lines": [
+                            {"kind": "remove", "text": "beta"},
+                            {"kind": "add", "text": "BETA"}
+                        ]
+                    }]
+                }]
             }),
         );
         let (first, second) = tokio::join!(first, second);
         first.unwrap();
         second.unwrap();
         assert_eq!(
-            std::fs::read_to_string(directory.path().join("patch.txt")).unwrap(),
-            "ALPHA BETA\n"
+            std::fs::read_to_string(directory.path().join("first.txt")).unwrap(),
+            "ALPHA\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("second.txt")).unwrap(),
+            "BETA\n"
         );
     }
 
@@ -3040,7 +3396,12 @@ mod tests {
         let host = Wave2ApplicationHost::for_workspace_root(directory.path());
         let context = context(directory.path());
 
-        let snapshot = invoke(&host, context, "fs.snapshot", json!({}))
+        let snapshot = invoke(
+            &host,
+            context,
+            "fs.snapshot",
+            json!({"operation": "init"}),
+        )
             .await
             .unwrap();
         assert_eq!(snapshot.0["mode"], "snapshot");
@@ -3732,7 +4093,9 @@ mod tests {
         drop(index);
 
         std::fs::remove_file(batch.join("remove.txt")).unwrap();
-        invoke(&host, context, "vcs.stage", json!({"path": "batch"}))
+        let mut second_context = context;
+        second_context.idempotency_key = IdempotencyKey::from("stage-after-delete");
+        invoke(&host, second_context, "vcs.stage", json!({"path": "batch"}))
             .await
             .unwrap();
         let index = git2::Repository::open(directory.path())

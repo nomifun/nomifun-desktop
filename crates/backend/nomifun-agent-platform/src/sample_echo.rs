@@ -222,7 +222,7 @@ pub struct SampleEchoFaultReport {
     pub save_failure_created_revision: bool,
     pub save_failure_created_session: bool,
     pub materialization_failure_published_generation: bool,
-    pub panic_effect_became_uncertain: bool,
+    pub panic_effect_became_failed: bool,
     pub panic_retried_effect: bool,
     pub dispose_timeout_forced_tree_cleanup: bool,
 }
@@ -1953,7 +1953,7 @@ async fn execute_tool(
                 .record_effect_terminal(
                     EffectEventRequest {
                         agent_session_id: session.session_id.clone(),
-                        event_id: EventId::from(new_id("effect-uncertain")),
+                        event_id: EventId::from(new_id("effect-failed")),
                         producer_id: EventProducerId::from("runtime-supervisor"),
                         idempotency_key: effect.start.idempotency_key.clone(),
                         correlation_id: CorrelationId::from(
@@ -1965,7 +1965,7 @@ async fn execute_tool(
                             "reason": "plugin_panic"
                         }))),
                     },
-                    EffectTerminalState::Uncertain,
+                    EffectTerminalState::Failed,
                 )
                 .await?;
             Ok(ToolExecution::Panicked)
@@ -2473,8 +2473,8 @@ pub async fn run_sample_echo_gate(
         .read_events(&dirty_session.session_id, None, 1000)
         .await?
         .events;
-    let panic_effect_became_uncertain =
-        dirty_events.iter().any(|event| event.kind.0 == "effect/uncertain");
+    let panic_effect_became_failed =
+        dirty_events.iter().any(|event| event.kind.0 == "effect/failed");
     let panic_retried_effect = effect_count_after_panic != effect_count_before_panic;
     let dirty_report =
         dispose_and_delete(&session_store, &supervisor, &dirty_session, true).await?;
@@ -2527,7 +2527,7 @@ pub async fn run_sample_echo_gate(
             save_failure_created_revision: !revisions.save_fault_rejected,
             save_failure_created_session: false,
             materialization_failure_published_generation,
-            panic_effect_became_uncertain,
+            panic_effect_became_failed,
             panic_retried_effect,
             dispose_timeout_forced_tree_cleanup,
         },

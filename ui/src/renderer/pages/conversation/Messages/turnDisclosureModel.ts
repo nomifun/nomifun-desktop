@@ -152,17 +152,6 @@ const getProcessStartAt = (entry: TurnDisclosureInputItem): number => entry.proc
 
 const getProcessEndAt = (entry: TurnDisclosureInputItem): number => entry.processEndedAt ?? entry.createdAt;
 
-const resolveDisclosureState = (
-  processItems: TurnDisclosureInputItem[],
-  options: { isClosed: boolean }
-): TurnDisclosureProcessState => {
-  const states = processItems.map((entry) => getEffectiveProcessState(entry, options));
-  if (states.includes('running')) return 'running';
-  if (states.includes('failed')) return 'failed';
-  if (states.includes('canceled')) return 'canceled';
-  return 'completed';
-};
-
 const buildEmptyRunningDisclosure = (
   turnId: MessageId,
   segment: TurnDisclosureInputItem[],
@@ -238,7 +227,6 @@ function buildSegmentOutput(
     return segment.map((entry) => ({ type: 'item', id: entry.id }));
   }
 
-  const resolvedState = resolveDisclosureState(processItems, stateOptions);
   const terminalProcessState = getEffectiveProcessState(processItems.at(-1)!, stateOptions);
   // The header describes lifecycle, not whether every individual operation
   // succeeded. Once processing settles, every non-canceled turn is "processed";

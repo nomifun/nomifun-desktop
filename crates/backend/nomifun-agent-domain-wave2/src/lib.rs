@@ -29,7 +29,8 @@ use nomifun_agent_contracts::{
     PluginStateHandleDescriptor, PluginStateMethod, OperationId, PrincipalRef,
     ExactRoleProviderRef, ResolvedSnapshotRef, ResourceKind, RoleContractKey, RoleContractManifest,
     RoleMemberContract, RoleMemberRequirement, RoleProviderContribution,
-    RoleProviderMemberContribution, RuntimeTarget, ScopeKey, StateKey, StrictJsonValue,
+    ResolvedMcpToolLock, RoleProviderMemberContribution, RuntimeTarget, ScopeKey, StateKey,
+    StrictJsonValue,
     ToolPresentationKind, TypedResourceBindings, ValidatedPluginConfig, VersionString,
     CAPABILITY_UNAVAILABLE_ON_PLATFORM, PRESET_RESOURCE_NOT_BOUND, RESOURCE_OWNER_MISMATCH,
     digest_payload,
@@ -218,6 +219,8 @@ const BROWSER_RESOURCE: &[&str] = &["browser"];
 const COMPUTER_RESOURCE: &[&str] = &["computer"];
 const ARTIFACT_RESOURCES: &[&str] = &["workspace"];
 const CONNECTOR_RESOURCES: &[&str] = &["mcp_server"];
+// Keep this composite grant aligned with the canonical MCP owner contract.
+const MCP_TOOL_PROXY_REQUIRED_OPERATIONS: &[&str] = &["connect", "invoke"];
 
 const PLUGIN_CANCEL_PORT: &str = "host.plugin.cancel";
 const PLUGIN_TASKS_PORT: &str = "host.plugin.tasks";
@@ -322,6 +325,9 @@ pub struct Wave2HostContext {
     /// the only state surface exposed to the adapter.
     pub state: Wave2StateHandle,
     pub resource_bindings: TypedResourceBindings,
+    /// Exact MCP mapping frozen by the Agent Snapshot. This is absent for
+    /// non-MCP capabilities and is never supplied by operation input.
+    pub mcp_tool_lock: Option<ResolvedMcpToolLock>,
 }
 
 /// A family-typed action operation for the host adapter.
@@ -1832,6 +1838,7 @@ impl CapabilityHandler for Wave2CapabilityHandler {
                             .map(|provider| provider.provider.clone()),
                         state: Wave2StateHandle::new(context.state),
                         resource_bindings: context.resource_bindings,
+                        mcp_tool_lock: context.mcp_tool_lock,
                     },
                     operation,
                 })
@@ -1936,12 +1943,16 @@ pub fn required_resource_kinds(capability_id: &str) -> Option<BTreeSet<ResourceK
     })
 }
 
-/// Return the operation that must be granted by the bound resource for an
-/// action capability.
+/// Return the primary operation that must be granted by the bound resource
+/// for an action capability.
 ///
 /// The official Coding resource defaults grant `read`, `write`, and `execute`;
 /// destructive filesystem actions therefore consume the workspace `write`
 /// grant rather than inventing a separate `delete` permission.
+///
+/// `mcp.tool_proxy` is the one composite resource contract: this compatibility
+/// helper returns its invocation operation, while
+/// [`validate_action_resource_bindings`] enforces both `connect` and `invoke`.
 pub fn required_resource_operation(capability_id: &CapabilityId) -> Option<&'static str> {
     match capability_id.as_ref() {
         "fs.read" | "fs.search" | "fs.snapshot" | "vcs.status" | "vcs.diff" => Some("read"),
@@ -2045,17 +2056,24 @@ pub fn validate_action_resource_bindings(
                 ),
             });
         }
-        if let Some(required_operation) = required_resource_operation(capability_id) {
-            if !matching_bindings[0].operations.contains(required_operation) {
-                return Err(KernelError::CapabilityResourceNotBound {
-                    capability_id: capability_id.clone(),
-                    resource_kind: format!(
-                        "{} (operation {})",
-                        resource_kind.as_ref(),
-                        required_operation
-                    ),
-                });
-            }
+        let missing_operation = if capability_id.as_ref() == "mcp.tool_proxy" {
+            MCP_TOOL_PROXY_REQUIRED_OPERATIONS
+                .iter()
+                .copied()
+                .find(|operation| !matching_bindings[0].operations.contains(*operation))
+        } else {
+            required_resource_operation(capability_id)
+                .filter(|operation| !matching_bindings[0].operations.contains(*operation))
+        };
+        if let Some(required_operation) = missing_operation {
+            return Err(KernelError::CapabilityResourceNotBound {
+                capability_id: capability_id.clone(),
+                resource_kind: format!(
+                    "{} (operation {})",
+                    resource_kind.as_ref(),
+                    required_operation
+                ),
+            });
         }
     }
     Ok(())
@@ -3328,6 +3346,7 @@ mod tests {
             role_provider: None,
             state: test_state_handle(),
             resource_bindings: vec![binding.clone()],
+            mcp_tool_lock: None,
         };
         let wrong_family = match (Wave2HostRequest {
             context: context.clone(),
@@ -3427,6 +3446,93 @@ mod tests {
     }
 
     #[test]
+    fn mcp_tool_proxy_requires_connect_and_invoke_resource_grants() {
+        let capability_id = CapabilityId::from("mcp.tool_proxy");
+        let principal = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: "owner".to_owned(),
+        };
+        let binding_for = |operations: &[&str]| TypedResourceBinding {
+            binding_id: ResourceBindingId::from("mcp-binding"),
+            resource_kind: ResourceKind::from("mcp_server"),
+            resource_id: "server-1".into(),
+            owner_id: principal.principal_id.clone(),
+            operations: operations
+                .iter()
+                .map(|operation| (*operation).to_owned())
+                .collect(),
+            connection_config_ref: None,
+            typed_parameters: Default::default(),
+        };
+
+        let missing_connect = validate_action_resource_bindings(
+            &capability_id,
+            &principal,
+            &vec![binding_for(&["invoke"])],
+        )
+        .expect_err("MCP tool proxy must require the connect grant");
+        assert!(matches!(
+            &missing_connect,
+            KernelError::CapabilityResourceNotBound {
+                capability_id: actual_capability,
+                resource_kind,
+            } if actual_capability == &capability_id
+                && resource_kind == "mcp_server (operation connect)"
+        ));
+        assert_eq!(
+            missing_connect.canonical_code(),
+            CanonicalErrorCode::from(PRESET_RESOURCE_NOT_BOUND)
+        );
+
+        let missing_invoke = validate_action_resource_bindings(
+            &capability_id,
+            &principal,
+            &vec![binding_for(&["connect"])],
+        )
+        .expect_err("MCP tool proxy must require the invoke grant");
+        assert!(matches!(
+            &missing_invoke,
+            KernelError::CapabilityResourceNotBound {
+                capability_id: actual_capability,
+                resource_kind,
+            } if actual_capability == &capability_id
+                && resource_kind == "mcp_server (operation invoke)"
+        ));
+        assert_eq!(
+            missing_invoke.canonical_code(),
+            CanonicalErrorCode::from(PRESET_RESOURCE_NOT_BOUND)
+        );
+
+        validate_action_resource_bindings(
+            &capability_id,
+            &principal,
+            &vec![binding_for(&["connect", "invoke"])],
+        )
+        .expect("MCP tool proxy with both grants must be admitted");
+    }
+
+    #[test]
+    fn non_mcp_action_resource_contracts_remain_single_operation() {
+        let capability_id = CapabilityId::from("fs.read");
+        let principal = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: "owner".to_owned(),
+        };
+        let binding = TypedResourceBinding {
+            binding_id: ResourceBindingId::from("workspace-binding"),
+            resource_kind: ResourceKind::from("workspace"),
+            resource_id: "workspace-1".into(),
+            owner_id: principal.principal_id.clone(),
+            operations: BTreeSet::from(["read".to_owned()]),
+            connection_config_ref: None,
+            typed_parameters: Default::default(),
+        };
+
+        validate_action_resource_bindings(&capability_id, &principal, &vec![binding])
+            .expect("non-MCP capabilities must retain their single-operation contract");
+    }
+
+    #[test]
     fn composed_typed_adapter_receives_exact_operation_and_authorization_projection() {
         use std::sync::Mutex;
         use std::task::{Context, Poll, Waker};
@@ -3482,6 +3588,7 @@ mod tests {
                     connection_config_ref: None,
                     typed_parameters: Default::default(),
                 }],
+                mcp_tool_lock: None,
             },
             operation: Wave2CapabilityOperation::WorkspaceExecution {
                 input: empty_object(),
@@ -3540,6 +3647,7 @@ mod tests {
                         role_provider: None,
                         state: test_state_handle(),
                         resource_bindings: Vec::new(),
+                        mcp_tool_lock: None,
                     }
                 },
                 operation: Wave2CapabilityOperation::WorkspaceExecution {
@@ -3581,6 +3689,7 @@ mod tests {
                     role_provider: None,
                     state: test_state_handle(),
                     resource_bindings: Vec::new(),
+                    mcp_tool_lock: None,
                 },
                 operation: Wave2CapabilityOperation::WorkspaceExecution {
                     input: empty_object(),

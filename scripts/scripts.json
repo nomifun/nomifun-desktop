@@ -64,6 +64,7 @@
     "check:theme":   { "group": "check", "desc": "校验预设 CSS 主题契约" },
     "check:icons":   { "group": "check", "desc": "校验 @icon-park/react 导入禁别名/禁命名空间（别名会被图标包装插件改写成非法代码，tsc 抓不到）" },
     "check:dead-css": { "group": "check", "desc": "死 CSS 工具类禁令：拦住 <任意颜色前缀>-[rgb(var(--RAMP-N))] / border-border-* / border-b-base / border-b-light / {bg,text,border}-RAMP-N/NN（存量已清零，无基线，出现一处即失败）" },
+    "gate:agent-v2": { "group": "check", "desc": "运行 Agent Capability Platform v2 的合同、域切片、Windows/native、合流和 C9 门禁" },
     "gen:i18n":      { "group": "gen",   "desc": "由 locale 重新生成 i18n 类型声明" },
     "clean":         { "group": "maint", "desc": "深度回收构建空间（debug 产物 + flycheck + 旧安装包）" },
     "seed:dev":      { "group": "maint", "desc": "用生产数据目录播种 dev 数据目录" },

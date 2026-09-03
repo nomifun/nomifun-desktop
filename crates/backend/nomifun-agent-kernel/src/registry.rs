@@ -426,6 +426,12 @@ impl KernelRegistry {
                 .filter_map(|binding_id| snapshot.binding(binding_id).cloned())
                 .collect::<Vec<TypedResourceBinding>>();
             resource_bindings.sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+            let mcp_tool_lock = snapshot
+                .content()
+                .mcp_tool_locks
+                .iter()
+                .find(|lock| lock.capability_id == request.capability_id)
+                .cloned();
             (
                 Arc::clone(&binding.handler),
                 CapabilityInvocationContext {
@@ -443,6 +449,7 @@ impl KernelRegistry {
                     state_scope_key: request.state_scope_key,
                     state,
                     services,
+                    mcp_tool_lock,
                 },
             )
         };
@@ -882,6 +889,7 @@ async fn dispatch_resolved_role_tool(
                         state_scope_key: context.state_scope_key,
                         state: context.mount.state,
                         services: context.mount.services,
+                        mcp_tool_lock: None,
                     },
                     input,
                 )

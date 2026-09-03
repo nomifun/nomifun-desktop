@@ -1179,6 +1179,15 @@ P1-R2/C8 的 residual-zero 只针对新的 v4/Codex、Knowledge、Gateway 和 st
 
 其中“标准 MCP Toolset 直接映射”仍必须先经过既有 `McpToolCapabilityMapping`、exact schema digest、resource binding 和 provenance lock；Role Adapter 只是把已物化的 backing MCP capabilities 适配为 canonical Role members，不能让裸 MCP Tool 形成第二身份或绕过 Snapshot 的 MCP lock。
 
+一期的 Fresh-v4 MCP 事实分层固定为：`mcp_servers` 保存 server owner、connection
+reference 和 catalog revision，`mcp_tool_materializations` 保存 canonical mapping、
+schema digest 与 materialization identity，远端 transport 及 tool name/schema 由
+`nomifun.mcp-connectors` owning package 的已校验 runtime catalog 保存。运行时按
+Snapshot 的 `(server_id, canonical_tool_key, schema_digest, materialization_revision)`
+精确联结，不回读 legacy `McpServerRow`，也不为缺失配置生成 synthetic
+server/connection ref。Credential 只经过 central authority，不进入 catalog、resource
+`typed_parameters` 或模型输入。
+
 06 当前“不能透明 override 内建能力”的表述以后应改成：
 
 > 禁止同 Capability ID 抢占和静默劫持；允许用户通过显式 Role Binding 替换系统能力的当前实现。

@@ -860,7 +860,9 @@ fn compile_mcp_locks(
             canonical_tool_key: mcp.mapping.canonical_tool_key.clone(),
             capability_id: mcp.mapping.capability.id.clone(),
             schema_digest: mcp.mapping.schema_digest.clone(),
-            materialization_revision: registry.generation,
+            materialization_revision: mcp_materialization_revision(
+                &mcp.mapping.materialization_version,
+            ),
         })
         .collect::<Vec<_>>();
     locks.sort_by(|left, right| {
@@ -868,6 +870,20 @@ fn compile_mcp_locks(
             .cmp(&(&right.server_id, &right.canonical_tool_key))
     });
     locks
+}
+
+/// The Snapshot lock identifies the materialized mapping version, not the
+/// process-local Registry generation. Registry generations can change when an
+/// unrelated package is republished, while the persisted v4 materialization
+/// row uses the mapping's semantic version major as its bounded revision.
+fn mcp_materialization_revision(version: &VersionString) -> u64 {
+    version
+        .as_ref()
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u64>().ok())
+        .filter(|revision| *revision >= 1)
+        .unwrap_or(1)
 }
 
 fn compile_role_provider_locks(
