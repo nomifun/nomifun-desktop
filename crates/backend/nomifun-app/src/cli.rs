@@ -150,11 +150,6 @@ pub enum Command {
     /// folder / application via ShellExecute; spawned by the ACP agent CLI on
     /// Windows so the agent stops launching apps with fragile `cmd /c start`).
     McpOpenStdio,
-    /// MCP stdio server exposing the desktop computer-use capability as discrete
-    /// tools (snapshot / click / type / launch / …; spawned by the ACP agent CLI
-    /// on Windows when the `computer-use` build is present). A thin facade over
-    /// the in-tree ComputerTool, so codex/ACP get the same upgraded automation.
-    McpComputerStdio,
     /// One-shot terminal lifecycle hook relay (invoked by claude/codex native
     /// hooks; reads the event JSON from stdin and POSTs it to the in-process
     /// TerminalLifecycleServer). NOT an MCP server — fire-and-forget.

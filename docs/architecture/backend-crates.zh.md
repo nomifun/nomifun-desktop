@@ -10,8 +10,8 @@
 
 存在有意为之、由 feature 控制的直接依赖例外：
 
-- [`nomifun-app`](../../crates/backend/nomifun-app/) 为 `mcp-computer-stdio` 桥接子命令，可选依赖 `nomi-computer`、`nomi-config`、`nomi-tools`、`nomi-types`；浏览器自动化统一走进程内 `BrowserSessionHub`。
-- [`nomifun-gateway`](../../crates/backend/nomifun-gateway/) 为平台 Gateway 的 browser/computer 注册表，可选依赖 `nomi-browser`、`nomi-computer`、`nomi-config`、`nomi-tools`、`nomi-types`。
+- Browser/Computer 具体实现由 `nomifun-app` 的 canonical `AgentPlatform`
+  Role host 持有；Platform Gateway 不依赖或注册具体桌面控制工具。
 
 不要在未说明“为何无法走正常接缝或上述桥接面”的情况下，新增其他直接的 `nomi-*` 依赖。
 
@@ -67,7 +67,7 @@
 | [`nomifun-mcp`](../../crates/backend/nomifun-mcp/) | MCP 服务器 CRUD、**OAuth 流程**、多 CLI 同步（`adapters/` 下的 `Claude`、`Codex`、`CodeBuddy`、`Gemini`、`Qwen`、`OpenCode`、`Nomi`、`Nomifun` 适配器）、连接测试、向会话注入 MCP 能力（含内置图像生成）。 |
 | [`nomifun-extension`](../../crates/backend/nomifun-extension/) | 扩展与技能枢纽：清单、依赖图、分类器、安装 / 启用 / 禁用，捆绑技能 + MCP 服务器 + 设定的扩展包。 |
 | [`nomifun-channel`](../../crates/backend/nomifun-channel/) | 外部聊天渠道适配器（Telegram、Lark、DingTalk、WeChat）——通过 feature 控制。将入站消息映射到共享的 Agent / Conversation runtime，解析按机器人或平台配置的伙伴归属，并应用渠道 Agent 上下文。它是接入边界，不是额外的 Agent 类型或模式。 |
-| [`nomifun-gateway`](../../crates/backend/nomifun-gateway/) | **平台 Gateway MCP** —— `nomi_*` 工具（会话、定时任务、伙伴记忆、需求平台，以及 feature 控制的 browser/computer 工具）的进程内能力注册表与传输层。内部子进程经 `nomicore mcp-gateway-stdio` 接入，只接收服务端派生、带作用域、有效期和签名的能力声明；Conversation 或 build-extra 字段都不能授权。公开入口只投影其鉴权边界允许的能力子集。 |
+| [`nomifun-gateway`](../../crates/backend/nomifun-gateway/) | **平台 Gateway MCP** —— `nomi_*` 兼容工具（会话、定时任务、伙伴记忆、需求平台等）的进程内能力注册表与传输层。Browser/Computer 走 canonical `AgentPlatform` Role host，不由 Gateway 持有。内部子进程经 `nomicore mcp-gateway-stdio` 接入，只接收服务端派生、带作用域、有效期和签名的能力声明；Conversation 或 build-extra 字段都不能授权。公开入口只投影其鉴权边界允许的能力子集。 |
 | [`nomifun-cron`](../../crates/backend/nomifun-cron/) | 定时任务：cron 表达式、时区修复、cron 守护进程、由斜杠命令驱动的创建。 |
 | [`nomifun-requirement`](../../crates/backend/nomifun-requirement/) | **AutoWork 持久执行器** —— 后端驱动、支持 boot-resume 的持久循环。通过 `RequirementSink` 与 Agent 层通信。 |
 | [`nomifun-idmm`](../../crates/backend/nomifun-idmm/) | 智能决策模式（IDMM）：一个按会话的监督器，在提供商故障与决策停滞中保活智能体 / 终端会话（规则层 + 旁路模型）。详见[智能决策](../guides/intelligent-decision.zh.md)。 |
@@ -98,7 +98,7 @@
 
 | 模块 | 角色 |
 | --- | --- |
-| `cli.rs` | 顶层 `nomicore` clap 解析器：`--host/--port/--data-dir/--work-dir/--app-version/--local/--log-dir/--log-level`，加上子命令 `mcp-requirement-stdio`、`mcp-knowledge-stdio`、`mcp-gateway-stdio`、`mcp-open-stdio`、`mcp-computer-stdio`、`terminal-hook`、`doctor`、`tools`、`call`、`backup`、`restore`。Web 宿主调用 `Cli::parse_from(["nomifun-web"])` 取得带默认值的实例，然后覆盖自身关心的项。 |
+| `cli.rs` | 顶层 `nomicore` clap 解析器：`--host/--port/--data-dir/--work-dir/--app-version/--local/--log-dir/--log-level`，加上子命令 `mcp-requirement-stdio`、`mcp-knowledge-stdio`、`mcp-gateway-stdio`、`mcp-open-stdio`、`terminal-hook`、`doctor`、`tools`、`call`、`backup`、`restore`。Web 宿主调用 `Cli::parse_from(["nomifun-web"])` 取得带默认值的实例，然后覆盖自身关心的项。 |
 | `bootstrap/` | 分层初始化：`tracing_init`（文件 + 控制台层）、`work_dir` 解析、`builtin_skills` 物化、`environment::{init_environment,init_data_layer}`、`admin::ensure_admin_credentials`（认证模式下的首次运行预置）。 |
 | `services.rs` | `AppServices` 大杂烩：每个功能 crate 的服务带着对应仓储一并接好。通过 `AppServices::from_config(database, &config)` 一次构建。 |
 | `router/` | `create_router(&services)` 以及类型化的 `routes`、`state`、`health`、`trace` 辅助；`build_preset_state` / `build_conversation_state` / `build_extension_states` / `build_module_states` / `build_ws_state`。 |

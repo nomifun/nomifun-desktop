@@ -50,7 +50,6 @@ Subcommands (used internally by the agent CLI bridge and for diagnostics):
 | `mcp-knowledge-stdio` | MCP stdio server for per-session knowledge search. |
 | `mcp-gateway-stdio` | Internal stdio transport for platform Gateway tools; accepts only a host-issued scoped, expiring signed claim. |
 | `mcp-open-stdio` | MCP stdio server exposing a reliable OS `open` tool. |
-| `mcp-computer-stdio` | MCP stdio server exposing desktop computer-use tools. |
 | `terminal-hook --event <kind>` | One-shot terminal lifecycle hook relay. |
 | `doctor` | Self-check: hydrate the agent registry, probe every CLI on `$PATH`, print a per-agent availability table. |
 | `remote open <binding_id>` | Open a canonical Remote AgentSession. |

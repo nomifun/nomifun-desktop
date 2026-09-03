@@ -119,7 +119,6 @@ stdio MCP bridge 和公开能力调用仍会用到。
 - `mcp-knowledge-stdio`
 - `mcp-gateway-stdio`
 - `mcp-open-stdio`
-- `mcp-computer-stdio`
 - `terminal-hook --event <kind>`
 - `doctor`
 - `tools`

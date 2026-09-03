@@ -26,12 +26,6 @@ pub mod deps;
 pub mod registry;
 pub mod server;
 
-#[cfg(feature = "browser-use")]
-pub mod browser_registry;
-
-#[cfg(feature = "computer-use")]
-pub mod computer_registry;
-
 // Pure support functions shared by multiple registered capability domains.
 // They do not dispatch tools and are not an alternate capability surface.
 mod id_schema;
@@ -46,12 +40,8 @@ mod terminal_support;
 // file here is missing its register() call (and vice-versa).
 mod caps_agent;
 mod caps_autowork;
-#[cfg(feature = "browser-use")]
-mod caps_browser;
 mod caps_channel;
 mod caps_companion;
-#[cfg(feature = "computer-use")]
-mod caps_computer;
 mod caps_conversation;
 mod caps_cron;
 mod caps_files;

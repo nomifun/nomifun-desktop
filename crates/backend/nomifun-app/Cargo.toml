@@ -151,11 +151,10 @@ twitch = ["nomifun-channel/twitch"]
 nostr = ["nomifun-channel/nostr"]
 qqbot = ["nomifun-channel/qqbot"]
 # Desktop control tools (desktop host enables this; web/server hosts do not).
-# Also pulls the discrete-tool MCP bridge (`mcp-computer-stdio`) deps so codex/
-# ACP sessions get the same computer-use; web/headless builds omit them entirely.
+# The canonical AgentPlatform Computer Role owns the native screen/input
+# implementation; web/headless builds omit the native stack entirely.
 computer-use = [
     "nomifun-ai-agent/computer-use",
-    "nomifun-gateway/computer-use",
     "dep:nomi-computer",
     "dep:nomi-config",
     "dep:nomi-tools",
@@ -165,12 +164,10 @@ computer-use = [
 # The native Nomi executor and Platform Gateway share the process-wide
 # BrowserSessionHub; web/headless builds omit the self-hosted-CDP / Chromium
 # stack entirely.
-# P3-GW1: also forwards to `nomifun-gateway/browser-use` so the Platform Gateway
-# exposes the per-companion `nomi_browser_*` tools (route A). Web/headless builds
-# omit the feature → the gateway registers no browser tools.
+# The Platform Gateway does not own or register Browser tools; canonical
+# AgentPlatform Role dispatch is the only Browser capability path.
 browser-use = [
     "nomifun-ai-agent/browser-use",
-    "nomifun-gateway/browser-use",
     "dep:nomi-browser",
     "dep:nomi-browser-engine",
     "dep:nomifun-browser-platform",
@@ -260,9 +257,8 @@ if-addrs = "0.13"
 # Decode request paths before matching the immutable embedded WebUI asset map.
 percent-encoding = "2"
 
-# Computer-use discrete-tool MCP bridge (`mcp-computer-stdio`) — facade over
-# ComputerTool. Optional; only the `computer-use` feature pulls the native
-# screen/input/UI-Automation stack, so web/headless builds stay lean.
+# Computer Role implementation. Optional; only the `computer-use` feature pulls
+# the native screen/input/UI-Automation stack, so web/headless builds stay lean.
 nomi-computer = { workspace = true, optional = true }
 # Browser facade used by the application-owned managed Host factory. Optional;
 # only the `browser-use` feature pulls the managed browser engine + Chromium,

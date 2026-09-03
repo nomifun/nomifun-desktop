@@ -170,11 +170,6 @@ impl Registry {
         register_instance_owner_domain(&mut caps, crate::caps_mcp::register);
         register_instance_owner_domain(&mut caps, crate::caps_agent::register);
         register_instance_owner_domain(&mut caps, crate::caps_creative_studio::register);
-        #[cfg(feature = "browser-use")]
-        register_instance_owner_domain(&mut caps, crate::caps_browser::register);
-        #[cfg(feature = "computer-use")]
-        register_instance_owner_domain(&mut caps, crate::caps_computer::register);
-
         validate_registered_tool_names(caps.iter().map(|capability| capability.meta.name))
             .unwrap_or_else(|error| panic!("gateway capability registration rejected: {error}"));
         let by_name = caps
@@ -396,8 +391,8 @@ mod tests {
     /// Floor on the registered-capability count. A drop below this almost always
     /// means a `caps_*` module's `register()` call was accidentally removed from
     /// `build()` (or a domain module deleted). Bump the floor when capabilities
-    /// are intentionally removed. Default build (no `browser-use`) sits just
-    /// below the feature-on count, so the floor allows for the gated module.
+    /// are intentionally removed. Host UI capabilities are currently absent
+    /// from every build until a canonical typed host-operation port is wired.
     #[test]
     fn registry_capability_count_floor() {
         let n = Registry::global().len();

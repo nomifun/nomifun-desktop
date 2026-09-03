@@ -6,18 +6,12 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# Gateway browser capabilities: a feature-gated adapter to the application-owned
-# BrowserSessionHub. `nomi-browser` remains only for the shared GW2 redline
-# classifier/sentinel; Gateway never constructs BrowserTool or Chromium.
-# 由 `nomifun-app` 的同名 feature 经 `nomifun-gateway/browser-use` 向下传导；关时网关不暴露
-# nomi_browser_* 工具（dispatch 走 unknown tool，schema 不注册）。依赖方向：gateway → nomi-browser
-# （nomi-browser 不反依赖 gateway，已核对无环）。
-browser-use = ["dep:nomi-browser", "dep:nomi-types", "dep:nomifun-browser-platform", "dep:futures"]
-# Gateway computer-use tools (single shared desktop ComputerTool). Forwarded by
-# `nomifun-app`'s `computer-use` feature via `nomifun-gateway/computer-use`; off
-# on headless/web hosts (which never pull the native screen/input/UIA stack).
-# Reuses the optional nomi-types/-config/-tools deps shared with browser-use.
-computer-use = ["dep:nomi-computer", "dep:nomi-types", "dep:nomi-config", "dep:nomi-tools"]
+# These names remain for nomifun-app feature forwarding. Gateway host tools
+# stay disabled until a canonical typed host-operation port is injected by
+# application composition. Enabling either feature adds no implementation
+# dependency and registers no browser/computer capability.
+browser-use = []
+computer-use = []
 
 [dependencies]
 nomifun-common.workspace = true
@@ -48,25 +42,13 @@ nomifun-shell.workspace = true
 # MCP-server + extensions/hub/skills domain capabilities.
 nomifun-mcp.workspace = true
 nomifun-extension.workspace = true
-# Shared GW2 classifier only; BrowserRegistry does not construct BrowserTool.
-nomi-browser = { workspace = true, optional = true }
-nomifun-browser-platform = { workspace = true, optional = true }
-# Computer-use: shared desktop ComputerTool. optional + feature 门控，关时不拉 screen/input/UIA 栈。
-nomi-computer = { workspace = true, optional = true }
-nomi-types = { workspace = true, optional = true }
-nomi-config = { workspace = true, optional = true }
-nomi-tools = { workspace = true, optional = true }
-# CC: BrowserRegistry::execute_parallel 用 futures::future::join_all 并行多 key（异 key 真并发/同 key 串行）。
-futures = { workspace = true, optional = true }
 axum.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Capability registry: single-source JSON Schema generation from each capability's
-# typed Request struct (same schemars major as rmcp 1.7 re-exports → identical shape
-# for the MCP clients consuming tools/list). The bridge passes these schema maps
-# straight through to `rmcp::model::Tool`, so only the gateway needs schemars.
+# Capability registry: single-source JSON Schema generation from each
+# capability's typed Request struct.
 schemars = "1"
 tracing.workspace = true
 sysinfo.workspace = true

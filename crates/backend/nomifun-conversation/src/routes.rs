@@ -133,7 +133,6 @@ fn strip_server_owned_runtime_fields(extra: &mut serde_json::Value) {
             "requirement_mcp_config",
             "knowledge_mcp_config",
             "open_mcp_config",
-            "computer_mcp_config",
             "user_id",
             "allowed_tools",
             "knowledge_mounts",

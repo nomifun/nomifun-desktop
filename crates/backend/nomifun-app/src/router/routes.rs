@@ -326,21 +326,6 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
         // REST, model tools and boot recovery share the same public facade and
         // therefore one scheduler handle map and one durable state machine.
         agent_execution_engine: states.agent_execution.clone(),
-        // Gateway is only an adapter to the one process-wide browser hub. An
-        // unsupported/degraded host leaves this as `None`; it never creates a
-        // fallback BrowserTool/Chromium owner inside the Gateway.
-        #[cfg(feature = "browser-use")]
-        browser_registry: services.browser_session_hub.as_ref().map(|hub| {
-            nomifun_gateway::browser_registry::BrowserRegistry::from_hub(
-                hub.as_ref().clone(),
-            )
-        }),
-        // Computer-use: one shared desktop ComputerTool (no per-companion
-        // isolation — the desktop is a single screen).
-        #[cfg(feature = "computer-use")]
-        computer_registry: Some(Arc::new(
-            nomifun_gateway::computer_registry::ComputerRegistry::new(),
-        )),
     });
     services.inject_gateway_deps(gateway_deps.clone()).await;
     tracing::info!(

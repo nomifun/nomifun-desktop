@@ -20,13 +20,9 @@ that need agent concepts should consume them through
 
 There are deliberate, feature-gated direct-dependency exceptions:
 
-- [`nomifun-app`](../../crates/backend/nomifun-app/) depends on optional
-  `nomi-computer`, `nomi-config`, `nomi-tools`, and `nomi-types` for the
-  `mcp-computer-stdio` bridge subcommand; browser automation stays in the
-  process-wide BrowserSessionHub.
-- [`nomifun-gateway`](../../crates/backend/nomifun-gateway/) depends on optional
-  `nomi-browser`, `nomi-computer`, `nomi-config`, `nomi-tools`, and
-  `nomi-types` for the platform Gateway browser/computer registries.
+- Browser and Computer implementations are owned by the canonical
+  `AgentPlatform` Role host in `nomifun-app`; the Platform Gateway does not
+  depend on or register concrete desktop-control tools.
 
 Do not add another direct `nomi-*` dependency without documenting why it cannot
 go through the normal seam or one of those bridge surfaces.
@@ -85,7 +81,7 @@ identifiers remain opaque.
 | [`nomifun-mcp`](../../crates/backend/nomifun-mcp/) | MCP server CRUD, **OAuth flow**, multi-CLI sync (`Claude`, `Codex`, `CodeBuddy`, `Gemini`, `Qwen`, `OpenCode`, `Nomi`, `Nomifun` adapters under `adapters/`), connection test, session injection of MCP capabilities (incl. built-in image-gen). |
 | [`nomifun-extension`](../../crates/backend/nomifun-extension/) | Extension and skill hub: manifests, dependency graph, classifier, install / enable / disable, packs that bundle skills + MCP servers + presets. |
 | [`nomifun-channel`](../../crates/backend/nomifun-channel/) | External chat-channel adapters (Telegram, Lark, DingTalk, WeChat) — feature-gated. Maps inbound messages into the shared Agent / Conversation runtime, resolves per-bot or per-platform companion ownership, and applies channel Agent context. This is an integration boundary, not a separate Agent type or mode. |
-| [`nomifun-gateway`](../../crates/backend/nomifun-gateway/) | **Platform Gateway MCP** — in-process capability registry and transport for `nomi_*` tools (conversations, cron, companion memory, requirements, and feature-gated browser/computer tools). Internal child processes reach it through `nomicore mcp-gateway-stdio` with a server-derived, scoped, expiring signed claim; no Conversation or build-extra field grants access. Authenticated public fronts project only their allowed capability subset. |
+| [`nomifun-gateway`](../../crates/backend/nomifun-gateway/) | **Platform Gateway MCP** — in-process capability registry and transport for `nomi_*` compatibility tools (conversations, cron, companion memory, requirements, and other domain services). Browser/Computer Role capabilities are owned by `AgentPlatform`. Internal child processes reach it through `nomicore mcp-gateway-stdio` with a server-derived, scoped, expiring signed claim; no Conversation or build-extra field grants access. Authenticated public fronts project only their allowed capability subset. |
 | [`nomifun-cron`](../../crates/backend/nomifun-cron/) | Scheduled tasks: cron expressions, timezone repair, the cron daemon, slash-command-driven creation. |
 | [`nomifun-requirement`](../../crates/backend/nomifun-requirement/) | **Persistent AutoWork runner** — backend-driven, boot-resume loop. Speaks to the Agent layer through `RequirementSink`. |
 | [`nomifun-idmm`](../../crates/backend/nomifun-idmm/) | Intelligent Decision-Making Mode: a per-session supervisor that keeps agent / terminal sessions alive through provider faults and decision stalls (rule tier + sidecar model). See [Intelligent Decision](../guides/intelligent-decision.md). |
@@ -118,7 +114,7 @@ link. It is structured as:
 
 | Module | Role |
 | --- | --- |
-| `cli.rs` | Top-level `nomicore` clap parser: `--host/--port/--data-dir/--work-dir/--app-version/--local/--log-dir/--log-level` plus subcommands `mcp-requirement-stdio`, `mcp-knowledge-stdio`, `mcp-gateway-stdio`, `mcp-open-stdio`, `mcp-computer-stdio`, `terminal-hook`, `doctor`, `tools`, `call`, `backup`, and `restore`. The web host calls `Cli::parse_from(["nomifun-web"])` to get a defaulted instance, then overrides what it owns. |
+| `cli.rs` | Top-level `nomicore` clap parser: `--host/--port/--data-dir/--work-dir/--app-version/--local/--log-dir/--log-level` plus subcommands `mcp-requirement-stdio`, `mcp-knowledge-stdio`, `mcp-gateway-stdio`, `mcp-open-stdio`, `terminal-hook`, `doctor`, `tools`, `call`, `backup`, and `restore`. The web host calls `Cli::parse_from(["nomifun-web"])` to get a defaulted instance, then overrides what it owns. |
 | `bootstrap/` | Layered initialization: `tracing_init` (file + console layers), `work_dir` resolution, `builtin_skills` materialization, `environment::{init_environment,init_data_layer}`, `admin::ensure_admin_credentials` for first-run pre-seed in authenticated mode. |
 | `services.rs` | The `AppServices` god-bag: every feature-crate service wired together with the right repositories. Built once via `AppServices::from_config(database, &config)`. |
 | `router/` | `create_router(&services)` and the typed `routes`, `state`, `health`, `trace` helpers; `build_preset_state` / `build_conversation_state` / `build_extension_states` / `build_module_states` / `build_ws_state`. |

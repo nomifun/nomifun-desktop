@@ -56,7 +56,6 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | `mcp-knowledge-stdio` | 每会话 knowledge search 的 MCP stdio server。 |
 | `mcp-gateway-stdio` | 平台 Gateway 工具的内部 stdio 传输；只接受宿主签发、带作用域、有效期和签名的能力声明。 |
 | `mcp-open-stdio` | 暴露可靠 OS `open` 工具的 MCP stdio server。 |
-| `mcp-computer-stdio` | 暴露 desktop computer-use 工具的 MCP stdio server。 |
 | `terminal-hook --event <kind>` | 一次性 terminal 生命周期 hook relay。 |
 | `doctor` | 自检：填充智能体注册表，逐个探测 `$PATH` 上的每个 CLI，并打印一张按智能体维度的可用性表格。 |
 | `remote open <binding_id>` | 打开 canonical Remote AgentSession。 |

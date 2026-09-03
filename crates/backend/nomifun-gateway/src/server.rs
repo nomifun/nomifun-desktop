@@ -5,8 +5,6 @@
 //! it forwards each tool call back here as an authenticated `POST /tool`.
 
 use std::net::SocketAddr;
-#[cfg(feature = "browser-use")]
-use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
 use axum::Json;
@@ -15,8 +13,6 @@ use axum::extract::{DefaultBodyLimit, Extension, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-#[cfg(feature = "browser-use")]
-use futures::FutureExt;
 use nomifun_api_types::{
     GATEWAY_CALL_TOOL_OPERATION, GATEWAY_CAPABILITY_DOMAIN,
     GatewayCapabilityClaims, GatewayCapabilityScope, GatewayMcpConfig,
@@ -36,13 +32,7 @@ use tracing::{debug, info, warn};
 use crate::deps::{CallerCtx, CompatibilityCapabilityHost};
 use crate::registry::Registry;
 
-#[cfg(feature = "browser-use")]
-const BROWSER_OWNER_SWEEP_INTERVAL: std::time::Duration =
-    std::time::Duration::from_millis(500);
-#[cfg(feature = "browser-use")]
-const BROWSER_CLEANUP_FAILURE_BACKOFF_MAX: std::time::Duration =
-    std::time::Duration::from_secs(30);
-const BROWSER_REVOKE_WAIT: std::time::Duration =
+const GATEWAY_STOP_WAIT: std::time::Duration =
     std::time::Duration::from_millis(750);
 /// Parsed requests are charged to the trusted domain/user/session family
 /// shared by every sibling runtime lease. This is a per-task structural
@@ -72,27 +62,15 @@ const GATEWAY_REQUEST_BODY_TIMEOUT: std::time::Duration =
 /// no other owner. Nothing inside the bundle references the server back, so
 /// there is no Arc cycle.
 type DepsSlot = Arc<RwLock<Option<Arc<CompatibilityCapabilityHost>>>>;
-#[cfg(feature = "browser-use")]
-type BrowserRegistrySlot =
-    Arc<RwLock<Option<crate::browser_registry::BrowserRegistry>>>;
 
-type StopCompletion =
-    tokio::sync::watch::Receiver<Option<Result<(), String>>>;
+type StopCompletion = tokio::sync::watch::Receiver<Option<Result<(), String>>>;
 
 type IngressCompletion =
     tokio::sync::watch::Receiver<Option<Result<(), String>>>;
 
-struct GatewayCleanupWorker {
-    shutdown: tokio::sync::watch::Sender<bool>,
-    handle: tokio::task::JoinHandle<()>,
-    #[cfg(feature = "browser-use")]
-    cleanup_state: GatewayState,
-}
-
 struct GatewayLifecycle {
     http_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     http_handle: Option<tokio::task::JoinHandle<()>>,
-    browser_cleanup_worker: Option<GatewayCleanupWorker>,
     ingress_completion: Option<IngressCompletion>,
     stop_completion: Option<StopCompletion>,
 }
@@ -115,13 +93,6 @@ impl IngressTestGate {
 
 #[cfg(test)]
 type IngressTestGateSlot = Arc<RwLock<Option<Arc<IngressTestGate>>>>;
-
-#[cfg(all(test, feature = "browser-use"))]
-#[derive(Default)]
-struct BrowserCleanupTestControl {
-    sweep_attempts: std::sync::atomic::AtomicUsize,
-    sweep_panics_remaining: std::sync::atomic::AtomicUsize,
-}
 
 #[derive(Clone)]
 struct GatewayBodyReadAdmission {
@@ -185,12 +156,8 @@ struct GatewayState {
     issuer: Arc<LoopbackCapabilityIssuer>,
     deps: DepsSlot,
     body_read_admission: GatewayBodyReadAdmission,
-    #[cfg(feature = "browser-use")]
-    browser_registry: BrowserRegistrySlot,
     #[cfg(test)]
     ingress_test_gate: IngressTestGateSlot,
-    #[cfg(all(test, feature = "browser-use"))]
-    browser_cleanup_test_control: Arc<BrowserCleanupTestControl>,
 }
 
 /// In-process HTTP MCP server for the Platform Gateway tools.
@@ -200,12 +167,8 @@ pub struct GatewayMcpServer {
     shutdown_runtime: tokio::runtime::Handle,
     lifecycle: Mutex<GatewayLifecycle>,
     deps_slot: DepsSlot,
-    #[cfg(feature = "browser-use")]
-    browser_registry_slot: BrowserRegistrySlot,
     #[cfg(test)]
     ingress_test_gate_slot: IngressTestGateSlot,
-    #[cfg(all(test, feature = "browser-use"))]
-    browser_cleanup_test_control: Arc<BrowserCleanupTestControl>,
 }
 
 impl GatewayMcpServer {
@@ -224,27 +187,16 @@ impl GatewayMcpServer {
             .map_err(|e| format!("Failed to read gateway MCP local addr: {e}"))?;
 
         let deps_slot: DepsSlot = Arc::new(RwLock::new(None));
-        #[cfg(feature = "browser-use")]
-        let browser_registry_slot: BrowserRegistrySlot =
-            Arc::new(RwLock::new(None));
         #[cfg(test)]
         let ingress_test_gate_slot: IngressTestGateSlot =
             Arc::new(RwLock::new(None));
-        #[cfg(all(test, feature = "browser-use"))]
-        let browser_cleanup_test_control =
-            Arc::new(BrowserCleanupTestControl::default());
 
         let state = GatewayState {
             issuer: issuer.clone(),
             deps: deps_slot.clone(),
             body_read_admission: GatewayBodyReadAdmission::for_machine(),
-            #[cfg(feature = "browser-use")]
-            browser_registry: browser_registry_slot.clone(),
             #[cfg(test)]
             ingress_test_gate: ingress_test_gate_slot.clone(),
-            #[cfg(all(test, feature = "browser-use"))]
-            browser_cleanup_test_control:
-                browser_cleanup_test_control.clone(),
         };
 
         let tool_router = axum::Router::new()
@@ -277,28 +229,6 @@ impl GatewayMcpServer {
         );
         let app = app.with_state(state.clone());
 
-        #[cfg(feature = "browser-use")]
-        let browser_cleanup_worker = {
-            let cleanup_state = state;
-            let (shutdown_tx, mut shutdown_rx) =
-                tokio::sync::watch::channel(false);
-            let fallback_state = cleanup_state.clone();
-            let handle = tokio::spawn(async move {
-                supervise_gateway_browser_cleanup(
-                    cleanup_state,
-                    &mut shutdown_rx,
-                )
-                .await;
-            });
-            Some(GatewayCleanupWorker {
-                shutdown: shutdown_tx,
-                handle,
-                cleanup_state: fallback_state,
-            })
-        };
-        #[cfg(not(feature = "browser-use"))]
-        let browser_cleanup_worker = None;
-
         let (http_shutdown, http_shutdown_rx) =
             tokio::sync::oneshot::channel();
         let handle = tokio::spawn(async move {
@@ -325,28 +255,18 @@ impl GatewayMcpServer {
             lifecycle: Mutex::new(GatewayLifecycle {
                 http_shutdown: Some(http_shutdown),
                 http_handle: Some(handle),
-                browser_cleanup_worker,
                 ingress_completion: None,
                 stop_completion: None,
             }),
             deps_slot,
-            #[cfg(feature = "browser-use")]
-            browser_registry_slot,
             #[cfg(test)]
             ingress_test_gate_slot,
-            #[cfg(all(test, feature = "browser-use"))]
-            browser_cleanup_test_control,
         })
     }
 
     /// Wire the dependency bundle after router construction. Must be called
     /// once before the first tool request arrives.
     pub async fn set_deps(&self, deps: Arc<CompatibilityCapabilityHost>) {
-        #[cfg(feature = "browser-use")]
-        {
-            *self.browser_registry_slot.write().await =
-                deps.browser_registry.clone();
-        }
         *self.deps_slot.write().await = Some(deps);
     }
 
@@ -376,7 +296,6 @@ impl GatewayMcpServer {
             ingress_completion_tx,
             completion_tx,
             http_handle,
-            browser_cleanup_worker,
         ) = {
             let mut lifecycle = self
                 .lifecycle
@@ -398,8 +317,6 @@ impl GatewayMcpServer {
             }
 
             let http_handle = lifecycle.http_handle.take();
-            let browser_cleanup_worker =
-                lifecycle.browser_cleanup_worker.take();
             let (ingress_completion_tx, ingress_completion) =
                 tokio::sync::watch::channel(None);
             let (completion_tx, completion) =
@@ -412,7 +329,6 @@ impl GatewayMcpServer {
                 ingress_completion_tx,
                 completion_tx,
                 http_handle,
-                browser_cleanup_worker,
             )
         };
 
@@ -425,7 +341,6 @@ impl GatewayMcpServer {
         self.shutdown_runtime.spawn(async move {
             let result = finish_stop(
                 http_handle,
-                browser_cleanup_worker,
                 ingress_completion_tx,
             )
             .await;
@@ -435,15 +350,13 @@ impl GatewayMcpServer {
         (ingress_completion, completion)
     }
 
-    /// Stop HTTP ingress, wait until it is fully quiesced, and then wait briefly
-    /// for the durable browser owner drain.
+    /// Stop HTTP ingress and wait until it is fully quiesced.
     ///
     /// The timeout applies only after Axum has stopped accepting and every
     /// accepted request has completed. Therefore any return from this method is
-    /// an authoritative ingress barrier. A cleanup timeout detaches only the
-    /// caller; the shared durable cleanup flight retains exact-owner authority.
+    /// an authoritative ingress barrier.
     pub async fn stop_and_wait(&self) -> Result<(), String> {
-        self.stop_and_wait_for(BROWSER_REVOKE_WAIT).await
+        self.stop_and_wait_for(GATEWAY_STOP_WAIT).await
     }
 
     /// Wait for the already-started durable shutdown authority to reach its
@@ -476,7 +389,7 @@ impl GatewayMcpServer {
         match time::timeout(wait, wait_for_stop_completion(completion)).await {
             Ok(result) => result,
             Err(_) => Err(format!(
-                "Gateway MCP browser owner cleanup exceeded the {} ms shutdown wait after HTTP ingress quiesced; durable cleanup continues",
+                "Gateway MCP shutdown exceeded the {} ms wait after HTTP ingress quiesced",
                 wait.as_millis()
             )),
         }
@@ -504,7 +417,6 @@ impl Drop for GatewayMcpServer {
 
 async fn finish_stop(
     http_handle: Option<tokio::task::JoinHandle<()>>,
-    browser_cleanup_worker: Option<GatewayCleanupWorker>,
     ingress_completion_tx: tokio::sync::watch::Sender<Option<Result<(), String>>>,
 ) -> Result<(), String> {
     let ingress_result = if let Some(handle) = http_handle {
@@ -518,39 +430,7 @@ async fn finish_stop(
         Ok(())
     };
     let _ = ingress_completion_tx.send(Some(ingress_result.clone()));
-
-    let cleanup_result = if let Some(worker) = browser_cleanup_worker {
-        let _ = worker.shutdown.send(true);
-        match worker.handle.await {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                let join_error = format!(
-                    "Gateway MCP browser cleanup task failed while stopping: {error}"
-                );
-                warn!(error = %error, "Gateway MCP browser cleanup supervisor failed; running authoritative fallback drain");
-                // A panic/abort in the periodic supervisor may not discard the
-                // exact-owner authority retained by the server. The fallback
-                // is awaited by this same durable stop flight, so there is
-                // still at most one terminal drain and no detached retry task.
-                #[cfg(feature = "browser-use")]
-                drain_gateway_browser_owners_until_clean(
-                    &worker.cleanup_state,
-                )
-                .await;
-                Err(join_error)
-            }
-        }
-    } else {
-        Ok(())
-    };
-
-    match (ingress_result, cleanup_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(ingress_error), Err(cleanup_error)) => Err(format!(
-            "{ingress_error}; {cleanup_error}"
-        )),
-    }
+    ingress_result
 }
 
 async fn wait_for_stage_completion(
@@ -599,154 +479,6 @@ async fn handle_ingress_test_gate(
         }
     }
     StatusCode::NO_CONTENT
-}
-
-#[cfg(feature = "browser-use")]
-async fn gateway_browser_registry(
-    state: &GatewayState,
-) -> Option<crate::browser_registry::BrowserRegistry> {
-    state.browser_registry.read().await.clone()
-}
-
-#[cfg(feature = "browser-use")]
-async fn sweep_gateway_browser_owners(state: &GatewayState) {
-    #[cfg(test)]
-    {
-        use std::sync::atomic::Ordering;
-
-        state
-            .browser_cleanup_test_control
-            .sweep_attempts
-            .fetch_add(1, Ordering::AcqRel);
-        if state
-            .browser_cleanup_test_control
-            .sweep_panics_remaining
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok()
-        {
-            panic!("injected gateway browser cleanup sweep panic");
-        }
-    }
-
-    let Some(registry) = gateway_browser_registry(state).await else {
-        return;
-    };
-    let issuer = Arc::clone(&state.issuer);
-    registry
-        .cleanup_inactive_signed_child_leases(|lease_id| {
-            issuer.is_lease_active(GATEWAY_CAPABILITY_DOMAIN, lease_id)
-        })
-        .await;
-    registry.retry_pending_browser_cleanups().await;
-}
-
-#[cfg(feature = "browser-use")]
-fn next_browser_cleanup_failure_backoff(
-    current: std::time::Duration,
-) -> std::time::Duration {
-    current
-        .checked_mul(2)
-        .unwrap_or(BROWSER_CLEANUP_FAILURE_BACKOFF_MAX)
-        .min(BROWSER_CLEANUP_FAILURE_BACKOFF_MAX)
-}
-
-#[cfg(feature = "browser-use")]
-async fn supervise_gateway_browser_cleanup(
-    state: GatewayState,
-    shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
-) {
-    let mut next_sweep_delay = std::time::Duration::ZERO;
-    let mut failure_backoff = BROWSER_OWNER_SWEEP_INTERVAL;
-
-    loop {
-        if *shutdown_rx.borrow() {
-            drain_gateway_browser_owners_until_clean(&state).await;
-            return;
-        }
-
-        tokio::select! {
-            biased;
-            changed = shutdown_rx.changed() => {
-                if changed.is_err() || *shutdown_rx.borrow() {
-                    drain_gateway_browser_owners_until_clean(&state).await;
-                    return;
-                }
-            }
-            _ = time::sleep(next_sweep_delay) => {
-                match AssertUnwindSafe(sweep_gateway_browser_owners(&state))
-                    .catch_unwind()
-                    .await
-                {
-                    Ok(()) => {
-                        next_sweep_delay = BROWSER_OWNER_SWEEP_INTERVAL;
-                        failure_backoff = BROWSER_OWNER_SWEEP_INTERVAL;
-                    }
-                    Err(_) => {
-                        warn!(
-                            retry_delay_ms = failure_backoff.as_millis(),
-                            "Gateway MCP browser owner sweep panicked; supervisor retained authority and will retry"
-                        );
-                        next_sweep_delay = failure_backoff;
-                        failure_backoff =
-                            next_browser_cleanup_failure_backoff(failure_backoff);
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[cfg(feature = "browser-use")]
-async fn drain_gateway_browser_owners_once(state: &GatewayState) -> bool {
-    let Some(registry) = gateway_browser_registry(state).await else {
-        return true;
-    };
-
-    match registry.drain_signed_child_browser_owners_once().await {
-        Ok(()) => true,
-        Err(error) => {
-            let status = registry.signed_child_cleanup_status();
-            warn!(
-                code = ?error.code,
-                retryable = error.retryable,
-                pending_attachments = status.pending_attachments,
-                pending_owner_leases = status.pending_owner_leases,
-                revocation_pending_attachments =
-                    status.revocation_pending_attachments,
-                "Gateway MCP browser owner cleanup remains pending; retrying"
-            );
-            false
-        }
-    }
-}
-
-#[cfg(feature = "browser-use")]
-async fn drain_gateway_browser_owners_until_clean(state: &GatewayState) {
-    // Ingress is already quiesced, so the set of SignedChild runtimes can only
-    // shrink. Keep one exact-owner authority alive until its postcondition is
-    // true; callers may time out without cancelling this task. Both ordinary
-    // failures and panics are retried with a capped delay to avoid a hot loop.
-    let mut failure_backoff = BROWSER_OWNER_SWEEP_INTERVAL;
-    loop {
-        match AssertUnwindSafe(drain_gateway_browser_owners_once(state))
-            .catch_unwind()
-            .await
-        {
-            Ok(true) => return,
-            Ok(false) => {}
-            Err(_) => {
-                warn!(
-                    retry_delay_ms = failure_backoff.as_millis(),
-                    "Gateway MCP browser owner final drain panicked; exact-owner authority retained for retry"
-                );
-            }
-        }
-        time::sleep(failure_backoff).await;
-        failure_backoff =
-            next_browser_cleanup_failure_backoff(failure_backoff);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -981,8 +713,6 @@ async fn handle_tool_request(
         // never the external Remote surface.
         ..Default::default()
     };
-    #[cfg(feature = "browser-use")]
-    let ctx = ctx;
 
     let deps = match state.deps.read().await.clone() {
         Some(d) => d,
@@ -1017,31 +747,6 @@ async fn handle_tool_request(
         }));
     }
 
-    // Browser identity/owner attachment is deliberately the last pre-dispatch
-    // step. The registry can renew or issue a Hub owner lease, so no rejected
-    // request may reach it before owner classification, tool visibility, and
-    // argument validation have all succeeded.
-    #[cfg(feature = "browser-use")]
-    let ctx = if tool.starts_with("nomi_browser_")
-        && let Some(registry) = deps.browser_registry.clone()
-    {
-        match preflight_and_attach_browser_identity(
-            registry,
-            ctx,
-            &tool,
-            &args,
-            claims.lease_id.clone(),
-            claims.expires_at_unix_secs.saturating_mul(1_000),
-        )
-        .await
-        {
-            Ok(ctx) => ctx,
-            Err(error) => return finish(error),
-        }
-    } else {
-        ctx
-    };
-
     info!(tool, caller = ?ctx.conversation_id, "Gateway MCP: dispatching tool");
 
     // The capability registry owns every tool and its typed schema. The
@@ -1059,60 +764,6 @@ async fn handle_tool_request(
     };
 
     finish(response_body)
-}
-
-#[cfg(feature = "browser-use")]
-async fn preflight_and_attach_browser_identity(
-    registry: crate::browser_registry::BrowserRegistry,
-    ctx: CallerCtx,
-    tool: &str,
-    args: &Value,
-    lease_id: String,
-    capability_expires_at_ms: u64,
-) -> Result<CallerCtx, Value> {
-    match Registry::global().validate_arguments(tool, args) {
-        Some(Ok(())) => {}
-        Some(Err(error)) => return Err(error),
-        None => return Err(json!({ "error": format!("Unknown tool: {tool}") })),
-    }
-    registry
-        .validate_managed_request(&ctx, tool, args)
-        .await
-        .map_err(crate::browser_registry::platform_error_to_value)?;
-    let ctx = attach_browser_identity(
-        registry.clone(),
-        ctx,
-        lease_id,
-        capability_expires_at_ms,
-    )
-    .await?;
-    // The owner-scoped lane_id check needs the trusted identity, which only
-    // exists after attachment. Re-validate so an unowned handle fails here
-    // rather than surfacing later from the bound Hub dispatch.
-    registry
-        .validate_managed_request(&ctx, tool, args)
-        .await
-        .map_err(crate::browser_registry::platform_error_to_value)?;
-    Ok(ctx)
-}
-
-#[cfg(feature = "browser-use")]
-async fn attach_browser_identity(
-    registry: crate::browser_registry::BrowserRegistry,
-    mut ctx: CallerCtx,
-    lease_id: String,
-    capability_expires_at_ms: u64,
-) -> Result<CallerCtx, Value> {
-    registry
-        .attach_trusted_identity(
-            &mut ctx,
-            &lease_id,
-            None,
-            capability_expires_at_ms,
-        )
-        .await
-        .map_err(crate::browser_registry::platform_error_to_value)?;
-    Ok(ctx)
 }
 
 async fn handle_capability_renew(
@@ -1149,30 +800,6 @@ async fn handle_capability_revoke(
         .revoke(GATEWAY_CAPABILITY_DOMAIN, &request)
     {
         Ok(()) => {
-            // The signed capability is already irreversibly revoked at this
-            // point. Tear down its browser owner immediately rather than
-            // waiting for the Hub lease sweep. Cleanup is deliberately never
-            // attempted for an invalid renewal proof.
-            #[cfg(feature = "browser-use")]
-            {
-                let registry = state
-                    .deps
-                    .read()
-                    .await
-                    .as_ref()
-                    .and_then(|deps| deps.browser_registry.clone());
-                if let Some(registry) = registry
-                    && let Err(error) = registry
-                        .revoke_signed_child_lease(&request.lease_id)
-                        .await
-                {
-                    warn!(
-                        lease_id = %request.lease_id,
-                        code = ?error.code,
-                        "Gateway MCP: browser owner cleanup after capability revoke failed"
-                    );
-                }
-            }
             (StatusCode::NO_CONTENT, Json(Value::Null)).into_response()
         }
         Err(_) => (
@@ -1207,17 +834,6 @@ pub(crate) fn ok<T: serde::Serialize>(payload: T) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "browser-use")]
-    use nomifun_common::UserId;
-    #[cfg(feature = "browser-use")]
-    use nomifun_browser_platform::{
-        BrowserHostDriver, BrowserHostFactory, BrowserHostId, BrowserProfileFootprint,
-        BrowserLaneDriver, BrowserOperation, BrowserOperationResult,
-        BrowserPlatformError, BrowserSessionHub, DriverOperationContext,
-        HostLaunchRequest, HostLifecycleState, HubConfig, LaneLaunchRequest,
-    };
-    #[cfg(feature = "browser-use")]
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const TEST_OWNER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const TEST_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
@@ -1258,13 +874,7 @@ mod tests {
             issuer,
             deps: Arc::new(RwLock::new(None)),
             body_read_admission,
-            #[cfg(feature = "browser-use")]
-            browser_registry: Arc::new(RwLock::new(None)),
             ingress_test_gate: Arc::new(RwLock::new(None)),
-            #[cfg(feature = "browser-use")]
-            browser_cleanup_test_control: Arc::new(
-                BrowserCleanupTestControl::default(),
-            ),
         }
     }
 
@@ -1528,200 +1138,6 @@ mod tests {
         assert_eq!(admission.slots.available_permits(), 1);
     }
 
-    #[cfg(feature = "browser-use")]
-    struct BrowserCloseProbe {
-        lane_closes: AtomicUsize,
-    }
-
-    #[cfg(feature = "browser-use")]
-    struct GatedBrowserCloseProbe {
-        lane_closes: AtomicUsize,
-        close_started: tokio::sync::Semaphore,
-        close_release: tokio::sync::Semaphore,
-    }
-
-    #[cfg(feature = "browser-use")]
-    struct GatedBrowserLane {
-        probe: Arc<GatedBrowserCloseProbe>,
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[async_trait::async_trait]
-    impl BrowserLaneDriver for GatedBrowserLane {
-        async fn execute(
-            &self,
-            _operation: BrowserOperation,
-            _context: DriverOperationContext,
-        ) -> Result<BrowserOperationResult, BrowserPlatformError> {
-            Ok(BrowserOperationResult::default())
-        }
-
-        async fn close(&self) -> Result<(), BrowserPlatformError> {
-            self.probe.close_started.add_permits(1);
-            let permit = self
-                .probe
-                .close_release
-                .acquire()
-                .await
-                .expect("test close gate must remain open");
-            permit.forget();
-            self.probe.lane_closes.fetch_add(1, Ordering::AcqRel);
-            Ok(())
-        }
-    }
-
-    #[cfg(feature = "browser-use")]
-    struct GatedBrowserHost {
-        host_id: BrowserHostId,
-        probe: Arc<GatedBrowserCloseProbe>,
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[async_trait::async_trait]
-    impl BrowserHostDriver for GatedBrowserHost {
-        fn host_id(&self) -> BrowserHostId {
-            self.host_id.clone()
-        }
-
-        fn epoch(&self) -> u64 {
-            1
-        }
-
-        // This fake manages no on-disk profile, so report a completed
-        // zero measurement. Inheriting the trait default would instead
-        // mean "could not measure", which fences Primary fail-closed.
-        async fn profile_footprint(
-            &self,
-            _stop_after_bytes: u64,
-            _stop_after_entries: u64,
-        ) -> Result<Option<BrowserProfileFootprint>, BrowserPlatformError> {
-            Ok(Some(BrowserProfileFootprint::EMPTY))
-        }
-
-        fn state(&self) -> HostLifecycleState {
-            HostLifecycleState::Running
-        }
-
-        async fn open_lane(
-            &self,
-            _request: LaneLaunchRequest,
-        ) -> Result<Arc<dyn BrowserLaneDriver>, BrowserPlatformError> {
-            Ok(Arc::new(GatedBrowserLane {
-                probe: Arc::clone(&self.probe),
-            }))
-        }
-
-        async fn shutdown(&self) -> Result<(), BrowserPlatformError> {
-            Ok(())
-        }
-    }
-
-    #[cfg(feature = "browser-use")]
-    struct GatedBrowserFactory {
-        probe: Arc<GatedBrowserCloseProbe>,
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[async_trait::async_trait]
-    impl BrowserHostFactory for GatedBrowserFactory {
-        async fn launch(
-            &self,
-            request: HostLaunchRequest,
-        ) -> Result<Arc<dyn BrowserHostDriver>, BrowserPlatformError> {
-            Ok(Arc::new(GatedBrowserHost {
-                host_id: request.host_id,
-                probe: Arc::clone(&self.probe),
-            }))
-        }
-    }
-
-    #[cfg(feature = "browser-use")]
-    struct TestBrowserLane {
-        probe: Arc<BrowserCloseProbe>,
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[async_trait::async_trait]
-    impl BrowserLaneDriver for TestBrowserLane {
-        async fn execute(
-            &self,
-            _operation: BrowserOperation,
-            _context: DriverOperationContext,
-        ) -> Result<BrowserOperationResult, BrowserPlatformError> {
-            Ok(BrowserOperationResult::default())
-        }
-
-        async fn close(&self) -> Result<(), BrowserPlatformError> {
-            self.probe.lane_closes.fetch_add(1, Ordering::AcqRel);
-            Ok(())
-        }
-    }
-
-    #[cfg(feature = "browser-use")]
-    struct TestBrowserHost {
-        host_id: BrowserHostId,
-        probe: Arc<BrowserCloseProbe>,
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[async_trait::async_trait]
-    impl BrowserHostDriver for TestBrowserHost {
-        fn host_id(&self) -> BrowserHostId {
-            self.host_id.clone()
-        }
-
-        fn epoch(&self) -> u64 {
-            1
-        }
-
-        // This fake manages no on-disk profile, so report a completed
-        // zero measurement. Inheriting the trait default would instead
-        // mean "could not measure", which fences Primary fail-closed.
-        async fn profile_footprint(
-            &self,
-            _stop_after_bytes: u64,
-            _stop_after_entries: u64,
-        ) -> Result<Option<BrowserProfileFootprint>, BrowserPlatformError> {
-            Ok(Some(BrowserProfileFootprint::EMPTY))
-        }
-
-        fn state(&self) -> HostLifecycleState {
-            HostLifecycleState::Running
-        }
-
-        async fn open_lane(
-            &self,
-            _request: LaneLaunchRequest,
-        ) -> Result<Arc<dyn BrowserLaneDriver>, BrowserPlatformError> {
-            Ok(Arc::new(TestBrowserLane {
-                probe: Arc::clone(&self.probe),
-            }))
-        }
-
-        async fn shutdown(&self) -> Result<(), BrowserPlatformError> {
-            Ok(())
-        }
-    }
-
-    #[cfg(feature = "browser-use")]
-    struct TestBrowserFactory {
-        probe: Arc<BrowserCloseProbe>,
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[async_trait::async_trait]
-    impl BrowserHostFactory for TestBrowserFactory {
-        async fn launch(
-            &self,
-            request: HostLaunchRequest,
-        ) -> Result<Arc<dyn BrowserHostDriver>, BrowserPlatformError> {
-            Ok(Arc::new(TestBrowserHost {
-                host_id: request.host_id,
-                probe: Arc::clone(&self.probe),
-            }))
-        }
-    }
-
     fn child(
         server: &GatewayMcpServer,
         user_id: &str,
@@ -1942,282 +1358,6 @@ mod tests {
         .expect("durable shutdown supervisor must finish after ingress drains");
     }
 
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn final_browser_drain_starts_only_after_in_flight_request_finishes() {
-        let server = GatewayMcpServer::start().await.unwrap();
-        let addr = server.http_addr;
-        let ingress_gate = Arc::new(IngressTestGate::new());
-        *server.ingress_test_gate_slot.write().await =
-            Some(ingress_gate.clone());
-
-        let close_probe = Arc::new(GatedBrowserCloseProbe {
-            lane_closes: AtomicUsize::new(0),
-            close_started: tokio::sync::Semaphore::new(0),
-            close_release: tokio::sync::Semaphore::new(0),
-        });
-        let hub = BrowserSessionHub::new(
-            Arc::new(GatedBrowserFactory {
-                probe: close_probe.clone(),
-            }),
-            HubConfig::default(),
-        );
-        let registry =
-            crate::browser_registry::BrowserRegistry::from_hub(hub.clone());
-        *server.browser_registry_slot.write().await = Some(registry.clone());
-
-        let ctx = CallerCtx {
-            conversation_id: Some(
-                nomifun_common::ConversationId::parse(TEST_CONVERSATION_ID)
-                    .unwrap(),
-            ),
-            user_id: UserId::parse(TEST_OWNER_ID).unwrap(),
-            ..Default::default()
-        };
-        let signed_child =
-            child(&server, TEST_OWNER_ID, TEST_CONVERSATION_ID);
-        let runtime_lease_id =
-            signed_child.bootstrap.access.claims.lease_id.clone();
-        let ctx = attach_browser_identity(
-            registry,
-            ctx,
-            runtime_lease_id,
-            u64::MAX,
-        )
-        .await
-        .unwrap();
-        server
-            .browser_registry_slot
-            .read()
-            .await
-            .clone()
-            .expect("registry must be installed")
-            .open(&ctx, None)
-            .await
-            .unwrap();
-        assert_eq!(hub.list_lanes().await.len(), 1);
-
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .pool_max_idle_per_host(0)
-            .build()
-            .unwrap();
-        let in_flight = tokio::spawn(async move {
-            client
-                .get(format!("http://{addr}/__test__/ingress-gate"))
-                .send()
-                .await
-        });
-        let entered = time::timeout(
-            std::time::Duration::from_secs(1),
-            ingress_gate.entered.acquire(),
-        )
-        .await
-        .expect("request must enter the handler")
-        .expect("test gate must remain open");
-        entered.forget();
-
-        let (_, stop) = server.begin_stop();
-        assert!(
-            time::timeout(
-                std::time::Duration::from_millis(50),
-                close_probe.close_started.acquire(),
-            )
-            .await
-            .is_err(),
-            "final cleanup must not take its snapshot while ingress is active"
-        );
-        assert_eq!(hub.list_lanes().await.len(), 1);
-
-        ingress_gate.release.add_permits(1);
-        let response = time::timeout(
-            std::time::Duration::from_secs(1),
-            in_flight,
-        )
-        .await
-        .expect("in-flight request must finish after release")
-        .expect("request task must not panic")
-        .expect("accepted request must complete successfully");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-        let close_started = time::timeout(
-            std::time::Duration::from_secs(1),
-            close_probe.close_started.acquire(),
-        )
-        .await
-        .expect("cleanup must start after ingress drains")
-        .expect("close gate must remain open");
-        close_started.forget();
-        close_probe.close_release.add_permits(1);
-
-        time::timeout(
-            std::time::Duration::from_secs(2),
-            wait_for_stop_completion(stop),
-        )
-        .await
-        .expect("stop must complete after cleanup is released")
-        .expect("ordered shutdown must succeed");
-        assert!(hub.list_lanes().await.is_empty());
-        assert_eq!(close_probe.lane_closes.load(Ordering::Acquire), 1);
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn browser_cleanup_supervisor_recovers_after_a_sweep_panic() {
-        let server = GatewayMcpServer::start().await.unwrap();
-        let probe = Arc::new(BrowserCloseProbe {
-            lane_closes: AtomicUsize::new(0),
-        });
-        let hub = BrowserSessionHub::new(
-            Arc::new(TestBrowserFactory {
-                probe: Arc::clone(&probe),
-            }),
-            HubConfig::default(),
-        );
-        let registry =
-            crate::browser_registry::BrowserRegistry::from_hub(hub.clone());
-        *server.browser_registry_slot.write().await = Some(registry.clone());
-
-        let signed_child =
-            child(&server, TEST_OWNER_ID, TEST_CONVERSATION_ID);
-        let runtime_lease_id =
-            signed_child.bootstrap.access.claims.lease_id.clone();
-        let ctx = CallerCtx {
-            conversation_id: Some(
-                nomifun_common::ConversationId::parse(TEST_CONVERSATION_ID)
-                    .unwrap(),
-            ),
-            user_id: UserId::parse(TEST_OWNER_ID).unwrap(),
-            ..Default::default()
-        };
-        let ctx = attach_browser_identity(
-            registry,
-            ctx,
-            runtime_lease_id,
-            u64::MAX,
-        )
-        .await
-        .unwrap();
-        server
-            .browser_registry_slot
-            .read()
-            .await
-            .clone()
-            .expect("registry must be installed")
-            .open(&ctx, None)
-            .await
-            .unwrap();
-        assert_eq!(hub.list_lanes().await.len(), 1);
-
-        let attempts_before = server
-            .browser_cleanup_test_control
-            .sweep_attempts
-            .load(Ordering::Acquire);
-        server
-            .browser_cleanup_test_control
-            .sweep_panics_remaining
-            .store(1, Ordering::Release);
-        server
-            .issuer
-            .revoke(
-                GATEWAY_CAPABILITY_DOMAIN,
-                &signed_child.bootstrap.renewal,
-            )
-            .unwrap();
-
-        time::timeout(std::time::Duration::from_secs(3), async {
-            loop {
-                if hub.list_lanes().await.is_empty()
-                    && server
-                        .browser_cleanup_test_control
-                        .sweep_attempts
-                        .load(Ordering::Acquire)
-                        >= attempts_before + 2
-                {
-                    break;
-                }
-                time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the single supervisor must retry after the injected panic");
-        assert_eq!(probe.lane_closes.load(Ordering::Acquire), 1);
-        server.stop_and_wait().await.unwrap();
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn cleanup_worker_join_error_still_runs_authoritative_final_drain() {
-        let server = GatewayMcpServer::start().await.unwrap();
-        let probe = Arc::new(BrowserCloseProbe {
-            lane_closes: AtomicUsize::new(0),
-        });
-        let hub = BrowserSessionHub::new(
-            Arc::new(TestBrowserFactory {
-                probe: Arc::clone(&probe),
-            }),
-            HubConfig::default(),
-        );
-        let registry =
-            crate::browser_registry::BrowserRegistry::from_hub(hub.clone());
-        *server.browser_registry_slot.write().await = Some(registry.clone());
-
-        let signed_child =
-            child(&server, TEST_OWNER_ID, TEST_CONVERSATION_ID);
-        let runtime_lease_id =
-            signed_child.bootstrap.access.claims.lease_id.clone();
-        let ctx = CallerCtx {
-            conversation_id: Some(
-                nomifun_common::ConversationId::parse(TEST_CONVERSATION_ID)
-                    .unwrap(),
-            ),
-            user_id: UserId::parse(TEST_OWNER_ID).unwrap(),
-            ..Default::default()
-        };
-        let ctx = attach_browser_identity(
-            registry,
-            ctx,
-            runtime_lease_id,
-            u64::MAX,
-        )
-        .await
-        .unwrap();
-        server
-            .browser_registry_slot
-            .read()
-            .await
-            .clone()
-            .expect("registry must be installed")
-            .open(&ctx, None)
-            .await
-            .unwrap();
-        assert_eq!(hub.list_lanes().await.len(), 1);
-
-        {
-            let lifecycle = server
-                .lifecycle
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            lifecycle
-                .browser_cleanup_worker
-                .as_ref()
-                .expect("browser cleanup worker must be installed")
-                .handle
-                .abort();
-        }
-
-        let error = server.stop_and_wait().await.unwrap_err();
-        assert!(
-            error.contains("browser cleanup task failed while stopping"),
-            "unexpected stop error: {error}"
-        );
-        assert!(
-            hub.list_lanes().await.is_empty(),
-            "JoinError must not bypass the fallback exact-owner drain"
-        );
-        assert_eq!(probe.lane_closes.load(Ordering::Acquire), 1);
-    }
-
     #[tokio::test]
     async fn concurrent_stop_and_wait_calls_share_one_shutdown() {
         let server = GatewayMcpServer::start().await.unwrap();
@@ -2234,71 +1374,6 @@ mod tests {
         assert_eq!(third, first);
         assert!(TcpListener::bind(addr).await.is_ok());
         assert!(server.stop_and_wait().await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn stop_timeout_keeps_shared_flight_for_retry() {
-        let server = GatewayMcpServer::start().await.unwrap();
-        let (shutdown_tx, mut shutdown_rx) =
-            tokio::sync::watch::channel(false);
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let delayed_cleanup = tokio::spawn(async move {
-            while !*shutdown_rx.borrow() {
-                if shutdown_rx.changed().await.is_err() {
-                    return;
-                }
-            }
-            let _ = release_rx.await;
-        });
-        {
-            let mut lifecycle = server
-                .lifecycle
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            #[cfg(feature = "browser-use")]
-            let cleanup_state = lifecycle
-                .browser_cleanup_worker
-                .as_ref()
-                .expect("browser cleanup worker must be installed")
-                .cleanup_state
-                .clone();
-            if let Some(existing) = lifecycle.browser_cleanup_worker.replace(
-                GatewayCleanupWorker {
-                    shutdown: shutdown_tx,
-                    handle: delayed_cleanup,
-                    #[cfg(feature = "browser-use")]
-                    cleanup_state,
-                },
-            ) {
-                existing.handle.abort();
-            }
-        }
-
-        let error = server
-            .stop_and_wait_for(std::time::Duration::from_millis(1))
-            .await
-            .unwrap_err();
-        assert!(error.contains("durable cleanup continues"));
-        assert!(
-            TcpListener::bind(server.http_addr).await.is_ok(),
-            "a cleanup timeout may not return before ingress is quiesced"
-        );
-
-        release_tx.send(()).unwrap();
-        time::timeout(
-            std::time::Duration::from_secs(1),
-            server.wait_for_shutdown(),
-        )
-            .await
-            .expect("durable cleanup must finish after release")
-            .expect("wait_for_shutdown must observe the original flight");
-        assert!(
-            server
-                .stop_and_wait_for(std::time::Duration::from_millis(1))
-                .await
-                .is_ok(),
-            "successful flight result must be cached"
-        );
     }
 
     #[tokio::test]
@@ -2320,230 +1395,7 @@ mod tests {
             .is_err());
     }
 
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn gateway_browser_identity_uses_lease_as_runtime_not_attempt() {
-        let probe = Arc::new(BrowserCloseProbe {
-            lane_closes: AtomicUsize::new(0),
-        });
-        let hub = BrowserSessionHub::new(
-            Arc::new(TestBrowserFactory {
-                probe: Arc::clone(&probe),
-            }),
-            HubConfig::default(),
-        );
-        let registry =
-            crate::browser_registry::BrowserRegistry::from_hub(hub.clone());
-        let runtime_lease_id = "signed-gateway-runtime-lease";
-        let ctx = CallerCtx {
-            conversation_id: Some(
-                nomifun_common::ConversationId::parse(TEST_CONVERSATION_ID)
-                    .unwrap(),
-            ),
-            user_id: UserId::parse(TEST_OWNER_ID).unwrap(),
-            ..Default::default()
-        };
-
-        let ctx = attach_browser_identity(
-            registry.clone(),
-            ctx,
-            runtime_lease_id.to_owned(),
-            u64::MAX,
-        )
-        .await
-        .unwrap();
-        let identity = ctx
-            .browser_identity
-            .as_ref()
-            .expect("gateway must attach a browser identity");
-        assert_eq!(identity.runtime_instance_id, runtime_lease_id);
-        assert_eq!(
-            identity.attempt_id, None,
-            "a capability lease is runtime authority, not execution-attempt metadata"
-        );
-
-        registry.open(&ctx, None).await.unwrap();
-        assert_eq!(hub.list_lanes().await.len(), 1);
-        let revoked = registry
-            .revoke_signed_child_lease(runtime_lease_id)
-            .await
-            .unwrap();
-        assert_eq!(revoked.closed, 1);
-        assert!(!revoked.already_closed);
-        assert!(hub.list_lanes().await.is_empty());
-        assert_eq!(probe.lane_closes.load(Ordering::Acquire), 1);
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn invalid_browser_arguments_do_not_create_or_renew_a_browser_lease() {
-        let close_probe = Arc::new(BrowserCloseProbe {
-            lane_closes: AtomicUsize::new(0),
-        });
-        let hub = BrowserSessionHub::new(
-            Arc::new(TestBrowserFactory {
-                probe: Arc::clone(&close_probe),
-            }),
-            HubConfig::default(),
-        );
-        let browser_registry =
-            crate::browser_registry::BrowserRegistry::from_hub(hub);
-        let ctx = CallerCtx {
-            conversation_id: Some(
-                nomifun_common::ConversationId::parse(TEST_CONVERSATION_ID)
-                    .unwrap(),
-            ),
-            user_id: UserId::parse(TEST_OWNER_ID).unwrap(),
-            ..Default::default()
-        };
-
-        let invalid = preflight_and_attach_browser_identity(
-            browser_registry.clone(),
-            ctx.clone(),
-            "nomi_browser_open",
-            &json!({"lane_name": 7}),
-            "signed-browser-lease".to_owned(),
-            u64::MAX,
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            invalid
-                .get("error")
-                .and_then(Value::as_str)
-                == Some("invalid_tool_arguments"),
-            "invalid args must be rejected by typed preflight: {invalid}"
-        );
-        assert_eq!(
-            browser_registry.signed_child_cleanup_status(),
-            crate::browser_registry::BrowserCleanupStatus::default(),
-            "invalid args must not create a Browser identity or owner lease"
-        );
-
-        preflight_and_attach_browser_identity(
-            browser_registry.clone(),
-            ctx.clone(),
-            "nomi_browser_open",
-            &json!({"lane_name": "default"}),
-            "signed-browser-lease".to_owned(),
-            u64::MAX,
-        )
-        .await
-        .expect("valid args must attach the Browser owner");
-        assert_eq!(
-            browser_registry.signed_child_cleanup_status().pending_attachments,
-            1,
-            "valid args must attach one signed-child Browser owner"
-        );
-
-        let invalid = preflight_and_attach_browser_identity(
-            browser_registry.clone(),
-            ctx,
-            "nomi_browser_open",
-            &json!({"lane_name": 7}),
-            "signed-browser-lease".to_owned(),
-            u64::MAX,
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            invalid
-                .get("error")
-                .and_then(Value::as_str)
-                == Some("invalid_tool_arguments"),
-            "invalid renewal must be rejected before Browser owner renewal: {invalid}"
-        );
-        assert_eq!(
-            browser_registry.signed_child_cleanup_status().pending_owner_leases,
-            1,
-            "invalid args must not renew or replace the existing Browser owner lease"
-        );
-    }
-
-    #[cfg(feature = "browser-use")]
-    #[tokio::test]
-    async fn preflight_accepts_forked_lane_id_for_owner_and_rejects_sibling() {
-        let close_probe = Arc::new(BrowserCloseProbe {
-            lane_closes: AtomicUsize::new(0),
-        });
-        let hub = BrowserSessionHub::new(
-            Arc::new(TestBrowserFactory {
-                probe: Arc::clone(&close_probe),
-            }),
-            HubConfig::default(),
-        );
-        let browser_registry =
-            crate::browser_registry::BrowserRegistry::from_hub(hub);
-        let ctx = CallerCtx {
-            conversation_id: Some(
-                nomifun_common::ConversationId::parse(TEST_CONVERSATION_ID)
-                    .unwrap(),
-            ),
-            user_id: UserId::parse(TEST_OWNER_ID).unwrap(),
-            ..Default::default()
-        };
-
-        // nomi_browser_fork returns the owner-scoped Lane handle.
-        let attached = preflight_and_attach_browser_identity(
-            browser_registry.clone(),
-            ctx.clone(),
-            "nomi_browser_fork",
-            &json!({"lane_name": "research"}),
-            "signed-browser-lease-fork".to_owned(),
-            u64::MAX,
-        )
-        .await
-        .expect("fork request must attach the Browser owner");
-        let forked = browser_registry
-            .dispatch_managed(
-                &attached,
-                None,
-                json!({"action": "browser_fork", "lane_name": "research"}),
-            )
-            .await
-            .unwrap();
-        assert!(!forked.is_error, "{}", forked.content);
-        let forked: Value = serde_json::from_str(&forked.content).unwrap();
-        let lane_id = forked
-            .pointer("/lane/lane_id")
-            .and_then(Value::as_str)
-            .unwrap()
-            .to_owned();
-
-        // A follow-up request carrying that lane_id starts from a fresh
-        // per-request CallerCtx with no browser identity; the transport
-        // preflight must accept it for the same signed lease.
-        preflight_and_attach_browser_identity(
-            browser_registry.clone(),
-            ctx.clone(),
-            "nomi_browser_status",
-            &json!({"lane_id": lane_id}),
-            "signed-browser-lease-fork".to_owned(),
-            u64::MAX,
-        )
-        .await
-        .expect("the owning lease must be able to target its forked lane_id");
-
-        // A different signed lease is a different trusted runtime; the same
-        // handle must still fail closed after identity attachment.
-        let error = preflight_and_attach_browser_identity(
-            browser_registry.clone(),
-            ctx,
-            "nomi_browser_status",
-            &json!({"lane_id": lane_id}),
-            "signed-browser-lease-sibling".to_owned(),
-            u64::MAX,
-        )
-        .await
-        .expect_err("an unowned lane handle must be rejected at preflight");
-        assert_eq!(
-            error.get("code").and_then(Value::as_str),
-            Some("operation_not_allowed"),
-            "{error}"
-        );
-    }
-
-    #[tokio::test]
+                #[tokio::test]
     async fn tool_call_requires_auth() {
         let server = GatewayMcpServer::start().await.unwrap();
         let (status, _) = post_tool(
