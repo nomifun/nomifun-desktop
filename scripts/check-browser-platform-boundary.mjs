@@ -22,6 +22,12 @@ const ENGINE_BACKEND = 'crates/agent/nomi-browser-engine/src/backend/cdp.rs';
 const PLATFORM_ADAPTER = 'crates/agent/nomi-browser/src/platform_adapter.rs';
 const GATEWAY_REGISTRY = 'crates/backend/nomifun-gateway/src/browser_registry.rs';
 const HUB_COMPOSITION = 'crates/backend/nomifun-app/src/services.rs';
+const FRESH_V4_HUB_COMPOSITION =
+  'crates/backend/nomifun-app/src/router/agent_platform_host.rs';
+const HUB_COMPOSITION_ROOTS = new Set([
+  HUB_COMPOSITION,
+  FRESH_V4_HUB_COMPOSITION,
+]);
 
 const OWNERSHIP_BOUNDARY_PREFIXES = [
   'apps/desktop/src/',
@@ -748,19 +754,40 @@ function scanEntries(entries) {
     }
   }
 
-  if (hubConstructors.length === 0) {
+  const constructorsByRoot = new Map();
+  for (const constructor of hubConstructors) {
+    constructorsByRoot.set(
+      constructor.path,
+      (constructorsByRoot.get(constructor.path) ?? 0) + 1,
+    );
+  }
+  const hasUnexpectedRoot = hubConstructors.some(
+    (constructor) => !HUB_COMPOSITION_ROOTS.has(constructor.path),
+  );
+  const hasMissingRoot = [...HUB_COMPOSITION_ROOTS].some(
+    (path) => constructorsByRoot.get(path) !== 1,
+  );
+  if (
+    hubConstructors.length === 0 ||
+    hasUnexpectedRoot ||
+    hasMissingRoot ||
+    hubConstructors.length !== HUB_COMPOSITION_ROOTS.size
+  ) {
     violations.push({
       path: HUB_COMPOSITION,
       line: 1,
       rule: 'hub-composition-contract',
-      detail: `production must construct exactly one BrowserSessionHub in ${HUB_COMPOSITION} (found 0)`,
+      detail:
+        `each mutually exclusive Browser composition root must construct exactly one ` +
+        `BrowserSessionHub (${[...HUB_COMPOSITION_ROOTS].join(', ')})`,
       snippet: '',
     });
-  } else {
+  }
+  if (hasUnexpectedRoot || hasMissingRoot) {
     for (const constructor of hubConstructors) {
       if (
-        hubConstructors.length === 1 &&
-        constructor.path === HUB_COMPOSITION
+        HUB_COMPOSITION_ROOTS.has(constructor.path) &&
+        constructorsByRoot.get(constructor.path) === 1
       ) {
         continue;
       }
@@ -770,7 +797,8 @@ function scanEntries(entries) {
         constructor.masked,
         constructor.index,
         'hub-composition-contract',
-        `production must construct exactly one BrowserSessionHub in ${HUB_COMPOSITION} (found ${hubConstructors.length})`,
+        `BrowserSessionHub construction is only allowed once in each declared ` +
+          `mutually exclusive composition root`,
       );
     }
   }
@@ -1048,6 +1076,10 @@ function selfTest() {
       path: HUB_COMPOSITION,
       source: 'fn service() { BrowserSessionHub::new(); }',
     },
+    {
+      path: FRESH_V4_HUB_COMPOSITION,
+      source: 'fn fresh_v4() { BrowserSessionHub::new(); }',
+    },
   ];
   assertNoViolation(baseline, 'baseline unexpectedly violates the Browser Platform boundary');
 
@@ -1155,6 +1187,19 @@ function selfTest() {
     }),
     'hub-composition-contract',
     'failed to reject a second production BrowserSessionHub constructor',
+  );
+  assertViolation(
+    baseline.concat({
+      path: FRESH_V4_HUB_COMPOSITION,
+      source: `
+        fn fresh_v4() {
+          BrowserSessionHub::new();
+          BrowserSessionHub::new();
+        }
+      `,
+    }),
+    'hub-composition-contract',
+    'failed to reject a second Fresh-v4 BrowserSessionHub constructor',
   );
   assertViolation(
     baseline.map((entry) =>
