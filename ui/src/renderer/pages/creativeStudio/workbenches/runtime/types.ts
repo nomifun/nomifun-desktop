@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CreativeAsset, CreativeAssetKind } from "../../assets";
+import type { CreativeAsset, CreativeAssetKind, CreativeAssetAvailability } from "../../assets";
 import type { CreativeModelOption } from "../../models";
 import type {
   CreateCreativeTaskInput,
@@ -59,9 +59,11 @@ export interface CreativeWorkbenchCommittedOutput {
   kind: Exclude<CreativeAssetKind, "text">;
   /** Audio uses asset callbacks and intentionally does not require a URL. */
   url: string | null;
+  availability?: CreativeAssetAvailability;
 }
 
 export interface CreativeWorkbenchRuntimeEntry {
+  hasDeletedInputs?: boolean;
   order: number;
   task: CreativeTask;
   outputs: readonly CreativeWorkbenchCommittedOutput[];

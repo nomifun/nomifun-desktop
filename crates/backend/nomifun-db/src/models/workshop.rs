@@ -98,6 +98,10 @@ pub struct WorkshopAssetRow {
     /// Canonical provenance object. Durable ownership is either
     /// `{project_id,node_id}` or `{template_id,template_run_id,template_step_id}`.
     pub origin: Option<String>,
+    /// Logical content deletion. Historical references keep this identity.
+    pub deleted_at: Option<TimestampMs>,
+    /// File cleanup completion; a tombstone with `None` remains retryable.
+    pub content_deleted_at: Option<TimestampMs>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }

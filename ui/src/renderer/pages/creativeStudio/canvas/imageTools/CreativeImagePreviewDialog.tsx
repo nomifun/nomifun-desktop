@@ -8,7 +8,7 @@ import { Button, Image, Modal, Spin } from '@arco-design/web-react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import type { CreativeAsset } from '../../assets';
+import { creativeAssetClient, isCreativeAssetDeleted, subscribeCreativeAssetDeletion, type CreativeAsset } from '../../assets';
 import type { CreativeCanvasNode } from '../../domain';
 import styles from './CreativeImageTools.module.css';
 
@@ -37,13 +37,22 @@ const CreativeImagePreviewDialog: React.FC<CreativeImagePreviewDialogProps> = ({
   const getStage = useCallback(() => stage!, [stage]);
 
   useEffect(() => {
+    const refresh = () => setAttempt((current) => current + 1);
+    const unsubscribe = subscribeCreativeAssetDeletion(creativeAssetClient, (assetId) => {
+      if (assetId === node.data.assetId) refresh();
+    });
+    window.addEventListener('focus', refresh);
+    return () => { unsubscribe(); window.removeEventListener('focus', refresh); };
+  }, [node.data.assetId]);
+
+  useEffect(() => {
     let active = true;
     setAsset(null);
     setFailed(false);
     void resolveAsset(node).then(
       (resolved) => {
         if (!active) return;
-        if (resolved.kind !== 'image' || !resolved.originalUrl.trim()) {
+        if (resolved.kind !== 'image' || (!isCreativeAssetDeleted(resolved) && !resolved.originalUrl.trim())) {
           setFailed(true);
           return;
         }
@@ -88,7 +97,11 @@ const CreativeImagePreviewDialog: React.FC<CreativeImagePreviewDialogProps> = ({
       footer={null}
     >
       <div ref={setStage} className={styles.previewStage} data-creative-image-preview>
-        {failed ? (
+        {asset && isCreativeAssetDeleted(asset) ? (
+          <div className={styles.previewStatus} role='status'>
+            {t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })}
+          </div>
+        ) : failed ? (
           <div className={styles.previewStatus} role='alert'>
             <span>{t('creativeStudio.canvas.imageTools.preview.loadFailed')}</span>
             <Button onClick={() => setAttempt((current) => current + 1)}>

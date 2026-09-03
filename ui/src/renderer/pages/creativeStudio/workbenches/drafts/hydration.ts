@@ -6,7 +6,7 @@
 
 import { parseAssetId } from '@/common/types/ids';
 
-import type { CreativeAsset } from '../../assets';
+import { isCreativeAssetDeleted, type CreativeAsset } from '../../assets';
 import type { StandaloneWorkbenchDraftKind } from './types';
 
 export interface StandaloneWorkbenchDraftAssetReader {
@@ -44,7 +44,7 @@ export async function hydrateStandaloneWorkbenchDraftReferences(
     seen.add(assetId);
     try {
       const asset = await assets.get(assetId);
-      if (asset.id !== assetId || asset.kind !== 'image') {
+      if (asset.id !== assetId || asset.kind !== 'image' || isCreativeAssetDeleted(asset)) {
         return { index, candidate: assetId, asset: null };
       }
       return { index, candidate: assetId, asset };

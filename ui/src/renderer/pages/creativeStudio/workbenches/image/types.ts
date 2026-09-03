@@ -6,6 +6,7 @@
 
 import type { ReactNode } from 'react';
 import { getI18n } from 'react-i18next';
+import type { CreativeAssetAvailability } from '../../assets';
 
 export type ImageWorkbenchLayout = 'side' | 'bottom';
 export type ImageWorkbenchInterfaceMode = 'images' | 'responses';
@@ -86,6 +87,7 @@ export interface ImageWorkbenchReference {
 }
 
 interface ImageWorkbenchResultBase {
+  hasDeletedInputs?: boolean;
   id: string;
   /** Runtime task identity remains distinct from the generated asset identity. */
   taskId: string;
@@ -117,6 +119,7 @@ export interface ImageWorkbenchSucceededResult extends ImageWorkbenchResultBase 
   outputs: readonly {
     assetId: string;
     imageUrl: string;
+    availability?: CreativeAssetAvailability;
     alt: string;
     width?: number;
     height?: number;

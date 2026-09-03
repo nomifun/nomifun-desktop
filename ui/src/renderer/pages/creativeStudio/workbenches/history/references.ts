@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CreativeAsset } from '../../assets';
+import { CreativeAssetDeletedError, isCreativeAssetDeleted, type CreativeAsset } from '../../assets';
 import type { CreativeTask } from '../../tasks';
 import type { CreativeWorkbenchReferences } from '../runtime';
 
@@ -24,6 +24,7 @@ export async function hydrateStandaloneTaskReferences(
   );
   task.inputs.forEach((binding, index) => {
     const asset = resolved[index];
+    if (asset && isCreativeAssetDeleted(asset)) throw new CreativeAssetDeletedError(asset.id);
     if (!asset || asset.id !== binding.assetId || asset.kind !== binding.kind) {
       throw new Error(
         `Task ${task.taskId} input ${binding.assetId} no longer matches its ${binding.kind} snapshot`

@@ -7,6 +7,9 @@
 import { parseAssetId } from '@/common/types/ids';
 
 import { workshopAssetApi } from './api';
+import { isCreativeAssetDeleted } from './types';
+import { notifyCreativeAssetDeleted } from './assetDeletion';
+import { invalidateCreativeAssetQueryCache } from './creativeAssetQueryCache';
 import type {
   WorkshopAssetApi,
   WorkshopAssetDto,
@@ -162,6 +165,7 @@ export function mapWorkshopAsset(dto: WorkshopAssetDto): CreativeAsset {
     thumbnailUrl: nullableString(dto.thumb_url, 'thumb_url'),
     createdAt: requireNumber(dto.created_at, 'created_at'),
     updatedAt: requireNumber(dto.updated_at, 'updated_at'),
+    deletedAt: nullableNumber(dto.deleted_at ?? null, 'deleted_at'),
   };
 }
 
@@ -200,11 +204,26 @@ function toWorkshopPatch(patch: CreativeAssetPatch): WorkshopAssetPatch {
 }
 
 export class CreativeAssetClient implements CreativeAssetLibraryPort, CreativePromptAssetPort {
+  // Deletion is irreversible. Late GET/list/update responses must not restore it.
+  private readonly deletedAssets = new Map<string, number>();
   constructor(private readonly api: WorkshopAssetApi = workshopAssetApi) {}
+
+  private recordDeletion(assetId: string, deletedAt: number): void {
+    const known = this.deletedAssets.has(assetId);
+    this.deletedAssets.set(assetId, deletedAt);
+    if (known) return;
+    invalidateCreativeAssetQueryCache(this);
+    notifyCreativeAssetDeleted(this, assetId);
+  }
 
   private map(dto: WorkshopAssetDto): CreativeAsset {
     const asset = mapWorkshopAsset(dto);
     const assetId = parseAssetId(asset.id);
+    if (isCreativeAssetDeleted(asset)) this.recordDeletion(assetId, asset.deletedAt!);
+    const deletedAt = this.deletedAssets.get(assetId);
+    if (deletedAt !== undefined) {
+      return { ...asset, deletedAt, originalUrl: '', thumbnailUrl: null, textContent: null, inLibrary: false };
+    }
     return {
       ...asset,
       // DTO paths are backend-relative. Always use the API's URL resolver so
@@ -217,7 +236,7 @@ export class CreativeAssetClient implements CreativeAssetLibraryPort, CreativePr
   async list(query: CreativeAssetQuery = {}): Promise<CreativeAssetPage> {
     const page = await this.api.list(toWorkshopAssetQuery(query));
     return {
-      items: page.items.map((item) => this.map(item)),
+      items: page.items.map((item) => this.map(item)).filter((asset) => !isCreativeAssetDeleted(asset)),
       total: requireNumber(page.total, 'page total'),
     };
   }
@@ -280,8 +299,18 @@ export class CreativeAssetClient implements CreativeAssetLibraryPort, CreativePr
     return this.map(await this.api.update(parseAssetId(assetId), toWorkshopPatch(patch)));
   }
 
-  remove(assetId: string): Promise<void> {
-    return this.api.remove(parseAssetId(assetId));
+  async remove(assetId: string): Promise<void> {
+    const id = parseAssetId(assetId);
+    try {
+      await this.api.remove(id);
+    } catch (reason) {
+      // File cleanup can fail after the durable tombstone commits. Confirm it
+      // through metadata, notify open views, and keep the original failure so
+      // the dialog can retry cleanup for this exact id.
+      try { await this.get(id); } catch { /* Unavailable metadata is not proof of deletion. */ }
+      throw reason;
+    }
+    this.recordDeletion(id, Date.now());
   }
 
   renameCollection(from: string, to: string): Promise<number> {

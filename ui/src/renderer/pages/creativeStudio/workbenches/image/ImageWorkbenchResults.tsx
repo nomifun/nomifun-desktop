@@ -20,6 +20,7 @@ import { Button, Checkbox, Progress, Tag } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
+import { CreativeAssetUnavailable } from '../../assets/components/CreativeAssetUnavailable';
 import {
   nextImageWorkbenchSelection,
   type ImageWorkbenchResult,
@@ -75,6 +76,7 @@ const TaskMeta: React.FC<{
   const { t } = useTranslation();
   return (
     <div className={styles.resultMeta}>
+      {result.hasDeletedInputs ? <p role='status'>{t('creativeStudio.assets.deletedReference', { defaultValue: '引用素材已删除，请重新选择后再生成。' })}</p> : null}
       <div className={styles.resultPromptRow}>
         <p className={styles.resultPrompt} title={result.prompt}>{result.prompt}</p>
         {result.prompt ? (
@@ -110,7 +112,9 @@ const ResultVisual: React.FC<{
       <div className={styles.successVisual}>
         <div className={styles.successGallery} data-image-output-count={result.outputs.length}>
           {result.outputs.map((output) => (
-            <img key={output.assetId} src={output.imageUrl} alt={output.alt} />
+            output.availability && output.availability !== 'available'
+              ? <CreativeAssetUnavailable key={output.assetId} status={output.availability} />
+              : <img key={output.assetId} src={output.imageUrl} alt={output.alt} />
           ))}
         </div>
         <span className={styles.resultBadge} data-tone='success'>

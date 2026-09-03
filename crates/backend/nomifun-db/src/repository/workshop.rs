@@ -333,6 +333,18 @@ pub trait IWorkshopRepository: Send + Sync {
     /// generation on the serve path. `DbError::NotFound` when the id is unknown.
     async fn set_asset_thumb(&self, id: &str, thumb_rel_path: &str, now: i64) -> Result<(), DbError>;
 
+    /// Atomically retire content while retaining the identity for history.
+    /// Live task/run references reject deletion. Pending file paths survive
+    /// retries until `finish_asset_content_deletion` commits their removal.
+    async fn mark_asset_content_deleted(&self, id: &str, now: i64) -> Result<WorkshopAssetRow, DbError>;
+
+    /// Tombstones whose original/thumbnail cleanup has not yet completed.
+    async fn list_pending_asset_content_deletions(&self) -> Result<Vec<WorkshopAssetRow>, DbError>;
+
+    /// Finish an already-marked content deletion after removing its files.
+    /// Idempotent; cannot delete content that has not first been marked.
+    async fn finish_asset_content_deletion(&self, id: &str, now: i64) -> Result<WorkshopAssetRow, DbError>;
+
     /// Delete an asset row (the service removes the file). `DbError::NotFound`
     /// when the id is unknown.
     async fn delete_asset(&self, id: &str) -> Result<(), DbError>;

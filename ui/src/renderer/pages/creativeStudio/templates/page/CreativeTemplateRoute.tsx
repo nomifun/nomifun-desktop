@@ -10,6 +10,8 @@ import { useNavigate } from 'react-router-dom';
 
 import {
   creativeAssetClient,
+  CreativeAssetDeletedError,
+  isCreativeAssetDeleted,
   useCreativeAssetPickerDialog,
 } from '../../assets';
 import { useNomiCreativeModelCatalog } from '../../models';
@@ -17,6 +19,19 @@ import { templateDraftPort } from '../agent';
 import { useCreativeTemplateRuntime } from '../runtime';
 import CreativeTemplateWorkspacePage from './CreativeTemplateWorkspacePage';
 import type { CreativeTemplateRunnerPort } from './TemplateRunModal';
+import type { StartCreativeTemplateRun } from '../runtime/types';
+
+async function validateRunAssets(input: StartCreativeTemplateRun): Promise<void> {
+  const ids = [...new Set([
+    ...input.referenceAssetIds,
+    ...input.inputs.flatMap((value) => value.type === 'image'
+      ? value.assetId ? [value.assetId] : []
+      : value.type === 'image-series' ? value.assetIds : []),
+  ])];
+  const assets = await Promise.all(ids.map((id) => creativeAssetClient.get(id)));
+  const deleted = assets.find(isCreativeAssetDeleted);
+  if (deleted) throw new CreativeAssetDeletedError(deleted.id);
+}
 
 const CreativeTemplateRoute: React.FC = () => {
   const { t } = useTranslation();
@@ -26,6 +41,7 @@ const CreativeTemplateRoute: React.FC = () => {
   const modelCatalog = useNomiCreativeModelCatalog();
   const runner = useMemo<CreativeTemplateRunnerPort>(() => ({
     async start(input) {
+      await validateRunAssets(input);
       await controller.start(input);
     },
   }), [controller]);
@@ -42,7 +58,7 @@ const CreativeTemplateRoute: React.FC = () => {
           resume: (templateRunId) => controller.resume(templateRunId),
           cancel: (templateRunId) => controller.cancel(templateRunId),
           review: (templateRunId, drafts) => controller.review(templateRunId, drafts),
-          retry: (run) => controller.start({
+          retry: (run) => runner.start({
             template: run.templateSnapshot,
             inputs: run.request.inputs,
             referenceAssetIds: run.request.referenceAssetIds,

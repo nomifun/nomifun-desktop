@@ -16,6 +16,8 @@ import {
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
+import { useCreativeAssetAvailability, type CreativeAsset } from '../../assets';
+import { CreativeAssetUnavailable } from '../../assets/components/CreativeAssetUnavailable';
 
 import type { CreativeTemplateRunAggregateV1 } from '../domain';
 import type {
@@ -32,6 +34,7 @@ import {
 export interface CreativeTemplateRunCenterPort {
   snapshot: CreativeTemplateRuntimeSnapshot;
   assetUrl(assetId: string): string;
+  assetReader?: { get(assetId: string): Promise<CreativeAsset> };
   resume(templateRunId: string): Promise<unknown>;
   cancel(templateRunId: string): Promise<unknown>;
   review(templateRunId: string, drafts: readonly ReviewCreativeTemplateDraft[]): Promise<unknown>;
@@ -199,6 +202,13 @@ const TemplateRunCenter: React.FC<TemplateRunCenterProps> = ({ port }) => {
   const [reviewing, setReviewing] = useState<CreativeTemplateRunAggregateV1 | null>(null);
   const [actingId, setActingId] = useState<string | null>(null);
   const runs = snapshot.runs;
+  const availability = useCreativeAssetAvailability(runs.flatMap((run) => [
+    ...run.record.resultAssetIds,
+    ...run.request.referenceAssetIds,
+    ...run.request.inputs.flatMap((input) => input.type === 'image'
+      ? input.assetId ? [input.assetId] : []
+      : input.type === 'image-series' ? input.assetIds : []),
+  ]), port.assetReader);
   const activeCount = runs.filter((run) => ACTIVE.has(run.record.status)).length;
   const reviewCount = runs.filter((run) => run.record.status === 'awaiting-review').length;
 
@@ -301,6 +311,9 @@ const TemplateRunCenter: React.FC<TemplateRunCenterProps> = ({ port }) => {
                 defaultValue: 'Waiting to resume',
               })
             : statusLabel(run.record.status, t);
+          const inputAssetIds = [...run.request.referenceAssetIds, ...run.request.inputs.flatMap((input) =>
+            input.type === 'image' ? input.assetId ? [input.assetId] : [] : input.type === 'image-series' ? input.assetIds : [])];
+          const hasDeletedInputs = inputAssetIds.some((id) => availability.get(id) === 'deleted');
           return (
             <article
               key={run.request.id}
@@ -363,10 +376,13 @@ const TemplateRunCenter: React.FC<TemplateRunCenterProps> = ({ port }) => {
                 </p>
               ) : null}
 
+              {hasDeletedInputs ? <p className={styles.runError} role='status'>{t('creativeStudio.assets.deletedReference', { defaultValue: '引用素材已删除，请重新选择后再生成。' })}</p> : null}
               {run.record.resultAssetIds.length > 0 ? (
                 <div className={styles.runResults}>
                   {run.record.resultAssetIds.slice(0, 6).map((assetId, index) => (
-                    <a
+                    availability.get(assetId) !== 'available'
+                    ? <CreativeAssetUnavailable key={assetId} status={availability.get(assetId) ?? 'loading'} />
+                    : <a
                       key={assetId}
                       href={port.assetUrl(assetId)}
                       target='_blank'
@@ -429,6 +445,7 @@ const TemplateRunCenter: React.FC<TemplateRunCenterProps> = ({ port }) => {
                 ) : null}
                 {run.record.status === 'failed' || run.record.status === 'cancelled' ? (
                   <Button
+                    disabled={hasDeletedInputs}
                     size='small'
                     icon={<Refresh theme='outline' size={14} fill='currentColor' />}
                     loading={actingId === run.request.id}
@@ -451,7 +468,8 @@ const TemplateRunCenter: React.FC<TemplateRunCenterProps> = ({ port }) => {
                   <Button
                     size='small'
                     icon={<Download theme='outline' size={14} fill='currentColor' />}
-                    href={port.assetUrl(run.record.resultAssetIds[0])}
+                    disabled={availability.get(run.record.resultAssetIds[0]) !== 'available'}
+                    href={availability.get(run.record.resultAssetIds[0]) === 'available' ? port.assetUrl(run.record.resultAssetIds[0]) : undefined}
                     target='_blank'
                   >
                     {t('creativeStudio.templates.runCenter.openResult', {

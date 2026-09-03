@@ -149,6 +149,34 @@ const IDLE_SNAPSHOT: CreativeWorkbenchRuntimeSnapshot = {
 };
 
 describe('canvas image mask edit runtime integration', () => {
+  test('recovers a deleted mask-edit result as a history marker and clears pending', async () => {
+    const config = configNode();
+    const harness = editorHarness(config);
+    const deleted = { ...resultAsset, deletedAt: 10, inLibrary: false, originalUrl: '', thumbnailUrl: null };
+    const input = {
+      editor: harness.editor, projectId: PROJECT_ID, task: task('succeeded', config),
+      assets: {
+        async get() { return deleted; },
+        async list() { return { items: [], total: 0 }; },
+        async upload() { return deleted; },
+        async update() { return deleted; },
+        async remove() {},
+        url: () => '',
+      },
+      viewportSize: { width: 1440, height: 900 },
+    };
+    await settleCanvasImageMaskEditTask(input);
+    expect(harness.pending()).toEqual([]);
+    expect(harness.state().document.nodes.find((node) => node.id === config.id)).toMatchObject({
+      locked: false, data: { status: 'succeeded', resultAssetIds: [RESULT_ASSET_ID] },
+    });
+    expect(harness.state().document.nodes.filter((node) =>
+      node.type === 'image' && node.data.assetId === RESULT_ASSET_ID)).toHaveLength(1);
+    const count = harness.state().document.nodes.length;
+    await settleCanvasImageMaskEditTask(input);
+    expect(harness.state().document.nodes).toHaveLength(count);
+  });
+
   test('flushes the exact config owner before task submission', async () => {
     const node = configNode();
     const harness = editorHarness(node);

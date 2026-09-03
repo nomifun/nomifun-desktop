@@ -3,7 +3,8 @@
 //! An archive is a ZIP with exactly one `manifest.json` plus one content entry
 //! for every asset referenced by the canonical project document. The archive
 //! has a versioned product manifest. v1 project archives remain readable for
-//! compatibility; new canonical exports use the v2 Canvas manifest.
+//! compatibility; canonical exports use the v3 Canvas manifest with explicit
+//! tombstones for content the user permanently deleted.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{Cursor, Read, Write};
@@ -28,7 +29,7 @@ pub const MAX_CREATIVE_ARCHIVE_COMPRESSED_BYTES: usize = 256 * 1024 * 1024;
 const CREATIVE_STUDIO_ARCHIVE_KIND: &str = "project-archive";
 const CREATIVE_STUDIO_ARCHIVE_VERSION: u32 = 1;
 pub const CREATIVE_CANVAS_ARCHIVE_KIND: &str = "canvas-archive";
-pub const CREATIVE_CANVAS_ARCHIVE_VERSION: u32 = 2;
+pub const CREATIVE_CANVAS_ARCHIVE_VERSION: u32 = 3;
 // A legal Director v1 sidecar may own 5,000 captures plus 2,000 entity assets.
 // Keep the archive below the shared hardened ZIP entry ceiling rather than
 // silently making those canonical projects non-exportable.
@@ -111,6 +112,8 @@ pub(crate) struct CreativeArchiveAsset {
     pub height: Option<i64>,
     pub byte_length: u64,
     pub in_library: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<i64>,
     pub origin: Option<Value>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -239,7 +242,7 @@ pub(crate) fn build_creative_project_archive(
     Ok(bytes)
 }
 
-/// Build the canonical Canvas v2 archive while retaining the v1 asset
+/// Build the canonical Canvas archive while retaining the shared asset
 /// closure/metadata writer as the single source of truth. The v1 bytes are
 /// decoded as structured data and rewritten with the product-facing Canvas
 /// envelope; no string replacement is used for document or asset JSON.
@@ -310,7 +313,7 @@ pub(crate) fn parse_creative_project_archive(
     )
 }
 
-/// Parse either a legacy v1 project archive or the canonical v2 Canvas
+/// Parse legacy v1/v2 archives or the canonical v3 Canvas
 /// archive. Both paths end in the unchanged v1 asset/document validator and
 /// therefore produce the same normalized import representation.
 pub(crate) fn parse_creative_archive(
@@ -691,6 +694,19 @@ pub(crate) fn remap_creative_archive_for_import(
     for node in &archive.document.nodes {
         node_ids.insert(node.id.clone(), uuid::Uuid::now_v7().to_string());
     }
+    // Configs retain generation provenance after their source nodes are
+    // deleted. Give those historical identities one consistent new ID too,
+    // without recreating nodes or leaving links to the exporting canvas.
+    // Live graph references are still checked by document validation.
+    for node in &archive.document.nodes {
+        if let CreativeNodeData::Config(config) = &node.data
+            && let Some(operation) = &config.operation
+        {
+            node_ids
+                .entry(operation.source_node_id().to_owned())
+                .or_insert_with(|| uuid::Uuid::now_v7().to_string());
+        }
+    }
     remap_archive_director_sidecars(
         &archive.document,
         &mut archive.assets,
@@ -889,6 +905,7 @@ fn archive_asset_from_snapshot(
         height: row.height,
         byte_length: snapshot.bytes.len() as u64,
         in_library: row.in_library,
+        deleted_at: row.deleted_at,
         origin,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -949,10 +966,13 @@ fn validate_canvas_manifest_envelope(
             "archive is not a Creative Studio Canvas archive".into(),
         ));
     }
-    if manifest.version != CREATIVE_CANVAS_ARCHIVE_VERSION {
+    if !matches!(manifest.version, 2 | CREATIVE_CANVAS_ARCHIVE_VERSION) {
         return Err(AppError::BadRequest(format!(
-            "creative Canvas archive version must be exactly {CREATIVE_CANVAS_ARCHIVE_VERSION}"
+            "creative Canvas archive version must be 2 or {CREATIVE_CANVAS_ARCHIVE_VERSION}"
         )));
+    }
+    if manifest.version == 2 && manifest.assets.iter().any(|asset| asset.deleted_at.is_some()) {
+        return Err(AppError::BadRequest("deleted asset markers require Canvas archive version 3".into()));
     }
     if manifest.exported_at < 0 {
         return Err(AppError::BadRequest(
@@ -1038,6 +1058,15 @@ fn validate_archive_asset_metadata(asset: &CreativeArchiveAsset) -> Result<(), A
             asset.asset_id
         )));
     }
+    if let Some(deleted_at) = asset.deleted_at {
+        if deleted_at < asset.created_at || deleted_at > asset.updated_at
+            || asset.in_library || asset.byte_length != 0 || asset.sha256 != sha256_bytes(&[])
+        {
+            return Err(AppError::BadRequest(format!(
+                "creative archive asset {} has an invalid content tombstone", asset.asset_id
+            )));
+        }
+    }
     if asset.byte_length > MAX_ASSET_BYTES as u64 {
         return Err(AppError::BadRequest(format!(
             "creative archive asset {} exceeds {MAX_ASSET_BYTES} bytes",
@@ -1081,7 +1110,7 @@ fn validate_archive_asset_metadata(asset: &CreativeArchiveAsset) -> Result<(), A
                     asset.asset_id
                 )));
             }
-            if asset.byte_length == 0 {
+            if asset.byte_length == 0 && asset.deleted_at.is_none() {
                 return Err(AppError::BadRequest(format!(
                     "creative archive binary asset {} is empty",
                     asset.asset_id
@@ -1115,6 +1144,14 @@ fn validate_asset_content(
     metadata: &CreativeArchiveAsset,
     content: &[u8],
 ) -> Result<(), AppError> {
+    if metadata.deleted_at.is_some() {
+        if !content.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "deleted creative archive asset {} must not contain any content", metadata.asset_id
+            )));
+        }
+        return Ok(());
+    }
     if metadata.kind == "text" {
         std::str::from_utf8(content).map_err(|_| {
             AppError::BadRequest(format!(
@@ -1141,11 +1178,6 @@ pub(crate) fn collect_document_asset_ids(
     document: &CreativeProjectDocument,
 ) -> Result<BTreeSet<String>, AppError> {
     let mut asset_ids = BTreeSet::new();
-    let node_ids = document
-        .nodes
-        .iter()
-        .map(|node| node.id.as_str())
-        .collect::<BTreeSet<_>>();
     for node in &document.nodes {
         match &node.data {
             CreativeNodeData::Image(data) => insert_optional_asset(&mut asset_ids, data.asset_id.as_deref())?,
@@ -1156,7 +1188,7 @@ pub(crate) fn collect_document_asset_ids(
                 for asset_id in data.input_asset_ids.iter().chain(&data.result_asset_ids) {
                     insert_asset(&mut asset_ids, asset_id)?;
                 }
-                collect_config_operation_asset_ids(data, &mut asset_ids, &node_ids)?;
+                collect_config_operation_asset_ids(data, &mut asset_ids)?;
             }
             CreativeNodeData::Video(data) => {
                 insert_optional_asset(&mut asset_ids, data.asset_id.as_deref())?;
@@ -1197,51 +1229,39 @@ fn insert_asset(ids: &mut BTreeSet<String>, asset_id: &str) -> Result<(), AppErr
 fn collect_config_operation_asset_ids(
     data: &crate::creative_studio::CreativeConfigNodeData,
     asset_ids: &mut BTreeSet<String>,
-    node_ids: &BTreeSet<&str>,
 ) -> Result<(), AppError> {
     let Some(operation) = &data.operation else {
         return Ok(());
     };
+    // sourceNodeId is historical provenance, not an asset dependency. Requiring
+    // it to exist here makes a legal source-node deletion block every asset
+    // deletion, project export/cleanup, and startup audit. Keep collecting all
+    // actual asset references regardless of whether that node still exists.
     match operation {
         CreativeConfigOperation::ImageNodeCompose {
-            source_node_id,
             source_asset_id,
+            ..
         }
         | CreativeConfigOperation::VideoNodeCompose {
-            source_node_id,
             source_asset_id,
+            ..
         }
         | CreativeConfigOperation::AudioNodeCompose {
-            source_node_id,
             source_asset_id,
+            ..
         } => {
-            validate_config_source_node(source_node_id, operation, node_ids)?;
             if let Some(asset_id) = source_asset_id {
                 insert_asset(asset_ids, asset_id)?;
             }
         }
         CreativeConfigOperation::ImageMaskEdit {
-            source_node_id,
             source_asset_id,
             marked_reference_asset_id,
+            ..
         } => {
-            validate_config_source_node(source_node_id, operation, node_ids)?;
             insert_asset(asset_ids, source_asset_id)?;
             insert_asset(asset_ids, marked_reference_asset_id)?;
         }
-    }
-    Ok(())
-}
-
-fn validate_config_source_node(
-    source_node_id: &str,
-    operation: &CreativeConfigOperation,
-    node_ids: &BTreeSet<&str>,
-) -> Result<(), AppError> {
-    if !node_ids.contains(source_node_id) {
-        return Err(AppError::BadRequest(format!(
-            "creative config operation {operation:?} references missing source node {source_node_id:?}"
-        )));
     }
     Ok(())
 }
@@ -1413,6 +1433,9 @@ fn collect_archive_asset_ids_from_snapshots(
                 "creative project Director sidecar {scene_id} is not a text asset"
             )));
         }
+        if snapshot.row.deleted_at.is_some() {
+            continue;
+        }
         let nested = director_sidecar_asset_ids(&snapshot.bytes, &document.project_id).map_err(
             |error| {
                 AppError::Conflict(format!(
@@ -1443,6 +1466,9 @@ fn extend_archive_asset_ids_from_import(
             return Err(AppError::BadRequest(format!(
                 "creative project archive Director sidecar {scene_id} is not a text asset"
             )));
+        }
+        if sidecar.metadata.deleted_at.is_some() {
+            continue;
         }
         let nested = director_sidecar_asset_ids(&sidecar.bytes, &document.project_id).map_err(
             |error| {
@@ -1530,6 +1556,9 @@ fn remap_archive_director_sidecars(
             return Err(AppError::BadRequest(format!(
                 "creative archive Director sidecar {scene_id} is not a text asset"
             )));
+        }
+        if sidecar.metadata.deleted_at.is_some() {
+            continue;
         }
         sidecar.bytes = remap_director_sidecar_bytes(
             &sidecar.bytes,
@@ -1973,6 +2002,8 @@ mod tests {
                 text_content: None,
                 in_library: true,
                 origin: Some(r#"{"prompt":"reference","provider_id":"0190f5fe-7c00-7a00-8abc-000000000703"}"#.into()),
+                deleted_at: None,
+                content_deleted_at: None,
                 created_at: 10,
                 updated_at: 20,
             },
@@ -2003,6 +2034,8 @@ mod tests {
                 text_content: None,
                 in_library,
                 origin: None,
+                deleted_at: None,
+                content_deleted_at: None,
                 created_at: 10,
                 updated_at: 20,
             },
@@ -2033,6 +2066,8 @@ mod tests {
                 text_content: None,
                 in_library,
                 origin: None,
+                deleted_at: None,
+                content_deleted_at: None,
                 created_at: 10,
                 updated_at: 20,
             },
@@ -2190,6 +2225,8 @@ mod tests {
                 text_content: Some(text.clone()),
                 in_library: false,
                 origin: None,
+                deleted_at: None,
+                content_deleted_at: None,
                 created_at: 10,
                 updated_at: 20,
             },
@@ -2237,7 +2274,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_canvas_writer_uses_canvas_manifest_and_reader_accepts_both_versions() {
+    fn canvas_writer_uses_v3_manifest_and_reader_accepts_v1_and_v2() {
         let document = image_document();
         let bytes = build_creative_canvas_archive(
             "归档画布",
@@ -2264,10 +2301,17 @@ mod tests {
             .unwrap()
             .contains("projectId"));
 
-        let parsed_v2 = parse_creative_archive(&bytes).unwrap();
-        assert_eq!(parsed_v2.title, "归档画布");
-        assert_eq!(parsed_v2.document.project_id, PROJECT_ID);
-        assert_eq!(parsed_v2.assets.len(), 1);
+        let parsed = parse_creative_archive(&bytes).unwrap();
+        assert_eq!(parsed.title, "归档画布");
+        assert_eq!(parsed.document.project_id, PROJECT_ID);
+        assert_eq!(parsed.assets.len(), 1);
+
+        let mut v2_files = files;
+        let mut v2_manifest = manifest;
+        v2_manifest["version"] = 2.into();
+        v2_files.insert("manifest.json".into(), serde_json::to_vec(&v2_manifest).unwrap());
+        let v2_bytes = write_archive_entries(v2_files, "legacy Canvas").unwrap();
+        assert_eq!(parse_creative_archive(&v2_bytes).unwrap().document, document);
 
         let v1_bytes = build_creative_project_archive(
             "旧归档项目",
@@ -2399,25 +2443,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_config_operation_rejects_missing_source_node_and_invalid_asset_identity() {
-        let mut missing_source = config_reference_document();
-        let CreativeNodeData::Config(config) = &mut missing_source.nodes[7].data else {
-            panic!("expected audio config")
-        };
-        let Some(CreativeConfigOperation::AudioNodeCompose { source_node_id, .. }) =
-            &mut config.operation
-        else {
-            panic!("expected audio compose operation")
-        };
-        *source_node_id = "missing-audio-source".into();
-        let error = collect_document_asset_ids(&missing_source).unwrap_err();
-        assert!(matches!(
-            error,
-            AppError::BadRequest(ref message)
-                if message.contains("missing source node")
-                    && message.contains("missing-audio-source")
-        ));
-
+    fn audio_config_operation_rejects_invalid_asset_identity() {
         let mut invalid_asset = config_reference_document();
         let CreativeNodeData::Config(config) = &mut invalid_asset.nodes[7].data else {
             panic!("expected audio config")
@@ -2436,6 +2462,207 @@ mod tests {
                 if message.contains("invalid assetId")
                     && message.contains("not-an-asset-id")
         ));
+    }
+
+    #[test]
+    fn config_history_without_source_nodes_round_trips_with_all_asset_references() {
+        let mut document = config_reference_document();
+        // The editor and Agent can delete source nodes after generation while
+        // retaining the configs as history, including text-only compose ops.
+        document
+            .nodes
+            .retain(|node| matches!(node.data, CreativeNodeData::Config(_)));
+        document.validate_for_project(PROJECT_ID).unwrap();
+        let expected_assets = [
+            ASSET_ID,
+            MASK_REFERENCE_ASSET_ID,
+            CONFIG_RESULT_ASSET_ID,
+            AUDIO_SOURCE_ASSET_ID,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        assert_eq!(
+            collect_document_asset_ids(&document).unwrap(),
+            expected_assets
+        );
+
+        for canvas_format in [false, true] {
+            let assets = vec![
+                opaque_image_asset_snapshot(ASSET_ID, "source", false),
+                opaque_image_asset_snapshot(MASK_REFERENCE_ASSET_ID, "mask", false),
+                opaque_image_asset_snapshot(CONFIG_RESULT_ASSET_ID, "result", false),
+                opaque_audio_asset_snapshot(AUDIO_SOURCE_ASSET_ID, "audio", false),
+            ];
+            let bytes = if canvas_format {
+                build_creative_canvas_archive("history", &document, assets, 30)
+            } else {
+                build_creative_project_archive("history", &document, assets, 30)
+            }
+            .unwrap();
+            let parsed = parse_creative_archive(&bytes).unwrap();
+            assert_eq!(parsed.document, document);
+            let imported =
+                remap_creative_archive_for_import(parsed, "0190f5fe-7c00-7a00-8abc-000000000713")
+                    .unwrap();
+            let mut source_id_map = BTreeMap::new();
+            for (original, remapped) in document.nodes.iter().zip(&imported.document.nodes) {
+                let original = serde_json::to_value(original).unwrap();
+                let remapped = serde_json::to_value(remapped).unwrap();
+                let old_source = original["data"]["operation"]["sourceNodeId"]
+                    .as_str()
+                    .unwrap();
+                let new_source = remapped["data"]["operation"]["sourceNodeId"]
+                    .as_str()
+                    .unwrap();
+                assert_ne!(new_source, old_source);
+                nomifun_common::validate_uuidv7(new_source).unwrap();
+                assert!(
+                    !imported
+                        .document
+                        .nodes
+                        .iter()
+                        .any(|node| node.id == new_source)
+                );
+                if let Some(previous) =
+                    source_id_map.insert(old_source.to_owned(), new_source.to_owned())
+                {
+                    assert_eq!(
+                        previous, new_source,
+                        "history from one source must stay linked"
+                    );
+                }
+                assert_eq!(
+                    original["data"]["operation"]["kind"],
+                    remapped["data"]["operation"]["kind"]
+                );
+                assert_eq!(original["data"]["prompt"], remapped["data"]["prompt"]);
+            }
+            assert_eq!(source_id_map.len(), 3);
+            assert_eq!(source_id_map.values().collect::<BTreeSet<_>>().len(), 3);
+            let imported_assets = imported
+                .assets
+                .iter()
+                .map(|asset| asset.metadata.asset_id.clone())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                collect_document_asset_ids(&imported.document).unwrap(),
+                imported_assets
+            );
+            assert!(imported_assets.is_disjoint(&expected_assets));
+            imported
+                .document
+                .validate_for_project(&imported.document.project_id)
+                .unwrap();
+            // The imported history remains portable on subsequent exports.
+            let snapshots = imported
+                .assets
+                .into_iter()
+                .map(|asset| {
+                    let mut snapshot = if asset.metadata.kind == "audio" {
+                        opaque_audio_asset_snapshot(
+                            &asset.metadata.asset_id,
+                            &asset.metadata.title,
+                            false,
+                        )
+                    } else {
+                        opaque_image_asset_snapshot(
+                            &asset.metadata.asset_id,
+                            &asset.metadata.title,
+                            false,
+                        )
+                    };
+                    snapshot.bytes = asset.bytes;
+                    snapshot
+                })
+                .collect();
+            build_creative_canvas_archive("history again", &imported.document, snapshots, 40).unwrap();
+        }
+    }
+
+    #[test]
+    fn missing_history_source_does_not_relax_asset_or_live_connection_validation() {
+        let mut document = config_reference_document();
+        document
+            .nodes
+            .retain(|node| matches!(node.data, CreativeNodeData::Config(_)));
+        // Even when a source node is gone, malformed operation asset IDs must
+        // still fail instead of silently dropping that config's asset closure.
+        for index in [0, 1, 3, 4] {
+            let mut wire = serde_json::to_value(&document).unwrap();
+            wire["nodes"][index]["data"]["operation"]["sourceAssetId"] = "invalid-asset".into();
+            let invalid: CreativeProjectDocument = serde_json::from_value(wire).unwrap();
+            assert!(matches!(collect_document_asset_ids(&invalid),
+                Err(AppError::BadRequest(message)) if message.contains("invalid assetId")));
+        }
+        let mut wire = serde_json::to_value(&document).unwrap();
+        wire["nodes"][1]["data"]["operation"]["markedReferenceAssetId"] = "invalid-mask".into();
+        let invalid: CreativeProjectDocument = serde_json::from_value(wire).unwrap();
+        assert!(matches!(collect_document_asset_ids(&invalid),
+            Err(AppError::BadRequest(message)) if message.contains("invalid assetId")));
+
+        document.connections.push(CreativeConnection {
+            id: "dangling-edge".into(),
+            source_node_id: "config-source-node".into(),
+            target_node_id: "compose-config".into(),
+            source_handle: None,
+            target_handle: None,
+        });
+        assert!(
+            matches!(build_creative_canvas_archive("invalid graph", &document, vec![], 30),
+            Err(AppError::Conflict(message)) if message.contains("missing node"))
+        );
+    }
+
+    #[test]
+    fn deleted_asset_markers_round_trip_without_media_or_director_sidecar_content() {
+        for (document, mut snapshot) in [
+            (image_document(), asset_snapshot()),
+            (director_document(), director_scene_asset_snapshot()),
+        ] {
+            snapshot.row.deleted_at = Some(25);
+            snapshot.row.content_deleted_at = Some(25);
+            snapshot.row.updated_at = 25;
+            snapshot.row.in_library = false;
+            snapshot.row.rel_path = None;
+            snapshot.row.thumb_rel_path = None;
+            snapshot.row.text_content = None;
+            snapshot.bytes.clear();
+            let bytes = build_creative_canvas_archive("deleted content", &document, vec![snapshot], 30)
+                .unwrap();
+            let mut files = unzip_to_map(&bytes);
+            let mut manifest: Value = serde_json::from_slice(&files["manifest.json"]).unwrap();
+            assert_eq!(manifest["version"], 3);
+            assert_eq!(manifest["assets"][0]["deletedAt"], 25);
+            let path = manifest["assets"][0]["contentPath"].as_str().unwrap();
+            assert!(files[path].is_empty());
+            let parsed = parse_creative_archive(&bytes).unwrap();
+            assert!(parsed.assets[0].bytes.is_empty());
+            let imported =
+                remap_creative_archive_for_import(parsed, "0190f5fe-7c00-7a00-8abc-000000000713")
+                    .unwrap();
+            assert_eq!(imported.assets[0].metadata.deleted_at, Some(25));
+            assert_ne!(
+                imported.assets[0].metadata.asset_id,
+                manifest["assets"][0]["assetId"].as_str().unwrap()
+            );
+            assert_eq!(
+                collect_document_asset_ids(&imported.document).unwrap(),
+                [imported.assets[0].metadata.asset_id.clone()]
+                    .into_iter()
+                    .collect()
+            );
+
+            // Older archives cannot disguise empty binaries as usable files.
+            manifest["version"] = 2.into();
+            files.insert(
+                "manifest.json".into(),
+                serde_json::to_vec(&manifest).unwrap(),
+            );
+            let invalid = write_archive_entries(files, "downgraded tombstone").unwrap();
+            assert!(matches!(parse_creative_archive(&invalid),
+                Err(AppError::BadRequest(message)) if message.contains("version 3")));
+        }
     }
 
     #[test]

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CreativeAsset, CreativeAssetPort } from "../../assets";
+import { CreativeAssetDeletedError, isCreativeAssetDeleted, type CreativeAsset, type CreativeAssetPort } from "../../assets";
 import {
   assertCreativeTaskReference,
   assertTaskCapabilityPair,
@@ -188,6 +188,8 @@ function assertInputAssets(
   field: string,
 ): void {
   const assetIds = references.map((asset) => asset.id);
+  const deleted = references.find(isCreativeAssetDeleted);
+  if (deleted) throw new CreativeAssetDeletedError(deleted.id);
   if (new Set(assetIds).size !== assetIds.length) {
     throw new CreativeWorkbenchRuntimeError(
       "reference_contract_mismatch",

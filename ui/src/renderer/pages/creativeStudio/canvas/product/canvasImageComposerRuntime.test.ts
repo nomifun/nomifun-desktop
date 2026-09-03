@@ -7,15 +7,22 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { CreativeAsset } from '../../assets';
-import type { CreativeCanvasNode } from '../../domain';
+import {
+  createEmptyCreativeProjectDocument,
+  parseCreativeProjectDocument,
+  type CreativeCanvasNode,
+} from '../../domain';
 import type { CreativeTask, CreativeTaskReference } from '../../tasks';
 import {
+  canvasCommands,
   canvasReducer,
   createInitialCanvasState,
   type CanvasCommand,
   type CanvasState,
 } from '../core';
 import { testNode, testUuid } from '../core/testFixtures';
+import { projectDocumentWithPendingTaskIds } from '../editor/editorModel';
+import { canvasCommandPreservesPendingTaskOwners } from '../editor/pendingTaskGuard';
 import type { CanvasImageComposerEditorPort } from './canvasImageComposerRuntime';
 import {
   orphanCanvasImageComposeTask,
@@ -251,6 +258,37 @@ const assets = {
 };
 
 describe('canvas image composer runtime integration', () => {
+  test.each(['image-generation', 'image-edit'] as const)(
+    'recovers %s results deleted before Canvas settlement without blocking pending tasks', async (mode) => {
+      const config = mode === 'image-generation' ? generationConfigNode() : configNode();
+      const harness = editorHarness(config, mode === 'image-generation' ? emptySourceNode() : sourceNode());
+      const completed = mode === 'image-generation' ? generationTask(config) : task('succeeded', config);
+      const recovered: CreativeAsset[] = [];
+      const input = {
+        editor: harness.editor, projectId: PROJECT_ID, task: completed,
+        assets: { ...assets, async get(id: string) {
+          return { ...(id === RESULT_ASSET_ID ? resultAsset : secondResultAsset),
+            deletedAt: 10, inLibrary: false, originalUrl: '', thumbnailUrl: null };
+        } },
+        viewportSize: { width: 1440, height: 900 },
+        onAsset: (asset: CreativeAsset) => { recovered.push(asset); },
+      };
+      await settleCanvasImageComposeTask(input);
+      expect(harness.pending()).toEqual([]);
+      expect(recovered.every((asset) => asset.deletedAt === 10)).toBe(true);
+      expect(harness.state().document.nodes.find((node) => node.id === config.id)).toMatchObject({
+        locked: false, data: { status: 'succeeded', resultAssetIds: completed.resultAssetIds },
+      });
+      for (const id of completed.resultAssetIds) {
+        expect(harness.state().document.nodes.filter((node) =>
+          node.type === 'image' && node.data.assetId === id)).toHaveLength(1);
+      }
+      const count = harness.state().document.nodes.length;
+      await settleCanvasImageComposeTask(input);
+      expect(harness.state().document.nodes).toHaveLength(count);
+    }
+  );
+
   test('flushes exact owner before submission and reflects running state', async () => {
     const config = configNode();
     const harness = editorHarness(config);
@@ -393,6 +431,79 @@ describe('canvas image composer runtime integration', () => {
       )
     ).toHaveLength(1);
   });
+
+  test.each(['image-generation', 'image-edit'] as const)(
+    'retains %s task history through source deletion and save reload after settlement',
+    async (mode) => {
+      const source = mode === 'image-generation' ? emptySourceNode() : sourceNode();
+      const config = mode === 'image-generation' ? generationConfigNode() : configNode();
+      const completed = mode === 'image-generation'
+        ? generationTask(config)
+        : task('succeeded', config);
+      const harness = editorHarness(config, source);
+      const deleteSource = canvasCommands.deleteSelection({ nodeIds: [source.id] });
+
+      expect(
+        canvasCommandPreservesPendingTaskOwners(
+          harness.state(), harness.pending(), deleteSource
+        )
+      ).toBe(false);
+
+      await settleCanvasImageComposeTask({
+        editor: harness.editor,
+        projectId: PROJECT_ID,
+        task: completed,
+        assets: {
+          ...assets,
+          async get(assetId: string) {
+            if (assetId === RESULT_ASSET_ID) return resultAsset;
+            if (assetId === SECOND_RESULT_ASSET_ID) return secondResultAsset;
+            throw new Error(`Unexpected asset ${assetId}`);
+          },
+        },
+        viewportSize: { width: 1440, height: 900 },
+      });
+      const terminalConfig = structuredClone(
+        harness.state().document.nodes.find((node) => node.id === config.id)
+      );
+      expect(terminalConfig).toMatchObject({
+        data: {
+          status: 'succeeded',
+          taskId: TASK_ID,
+          operation: config.data.operation,
+          inputAssetIds: config.data.inputAssetIds,
+          resultAssetIds: completed.resultAssetIds,
+        },
+      });
+      expect(harness.pending()).toEqual([]);
+      expect(
+        canvasCommandPreservesPendingTaskOwners(
+          harness.state(), harness.pending(), deleteSource
+        )
+      ).toBe(true);
+
+      harness.editor.dispatch(deleteSource);
+      const saved = projectDocumentWithPendingTaskIds(
+        createEmptyCreativeProjectDocument(PROJECT_ID),
+        harness.state(),
+        harness.pending()
+      );
+      const restored = parseCreativeProjectDocument(
+        JSON.parse(JSON.stringify(saved)), PROJECT_ID
+      );
+
+      expect(restored.nodes.some((node) => node.id === source.id)).toBe(false);
+      expect(restored.nodes.find((node) => node.id === config.id)).toEqual(terminalConfig);
+      expect(restored.pendingTaskIds).toEqual([]);
+      expect(
+        restored.connections.some((edge) =>
+          edge.sourceNodeId === source.id || edge.targetNodeId === source.id
+        )
+      ).toBe(false);
+      expect(restored.nodes.filter((node) => node.type === 'image')).toHaveLength(1);
+      expect(restored.connections).toHaveLength(1);
+    }
+  );
 
   test('confirmed orphan clears only its pending id and retains failed config', async () => {
     const config = configNode();

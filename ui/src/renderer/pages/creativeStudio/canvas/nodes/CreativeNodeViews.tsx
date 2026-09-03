@@ -183,7 +183,8 @@ export const CreativeImageNode: React.FC<CreativeImageNodeProps> = ({
   const resolved = Boolean(node.data.assetId && asset?.src);
   const resolvedTitle = title ?? t('creativeStudio.canvas.nodeKinds.image');
   const resolvedEmptyLabel =
-    emptyLabel ?? t('creativeStudio.canvas.nodes.image.empty');
+    asset?.deleted ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })
+      : emptyLabel ?? t('creativeStudio.canvas.nodes.image.empty');
   return (
     <CreativeNodeFrame
       node={node}
@@ -223,7 +224,8 @@ export const CreativeVideoNode: React.FC<CreativeVideoNodeProps> = ({
   const resolved = Boolean(node.data.assetId && asset?.src);
   const resolvedTitle = title ?? t('creativeStudio.canvas.nodeKinds.video');
   const resolvedEmptyLabel =
-    emptyLabel ?? t('creativeStudio.canvas.nodes.video.empty');
+    asset?.deleted ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })
+      : emptyLabel ?? t('creativeStudio.canvas.nodes.video.empty');
   const trimLabel = `${formatMilliseconds(node.data.trimStartMs)} – ${
     node.data.trimEndMs == null ? '∞' : formatMilliseconds(node.data.trimEndMs)
   }`;
@@ -271,7 +273,8 @@ export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
   const resolved = Boolean(node.data.assetId && asset?.src);
   const resolvedTitle = title ?? t('creativeStudio.canvas.nodeKinds.audio');
   const resolvedEmptyLabel =
-    emptyLabel ?? t('creativeStudio.canvas.nodes.audio.empty');
+    asset?.deleted ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })
+      : emptyLabel ?? t('creativeStudio.canvas.nodes.audio.empty');
   const trimLabel = `${formatMilliseconds(node.data.trimStartMs)} – ${
     node.data.trimEndMs == null ? '∞' : formatMilliseconds(node.data.trimEndMs)
   } · ${Math.round(Math.min(1, Math.max(0, node.data.volume)) * 100)}%`;
@@ -328,7 +331,8 @@ export const CreativePanoramaNode: React.FC<CreativePanoramaNodeProps> = ({
   const resolvedTitle =
     title ?? t('creativeStudio.canvas.nodeKinds.panorama');
   const resolvedEmptyLabel =
-    emptyLabel ?? t('creativeStudio.canvas.nodes.panorama.empty');
+    asset?.deleted ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })
+      : emptyLabel ?? t('creativeStudio.canvas.nodes.panorama.empty');
   return (
     <CreativeNodeFrame
       node={node}
@@ -339,7 +343,7 @@ export const CreativePanoramaNode: React.FC<CreativePanoramaNodeProps> = ({
       })}
       {...sharedFrameProps(props)}
     >
-      {preview ? (
+      {preview && !asset?.deleted ? (
         <div className={styles.previewSlot} data-node-preview='panorama'>
           {preview}
         </div>

@@ -6,7 +6,7 @@
 
 import { parseAssetId } from "@/common/types/ids";
 
-import type { CreativeAsset, CreativeAssetPort } from "../../assets";
+import { CreativeAssetDeletedError, isCreativeAssetDeleted, type CreativeAsset, type CreativeAssetPort } from "../../assets";
 import type { CreativeTask } from "../../tasks";
 import { projectCreativeTaskOutput } from "../../tasks";
 import type {
@@ -46,6 +46,7 @@ export function validateWorkbenchReferences(
     }
     seen.add(assetId);
     const asset = assets.get(assetId);
+    if (asset && isCreativeAssetDeleted(asset)) throw new CreativeAssetDeletedError(asset.id);
     if (!asset) {
       throw new CreativeWorkbenchRuntimeError(
         "reference_not_owned",

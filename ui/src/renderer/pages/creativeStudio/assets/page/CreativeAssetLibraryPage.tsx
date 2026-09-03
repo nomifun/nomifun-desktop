@@ -9,7 +9,9 @@ import type { TFunction } from 'i18next';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { creativeAssetClient } from '../client';
+import { subscribeCreativeAssetDeletion } from '../assetDeletion';
 import {
   CreateCreativeTextAssetModal,
   CreativeAssetLibrary,
@@ -19,7 +21,7 @@ import type {
   CreativeAssetViewMode,
   CreativeTextAssetFormValue,
 } from '../components';
-import type { CreativeAsset, CreativeAssetLibraryPort } from '../types';
+import { isCreativeAssetDeleted, type CreativeAsset, type CreativeAssetLibraryPort } from '../types';
 import { useCreativeAssets } from '../useCreativeAssets';
 import styles from './CreativeAssetLibraryPage.module.css';
 import {
@@ -80,6 +82,7 @@ function useDebouncedValue<T>(value: T, delay: number): T {
 }
 
 const downloadAsset = (asset: CreativeAsset): void => {
+  if (isCreativeAssetDeleted(asset)) return;
   const anchor = document.createElement('a');
   anchor.href = asset.originalUrl;
   anchor.download = creativeAssetDownloadName(asset);
@@ -112,7 +115,9 @@ const AssetPreviewModal: React.FC<AssetPreviewModalProps> = ({ asset, onClose })
       {asset ? (
         <div className={styles.previewBody} data-creative-asset-preview={asset.kind}>
           <div className={styles.previewMedia}>
-            {asset.kind === 'image' ? (
+            {isCreativeAssetDeleted(asset) ? (
+              <p role='status'>{t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })}</p>
+            ) : asset.kind === 'image' ? (
               <img src={asset.originalUrl} alt={asset.title} />
             ) : asset.kind === 'video' ? (
               <video src={asset.originalUrl} controls playsInline preload='metadata' aria-label={asset.title} />
@@ -156,7 +161,7 @@ const AssetPreviewModal: React.FC<AssetPreviewModalProps> = ({ asset, onClose })
           ) : null}
           <footer className={styles.previewFooter}>
             {asset.kind !== 'text' ? (
-              <Button type='primary' onClick={() => downloadAsset(asset)}>
+              <Button type='primary' disabled={isCreativeAssetDeleted(asset)} onClick={() => downloadAsset(asset)}>
                 {t('creativeStudio.assets.preview.downloadOriginal', {
                   defaultValue: '下载原始文件',
                 })}
@@ -369,6 +374,28 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
 
   const [previewAsset, setPreviewAsset] = useState<CreativeAsset | null>(null);
   const [editingAsset, setEditingAsset] = useState<CreativeAsset | null>(null);
+
+  useEffect(() => subscribeCreativeAssetDeletion(client, (assetId) => {
+    setPreviewAsset((current) => current?.id === assetId
+      ? { ...current, deletedAt: Date.now(), textContent: null, originalUrl: '', thumbnailUrl: null, inLibrary: false }
+      : current);
+    setEditingAsset((current) => current?.id === assetId ? null : current);
+  }), [client]);
+
+  useEffect(() => {
+    const reader = client as CreativeAssetLibraryPort & { get?(id: string): Promise<CreativeAsset> };
+    if (!previewAsset || !reader.get) return;
+    let active = true;
+    const id = previewAsset.id;
+    const refresh = () => {
+      void reader.get!(id).then((asset) => {
+        if (active) setPreviewAsset(asset);
+      }).catch(() => undefined);
+    };
+    refresh();
+    window.addEventListener('focus', refresh);
+    return () => { active = false; window.removeEventListener('focus', refresh); };
+  }, [client, previewAsset?.id]);
   const [editDraft, setEditDraft] = useState<CreativeAssetEditDraft>(DEFAULT_EDIT_DRAFT);
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
@@ -376,6 +403,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
   const [deletingAsset, setDeletingAsset] = useState<CreativeAsset | null>(null);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const deleteSubmittingRef = useRef(false);
 
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameDraft, setRenameDraft] = useState<CreativeCollectionRenameDraft>(DEFAULT_RENAME_DRAFT);
@@ -453,7 +481,8 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
   };
 
   const handleDelete = async (): Promise<void> => {
-    if (!deletingAsset) return;
+    if (!deletingAsset || deleteSubmittingRef.current) return;
+    deleteSubmittingRef.current = true;
     setDeleteSubmitting(true);
     setDeleteError(null);
     try {
@@ -464,8 +493,17 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         t('creativeStudio.assets.messages.assetDeleted', { defaultValue: '素材已删除。' })
       );
     } catch (reason) {
-      setDeleteError(errorText(reason));
+      setDeleteError(
+        isBackendHttpError(reason) && reason.status === 409
+          ? t('creativeStudio.assets.delete.activeTask', {
+              defaultValue: '素材仍被正在执行的生成任务使用，请等待任务结束或取消任务后再删除。',
+            })
+          : isBackendHttpError(reason) && reason.status >= 500
+            ? t('creativeStudio.assets.delete.retryCleanup', { defaultValue: '删除或文件清理尚未完成，请重试删除。' })
+            : isBackendHttpError(reason) ? reason.backendMessage : errorText(reason)
+      );
     } finally {
+      deleteSubmittingRef.current = false;
       setDeleteSubmitting(false);
     }
   };
@@ -580,6 +618,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         onEditAsset={openEdit}
         onDownloadAsset={downloadAsset}
         onRemoveAsset={(asset) => {
+          if (deleteSubmittingRef.current) return;
           setDeleteError(null);
           setDeletingAsset(asset);
         }}
@@ -617,20 +656,20 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         title={t('creativeStudio.assets.delete.title', { defaultValue: '删除素材' })}
         confirmLoading={deleteSubmitting}
         okButtonProps={{ status: 'danger' }}
-        okText={t('creativeStudio.assets.delete.confirm', { defaultValue: '删除' })}
+        okText={t('creativeStudio.assets.delete.confirm', { defaultValue: '永久删除' })}
         cancelText={t('creativeStudio.assets.delete.cancel', { defaultValue: '取消' })}
         maskClosable={!deleteSubmitting}
         closable={!deleteSubmitting}
         getPopupContainer={popupContainer}
         onOk={() => void handleDelete()}
         onCancel={() => {
-          if (!deleteSubmitting) setDeletingAsset(null);
+          if (!deleteSubmittingRef.current) setDeletingAsset(null);
         }}
       >
         <div className={styles.modalBody}>
           <p className={styles.deleteText}>
             {t('creativeStudio.assets.delete.description', {
-              defaultValue: '确定删除“{{title}}”吗？原始文件也会被永久删除，且无法恢复。',
+              defaultValue: '确定永久删除“{{title}}”吗？原始文件及缩略图将被删除，且无法恢复。使用此素材的画布和生成历史会保留记录，并显示“素材已删除”。',
               title: deletingAsset?.title ?? '',
             })}
           </p>

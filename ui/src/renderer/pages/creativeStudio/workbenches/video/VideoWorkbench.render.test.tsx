@@ -63,6 +63,17 @@ const tasks: VideoWorkbenchTask[] = [
 ];
 
 describe('VideoWorkbench result rendering', () => {
+  test('keeps a deleted successful result visible without playable media or download', () => {
+    const html = renderToStaticMarkup(<I18nextProvider i18n={testI18n}>
+      <VideoWorkbenchResults tasks={[{ ...base, id: 'deleted', taskId: 'deleted', status: 'succeeded',
+        assetId: 'deleted-asset', videoUrl: '/deleted-video', availability: 'deleted', hasDeletedInputs: true,
+      }]} selectedTaskIds={[]} onSelectedTaskIdsChange={() => undefined} onDownloadTask={() => undefined} />
+    </I18nextProvider>);
+    expect(html.includes('素材已删除')).toBe(true);
+    expect(html.includes('<video')).toBe(false);
+    expect(html.includes('/deleted-video')).toBe(false);
+    expect(html.includes('disabled=""')).toBe(true);
+  });
   test('renders every backend state without inventing progress or media', () => {
     const html = renderToStaticMarkup(
       <I18nextProvider i18n={testI18n}>

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CreativeAsset } from '../../assets';
+import { isCreativeAssetDeleted, type CreativeAsset } from '../../assets';
 import {
   isCreativeCanvasUserNode,
   type CreativeCanvasNode,
@@ -296,6 +296,23 @@ const naturalImageSize = (asset: CreativeAsset): CreativeSize | null =>
  * thumbnail URLs remain presentation concerns.
  */
 export function creativeNodeFromAsset(
+  asset: CreativeAsset,
+  state: CreativeCanvasProductState,
+  viewportSize: CreativeSize,
+  overrides: CreativeCanvasProductNodeOverrides = {}
+): CreativeCanvasNode {
+  if (isCreativeAssetDeleted(asset)) {
+    throw new Error(creativeStudioProductText('creativeStudio.assets.deleted', '素材已删除'));
+  }
+  return creativeNodeFromHistoricalAsset(asset, state, viewportSize, overrides);
+}
+
+/**
+ * Project an already-validated, completed task result, including a deleted
+ * result's identity. This does not read or restore its content. New insertions
+ * and generation inputs must use creativeNodeFromAsset instead.
+ */
+export function creativeNodeFromHistoricalAsset(
   asset: CreativeAsset,
   state: CreativeCanvasProductState,
   viewportSize: CreativeSize,

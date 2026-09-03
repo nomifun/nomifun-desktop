@@ -10,7 +10,7 @@ import type { TFunction } from 'i18next';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import type { CreativeAsset, CreativeAssetKind } from '../types';
+import { isCreativeAssetDeleted, type CreativeAsset, type CreativeAssetKind } from '../types';
 import CreativeAssetMedia from './CreativeAssetMedia';
 import styles from './CreativeAssetPickerModal.module.css';
 
@@ -89,6 +89,7 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
   const compatible = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
     return assets.filter((asset) => {
+      if (isCreativeAssetDeleted(asset)) return false;
       if (!acceptedKinds.includes(asset.kind)) return false;
       if (scope === 'library' && !asset.inLibrary) return false;
       if (kind !== 'all' && asset.kind !== kind) return false;
