@@ -17,5 +17,5 @@ pub mod types;
 
 pub use events::CronEventEmitter;
 pub use routes::cron_routes;
-pub use session_port::{CronSessionPort, conversation_cron_session_port};
+pub use session_port::{CronSessionPort, CronTurnRequest, conversation_cron_session_port};
 pub use state::CronRouterState;

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(test)]
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 #[cfg(test)]
 use nomifun_ai_agent::types::SendMessageData;
@@ -18,8 +19,8 @@ use nomifun_conversation::ConversationService;
 use nomifun_conversation::{
     IdempotentMessageDelivery,
     service::{
-        BackgroundTurnReconciliationDisposition, BackgroundTurnRuntimePreparation,
-        ObservedIdempotentMessageDelivery, PublicTurnDeliveryState,
+        BackgroundTurnReconciliationDisposition, ObservedIdempotentMessageDelivery,
+        PublicTurnDeliveryState,
     },
 };
 use nomifun_db::models::MessageRow;
@@ -37,7 +38,7 @@ use crate::prompt::{
     build_existing_conversation_prompt, build_new_conversation_prompt,
     build_new_conversation_prompt_with_skill_suggest, build_new_conversation_with_skill_prompt,
 };
-use crate::session_port::CronSessionPort;
+use crate::session_port::{CronSessionPort, CronTurnRequest};
 use crate::skill_file::{
     cron_skill_name, validate_skill_content, write_raw_skill_file,
 };
@@ -575,44 +576,6 @@ impl JobExecutor {
                 };
             }
         };
-        let agent_type = match serde_json::from_value::<AgentType>(
-            serde_json::Value::String(conversation_row.r#type.clone()),
-        ) {
-            Ok(agent_type) => agent_type,
-            Err(_) => {
-                return ExecutionResult::Error {
-                    message: format!(
-                        "conversation {conversation_id} has unknown agent type '{}'",
-                        conversation_row.r#type
-                    ),
-                };
-            }
-        };
-        let model = match nomifun_conversation::runtime_options::provider_model_from_conversation_row(
-            &conversation_row,
-        ) {
-            Ok(model) => model,
-            Err(error) => {
-                error!(job_id = %job.cron_job_id, conversation_id, error = %error, "Failed to resolve canonical conversation model");
-                return ExecutionResult::Error {
-                    message: error.to_string(),
-                };
-            }
-        };
-        let delegation_policy = match nomifun_conversation::runtime_options::delegation_policy_from_conversation_row(&conversation_row) {
-            Ok(policy) => policy,
-            Err(error) => {
-                error!(
-                    job_id = %job.cron_job_id,
-                    conversation_id,
-                    error = %error,
-                    "Failed to resolve conversation delegation policy for cron runtime"
-                );
-                return ExecutionResult::Error {
-                    message: error.to_string(),
-                };
-            }
-        };
         let row_extra =
             match serde_json::from_str::<serde_json::Value>(&conversation_row.extra) {
                 Ok(extra) => extra,
@@ -747,62 +710,37 @@ impl JobExecutor {
                 return replayed_delivery_result(run_id, conversation_id, delivery);
         }
 
-        let mut build_extra = build_task_extra(job, &skill_names);
+        let mut runtime_extra = build_task_extra(job, &skill_names);
         if managed_workspace {
             let temp_workspace_id = row_extra
                 .get(TEMP_WORKSPACE_ID_EXTRA_KEY)
                 .cloned()
                 .expect("managed workspace marker checked above");
-            build_extra[TEMP_WORKSPACE_ID_EXTRA_KEY] = temp_workspace_id;
+            runtime_extra[TEMP_WORKSPACE_ID_EXTRA_KEY] = temp_workspace_id;
         }
-        // Resolve this conversation instance's identity (row `created_at`) for
-        // nomi session ownership validation; best-effort (None skips it).
-        let conversation_created_at = Some(conversation_row.created_at);
-
-        let options = AgentRuntimeBuildOptions {
-            user_id: job.user_id.clone(),
-            agent_type,
-            workspace,
-            model,
-            conversation_id: conversation_id.to_owned(),
-            delegation_policy,
-            extra: build_extra,
-            conversation_created_at,
-            workspace_binding_lease: None,
-        };
-        let skill_suggest_workspace = options.workspace.clone();
+        // The resolved workspace remains a Cron scheduling concern, while
+        // Session-owned identity/model/policy fields are resolved by the
+        // typed session port immediately before runtime preparation.
+        runtime_extra["workspace"] = serde_json::Value::String(workspace.clone());
+        let skill_suggest_workspace = workspace.clone();
         let clear_context = matches!(job.execution_mode, ExecutionMode::Existing)
             && job
                 .agent_config
                 .as_ref()
                 .is_some_and(|config| config.clear_context_each_run);
-        let runtime_preparation = BackgroundTurnRuntimePreparation {
-            runtime_options: options,
-            clear_context,
-            pre_send_hook: None,
-        };
-        // This lease fences stop/reset while Conversation atomically claims the
-        // durable turn. Cron never uses it to build or mutate a runtime itself.
-        let build_lease = match self
-            .sessions
-            .begin_runtime_preparation(conversation_id, &job.user_id)
-        {
-            Ok(lease) => lease,
-            Err(error) => {
-                return ExecutionResult::Error {
-                    message: error.to_string(),
-                };
-            }
-        };
+        // The Session port owns the preparation lease and legacy runtime
+        // translation. Cron only submits one immutable turn request.
         let observed = match self
             .sessions
             .send_observed_turn(
                 &job.user_id,
                 conversation_id,
                 &turn_key,
-                build_cron_send_request(&prompt, &skill_names),
-                build_lease,
-                runtime_preparation,
+                CronTurnRequest {
+                    message: build_cron_send_request(&prompt, &skill_names),
+                    runtime_extra,
+                    clear_context,
+                },
             )
             .await
         {

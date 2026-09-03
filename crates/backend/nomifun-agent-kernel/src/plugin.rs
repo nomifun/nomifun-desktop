@@ -49,12 +49,13 @@ pub struct CapabilityInvocationContext {
     pub services: DeclaredServiceView,
 }
 
-/// Host-owned admission for a non-action role member.
+/// Host-owned admission for a role member.
 ///
-/// Context assembly and resource acquisition have no model-selected action or
-/// idempotency key. They still carry the same owner, frozen Snapshot,
-/// activation generation, and exact resource-binding set used by regular
-/// capability calls.
+/// Agent calls carry the session Snapshot/activation facts. Non-Agent
+/// operations carry an independently transferable exact Provider lock and the
+/// typed resources admitted for that operation. The latter is deliberately
+/// self-contained so an operation does not need a fabricated AgentSession or
+/// Snapshot just to reach a Provider.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RoleMemberAdmission {
     Agent {
@@ -66,6 +67,7 @@ pub enum RoleMemberAdmission {
         provider_lock: ResolvedRoleProviderLock,
         registry_generation: u64,
         registry_digest: DigestHex,
+        resource_bindings: TypedResourceBindings,
     },
 }
 
@@ -79,6 +81,19 @@ pub struct RoleMemberInvocationRequest {
     pub resource_binding_ids: BTreeSet<ResourceBindingId>,
     pub state_scope_key: ScopeKey,
     pub admission: RoleMemberAdmission,
+}
+
+/// Generic non-Agent Tool operation envelope.
+///
+/// Capability-specific input decoding remains in the owning Provider. The
+/// Kernel owns only the exact member admission, action identity, and
+/// idempotency identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoleToolOperationRequest {
+    pub member: RoleMemberInvocationRequest,
+    pub action_id: ActionId,
+    pub idempotency_key: IdempotencyKey,
+    pub input: StrictJsonValue,
 }
 
 /// Exact Provider-Mount facts projected after the Registry resolves the frozen
@@ -116,6 +131,28 @@ pub trait CapabilityHandler: Send + Sync {
         context: CapabilityInvocationContext,
         input: StrictJsonValue,
     ) -> Result<StrictJsonValue, KernelError>;
+}
+
+/// Operation-capable Tool export.
+///
+/// This is separate from [`CapabilityHandler`] because the latter is
+/// intentionally Agent-shaped and requires an AgentSession and Snapshot.
+/// Implementations receive the common resolved role-member context instead of
+/// synthetic Agent identity.
+#[async_trait]
+pub trait RoleToolHandler: Send + Sync {
+    async fn invoke(
+        &self,
+        context: RoleToolInvocationContext,
+        input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, KernelError>;
+}
+
+#[derive(Clone)]
+pub struct RoleToolInvocationContext {
+    pub context: ResolvedRoleMemberContext,
+    pub action_id: ActionId,
+    pub idempotency_key: IdempotencyKey,
 }
 
 /// Typed export for a `CapabilityKind::ContextContributor` role member.
@@ -177,6 +214,8 @@ pub struct PluginRegistration {
     handlers: BTreeMap<CapabilityId, Arc<dyn CapabilityHandler>>,
     role_action_handlers:
         BTreeMap<(ExecutionRoleId, CapabilityId), Arc<dyn CapabilityHandler>>,
+    role_tool_handlers:
+        BTreeMap<(ExecutionRoleId, CapabilityId), Arc<dyn RoleToolHandler>>,
     role_context_factories:
         BTreeMap<(ExecutionRoleId, CapabilityId), Arc<dyn ContextContributionFactory>>,
     role_resource_factories:
@@ -190,6 +229,7 @@ impl PluginRegistration {
             metadata,
             handlers: BTreeMap::new(),
             role_action_handlers: BTreeMap::new(),
+            role_tool_handlers: BTreeMap::new(),
             role_context_factories: BTreeMap::new(),
             role_resource_factories: BTreeMap::new(),
             services: ServiceExports::new(),
@@ -230,6 +270,31 @@ impl PluginRegistration {
     ) -> Result<(), KernelError> {
         if self
             .role_action_handlers
+            .insert((role_id.clone(), capability_id.clone()), handler)
+            .is_some()
+        {
+            return Err(KernelError::DuplicateRoleProvider {
+                role_id,
+                mount_id: self.metadata.mount_id.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Register the operation-capable Tool export for a role member.
+    ///
+    /// The legacy Agent-shaped action export remains available through
+    /// [`Self::add_role_action_handler`]. Both exports may coexist for one
+    /// member because admission selects the context shape; neither path
+    /// performs Provider fallback.
+    pub fn add_role_tool_handler(
+        &mut self,
+        role_id: ExecutionRoleId,
+        capability_id: CapabilityId,
+        handler: Arc<dyn RoleToolHandler>,
+    ) -> Result<(), KernelError> {
+        if self
+            .role_tool_handlers
             .insert((role_id.clone(), capability_id.clone()), handler)
             .is_some()
         {
@@ -293,6 +358,12 @@ impl PluginRegistration {
         self.role_action_handlers.keys().cloned().collect()
     }
 
+    pub fn role_tool_handler_ids(
+        &self,
+    ) -> BTreeSet<(ExecutionRoleId, CapabilityId)> {
+        self.role_tool_handlers.keys().cloned().collect()
+    }
+
     pub fn role_context_factory_ids(
         &self,
     ) -> BTreeSet<(ExecutionRoleId, CapabilityId)> {
@@ -324,6 +395,17 @@ impl PluginRegistration {
         ),
     > {
         self.role_action_handlers.iter()
+    }
+
+    pub(crate) fn role_tool_handlers(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &(ExecutionRoleId, CapabilityId),
+            &Arc<dyn RoleToolHandler>,
+        ),
+    > {
+        self.role_tool_handlers.iter()
     }
 
     pub(crate) fn role_context_factories(
@@ -456,6 +538,20 @@ impl PluginRegistration {
                 mount_id: metadata.mount_id.clone(),
                 reason: format!(
                     "role action handler {} is not declared by the provider contribution",
+                    capability_id.as_ref()
+                ),
+            });
+        }
+        let actual_role_tool_handlers = self.role_tool_handler_ids();
+        if let Some((role_id, capability_id)) = actual_role_tool_handlers
+            .difference(&role_members)
+            .next()
+        {
+            return Err(KernelError::InvalidRoleProvider {
+                role_id: role_id.clone(),
+                mount_id: metadata.mount_id.clone(),
+                reason: format!(
+                    "role Tool handler {} is not declared by the provider contribution",
                     capability_id.as_ref()
                 ),
             });

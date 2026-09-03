@@ -1,14 +1,20 @@
 # NomiFun ID / Data-Storage Refactor Continuity Area
 
-This directory is the cross-account, cross-platform handoff entry point for
-the identifier and schema refactor. The authoritative working documents are
-currently written in Chinese; start with [`README.zh.md`](README.zh.md).
+This directory is a historical continuity and release-audit archive for the
+identifier and schema refactor. It is not an active development task entry.
+The authoritative working documents are currently written in Chinese; start
+with [`README.zh.md`](README.zh.md).
+
+For current Agent Capability Platform v2 work, read the
+[document entry](../specs/2026-08-28-agent-capability-platform-v2/README.zh.md)
+and the
+[current closure TODO](../specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md).
 
 This is not the repository-wide contributor standard. For current mandatory
 rules, read [Data and Identifier Standards](../contributing/data-and-identifier-standards.md)
 and the canonical architecture contract in
 [`../architecture/id-system.md`](../architecture/id-system.md). The files here
-record decisions, handoff context, implementation evidence, and release audit
+record historical decisions, implementation evidence, and release-audit
 status; they must not override those current sources of truth.
 
 Status: `V3 CONTRACT IMPLEMENTED / RELEASE AUDIT PENDING`. The clean v3
