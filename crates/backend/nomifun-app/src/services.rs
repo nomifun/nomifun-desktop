@@ -3283,13 +3283,12 @@ impl AppServices {
                     );
                 }
             }
-            let browser_fetcher = Arc::new(nomifun_ai_agent::BrowserFetcher::new(
-                Arc::clone(&hub),
-                services.authoritative_user_id.to_string(),
-            ));
-            services
-                .knowledge_service
-                .set_render_fetcher(browser_fetcher);
+            // Rendered Knowledge sources are intentionally not wired to the
+            // legacy Hub-backed BrowserFetcher. They must enter through the
+            // canonical hidden `browser.render_content` operation, which is
+            // owned by the Fresh-v4 Agent platform. Leaving the port in its
+            // explicit unavailable state is safer than silently selecting a
+            // first-party implementation outside the frozen Provider lock.
             let services = services.with_browser_session_hub(hub).await?;
             services.terminal_service.spawn_scrollback_flusher();
             tokio::spawn(

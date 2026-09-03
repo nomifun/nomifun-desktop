@@ -53,7 +53,10 @@ pub use service::{
     WriteSurface, WriteTargetSpec, decode_doc_handle, encode_doc_handle,
     resolve_write_policy,
 };
-pub use source_url::{HttpFetcher, PageFetcher};
+pub use source_url::{
+    BrowserRenderContent, BrowserRenderContentPort, BrowserRenderContentRequest, FetchedPage,
+    HttpFetcher, PageFetcher, UnavailableBrowserRenderContentPort,
+};
 pub use state::KnowledgeRouterState;
 pub use turn_writeback::{TurnWritebackCandidate, TurnWritebackOutput};
 pub use workpath::{DEFAULT_WORKPATH_KEY, WORKPATH_BINDING_KIND, session_workpath_key, workpath_key};
