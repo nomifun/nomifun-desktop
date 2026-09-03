@@ -66,38 +66,31 @@ impl McpServerTransport {
 
         match transport_type {
             "stdio" => {
-                let command = value["command"]
-                    .as_str()
-                    .ok_or_else(|| McpError::InvalidTransport("stdio: missing command".into()))?
-                    .to_owned();
-                let args = value["args"]
-                    .as_array()
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                    .unwrap_or_default();
-                let env = value["env"]
-                    .as_object()
-                    .map(|obj| {
-                        obj.iter()
-                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let object = value.as_object().ok_or_else(|| {
+                    McpError::InvalidTransport("stdio: config must be a JSON object".into())
+                })?;
+                reject_unknown_fields(object, "stdio", &["command", "args", "env"])?;
+                let command = required_string_field(object, "stdio", "command")?;
+                let args = optional_string_array_field(object, "stdio", "args")?;
+                let env = optional_string_map_field(object, "stdio", "env")?;
                 Ok(Self::Stdio { command, args, env })
             }
             "sse" => {
-                let url = value["url"]
-                    .as_str()
-                    .ok_or_else(|| McpError::InvalidTransport("sse: missing url".into()))?
-                    .to_owned();
-                let headers = parse_headers_object(&value["headers"]);
+                let object = value.as_object().ok_or_else(|| {
+                    McpError::InvalidTransport("sse: config must be a JSON object".into())
+                })?;
+                reject_unknown_fields(object, "sse", &["url", "headers"])?;
+                let url = required_string_field(object, "sse", "url")?;
+                let headers = optional_string_map_field(object, "sse", "headers")?;
                 Ok(Self::Sse { url, headers })
             }
             "http" => {
-                let url = value["url"]
-                    .as_str()
-                    .ok_or_else(|| McpError::InvalidTransport("http: missing url".into()))?
-                    .to_owned();
-                let headers = parse_headers_object(&value["headers"]);
+                let object = value.as_object().ok_or_else(|| {
+                    McpError::InvalidTransport("http: config must be a JSON object".into())
+                })?;
+                reject_unknown_fields(object, "http", &["url", "headers"])?;
+                let url = required_string_field(object, "http", "url")?;
+                let headers = optional_string_map_field(object, "http", "headers")?;
                 Ok(Self::Http { url, headers })
             }
             other => Err(McpError::InvalidTransport(format!("unknown transport type: {other}"))),
@@ -105,16 +98,92 @@ impl McpServerTransport {
     }
 }
 
-/// Helper: extract `HashMap<String, String>` from a JSON object value.
-fn parse_headers_object(value: &serde_json::Value) -> HashMap<String, String> {
-    value
-        .as_object()
-        .map(|obj| {
-            obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
-                .collect()
+fn reject_unknown_fields(
+    object: &serde_json::Map<String, serde_json::Value>,
+    transport_type: &str,
+    allowed_fields: &[&str],
+) -> Result<(), McpError> {
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed_fields.iter().any(|allowed| *allowed == field.as_str()))
+    {
+        return Err(McpError::InvalidTransport(format!(
+            "{transport_type}: unknown field `{field}`"
+        )));
+    }
+
+    Ok(())
+}
+
+fn required_string_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    transport_type: &str,
+    field: &str,
+) -> Result<String, McpError> {
+    match object.get(field) {
+        Some(value) => value.as_str().map(str::to_owned).ok_or_else(|| {
+            McpError::InvalidTransport(format!(
+                "{transport_type}: field `{field}` must be a string"
+            ))
+        }),
+        None => Err(McpError::InvalidTransport(format!(
+            "{transport_type}: missing {field}"
+        ))),
+    }
+}
+
+fn optional_string_array_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    transport_type: &str,
+    field: &str,
+) -> Result<Vec<String>, McpError> {
+    let Some(value) = object.get(field) else {
+        return Ok(Vec::new());
+    };
+
+    let array = value.as_array().ok_or_else(|| {
+        McpError::InvalidTransport(format!(
+            "{transport_type}: field `{field}` must be an array of strings"
+        ))
+    })?;
+
+    array
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                McpError::InvalidTransport(format!(
+                    "{transport_type}: field `{field}[{index}]` must be a string"
+                ))
+            })
         })
-        .unwrap_or_default()
+        .collect()
+}
+
+fn optional_string_map_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    transport_type: &str,
+    field: &str,
+) -> Result<HashMap<String, String>, McpError> {
+    let Some(value) = object.get(field) else {
+        return Ok(HashMap::new());
+    };
+
+    let map = value.as_object().ok_or_else(|| {
+        McpError::InvalidTransport(format!(
+            "{transport_type}: field `{field}` must be an object of strings"
+        ))
+    })?;
+
+    map.iter()
+        .map(|(key, value)| {
+            value.as_str().map(|value| (key.clone(), value.to_owned())).ok_or_else(|| {
+                McpError::InvalidTransport(format!(
+                    "{transport_type}: field `{field}.{key}` must be a string"
+                ))
+            })
+        })
+        .collect()
 }
 
 // -- Conversions between domain and API transport --
@@ -373,6 +442,40 @@ mod tests {
     fn from_db_invalid_json_fails() {
         let result = McpServerTransport::from_db("stdio", "not json");
         assert!(matches!(result, Err(McpError::Json(_))));
+    }
+
+    #[test]
+    fn from_db_rejects_malformed_collection_values() {
+        let cases = [
+            ("stdio", r#"{"command":"node","args":["ok",42]}"#),
+            ("stdio", r#"{"command":"node","env":{"KEY":false}}"#),
+            ("http", r#"{"url":"https://example.com/mcp","headers":{"X-Value":null}}"#),
+            ("stdio", r#"{"command":"node","args":{}}"#),
+            ("stdio", r#"{"command":"node","env":[]}"#),
+            ("http", r#"{"url":"https://example.com/mcp","headers":[]}"#),
+            ("stdio", r#"["not","an","object"]"#),
+        ];
+
+        for (transport_type, config_json) in cases {
+            let result = McpServerTransport::from_db(transport_type, config_json);
+            assert!(
+                matches!(result, Err(McpError::InvalidTransport(_))),
+                "expected invalid transport for {transport_type}: {config_json}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_db_rejects_unknown_fields() {
+        let result = McpServerTransport::from_db(
+            "http",
+            r#"{"url":"https://example.com/mcp","unexpected":"value"}"#,
+        );
+
+        assert!(matches!(
+            result,
+            Err(McpError::InvalidTransport(message)) if message.contains("unknown field `unexpected`")
+        ));
     }
 
     // -- API transport conversions --------------------------------------------

@@ -111,6 +111,7 @@ pub(crate) enum RoleHostError {
     ResourceOperationDenied(&'static str),
     ResourceIdentityMismatch,
     StaleObservationGeneration,
+    UnsupportedOptionalMember(&'static str),
     ProviderUnavailable,
     ProviderFailure(String),
 }
@@ -127,6 +128,7 @@ impl RoleHostError {
             Self::ResourceOperationDenied(_) => "ROLE_HOST_RESOURCE_OPERATION_DENIED",
             Self::ResourceIdentityMismatch => "ROLE_HOST_RESOURCE_IDENTITY_MISMATCH",
             Self::StaleObservationGeneration => "ROLE_HOST_STALE_OBSERVATION_GENERATION",
+            Self::UnsupportedOptionalMember(_) => "CAPABILITY_UNAVAILABLE",
             Self::ProviderUnavailable => "ROLE_HOST_PROVIDER_UNAVAILABLE",
             Self::ProviderFailure(_) => "ROLE_HOST_PROVIDER_FAILURE",
         }
@@ -162,6 +164,9 @@ impl fmt::Display for RoleHostError {
             }
             Self::StaleObservationGeneration => {
                 formatter.write_str("computer observation generation is stale or missing")
+            }
+            Self::UnsupportedOptionalMember(capability_id) => {
+                write!(formatter, "optional role member `{capability_id}` is unavailable")
             }
             Self::ProviderUnavailable => formatter.write_str("role provider is unavailable"),
             Self::ProviderFailure(message) => write!(formatter, "role provider failed: {message}"),
@@ -315,6 +320,49 @@ fn reject_browser_control_fields(
         return Err(RoleHostError::InvalidContext(field));
     }
     Ok(())
+}
+
+#[cfg(feature = "browser-use")]
+fn parse_browser_render_content_input(
+    input: serde_json::Value,
+) -> Result<String, RoleHostError> {
+    let mut object = require_object(input)?;
+    reject_browser_control_fields(&object)?;
+    let url = object
+        .remove("url")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or(RoleHostError::InvalidContext("browser URL"))?;
+    if url.trim().is_empty() {
+        return Err(RoleHostError::InvalidContext("browser URL"));
+    }
+    if !object.is_empty() {
+        return Err(RoleHostError::InvalidContext(
+            "unsupported browser.render_content field",
+        ));
+    }
+    Ok(url)
+}
+
+#[cfg(feature = "browser-use")]
+fn browser_action_resource_operation(
+    operation: &Wave2TypedCapabilityOperation,
+) -> Result<&'static str, RoleHostError> {
+    match operation {
+        Wave2TypedCapabilityOperation::BrowserNavigate { .. }
+        | Wave2TypedCapabilityOperation::BrowserRenderContent { .. } => Ok("navigate"),
+        Wave2TypedCapabilityOperation::BrowserAct { .. } => Ok("interact"),
+        Wave2TypedCapabilityOperation::BrowserDownload { .. }
+        | Wave2TypedCapabilityOperation::BrowserUpload { .. }
+        | Wave2TypedCapabilityOperation::BrowserEvaluate { .. }
+        | Wave2TypedCapabilityOperation::BrowserTakeover { .. } => {
+            Err(RoleHostError::UnsupportedOptionalMember(
+                operation.capability_id(),
+            ))
+        }
+        _ => Err(RoleHostError::InvalidContext(
+            "operation is not a Browser role member",
+        )),
+    }
 }
 
 #[cfg(feature = "browser-use")]
@@ -1047,21 +1095,18 @@ impl RoleHostInvoker for BrowserRoleRuntime {
         &self,
         request: Wave2TypedHostRequest,
     ) -> Result<StrictJsonValue, RoleHostError> {
+        let render_url = match &request.operation {
+            Wave2TypedCapabilityOperation::BrowserRenderContent { input } => {
+                Some(parse_browser_render_content_input(input.0.clone())?)
+            }
+            _ => None,
+        };
+        let required_operation = browser_action_resource_operation(&request.operation)?;
         let provider = request
             .context
             .role_provider
             .clone()
             .ok_or(RoleHostError::ProviderUnavailable)?;
-        let required_operation = match &request.operation {
-            Wave2TypedCapabilityOperation::BrowserNavigate { .. }
-            | Wave2TypedCapabilityOperation::BrowserRenderContent { .. } => "navigate",
-            Wave2TypedCapabilityOperation::BrowserAct { .. } => "interact",
-            _ => {
-                return Err(RoleHostError::InvalidContext(
-                    "operation is not an implemented Browser role member",
-                ));
-            }
-        };
         let resource = self
             .action_resource(&request, required_operation)
             .await?;
@@ -1088,20 +1133,8 @@ impl RoleHostInvoker for BrowserRoleRuntime {
             resource_bindings: request.context.resource_bindings.clone(),
         };
 
-        if let Wave2TypedCapabilityOperation::BrowserRenderContent { input } =
-            request.operation
-        {
-            let mut object = require_object(input.0)?;
-            reject_browser_control_fields(&object)?;
-            let url = object
-                .remove("url")
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .ok_or(RoleHostError::InvalidContext("browser URL"))?;
-            if !object.is_empty() {
-                return Err(RoleHostError::InvalidContext(
-                    "unsupported browser.render_content field",
-                ));
-            }
+        if let Wave2TypedCapabilityOperation::BrowserRenderContent { .. } = request.operation {
+            let url = render_url.expect("render URL is parsed before Browser resource access");
             host.invoke(
                 role_context.clone(),
                 BrowserRoleOperation::Navigate(BrowserNavigate {
@@ -1328,25 +1361,8 @@ impl Wave2OperationToolHostPort for BrowserRoleRuntime {
                     "this first-party operation host currently exposes only browser.render_content",
                 ));
             };
-            let mut object = require_object(input.0)
+            let url = parse_browser_render_content_input(input.0)
                 .map_err(|error| Wave2HostPortError::new(error.code(), error.to_string()))?;
-            reject_browser_control_fields(&object)
-                .map_err(|error| Wave2HostPortError::new(error.code(), error.to_string()))?;
-            let url = object
-                .remove("url")
-                .and_then(|value| value.as_str().map(str::to_owned))
-                .ok_or_else(|| {
-                    Wave2HostPortError::new(
-                        "ROLE_HOST_INVALID_CONTEXT",
-                        "browser.render_content requires a URL",
-                    )
-                })?;
-            if !object.is_empty() {
-                return Err(Wave2HostPortError::new(
-                    "ROLE_HOST_INVALID_CONTEXT",
-                    "unsupported browser.render_content field",
-                ));
-            }
             let resource = self
                 .operation_resource(&request.context, "navigate")
                 .await
@@ -1439,6 +1455,18 @@ mod computer {
     use nomi_tools::Tool;
     use nomi_types::tool::ToolResult;
 
+    #[async_trait::async_trait]
+    pub(crate) trait ComputerToolPort: Send + Sync {
+        async fn execute(&self, input: serde_json::Value) -> ToolResult;
+    }
+
+    #[async_trait::async_trait]
+    impl ComputerToolPort for ComputerTool {
+        async fn execute(&self, input: serde_json::Value) -> ToolResult {
+            Tool::execute(self, input).await
+        }
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub(crate) struct ComputerObserve;
 
@@ -1501,7 +1529,7 @@ mod computer {
     /// serialized because ComputerTool owns the latest screenshot and a11y
     /// snapshot/ref cache.
     pub(crate) struct ComputerRoleHost {
-        tool: Arc<ComputerTool>,
+        tool: Arc<dyn ComputerToolPort>,
         target_resource_id: String,
         expected_provider: ExactRoleProviderRef,
         expected_snapshot: ResolvedSnapshotRef,
@@ -1513,6 +1541,22 @@ mod computer {
     impl ComputerRoleHost {
         pub(crate) fn new(
             tool: Arc<ComputerTool>,
+            target_resource_id: String,
+            expected_provider: ExactRoleProviderRef,
+            expected_snapshot: ResolvedSnapshotRef,
+            expected_registry_generation: u64,
+        ) -> Self {
+            Self::new_with_executor(
+                tool,
+                target_resource_id,
+                expected_provider,
+                expected_snapshot,
+                expected_registry_generation,
+            )
+        }
+
+        pub(crate) fn new_with_executor(
+            tool: Arc<dyn ComputerToolPort>,
             target_resource_id: String,
             expected_provider: ExactRoleProviderRef,
             expected_snapshot: ResolvedSnapshotRef,
@@ -1654,7 +1698,7 @@ mod computer {
 #[allow(unused_imports)]
 pub(crate) use computer::{
     ComputerInput, ComputerLaunch, ComputerObserve, ComputerRoleHost, ComputerRoleOperation,
-    ComputerRoleResult,
+    ComputerRoleResult, ComputerToolPort,
 };
 
 #[cfg(feature = "computer-use")]
@@ -1877,6 +1921,37 @@ mod tests {
         DigestHex, PackageId, PackageRef, PluginMountId, RoleContractKey, VersionString,
     };
 
+    #[cfg(feature = "computer-use")]
+    #[derive(Default)]
+    struct FakeComputerToolPort {
+        active: std::sync::atomic::AtomicUsize,
+        max_active: std::sync::atomic::AtomicUsize,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[async_trait::async_trait]
+    impl ComputerToolPort for FakeComputerToolPort {
+        async fn execute(
+            &self,
+            input: serde_json::Value,
+        ) -> nomi_types::tool::ToolResult {
+            use std::sync::atomic::Ordering;
+
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            nomi_types::tool::ToolResult::text(
+                input
+                    .get("action")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown"),
+            )
+        }
+    }
+
     fn provider(role_id: &str) -> ExactRoleProviderRef {
         ExactRoleProviderRef {
             role: nomifun_agent_contracts::ExactRoleContractRef {
@@ -1928,6 +2003,27 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "computer-use")]
+    fn computer_host(
+        tool: Arc<dyn ComputerToolPort>,
+    ) -> (Arc<ComputerRoleHost>, RoleHostContext) {
+        let context = context(
+            COMPUTER_ROLE_ID,
+            vec![binding(
+                COMPUTER_RESOURCE_KIND,
+                &["observe", "input", "launch"],
+            )],
+        );
+        let host = Arc::new(ComputerRoleHost::new_with_executor(
+            tool,
+            "resource".to_owned(),
+            context.provider.clone(),
+            context.snapshot.clone(),
+            context.registry_generation,
+        ));
+        (host, context)
+    }
+
     #[test]
     fn exact_resource_requires_one_owned_granted_binding() {
         let context = context(
@@ -1969,6 +2065,179 @@ mod tests {
             .code(),
             "ROLE_HOST_RESOURCE_CARDINALITY"
         );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn browser_render_content_rejects_untrusted_or_unsupported_input() {
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({ "url": "   " }),
+            serde_json::json!({
+                "url": "https://example.test",
+                "lane_id": "model-selected",
+            }),
+            serde_json::json!({
+                "url": "https://example.test",
+                "extra": true,
+            }),
+        ] {
+            assert_eq!(
+                parse_browser_render_content_input(invalid)
+                    .unwrap_err()
+                    .code(),
+                "ROLE_HOST_INVALID_CONTEXT"
+            );
+        }
+
+        assert_eq!(
+            parse_browser_render_content_input(serde_json::json!({
+                "url": "https://example.test/page",
+            }))
+            .unwrap(),
+            "https://example.test/page"
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn browser_render_content_requires_owned_navigate_resource() {
+        let principal = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: "owner".to_owned(),
+        };
+        let mut wrong_owner = binding(BROWSER_RESOURCE_KIND, &["navigate"]);
+        wrong_owner.owner_id = "other-owner".to_owned();
+        assert_eq!(
+            exact_resource(
+                &[wrong_owner],
+                BROWSER_RESOURCE_KIND,
+                &principal,
+                "navigate",
+            )
+            .unwrap_err(),
+            RoleHostError::ResourceOwnerMismatch
+        );
+
+        assert_eq!(
+            exact_resource(
+                &[binding(BROWSER_RESOURCE_KIND, &["observe"])],
+                BROWSER_RESOURCE_KIND,
+                &principal,
+                "navigate",
+            )
+            .unwrap_err(),
+            RoleHostError::ResourceOperationDenied("navigate")
+        );
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn unsupported_optional_browser_members_are_unavailable() {
+        for operation in [
+            Wave2TypedCapabilityOperation::BrowserDownload {
+                input: StrictJsonValue(serde_json::json!({})),
+            },
+            Wave2TypedCapabilityOperation::BrowserUpload {
+                input: StrictJsonValue(serde_json::json!({})),
+            },
+            Wave2TypedCapabilityOperation::BrowserEvaluate {
+                input: StrictJsonValue(serde_json::json!({})),
+            },
+            Wave2TypedCapabilityOperation::BrowserTakeover {
+                input: StrictJsonValue(serde_json::json!({})),
+            },
+        ] {
+            let capability_id = operation.capability_id();
+            let error = browser_action_resource_operation(&operation).unwrap_err();
+            assert_eq!(
+                error,
+                RoleHostError::UnsupportedOptionalMember(capability_id)
+            );
+            assert_eq!(error.code(), "CAPABILITY_UNAVAILABLE");
+        }
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn computer_observations_are_serialized_and_monotonic() {
+        use std::sync::atomic::Ordering;
+
+        let tool = Arc::new(FakeComputerToolPort::default());
+        let (host, context) = computer_host(tool.clone());
+        let start = Arc::new(tokio::sync::Barrier::new(3));
+
+        let first = {
+            let host = Arc::clone(&host);
+            let context = context.clone();
+            let start = Arc::clone(&start);
+            tokio::spawn(async move {
+                start.wait().await;
+                host.invoke(context, ComputerRoleOperation::Observe(ComputerObserve))
+                    .await
+                    .unwrap()
+                    .generation
+            })
+        };
+        let second = {
+            let host = Arc::clone(&host);
+            let context = context.clone();
+            let start = Arc::clone(&start);
+            tokio::spawn(async move {
+                start.wait().await;
+                host.invoke(context, ComputerRoleOperation::Observe(ComputerObserve))
+                    .await
+                    .unwrap()
+                    .generation
+            })
+        };
+
+        start.wait().await;
+        let mut generations = vec![first.await.unwrap(), second.await.unwrap()];
+        generations.sort_unstable();
+        assert_eq!(generations, vec![1, 2]);
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(tool.max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[tokio::test]
+    async fn computer_input_rejects_stale_observation_generation_before_provider_call() {
+        use std::sync::atomic::Ordering;
+
+        let tool = Arc::new(FakeComputerToolPort::default());
+        let (host, context) = computer_host(tool.clone());
+        let first = host
+            .invoke(
+                context.clone(),
+                ComputerRoleOperation::Observe(ComputerObserve),
+            )
+            .await
+            .unwrap();
+        let current = host
+            .invoke(
+                context.clone(),
+                ComputerRoleOperation::Observe(ComputerObserve),
+            )
+            .await
+            .unwrap();
+        assert_eq!((first.generation, current.generation), (1, 2));
+
+        let error = host
+            .invoke(
+                context,
+                ComputerRoleOperation::Input(ComputerInput {
+                    action: "wait".to_owned(),
+                    parameters: serde_json::json!({ "seconds": 0 }),
+                    expected_generation: first.generation,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error, RoleHostError::StaleObservationGeneration);
+        assert_eq!(error.code(), "ROLE_HOST_STALE_OBSERVATION_GENERATION");
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

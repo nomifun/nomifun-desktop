@@ -356,6 +356,28 @@ pub struct ResolvedMcpToolLock {
     pub materialization_revision: u64,
 }
 
+impl ResolvedMcpToolLock {
+    pub fn validate(&self) -> Result<(), PresetContractViolation> {
+        validate_non_empty_canonical_value(self.server_id.as_ref(), "server_id")?;
+        validate_non_empty_canonical_value(
+            self.canonical_tool_key.as_ref(),
+            "canonical_tool_key",
+        )?;
+        validate_non_empty_canonical_value(self.capability_id.as_ref(), "capability_id")?;
+        if !is_lowercase_hex_digest(&self.schema_digest) {
+            return Err(mcp_lock_violation(
+                "schema_digest must be 64 lowercase hexadecimal characters",
+            ));
+        }
+        if self.materialization_revision == 0 {
+            return Err(mcp_lock_violation(
+                "materialization_revision must be greater than or equal to 1",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedRoleProviderLock {
@@ -419,6 +441,11 @@ impl ResolvedSnapshotEnvelope {
         validate_resolved_role_provider_locks(
             &self.content.resolved_role_providers,
         )?;
+        validate_resolved_mcp_tool_locks(
+            &self.content.mcp_tool_locks,
+            &self.content.initial_capabilities,
+            &self.content.on_demand_capabilities,
+        )?;
         let digest = digest_payload(&self.content).map_err(|error| PresetContractViolation {
             code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
             message: error.to_string(),
@@ -465,6 +492,80 @@ fn validate_resolved_role_provider_locks(
         }
     }
     Ok(())
+}
+
+fn validate_resolved_mcp_tool_locks(
+    locks: &[ResolvedMcpToolLock],
+    initial: &[ResolvedCapability],
+    on_demand: &[ResolvedCapability],
+) -> Result<(), PresetContractViolation> {
+    let mut identity_keys = BTreeSet::new();
+    let mut capability_ids = BTreeSet::new();
+
+    for lock in locks {
+        lock.validate()?;
+
+        let identity = (lock.server_id.clone(), lock.canonical_tool_key.clone());
+        if !identity_keys.insert(identity) {
+            return Err(mcp_lock_violation(format!(
+                "duplicate MCP tool lock for server {} and tool {}",
+                lock.server_id.as_ref(),
+                lock.canonical_tool_key.as_ref()
+            )));
+        }
+        if !capability_ids.insert(lock.capability_id.clone()) {
+            return Err(mcp_lock_violation(format!(
+                "duplicate MCP tool lock capability {}",
+                lock.capability_id.as_ref()
+            )));
+        }
+
+        let resolved = initial
+            .iter()
+            .chain(on_demand.iter())
+            .find(|capability| capability.capability.id == lock.capability_id)
+            .ok_or_else(|| {
+                mcp_lock_violation(format!(
+                    "MCP tool lock capability {} is not resolved in initial or on-demand capabilities",
+                    lock.capability_id.as_ref()
+                ))
+            })?;
+        // `ResolvedCapability.schema_digest` is the digest of the complete
+        // Capability manifest. `ResolvedMcpToolLock.schema_digest` is the
+        // materialized MCP action-input schema digest; they intentionally
+        // describe different layers and must not be compared here. The
+        // materialization/source and owner validate the latter against the
+        // stored tool schema immediately before network execution.
+        let _ = resolved;
+    }
+    Ok(())
+}
+
+fn validate_non_empty_canonical_value(
+    value: &str,
+    field: &str,
+) -> Result<(), PresetContractViolation> {
+    if value.trim().is_empty() || value != value.trim() {
+        return Err(mcp_lock_violation(format!(
+            "{field} must be a non-empty canonical value"
+        )));
+    }
+    Ok(())
+}
+
+fn is_lowercase_hex_digest(value: &DigestHex) -> bool {
+    value.as_ref().len() == 64
+        && value
+            .as_ref()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn mcp_lock_violation(message: impl Into<String>) -> PresetContractViolation {
+    PresetContractViolation {
+        code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
+        message: message.into(),
+    }
 }
 
 fn validate_snapshot_chat_route_identity(
@@ -1099,6 +1200,201 @@ mod tests {
             id: crate::CapabilityId::from(id),
             version: VersionString::from("1.0.0"),
         }
+    }
+
+    fn resolved_capability(id: &str, schema_digest: &str) -> ResolvedCapability {
+        ResolvedCapability {
+            capability: capability(id),
+            source_package: PackageRef {
+                id: crate::PackageId::from("fixture.package"),
+                version: VersionString::from("1.0.0"),
+            },
+            schema_digest: DigestHex::from(schema_digest),
+            dependency_path: vec![crate::CapabilityId::from(id)],
+            required_runtime_features: BTreeSet::new(),
+        }
+    }
+
+    fn mcp_lock(
+        server_id: &str,
+        canonical_tool_key: &str,
+        capability_id: &str,
+        schema_digest: &str,
+    ) -> ResolvedMcpToolLock {
+        ResolvedMcpToolLock {
+            server_id: McpServerId::from(server_id),
+            canonical_tool_key: McpToolKey::from(canonical_tool_key),
+            capability_id: crate::CapabilityId::from(capability_id),
+            schema_digest: DigestHex::from(schema_digest),
+            materialization_revision: 1,
+        }
+    }
+
+    fn snapshot_content(
+        initial_capabilities: Vec<ResolvedCapability>,
+        on_demand_capabilities: Vec<ResolvedCapability>,
+        mcp_tool_locks: Vec<ResolvedMcpToolLock>,
+    ) -> ResolvedSnapshotContent {
+        ResolvedSnapshotContent {
+            schema_version: VersionString::from("1.0.0"),
+            resolver_version: VersionString::from("1.0.0"),
+            preset_revision_ref: PresetRevisionRef {
+                preset_id: AgentPresetId::from("fixture.preset"),
+                revision: 1,
+                revision_digest: DigestHex::from("fixture-revision"),
+            },
+            required_runtime_protocol_version: VersionString::from("1.0.0"),
+            required_runtime_profile: RuntimeProfileKind::CodingNative,
+            runtime_feature_inventory_digest: DigestHex::from("fixture-runtime"),
+            required_runtime_features: BTreeSet::new(),
+            compiled_runtime_profile_digest: DigestHex::from("fixture-profile"),
+            model_route_refs: BTreeMap::new(),
+            chat_route_identity: None,
+            initial_capabilities,
+            on_demand_capabilities,
+            on_demand_activation_plans: BTreeMap::new(),
+            compact_on_demand_index: Vec::new(),
+            capability_allowlist: BTreeSet::new(),
+            skill_locks: Vec::new(),
+            mcp_tool_locks,
+            resolved_role_providers: BTreeMap::new(),
+            typed_resource_bindings: Vec::new(),
+            canonical_schema_manifest_digest: DigestHex::from("fixture-schema"),
+            target_contribution_manifest_digest: DigestHex::from("fixture-target"),
+        }
+    }
+
+    fn envelope(content: ResolvedSnapshotContent) -> ResolvedSnapshotEnvelope {
+        let snapshot_digest = digest_payload(&content).expect("fixture content digest");
+        ResolvedSnapshotEnvelope {
+            snapshot_ref: ResolvedSnapshotRef {
+                snapshot_id: ResolvedSnapshotId::from("fixture.snapshot"),
+                snapshot_digest,
+            },
+            content,
+            actor: PrincipalRef {
+                principal_kind: "user".to_owned(),
+                principal_id: "fixture-user".to_owned(),
+            },
+            scene: "fixture".to_owned(),
+            surface: "test".to_owned(),
+            audience: "fixture".to_owned(),
+            created_at_ms: 1,
+            resolver_run_id: OperationId::from("fixture-operation"),
+            availability_evidence_revision: "1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn resolved_mcp_tool_lock_requires_canonical_identity_digest_and_revision() {
+        let digest = "a".repeat(64);
+        let valid = mcp_lock("server-1", "vendor.echo", "capability.echo", &digest);
+        assert!(valid.validate().is_ok());
+
+        let mut empty_server = valid.clone();
+        empty_server.server_id = McpServerId::from(" ");
+        assert!(empty_server.validate().is_err());
+
+        let mut noncanonical_tool = valid.clone();
+        noncanonical_tool.canonical_tool_key = McpToolKey::from(" vendor.echo");
+        assert!(noncanonical_tool.validate().is_err());
+
+        let mut empty_capability = valid.clone();
+        empty_capability.capability_id = crate::CapabilityId::from("");
+        assert!(empty_capability.validate().is_err());
+
+        let mut uppercase_digest = valid.clone();
+        uppercase_digest.schema_digest = DigestHex::from("A".repeat(64));
+        assert!(uppercase_digest.validate().is_err());
+
+        let mut short_digest = valid.clone();
+        short_digest.schema_digest = DigestHex::from("a".repeat(63));
+        assert!(short_digest.validate().is_err());
+
+        let mut zero_revision = valid;
+        zero_revision.materialization_revision = 0;
+        assert!(zero_revision.validate().is_err());
+    }
+
+    #[test]
+    fn resolved_snapshot_rejects_duplicate_mcp_lock_identity_and_capability() {
+        let digest = "a".repeat(64);
+        let initial = vec![
+            resolved_capability("capability.echo", &digest),
+            resolved_capability("capability.other", &digest),
+        ];
+        let first = mcp_lock("server-1", "vendor.echo", "capability.echo", &digest);
+
+        let duplicate_identity = envelope(snapshot_content(
+            initial.clone(),
+            Vec::new(),
+            vec![first.clone(), first.clone()],
+        ));
+        assert!(duplicate_identity.validate().is_err());
+
+        let duplicate_capability = envelope(snapshot_content(
+            initial,
+            Vec::new(),
+            vec![
+                first,
+                mcp_lock(
+                    "server-2",
+                    "vendor.other",
+                    "capability.echo",
+                    &digest,
+                ),
+            ],
+        ));
+        assert!(duplicate_capability.validate().is_err());
+    }
+
+    #[test]
+    fn resolved_snapshot_mcp_lock_matches_initial_or_on_demand_capability_schema() {
+        let digest = "a".repeat(64);
+        let initial = vec![resolved_capability("capability.initial", &digest)];
+        let on_demand = vec![resolved_capability("capability.lazy", &digest)];
+
+        let valid = envelope(snapshot_content(
+            initial.clone(),
+            on_demand.clone(),
+            vec![
+                mcp_lock(
+                    "server-1",
+                    "vendor.initial",
+                    "capability.initial",
+                    &digest,
+                ),
+                mcp_lock("server-1", "vendor.lazy", "capability.lazy", &digest),
+            ],
+        ));
+        assert!(valid.validate().is_ok());
+
+        let unknown = envelope(snapshot_content(
+            initial.clone(),
+            on_demand.clone(),
+            vec![mcp_lock(
+                "server-1",
+                "vendor.unknown",
+                "capability.unknown",
+                &digest,
+            )],
+        ));
+        assert!(unknown.validate().is_err());
+
+        let independent_tool_schema_digest = envelope(snapshot_content(
+            initial,
+            on_demand,
+            vec![mcp_lock(
+                "server-1",
+                "vendor.initial",
+                "capability.initial",
+                &"b".repeat(64),
+            )],
+        ));
+        assert!(
+            independent_tool_schema_digest.validate().is_ok(),
+            "MCP action schema digest is independent from the full capability manifest digest"
+        );
     }
 
     #[test]

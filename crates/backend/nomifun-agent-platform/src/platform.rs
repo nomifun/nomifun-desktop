@@ -68,6 +68,7 @@ use uuid::Uuid;
 
 const ROLE_CONTEXT_CONTRIBUTION_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(15);
+const MCP_CONNECTORS_PACKAGE_ID: &str = "nomifun.mcp-connectors";
 
 #[derive(Debug, Error)]
 pub enum AgentPlatformError {
@@ -3257,8 +3258,9 @@ impl AgentSessionCommandPort for AgentPlatform {
                 request.audience.clone(),
             )
             .await?;
-        let agent_session_id = request
-            .requested_session_id
+        let requested_session_id = request.requested_session_id.clone();
+        let agent_session_id = requested_session_id
+            .clone()
             .unwrap_or_else(|| AgentSessionId::from(Uuid::now_v7().to_string()));
         let session = AgentSessionLiveRecord {
             agent_session_id: agent_session_id.clone(),
@@ -3270,6 +3272,7 @@ impl AgentSessionCommandPort for AgentPlatform {
             fork_base_payload_id: None,
             next_seq: 1,
         };
+        let creation_producer_id = request.producer_id.clone();
         let mut create = CreateSessionRequest::new(
             session,
             request.created_at,
@@ -3279,16 +3282,24 @@ impl AgentSessionCommandPort for AgentPlatform {
             request.correlation_id,
         );
         create.initial_input = request.initial_input;
-        create.opening_event_id = Some(stable_event_id(
-            "session-opening",
-            &agent_session_id,
-            request.idempotency_key.as_ref(),
-        ));
-        create.activation_event_id = Some(stable_event_id(
-            "active-set-0",
-            &agent_session_id,
-            request.idempotency_key.as_ref(),
-        ));
+        // Creation event identities must be stable before a Session ID exists.
+        // `OpenAgentSessionRequest::user` intentionally leaves the ID unset, so
+        // an idempotent retry may otherwise generate a new UUID and conflict
+        // with the first opening event even though the request is identical.
+        let creation_event_id = |namespace| match requested_session_id.as_ref() {
+            Some(requested_session_id) => stable_event_id(
+                namespace,
+                requested_session_id,
+                request.idempotency_key.as_ref(),
+            ),
+            None => stable_creation_event_id(
+                namespace,
+                &creation_producer_id,
+                request.idempotency_key.as_ref(),
+            ),
+        };
+        create.opening_event_id = Some(creation_event_id("session-opening"));
+        create.activation_event_id = Some(creation_event_id("active-set-0"));
         create.initial_active_capability_ids = compiled
             .content()
             .initial_capabilities
@@ -4037,6 +4048,7 @@ fn validate_compiler_convergence(
         || persisted_content.model_route_refs != compiled_content.model_route_refs
         || persisted_content.chat_route_identity != compiled_content.chat_route_identity
         || persisted_content.capability_allowlist != compiled_content.capability_allowlist
+        || persisted_content.mcp_tool_locks != compiled_content.mcp_tool_locks
         || persisted_content.typed_resource_bindings
             != compiled_content.typed_resource_bindings
         || persisted_content.resolved_role_providers
@@ -4347,6 +4359,14 @@ fn stable_event_id(namespace: &str, session_id: &AgentSessionId, key: &str) -> E
     EventId::from(format!("{namespace}:{}:{key}", session_id.as_ref()))
 }
 
+fn stable_creation_event_id(
+    namespace: &str,
+    producer_id: &EventProducerId,
+    key: &str,
+) -> EventId {
+    EventId::from(format!("{namespace}:{}:{key}", producer_id.as_ref()))
+}
+
 fn runtime_session_error(error: SessionStoreError) -> RuntimeError {
     RuntimeError::Protocol(error.to_string())
 }
@@ -4407,20 +4427,39 @@ async fn persist_plugin_registrations_tx(
         .execute(&mut **tx)
         .await?;
 
-        sqlx::query(
-            "INSERT INTO plugin_configs \
-             (package_id, mount_id, config_json, revision) VALUES (?, ?, ?, ?) \
-             ON CONFLICT (package_id, mount_id) DO UPDATE SET \
-                 config_json = excluded.config_json, revision = excluded.revision",
-        )
-        .bind(package_id)
-        .bind(metadata.mount_id.as_ref())
-        .bind(platform_json(&metadata.context.validated_config.value.0)?)
-        .bind(i64::try_from(metadata.context.validated_config.config_revision).map_err(
-            |_| AgentPlatformError::Contract("plugin config revision exceeds SQLite i64".into()),
-        )?)
-        .execute(&mut **tx)
-        .await?;
+        let config_json = platform_json(&metadata.context.validated_config.value.0)?;
+        let config_revision = i64::try_from(metadata.context.validated_config.config_revision)
+            .map_err(|_| AgentPlatformError::Contract("plugin config revision exceeds SQLite i64".into()))?;
+        if package_id == MCP_CONNECTORS_PACKAGE_ID {
+            // MCP runtime transport/catalog facts are application-owned
+            // configuration. Publishing the bundled registration must not
+            // overwrite a validated user catalog with the registration's
+            // empty default object.
+            sqlx::query(
+                "INSERT INTO plugin_configs \
+                 (package_id, mount_id, config_json, revision) VALUES (?, ?, ?, ?) \
+                 ON CONFLICT (package_id, mount_id) DO NOTHING",
+            )
+            .bind(package_id)
+            .bind(metadata.mount_id.as_ref())
+            .bind(config_json)
+            .bind(config_revision)
+            .execute(&mut **tx)
+            .await?;
+        } else {
+            sqlx::query(
+                "INSERT INTO plugin_configs \
+                 (package_id, mount_id, config_json, revision) VALUES (?, ?, ?, ?) \
+                 ON CONFLICT (package_id, mount_id) DO UPDATE SET \
+                     config_json = excluded.config_json, revision = excluded.revision",
+            )
+            .bind(package_id)
+            .bind(metadata.mount_id.as_ref())
+            .bind(config_json)
+            .bind(config_revision)
+            .execute(&mut **tx)
+            .await?;
+        }
 
         for capability in &manifest.contributions.capabilities {
             sqlx::query(
@@ -4465,22 +4504,19 @@ async fn persist_plugin_registrations_tx(
             .await?;
         }
         for mapping in &manifest.contributions.mcp_tools {
-            let connection_ref = format!(
-                "package:{}@{}:{}",
-                package_id,
-                package_version,
-                mapping.server_id.as_ref()
-            );
-            sqlx::query(
-                "INSERT INTO mcp_servers \
-                 (server_id, owner_user_id, connection_config_ref, catalog_revision) \
-                 VALUES (?, 'system', ?, 0) \
-                 ON CONFLICT (server_id) DO NOTHING",
+            let server_exists: Option<i64> = sqlx::query_scalar(
+                "SELECT 1 FROM mcp_servers WHERE server_id = ?",
             )
             .bind(mapping.server_id.as_ref())
-            .bind(connection_ref)
-            .execute(&mut **tx)
+            .fetch_optional(&mut **tx)
             .await?;
+            if server_exists.is_none() {
+                return Err(AgentPlatformError::Contract(format!(
+                    "MCP mapping {}/{} references a server that has not been configured",
+                    mapping.server_id.as_ref(),
+                    mapping.canonical_tool_key.as_ref()
+                )));
+            }
             sqlx::query(
                 "INSERT INTO mcp_tool_materializations \
                  (server_id, canonical_tool_key, schema_hash, capability_id, \
@@ -4733,5 +4769,40 @@ mod route_writer_tests {
         assert!(value.is_object());
         assert_eq!(value["primary"]["model_route_id"], "opaque-route");
         assert!(value.get("provider_id").is_none());
+    }
+
+    #[test]
+    fn session_creation_event_ids_are_stable_before_session_id_allocation() {
+        let producer = EventProducerId::from("remote_rest:owner");
+        let opening_a =
+            stable_creation_event_id("session-opening", &producer, "remote-open:key");
+        let opening_b =
+            stable_creation_event_id("session-opening", &producer, "remote-open:key");
+        let different_key =
+            stable_creation_event_id("session-opening", &producer, "remote-open:other");
+
+        assert_eq!(opening_a, opening_b);
+        assert_ne!(opening_a, different_key);
+        assert_eq!(
+            opening_a.as_ref(),
+            "session-opening:remote_rest:owner:remote-open:key"
+        );
+    }
+
+    #[test]
+    fn explicit_session_ids_remain_part_of_creation_event_identity() {
+        let key = "remote-open:key";
+        let first = stable_event_id(
+            "session-opening",
+            &AgentSessionId::from("01900000-0000-7000-8000-000000000001"),
+            key,
+        );
+        let second = stable_event_id(
+            "session-opening",
+            &AgentSessionId::from("01900000-0000-7000-8000-000000000002"),
+            key,
+        );
+
+        assert_ne!(first, second);
     }
 }

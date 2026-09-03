@@ -3988,10 +3988,16 @@ pub fn apply_pending_v3_dataset_reset(
                     && error.kind() == std::io::ErrorKind::NotFound
                     && dest_error.kind() == std::io::ErrorKind::NotFound =>
             {
-                return Err(AppError::Internal(format!(
-                    "managed reset root disappeared from both active and retired locations: {}",
-                    root.relative_path
-                )));
+                if !is_ephemeral_database_sidecar(&root.relative_path) {
+                    return Err(AppError::Internal(format!(
+                        "managed reset root disappeared from both active and retired locations: {}",
+                        root.relative_path
+                    )));
+                }
+                // SQLite may checkpoint or remove a WAL/SHM/journal/lock
+                // between planning and applying the reset. These sidecars
+                // are recreated by SQLite and are not independent dataset
+                // facts; the main database remains a required managed root.
             }
             (Err(error), Ok(_))
                 if !root.initially_present
@@ -4071,6 +4077,16 @@ pub fn apply_pending_v3_dataset_reset(
         "managed dataset quarantined; awaiting fresh database bootstrap"
     );
     Ok(true)
+}
+
+fn is_ephemeral_database_sidecar(relative_path: &str) -> bool {
+    matches!(
+        relative_path,
+        "nomifun-backend.db-wal"
+            | "nomifun-backend.db-shm"
+            | "nomifun-backend.db-journal"
+            | "nomifun-backend.db.migrate.lock"
+    )
 }
 
 /// Record the v3 receipt after the fresh database has been opened and passed
@@ -6125,6 +6141,26 @@ mod tests {
 
     fn touch(path: &Path) {
         fs::write(path, b"x").unwrap();
+    }
+
+    #[test]
+    fn only_sqlite_runtime_sidecars_may_disappear_during_reset_recovery() {
+        for path in [
+            "nomifun-backend.db-wal",
+            "nomifun-backend.db-shm",
+            "nomifun-backend.db-journal",
+            "nomifun-backend.db.migrate.lock",
+        ] {
+            assert!(is_ephemeral_database_sidecar(path));
+        }
+        for path in [
+            "nomifun-backend.db",
+            "storage-generation",
+            "conversations",
+            "browser-data",
+        ] {
+            assert!(!is_ephemeral_database_sidecar(path));
+        }
     }
 
     fn seed_managed_root(data_dir: &Path, relative_path: &str, kind: ManagedRootKind) {

@@ -46,7 +46,7 @@ async fn compiled_sample_echo_runs_the_final_stack_and_fault_gate() {
     assert!(!report.faults.save_failure_created_revision);
     assert!(!report.faults.save_failure_created_session);
     assert!(!report.faults.materialization_failure_published_generation);
-    assert!(report.faults.panic_effect_became_uncertain);
+    assert!(report.faults.panic_effect_became_failed);
     assert!(!report.faults.panic_retried_effect);
     assert!(report.faults.dispose_timeout_forced_tree_cleanup);
 }
