@@ -1206,6 +1206,8 @@ impl AgentDomainHostPorts {
         ));
         self.wave2_roles.browser_contexts = Arc::clone(&browser_runtime)
             as Arc<dyn nomifun_agent_domain_wave2::Wave2ContextHostPort>;
+        self.wave2_roles.browser_operation_tools = Arc::clone(&browser_runtime)
+            as Arc<dyn nomifun_agent_domain_wave2::Wave2OperationToolHostPort>;
         self.wave2_roles.browser_resources =
             browser_runtime as Arc<dyn nomifun_agent_domain_wave2::Wave2ResourceHostPort>;
         self
