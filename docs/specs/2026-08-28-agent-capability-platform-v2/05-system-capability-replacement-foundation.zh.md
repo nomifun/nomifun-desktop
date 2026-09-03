@@ -631,15 +631,15 @@ Role Binding 只回答“由谁实现”，不授予 Browser/Computer 能力。A
 
 因此，本课题不是另起一套插件系统，而是把已经存在的 Capability 主链从“固定后端”改成“稳定 façade + 精确后端”。
 
-#### 2.2 当前仍存在的直接耦合
+#### 2.2 已识别耦合与当前处置
 
 | 当前事实 | 代码位置 | 对二期的影响 |
 |---|---|---|
 | Wave 2 compatibility Host 仍保留通用 unavailable/旧 owner 路径；Fresh-v4 已增加 Browser/Computer Role host | `crates/backend/nomifun-app/src/router/agent_wave2_host.rs`、`agent_role_host.rs` | first-party Role owner 已接通，但 compatibility bypass、完整消费者迁移和 live E2E 仍需收口 |
 | legacy Nomi Factory 使用一次性 `BrowserLaneClientProviderSlot` 晚绑定具体 Provider | `crates/backend/nomifun-ai-agent/src/factory/browser_lane.rs` | 新 v4/Codex 主链不能复用；该 Nomi-only Slot 按 D-020 精确留到 C9 后整体删除，不值得再做过渡改造 |
-| Computer Gateway 直接持有并调用 `ComputerRegistry` | `crates/backend/nomifun-gateway/src/caps_computer.rs`、`computer_registry.rs` | 二期 Provider 选择只能覆盖部分路径，Gateway 和后台消费者仍可能绕过 |
-| `mcp-computer-stdio` 自行构造 `ComputerTool` | `crates/backend/nomifun-app/src/commands/computer_stdio.rs` | Codex/ACP 可以完全绕过 Snapshot Provider lock，是比 Gateway 更直接的第二执行主链 |
-| legacy Knowledge URL 渲染仍有 `BrowserFetcher` 直接调用 Hub；Fresh-v4 已提供 non-Agent Role admission，但尚未接到该消费者 | `crates/backend/nomifun-ai-agent/src/browser_fetcher.rs`、`nomifun-app/src/services.rs`、`nomifun-agent-kernel/src/registry.rs` | 仍需把 Knowledge hidden render 接入同一 resolved Provider，避免 legacy 路径暗中启动第一方 Chromium |
+| Computer Gateway 的 `ComputerRegistry` 具体入口已删除 | 历史位置：`crates/backend/nomifun-gateway/src/caps_computer.rs`、`computer_registry.rs`；当前由 `production_bypass_audit` 守护 | Gateway 不再提供绕过 Snapshot Provider lock 的 Browser/Computer 具体执行入口 |
+| standalone `mcp-computer-stdio` 及其 `ComputerMcpConfig` 已物理删除 | 历史位置：`crates/backend/nomifun-app/src/commands/computer_stdio.rs`、`nomifun-api-types/src/mcp_bridge.rs` | Codex/ACP 只能使用带 AgentSession/Snapshot 的 canonical Host route；不存在第二执行主链 |
+| legacy Knowledge URL 渲染已改为 typed `BrowserRenderContentPort`；旧 `BrowserFetcher -> Hub` 生产接线已删除，缺少 canonical port 时 fail-closed | `crates/backend/nomifun-knowledge/src/source_url.rs`、`service.rs`、`nomifun-app/src/services.rs` | Knowledge 不会暗中启动第一方 Chromium；完整 canonical Knowledge consumer 组合仍需后续主线接入 |
 | canonical `CapabilityManifest` 已改为 source-neutral；具体平台范围由选定 Provider member 声明 | `crates/backend/nomifun-agent-domain-wave2/src/lib.rs`、`nomifun-agent-domain-support/src/lib.rs` | Provider 解析前不再被第一方平台条件提前拒绝，仍需完成各 Provider 的真实原生验证 |
 | Materialized Registry 已有 `(ExecutionRoleId, PluginMountId)` Provider 平表和 typed exports | `crates/backend/nomifun-agent-kernel/src/materialize.rs`、`registry.rs` | non-Agent operation 仍需由实际业务消费者使用该 exact dispatch |
 | Resolved Snapshot 已冻结 Browser/Computer Provider lock、member 和 typed resource refs | `crates/backend/nomifun-agent-contracts/src/preset.rs`、`nomifun-agent-kernel/src/compiler.rs` | 旧 Session 的实现恢复边界已具备，仍需完成生产消费者迁移和不可用场景验收 |
@@ -1129,6 +1129,12 @@ Computer physical action 在进入 Provider handler 前，按 `serialized_target
 人类 Browser 管理、登录、诊断、Surface、进程生命周期、telemetry 和 shutdown 是 Browser Engine/产品控制面，不是 Agent/automation Browser Use 消费者；这些具名 owning surface 可以直接持有 `BrowserSessionHub`。允许清单必须精确到模块/用途，不能把 Knowledge、Agent Factory、Gateway 或自动化消费者归入“管理”例外。
 
 P1-R2/C8 的 residual-zero 只针对新的 v4/Codex、Knowledge、Gateway 和 stdio target 主链。D-020 deletion manifest 中已经登记的 Nomi-only Browser/Computer wiring 可以作为精确、有期限的 legacy allowlist 保留到 C9，但不得增长或接入新架构；C9 删除 Nomi 后，除上述人类 Browser owning surface 和 first-party Provider 实现外，全仓具体实现旁路才要求为 0。
+
+截至 2026-09-03，Gateway Browser/Computer capability modules、具体 Registry 和
+standalone `mcp-computer-stdio` 已按本节删除边界物理移除；这一处置保留了本节的
+历史问题背景，但不再把已删除的错误形态当作当前实现状态。剩余的
+`BrowserLaneClientProviderSlot` 仅属于 D-020 的 Nomi-only legacy allowlist，等待 C9
+随旧 Nomi runtime 一并删除。
 
 ### 7. 一期与二期的精确边界
 

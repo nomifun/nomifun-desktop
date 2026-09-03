@@ -2155,7 +2155,8 @@ mod tests {
     };
     use nomifun_chat_model_broker::{
         BrokerRetryPolicy, ChatCausality, ChatCausalityGate, ChatModelError,
-        ChatModelErrorCode, ChatProtocol, ProviderIdRef,
+        ChatContentPart, ChatMessage, ChatModelErrorCode, ChatProtocol,
+        ChatResponseFormat, ChatRole, ChatToolChoice, PromptCachePolicy, ProviderIdRef,
         ProductionProviderRepository as ProductionProviderRepositoryPort,
     };
     use nomifun_common::{KnowledgeBaseId, encrypt_string};
@@ -3617,6 +3618,223 @@ mod tests {
             server.received_requests().await.expect("requests").len(),
             1
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires NOMIFUN_LIVE_STEPFUN_API_KEY; run explicitly with --ignored"]
+    async fn production_host_chat_broker_streams_configured_stepfun_plan_response() {
+        let api_key = std::env::var("NOMIFUN_LIVE_STEPFUN_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .expect("set NOMIFUN_LIVE_STEPFUN_API_KEY in the process environment");
+        let base_url = std::env::var("NOMIFUN_LIVE_STEPFUN_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "https://api.stepfun.com/step_plan/v1".to_owned());
+        let model = std::env::var("NOMIFUN_LIVE_STEPFUN_MODEL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "step-router-v1".to_owned());
+
+        let directory = tempfile::tempdir().expect("live Step Plan temp root");
+        let v4_dir = directory.path().join("v4");
+        nomifun_v4_root::FreshV4Coordinator::default()
+            .bootstrap(&v4_dir, APPLICATION_BUILD_IDENTITY, &[])
+            .await
+            .expect("live Step Plan v4 root");
+        let pool = super::open_validated_pool(
+            &v4_dir.join(FRESH_V4_DATABASE_FILE),
+        )
+        .await
+        .expect("live Step Plan v4 pool");
+        let credentials = encrypt_string(
+            &serde_json::json!({ "api_keys": [api_key] }).to_string(),
+            &[0x41; 32],
+        )
+        .expect("encrypt live Step Plan credentials");
+        let capabilities = [NewProviderModelCapability {
+            task: "chat",
+            traits: "[]",
+            protocol: "openai.chat_text",
+            connection_role: "default",
+            provider_params: r#"{"temperature":0.1}"#,
+            output_limit: Some(128),
+            ..Default::default()
+        }];
+        let (provider, _) = SqliteProviderRepository::new(pool.clone())
+            .create(
+                CreateProviderParams {
+                    provider_id: None,
+                    platform: "stepfun-plan",
+                    name: "live Step Plan smoke provider",
+                    base_url: &base_url,
+                    auth_scheme: "bearer",
+                    credentials_encrypted: &credentials,
+                    enabled: true,
+                    bedrock_config: None,
+                    sort_order: Some(0),
+                },
+                &NewProviderModel {
+                    model: &model,
+                    enabled: true,
+                    sort_order: 0,
+                    description: None,
+                    capabilities: &capabilities,
+                },
+                &[],
+            )
+            .await
+            .expect("live Step Plan provider graph");
+        let provider_id = ProviderIdRef::from(provider.provider_id.clone());
+        let provider_record = super::super::chat_broker_host::ProductionProviderRepository::new(
+            pool.clone(),
+        )
+        .find_provider(&provider_id)
+        .await
+        .expect("live Step Plan provider digest")
+        .expect("live Step Plan provider row");
+        let preset_revision_id = "live-stepfun-plan@1";
+        sqlx::query(
+            "INSERT INTO agent_presets \
+             (preset_id, owner_ref_json, source_json, display_json, \
+              current_stable_revision, created_at) \
+             VALUES (?, '{}', '{}', '{}', 1, 0)",
+        )
+        .bind("live-stepfun-plan")
+        .execute(&pool)
+        .await
+        .expect("live Step Plan preset row");
+        sqlx::query(
+            "INSERT INTO agent_preset_revisions \
+             (revision_id, preset_id, revision_no, schema_version, \
+              editor_document_json, revision_digest, created_by, created_at, reason) \
+             VALUES (?, ?, 1, '1.0.0', '{}', ?, 'live-stepfun-owner', 0, '')",
+        )
+        .bind(preset_revision_id)
+        .bind("live-stepfun-plan")
+        .bind("a".repeat(64))
+        .execute(&pool)
+        .await
+        .expect("live Step Plan revision row");
+        let route_record = ChatRouteRecord {
+            schema: ChatRouteRecordSchema::V1,
+            task: ChatRouteTask::AgentChat,
+            primary: ChatRouteCandidate {
+                model_route_id: "live-stepfun-route".into(),
+                model_route_revision: 1,
+                provider_id: provider.provider_id,
+                model,
+                protocol: ChatRouteProtocol::OpenaiChat,
+                connection_config_ref: "default".into(),
+                config_revision_digest: provider_record.config_revision_digest,
+                credential_ref: "live-stepfun-credential".to_owned(),
+                features: BTreeSet::from([
+                    ChatRouteFeature::TextInput,
+                    ChatRouteFeature::TextOutput,
+                    ChatRouteFeature::Reasoning,
+                    ChatRouteFeature::ToolCalls,
+                ]),
+            },
+            failovers: Vec::new(),
+        };
+        sqlx::query(
+            "INSERT INTO agent_preset_model_routes \
+             (revision_id, model_task, route_json) VALUES (?, ?, ?)",
+        )
+        .bind(preset_revision_id)
+        .bind("agent_chat")
+        .bind(route_record.to_canonical_json().expect("live route JSON"))
+        .execute(&pool)
+        .await
+        .expect("live Step Plan route row");
+
+        let composition = ChatBrokerHostComposition::new(
+            pool.clone(),
+            pool.clone(),
+            [0x41; 32],
+            ConnectionCredentialLeaseRegistry::new(),
+        );
+        let broker = composition
+            .build_broker(
+                Arc::new(AllowChatGate),
+                composition
+                    .build_model_invoke(
+                        nomifun_net::http_client_no_redirect()
+                            .expect("live Step Plan HTTP client"),
+                    ),
+                BrokerRetryPolicy {
+                    max_total_attempts: 1,
+                    max_attempts_per_route: 1,
+                },
+            )
+            .expect("live Step Plan production broker");
+        let fixture = nomifun_chat_model_broker::recorded_conformance_fixtures()
+            .into_iter()
+            .find(|fixture| fixture.protocol == ChatProtocol::OpenaiChat)
+            .expect("OpenAI Chat fixture");
+        let mut request = fixture.request;
+        let identity = ChatRouteIdentity::new(
+            preset_revision_id,
+            nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+            "live-stepfun-route".into(),
+            1,
+        );
+        request.route = identity.clone();
+        request.causality.route_identity = identity;
+        request.input.instructions = vec!["Reply with exactly OK.".to_owned()];
+        request.input.messages = vec![ChatMessage {
+            role: ChatRole::User,
+            content: vec![ChatContentPart::Text {
+                text: "Reply with exactly OK.".to_owned(),
+            }],
+            provider_round_id: None,
+        }];
+        request.input.tools.clear();
+        request.input.tool_choice = ChatToolChoice::None;
+        request.input.reasoning = None;
+        request.input.prompt_cache = PromptCachePolicy::Disabled;
+        request.input.response_format = ChatResponseFormat::Text;
+        request.input.requested_output_modalities =
+            BTreeSet::from([nomifun_chat_model_broker::ChatModality::Text]);
+        request.input.provider_round_parent = None;
+        request.input.preserve_native_responses_items = false;
+        request.input.max_output_tokens = Some(128);
+        let events = tokio::time::timeout(
+            Duration::from_secs(60),
+            broker
+                .open_chat_stream(request)
+                .await
+                .expect("live Step Plan stream")
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("live Step Plan response exceeded the 60 second deadline");
+        if let Some(error) = events.iter().find_map(|event| event.as_ref().err()) {
+            panic!(
+                "live Step Plan returned typed broker error code={:?} provider_status={:?}",
+                error.code, error.provider_status
+            );
+        }
+        assert!(
+            events.iter().any(|event| {
+                event.as_ref().is_ok_and(|event| {
+                    matches!(
+                        event.event,
+                        nomifun_chat_model_broker::ChatModelEvent::OutputTextDelta { .. }
+                    )
+                })
+            }),
+            "live Step Plan response contained no output text deltas"
+        );
+        assert!(
+            events.last().is_some_and(|event| {
+                event
+                    .as_ref()
+                    .is_ok_and(|event| event.event.is_terminal())
+            }),
+            "live Step Plan response did not end with a canonical terminal event"
+        );
+        pool.close().await;
     }
 
     #[test]
