@@ -49,6 +49,20 @@ const setMediaNumber = (
 };
 
 describe('Creative video node custom player', () => {
+  test('shows a failed media state while preserving the drag surface and recovers with a new source', () => {
+    const node = loadedVideoNode(1990);
+    const view = (src: string) => withCanvasTestI18n(<CreativeNodeView node={node} asset={{ src }} />);
+    const { container, rerender } = render(view('/broken.mp4'));
+    fireEvent.error(playerElements(container).video);
+    expect(container.querySelector('[role="status"]')).not.toBeNull();
+    expect(playerElements(container).centerPlay).toBeNull();
+    expect(playerElements(container).dragSurface).not.toBeNull();
+    expect(playerElements(container).controls.style.display).toBe('none');
+    rerender(view('/replacement.mp4'));
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(playerElements(container).centerPlay).not.toBeNull();
+  });
+
   test('formats finite media times without allowing invalid values into the UI', () => {
     expect(formatVideoNodeTime(0)).toBe('0:00');
     expect(formatVideoNodeTime(62.99)).toBe('1:02');

@@ -23,6 +23,7 @@ import { Button, Checkbox, Progress, Tag } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { CreativeAssetUnavailable } from '../../assets/components/CreativeAssetUnavailable';
+import CreativeVideoMedia from '../../assets/components/CreativeVideoMedia';
 
 import {
   clampVideoProgress,
@@ -170,10 +171,11 @@ const SuccessVisual: React.FC<{
   const { t } = useTranslation();
   return (
   <div className={styles.successVisual}>
-    {task.availability && task.availability !== 'available' ? <CreativeAssetUnavailable status={task.availability} /> : <video
+    {task.availability && task.availability !== 'available' ? <CreativeAssetUnavailable status={task.availability} /> : <CreativeVideoMedia
       src={task.videoUrl}
       poster={task.posterUrl}
       controls
+      playsInline
       preload='metadata'
       aria-label={t('creativeStudio.video.results.generatedVideo', {
         defaultValue: '生成视频：{{prompt}}',

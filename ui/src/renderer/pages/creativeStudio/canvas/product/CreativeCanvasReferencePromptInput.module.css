@@ -172,13 +172,6 @@
   background: var(--color-fill-2);
 }
 
-.thumbnail img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
 .thumbnailFallback {
   color: var(--color-text-3);
   font-size: 15px;

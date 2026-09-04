@@ -18,6 +18,7 @@ export type CreativeNodeOfKind<K extends CreativeCanvasNodeKind> = Extract<Creat
 /** Resolved media supplied by the asset boundary. No URL is persisted in a node. */
 export interface CreativeNodeAssetPresentation {
   src: string;
+  originalSrc?: string;
   deleted?: boolean;
   posterSrc?: string;
   label?: string;

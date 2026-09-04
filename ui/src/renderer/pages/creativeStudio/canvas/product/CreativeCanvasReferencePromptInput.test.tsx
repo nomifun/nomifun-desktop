@@ -78,6 +78,24 @@ const typeAtCaret = (
 };
 
 describe('CreativeCanvasReferencePromptInput', () => {
+  test('keeps a reference selectable when its thumbnail falls back to the original', () => {
+    const reference = {
+      ...references[0]!,
+      originalUrl: 'https://example.test/person-original.png',
+    };
+    const { getByRole } = render(<Harness referenceOptions={[reference]} />);
+    const input = getByRole('combobox') as HTMLTextAreaElement;
+    typeAtCaret(input, '@');
+    const option = getByRole('option', { name: /@图片1.*人物图/ });
+    const image = option.querySelector('img')!;
+    expect(image.getAttribute('src')).toBe(reference.thumbnailUrl!);
+
+    fireEvent.error(image);
+    expect(option.querySelector('img')?.getAttribute('src')).toBe(reference.originalUrl);
+    fireEvent.click(option);
+    expect(input.value).toBe('@图片1 ');
+  });
+
   test('opens a connected-reference-only list after @ and exposes combobox semantics', () => {
     const { getByRole } = render(<Harness />);
     const input = getByRole('combobox', {

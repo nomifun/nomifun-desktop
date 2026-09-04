@@ -18,7 +18,7 @@ use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Extension, Json, Multipart, Path, Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
@@ -1270,24 +1270,113 @@ struct FileQuery {
     thumb: Option<String>,
 }
 
+enum AssetByteRange {
+    Full,
+    Partial(std::ops::Range<usize>),
+    Unsatisfiable,
+}
+
+fn parse_asset_byte_range(value: &str, length: usize) -> AssetByteRange {
+    // Media elements request a single range. Unsupported units, malformed
+    // syntax, and multipart ranges can safely fall back to the full response.
+    let Some(spec) = value.trim().strip_prefix("bytes=") else {
+        return AssetByteRange::Full;
+    };
+    let Some((start, end)) = spec.split_once('-') else {
+        return AssetByteRange::Full;
+    };
+    let offset = |value: &str| -> Option<usize> {
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        // Oversized decimal offsets are legal syntax: clamp ends/suffixes and
+        // reject starts beyond EOF without overflowing on untrusted headers.
+        Some(value.bytes().fold(0usize, |number, digit| {
+            number.saturating_mul(10).saturating_add((digit - b'0') as usize)
+        }))
+    };
+    if start.is_empty() {
+        let Some(suffix) = offset(end) else {
+            return AssetByteRange::Full;
+        };
+        return if suffix == 0 || length == 0 {
+            AssetByteRange::Unsatisfiable
+        } else {
+            AssetByteRange::Partial(length.saturating_sub(suffix)..length)
+        };
+    }
+    let Some(start) = offset(start) else {
+        return AssetByteRange::Full;
+    };
+    let end = if end.is_empty() {
+        usize::MAX
+    } else if let Some(end) = offset(end) {
+        end
+    } else {
+        return AssetByteRange::Full;
+    };
+    if start >= length || end < start {
+        return AssetByteRange::Unsatisfiable;
+    }
+    AssetByteRange::Partial(start..end.min(length - 1) + 1)
+}
+
 /// AUTH-EXEMPT (mounted on [`workshop_public_routes`]): no `CurrentUser`
 /// extractor. Serves an asset's original binary (or, with `?thumb=1`, its
-/// thumbnail). Traversal-safe via the service; missing → 404.
+/// thumbnail). Supports the single byte ranges used by media elements.
+/// Traversal-safe via the service; missing or deleted assets still return 404.
 async fn serve_file(
     State(state): State<WorkshopRouterState>,
     Path(asset_id): Path<WorkshopAssetId>,
     Query(query): Query<FileQuery>,
+    method: Method,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let thumb = query.thumb.as_deref().map(parse_bool_flag).unwrap_or(false);
     let served = state.service.serve_file(asset_id.as_str(), thumb).await?;
-    Ok((
+    let bytes = Bytes::from(served.bytes);
+    let length = bytes.len();
+    // Range applies only to GET. There are no representation validators on
+    // this no-store route, so an If-Range request must receive the full file.
+    let range = if method == Method::GET
+        && !headers.contains_key(header::IF_RANGE)
+        && headers.get_all(header::RANGE).iter().count() == 1
+    {
+        headers.get(header::RANGE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| parse_asset_byte_range(value, length))
+            .unwrap_or(AssetByteRange::Full)
+    } else {
+        AssetByteRange::Full
+    };
+    let (status, content_range, body) = match range {
+        AssetByteRange::Full => (StatusCode::OK, None, bytes),
+        AssetByteRange::Partial(range) => (
+            StatusCode::PARTIAL_CONTENT,
+            Some(format!("bytes {}-{}/{length}", range.start, range.end - 1)),
+            bytes.slice(range),
+        ),
+        AssetByteRange::Unsatisfiable => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            Some(format!("bytes */{length}")),
+            Bytes::new(),
+        ),
+    };
+    let response = (
+        status,
         [
             (header::CONTENT_TYPE, served.mime),
             (header::CACHE_CONTROL, SERVE_CACHE_CONTROL.to_string()),
+            (header::ACCEPT_RANGES, "bytes".to_owned()),
+            (header::CONTENT_LENGTH, body.len().to_string()),
         ],
-        Body::from(served.bytes),
+        Body::from(body),
     )
-        .into_response())
+        .into_response();
+    Ok(match content_range {
+        Some(value) => ([(header::CONTENT_RANGE, value)], response).into_response(),
+        None => response,
+    })
 }
 
 #[cfg(test)]
@@ -3580,5 +3669,151 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(canonical.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn asset_file_range_returns_exact_bytes_and_media_headers() {
+        let (state, _user, _data_dir) = test_state().await;
+        let asset = state.service
+            .ingest_asset_bytes(b"0123456789".to_vec(), "video/mp4", "video", true, None)
+            .await
+            .unwrap();
+        let app = workshop_public_routes(state);
+        let uri = format!("/api/creative-studio/files/{}", asset.asset_id);
+        for (range, status, content_range, expected) in [
+            (None, StatusCode::OK, None, "0123456789"),
+            (Some("bytes=0-1"), StatusCode::PARTIAL_CONTENT, Some("bytes 0-1/10"), "01"),
+            (Some("bytes=7-"), StatusCode::PARTIAL_CONTENT, Some("bytes 7-9/10"), "789"),
+            (Some("bytes=-3"), StatusCode::PARTIAL_CONTENT, Some("bytes 7-9/10"), "789"),
+            (Some("bytes=-200"), StatusCode::PARTIAL_CONTENT, Some("bytes 0-9/10"), "0123456789"),
+            (Some("bytes=8-200"), StatusCode::PARTIAL_CONTENT, Some("bytes 8-9/10"), "89"),
+            (Some("bytes=8-999999999999999999999999999999"), StatusCode::PARTIAL_CONTENT, Some("bytes 8-9/10"), "89"),
+            (Some("bytes=-999999999999999999999999999999"), StatusCode::PARTIAL_CONTENT, Some("bytes 0-9/10"), "0123456789"),
+            (Some("bytes=invalid"), StatusCode::OK, None, "0123456789"),
+            (Some("bytes=0-1,4-5"), StatusCode::OK, None, "0123456789"),
+            (Some("items=0-1"), StatusCode::OK, None, "0123456789"),
+        ] {
+            let mut request = axum::http::Request::builder().uri(&uri);
+            if let Some(range) = range {
+                request = request.header(header::RANGE, range);
+            }
+            let response = app.clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "range: {range:?}");
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp4");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], SERVE_CACHE_CONTROL);
+            assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+            assert_eq!(response.headers()[header::CONTENT_LENGTH], expected.len().to_string());
+            assert_eq!(
+                response.headers().get(header::CONTENT_RANGE).map(|value| value.to_str().unwrap()),
+                content_range,
+            );
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 10).await.unwrap().as_ref(),
+                expected.as_bytes(),
+                "range: {range:?}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn asset_file_range_unsatisfiable_returns_416_and_actual_length() {
+        let (state, _user, _data_dir) = test_state().await;
+        let asset = state.service
+            .ingest_asset_bytes(b"0123456789".to_vec(), "video/mp4", "video", true, None)
+            .await
+            .unwrap();
+        let app = workshop_public_routes(state);
+        for range in ["bytes=10-", "bytes=20-30", "bytes=5-2", "bytes=-0", "bytes=999999999999999999999999999999-"] {
+            let response = app.clone().oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/creative-studio/files/{}", asset.asset_id))
+                    .header(header::RANGE, range)
+                    .body(Body::empty())
+                    .unwrap(),
+            ).await.unwrap();
+            assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE, "range: {range}");
+            assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes */10");
+            assert_eq!(response.headers()[header::CONTENT_LENGTH], "0");
+            assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], SERVE_CACHE_CONTROL);
+            assert!(axum::body::to_bytes(response.into_body(), 10).await.unwrap().is_empty());
+        }
+        assert!(matches!(parse_asset_byte_range("bytes=0-", 0), AssetByteRange::Unsatisfiable));
+        assert!(matches!(parse_asset_byte_range("bytes=-1", 0), AssetByteRange::Unsatisfiable));
+    }
+
+    #[tokio::test]
+    async fn asset_file_range_head_conditional_and_multiple_headers_keep_full_representation() {
+        let (state, _user, _data_dir) = test_state().await;
+        let asset = state.service
+            .ingest_asset_bytes(b"0123456789".to_vec(), "video/mp4", "video", true, None)
+            .await
+            .unwrap();
+        let app = workshop_public_routes(state);
+        let uri = format!("/api/creative-studio/files/{}", asset.asset_id);
+        for (method, extra_header) in [
+            (Method::HEAD, None),
+            (Method::GET, Some((header::IF_RANGE, "\"unmatched-validator\""))),
+            (Method::GET, Some((header::RANGE, "bytes=6-7"))),
+        ] {
+            let mut request = axum::http::Request::builder()
+                .method(method.clone())
+                .uri(&uri)
+                .header(header::RANGE, "bytes=0-1");
+            if let Some((name, value)) = extra_header {
+                request = request.header(name, value);
+            }
+            let response = app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CONTENT_LENGTH], "10");
+            assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+            assert!(response.headers().get(header::CONTENT_RANGE).is_none());
+            let body = axum::body::to_bytes(response.into_body(), 10).await.unwrap();
+            assert_eq!(body.as_ref(), if method == Method::HEAD { b"".as_slice() } else { b"0123456789".as_slice() });
+        }
+    }
+
+    #[tokio::test]
+    async fn asset_file_range_uses_thumbnail_representation_and_preserves_deleted_guard() {
+        let (state, _user, _data_dir) = test_state().await;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(4, 4)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let asset = state.service
+            .ingest_asset_bytes(png.into_inner(), "image/png", "image", true, None)
+            .await
+            .unwrap();
+        let thumbnail = state.service.serve_file(&asset.asset_id, true).await.unwrap();
+        let app = workshop_public_routes(state.clone());
+        let uri = format!("/api/creative-studio/files/{}", asset.asset_id);
+        let response = app.clone().oneshot(
+            axum::http::Request::builder()
+                .uri(format!("{uri}?thumb=1"))
+                .header(header::RANGE, "bytes=0-1")
+                .body(Body::empty())
+                .unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/jpeg");
+        assert_eq!(response.headers()[header::CONTENT_RANGE], format!("bytes 0-1/{}", thumbnail.bytes.len()));
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "2");
+        assert_eq!(axum::body::to_bytes(response.into_body(), 2).await.unwrap().as_ref(), &thumbnail.bytes[..2]);
+
+        state.service.delete_asset_content(&asset.asset_id).await.unwrap();
+        for path in [uri.clone(), format!("{uri}?thumb=1"), format!("/api/creative-studio/files/{}", WorkshopAssetId::new())] {
+            let response = app.clone().oneshot(
+                axum::http::Request::builder()
+                    .uri(path)
+                    .header(header::RANGE, "bytes=0-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            ).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert!(response.headers().get(header::CONTENT_RANGE).is_none());
+        }
     }
 }

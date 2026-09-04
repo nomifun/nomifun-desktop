@@ -27,6 +27,7 @@ import { useTranslation } from "react-i18next";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { creativeAssetClient, CreativeAssetDeletedError, isCreativeAssetDeleted, useCreativeAssetAvailability, type CreativeAsset } from "../../assets";
+import CreativeAssetMedia from "../../assets/components/CreativeAssetMedia";
 import {
   CREATIVE_STUDIO_PROJECTS_PATH,
   creativeStudioCanvasProjectPath,
@@ -1443,13 +1444,15 @@ const CreativeDirectorProductRoute: React.FC = () => {
                   className={styles.panoramaCard}
                   onClick={() => choosePanorama(asset)}
                 >
-                  <img
-                    src={asset.thumbnailUrl ?? asset.originalUrl}
-                    alt={t("creativeStudio.director.panoramaPicker.thumbnail", {
-                      defaultValue: "{{name}} 全景缩略图",
-                      name: asset.title,
-                    })}
-                  />
+                  <div className={styles.panoramaPreview}>
+                    <CreativeAssetMedia
+                      asset={asset}
+                      compact
+                      unavailableLabel={t("creativeStudio.assets.library.mediaUnavailable", {
+                        defaultValue: "素材暂时无法预览",
+                      })}
+                    />
+                  </div>
                   <strong title={asset.title}>{asset.title}</strong>
                   <small>
                     {asset.width} × {asset.height}

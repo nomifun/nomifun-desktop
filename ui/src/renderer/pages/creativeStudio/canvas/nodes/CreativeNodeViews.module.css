@@ -78,6 +78,17 @@
   pointer-events: none;
 }
 
+.videoError {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  color: var(--color-text-3);
+  font-size: calc(12px * var(--video-control-scale));
+  text-align: center;
+}
+
 .videoDragSurface {
   position: absolute;
   inset: 0;

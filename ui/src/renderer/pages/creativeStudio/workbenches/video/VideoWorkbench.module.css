@@ -233,20 +233,11 @@
   color: var(--color-text-3);
 }
 
-.referencePreview img {
+.referenceMedia {
   width: 100%;
   height: 100%;
-  object-fit: cover;
-}
-
-.referencePreview span {
-  display: grid;
-  width: 31px;
-  height: 31px;
-  place-items: center;
-  border: 1px solid var(--color-border-2);
-  border-radius: 8px;
-  background: var(--color-bg-2);
+  min-width: 0;
+  min-height: 0;
 }
 
 .referenceName {

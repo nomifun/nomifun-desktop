@@ -21,6 +21,8 @@ export interface VideoWorkbenchReference {
   name: string;
   /** Optional real thumbnail supplied by the asset layer. */
   previewUrl?: string;
+  /** Original media is kept separate so a video or audio file never becomes an image source. */
+  originalUrl?: string;
 }
 
 export interface VideoWorkbenchChoice {

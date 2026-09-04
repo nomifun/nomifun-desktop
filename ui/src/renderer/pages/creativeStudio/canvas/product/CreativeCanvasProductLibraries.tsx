@@ -5,14 +5,10 @@
  */
 
 import {
-  FileText,
   Loading,
-  Pic,
   Plus,
   Refresh,
   Search,
-  VideoTwo,
-  Voice,
 } from '@icon-park/react';
 import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -24,6 +20,7 @@ import {
   type CreativeAssetKind,
   type UseCreativeAssetsResult,
 } from '../../assets';
+import CreativeAssetMedia from '../../assets/components/CreativeAssetMedia';
 import {
   createNomiPromptLibraryPort,
   PromptLibrarySidebar,
@@ -69,25 +66,6 @@ const iconProps = {
   size: 18,
   fill: 'currentColor',
   strokeWidth: 2.5,
-};
-
-function assetIcon(kind: CreativeAssetKind): React.ReactNode {
-  if (kind === 'image') return <Pic {...iconProps} />;
-  if (kind === 'video') return <VideoTwo {...iconProps} />;
-  if (kind === 'audio') return <Voice {...iconProps} />;
-  return <FileText {...iconProps} />;
-}
-
-const CreativeAssetPreview: React.FC<{ asset: CreativeAsset }> = ({ asset }) => {
-  const { t } = useTranslation();
-  if (isCreativeAssetDeleted(asset)) {
-    return <span>{t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })}</span>;
-  }
-  const previewUrl = asset.thumbnailUrl ?? (asset.kind === 'image' ? asset.originalUrl : null);
-  if (previewUrl) {
-    return <img src={previewUrl} alt='' draggable={false} />;
-  }
-  return <span aria-hidden='true'>{assetIcon(asset.kind)}</span>;
 };
 
 /**
@@ -243,9 +221,15 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
                   onClick={() => onToggleAsset(asset.id)}
                   role='listitem'
                 >
-                  <span className={styles.assetPreview}>
-                    <CreativeAssetPreview asset={asset} />
-                  </span>
+                  <div className={styles.assetPreview}>
+                    <CreativeAssetMedia
+                      asset={asset}
+                      compact
+                      unavailableLabel={t('creativeStudio.assets.library.mediaUnavailable', {
+                        defaultValue: '素材暂时无法预览',
+                      })}
+                    />
+                  </div>
                   <span className={styles.assetCopy}>
                     <strong>{asset.title}</strong>
                     <span>{assetKindLabel(asset.kind)}</span>

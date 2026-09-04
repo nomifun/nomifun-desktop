@@ -168,6 +168,7 @@ describe('Creative Canvas product controller helpers', () => {
 
     expect(resolveCreativeNodeAssetPresentation(connectedImage, assets)).toEqual({
       src: imageAsset.thumbnailUrl,
+      originalSrc: imageAsset.originalUrl,
       label: imageAsset.title,
       alt: imageAsset.title,
     });
@@ -188,5 +189,75 @@ describe('Creative Canvas product controller helpers', () => {
         assets
       )
     ).toBeNull();
+  });
+
+  test('prefers a video node’s explicit image poster without changing its playable source', () => {
+    const videoAsset = asset({
+      id: 'asset-video',
+      kind: 'video',
+      mimeType: 'video/mp4',
+      originalUrl: '/video.mp4',
+      thumbnailUrl: '/video-thumbnail.jpg',
+    });
+    const posterAsset = asset({
+      id: 'asset-poster',
+      originalUrl: '/poster-original.png',
+      thumbnailUrl: '/poster-thumbnail.jpg',
+    });
+    const node = createCreativeCanvasProductNode('video', createInitialCanvasState(), VIEWPORT);
+    const videoNode = {
+      ...node,
+      data: { ...node.data, assetId: videoAsset.id, posterAssetId: posterAsset.id },
+    };
+
+    expect(resolveCreativeNodeAssetPresentation(videoNode, new Map([
+      [videoAsset.id, videoAsset],
+      [posterAsset.id, posterAsset],
+    ]))).toEqual({
+      src: videoAsset.originalUrl,
+      posterSrc: posterAsset.originalUrl,
+      label: videoAsset.title,
+    });
+  });
+
+  test('falls back to the video thumbnail when its explicit poster is unavailable', () => {
+    const videoAsset = asset({
+      id: 'asset-video',
+      kind: 'video',
+      mimeType: 'video/mp4',
+      originalUrl: '/video.mp4',
+      thumbnailUrl: '/video-thumbnail.jpg',
+    });
+    const posterAsset = asset({ id: 'asset-poster', originalUrl: '/poster.png' });
+    const node = createCreativeCanvasProductNode('video', createInitialCanvasState(), VIEWPORT);
+    const videoNode = {
+      ...node,
+      data: { ...node.data, assetId: videoAsset.id, posterAssetId: posterAsset.id },
+    };
+    const invalidPosters: Array<CreativeAsset | null> = [
+      null,
+      { ...posterAsset, deletedAt: 50 },
+      { ...posterAsset, kind: 'video', mimeType: 'video/mp4' },
+      { ...posterAsset, originalUrl: '' },
+      { ...posterAsset, originalUrl: '   ' },
+    ];
+
+    for (const invalidPoster of invalidPosters) {
+      const assets = new Map([[videoAsset.id, videoAsset]]);
+      if (invalidPoster) assets.set(invalidPoster.id, invalidPoster);
+      expect(resolveCreativeNodeAssetPresentation(videoNode, assets)).toEqual({
+        src: videoAsset.originalUrl,
+        posterSrc: videoAsset.thumbnailUrl,
+        label: videoAsset.title,
+      });
+    }
+
+    expect(resolveCreativeNodeAssetPresentation(videoNode, new Map([
+      [videoAsset.id, { ...videoAsset, thumbnailUrl: null }],
+    ]))).toEqual({ src: videoAsset.originalUrl, label: videoAsset.title });
+    expect(resolveCreativeNodeAssetPresentation(videoNode, new Map([
+      [videoAsset.id, { ...videoAsset, deletedAt: 50 }],
+      [posterAsset.id, posterAsset],
+    ]))).toEqual({ src: '', label: videoAsset.title, deleted: true });
   });
 });

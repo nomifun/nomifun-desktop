@@ -852,13 +852,6 @@
   aspect-ratio: 1;
 }
 
-.runResults img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
 .runCardActions {
   margin-top: auto;
   justify-content: flex-end;

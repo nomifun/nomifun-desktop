@@ -18,6 +18,7 @@ import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { useCreativeAssetAvailability, type CreativeAsset } from '../../assets';
 import { CreativeAssetUnavailable } from '../../assets/components/CreativeAssetUnavailable';
+import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 
 import type { CreativeTemplateRunAggregateV1 } from '../domain';
 import type {
@@ -392,7 +393,8 @@ const TemplateRunCenter: React.FC<TemplateRunCenterProps> = ({ port }) => {
                         defaultValue: 'View result {{index}}',
                       })}
                     >
-                      <img
+                      <CreativeMediaPreview
+                        kind='image'
                         src={port.assetUrl(assetId)}
                         alt={t('creativeStudio.templates.runCenter.resultAlt', {
                           name: run.templateSnapshot.metadata.name,
