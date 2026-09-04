@@ -597,16 +597,28 @@
   background: #000;
 }
 
-.successVisual video {
+.resultPlayer {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: contain;
+}
+
+.resultBadges {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: flex;
+  max-width: calc(100% - 16px);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  pointer-events: none;
 }
 
 .statusBadge,
 .mediaMeta {
-  position: absolute;
-  z-index: 2;
   display: inline-flex;
   align-items: center;
   gap: 3px;
@@ -619,18 +631,8 @@
   backdrop-filter: blur(8px);
 }
 
-.statusBadge {
-  right: 8px;
-  bottom: 8px;
-}
-
 .statusBadge[data-tone='success'] {
   color: #d1fae5;
-}
-
-.mediaMeta {
-  bottom: 8px;
-  left: 8px;
 }
 
 .queuedVisual,

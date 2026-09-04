@@ -157,6 +157,26 @@ describe('Creative Studio canonical node views', () => {
     expect(html.includes('width:42%')).toBe(true);
   });
 
+  test('shows video playback without the obsolete trim-range badge', () => {
+    const videoNode = nodes.find((node): node is Extract<CreativeCanvasNode, { type: 'video' }> => node.type === 'video');
+    if (!videoNode) throw new Error('video fixture is missing');
+    for (const trimEndMs of [null, 12_000]) {
+      const html = renderCanvas(
+        <CreativeNodeView
+          node={{ ...videoNode, data: { ...videoNode.data, assetId: 'video-asset', trimEndMs } }}
+          asset={{ src: '/clip.mp4', posterSrc: '/poster.jpg' }}
+        />
+      );
+
+      expect(html.includes('<video')).toBe(true);
+      expect(html.includes('data-creative-video-player')).toBe(true);
+      expect(html.includes('0:00 – ∞')).toBe(false);
+      expect(html.includes('0:00 – 0:12')).toBe(false);
+      expect(html.includes('controls=""')).toBe(false);
+      expect(html.toLowerCase().includes('disablepictureinpicture=""')).toBe(true);
+    }
+  });
+
   test('keeps node names accessible without rendering descriptions above cards', () => {
     const imageNode = nodes.find((node): node is Extract<CreativeCanvasNode, { type: 'image' }> => node.type === 'image');
     if (!imageNode) throw new Error('image fixture is missing');

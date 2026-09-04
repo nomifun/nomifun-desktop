@@ -229,14 +229,10 @@ export const CreativeVideoNode: React.FC<CreativeVideoNodeProps> = ({
   const resolvedEmptyLabel =
     asset?.deleted ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })
       : emptyLabel ?? t('creativeStudio.canvas.nodes.video.empty');
-  const trimLabel = `${formatMilliseconds(node.data.trimStartMs)} – ${
-    node.data.trimEndMs == null ? '∞' : formatMilliseconds(node.data.trimEndMs)
-  }`;
   return (
     <CreativeNodeFrame
       node={node}
       title={resolvedTitle}
-      footer={resolved ? trimLabel : undefined}
       {...sharedFrameProps(props)}
     >
       {resolved && asset ? (

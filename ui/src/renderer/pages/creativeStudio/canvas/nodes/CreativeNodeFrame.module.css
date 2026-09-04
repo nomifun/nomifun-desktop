@@ -223,14 +223,6 @@
   pointer-events: none;
 }
 
-.frame[data-node-type='video']:has([data-video-node-player]) .footer {
-  top: 8px;
-  right: auto;
-  bottom: auto;
-  left: 8px;
-  opacity: 0.78;
-}
-
 .inputHandle,
 .outputHandle {
   position: absolute;

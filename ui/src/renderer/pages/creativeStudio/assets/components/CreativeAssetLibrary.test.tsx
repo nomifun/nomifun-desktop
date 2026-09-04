@@ -207,8 +207,18 @@ describe('CreativeAssetLibrary', () => {
     expect(html.includes('aria-label="素材范围"')).toBe(false);
     expect(html.includes('aria-label="显示方式"')).toBe(false);
     expect(html.includes('type="checkbox"')).toBe(false);
-    expect(html.includes('data-action-labels="true"')).toBe(true);
-    expect(html.includes('aria-label="查看">查看</button>')).toBe(true);
+    expect(html.match(/aria-haspopup="menu"/g)?.length).toBe(assets.length);
+    expect(html.match(/aria-expanded="false"/g)?.length).toBe(assets.length);
+    expect(html.includes('role="menuitem"')).toBe(false);
+    for (const item of assets) {
+      expect(html.includes(`aria-label="更多：${item.title}"`)).toBe(true);
+    }
+    const imageCard = html.match(/<article\b[^>]*data-asset-id="asset-0"[\s\S]*?<\/article>/)?.[0] ?? '';
+    const footer = imageCard.match(/<footer\b[\s\S]*?<\/footer>/)?.[0] ?? '';
+    expect(footer.includes('1280 × 720')).toBe(true);
+    expect(footer.includes('2.0 KB')).toBe(true);
+    expect(footer.includes('image/example')).toBe(true);
+    expect(footer.includes('aria-haspopup="menu"')).toBe(true);
     expect(html.includes('重命名合集')).toBe(true);
     expect(html.includes('图片和视频，单文件最大 64 MB')).toBe(true);
     expect(html.includes('aria-label="素材分页"')).toBe(true);

@@ -13,7 +13,6 @@
   position: absolute;
   box-sizing: border-box;
   touch-action: none;
-  transition: opacity 120ms ease;
 }
 
 .nodePlacement > * {
@@ -30,10 +29,6 @@
     [data-canvas-audio-composer]
   ) {
   z-index: 1000000 !important;
-}
-
-.nodePlacement[data-dimmed='true'] {
-  opacity: 0.32;
 }
 
 .nodePlacement[data-connection-target]::after {
@@ -207,7 +202,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .nodePlacement,
   .connectionHandle {
     transition: none;
   }
