@@ -820,21 +820,6 @@
   cursor: default;
 }
 
-.mediaImage,
-.mediaVideo {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  background: var(--color-fill-2);
-  transition: transform 220ms ease;
-}
-
-.assetItem:hover .mediaImage,
-.assetItem:hover .mediaVideo {
-  transform: scale(1.025);
-}
-
 .mediaFallback,
 .textPreview,
 .audioPreview {
@@ -1624,8 +1609,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .assetItem,
-  .mediaImage,
-  .mediaVideo,
   .uploadProgress i,
   .primaryButton,
   .secondaryButton,

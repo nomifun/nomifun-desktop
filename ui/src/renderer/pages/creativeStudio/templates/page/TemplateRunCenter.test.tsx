@@ -27,6 +27,35 @@ testI18n.use(initReactI18next).init({
 });
 
 describe('Template Run Center', () => {
+  test('renders an available image result while preserving its original link and accessible name', async () => {
+    const run = createTemplateRunFixture();
+    run.record.status = 'succeeded';
+    run.record.resultAssetIds = [IDS.asset];
+    const originalUrl = `/api/creative-studio/files/${IDS.asset}`;
+    const asset: CreativeAsset = {
+      id: IDS.asset, kind: 'image', title: 'Portrait result', collection: null, tags: [],
+      mimeType: 'image/png', width: 720, height: 1280, bytes: 1_024, inLibrary: true,
+      textContent: null, origin: null, originalUrl, thumbnailUrl: null,
+      createdAt: 1, updatedAt: 2,
+    };
+    const view = render(<I18nextProvider i18n={testI18n}><TemplateRunCenter port={{
+      snapshot: { loading: false, loadError: null, runs: [run], activities: {} },
+      assetReader: { get: async () => asset }, assetUrl: () => originalUrl,
+      resume: async () => undefined, cancel: async () => undefined,
+      review: async () => undefined, retry: async () => undefined,
+    }} /></I18nextProvider>);
+
+    await waitFor(() => expect(view.container.querySelector('img')).not.toBeNull());
+    const image = view.container.querySelector('img')!;
+    const link = image.closest('a')!;
+    expect(image.getAttribute('src')).toBe(originalUrl);
+    expect(image.getAttribute('alt')).toBe(`${run.templateSnapshot.metadata.name} result 1`);
+    expect(link.getAttribute('href')).toBe(originalUrl);
+    expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.getAttribute('rel')).toBe('noreferrer');
+    expect(link.getAttribute('title')).toBe('View result 1');
+  });
+
   test('renders durable status and recovery while awaiting result metadata', () => {
     const succeeded = createTemplateRunFixture();
     succeeded.revision = 4;

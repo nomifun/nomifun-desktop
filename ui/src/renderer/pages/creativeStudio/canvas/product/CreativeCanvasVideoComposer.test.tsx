@@ -86,7 +86,24 @@ describe('CreativeCanvasVideoComposer', () => {
     expect(html.includes('图生视频·1张参考图')).toBe(false);
     expect(html.includes('晨雾参考图.png')).toBe(true);
     expect(html.includes('reference.png')).toBe(true);
+    expect(html.includes('data-creative-media-preview="image"')).toBe(true);
+    expect(html.match(/<img\b/g)?.length).toBe(1);
     expect(html.includes('描述参考图要如何运动、变化与运镜')).toBe(true);
+  });
+
+  test('uses the original image when an image-to-video reference has no thumbnail', () => {
+    const html = renderToStaticMarkup(
+      <CreativeCanvasVideoComposer
+        {...props({
+          mode: 'i2v',
+          reference: { name: '参考图', originalUrl: '/reference-original.png' },
+        })}
+      />
+    );
+
+    expect(html.includes('src="/reference-original.png"')).toBe(true);
+    expect(html.match(/<img\b/g)?.length).toBe(1);
+    expect(html.includes('data-creative-media-preview="image"')).toBe(true);
   });
 
   test('keeps generation disabled when no exact video model exists', () => {

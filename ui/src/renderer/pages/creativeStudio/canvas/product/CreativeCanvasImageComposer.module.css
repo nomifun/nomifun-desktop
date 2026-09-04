@@ -46,13 +46,6 @@
   font: inherit;
 }
 
-.referencePreview img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
 .referencePreview > span {
   font-size: 13px;
   font-weight: 700;

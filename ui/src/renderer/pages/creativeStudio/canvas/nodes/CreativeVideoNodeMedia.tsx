@@ -14,6 +14,7 @@ import {
 } from '@icon-park/react';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import CreativeVideoMedia from '../../assets/components/CreativeVideoMedia';
 
 import type { CreativeNodeAssetPresentation, CreativeNodeOfKind } from './types';
 import styles from './CreativeNodeViews.module.css';
@@ -66,6 +67,7 @@ const CreativeVideoNodeMedia: React.FC<CreativeVideoNodeMediaProps> = ({
   const videoRef = useRef<HTMLVideoElement>(null);
   const lastAudibleVolumeRef = useRef(1);
   const [playing, setPlaying] = useState(false);
+  const [failed, setFailed] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
@@ -204,7 +206,7 @@ const CreativeVideoNodeMedia: React.FC<CreativeVideoNodeMediaProps> = ({
       onDoubleClick={isolateFullscreenCanvasEvent}
       onContextMenu={isolateFullscreenCanvasEvent}
     >
-      <video
+      <CreativeVideoMedia
         ref={videoRef}
         className={styles.videoMedia}
         src={asset.src}
@@ -223,6 +225,8 @@ const CreativeVideoNodeMedia: React.FC<CreativeVideoNodeMediaProps> = ({
           setDuration(safeMediaTime(event.currentTarget.duration));
           setCurrentTime(safeMediaTime(event.currentTarget.currentTime));
         }}
+        onLoadedData={() => setFailed(false)}
+        onError={() => { setFailed(true); setPlaying(false); }}
         onDurationChange={(event) => setDuration(safeMediaTime(event.currentTarget.duration))}
         onTimeUpdate={(event) => setCurrentTime(safeMediaTime(event.currentTarget.currentTime))}
         onVolumeChange={(event) => syncVolume(event.currentTarget)}
@@ -231,13 +235,19 @@ const CreativeVideoNodeMedia: React.FC<CreativeVideoNodeMediaProps> = ({
         onEnded={() => setPlaying(false)}
       />
 
+      {failed ? (
+        <span className={styles.videoError} role='status'>
+          {t('creativeStudio.assets.picker.mediaUnavailable', { defaultValue: '素材文件不可用' })}
+        </span>
+      ) : null}
+
       <div
         className={styles.videoDragSurface}
         data-video-node-drag-surface
         title={t('creativeStudio.canvas.nodes.video.drag')}
       />
 
-      {!playing ? (
+      {!playing && !failed ? (
         <button
           type='button'
           className={styles.videoCenterPlay}
@@ -257,6 +267,7 @@ const CreativeVideoNodeMedia: React.FC<CreativeVideoNodeMediaProps> = ({
 
       <div
         className={styles.videoControls}
+        style={failed ? { display: 'none' } : undefined}
         data-video-node-controls
         onPointerDown={isolatePointer}
         onClick={isolateClick}

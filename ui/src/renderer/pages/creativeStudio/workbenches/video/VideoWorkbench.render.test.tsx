@@ -9,6 +9,9 @@ import { createInstance } from 'i18next';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 
+import type { CreativeAsset } from '../../assets';
+import { videoWorkbenchReferencesFromAssets } from '../runtime/adapters';
+import VideoWorkbenchComposer from './VideoWorkbenchComposer';
 import VideoWorkbenchResults from './VideoWorkbenchResults';
 import type { VideoWorkbenchTask } from './types';
 
@@ -63,6 +66,93 @@ const tasks: VideoWorkbenchTask[] = [
 ];
 
 describe('VideoWorkbench result rendering', () => {
+  test('renders video and audio references without using their original files as image sources', () => {
+    const reference = (kind: CreativeAsset['kind'], thumbnailUrl: string | null = null): CreativeAsset => ({
+      id: `reference-${kind}`,
+      kind,
+      title: `${kind} reference`,
+      collection: null,
+      tags: [],
+      mimeType: `${kind}/example`,
+      width: null,
+      height: null,
+      bytes: 1_024,
+      inLibrary: true,
+      textContent: null,
+      origin: null,
+      originalUrl: `/references/${kind}.original`,
+      thumbnailUrl,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const image = reference('image', '/references/image.jpg');
+    const video = reference('video');
+    const audio = reference('audio');
+    const references = videoWorkbenchReferencesFromAssets([image, video, audio]);
+    const noop = () => undefined;
+    const html = renderToStaticMarkup(
+      <I18nextProvider i18n={testI18n}>
+        <VideoWorkbenchComposer
+          layout='side'
+          prompt=''
+          references={references}
+          modelSlot={<span>Video model</span>}
+          resolution='1080p'
+          resolutionOptions={[]}
+          size='16:9'
+          sizeOptions={[]}
+          duration='5'
+          durationOptions={[]}
+          taskCount={1}
+          tasks={[]}
+          onLayoutChange={noop}
+          onPromptChange={noop}
+          onGenerate={noop}
+          onAddReferences={noop}
+          onRemoveReference={noop}
+          onResolutionChange={noop}
+          onSizeChange={noop}
+          onDurationChange={noop}
+          onTaskCountChange={noop}
+          onOpenParameters={noop}
+        />
+      </I18nextProvider>
+    );
+    const imageElements = html.match(/<img\b[^>]*>/g) ?? [];
+
+    expect(imageElements).toHaveLength(1);
+    expect(imageElements[0]?.includes('src="/references/image.jpg"')).toBe(true);
+    expect(imageElements.some((element) => element.includes(video.originalUrl))).toBe(false);
+    expect(imageElements.some((element) => element.includes(audio.originalUrl))).toBe(false);
+    expect(html.includes('<video')).toBe(true);
+    expect(html.includes(`src="${video.originalUrl}`)).toBe(true);
+    expect(html.includes('audio reference')).toBe(true);
+  });
+
+  test('preserves a real poster on successful video results', () => {
+    const html = renderToStaticMarkup(
+      <I18nextProvider i18n={testI18n}>
+        <VideoWorkbenchResults
+          tasks={[{
+            ...base,
+            id: 'with-poster',
+            taskId: 'with-poster',
+            status: 'succeeded',
+            assetId: 'asset-with-poster',
+            videoUrl: '/video.mp4',
+            posterUrl: '/poster.jpg',
+          }]}
+          selectedTaskIds={[]}
+          onSelectedTaskIdsChange={() => undefined}
+        />
+      </I18nextProvider>
+    );
+    expect(html.includes('poster="/poster.jpg"')).toBe(true);
+    expect(html.includes('src="/video.mp4')).toBe(true);
+    expect(html.includes('controls=""')).toBe(true);
+    expect(html.includes('playsInline=""') || html.includes('playsinline=""')).toBe(true);
+  });
+
   test('keeps a deleted successful result visible without playable media or download', () => {
     const html = renderToStaticMarkup(<I18nextProvider i18n={testI18n}>
       <VideoWorkbenchResults tasks={[{ ...base, id: 'deleted', taskId: 'deleted', status: 'succeeded',

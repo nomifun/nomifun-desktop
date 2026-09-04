@@ -428,6 +428,7 @@ const canvasImageComposerReferences = (
       base: reference.connection === null,
       label,
       thumbnailUrl: reference.asset.thumbnailUrl ?? reference.asset.originalUrl,
+      originalUrl: reference.asset.originalUrl,
       ordinal: reference.ordinal,
     };
   });
@@ -481,6 +482,7 @@ const invalidCanvasImageComposerReferences = (
       base: false,
       label,
       thumbnailUrl: asset?.thumbnailUrl ?? asset?.originalUrl ?? null,
+      originalUrl: asset?.originalUrl ?? null,
       ordinal: 1_000 + index,
       disabledReason:
         canvasImageGenerationBlockerMessage(
@@ -510,6 +512,7 @@ const invalidCanvasImageComposerReferences = (
         1
       ),
       thumbnailUrl: asset?.thumbnailUrl ?? asset?.originalUrl ?? null,
+      originalUrl: asset?.originalUrl ?? null,
       ordinal: 0,
       disabledReason:
         canvasImageGenerationBlockerMessage(
@@ -1156,10 +1159,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
     selectedCanvasImageReferenceAssetIds.join('\u0000');
   const canvasMediaAssetIds = useMemo(() => [...new Set([
     ...selectedCanvasImageReferenceAssetIds,
-    ...(canvasState?.document.nodes.flatMap((node) =>
-      (node.type === 'image' || node.type === 'panorama' || node.type === 'video' || node.type === 'audio')
-        && node.data.assetId ? [node.data.assetId] : []
-    ) ?? []),
+    ...(canvasState?.document.nodes.flatMap((node) => {
+      if (node.type === 'video') {
+        return [node.data.assetId, node.data.posterAssetId].filter(
+          (assetId): assetId is string => Boolean(assetId)
+        );
+      }
+      return (node.type === 'image' || node.type === 'panorama' || node.type === 'audio')
+        && node.data.assetId ? [node.data.assetId] : [];
+    }) ?? []),
   ])], [canvasState?.document.nodes, selectedCanvasImageReferenceAssetKey]);
   const canvasMediaAssetKey = canvasMediaAssetIds.join('\u0000');
 
@@ -4975,6 +4983,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
                                       }),
                                     previewUrl:
                                       referenceAsset?.thumbnailUrl ??
+                                      referenceAsset?.originalUrl ??
+                                      creativeAssetClient.url(mode.assetId),
+                                    originalUrl:
                                       referenceAsset?.originalUrl ??
                                       creativeAssetClient.url(mode.assetId),
                                   }

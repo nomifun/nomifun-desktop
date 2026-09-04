@@ -69,7 +69,7 @@ describe('VideoWorkbench controlled boundary', () => {
     expect(types.includes("status: 'succeeded'")).toBe(true);
     expect(types.includes('assetId: string')).toBe(true);
     expect(types.includes('videoUrl: string')).toBe(true);
-    expect(results.includes('<video')).toBe(true);
+    expect(results.includes('<CreativeVideoMedia')).toBe(true);
     expect(results.includes('data:video')).toBe(false);
     expect(results.includes('placehold')).toBe(false);
   });

@@ -21,6 +21,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import { CreativeAssetUnavailable } from '../../assets/components/CreativeAssetUnavailable';
+import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 import {
   nextImageWorkbenchSelection,
   type ImageWorkbenchResult,
@@ -114,7 +115,13 @@ const ResultVisual: React.FC<{
           {result.outputs.map((output) => (
             output.availability && output.availability !== 'available'
               ? <CreativeAssetUnavailable key={output.assetId} status={output.availability} />
-              : <img key={output.assetId} src={output.imageUrl} alt={output.alt} />
+              : <CreativeMediaPreview
+                  key={output.assetId}
+                  kind='image'
+                  src={output.imageUrl}
+                  alt={output.alt}
+                  className={styles.resultMedia}
+                />
           ))}
         </div>
         <span className={styles.resultBadge} data-tone='success'>

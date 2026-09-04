@@ -15,6 +15,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { CreativeCanvasNodeKind } from '../../domain/schema';
+import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 import CreativeNodeFrame from './CreativeNodeFrame';
 import CreativeVideoNodeMedia from './CreativeVideoNodeMedia';
 import type {
@@ -194,12 +195,13 @@ export const CreativeImageNode: React.FC<CreativeImageNodeProps> = ({
       {...sharedFrameProps(props)}
     >
       {resolved ? (
-        <img
+        <CreativeMediaPreview
+          kind='image'
           className={styles.imageMedia}
-          src={asset?.src}
+          src={asset?.originalSrc ?? asset?.src}
+          posterSrc={asset?.src}
           alt={asset?.alt ?? node.data.alt}
-          draggable={false}
-          style={{ objectFit: node.data.fit }}
+          fit={node.data.fit}
         />
       ) : (
         <EmptyMedia
@@ -345,11 +347,12 @@ export const CreativePanoramaNode: React.FC<CreativePanoramaNodeProps> = ({
           {preview}
         </div>
       ) : resolved ? (
-        <img
+        <CreativeMediaPreview
+          kind='image'
           className={styles.imageMedia}
-          src={asset?.src}
+          src={asset?.originalSrc ?? asset?.src}
+          posterSrc={asset?.src}
           alt={asset?.alt ?? asset?.label ?? resolvedTitle}
-          draggable={false}
         />
       ) : (
         <EmptyMedia

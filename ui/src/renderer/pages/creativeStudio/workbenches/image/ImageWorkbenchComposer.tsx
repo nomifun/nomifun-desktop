@@ -21,6 +21,7 @@ import { Button, Input, InputNumber, Radio, Select, Tag, Tooltip } from '@arco-d
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
+import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 import {
   DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS,
   IMAGE_WORKBENCH_QUALITY_OPTIONS,
@@ -174,7 +175,13 @@ const ReferenceStrip: React.FC<{
     >
       {references.map((reference) => (
         <div key={reference.id} className={styles.referenceItem}>
-          <img src={reference.previewUrl} alt={reference.name} />
+          <CreativeMediaPreview
+            kind='image'
+            src={reference.originalUrl ?? reference.previewUrl}
+            posterSrc={reference.previewUrl}
+            alt={reference.name}
+            className={styles.referenceMedia}
+          />
           <button
             type='button'
             className={styles.referenceRemove}

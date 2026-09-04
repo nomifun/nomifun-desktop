@@ -24,6 +24,27 @@ const references: CreativeCanvasImageComposerReference[] = [
 const wrap = (content: React.ReactNode) => <I18nextProvider i18n={i18n}>{content}</I18nextProvider>;
 
 describe('CreativeCanvasReferenceList', () => {
+  test('falls back from a broken thumbnail to the original without changing reference actions', () => {
+    const activations: string[] = [];
+    const reference = {
+      ...references[1],
+      thumbnailUrl: '/reference-thumbnail.jpg',
+      originalUrl: '/reference-original.png',
+    };
+    const { getByRole } = render(wrap(<CreativeCanvasReferenceList
+      references={[reference]}
+      onActivate={(id) => activations.push(id)}
+    />));
+    const button = getByRole('button', { name: '定位参考 猫咪' });
+    const image = button.querySelector('img')!;
+    expect(image.getAttribute('src')).toBe(reference.thumbnailUrl);
+
+    fireEvent.error(image);
+    expect(button.querySelector('img')?.getAttribute('src')).toBe(reference.originalUrl);
+    fireEvent.click(button);
+    expect(activations).toEqual([reference.nodeId]);
+  });
+
   test('selects valid and unavailable references in one batch while preserving the base image', () => {
     const calls: string[][] = [];
     const activations: string[] = [];

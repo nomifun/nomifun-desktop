@@ -247,6 +247,7 @@ export function imageWorkbenchReferencesFromAssets(
       id: asset.id,
       name: asset.title,
       previewUrl: asset.thumbnailUrl ?? asset.originalUrl,
+      originalUrl: asset.originalUrl,
     };
   });
 }
@@ -266,7 +267,12 @@ export function videoWorkbenchReferencesFromAssets(
       id: asset.id,
       kind: asset.kind,
       name: asset.title,
-      previewUrl: asset.thumbnailUrl ?? asset.originalUrl,
+      previewUrl: asset.kind === "image"
+        ? asset.thumbnailUrl ?? asset.originalUrl
+        : asset.kind === "video"
+          ? asset.thumbnailUrl ?? undefined
+          : undefined,
+      originalUrl: asset.kind === "audio" ? undefined : asset.originalUrl,
     };
   });
 }

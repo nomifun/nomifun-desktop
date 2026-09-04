@@ -84,6 +84,8 @@ export interface ImageWorkbenchReference {
   id: string;
   name: string;
   previewUrl: string;
+  /** Original image used if its optional thumbnail cannot be loaded. */
+  originalUrl?: string;
 }
 
 interface ImageWorkbenchResultBase {

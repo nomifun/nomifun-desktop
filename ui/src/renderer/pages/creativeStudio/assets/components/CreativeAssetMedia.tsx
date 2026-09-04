@@ -4,12 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { FileText, Pic, VideoTwo, Voice } from '@icon-park/react';
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { isCreativeAssetDeleted, type CreativeAsset, type CreativeAssetKind } from '../types';
+import { isCreativeAssetDeleted, type CreativeAsset } from '../types';
+import CreativeMediaPreview, { creativeAssetKindIcon } from './CreativeMediaPreview';
 import styles from './CreativeAssetLibrary.module.css';
+
+export { creativeAssetKindIcon } from './CreativeMediaPreview';
 
 export interface CreativeAssetMediaProps {
   asset: CreativeAsset;
@@ -17,59 +19,26 @@ export interface CreativeAssetMediaProps {
   compact?: boolean;
 }
 
-export const creativeAssetKindIcon = (kind: CreativeAssetKind, size = 20): React.ReactNode => {
-  const props = { theme: 'outline' as const, size, fill: 'currentColor', strokeWidth: 3 };
-  switch (kind) {
-    case 'image':
-      return <Pic {...props} />;
-    case 'video':
-      return <VideoTwo {...props} />;
-    case 'audio':
-      return <Voice {...props} />;
-    case 'text':
-      return <FileText {...props} />;
-  }
-};
-
 const CreativeAssetMedia: React.FC<CreativeAssetMediaProps> = ({ asset, unavailableLabel, compact = false }) => {
   const { t } = useTranslation();
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => setFailed(false), [asset.id, asset.originalUrl, asset.thumbnailUrl]);
-
   const deleted = isCreativeAssetDeleted(asset);
-  if (deleted || failed) {
+  if (deleted) {
     return (
-      <div className={styles.mediaFallback} data-asset-media-state={deleted ? 'deleted' : 'missing'} role='status'>
+      <div className={styles.mediaFallback} data-asset-media-state='deleted' role='status'>
         <span aria-hidden='true'>{creativeAssetKindIcon(asset.kind, compact ? 18 : 26)}</span>
-        <span>{deleted ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' }) : unavailableLabel}</span>
+        <span>{t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })}</span>
       </div>
     );
   }
 
-  if (asset.kind === 'image') {
+  if (asset.kind === 'image' || asset.kind === 'video') {
     return (
-      <img
-        className={styles.mediaImage}
-        src={asset.thumbnailUrl ?? asset.originalUrl}
-        alt={asset.title}
-        loading='lazy'
-        draggable={false}
-        onError={() => setFailed(true)}
-      />
-    );
-  }
-
-  if (asset.kind === 'video') {
-    return (
-      <video
-        className={styles.mediaVideo}
+      <CreativeMediaPreview
+        kind={asset.kind}
         src={asset.originalUrl}
-        muted
-        playsInline
-        preload='metadata'
-        aria-label={asset.title}
-        onError={() => setFailed(true)}
+        posterSrc={asset.thumbnailUrl}
+        alt={asset.title}
+        unavailableLabel={unavailableLabel}
       />
     );
   }

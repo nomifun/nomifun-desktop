@@ -9,6 +9,7 @@ import { Popover, Select } from '@arco-design/web-react';
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 import type {
   CreativeModelOption,
   CreativeModelSelectionRef,
@@ -29,6 +30,7 @@ export type CanvasVideoSeconds = 5 | 10;
 export interface CanvasVideoReferenceSummary {
   name: string;
   previewUrl?: string | null;
+  originalUrl?: string | null;
 }
 
 export interface CreativeCanvasVideoComposerProps {
@@ -200,12 +202,15 @@ const CreativeCanvasVideoComposer: React.FC<
             ) : null}
             {mode === 'i2v' && reference ? (
               <span className={styles.reference} title={reference.name}>
-                {reference.previewUrl ? (
-                  <img
-                    className={styles.referencePreview}
-                    src={reference.previewUrl}
-                    alt=''
-                  />
+                {reference.previewUrl || reference.originalUrl ? (
+                  <span className={styles.referencePreview}>
+                    <CreativeMediaPreview
+                      kind='image'
+                      src={reference.originalUrl ?? reference.previewUrl}
+                      posterSrc={reference.previewUrl}
+                      alt=''
+                    />
+                  </span>
                 ) : null}
                 <span className={styles.referenceName}>{reference.name}</span>
               </span>

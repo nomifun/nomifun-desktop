@@ -8,6 +8,7 @@ import { CloseOne } from '@icon-park/react';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 import type { CreativeCanvasPromptReferenceOption } from './CreativeCanvasReferencePromptInput';
 import styles from './CreativeCanvasImageComposer.module.css';
 
@@ -117,8 +118,13 @@ const CreativeCanvasReferenceList: React.FC<CreativeCanvasReferenceListProps> = 
                 >
                   {reference.kind === 'text' ? (
                     <span className={styles.referenceText}>{reference.textContent || reference.label}</span>
-                  ) : reference.thumbnailUrl ? (
-                    <img src={reference.thumbnailUrl} alt='' />
+                  ) : reference.thumbnailUrl || reference.originalUrl ? (
+                    <CreativeMediaPreview
+                      kind='image'
+                      src={reference.originalUrl ?? reference.thumbnailUrl}
+                      posterSrc={reference.thumbnailUrl}
+                      alt=''
+                    />
                   ) : (
                     <span aria-hidden='true'>—</span>
                   )}
