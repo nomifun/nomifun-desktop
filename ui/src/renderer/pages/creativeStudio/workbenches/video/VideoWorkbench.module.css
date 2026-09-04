@@ -16,7 +16,7 @@
   height: 100%;
   min-width: 0;
   min-height: 0;
-  grid-template-columns: 420px minmax(0, 1fr);
+  grid-template-columns: minmax(330px, 380px) minmax(0, 1fr);
   gap: 12px;
   padding: 12px;
 }
@@ -1028,11 +1028,13 @@
   }
 }
 
-@media (max-width: 1120px) {
+@media (max-width: 1180px) {
   .sideLayout {
-    grid-template-columns: 360px minmax(0, 1fr);
+    grid-template-columns: minmax(310px, 350px) minmax(0, 1fr);
   }
+}
 
+@media (max-width: 1120px) {
   .resultGrid {
     grid-template-columns: 1fr;
   }
