@@ -906,7 +906,15 @@
       "unlock": "解锁节点",
       "unnamedGroup": "未命名分组",
       "video": {
-        "empty": "空视频节点"
+        "drag": "拖动视频节点",
+        "empty": "空视频节点",
+        "exitFullscreen": "退出全屏",
+        "fullscreen": "全屏播放",
+        "mute": "静音",
+        "pause": "暂停视频",
+        "play": "播放视频",
+        "seek": "视频进度",
+        "unmute": "取消静音"
       }
     },
     "notices": {

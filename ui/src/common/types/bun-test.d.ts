@@ -34,6 +34,7 @@ declare module 'bun:test' {
   }
 
   export function describe(name: string, fn: TestFn): void;
+  export function beforeEach(fn: TestFn): void;
   export function afterEach(fn: TestFn): void;
   export const test: Test;
   export function expect(actual: unknown): Matchers;

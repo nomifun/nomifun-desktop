@@ -16,6 +16,7 @@ import { useTranslation } from 'react-i18next';
 
 import type { CreativeCanvasNodeKind } from '../../domain/schema';
 import CreativeNodeFrame from './CreativeNodeFrame';
+import CreativeVideoNodeMedia from './CreativeVideoNodeMedia';
 import type {
   CreativeNodeAssetPresentation,
   CreativeNodeOfKind,
@@ -236,18 +237,14 @@ export const CreativeVideoNode: React.FC<CreativeVideoNodeProps> = ({
       footer={resolved ? trimLabel : undefined}
       {...sharedFrameProps(props)}
     >
-      {resolved ? (
-        <video
-          className={styles.videoMedia}
-          src={asset?.src}
-          poster={asset?.posterSrc}
-          controls
-          muted={node.data.muted}
-          loop={node.data.loop}
-          autoPlay={node.data.autoplay}
-          preload='metadata'
-          aria-label={asset?.alt ?? asset?.label ?? resolvedTitle}
-          onPointerDown={(event) => event.stopPropagation()}
+      {resolved && asset ? (
+        <CreativeVideoNodeMedia
+          key={`${node.id}:${asset.src}`}
+          node={node}
+          asset={asset}
+          title={resolvedTitle}
+          selected={props.selected}
+          onActivate={nodeCallbacks(node, props).onActivate}
         />
       ) : (
         <EmptyMedia

@@ -906,7 +906,15 @@
       "unlock": "Unlock node",
       "unnamedGroup": "Untitled group",
       "video": {
-        "empty": "Empty video node"
+        "drag": "Drag video node",
+        "empty": "Empty video node",
+        "exitFullscreen": "Exit fullscreen",
+        "fullscreen": "Play fullscreen",
+        "mute": "Mute",
+        "pause": "Pause video",
+        "play": "Play video",
+        "seek": "Video progress",
+        "unmute": "Unmute"
       }
     },
     "notices": {
