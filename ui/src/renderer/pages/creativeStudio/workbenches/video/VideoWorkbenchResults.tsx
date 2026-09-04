@@ -327,16 +327,16 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
     >
       <header className={styles.resultsHeader}>
         <div className={styles.resultsTitle}>
-          <History size={17} />
+          <History size={15} />
           <h2>{t('creativeStudio.video.results.title', { defaultValue: '全部成果' })}</h2>
-          <Tag>
+          <Tag size='small' bordered={false}>
             {t('creativeStudio.video.results.loadedCount', {
               defaultValue: '已加载 {{resultCount}}',
               resultCount: tasks.length,
             })}
           </Tag>
           {pendingCount ? (
-            <Tag color='arcoblue'>
+            <Tag size='small' bordered={false} color='arcoblue'>
               {t('creativeStudio.video.results.pendingCount', {
                 defaultValue: '{{taskCount}} 个处理中',
                 taskCount: pendingCount,

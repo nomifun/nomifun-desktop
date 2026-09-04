@@ -274,15 +274,19 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
     <section className={styles.resultsPanel} data-image-workbench-results data-result-count={results.length}>
       <header className={styles.resultsHeader}>
         <div className={styles.resultsTitle}>
-          <History />
+          <History size={15} />
           <h2>{t('creativeStudio.image.results.title', { defaultValue: '全部结果' })}</h2>
-          <Tag>
+          <Tag size='small' bordered={false}>
             {t('creativeStudio.image.results.loadedCount', {
               defaultValue: '已加载 {{resultCount}}',
               resultCount: results.length,
             })}
           </Tag>
-          {stateLabel ? <Tag color={stateTone}>{stateLabel}</Tag> : null}
+          {stateLabel ? (
+            <Tag size='small' bordered={false} color={stateTone}>
+              {stateLabel}
+            </Tag>
+          ) : null}
         </div>
         {deletionEnabled ? <div className={styles.resultsActions}>
           <Button
