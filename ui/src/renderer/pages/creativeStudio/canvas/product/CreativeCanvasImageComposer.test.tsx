@@ -400,7 +400,7 @@ describe('CreativeCanvasImageComposer', () => {
     expect(
       /\.selectedModelLabel\s*\{[\s\S]*?display:\s*inline-flex;/.test(shellCss)
     ).toBe(true);
-    expect(shellCss.includes('min-width: 124px')).toBe(true);
+    expect(shellCss.includes('flex: 0 1 144px')).toBe(true);
     expect(shellCss.includes('min-width: 48px')).toBe(true);
     expect(shellCss.includes('.footer :global(.i-icon)')).toBe(true);
     expect(shellCss.includes(".positioner[data-placement='above']")).toBe(true);

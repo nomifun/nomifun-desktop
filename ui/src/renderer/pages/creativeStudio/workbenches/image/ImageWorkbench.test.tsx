@@ -115,14 +115,19 @@ describe('ImageWorkbench visual states', () => {
   test('keeps workbench headings compact and reference content inside the sidebar', () => {
     const css = readFileSync(new URL('./ImageWorkbench.module.css', import.meta.url), 'utf8');
     const composerSource = readFileSync(new URL('./ImageWorkbenchComposer.tsx', import.meta.url), 'utf8');
+    const resultsSource = readFileSync(new URL('./ImageWorkbenchResults.tsx', import.meta.url), 'utf8');
 
     expect(composerSource.includes('className={styles.composerHeading}')).toBe(true);
     expect(composerSource.includes('<Pic size={20} />')).toBe(true);
     expect(composerSource.includes("'creativeStudio.image.header.settings'")).toBe(true);
     expect(/\.composerHeader\s*\{[\s\S]*?align-items:\s*center;/.test(css)).toBe(true);
     expect(/\.composerHeader h1\s*\{[\s\S]*?font-size:\s*14px;[\s\S]*?line-height:\s*18px;/.test(css)).toBe(true);
-    expect(/\.resultsTitle h2\s*\{[\s\S]*?font-size:\s*16px;[\s\S]*?line-height:\s*22px;/.test(css)).toBe(true);
+    expect(/\.resultsTitle h2\s*\{[\s\S]*?font-size:\s*14px;[\s\S]*?line-height:\s*20px;/.test(css)).toBe(true);
     expect(/\.layoutSwitch :global\(\.arco-btn\)\s*\{[\s\S]*?height:\s*28px;[\s\S]*?font-size:\s*12px;/.test(css)).toBe(true);
+    expect(/\.layoutSwitch :global\(\.arco-btn\) > :global\(\.i-icon\)[\s\S]*?line-height:\s*0;/.test(css)).toBe(true);
+    expect(/\.resultsHeader\s*\{[\s\S]*?min-height:\s*64px;[\s\S]*?padding:\s*12px 16px;/.test(css)).toBe(true);
+    expect(resultsSource.includes("<History size={15} />")).toBe(true);
+    expect(resultsSource.includes("<Tag size='small' bordered={false}>")).toBe(true);
     expect(/\.composerScroll\s*\{[\s\S]*?padding:\s*12px 16px 16px;/.test(css)).toBe(true);
     expect(/\.sectionHeader\s*\{[\s\S]*?box-sizing:\s*border-box;[\s\S]*?min-height:\s*34px;[\s\S]*?padding:\s*5px 10px;/.test(css)).toBe(true);
     expect(/\.referenceStrip\s*\{[\s\S]*?box-sizing:\s*border-box;[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*100%;/.test(css)).toBe(true);
@@ -142,6 +147,24 @@ describe('ImageWorkbench visual states', () => {
     expect(/\.optionPill\s*\{[\s\S]*?height:\s*28px;[\s\S]*?font-size:\s*10px;/.test(css)).toBe(true);
     expect(css.includes('.dimensionGrid')).toBe(false);
     expect(css.includes('.sizeOptionIdentity')).toBe(true);
+  });
+
+  test('keeps the side-by-side workspace through compact desktop widths and adapts the result list', () => {
+    const css = readFileSync(new URL('./ImageWorkbench.module.css', import.meta.url), 'utf8');
+
+    expect(
+      /@media \(max-width:\s*820px\)\s*\{[\s\S]*?\.sideLayout\s*\{[\s\S]*?flex-direction:\s*column;/.test(
+        css
+      )
+    ).toBe(true);
+    expect(css.includes('@media (max-width: 900px)')).toBe(false);
+    expect(
+      /@media \(max-width:\s*1120px\)\s*\{[\s\S]*?\.resultGrid\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\);/.test(
+        css
+      )
+    ).toBe(true);
+    expect(/\.resultsPanel\s*\{[\s\S]*?overflow:\s*hidden;/.test(css)).toBe(true);
+    expect(/\.resultGrid\s*\{[\s\S]*?overflow-y:\s*auto;/.test(css)).toBe(true);
   });
 
   test('renders the floating bottom composer with exact model and parameter controls', () => {
@@ -460,6 +483,6 @@ describe('ImageWorkbench controlled contract', () => {
     expect(componentSource.includes('useModelsForTask')).toBe(false);
     expect(css.includes('.bottomComposerDock {\n  position: absolute;')).toBe(true);
     expect(css.includes('position: fixed')).toBe(false);
-    expect(css.includes('@media (max-width: 640px)')).toBe(true);
+    expect(css.includes('@media (max-width: 560px)')).toBe(true);
   });
 });

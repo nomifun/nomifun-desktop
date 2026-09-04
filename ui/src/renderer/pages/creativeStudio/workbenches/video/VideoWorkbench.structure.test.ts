@@ -31,9 +31,12 @@ describe('VideoWorkbench controlled boundary', () => {
     expect(/\.composerHeader strong\s*\{[\s\S]*?font-size:\s*14px;[\s\S]*?line-height:\s*18px;/.test(css)).toBe(true);
     expect(/\.layoutSwitch button\s*\{[\s\S]*?height:\s*28px;[\s\S]*?font-size:\s*12px;/.test(css)).toBe(true);
     expect(/\.sideComposerBody\s*\{[\s\S]*?padding:\s*12px 16px 16px;/.test(css)).toBe(true);
-    expect(/\.resultsHeader\s*\{[\s\S]*?margin-bottom:\s*16px;[\s\S]*?padding:\s*18px 18px 0;/.test(css)).toBe(true);
+    expect(/\.resultsHeader\s*\{[\s\S]*?min-height:\s*64px;[\s\S]*?margin-bottom:\s*0;[\s\S]*?padding:\s*12px 16px;/.test(css)).toBe(true);
     expect(css.includes('min-height: 62px')).toBe(false);
-    expect(/\.resultsTitle h2\s*\{[\s\S]*?font-size:\s*16px;[\s\S]*?line-height:\s*22px;/.test(css)).toBe(true);
+    expect(/\.resultsTitle h2\s*\{[\s\S]*?font-size:\s*14px;[\s\S]*?line-height:\s*20px;/.test(css)).toBe(true);
+    expect(/\.layoutSwitch button > :global\(\.i-icon\)[\s\S]*?line-height:\s*0;/.test(css)).toBe(true);
+    expect(results.includes("<History size={15} />")).toBe(true);
+    expect(results.includes("<Tag size='small' bordered={false}>")).toBe(true);
     expect(/\.emptyResults\s*\{[\s\S]*?margin:\s*0 18px 18px;/.test(css)).toBe(true);
   });
 

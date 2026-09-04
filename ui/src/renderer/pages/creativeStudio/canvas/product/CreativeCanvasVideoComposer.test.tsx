@@ -233,6 +233,22 @@ describe('CreativeCanvasVideoComposer', () => {
     expect(shellCss.includes('background: rgb(var(--primary-6))')).toBe(true);
     expect(shellCss.includes('height: 92px')).toBe(true);
     expect(shellCss.includes('height: 30px')).toBe(true);
+    expect(/\.controls\s*\{[\s\S]*?flex-wrap:\s*nowrap;/.test(shellCss)).toBe(true);
+    expect(
+      /\.settingsButton\s*\{[\s\S]*?flex:\s*0 1 144px;[\s\S]*?flex-direction:\s*row;[\s\S]*?flex-wrap:\s*nowrap;[\s\S]*?overflow:\s*hidden;/.test(
+        shellCss
+      )
+    ).toBe(true);
+    expect(
+      /\.settingsSummary\s*\{[\s\S]*?flex:\s*1 1 auto;[\s\S]*?text-overflow:\s*ellipsis;[\s\S]*?white-space:\s*nowrap;/.test(
+        shellCss
+      )
+    ).toBe(true);
+    expect(
+      /\.settingsButton > button\s*\{[\s\S]*?display:\s*inline-flex;[\s\S]*?flex-direction:\s*row;[\s\S]*?flex-wrap:\s*nowrap;/.test(
+        shellCss
+      )
+    ).toBe(true);
     expect(shellCss.includes(".positioner[data-placement='above']")).toBe(true);
     expect(shellCss.includes('--creative-canvas-composer-offset-x')).toBe(true);
     expect(shellCss.includes(".positioner[data-overlay='true']")).toBe(true);
