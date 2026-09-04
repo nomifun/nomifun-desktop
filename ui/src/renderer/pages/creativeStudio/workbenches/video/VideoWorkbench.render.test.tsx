@@ -149,7 +149,10 @@ describe('VideoWorkbench result rendering', () => {
     );
     expect(html.includes('poster="/poster.jpg"')).toBe(true);
     expect(html.includes('src="/video.mp4')).toBe(true);
-    expect(html.includes('controls=""')).toBe(true);
+    expect(html.includes('data-creative-video-player')).toBe(true);
+    expect(html.includes('controls=""')).toBe(false);
+    expect(html.toLowerCase().includes('disablepictureinpicture=""')).toBe(true);
+    expect(html.includes('画中画')).toBe(false);
     expect(html.includes('playsInline=""') || html.includes('playsinline=""')).toBe(true);
   });
 

@@ -77,12 +77,17 @@
   background: var(--color-fill-1);
 }
 
-.previewMedia img,
-.previewMedia video {
+.previewMedia img {
   display: block;
   max-width: 100%;
   max-height: min(55vh, 560px);
   object-fit: contain;
+}
+
+.previewVideo {
+  width: 100%;
+  height: min(55vh, 460px);
+  min-width: 0;
 }
 
 .previewMedia audio {

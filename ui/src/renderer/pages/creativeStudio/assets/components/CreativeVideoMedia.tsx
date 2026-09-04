@@ -61,6 +61,7 @@ const VideoMedia = forwardRef<HTMLVideoElement, React.VideoHTMLAttributes<HTMLVi
         {...props}
         ref={videoRef}
         poster={resolvedPoster}
+        disablePictureInPicture
         playsInline
         preload={!visible && !props.autoPlay ? 'none' : !resolvedPoster && !frameReady ? 'auto' : preload ?? 'metadata'}
         onLoadedMetadata={(event) => {

@@ -11,7 +11,7 @@ import { useTranslation } from 'react-i18next';
 
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { creativeAssetClient } from '../client';
-import CreativeVideoMedia from '../components/CreativeVideoMedia';
+import CreativeVideoPlayer from '../components/CreativeVideoPlayer';
 import { subscribeCreativeAssetDeletion } from '../assetDeletion';
 import {
   CreateCreativeTextAssetModal,
@@ -121,7 +121,9 @@ const AssetPreviewModal: React.FC<AssetPreviewModalProps> = ({ asset, onClose })
             ) : asset.kind === 'image' ? (
               <img src={asset.originalUrl} alt={asset.title} />
             ) : asset.kind === 'video' ? (
-              <CreativeVideoMedia src={asset.originalUrl} poster={asset.thumbnailUrl ?? undefined} controls aria-label={asset.title} />
+              <div className={styles.previewVideo}>
+                <CreativeVideoPlayer src={asset.originalUrl} poster={asset.thumbnailUrl ?? undefined} label={asset.title} />
+              </div>
             ) : asset.kind === 'audio' ? (
               <audio src={asset.originalUrl} controls preload='metadata' aria-label={asset.title} />
             ) : (
