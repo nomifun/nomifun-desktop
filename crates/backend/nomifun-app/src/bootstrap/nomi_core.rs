@@ -154,78 +154,9 @@ impl NomiCoreApplication {
     }
 
     pub async fn close(self) -> Result<()> {
-        let mut errors = Vec::new();
-
         // The HTTP listener is already quiescent when this method is called.
-        // Finish the in-process resource owners before closing SQLite so a
-        // terminal, robot, or SSH task cannot write through a closed pool.
-        self.services.request_background_shutdown();
-        self.services.shutdown_cron_timers();
-        if let Err(error) = self.services.shutdown_auto_work_runner().await {
-            errors.push(format!("AutoWork cleanup failed: {error:#}"));
-        }
-        if !self.services.nomi_core_remote_runtime.shutdown().await {
-            errors.push(
-                "Nomi-core Remote tasks remained active after the shutdown abort deadline"
-                    .to_owned(),
-            );
-        }
-        let background_errors = self
-            .services
-            .shutdown_background_tasks(std::time::Duration::from_secs(15))
-            .await;
-        if !background_errors.is_empty() {
-            errors.extend(
-                background_errors
-                    .into_iter()
-                    .map(|error| format!("background task cleanup failed: {error}")),
-            );
-        }
-        if let Err(error) = self.services.shutdown_channel_manager().await {
-            errors.push(format!("channel plugin cleanup failed: {error:#}"));
-        }
-        if let Err(error) = self.services.agent_execution_lifecycle.shutdown().await {
-            errors.push(format!("Agent Execution cleanup failed: {error}"));
-        }
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            self.services.terminal_service.shutdown_cleanup(),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => errors.push(format!("terminal cleanup failed: {error}")),
-            Err(_) => errors.push("terminal cleanup timed out after 5 seconds".to_owned()),
-        }
-
-        if let Err(error) = self.services.shutdown_browser_platform().await {
-            errors.push(format!("browser/gateway cleanup failed: {error:#}"));
-        }
-        if let Some(robot) = &self.services.robot {
-            robot.shutdown();
-        }
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            self.services.ssh_pool.shutdown_all(),
-        )
-        .await
-        {
-            Ok(report) if report.lost == 0 => {}
-            Ok(report) => errors.push(format!(
-                "{} SSH link(s) were released without proof the remote shell stopped",
-                report.lost
-            )),
-            Err(_) => errors.push("SSH cleanup timed out after 5 seconds".to_owned()),
-        }
-
-        if errors.is_empty() {
-            self.services.database.close().await;
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!(
-                "Nomi-core cleanup failed: {}",
-                errors.join("; ")
-            ))
-        }
+        // Desktop startup-failure cleanup uses this exact same AppServices
+        // sequence, including the background-task join barrier before SQLite.
+        self.services.shutdown_nomi_core_host().await
     }
 }

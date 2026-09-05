@@ -9,7 +9,6 @@ nomifun-db.workspace = true
 nomifun-api-types.workspace = true
 nomifun-file.workspace = true
 nomifun-realtime.workspace = true
-nomifun-conversation.workspace = true
 nomifun-ai-agent.workspace = true
 nomifun-terminal.workspace = true
 nomifun-auth.workspace = true
@@ -27,3 +26,4 @@ tokio = { workspace = true, features = ["test-util"] }
 sqlx = { workspace = true }
 reqwest = { workspace = true }
 tempfile.workspace = true
+nomifun-conversation.workspace = true

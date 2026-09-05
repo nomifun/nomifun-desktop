@@ -55,71 +55,253 @@ fn require_utf8_executable_path(path: &std::path::Path) -> anyhow::Result<String
 /// registry therefore keeps every host-owned loop's join handle and drains
 /// them before the database is closed.  It is intentionally small and
 /// app-local; domain services retain ownership of their own internal workers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackgroundTaskRegistryPhase {
+    Open,
+    Closing,
+    Closed,
+}
+
+struct BackgroundTaskRegistryState {
+    phase: BackgroundTaskRegistryPhase,
+    tasks: Vec<JoinHandle<()>>,
+}
+
 pub(crate) struct BackgroundTaskRegistry {
     shutdown: CancellationToken,
-    tasks: Mutex<Vec<JoinHandle<()>>>,
+    state: Mutex<BackgroundTaskRegistryState>,
+    shutdown_owner: tokio::sync::Mutex<()>,
 }
 
 impl BackgroundTaskRegistry {
     fn new(shutdown: CancellationToken) -> Self {
+        let phase = if shutdown.is_cancelled() {
+            BackgroundTaskRegistryPhase::Closing
+        } else {
+            BackgroundTaskRegistryPhase::Open
+        };
         Self {
             shutdown,
-            tasks: Mutex::new(Vec::new()),
+            state: Mutex::new(BackgroundTaskRegistryState {
+                phase,
+                tasks: Vec::new(),
+            }),
+            shutdown_owner: tokio::sync::Mutex::new(()),
         }
     }
 
     pub(crate) fn register(&self, handle: JoinHandle<()>) {
-        if self.shutdown.is_cancelled() {
-            handle.abort();
-            return;
-        }
-        let mut tasks = self
-            .tasks
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Finished handles no longer need to be retained. Reaping them on
-        // every registration keeps timer/observer-heavy installations from
-        // growing an unbounded vector while preserving active join ownership.
-        tasks.retain(|task| !task.is_finished());
-        tasks.push(handle);
+        if state.phase == BackgroundTaskRegistryPhase::Open && self.shutdown.is_cancelled() {
+            // Defensive synchronization for a CancellationToken clone that was
+            // cancelled outside AppServices. The host-owned path changes the
+            // phase before cancelling, so ordinary register/shutdown races are
+            // fully ordered by this mutex.
+            state.phase = BackgroundTaskRegistryPhase::Closing;
+        }
+
+        match state.phase {
+            BackgroundTaskRegistryPhase::Open => {
+                // Finished handles no longer need to be retained. Reaping them
+                // on every registration keeps timer/observer-heavy
+                // installations from growing an unbounded vector while
+                // preserving active join ownership.
+                state.tasks.retain(|task| !task.is_finished());
+                state.tasks.push(handle);
+            }
+            BackgroundTaskRegistryPhase::Closing => {
+                // A task published after shutdown admission must never escape
+                // the current drain. Abort it immediately, but retain its
+                // JoinHandle so shutdown can prove cancellation completed.
+                handle.abort();
+                state.tasks.push(handle);
+            }
+            BackgroundTaskRegistryPhase::Closed => {
+                // Closed is a hard rejection boundary. Retain the aborted
+                // handle and reopen Closing so a retry cannot incorrectly
+                // report quiescence without joining this invariant-violating
+                // late registration.
+                handle.abort();
+                state.tasks.push(handle);
+                state.phase = BackgroundTaskRegistryPhase::Closing;
+                tracing::error!(
+                    "background task registration attempted after the registry was closed; task aborted and retained for shutdown retry"
+                );
+            }
+        }
+    }
+
+    fn request_shutdown(&self) {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.phase == BackgroundTaskRegistryPhase::Open {
+                state.phase = BackgroundTaskRegistryPhase::Closing;
+            }
+        }
+        // Publish Closing before waking tasks. Any task that races to register
+        // a child after observing cancellation is therefore aborted and added
+        // to the same drain.
+        self.shutdown.cancel();
     }
 
     pub(crate) async fn shutdown(&self, timeout: Duration) -> Vec<String> {
-        self.shutdown.cancel();
-        let tasks = std::mem::take(
-            &mut *self
-                .tasks
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        );
-        if tasks.is_empty() {
-            return Vec::new();
-        }
-
         let deadline = tokio::time::Instant::now() + timeout;
-        let mut errors = Vec::new();
-        for mut task in tasks {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                task.abort();
-                errors.push("background task did not quiesce before shutdown deadline".to_owned());
-                continue;
-            }
-            match tokio::time::timeout(remaining, &mut task).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    if !error.is_cancelled() {
-                        errors.push(format!("background task join failed: {error}"));
+        self.request_shutdown();
+
+        // Only one caller owns the drain. Followers share the same total
+        // deadline and observe the terminal state after the active owner
+        // releases this guard.
+        let _shutdown_owner = match self.shutdown_owner.try_lock() {
+            Ok(owner) => owner,
+            Err(_) => {
+                let remaining =
+                    deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return vec![
+                        "background task shutdown owner did not become available before the shutdown deadline"
+                            .to_owned(),
+                    ];
+                }
+                match tokio::time::timeout(remaining, self.shutdown_owner.lock()).await {
+                    Ok(owner) => owner,
+                    Err(_) => {
+                        return vec![
+                            "background task shutdown owner did not become available before the shutdown deadline"
+                                .to_owned(),
+                        ];
                     }
                 }
-                Err(_) => {
+            }
+        };
+
+        let mut errors = Vec::new();
+
+        loop {
+            let tasks = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match state.phase {
+                    BackgroundTaskRegistryPhase::Open => {
+                        // `request_shutdown` linearizes Open -> Closing before
+                        // this owner is acquired.
+                        state.phase = BackgroundTaskRegistryPhase::Closing;
+                    }
+                    BackgroundTaskRegistryPhase::Closing => {}
+                    BackgroundTaskRegistryPhase::Closed if state.tasks.is_empty() => {
+                        return errors;
+                    }
+                    BackgroundTaskRegistryPhase::Closed => {
+                        // A defensive late registration retained a task after
+                        // the previous drain. Re-enter Closing and join it.
+                        state.phase = BackgroundTaskRegistryPhase::Closing;
+                    }
+                }
+
+                if state.tasks.is_empty() {
+                    // The empty check and Closed publication share the same
+                    // mutex as register(). No registration can slip between
+                    // them and become an untracked detached handle.
+                    state.phase = BackgroundTaskRegistryPhase::Closed;
+                    return errors;
+                }
+                std::mem::take(&mut state.tasks)
+            };
+
+            let mut tasks = tasks.into_iter();
+            while let Some(mut task) = tasks.next() {
+                let remaining =
+                    deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
                     task.abort();
-                    let _ = task.await;
-                    errors.push("background task shutdown timed out".to_owned());
+                    let mut retained = Vec::with_capacity(1 + tasks.len());
+                    retained.push(task);
+                    for task in tasks {
+                        task.abort();
+                        retained.push(task);
+                    }
+                    let retained_count = retained.len();
+                    let mut state = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.phase = BackgroundTaskRegistryPhase::Closing;
+                    state.tasks.extend(retained);
+                    errors.push(format!(
+                        "{retained_count} background task(s) did not quiesce before the shutdown deadline; aborted handles retained for retry"
+                    ));
+                    return errors;
+                }
+
+                match tokio::time::timeout(remaining, &mut task).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        if !error.is_cancelled() {
+                            errors.push(format!("background task join failed: {error}"));
+                        }
+                    }
+                    Err(_) => {
+                        task.abort();
+                        let mut retained = Vec::with_capacity(1 + tasks.len());
+                        retained.push(task);
+                        for task in tasks {
+                            task.abort();
+                            retained.push(task);
+                        }
+                        let retained_count = retained.len();
+                        let mut state = self
+                            .state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        state.phase = BackgroundTaskRegistryPhase::Closing;
+                        state.tasks.extend(retained);
+                        errors.push(format!(
+                            "{retained_count} background task(s) exceeded the shutdown deadline; aborted handles retained for retry"
+                        ));
+                        return errors;
+                    }
                 }
             }
+
+            // Registrations that raced while the current batch was awaited are
+            // stored in state.tasks with phase Closing. Loop until an empty
+            // queue can be sealed Closed under the registration mutex.
         }
-        errors
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> (BackgroundTaskRegistryPhase, usize) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (state.phase, state.tasks.len())
+    }
+}
+
+impl Drop for BackgroundTaskRegistry {
+    fn drop(&mut self) {
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for task in &state.tasks {
+            task.abort();
+        }
+        if !state.tasks.is_empty() {
+            tracing::error!(
+                retained_tasks = state.tasks.len(),
+                phase = ?state.phase,
+                "background task registry dropped with retained task handles"
+            );
+        }
     }
 }
 
@@ -2248,7 +2430,7 @@ impl AppServices {
 
     /// Stop process-lifetime background tasks before their repositories close.
     pub(crate) fn request_background_shutdown(&self) {
-        self.background_shutdown.cancel();
+        self.background_tasks.request_shutdown();
     }
 
     pub(crate) fn register_background_task(&self, handle: JoinHandle<()>) {
@@ -2309,6 +2491,95 @@ impl AppServices {
 
     pub(crate) async fn shutdown_background_tasks(&self, timeout: Duration) -> Vec<String> {
         self.background_tasks.shutdown(timeout).await
+    }
+
+    /// Ordered shutdown shared by every Nomi-core host authority.
+    ///
+    /// Desktop startup failures can retain a bare `AppServices` before
+    /// `NomiCoreApplication` is assembled. Keeping the complete sequence here
+    /// prevents that path from closing SQLite while host-owned background,
+    /// terminal, channel, Agent Execution, Browser/Gateway, robot, or SSH
+    /// resources are still active.
+    pub(crate) async fn shutdown_nomi_core_host(&self) -> anyhow::Result<()> {
+        let mut errors = Vec::new();
+
+        self.request_background_shutdown();
+        self.shutdown_cron_timers();
+        if let Err(error) = self.shutdown_auto_work_runner().await {
+            errors.push(format!("AutoWork cleanup failed: {error:#}"));
+        }
+        if !self.nomi_core_remote_runtime.shutdown().await {
+            errors.push(
+                "Nomi-core Remote tasks remained active after the shutdown abort deadline"
+                    .to_owned(),
+            );
+        }
+        let background_errors = self
+            .shutdown_background_tasks(Duration::from_secs(15))
+            .await;
+        if !background_errors.is_empty() {
+            errors.extend(
+                background_errors
+                    .into_iter()
+                    .map(|error| format!("background task cleanup failed: {error}")),
+            );
+        }
+        if let Err(error) = self.shutdown_channel_manager().await {
+            errors.push(format!("channel plugin cleanup failed: {error:#}"));
+        }
+        if let Err(error) = self.agent_execution_lifecycle.shutdown().await {
+            errors.push(format!("Agent Execution cleanup failed: {error}"));
+        }
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            self.terminal_service.shutdown_cleanup(),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => errors.push(format!("terminal cleanup failed: {error}")),
+            Err(_) => errors.push("terminal cleanup timed out after 5 seconds".to_owned()),
+        }
+
+        if let Err(error) = self.shutdown_browser_platform().await {
+            errors.push(format!("browser/gateway cleanup failed: {error:#}"));
+        }
+        if let Some(robot) = &self.robot {
+            robot.shutdown();
+        }
+        match tokio::time::timeout(Duration::from_secs(5), self.ssh_pool.shutdown_all()).await {
+            Ok(report) if report.lost == 0 => {}
+            Ok(report) => errors.push(format!(
+                "{} SSH link(s) were released without proof the remote shell stopped",
+                report.lost
+            )),
+            Err(_) => errors.push("SSH cleanup timed out after 5 seconds".to_owned()),
+        }
+
+        // Channel/terminal/browser shutdown hooks are not expected to publish
+        // new host tasks, but seal the registry once more after every producer
+        // has stopped. A defensive post-close registration reopens Closing and
+        // is therefore caught here instead of racing the database close.
+        let final_background_errors = self
+            .shutdown_background_tasks(Duration::from_secs(1))
+            .await;
+        if !final_background_errors.is_empty() {
+            errors.extend(
+                final_background_errors
+                    .into_iter()
+                    .map(|error| format!("final background task cleanup failed: {error}")),
+            );
+        }
+
+        if errors.is_empty() {
+            self.database.close().await;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Nomi-core cleanup failed: {}",
+                errors.join("; ")
+            ))
+        }
     }
 
     pub(crate) fn set_channel_manager(
@@ -3566,6 +3837,7 @@ mod tests {
     use super::*;
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex as StdMutex};
     #[cfg(feature = "browser-use")]
     use std::sync::atomic::AtomicBool;
     #[cfg(feature = "browser-use")]
@@ -3586,6 +3858,193 @@ mod tests {
     };
     #[cfg(feature = "browser-use")]
     use tokio::sync::{Notify, Semaphore};
+
+    struct BackgroundTaskDropProbe {
+        dropped: Arc<AtomicUsize>,
+    }
+
+    impl Drop for BackgroundTaskDropProbe {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    async fn wait_for_background_registry_snapshot(
+        registry: &BackgroundTaskRegistry,
+        expected_phase: BackgroundTaskRegistryPhase,
+        expected_tasks: usize,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if registry.snapshot() == (expected_phase, expected_tasks) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background registry did not reach the expected state");
+    }
+
+    #[tokio::test]
+    async fn background_registry_drains_registration_racing_with_shutdown() {
+        let shutdown = CancellationToken::new();
+        let registry = Arc::new(BackgroundTaskRegistry::new(shutdown.clone()));
+
+        let (first_started_tx, first_started_rx) = tokio::sync::oneshot::channel();
+        let (release_first_tx, release_first_rx) = tokio::sync::oneshot::channel();
+        registry.register(tokio::spawn(async move {
+            let _ = first_started_tx.send(());
+            let _ = release_first_rx.await;
+        }));
+        first_started_rx
+            .await
+            .expect("first background task did not start");
+
+        let registry_for_shutdown = Arc::clone(&registry);
+        let shutdown_task = tokio::spawn(async move {
+            registry_for_shutdown
+                .shutdown(Duration::from_secs(1))
+                .await
+        });
+        shutdown.cancelled().await;
+        wait_for_background_registry_snapshot(
+            &registry,
+            BackgroundTaskRegistryPhase::Closing,
+            0,
+        )
+        .await;
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let dropped_for_task = Arc::clone(&dropped);
+        let (late_started_tx, late_started_rx) = tokio::sync::oneshot::channel();
+        let late = tokio::spawn(async move {
+            let _drop_probe = BackgroundTaskDropProbe {
+                dropped: dropped_for_task,
+            };
+            let _ = late_started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        late_started_rx
+            .await
+            .expect("late background task did not start");
+        registry.register(late);
+        release_first_tx
+            .send(())
+            .expect("first background task already stopped");
+
+        let errors = shutdown_task
+            .await
+            .expect("background shutdown owner panicked");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+        assert_eq!(
+            registry.snapshot(),
+            (BackgroundTaskRegistryPhase::Closed, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn background_registry_registration_after_closed_is_retained_for_retry() {
+        let registry = BackgroundTaskRegistry::new(CancellationToken::new());
+        assert!(
+            registry
+                .shutdown(Duration::from_secs(1))
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            registry.snapshot(),
+            (BackgroundTaskRegistryPhase::Closed, 0)
+        );
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let dropped_for_task = Arc::clone(&dropped);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let late = tokio::spawn(async move {
+            let _drop_probe = BackgroundTaskDropProbe {
+                dropped: dropped_for_task,
+            };
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.expect("late task did not start");
+        registry.register(late);
+
+        assert_eq!(
+            registry.snapshot(),
+            (BackgroundTaskRegistryPhase::Closing, 1),
+            "a rejected post-close handle must remain owned until a shutdown retry joins it"
+        );
+        assert!(
+            registry
+                .shutdown(Duration::from_secs(1))
+                .await
+                .is_empty()
+        );
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+        assert_eq!(
+            registry.snapshot(),
+            (BackgroundTaskRegistryPhase::Closed, 0)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_registry_timeout_is_bounded_and_retains_join_authority() {
+        let registry = BackgroundTaskRegistry::new(CancellationToken::new());
+        let release = Arc::new((StdMutex::new(false), Condvar::new()));
+        let release_for_task = Arc::clone(&release);
+        let completed = Arc::new(AtomicUsize::new(0));
+        let completed_for_task = Arc::clone(&completed);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        registry.register(tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let (released, release_signal) = &*release_for_task;
+            let released = released
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _released = release_signal
+                .wait_while(released, |released| !*released)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            completed_for_task.fetch_add(1, Ordering::AcqRel);
+        }));
+        started_rx.await.expect("blocking task did not start");
+
+        let started_at = std::time::Instant::now();
+        let errors = registry.shutdown(Duration::from_millis(40)).await;
+        let elapsed = started_at.elapsed();
+        let timed_out_snapshot = registry.snapshot();
+
+        {
+            let (released, release_signal) = &*release;
+            *released
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            release_signal.notify_all();
+        }
+        let retry_errors = registry.shutdown(Duration::from_secs(1)).await;
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "bounded shutdown took {elapsed:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("retained for retry")),
+            "{errors:?}"
+        );
+        assert_eq!(
+            timed_out_snapshot,
+            (BackgroundTaskRegistryPhase::Closing, 1)
+        );
+        assert!(retry_errors.is_empty(), "{retry_errors:?}");
+        assert_eq!(completed.load(Ordering::Acquire), 1);
+        assert_eq!(
+            registry.snapshot(),
+            (BackgroundTaskRegistryPhase::Closed, 0)
+        );
+    }
 
     #[cfg(feature = "browser-use")]
     struct ActiveBrowserLoopGuard {

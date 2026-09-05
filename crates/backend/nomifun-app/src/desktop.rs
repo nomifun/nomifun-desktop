@@ -566,12 +566,7 @@ impl DesktopKeepAlive {
     pub async fn shutdown_after_startup_failure(&self) -> anyhow::Result<()> {
         match &self.inner.cleanup {
             DesktopStartupCleanupAuthority::Services(services) => {
-                services.request_background_shutdown();
-                services.shutdown_cron_timers();
-                services.shutdown_auto_work_runner().await?;
-                services.shutdown_browser_platform().await?;
-                services.database.close().await;
-                Ok(())
+                services.shutdown_nomi_core_host().await
             }
             DesktopStartupCleanupAuthority::Startup(authority) => authority.cleanup().await,
             DesktopStartupCleanupAuthority::NomiCore(application) => {
@@ -672,7 +667,7 @@ async fn cleanup_start_failure(
         }
         Err(cleanup_error) => DesktopStartError::unverified(
             anyhow::anyhow!(
-                "{error:#}; managed browser platform cleanup after startup failure also failed: {cleanup_error:#}"
+                "{error:#}; managed host cleanup after startup failure also failed: {cleanup_error:#}"
             ),
             keep_alive,
         ),

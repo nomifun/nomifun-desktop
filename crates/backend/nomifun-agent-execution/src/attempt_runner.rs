@@ -26,9 +26,10 @@ use nomifun_common::{
     MAX_AGENT_DELEGATION_DEPTH, MessagePosition, MessageStatus, MessageType, ProviderId,
     ProviderWithModel,
 };
-use nomifun_conversation::IdempotentMessageDelivery;
 use nomifun_db::AgentExecutionTurnAuthority;
 use serde_json::{Value, json};
+
+use crate::delivery::AgentExecutionDelivery;
 
 const ARTIFACT_RECEIPT_PAGE_SIZE: u32 = 100;
 // Keep receipt consumption aligned with ArtifactStore::verify_existing_path.
@@ -171,14 +172,14 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         operation_id: &str,
         authority: AgentExecutionTurnAuthority,
         request: SendMessageRequest,
-    ) -> Result<IdempotentMessageDelivery, AppError>;
+    ) -> Result<AgentExecutionDelivery, AppError>;
 
     async fn delivery_result(
         &self,
         owner_id: &str,
         conversation_id: &str,
         operation_id: &str,
-    ) -> Result<Option<IdempotentMessageDelivery>, AppError>;
+    ) -> Result<Option<AgentExecutionDelivery>, AppError>;
 
     async fn list_messages(
         &self,
@@ -260,7 +261,7 @@ impl AgentSessionAttemptRunner {
         conversation_id: &str,
         operation_id: &str,
         timeout: Duration,
-    ) -> Result<Option<nomifun_conversation::IdempotentMessageDelivery>, AppError> {
+    ) -> Result<Option<AgentExecutionDelivery>, AppError> {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(receipt) = self

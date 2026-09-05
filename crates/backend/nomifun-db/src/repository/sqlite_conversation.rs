@@ -5,7 +5,7 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use nomifun_common::{
     AgentId, CompanionId, ConversationId, CronJobId, MessageId, PaginatedResult, ProviderId,
-    ProviderWithModel, RequirementId, TimestampMs, validate_uuidv7,
+    ProviderWithModel, RequirementId, TimestampMs, UserId, validate_uuidv7,
 };
 
 use crate::error::DbError;
@@ -4273,6 +4273,119 @@ impl IConversationRepository for SqliteConversationRepository {
         })
     }
 
+    async fn bind_cron_relation(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        cron_job_id: &str,
+        updated_at: TimestampMs,
+    ) -> Result<(), DbError> {
+        UserId::parse(user_id)
+            .map_err(|error| DbError::Conflict(format!("invalid Cron relation owner: {error}")))?;
+        ConversationId::parse(conversation_id).map_err(|error| {
+            DbError::Conflict(format!("invalid Cron relation AgentSession id: {error}"))
+        })?;
+        CronJobId::parse(cron_job_id)
+            .map_err(|error| DbError::Conflict(format!("invalid Cron relation job id: {error}")))?;
+
+        let mut tx = self.pool.begin().await?;
+        let conversation = sqlx::query(
+            "UPDATE conversations SET updated_at = updated_at \
+             WHERE conversation_id = ? AND user_id = ?",
+        )
+        .bind(conversation_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        if conversation.rows_affected() != 1 {
+            return Err(DbError::NotFound(format!(
+                "AgentSession '{conversation_id}'"
+            )));
+        }
+        let job = sqlx::query(
+            "UPDATE cron_jobs SET updated_at = updated_at \
+             WHERE cron_job_id = ? AND user_id = ?",
+        )
+        .bind(cron_job_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        if job.rows_affected() != 1 {
+            return Err(DbError::NotFound(format!("cron job '{cron_job_id}'")));
+        }
+
+        let relation: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT conversation.cron_job_id, job.conversation_id \
+             FROM conversations conversation \
+             JOIN cron_jobs job ON job.cron_job_id = ? \
+             WHERE conversation.conversation_id = ? \
+               AND conversation.user_id = ? AND job.user_id = ?",
+        )
+        .bind(cron_job_id)
+        .bind(conversation_id)
+        .bind(user_id)
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if relation
+            .0
+            .as_deref()
+            .is_some_and(|existing| existing != cron_job_id)
+        {
+            return Err(DbError::Conflict(format!(
+                "AgentSession '{conversation_id}' is already bound to Cron job '{}'",
+                relation.0.as_deref().unwrap_or_default()
+            )));
+        }
+        if relation
+            .1
+            .as_deref()
+            .is_some_and(|existing| existing != conversation_id)
+        {
+            return Err(DbError::Conflict(format!(
+                "Cron job '{cron_job_id}' is already bound to AgentSession '{}'",
+                relation.1.as_deref().unwrap_or_default()
+            )));
+        }
+
+        let job_bound = sqlx::query(
+            "UPDATE cron_jobs \
+             SET conversation_id = ?, updated_at = ? \
+             WHERE cron_job_id = ? AND user_id = ? \
+               AND (conversation_id IS NULL OR conversation_id = ?)",
+        )
+        .bind(conversation_id)
+        .bind(updated_at)
+        .bind(cron_job_id)
+        .bind(user_id)
+        .bind(conversation_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        let conversation_bound = sqlx::query(
+            "UPDATE conversations \
+             SET cron_job_id = ?, updated_at = ? \
+             WHERE conversation_id = ? AND user_id = ? \
+               AND (cron_job_id IS NULL OR cron_job_id = ?)",
+        )
+        .bind(cron_job_id)
+        .bind(updated_at)
+        .bind(conversation_id)
+        .bind(user_id)
+        .bind(cron_job_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if job_bound != 1 || conversation_bound != 1 {
+            return Err(DbError::Conflict(
+                "Cron/AgentSession relation changed during atomic binding".to_owned(),
+            ));
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn update(
         &self,
         conversation_id: &str,
@@ -4501,6 +4614,53 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(())
     }
 
+    async fn compare_and_swap_extra(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        expected_extra: &str,
+        new_extra: &str,
+        updated_at: TimestampMs,
+    ) -> Result<bool, DbError> {
+        UserId::parse(user_id)
+            .map_err(|error| DbError::Conflict(format!("invalid extra owner: {error}")))?;
+        ConversationId::parse(conversation_id).map_err(|error| {
+            DbError::Conflict(format!("invalid Conversation id for extra CAS: {error}"))
+        })?;
+        let expected: serde_json::Value = serde_json::from_str(expected_extra).map_err(|error| {
+            DbError::Conflict(format!("expected Conversation extra is invalid JSON: {error}"))
+        })?;
+        if !expected.is_object() {
+            return Err(DbError::Conflict(
+                "expected Conversation extra must be a JSON object".to_owned(),
+            ));
+        }
+        let replacement: serde_json::Value = serde_json::from_str(new_extra).map_err(|error| {
+            DbError::Conflict(format!("replacement Conversation extra is invalid JSON: {error}"))
+        })?;
+        if !replacement.is_object() {
+            return Err(DbError::Conflict(
+                "replacement Conversation extra must be a JSON object".to_owned(),
+            ));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        lock_conversation_extra_references(&mut tx, new_extra).await?;
+        let result = sqlx::query(
+            "UPDATE conversations SET extra = ?, updated_at = ? \
+             WHERE conversation_id = ? AND user_id = ? AND extra = ?",
+        )
+        .bind(new_extra)
+        .bind(updated_at)
+        .bind(conversation_id)
+        .bind(user_id)
+        .bind(expected_extra)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     async fn update_idmm(
         &self,
         conversation_id: &str,
@@ -4595,6 +4755,34 @@ impl IConversationRepository for SqliteConversationRepository {
         if status == "running" {
             return Err(DbError::Conflict(format!(
                 "Running Conversation '{conversation_id}' must be settled before deletion"
+            )));
+        }
+
+        // A Cron reservation is the durable recovery authority for a turn
+        // that may already have been accepted by this Session. The
+        // Conversation aggregate and its Cron relation must remain intact
+        // until that exact reservation becomes terminal.
+        let admitted_cron_run: Option<(String, String)> = sqlx::query_as(
+            "SELECT reservation.cron_job_run_id, reservation.cron_job_id \
+             FROM cron_run_reservations reservation \
+             JOIN cron_jobs job ON job.cron_job_id = reservation.cron_job_id \
+             LEFT JOIN conversations target ON target.conversation_id = ? \
+             WHERE reservation.status = 'reserved' AND (\
+                    job.conversation_id = ? \
+                 OR reservation.conversation_id = ? \
+                 OR job.cron_job_id = target.cron_job_id\
+             ) \
+             ORDER BY reservation.created_at_ms, reservation.id LIMIT 1",
+        )
+        .bind(conversation_id)
+        .bind(conversation_id)
+        .bind(conversation_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((run_id, cron_job_id)) = admitted_cron_run {
+            return Err(DbError::Conflict(format!(
+                "AgentSession '{conversation_id}' belongs to Cron job '{cron_job_id}' \
+                 with admitted run '{run_id}'; settle its durable receipt before deletion"
             )));
         }
 

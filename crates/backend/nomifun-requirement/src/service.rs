@@ -1,5 +1,6 @@
 use std::{fmt, sync::Arc};
 
+use dashmap::DashMap;
 use nomifun_api_types::{
     AttachmentDto, AutoWorkRunState, AutoWorkTargetKind, BoardResponse, CreateRequirementRequest,
     ListRequirementsQuery, Requirement, RequirementStatus, TagBinding, TagBindings, TagSummary,
@@ -10,14 +11,21 @@ use nomifun_common::{
 };
 use nomifun_db::models::RequirementRowUpdate;
 use nomifun_db::{
-    ConversationFilters, IConversationRepository, IRequirementRepository, ITerminalRepository, ListRequirementsParams,
+    IConversationRepository, IRequirementRepository, ITerminalRepository, ListRequirementsParams,
     RequirementClaimResolution,
 };
 use nomifun_terminal::TerminalDriver;
 use tracing::warn;
 
 use crate::attachments::AttachmentStore;
-use crate::conversation_port::AutoWorkSessionPort;
+use crate::autowork_config::{
+    AutoWorkConfig, AutoWorkConfigSnapshot, AutoWorkSessionConfigCommand,
+    decode_terminal_autowork_config, encode_terminal_autowork_config,
+};
+use crate::conversation_port::{
+    AutoWorkBindingLookup, AutoWorkScheduledSessionLookup, AutoWorkSessionPort,
+    PersistedAutoWorkBinding, ScheduledAutoWorkSession,
+};
 use crate::convert::row_to_dto;
 use crate::events::RequirementEventEmitter;
 use crate::notifier::CompletionNotifier;
@@ -101,6 +109,9 @@ pub struct RequirementService {
     conversation: Option<Arc<dyn AutoWorkSessionPort>>,
     /// Attached for reading a conversation row when loading AutoWork config.
     conversation_repo: Option<Arc<dyn IConversationRepository>>,
+    /// Canonical host projection used for boot-resume/admin enumeration of
+    /// persisted Conversation AutoWork schedules.
+    scheduled_session_lookup: Option<Arc<dyn AutoWorkScheduledSessionLookup>>,
     /// Attached for terminal AutoWork config + ownership/eligibility checks.
     terminal_driver: Option<Arc<dyn TerminalDriver>>,
     /// Attached to enumerate terminal sessions for the AutoWork admin
@@ -120,6 +131,11 @@ pub struct RequirementService {
     /// workspace staging). `None` on instances that never touch attachments
     /// (e.g. the declaration sink).
     attachments: Option<Arc<AttachmentStore>>,
+    /// Serializes owner-scoped config CAS/write commands per target inside this
+    /// host process. Conversation storage still performs its own transactional
+    /// CAS; terminal storage uses this as its single-writer boundary.
+    autowork_config_transitions:
+        Arc<DashMap<(AutoWorkTargetKind, String), Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl RequirementService {
@@ -129,11 +145,13 @@ impl RequirementService {
             emitter,
             conversation: None,
             conversation_repo: None,
+            scheduled_session_lookup: None,
             terminal_driver: None,
             terminal_repo: None,
             completion_notifier: None,
             autowork_waker: None,
             attachments: None,
+            autowork_config_transitions: Arc::new(DashMap::new()),
         }
     }
 
@@ -180,6 +198,16 @@ impl RequirementService {
     /// need just the read side (e.g. `tag_bindings`).
     pub fn with_conversation_repo(mut self, repo: Arc<dyn IConversationRepository>) -> Self {
         self.conversation_repo = Some(repo);
+        self
+    }
+
+    /// Attach the canonical host projection for persisted Conversation
+    /// AutoWork schedules. This lookup does not own Session/runtime state.
+    pub fn with_scheduled_session_lookup(
+        mut self,
+        lookup: Arc<dyn AutoWorkScheduledSessionLookup>,
+    ) -> Self {
+        self.scheduled_session_lookup = Some(lookup);
         self
     }
 
@@ -1043,17 +1071,60 @@ impl RequirementService {
         self.emitter.emit_autowork_changed(state);
     }
 
-    /// Persist the AutoWork config `{ enabled, tag, max_requirements }` for a
-    /// target. Conversations store it under `extra.autowork`; terminals store it
-    /// in the `terminal_sessions.autowork` JSON column (via the driver).
-    pub async fn save_autowork_config(
+    fn autowork_config_transition(
         &self,
         kind: AutoWorkTargetKind,
         target_id: &str,
-        enabled: bool,
-        tag: Option<&str>,
-        max_requirements: Option<u32>,
-    ) -> Result<(), AppError> {
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        self.autowork_config_transitions
+            .entry((kind, target_id.to_owned()))
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// Persist one owner-scoped AutoWork config command.
+    ///
+    /// Conversation hosts must perform an atomic metadata merge and compare the
+    /// supplied revision. Terminal config is serialized here and keeps a
+    /// persisted revision plus last operation identity.
+    pub async fn save_autowork_config(
+        &self,
+        owner_id: &str,
+        kind: AutoWorkTargetKind,
+        target_id: &str,
+        config: AutoWorkConfig,
+        expected_revision: &str,
+        operation_id: Option<&str>,
+    ) -> Result<AutoWorkConfigSnapshot, AppError> {
+        let owner_id = UserId::parse(owner_id)
+            .map_err(|error| AppError::Forbidden(format!("invalid caller identity: {error}")))?;
+        let canonical = AutoWorkConfig::normalize(
+            config.enabled,
+            config.tag.as_deref(),
+            config.max_requirements,
+        )?;
+        if canonical != config {
+            return Err(AppError::BadRequest(
+                "AutoWork config must use its canonical normalized tag".to_owned(),
+            ));
+        }
+        if expected_revision.trim().is_empty() {
+            return Err(AppError::Conflict(
+                "AutoWork config write requires an expected revision".to_owned(),
+            ));
+        }
+        if operation_id.is_some_and(|operation_id| operation_id.trim().is_empty()) {
+            return Err(AppError::BadRequest(
+                "AutoWork config operation identity must not be empty".to_owned(),
+            ));
+        }
+        let target_id = match kind {
+            AutoWorkTargetKind::Conversation => parse_conversation_id(target_id)?,
+            AutoWorkTargetKind::Terminal => parse_terminal_id(target_id)?,
+        };
+        let transition = self.autowork_config_transition(kind, target_id);
+        let _transition_guard = transition.lock().await;
+
         match kind {
             AutoWorkTargetKind::Conversation => {
                 let Some(conversation) = &self.conversation else {
@@ -1061,73 +1132,151 @@ impl RequirementService {
                         "AutoWork conversation port not attached".into(),
                     ));
                 };
-                conversation
-                    .save_config(target_id, enabled, tag, max_requirements)
-                    .await
+                let snapshot = conversation
+                    .save_config(AutoWorkSessionConfigCommand {
+                        owner_id: owner_id.as_str().to_owned(),
+                        session_id: target_id.to_owned(),
+                        config: config.clone(),
+                        expected_revision: expected_revision.to_owned(),
+                        operation_id: operation_id.map(str::to_owned),
+                    })
+                    .await?;
+                if snapshot.config != config {
+                    return Err(AppError::Conflict(
+                        "Session host returned a different AutoWork config after save".to_owned(),
+                    ));
+                }
+                if operation_id.is_some()
+                    && snapshot.operation_id.as_deref() != operation_id
+                {
+                    return Err(AppError::Conflict(
+                        "Session host did not retain the AutoWork operation identity".to_owned(),
+                    ));
+                }
+                Ok(snapshot)
             }
             AutoWorkTargetKind::Terminal => {
                 let Some(driver) = &self.terminal_driver else {
                     return Err(AppError::Internal("terminal driver not attached".into()));
                 };
-                let blob = serde_json::json!({
-                    "enabled": enabled,
-                    "tag": tag,
-                    "max_requirements": max_requirements,
-                })
-                .to_string();
+                self.verify_terminal_owner(target_id, owner_id.as_str()).await?;
+                let raw = driver
+                    .read_autowork(target_id)
+                    .await?
+                    .map(|raw| {
+                        serde_json::from_str::<serde_json::Value>(&raw).map_err(|error| {
+                            AppError::Internal(format!(
+                                "terminal {target_id} has invalid autowork JSON: {error}"
+                            ))
+                        })
+                    })
+                    .transpose()?;
+                let current = decode_terminal_autowork_config(raw.as_ref(), target_id)?;
+                if current.snapshot.operation_id.as_deref() == operation_id
+                    && operation_id.is_some()
+                {
+                    if current.snapshot.config == config {
+                        return Ok(current.snapshot);
+                    }
+                    return Err(AppError::Conflict(
+                        "AutoWork operation identity was replayed with a different config"
+                            .to_owned(),
+                    ));
+                }
+                if current.snapshot.revision != expected_revision {
+                    return Err(AppError::Conflict(format!(
+                        "AutoWork config for terminal {target_id} changed concurrently"
+                    )));
+                }
+                if current.snapshot.config == config && operation_id.is_none() {
+                    return Ok(current.snapshot);
+                }
+
+                let semantic_change = current.snapshot.config != config;
+                let legacy_revision = current.snapshot.revision.starts_with("terminal:legacy:");
+                let next_sequence = if semantic_change || legacy_revision {
+                    current.sequence.checked_add(1).ok_or_else(|| {
+                        AppError::Conflict(format!(
+                            "AutoWork config revision overflow for terminal {target_id}"
+                        ))
+                    })?
+                } else {
+                    current.sequence
+                };
+                let value =
+                    encode_terminal_autowork_config(&config, next_sequence, operation_id);
+                let blob = serde_json::to_string(&value).map_err(|error| {
+                    AppError::Internal(format!(
+                        "failed to serialize AutoWork config for terminal {target_id}: {error}"
+                    ))
+                })?;
                 driver.write_autowork(parse_terminal_id(target_id)?, Some(&blob)).await?;
-                Ok(())
+                Ok(AutoWorkConfigSnapshot {
+                    config,
+                    revision: format!("terminal:{next_sequence}"),
+                    operation_id: operation_id.map(str::to_owned),
+                })
             }
         }
     }
 
-    /// Read the persisted AutoWork config `(enabled, tag, max)` for a target.
-    /// Returns `(false, None, None)` when no backing store is attached or no
-    /// config exists.
-    pub async fn read_autowork_config(
+    /// Read one owner-scoped AutoWork config and its revision.
+    pub async fn read_autowork_config_snapshot(
         &self,
+        owner_id: &str,
         kind: AutoWorkTargetKind,
         target_id: &str,
-    ) -> Result<(bool, Option<String>, Option<u32>), AppError> {
-        let raw: Option<serde_json::Value> = match kind {
+    ) -> Result<AutoWorkConfigSnapshot, AppError> {
+        let owner_id = UserId::parse(owner_id)
+            .map_err(|error| AppError::Forbidden(format!("invalid caller identity: {error}")))?;
+        match kind {
             AutoWorkTargetKind::Conversation => {
-                let Some(conv_repo) = &self.conversation_repo else {
-                    return Ok((false, None, None));
+                let Some(conversation) = &self.conversation else {
+                    return Err(AppError::Internal(
+                        "AutoWork conversation port not attached".into(),
+                    ));
                 };
-                let Some(row) = conv_repo.get(parse_conversation_id(target_id)?).await? else {
-                    return Ok((false, None, None));
-                };
-                let extra: serde_json::Value = serde_json::from_str(&row.extra).map_err(|error| {
-                    AppError::Internal(format!(
-                        "conversation {target_id} has invalid extra JSON: {error}"
+                let snapshot = conversation
+                    .read_config(owner_id.as_str(), parse_conversation_id(target_id)?)
+                    .await?;
+                let canonical = AutoWorkConfig::normalize(
+                    snapshot.config.enabled,
+                    snapshot.config.tag.as_deref(),
+                    snapshot.config.max_requirements,
+                )
+                .map_err(|error| {
+                    AppError::Conflict(format!(
+                        "Session host returned invalid AutoWork config for {target_id}: {error}"
                     ))
                 })?;
-                if !extra.is_object() {
-                    return Err(AppError::Internal(format!(
-                        "conversation {target_id} extra must be a JSON object"
+                if canonical != snapshot.config {
+                    return Err(AppError::Conflict(format!(
+                        "Session host returned non-canonical AutoWork config for {target_id}"
                     )));
                 }
-                extra.get("autowork").cloned()
+                AutoWorkConfigSnapshot::new(
+                    snapshot.config,
+                    snapshot.revision,
+                    snapshot.operation_id,
+                )
             }
             AutoWorkTargetKind::Terminal => {
                 let Some(driver) = &self.terminal_driver else {
-                    return Ok((false, None, None));
+                    return Err(AppError::Internal("terminal driver not attached".into()));
                 };
-                match driver.read_autowork(parse_terminal_id(target_id)?).await? {
-                    Some(s) => Some(serde_json::from_str(&s).map_err(|error| {
+                let target_id = parse_terminal_id(target_id)?;
+                self.verify_terminal_owner(target_id, owner_id.as_str()).await?;
+                let raw = match driver.read_autowork(target_id).await? {
+                    Some(raw) => Some(serde_json::from_str(&raw).map_err(|error| {
                         AppError::Internal(format!(
                             "terminal {target_id} has invalid autowork JSON: {error}"
                         ))
                     })?),
                     None => None,
-                }
+                };
+                Ok(decode_terminal_autowork_config(raw.as_ref(), target_id)?.snapshot)
             }
-        };
-        let aw = raw.unwrap_or_default();
-        let enabled = aw.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-        let tag = aw.get("tag").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let max = aw.get("max_requirements").and_then(|v| v.as_u64()).map(|n| n as u32);
-        Ok((enabled, tag, max))
+        }
     }
 
     /// Verify `terminal_id` belongs to `user_id` (data isolation for the terminal
@@ -1626,108 +1775,172 @@ impl RequirementService {
         return Ok(rows.len() as u64);
     }
 
-    /// Enumerate AutoWork tag/session bindings for `user_id`, grouped by tag.
+    /// Enumerate validated, enabled AutoWork bindings from the compatible
+    /// persisted Conversation/Terminal representations.
     ///
-    /// A "binding" is a conversation or terminal whose persisted AutoWork config
-    /// is `enabled`, pointing at a tag. The `run_state` returned here reflects the
-    /// persisted config only (`Idle` for every enabled binding); the routes layer
-    /// upgrades it to `Active` for targets the AutoWork runner is currently driving
-    /// (it owns the live progress map). Used by the AutoWork admin session bindings tab.
-    pub async fn tag_bindings(&self, user_id: &str) -> Result<Vec<TagBindings>, AppError> {
+    /// This is the Requirement-side implementation of the typed boot-resume
+    /// lookup contract. Storage details stay here; callers never parse
+    /// Conversation `extra` or terminal JSON.
+    async fn collect_enabled_autowork_bindings(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<PersistedAutoWorkBinding>, AppError> {
         let user_id = UserId::parse(user_id)
             .map_err(|error| AppError::Forbidden(format!("invalid caller identity: {error}")))?;
         let user_id = user_id.as_str();
-        // (tag, binding) accumulator, grouped at the end.
-        let mut by_tag: std::collections::BTreeMap<String, Vec<TagBinding>> = std::collections::BTreeMap::new();
+        let mut bindings = Vec::new();
 
-        // Conversations: page through all of the user's conversations and parse
-        // each `extra.autowork` directly from
-        // the row we already hold (no extra per-row query).
-        if let Some(conv_repo) = &self.conversation_repo {
-            let mut cursor: Option<String> = None;
-            loop {
-                let filters = ConversationFilters {
-                    cursor: cursor.clone(),
-                    limit: 200,
-                    source: None,
-                    cron_job_id: None,
-                    pinned: None,
-                    exclude_companion_companion: false,
-                    // Keep unrelated conversation filters at their defaults.
-                    ..Default::default()
-                };
-                let page = conv_repo.list_paginated(user_id, &filters).await?;
-                if page.items.is_empty() {
-                    break;
-                }
-                for row in &page.items {
-                    let extra: serde_json::Value = serde_json::from_str(&row.extra).map_err(|error| {
-                        AppError::Internal(format!(
-                            "conversation {} has invalid extra JSON: {error}",
-                            row.conversation_id
-                        ))
-                    })?;
-                    if !extra.is_object() {
-                        return Err(AppError::Internal(format!(
-                            "conversation {} extra must be a JSON object",
-                            row.conversation_id
-                        )));
-                    }
-                    let aw = extra.get("autowork");
-                    let Some(aw) = aw else { continue };
-                    let enabled = aw.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let tag = aw.get("tag").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    if let (true, Some(tag)) = (enabled, tag) {
-                        by_tag.entry(tag).or_default().push(TagBinding {
-                            kind: AutoWorkTargetKind::Conversation,
-                            target_id: row.conversation_id.clone(),
-                            name: if row.name.is_empty() {
-                                row.conversation_id.clone()
-                            } else {
-                                row.name.clone()
-                            },
-                            run_state: AutoWorkRunState::Idle,
-                        });
-                    }
-                }
-                if !page.has_more {
-                    break;
-                }
-                cursor = page.items.last().map(|r| r.conversation_id.clone());
+        if let Some(lookup) = &self.scheduled_session_lookup {
+            let scan = lookup.list_enabled_scheduled_sessions(user_id).await?;
+            for issue in scan.quarantined {
+                warn!(
+                    target_id = issue.target_id.as_deref().unwrap_or("<unknown>"),
+                    code = issue.code,
+                    detail = issue.detail,
+                    "Quarantined malformed Conversation AutoWork binding"
+                );
             }
+            for scheduled in scan.sessions {
+                match scheduled_session_binding(scheduled) {
+                    Ok(binding) => bindings.push(binding),
+                    Err(error) => warn!(
+                        error = %error,
+                        "Quarantined invalid typed Conversation AutoWork binding"
+                    ),
+                }
+            }
+        } else if self.conversation.is_some() || self.conversation_repo.is_some() {
+            return Err(AppError::Conflict(
+                "AutoWork scheduled-session lookup is not wired by the canonical Session facade"
+                    .to_owned(),
+            ));
         }
 
-        // Terminals: enumerate the user's sessions and parse the `autowork` column.
+        // Terminals retain the established JSON `autowork` column shape.
         if let Some(term_repo) = &self.terminal_repo {
             for row in term_repo.list_by_user(user_id).await? {
                 let Some(blob) = row.autowork.as_deref() else { continue };
-                let aw: serde_json::Value = serde_json::from_str(blob).map_err(|error| {
-                    AppError::Internal(format!(
-                        "terminal {} has invalid autowork JSON: {error}",
-                        row.terminal_id
-                    ))
-                })?;
-                let enabled = aw.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-                let tag = aw.get("tag").and_then(|v| v.as_str()).map(|s| s.to_string());
-                if let (true, Some(tag)) = (enabled, tag) {
-                    by_tag.entry(tag).or_default().push(TagBinding {
-                        kind: AutoWorkTargetKind::Terminal,
-                        target_id: row.terminal_id.to_string(),
-                        name: if row.name.is_empty() {
-                            row.terminal_id.to_string()
-                        } else {
-                            row.name.clone()
-                        },
-                        run_state: AutoWorkRunState::Idle,
-                    });
+                let target_id = row.terminal_id.to_string();
+                let raw: serde_json::Value = match serde_json::from_str(blob) {
+                    Ok(raw) => raw,
+                    Err(error) => {
+                        warn!(
+                            terminal_id = %row.terminal_id,
+                            %error,
+                            "Quarantined terminal with malformed AutoWork JSON"
+                        );
+                        continue;
+                    }
+                };
+                match decode_terminal_autowork_config(Some(&raw), &target_id) {
+                    Ok(decoded) if decoded.snapshot.config.enabled => {
+                        let AutoWorkConfigSnapshot {
+                            config,
+                            revision,
+                            ..
+                        } = decoded.snapshot;
+                        let Some(tag) = config.tag else {
+                            warn!(
+                                terminal_id = %row.terminal_id,
+                                "Quarantined enabled terminal AutoWork binding without a tag"
+                            );
+                            continue;
+                        };
+                        bindings.push(PersistedAutoWorkBinding {
+                            kind: AutoWorkTargetKind::Terminal,
+                            target_id,
+                            display_name: if row.name.is_empty() {
+                                row.terminal_id.to_string()
+                            } else {
+                                row.name.clone()
+                            },
+                            tag,
+                            max_requirements: config.max_requirements,
+                            config_revision: revision,
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(error) => warn!(
+                        terminal_id = %row.terminal_id,
+                        %error,
+                        "Quarantined terminal with invalid persisted AutoWork config"
+                    ),
                 }
             }
         }
 
+        Ok(bindings)
+    }
+
+    /// Enumerate AutoWork tag/session bindings for `user_id`, grouped by tag.
+    ///
+    /// The public API projection is derived from the same typed lookup used by
+    /// boot resume, so admin listing and runtime startup cannot disagree about
+    /// persisted binding semantics.
+    pub async fn tag_bindings(&self, user_id: &str) -> Result<Vec<TagBindings>, AppError> {
+        let mut by_tag: std::collections::BTreeMap<String, Vec<TagBinding>> =
+            std::collections::BTreeMap::new();
+        for binding in self.collect_enabled_autowork_bindings(user_id).await? {
+            by_tag
+                .entry(binding.tag.clone())
+                .or_default()
+                .push(TagBinding {
+                    kind: binding.kind,
+                    target_id: binding.target_id,
+                    name: binding.display_name,
+                    run_state: AutoWorkRunState::Idle,
+                });
+        }
         Ok(by_tag
             .into_iter()
             .map(|(tag, bindings)| TagBindings { tag, bindings })
             .collect())
+    }
+}
+
+fn scheduled_session_binding(
+    scheduled: ScheduledAutoWorkSession,
+) -> Result<PersistedAutoWorkBinding, AppError> {
+    let session_id = parse_conversation_id(&scheduled.session_id)?;
+    let config = AutoWorkConfig::normalize(
+        true,
+        Some(&scheduled.tag),
+        scheduled.max_requirements,
+    )
+    .map_err(|error| {
+        AppError::Conflict(format!(
+            "AutoWork scheduled session {session_id} has invalid config: {error}"
+        ))
+    })?;
+    let snapshot = AutoWorkConfigSnapshot::new(
+        config,
+        scheduled.config_revision,
+        None,
+    )?;
+    Ok(PersistedAutoWorkBinding {
+        kind: AutoWorkTargetKind::Conversation,
+        target_id: session_id.to_owned(),
+        display_name: if scheduled.display_name.trim().is_empty() {
+            session_id.to_owned()
+        } else {
+            scheduled.display_name
+        },
+        tag: snapshot
+            .config
+            .tag
+            .expect("enabled canonical AutoWork config has a tag"),
+        max_requirements: snapshot.config.max_requirements,
+        config_revision: snapshot.revision,
+    })
+}
+
+#[async_trait::async_trait]
+impl AutoWorkBindingLookup for RequirementService {
+    async fn list_enabled_autowork_bindings(
+        &self,
+        owner_id: &str,
+    ) -> Result<Vec<PersistedAutoWorkBinding>, AppError> {
+        self.collect_enabled_autowork_bindings(owner_id).await
     }
 }
 
@@ -1774,6 +1987,7 @@ impl nomifun_common::OnTerminalDelete for RequirementService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conversation_port::ScheduledAutoWorkSessionScan;
     use nomifun_common::{ConversationId, TerminalId, UserId};
     use nomifun_db::{
         IAttachmentRepository, SqliteAttachmentRepository, SqliteRequirementRepository,
@@ -1790,6 +2004,117 @@ mod tests {
             _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
         ) {
         }
+    }
+
+    struct ScheduledLookup {
+        sessions: Vec<ScheduledAutoWorkSession>,
+    }
+
+    #[async_trait::async_trait]
+    impl AutoWorkScheduledSessionLookup for ScheduledLookup {
+        async fn list_enabled_scheduled_sessions(
+            &self,
+            _owner_id: &str,
+        ) -> Result<ScheduledAutoWorkSessionScan, AppError> {
+            Ok(ScheduledAutoWorkSessionScan {
+                sessions: self.sessions.clone(),
+                quarantined: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn scheduled_session_projection_is_typed_and_normalizes_persisted_values() {
+        let session_id = ConversationId::new().into_string();
+        let binding = scheduled_session_binding(ScheduledAutoWorkSession {
+            session_id: session_id.clone(),
+            display_name: String::new(),
+            tag: " release ".to_owned(),
+            max_requirements: Some(7),
+            config_revision: "conversation:7".to_owned(),
+        })
+        .expect("valid host projection");
+
+        assert_eq!(binding.kind, AutoWorkTargetKind::Conversation);
+        assert_eq!(binding.target_id, session_id);
+        assert_eq!(binding.display_name, binding.target_id);
+        assert_eq!(binding.tag, "release");
+        assert_eq!(binding.max_requirements, Some(7));
+        assert_eq!(binding.config_revision, "conversation:7");
+    }
+
+    #[test]
+    fn scheduled_session_projection_rejects_empty_tag() {
+        let error = scheduled_session_binding(ScheduledAutoWorkSession {
+            session_id: ConversationId::new().into_string(),
+            display_name: "Scheduled".to_owned(),
+            tag: " \t".to_owned(),
+            max_requirements: None,
+            config_revision: "conversation:1".to_owned(),
+        })
+        .expect_err("empty host tags must fail closed");
+
+        assert!(matches!(error, AppError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn typed_host_lookup_quarantines_one_bad_binding_and_keeps_valid_sessions() {
+        let db = init_database_memory().await.expect("in-memory database");
+        let owner_id = nomifun_db::installation_owner_id(db.pool())
+            .await
+            .expect("installation owner");
+        let session_id = ConversationId::new().into_string();
+        let conv_repo: Arc<dyn IConversationRepository> =
+            Arc::new(nomifun_db::SqliteConversationRepository::new(
+                db.pool().clone(),
+            ));
+        let requirement_repo: Arc<dyn IRequirementRepository> =
+            Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
+        let service = RequirementService::new(
+            requirement_repo,
+            RequirementEventEmitter::new(
+                Arc::new(NoopBroadcaster),
+                Arc::from(owner_id.as_str()),
+            ),
+        )
+        .with_scheduled_session_lookup(Arc::new(ScheduledLookup {
+                sessions: vec![
+                    ScheduledAutoWorkSession {
+                        session_id: ConversationId::new().into_string(),
+                        display_name: "Malformed".to_owned(),
+                        tag: " \t".to_owned(),
+                        max_requirements: None,
+                        config_revision: "conversation:bad".to_owned(),
+                    },
+                    ScheduledAutoWorkSession {
+                    session_id: session_id.clone(),
+                    display_name: "Host Scheduled".to_owned(),
+                    tag: "host".to_owned(),
+                    max_requirements: Some(3),
+                    config_revision: "conversation:3".to_owned(),
+                    },
+                ],
+            }))
+        .with_conversation_repo(conv_repo);
+
+        let bindings = AutoWorkBindingLookup::list_enabled_autowork_bindings(
+            &service,
+            &owner_id,
+        )
+        .await
+        .expect("typed host lookup");
+
+        assert_eq!(
+            bindings,
+            vec![PersistedAutoWorkBinding {
+                kind: AutoWorkTargetKind::Conversation,
+                target_id: session_id,
+                display_name: "Host Scheduled".to_owned(),
+                tag: "host".to_owned(),
+                max_requirements: Some(3),
+                config_revision: "conversation:3".to_owned(),
+            }]
+        );
     }
 
     async fn service_with_owners_and_database(
@@ -3466,25 +3791,114 @@ mod tests {
     async fn terminal_config_roundtrips_with_canonical_id() {
         let user_id = UserId::new().into_string();
         let terminal_id = TerminalId::new().into_string();
-        let service = service_with_driver(Arc::new(MockDriver::agent(user_id))).await;
-
-        service
-            .save_autowork_config(
+        let service =
+            service_with_driver(Arc::new(MockDriver::agent(user_id.clone()))).await;
+        let initial = service
+            .read_autowork_config_snapshot(
+                &user_id,
                 AutoWorkTargetKind::Terminal,
                 &terminal_id,
-                true,
-                Some("alpha"),
-                Some(5),
             )
             .await
             .unwrap();
-        let (enabled, tag, max) = service
-            .read_autowork_config(AutoWorkTargetKind::Terminal, &terminal_id)
+        let config = AutoWorkConfig::normalize(true, Some("alpha"), Some(5)).unwrap();
+
+        let saved = service
+            .save_autowork_config(
+                &user_id,
+                AutoWorkTargetKind::Terminal,
+                &terminal_id,
+                config.clone(),
+                &initial.revision,
+                Some("test:terminal-config"),
+            )
             .await
             .unwrap();
-        assert!(enabled);
-        assert_eq!(tag.as_deref(), Some("alpha"));
-        assert_eq!(max, Some(5));
+        assert_eq!(saved.config, config);
+        let snapshot = service
+            .read_autowork_config_snapshot(
+                &user_id,
+                AutoWorkTargetKind::Terminal,
+                &terminal_id,
+            )
+            .await
+            .unwrap();
+        assert!(snapshot.config.enabled);
+        assert_eq!(snapshot.config.tag.as_deref(), Some("alpha"));
+        assert_eq!(snapshot.config.max_requirements, Some(5));
+        assert_eq!(
+            snapshot.operation_id.as_deref(),
+            Some("test:terminal-config")
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_config_write_is_revisioned_and_operation_idempotent() {
+        let user_id = UserId::new().into_string();
+        let terminal_id = TerminalId::new().into_string();
+        let service = service_with_driver(Arc::new(MockDriver::agent(user_id.clone()))).await;
+        let initial = service
+            .read_autowork_config_snapshot(
+                &user_id,
+                AutoWorkTargetKind::Terminal,
+                &terminal_id,
+            )
+            .await
+            .unwrap();
+        let first_config =
+            AutoWorkConfig::normalize(true, Some("alpha"), Some(2)).unwrap();
+        let first = service
+            .save_autowork_config(
+                &user_id,
+                AutoWorkTargetKind::Terminal,
+                &terminal_id,
+                first_config.clone(),
+                &initial.revision,
+                Some("gateway:operation-1"),
+            )
+            .await
+            .unwrap();
+
+        let replay = service
+            .save_autowork_config(
+                &user_id,
+                AutoWorkTargetKind::Terminal,
+                &terminal_id,
+                first_config,
+                &initial.revision,
+                Some("gateway:operation-1"),
+            )
+            .await
+            .expect("same operation and payload must replay");
+        assert_eq!(replay, first);
+
+        let changed = AutoWorkConfig::normalize(true, Some("beta"), Some(2)).unwrap();
+        assert!(matches!(
+            service
+                .save_autowork_config(
+                    &user_id,
+                    AutoWorkTargetKind::Terminal,
+                    &terminal_id,
+                    changed.clone(),
+                    &first.revision,
+                    Some("gateway:operation-1"),
+                )
+                .await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(matches!(
+            service
+                .save_autowork_config(
+                    &user_id,
+                    AutoWorkTargetKind::Terminal,
+                    &terminal_id,
+                    changed,
+                    &initial.revision,
+                    Some("gateway:operation-2"),
+                )
+                .await,
+            Err(AppError::Conflict(_))
+        ));
     }
 
     #[tokio::test]

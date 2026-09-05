@@ -9,8 +9,11 @@ use nomifun_db::{
     SqliteConversationRepository, SqliteRequirementRepository, SqliteTerminalRepository, init_database_memory,
 };
 use nomifun_realtime::UserEventSink;
-use nomifun_requirement::{RequirementEventEmitter, RequirementService};
-use nomifun_common::{ConversationId, TerminalId, UserId};
+use nomifun_requirement::{
+    AutoWorkScheduledSessionLookup, RequirementEventEmitter, RequirementService,
+    ScheduledAutoWorkSession, ScheduledAutoWorkSessionScan,
+};
+use nomifun_common::{AppError, ConversationId, TerminalId, UserId};
 
 #[derive(Default)]
 struct NoopBroadcaster;
@@ -20,6 +23,21 @@ impl UserEventSink for NoopBroadcaster {
         _user_id: &str,
         _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
     ) {
+    }
+}
+
+struct StaticScheduledLookup(Vec<ScheduledAutoWorkSession>);
+
+#[async_trait::async_trait]
+impl AutoWorkScheduledSessionLookup for StaticScheduledLookup {
+    async fn list_enabled_scheduled_sessions(
+        &self,
+        _owner_id: &str,
+    ) -> Result<ScheduledAutoWorkSessionScan, AppError> {
+        Ok(ScheduledAutoWorkSessionScan {
+            sessions: self.0.clone(),
+            quarantined: Vec::new(),
+        })
     }
 }
 
@@ -64,11 +82,13 @@ async fn groups_enabled_conversation_and_terminal_bindings_by_tag() {
     // The technical row id is not part of the binding contract.
     let mut c = conv("Alpha A", r#"{"autowork":{"enabled":true,"tag":"x"}}"#);
     c.user_id = installation_owner.clone();
+    let alpha_a_id = c.conversation_id.clone();
     conv_repo.create(&c)
         .await
         .unwrap();
     let mut c = conv("Alpha B", r#"{"autowork":{"enabled":true,"tag":"x"}}"#);
     c.user_id = installation_owner.clone();
+    let alpha_b_id = c.conversation_id.clone();
     conv_repo.create(&c)
         .await
         .unwrap();
@@ -109,6 +129,22 @@ async fn groups_enabled_conversation_and_terminal_bindings_by_tag() {
         RequirementEventEmitter::new(Arc::new(NoopBroadcaster), Arc::from(installation_owner.clone())),
     )
         .with_conversation_repo(conv_repo)
+        .with_scheduled_session_lookup(Arc::new(StaticScheduledLookup(vec![
+            ScheduledAutoWorkSession {
+                session_id: alpha_a_id,
+                display_name: "Alpha A".into(),
+                tag: "x".into(),
+                max_requirements: None,
+                config_revision: "conversation:alpha-a".into(),
+            },
+            ScheduledAutoWorkSession {
+                session_id: alpha_b_id,
+                display_name: "Alpha B".into(),
+                tag: "x".into(),
+                max_requirements: None,
+                config_revision: "conversation:alpha-b".into(),
+            },
+        ])))
         .with_terminal_repo(term_repo);
     Box::leak(Box::new(db));
 

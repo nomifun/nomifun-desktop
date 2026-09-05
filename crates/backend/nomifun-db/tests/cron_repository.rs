@@ -16,7 +16,7 @@ use nomifun_db::models::{CronJobRow, CronJobRunRow};
 use nomifun_db::{
     AdvanceCronOccurrenceParams, DbError, FinalizeCronRunOutcome, FinalizeCronRunParams,
     ICronRepository, ReserveCronRunParams, SqliteCronRepository,
-    UpdateCronJobParams,
+    SqliteConversationRepository, UpdateCronJobParams, IConversationRepository,
 };
 
 const INSTALLATION_OWNER: &str = "0190f5fe-7c00-7a00-8000-000000000001";
@@ -186,6 +186,129 @@ async fn cj1_insert_returns_all_fields() {
     assert_eq!(found.run_count, 0);
     assert_eq!(found.retry_count, 0);
     assert_eq!(found.max_retries, 3);
+}
+
+#[tokio::test]
+async fn atomic_insert_commits_both_cron_session_relation_sides() {
+    let (r, db) = repo().await;
+    let job = make_job();
+    let job_id = job.cron_job_id.clone();
+
+    r.insert_with_session_relation(&job).await.unwrap();
+
+    let conversation_job: Option<String> =
+        sqlx::query_scalar("SELECT cron_job_id FROM conversations WHERE conversation_id = ?")
+            .bind(CONV_1)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    let persisted = r
+        .get_by_cron_job_id(INSTALLATION_OWNER, &job_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(conversation_job.as_deref(), Some(job_id.as_str()));
+    assert_eq!(persisted.conversation_id.as_deref(), Some(CONV_1));
+}
+
+#[tokio::test]
+async fn concurrent_atomic_inserts_choose_one_session_relation_owner() {
+    let (r, db) = repo().await;
+    let first = make_job();
+    let second = make_job();
+    let first_id = first.cron_job_id.clone();
+    let second_id = second.cron_job_id.clone();
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+
+    let first_task = {
+        let repository = Arc::clone(&r);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            repository.insert_with_session_relation(&first).await
+        })
+    };
+    let second_task = {
+        let repository = Arc::clone(&r);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            repository.insert_with_session_relation(&second).await
+        })
+    };
+    barrier.wait().await;
+    let first_result = first_task.await.unwrap();
+    let second_result = second_task.await.unwrap();
+
+    assert_ne!(
+        first_result.is_ok(),
+        second_result.is_ok(),
+        "exactly one Cron job may claim the Session"
+    );
+    let winner = if first_result.is_ok() {
+        first_id.as_str()
+    } else {
+        assert!(matches!(first_result, Err(DbError::Conflict(_))));
+        assert!(second_result.is_ok());
+        second_id.as_str()
+    };
+    let relation: Option<String> =
+        sqlx::query_scalar("SELECT cron_job_id FROM conversations WHERE conversation_id = ?")
+            .bind(CONV_1)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    let job_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM cron_jobs WHERE conversation_id = ?")
+            .bind(CONV_1)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(relation.as_deref(), Some(winner));
+    assert_eq!(job_count, 1, "the losing insert must roll back entirely");
+}
+
+#[tokio::test]
+async fn atomic_relation_bind_repairs_one_sided_crash_and_replays() {
+    let (r, db) = repo().await;
+    let job = make_job();
+    let job_id = job.cron_job_id.clone();
+    r.insert(&job).await.unwrap();
+    let conversations = SqliteConversationRepository::new(db.pool().clone());
+
+    let before: Option<String> =
+        sqlx::query_scalar("SELECT cron_job_id FROM conversations WHERE conversation_id = ?")
+            .bind(CONV_1)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert!(before.is_none(), "fixture models a crash after the job-side write");
+
+    conversations
+        .bind_cron_relation(INSTALLATION_OWNER, CONV_1, &job_id, now_ms())
+        .await
+        .unwrap();
+    conversations
+        .bind_cron_relation(INSTALLATION_OWNER, CONV_1, &job_id, now_ms())
+        .await
+        .unwrap();
+
+    let relation: Option<String> =
+        sqlx::query_scalar("SELECT cron_job_id FROM conversations WHERE conversation_id = ?")
+            .bind(CONV_1)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(relation.as_deref(), Some(job_id.as_str()));
+    assert_eq!(
+        r.get_by_cron_job_id(INSTALLATION_OWNER, &job_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .conversation_id
+            .as_deref(),
+        Some(CONV_1)
+    );
 }
 
 #[tokio::test]
@@ -522,6 +645,108 @@ async fn cj11_delete() {
 }
 
 #[tokio::test]
+async fn delete_refuses_an_admitted_run_until_its_receipt_is_terminal() {
+    let (r, db) = repo().await;
+    let job = make_job();
+    let job_id = job.cron_job_id.clone();
+    r.insert(&job).await.unwrap();
+    let run_id = nomifun_common::CronJobRunId::new().into_string();
+    r.reserve_run(
+        INSTALLATION_OWNER,
+        &ReserveCronRunParams {
+            cron_job_run_id: run_id.clone(),
+            cron_job_id: job_id.clone(),
+            trigger_kind: "run_now".to_owned(),
+            operation_key: format!("cron:run-now:{INSTALLATION_OWNER}:delete-race"),
+            request_fingerprint: format!("run-now:v1:{INSTALLATION_OWNER}:{job_id}"),
+            schedule_revision: None,
+            planned_at_ms: None,
+            now: now_ms(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let error = r.delete(INSTALLATION_OWNER, &job_id).await.unwrap_err();
+    assert!(
+        matches!(error, DbError::Conflict(ref message) if message.contains(&run_id)),
+        "unexpected deletion result: {error:?}"
+    );
+    assert!(
+        r.get_by_cron_job_id(INSTALLATION_OWNER, &job_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let reservation_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cron_run_reservations WHERE cron_job_run_id = ?",
+    )
+    .bind(&run_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        reservation_count, 1,
+        "deletion conflict must preserve recovery authority"
+    );
+
+    assert_eq!(
+        r.finalize_run_with_job_projection(
+            INSTALLATION_OWNER,
+            &successful_run_projection(&run_id, None, now_ms()),
+        )
+        .await
+        .unwrap(),
+        FinalizeCronRunOutcome::Applied
+    );
+    r.delete(INSTALLATION_OWNER, &job_id).await.unwrap();
+}
+
+#[tokio::test]
+async fn conversation_cascade_refuses_any_selected_admitted_run() {
+    let (r, db) = repo().await;
+    let job = make_job();
+    let job_id = job.cron_job_id.clone();
+    r.insert(&job).await.unwrap();
+    let run_id = nomifun_common::CronJobRunId::new().into_string();
+    r.reserve_run(
+        INSTALLATION_OWNER,
+        &ReserveCronRunParams {
+            cron_job_run_id: run_id.clone(),
+            cron_job_id: job_id.clone(),
+            trigger_kind: "run_now".to_owned(),
+            operation_key: format!("cron:run-now:{INSTALLATION_OWNER}:cascade-race"),
+            request_fingerprint: format!("run-now:v1:{INSTALLATION_OWNER}:{job_id}"),
+            schedule_revision: None,
+            planned_at_ms: None,
+            now: now_ms(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let error = r
+        .delete_by_conversation(INSTALLATION_OWNER, CONV_1)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DbError::Conflict(_)));
+    assert!(
+        r.get_by_cron_job_id(INSTALLATION_OWNER, &job_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let reservation_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cron_run_reservations WHERE cron_job_run_id = ?",
+    )
+    .bind(&run_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(reservation_count, 1);
+}
+
+#[tokio::test]
 async fn cj12_delete_nonexistent() {
     let (r, _db) = repo().await;
     let err = r
@@ -833,6 +1058,129 @@ async fn durable_scheduled_occurrence_has_one_non_prunable_identity() {
     .await
     .unwrap();
     assert_eq!(durable_count, 1);
+}
+
+#[tokio::test]
+async fn lazy_run_finalization_binds_both_relation_sides_atomically() {
+    let (r, db) = repo().await;
+    let mut job = make_job();
+    job.conversation_id = None;
+    let job_id = job.cron_job_id.clone();
+    r.insert(&job).await.unwrap();
+    let run_id = nomifun_common::CronJobRunId::new().into_string();
+    r.reserve_run(
+        INSTALLATION_OWNER,
+        &ReserveCronRunParams {
+            cron_job_run_id: run_id.clone(),
+            cron_job_id: job_id.clone(),
+            trigger_kind: "run_now".to_owned(),
+            operation_key: format!("cron:run-now:{INSTALLATION_OWNER}:lazy-bind"),
+            request_fingerprint: format!("run-now:v1:{INSTALLATION_OWNER}:{job_id}"),
+            schedule_revision: None,
+            planned_at_ms: None,
+            now: now_ms(),
+        },
+    )
+    .await
+    .unwrap();
+    r.attach_run_conversation(INSTALLATION_OWNER, &run_id, CONV_1, now_ms())
+        .await
+        .unwrap();
+    let mut projection = successful_run_projection(&run_id, Some(CONV_1), now_ms());
+    projection.bind_job_conversation_if_unbound = true;
+
+    assert_eq!(
+        r.finalize_run_with_job_projection(INSTALLATION_OWNER, &projection)
+            .await
+            .unwrap(),
+        FinalizeCronRunOutcome::Applied
+    );
+    let job_relation = r
+        .get_by_cron_job_id(INSTALLATION_OWNER, &job_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .conversation_id;
+    let session_relation: Option<String> =
+        sqlx::query_scalar("SELECT cron_job_id FROM conversations WHERE conversation_id = ?")
+            .bind(CONV_1)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(job_relation.as_deref(), Some(CONV_1));
+    assert_eq!(session_relation.as_deref(), Some(job_id.as_str()));
+    assert_eq!(
+        r.finalize_run_with_job_projection(INSTALLATION_OWNER, &projection)
+            .await
+            .unwrap(),
+        FinalizeCronRunOutcome::AlreadyApplied
+    );
+}
+
+#[tokio::test]
+async fn lazy_run_relation_conflict_rolls_back_terminal_projection() {
+    let (r, db) = repo().await;
+    let owner = make_job();
+    let owner_id = owner.cron_job_id.clone();
+    r.insert_with_session_relation(&owner).await.unwrap();
+
+    let mut contender = make_job();
+    contender.conversation_id = None;
+    let contender_id = contender.cron_job_id.clone();
+    r.insert(&contender).await.unwrap();
+    let run_id = nomifun_common::CronJobRunId::new().into_string();
+    r.reserve_run(
+        INSTALLATION_OWNER,
+        &ReserveCronRunParams {
+            cron_job_run_id: run_id.clone(),
+            cron_job_id: contender_id.clone(),
+            trigger_kind: "run_now".to_owned(),
+            operation_key: format!("cron:run-now:{INSTALLATION_OWNER}:lazy-conflict"),
+            request_fingerprint: format!(
+                "run-now:v1:{INSTALLATION_OWNER}:{contender_id}"
+            ),
+            schedule_revision: None,
+            planned_at_ms: None,
+            now: now_ms(),
+        },
+    )
+    .await
+    .unwrap();
+    r.attach_run_conversation(INSTALLATION_OWNER, &run_id, CONV_1, now_ms())
+        .await
+        .unwrap();
+    let mut projection = successful_run_projection(&run_id, Some(CONV_1), now_ms());
+    projection.bind_job_conversation_if_unbound = true;
+
+    assert!(matches!(
+        r.finalize_run_with_job_projection(INSTALLATION_OWNER, &projection)
+            .await,
+        Err(DbError::Conflict(_))
+    ));
+    let reservation: (String, String) = sqlx::query_as(
+        "SELECT status, job_projection_state FROM cron_run_reservations \
+         WHERE cron_job_run_id = ?",
+    )
+    .bind(&run_id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(reservation, ("reserved".to_owned(), "pending".to_owned()));
+    assert!(
+        r.get_by_cron_job_id(INSTALLATION_OWNER, &contender_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .conversation_id
+            .is_none()
+    );
+    let session_relation: Option<String> =
+        sqlx::query_scalar("SELECT cron_job_id FROM conversations WHERE conversation_id = ?")
+            .bind(CONV_1)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(session_relation.as_deref(), Some(owner_id.as_str()));
 }
 
 #[tokio::test]

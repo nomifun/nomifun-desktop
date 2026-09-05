@@ -11,15 +11,17 @@ use nomifun_ai_agent::AgentRegistry;
 use nomifun_ai_agent::AgentStreamEvent;
 #[cfg(test)]
 use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
-use nomifun_api_types::{CreateConversationRequest, SendMessageRequest};
+use nomifun_api_types::CreateConversationRequest;
+#[cfg(test)]
+use nomifun_api_types::SendMessageRequest;
 use nomifun_common::{
     AgentType, AppError, ConversationId, ExecutionAuthority, MessageId, ProviderWithModel, UserId,
-    now_ms, validate_uuidv7, workspace_path_has_edge_whitespace_segment,
+    now_ms, workspace_path_has_edge_whitespace_segment,
 };
 #[cfg(test)]
 use nomifun_conversation::ConversationService;
 use nomifun_db::models::MessageRow;
-use nomifun_db::{ConversationRowUpdate, IConversationRepository};
+use nomifun_db::IConversationRepository;
 use nomifun_realtime::UserEventSink;
 #[cfg(test)]
 use tokio::time::timeout;
@@ -33,8 +35,12 @@ use crate::prompt::{
     build_new_conversation_prompt_with_skill_suggest, build_new_conversation_with_skill_prompt,
 };
 use crate::session_port::{
-    CronSessionHandle, CronSessionPort, CronTurnDelivery, CronTurnReceiptState,
-    CronTurnReconciliation, CronTurnRequest,
+    CronRuntimePreparationRequest, CronScheduledSession, CronScheduledSessionLookup,
+    CronSessionCronBindingRequest, CronSessionHandle, CronSessionLookup, CronSessionPort,
+    CronSessionProjection, CronTurnDelivery, CronTurnDeliveryQuery, CronTurnMessage,
+    CronTurnReceiptQuery, CronTurnReceiptState, CronTurnReconciliation,
+    CronTurnReconciliationRequest, CronTurnRequest, CronTurnRuntimeOverlay,
+    CronTurnRuntimePreparation,
 };
 use crate::skill_file::{
     cron_skill_name, validate_skill_content, write_raw_skill_file,
@@ -47,8 +53,6 @@ const DURABLE_RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DURABLE_RECEIPT_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const DURABLE_RECEIPT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 const DURABLE_RECEIPT_WAIT_TIMEOUT: Duration = Duration::from_secs(3600);
-const TEMP_WORKSPACE_ID_EXTRA_KEY: &str = "temp_workspace_id";
-
 fn parse_conversation_id(id: &str) -> Result<&str, AppError> {
     ConversationId::try_from(id)
         .map(|_| id)
@@ -94,9 +98,15 @@ pub(crate) struct PreparedExecution {
 pub struct JobExecutor {
     authoritative_user_id: Arc<str>,
     sessions: Arc<dyn CronSessionPort>,
+    /// Minimal legacy persistence blocker.
+    ///
+    /// Cron still writes tips messages and Cron-owned artifact projections to
+    /// the shared conversation tables. It must not use this repository for
+    /// Session owner, model, workspace, runtime, receipt, or cron-relation
+    /// authority; those reads and mutations go through `sessions`.
     conversation_repo: Arc<dyn IConversationRepository>,
     busy_guard: Arc<CronBusyGuard>,
-    work_dir: PathBuf,
+    _work_dir: PathBuf,
     data_dir: PathBuf,
     user_events: Arc<dyn UserEventSink>,
     /// Retained only to keep the executor's injection contract stable for the
@@ -129,7 +139,7 @@ impl JobExecutor {
             sessions,
             conversation_repo,
             busy_guard,
-            work_dir,
+            _work_dir: work_dir,
             data_dir,
             user_events,
             agent_registry,
@@ -147,7 +157,39 @@ impl JobExecutor {
         user_id: &str,
         cron_job_id: &str,
     ) -> Result<Vec<nomifun_api_types::ConversationResponse>, AppError> {
-        self.sessions.list_by_cron_job(user_id, cron_job_id).await
+        self.sessions
+            .list_conversation_responses_for_cron(&CronScheduledSessionLookup {
+                owner_id: user_id.to_owned(),
+                cron_job_id: cron_job_id.to_owned(),
+            })
+            .await
+    }
+
+    pub(crate) async fn lookup_scheduled_sessions(
+        &self,
+        user_id: &str,
+        cron_job_id: &str,
+    ) -> Result<Vec<CronScheduledSession>, AppError> {
+        self.sessions
+            .lookup_scheduled_sessions(&CronScheduledSessionLookup {
+                owner_id: user_id.to_owned(),
+                cron_job_id: cron_job_id.to_owned(),
+            })
+            .await
+    }
+
+    pub(crate) async fn get_session_projection(
+        &self,
+        owner_id: &str,
+        session_id: &str,
+    ) -> Result<CronSessionProjection, AppError> {
+        parse_conversation_id(session_id)?;
+        self.sessions
+            .get_session(&CronSessionLookup {
+                owner_id: owner_id.to_owned(),
+                agent_session_id: session_id.into(),
+            })
+            .await
     }
 
     /// Normalize the job's persisted `agent_type` selector to its canonical
@@ -240,6 +282,7 @@ impl JobExecutor {
         &self.busy_guard
     }
 
+    #[cfg(test)]
     pub async fn get_conversation_row(
         &self,
         conversation_id: &str,
@@ -287,15 +330,10 @@ impl JobExecutor {
         UserId::try_from(owner_id)
             .map_err(|error| CronError::Scheduler(format!("invalid cron owner id: {error}")))?;
         let row = self
-            .get_conversation_row(conversation_id)
-            .await?
-            .filter(|row| row.user_id == owner_id)
-            .ok_or_else(|| {
-                CronError::Scheduler(format!(
-                    "conversation {conversation_id} is not owned by cron owner {owner_id}"
-                ))
-            })?;
-        debug_assert_eq!(row.user_id, owner_id);
+            .get_session_projection(owner_id, conversation_id)
+            .await
+            .map_err(CronError::from)?;
+        debug_assert_eq!(row.owner_id, owner_id);
         // Reuse the conversation service's canonical bare UUIDv7 message-ID
         // minting boundary.
         let row = MessageRow {
@@ -321,13 +359,10 @@ impl JobExecutor {
             .map_err(CronError::Database)
     }
 
-    /// Bind a conversation to its owning cron job through the logical
-    /// `conversations.cron_job_id` relation. The reverse logical relation
-    /// (`cron_jobs.conversation_id`) is maintained by the service layer.
+    /// Bind a canonical Session to its owning Cron job.
     ///
-    /// Idempotent: a no-op when the column already points at this job. The
-    /// conversation row already exists because the executor binds only after
-    /// `ConversationService::create` returns.
+    /// The Session owner validates and persists the relation. Cron never
+    /// updates the Session storage row directly.
     pub async fn bind_cron_job_to_conversation(
         &self,
         owner_id: &str,
@@ -338,35 +373,14 @@ impl JobExecutor {
             .map_err(|error| CronError::Scheduler(format!("invalid cron owner id: {error}")))?;
         nomifun_common::CronJobId::parse(cron_job_id)
             .map_err(|error| CronError::Scheduler(format!("invalid cron job id: {error}")))?;
-        let Some(row) = self.get_conversation_row(conversation_id).await? else {
-            return Err(CronError::Scheduler(format!(
-                "conversation {conversation_id} not found while binding cron job {cron_job_id}"
-            )));
-        };
-        if row.user_id != owner_id {
-            return Err(CronError::Scheduler(format!(
-                "conversation {conversation_id} owner does not match cron job {cron_job_id}"
-            )));
-        }
-
-        if row.cron_job_id.as_deref() == Some(cron_job_id) {
-            return Ok(());
-        }
-        if let Some(existing_cron_job_id) = row.cron_job_id.as_deref() {
-            return Err(CronError::App(AppError::Conflict(format!(
-                "conversation {conversation_id} is already bound to cron job {existing_cron_job_id}"
-            ))));
-        }
-
-        let update = ConversationRowUpdate {
-            cron_job_id: Some(Some(cron_job_id.to_owned())),
-            updated_at: Some(now_ms()),
-            ..Default::default()
-        };
-        self.conversation_repo
-            .update(parse_conversation_id(conversation_id)?, &update)
+        self.sessions
+            .bind_cron_relation(&CronSessionCronBindingRequest {
+                owner_id: owner_id.to_owned(),
+                agent_session_id: conversation_id.into(),
+                cron_job_id: cron_job_id.to_owned(),
+            })
             .await
-            .map_err(CronError::Database)
+            .map_err(CronError::from)
     }
 
     /// Read the exact Conversation receipt for one durably admitted Cron run.
@@ -380,11 +394,11 @@ impl JobExecutor {
         run_id: &str,
     ) -> Result<CronTurnReceiptState, AppError> {
         self.sessions
-            .public_turn_delivery_state(
-                user_id,
-                conversation_id,
-                &cron_turn_key(run_id),
-            )
+            .read_turn_receipt(&CronTurnReceiptQuery {
+                owner_id: user_id.to_owned(),
+                agent_session_id: conversation_id.into(),
+                idempotency_key: cron_turn_key(run_id),
+            })
             .await
     }
 
@@ -397,11 +411,11 @@ impl JobExecutor {
         run_id: &str,
     ) -> Result<CronTurnReconciliation, AppError> {
         self.sessions
-            .reconcile_quiescent_running_turn(
-                user_id,
-                conversation_id,
-                &cron_turn_key(run_id),
-            )
+            .reconcile_turn_receipt(&CronTurnReconciliationRequest {
+                owner_id: user_id.to_owned(),
+                agent_session_id: conversation_id.into(),
+                idempotency_key: cron_turn_key(run_id),
+            })
             .await
     }
 }
@@ -533,29 +547,22 @@ impl JobExecutor {
         conversation_id: &str,
         saved_skill: Option<&SavedSkillContext>,
     ) -> ExecutionResult {
-        // The interactive `send_message` path resolves the model by parsing
-        // `conversation.model` via
-        // `nomifun_conversation::runtime_options::provider_model_from_conversation_row`.
-        // Cron routes through the same helper so that a Nomi job whose
-        // cached `agent_config.provider_id` is invalid or missing
-        // cannot reach the factory and raise `Provider 'nomi' not found`
-        // (Sentry ELECTRON-1HM). `resolve_conversation` (called by
-        // `prepare_run_now` before this method runs) guarantees the
-        // row exists. Re-check both existence and owner here to close the
-        // delete/rebind race before any runtime is obtained.
-        let conversation_row = match self.get_conversation_row(conversation_id).await {
-            Ok(Some(row)) if row.user_id == job.user_id => row,
-            Ok(Some(_)) => {
+        let session = match self
+            .get_session_projection(&job.user_id, conversation_id)
+            .await
+        {
+            Ok(session)
+                if session.owner_id == job.user_id
+                    && session.agent_session_id.as_ref() == conversation_id =>
+            {
+                session
+            }
+            Ok(_) => {
                 return ExecutionResult::Error {
                     message: format!(
-                        "conversation {conversation_id} owner does not match cron job {}",
+                        "AgentSession {conversation_id} authority does not match cron job {}",
                         job.cron_job_id
                     ),
-                };
-            }
-            Ok(None) => {
-                return ExecutionResult::Error {
-                    message: format!("conversation {conversation_id} not found"),
                 };
             }
             Err(e) => {
@@ -563,81 +570,15 @@ impl JobExecutor {
                     job_id = %job.cron_job_id,
                     conversation_id,
                     error = %e,
-                    "Failed to load conversation row for cron runtime resolution"
+                    "Failed to load canonical Session projection for Cron execution"
                 );
                 return ExecutionResult::Error {
                     message: e.to_string(),
                 };
             }
         };
-        let row_extra =
-            match serde_json::from_str::<serde_json::Value>(&conversation_row.extra) {
-                Ok(extra) => extra,
-                Err(error) => {
-                    return ExecutionResult::Error {
-                        message: format!(
-                            "conversation {conversation_id} has invalid extra JSON: {error}"
-                        ),
-                    };
-                }
-            };
-        let managed_workspace = row_extra.get(TEMP_WORKSPACE_ID_EXTRA_KEY).is_some();
-        let workspace = if managed_workspace {
-            match default_temp_workspace_path(
-                &self.work_dir,
-                conversation_id,
-                &row_extra,
-            ) {
-                Ok(workspace) => workspace.to_string_lossy().into_owned(),
-                Err(error) => {
-                    error!(
-                        job_id = %job.cron_job_id,
-                        conversation_id,
-                        error = %error,
-                        "Failed to resolve managed cron workspace"
-                    );
-                    return ExecutionResult::Error {
-                        message: error.to_string(),
-                    };
-                }
-            }
-        } else {
-            match self.resolve_execution_workspace(job, conversation_id).await {
-                Ok(workspace) if !workspace.trim().is_empty() => workspace,
-                Ok(_) => {
-                    return ExecutionResult::Error {
-                        message: format!(
-                            "conversation {conversation_id} has neither a custom workspace nor a canonical temp_workspace_id"
-                        ),
-                    };
-                }
-                Err(e) => {
-                    error!(
-                        job_id = %job.cron_job_id,
-                        conversation_id,
-                        error = %e,
-                        "Failed to resolve cron execution workspace"
-                    );
-                    return ExecutionResult::Error {
-                        message: e.to_string(),
-                    };
-                }
-            }
-        };
-
         let skill_names = if self.controls_host(&job.user_id) {
-            match self
-                .resolve_task_skill_names(job, conversation_id, saved_skill)
-                .await
-            {
-                Ok(names) => names,
-                Err(e) => {
-                    error!(job_id = %job.cron_job_id, error = %e, "Failed to resolve task skills");
-                    return ExecutionResult::Error {
-                        message: e.to_string(),
-                    };
-                }
-            }
+            resolve_task_skill_names(job, &session, saved_skill)
         } else {
             Vec::new()
         };
@@ -645,7 +586,7 @@ impl JobExecutor {
         // Materialize the full request before runtime/knowledge/session
         // mutation. An accepted or completed durable receipt is absorbing and
         // must return without rebuilding or clearing the Conversation runtime.
-        let receipt_req = build_cron_send_request(&prompt, &skill_names);
+        let turn_message = build_cron_turn_message(&prompt, &skill_names);
         let turn_key = cron_turn_key(run_id);
         let preflight = match self
             .probe_durable_turn_delivery_until_known(
@@ -653,7 +594,7 @@ impl JobExecutor {
                 run_id,
                 conversation_id,
                 &turn_key,
-                &receipt_req,
+                &turn_message,
                 "before runtime preparation",
             )
             .await
@@ -702,19 +643,6 @@ impl JobExecutor {
                 return replayed_delivery_result(run_id, conversation_id, delivery);
         }
 
-        let mut runtime_extra = build_task_extra(job, &skill_names);
-        if managed_workspace {
-            let temp_workspace_id = row_extra
-                .get(TEMP_WORKSPACE_ID_EXTRA_KEY)
-                .cloned()
-                .expect("managed workspace marker checked above");
-            runtime_extra[TEMP_WORKSPACE_ID_EXTRA_KEY] = temp_workspace_id;
-        }
-        // The resolved workspace remains a Cron scheduling concern, while
-        // Session-owned identity/model/policy fields are resolved by the
-        // typed session port immediately before runtime preparation.
-        runtime_extra["workspace"] = serde_json::Value::String(workspace.clone());
-        let skill_suggest_workspace = workspace.clone();
         let clear_context = matches!(job.execution_mode, ExecutionMode::Existing)
             && job
                 .agent_config
@@ -724,16 +652,20 @@ impl JobExecutor {
         // translation. Cron only submits one immutable turn request.
         let observed = match self
             .sessions
-            .send_observed_turn(
-                &job.user_id,
-                conversation_id,
-                &turn_key,
-                CronTurnRequest {
-                    message: build_cron_send_request(&prompt, &skill_names),
-                    runtime_extra,
-                    clear_context,
+            .prepare_runtime_and_send(CronRuntimePreparationRequest {
+                owner_id: job.user_id.clone(),
+                agent_session_id: conversation_id.into(),
+                idempotency_key: turn_key.clone(),
+                turn: CronTurnRequest {
+                    message: turn_message.clone(),
+                    runtime: CronTurnRuntimePreparation {
+                        overlay: CronTurnRuntimeOverlay {
+                            cron_job_id: job.cron_job_id.clone(),
+                        },
+                        clear_context,
+                    },
                 },
-            )
+            })
             .await
         {
             Ok(observed) => observed,
@@ -753,7 +685,7 @@ impl JobExecutor {
                         run_id,
                         conversation_id,
                         &turn_key,
-                        &receipt_req,
+                        &turn_message,
                         "after keyed send returned an error",
                     )
                     .await
@@ -800,7 +732,8 @@ impl JobExecutor {
                 return replayed_delivery_result(run_id, conversation_id, delivery);
             }
         };
-        let delivery = observed;
+        let skill_suggest_workspace = observed.workspace;
+        let delivery = observed.delivery;
         if delivery.replayed {
             info!(
                 job_id = %job.cron_job_id,
@@ -905,7 +838,7 @@ impl JobExecutor {
         run_id: &str,
         conversation_id: &str,
         turn_key: &str,
-        request: &SendMessageRequest,
+        message: &CronTurnMessage,
         phase: &'static str,
     ) -> Result<Option<CronTurnDelivery>, ExecutionResult> {
         self.probe_durable_turn_delivery_until_known_timed(
@@ -913,7 +846,7 @@ impl JobExecutor {
             run_id,
             conversation_id,
             turn_key,
-            request,
+            message,
             phase,
             DURABLE_RECEIPT_PROBE_TIMEOUT,
         )
@@ -927,7 +860,7 @@ impl JobExecutor {
         run_id: &str,
         conversation_id: &str,
         turn_key: &str,
-        request: &SendMessageRequest,
+        message: &CronTurnMessage,
         phase: &'static str,
         timeout: Duration,
     ) -> Result<Option<CronTurnDelivery>, ExecutionResult> {
@@ -936,12 +869,12 @@ impl JobExecutor {
         loop {
             match self
                 .sessions
-                .delivery_result(
-                    &job.user_id,
-                    conversation_id,
-                    turn_key,
-                    request,
-                )
+                .delivery_result(&CronTurnDeliveryQuery {
+                    owner_id: job.user_id.clone(),
+                    agent_session_id: conversation_id.into(),
+                    idempotency_key: turn_key.to_owned(),
+                    message: message.clone(),
+                })
                 .await
             {
                 Ok(delivery) => return Ok(delivery),
@@ -1009,11 +942,11 @@ impl JobExecutor {
         loop {
             match self
                 .sessions
-                .reconcile_quiescent_running_turn(
-                    &job.user_id,
-                    conversation_id,
-                    turn_key,
-                )
+                .reconcile_turn_receipt(&CronTurnReconciliationRequest {
+                    owner_id: job.user_id.clone(),
+                    agent_session_id: conversation_id.into(),
+                    idempotency_key: turn_key.to_owned(),
+                })
                 .await
             {
                 Ok(
@@ -1099,11 +1032,11 @@ impl JobExecutor {
         loop {
             match self
                 .sessions
-                .public_turn_delivery_state(
-                    &job.user_id,
-                    conversation_id,
-                    turn_key,
-                )
+                .read_turn_receipt(&CronTurnReceiptQuery {
+                    owner_id: job.user_id.clone(),
+                    agent_session_id: conversation_id.into(),
+                    idempotency_key: turn_key.to_owned(),
+                })
                 .await
             {
                 Ok(CronTurnReceiptState::Completed(delivery)) => {
@@ -1162,14 +1095,15 @@ impl JobExecutor {
         job: &CronJob,
         conversation_id: &str,
     ) -> Result<(), CronError> {
-        let Some(row) = self.get_conversation_row(conversation_id).await? else {
+        let session = self
+            .get_session_projection(&job.user_id, conversation_id)
+            .await
+            .map_err(CronError::from)?;
+        if session.owner_id != job.user_id
+            || session.agent_session_id.as_ref() != conversation_id
+        {
             return Err(CronError::Scheduler(format!(
-                "conversation {conversation_id} not found"
-            )));
-        };
-        if row.user_id != job.user_id {
-            return Err(CronError::Scheduler(format!(
-                "conversation {conversation_id} owner does not match cron job {}",
+                "AgentSession {conversation_id} authority does not match cron job {}",
                 job.cron_job_id
             )));
         }
@@ -1220,60 +1154,26 @@ impl JobExecutor {
         job: &CronJob,
         conversation_id: Option<&str>,
     ) -> Result<String, CronError> {
-        if let Some(workspace) = job
-            .agent_config
-            .as_ref()
-            .and_then(|config| config.workspace.as_deref())
-        {
-            return Ok(workspace.to_owned());
-        }
-
         let Some(conversation_id) = conversation_id else {
-            return Ok(String::new());
+            return Ok(job
+                .agent_config
+                .as_ref()
+                .and_then(|config| config.workspace.clone())
+                .unwrap_or_default());
         };
-        let Some(row) = self.get_conversation_row(conversation_id).await? else {
+        let session = self
+            .get_session_projection(&job.user_id, conversation_id)
+            .await
+            .map_err(CronError::from)?;
+        if session.owner_id != job.user_id
+            || session.agent_session_id.as_ref() != conversation_id
+        {
             return Err(CronError::Scheduler(format!(
-                "conversation {conversation_id} not found while resolving cron workspace"
-            )));
-        };
-        if row.user_id != job.user_id {
-            return Err(CronError::Scheduler(format!(
-                "conversation {conversation_id} owner does not match cron job {}",
+                "AgentSession {conversation_id} authority does not match cron job {}",
                 job.cron_job_id
             )));
         }
-
-        let extra = serde_json::from_str::<serde_json::Value>(&row.extra).map_err(|error| {
-            CronError::Scheduler(format!(
-                "conversation {conversation_id} has invalid extra JSON: {error}"
-            ))
-        })?;
-        if !extra.is_object() {
-            return Err(CronError::Scheduler(format!(
-                "conversation {conversation_id} extra must be a JSON object"
-            )));
-        }
-        Ok(extra
-            .get("workspace")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| {
-                CronError::Scheduler(format!(
-                    "conversation {conversation_id} has no canonical workspace"
-                ))
-            })?
-            .to_owned())
-    }
-
-    async fn resolve_execution_workspace(
-        &self,
-        job: &CronJob,
-        conversation_id: &str,
-    ) -> Result<String, CronError> {
-        Ok(self
-            .resolve_execution_workspace_raw(job, Some(conversation_id))
-            .await?
-            .trim()
-            .to_owned())
+        Ok(session.workspace)
     }
 
     async fn prepare_saved_skill(
@@ -1304,71 +1204,25 @@ impl JobExecutor {
         }))
     }
 
-    async fn resolve_task_skill_names(
-        &self,
-        job: &CronJob,
-        conversation_id: &str,
-        saved_skill: Option<&SavedSkillContext>,
-    ) -> Result<Vec<String>, CronError> {
-        let mut skills = match job.execution_mode {
-            ExecutionMode::Existing => {
-                self.load_conversation_skill_names(job, conversation_id).await?
-            }
-            ExecutionMode::NewConversation => Vec::new(),
-        };
+}
 
-        if matches!(job.execution_mode, ExecutionMode::NewConversation)
-            && let Some(saved_skill) = saved_skill
-            && !skills.iter().any(|name| name == &saved_skill.name)
-        {
-            skills.push(saved_skill.name.clone());
-        }
-
-        Ok(skills)
+fn resolve_task_skill_names(
+    job: &CronJob,
+    session: &CronSessionProjection,
+    saved_skill: Option<&SavedSkillContext>,
+) -> Vec<String> {
+    let mut skills = match job.execution_mode {
+        ExecutionMode::Existing => session.skills.clone(),
+        ExecutionMode::NewConversation => Vec::new(),
+    };
+    if matches!(job.execution_mode, ExecutionMode::NewConversation)
+        && let Some(saved_skill) = saved_skill
+        && !skills.iter().any(|name| name == &saved_skill.name)
+    {
+        skills.push(saved_skill.name.clone());
     }
 
-    async fn load_conversation_skill_names(
-        &self,
-        job: &CronJob,
-        conversation_id: &str,
-    ) -> Result<Vec<String>, CronError> {
-        let Some(row) = self
-            .conversation_repo
-            .get(parse_conversation_id(conversation_id)?)
-            .await
-            .map_err(CronError::Database)?
-        else {
-            return Ok(Vec::new());
-        };
-        if row.user_id != job.user_id {
-            return Err(CronError::Scheduler(format!(
-                "conversation {conversation_id} owner does not match cron job {}",
-                job.cron_job_id
-            )));
-        }
-
-        let extra = serde_json::from_str::<serde_json::Value>(&row.extra).map_err(|error| {
-            CronError::Scheduler(format!(
-                "conversation {conversation_id} has invalid extra JSON: {error}"
-            ))
-        })?;
-        if !extra.is_object() {
-            return Err(CronError::Scheduler(format!(
-                "conversation {conversation_id} extra must be a JSON object"
-            )));
-        }
-
-        Ok(extra
-            .get("skills")
-            .and_then(|value| value.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| item.as_str().map(ToOwned::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default())
-    }
+    skills
 }
 
 fn resolve_new_conversation_agent_type(job: &CronJob) -> Result<AgentType, CronError> {
@@ -1413,60 +1267,6 @@ fn resolve_model(job: &CronJob) -> Option<ProviderWithModel> {
     })
 }
 
-fn build_task_extra(job: &CronJob, skills: &[String]) -> serde_json::Value {
-    let mut extra = serde_json::Map::new();
-    extra.insert(
-        "cron_job_id".to_owned(),
-        serde_json::Value::String(job.cron_job_id.clone()),
-    );
-    if !skills.is_empty() {
-        extra.insert(
-            "skills".to_owned(),
-            serde_json::Value::Array(
-                skills
-                    .iter()
-                    .cloned()
-                    .map(serde_json::Value::String)
-                    .collect(),
-            ),
-        );
-    }
-
-    if let Some(config) = &job.agent_config {
-        if let Some(cli_path) = &config.cli_path {
-            extra.insert(
-                "cli_path".to_owned(),
-                serde_json::Value::String(cli_path.clone()),
-            );
-        }
-        if !config.name.is_empty() {
-            extra.insert(
-                "agent_name".to_owned(),
-                serde_json::Value::String(config.name.clone()),
-            );
-        }
-        if let Some(custom_agent_id) = &config.custom_agent_id {
-            extra.insert(
-                "custom_agent_id".to_owned(),
-                serde_json::Value::String(custom_agent_id.clone()),
-            );
-        }
-        if let Some(preset_id) = &config.preset_id {
-            extra.insert("preset_id".to_owned(), serde_json::Value::String(preset_id.clone()));
-        }
-        if let Some(revision) = config.preset_revision {
-            extra.insert("preset_revision".to_owned(), serde_json::Value::Number(revision.into()));
-        }
-        if let Some(snapshot) = &config.preset_snapshot {
-            if let Ok(value) = serde_json::to_value(snapshot) {
-                extra.insert("preset_snapshot".to_owned(), value);
-            }
-        }
-    }
-
-    serde_json::Value::Object(extra)
-}
-
 fn build_prompt(
     job: &CronJob,
     saved_skill: Option<&SavedSkillContext>,
@@ -1494,8 +1294,8 @@ fn build_prompt(
     }
 }
 
-fn build_cron_send_request(prompt: &str, skill_names: &[String]) -> SendMessageRequest {
-    SendMessageRequest {
+fn build_cron_turn_message(prompt: &str, skill_names: &[String]) -> CronTurnMessage {
+    CronTurnMessage {
         content: prompt.to_owned(),
         files: Vec::new(),
         inject_skills: skill_names.to_vec(),
@@ -1625,30 +1425,6 @@ fn schedule_description_text(schedule: &crate::types::CronSchedule) -> String {
             None => expr.clone(),
         }),
     }
-}
-
-fn default_temp_workspace_path(
-    data_dir: &std::path::Path,
-    conversation_id: &str,
-    extra: &serde_json::Value,
-) -> Result<std::path::PathBuf, CronError> {
-    let temp_workspace_id = extra
-        .get(TEMP_WORKSPACE_ID_EXTRA_KEY)
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            CronError::Scheduler(format!(
-                "conversation {conversation_id} has no canonical temp_workspace_id"
-            ))
-        })?;
-    validate_uuidv7(temp_workspace_id).map_err(|error| {
-        CronError::Scheduler(format!(
-            "conversation {conversation_id} has invalid temp_workspace_id '{temp_workspace_id}': {error}"
-        ))
-    })?;
-
-    Ok(data_dir.join("conversations").join(temp_workspace_id))
 }
 
 #[cfg(test)]
@@ -1868,41 +1644,6 @@ mod tests {
             );
 
             assert_eq!(actual, case.expected, "{}", case.name);
-        }
-    }
-
-    #[test]
-    fn default_temp_workspace_path_uses_backend_minted_token() {
-        let path = default_temp_workspace_path(
-            Path::new("/work"),
-            "0190f5fe-7c00-7a00-8abc-012345678901",
-            &serde_json::json!({
-                "temp_workspace_id": "0190f5fe-7c00-7a00-8abc-012345678901"
-            }),
-        )
-        .unwrap();
-
-        assert_eq!(
-            path,
-            Path::new("/work")
-                .join("conversations")
-                .join("0190f5fe-7c00-7a00-8abc-012345678901")
-        );
-    }
-
-    #[test]
-    fn default_temp_workspace_path_missing_or_malformed_token_fails_closed() {
-        for extra in [
-            serde_json::json!({}),
-            serde_json::json!({ "temp_workspace_id": "ws_abc" }),
-            serde_json::json!({ "temp_workspace_id": 7 }),
-        ] {
-            let result = default_temp_workspace_path(
-                Path::new("/work"),
-                "0190f5fe-7c00-7a00-8abc-012345678901",
-                &extra,
-            );
-            assert!(result.is_err());
         }
     }
 
@@ -2157,66 +1898,43 @@ mod tests {
         assert!(resolve_model(&job).is_none());
     }
 
-    // -- build_task_extra tests -----------------------------------------------
+    // -- closed runtime overlay inputs ----------------------------------------
 
     #[test]
-    fn build_task_extra_includes_cron_job_id() {
-        let job = sample_job();
-        let extra = build_task_extra(&job, &[]);
-        assert_eq!(extra["cron_job_id"], JOB_ID);
-    }
-
-    #[test]
-    fn build_task_extra_with_config_fields() {
-        let job = sample_job();
-        let extra = build_task_extra(&job, &[JOB_SKILL_NAME.into()]);
-        assert!(extra.get("agent_id").is_none());
-        assert!(extra.get("backend").is_none());
-        assert_eq!(extra["cli_path"], "/usr/bin/claude");
-        assert_eq!(extra["agent_name"], "Claude");
-        assert_eq!(extra["custom_agent_id"], TEST_AGENT_ID);
-        assert_eq!(extra["skills"], serde_json::json!([JOB_SKILL_NAME]));
-    }
-
-    #[test]
-    fn build_task_extra_without_config() {
+    fn cron_owned_turn_skills_only_add_the_new_session_saved_skill() {
+        const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
         let job = CronJob {
-            agent_config: None,
+            execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
         };
-        let extra = build_task_extra(&job, &[]);
-        assert_eq!(extra["cron_job_id"], JOB_ID);
-        // Agent identity is never synthesized here: the conversation row owns
-        // it, so a job that carries no config contributes no identity keys.
-        assert!(extra.get("agent_id").is_none());
-        assert!(extra.get("backend").is_none());
-        assert!(extra.get("agent_source").is_none());
-    }
-
-    #[test]
-    fn build_task_extra_omits_current_model_id() {
-        // The model reaches the runtime through the top-level
-        // `conversation.model` provider path, never through an
-        // `extra.current_model_id` side channel.
-        let job = CronJob {
-            agent_config: Some(CronAgentConfig {
-                backend: None,
-                name: "OpenAI".into(),
-                cli_path: None,
-                custom_agent_id: None,
-                preset_id: None,
-                preset_revision: None,
-                preset_snapshot: None,
-                model: Some("gpt-5".into()),
-                provider_id: Some(PROVIDER_ID.into()),
-                config_options: None,
-                workspace: None,
-                clear_context_each_run: false,
-            }),
-            ..sample_job()
+        let saved_skill = SavedSkillContext {
+            name: JOB_SKILL_NAME.into(),
+            raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
         };
-        let extra = build_task_extra(&job, &[]);
-        assert!(extra.get("current_model_id").is_none());
+        assert_eq!(
+            resolve_task_skill_names(
+                &job,
+                &CronSessionProjection {
+                    agent_session_id: CONVERSATION_ID.into(),
+                    owner_id: USER_ID.into(),
+                    name: "session".into(),
+                    agent_type: AgentType::Nomi,
+                    model: None,
+                    workspace: "/tmp/session".into(),
+                    cron_job_id: None,
+                    temp_workspace_id: None,
+                    skills: Vec::new(),
+                    agent_name: None,
+                    cli_path: None,
+                    custom_agent_id: None,
+                    preset_id: None,
+                    preset_revision: None,
+                    preset_snapshot: None,
+                },
+                Some(&saved_skill),
+            ),
+            vec![JOB_SKILL_NAME.to_owned()]
+        );
     }
 
     #[test]
@@ -2588,7 +2306,7 @@ mod tests {
         const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
         const RUN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000029";
         let job = sample_job();
-        let request = build_cron_send_request(&build_prompt(&job, None, true), &[]);
+        let request = build_cron_turn_message(&build_prompt(&job, None, true), &[]);
         let request_payload = serde_json::json!({
             "content": request.content,
             "files": request.files,
@@ -2680,7 +2398,7 @@ mod tests {
             repo,
         );
         let job = sample_job();
-        let request = build_cron_send_request(&build_prompt(&job, None, true), &[]);
+        let request = build_cron_turn_message(&build_prompt(&job, None, true), &[]);
         let result = executor
             .probe_durable_turn_delivery_until_known_timed(
                 &job,

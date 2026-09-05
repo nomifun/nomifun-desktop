@@ -1,5 +1,7 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
 use dashmap::{DashMap, mapref::entry::Entry};
@@ -12,14 +14,16 @@ use nomifun_common::{
     UserId, now_ms,
     workspace_path_has_edge_whitespace_segment,
 };
-use nomifun_conversation::BackgroundTaskRegistrar;
-use crate::session_port::{CronTurnReceiptState, CronTurnReconciliation};
+use crate::session_port::{
+    CronSessionProjection, CronTurnReceiptState, CronTurnReconciliation,
+};
 use nomifun_db::{
     AdvanceCronOccurrenceParams, CRON_RUN_HISTORY_LIMIT, CronJobRunRow, ICronRepository,
     FinalizeCronRunOutcome, FinalizeCronRunParams, ReserveCronRunParams, UpdateCronJobParams,
     models::CronJobRow,
 };
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, watch};
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use crate::events::CronEventEmitter;
@@ -48,6 +52,78 @@ const PLACEHOLDER_PATTERNS: &[&str] = &[
     "write your",
     "put your",
 ];
+
+/// Host-owned sink for detached Cron workers.
+///
+/// Cron stores only this domain-owned capability. Application assembly adapts
+/// its process-wide background-task registry to this trait.
+pub trait CronBackgroundTaskRegistrar: Send + Sync {
+    fn register(&self, task: JoinHandle<()>);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronEmbeddedCreateCommand {
+    pub name: String,
+    pub schedule: String,
+    pub schedule_description: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronEmbeddedUpdateCommand {
+    pub job_id: String,
+    pub name: String,
+    pub schedule: String,
+    pub schedule_description: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronEmbeddedDeleteCommand {
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronEmbeddedMutationRequest<T> {
+    pub operation_id: String,
+    pub command: T,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronEmbeddedCommandResult {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Clone)]
+pub struct CronEmbeddedMutationWaiter {
+    receiver: watch::Receiver<Option<CronEmbeddedCommandResult>>,
+}
+
+impl CronEmbeddedMutationWaiter {
+    /// Wait for the process-owned mutation result.
+    ///
+    /// Dropping this waiter never cancels the mutation owner. A later replay
+    /// with the same operation identity can subscribe to the same receipt.
+    pub async fn wait(mut self) -> CronEmbeddedCommandResult {
+        loop {
+            if let Some(result) = self.receiver.borrow().clone() {
+                return result;
+            }
+            if self.receiver.changed().await.is_err() {
+                return embedded_error(
+                    "Cron mutation owner closed before publishing a receipt".to_owned(),
+                );
+            }
+        }
+    }
+}
+
+struct EmbeddedMutationEntry {
+    fingerprint: String,
+    sender: watch::Sender<Option<CronEmbeddedCommandResult>>,
+    completed: AtomicBool,
+}
 
 fn validate_cron_job_id(job_id: &str) -> Result<String, CronError> {
     CronJobId::parse(job_id.trim())
@@ -85,8 +161,9 @@ pub struct CronService {
     data_dir: PathBuf,
     preset_service: Arc<RwLock<Option<Arc<nomifun_preset::PresetService>>>>,
     job_gates: Arc<DashMap<String, Weak<AsyncMutex<()>>>>,
-    active_scheduled_runs: Arc<DashMap<String, ()>>,
-    background_task_registrar: Arc<RwLock<Option<Arc<dyn BackgroundTaskRegistrar>>>>,
+    active_runs: Arc<DashMap<String, String>>,
+    embedded_mutations: Arc<DashMap<String, Arc<EmbeddedMutationEntry>>>,
+    background_task_registrar: Arc<RwLock<Option<Arc<dyn CronBackgroundTaskRegistrar>>>>,
 }
 
 #[derive(Debug, Default)]
@@ -100,7 +177,7 @@ struct CronJobRunProjection {
 }
 
 struct ActiveScheduledRunGuard {
-    runs: Arc<DashMap<String, ()>>,
+    runs: Arc<DashMap<String, String>>,
     run_id: String,
 }
 
@@ -128,18 +205,17 @@ impl CronService {
             data_dir,
             preset_service: Arc::new(RwLock::new(None)),
             job_gates: Arc::new(DashMap::new()),
-            active_scheduled_runs: Arc::new(DashMap::new()),
+            active_runs: Arc::new(DashMap::new()),
+            embedded_mutations: Arc::new(DashMap::new()),
             background_task_registrar: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// Install the application-owned join sink for run-now workers. Timer
-    /// callbacks are registered by the host scheduler itself, while this
-    /// boundary covers explicit API-triggered executions spawned inside the
-    /// Cron service.
-    pub fn with_background_task_registrar(
+    /// Install the host-owned join sink without importing a Conversation
+    /// lifecycle contract into Cron core.
+    pub fn with_cron_background_task_registrar(
         &self,
-        registrar: Arc<dyn BackgroundTaskRegistrar>,
+        registrar: Arc<dyn CronBackgroundTaskRegistrar>,
     ) {
         if let Ok(mut guard) = self.background_task_registrar.write() {
             *guard = Some(registrar);
@@ -181,11 +257,84 @@ impl CronService {
         }
     }
 
-    fn mark_scheduled_run_active(&self, run_id: &str) -> ActiveScheduledRunGuard {
-        self.active_scheduled_runs.insert(run_id.to_owned(), ());
+    fn mark_run_active(&self, job_id: &str, run_id: &str) -> ActiveScheduledRunGuard {
+        self.active_runs
+            .insert(run_id.to_owned(), job_id.to_owned());
         ActiveScheduledRunGuard {
-            runs: Arc::clone(&self.active_scheduled_runs),
+            runs: Arc::clone(&self.active_runs),
             run_id: run_id.to_owned(),
+        }
+    }
+
+    fn has_active_run_for_job(&self, job_id: &str) -> bool {
+        self.active_runs
+            .iter()
+            .any(|entry| entry.value() == job_id)
+    }
+
+    fn register_background_task(&self, task: JoinHandle<()>) {
+        if let Some(registrar) = self
+            .background_task_registrar
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone())
+        {
+            registrar.register(task);
+        }
+    }
+
+    fn submit_embedded_mutation<F, Fut>(
+        &self,
+        user_id: &str,
+        operation_id: &str,
+        fingerprint: String,
+        operation: F,
+    ) -> Result<CronEmbeddedMutationWaiter, CronError>
+    where
+        F: FnOnce(CronService) -> Fut + Send + 'static,
+        Fut: Future<Output = CronEmbeddedCommandResult> + Send + 'static,
+    {
+        let user_id = validate_cron_user_id(user_id)?.to_owned();
+        let operation_id = validate_embedded_operation_id(operation_id)?;
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            CronError::Scheduler(format!(
+                "Cron mutation owner requires an active async runtime: {error}"
+            ))
+        })?;
+        if self.embedded_mutations.len() >= 4_096 {
+            self.embedded_mutations
+                .retain(|_, entry| !entry.completed.load(Ordering::Acquire));
+        }
+
+        let operation_key = format!("{user_id}\0{operation_id}");
+        match self.embedded_mutations.entry(operation_key) {
+            Entry::Occupied(entry) => {
+                if entry.get().fingerprint != fingerprint {
+                    return Err(CronError::App(AppError::Conflict(format!(
+                        "Cron embedded operation '{operation_id}' was reused with a different request"
+                    ))));
+                }
+                Ok(CronEmbeddedMutationWaiter {
+                    receiver: entry.get().sender.subscribe(),
+                })
+            }
+            Entry::Vacant(entry) => {
+                let (sender, receiver) = watch::channel(None);
+                let state = Arc::new(EmbeddedMutationEntry {
+                    fingerprint,
+                    sender,
+                    completed: AtomicBool::new(false),
+                });
+                entry.insert(Arc::clone(&state));
+                let service = self.clone();
+                let task = runtime.spawn(async move {
+                    let result = operation(service).await;
+                    state.sender.send_replace(Some(result));
+                    state.completed.store(true, Ordering::Release);
+                });
+                self.register_background_task(task);
+                Ok(CronEmbeddedMutationWaiter { receiver })
+            }
         }
     }
 
@@ -344,17 +493,28 @@ impl CronService {
         }
 
         if let Some(conversation_id) = conversation_id.as_deref() {
-            let row = self
+            let session = self
                 .executor
-                .get_conversation_row(conversation_id)
-                .await?
-                .filter(|row| row.user_id == user_id)
-                .ok_or_else(|| {
-                    CronError::JobNotFound(format!(
+                .get_session_projection(user_id, conversation_id)
+                .await
+                .map_err(|error| match error {
+                    AppError::NotFound(_) => CronError::JobNotFound(format!(
                         "conversation {conversation_id} is not owned by the caller"
-                    ))
+                    )),
+                    error => CronError::from(error),
                 })?;
-            debug_assert_eq!(row.user_id, user_id);
+            if session.owner_id != user_id
+                || session.agent_session_id.as_ref() != conversation_id
+            {
+                return Err(CronError::JobNotFound(format!(
+                    "AgentSession {conversation_id} is not owned by the caller"
+                )));
+            }
+            if let Some(existing_cron_job_id) = session.cron_job_id.as_deref() {
+                return Err(CronError::App(AppError::Conflict(format!(
+                    "AgentSession {conversation_id} is already bound to Cron job {existing_cron_job_id}"
+                ))));
+            }
         }
 
         // The model source depends on execution mode: an Existing job bound to
@@ -363,6 +523,7 @@ impl CronService {
         // flow omits it). Only NewConversation / lazy-bind jobs require
         // `agent_config.provider_id` and `agent_config.model`.
         self.validate_nomi_job_model(
+            user_id,
             &req.agent_type,
             execution_mode,
             conversation_id.as_deref(),
@@ -433,7 +594,13 @@ impl CronService {
         self.validate_job_workspace(&job).await?;
 
         let row = cron_job_to_row(&job)?;
-        self.repo.insert(&row).await?;
+        if matches!(job.execution_mode, ExecutionMode::Existing)
+            && job.conversation_id.is_some()
+        {
+            self.repo.insert_with_session_relation(&row).await?;
+        } else {
+            self.repo.insert(&row).await?;
+        }
         if let Err(bind_error) = self.bind_existing_conversation_if_needed(&job).await {
             if let Err(compensation_error) =
                 self.repo.delete(user_id, &job.cron_job_id).await
@@ -541,6 +708,7 @@ impl CronService {
             // disabled row cannot be re-enabled without first selecting a
             // usable Nomi model.
             self.validate_nomi_job_model(
+                user_id,
                 &job.agent_type,
                 job.execution_mode,
                 job.conversation_id.as_deref(),
@@ -651,9 +819,8 @@ impl CronService {
     ///
     /// The model source depends on the execution mode (see [`nomi_model_check`]):
     ///
-    /// * An [`ExecutionMode::Existing`] job bound to a real conversation takes
-    ///   its model from that conversation row at run time (`executor`'s
-    ///   `execute_inner` → `provider_model_from_conversation_row`), *not* from
+    /// * An [`ExecutionMode::Existing`] job bound to a real Session takes its
+    ///   model from the typed Session projection, *not* from
     ///   `agent_config.provider_id`. The desktop "指定会话" flow deliberately omits
     ///   `agent_config` (passing it would clobber the conversation's own
     ///   workspace), so demanding `agent_config.provider_id` here wrongly rejected
@@ -666,6 +833,7 @@ impl CronService {
     ///   so the original static check applies.
     async fn validate_nomi_job_model(
         &self,
+        user_id: &str,
         agent_type: &str,
         execution_mode: ExecutionMode,
         conversation_id: Option<&str>,
@@ -680,25 +848,19 @@ impl CronService {
             }
             NomiModelCheck::BoundConversation => {
                 let conversation_id = conversation_id.expect("bound conversation check requires an ID");
-                match self.executor.get_conversation_row(conversation_id).await {
-                    Ok(Some(row)) => {
-                        match nomifun_conversation::runtime_options::provider_model_from_conversation_row(&row) {
-                            Ok(Some(_)) => Ok(()),
-                            Ok(None) => Err(CronError::InvalidAgentConfig(
-                                "the bound nomi conversation has no model configured; \
-                             open the conversation and choose a model first, then create the job"
-                                    .into(),
-                            )),
-                            Err(error) => Err(CronError::InvalidAgentConfig(format!(
-                                "the bound nomi conversation has an invalid model: {error}"
-                            ))),
-                        }
-                    }
-                    Ok(None) => Err(CronError::InvalidAgentConfig(format!(
-                        "bound conversation {conversation_id} does not exist"
-                    ))),
+                match self
+                    .executor
+                    .get_session_projection(user_id, conversation_id)
+                    .await
+                {
+                    Ok(session) if session.model.is_some() => Ok(()),
+                    Ok(_) => Err(CronError::InvalidAgentConfig(
+                        "the bound nomi AgentSession has no model configured; \
+                         open the session and choose a model first, then create the job"
+                            .into(),
+                    )),
                     Err(err) => Err(CronError::InvalidAgentConfig(format!(
-                        "failed to validate bound conversation {conversation_id}: {err}"
+                        "failed to validate bound AgentSession {conversation_id}: {err}"
                     ))),
                 }
             }
@@ -711,6 +873,12 @@ impl CronService {
         let gate = self.job_gate(&job_id);
         let _job_guard = gate.lock().await;
         let job = self.get_job(user_id, &job_id).await?;
+        if self.has_active_run_for_job(&job_id) {
+            return Err(CronError::App(AppError::Conflict(format!(
+                "cron job '{job_id}' has an admitted execution; \
+                 wait for its durable receipt to become terminal before deletion"
+            ))));
+        }
         self.scheduler.cancel_job_for_owner(&job_id, user_id);
         if let Err(delete_error) = self.repo.delete(user_id, &job_id).await {
             self.restore_timer_from_authoritative_row(user_id, &job_id, Some(&job))
@@ -752,6 +920,279 @@ impl CronService {
             .list_conversations_by_cron_job(user_id, &job_id)
             .await
             .map_err(CronError::from)
+    }
+
+    pub async fn lookup_scheduled_sessions(
+        &self,
+        user_id: &str,
+        job_id: &str,
+    ) -> Result<Vec<crate::CronScheduledSession>, CronError> {
+        let user_id = validate_cron_user_id(user_id)?;
+        let job_id = validate_cron_job_id(job_id)?;
+        self.get_job(user_id, &job_id).await?;
+        self.executor
+            .lookup_scheduled_sessions(user_id, &job_id)
+            .await
+            .map_err(CronError::from)
+    }
+
+    /// Submit an embedded create mutation to a process-owned task.
+    ///
+    /// The returned waiter is cancellation-safe: caller timeout only abandons
+    /// observation, not the mutation. Reusing the same operation identity and
+    /// payload subscribes to the existing receipt.
+    pub fn submit_embedded_create(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        request: CronEmbeddedMutationRequest<CronEmbeddedCreateCommand>,
+    ) -> Result<CronEmbeddedMutationWaiter, CronError> {
+        let CronEmbeddedMutationRequest {
+            operation_id,
+            command,
+        } = request;
+        let owned_user_id = user_id.to_owned();
+        let owned_session_id = session_id.to_owned();
+        let fingerprint =
+            embedded_create_fingerprint(&owned_session_id, &command);
+        self.submit_embedded_mutation(
+            user_id,
+            &operation_id,
+            fingerprint,
+            move |service| async move {
+                service
+                    .execute_embedded_create(
+                        &owned_user_id,
+                        &owned_session_id,
+                        &command,
+                    )
+                    .await
+            },
+        )
+    }
+
+    /// Cancellation-safe owner entry point for an embedded update mutation.
+    pub fn submit_embedded_update(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        request: CronEmbeddedMutationRequest<CronEmbeddedUpdateCommand>,
+    ) -> Result<CronEmbeddedMutationWaiter, CronError> {
+        let CronEmbeddedMutationRequest {
+            operation_id,
+            command,
+        } = request;
+        let owned_user_id = user_id.to_owned();
+        let owned_session_id = session_id.to_owned();
+        let fingerprint =
+            embedded_update_fingerprint(&owned_session_id, &command);
+        self.submit_embedded_mutation(
+            user_id,
+            &operation_id,
+            fingerprint,
+            move |service| async move {
+                service
+                    .execute_embedded_update(
+                        &owned_user_id,
+                        &owned_session_id,
+                        &command,
+                    )
+                    .await
+            },
+        )
+    }
+
+    /// Cancellation-safe owner entry point for an embedded delete mutation.
+    pub fn submit_embedded_delete(
+        &self,
+        user_id: &str,
+        request: CronEmbeddedMutationRequest<CronEmbeddedDeleteCommand>,
+    ) -> Result<CronEmbeddedMutationWaiter, CronError> {
+        let CronEmbeddedMutationRequest {
+            operation_id,
+            command,
+        } = request;
+        let owned_user_id = user_id.to_owned();
+        let fingerprint = embedded_delete_fingerprint(&command);
+        self.submit_embedded_mutation(
+            user_id,
+            &operation_id,
+            fingerprint,
+            move |service| async move {
+                service
+                    .execute_embedded_delete(
+                        &owned_user_id,
+                        &command.job_id,
+                    )
+                    .await
+            },
+        )
+    }
+
+    /// Compatibility entry point for callers not yet migrated to
+    /// [`Self::submit_embedded_create`].
+    pub async fn execute_embedded_create(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        command: &CronEmbeddedCreateCommand,
+    ) -> CronEmbeddedCommandResult {
+        if ConversationId::try_from(session_id).is_err() {
+            return embedded_error(format!("invalid conversation id '{session_id}'"));
+        }
+        let session = match self
+            .executor
+            .get_session_projection(user_id, session_id)
+            .await
+        {
+            Ok(session) => session,
+            Err(error) => return embedded_error(error.to_string()),
+        };
+        let agent_config = match build_agent_config_from_session(&session) {
+            Ok(config) => config,
+            Err(error) => return embedded_error(error.to_string()),
+        };
+        let request = CreateCronJobRequest {
+            name: command.name.clone(),
+            description: None,
+            schedule: CronScheduleDto::Cron {
+                expr: command.schedule.clone(),
+                tz: None,
+                description: Some(command.schedule_description.clone()),
+            },
+            prompt: None,
+            message: Some(command.message.clone()),
+            conversation_id: Some(session_id.to_owned()),
+            conversation_title: Some(session.name),
+            agent_type: session.agent_type.serde_name().to_owned(),
+            created_by: "agent".to_owned(),
+            execution_mode: Some("existing".to_owned()),
+            agent_config: Some(agent_config),
+        };
+        match self.add_job(user_id, request).await {
+            Ok(job) => CronEmbeddedCommandResult {
+                success: true,
+                message: format!("Created cron job '{}' ({})", job.name, job.cron_job_id),
+            },
+            Err(error) => embedded_error(error.to_string()),
+        }
+    }
+
+    /// Compatibility entry point for callers not yet migrated to
+    /// [`Self::submit_embedded_update`].
+    pub async fn execute_embedded_update(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        command: &CronEmbeddedUpdateCommand,
+    ) -> CronEmbeddedCommandResult {
+        if ConversationId::try_from(session_id).is_err() {
+            return embedded_error(format!("invalid conversation id '{session_id}'"));
+        }
+        let session = match self
+            .executor
+            .get_session_projection(user_id, session_id)
+            .await
+        {
+            Ok(session) => session,
+            Err(error) => return embedded_error(error.to_string()),
+        };
+        let job_id = match validate_cron_job_id(&command.job_id) {
+            Ok(job_id) => job_id,
+            Err(error) => return embedded_error(error.to_string()),
+        };
+        let row = match self.repo.get_by_cron_job_id(user_id, &job_id).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return embedded_error(format!("Cron job not found: {job_id}")),
+            Err(error) => return embedded_error(error.to_string()),
+        };
+        if row.execution_mode != ExecutionMode::Existing.as_str()
+            || row.conversation_id.as_deref() != Some(session_id)
+            || session.cron_job_id.as_deref() != Some(job_id.as_str())
+        {
+            return embedded_error(format!(
+                "cron job '{job_id}' is not bound to conversation '{session_id}'"
+            ));
+        }
+
+        let request = UpdateCronJobRequest {
+            name: Some(command.name.clone()),
+            description: None,
+            enabled: None,
+            schedule: Some(CronScheduleDto::Cron {
+                expr: command.schedule.clone(),
+                tz: None,
+                description: Some(command.schedule_description.clone()),
+            }),
+            message: Some(command.message.clone()),
+            agent_config: None,
+            conversation_title: None,
+            max_retries: None,
+        };
+        match self.update_job(user_id, &job_id, request).await {
+            Ok(job) => CronEmbeddedCommandResult {
+                success: true,
+                message: format!("Updated cron job '{}' ({})", job.name, job.cron_job_id),
+            },
+            Err(error) => embedded_error(error.to_string()),
+        }
+    }
+
+    pub async fn execute_embedded_list(
+        &self,
+        user_id: &str,
+        session_id: &str,
+    ) -> CronEmbeddedCommandResult {
+        if ConversationId::try_from(session_id).is_err() {
+            return CronEmbeddedCommandResult {
+                success: true,
+                message: format!("No cron jobs found for conversation '{session_id}'."),
+            };
+        }
+        let query = ListCronJobsQuery {
+            conversation_id: Some(session_id.to_owned()),
+        };
+        match self.list_jobs(user_id, &query).await {
+            Ok(jobs) if jobs.is_empty() => CronEmbeddedCommandResult {
+                success: true,
+                message: format!("No cron jobs found for conversation '{session_id}'."),
+            },
+            Ok(jobs) => {
+                let lines = jobs
+                    .iter()
+                    .map(|job| {
+                        let status = if job.enabled { "enabled" } else { "disabled" };
+                        format!("- {} ({}) [{}]", job.name, job.cron_job_id, status)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                CronEmbeddedCommandResult {
+                    success: true,
+                    message: format!(
+                        "Found {} cron job(s) for conversation '{}':\n{lines}",
+                        jobs.len(),
+                        session_id
+                    ),
+                }
+            }
+            Err(error) => embedded_error(error.to_string()),
+        }
+    }
+
+    /// Compatibility entry point for callers not yet migrated to
+    /// [`Self::submit_embedded_delete`].
+    pub async fn execute_embedded_delete(
+        &self,
+        user_id: &str,
+        job_id: &str,
+    ) -> CronEmbeddedCommandResult {
+        match self.remove_job(user_id, job_id).await {
+            Ok(()) => CronEmbeddedCommandResult {
+                success: true,
+                message: format!("Deleted cron job '{job_id}'"),
+            },
+            Err(error) => embedded_error(error.to_string()),
+        }
     }
 
     pub async fn list_jobs(
@@ -1535,7 +1976,7 @@ impl CronService {
             &job_id,
             expected_user_id,
             generation,
-            || self.mark_scheduled_run_active(&reservation.cron_job_run_id),
+            || self.mark_run_active(&job_id, &reservation.cron_job_run_id),
         );
         let Some(_active_run) = active_run else {
             let reason =
@@ -1713,7 +2154,7 @@ impl CronService {
                 if let Some(reservation) = existing {
                     if reservation.status == "reserved" {
                         if self
-                            .active_scheduled_runs
+                            .active_runs
                             .contains_key(&reservation.cron_job_run_id)
                         {
                             info!(
@@ -1836,6 +2277,8 @@ impl CronService {
                     .to_owned(),
             )));
         }
+        let gate = self.job_gate(&job_id);
+        let job_guard = gate.lock().await;
         let row = self
             .repo
             .get_by_cron_job_id(user_id, &job_id)
@@ -1933,19 +2376,15 @@ impl CronService {
         }
         let service = self.clone();
         let run_id = reservation.cron_job_run_id;
+        let active_run = self.mark_run_active(&job.cron_job_id, &run_id);
+        drop(job_guard);
 
         let task = tokio::spawn(async move {
+            let _active_run = active_run;
             let result = service.executor.execute_prepared(&job, prepared).await;
             service.handle_run_now_result(&job, &run_id, result).await;
         });
-        if let Some(registrar) = self
-            .background_task_registrar
-            .read()
-            .ok()
-            .and_then(|slot| slot.clone())
-        {
-            registrar.register(task);
-        }
+        self.register_background_task(task);
 
         // The executor returns the canonical conversation entity ID unchanged.
         Ok(RunNowResponse { conversation_id })
@@ -2125,9 +2564,16 @@ impl CronService {
 
         // Only true orphan case: Existing + bound conversation_id, but that
         // conversation has been deleted.
-        match self.executor.get_conversation_row(conversation_id).await {
-            Ok(Some(row)) => row.user_id != job.user_id,
-            Ok(None) => true,
+        match self
+            .executor
+            .get_session_projection(&job.user_id, conversation_id)
+            .await
+        {
+            Ok(session) => {
+                session.owner_id != job.user_id
+                    || session.agent_session_id.as_ref() != conversation_id
+            }
+            Err(AppError::NotFound(_)) => true,
             Err(err) => {
                 warn!(
                     job_id = %job.cron_job_id,
@@ -2703,378 +3149,94 @@ impl CronService {
     }
 }
 
-// ---------------------------------------------------------------------------
-// OnConversationDelete implementation (cascade delete)
-// ---------------------------------------------------------------------------
-
-#[async_trait::async_trait]
-impl nomifun_common::OnConversationDelete for CronService {
-    async fn on_conversation_deleted(&self, user_id: &str, conversation_id: &str) {
-        if let Some(job_ids) =
-            nomifun_conversation::service::current_deleted_cron_job_ids()
-        {
-            self.cleanup_deleted_jobs(user_id, &job_ids).await;
-        } else {
-            self.delete_jobs_by_conversation(user_id, conversation_id).await;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ICronService implementation (for middleware)
-// ---------------------------------------------------------------------------
-
-#[async_trait::async_trait]
-impl nomifun_conversation::response_middleware::ICronService for CronService {
-    async fn create_job(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        params: &nomifun_conversation::response_middleware::CronCreateParams,
-    ) -> nomifun_conversation::response_middleware::CronCommandResult {
-        if nomifun_common::ConversationId::try_from(conversation_id).is_err() {
-            return nomifun_conversation::response_middleware::CronCommandResult {
-                success: false,
-                message: format!("invalid conversation id '{conversation_id}'"),
-            };
-        }
-
-        let schedule_dto = CronScheduleDto::Cron {
-            expr: params.schedule.clone(),
-            tz: None,
-            description: Some(params.schedule_description.clone()),
-        };
-
-        let (agent_type, conversation_title, agent_config) = match self
-            .executor
-            .get_conversation_row(conversation_id)
-            .await
-        {
-            Ok(Some(row)) if row.user_id == user_id => {
-                let title = Some(row.name.clone());
-                let (agent_type, agent_config) = match build_agent_config_from_conversation(&row) {
-                    Ok(config) => config,
-                    Err(error) => {
-                        return nomifun_conversation::response_middleware::CronCommandResult {
-                            success: false,
-                            message: error.to_string(),
-                        };
-                    }
-                };
-                (agent_type, title, agent_config)
-            }
-            Ok(Some(_)) | Ok(None) => {
-                return nomifun_conversation::response_middleware::CronCommandResult {
-                    success: false,
-                    message: format!(
-                        "conversation '{conversation_id}' is not owned by the caller"
-                    ),
-                };
-            }
-            Err(err) => {
-                return nomifun_conversation::response_middleware::CronCommandResult {
-                    success: false,
-                    message: err.to_string(),
-                };
-            }
-        };
-
-        let req = CreateCronJobRequest {
-            name: params.name.clone(),
-            description: None,
-            schedule: schedule_dto,
-            prompt: None,
-            message: Some(params.message.clone()),
-            conversation_id: Some(conversation_id.to_owned()),
-            conversation_title,
-            agent_type,
-            created_by: "agent".to_owned(),
-            execution_mode: Some("existing".to_owned()),
-            agent_config,
-        };
-
-        match self.add_job(user_id, req).await {
-            Ok(job) => nomifun_conversation::response_middleware::CronCommandResult {
-                success: true,
-                message: format!("Created cron job '{}' ({})", job.name, job.cron_job_id),
-            },
-            Err(e) => nomifun_conversation::response_middleware::CronCommandResult {
-                success: false,
-                message: e.to_string(),
-            },
-        }
-    }
-
-    async fn update_job(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-        params: &nomifun_conversation::response_middleware::CronUpdateParams,
-    ) -> nomifun_conversation::response_middleware::CronCommandResult {
-        if ConversationId::parse(conversation_id).is_err() {
-            return nomifun_conversation::response_middleware::CronCommandResult {
-                success: false,
-                message: format!("invalid conversation id '{conversation_id}'"),
-            };
-        }
-        let conversation = match self.executor.get_conversation_row(conversation_id).await {
-            Ok(Some(row)) if row.user_id == user_id => row,
-            Ok(Some(_)) | Ok(None) => {
-                return nomifun_conversation::response_middleware::CronCommandResult {
-                    success: false,
-                    message: format!(
-                        "conversation '{conversation_id}' is not owned by the caller"
-                    ),
-                };
-            }
-            Err(error) => {
-                return nomifun_conversation::response_middleware::CronCommandResult {
-                    success: false,
-                    message: error.to_string(),
-                };
-            }
-        };
-        let cron_job_id = match validate_cron_job_id(&params.job_id) {
-            Ok(cron_job_id) => cron_job_id,
-            Err(error) => {
-                return nomifun_conversation::response_middleware::CronCommandResult {
-                    success: false,
-                    message: error.to_string(),
-                };
-            }
-        };
-        let row = match self
-            .repo
-            .get_by_cron_job_id(user_id, &cron_job_id)
-            .await
-        {
-            Ok(Some(row)) => row,
-            Ok(None) => {
-                return nomifun_conversation::response_middleware::CronCommandResult {
-                    success: false,
-                    message: format!("Cron job not found: {cron_job_id}"),
-                };
-            }
-            Err(error) => {
-                return nomifun_conversation::response_middleware::CronCommandResult {
-                    success: false,
-                    message: error.to_string(),
-                };
-            }
-        };
-        if row.execution_mode != ExecutionMode::Existing.as_str()
-            || row.conversation_id.as_deref() != Some(conversation_id)
-            || conversation.cron_job_id.as_deref() != Some(cron_job_id.as_str())
-        {
-            return nomifun_conversation::response_middleware::CronCommandResult {
-                success: false,
-                message: format!(
-                    "cron job '{cron_job_id}' is not bound to conversation '{conversation_id}'"
-                ),
-            };
-        }
-
-        let req = UpdateCronJobRequest {
-            name: Some(params.name.clone()),
-            description: None,
-            enabled: None,
-            schedule: Some(CronScheduleDto::Cron {
-                expr: params.schedule.clone(),
-                tz: None,
-                description: Some(params.schedule_description.clone()),
-            }),
-            message: Some(params.message.clone()),
-            agent_config: None,
-            conversation_title: None,
-            max_retries: None,
-        };
-
-        match self.update_job(user_id, &cron_job_id, req).await {
-            Ok(job) => nomifun_conversation::response_middleware::CronCommandResult {
-                success: true,
-                message: format!("Updated cron job '{}' ({})", job.name, job.cron_job_id),
-            },
-            Err(e) => nomifun_conversation::response_middleware::CronCommandResult {
-                success: false,
-                message: e.to_string(),
-            },
-        }
-    }
-
-    async fn list_jobs(
-        &self,
-        user_id: &str,
-        conversation_id: &str,
-    ) -> nomifun_conversation::response_middleware::CronCommandResult {
-        if nomifun_common::ConversationId::try_from(conversation_id).is_err() {
-            return nomifun_conversation::response_middleware::CronCommandResult {
-                success: true,
-                message: format!("No cron jobs found for conversation '{}'.", conversation_id),
-            };
-        }
-        let query = ListCronJobsQuery {
-            conversation_id: Some(conversation_id.to_owned()),
-        };
-        match self.list_jobs(user_id, &query).await {
-            Ok(jobs) => {
-                if jobs.is_empty() {
-                    return nomifun_conversation::response_middleware::CronCommandResult {
-                        success: true,
-                        message: format!(
-                            "No cron jobs found for conversation '{}'.",
-                            conversation_id
-                        ),
-                    };
-                }
-
-                let lines: Vec<String> = jobs
-                    .iter()
-                    .map(|j| {
-                        let status = if j.enabled { "enabled" } else { "disabled" };
-                        format!("- {} ({}) [{}]", j.name, j.cron_job_id, status)
-                    })
-                    .collect();
-
-                nomifun_conversation::response_middleware::CronCommandResult {
-                    success: true,
-                    message: format!(
-                        "Found {} cron job(s) for conversation '{}':\n{}",
-                        jobs.len(),
-                        conversation_id,
-                        lines.join("\n")
-                    ),
-                }
-            }
-            Err(e) => nomifun_conversation::response_middleware::CronCommandResult {
-                success: false,
-                message: e.to_string(),
-            },
-        }
-    }
-
-    async fn delete_job(
-        &self,
-        user_id: &str,
-        job_id: &str,
-    ) -> nomifun_conversation::response_middleware::CronCommandResult {
-        match self.remove_job(user_id, job_id).await {
-            Ok(()) => nomifun_conversation::response_middleware::CronCommandResult {
-                success: true,
-                message: format!("Deleted cron job '{job_id}'"),
-            },
-            Err(e) => nomifun_conversation::response_middleware::CronCommandResult {
-                success: false,
-                message: e.to_string(),
-            },
-        }
-    }
-
-}
-
-fn build_agent_config_from_conversation(
-    row: &nomifun_db::models::ConversationRow,
-) -> Result<(String, Option<nomifun_api_types::CronAgentConfigDto>), nomifun_common::AppError> {
-    let extra = serde_json::from_str::<serde_json::Value>(&row.extra).map_err(|error| {
-        nomifun_common::AppError::Internal(format!(
-            "conversation {} has invalid extra JSON: {error}",
-            row.conversation_id
-        ))
-    })?;
-    if !extra.is_object() {
-        return Err(nomifun_common::AppError::Internal(format!(
-            "conversation {} extra must be a JSON object",
-            row.conversation_id
+fn validate_embedded_operation_id(operation_id: &str) -> Result<String, CronError> {
+    if operation_id.is_empty()
+        || operation_id.len() > 256
+        || !operation_id
+            .bytes()
+            .all(|byte| (0x21..=0x7e).contains(&byte))
+    {
+        return Err(CronError::App(AppError::BadRequest(
+            "Cron embedded operation identity must contain 1..=256 visible ASCII bytes"
+                .to_owned(),
         )));
     }
-    // Both interactive `send_message` and the cron executor parse
-    // `conversation.model` via the same helper. Keeping the cron-side
-    // `agent_config.provider_id` derivation in sync with that parser
-    // prevents the cached vendor-label fallback (`"nomi"`) from
-    // sneaking back in (Sentry ELECTRON-1HM).
-    //
-    // The agent type is parsed first: serde accepts only the native engine, so
-    // a row naming anything else is rejected before any field is derived from
-    // it.
-    serde_json::from_value::<AgentType>(serde_json::Value::String(row.r#type.clone())).map_err(
-        |_| {
-            nomifun_common::AppError::Internal(format!(
-                "conversation {} has unknown agent type '{}'",
-                row.conversation_id, row.r#type
-            ))
-        },
-    )?;
-    let model_resolved =
-        nomifun_conversation::runtime_options::provider_model_from_conversation_row(row)?;
-    let model = model_resolved.as_ref();
+    Ok(operation_id.to_owned())
+}
 
-    let provider_id = model
-        .map(|value| value.provider_id.clone())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            nomifun_common::AppError::BadRequest(
-                "the bound nomi conversation has no canonical provider/model selection".into(),
-            )
-        })?;
+fn embedded_create_fingerprint(
+    session_id: &str,
+    command: &CronEmbeddedCreateCommand,
+) -> String {
+    serde_json::to_string(&(
+        "cron-embedded-create-v1",
+        session_id,
+        &command.name,
+        &command.schedule,
+        &command.schedule_description,
+        &command.message,
+    ))
+    .expect("Cron embedded create fingerprint fields are serializable")
+}
 
-    let preset_id = get_string(&extra, "preset_id");
-    let custom_agent_id = get_string(&extra, "custom_agent_id");
-    let preset_revision = extra.get("preset_revision").and_then(serde_json::Value::as_i64);
-    let preset_snapshot = extra
-        .get("preset_snapshot")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|error| {
-            nomifun_common::AppError::Internal(format!(
-                "conversation {} has invalid preset_snapshot: {error}",
-                row.conversation_id
-            ))
-        })?;
+fn embedded_update_fingerprint(
+    session_id: &str,
+    command: &CronEmbeddedUpdateCommand,
+) -> String {
+    serde_json::to_string(&(
+        "cron-embedded-update-v1",
+        session_id,
+        &command.job_id,
+        &command.name,
+        &command.schedule,
+        &command.schedule_description,
+        &command.message,
+    ))
+    .expect("Cron embedded update fingerprint fields are serializable")
+}
 
-    let agent_config = nomifun_api_types::CronAgentConfigDto {
-        // Reserved for a host runtime selector that no longer exists; a nomi
-        // job must leave it unset so `validate_nomi_agent_selection` passes.
+fn embedded_delete_fingerprint(command: &CronEmbeddedDeleteCommand) -> String {
+    serde_json::to_string(&("cron-embedded-delete-v1", &command.job_id))
+        .expect("Cron embedded delete fingerprint fields are serializable")
+}
+
+fn embedded_error(message: String) -> CronEmbeddedCommandResult {
+    CronEmbeddedCommandResult {
+        success: false,
+        message,
+    }
+}
+
+fn build_agent_config_from_session(
+    session: &CronSessionProjection,
+) -> Result<nomifun_api_types::CronAgentConfigDto, AppError> {
+    let model = session.model.as_ref().ok_or_else(|| {
+        AppError::BadRequest(
+            "the bound Nomi AgentSession has no canonical provider/model selection".into(),
+        )
+    })?;
+    Ok(nomifun_api_types::CronAgentConfigDto {
         backend: None,
-        name: get_string(&extra, "agent_name").unwrap_or_else(|| row.name.clone()),
-        cli_path: get_string(&extra, "cli_path").or_else(|| {
-            extra
-                .get("gateway")
-                .and_then(|gateway| gateway.get("cli_path"))
-                .and_then(|value| value.as_str())
-                .map(ToOwned::to_owned)
-        }),
-        custom_agent_id,
-        preset_id,
-        preset_revision,
-        preset_snapshot,
+        name: session
+            .agent_name
+            .clone()
+            .unwrap_or_else(|| session.name.clone()),
+        cli_path: session.cli_path.clone(),
+        custom_agent_id: session.custom_agent_id.clone(),
+        preset_id: session.preset_id.clone(),
+        preset_revision: session.preset_revision,
+        preset_snapshot: session.preset_snapshot.clone(),
         model: Some(
             model
-                .and_then(|value| {
-                    value
-                        .use_model
-                        .clone()
-                        .or_else(|| (!value.model.is_empty()).then(|| value.model.clone()))
-                })
-                .ok_or_else(|| {
-                    nomifun_common::AppError::BadRequest(
-                        "the bound nomi conversation has no canonical model selection".into(),
-                    )
-                })?,
+                .use_model
+                .clone()
+                .unwrap_or_else(|| model.model.clone()),
         ),
-        provider_id: Some(provider_id),
+        provider_id: Some(model.provider_id.clone()),
         config_options: None,
-        workspace: get_string(&extra, "workspace"),
+        workspace: Some(session.workspace.clone()),
         clear_context_each_run: false,
-    };
-
-    Ok((row.r#type.clone(), Some(agent_config)))
-}
-fn get_string(extra: &serde_json::Value, key: &str) -> Option<String> {
-    extra
-        .get(key)
-        .and_then(|value| value.as_str())
-        .map(ToOwned::to_owned)
-        .filter(|value| !value.is_empty())
+    })
 }
 
 // ---------------------------------------------------------------------------

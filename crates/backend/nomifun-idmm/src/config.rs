@@ -2,16 +2,40 @@
 //! themselves live in `nomifun_api_types::idmm`; this module adds runtime logic
 //! over them.
 
-use nomifun_api_types::{IdmmConfig, WatchTier};
+use nomifun_api_types::{AgentErrorCode, IdmmConfig, WatchTier};
 use nomifun_common::ProviderId;
 
 /// Classify an `AgentErrorCode` as a provider fault IDMM should supervise
 /// (i.e. a single-vendor failure a backup model or a retry might overcome).
 ///
-/// Single source of truth lives in `nomifun-conversation` (the failover seam,
-/// which this crate already depends on); re-exported here so IDMM callers keep
-/// their `crate::config::is_provider_fault` path.
-pub use nomifun_conversation::model_failover::is_provider_fault;
+/// This is an IDMM policy decision, so it belongs to this crate rather than
+/// reaching through the Conversation implementation. The list intentionally
+/// excludes provider-quality errors such as `ImageUnsupported` and
+/// `UnbackedCompletion`: those errors require the active send loop's own
+/// recovery semantics and are not safe for an out-of-band retry.
+pub fn is_provider_fault(code: AgentErrorCode) -> bool {
+    use AgentErrorCode::*;
+
+    matches!(
+        code,
+        UserLlmProviderAuthFailed
+            | UserLlmProviderPermissionDenied
+            | UserLlmProviderBillingRequired
+            | UserLlmProviderConfigError
+            | UserLlmProviderModelNotFound
+            | UserLlmProviderUnsupportedModel
+            | UserLlmProviderEndpointNotFound
+            | UserLlmProviderInvalidRequest
+            | UserLlmProviderInvalidToolSchema
+            | UserLlmProviderContextTooLarge
+            | UserLlmProviderRateLimited
+            | UserLlmProviderTimeout
+            | UserLlmProviderNetworkError
+            | UserLlmProviderEmptyResponse
+            | UserLlmProviderGatewayError
+            | UnknownUpstreamError
+    )
+}
 
 /// Validate a config for the given backup resolvability. Returns `Err(reason)`
 /// to map to a 400 / inline UI error.
@@ -116,6 +140,62 @@ pub fn is_cancel_option(text: &str) -> bool {
 mod tests {
     use super::*;
     use nomifun_api_types::{DecisionWatchConfig, FaultWatchConfig, IdmmConfig, WatchBase, WatchTier};
+
+    #[test]
+    fn provider_fault_policy_matches_the_existing_failover_contract() {
+        use AgentErrorCode::*;
+
+        let all_codes = [
+            NomifunConversationBusy,
+            NomifunStreamBroken,
+            NomifunStateInconsistent,
+            NomifunAgentSessionInconsistent,
+            NomifunPermissionError,
+            NomifunInternalError,
+            NomifunToolResultEncodingError,
+            WorkspacePathEdgeWhitespaceRuntimeUnsupported,
+            UserAgentHandshakeFailed,
+            UserAgentHandshakeTimeout,
+            UserAgentAcpInitFailed,
+            UserAgentProtocolMismatch,
+            UserAgentNotInstalled,
+            UserAgentStartupFailed,
+            UserAgentDisconnected,
+            UserAgentAuthRequired,
+            UserAgentSessionNotFound,
+            UserAgentNoPreviousSession,
+            UserAgentCommandNotFound,
+            UserAgentMissingEnv,
+            UserAgentUnsupportedMethod,
+            UserAgentInvalidParams,
+            UserLlmProviderAuthFailed,
+            UserLlmProviderPermissionDenied,
+            UserLlmProviderBillingRequired,
+            UserLlmProviderConfigError,
+            UserLlmProviderModelNotFound,
+            UserLlmProviderUnsupportedModel,
+            UserLlmProviderEndpointNotFound,
+            UserLlmProviderInvalidRequest,
+            UserLlmProviderImageUnsupported,
+            UserLlmProviderInvalidToolSchema,
+            UserLlmProviderContextTooLarge,
+            UserLlmProviderRateLimited,
+            UserLlmProviderTimeout,
+            UserLlmProviderNetworkError,
+            UserLlmProviderEmptyResponse,
+            UserLlmProviderUnbackedCompletion,
+            UserLlmProviderGatewayError,
+            UnknownUpstreamError,
+        ];
+
+        for code in all_codes {
+            assert_eq!(
+                is_provider_fault(code),
+                nomifun_conversation::model_failover::is_provider_fault(code),
+                "IDMM provider-fault policy drifted for {code:?}"
+            );
+        }
+    }
 
     fn decision_model_watch(enabled: bool) -> DecisionWatchConfig {
         DecisionWatchConfig {

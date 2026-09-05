@@ -25,6 +25,7 @@ use serde_json::{Value, json};
 const CHAT_TASK: &str = nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT;
 const WORKSPACE_KIND: &str = "workspace";
 const WORKSPACE_ROOT: &str = "workspace_root";
+const PROCESS_SESSION_KIND: &str = "process_session";
 const KNOWLEDGE_KIND: &str = "knowledge_base";
 const MCP_KIND: &str = "mcp_server";
 
@@ -473,6 +474,7 @@ fn exact_chat_route(
 #[derive(Debug, Default)]
 struct ProjectedResources {
     workspace: Option<String>,
+    process_workspace: Option<String>,
     knowledge_mounts: Vec<KnowledgeMountInfo>,
     mcp_server_ids: Vec<String>,
 }
@@ -514,6 +516,24 @@ fn project_resources(
                     return Err(unsupported(
                         "workspace resource",
                         "multiple workspace bindings cannot be projected to one Nomi conversation",
+                    ));
+                }
+            }
+            PROCESS_SESSION_KIND => {
+                if !resource.operations.contains("execute") {
+                    return Err(unsupported(
+                        "process session resource",
+                        format!(
+                            "binding {} does not grant execute",
+                            resource.binding_id.as_ref()
+                        ),
+                    ));
+                }
+                let root = required_parameter(resource, WORKSPACE_ROOT)?;
+                if projected.process_workspace.replace(root).is_some() {
+                    return Err(unsupported(
+                        "process session resource",
+                        "multiple process_session bindings cannot be projected to one Nomi runtime",
                     ));
                 }
             }
@@ -562,6 +582,20 @@ fn project_resources(
                     "typed resource",
                     format!("resource kind {other:?} has no Nomi-core projection"),
                 ));
+            }
+        }
+    }
+    if let Some(process_workspace) = projected.process_workspace.as_deref() {
+        match projected.workspace.as_deref() {
+            Some(workspace) if workspace == process_workspace => {}
+            Some(_) => {
+                return Err(unsupported(
+                    "process session resource",
+                    "process_session workspace_root must exactly match the bound workspace",
+                ));
+            }
+            None => {
+                projected.workspace = Some(process_workspace.to_owned());
             }
         }
     }
@@ -948,6 +982,23 @@ mod tests {
         }
     }
 
+    fn refresh_fixture_identity(
+        fixture: &mut (
+            UserId,
+            AgentBindingValue,
+            AgentPresetRevision,
+            ResolvedSnapshotEnvelope,
+        ),
+    ) {
+        fixture.2.reference.revision_digest =
+            nomifun_agent_contracts::digest_payload(&fixture.2.payload).unwrap();
+        fixture.3.content.preset_revision_ref = fixture.2.reference.clone();
+        fixture.3.snapshot_ref.snapshot_digest =
+            nomifun_agent_contracts::digest_payload(&fixture.3.content).unwrap();
+        fixture.1.preset_revision_ref = fixture.2.reference.clone();
+        fixture.1.resolved_snapshot_ref = fixture.3.snapshot_ref.clone();
+    }
+
     #[test]
     fn exact_binding_projects_chat_route_and_resources() {
         let fixture = fixture();
@@ -966,6 +1017,62 @@ mod tests {
             .unwrap()
             .iter()
             .any(|tool| tool == "Bash"));
+    }
+
+    #[test]
+    fn process_session_binding_projects_real_nomi_process_tools() {
+        let mut fixture = fixture();
+        let mut process = resource(
+            "process-session",
+            PROCESS_SESSION_KIND,
+            "local-process-session",
+            BTreeMap::from([(WORKSPACE_ROOT.into(), "C:\\work".into())]),
+        );
+        process.operations = BTreeSet::from(["execute".to_owned(), "observe".to_owned()]);
+        fixture
+            .2
+            .payload
+            .initial_capabilities
+            .iter_mut()
+            .find(|selection| selection.capability.id.as_ref() == "process.exec")
+            .expect("fixture process.exec capability")
+            .resource_binding_refs = vec!["process-session".into()];
+        fixture.2.payload.resource_bindings.push(process.clone());
+        fixture.1.typed_resource_bindings.push(process.clone());
+        fixture.3.content.typed_resource_bindings.push(process);
+        refresh_fixture_identity(&mut fixture);
+
+        let result = project(input(&fixture)).expect("typed process projection");
+        let tools = result.request.extra["allowed_tools"]
+            .as_array()
+            .expect("native tool allowlist");
+        for expected in ["Bash", "exec_command", "write_stdin"] {
+            assert!(
+                tools.iter().any(|tool| tool == expected),
+                "{expected} must be backed by the admitted process_session"
+            );
+        }
+        assert_eq!(result.request.extra["workspace"], "C:\\work");
+    }
+
+    #[test]
+    fn process_session_cannot_escape_the_bound_workspace() {
+        let mut fixture = fixture();
+        let mut process = resource(
+            "process-session",
+            PROCESS_SESSION_KIND,
+            "local-process-session",
+            BTreeMap::from([(WORKSPACE_ROOT.into(), "C:\\other".into())]),
+        );
+        process.operations = BTreeSet::from(["execute".to_owned(), "observe".to_owned()]);
+        fixture.2.payload.resource_bindings.push(process.clone());
+        fixture.1.typed_resource_bindings.push(process.clone());
+        fixture.3.content.typed_resource_bindings.push(process);
+        refresh_fixture_identity(&mut fixture);
+
+        let error = project(input(&fixture))
+            .expect_err("process execution must not target a different workspace");
+        assert!(error.to_string().contains("must exactly match"));
     }
 
     #[test]

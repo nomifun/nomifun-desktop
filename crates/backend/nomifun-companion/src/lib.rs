@@ -42,6 +42,7 @@ pub mod summon_support;
 mod skill_io;
 
 pub use events::CompanionEventEmitter;
+pub use archive_port::CompanionArchiveSessionPort;
 pub use figures::FigureMeta;
 pub use memory_search::{
     CompanionMemoryRow, MemorySearchHit, MemorySearchQuery, MemoryStatusFilter,
@@ -53,9 +54,10 @@ pub use profile::{
 pub use registry::CompanionRegistry;
 pub use routes::{companion_public_routes, companion_routes};
 pub use session_port::{
-    CompanionHostPorts, CompanionSessionPort, companion_ports_with_session,
-    conversation_companion_ports,
+    companion_ports_from_typed_host, CompanionHostPorts, CompanionSessionPort,
 };
+#[cfg(test)]
+pub use session_port::{companion_ports_with_session, conversation_companion_ports};
 pub use service::CompanionService;
 pub use state::CompanionRouterState;
 pub use store::CompanionStore;

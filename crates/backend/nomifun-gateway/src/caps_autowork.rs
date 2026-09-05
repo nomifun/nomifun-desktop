@@ -56,6 +56,27 @@ fn parse_target_id(kind: AutoWorkTargetKind, raw: String) -> Result<String, Valu
     }
 }
 
+fn normalize_config(
+    params: &SetAutoworkParams,
+) -> Result<nomifun_requirement::AutoWorkConfig, Value> {
+    nomifun_requirement::AutoWorkConfig::normalize(
+        params.enabled,
+        params.tag.as_deref(),
+        params.max_requirements,
+    )
+    .map_err(|error| json!({ "error": error.to_string() }))
+}
+
+fn authenticated_operation_id(ctx: &CallerCtx) -> Result<String, Value> {
+    ctx.operation_id
+        .as_deref()
+        .filter(|operation_id| !operation_id.trim().is_empty())
+        .map(|operation_id| format!("gateway:{operation_id}"))
+        .ok_or_else(
+            || json!({ "error": "authenticated operation_id is required for AutoWork mutation" }),
+        )
+}
+
 #[derive(Clone)]
 struct AutoWorkCapabilityDeps {
     requirements: Arc<nomifun_requirement::RequirementService>,
@@ -90,14 +111,17 @@ where
 /// `AutoWorkState` (the same shape the REST routes return and broadcast).
 async fn build_state(
     deps: &AutoWorkCapabilityDeps,
+    owner_id: &str,
     kind: AutoWorkTargetKind,
     target_id: &str,
 ) -> Result<AutoWorkState, Value> {
-    let (enabled, tag, _max) = deps
+    let snapshot = deps
         .requirements
-        .read_autowork_config(kind, target_id)
+        .read_autowork_config_snapshot(owner_id, kind, target_id)
         .await
         .map_err(|e| json!({ "error": e.to_string() }))?;
+    let enabled = snapshot.config.enabled;
+    let tag = snapshot.config.tag;
     let running = deps.runner.is_running(kind, target_id);
     let live_tag = deps.runner.running_tag(kind, target_id).or(tag);
     let (current_requirement_id, completed_count) = deps
@@ -123,13 +147,18 @@ async fn set(
     p: SetAutoworkParams,
 ) -> Value {
     let kind = AutoWorkTargetKind::from(p.kind);
+    let config = match normalize_config(&p) {
+        Ok(config) => config,
+        Err(error) => return error,
+    };
     let target_id = match parse_target_id(kind, p.target_id.into_string()) {
         Ok(target_id) => target_id,
         Err(error) => return error,
     };
-    if p.enabled && p.tag.is_none() {
-        return json!({ "error": "tag is required when enabling autowork (the tag groups the requirements this session will work through)" });
-    }
+    let operation_id = match authenticated_operation_id(&ctx) {
+        Ok(operation_id) => operation_id,
+        Err(error) => return error,
+    };
 
     // Ownership + (terminal) eligibility — same gates as the REST route.
     let owner_check = match kind {
@@ -156,24 +185,21 @@ async fn set(
     }
 
     if let Err(e) = deps
-        .requirements
-        .save_autowork_config(kind, &target_id, p.enabled, p.tag.as_deref(), p.max_requirements)
+        .runner
+        .apply_config(
+            ctx.user_id.as_str(),
+            kind,
+            &target_id,
+            config,
+            None,
+            Some(&operation_id),
+        )
         .await
     {
         return json!({ "error": e.to_string() });
     }
 
-    if p.enabled {
-        if let Some(tag) = p.tag.clone() {
-            deps.runner
-                .start(kind, target_id.clone(), tag, p.max_requirements)
-                .await;
-        }
-    } else {
-        deps.runner.stop(kind, &target_id).await;
-    }
-
-    match build_state(&deps, kind, &target_id).await {
+    match build_state(&deps, ctx.user_id.as_str(), kind, &target_id).await {
         Ok(state) => {
             deps.requirements.emit_autowork_state(&state);
             ok(state)
@@ -205,7 +231,7 @@ async fn get(
     if let Err(e) = owner_check {
         return json!({ "error": e.to_string() });
     }
-    match build_state(&deps, kind, &target_id).await {
+    match build_state(&deps, ctx.user_id.as_str(), kind, &target_id).await {
         Ok(state) => ok(state),
         Err(e) => e,
     }
@@ -230,4 +256,46 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         ),
         adapt(get),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_and_rest_share_blank_tag_rejection_and_trimmed_identity() {
+        let blank: SetAutoworkParams = serde_json::from_value(json!({
+            "kind": "conversation",
+            "target_id": nomifun_common::ConversationId::new().into_string(),
+            "enabled": true,
+            "tag": " \t ",
+        }))
+        .unwrap();
+        assert!(normalize_config(&blank).is_err());
+
+        let normalized: SetAutoworkParams = serde_json::from_value(json!({
+            "kind": "conversation",
+            "target_id": nomifun_common::ConversationId::new().into_string(),
+            "enabled": true,
+            "tag": "  release  ",
+            "max_requirements": 4,
+        }))
+        .unwrap();
+        let config = normalize_config(&normalized).unwrap();
+        assert_eq!(config.tag.as_deref(), Some("release"));
+        assert_eq!(config.max_requirements, Some(4));
+    }
+
+    #[test]
+    fn gateway_mutation_requires_transport_operation_identity() {
+        let missing = CallerCtx::default();
+        assert!(authenticated_operation_id(&missing).is_err());
+
+        let mut authenticated = CallerCtx::default();
+        authenticated.operation_id = Some("request-7".to_owned());
+        assert_eq!(
+            authenticated_operation_id(&authenticated).unwrap(),
+            "gateway:request-7"
+        );
+    }
 }

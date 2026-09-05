@@ -10,6 +10,7 @@ mod attempt_runner;
 mod artifact_contract;
 mod control_steps;
 mod conversation_effect;
+mod delivery;
 mod domain_mapper;
 mod engine;
 mod event_publisher;
@@ -24,6 +25,7 @@ mod scheduler;
 mod template_routes;
 
 pub use attempt_runner::AgentExecutionSessionPort;
+pub use delivery::AgentExecutionDelivery;
 pub use engine::AgentExecutionEngine;
 pub use lifecycle::AgentExecutionLifecycle;
 pub use production::AgentExecutionEngineConfig;

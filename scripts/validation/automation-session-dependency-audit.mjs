@@ -142,7 +142,7 @@ const DOMAIN_SPECS = [
       function: 'build_companion_state',
       evidence: [
         /conversation_owner\s*:\s*Arc<\s*NomiCoreSessionOwner\s*>/,
-        /companion_ports_with_session\([\s\S]*conversation_owner/,
+        /companion_ports_(?:with_session|from_typed_host)\([\s\S]*conversation_owner/,
       ],
     },
     compatibilityFactory: 'conversation_companion_ports',
@@ -193,11 +193,6 @@ const LEGACY_PATTERNS = [
     id: 'runtime-options',
     label: 'AgentRuntimeBuildOptions',
     pattern: /\bAgentRuntimeBuildOptions\b/g,
-  },
-  {
-    id: 'nomi-agent',
-    label: 'nomifun_ai_agent',
-    pattern: /\bnomifun_ai_agent::/g,
   },
 ];
 
@@ -654,6 +649,11 @@ export function collectAutomationDependencyInventory(root = REPO_ROOT) {
     (file) => file.kind === 'test' && file.legacy.length > 0,
   );
   const appComposition = inspectAppComposition(root);
+  const migrationCandidateDomain = domains.find(
+    (domain) =>
+      domain.productionFilesWithLegacyDependencies > 0 ||
+      domain.adapterLegacyReferences.length > 0,
+  );
   return {
     task: TASK_ID,
     scope: DOMAIN_SPECS.map((spec) => spec.id),
@@ -670,21 +670,30 @@ export function collectAutomationDependencyInventory(root = REPO_ROOT) {
     },
     domains,
     appComposition,
-    migrationCandidate: {
-      domain: 'cron',
-      path: 'crates/backend/nomifun-cron/src/session_port.rs',
-      consumer: 'crates/backend/nomifun-cron/src/executor.rs',
-      rationale:
-        'Cron is the first scheduled producer, has the smallest consumer-facing port, and is already isolated behind one adapter. Migrate its adapter only after canonical Session adds receipt/reconciliation and cron-session lookup operations.',
-      currentStatus: 'blocked-by-canonical-automation-contract',
-      compositionStatus: 'covered-by-app-nomi-core-session-owner',
-      nextRequiredContract: [
-        'open or reuse an AgentSession from an explicit frozen binding',
-        'start a keyed turn and query its terminal receipt',
-        'observe/reconcile an accepted turn without resend authority',
-        'cancel the exact active turn',
-      ],
-    },
+    migrationCandidate: migrationCandidateDomain
+      ? {
+          domain: migrationCandidateDomain.id,
+          path: migrationCandidateDomain.adapter,
+          consumer: migrationCandidateDomain.consumer,
+          rationale:
+            'The lowest-rank domain with a remaining production or adapter legacy dependency is the next migration candidate.',
+          currentStatus: migrationCandidateDomain.readiness,
+          compositionStatus:
+            appComposition.domains.find(
+              (domain) => domain.domain === migrationCandidateDomain.id,
+            )?.status ?? 'missing',
+          nextRequiredContract: migrationCandidateDomain.blockers,
+        }
+      : {
+          domain: null,
+          path: null,
+          consumer: null,
+          rationale: 'Every audited production and adapter legacy dependency is cleared.',
+          currentStatus: 'complete',
+          compositionStatus:
+            appComposition.missingDomains === 0 ? 'covered' : 'missing',
+          nextRequiredContract: [],
+        },
   };
 }
 
@@ -695,12 +704,6 @@ export function assertAuditInvariants(report) {
   if (report.scope.length !== DOMAIN_SPECS.length) {
     throw new Error('the automation scope must contain all six domains');
   }
-  if (report.migrationCandidate.domain !== 'cron') {
-    throw new Error('Cron must remain the first migration candidate');
-  }
-  if (report.migrationCandidate.currentStatus !== 'blocked-by-canonical-automation-contract') {
-    throw new Error('the audit must keep Cron blocked on the missing canonical contract');
-  }
   if (report.appComposition.missingDomains !== 0) {
     throw new Error(
       `app composition is missing: ${report.appComposition.domains
@@ -709,15 +712,9 @@ export function assertAuditInvariants(report) {
         .join(', ')}`,
     );
   }
-  if (report.summary.productionFilesWithLegacyDependencies === 0) {
-    throw new Error('the audit must retain real production legacy findings');
-  }
   for (const domain of report.domains) {
     if (!ADAPTER_FILE_SET.has(domain.adapter)) {
       throw new Error(`missing adapter declaration for ${domain.id}`);
-    }
-    if (domain.adapterLegacyReferences.length === 0) {
-      throw new Error(`${domain.id} adapter no longer exposes the expected legacy boundary`);
     }
     if (
       domain.compatibilityFactory.name != null &&
@@ -736,6 +733,26 @@ export function assertAuditInvariants(report) {
     ) {
       throw new Error(`${domain.id} test/adapter references leaked into production legacy`);
     }
+  }
+  const expectedCandidate = report.domains.find(
+    (domain) =>
+      domain.productionFilesWithLegacyDependencies > 0 ||
+      domain.adapterLegacyReferences.length > 0,
+  );
+  if (expectedCandidate == null) {
+    if (
+      report.migrationCandidate.domain !== null ||
+      report.migrationCandidate.currentStatus !== 'complete'
+    ) {
+      throw new Error('a clean audit must report a complete migration');
+    }
+  } else if (
+    report.migrationCandidate.domain !== expectedCandidate.id ||
+    report.migrationCandidate.path !== expectedCandidate.adapter
+  ) {
+    throw new Error(
+      `expected ${expectedCandidate.id} as the next migration candidate, got ${report.migrationCandidate.domain}`,
+    );
   }
   return report;
 }
@@ -756,6 +773,23 @@ function assertSyntheticMask() {
   const realImport = lexicalMask('use nomifun_conversation::ConversationService;');
   if (!realImport.includes('nomifun_conversation::')) {
     throw new Error('lexical mask removed a real import');
+  }
+  const legacyReferences = (source) =>
+    LEGACY_PATTERNS.flatMap((descriptor) =>
+      matchesFor(source, productionMask(source), descriptor),
+    );
+  if (
+    legacyReferences('use nomifun_ai_agent::artifact_store::ArtifactStore;')
+      .length !== 0
+  ) {
+    throw new Error('non-runtime agent support was misclassified as a Session dependency');
+  }
+  if (
+    legacyReferences(
+      'use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;',
+    ).length === 0
+  ) {
+    throw new Error('direct runtime registry dependency was not classified as legacy');
   }
   const testOnly = `
     #[cfg(test)]
@@ -821,14 +855,14 @@ function printHumanReport(report) {
     }
   }
   console.log(
-    `candidate=${report.migrationCandidate.path} ` +
+    `candidate=${report.migrationCandidate.path ?? 'none'} ` +
       `(status=${report.migrationCandidate.currentStatus})`,
   );
   console.log(
     `candidate composition=${report.migrationCandidate.compositionStatus}`,
   );
   console.log('candidate blockers:');
-  for (const blocker of report.domains[0].blockers) {
+  for (const blocker of report.migrationCandidate.nextRequiredContract) {
     console.log(`- ${blocker}`);
   }
 }
@@ -844,7 +878,10 @@ function main(argv = process.argv.slice(2)) {
   } else {
     printHumanReport(report);
   }
-  if (report.summary.productionFilesWithLegacyDependencies > 0) {
+  if (
+    report.summary.productionFilesWithLegacyDependencies > 0 ||
+    report.summary.transitionalAdaptersWithLegacyDependencies > 0
+  ) {
     process.exitCode = 1;
   }
 }

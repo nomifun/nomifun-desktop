@@ -55,9 +55,11 @@
   代替真实 Provider 下的产品 `open -> turn -> observe -> cancel` 验证。
 - AutoWork 的 sweeper、启动恢复和 active target loop 已纳入 cancellation/join 或
   exact claim cleanup；Cron/AutoWork 的 durable receipt、accepted 等待、丢失 receipt
-  和 reconciliation 错误继续 fail-closed。生产消费者仍有 Conversation-backed
-  compatibility，canonical scheduled-session lookup/runtime-preparation/reconciliation
-  合同尚未因此自动成立。
+  和 reconciliation 错误继续 fail-closed。当前 Cron、Requirement/AutoWork 和
+  AgentExecution 的生产消费者已通过 host-owned typed boundary 接入；Companion
+  archive 也已由 host 直接提供 owner-scoped window/reset contract。Channel 与
+  IDMM 仍保留边界 adapter，因为 canonical Session 尚缺它们所需的事件流、完整
+  receipt 和活动 turn supervision 合同；这不等于自动完成 `SL-S3-10`。
 - Agent Settings/AgentSession 已完成产品表面和定向 UI build/test 收口。当前
   Nomi-core 没有 canonical on-demand activation port 时，Coding/on-demand 继续
   显式 unavailable；不得通过 metadata-only success 或静态 fixture 宣称完整 Coding。
@@ -65,6 +67,32 @@
   HTTP `503`。因此 `SL-S3-07`、`SL-S3-10`、`SL-S3-11` 和 `SL-S4-02` 继续按
   `GLOBAL-CLOSURE-TODO` 保持未关闭；Windows candidate、macOS arm64 和 Linux
   Desktop x64 只在这些前置项完成后进入原生验证。
+
+### 2026-09-05 主机续接实现事实
+
+本节记录本次主机实现的机器事实，不把本机编译或定向测试升级为真实 Provider
+产品证据：
+
+- Cron 的 Session port 只接受 `CronTurnMessage` 与封闭
+  `CronTurnRuntimeOverlay`；workspace、model、delegation policy、creation time
+  和 Session identity 均从 host 的最新 projection 解析。Cron/Session 双侧关系
+  通过 SQLite 单事务 CAS 绑定，receipt 读取、reconciliation 和 delivery result
+  均以 typed projection 返回。
+- AutoWork 的 host port 使用 `AutoWorkRuntimeLeaseIssuer` 签发绑定 owner/Session
+  的 opaque lease；attachment planning 取得的 snapshot 带有 host projection
+  revision，发送前重新校验 issuer、作用域和 revision。配置写入使用
+  owner-scoped operation identity、revision compare-and-swap，并保留同一
+  `extra` 对象中的非 AutoWork 字段。
+- Companion archive 的生产组合使用 `companion_ports_from_typed_host`，由
+  `NomiCoreSessionOwner` 提供有界消息窗口与上下文清理；Conversation 元数据投影
+  只留在测试兼容边界。IDMM 的 supervision scope/admission 核心同样使用
+  IDMM-owned typed contract，但 canonical Session 仍未提供完整 live event /
+  continuation / failover surface。
+- 本次定向结果包括：App lib `398 passed`、DB Conversation repository `83 passed`、
+  Cron lib/integration `192/62 passed`、Requirement lib/tests `115/120 passed`、
+  IDMM `196 passed`、Channel `345 passed`、Companion `275 passed`；UI build、
+  i18n、live smoke runner self-test/compile-only 均通过。精确命令和未运行的真实
+  Provider smoke 以 `GLOBAL-CLOSURE-TODO.zh.md` 的 2026-09-05 checkpoint 为准。
 
 ## 0. 本文的权威与执行方式
 

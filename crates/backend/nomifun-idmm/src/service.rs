@@ -222,11 +222,9 @@ impl IdmmService {
             return true;
         }
         if kind == IdmmTargetKind::Conversation
-            && let Ok(id) = ConversationId::try_from(target_id)
-            && let Ok(Some(row)) = self.probe_deps.conversation_repo.get(id.as_ref()).await
+            && let Some(probe) = self.probe_deps.build_probe(kind, target_id)
         {
-            return nomifun_conversation::runtime_options::provider_model_from_conversation_row(&row)
-                .is_ok_and(|model| model.is_some());
+            return probe.fallback_model().await.is_some();
         }
         false
     }

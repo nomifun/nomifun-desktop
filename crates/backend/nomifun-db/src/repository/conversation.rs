@@ -891,6 +891,42 @@ pub trait IConversationRepository: Send + Sync {
         updates: &ConversationRowUpdate,
     ) -> Result<(), DbError>;
 
+    /// Compare-and-swap the complete `conversation.extra` object for one
+    /// owner-scoped Conversation. This is used by host-owned metadata
+    /// commands that need a durable revision fence; a preceding read followed
+    /// by generic `update()` is not sufficient under concurrent writers.
+    async fn compare_and_swap_extra(
+        &self,
+        _user_id: &str,
+        _conversation_id: &str,
+        _expected_extra: &str,
+        _new_extra: &str,
+        _updated_at: TimestampMs,
+    ) -> Result<bool, DbError> {
+        Err(DbError::Init(
+            "compare-and-swap Conversation extra is not supported".to_owned(),
+        ))
+    }
+
+    /// Atomically bind both sides of the one-to-one Cron/Session relation.
+    ///
+    /// This is the only repository operation suitable for assigning
+    /// `conversations.cron_job_id` in production. It verifies owner identity,
+    /// accepts an identical replay, rejects either side being bound to a
+    /// different identity, and writes both logical references in one
+    /// transaction.
+    async fn bind_cron_relation(
+        &self,
+        _user_id: &str,
+        _conversation_id: &str,
+        _cron_job_id: &str,
+        _updated_at: TimestampMs,
+    ) -> Result<(), DbError> {
+        Err(DbError::Init(
+            "atomic Cron/Session relation binding is not supported".to_owned(),
+        ))
+    }
+
     /// Atomically replaces the persisted IDMM configuration inside
     /// `conversation.extra`. Implementations must validate and logically lock
     /// every per-watch `bypass_model.provider_id` before writing the JSON.

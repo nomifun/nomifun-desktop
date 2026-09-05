@@ -1,20 +1,32 @@
 import { describe, expect, test } from 'bun:test';
 import type {
+  CapabilityCatalogItem,
   AgentPresetDraft,
   ChatRouteRecord,
   ResolveAgentPresetPreviewResponse,
   SaveAgentPresetRevisionResponse,
 } from '@/common/types/agentPlatform';
-import { asDigestHex, asResolvedSnapshotId } from '@/common/types/agentPlatform';
 import {
+  asCapabilityId,
+  asDigestHex,
+  asPackageId,
+  asResolvedSnapshotId,
+  placeCapability,
+} from '@/common/types/agentPlatform';
+import {
+  DEFAULT_PROCESS_SESSION_RESOURCE_ID,
   DEFAULT_WORKSPACE_RESOURCE_ID,
   KNOWLEDGE_NAME_PARAMETER,
   KNOWLEDGE_ROOT_PARAMETER,
   WORKSPACE_ROOT_PARAMETER,
+  bindProcessSessionResource,
   bindKnowledgeBaseResource,
   bindWorkspaceResource,
+  resolveHostManagedResourceBindings,
+  resourceKindsForDraft,
   saveDraftRevisionWithPreview,
   selectChatRouteCandidate,
+  updateResourceBinding,
   withHostResolvedWorkspaceBinding,
 } from './model';
 
@@ -46,6 +58,37 @@ const draft = (): AgentPresetDraft => ({
     execution_constraints: {},
     runtime_budget: {},
   },
+});
+
+const processExecCapability = (): CapabilityCatalogItem => ({
+    capability: {
+      id: asCapabilityId('process.exec'),
+      version: '1.0.0',
+    },
+    kind: 'tool',
+    display_name: 'Run process',
+    description: 'Run a process in the selected workspace.',
+    source_package: {
+      id: asPackageId('nomifun.workspace-execution'),
+      version: '1.0.0',
+    },
+    source_kind: 'first_party',
+    materialization_state: 'materialized',
+    supported_surfaces: ['desktop'],
+    required_runtime_features: [],
+    required_resource_kinds: ['process_session'],
+    required_capabilities: [],
+    conflicting_capabilities: [],
+    action_count: 1,
+    context_contributor_count: 0,
+  });
+
+const withProcessExecSelected = (
+  source: AgentPresetDraft,
+  capability = processExecCapability()
+): AgentPresetDraft => ({
+  ...source,
+  document: placeCapability(source.document, capability.capability, 'initial'),
 });
 
 const preview = (
@@ -138,6 +181,152 @@ describe('Agent Settings host resource resolution', () => {
     expect(binding.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]).toBe('C:\\work\\nomifun');
   });
 
+  test('derives a host-managed process session from the selected workspace', () => {
+    const binding = bindProcessSessionResource(
+      {
+        binding_id: 'process-session',
+        resource_kind: 'process_session',
+        resource_id: '',
+        owner_id: 'owner',
+        operations: ['execute', 'observe'],
+        typed_parameters: {},
+      },
+      'C:\\work\\nomifun'
+    );
+
+    expect(binding.resource_id).toBe(DEFAULT_PROCESS_SESSION_RESOURCE_ID);
+    expect(binding.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]).toBe('C:\\work\\nomifun');
+  });
+
+  test('selecting process.exec materializes and references both host-managed bindings', () => {
+    const capability = processExecCapability();
+    const source = draft();
+    source.document.resource_bindings = [];
+    const selected = withProcessExecSelected(source, capability);
+    const resolved = resolveHostManagedResourceBindings(
+      selected,
+      'C:\\work\\nomifun',
+      [capability],
+      'owner'
+    );
+    const workspace = resolved.document.resource_bindings.find(
+      (binding) => binding.resource_kind === 'workspace'
+    );
+    const process = resolved.document.resource_bindings.find(
+      (binding) => binding.resource_kind === 'process_session'
+    );
+
+    expect(workspace?.resource_id).toBe(DEFAULT_WORKSPACE_RESOURCE_ID);
+    expect(process?.resource_id).toBe(DEFAULT_PROCESS_SESSION_RESOURCE_ID);
+    expect(process?.operations).toEqual(['execute', 'observe']);
+    expect(process?.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]).toBe('C:\\work\\nomifun');
+    expect(resourceKindsForDraft(selected, [capability])).toEqual([
+      'process_session',
+      'workspace',
+    ]);
+    expect(resolved.document.initial_capabilities[0]?.resource_binding_refs).toEqual([
+      process?.binding_id,
+    ]);
+    expect(
+      resolveHostManagedResourceBindings(resolved, 'C:\\work\\nomifun', [capability], 'owner')
+    ).toBe(resolved);
+  });
+
+  test('uses an explicitly selected workspace when process.exec first creates its session', () => {
+    const capability = processExecCapability();
+    const source = draft();
+    source.document.resource_bindings[0] = bindWorkspaceResource(
+      source.document.resource_bindings[0],
+      'D:\\projects\\agent'
+    );
+    const resolved = resolveHostManagedResourceBindings(
+      withProcessExecSelected(source, capability),
+      'C:\\work\\nomifun',
+      [capability],
+      'owner'
+    );
+
+    const workspace = resolved.document.resource_bindings.find(
+      (binding) => binding.resource_kind === 'workspace'
+    );
+    const process = resolved.document.resource_bindings.find(
+      (binding) => binding.resource_kind === 'process_session'
+    );
+    expect(workspace?.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]).toBe(
+      'D:\\projects\\agent'
+    );
+    expect(process?.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]).toBe(
+      'D:\\projects\\agent'
+    );
+  });
+
+  test('moves the process session when the workspace selection changes', () => {
+    const capability = processExecCapability();
+    const initial = resolveHostManagedResourceBindings(
+      withProcessExecSelected(draft(), capability),
+      'C:\\work\\nomifun',
+      [capability],
+      'owner'
+    );
+    const workspace = initial.document.resource_bindings.find(
+      (binding) => binding.resource_kind === 'workspace'
+    );
+    const originalProcess = initial.document.resource_bindings.find(
+      (binding) => binding.resource_kind === 'process_session'
+    );
+    expect(workspace).toBeDefined();
+    expect(originalProcess).toBeDefined();
+
+    const moved = resolveHostManagedResourceBindings(
+      updateResourceBinding(
+        initial,
+        bindWorkspaceResource(workspace!, 'D:\\projects\\moved')
+      ),
+      'C:\\work\\nomifun',
+      [capability],
+      'owner'
+    );
+    const movedProcess = moved.document.resource_bindings.find(
+      (binding) => binding.resource_kind === 'process_session'
+    );
+
+    expect(movedProcess?.resource_id).toBe(originalProcess?.resource_id);
+    expect(movedProcess?.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]).toBe(
+      'D:\\projects\\moved'
+    );
+    expect(moved.document.initial_capabilities[0]?.resource_binding_refs).toEqual([
+      movedProcess?.binding_id,
+    ]);
+  });
+
+  test('clears a process session when no workspace root remains', () => {
+    const capability = processExecCapability();
+    const initial = resolveHostManagedResourceBindings(
+      withProcessExecSelected(draft(), capability),
+      'C:\\work\\nomifun',
+      [capability],
+      'owner'
+    );
+    const workspace = initial.document.resource_bindings.find(
+      (binding) => binding.resource_kind === 'workspace'
+    );
+    expect(workspace).toBeDefined();
+
+    const cleared = resolveHostManagedResourceBindings(
+      updateResourceBinding(initial, bindWorkspaceResource(workspace!, '')),
+      null,
+      [capability],
+      'owner'
+    );
+    const process = cleared.document.resource_bindings.find(
+      (binding) => binding.resource_kind === 'process_session'
+    );
+
+    expect(process?.resource_id).toBe('');
+    expect(process?.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]).toBeUndefined();
+    expect(cleared.document.initial_capabilities[0]?.resource_binding_refs).toEqual([]);
+  });
+
   test('is stable once the exact host path has been resolved', () => {
     const first = withHostResolvedWorkspaceBinding(draft(), '/work/nomifun');
     const second = withHostResolvedWorkspaceBinding(first, '/work/nomifun');
@@ -163,6 +352,40 @@ describe('Agent Settings host resource resolution', () => {
 
     expect(
       resolved.document.resource_bindings[0].typed_parameters?.[WORKSPACE_ROOT_PARAMETER]
+    ).toBe('D:\\projects\\agent');
+  });
+
+  test('keeps an existing process session on the exact selected workspace', () => {
+    const selected = bindWorkspaceResource(
+      draft().document.resource_bindings[0],
+      'D:\\projects\\agent'
+    );
+    const process = bindProcessSessionResource(
+      {
+        binding_id: 'process-session',
+        resource_kind: 'process_session',
+        resource_id: '',
+        owner_id: 'owner',
+        operations: ['execute', 'observe'],
+        typed_parameters: {},
+      },
+      'C:\\stale'
+    );
+    const resolved = withHostResolvedWorkspaceBinding(
+      {
+        ...draft(),
+        document: {
+          ...draft().document,
+          resource_bindings: [selected, process],
+        },
+      },
+      'C:\\work\\nomifun'
+    );
+
+    expect(
+      resolved.document.resource_bindings.find(
+        (binding) => binding.resource_kind === 'process_session'
+      )?.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]
     ).toBe('D:\\projects\\agent');
   });
 

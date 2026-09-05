@@ -21,17 +21,89 @@ pub struct ChannelTurnDelivery {
     pub events: Option<broadcast::Receiver<AgentStreamEvent>>,
 }
 
+/// Channel-owned read-only projection of one keyed turn receipt.
+///
+/// The compatibility implementation below still receives the historical
+/// Conversation receipt from the app facade, but that type must not leak into
+/// Channel consumers. This projection carries only the delivery facts needed
+/// for Channel retry/notification decisions and has no send or settlement
+/// authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelCompletedTurnReceipt {
+    pub message_id: String,
+    pub replayed: bool,
+    pub result_ok: Option<bool>,
+    pub result_text: Option<String>,
+    pub result_error: Option<String>,
+    pub result_error_code: Option<String>,
+    pub result_error_retryable: Option<bool>,
+}
+
+/// Read-only receipt state used by Channel delivery code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelTurnReceiptState {
+    Missing,
+    Accepted { message_id: String },
+    Completed(ChannelCompletedTurnReceipt),
+}
+
+impl From<IdempotentMessageDelivery> for ChannelCompletedTurnReceipt {
+    fn from(delivery: IdempotentMessageDelivery) -> Self {
+        Self {
+            message_id: delivery.message_id,
+            replayed: delivery.replayed,
+            result_ok: delivery.result_ok,
+            result_text: delivery.result_text,
+            result_error: delivery.result_error,
+            result_error_code: delivery.result_error_code,
+            result_error_retryable: delivery.result_error_retryable,
+        }
+    }
+}
+
+impl From<PublicTurnDeliveryState> for ChannelTurnReceiptState {
+    fn from(state: PublicTurnDeliveryState) -> Self {
+        match state {
+            PublicTurnDeliveryState::Missing => Self::Missing,
+            PublicTurnDeliveryState::Accepted { message_id } => Self::Accepted { message_id },
+            PublicTurnDeliveryState::Completed(delivery) => {
+                Self::Completed(delivery.into())
+            }
+        }
+    }
+}
+
 /// Exact Session command/query surface used by the Channel domain.
 #[async_trait]
 pub trait ChannelSessionPort: Send + Sync {
     async fn is_busy(&self, session_id: &str) -> bool;
 
+    /// Transitional compatibility hook implemented by the current app facade.
+    ///
+    /// New Channel consumers must use [`Self::read_turn_receipt`], which keeps
+    /// the historical Conversation type inside this adapter boundary.
+    #[doc(hidden)]
     async fn turn_outcome(
         &self,
         owner_id: &str,
         session_id: &str,
         idempotency_key: &str,
     ) -> Result<PublicTurnDeliveryState, AppError>;
+
+    /// Read the exact keyed turn outcome as a Channel-owned projection.
+    ///
+    /// This default is intentionally a pure adapter over the existing facade
+    /// method. It creates no receipt, runtime, or alternate Session identity.
+    async fn read_turn_receipt(
+        &self,
+        owner_id: &str,
+        session_id: &str,
+        idempotency_key: &str,
+    ) -> Result<ChannelTurnReceiptState, AppError> {
+        self.turn_outcome(owner_id, session_id, idempotency_key)
+            .await
+            .map(Into::into)
+    }
 
     async fn cancel(&self, owner_id: &str, session_id: &str) -> Result<(), AppError>;
 
@@ -186,4 +258,57 @@ pub fn conversation_channel_session_port(
         service,
         runtime_registry,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn completed_delivery() -> IdempotentMessageDelivery {
+        IdempotentMessageDelivery {
+            message_id: "message-1".to_owned(),
+            replayed: true,
+            completed: true,
+            result_ok: Some(false),
+            result_text: Some("partial".to_owned()),
+            result_error: Some("provider timeout".to_owned()),
+            result_error_code: Some("provider_timeout".to_owned()),
+            result_error_retryable: Some(true),
+        }
+    }
+
+    #[test]
+    fn receipt_projection_preserves_completed_delivery_facts() {
+        let state = PublicTurnDeliveryState::Completed(completed_delivery());
+        let projected = ChannelTurnReceiptState::from(state);
+
+        assert_eq!(
+            projected,
+            ChannelTurnReceiptState::Completed(ChannelCompletedTurnReceipt {
+                message_id: "message-1".to_owned(),
+                replayed: true,
+                result_ok: Some(false),
+                result_text: Some("partial".to_owned()),
+                result_error: Some("provider timeout".to_owned()),
+                result_error_code: Some("provider_timeout".to_owned()),
+                result_error_retryable: Some(true),
+            })
+        );
+    }
+
+    #[test]
+    fn receipt_projection_preserves_missing_and_accepted_states() {
+        assert_eq!(
+            ChannelTurnReceiptState::from(PublicTurnDeliveryState::Missing),
+            ChannelTurnReceiptState::Missing
+        );
+        assert_eq!(
+            ChannelTurnReceiptState::from(PublicTurnDeliveryState::Accepted {
+                message_id: "message-2".to_owned(),
+            }),
+            ChannelTurnReceiptState::Accepted {
+                message_id: "message-2".to_owned(),
+            }
+        );
+    }
 }

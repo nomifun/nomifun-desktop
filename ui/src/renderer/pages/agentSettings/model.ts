@@ -36,9 +36,11 @@ export const TEMPLATE_I18N_PATH: Record<OfficialPresetKey, string> = {
  * editor must never reinterpret `resource_id` as a filesystem path.
  */
 export const DEFAULT_WORKSPACE_RESOURCE_ID = 'workspace.default';
+export const DEFAULT_PROCESS_SESSION_RESOURCE_ID = 'process.local';
 export const WORKSPACE_ROOT_PARAMETER = 'workspace_root';
 export const KNOWLEDGE_ROOT_PARAMETER = 'knowledge_root';
 export const KNOWLEDGE_NAME_PARAMETER = 'knowledge_name';
+const HOST_MANAGED_RESOURCE_KINDS = new Set(['workspace', 'process_session']);
 
 export type KnowledgeBindingSource = {
   knowledge_base_id: string;
@@ -82,6 +84,31 @@ export function bindWorkspaceResource(
   return {
     ...binding,
     resource_id: root ? binding.resource_id.trim() || DEFAULT_WORKSPACE_RESOURCE_ID : '',
+    typed_parameters: typedParameters,
+  };
+}
+
+/**
+ * The Nomi-core process supervisor is host-managed and scoped to the same
+ * workspace as the Session. Users select the workspace; the renderer derives
+ * the opaque process-session binding instead of asking for an internal ID.
+ */
+export function bindProcessSessionResource(
+  binding: TypedResourceBinding,
+  workspaceRoot: string
+): TypedResourceBinding {
+  const root = workspaceRoot.trim();
+  const typedParameters = { ...(binding.typed_parameters ?? {}) };
+  if (root) {
+    typedParameters[WORKSPACE_ROOT_PARAMETER] = root;
+  } else {
+    delete typedParameters[WORKSPACE_ROOT_PARAMETER];
+  }
+  return {
+    ...binding,
+    resource_id: root
+      ? binding.resource_id.trim() || DEFAULT_PROCESS_SESSION_RESOURCE_ID
+      : '',
     typed_parameters: typedParameters,
   };
 }
@@ -190,23 +217,47 @@ export const defaultResourceBinding = (
   typed_parameters: defaults.typedParameters ?? {},
 });
 
+export function workspaceRootForDraft(
+  draft: AgentPresetDraft,
+  hostWorkDir: string | null
+): string | null {
+  const workspaceBinding = draft.document.resource_bindings.find(
+    (binding) => binding.resource_kind === 'workspace'
+  );
+  return (
+    workspaceBinding?.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]?.trim() ||
+    hostWorkDir?.trim() ||
+    null
+  );
+}
+
 export function withHostResolvedWorkspaceBinding(
   draft: AgentPresetDraft,
   hostWorkDir: string | null
 ): AgentPresetDraft {
-  const workspaceRoot = hostWorkDir?.trim();
-  if (!workspaceRoot) return draft;
+  const workspaceBinding = draft.document.resource_bindings.find(
+    (binding) => binding.resource_kind === 'workspace'
+  );
+  const workspaceRoot = workspaceRootForDraft(draft, hostWorkDir) ?? '';
+  if (!workspaceBinding && !workspaceRoot) return draft;
 
   let changed = false;
   const resourceBindings = draft.document.resource_bindings.map((binding) => {
+    if (binding.resource_kind === 'process_session') {
+      const nextBinding = bindProcessSessionResource(binding, workspaceRoot);
+      if (
+        nextBinding.resource_id === binding.resource_id &&
+        nextBinding.typed_parameters?.[WORKSPACE_ROOT_PARAMETER] ===
+          binding.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]
+      ) {
+        return binding;
+      }
+      changed = true;
+      return nextBinding;
+    }
     if (binding.resource_kind !== 'workspace') return binding;
 
-    const existingRoot = binding.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]?.trim();
-    const effectiveRoot = existingRoot || workspaceRoot;
-    if (!effectiveRoot) {
-      return binding;
-    }
-    const nextBinding = bindWorkspaceResource(binding, effectiveRoot);
+    const nextBinding = bindWorkspaceResource(binding, workspaceRoot);
     if (
       nextBinding.resource_id === binding.resource_id &&
       nextBinding.typed_parameters?.[WORKSPACE_ROOT_PARAMETER] ===
@@ -227,10 +278,11 @@ export function withHostResolvedWorkspaceBinding(
 }
 
 /**
- * Materialize the host workspace binding as soon as a capability selection
- * starts requiring it.  The editor may render a host default before the
- * binding exists in the draft; persisting the same value here prevents Preview
- * and Save from sending a visually selected, but actually unbound, workspace.
+ * Materialize the host workspace and its coupled process session as soon as a
+ * capability selection starts requiring them. The editor may render a host
+ * default before either binding exists in the draft; persisting the same value
+ * here prevents Preview and Save from sending visually selected but unbound
+ * resources.
  */
 export function ensureWorkspaceBinding(
   draft: AgentPresetDraft,
@@ -239,34 +291,164 @@ export function ensureWorkspaceBinding(
   ownerId: string,
   operations: string[] = ['read', 'write', 'execute']
 ): AgentPresetDraft {
-  const root = hostWorkDir?.trim();
-  if (!root || !requiredResourceKinds.includes('workspace')) return draft;
+  let resolvedDraft = withHostResolvedWorkspaceBinding(draft, hostWorkDir);
+  const root = workspaceRootForDraft(resolvedDraft, hostWorkDir);
+  if (!root) return resolvedDraft;
 
-  const existing = draft.document.resource_bindings.find(
-    (binding) => binding.resource_kind === 'workspace'
-  );
-  const binding = existing ?? defaultResourceBinding('workspace', ownerId, operations);
-  const resolved = bindWorkspaceResource(binding, root);
-  if (
-    existing &&
-    existing.resource_id === resolved.resource_id &&
-    existing.typed_parameters?.[WORKSPACE_ROOT_PARAMETER] ===
-      resolved.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]
-  ) {
-    return draft;
+  if (requiredResourceKinds.includes('workspace')) {
+    const existing = resolvedDraft.document.resource_bindings.find(
+      (binding) => binding.resource_kind === 'workspace'
+    );
+    const binding =
+      existing ??
+      defaultResourceBinding(
+        'workspace',
+        ownerId ||
+          resolvedDraft.document.resource_bindings.find(
+            (candidate) => candidate.resource_kind === 'process_session'
+          )?.owner_id ||
+          '',
+        operations
+      );
+    const resolved = bindWorkspaceResource(binding, root);
+    if (
+      !existing ||
+      existing.resource_id !== resolved.resource_id ||
+      existing.typed_parameters?.[WORKSPACE_ROOT_PARAMETER] !==
+        resolved.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]
+    ) {
+      resolvedDraft = updateResourceBinding(resolvedDraft, resolved);
+    }
   }
-  return updateResourceBinding(draft, resolved);
+  if (requiredResourceKinds.includes('process_session')) {
+    const existing = resolvedDraft.document.resource_bindings.find(
+      (binding) => binding.resource_kind === 'process_session'
+    );
+    const workspaceOwnerId = resolvedDraft.document.resource_bindings.find(
+      (binding) => binding.resource_kind === 'workspace'
+    )?.owner_id;
+    const binding =
+      existing ??
+      defaultResourceBinding(
+        'process_session',
+        ownerId || workspaceOwnerId || '',
+        ['execute', 'observe']
+      );
+    const resolved = bindProcessSessionResource(binding, root);
+    if (
+      !existing ||
+      existing.resource_id !== resolved.resource_id ||
+      existing.typed_parameters?.[WORKSPACE_ROOT_PARAMETER] !==
+        resolved.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]
+    ) {
+      resolvedDraft = updateResourceBinding(resolvedDraft, resolved);
+    }
+  }
+  return resolvedDraft;
 }
 
 export function resourceKindsForDraft(
   draft: AgentPresetDraft,
   capabilities: CapabilityCatalogItem[]
 ): string[] {
-  return requiredResourceKinds(draft.document, {
-    capabilities,
-    skills: [],
-    mcp_tools: [],
-  });
+  const kinds = new Set(
+    requiredResourceKinds(draft.document, {
+      capabilities,
+      skills: [],
+      mcp_tools: [],
+    })
+  );
+  // A host-managed process session is always rooted in a workspace. Keep the
+  // workspace binding explicit even when process.exec is the only selected
+  // capability and its catalog contract names only process_session.
+  if (kinds.has('process_session')) kinds.add('workspace');
+  return [...kinds].sort();
+}
+
+function withHostManagedResourceBindingRefs(
+  draft: AgentPresetDraft,
+  capabilities: CapabilityCatalogItem[]
+): AgentPresetDraft {
+  const capabilityById = new Map(
+    capabilities.map((capability) => [capability.capability.id, capability])
+  );
+  const bindingById = new Map(
+    draft.document.resource_bindings.map((binding) => [binding.binding_id, binding])
+  );
+  const usableBindingByKind = new Map<string, TypedResourceBinding>();
+  for (const binding of draft.document.resource_bindings) {
+    if (
+      HOST_MANAGED_RESOURCE_KINDS.has(binding.resource_kind) &&
+      binding.resource_id.trim() &&
+      binding.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]?.trim() &&
+      !usableBindingByKind.has(binding.resource_kind)
+    ) {
+      usableBindingByKind.set(binding.resource_kind, binding);
+    }
+  }
+
+  let changed = false;
+  const bindSelections = (selections: AgentPresetDocument['initial_capabilities']) =>
+    selections.map((selection) => {
+      const capability = capabilityById.get(selection.capability.id);
+      if (!capability) return selection;
+
+      const requiredHostKinds = capability.required_resource_kinds.filter((kind) =>
+        HOST_MANAGED_RESOURCE_KINDS.has(kind)
+      );
+      const currentRefs = selection.resource_binding_refs ?? [];
+      const nextRefs = [
+        ...currentRefs.filter((bindingId) => {
+          const kind = bindingById.get(bindingId)?.resource_kind;
+          return kind == null || !HOST_MANAGED_RESOURCE_KINDS.has(kind);
+        }),
+        ...requiredHostKinds.flatMap((kind) => {
+          const binding = usableBindingByKind.get(kind);
+          return binding ? [binding.binding_id] : [];
+        }),
+      ]
+        .filter((bindingId, index, refs) => refs.indexOf(bindingId) === index)
+        .sort();
+
+      if (
+        currentRefs.length === nextRefs.length &&
+        currentRefs.every((bindingId, index) => bindingId === nextRefs[index])
+      ) {
+        return selection;
+      }
+      changed = true;
+      return { ...selection, resource_binding_refs: nextRefs };
+    });
+
+  const initialCapabilities = bindSelections(draft.document.initial_capabilities);
+  const onDemandCapabilities = bindSelections(draft.document.on_demand_capabilities);
+  return changed
+    ? updateDocument(draft, (document) => ({
+        ...document,
+        initial_capabilities: initialCapabilities,
+        on_demand_capabilities: onDemandCapabilities,
+      }))
+    : draft;
+}
+
+/**
+ * Complete the renderer-owned portion of host resource resolution. This is
+ * intentionally shared by editing, Preview, Save, and Test so no operation can
+ * send a visually selected workspace with a missing/stale process binding.
+ */
+export function resolveHostManagedResourceBindings(
+  draft: AgentPresetDraft,
+  hostWorkDir: string | null,
+  capabilities: CapabilityCatalogItem[],
+  ownerId: string
+): AgentPresetDraft {
+  const withBindings = ensureWorkspaceBinding(
+    draft,
+    hostWorkDir,
+    resourceKindsForDraft(draft, capabilities),
+    ownerId
+  );
+  return withHostManagedResourceBindingRefs(withBindings, capabilities);
 }
 
 export function templateDraftForInspection(template: OfficialPresetTemplate): AgentPresetDraft {

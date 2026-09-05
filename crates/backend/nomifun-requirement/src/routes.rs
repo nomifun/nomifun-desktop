@@ -14,6 +14,7 @@ use nomifun_common::{AppError, ConversationId, PaginatedResult, RequirementId, T
 use serde::Deserialize;
 
 use crate::state::RequirementRouterState;
+use crate::AutoWorkConfig;
 
 pub fn requirement_routes(state: RequirementRouterState) -> Router {
     Router::new()
@@ -221,9 +222,8 @@ async fn set_autowork(
 ) -> Result<Json<ApiResponse<AutoWorkState>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     validate_target_id(req.kind, &req.target_id)?;
-    if req.enabled && req.tag.as_deref().unwrap_or("").trim().is_empty() {
-        return Err(AppError::BadRequest("tag is required when enabling autowork".into()));
-    }
+    let config =
+        AutoWorkConfig::normalize(req.enabled, req.tag.as_deref(), req.max_requirements)?;
     // Admin guard (tag/session management): refuse to disable a session that is actively
     // executing a requirement when the request comes from the admin backend. The
     // user must stop it from the session page so a live turn is not interrupted.
@@ -258,37 +258,21 @@ async fn set_autowork(
             }
         }
     }
-    // Persist config.
+    // Persist config and reconcile the live loop under one per-target
+    // transition lock. Identical enables are a no-op for the running
+    // Requirement; changed bindings quiesce the prior generation first.
     state
-        .requirement_service
-        .save_autowork_config(
+        .auto_work_runner
+        .apply_config(
+            &user.id,
             req.kind,
             &req.target_id,
-            req.enabled,
-            req.tag.as_deref(),
-            req.max_requirements,
+            config,
+            None,
+            None,
         )
         .await?;
-    // Start/stop the live loop.
-    if req.enabled {
-        if let Some(tag) = req.tag.clone() {
-            // An explicit enable resumes a tag a prior failure left paused, so
-            // toggling 自动工作 on actually RUNS instead of silently inheriting the
-            // paused state (which blocks every conversation bound to the tag —
-            // the recurring "彻底不工作" trap). Best-effort: a resume failure must
-            // not block enabling.
-            if let Err(e) = state.requirement_service.resume_tag_for_enable(&tag).await {
-                tracing::warn!(tag, error = %e, "auto-resume on autowork enable failed (non-fatal)");
-            }
-            state
-                .auto_work_runner
-                .start(req.kind, req.target_id.clone(), tag, req.max_requirements)
-                .await;
-        }
-    } else {
-        state.auto_work_runner.stop(req.kind, &req.target_id).await;
-    }
-    let st = build_autowork_state(&state, req.kind, &req.target_id).await?;
+    let st = build_autowork_state(&state, &user.id, req.kind, &req.target_id).await?;
     state.requirement_service.emit_autowork_state(&st);
     Ok(Json(ApiResponse::ok(st)))
 }
@@ -315,7 +299,7 @@ async fn get_autowork(
                 .await?;
         }
     }
-    let st = build_autowork_state(&state, kind, &target_id).await?;
+    let st = build_autowork_state(&state, &user.id, kind, &target_id).await?;
     Ok(Json(ApiResponse::ok(st)))
 }
 
@@ -336,10 +320,16 @@ fn validate_target_id(kind: AutoWorkTargetKind, target_id: &str) -> Result<(), A
 
 async fn build_autowork_state(
     state: &RequirementRouterState,
+    owner_id: &str,
     kind: AutoWorkTargetKind,
     target_id: &str,
 ) -> Result<AutoWorkState, AppError> {
-    let (enabled, tag, _max) = state.requirement_service.read_autowork_config(kind, target_id).await?;
+    let snapshot = state
+        .requirement_service
+        .read_autowork_config_snapshot(owner_id, kind, target_id)
+        .await?;
+    let enabled = snapshot.config.enabled;
+    let tag = snapshot.config.tag;
     let running = state.auto_work_runner.is_running(kind, target_id);
     let live_tag = state.auto_work_runner.running_tag(kind, target_id).or(tag);
     let (current_requirement_id, completed_count) =

@@ -18,6 +18,7 @@ use axum::middleware::{Next, from_fn};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
+use dashmap::DashMap;
 use futures_util::FutureExt;
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 use nomifun_ai_agent::{AgentRuntimeRegistry, AgentStreamEvent};
@@ -34,17 +35,19 @@ use nomifun_api_types::{
     CreateAgentSessionRequestDto, CreateConversationRequest,
     CreateAgentSessionResponseDto, CreateAgentSessionTurnRequestDto,
     CreateAgentSessionTurnResponseDto, ErrorResponse, ForkAgentSessionRequestDto,
-    ForkAgentSessionResponseDto, ListMessagesQuery, MessageListResponse,
+    ForkAgentSessionResponseDto, ListMessagesQuery, MessageListResponse, MessageResponse,
+    ListConversationsQuery,
     RemoteCancelRequestDto, RemoteMutationResponseDto, RemoteObserveResponseDto,
     RemoteOpenRequestDto, RemoteOpenResponseDto, RemoteOpenStateViewDto, RemoteTurnRequestDto,
     ResolveSavedRevisionPreviewRequest, ResolvedPresetSnapshot, SessionCursorDto,
     SendMessageRequest, UpdateConversationRequest,
 };
-use nomifun_common::AppError;
+use nomifun_common::{AppError, MessagePosition, MessageType};
 use nomifun_conversation::runtime_state::RuntimeBuildLease;
 use nomifun_conversation::service::{
-    BackgroundTurnReconciliationDisposition, BackgroundTurnRuntimePreparation,
-    IdempotentMessageDelivery, ObservedIdempotentMessageDelivery, PublicTurnDeliveryState,
+    BackgroundTurnPreSendHook, BackgroundTurnReconciliationDisposition,
+    BackgroundTurnRuntimePreparation, IdempotentMessageDelivery,
+    PublicTurnDeliveryState,
 };
 use nomifun_conversation::{AgentExecutionConversationPort, ConversationService, IdmmTurnScope};
 use nomifun_db::{
@@ -57,6 +60,7 @@ use nomifun_agent_session::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -71,6 +75,8 @@ pub(crate) struct NomiCoreSessionOwner {
     service: ConversationService,
     runtime_registry: Arc<dyn AgentRuntimeRegistry>,
     execution: AgentExecutionConversationPort,
+    autowork_runtime_lease_issuer: nomifun_requirement::AutoWorkRuntimeLeaseIssuer,
+    autowork_config_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl NomiCoreSessionOwner {
@@ -83,6 +89,9 @@ impl NomiCoreSessionOwner {
             service,
             runtime_registry,
             execution,
+            autowork_runtime_lease_issuer:
+                nomifun_requirement::AutoWorkRuntimeLeaseIssuer::new(),
+            autowork_config_locks: Arc::new(DashMap::new()),
         }
     }
 
@@ -181,43 +190,141 @@ impl NomiCoreSessionOwner {
         self.service.delete(owner_id, session_id).await
     }
 
+    fn autowork_config_lock(
+        &self,
+        owner_id: &str,
+        session_id: &str,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let key = format!("{owner_id}\n{session_id}");
+        self.autowork_config_locks
+            .entry(key)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    async fn raw_owned_session_extra(
+        &self,
+        owner_id: &str,
+        session_id: &str,
+    ) -> Result<(String, Value), AppError> {
+        let row = self
+            .service
+            .conversation_repo()
+            .get(session_id)
+            .await?
+            .filter(|row| row.user_id == owner_id)
+            .ok_or_else(|| AppError::NotFound(format!("AgentSession {session_id} not found")))?;
+        let extra: Value = serde_json::from_str(&row.extra).map_err(|error| {
+            AppError::Internal(format!(
+                "AgentSession {session_id} has invalid extra JSON: {error}"
+            ))
+        })?;
+        if !extra.is_object() {
+            return Err(AppError::Internal(format!(
+                "AgentSession {session_id} extra must be a JSON object"
+            )));
+        }
+        Ok((row.extra, extra))
+    }
 }
 
 #[async_trait]
 impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
-    async fn list_by_cron_job(
+    async fn get_session(
         &self,
-        user_id: &str,
-        cron_job_id: &str,
+        query: &nomifun_cron::CronSessionLookup,
+    ) -> Result<nomifun_cron::CronSessionProjection, AppError> {
+        let response = self
+            .service
+            .get(&query.owner_id, query.agent_session_id.as_ref())
+            .await?;
+        let row = self
+            .service
+            .conversation_repo()
+            .get(query.agent_session_id.as_ref())
+            .await?
+            .filter(|row| row.user_id == query.owner_id)
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "AgentSession {} not found",
+                    query.agent_session_id.as_ref()
+                ))
+            })?;
+        cron_session_projection_from_response(&query.owner_id, response, row.cron_job_id)
+    }
+
+    async fn lookup_scheduled_sessions(
+        &self,
+        query: &nomifun_cron::CronScheduledSessionLookup,
+    ) -> Result<Vec<nomifun_cron::CronScheduledSession>, AppError> {
+        self.service
+            .list_by_cron_job(&query.owner_id, &query.cron_job_id)
+            .await?
+            .into_iter()
+            .map(|response| {
+                cron_session_projection_from_response(
+                    &query.owner_id,
+                    response,
+                    Some(query.cron_job_id.clone()),
+                )
+            })
+            .collect()
+    }
+
+    async fn list_conversation_responses_for_cron(
+        &self,
+        query: &nomifun_cron::CronScheduledSessionLookup,
     ) -> Result<Vec<ConversationResponse>, AppError> {
-        self.service.list_by_cron_job(user_id, cron_job_id).await
+        self.service
+            .list_by_cron_job(&query.owner_id, &query.cron_job_id)
+            .await
     }
 
-    async fn public_turn_delivery_state(
+    async fn bind_cron_relation(
         &self,
-        user_id: &str,
-        session_id: &str,
-        idempotency_key: &str,
-    ) -> Result<nomifun_cron::CronTurnReceiptState, AppError> {
-        Ok(nomifun_cron::turn_state_from_conversation(self.service
-            .public_turn_delivery_state(user_id, session_id, idempotency_key)
-            .await?))
-    }
-
-    async fn reconcile_quiescent_running_turn(
-        &self,
-        user_id: &str,
-        session_id: &str,
-        idempotency_key: &str,
-    ) -> Result<nomifun_cron::CronTurnReconciliation, AppError> {
-        Ok(nomifun_cron::turn_reconciliation_from_conversation(self.service
-            .reconcile_quiescent_running_turn_for_background(
-                user_id,
-                session_id,
-                idempotency_key,
-                &self.runtime_registry,
+        request: &nomifun_cron::CronSessionCronBindingRequest,
+    ) -> Result<(), AppError> {
+        self.service
+            .conversation_repo()
+            .bind_cron_relation(
+                &request.owner_id,
+                request.agent_session_id.as_ref(),
+                &request.cron_job_id,
+                nomifun_common::now_ms(),
             )
-            .await?))
+            .await
+            .map_err(AppError::from)
+    }
+
+    async fn read_turn_receipt(
+        &self,
+        query: &nomifun_cron::CronTurnReceiptQuery,
+    ) -> Result<nomifun_cron::CronTurnReceiptState, AppError> {
+        Ok(cron_turn_state_from_conversation(
+            self.service
+                .public_turn_delivery_state(
+                    &query.owner_id,
+                    query.agent_session_id.as_ref(),
+                    &query.idempotency_key,
+                )
+                .await?,
+        ))
+    }
+
+    async fn reconcile_turn_receipt(
+        &self,
+        request: &nomifun_cron::CronTurnReconciliationRequest,
+    ) -> Result<nomifun_cron::CronTurnReconciliation, AppError> {
+        Ok(cron_reconciliation_from_conversation(
+            self.service
+                .reconcile_quiescent_running_turn_for_background(
+                    &request.owner_id,
+                    request.agent_session_id.as_ref(),
+                    &request.idempotency_key,
+                    &self.runtime_registry,
+                )
+                .await?,
+        ))
     }
 
     async fn create_idempotent(
@@ -244,57 +351,89 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                     .await
             }
         }?;
-        nomifun_cron::session_handle_from_response(response)
+        cron_session_handle_from_response(response)
     }
 
-    async fn send_observed_turn(
+    async fn prepare_runtime_and_send(
         &self,
-        user_id: &str,
-        session_id: &str,
-        idempotency_key: &str,
-        turn: nomifun_cron::CronTurnRequest,
-    ) -> Result<nomifun_cron::CronTurnDelivery, AppError> {
+        request: nomifun_cron::CronRuntimePreparationRequest,
+    ) -> Result<nomifun_cron::CronPreparedTurnDelivery, AppError> {
+        let nomifun_cron::CronRuntimePreparationRequest {
+            owner_id,
+            agent_session_id,
+            idempotency_key,
+            turn,
+        } = request;
+        let nomifun_cron::CronTurnRequest {
+            message,
+            runtime:
+                nomifun_cron::CronTurnRuntimePreparation {
+                    overlay,
+                    clear_context,
+                },
+        } = turn;
+        let session_id = agent_session_id.as_ref();
+        nomifun_common::CronJobId::parse(&overlay.cron_job_id).map_err(|error| {
+            AppError::BadRequest(format!("invalid Cron runtime annotation: {error}"))
+        })?;
         let build_lease = self
             .service
-            .begin_public_runtime_preparation(session_id, user_id)?;
-        let session = self.service.get(user_id, session_id).await?;
+            .begin_public_runtime_preparation(session_id, &owner_id)?;
+        let relation = self
+            .service
+            .conversation_repo()
+            .get(session_id)
+            .await?
+            .filter(|row| row.user_id == owner_id)
+            .ok_or_else(|| {
+                AppError::NotFound(format!("AgentSession {session_id} not found"))
+            })?;
+        if relation.cron_job_id.as_deref() != Some(overlay.cron_job_id.as_str()) {
+            return Err(AppError::Conflict(format!(
+                "AgentSession {session_id} is not bound to Cron job {}",
+                overlay.cron_job_id
+            )));
+        }
+        let session = self.service.get(&owner_id, session_id).await?;
         build_lease.ensure_active()?;
-        let runtime_options =
-            runtime_options_from_session(user_id, session, turn.runtime_extra)?;
-        let observed = self.service
+        let (runtime_options, workspace) =
+            runtime_options_from_session(&owner_id, session, Some(&overlay))?;
+        let observed = self
+            .service
             .send_observed_background_message_with_idempotency_key(
-                user_id,
+                &owner_id,
                 session_id,
-                idempotency_key,
-                turn.message,
+                &idempotency_key,
+                cron_turn_message_to_request(message),
                 &self.runtime_registry,
                 build_lease,
                 BackgroundTurnRuntimePreparation {
                     runtime_options,
-                    clear_context: turn.clear_context,
+                    clear_context,
                     pre_send_hook: None,
                 },
             )
             .await?;
-        Ok(nomifun_cron::turn_delivery_from_conversation(observed.delivery))
+        Ok(nomifun_cron::CronPreparedTurnDelivery {
+            delivery: cron_delivery_from_conversation(observed.delivery),
+            workspace,
+        })
     }
 
     async fn delivery_result(
         &self,
-        user_id: &str,
-        session_id: &str,
-        idempotency_key: &str,
-        request: &SendMessageRequest,
+        query: &nomifun_cron::CronTurnDeliveryQuery,
     ) -> Result<Option<nomifun_cron::CronTurnDelivery>, AppError> {
-        Ok(self.service
+        Ok(self
+            .service
             .idempotent_delivery_result_with_idempotency_key(
-                user_id,
-                session_id,
-                idempotency_key,
-                request,
+                &query.owner_id,
+                query.agent_session_id.as_ref(),
+                &query.idempotency_key,
+                &cron_turn_message_to_request(query.message.clone()),
             )
             .await?
-            .map(nomifun_cron::turn_delivery_from_conversation))
+            .map(cron_delivery_from_conversation))
     }
 }
 
@@ -380,14 +519,129 @@ impl nomifun_channel::ChannelSessionPort for NomiCoreSessionOwner {
 }
 
 #[async_trait]
-impl nomifun_requirement::AutoWorkConversationPort for NomiCoreSessionOwner {
+impl nomifun_requirement::AutoWorkScheduledSessionLookup for NomiCoreSessionOwner {
+    async fn list_enabled_scheduled_sessions(
+        &self,
+        owner_id: &str,
+    ) -> Result<nomifun_requirement::ScheduledAutoWorkSessionScan, AppError> {
+        const PAGE_SIZE: u32 = 200;
+        let mut cursor = None;
+        let mut sessions = Vec::new();
+        let mut quarantined = Vec::new();
+        loop {
+            let page = self
+                .service
+                .list(
+                    owner_id,
+                    ListConversationsQuery {
+                        cursor: cursor.clone(),
+                        limit: Some(PAGE_SIZE),
+                        source: None,
+                        cron_job_id: None,
+                        pinned: None,
+                    },
+                    false,
+                )
+                .await?;
+            let next_cursor = page.items.last().map(|session| session.conversation_id.clone());
+            for session in page.items {
+                let Some(raw) = session.extra.get("autowork") else {
+                    continue;
+                };
+                match conversation_autowork_config_snapshot(
+                    &session.conversation_id,
+                    Some(raw),
+                ) {
+                    Ok(snapshot) if snapshot.config.enabled => {
+                        match snapshot.config.enabled_tag() {
+                            Ok(tag) => {
+                                sessions.push(nomifun_requirement::ScheduledAutoWorkSession {
+                                    session_id: session.conversation_id,
+                                    display_name: session.name,
+                                    tag: tag.to_owned(),
+                                    max_requirements: snapshot.config.max_requirements,
+                                    config_revision: snapshot.revision,
+                                });
+                            }
+                            Err(error) => quarantined.push(
+                                nomifun_requirement::AutoWorkBindingIssue {
+                                    target_id: Some(session.conversation_id),
+                                    code: "missing_tag",
+                                    detail: error.to_string(),
+                                },
+                            ),
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => quarantined.push(
+                        nomifun_requirement::AutoWorkBindingIssue {
+                            target_id: Some(session.conversation_id),
+                            code: "invalid_config",
+                            detail: error.to_string(),
+                        },
+                    ),
+                }
+            }
+            if !page.has_more {
+                break;
+            }
+            let next_cursor = next_cursor.ok_or_else(|| {
+                AppError::Internal(
+                    "AgentSession AutoWork lookup returned an empty non-terminal page".to_owned(),
+                )
+            })?;
+            if cursor.as_deref() == Some(next_cursor.as_str()) {
+                return Err(AppError::Internal(
+                    "AgentSession AutoWork lookup cursor did not advance".to_owned(),
+                ));
+            }
+            cursor = Some(next_cursor);
+        }
+        Ok(nomifun_requirement::ScheduledAutoWorkSessionScan {
+            sessions,
+            quarantined,
+        })
+    }
+}
+
+#[async_trait]
+impl nomifun_requirement::AutoWorkSessionPort for NomiCoreSessionOwner {
+    async fn prepare_autowork_turn(
+        &self,
+        owner_id: &str,
+        session_id: &str,
+        build_lease: &nomifun_requirement::AutoWorkRuntimeBuildLease,
+    ) -> Result<nomifun_requirement::AutoWorkSessionPreparation, AppError> {
+        build_lease.ensure_scope(owner_id, session_id)?;
+        build_lease.ensure_active()?;
+        let session = self.service.get(owner_id, session_id).await?;
+        build_lease.ensure_active()?;
+        let workspace = session_workspace(&session)?;
+        let revision = session_projection_revision(&session)?;
+        let snapshot = self
+            .autowork_runtime_lease_issuer
+            .issue_snapshot(owner_id, session_id, revision)?;
+        Ok(nomifun_requirement::AutoWorkSessionPreparation {
+            agent_type: session.r#type,
+            workspace,
+            snapshot,
+        })
+    }
+
     fn begin_runtime_preparation(
         &self,
         conversation_id: &str,
         requester_user_id: &str,
-    ) -> Result<RuntimeBuildLease, AppError> {
-        self.service
-            .begin_public_runtime_preparation(conversation_id, requester_user_id)
+    ) -> Result<nomifun_requirement::AutoWorkRuntimeBuildLease, AppError> {
+        let lease = self
+            .service
+            .begin_public_runtime_preparation(conversation_id, requester_user_id)?;
+        self.autowork_runtime_lease_issuer.issue(
+            requester_user_id,
+            conversation_id,
+            lease,
+            RuntimeBuildLease::ensure_active,
+        )
     }
 
     fn user_cancelled_since(&self, conversation_id: &str, since_ms: i64) -> bool {
@@ -401,49 +655,218 @@ impl nomifun_requirement::AutoWorkConversationPort for NomiCoreSessionOwner {
         Ok(())
     }
 
-    async fn save_config(
+    async fn read_config(
         &self,
-        conversation_id: &str,
-        enabled: bool,
-        tag: Option<&str>,
-        max_requirements: Option<u32>,
-    ) -> Result<(), AppError> {
-        self.service
-            .update_extra(
-                conversation_id,
-                serde_json::json!({
-                    "autowork": {
-                        "enabled": enabled,
-                        "tag": tag,
-                        "max_requirements": max_requirements,
-                    }
-                }),
-            )
-            .await
+        owner_id: &str,
+        session_id: &str,
+    ) -> Result<nomifun_requirement::AutoWorkConfigSnapshot, AppError> {
+        let (_, extra) = self.raw_owned_session_extra(owner_id, session_id).await?;
+        conversation_autowork_config_snapshot(session_id, extra.get("autowork"))
     }
 
-    async fn send_observed_turn(
+    async fn save_config(
+        &self,
+        command: nomifun_requirement::AutoWorkSessionConfigCommand,
+    ) -> Result<nomifun_requirement::AutoWorkConfigSnapshot, AppError> {
+        let canonical = nomifun_requirement::AutoWorkConfig::normalize(
+            command.config.enabled,
+            command.config.tag.as_deref(),
+            command.config.max_requirements,
+        )?;
+        if canonical != command.config {
+            return Err(AppError::BadRequest(
+                "AutoWork config must use its canonical normalized tag".to_owned(),
+            ));
+        }
+        if command.expected_revision.trim().is_empty() {
+            return Err(AppError::Conflict(
+                "AutoWork config write requires an expected revision".to_owned(),
+            ));
+        }
+        if command
+            .operation_id
+            .as_deref()
+            .is_some_and(|operation_id| operation_id.trim().is_empty())
+        {
+            return Err(AppError::BadRequest(
+                "AutoWork config operation identity must not be empty".to_owned(),
+            ));
+        }
+        let lock = self.autowork_config_lock(&command.owner_id, &command.session_id);
+        let _guard = lock.lock().await;
+        let (expected_extra, stored_extra) = self
+            .raw_owned_session_extra(&command.owner_id, &command.session_id)
+            .await?;
+        let current = conversation_autowork_config_snapshot(
+            &command.session_id,
+            stored_extra.get("autowork"),
+        )?;
+        if command.operation_id.is_some()
+            && current.operation_id == command.operation_id
+        {
+            if current.config == command.config {
+                return Ok(current);
+            }
+            return Err(AppError::Conflict(
+                "AutoWork operation identity was replayed with a different config".to_owned(),
+            ));
+        }
+        if current.revision != command.expected_revision {
+            return Err(AppError::Conflict(format!(
+                "AutoWork config for conversation {} changed concurrently",
+                command.session_id
+            )));
+        }
+        if current.config == command.config && command.operation_id.is_none() {
+            return Ok(current);
+        }
+
+        let current_sequence = conversation_autowork_sequence(&current.revision);
+        let next_sequence = if current.config == command.config
+            && !current.revision.starts_with("conversation:legacy:")
+        {
+            current_sequence
+        } else {
+            current_sequence.checked_add(1).ok_or_else(|| {
+                AppError::Conflict(format!(
+                    "AutoWork config revision overflow for conversation {}",
+                    command.session_id
+                ))
+            })?
+        };
+        let mut autowork = stored_extra
+            .get("autowork")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let object = autowork.as_object_mut().ok_or_else(|| {
+            AppError::Conflict(format!(
+                "AgentSession {} has an invalid AutoWork config",
+                command.session_id
+            ))
+        })?;
+        object.insert("enabled".to_owned(), Value::Bool(command.config.enabled));
+        object.insert(
+            "tag".to_owned(),
+            command
+                .config
+                .tag
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "max_requirements".to_owned(),
+            command
+                .config
+                .max_requirements
+                .map(|value| Value::Number(value.into()))
+                .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "_revision".to_owned(),
+            Value::Number(next_sequence.into()),
+        );
+        object.insert(
+            "_operation_id".to_owned(),
+            command
+                .operation_id
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        let mut replacement_extra = stored_extra;
+        replacement_extra["autowork"] = Value::Object(object.clone());
+        let replacement_extra = serde_json::to_string(&replacement_extra).map_err(|error| {
+            AppError::Internal(format!(
+                "failed to serialize AutoWork Session extra {}: {error}",
+                command.session_id
+            ))
+        })?;
+        let swapped = self
+            .service
+            .conversation_repo()
+            .compare_and_swap_extra(
+                &command.owner_id,
+                &command.session_id,
+                &expected_extra,
+                &replacement_extra,
+                nomifun_common::now_ms(),
+            )
+            .await?;
+        if !swapped {
+            return Err(AppError::Conflict(format!(
+                "AutoWork config for conversation {} changed concurrently",
+                command.session_id
+            )));
+        }
+        let (_, updated_extra) = self
+            .raw_owned_session_extra(&command.owner_id, &command.session_id)
+            .await?;
+        let snapshot =
+            conversation_autowork_config_snapshot(&command.session_id, updated_extra.get("autowork"))?;
+        if snapshot.config != command.config
+            || snapshot.revision != format!("conversation:{next_sequence}")
+            || snapshot.operation_id != command.operation_id
+        {
+            return Err(AppError::Conflict(
+                "Session host returned a different AutoWork config after save".to_owned(),
+            ));
+        }
+        Ok(snapshot)
+    }
+
+    async fn send_turn(
         &self,
         user_id: &str,
         conversation_id: &str,
         operation_id: &str,
-        request: SendMessageRequest,
-        build_lease: RuntimeBuildLease,
-        runtime_preparation: BackgroundTurnRuntimePreparation,
+        request: nomifun_requirement::AutoWorkTurnRequest,
+        build_lease: nomifun_requirement::AutoWorkRuntimeBuildLease,
         authority: nomifun_db::RequirementConversationTurnAuthority,
-    ) -> Result<ObservedIdempotentMessageDelivery, AppError> {
-        self.service
+    ) -> Result<nomifun_requirement::AutoWorkMessageDelivery, AppError> {
+        let nomifun_requirement::AutoWorkTurnRequest {
+            message,
+            runtime_overlay,
+            session_snapshot,
+        } = request;
+        build_lease.ensure_snapshot(&session_snapshot)?;
+        let build_lease = self.autowork_runtime_lease_issuer.consume::<RuntimeBuildLease>(
+            build_lease,
+            user_id,
+            conversation_id,
+        )?;
+        let session = self.service.get(user_id, conversation_id).await?;
+        build_lease.ensure_active()?;
+        let revision = session_projection_revision(&session)?;
+        self.autowork_runtime_lease_issuer.validate_snapshot(
+            &session_snapshot,
+            user_id,
+            conversation_id,
+            &revision,
+        )?;
+        build_lease.ensure_active()?;
+        let (runtime_options, _) = runtime_options_from_session(user_id, session, None)?;
+        let observed = self
+            .service
             .send_observed_autowork_message_with_idempotency_key(
                 user_id,
                 conversation_id,
                 operation_id,
-                request,
+                autowork_message_to_request(message),
                 &self.runtime_registry,
                 build_lease,
-                runtime_preparation,
+                BackgroundTurnRuntimePreparation {
+                    runtime_options,
+                    clear_context: runtime_overlay.clear_context,
+                    pre_send_hook: runtime_overlay.pre_send_hook.map(|hook| {
+                        Arc::new(NomiCoreAutoWorkPreSendHook { inner: hook })
+                            as Arc<dyn BackgroundTurnPreSendHook>
+                    }),
+                },
                 authority,
             )
-            .await
+            .await?;
+        Ok(autowork_delivery_from_conversation(observed.delivery))
     }
 
     async fn delivery_result(
@@ -451,18 +874,20 @@ impl nomifun_requirement::AutoWorkConversationPort for NomiCoreSessionOwner {
         user_id: &str,
         conversation_id: &str,
         operation_id: &str,
-        request: &SendMessageRequest,
+        request: &nomifun_requirement::AutoWorkMessage,
         authority: &nomifun_db::RequirementConversationTurnAuthority,
-    ) -> Result<Option<nomifun_conversation::IdempotentMessageDelivery>, AppError> {
+    ) -> Result<Option<nomifun_requirement::AutoWorkMessageDelivery>, AppError> {
+        let request = autowork_message_to_request(request.clone());
         self.service
             .autowork_delivery_result_with_idempotency_key(
                 user_id,
                 conversation_id,
                 operation_id,
-                request,
+                &request,
                 authority,
             )
             .await
+            .map(|delivery| delivery.map(autowork_delivery_from_conversation))
     }
 
     async fn public_turn_delivery_state(
@@ -470,10 +895,11 @@ impl nomifun_requirement::AutoWorkConversationPort for NomiCoreSessionOwner {
         user_id: &str,
         conversation_id: &str,
         operation_id: &str,
-    ) -> Result<PublicTurnDeliveryState, AppError> {
+    ) -> Result<nomifun_requirement::AutoWorkTurnDeliveryState, AppError> {
         self.service
             .public_turn_delivery_state(user_id, conversation_id, operation_id)
             .await
+            .map(autowork_turn_state_from_conversation)
     }
 
     async fn reconcile_quiescent_running_turn(
@@ -481,7 +907,7 @@ impl nomifun_requirement::AutoWorkConversationPort for NomiCoreSessionOwner {
         user_id: &str,
         conversation_id: &str,
         operation_id: &str,
-    ) -> Result<BackgroundTurnReconciliationDisposition, AppError> {
+    ) -> Result<nomifun_requirement::AutoWorkReconciliationDisposition, AppError> {
         self.service
             .reconcile_quiescent_running_turn_for_background(
                 user_id,
@@ -490,6 +916,7 @@ impl nomifun_requirement::AutoWorkConversationPort for NomiCoreSessionOwner {
                 &self.runtime_registry,
             )
             .await
+            .map(autowork_reconciliation_from_conversation)
     }
 }
 
@@ -559,6 +986,69 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
             .message_local_day_index(owner_id, session_id)
             .await
     }
+}
+
+#[async_trait]
+impl nomifun_companion::CompanionArchiveSessionPort for NomiCoreSessionOwner {
+    async fn window_messages(
+        &self,
+        owner_id: &str,
+        session_id: &str,
+        since_ts: i64,
+        limit: u32,
+    ) -> Result<Vec<nomifun_companion::archiver::WindowMessage>, AppError> {
+        let query = ListMessagesQuery {
+            cursor: Some(String::new()),
+            page_size: Some(limit.clamp(1, 400)),
+            ..Default::default()
+        };
+        let response = self.service.list_messages(owner_id, session_id, query).await?;
+        Ok(response
+            .items
+            .into_iter()
+            .filter_map(|message| companion_archive_message(message, since_ts))
+            .collect())
+    }
+
+    async fn reset_context(
+        &self,
+        owner_id: &str,
+        session_id: &str,
+    ) -> Result<(), AppError> {
+        self.service.clear_context(owner_id, session_id).await
+    }
+}
+
+fn companion_archive_message(
+    message: MessageResponse,
+    since_ts: i64,
+) -> Option<nomifun_companion::archiver::WindowMessage> {
+    if message.hidden
+        || message.created_at <= since_ts
+        || message.r#type != MessageType::Text
+    {
+        return None;
+    }
+    let is_user = match message.position {
+        Some(MessagePosition::Right) => true,
+        Some(MessagePosition::Left) => false,
+        _ => return None,
+    };
+    let content = match message.content {
+        Value::String(content) => content,
+        Value::Object(object) => object
+            .get("text")
+            .or_else(|| object.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        _ => String::new(),
+    };
+    (!content.trim().is_empty()).then_some(nomifun_companion::archiver::WindowMessage {
+        is_user,
+        content,
+        created_at: message.created_at,
+    })
 }
 
 #[async_trait]
@@ -668,7 +1158,7 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         operation_id: &str,
         authority: AgentExecutionTurnAuthority,
         request: SendMessageRequest,
-    ) -> Result<nomifun_conversation::IdempotentMessageDelivery, AppError> {
+    ) -> Result<nomifun_agent_execution::AgentExecutionDelivery, AppError> {
         self.execution
             .deliver_turn(
                 owner_id,
@@ -678,6 +1168,7 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
                 request,
             )
             .await
+            .map(agent_execution_delivery_from_conversation)
     }
 
     async fn delivery_result(
@@ -685,10 +1176,11 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         owner_id: &str,
         conversation_id: &str,
         operation_id: &str,
-    ) -> Result<Option<nomifun_conversation::IdempotentMessageDelivery>, AppError> {
+    ) -> Result<Option<nomifun_agent_execution::AgentExecutionDelivery>, AppError> {
         self.execution
             .delivery_result(owner_id, conversation_id, operation_id)
             .await
+            .map(|delivery| delivery.map(agent_execution_delivery_from_conversation))
     }
 
     async fn list_messages(
@@ -756,31 +1248,298 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
     }
 }
 
+fn agent_execution_delivery_from_conversation(
+    delivery: IdempotentMessageDelivery,
+) -> nomifun_agent_execution::AgentExecutionDelivery {
+    nomifun_agent_execution::AgentExecutionDelivery {
+        message_id: delivery.message_id,
+        replayed: delivery.replayed,
+        completed: delivery.completed,
+        result_ok: delivery.result_ok,
+        result_text: delivery.result_text,
+        result_error: delivery.result_error,
+        result_error_code: delivery.result_error_code,
+        result_error_retryable: delivery.result_error_retryable,
+    }
+}
+
+fn cron_turn_message_to_request(
+    message: nomifun_cron::CronTurnMessage,
+) -> SendMessageRequest {
+    SendMessageRequest {
+        content: message.content,
+        files: message.files,
+        inject_skills: message.inject_skills,
+        hidden: message.hidden,
+        origin: message.origin,
+        channel_platform: message.channel_platform,
+    }
+}
+
+fn cron_delivery_from_conversation(
+    delivery: IdempotentMessageDelivery,
+) -> nomifun_cron::CronTurnDelivery {
+    nomifun_cron::CronTurnDelivery {
+        message_id: delivery.message_id,
+        replayed: delivery.replayed,
+        completed: delivery.completed,
+        result_ok: delivery.result_ok,
+        result_text: delivery.result_text,
+        result_error: delivery.result_error,
+        result_error_code: delivery.result_error_code,
+        result_error_retryable: delivery.result_error_retryable,
+    }
+}
+
+fn cron_turn_state_from_conversation(
+    state: PublicTurnDeliveryState,
+) -> nomifun_cron::CronTurnReceiptState {
+    match state {
+        PublicTurnDeliveryState::Missing => nomifun_cron::CronTurnReceiptState::Missing,
+        PublicTurnDeliveryState::Accepted { message_id } => {
+            nomifun_cron::CronTurnReceiptState::Accepted { message_id }
+        }
+        PublicTurnDeliveryState::Completed(delivery) => {
+            nomifun_cron::CronTurnReceiptState::Completed(
+                cron_delivery_from_conversation(delivery),
+            )
+        }
+    }
+}
+
+fn cron_reconciliation_from_conversation(
+    disposition: BackgroundTurnReconciliationDisposition,
+) -> nomifun_cron::CronTurnReconciliation {
+    match disposition {
+        BackgroundTurnReconciliationDisposition::LiveExactOwnerWait => {
+            nomifun_cron::CronTurnReconciliation::LiveExactOwnerWait
+        }
+        BackgroundTurnReconciliationDisposition::ReconciledOrTerminalReRead => {
+            nomifun_cron::CronTurnReconciliation::ReconciledOrTerminalReRead
+        }
+        BackgroundTurnReconciliationDisposition::ExternalProofRequiredFailClosed => {
+            nomifun_cron::CronTurnReconciliation::ExternalProofRequiredFailClosed
+        }
+        BackgroundTurnReconciliationDisposition::StaleConflict => {
+            nomifun_cron::CronTurnReconciliation::StaleConflict
+        }
+    }
+}
+
+fn cron_session_handle_from_response(
+    response: ConversationResponse,
+) -> Result<nomifun_cron::CronSessionHandle, AppError> {
+    let workspace = session_workspace(&response)?;
+    let agent_session_id = AgentSessionId::from(response.conversation_id);
+    nomifun_common::validate_uuidv7(agent_session_id.as_ref()).map_err(|error| {
+        AppError::Conflict(format!(
+            "AgentSession identity is not canonical UUIDv7: {error}"
+        ))
+    })?;
+    Ok(nomifun_cron::CronSessionHandle {
+        agent_session_id,
+        workspace,
+    })
+}
+
+fn cron_session_projection_from_response(
+    owner_id: &str,
+    response: ConversationResponse,
+    cron_job_id: Option<String>,
+) -> Result<nomifun_cron::CronSessionProjection, AppError> {
+    let agent_session_id = AgentSessionId::from(response.conversation_id.clone());
+    nomifun_common::validate_uuidv7(agent_session_id.as_ref()).map_err(|error| {
+        AppError::Conflict(format!(
+            "AgentSession identity is not canonical UUIDv7: {error}"
+        ))
+    })?;
+    let workspace = session_workspace(&response)?;
+    let optional_string = |key: &str| {
+        response
+            .extra
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let skills = match response.extra.get("skills") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        AppError::Conflict(format!(
+                            "AgentSession {} has an invalid skills projection",
+                            response.conversation_id
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => {
+            return Err(AppError::Conflict(format!(
+                "AgentSession {} has an invalid skills projection",
+                response.conversation_id
+            )));
+        }
+    };
+    let temp_workspace_id = optional_string("temp_workspace_id");
+    let agent_name = optional_string("agent_name");
+    let cli_path = optional_string("cli_path").or_else(|| {
+        response
+            .extra
+            .get("gateway")
+            .and_then(|gateway| gateway.get("cli_path"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    });
+    let custom_agent_id = optional_string("custom_agent_id");
+    Ok(nomifun_cron::CronSessionProjection {
+        agent_session_id,
+        owner_id: owner_id.to_owned(),
+        name: response.name,
+        agent_type: response.r#type,
+        model: response.model,
+        workspace,
+        cron_job_id,
+        temp_workspace_id,
+        skills,
+        agent_name,
+        cli_path,
+        custom_agent_id,
+        preset_id: response.preset_id,
+        preset_revision: response.preset_revision,
+        preset_snapshot: response.preset_snapshot,
+    })
+}
+
+struct NomiCoreAutoWorkPreSendHook {
+    inner: Arc<dyn nomifun_requirement::AutoWorkPreSendHook>,
+}
+
+#[async_trait]
+impl BackgroundTurnPreSendHook for NomiCoreAutoWorkPreSendHook {
+    async fn prepare(&self) -> Result<(), AppError> {
+        self.inner.prepare().await
+    }
+}
+
+fn autowork_message_to_request(
+    message: nomifun_requirement::AutoWorkMessage,
+) -> SendMessageRequest {
+    SendMessageRequest {
+        content: message.content,
+        files: message.files,
+        inject_skills: message.inject_skills,
+        hidden: message.hidden,
+        origin: message.origin,
+        channel_platform: message.channel_platform,
+    }
+}
+
+fn autowork_delivery_from_conversation(
+    delivery: IdempotentMessageDelivery,
+) -> nomifun_requirement::AutoWorkMessageDelivery {
+    nomifun_requirement::AutoWorkMessageDelivery {
+        message_id: delivery.message_id,
+        replayed: delivery.replayed,
+        completed: delivery.completed,
+        result_ok: delivery.result_ok,
+        result_text: delivery.result_text,
+        result_error: delivery.result_error,
+        result_error_code: delivery.result_error_code,
+        result_error_retryable: delivery.result_error_retryable,
+    }
+}
+
+fn autowork_turn_state_from_conversation(
+    state: PublicTurnDeliveryState,
+) -> nomifun_requirement::AutoWorkTurnDeliveryState {
+    match state {
+        PublicTurnDeliveryState::Missing => {
+            nomifun_requirement::AutoWorkTurnDeliveryState::Missing
+        }
+        PublicTurnDeliveryState::Accepted { message_id } => {
+            nomifun_requirement::AutoWorkTurnDeliveryState::Accepted { message_id }
+        }
+        PublicTurnDeliveryState::Completed(delivery) => {
+            nomifun_requirement::AutoWorkTurnDeliveryState::Completed(
+                autowork_delivery_from_conversation(delivery),
+            )
+        }
+    }
+}
+
+fn autowork_reconciliation_from_conversation(
+    disposition: BackgroundTurnReconciliationDisposition,
+) -> nomifun_requirement::AutoWorkReconciliationDisposition {
+    match disposition {
+        BackgroundTurnReconciliationDisposition::LiveExactOwnerWait => {
+            nomifun_requirement::AutoWorkReconciliationDisposition::LiveExactOwnerWait
+        }
+        BackgroundTurnReconciliationDisposition::ReconciledOrTerminalReRead => {
+            nomifun_requirement::AutoWorkReconciliationDisposition::ReconciledOrTerminalReRead
+        }
+        BackgroundTurnReconciliationDisposition::ExternalProofRequiredFailClosed => {
+            nomifun_requirement::AutoWorkReconciliationDisposition::ExternalProofRequiredFailClosed
+        }
+        BackgroundTurnReconciliationDisposition::StaleConflict => {
+            nomifun_requirement::AutoWorkReconciliationDisposition::StaleConflict
+        }
+    }
+}
+
+fn session_workspace(session: &ConversationResponse) -> Result<String, AppError> {
+    session
+        .extra
+        .get("workspace")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|workspace| !workspace.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            AppError::Conflict(format!(
+                "AgentSession {} has no canonical workspace",
+                session.conversation_id
+            ))
+        })
+}
+
 fn runtime_options_from_session(
     user_id: &str,
     session: ConversationResponse,
-    runtime_extra: serde_json::Value,
-) -> Result<AgentRuntimeBuildOptions, AppError> {
+    cron_overlay: Option<&nomifun_cron::CronTurnRuntimeOverlay>,
+) -> Result<(AgentRuntimeBuildOptions, String), AppError> {
     let ConversationResponse {
         conversation_id,
         r#type: agent_type,
         model,
         delegation_policy,
         created_at,
-        extra: mut session_extra,
+        extra: session_extra,
         ..
     } = session;
 
-    let session_extra = session_extra.as_object_mut().ok_or_else(|| {
+    let mut session_extra = session_extra.as_object().cloned().ok_or_else(|| {
         AppError::Internal(format!(
             "conversation {conversation_id} extra must be a JSON object"
         ))
     })?;
-    let runtime_extra = runtime_extra.as_object().ok_or_else(|| {
-        AppError::BadRequest("Cron runtime extra must be a JSON object".to_owned())
-    })?;
-    for (key, value) in runtime_extra {
-        session_extra.insert(key.clone(), value.clone());
+    if let Some(overlay) = cron_overlay {
+        nomifun_common::CronJobId::parse(&overlay.cron_job_id).map_err(|error| {
+            AppError::BadRequest(format!("invalid Cron runtime annotation: {error}"))
+        })?;
+        session_extra.insert(
+            "cron_job_id".to_owned(),
+            Value::String(overlay.cron_job_id.clone()),
+        );
     }
 
     let workspace = session_extra
@@ -795,17 +1554,315 @@ fn runtime_options_from_session(
         })?
         .to_owned();
 
-    Ok(AgentRuntimeBuildOptions {
-        user_id: user_id.to_owned(),
-        agent_type,
+    Ok((
+        AgentRuntimeBuildOptions {
+            user_id: user_id.to_owned(),
+            agent_type,
+            workspace: workspace.clone(),
+            model,
+            conversation_id,
+            delegation_policy,
+            extra: Value::Object(session_extra).into(),
+            conversation_created_at: Some(created_at),
+            workspace_binding_lease: None,
+        },
         workspace,
-        model,
-        conversation_id,
-        delegation_policy,
-        extra: session_extra.clone().into(),
-        conversation_created_at: Some(created_at),
-        workspace_binding_lease: None,
+    ))
+}
+
+fn conversation_autowork_config_snapshot(
+    session_id: &str,
+    raw: Option<&Value>,
+) -> Result<nomifun_requirement::AutoWorkConfigSnapshot, AppError> {
+    let Some(raw) = raw else {
+        return Ok(nomifun_requirement::AutoWorkConfigSnapshot {
+            config: nomifun_requirement::AutoWorkConfig::default(),
+            revision: "conversation:0".to_owned(),
+            operation_id: None,
+        });
+    };
+    let object = raw.as_object().ok_or_else(|| {
+        AppError::Conflict(format!(
+            "AgentSession {session_id} has an invalid AutoWork config"
+        ))
+    })?;
+    let enabled = match object.get("enabled") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(AppError::Conflict(format!(
+                "AgentSession {session_id} AutoWork enabled must be a boolean"
+            )));
+        }
+    };
+    let tag = match object.get("tag") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => {
+            return Err(AppError::Conflict(format!(
+                "AgentSession {session_id} AutoWork tag must be a string"
+            )));
+        }
+    };
+    let max_requirements = match object.get("max_requirements") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(value)) => {
+            let value = value.as_u64().ok_or_else(|| {
+                AppError::Conflict(format!(
+                    "AgentSession {session_id} AutoWork max_requirements must be an unsigned integer"
+                ))
+            })?;
+            Some(u32::try_from(value).map_err(|_| {
+                AppError::Conflict(format!(
+                    "AgentSession {session_id} AutoWork max_requirements exceeds u32"
+                ))
+            })?)
+        }
+        Some(_) => {
+            return Err(AppError::Conflict(format!(
+                "AgentSession {session_id} AutoWork max_requirements must be an unsigned integer"
+            )));
+        }
+    };
+    let config = nomifun_requirement::AutoWorkConfig::normalize(
+        enabled,
+        tag,
+        max_requirements,
+    )
+    .map_err(|error| {
+        AppError::Conflict(format!(
+            "AgentSession {session_id} has an invalid persisted AutoWork config: {error}"
+        ))
+    })?;
+    let sequence = match object.get("_revision") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(value)) => Some(value.as_u64().ok_or_else(|| {
+            AppError::Conflict(format!(
+                "AgentSession {session_id} AutoWork revision must be an unsigned integer"
+            ))
+        })?),
+        Some(_) => {
+            return Err(AppError::Conflict(format!(
+                "AgentSession {session_id} AutoWork revision must be an unsigned integer"
+            )));
+        }
+    };
+    let operation_id = match object.get("_operation_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),
+        Some(_) => {
+            return Err(AppError::Conflict(format!(
+                "AgentSession {session_id} AutoWork operation identity must be a non-empty string"
+            )));
+        }
+    };
+    let revision = match sequence {
+        Some(sequence) => format!("conversation:{sequence}"),
+        None => {
+            let fingerprint = serde_json::to_string(&config).map_err(|error| {
+                AppError::Internal(format!(
+                    "failed to fingerprint AutoWork config for {session_id}: {error}"
+                ))
+            })?;
+            format!(
+                "conversation:legacy:{:x}",
+                Sha256::digest(fingerprint.as_bytes())
+            )
+        }
+    };
+    Ok(nomifun_requirement::AutoWorkConfigSnapshot {
+        config,
+        revision,
+        operation_id,
     })
+}
+
+fn conversation_autowork_sequence(revision: &str) -> u64 {
+    revision
+        .strip_prefix("conversation:")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn session_projection_revision(session: &ConversationResponse) -> Result<String, AppError> {
+    let projection = json!({
+        "conversation_id": session.conversation_id,
+        "type": session.r#type,
+        "model": session.model,
+        "delegation_policy": session.delegation_policy,
+        "execution_model_pool": session.execution_model_pool,
+        "decision_policy": session.decision_policy,
+        "execution_template_id": session.execution_template_id,
+        "preset_id": session.preset_id,
+        "preset_revision": session.preset_revision,
+        "preset_snapshot": session.preset_snapshot,
+        "source": session.source,
+        "channel_chat_id": session.channel_chat_id,
+        "created_at": session.created_at,
+        "extra": session.extra,
+    });
+    let bytes = serde_json::to_vec(&projection).map_err(|error| {
+        AppError::Internal(format!(
+            "failed to fingerprint AgentSession {}: {error}",
+            session.conversation_id
+        ))
+    })?;
+    Ok(format!(
+        "session:{:x}",
+        Sha256::digest(bytes)
+    ))
+}
+
+#[cfg(test)]
+mod session_boundary_tests {
+    use super::{
+        companion_archive_message, conversation_autowork_config_snapshot,
+        conversation_autowork_sequence, session_projection_revision,
+    };
+    use nomifun_api_types::MessageResponse;
+    use nomifun_common::{
+        AgentType, ConversationSource, ConversationStatus, DecisionPolicy, DelegationPolicy,
+        MessagePosition, MessageType,
+    };
+    use serde_json::json;
+
+    const SESSION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
+
+    #[test]
+    fn conversation_autowork_config_has_stable_legacy_and_explicit_revisions() {
+        let legacy = json!({
+            "enabled": true,
+            "tag": "  release  ",
+            "max_requirements": 3,
+        });
+        let first =
+            conversation_autowork_config_snapshot(SESSION_ID, Some(&legacy)).unwrap();
+        let second =
+            conversation_autowork_config_snapshot(SESSION_ID, Some(&legacy)).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.config.tag.as_deref(), Some("release"));
+        assert!(first.revision.starts_with("conversation:legacy:"));
+
+        let versioned = json!({
+            "enabled": true,
+            "tag": "release",
+            "max_requirements": 3,
+            "_revision": 7,
+            "_operation_id": "gateway:request-7",
+        });
+        let snapshot =
+            conversation_autowork_config_snapshot(SESSION_ID, Some(&versioned)).unwrap();
+        assert_eq!(snapshot.revision, "conversation:7");
+        assert_eq!(
+            snapshot.operation_id.as_deref(),
+            Some("gateway:request-7")
+        );
+        assert_eq!(conversation_autowork_sequence(&snapshot.revision), 7);
+    }
+
+    #[test]
+    fn conversation_autowork_config_rejects_malformed_persisted_values() {
+        for raw in [
+            json!({"enabled": "yes", "tag": "release"}),
+            json!({"enabled": true, "tag": " \t "}),
+            json!({"enabled": true, "tag": "release", "_revision": -1}),
+            json!({"enabled": true, "tag": "release", "_operation_id": ""}),
+        ] {
+            assert!(
+                conversation_autowork_config_snapshot(SESSION_ID, Some(&raw)).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn companion_archive_projection_drops_non_dialogue_rows() {
+        let message = |r#type, position, hidden, content| MessageResponse {
+            message_id: "0190f5fe-7c00-7a00-8abc-000000000001".to_owned(),
+            conversation_id: SESSION_ID.to_owned(),
+            msg_id: None,
+            r#type,
+            content,
+            position,
+            status: None,
+            hidden,
+            created_at: 11,
+        };
+        assert_eq!(
+            companion_archive_message(
+                message(
+                    MessageType::Text,
+                    Some(MessagePosition::Right),
+                    false,
+                    json!({"content": "owner"}),
+                ),
+                10,
+            )
+            .map(|item| (item.is_user, item.content, item.created_at)),
+            Some((true, "owner".to_owned(), 11))
+        );
+        assert!(
+            companion_archive_message(
+                message(
+                    MessageType::ToolCall,
+                    Some(MessagePosition::Left),
+                    false,
+                    json!({"content": "tool"}),
+                ),
+                10,
+            )
+            .is_none()
+        );
+        assert!(
+            companion_archive_message(
+                message(
+                    MessageType::Text,
+                    Some(MessagePosition::Center),
+                    false,
+                    json!("system"),
+                ),
+                10,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn session_revision_ignores_presentation_only_changes() {
+        let mut base = super::ConversationResponse {
+            conversation_id: SESSION_ID.to_owned(),
+            name: "original".to_owned(),
+            r#type: AgentType::Nomi,
+            model: None,
+            status: ConversationStatus::Finished,
+            runtime: None,
+            source: Some(ConversationSource::Nomifun),
+            pinned: false,
+            pinned_at: None,
+            channel_chat_id: None,
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
+            delegation_policy: DelegationPolicy::Automatic,
+            execution_model_pool: None,
+            decision_policy: DecisionPolicy::Automatic,
+            execution_template_id: None,
+            linked_execution_id: None,
+            execution_step_id: None,
+            execution_attempt_id: None,
+            created_at: 1,
+            modified_at: 2,
+            extra: json!({"workspace": "C:/workspace"}),
+        };
+        let original = session_projection_revision(&base).unwrap();
+        base.name = "renamed".to_owned();
+        base.pinned = true;
+        base.pinned_at = Some(3);
+        base.modified_at = 4;
+        assert_eq!(session_projection_revision(&base).unwrap(), original);
+
+        base.extra["workspace"] = json!("C:/other");
+        assert_ne!(session_projection_revision(&base).unwrap(), original);
+    }
 }
 
 async fn wait_for_runtime_subscription(
