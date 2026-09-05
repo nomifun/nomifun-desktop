@@ -1,5 +1,4 @@
 import { agentPlatform, type IAgentSessionCapabilityState, type IAgentSessionObservation } from '@/common/adapter/ipcBridge';
-import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { ForkAgentSessionRequest } from '@/common/types/agentPlatform';
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
 import { Alert, Button, Input, Popconfirm, Spin, Tag } from '@arco-design/web-react';
@@ -7,6 +6,10 @@ import { ArrowLeft, Branch, Delete, PlayOne, Refresh } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams } from 'react-router-dom';
+import {
+  agentUiErrorMessage,
+  classifyAgentUiError,
+} from '../agentSettings/model';
 import { projectionCards } from './model';
 import SessionInspector from './SessionInspector';
 import SessionProjectionCard from './SessionProjectionCard';
@@ -26,9 +29,11 @@ const AgentSessionPage: React.FC = () => {
   const [input, setInput] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [deleted, setDeleted] = useState(false);
+  const [notFound, setNotFound] = useState(false);
 
   const load = useCallback(async () => {
-    if (!agentSessionId || deleted) return;
+    if (!agentSessionId || deleted || notFound) return;
+    setLoading(true);
     try {
       const [nextObservation, nextCapabilities] = await Promise.all([
         agentPlatform.sessions.get.invoke({ agent_session_id: agentSessionId }),
@@ -36,19 +41,30 @@ const AgentSessionPage: React.FC = () => {
       ]);
       setObservation(nextObservation);
       setCapabilities(nextCapabilities);
+      setNotFound(false);
       setError(null);
     } catch (loadError) {
-      if (isBackendHttpError(loadError) && loadError.code === 'SESSION_DELETED') {
+      const kind = classifyAgentUiError(loadError, 'session-load');
+      if (kind === 'session-deleted') {
         setDeleted(true);
-        setObservation(null);
-        setCapabilities(null);
+      } else if (kind === 'session-not-found') {
+        setNotFound(true);
       } else {
-        setError(String(loadError));
+        setError(agentUiErrorMessage(loadError, 'session-load'));
       }
     } finally {
       setLoading(false);
     }
-  }, [agentSessionId, deleted]);
+  }, [agentSessionId, deleted, notFound]);
+
+  useEffect(() => {
+    setDeleted(false);
+    setNotFound(false);
+    setObservation(null);
+    setCapabilities(null);
+    setError(null);
+    setLoading(true);
+  }, [agentSessionId]);
 
   useEffect(() => {
     void load();
@@ -66,7 +82,10 @@ const AgentSessionPage: React.FC = () => {
   );
 
   const sendTurn = useCallback(async () => {
-    if (!input.trim() || !observation) return;
+    const readOnly =
+      observation?.continuation?.history_read_only === true ||
+      observation?.continuation?.can_continue_same_session === false;
+    if (!input.trim() || !observation || readOnly) return;
     setBusy('turn');
     try {
       await agentPlatform.sessions.createTurn.invoke({
@@ -76,8 +95,8 @@ const AgentSessionPage: React.FC = () => {
       setInput('');
       await load();
     } catch (turnError) {
-      if (isBackendHttpError(turnError) && turnError.code === 'SESSION_DELETED') setDeleted(true);
-      else setError(String(turnError));
+      if (classifyAgentUiError(turnError, 'turn') === 'session-deleted') setDeleted(true);
+      else setError(agentUiErrorMessage(turnError, 'turn'));
     } finally {
       setBusy(null);
     }
@@ -98,8 +117,8 @@ const AgentSessionPage: React.FC = () => {
       });
       void navigate(`/agent-sessions/${result.child_agent_session_id}`);
     } catch (forkError) {
-      if (isBackendHttpError(forkError) && forkError.code === 'SESSION_DELETED') setDeleted(true);
-      else setError(String(forkError));
+      if (classifyAgentUiError(forkError, 'session-fork') === 'session-deleted') setDeleted(true);
+      else setError(agentUiErrorMessage(forkError, 'session-fork'));
     } finally {
       setBusy(null);
     }
@@ -116,8 +135,11 @@ const AgentSessionPage: React.FC = () => {
       setObservation(null);
       setCapabilities(null);
     } catch (deleteError) {
-      if (isBackendHttpError(deleteError) && deleteError.code === 'SESSION_DELETED') setDeleted(true);
-      else setError(String(deleteError));
+      if (classifyAgentUiError(deleteError, 'session-delete') === 'session-deleted') {
+        setDeleted(true);
+      } else {
+        setError(agentUiErrorMessage(deleteError, 'session-delete'));
+      }
     } finally {
       setBusy(null);
     }
@@ -128,7 +150,7 @@ const AgentSessionPage: React.FC = () => {
       <HubPageShell title={t('agentSettings.session.deletedTitle')} maxWidthClass='md:max-w-900px'>
         <div className={styles.deletedState}>
           <Delete theme='outline' size='28' />
-          <h2>SESSION_DELETED</h2>
+          <h2>{t('agentSettings.session.deletedTitle')}</h2>
           <p>{t('agentSettings.session.deletedBody')}</p>
           <Button type='primary' onClick={() => void navigate('/settings/agent-presets')}>
             {t('agentSettings.session.backToSettings')}
@@ -138,10 +160,37 @@ const AgentSessionPage: React.FC = () => {
     );
   }
 
+  if (notFound) {
+    return (
+      <HubPageShell title={t('agentSettings.session.title')} maxWidthClass='md:max-w-900px'>
+        <div className={styles.deletedState}>
+          <Delete theme='outline' size='28' />
+          <h2>{t('agentSettings.session.notFound', { defaultValue: 'Session unavailable' })}</h2>
+          <p>
+            {t('agentSettings.session.notFoundBody', {
+              defaultValue: 'This Session is no longer available. Return to Agent Settings and choose another setup.',
+            })}
+          </p>
+          <div className={styles.toolbar}>
+            <Button onClick={() => void navigate('/settings/agent-presets')}>
+              {t('agentSettings.session.backToSettings')}
+            </Button>
+            <Button type='primary' onClick={() => {
+              setNotFound(false);
+              setLoading(true);
+              void load();
+            }}>
+              {t('agentSettings.actions.retry')}
+            </Button>
+          </div>
+        </div>
+      </HubPageShell>
+    );
+  }
+
   return (
     <HubPageShell
       title={observation?.session.metadata.title || t('agentSettings.session.title')}
-      subtitle={agentSessionId}
       maxWidthClass='md:max-w-1400px'
       toolbar={
         <div className={styles.toolbar}>
@@ -167,15 +216,25 @@ const AgentSessionPage: React.FC = () => {
         <div className={styles.sessionGrid}>
           <main className={styles.transcript}>
             <div className={styles.statusBar}>
-              <Tag color={observation.head.status === 'ready' ? 'green' : 'blue'}>{observation.head.status}</Tag>
-              <span>{t('agentSettings.session.generation')}: {observation.head.active_set_generation}</span>
-              <span>{t('agentSettings.session.lastSeq')}: {observation.head.last_seq}</span>
+              <Tag color={observation.head.status === 'ready' ? 'green' : 'blue'}>
+                {observation.head.status}
+              </Tag>
+              {(observation.continuation?.history_read_only ||
+                observation.continuation?.can_continue_same_session === false) && (
+                <Tag color='orange'>
+                  {t('agentSettings.session.readOnly', {
+                    defaultValue: 'History is read-only',
+                  })}
+                </Tag>
+              )}
             </div>
             {observation.continuation?.requires_explicit_fork && (
               <Alert
                 type='warning'
                 showIcon
-                title='SNAPSHOT_EXECUTOR_UNAVAILABLE'
+                title={t('agentSettings.session.continuationUnavailable', {
+                  defaultValue: 'This setup needs a new Session',
+                })}
                 content={t('agentSettings.session.continuationRequired')}
               />
             )}
@@ -186,7 +245,11 @@ const AgentSessionPage: React.FC = () => {
             <div className={styles.composer}>
               <Input.TextArea
                 value={input}
-                disabled={observation.head.status !== 'ready'}
+                disabled={
+                  observation.head.status !== 'ready' ||
+                  observation.continuation?.history_read_only === true ||
+                  observation.continuation?.can_continue_same_session === false
+                }
                 placeholder={t('agentSettings.session.inputPlaceholder')}
                 autoSize={{ minRows: 2, maxRows: 6 }}
                 onChange={setInput}
@@ -195,7 +258,12 @@ const AgentSessionPage: React.FC = () => {
                 type='primary'
                 icon={<PlayOne size='15' />}
                 loading={busy === 'turn'}
-                disabled={observation.head.status !== 'ready' || !input.trim()}
+                disabled={
+                  observation.head.status !== 'ready' ||
+                  observation.continuation?.history_read_only === true ||
+                  observation.continuation?.can_continue_same_session === false ||
+                  !input.trim()
+                }
                 onClick={() => void sendTurn()}
               >
                 {t('agentSettings.session.send')}

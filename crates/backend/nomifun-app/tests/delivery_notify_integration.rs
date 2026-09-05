@@ -291,6 +291,7 @@ async fn build_stack(pool: nomifun_db::SqlitePool) -> Stack {
         Arc::clone(&recorder) as Arc<dyn ChannelSender>,
         ChannelStopConfirmationStore::new(),
         None,
+        tokio_util::sync::CancellationToken::new(),
     ));
     conversation_svc.with_turn_completion_observer(
         Arc::clone(&observer) as Arc<dyn TurnCompletionObserver>

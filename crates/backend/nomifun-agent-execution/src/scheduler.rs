@@ -37,6 +37,7 @@ use crate::control_steps::{self, ControlResolution};
 use crate::conversation_effect::{AttemptConversationEffects, PendingConversationEffect};
 use crate::domain_mapper;
 use crate::event_publisher::AgentExecutionEventPublisher;
+use crate::lifecycle::AgentExecutionLifecycle;
 
 pub(crate) const DEFAULT_MAX_PARALLEL: i64 = 4;
 pub(crate) const DEFAULT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -207,6 +208,7 @@ pub(crate) struct ExecutionSchedulerDeps {
     pub conversation_effects: Arc<dyn ConversationEffects>,
     pub data_dir: PathBuf,
     pub attempt_timeout: Duration,
+    pub lifecycle: AgentExecutionLifecycle,
 }
 
 impl ExecutionSchedulerDeps {
@@ -224,6 +226,7 @@ impl ExecutionSchedulerDeps {
             conversation_effects,
             data_dir,
             attempt_timeout: DEFAULT_ATTEMPT_TIMEOUT,
+            lifecycle: AgentExecutionLifecycle::new(),
         }
     }
 }
@@ -269,6 +272,9 @@ impl ExecutionScheduler {
     }
 
     pub fn start(&self, owner_id: String, execution_id: String) {
+        if self.inner.deps.lifecycle.is_cancelled() {
+            return;
+        }
         use dashmap::mapref::entry::Entry;
         let generation = generate_id();
         let (cancel, receiver) = watch::channel(false);
@@ -297,7 +303,8 @@ impl ExecutionScheduler {
                     lease: None,
                 });
                 let scheduler = self.clone();
-                tokio::spawn(async move {
+                let lifecycle = scheduler.inner.deps.lifecycle.clone();
+                lifecycle.spawn(async move {
                     if let Err(error) = scheduler
                         .execute_loop(
                             &owner_id,
@@ -533,6 +540,9 @@ impl ExecutionScheduler {
     }
 
     fn schedule_cleanup_reconciliation(&self) {
+        if self.inner.deps.lifecycle.is_cancelled() {
+            return;
+        }
         const KEY: &str = "all";
         if self
             .inner
@@ -543,10 +553,13 @@ impl ExecutionScheduler {
             return;
         }
         let scheduler = self.clone();
-        tokio::spawn(async move {
+        self.inner.deps.lifecycle.spawn(async move {
             let mut delay = EFFECT_RETRY_MIN;
             loop {
-                tokio::time::sleep(delay).await;
+                tokio::select! {
+                    _ = scheduler.inner.deps.lifecycle.cancelled() => break,
+                    _ = tokio::time::sleep(delay) => {}
+                }
                 if scheduler.reconcile_conversation_cleanup_once(None).await {
                     break;
                 }
@@ -696,6 +709,9 @@ impl ExecutionScheduler {
     }
 
     fn schedule_lead_report_reconciliation(&self, owner_id: String, execution_id: String) {
+        if self.inner.deps.lifecycle.is_cancelled() {
+            return;
+        }
         if self
             .inner
             .pending_lead_reports
@@ -705,10 +721,13 @@ impl ExecutionScheduler {
             return;
         }
         let scheduler = self.clone();
-        tokio::spawn(async move {
+        self.inner.deps.lifecycle.spawn(async move {
             let mut delay = EFFECT_RETRY_MIN;
             loop {
-                tokio::time::sleep(delay).await;
+                tokio::select! {
+                    _ = scheduler.inner.deps.lifecycle.cancelled() => break,
+                    _ = tokio::time::sleep(delay) => {}
+                }
                 let completed = match scheduler.detail(&owner_id, &execution_id).await {
                     Ok(detail) => match scheduler
                         .reconcile_lead_report_once(&owner_id, &detail)
@@ -838,7 +857,7 @@ impl ExecutionScheduler {
             let mut in_flight_step_ids = HashSet::new();
             let mut deferred_error: Option<AppError> = None;
             loop {
-                if *cancelled.borrow() {
+                if self.inner.deps.lifecycle.is_cancelled() || *cancelled.borrow() {
                     return Ok(SchedulerLoopExit::Normal);
                 }
                 if *lease_loss.borrow() {
@@ -864,6 +883,9 @@ impl ExecutionScheduler {
                             if changed.is_err() || *cancelled.borrow() {
                                 return Ok(SchedulerLoopExit::Normal);
                             }
+                        }
+                        _ = self.inner.deps.lifecycle.cancelled() => {
+                            return Ok(SchedulerLoopExit::Normal);
                         }
                         changed = lease_loss.changed() => {
                             if changed.is_err() || *lease_loss.borrow() {
@@ -950,6 +972,9 @@ impl ExecutionScheduler {
                                 return Ok(SchedulerLoopExit::Normal);
                             }
                         }
+                        _ = self.inner.deps.lifecycle.cancelled() => {
+                            return Ok(SchedulerLoopExit::Normal);
+                        }
                         changed = lease_loss.changed() => {
                             if changed.is_err() || *lease_loss.borrow() {
                                 return Ok(SchedulerLoopExit::LeaseLost);
@@ -971,6 +996,9 @@ impl ExecutionScheduler {
                             if changed.is_err() || *cancelled.borrow() {
                                 return Ok(SchedulerLoopExit::Normal);
                             }
+                        }
+                        _ = self.inner.deps.lifecycle.cancelled() => {
+                            return Ok(SchedulerLoopExit::Normal);
                         }
                         changed = lease_loss.changed() => {
                             if changed.is_err() || *lease_loss.borrow() {
@@ -1042,7 +1070,7 @@ impl ExecutionScheduler {
             self.inner.instance_id
         ));
         loop {
-            if *cancelled.borrow() {
+            if self.inner.deps.lifecycle.is_cancelled() || *cancelled.borrow() {
                 return Ok(None);
             }
             let row = match repository.get_execution(owner_id, execution_id).await {
@@ -1098,9 +1126,11 @@ impl ExecutionScheduler {
         lease_lost: watch::Sender<bool>,
     ) -> tokio::task::JoinHandle<()> {
         let repository = self.inner.deps.repository.clone();
-        tokio::spawn(async move {
+        let lifecycle = self.inner.deps.lifecycle.clone();
+        lifecycle.clone().spawn(async move {
             loop {
                 tokio::select! {
+                    _ = lifecycle.cancelled() => return,
                     changed = stopped.changed() => {
                         if changed.is_err() || *stopped.borrow() { return; }
                     }
@@ -1128,6 +1158,13 @@ impl ExecutionScheduler {
                 }
             }
         })
+    }
+
+    pub async fn shutdown(&self) -> Result<(), AppError> {
+        for handle in self.inner.active.iter() {
+            let _ = handle.cancel.send(true);
+        }
+        self.inner.deps.lifecycle.shutdown().await
     }
 
     async fn detail(&self, owner_id: &str, execution_id: &str) -> Result<AgentExecutionDetail, AppError> {

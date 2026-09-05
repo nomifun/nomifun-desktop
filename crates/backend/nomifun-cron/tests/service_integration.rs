@@ -17,12 +17,14 @@ use nomifun_ai_agent::AgentRegistry;
 use nomifun_ai_agent::runtime_handle::AgentRuntimeHandle;
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 use nomifun_api_types::{
-    CreateCronJobRequest, CronAgentConfigDto, CronScheduleDto, ListCronJobsQuery,
-    SaveCronSkillRequest, UpdateCronJobRequest, WebSocketMessage,
+    ConversationResponse, CreateConversationRequest, CreateCronJobRequest, CronAgentConfigDto,
+    CronScheduleDto, ListCronJobsQuery, ResolvedPresetSnapshot, SaveCronSkillRequest,
+    SendMessageRequest, UpdateCronJobRequest, WebSocketMessage,
 };
 use nomifun_common::{PaginatedResult, TimestampMs, now_ms};
 use nomifun_conversation::ConversationService;
 use nomifun_conversation::response_middleware::{CronCreateParams, CronUpdateParams};
+use nomifun_conversation::service::BackgroundTurnRuntimePreparation;
 use nomifun_db::{
     ConversationFilters, ConversationRowUpdate, IAgentMetadataRepository,
     IConversationRepository, ICronRepository, MessageRowUpdate, MessageSearchRow, SortOrder,
@@ -36,6 +38,11 @@ use nomifun_cron::events::CronEventEmitter;
 use nomifun_cron::executor::JobExecutor;
 use nomifun_cron::scheduler::CronScheduler;
 use nomifun_cron::service::CronService;
+use nomifun_cron::{
+    CronSessionPort, CronTurnDelivery, CronTurnReceiptState, CronTurnReconciliation,
+    CronTurnRequest, turn_delivery_from_conversation, turn_reconciliation_from_conversation,
+    turn_state_from_conversation,
+};
 use nomifun_cron::skill_file::{CRON_SKILLS_REL_DIR, SKILL_FILE_NAME, write_raw_skill_file};
 use nomifun_cron::types::JobStatus;
 
@@ -194,6 +201,182 @@ impl nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry for StubAgentRunti
     fn active_runtime_count(&self) -> usize {
         0
     }
+}
+
+/// Test-only host adapter for the integration fixture.
+///
+/// Production Cron receives its port from the app-owned NomiCore Session
+/// owner. This fixture deliberately keeps the old Conversation service behind
+/// the test boundary so the Cron service tests can exercise real SQLite
+/// receipt/reconciliation behavior without exporting that compatibility
+/// adapter from the production crate.
+struct TestCronSessionPort {
+    service: Arc<ConversationService>,
+    runtime_registry: Arc<dyn nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry>,
+}
+
+#[async_trait::async_trait]
+impl CronSessionPort for TestCronSessionPort {
+    async fn list_by_cron_job(
+        &self,
+        user_id: &str,
+        cron_job_id: &str,
+    ) -> Result<Vec<ConversationResponse>, nomifun_common::AppError> {
+        self.service.list_by_cron_job(user_id, cron_job_id).await
+    }
+
+    async fn public_turn_delivery_state(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        idempotency_key: &str,
+    ) -> Result<CronTurnReceiptState, nomifun_common::AppError> {
+        Ok(turn_state_from_conversation(self.service
+            .public_turn_delivery_state(user_id, session_id, idempotency_key)
+            .await?))
+    }
+
+    async fn reconcile_quiescent_running_turn(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        idempotency_key: &str,
+    ) -> Result<CronTurnReconciliation, nomifun_common::AppError> {
+        Ok(turn_reconciliation_from_conversation(self.service
+            .reconcile_quiescent_running_turn_for_background(
+                user_id,
+                session_id,
+                idempotency_key,
+                &self.runtime_registry,
+            )
+            .await?))
+    }
+
+    async fn create_idempotent(
+        &self,
+        user_id: &str,
+        request: CreateConversationRequest,
+        snapshot: Option<ResolvedPresetSnapshot>,
+        creation_key: &str,
+    ) -> Result<nomifun_cron::CronSessionHandle, nomifun_common::AppError> {
+        let response = match snapshot {
+            Some(snapshot) => {
+                self.service
+                    .create_from_preset_snapshot_idempotent(
+                        user_id,
+                        request,
+                        snapshot,
+                        creation_key,
+                    )
+                    .await
+            }
+            None => {
+                self.service
+                    .create_idempotent(user_id, request, creation_key)
+                    .await
+            }
+        }?;
+        nomifun_cron::session_handle_from_response(response)
+    }
+
+    async fn send_observed_turn(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        idempotency_key: &str,
+        turn: CronTurnRequest,
+    ) -> Result<CronTurnDelivery, nomifun_common::AppError> {
+        let build_lease = self
+            .service
+            .begin_public_runtime_preparation(session_id, user_id)?;
+        let session = self.service.get(user_id, session_id).await?;
+        build_lease.ensure_active()?;
+        let runtime_options =
+            test_runtime_options_from_session(user_id, session, turn.runtime_extra)?;
+        let observed = self.service
+            .send_observed_background_message_with_idempotency_key(
+                user_id,
+                session_id,
+                idempotency_key,
+                turn.message,
+                &self.runtime_registry,
+                build_lease,
+                BackgroundTurnRuntimePreparation {
+                    runtime_options,
+                    clear_context: turn.clear_context,
+                    pre_send_hook: None,
+                },
+            )
+            .await?;
+        Ok(turn_delivery_from_conversation(observed.delivery))
+    }
+
+    async fn delivery_result(
+        &self,
+        user_id: &str,
+        session_id: &str,
+        idempotency_key: &str,
+        request: &SendMessageRequest,
+    ) -> Result<Option<CronTurnDelivery>, nomifun_common::AppError> {
+        Ok(self.service
+            .idempotent_delivery_result_with_idempotency_key(
+                user_id,
+                session_id,
+                idempotency_key,
+                request,
+            )
+            .await?
+            .map(turn_delivery_from_conversation))
+    }
+}
+
+fn test_runtime_options_from_session(
+    user_id: &str,
+    session: ConversationResponse,
+    runtime_extra: serde_json::Value,
+) -> Result<AgentRuntimeBuildOptions, nomifun_common::AppError> {
+    let ConversationResponse {
+        conversation_id,
+        r#type: agent_type,
+        model,
+        delegation_policy,
+        created_at,
+        extra: mut session_extra,
+        ..
+    } = session;
+    let session_extra = session_extra.as_object_mut().ok_or_else(|| {
+        nomifun_common::AppError::Internal(format!(
+            "conversation {conversation_id} extra must be a JSON object"
+        ))
+    })?;
+    let runtime_extra = runtime_extra.as_object().ok_or_else(|| {
+        nomifun_common::AppError::BadRequest("Cron runtime extra must be a JSON object".to_owned())
+    })?;
+    for (key, value) in runtime_extra {
+        session_extra.insert(key.clone(), value.clone());
+    }
+    let workspace = session_extra
+        .get("workspace")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            nomifun_common::AppError::Internal(format!(
+                "conversation {conversation_id} has no canonical workspace"
+            ))
+        })?
+        .to_owned();
+    Ok(AgentRuntimeBuildOptions {
+        user_id: user_id.to_owned(),
+        agent_type,
+        workspace,
+        model,
+        conversation_id,
+        delegation_policy,
+        extra: session_extra.clone().into(),
+        conversation_created_at: Some(created_at),
+        workspace_binding_lease: None,
+    })
 }
 
 struct StubConvRepo {
@@ -964,10 +1147,10 @@ async fn setup_with_conv_repo() -> (
     let agent_registry = AgentRegistry::new(agent_metadata_repo);
     agent_registry.hydrate().await.unwrap();
     let busy_guard = Arc::new(CronBusyGuard::new());
-    let sessions = nomifun_cron::conversation_cron_session_port(
-        conv_service,
+    let sessions: Arc<dyn CronSessionPort> = Arc::new(TestCronSessionPort {
+        service: conv_service,
         runtime_registry,
-    );
+    });
     let executor = Arc::new(JobExecutor::new(
         Arc::<str>::from(TEST_USER_ID),
         sessions,

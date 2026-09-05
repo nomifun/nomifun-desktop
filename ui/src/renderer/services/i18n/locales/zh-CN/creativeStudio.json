@@ -2037,6 +2037,7 @@
       "reviewRequired": "生成前审核提示词",
       "save": "保存",
       "seriesPlanning": "多图提示词规划",
+      "size": "尺寸",
       "splitInstruction": "系列拆分要求",
       "splitPlaceholder": "说明每张图之间如何分工并保持连贯",
       "variableKeyPlaceholder": "变量名，例如 product_name",

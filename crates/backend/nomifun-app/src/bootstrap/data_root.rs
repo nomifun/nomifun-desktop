@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use nomifun_common::paths;
 use nomifun_v4_root::FreshV4OperationKind;
+use nomifun_v4_root::FRESH_V4_READY_MARKER_FILE;
 
 use super::boot_log::{BootNoteLevel, record_boot_note};
 
@@ -87,6 +88,60 @@ pub fn resolve_startup_data_root(requested: PathBuf) -> PathBuf {
         None => {}
     }
     canonical
+}
+
+/// Resolve the data root for the current Nomi-core desktop phase.
+///
+/// The Fresh-v4/Codex experiment may have already created a ready marker at
+/// the channel default.  The Nomi-core host must not open that database and
+/// must not archive or mutate it implicitly.  In that one case, use a sibling
+/// root for the Nomi-core dataset; an explicitly supplied custom root is left
+/// untouched and will fail closed if it is still a Fresh-v4 root.
+pub fn resolve_nomi_core_data_root(requested: PathBuf) -> PathBuf {
+    let canonical = normalize_requested_startup_data_root(requested);
+    if !is_known_default_location(&canonical) {
+        return canonical;
+    }
+
+    let marker = canonical.join(FRESH_V4_READY_MARKER_FILE);
+    let ready = match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) => metadata.is_file(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            record_boot_note(
+                BootNoteLevel::Warn,
+                format!(
+                    "could not inspect the Fresh-v4 marker for Nomi-core root {}: {error}",
+                    canonical.display()
+                ),
+            );
+            false
+        }
+    };
+    if !ready {
+        return canonical;
+    }
+
+    let nomi_root = isolated_nomi_core_root(&canonical);
+    record_boot_note(
+        BootNoteLevel::Warn,
+        format!(
+            "Fresh-v4 root detected at {}; Nomi-core desktop uses the isolated sibling {}",
+            canonical.display(),
+            nomi_root.display()
+        ),
+    );
+    nomi_root
+}
+
+fn isolated_nomi_core_root(canonical: &Path) -> PathBuf {
+    let parent = canonical.parent().unwrap_or_else(|| Path::new("."));
+    let basename = canonical
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty() && *value != "." && *value != "..")
+        .unwrap_or("NomiFun");
+    parent.join(format!("{basename}-nomi-core"))
 }
 
 fn is_expected_dev_contract_drift(error: &anyhow::Error) -> bool {
@@ -199,6 +254,15 @@ mod tests {
         assert_eq!(
             normalize_requested_startup_data_root(custom.clone()),
             custom
+        );
+    }
+
+    #[test]
+    fn ready_default_isolated_root_is_a_stable_sibling() {
+        let root = PathBuf::from(r"C:\Users\fixture\AppData\Local\NomiFun-dev");
+        assert_eq!(
+            isolated_nomi_core_root(&root),
+            PathBuf::from(r"C:\Users\fixture\AppData\Local\NomiFun-dev-nomi-core")
         );
     }
 

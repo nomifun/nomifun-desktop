@@ -136,6 +136,10 @@ path = "tests/mcp_crud_e2e.rs"
 name = "content_e2e_suite"
 path = "tests/suites/content.rs"
 
+[[test]]
+name = "nomi_core_route_gap"
+path = "tests/nomi_core_route_gap.rs"
+
 [features]
 default = ["telegram", "lark", "dingtalk", "weixin", "wecom", "discord", "matrix", "mattermost", "slack", "twitch", "nostr", "qqbot"]
 telegram = ["nomifun-channel/telegram"]

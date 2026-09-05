@@ -39,10 +39,26 @@ struct EditorQuery {
 }
 
 pub fn control_plane_router(control_plane: Arc<AgentControlPlane>) -> Router {
-    Router::new()
+    control_plane_router_with_legacy_skill_route(control_plane, true)
+}
+
+/// Build the control-plane routes without claiming the legacy `/api/skills`
+/// endpoint.  The current Nomi-core application still exposes the historical
+/// skill-management API at that path, so its canonical Agent Settings catalog
+/// uses `/api/agent-catalog/skills` instead.
+pub fn control_plane_router_without_legacy_skills(
+    control_plane: Arc<AgentControlPlane>,
+) -> Router {
+    control_plane_router_with_legacy_skill_route(control_plane, false)
+}
+
+fn control_plane_router_with_legacy_skill_route(
+    control_plane: Arc<AgentControlPlane>,
+    include_legacy_skill_route: bool,
+) -> Router {
+    let router = Router::new()
         .route("/api/agent-preset-templates", get(list_official_templates))
         .route("/api/capabilities", get(list_capabilities))
-        .route("/api/skills", get(list_skills))
         .route("/api/mcp-tool-mappings", get(list_mcp_tools))
         .route("/api/agent-presets", post(create_preset))
         .route(
@@ -80,8 +96,15 @@ pub fn control_plane_router(control_plane: Arc<AgentControlPlane>) -> Router {
         .route(
             "/api/remote-bindings/{binding_id}",
             put(update_remote_binding).delete(delete_remote_binding),
-        )
-        .with_state(control_plane)
+        );
+    let router = if include_legacy_skill_route {
+        router
+            .route("/api/skills", get(list_skills))
+            .route("/api/agent-catalog/skills", get(list_skills))
+    } else {
+        router.route("/api/agent-catalog/skills", get(list_skills))
+    };
+    router.with_state(control_plane)
 }
 
 async fn list_official_templates(

@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import {
+  CANONICAL_UUID_V7,
   InvalidEntityIdError,
   conversationTarget,
   isSameSessionTarget,
@@ -79,6 +80,14 @@ describe('entity ids', () => {
       expect(error instanceof InvalidEntityIdError).toBe(true);
     }
     expect(tryParseEntityId('conversation', null)).toBeNull();
+  });
+
+  test('rejects a canonical UUIDv7 followed by a trailing newline', () => {
+    const validConversation = '0190f5fe-7c00-7a00-8000-000000000001';
+    const value = `${validConversation}\n`;
+
+    expect(CANONICAL_UUID_V7.test(value)).toBe(false);
+    expectInvalidEntityId(() => parseConversationId(value));
   });
 
   test('rejects legacy prefixes and non-canonical UUID forms for every business kind', () => {

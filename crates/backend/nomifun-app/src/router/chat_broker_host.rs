@@ -275,7 +275,7 @@ impl ProductionProviderRepositoryPort for ProductionProviderRepository {
 /// one.  This explicit, versioned input contains every persisted field that
 /// can change the Chat wire request or its credential target, while excluding
 /// health observations and display-only timestamps.
-async fn provider_config_digest(
+pub(crate) async fn provider_config_digest(
     pool: &SqlitePool,
     provider_id: &ProviderIdRef,
 ) -> Result<DigestHex, ProductionRepositoryError> {

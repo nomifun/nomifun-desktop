@@ -156,12 +156,29 @@ pub fn conversation_companion_ports(
     service: Arc<ConversationService>,
     runtime_registry: Arc<dyn AgentRuntimeRegistry>,
 ) -> CompanionHostPorts {
-    let repo = service.conversation_repo().clone();
-    CompanionHostPorts {
-        sessions: Arc::new(ConversationCompanionSessionPort {
-            service: service.clone(),
+    companion_ports_with_session(
+        owner_id,
+        service.clone(),
+        Arc::new(ConversationCompanionSessionPort {
+            service,
             runtime_registry,
         }),
+    )
+}
+
+/// Build Companion's host ports from an already-composed Session owner.
+///
+/// Production Nomi-core assembly uses this entry point so the domain does not
+/// construct another Conversation-backed Session adapter. The archive and
+/// transcript readers remain small, read-only adapters over the same service.
+pub fn companion_ports_with_session(
+    owner_id: Arc<str>,
+    service: Arc<ConversationService>,
+    sessions: Arc<dyn CompanionSessionPort>,
+) -> CompanionHostPorts {
+    let repo = service.conversation_repo().clone();
+    CompanionHostPorts {
+        sessions,
         archive: Arc::new(ConversationArchivePort::new(owner_id, service)),
         transcript: Arc::new(ConversationTranscriptSource::new(repo)),
     }

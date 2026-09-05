@@ -32,6 +32,7 @@ mod terminal_turn;
 mod user;
 mod webhook;
 mod workshop;
+mod remote_binding;
 
 pub use agent_metadata::{AgentMetadataRow, UpdateAgentHandshakeParams, UpsertAgentMetadataParams};
 pub use agent_execution::*;
@@ -105,4 +106,7 @@ pub use webhook::WebhookRow;
 pub use workshop::{
     CreationTaskRow, CreativeStudioAgentProposalReceiptRow, CreativeStudioProjectRow,
     CreativeStudioTemplateRow, CreativeStudioTemplateRunRow, WorkshopAssetRow,
+};
+pub use remote_binding::{
+    NomiRemoteEventPage, NomiRemoteEventRow, NomiRemoteSessionRow, RemoteBindingRow,
 };

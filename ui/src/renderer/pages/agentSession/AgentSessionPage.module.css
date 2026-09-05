@@ -14,7 +14,7 @@
 .cardHeader strong { min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--color-text-1); font-size:11px; }
 .messageContent { margin-top:7px; color:var(--color-text-1); font-size:13px; line-height:1.65; white-space:pre-wrap; overflow-wrap:anywhere; }
 .detailCollapse,.inspectorCollapse { margin-top:7px; border:0; background:transparent; }
-.detailCollapse pre { max-height:260px; overflow:auto; margin:0; white-space:pre-wrap; font-size:11px; line-height:1.5; }
+.detailText { display:block; color:var(--color-text-2); font-size:11px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; }
 .composer { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:9px; align-items:end; border-top:1px solid var(--color-border-2); padding-top:12px; }
 .inspectorRows { display:flex; flex-direction:column; gap:7px; }
 .inspectorRows > div { display:grid; grid-template-columns:120px minmax(0,1fr); gap:8px; }

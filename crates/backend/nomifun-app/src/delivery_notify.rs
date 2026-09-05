@@ -25,10 +25,13 @@ use nomifun_channel::pending_decision::ChannelStopConfirmationStore;
 use nomifun_channel::stream_relay::{ChannelSender, ChannelStreamRelay, RelayConfig};
 use nomifun_channel::types::PluginType;
 use nomifun_common::AppError;
-use nomifun_conversation::{ConversationService, DELIVERY_NOTIFY_ORIGIN, TurnCompletionObserver};
+use nomifun_conversation::{
+    BackgroundTaskRegistrar, ConversationService, DELIVERY_NOTIFY_ORIGIN, TurnCompletionObserver,
+};
 use nomifun_db::IChannelRepository;
 use sha2::{Digest, Sha256};
 use tracing::{error, info, warn};
+use tokio_util::sync::CancellationToken;
 
 /// Spec: success receipts embed at most this many characters of result text.
 const RESULT_TEXT_LIMIT: usize = 1500;
@@ -48,6 +51,8 @@ pub struct DeliveryNotifyObserver {
     channel_sender: Arc<dyn ChannelSender>,
     stop_confirmations: Arc<ChannelStopConfirmationStore>,
     asset_resolver: Option<Arc<dyn AssetResolver>>,
+    shutdown: CancellationToken,
+    background_task_registrar: Option<Arc<dyn BackgroundTaskRegistrar>>,
 }
 
 impl DeliveryNotifyObserver {
@@ -60,6 +65,7 @@ impl DeliveryNotifyObserver {
         channel_sender: Arc<dyn ChannelSender>,
         stop_confirmations: Arc<ChannelStopConfirmationStore>,
         asset_resolver: Option<Arc<dyn AssetResolver>>,
+        shutdown: CancellationToken,
     ) -> Self {
         Self {
             conversation_service,
@@ -69,7 +75,17 @@ impl DeliveryNotifyObserver {
             channel_sender,
             stop_confirmations,
             asset_resolver,
+            shutdown,
+            background_task_registrar: None,
         }
+    }
+
+    pub fn with_background_task_registrar(
+        mut self,
+        registrar: Arc<dyn BackgroundTaskRegistrar>,
+    ) -> Self {
+        self.background_task_registrar = Some(registrar);
+        self
     }
 
     /// Inject the receipt into the requester session (bounded busy retries),
@@ -83,6 +99,11 @@ impl DeliveryNotifyObserver {
         let idempotency_key = delivery_notify_idempotency_key(operation_id);
         let mut delay = BUSY_RETRY_INITIAL_DELAY;
         for attempt in 1..=BUSY_RETRY_ATTEMPTS {
+            if self.shutdown.is_cancelled() {
+                return Err(AppError::Conflict(
+                    "delivery-notify was cancelled during application shutdown".to_owned(),
+                ));
+            }
             let req = SendMessageRequest {
                 content: content.clone(),
                 files: vec![],
@@ -120,7 +141,14 @@ impl DeliveryNotifyObserver {
                 // The requester session is momentarily busy — the receipt is
                 // worth a short bounded wait (the fixed key keeps this safe).
                 Err(AppError::Conflict(_)) if attempt < BUSY_RETRY_ATTEMPTS => {
-                    tokio::time::sleep(delay).await;
+                    tokio::select! {
+                        _ = self.shutdown.cancelled() => {
+                            return Err(AppError::Conflict(
+                                "delivery-notify was cancelled during application shutdown".to_owned(),
+                            ));
+                        }
+                        _ = tokio::time::sleep(delay) => {}
+                    }
                     delay = (delay * 2).min(BUSY_RETRY_MAX_DELAY);
                 }
                 Err(e) => return Err(e),
@@ -165,6 +193,9 @@ impl DeliveryNotifyObserver {
         // right after the keyed send catches the receipt turn's stream.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let rx = loop {
+            if self.shutdown.is_cancelled() {
+                return;
+            }
             if let Some(handle) = self.runtime_registry.get_runtime(requester_conversation_id) {
                 break handle.subscribe();
             }
@@ -175,7 +206,10 @@ impl DeliveryNotifyObserver {
                 );
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::select! {
+                _ = self.shutdown.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
         };
         let relay = ChannelStreamRelay::new(
             RelayConfig {
@@ -189,7 +223,16 @@ impl DeliveryNotifyObserver {
             Arc::clone(&self.stop_confirmations),
             self.asset_resolver.clone(),
         );
-        tokio::spawn(relay.run(rx));
+        let shutdown = self.shutdown.clone();
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown.cancelled() => {}
+                _ = relay.run(rx) => {}
+            }
+        });
+        if let Some(registrar) = self.background_task_registrar.as_ref() {
+            registrar.register(task);
+        }
     }
 }
 
@@ -203,6 +246,9 @@ impl TurnCompletionObserver for DeliveryNotifyObserver {
         result_text: Option<&str>,
         result_error_code: Option<&str>,
     ) {
+        if self.shutdown.is_cancelled() {
+            return;
+        }
         // Single-winner claim: a duplicate completion (replayed finalization)
         // observes None and delivers nothing twice.
         let registration = match self

@@ -54,6 +54,7 @@ use crate::domain_mapper;
 use crate::event_publisher::{
     AgentExecutionEventPublisher, LeadThinkingKind, LeadThinkingPhase,
 };
+use crate::lifecycle::AgentExecutionLifecycle;
 use crate::participant_resolver::ParticipantResolver;
 use crate::participant_router::score_participant;
 use crate::plan_materializer::{self, MaterializedPlan};
@@ -143,6 +144,7 @@ pub(crate) struct AgentExecutionEngineDeps {
     pub(crate) data_dir: PathBuf,
     pub(crate) conversation_effects: Arc<dyn ConversationEffects>,
     pub(crate) attempt_timeout: Duration,
+    pub(crate) lifecycle: AgentExecutionLifecycle,
 }
 
 impl AgentExecutionEngineDeps {
@@ -161,6 +163,7 @@ impl AgentExecutionEngineDeps {
         conversation_effects: Arc<dyn ConversationEffects>,
         publisher: AgentExecutionEventPublisher,
         data_dir: PathBuf,
+        lifecycle: AgentExecutionLifecycle,
     ) -> Self {
         Self {
             repository,
@@ -175,6 +178,7 @@ impl AgentExecutionEngineDeps {
             data_dir,
             conversation_effects,
             attempt_timeout: DEFAULT_ATTEMPT_TIMEOUT,
+            lifecycle,
         }
     }
 }
@@ -188,6 +192,7 @@ pub struct AgentExecutionEngine {
     planner: Arc<dyn PlanProducer>,
     publisher: AgentExecutionEventPublisher,
     scheduler: ExecutionScheduler,
+    lifecycle: AgentExecutionLifecycle,
 }
 
 impl AgentExecutionEngine {
@@ -206,6 +211,7 @@ impl AgentExecutionEngine {
             deps.data_dir,
         );
         scheduler_deps.attempt_timeout = deps.attempt_timeout;
+        scheduler_deps.lifecycle = deps.lifecycle.clone();
         Self {
             repository: deps.repository,
             template_repository: deps.template_repository,
@@ -214,7 +220,31 @@ impl AgentExecutionEngine {
             planner: deps.planner,
             publisher: deps.publisher,
             scheduler: ExecutionScheduler::new(scheduler_deps),
+            lifecycle: deps.lifecycle,
         }
+    }
+
+    /// Stop and join every background task owned by this engine composition.
+    pub async fn shutdown(&self) -> Result<(), AppError> {
+        self.scheduler.shutdown().await
+    }
+
+    /// Start boot recovery under the same lifecycle tracker as scheduler and
+    /// outbox tasks.
+    pub fn spawn_recovery(self: &Arc<Self>) {
+        if self.lifecycle.is_cancelled() {
+            return;
+        }
+        let engine = Arc::clone(self);
+        self.lifecycle.clone().spawn(async move {
+            let result = tokio::select! {
+                _ = engine.lifecycle.cancelled() => return,
+                result = engine.recover() => result,
+            };
+            if let Err(error) = result {
+                tracing::error!(%error, "Agent Execution recovery failed");
+            }
+        });
     }
 
     pub async fn create(
@@ -2426,6 +2456,9 @@ impl AgentExecutionEngine {
     }
 
     pub async fn recover(&self) -> Result<(), AppError> {
+        if self.lifecycle.is_cancelled() {
+            return Ok(());
+        }
         let statuses = [
             AgentExecutionStatus::Planning,
             AgentExecutionStatus::Running,
@@ -2466,13 +2499,22 @@ impl AgentExecutionEngine {
     }
 
     fn spawn_initial_plan(&self, owner_id: String, execution_id: String) {
+        if self.lifecycle.is_cancelled() {
+            return;
+        }
         let engine = self.clone();
-        tokio::spawn(async move {
-            if let Err(error) = engine.plan_initial(&owner_id, &execution_id).await {
+        self.lifecycle.spawn(async move {
+            let result = tokio::select! {
+                _ = engine.lifecycle.cancelled() => return,
+                result = engine.plan_initial(&owner_id, &execution_id) => result,
+            };
+            if let Err(error) = result {
                 tracing::error!(%execution_id, %error, "Agent Execution planning failed");
-                engine
-                    .fail_planning(&owner_id, &execution_id, &error.to_string())
-                    .await;
+                if !engine.lifecycle.is_cancelled() {
+                    engine
+                        .fail_planning(&owner_id, &execution_id, &error.to_string())
+                        .await;
+                }
             }
         });
     }

@@ -6,7 +6,9 @@ use std::time::Duration;
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 #[cfg(test)]
 use nomifun_ai_agent::types::SendMessageData;
-use nomifun_ai_agent::{AgentRegistry, AgentStreamEvent};
+use nomifun_ai_agent::AgentRegistry;
+#[cfg(test)]
+use nomifun_ai_agent::AgentStreamEvent;
 #[cfg(test)]
 use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
 use nomifun_api_types::{CreateConversationRequest, SendMessageRequest};
@@ -16,17 +18,9 @@ use nomifun_common::{
 };
 #[cfg(test)]
 use nomifun_conversation::ConversationService;
-use nomifun_conversation::{
-    IdempotentMessageDelivery,
-    service::{
-        BackgroundTurnReconciliationDisposition, ObservedIdempotentMessageDelivery,
-        PublicTurnDeliveryState,
-    },
-};
 use nomifun_db::models::MessageRow;
 use nomifun_db::{ConversationRowUpdate, IConversationRepository};
 use nomifun_realtime::UserEventSink;
-use tokio::sync::broadcast;
 #[cfg(test)]
 use tokio::time::timeout;
 use tracing::{error, info, warn};
@@ -38,7 +32,10 @@ use crate::prompt::{
     build_existing_conversation_prompt, build_new_conversation_prompt,
     build_new_conversation_prompt_with_skill_suggest, build_new_conversation_with_skill_prompt,
 };
-use crate::session_port::{CronSessionPort, CronTurnRequest};
+use crate::session_port::{
+    CronSessionHandle, CronSessionPort, CronTurnDelivery, CronTurnReceiptState,
+    CronTurnReconciliation, CronTurnRequest,
+};
 use crate::skill_file::{
     cron_skill_name, validate_skill_content, write_raw_skill_file,
 };
@@ -47,6 +44,9 @@ use crate::types::{CronJob, ExecutionMode, cron_job_to_row};
 
 pub const RETRY_INTERVAL_MS: u64 = 30_000;
 const DURABLE_RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const DURABLE_RECEIPT_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+const DURABLE_RECEIPT_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
+const DURABLE_RECEIPT_WAIT_TIMEOUT: Duration = Duration::from_secs(3600);
 const TEMP_WORKSPACE_ID_EXTRA_KEY: &str = "temp_workspace_id";
 
 fn parse_conversation_id(id: &str) -> Result<&str, AppError> {
@@ -378,7 +378,7 @@ impl JobExecutor {
         user_id: &str,
         conversation_id: &str,
         run_id: &str,
-    ) -> Result<PublicTurnDeliveryState, AppError> {
+    ) -> Result<CronTurnReceiptState, AppError> {
         self.sessions
             .public_turn_delivery_state(
                 user_id,
@@ -395,7 +395,7 @@ impl JobExecutor {
         user_id: &str,
         conversation_id: &str,
         run_id: &str,
-    ) -> Result<BackgroundTurnReconciliationDisposition, AppError> {
+    ) -> Result<CronTurnReconciliation, AppError> {
         self.sessions
             .reconcile_quiescent_running_turn(
                 user_id,
@@ -489,25 +489,19 @@ impl JobExecutor {
             .agent_config
             .as_ref()
             .and_then(|config| config.preset_snapshot.clone());
-        let response = self
+        let session = self
             .sessions
             .create_idempotent(&job.user_id, req, snapshot, &creation_key)
             .await
             .map_err(CronError::from_conversation_create)?;
-        // Preserve the canonical conversation entity ID through all cron
-        // workspace and persistence boundaries.
-        let conversation_id = response.conversation_id;
-
-        let response_workspace = response
-            .extra
-            .get("workspace")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .unwrap_or_default();
-
+        let CronSessionHandle {
+            agent_session_id,
+            workspace: response_workspace,
+        } = session;
+        let conversation_id = agent_session_id.as_ref().to_owned();
         if response_workspace.is_empty() {
             return Err(CronError::Scheduler(format!(
-                "new conversation {conversation_id} did not persist a canonical managed workspace"
+                "new AgentSession {conversation_id} did not persist a canonical workspace"
             )));
         }
 
@@ -694,8 +688,6 @@ impl JobExecutor {
                             run_id,
                             conversation_id,
                             &turn_key,
-                            &receipt_req,
-                            None,
                         )
                         .await
                     {
@@ -794,8 +786,6 @@ impl JobExecutor {
                             run_id,
                             conversation_id,
                             &turn_key,
-                            &receipt_req,
-                            None,
                         )
                         .await
                     {
@@ -810,11 +800,7 @@ impl JobExecutor {
                 return replayed_delivery_result(run_id, conversation_id, delivery);
             }
         };
-        let ObservedIdempotentMessageDelivery {
-            delivery,
-            runtime: _runtime,
-            events,
-        } = observed;
+        let delivery = observed;
         if delivery.replayed {
             info!(
                 job_id = %job.cron_job_id,
@@ -842,8 +828,6 @@ impl JobExecutor {
                         run_id,
                         conversation_id,
                         &turn_key,
-                        &receipt_req,
-                        events,
                     )
                     .await
                 {
@@ -867,8 +851,7 @@ impl JobExecutor {
                     run_id,
                     conversation_id,
                     &turn_key,
-                    &receipt_req,
-                    events,
+
                 )
                 .await
             {
@@ -924,7 +907,31 @@ impl JobExecutor {
         turn_key: &str,
         request: &SendMessageRequest,
         phase: &'static str,
-    ) -> Result<Option<IdempotentMessageDelivery>, ExecutionResult> {
+    ) -> Result<Option<CronTurnDelivery>, ExecutionResult> {
+        self.probe_durable_turn_delivery_until_known_timed(
+            job,
+            run_id,
+            conversation_id,
+            turn_key,
+            request,
+            phase,
+            DURABLE_RECEIPT_PROBE_TIMEOUT,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn probe_durable_turn_delivery_until_known_timed(
+        &self,
+        job: &CronJob,
+        run_id: &str,
+        conversation_id: &str,
+        turn_key: &str,
+        request: &SendMessageRequest,
+        phase: &'static str,
+        timeout: Duration,
+    ) -> Result<Option<CronTurnDelivery>, ExecutionResult> {
+        let probe = async {
         let mut retry_delay = Duration::from_millis(25);
         loop {
             match self
@@ -959,6 +966,17 @@ impl JobExecutor {
                 }
             }
         }
+        };
+        match tokio::time::timeout(timeout, probe).await {
+            Ok(result) => result,
+            Err(_) => Err(ExecutionResult::Quarantined {
+                message: format!(
+                    "cron run {run_id} exact turn receipt probe {phase} exceeded its {} second \
+                     deadline; the run remains non-terminal for review",
+                    timeout.as_secs()
+                ),
+            }),
+        }
     }
 
     async fn reconcile_accepted_turn_before_wait(
@@ -968,6 +986,25 @@ impl JobExecutor {
         conversation_id: &str,
         turn_key: &str,
     ) -> Result<(), ExecutionResult> {
+        self.reconcile_accepted_turn_before_wait_timed(
+            job,
+            run_id,
+            conversation_id,
+            turn_key,
+            DURABLE_RECEIPT_RECONCILE_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn reconcile_accepted_turn_before_wait_timed(
+        &self,
+        job: &CronJob,
+        run_id: &str,
+        conversation_id: &str,
+        turn_key: &str,
+        timeout: Duration,
+    ) -> Result<(), ExecutionResult> {
+        let reconcile = async {
         let mut retry_delay = Duration::from_millis(25);
         loop {
             match self
@@ -980,11 +1017,11 @@ impl JobExecutor {
                 .await
             {
                 Ok(
-                    BackgroundTurnReconciliationDisposition::LiveExactOwnerWait
-                    | BackgroundTurnReconciliationDisposition::ReconciledOrTerminalReRead,
+                    CronTurnReconciliation::LiveExactOwnerWait
+                    | CronTurnReconciliation::ReconciledOrTerminalReRead,
                 ) => return Ok(()),
                 Ok(
-                    BackgroundTurnReconciliationDisposition::ExternalProofRequiredFailClosed,
+                    CronTurnReconciliation::ExternalProofRequiredFailClosed,
                 ) => {
                     return Err(ExecutionResult::Quarantined {
                         message: format!(
@@ -992,7 +1029,7 @@ impl JobExecutor {
                         ),
                     });
                 }
-                Ok(BackgroundTurnReconciliationDisposition::StaleConflict) => {
+                Ok(CronTurnReconciliation::StaleConflict) => {
                     return Err(ExecutionResult::Quarantined {
                         message: format!(
                             "cron run {run_id} has an accepted Conversation receipt that no longer matches the exact active turn generation"
@@ -1019,6 +1056,17 @@ impl JobExecutor {
                 }
             }
         }
+        };
+        match tokio::time::timeout(timeout, reconcile).await {
+            Ok(result) => result,
+            Err(_) => Err(ExecutionResult::Quarantined {
+                message: format!(
+                    "cron run {run_id} accepted turn reconciliation exceeded its {} second \
+                     deadline; the run remains non-terminal for review",
+                    timeout.as_secs()
+                ),
+            }),
+        }
     }
 
     async fn await_durable_turn_completion(
@@ -1027,43 +1075,57 @@ impl JobExecutor {
         run_id: &str,
         conversation_id: &str,
         turn_key: &str,
-        request: &SendMessageRequest,
-        mut events: Option<broadcast::Receiver<AgentStreamEvent>>,
-    ) -> Result<IdempotentMessageDelivery, AppError> {
+    ) -> Result<CronTurnDelivery, AppError> {
+        self.await_durable_turn_completion_timed(
+            job,
+            run_id,
+            conversation_id,
+            turn_key,
+            DURABLE_RECEIPT_WAIT_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn await_durable_turn_completion_timed(
+        &self,
+        job: &CronJob,
+        run_id: &str,
+        conversation_id: &str,
+        turn_key: &str,
+        timeout: Duration,
+    ) -> Result<CronTurnDelivery, AppError> {
+        let wait = async {
         let mut consecutive_probe_failures = 0_u64;
         loop {
             match self
                 .sessions
-                .delivery_result(
+                .public_turn_delivery_state(
                     &job.user_id,
                     conversation_id,
                     turn_key,
-                    request,
                 )
                 .await
             {
-                Ok(Some(delivery)) => {
+                Ok(CronTurnReceiptState::Completed(delivery)) => {
+                    if !delivery.completed {
+                        return Err(AppError::Conflict(format!(
+                            "cron run {run_id} received a completed turn state without terminal delivery proof"
+                        )));
+                    }
+                    return Ok(delivery);
+                }
+                Ok(CronTurnReceiptState::Accepted { .. }) => {
                     consecutive_probe_failures = 0;
-                    if delivery.completed {
-                        return Ok(delivery);
-                    }
                 }
-                Ok(None) => {
-                    consecutive_probe_failures =
-                        consecutive_probe_failures.saturating_add(1);
-                    if consecutive_probe_failures == 1
-                        || consecutive_probe_failures.is_multiple_of(100)
-                    {
-                        warn!(
-                            job_id = %job.cron_job_id,
-                            run_id,
-                            conversation_id,
-                            consecutive_probe_failures,
-                            "Accepted Cron turn receipt is temporarily unavailable; retaining the Cron run as non-terminal"
-                        );
-                    }
+                Ok(CronTurnReceiptState::Missing) => {
+                    // Once admission has returned an accepted receipt, its
+                    // disappearance is loss of the exact operation authority,
+                    // not evidence that the model became idle or finished.
+                    return Err(AppError::Conflict(format!(
+                        "cron run {run_id} lost its accepted exact durable turn receipt"
+                    )));
                 }
-                Err(error) => {
+                Err(error) if background_reconciliation_error_is_retryable(&error) => {
                     consecutive_probe_failures =
                         consecutive_probe_failures.saturating_add(1);
                     if consecutive_probe_failures == 1
@@ -1079,38 +1141,19 @@ impl JobExecutor {
                         );
                     }
                 }
+                Err(error) => return Err(error),
             }
 
-            if let Some(receiver) = events.as_mut() {
-                tokio::select! {
-                    event = receiver.recv() => {
-                        match event {
-                            Ok(AgentStreamEvent::Finish(_))
-                            | Ok(AgentStreamEvent::Error(_))
-                            | Err(broadcast::error::RecvError::Closed) => {
-                                // The receipt is authoritative. A terminal stream
-                                // event only prompts an immediate re-read because
-                                // atomic DB finalization may complete just after it.
-                                events = None;
-                            }
-                            Ok(_) => {}
-                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                                warn!(
-                                    job_id = %job.cron_job_id,
-                                    run_id,
-                                    conversation_id,
-                                    skipped,
-                                    "Cron turn event stream lagged; continuing from durable receipt"
-                                );
-                                events = None;
-                            }
-                        }
-                    }
-                    _ = tokio::time::sleep(DURABLE_RECEIPT_POLL_INTERVAL) => {}
-                }
-            } else {
-                tokio::time::sleep(DURABLE_RECEIPT_POLL_INTERVAL).await;
-            }
+            tokio::time::sleep(DURABLE_RECEIPT_POLL_INTERVAL).await;
+        }
+        };
+        match tokio::time::timeout(timeout, wait).await {
+            Ok(result) => result,
+            Err(_) => Err(AppError::Timeout(format!(
+                "cron run {run_id} exceeded its durable turn receipt deadline of {} seconds; \
+                 terminal outcome remains unknown and the run must be reviewed",
+                timeout.as_secs()
+            ))),
         }
     }
 
@@ -1465,7 +1508,7 @@ fn build_cron_send_request(prompt: &str, skill_names: &[String]) -> SendMessageR
 fn replayed_delivery_result(
     run_id: &str,
     conversation_id: &str,
-    delivery: IdempotentMessageDelivery,
+    delivery: CronTurnDelivery,
 ) -> ExecutionResult {
     if !delivery.completed {
         return ExecutionResult::Quarantined {
@@ -1724,6 +1767,19 @@ mod tests {
         .expect("agent send should complete");
     }
 
+    async fn wait_for_receipt_probe(repo: &MissingWorkspaceConversationRepo) {
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if repo.receipt_reads() > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("durable receipt probe should complete");
+    }
+
     #[test]
     fn replayed_delivery_result_requires_an_explicit_completed_success() {
         const RUN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000201";
@@ -1799,7 +1855,7 @@ mod tests {
             let actual = replayed_delivery_result(
                 RUN_ID,
                 CONVERSATION_ID,
-                IdempotentMessageDelivery {
+                CronTurnDelivery {
                     message_id: "0190f5fe-7c00-7a00-8000-000000000203".to_owned(),
                     replayed: true,
                     completed: case.completed,
@@ -2598,8 +2654,7 @@ mod tests {
                 RUN_ID,
                 CONVERSATION_ID,
                 &turn_key,
-                &request,
-                None,
+
             ),
         )
         .await
@@ -2607,6 +2662,251 @@ mod tests {
         .expect("completed durable receipt");
         assert!(delivery.completed);
         assert_eq!(delivery.result_ok, Some(true));
+    }
+
+    #[tokio::test]
+    async fn repeated_receipt_probe_errors_hit_a_bounded_quarantine() {
+        const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
+        const RUN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000029";
+        let repo = Arc::new(MissingWorkspaceConversationRepo::new(
+            CONVERSATION_ID,
+            serde_json::json!({}),
+        ));
+        repo.fail_next_receipt_probes(usize::MAX);
+        let executor = make_executor_with_runtime_registry_and_repo(
+            Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
+                Arc::new(RecordingAgent::without_auto_finish(CONVERSATION_ID)),
+            ))),
+            repo,
+        );
+        let job = sample_job();
+        let request = build_cron_send_request(&build_prompt(&job, None, true), &[]);
+        let result = executor
+            .probe_durable_turn_delivery_until_known_timed(
+                &job,
+                RUN_ID,
+                CONVERSATION_ID,
+                &cron_turn_key(RUN_ID),
+                &request,
+                "during timeout regression",
+                Duration::from_millis(80),
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(ExecutionResult::Quarantined { message })
+                    if message.contains("receipt probe")
+                        && message.contains("deadline")
+            ),
+            "persistent receipt probe failures must stop at the configured deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn text_finish_and_idle_never_complete_without_terminal_receipt() {
+        const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
+        const RUN_ID: &str = "0190f5fe-7c00-7a00-8000-00000000002a";
+        let turn_key = format!("cron:{RUN_ID}:turn");
+        let receipt = ConversationDeliveryReceiptRow {
+            id: 1,
+            operation_id: format!(
+                "public-turn:v1:{USER_ID}:{CONVERSATION_ID}:{turn_key}"
+            ),
+            message_id: "0190f5fe-7c00-7a00-8000-00000000002b".into(),
+            conversation_id: CONVERSATION_ID.into(),
+            user_id: USER_ID.into(),
+            kind: "turn".into(),
+            request_payload: "{}".into(),
+            status: "accepted".into(),
+            result_ok: None,
+            result_text: None,
+            result_error: None,
+            result_error_code: None,
+            result_error_retryable: None,
+            created_at: 1,
+            updated_at: 1,
+            completed_at: None,
+            projected_conversation_id: Some(CONVERSATION_ID.into()),
+            projected_message_id: Some("0190f5fe-7c00-7a00-8000-00000000002b".into()),
+        };
+        let repo = Arc::new(
+            MissingWorkspaceConversationRepo::new(
+                CONVERSATION_ID,
+                serde_json::json!({}),
+            )
+            .with_delivery_receipt(receipt),
+        );
+        // A conversation projection becoming idle is not a turn terminal fact.
+        repo.mark_conversation_idle_without_terminal_receipt();
+        let agent = Arc::new(RecordingAgent::without_auto_finish(CONVERSATION_ID));
+        let executor = Arc::new(make_executor_with_runtime_registry_and_repo(
+            Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
+                agent.clone(),
+            ))),
+            repo.clone(),
+        ));
+        let job = sample_job();
+        let mut waiter = tokio::spawn({
+            let executor = Arc::clone(&executor);
+            async move {
+                executor
+                    .await_durable_turn_completion(
+                        &job,
+                        RUN_ID,
+                        CONVERSATION_ID,
+                        &turn_key,
+                    )
+                    .await
+            }
+        });
+
+        wait_for_receipt_probe(&repo).await;
+        // Ordinary model text followed by a stream Finish is only a wakeup.
+        // The fake Conversation receipt remains accepted.
+        agent.finish_successfully();
+        match timeout(Duration::from_millis(150), &mut waiter).await {
+            Err(_) => {}
+            Ok(result) => panic!(
+                "text/Finish and an idle projection must not imply durable completion: {result:?}"
+            ),
+        }
+
+        repo.complete_delivery_receipt_ok();
+        let delivery = timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("durable terminal receipt should release the waiter")
+            .expect("waiter task should complete")
+            .expect("completed receipt should be returned");
+        assert!(delivery.completed);
+        assert_eq!(delivery.result_ok, Some(true));
+    }
+
+    #[tokio::test]
+    async fn accepted_receipt_disappearance_is_quarantined_without_waiting_forever() {
+        const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
+        const RUN_ID: &str = "0190f5fe-7c00-7a00-8000-00000000002c";
+        let turn_key = format!("cron:{RUN_ID}:turn");
+        let receipt = ConversationDeliveryReceiptRow {
+            id: 1,
+            operation_id: format!(
+                "public-turn:v1:{USER_ID}:{CONVERSATION_ID}:{turn_key}"
+            ),
+            message_id: "0190f5fe-7c00-7a00-8000-00000000002d".into(),
+            conversation_id: CONVERSATION_ID.into(),
+            user_id: USER_ID.into(),
+            kind: "turn".into(),
+            request_payload: "{}".into(),
+            status: "accepted".into(),
+            result_ok: None,
+            result_text: None,
+            result_error: None,
+            result_error_code: None,
+            result_error_retryable: None,
+            created_at: 1,
+            updated_at: 1,
+            completed_at: None,
+            projected_conversation_id: Some(CONVERSATION_ID.into()),
+            projected_message_id: Some("0190f5fe-7c00-7a00-8000-00000000002d".into()),
+        };
+        let repo = Arc::new(
+            MissingWorkspaceConversationRepo::new(
+                CONVERSATION_ID,
+                serde_json::json!({}),
+            )
+            .with_delivery_receipt(receipt),
+        );
+        let executor = make_executor_with_runtime_registry_and_repo(
+            Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
+                Arc::new(RecordingAgent::without_auto_finish(CONVERSATION_ID)),
+            ))),
+            repo.clone(),
+        );
+        let job = sample_job();
+        let waiter = tokio::spawn(async move {
+            executor
+                .await_durable_turn_completion(
+                    &job,
+                    RUN_ID,
+                    CONVERSATION_ID,
+                    &turn_key,
+
+                )
+                .await
+        });
+
+        wait_for_receipt_probe(&repo).await;
+        repo.clear_delivery_receipt();
+        let error = timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("receipt loss must not leave an unbounded waiter")
+            .expect("waiter task should complete")
+            .expect_err("receipt loss must fail closed");
+        assert!(
+            matches!(&error, AppError::Conflict(message) if message.contains(
+                "lost its accepted exact durable turn receipt"
+            )),
+            "unexpected receipt-loss error: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_receipt_wait_has_a_hard_deadline_and_never_infers_completion() {
+        const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
+        const RUN_ID: &str = "0190f5fe-7c00-7a00-8000-00000000002e";
+        let turn_key = format!("cron:{RUN_ID}:turn");
+        let receipt = ConversationDeliveryReceiptRow {
+            id: 1,
+            operation_id: format!(
+                "public-turn:v1:{USER_ID}:{CONVERSATION_ID}:{turn_key}"
+            ),
+            message_id: "0190f5fe-7c00-7a00-8000-00000000002f".into(),
+            conversation_id: CONVERSATION_ID.into(),
+            user_id: USER_ID.into(),
+            kind: "turn".into(),
+            request_payload: "{}".into(),
+            status: "accepted".into(),
+            result_ok: None,
+            result_text: None,
+            result_error: None,
+            result_error_code: None,
+            result_error_retryable: None,
+            created_at: 1,
+            updated_at: 1,
+            completed_at: None,
+            projected_conversation_id: Some(CONVERSATION_ID.into()),
+            projected_message_id: Some("0190f5fe-7c00-7a00-8000-00000000002f".into()),
+        };
+        let repo = Arc::new(
+            MissingWorkspaceConversationRepo::new(
+                CONVERSATION_ID,
+                serde_json::json!({}),
+            )
+            .with_delivery_receipt(receipt),
+        );
+        let executor = make_executor_with_runtime_registry_and_repo(
+            Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
+                Arc::new(RecordingAgent::without_auto_finish(CONVERSATION_ID)),
+            ))),
+            repo,
+        );
+        let error = executor
+            .await_durable_turn_completion_timed(
+                &sample_job(),
+                RUN_ID,
+                CONVERSATION_ID,
+                &turn_key,
+
+                Duration::from_millis(35),
+            )
+            .await
+            .expect_err("an accepted receipt without a terminal fact must time out");
+        assert!(
+            matches!(error, AppError::Timeout(ref message) if message.contains(
+                "durable turn receipt deadline"
+            )),
+            "unexpected hard-deadline error: {error:?}"
+        );
     }
 
     #[tokio::test]
@@ -3337,7 +3637,7 @@ mod tests {
 
         let agent_registry = AgentRegistry::new(agent_metadata_repo);
         let sessions =
-            crate::conversation_cron_session_port(conv_service, runtime_registry);
+            crate::session_port::test_cron_session_port(conv_service, runtime_registry);
 
         JobExecutor::new(
             Arc::<str>::from(USER_ID),
@@ -4086,6 +4386,7 @@ mod tests {
         artifacts: Mutex<Vec<ConversationArtifactRow>>,
         turn: Mutex<TestTurnState>,
         receipt_probe_failures: AtomicUsize,
+        receipt_reads: AtomicUsize,
     }
 
     impl MissingWorkspaceConversationRepo {
@@ -4124,6 +4425,7 @@ mod tests {
                 artifacts: Mutex::new(Vec::new()),
                 turn: Mutex::new(TestTurnState::terminal()),
                 receipt_probe_failures: AtomicUsize::new(0),
+                receipt_reads: AtomicUsize::new(0),
             }
         }
 
@@ -4153,6 +4455,23 @@ mod tests {
             receipt.completed_at = Some(receipt.updated_at);
             turn.status = Some("finished".to_owned());
             turn.active_operation_id = None;
+        }
+
+        fn mark_conversation_idle_without_terminal_receipt(&self) {
+            let mut turn = self.turn.lock().expect("missing-workspace turn state");
+            turn.status = Some("finished".to_owned());
+            turn.active_operation_id = None;
+        }
+
+        fn clear_delivery_receipt(&self) {
+            self.turn
+                .lock()
+                .expect("missing-workspace turn state")
+                .delivery_receipt = None;
+        }
+
+        fn receipt_reads(&self) -> usize {
+            self.receipt_reads.load(Ordering::SeqCst)
         }
 
         fn fail_next_receipt_probes(&self, count: usize) {
@@ -4428,12 +4747,14 @@ mod tests {
                     "injected durable receipt probe failure".to_owned(),
                 ));
             }
-            Ok(test_get_delivery_receipt(
+            let receipt = test_get_delivery_receipt(
                 &self.turn,
                 user_id,
                 conversation_id,
                 operation_id,
-            ))
+            );
+            self.receipt_reads.fetch_add(1, Ordering::SeqCst);
+            Ok(receipt)
         }
 
         async fn claim_turn_delivery_receipt_and_admit_with_candidate(
@@ -4677,7 +4998,7 @@ mod tests {
 
         let agent_registry = AgentRegistry::new(agent_metadata_repo);
 
-        let sessions = crate::conversation_cron_session_port(
+        let sessions = crate::session_port::test_cron_session_port(
             conversation_service.clone(),
             runtime_registry,
         );

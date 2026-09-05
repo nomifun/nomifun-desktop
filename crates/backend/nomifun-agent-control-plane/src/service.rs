@@ -32,12 +32,30 @@ use crate::wire::wire_cast;
 const SETTINGS_SCENE: &str = "agent_settings";
 const SETTINGS_SURFACE: &str = "desktop";
 const SETTINGS_AUDIENCE: &str = "owner";
+const CHAT_MODEL_TASK: &str = nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT;
+
+/// Host-owned source for the initial Chat route shown by the product editor.
+///
+/// The control-plane contract deliberately does not know how a host stores
+/// provider credentials or model capabilities.  A host may inject this
+/// resolver to materialize a complete, opaque [`ChatRouteRecord`] when a new
+/// preset is created.  Returning `None` is an honest "no usable Chat route is
+/// configured" result; callers then receive the normal blocked preview rather
+/// than a fabricated route or a raw JSON escape hatch.
+#[async_trait::async_trait]
+pub trait DefaultChatRouteResolver: Send + Sync {
+    async fn resolve_default_chat_route(
+        &self,
+        owner: &UserId,
+    ) -> Result<Option<nomifun_agent_contracts::ChatRouteRecord>, ControlPlaneError>;
+}
 
 pub struct AgentControlPlane {
     store: Arc<dyn ControlPlaneStore>,
     catalog: Arc<dyn CatalogProvider>,
     templates: OfficialTemplateCatalog,
     compiler: PresetPreviewCompiler,
+    default_chat_route_resolver: Option<Arc<dyn DefaultChatRouteResolver>>,
 }
 
 impl AgentControlPlane {
@@ -52,7 +70,20 @@ impl AgentControlPlane {
             catalog,
             templates,
             compiler,
+            default_chat_route_resolver: None,
         }
+    }
+
+    /// Inject the host-owned Chat route materializer used for new product
+    /// presets.  The resolver is consulted only when the request contains no
+    /// Chat route at all; explicit route records remain caller-owned and are
+    /// validated by the canonical revision/compiler contract.
+    pub fn with_default_chat_route_resolver(
+        mut self,
+        resolver: Arc<dyn DefaultChatRouteResolver>,
+    ) -> Self {
+        self.default_chat_route_resolver = Some(resolver);
+        self
     }
 
     pub async fn library(
@@ -147,18 +178,36 @@ impl AgentControlPlane {
                 )
                 .await;
         }
-        let stored = StoredPreset {
-            preset: AgentPreset {
-                preset_id: preset_id.clone(),
-                owner_user_id: Some(owner.clone()),
-                source: AgentPresetSource::User,
-                display_name: display_name.clone(),
-                description: request.description.clone(),
-                current_stable_revision: None,
-            },
-        };
-        self.store.insert_preset(stored.clone()).await?;
-        editor_response(stored, None, empty_document(), None)
+        let document = self
+            .materialize_default_chat_route(owner, empty_document())
+            .await?;
+        if document.model_route_refs.is_empty() {
+            let stored = StoredPreset {
+                preset: AgentPreset {
+                    preset_id,
+                    owner_user_id: Some(owner.clone()),
+                    source: AgentPresetSource::User,
+                    display_name,
+                    description: request.description,
+                    current_stable_revision: None,
+                },
+            };
+            self.store.insert_preset(stored.clone()).await?;
+            return editor_response(stored, None, document, None);
+        }
+        // A host-provided default route is a real immutable initial Revision,
+        // not editor-only metadata.  This makes a newly-created product
+        // preset immediately selectable without asking the user to type route
+        // IDs or JSON.
+        self.create_with_initial_revision(
+            owner,
+            preset_id,
+            display_name,
+            request.description,
+            document,
+            None,
+        )
+        .await
     }
 
     pub async fn create_from_template(
@@ -176,6 +225,25 @@ impl AgentControlPlane {
         let display_name = nonempty_name(request.display_name)?;
         let resource_bindings =
             template_resource_bindings(owner, seed, request.resource_bindings)?;
+        let mut model_route_refs = request.model_route_refs;
+        let mut chat_route_records = request.chat_route_records;
+        if !model_route_refs.contains_key(CHAT_MODEL_TASK)
+            && !chat_route_records.contains_key(CHAT_MODEL_TASK)
+        {
+            if let Some(record) = self
+                .resolve_default_chat_route(owner)
+                .await?
+            {
+                model_route_refs.insert(
+                    CHAT_MODEL_TASK.to_owned(),
+                    record.primary.model_route_id.as_ref().to_owned(),
+                );
+                chat_route_records.insert(
+                    CHAT_MODEL_TASK.to_owned(),
+                    serde_json::to_value(record)?,
+                );
+            }
+        }
         let document = nomifun_api_types::AgentPresetDocumentDto {
             schema_version: "1.0.0".into(),
             surfaces: BTreeSet::from([
@@ -183,8 +251,8 @@ impl AgentControlPlane {
                 "remote".into(),
                 "web".into(),
             ]),
-            model_route_refs: request.model_route_refs,
-            chat_route_records: request.chat_route_records,
+            model_route_refs,
+            chat_route_records,
             initial_capabilities: seed
                 .initial_capabilities
                 .iter()
@@ -228,6 +296,44 @@ impl AgentControlPlane {
             Some(template_key),
         )
         .await
+    }
+
+    async fn resolve_default_chat_route(
+        &self,
+        owner: &UserId,
+    ) -> Result<Option<nomifun_agent_contracts::ChatRouteRecord>, ControlPlaneError> {
+        let Some(resolver) = &self.default_chat_route_resolver else {
+            return Ok(None);
+        };
+        let route = resolver.resolve_default_chat_route(owner).await?;
+        if let Some(route) = &route {
+            route.validate().map_err(|error| {
+                ControlPlaneError::canonical(
+                    "MODEL_ROUTE_RECORD_INVALID",
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("host default Chat route is invalid: {error}"),
+                )
+            })?;
+        }
+        Ok(route)
+    }
+
+    async fn materialize_default_chat_route(
+        &self,
+        owner: &UserId,
+        mut document: nomifun_api_types::AgentPresetDocumentDto,
+    ) -> Result<nomifun_api_types::AgentPresetDocumentDto, ControlPlaneError> {
+        if let Some(record) = self.resolve_default_chat_route(owner).await? {
+            document.model_route_refs.insert(
+                CHAT_MODEL_TASK.to_owned(),
+                record.primary.model_route_id.as_ref().to_owned(),
+            );
+            document.chat_route_records.insert(
+                CHAT_MODEL_TASK.to_owned(),
+                serde_json::to_value(record)?,
+            );
+        }
+        Ok(document)
     }
 
     pub async fn editor(
@@ -410,6 +516,34 @@ impl AgentControlPlane {
             .await?
             .ok_or_else(|| not_found("AgentPresetRevision"))?;
         revision_api(&revision)
+    }
+
+    /// Load the immutable Snapshot attached to one owner-scoped Preset
+    /// revision.  This is a read-only control-plane operation used by
+    /// Session/capability projections; it never resolves a newer catalog
+    /// revision or creates a second Snapshot.
+    pub async fn saved_snapshot(
+        &self,
+        owner: &UserId,
+        preset_id: &str,
+        revision_number: u64,
+    ) -> Result<nomifun_agent_contracts::ResolvedSnapshotEnvelope, ControlPlaneError> {
+        let stored = self.owned_preset(owner, preset_id).await?;
+        let revision = self
+            .store
+            .get_revision_number(&stored.preset.preset_id, revision_number)
+            .await?
+            .ok_or_else(|| not_found("AgentPresetRevision"))?;
+        self.store
+            .get_snapshot(&revision.reference)
+            .await?
+            .ok_or_else(|| {
+                ControlPlaneError::canonical(
+                    "CAPABILITY_NOT_MATERIALIZED",
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    "saved Agent Preset revision has no immutable Snapshot",
+                )
+            })
     }
 
     pub async fn preview_saved_revision(

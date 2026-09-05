@@ -8,7 +8,10 @@ use nomifun_common::{
 use nomifun_db::models::{ConversationRow, MessageRow};
 use serde::{Deserialize, Serialize};
 
-use super::{ConversationService, CreativeStudioAgentCreationTarget, parse_provider_with_model};
+use super::{
+    ConversationService, CreativeStudioAgentCreationTarget, TrustedSnapshotOrigin,
+    parse_provider_with_model,
+};
 
 const CREATIVE_STUDIO_PLANNING_TURN_KIND: &str =
     "nomifun.creative-studio.planning-turn";
@@ -462,6 +465,7 @@ impl ConversationService {
                         .clone(),
                     create_if_missing: request.pending_turn_idempotency_key.is_some(),
                 }),
+                TrustedSnapshotOrigin::LegacyPreset,
             )
             .await?;
 

@@ -28,18 +28,43 @@ import { MemoryRouter } from 'react-router-dom';
 import zhSettings from '@/renderer/services/i18n/locales/zh-CN/settings.json';
 import ModelHubPage from './index';
 
-// The resizable sider reads a persisted width during render. Its own try/catch
-// already falls back to the default, but without a stub every render prints a
-// `localStorage is not defined` stack that buries the real assertions.
-const store = new Map<string, string>();
-(globalThis as { localStorage?: unknown }).localStorage = {
-  getItem: (key: string) => store.get(key) ?? null,
-  setItem: (key: string, value: string) => void store.set(key, value),
-  removeItem: (key: string) => void store.delete(key),
-  clear: () => store.clear(),
-  key: () => null,
-  length: 0,
-};
+/**
+ * The resizable sider reads a persisted width during render. Keep the stub
+ * scoped to each SSR render: the full Bun suite may have installed happy-dom,
+ * whose `localStorage` global is a configurable getter without a setter.
+ * Assigning to it throws and, more importantly, a module-global replacement
+ * would leak this test's storage into unrelated UI files.
+ */
+function withTestLocalStorage<T>(run: () => T): T {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const store = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => void store.set(key, value),
+    removeItem: (key: string) => void store.delete(key),
+    clear: () => store.clear(),
+    key: (index: number) => [...store.keys()][index] ?? null,
+    get length() {
+      return store.size;
+    },
+  } as unknown as Storage;
+
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    enumerable: previous?.enumerable ?? false,
+    writable: true,
+    value: storage,
+  });
+  try {
+    return run();
+  } finally {
+    if (previous) {
+      Object.defineProperty(globalThis, 'localStorage', previous);
+    } else {
+      delete (globalThis as { localStorage?: Storage }).localStorage;
+    }
+  }
+}
 
 const testI18n = createInstance();
 await testI18n.use(initReactI18next).init({
@@ -72,12 +97,14 @@ const EXPECTED_ORDER = [
 ];
 
 const render = (initialEntry: string): string =>
-  renderToStaticMarkup(
-    <I18nextProvider i18n={testI18n}>
-      <MemoryRouter initialEntries={[initialEntry]}>
-        <ModelHubPage />
-      </MemoryRouter>
-    </I18nextProvider>
+  withTestLocalStorage(() =>
+    renderToStaticMarkup(
+      <I18nextProvider i18n={testI18n}>
+        <MemoryRouter initialEntries={[initialEntry]}>
+          <ModelHubPage />
+        </MemoryRouter>
+      </I18nextProvider>
+    )
   );
 
 describe('model hub sidebar renders', () => {

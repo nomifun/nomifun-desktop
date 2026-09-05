@@ -83,15 +83,20 @@ async fn embedded_server_selects_fresh_v4_host_before_any_legacy_data_layer() {
     let env = bootstrap::init_environment(&cli, "").unwrap();
     let host = env.canonical_host().unwrap();
     let application = host.compose(&env.config).await.unwrap();
-    assert_eq!(
-        application
-            .platform()
-            .materialized_registry()
-            .unwrap()
-            .capabilities
-            .len(),
-        137
-    );
+    let actual_capabilities = application
+        .platform()
+        .materialized_registry()
+        .unwrap()
+        .capabilities
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_capabilities = nomifun_agent_domain_support::c7_package_specs()
+        .into_iter()
+        .flat_map(|package| package.capabilities)
+        .map(|capability| nomifun_agent_contracts::CapabilityId::from(capability.id))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual_capabilities, expected_capabilities);
     application.close().await.unwrap();
     assert!(tmp.path().join(FRESH_V4_DATABASE_FILE).is_file());
     assert!(!tmp.path().join("nomifun-backend.db").exists());
@@ -99,7 +104,7 @@ async fn embedded_server_selects_fresh_v4_host_before_any_legacy_data_layer() {
 }
 
 #[tokio::test]
-async fn desktop_fresh_v4_startup_selects_host_before_legacy_data_layer() {
+async fn desktop_startup_uses_the_original_nomi_core() {
     let tmp = TempDir::new().unwrap();
     let work_parent = TempDir::new().unwrap();
     let work = work_parent.path().join("work");
@@ -120,10 +125,10 @@ async fn desktop_fresh_v4_startup_selects_host_before_legacy_data_layer() {
         None,
     )
     .await
-    .expect("Fresh-v4 desktop startup");
+    .expect("Nomi-core desktop startup");
     assert!(server.loopback_port() > 0);
     server.shutdown_all().await.unwrap();
-    assert!(tmp.path().join(FRESH_V4_DATABASE_FILE).is_file());
-    assert!(!tmp.path().join("nomifun-backend.db").exists());
-    assert!(!tmp.path().join("builtin-skills").exists());
+    assert!(!tmp.path().join(FRESH_V4_DATABASE_FILE).exists());
+    assert!(tmp.path().join("nomifun-backend.db").is_file());
+    assert!(tmp.path().join("builtin-skills").is_dir());
 }

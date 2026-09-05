@@ -21,18 +21,16 @@ fn main() -> Result<ExitCode> {
     // (so the bundled `bun` resolves through the same cache the server
     // uses) before falling through to PATH probing.
     //
-    // Server-shaped commands additionally resolve the effective data root:
-    // known self-export/default locations map onto the channel default and
-    // the one-shot legacy layout migration runs (`NomiFun/Nomi<suffix>` →
-    // `NomiFun<suffix>`). MCP helpers keep their inherited value verbatim —
-    // it is the parent backend's authoritative export, not a boot decision.
+    // Server-shaped commands resolve the current Nomi-core data root. A
+    // ready Fresh-v4 experiment at the channel default remains isolated and
+    // is never opened or mutated by the in-process Nomi host.
     let owns_data_root = matches!(
         cli.command,
         None | Some(Command::Doctor) | Some(Command::Backup { .. })
     );
     if owns_data_root {
         cli.data_dir =
-            bootstrap::resolve_startup_data_root(cli.data_dir.clone());
+            bootstrap::resolve_nomi_core_data_root(cli.data_dir.clone());
     }
     let needs_runtime = matches!(cli.command, None | Some(Command::Doctor));
     if needs_runtime {

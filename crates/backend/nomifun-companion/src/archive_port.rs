@@ -18,13 +18,13 @@ use crate::archiver::{ArchiveConversationPort, WindowMessage};
 /// bounded also bounds the initial boundary=0 archive pass.
 const FETCH_LIMIT: u32 = 400;
 
-pub struct ConversationArchivePort {
+pub(crate) struct ConversationArchivePort {
     authoritative_user_id: Arc<str>,
     conversations: Arc<ConversationService>,
 }
 
 impl ConversationArchivePort {
-    pub fn new(
+    pub(crate) fn new(
         authoritative_user_id: Arc<str>,
         conversations: Arc<ConversationService>,
     ) -> Self {

@@ -36,6 +36,7 @@
     "readOnly": "Official read-only template",
     "capabilityHint": "The frozen seed defines exact initial and on-demand capability versions. Fork it to edit.",
     "resourceHint": "Templates declare typed resource slots, never a specific user's resource IDs.",
+    "hostUnavailable": "This template includes capabilities that are unavailable on the current Nomi-core host. Forking stays blocked until a real owner is available.",
     "zeroToolTitle": "Exact zero-tool profile",
     "zeroToolBody": "No capability, Skill, MCP, workspace, Coding context, or hidden capability search is constructed.",
     "chat": {

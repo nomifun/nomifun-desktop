@@ -15,10 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use nomifun_ai_agent::{
-    AgentRuntimeRegistry,
-    artifact_store::{ArtifactStore, PersistedArtifact},
-};
+use nomifun_ai_agent::artifact_store::{ArtifactStore, PersistedArtifact};
 use nomifun_api_types::{
     ConversationResponse, CreateConversationRequest, ExecutionModelPool, ExecutionModelRef,
     ExecutionParticipant, ListMessagesQuery, MessageListResponse, MessageResponse,
@@ -29,7 +26,7 @@ use nomifun_common::{
     MAX_AGENT_DELEGATION_DEPTH, MessagePosition, MessageStatus, MessageType, ProviderId,
     ProviderWithModel,
 };
-use nomifun_conversation::{AgentExecutionConversationPort, ConversationService};
+use nomifun_conversation::IdempotentMessageDelivery;
 use nomifun_db::AgentExecutionTurnAuthority;
 use serde_json::{Value, json};
 
@@ -138,12 +135,12 @@ pub(crate) trait AttemptRunner: Send + Sync {
     }
 }
 
-/// Narrow, stateless session command/query surface used by Agent Execution.
+/// Narrow, stateless typed Session command/query surface used by Agent
+/// Execution.
 ///
 /// Implementations own no session facts and cannot mint a second identity.
 /// Durable turn authority remains with the canonical session owner. The
-/// [`conversation_session_port`] implementation is transitional and delegates
-/// each operation to the existing Conversation service/typed execution seam.
+/// application supplies the implementation from its single Session owner.
 #[async_trait]
 pub trait AgentExecutionSessionPort: Send + Sync {
     async fn create_idempotent(
@@ -174,14 +171,14 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         operation_id: &str,
         authority: AgentExecutionTurnAuthority,
         request: SendMessageRequest,
-    ) -> Result<nomifun_conversation::IdempotentMessageDelivery, AppError>;
+    ) -> Result<IdempotentMessageDelivery, AppError>;
 
     async fn delivery_result(
         &self,
         owner_id: &str,
         conversation_id: &str,
         operation_id: &str,
-    ) -> Result<Option<nomifun_conversation::IdempotentMessageDelivery>, AppError>;
+    ) -> Result<Option<IdempotentMessageDelivery>, AppError>;
 
     async fn list_messages(
         &self,
@@ -220,163 +217,6 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         content: &str,
         origin: &str,
     ) -> Result<String, AppError>;
-}
-
-/// Transitional host adapter for the existing typed Conversation execution
-/// seam.  It is deliberately a pure delegator: no cache, fallback, retry or
-/// alternate Session authority is introduced here.
-struct ConversationExecutionSessionPort {
-    service: ConversationService,
-    execution: AgentExecutionConversationPort,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
-}
-
-#[async_trait]
-impl AgentExecutionSessionPort for ConversationExecutionSessionPort {
-    async fn create_idempotent(
-        &self,
-        owner_id: &str,
-        request: CreateConversationRequest,
-        creation_key: &str,
-    ) -> Result<ConversationResponse, AppError> {
-        self.service
-            .create_idempotent(owner_id, request, creation_key)
-            .await
-    }
-
-    async fn create_from_preset_snapshot_idempotent(
-        &self,
-        owner_id: &str,
-        request: CreateConversationRequest,
-        snapshot: ResolvedPresetSnapshot,
-        creation_key: &str,
-    ) -> Result<ConversationResponse, AppError> {
-        self.service
-            .create_from_preset_snapshot_idempotent(owner_id, request, snapshot, creation_key)
-            .await
-    }
-
-    async fn discard_unlinked_creation(
-        &self,
-        owner_id: &str,
-        creation_key: &str,
-    ) -> Result<(), AppError> {
-        self.service
-            .discard_unlinked_creation(owner_id, creation_key)
-            .await
-    }
-
-    async fn deliver_turn(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-        operation_id: &str,
-        authority: AgentExecutionTurnAuthority,
-        request: SendMessageRequest,
-    ) -> Result<nomifun_conversation::IdempotentMessageDelivery, AppError> {
-        self.execution
-            .deliver_turn(
-                owner_id,
-                conversation_id,
-                operation_id,
-                authority,
-                request,
-            )
-            .await
-    }
-
-    async fn delivery_result(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-        operation_id: &str,
-    ) -> Result<Option<nomifun_conversation::IdempotentMessageDelivery>, AppError> {
-        self.execution
-            .delivery_result(owner_id, conversation_id, operation_id)
-            .await
-    }
-
-    async fn list_messages(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-        query: ListMessagesQuery,
-    ) -> Result<MessageListResponse, AppError> {
-        self.service
-            .list_messages(owner_id, conversation_id, query)
-            .await
-    }
-
-    async fn get(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-    ) -> Result<ConversationResponse, AppError> {
-        self.service.get(owner_id, conversation_id).await
-    }
-
-    fn take_turn_tokens(&self, conversation_id: &str) -> Option<i64> {
-        self.service.take_turn_tokens(conversation_id)
-    }
-
-    async fn cancel_for_execution(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-    ) -> Result<(), AppError> {
-        self.service
-            .cancel_for_execution(owner_id, conversation_id, &self.runtime_registry)
-            .await
-    }
-
-    async fn steer_turn(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-        operation_id: &str,
-        request: SendMessageRequest,
-    ) -> Result<String, AppError> {
-        self.execution
-            .steer_turn(owner_id, conversation_id, operation_id, request)
-            .await
-    }
-
-    async fn project_assistant_message_idempotent(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-        operation_id: &str,
-        content: &str,
-        origin: &str,
-    ) -> Result<String, AppError> {
-        self.service
-            .project_assistant_message_idempotent(
-                owner_id,
-                conversation_id,
-                operation_id,
-                content,
-                origin,
-            )
-            .await
-    }
-}
-
-/// Build the transitional Conversation-backed Agent Execution session port.
-///
-/// This is a pure delegator: it retains no session state, does not create
-/// another runtime registry, and does not introduce a second session
-/// authority. New host composition should provide a native
-/// [`AgentExecutionSessionPort`] implementation instead.
-pub fn conversation_session_port(
-    conv: ConversationService,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
-) -> Arc<dyn AgentExecutionSessionPort> {
-    let execution = conv.agent_execution_port(runtime_registry.clone());
-    Arc::new(ConversationExecutionSessionPort {
-        service: conv,
-        execution,
-        runtime_registry,
-    })
 }
 
 /// Production adapter.  All runtime/turn work goes through the typed session

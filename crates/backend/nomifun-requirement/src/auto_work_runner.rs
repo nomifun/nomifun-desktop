@@ -9,7 +9,9 @@ use nomifun_ai_agent::registry::AgentRegistry;
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 use nomifun_api_types::{AutoWorkState, AutoWorkTargetKind, Requirement, RequirementStatus, SendMessageRequest};
 use nomifun_common::{AppError, ConversationId, TerminalId, UserId};
-use nomifun_conversation::{IdempotentMessageDelivery, runtime_state::RuntimeBuildLease};
+use nomifun_conversation::{
+    IdempotentMessageDelivery, PublicTurnDeliveryState, runtime_state::RuntimeBuildLease,
+};
 use nomifun_conversation::service::{
     BackgroundTurnPreSendHook, BackgroundTurnReconciliationDisposition,
     BackgroundTurnRuntimePreparation, ObservedIdempotentMessageDelivery,
@@ -21,13 +23,15 @@ use nomifun_db::{
 };
 use nomifun_terminal::{ExactTerminalLifecycleReceiver, LifecycleKind, TerminalDriver};
 use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, timeout};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::prompt::{build_requirement_prompt, build_terminal_requirement_prompt};
 use crate::service::{DEFAULT_LEASE_MS, RequirementService};
 use crate::attachments::PromptAttachmentPlan;
-use crate::conversation_port::AutoWorkConversationPort;
+use crate::conversation_port::AutoWorkSessionPort;
 
 /// Lease is renewed on this cadence while a turn is in flight.
 const LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(30);
@@ -35,6 +39,11 @@ const LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(30);
 /// This is intentionally a short poll: SQLite lookup is indexed by the stable
 /// operation identity and a fast turn must not wait for a lease tick.
 const CONVERSATION_RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Accepted-receipt reconciliation runs before the durable receipt wait. It
+/// may acquire a preparation gate and consult several persistence/runtime
+/// seams, so it needs its own finite deadline instead of inheriting the
+/// receipt wait's much larger turn timeout.
+const CONVERSATION_RECEIPT_RECONCILIATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// Hard ceiling on a single requirement turn.
 const TURN_TIMEOUT: Duration = Duration::from_secs(3600);
 /// Idle cadence for a persistent loop with nothing to do (tag drained, claim
@@ -54,7 +63,7 @@ pub struct AutoWorkRunnerDeps {
     /// Conversation/Terminal targets.
     pub authoritative_user_id: Arc<str>,
     pub service: Arc<RequirementService>,
-    pub conversation: Arc<dyn AutoWorkConversationPort>,
+    pub conversation: Arc<dyn AutoWorkSessionPort>,
     pub conversation_repo: Arc<dyn IConversationRepository>,
     pub agent_registry: Arc<AgentRegistry>,
     /// Drives terminal targets (write PTY input, observe output). `None` if the
@@ -79,10 +88,10 @@ pub struct AutoWorkRunnerDeps {
     pub requirement_mcp_enabled: bool,
 }
 
-/// Sealed, in-process preparation handed to ConversationService. It is invoked
-/// only after the exact Requirement capability, Conversation receipt, durable
-/// Running generation, and local turn owner have been admitted under one
-/// preparation fence. Public request payloads cannot inject this hook.
+/// Sealed, in-process preparation handed to the host-owned Session port. It is
+/// invoked only after the exact Requirement capability, typed turn receipt,
+/// durable Running generation, and local turn owner have been admitted under
+/// one preparation fence. Public request payloads cannot inject this hook.
 struct AutoWorkAttachmentActivation {
     service: Arc<RequirementService>,
     plan: PromptAttachmentPlan,
@@ -237,6 +246,12 @@ pub struct AutoWorkRunner {
     /// replacement loop, and two concurrent starts must not both spawn.
     transitions: Arc<TargetTransitionMap>,
     next_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Process-lifetime owner for the sweeper and boot-resume coordinators.
+    /// Per-target loops keep their exact claim cleanup protocol in `handles`;
+    /// this token only governs the two host-owned coordinator tasks.
+    shutdown: CancellationToken,
+    sweeper: Arc<Mutex<Option<JoinHandle<()>>>>,
+    resume: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl AutoWorkRunner {
@@ -246,6 +261,9 @@ impl AutoWorkRunner {
             handles: Arc::new(DashMap::new()),
             transitions: Arc::new(DashMap::new()),
             next_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            shutdown: CancellationToken::new(),
+            sweeper: Arc::new(Mutex::new(None)),
+            resume: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -284,6 +302,9 @@ impl AutoWorkRunner {
         tag: String,
         max_requirements: Option<u32>,
     ) {
+        if self.shutdown.is_cancelled() {
+            return;
+        }
         if !valid_target_id(kind, &target_id) {
             error!(target_id, ?kind, "Refusing to start AutoWork for an invalid target id");
             return;
@@ -291,6 +312,9 @@ impl AutoWorkRunner {
         let key: TargetKey = (kind, target_id.clone());
         let transition = self.transition_lock(&key);
         let _transition_guard = transition.lock().await;
+        if self.shutdown.is_cancelled() {
+            return;
+        }
         // A replacement generation cannot start until the prior loop has
         // stopped and its exact durable claim/admission has been settled. This
         // closes the old abort-then-spawn race where the new loop recovered an
@@ -535,10 +559,8 @@ impl AutoWorkRunner {
                                     )),
                                 ),
                             };
-                            if let Err(status_error) = self
-                                .deps
-                                .service
-                                .resolve_claim_verdict_exact(
+                            if let Err(status_error) = resolve_claim_verdict_required(
+                                &self.deps.service,
                                     &req_id,
                                     claim_generation,
                                     &claim_token,
@@ -546,8 +568,8 @@ impl AutoWorkRunner {
                                     AutoWorkTargetKind::Terminal,
                                     status,
                                     note,
-                                )
-                                .await
+                            )
+                            .await
                             {
                                 warn!(
                                     terminal_id = target_id,
@@ -561,10 +583,8 @@ impl AutoWorkRunner {
                 } else {
                     let detail = "AutoWork stopped an active Terminal claim without a durable \
                                   Terminal driver; its execution state is unknown.";
-                    if let Err(error) = self
-                        .deps
-                        .service
-                        .resolve_claim_verdict_exact(
+                    if let Err(error) = resolve_claim_verdict_required(
+                        &self.deps.service,
                             &req_id,
                             claim_generation,
                             &claim_token,
@@ -572,8 +592,8 @@ impl AutoWorkRunner {
                             AutoWorkTargetKind::Terminal,
                             RequirementStatus::NeedsReview,
                             Some(detail.to_owned()),
-                        )
-                        .await
+                    )
+                    .await
                     {
                         warn!(
                             terminal_id = target_id,
@@ -613,13 +633,30 @@ impl AutoWorkRunner {
     /// Expiry alone never makes an execution safe to repeat.
     /// Detached for the process lifetime (the runner lives in router state).
     pub fn start_sweeper(&self) {
+        if self.shutdown.is_cancelled() {
+            return;
+        }
+        {
+            let mut slot = self.sweeper.lock().expect("AutoWork sweeper lock");
+            if slot.as_ref().is_some_and(|task| !task.is_finished()) {
+                return;
+            }
+            let _ = slot.take();
+        }
         let handles = self.handles.clone();
         let service = self.deps.service.clone();
-        tokio::spawn(async move {
+        let shutdown = self.shutdown.clone();
+        let task = tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(60));
             ticker.tick().await; // consume the immediate first tick
             loop {
-                ticker.tick().await;
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = ticker.tick() => {}
+                }
+                if shutdown.is_cancelled() {
+                    break;
+                }
                 // The active set is keyed by `(kind, target_id)`. The sweep
                 // matches each typed owner column against its corresponding
                 // canonical string-ID set.
@@ -650,6 +687,7 @@ impl AutoWorkRunner {
                 }
             }
         });
+        *self.sweeper.lock().expect("AutoWork sweeper lock") = Some(task);
     }
 
     /// Resume every persisted-enabled AutoWork binding across all users at boot.
@@ -664,11 +702,25 @@ impl AutoWorkRunner {
     /// a terminal whose PTY is not yet live idles until the user relaunches it
     /// (the loop self-heals —see `run_loop`). Detached + best-effort.
     pub fn resume_persisted_bindings(&self) {
+        if self.shutdown.is_cancelled() {
+            return;
+        }
+        {
+            let mut slot = self.resume.lock().expect("AutoWork resume lock");
+            if slot.as_ref().is_some_and(|task| !task.is_finished()) {
+                return;
+            }
+            let _ = slot.take();
+        }
         let this = self.clone();
-        tokio::spawn(async move {
+        let shutdown = self.shutdown.clone();
+        let task = tokio::spawn(async move {
             let mut resumed = 0usize;
             let owner_id = this.deps.authoritative_user_id.clone();
-            let groups = match this.deps.service.tag_bindings(&owner_id).await {
+            let groups = match tokio::select! {
+                _ = shutdown.cancelled() => return,
+                result = this.deps.service.tag_bindings(&owner_id) => result,
+            } {
                 Ok(groups) => groups,
                 Err(error) => {
                     warn!(user_id = %owner_id, %error, "AutoWork resume: owner tag_bindings failed");
@@ -677,17 +729,20 @@ impl AutoWorkRunner {
             };
             for group in groups {
                 for binding in group.bindings {
+                    if shutdown.is_cancelled() {
+                        return;
+                    }
                     // Skip if already running (idempotent re-entry / racing toggle).
                     if this.is_running(binding.kind, &binding.target_id) {
                         continue;
                     }
-                    let max = this
-                        .deps
-                        .service
-                        .read_autowork_config(binding.kind, &binding.target_id)
-                        .await
-                        .ok()
-                        .and_then(|(_, _, m)| m);
+                    let max = tokio::select! {
+                        _ = shutdown.cancelled() => return,
+                        result = this.deps.service.read_autowork_config(
+                            binding.kind,
+                            &binding.target_id,
+                        ) => result.ok().and_then(|(_, _, m)| m),
+                    };
                     this
                         .start(binding.kind, binding.target_id.clone(), group.tag.clone(), max)
                         .await;
@@ -698,6 +753,53 @@ impl AutoWorkRunner {
                 info!(resumed, "AutoWork resumed persisted bindings on boot");
             }
         });
+        *self.resume.lock().expect("AutoWork resume lock") = Some(task);
+    }
+
+    /// Stop the host-owned sweeper/resume coordinators and every active target
+    /// loop before the shared SQLite pool is closed. Target loops use their
+    /// existing exact claim cleanup path instead of simply dropping handles.
+    pub async fn shutdown(&self) -> Result<(), String> {
+        self.shutdown.cancel();
+
+        let sweeper = self.sweeper.lock().expect("AutoWork sweeper lock").take();
+        let resume = self.resume.lock().expect("AutoWork resume lock").take();
+        let mut errors = Vec::new();
+        for (name, task) in [("sweeper", sweeper), ("boot resume", resume)] {
+            let Some(mut task) = task else {
+                continue;
+            };
+            match timeout(Duration::from_secs(5), &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if error.is_cancelled() => {}
+                Ok(Err(error)) => errors.push(format!("AutoWork {name} join failed: {error}")),
+                Err(_) => {
+                    task.abort();
+                    let _ = task.await;
+                    errors.push(format!("AutoWork {name} shutdown timed out"));
+                }
+            }
+        }
+
+        let keys = self
+            .handles
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for (kind, target_id) in keys {
+            self.stop(kind, &target_id).await;
+        }
+        if !self.handles.is_empty() {
+            errors.push(format!(
+                "AutoWork retained {} target loop(s) after shutdown",
+                self.handles.len()
+            ));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 }
 
@@ -717,6 +819,69 @@ fn valid_target_id(kind: AutoWorkTargetKind, target_id: &str) -> bool {
 /// `max_requirements` completions, or when a terminal target's session row is
 /// deleted. A terminal whose PTY merely exited idles until a relaunch revives it.
 /// Outcome of one claimed requirement's turn, used to drive the failure backoff.
+/// Apply one exact claim verdict. `Ok(None)` from the write is not success: it
+/// must be followed by an exact terminal-state re-confirmation, which covers
+/// the legitimate case where the claim's declaration tool committed first.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_claim_verdict_required(
+    service: &RequirementService,
+    requirement_id: &str,
+    claim_generation: i64,
+    claim_token: &str,
+    owner_id: &str,
+    kind: AutoWorkTargetKind,
+    status: RequirementStatus,
+    note: Option<String>,
+) -> Result<(), AppError> {
+    match service
+        .resolve_claim_verdict_exact(
+            requirement_id,
+            claim_generation,
+            claim_token,
+            owner_id,
+            kind,
+            status,
+            note,
+        )
+        .await?
+    {
+        Some(updated) if updated.status == status => Ok(()),
+        Some(updated) => Err(AppError::Conflict(format!(
+            "exact AutoWork claim generation {claim_generation} returned status '{}' \
+             instead of '{}' for requirement {requirement_id}",
+            updated.status.as_db(),
+            status.as_db(),
+        ))),
+        None => match service
+            .finalize_claim_if_needed(
+                requirement_id,
+                claim_generation,
+                claim_token,
+                owner_id,
+                kind,
+                false,
+                None,
+                true,
+            )
+            .await?
+        {
+            Some(existing) if existing.status == status => Ok(()),
+            Some(existing) => Err(AppError::Conflict(format!(
+                "exact AutoWork claim generation {claim_generation} was already resolved \
+                 as '{}' instead of '{}' for requirement {requirement_id}",
+                existing.status.as_db(),
+                status.as_db(),
+            ))),
+            _ => Err(AppError::Conflict(format!(
+                "exact AutoWork claim generation {claim_generation} lost authority before \
+                 '{}' verdict for requirement {requirement_id}; no exact terminal winner \
+                 could be confirmed",
+                status.as_db(),
+            ))),
+        },
+    }
+}
+
 async fn resolve_interrupted_conversation_claim(
     deps: &AutoWorkRunnerDeps,
     requirement_id: &str,
@@ -749,8 +914,8 @@ async fn resolve_interrupted_conversation_claim(
                 ),
                 Ok(true) => unreachable!(),
             };
-            deps.service
-                .resolve_claim_verdict_exact(
+            resolve_claim_verdict_required(
+                &deps.service,
                     requirement_id,
                     claim_generation,
                     claim_token,
@@ -758,8 +923,8 @@ async fn resolve_interrupted_conversation_claim(
                     AutoWorkTargetKind::Conversation,
                     RequirementStatus::NeedsReview,
                     Some(detail),
-                )
-                .await?;
+            )
+            .await?;
         }
     }
     Ok(())
@@ -799,8 +964,8 @@ async fn abandon_pre_effect_or_quarantine(
                 ),
                 Ok(true) => unreachable!(),
             };
-            deps.service
-                .resolve_claim_verdict_exact(
+            resolve_claim_verdict_required(
+                &deps.service,
                     requirement_id,
                     claim_generation,
                     claim_token,
@@ -808,8 +973,8 @@ async fn abandon_pre_effect_or_quarantine(
                     kind,
                     RequirementStatus::NeedsReview,
                     Some(detail),
-                )
-                .await?;
+            )
+            .await?;
             Ok(false)
         }
     }
@@ -894,9 +1059,8 @@ async fn cleanup_abandoned_loop_claim(
             let detail = "The AutoWork loop ended without a normal completion boundary; any \
                           durable Terminal admission was absorbed and will not be written again.";
             let Some(driver) = deps.terminal_driver.as_ref() else {
-                if let Err(error) = deps
-                    .service
-                    .resolve_claim_verdict_exact(
+                if let Err(error) = resolve_claim_verdict_required(
+                    &deps.service,
                         &requirement_id,
                         claim_generation,
                         &claim_token,
@@ -904,8 +1068,8 @@ async fn cleanup_abandoned_loop_claim(
                         AutoWorkTargetKind::Terminal,
                         RequirementStatus::NeedsReview,
                         Some(detail.to_owned()),
-                    )
-                    .await
+                )
+                .await
                 {
                     warn!(
                         terminal_id = target_id,
@@ -994,9 +1158,8 @@ async fn cleanup_abandoned_loop_claim(
                             Some(format!("{detail} Exact receipt lookup failed: {error}")),
                         ),
                     };
-                    if let Err(error) = deps
-                        .service
-                        .resolve_claim_verdict_exact(
+                    if let Err(error) = resolve_claim_verdict_required(
+                        &deps.service,
                             &requirement_id,
                             claim_generation,
                             &claim_token,
@@ -1004,8 +1167,8 @@ async fn cleanup_abandoned_loop_claim(
                             AutoWorkTargetKind::Terminal,
                             status,
                             note,
-                        )
-                        .await
+                    )
+                    .await
                     {
                         warn!(
                             terminal_id = target_id,
@@ -1034,20 +1197,26 @@ enum TurnResult {
     /// an attempt —the loop idles until the user resumes the tag. NOT a
     /// failure: no backoff, no retry.
     UserInterrupted,
+    /// The exact claim verdict/cleanup could not be committed or proven.
+    /// Stop this loop rather than claiming another requirement under
+    /// authority uncertainty.
+    Blocked,
 }
 
 /// How a conversation turn ended, from the AutoWork runner's perspective.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum TurnEnd {
-    /// Finished cleanly (`EndTurn`, or the backend reported no reason —
-    /// back-compat success for engines that don't set `stop_reason`).
+    /// The durable Conversation receipt completed successfully.
     Clean,
-    /// Failed: truncation / refusal / Error event / closed channel / timeout.
+    /// A pre-admission failure that is safe to retry after exact absence proof.
     Errored,
     /// Deliberately cancelled. Engines emit `Finish(Cancelled)` only on the
     /// user-stop path, so this is the event-level user-interrupt signal
-    /// (cross-checked with `ConversationService::user_cancelled_since`).
+    /// (cross-checked with the Session owner's cancellation epoch).
     Cancelled,
+    /// Admission happened, but the durable receipt cannot prove a terminal
+    /// result. This is absorbing and must be parked for human review.
+    Ambiguous,
 }
 
 enum DurableConversationReceiptWait {
@@ -1336,6 +1505,30 @@ async fn run_loop(
                                 error!(target_id, requirement_id = %req_id, error = %e, "AutoWork user-interrupt failed");
                             }
                             TurnResult::UserInterrupted
+                        } else if end == TurnEnd::Ambiguous {
+                            match resolve_claim_verdict_required(
+                                &deps.service,
+                                    &req_id,
+                                    claim_generation,
+                                    &claim_token,
+                                    owner_id,
+                                    AutoWorkTargetKind::Conversation,
+                                    RequirementStatus::NeedsReview,
+                                    note,
+                            )
+                            .await
+                            {
+                                Ok(()) => TurnResult::Done,
+                                Err(error) => {
+                                    error!(
+                                        target_id,
+                                        requirement_id = %req_id,
+                                        error = %error,
+                                        "AutoWork could not park an ambiguous Conversation turn"
+                                    );
+                                    TurnResult::Blocked
+                                }
+                            }
                         } else {
                             let turn_errored = end == TurnEnd::Errored;
                             // `note` carries the agent's final plain-text message for tool-free
@@ -1415,7 +1608,7 @@ async fn run_loop(
                                         error = %error,
                                         "AutoWork conflict could not be abandoned or quarantined"
                                     );
-                                    TurnResult::Busy
+                                    TurnResult::Blocked
                                 }
                             }
                         }
@@ -1491,9 +1684,8 @@ async fn run_loop(
                 .await
                 {
                     Ok(TerminalTurnEnd::AuthoritativeVerdict { status, note }) => {
-                        match deps
-                            .service
-                            .resolve_claim_verdict_exact(
+                        match resolve_claim_verdict_required(
+                            &deps.service,
                                 &req_id,
                                 claim_generation,
                                 &claim_token,
@@ -1501,10 +1693,10 @@ async fn run_loop(
                                 AutoWorkTargetKind::Terminal,
                                 status,
                                 note,
-                            )
-                            .await
+                        )
+                        .await
                         {
-                            Ok(_) => {
+                            Ok(()) => {
                                 if status == RequirementStatus::Failed {
                                     TurnResult::Errored
                                 } else {
@@ -1519,7 +1711,7 @@ async fn run_loop(
                                     error = %error,
                                     "Failed to project durable Terminal verdict onto Requirement"
                                 );
-                                TurnResult::Busy
+                                TurnResult::Blocked
                             }
                         }
                     }
@@ -1532,9 +1724,8 @@ async fn run_loop(
                             "AutoWork terminal claim generation {claim_generation} attempted PTY \
                              submission, but its final outcome is unknown; it was not executed again."
                         );
-                        match deps
-                            .service
-                            .resolve_claim_verdict_exact(
+                        match resolve_claim_verdict_required(
+                            &deps.service,
                                 &req_id,
                                 claim_generation,
                                 &claim_token,
@@ -1542,10 +1733,10 @@ async fn run_loop(
                                 AutoWorkTargetKind::Terminal,
                                 RequirementStatus::NeedsReview,
                                 Some(note),
-                            )
-                            .await
+                        )
+                        .await
                         {
-                            Ok(_) => TurnResult::Done,
+                            Ok(()) => TurnResult::Done,
                             Err(error) => {
                                 error!(
                                     target_id,
@@ -1554,7 +1745,7 @@ async fn run_loop(
                                     error = %error,
                                     "Failed to park ambiguous terminal submission for review"
                                 );
-                                TurnResult::Busy
+                                TurnResult::Blocked
                             }
                         }
                     }
@@ -1627,6 +1818,9 @@ async fn run_loop(
         // the next claim (None), and the user's resume must not inherit a backoff.
         match result {
             TurnResult::Done | TurnResult::UserInterrupted => consecutive_failures = 0,
+            TurnResult::Blocked => {
+                cancelled.store(true, Ordering::SeqCst);
+            }
             TurnResult::Errored | TurnResult::Busy => {
                 consecutive_failures = consecutive_failures.saturating_add(1);
                 let delay = failure_backoff(consecutive_failures);
@@ -1742,10 +1936,26 @@ async fn inject_and_wait(
         autowork_turn_idempotency_key(&req.requirement_id, claim_generation, claim_token);
     let expects_verdict = crate::prompt::has_native_requirement_tools(agent_type);
 
-    if let Some(outcome) =
-        legacy_recovered_claim_without_receipt_outcome(recovered_active, claim_generation)
-    {
-        return Ok(outcome);
+    if recovered_active {
+        match deps
+            .conversation
+            .public_turn_delivery_state(&user_id, conversation_id, &operation_id)
+            .await
+        {
+            Ok(state) => {
+                if let Err(reason) =
+                    recovered_claim_receipt_gate(&state, claim_generation)
+                {
+                    return Ok(autowork_blocked_delivery_outcome(reason));
+                }
+            }
+            Err(error) => {
+                return Ok(autowork_blocked_delivery_outcome(format!(
+                    "the durable receipt for recovered Conversation claim generation \
+                     {claim_generation} could not be read: {error}"
+                )));
+            }
+        }
     }
     build_lease.ensure_active()?;
 
@@ -1764,7 +1974,7 @@ async fn inject_and_wait(
     };
 
     // Runtime construction, knowledge mounting, attachment activation and event
-    // subscription are receiver-owned. ConversationService performs them only
+    // subscription are receiver-owned. The Session owner performs them only
     // after the raw Requirement capability is validated in the same SQLite
     // transaction as receipt INSERT + Conversation Running, and keeps one
     // preparation fence until the local turn owner has been handed off.
@@ -1839,12 +2049,10 @@ async fn inject_and_wait(
         events,
     } = observed;
     let reconciled = match reconcile_accepted_autowork_delivery(
-        deps,
+        deps.conversation.as_ref(),
         &user_id,
         conversation_id,
         &operation_id,
-        &send_receipt_probe,
-        &authority_probe,
         delivery,
     )
     .await
@@ -1866,7 +2074,7 @@ async fn inject_and_wait(
 
     if !reconciled.accepted_wait_authorized {
         if let Some(outcome) =
-            autowork_replayed_delivery_outcome(delivery, claim_generation, expects_verdict)
+            autowork_replayed_delivery_outcome(&delivery, claim_generation, expects_verdict)
         {
             return Ok(outcome);
         }
@@ -1886,7 +2094,8 @@ async fn inject_and_wait(
     // process scheduling gap cannot lose the terminal boundary.
     drop(runtime);
     let outcome = wait_for_conversation_receipt_with_renewal(
-        deps,
+        deps.service.as_ref(),
+        deps.conversation.as_ref(),
         conversation_id,
         conv_id,
         &req.requirement_id,
@@ -1894,8 +2103,7 @@ async fn inject_and_wait(
         claim_token,
         &user_id,
         &operation_id,
-        &send_receipt_probe,
-        &authority_probe,
+        &delivery.message_id,
         expects_verdict,
         events,
     )
@@ -1915,7 +2123,7 @@ fn autowork_turn_idempotency_key(
     // The public-key field is capped at 128 bytes. Hash the complete,
     // domain-separated capability scope so neither the opaque token nor a
     // variable-length Requirement id is exposed in the durable operation id.
-    // ConversationService independently stores/compares the token's SHA-256
+    // The Session owner independently stores/compares the token's SHA-256
     // fingerprint in the receipt payload and validates the raw capability in
     // the atomic Requirement + receipt + Running admission transaction.
     let scope = format!(
@@ -1929,7 +2137,7 @@ fn autowork_turn_idempotency_key(
 
 struct ReconciledAutoWorkDelivery {
     delivery: IdempotentMessageDelivery,
-    /// An accepted replay may wait only after ConversationService proves that
+    /// An accepted replay may wait only after the Session owner proves that
     /// the exact operation still has a live local owner or has completed the
     /// audited local orphan-reconciliation path.
     accepted_wait_authorized: bool,
@@ -1959,13 +2167,31 @@ fn authorize_accepted_receipt_wait(
 
 #[allow(clippy::too_many_arguments)]
 async fn reconcile_accepted_autowork_delivery(
-    deps: &Arc<AutoWorkRunnerDeps>,
+    conversation: &dyn AutoWorkSessionPort,
     user_id: &str,
     conversation_id: &str,
     idempotency_key: &str,
-    request: &SendMessageRequest,
-    authority: &RequirementConversationTurnAuthority,
     delivery: IdempotentMessageDelivery,
+) -> Result<ReconciledAutoWorkDelivery, AppError> {
+    reconcile_accepted_autowork_delivery_timed(
+        conversation,
+        user_id,
+        conversation_id,
+        idempotency_key,
+        delivery,
+        CONVERSATION_RECEIPT_RECONCILIATION_TIMEOUT,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_accepted_autowork_delivery_timed(
+    conversation: &dyn AutoWorkSessionPort,
+    user_id: &str,
+    conversation_id: &str,
+    idempotency_key: &str,
+    delivery: IdempotentMessageDelivery,
+    reconciliation_timeout: Duration,
 ) -> Result<ReconciledAutoWorkDelivery, AppError> {
     if !delivery.replayed || delivery.completed {
         return Ok(ReconciledAutoWorkDelivery {
@@ -1974,53 +2200,68 @@ async fn reconcile_accepted_autowork_delivery(
         });
     }
 
-    // Never infer death from elapsed time. ConversationService holds the
+    // Never infer death from elapsed time. The Session owner holds the
     // preparation gate, re-reads the exact receipt/Running generation, and only
     // local process-backed runtimes with positive parent-exit proof may be
     // terminalized. Remote/OpenClaw/unknown ownership remains accepted and
     // returns Conflict, which the runner parks for explicit review.
-    let disposition = deps
-        .conversation
-        .reconcile_quiescent_running_turn(
-            user_id,
-            conversation_id,
-            idempotency_key,
-        )
-        .await?;
-    authorize_accepted_receipt_wait(disposition, &delivery.message_id)?;
+    let expected_message_id = delivery.message_id.clone();
+    let reconcile = async {
+        let disposition = conversation
+            .reconcile_quiescent_running_turn(
+                user_id,
+                conversation_id,
+                idempotency_key,
+            )
+            .await?;
+        authorize_accepted_receipt_wait(disposition, &expected_message_id)?;
 
-    match deps
-        .conversation
-        .delivery_result(
-            user_id,
-            conversation_id,
-            idempotency_key,
-            request,
-            authority,
-        )
-        .await?
-    {
-        Some(refreshed) if refreshed.message_id == delivery.message_id => {
-            let accepted_wait_authorized = !refreshed.completed;
-            Ok(ReconciledAutoWorkDelivery {
-                delivery: refreshed,
-                accepted_wait_authorized,
-            })
+        match conversation
+            .public_turn_delivery_state(user_id, conversation_id, idempotency_key)
+            .await?
+        {
+            PublicTurnDeliveryState::Accepted { message_id }
+                if message_id == expected_message_id =>
+            {
+                Ok(ReconciledAutoWorkDelivery {
+                    delivery,
+                    accepted_wait_authorized: true,
+                })
+            }
+            PublicTurnDeliveryState::Completed(refreshed)
+                if refreshed.message_id == expected_message_id =>
+            {
+                Ok(ReconciledAutoWorkDelivery {
+                    delivery: refreshed,
+                    accepted_wait_authorized: false,
+                })
+            }
+            PublicTurnDeliveryState::Accepted { message_id }
+            | PublicTurnDeliveryState::Completed(IdempotentMessageDelivery { message_id, .. }) => {
+                Err(AppError::Conflict(format!(
+                    "accepted delivery {} resolved to a different immutable message {message_id}",
+                    expected_message_id
+                )))
+            }
+            PublicTurnDeliveryState::Missing => Err(AppError::Conflict(format!(
+                "accepted delivery {} disappeared during exact quiescent reconciliation",
+                expected_message_id
+            ))),
         }
-        Some(refreshed) => Err(AppError::Conflict(format!(
-            "accepted delivery {} resolved to a different immutable message {}",
-            delivery.message_id, refreshed.message_id
-        ))),
-        None => Err(AppError::Conflict(format!(
-            "accepted delivery {} disappeared during exact quiescent reconciliation",
-            delivery.message_id
+    };
+
+    match timeout(reconciliation_timeout, reconcile).await {
+        Ok(result) => result,
+        Err(_) => Err(AppError::Conflict(format!(
+            "accepted delivery {expected_message_id} reconciliation exceeded its {} ms deadline",
+            reconciliation_timeout.as_millis()
         ))),
     }
 }
 
 fn autowork_blocked_delivery_outcome(reason: String) -> (TurnEnd, Option<String>, bool) {
     (
-        TurnEnd::Clean,
+        TurnEnd::Ambiguous,
         Some(format!(
             "AutoWork did not start another turn because durable Conversation \
              state is ambiguous: {reason}. Explicit reset or human review is required."
@@ -2029,21 +2270,22 @@ fn autowork_blocked_delivery_outcome(reason: String) -> (TurnEnd, Option<String>
     )
 }
 
-fn legacy_recovered_claim_without_receipt_outcome(
-    recovered_active: bool,
+fn recovered_claim_receipt_gate(
+    state: &PublicTurnDeliveryState,
     claim_generation: i64,
-) -> Option<(TurnEnd, Option<String>, bool)> {
-    (recovered_active && claim_generation == 0).then(|| {
-        autowork_blocked_delivery_outcome(
-            "this claim predates durable AutoWork delivery receipts, so its prior execution \
-             outcome cannot be proven"
-                .to_owned(),
-        )
-    })
+) -> Result<(), String> {
+    match state {
+        PublicTurnDeliveryState::Accepted { .. }
+        | PublicTurnDeliveryState::Completed(_) => Ok(()),
+        PublicTurnDeliveryState::Missing => Err(format!(
+            "recovered Conversation claim generation {claim_generation} has no durable \
+             delivery receipt; its prior execution outcome cannot be proven"
+        )),
+    }
 }
 
 fn autowork_replayed_delivery_outcome(
-    delivery: IdempotentMessageDelivery,
+    delivery: &IdempotentMessageDelivery,
     claim_generation: i64,
     expects_verdict: bool,
 ) -> Option<(TurnEnd, Option<String>, bool)> {
@@ -2056,7 +2298,7 @@ fn autowork_replayed_delivery_outcome(
         // newly subscribed idle runtime and never manufacture a new attempt.
         // Forcing the verdict contract parks the Requirement in NeedsReview.
         return Some((
-            TurnEnd::Clean,
+            TurnEnd::Ambiguous,
             Some(format!(
                 "AutoWork delivery {} was already accepted for claim generation \
                  {claim_generation}; its outcome is unknown, so it was not executed again.",
@@ -2066,7 +2308,10 @@ fn autowork_replayed_delivery_outcome(
         ));
     }
 
-    let note = delivery.result_text.or(delivery.result_error);
+    let note = delivery
+        .result_text
+        .clone()
+        .or_else(|| delivery.result_error.clone());
     match delivery.result_ok {
         Some(true) => Some((TurnEnd::Clean, note, expects_verdict)),
         // A completed error proves only that the observer saw an error; it
@@ -2074,7 +2319,7 @@ fn autowork_replayed_delivery_outcome(
         // claim generation would mint a different delivery key and could
         // execute the same Requirement twice, so absorb it for review.
         Some(false) => Some((
-            TurnEnd::Clean,
+            TurnEnd::Ambiguous,
             note.or_else(|| {
                 Some(format!(
                     "Completed AutoWork delivery {} reported an error after durable admission; \
@@ -2085,7 +2330,7 @@ fn autowork_replayed_delivery_outcome(
             true,
         )),
         None => Some((
-            TurnEnd::Clean,
+            TurnEnd::Ambiguous,
             note.or_else(|| {
                 Some(format!(
                     "Completed AutoWork delivery {} has no durable outcome; \
@@ -2106,9 +2351,25 @@ fn autowork_replayed_delivery_outcome(
 /// finished. Only the unique logical AutoWork receipt can do that. Once this
 /// function starts, absence, lookup failure, lease loss and timeout are all
 /// ambiguous post-admission outcomes and therefore force NeedsReview.
+#[derive(Clone, Copy)]
+struct ConversationReceiptWaitTiming {
+    lease_renew_interval: Duration,
+    receipt_poll_interval: Duration,
+    hard_timeout: Duration,
+}
+
+impl ConversationReceiptWaitTiming {
+    const PRODUCTION: Self = Self {
+        lease_renew_interval: LEASE_RENEW_INTERVAL,
+        receipt_poll_interval: CONVERSATION_RECEIPT_POLL_INTERVAL,
+        hard_timeout: TURN_TIMEOUT,
+    };
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn wait_for_conversation_receipt_with_renewal(
-    deps: &Arc<AutoWorkRunnerDeps>,
+    service: &RequirementService,
+    conversation: &dyn AutoWorkSessionPort,
     conversation_id: &str,
     conv_id: &str,
     req_id: &str,
@@ -2116,14 +2377,47 @@ async fn wait_for_conversation_receipt_with_renewal(
     claim_token: &str,
     user_id: &str,
     operation_id: &str,
-    request: &SendMessageRequest,
-    authority: &RequirementConversationTurnAuthority,
+    expected_message_id: &str,
+    expects_verdict: bool,
+    events: Option<broadcast::Receiver<AgentStreamEvent>>,
+) -> (TurnEnd, Option<String>, bool) {
+    wait_for_conversation_receipt_with_renewal_timed(
+        service,
+        conversation,
+        conversation_id,
+        conv_id,
+        req_id,
+        claim_generation,
+        claim_token,
+        user_id,
+        operation_id,
+        expected_message_id,
+        expects_verdict,
+        events,
+        ConversationReceiptWaitTiming::PRODUCTION,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn wait_for_conversation_receipt_with_renewal_timed(
+    service: &RequirementService,
+    conversation: &dyn AutoWorkSessionPort,
+    conversation_id: &str,
+    conv_id: &str,
+    req_id: &str,
+    claim_generation: i64,
+    claim_token: &str,
+    user_id: &str,
+    operation_id: &str,
+    expected_message_id: &str,
     expects_verdict: bool,
     mut events: Option<broadcast::Receiver<AgentStreamEvent>>,
+    timing: ConversationReceiptWaitTiming,
 ) -> (TurnEnd, Option<String>, bool) {
-    let mut renew = interval(LEASE_RENEW_INTERVAL);
+    let mut renew = interval(timing.lease_renew_interval);
     renew.tick().await;
-    let mut receipts = interval(CONVERSATION_RECEIPT_POLL_INTERVAL);
+    let mut receipts = interval(timing.receipt_poll_interval);
     let mut event_note = String::new();
     let mut event_note_checkpoint: Option<String> = None;
 
@@ -2131,8 +2425,7 @@ async fn wait_for_conversation_receipt_with_renewal(
         loop {
             tokio::select! {
                 _ = renew.tick() => {
-                    match deps
-                        .service
+                    match service
                         .renew_lease(
                             req_id,
                             conv_id,
@@ -2167,22 +2460,39 @@ async fn wait_for_conversation_receipt_with_renewal(
                     }
                 }
                 _ = receipts.tick() => {
-                    match deps
-                        .conversation
-                        .delivery_result(
+                    match conversation
+                        .public_turn_delivery_state(
                             user_id,
                             conversation_id,
                             operation_id,
-                            request,
-                            authority,
                         )
                         .await
                     {
-                        Ok(Some(delivery)) if delivery.completed => {
+                        Ok(PublicTurnDeliveryState::Completed(delivery))
+                            if delivery.message_id == expected_message_id && delivery.completed =>
+                        {
                             return DurableConversationReceiptWait::Completed(delivery);
                         }
-                        Ok(Some(_)) => {}
-                        Ok(None) => {
+                        Ok(PublicTurnDeliveryState::Completed(delivery)) => {
+                            return DurableConversationReceiptWait::Ambiguous(format!(
+                                "The durable AutoWork receipt for Conversation claim generation \
+                                 {claim_generation} changed message identity or was not \
+                                 terminally completed (expected {expected_message_id}, got \
+                                 {}); the Requirement was not executed again.",
+                                delivery.message_id
+                            ));
+                        }
+                        Ok(PublicTurnDeliveryState::Accepted { message_id })
+                            if message_id == expected_message_id => {}
+                        Ok(PublicTurnDeliveryState::Accepted { message_id }) => {
+                            return DurableConversationReceiptWait::Ambiguous(format!(
+                                "The accepted AutoWork receipt for Conversation claim generation \
+                                 {claim_generation} changed message identity (expected \
+                                 {expected_message_id}, got {message_id}); the Requirement was \
+                                 not executed again."
+                            ));
+                        }
+                        Ok(PublicTurnDeliveryState::Missing) => {
                             return DurableConversationReceiptWait::Ambiguous(format!(
                                 "The exact AutoWork receipt for Conversation claim generation \
                                  {claim_generation} disappeared after admission; the Requirement \
@@ -2230,10 +2540,10 @@ async fn wait_for_conversation_receipt_with_renewal(
         }
     };
 
-    match timeout(TURN_TIMEOUT, wait).await {
+    match timeout(timing.hard_timeout, wait).await {
         Ok(DurableConversationReceiptWait::Completed(delivery)) => {
             let mut outcome = autowork_replayed_delivery_outcome(
-                delivery,
+                &delivery,
                 claim_generation,
                 expects_verdict,
             )
@@ -2248,10 +2558,10 @@ async fn wait_for_conversation_receipt_with_renewal(
             outcome
         }
         Ok(DurableConversationReceiptWait::Ambiguous(detail)) => {
-            (TurnEnd::Clean, Some(detail), true)
+            (TurnEnd::Ambiguous, Some(detail), true)
         }
         Err(_) => (
-            TurnEnd::Clean,
+            TurnEnd::Ambiguous,
             Some(format!(
                 "AutoWork Conversation claim generation {claim_generation} exceeded its hard \
                  timeout after durable admission; prior model/tool effects cannot be excluded and \
@@ -2404,9 +2714,8 @@ async fn park_terminal_turn(
             error = %error,
             "Failed to atomically park an ambiguous Terminal turn"
         );
-        if let Err(status_error) = deps
-            .service
-            .resolve_claim_verdict_exact(
+        if let Err(status_error) = resolve_claim_verdict_required(
+            &deps.service,
                 &key.requirement_id,
                 key.claim_generation,
                 &key.claim_token,
@@ -2414,8 +2723,8 @@ async fn park_terminal_turn(
                 AutoWorkTargetKind::Terminal,
                 RequirementStatus::NeedsReview,
                 Some(detail.to_owned()),
-            )
-            .await
+        )
+        .await
         {
             warn!(
                 terminal_id = %key.terminal_id,
@@ -2492,9 +2801,8 @@ async fn inject_and_wait_terminal(
                 "Recovered AutoWork Terminal claim generation {claim_generation} without a \
                  Terminal driver; prior effects cannot be excluded."
             );
-            let _ = deps
-                .service
-                .resolve_claim_verdict_exact(
+            if let Err(error) = resolve_claim_verdict_required(
+                &deps.service,
                     &req.requirement_id,
                     claim_generation,
                     claim_token,
@@ -2502,8 +2810,17 @@ async fn inject_and_wait_terminal(
                     AutoWorkTargetKind::Terminal,
                     RequirementStatus::NeedsReview,
                     Some(detail),
-                )
-                .await;
+            )
+            .await
+            {
+                warn!(
+                    terminal_id,
+                    requirement_id = %req.requirement_id,
+                    claim_generation,
+                    error = %error,
+                    "Failed to park recovered Terminal claim without a driver"
+                );
+            }
             return Ok(TerminalTurnEnd::AmbiguousAfterSubmission);
         }
         return Err(AppError::Internal("terminal driver not attached".into()));
@@ -2515,9 +2832,8 @@ async fn inject_and_wait_terminal(
                 "Recovered AutoWork Terminal claim generation {claim_generation} has no live PTY \
                  generation; prior effects cannot be excluded."
             );
-            let _ = deps
-                .service
-                .resolve_claim_verdict_exact(
+            if let Err(error) = resolve_claim_verdict_required(
+                &deps.service,
                     &req.requirement_id,
                     claim_generation,
                     claim_token,
@@ -2525,8 +2841,17 @@ async fn inject_and_wait_terminal(
                     AutoWorkTargetKind::Terminal,
                     RequirementStatus::NeedsReview,
                     Some(detail),
-                )
-                .await;
+            )
+            .await
+            {
+                warn!(
+                    terminal_id,
+                    requirement_id = %req.requirement_id,
+                    claim_generation,
+                    error = %error,
+                    "Failed to park recovered Terminal claim without a live PTY"
+                );
+            }
             return Ok(TerminalTurnEnd::AmbiguousAfterSubmission);
         }
         return Err(AppError::Conflict(format!(
@@ -2584,9 +2909,8 @@ async fn inject_and_wait_terminal(
                             let _ = driver
                                 .park_open_turn_admissions(terminal_id, None, &detail)
                                 .await;
-                            let _ = deps
-                                .service
-                                .resolve_claim_verdict_exact(
+                            if let Err(error) = resolve_claim_verdict_required(
+                                &deps.service,
                                     &req.requirement_id,
                                     claim_generation,
                                     claim_token,
@@ -2594,8 +2918,17 @@ async fn inject_and_wait_terminal(
                                     AutoWorkTargetKind::Terminal,
                                     RequirementStatus::NeedsReview,
                                     Some(detail),
-                                )
-                                .await;
+                            )
+                            .await
+                            {
+                                warn!(
+                                    terminal_id,
+                                    requirement_id = %req.requirement_id,
+                                    claim_generation,
+                                    error = %error,
+                                    "Failed to park invalid recovered Terminal admission"
+                                );
+                            }
                             return Ok(TerminalTurnEnd::AmbiguousAfterSubmission);
                         }
                     };
@@ -2623,9 +2956,8 @@ async fn inject_and_wait_terminal(
                         error = %second_error,
                         "Unable to verify durable Terminal admission"
                     );
-                    if let Err(status_error) = deps
-                        .service
-                        .resolve_claim_verdict_exact(
+                    if let Err(status_error) = resolve_claim_verdict_required(
+                        &deps.service,
                             &req.requirement_id,
                             claim_generation,
                             claim_token,
@@ -2633,8 +2965,8 @@ async fn inject_and_wait_terminal(
                             AutoWorkTargetKind::Terminal,
                             RequirementStatus::NeedsReview,
                             Some(detail),
-                        )
-                        .await
+                    )
+                    .await
                     {
                         warn!(
                             terminal_id,
@@ -2664,9 +2996,8 @@ async fn inject_and_wait_terminal(
             let _ = driver
                 .park_open_turn_admissions(terminal_id, None, &detail)
                 .await;
-            let _ = deps
-                .service
-                .resolve_claim_verdict_exact(
+            if let Err(error) = resolve_claim_verdict_required(
+                &deps.service,
                     &req.requirement_id,
                     claim_generation,
                     claim_token,
@@ -2674,8 +3005,17 @@ async fn inject_and_wait_terminal(
                     AutoWorkTargetKind::Terminal,
                     RequirementStatus::NeedsReview,
                     Some(detail),
-                )
-                .await;
+            )
+            .await
+            {
+                warn!(
+                    terminal_id,
+                    requirement_id = %req.requirement_id,
+                    claim_generation,
+                    error = %error,
+                    "Failed to park invalid Terminal admission receipt"
+                );
+            }
             return Ok(TerminalTurnEnd::AmbiguousAfterSubmission);
         }
     };
@@ -3326,7 +3666,7 @@ mod tests {
     #[test]
     fn unreconciled_accepted_replay_is_absorbed_instead_of_starting_a_second_turn() {
         let outcome = autowork_replayed_delivery_outcome(
-            IdempotentMessageDelivery {
+            &IdempotentMessageDelivery {
                 message_id: nomifun_common::MessageId::new().into_string(),
                 replayed: true,
                 completed: false,
@@ -3341,7 +3681,7 @@ mod tests {
         )
         .expect("accepted replay must terminate injection before the event wait");
 
-        assert_eq!(outcome.0, TurnEnd::Clean);
+        assert_eq!(outcome.0, TurnEnd::Ambiguous);
         assert!(
             outcome.1.as_deref().is_some_and(|note| {
                 note.contains("not executed again") && note.contains("generation 3")
@@ -3383,7 +3723,7 @@ mod tests {
     #[test]
     fn completed_error_replay_is_never_promoted_to_a_new_claim_generation() {
         let outcome = autowork_replayed_delivery_outcome(
-            IdempotentMessageDelivery {
+            &IdempotentMessageDelivery {
                 message_id: nomifun_common::MessageId::new().into_string(),
                 replayed: true,
                 completed: true,
@@ -3400,7 +3740,7 @@ mod tests {
 
         assert_eq!(
             outcome.0,
-            TurnEnd::Clean,
+            TurnEnd::Ambiguous,
             "post-admission errors must bypass the RetryPending branch"
         );
         assert!(
@@ -3418,7 +3758,7 @@ mod tests {
     #[test]
     fn only_the_receipt_leader_enters_the_live_event_wait() {
         let fresh = autowork_replayed_delivery_outcome(
-            IdempotentMessageDelivery {
+            &IdempotentMessageDelivery {
                 message_id: nomifun_common::MessageId::new().into_string(),
                 replayed: false,
                 completed: false,
@@ -3441,7 +3781,7 @@ mod tests {
     fn durable_preflight_conflict_is_parked_instead_of_minting_a_retry_turn() {
         let outcome =
             autowork_blocked_delivery_outcome("idempotency payload drift".to_owned());
-        assert_eq!(outcome.0, TurnEnd::Clean);
+        assert_eq!(outcome.0, TurnEnd::Ambiguous);
         assert!(outcome.2, "blocked delivery must finalize as needs_review");
         assert!(
             outcome
@@ -3453,24 +3793,552 @@ mod tests {
     }
 
     #[test]
-    fn legacy_recovered_generation_without_receipt_is_fail_closed() {
-        let legacy = legacy_recovered_claim_without_receipt_outcome(true, 0)
-            .expect("an upgraded in-progress row has ambiguous pre-receipt effects");
-        assert_eq!(legacy.0, TurnEnd::Clean);
-        assert!(legacy.2, "legacy ambiguity must finalize as needs_review");
+    fn recovered_claim_without_receipt_is_fail_closed_for_every_generation() {
+        let outcome = autowork_blocked_delivery_outcome(
+            recovered_claim_receipt_gate(&PublicTurnDeliveryState::Missing, 1)
+                .expect_err("a recovered claim without a receipt must be quarantined"),
+        );
+        assert_eq!(outcome.0, TurnEnd::Ambiguous);
+        assert!(outcome.2, "missing receipt must finalize as needs_review");
         assert!(
-            legacy
+            outcome
                 .1
                 .as_deref()
-                .is_some_and(|note| note.contains("predates durable AutoWork delivery receipts"))
+                .is_some_and(|note| note.contains("prior execution outcome cannot be proven"))
         );
         assert!(
-            legacy_recovered_claim_without_receipt_outcome(false, 1).is_none(),
-            "the first execution of a freshly allocated claim remains enabled"
+            recovered_claim_receipt_gate(
+                &PublicTurnDeliveryState::Missing,
+                17
+            )
+            .is_err(),
+            "the guard must not allow a later generation to bypass the receipt boundary"
+        );
+    }
+
+    #[test]
+    fn recovered_claim_with_accepted_or_completed_receipt_may_reconcile_only() {
+        let message_id = nomifun_common::MessageId::new().into_string();
+        assert!(
+            recovered_claim_receipt_gate(
+                &PublicTurnDeliveryState::Accepted {
+                    message_id: message_id.clone(),
+                },
+                2,
+            )
+            .is_ok()
         );
         assert!(
-            legacy_recovered_claim_without_receipt_outcome(true, 1).is_none(),
-            "post-migration recovered claims use their durable receiver receipt"
+            recovered_claim_receipt_gate(
+                &PublicTurnDeliveryState::Completed(IdempotentMessageDelivery {
+                    message_id,
+                    replayed: true,
+                    completed: true,
+                    result_ok: Some(true),
+                    result_text: None,
+                    result_error: None,
+                    result_error_code: None,
+                    result_error_retryable: None,
+                }),
+                2,
+            )
+            .is_ok()
+        );
+    }
+
+    struct ScriptedConversationPort {
+        state: Mutex<PublicTurnDeliveryState>,
+        reconciliation: BackgroundTurnReconciliationDisposition,
+        reconciliation_delay: Option<Duration>,
+        polls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptedConversationPort {
+        fn new(
+            state: PublicTurnDeliveryState,
+            reconciliation: BackgroundTurnReconciliationDisposition,
+        ) -> Self {
+            Self {
+                state: Mutex::new(state),
+                reconciliation,
+                reconciliation_delay: None,
+                polls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn with_reconciliation_delay(
+            state: PublicTurnDeliveryState,
+            reconciliation: BackgroundTurnReconciliationDisposition,
+            delay: Duration,
+        ) -> Self {
+            let mut port = Self::new(state, reconciliation);
+            port.reconciliation_delay = Some(delay);
+            port
+        }
+
+        fn set_state(&self, state: PublicTurnDeliveryState) {
+            *self.state.lock().expect("scripted receipt state lock") = state;
+        }
+
+        fn poll_count(&self) -> usize {
+            self.polls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AutoWorkSessionPort for ScriptedConversationPort {
+        fn begin_runtime_preparation(
+            &self,
+            _conversation_id: &str,
+            _requester_user_id: &str,
+        ) -> Result<RuntimeBuildLease, AppError> {
+            Err(AppError::Conflict("not used by receipt wait test".into()))
+        }
+
+        fn user_cancelled_since(&self, _conversation_id: &str, _since_ms: i64) -> bool {
+            false
+        }
+
+        async fn cancel_active_turn(&self, _conversation_id: &str) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn save_config(
+            &self,
+            _conversation_id: &str,
+            _enabled: bool,
+            _tag: Option<&str>,
+            _max_requirements: Option<u32>,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn send_observed_turn(
+            &self,
+            _user_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+            _request: SendMessageRequest,
+            _build_lease: RuntimeBuildLease,
+            _runtime_preparation: BackgroundTurnRuntimePreparation,
+            _authority: RequirementConversationTurnAuthority,
+        ) -> Result<ObservedIdempotentMessageDelivery, AppError> {
+            Err(AppError::Conflict("not used by receipt wait test".into()))
+        }
+
+        async fn delivery_result(
+            &self,
+            _user_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+            _request: &SendMessageRequest,
+            _authority: &RequirementConversationTurnAuthority,
+        ) -> Result<Option<IdempotentMessageDelivery>, AppError> {
+            Err(AppError::Conflict("receipt wait must use typed state".into()))
+        }
+
+        async fn public_turn_delivery_state(
+            &self,
+            _user_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+        ) -> Result<PublicTurnDeliveryState, AppError> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.state.lock().expect("scripted receipt state lock").clone())
+        }
+
+        async fn reconcile_quiescent_running_turn(
+            &self,
+            _user_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+        ) -> Result<BackgroundTurnReconciliationDisposition, AppError> {
+            if let Some(delay) = self.reconciliation_delay {
+                sleep(delay).await;
+            }
+            Ok(self.reconciliation)
+        }
+    }
+
+    async fn receipt_wait_fixture() -> (
+        RequirementService,
+        nomifun_db::Database,
+        String,
+        String,
+        i64,
+        String,
+        String,
+    ) {
+        use nomifun_db::{IRequirementRepository, SqliteRequirementRepository, init_database_memory};
+        use nomifun_realtime::UserEventSink;
+
+        #[derive(Default)]
+        struct NoopBroadcaster;
+
+        impl UserEventSink for NoopBroadcaster {
+            fn send_to_user(
+                &self,
+                _user_id: &str,
+                _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+            ) {
+            }
+        }
+
+        let db = init_database_memory().await.expect("in-memory database");
+        let user_id = nomifun_db::installation_owner_id(db.pool())
+            .await
+            .expect("installation owner");
+        let conversation_id = ConversationId::new().into_string();
+        sqlx::query(
+            "INSERT INTO conversations \
+                (conversation_id, user_id, name, type, created_at, updated_at) \
+             VALUES (?1, ?2, 'Receipt Wait Test', 'nomi', 0, 0)",
+        )
+        .bind(&conversation_id)
+        .bind(&user_id)
+        .execute(db.pool())
+        .await
+        .expect("conversation fixture");
+
+        let repo: Arc<dyn IRequirementRepository> =
+            Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
+        let emitter = crate::events::RequirementEventEmitter::new(
+            Arc::new(NoopBroadcaster),
+            Arc::from(user_id.as_str()),
+        );
+        let service = RequirementService::new(repo, emitter);
+        let requirement = service
+            .create(nomifun_api_types::CreateRequirementRequest {
+                title: "Receipt wait".into(),
+                content: "wait for durable completion".into(),
+                tag: "receipt-wait".into(),
+                order_key: Some("1".into()),
+                status: None,
+                created_by: None,
+                attachments: vec![],
+            })
+            .await
+            .expect("requirement fixture");
+        let claim = service
+            .claim_next_for_runner(
+                "receipt-wait",
+                &conversation_id,
+                AutoWorkTargetKind::Conversation,
+                DEFAULT_LEASE_MS,
+            )
+            .await
+            .expect("claim fixture")
+            .expect("requirement claim");
+
+        (
+            service,
+            db,
+            conversation_id,
+            requirement.requirement_id,
+            claim.claim_generation,
+            claim.claim_token,
+            user_id,
+        )
+    }
+
+    #[tokio::test]
+    async fn exact_verdict_none_requires_matching_terminal_reconfirmation() {
+        let (service, _db, conversation_id, requirement_id, generation, claim_token, _user_id) =
+            receipt_wait_fixture().await;
+
+        resolve_claim_verdict_required(
+            &service,
+            &requirement_id,
+            generation,
+            &claim_token,
+            &conversation_id,
+            AutoWorkTargetKind::Conversation,
+            RequirementStatus::NeedsReview,
+            Some("first terminal writer".to_owned()),
+        )
+        .await
+        .expect("the first exact verdict should commit");
+
+        let stale_done = resolve_claim_verdict_required(
+            &service,
+            &requirement_id,
+            generation,
+            &claim_token,
+            &conversation_id,
+            AutoWorkTargetKind::Conversation,
+            RequirementStatus::Done,
+            None,
+        )
+        .await;
+        let error = stale_done.expect_err("Ok(None) must not be treated as a Done success");
+        assert!(
+            error
+                .to_string()
+                .contains("already resolved as 'needs_review' instead of 'done'"),
+            "the exact terminal recheck must explain the conflicting winner: {error}"
+        );
+
+        resolve_claim_verdict_required(
+            &service,
+            &requirement_id,
+            generation,
+            &claim_token,
+            &conversation_id,
+            AutoWorkTargetKind::Conversation,
+            RequirementStatus::NeedsReview,
+            None,
+        )
+        .await
+        .expect("a same-status exact replay may be acknowledged after re-confirmation");
+    }
+
+    fn receipt_wait_timing(hard_timeout: Duration) -> ConversationReceiptWaitTiming {
+        ConversationReceiptWaitTiming {
+            lease_renew_interval: Duration::from_secs(60),
+            receipt_poll_interval: Duration::from_millis(5),
+            hard_timeout,
+        }
+    }
+
+    #[tokio::test]
+    async fn conversation_wait_ignores_text_until_typed_receipt_completes() {
+        let (service, _db, conversation_id, requirement_id, generation, claim_token, user_id) =
+            receipt_wait_fixture().await;
+        let message_id = nomifun_common::MessageId::new().into_string();
+        let port = Arc::new(ScriptedConversationPort::new(
+            PublicTurnDeliveryState::Accepted {
+                message_id: message_id.clone(),
+            },
+            BackgroundTurnReconciliationDisposition::LiveExactOwnerWait,
+        ));
+        let (events_tx, events_rx) = broadcast::channel(8);
+        let wait = wait_for_conversation_receipt_with_renewal_timed(
+            &service,
+            port.as_ref(),
+            &conversation_id,
+            &conversation_id,
+            &requirement_id,
+            generation,
+            &claim_token,
+            &user_id,
+            "autowork:test-receipt-wait",
+            &message_id,
+            false,
+            Some(events_rx),
+            receipt_wait_timing(Duration::from_secs(1)),
+        );
+        tokio::pin!(wait);
+
+        events_tx
+            .send(AgentStreamEvent::Text(
+                nomifun_ai_agent::protocol::events::TextEventData {
+                    content: "ordinary output is not a completion verdict".into(),
+                },
+            ))
+            .expect("event receiver");
+        let early = tokio::select! {
+            outcome = &mut wait => Some(outcome),
+            _ = sleep(Duration::from_millis(30)) => None,
+        };
+        assert!(
+            early.is_none(),
+            "ordinary text must not complete an accepted turn"
+        );
+        assert!(port.poll_count() > 0, "the typed receipt must be polled");
+
+        port.set_state(PublicTurnDeliveryState::Completed(
+            IdempotentMessageDelivery {
+                message_id: message_id.clone(),
+                replayed: true,
+                completed: true,
+                result_ok: Some(true),
+                result_text: None,
+                result_error: None,
+                result_error_code: None,
+                result_error_retryable: None,
+            },
+        ));
+        let outcome = timeout(Duration::from_secs(1), &mut wait)
+            .await
+            .expect("durable completion should be observed");
+        assert_eq!(outcome.0, TurnEnd::Clean);
+        assert!(!outcome.2, "durable success without native verdict is clean");
+        assert!(
+            outcome
+                .1
+                .as_deref()
+                .is_some_and(|note| note.contains("ordinary output")),
+            "stream text may enrich the note only after durable completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_receipt_is_bounded_review_and_never_a_success() {
+        let (service, _db, conversation_id, requirement_id, generation, claim_token, user_id) =
+            receipt_wait_fixture().await;
+        let port = ScriptedConversationPort::new(
+            PublicTurnDeliveryState::Missing,
+            BackgroundTurnReconciliationDisposition::LiveExactOwnerWait,
+        );
+        let outcome = wait_for_conversation_receipt_with_renewal_timed(
+            &service,
+            &port,
+            &conversation_id,
+            &conversation_id,
+            &requirement_id,
+            generation,
+            &claim_token,
+            &user_id,
+            "autowork:test-missing-receipt",
+            &nomifun_common::MessageId::new().into_string(),
+            false,
+            None,
+            receipt_wait_timing(Duration::from_secs(1)),
+        )
+        .await;
+        assert_eq!(outcome.0, TurnEnd::Ambiguous);
+        assert!(outcome.2, "missing receipt must require review");
+        assert!(
+            outcome
+                .1
+                .as_deref()
+                .is_some_and(|note| note.contains("disappeared")),
+            "missing receipt must explain the fail-closed decision"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_receipt_timeout_is_bounded_and_never_infers_done() {
+        let (service, _db, conversation_id, requirement_id, generation, claim_token, user_id) =
+            receipt_wait_fixture().await;
+        let message_id = nomifun_common::MessageId::new().into_string();
+        let port = ScriptedConversationPort::new(
+            PublicTurnDeliveryState::Accepted { message_id: message_id.clone() },
+            BackgroundTurnReconciliationDisposition::LiveExactOwnerWait,
+        );
+        let outcome = wait_for_conversation_receipt_with_renewal_timed(
+            &service,
+            &port,
+            &conversation_id,
+            &conversation_id,
+            &requirement_id,
+            generation,
+            &claim_token,
+            &user_id,
+            "autowork:test-timeout",
+            &message_id,
+            false,
+            None,
+            receipt_wait_timing(Duration::from_millis(35)),
+        )
+        .await;
+        assert_eq!(outcome.0, TurnEnd::Ambiguous);
+        assert!(outcome.2, "timeout must require review");
+        assert!(
+            outcome
+                .1
+                .as_deref()
+                .is_some_and(|note| note.contains("hard timeout")),
+            "timeout must be reported as an unknown outcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_replay_reconciliation_uses_typed_state_and_message_identity() {
+        let message_id = nomifun_common::MessageId::new().into_string();
+        let port = ScriptedConversationPort::new(
+            PublicTurnDeliveryState::Accepted {
+                message_id: message_id.clone(),
+            },
+            BackgroundTurnReconciliationDisposition::ReconciledOrTerminalReRead,
+        );
+        let delivery = IdempotentMessageDelivery {
+            message_id: message_id.clone(),
+            replayed: true,
+            completed: false,
+            result_ok: None,
+            result_text: None,
+            result_error: None,
+            result_error_code: None,
+            result_error_retryable: None,
+        };
+        let reconciled = reconcile_accepted_autowork_delivery(
+            &port,
+            "user",
+            "conversation",
+            "autowork:key",
+            delivery,
+        )
+        .await
+        .expect("accepted typed state should remain waitable");
+        assert!(reconciled.accepted_wait_authorized);
+
+        port.set_state(PublicTurnDeliveryState::Completed(
+            IdempotentMessageDelivery {
+                message_id,
+                replayed: true,
+                completed: true,
+                result_ok: Some(true),
+                result_text: None,
+                result_error: None,
+                result_error_code: None,
+                result_error_retryable: None,
+            },
+        ));
+        let completed = reconcile_accepted_autowork_delivery(
+            &port,
+            "user",
+            "conversation",
+            "autowork:key",
+            reconciled.delivery,
+        )
+        .await
+        .expect("completed typed state should be returned");
+        assert!(!completed.accepted_wait_authorized);
+        assert!(completed.delivery.completed);
+    }
+
+    #[tokio::test]
+    async fn accepted_reconciliation_timeout_is_bounded_before_receipt_wait() {
+        let message_id = nomifun_common::MessageId::new().into_string();
+        let port = ScriptedConversationPort::with_reconciliation_delay(
+            PublicTurnDeliveryState::Accepted {
+                message_id: message_id.clone(),
+            },
+            BackgroundTurnReconciliationDisposition::LiveExactOwnerWait,
+            Duration::from_millis(100),
+        );
+        let result = timeout(
+            Duration::from_secs(1),
+            reconcile_accepted_autowork_delivery_timed(
+                &port,
+                "user",
+                "conversation",
+                "autowork:key",
+                IdempotentMessageDelivery {
+                    message_id,
+                    replayed: true,
+                    completed: false,
+                    result_ok: None,
+                    result_text: None,
+                    result_error: None,
+                    result_error_code: None,
+                    result_error_retryable: None,
+                },
+                Duration::from_millis(10),
+            ),
+        )
+        .await
+        .expect("reconciliation must return before the outer guard");
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("a reconciliation past its deadline must fail closed"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("reconciliation exceeded its 10 ms deadline"),
+            "deadline error must identify the bounded reconciliation phase: {error}"
         );
     }
 

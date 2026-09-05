@@ -172,6 +172,9 @@ Reuse the printed key after an ambiguous network failure.
 | `REMOTE_SESSION_OPENING` | Runtime admission has not reached a durable terminal state. |
 | `REMOTE_OPEN_FAILED` | Runtime admission failed; inspect Session events. |
 | `REMOTE_SESSION_BUSY` | The requested turn/cancel conflicts with current Session state. |
+| `REMOTE_OPERATION_TIMEOUT` | A Remote operation exceeded its bounded deadline; the outcome may be unknown. Reuse the same idempotency key and recover through observe. |
+| `REMOTE_OPERATION_BLOCKED` | The operation panicked or became unrecoverably blocked before its outcome was known. Do not create a new operation; inspect the same Session and restart the host if required. |
+| `REMOTE_SESSION_PERSISTENCE_BLOCKED` | `session/open-failed` could not be persisted. Restore storage and restart the host so reconciliation can run. |
 | `SNAPSHOT_EXECUTOR_UNAVAILABLE` | The frozen Snapshot cannot currently execute. |
 
 ## Related docs

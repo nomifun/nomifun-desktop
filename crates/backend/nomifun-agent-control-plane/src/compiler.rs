@@ -82,6 +82,7 @@ pub struct PresetPreviewCompiler {
     official_templates: OfficialTemplateCatalog,
     canonical_registry: Option<Arc<dyn CanonicalRegistryProvider>>,
     canonical_environment: Option<CompilerEnvironment>,
+    reject_on_demand_capabilities: bool,
 }
 
 impl PresetPreviewCompiler {
@@ -94,6 +95,7 @@ impl PresetPreviewCompiler {
             official_templates,
             canonical_registry: None,
             canonical_environment: None,
+            reject_on_demand_capabilities: false,
         }
     }
 
@@ -121,6 +123,15 @@ impl PresetPreviewCompiler {
             Arc::new(StaticCanonicalRegistryProvider { registry }),
             environment,
         )
+    }
+
+    /// Configure a host composition that has no safe runtime activation port
+    /// for deferred capabilities.  Such hosts must return a blocked Preview
+    /// rather than persisting a Snapshot whose on-demand set can never be
+    /// activated.
+    pub fn reject_on_demand_capabilities(mut self) -> Self {
+        self.reject_on_demand_capabilities = true;
+        self
     }
 
     pub fn compile(
@@ -167,6 +178,23 @@ impl PresetPreviewCompiler {
             ));
         }
         validate_direct_catalog_availability(&payload, catalog, &mut diagnostics);
+        if self.reject_on_demand_capabilities
+            && !payload.on_demand_capabilities.is_empty()
+        {
+            let ids = payload
+                .on_demand_capabilities
+                .iter()
+                .map(|selection| selection.capability.id.as_ref().to_owned())
+                .collect::<Vec<_>>();
+            diagnostics.push(error_diagnostic(
+                CanonicalErrorCode::from("CAPABILITY_UNAVAILABLE"),
+                format!(
+                    "the selected host has no on-demand activation port for [{}]",
+                    ids.join(", ")
+                ),
+                Some("on-demand-capabilities".to_owned()),
+            ));
+        }
         validate_template_baseline(
             transient_template_key,
             &self.official_templates,

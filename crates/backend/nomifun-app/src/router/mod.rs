@@ -13,6 +13,10 @@ pub(crate) mod legacy_conversation_port;
 pub mod instance_token_routes;
 pub(crate) mod remote_rest;
 pub(crate) mod remote_runtime;
+pub(crate) mod nomi_core_agent_projection;
+pub(crate) mod nomi_core_chat_route;
+pub(crate) mod nomi_core_control_plane;
+pub(crate) mod nomi_core_session;
 #[cfg(feature = "browser-use")]
 pub(crate) mod browser_management;
 #[cfg(feature = "browser-use")]

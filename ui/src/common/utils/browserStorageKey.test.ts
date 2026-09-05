@@ -12,6 +12,7 @@ import {
   browserStorageKey,
   getBrowserStorageGeneration,
   initializeBrowserStorageGeneration,
+  isCanonicalBrowserStorageGeneration,
   sessionStorageKey,
   setBrowserStorageGeneration,
   type BrowserStoragePersistence,
@@ -19,6 +20,7 @@ import {
 
 const CANONICAL_GENERATION = '01900000-0000-7000-8000-000000000010';
 const CANONICAL_GENERATION_2 = '01900000-0000-7000-8000-000000000011';
+const CANONICAL_GENERATION_WITH_HEX = '0190f5fe-7c00-7a00-8000-000000000010';
 
 function createStorage(initial?: string): BrowserStoragePersistence {
   const values = new Map<string, string>();
@@ -109,6 +111,23 @@ describe('browser storage keys', () => {
     }
   });
 
+  test('accepts only canonical lowercase UUIDv7 generation values', () => {
+    expect(isCanonicalBrowserStorageGeneration(CANONICAL_GENERATION)).toBe(true);
+
+    for (const value of [
+      undefined,
+      null,
+      '',
+      'uninitialized',
+      '01900000-0000-4000-8000-000000000001',
+      CANONICAL_GENERATION_WITH_HEX.toUpperCase(),
+      `${CANONICAL_GENERATION}\n`,
+      'gen_01900000-0000-7000-8000-000000000001',
+    ]) {
+      expect(isCanonicalBrowserStorageGeneration(value)).toBe(false);
+    }
+  });
+
   test('uses the valid backend generation and persists it for the next reload', () => {
     const storage = createStorage('01900000-0000-7000-8000-000000000012');
 
@@ -136,6 +155,16 @@ describe('browser storage keys', () => {
     expect(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(generation)).toBe(true);
     expect(generation).toBe(generation.toLowerCase());
     expect(storage.getItem(BROWSER_STORAGE_GENERATION_STORAGE_KEY)).toBe(generation);
+  });
+
+  test('does not let an empty or legacy persisted value block bootstrap', () => {
+    for (const persisted of ['', 'undefined', 'null', 'legacy-storage-generation']) {
+      const storage = createStorage(persisted);
+      const generation = initializeBrowserStorageGeneration(undefined, storage);
+
+      expect(isCanonicalBrowserStorageGeneration(generation)).toBe(true);
+      expect(storage.getItem(BROWSER_STORAGE_GENERATION_STORAGE_KEY)).toBe(generation);
+    }
   });
 
   test('reuses the persisted value across a renderer reload', () => {

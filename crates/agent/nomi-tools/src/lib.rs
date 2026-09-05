@@ -17,6 +17,7 @@ pub mod read;
 pub mod registry;
 pub mod tool_search;
 pub mod update_plan;
+pub mod vcs;
 pub mod worktree;
 pub mod write;
 pub mod write_stdin;

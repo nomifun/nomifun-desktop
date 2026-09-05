@@ -12,9 +12,8 @@ use nomifun_common::{
     UserId, now_ms,
     workspace_path_has_edge_whitespace_segment,
 };
-use nomifun_conversation::service::{
-    BackgroundTurnReconciliationDisposition, PublicTurnDeliveryState,
-};
+use nomifun_conversation::BackgroundTaskRegistrar;
+use crate::session_port::{CronTurnReceiptState, CronTurnReconciliation};
 use nomifun_db::{
     AdvanceCronOccurrenceParams, CRON_RUN_HISTORY_LIMIT, CronJobRunRow, ICronRepository,
     FinalizeCronRunOutcome, FinalizeCronRunParams, ReserveCronRunParams, UpdateCronJobParams,
@@ -87,6 +86,7 @@ pub struct CronService {
     preset_service: Arc<RwLock<Option<Arc<nomifun_preset::PresetService>>>>,
     job_gates: Arc<DashMap<String, Weak<AsyncMutex<()>>>>,
     active_scheduled_runs: Arc<DashMap<String, ()>>,
+    background_task_registrar: Arc<RwLock<Option<Arc<dyn BackgroundTaskRegistrar>>>>,
 }
 
 #[derive(Debug, Default)]
@@ -129,7 +129,29 @@ impl CronService {
             preset_service: Arc::new(RwLock::new(None)),
             job_gates: Arc::new(DashMap::new()),
             active_scheduled_runs: Arc::new(DashMap::new()),
+            background_task_registrar: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Install the application-owned join sink for run-now workers. Timer
+    /// callbacks are registered by the host scheduler itself, while this
+    /// boundary covers explicit API-triggered executions spawned inside the
+    /// Cron service.
+    pub fn with_background_task_registrar(
+        &self,
+        registrar: Arc<dyn BackgroundTaskRegistrar>,
+    ) {
+        if let Ok(mut guard) = self.background_task_registrar.write() {
+            *guard = Some(registrar);
+        }
+    }
+
+    /// Stop timer admission before the host begins joining background work.
+    /// Already-dispatched occurrences remain owned by their registered task;
+    /// this only prevents a timer from creating new database work during
+    /// shutdown.
+    pub fn shutdown_timers(&self) {
+        self.scheduler.cancel_all();
     }
 
     /// Return the process-local mutation/admission gate for one durable job.
@@ -1009,7 +1031,7 @@ impl CronService {
             }
         };
 
-        if matches!(state, PublicTurnDeliveryState::Accepted { .. }) {
+        if matches!(state, CronTurnReceiptState::Accepted { .. }) {
             match self
                 .executor
                 .reconcile_accepted_turn_on_boot(
@@ -1019,7 +1041,7 @@ impl CronService {
                 )
                 .await
             {
-                Ok(BackgroundTurnReconciliationDisposition::ReconciledOrTerminalReRead) => {
+                Ok(CronTurnReconciliation::ReconciledOrTerminalReRead) => {
                     state = match self
                         .executor
                         .public_turn_delivery_state(
@@ -1043,9 +1065,9 @@ impl CronService {
                     };
                 }
                 Ok(
-                    BackgroundTurnReconciliationDisposition::LiveExactOwnerWait
-                    | BackgroundTurnReconciliationDisposition::ExternalProofRequiredFailClosed
-                    | BackgroundTurnReconciliationDisposition::StaleConflict,
+                    CronTurnReconciliation::LiveExactOwnerWait
+                    | CronTurnReconciliation::ExternalProofRequiredFailClosed
+                    | CronTurnReconciliation::StaleConflict,
                 ) => {
                     warn!(
                         job_id = %job.cron_job_id,
@@ -1069,7 +1091,7 @@ impl CronService {
         }
 
         match state {
-            PublicTurnDeliveryState::Missing => {
+            CronTurnReceiptState::Missing => {
                 // Attachment precedes the send call. Missing receipt after a
                 // process restart is exact proof that the receiver never
                 // accepted this occurrence.
@@ -1085,7 +1107,7 @@ impl CronService {
                 .await
                 .then(|| ("error", Some(message.to_owned())))
             }
-            PublicTurnDeliveryState::Accepted { .. } => {
+            CronTurnReceiptState::Accepted { .. } => {
                 warn!(
                     job_id = %job.cron_job_id,
                     run_id = %reservation.cron_job_run_id,
@@ -1094,7 +1116,7 @@ impl CronService {
                 );
                 None
             }
-            PublicTurnDeliveryState::Completed(delivery) => match delivery.result_ok {
+            CronTurnReceiptState::Completed(delivery) => match delivery.result_ok {
                 Some(true) => {
                     let (status, result_error, projection) =
                         match self.success_run_projection(job, conversation_id).await {
@@ -1912,10 +1934,18 @@ impl CronService {
         let service = self.clone();
         let run_id = reservation.cron_job_run_id;
 
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let result = service.executor.execute_prepared(&job, prepared).await;
             service.handle_run_now_result(&job, &run_id, result).await;
         });
+        if let Some(registrar) = self
+            .background_task_registrar
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone())
+        {
+            registrar.register(task);
+        }
 
         // The executor returns the canonical conversation entity ID unchanged.
         Ok(RunNowResponse { conversation_id })

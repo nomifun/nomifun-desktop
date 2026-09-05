@@ -123,7 +123,10 @@ const Main = () => {
     void Promise.all([
       application.systemInfo
         .invoke()
-        .then((info) => initializeBrowserStorageGeneration(info.storageGeneration))
+        // A fresh/legacy backend may briefly omit the generation. The storage
+        // initializer owns that recoverable fallback; only real runtime
+        // failures should reach the application error state below.
+        .then((info) => initializeBrowserStorageGeneration(info?.storageGeneration))
         .catch((err) => {
           console.error('Failed to initialize browser storage generation:', err);
           throw err;

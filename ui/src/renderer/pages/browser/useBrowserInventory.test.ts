@@ -363,7 +363,6 @@ describe('browser inventory recovery', () => {
       let state = readInventoryState(() => latest);
       expect(state.loading).toBe(false);
       expect(state.error?.includes('backend is still starting')).toBe(true);
-      expect(timers.getTimerCount()).toBe(1);
 
       timers.advanceTimersByTime(BROWSER_RETRY_BASE_DELAY_MS - 1);
       await flushPromises();
@@ -377,7 +376,14 @@ describe('browser inventory recovery', () => {
       expect(state.overview?.running_lanes).toBe(1);
       expect(state.lanes.map((lane) => lane.lane_id)).toEqual(['lane-recovered']);
       expect(state.error).toBeNull();
-      expect(timers.getTimerCount()).toBe(0);
+      // Do not assert the process-wide timer count: another UI test may own a
+      // timer in the shared Bun worker. Advancing the retry window and proving
+      // that this controller does not issue a third request checks the
+      // controller-owned timer without coupling the test to other files.
+      timers.advanceTimersByTime(BROWSER_RETRY_BASE_DELAY_MS);
+      await flushPromises();
+      expect(overviewCalls).toBe(2);
+      expect(laneCalls).toBe(2);
       controller.dispose();
     } finally {
       timers.clearAllTimers();
@@ -445,14 +451,16 @@ describe('browser overview entry recovery', () => {
       let state = readOverviewState(() => latest);
       expect(state.availability).toBe('transient-error');
       expect(state.error).toBe('temporary overview failure');
-      expect(timers.getTimerCount()).toBe(1);
+
+      timers.advanceTimersByTime(BROWSER_RETRY_BASE_DELAY_MS - 1);
+      await flushPromises();
+      expect(calls).toBe(1);
 
       await controller.realtime();
       expect(calls).toBe(2);
       state = readOverviewState(() => latest);
       expect(state.availability).toBe('available');
       expect(state.overview?.running_lanes).toBe(2);
-      expect(timers.getTimerCount()).toBe(0);
 
       timers.advanceTimersByTime(BROWSER_RETRY_BASE_DELAY_MS);
       await flushPromises();

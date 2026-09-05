@@ -41,11 +41,12 @@ pub use bootstrap::{CanonicalHost, FreshV4Host};
 pub use nomifun_auth::AuthPolicy;
 pub use router::create_agent_platform_router;
 
-/// Explicitly isolated v3 compatibility graph used by legacy-focused tests.
+/// Test assembly facade for the in-process Nomi-core graph.
 ///
-/// Production server, Web, and native Desktop entry points compose
-/// [`bootstrap::FreshV4Application`] and do not construct anything exported
-/// here. The entire module remains scheduled for C9 physical deletion.
+/// Product entry points compose [`bootstrap::NomiCoreApplication`] or use the
+/// typed desktop startup API. Tests that need individual routers/services use
+/// this facade instead of reaching private modules. Fresh-v4 remains isolated
+/// in [`bootstrap::FreshV4Application`].
 pub mod compatibility {
     pub use crate::router::{
         ChannelMessageLoopComponents, ModuleStates, build_conversation_state,
@@ -56,13 +57,11 @@ pub mod compatibility {
     pub use crate::services::AppServices;
 }
 
-/// In-process server entry used by embedded hosts (Tauri desktop, `nomifun-web`)
-/// and by the `nomicore` bin's default path. Builds environment → data layer →
-/// services, then serves until shutdown. For a host that also serves static
-/// assets (the web SPA), compose `create_router` + your fallback instead.
+/// In-process server entry used by embedded hosts and by the `nomicore` bin's
+/// default path. The current product composition is the original in-process
+/// Nomi engine; Fresh-v4/Codex remains an explicit future host.
 pub async fn run_embedded_server(cli: &cli::Cli, merged_path: &str) -> anyhow::Result<std::process::ExitCode> {
-    let env = bootstrap::init_environment(cli, merged_path)?;
-    let host = env.canonical_host()?;
-    let application = host.compose(&env.config).await?;
-    commands::run_canonical_server(env, application).await
+    let env = bootstrap::init_nomi_core_environment(cli, merged_path)?;
+    let application = bootstrap::NomiCoreApplication::compose(&env).await?;
+    commands::run_nomi_core_server(env, application).await
 }

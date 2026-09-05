@@ -3,7 +3,9 @@ use std::sync::Arc;
 use nomifun_db::SettleChannelInboundReceiptParams;
 use nomifun_db::models::NewChannelInboundReceiptRow;
 use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::action::{ActionExecutor, MessageResult};
@@ -153,6 +155,16 @@ pub struct ChannelMessageLoop {
     message_service: Arc<ChannelMessageService>,
     session_manager: Arc<SessionManager>,
     sender: Arc<dyn ChannelSender>,
+    shutdown: CancellationToken,
+    child_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+}
+
+type ChildTaskRegistry = Arc<Mutex<Vec<JoinHandle<()>>>>;
+
+async fn track_child_task(registry: &ChildTaskRegistry, task: JoinHandle<()>) {
+    let mut tasks = registry.lock().await;
+    tasks.retain(|task| !task.is_finished());
+    tasks.push(task);
 }
 
 impl ChannelMessageLoop {
@@ -167,18 +179,64 @@ impl ChannelMessageLoop {
             message_service,
             session_manager,
             sender,
+            shutdown: CancellationToken::new(),
+            child_tasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// Start the message loop. Runs until the message channel closes.
     pub async fn run(self, mut message_rx: mpsc::Receiver<ChannelIncoming>) {
+        self.run_with_shutdown(&mut message_rx, CancellationToken::new())
+            .await;
+    }
+
+    /// Start the message loop with an explicit process-lifetime cancellation
+    /// boundary.  The ordinary `run` method remains available to standalone
+    /// users/tests; production hosts use this method so all child handlers and
+    /// stream relays are joined before the database closes.
+    pub async fn run_with_shutdown(
+        mut self,
+        message_rx: &mut mpsc::Receiver<ChannelIncoming>,
+        shutdown: CancellationToken,
+    ) {
+        self.shutdown = shutdown;
         info!("ChannelMessageLoop started");
 
-        while let Some(incoming) = message_rx.recv().await {
+        loop {
+            let incoming = tokio::select! {
+                _ = self.shutdown.cancelled() => break,
+                incoming = message_rx.recv() => incoming,
+            };
+            let Some(incoming) = incoming else {
+                break;
+            };
+            if self.shutdown.is_cancelled() {
+                break;
+            }
             self.handle_message(incoming).await;
         }
 
+        self.shutdown.cancel();
+        self.join_child_tasks().await;
         info!("ChannelMessageLoop stopped (channel closed)");
+    }
+
+    async fn join_child_tasks(&self) {
+        let tasks = std::mem::take(&mut *self.child_tasks.lock().await);
+        for mut task in tasks {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if !error.is_cancelled() => {
+                    warn!(error = %error, "channel message child task failed during shutdown");
+                }
+                Ok(Err(_)) => {}
+                Err(_) => {
+                    task.abort();
+                    let _ = task.await;
+                    warn!("channel message child task exceeded shutdown deadline and was aborted");
+                }
+            }
+        }
     }
 
     async fn handle_message(&self, incoming: ChannelIncoming) {
@@ -275,8 +333,10 @@ impl ChannelMessageLoop {
         let msg_svc = Arc::clone(&self.message_service);
         let session_mgr = Arc::clone(&self.session_manager);
         let sender = Arc::clone(&self.sender);
+        let shutdown = self.shutdown.clone();
+        let child_tasks = Arc::clone(&self.child_tasks);
 
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut settlement = SettleChannelInboundReceiptParams {
                 outcome_json: Some(serde_json::json!({ "kind": "unknown" }).to_string()),
                 ..Default::default()
@@ -331,6 +391,8 @@ impl ChannelMessageLoop {
                         &msg_svc,
                         &session_mgr,
                         &sender,
+                        &shutdown,
+                        &child_tasks,
                         &session_id,
                         conversation_id.as_deref(),
                         &text,
@@ -359,6 +421,8 @@ impl ChannelMessageLoop {
                         &msg_svc,
                         &session_mgr,
                         &sender,
+                        &shutdown,
+                        &child_tasks,
                         &session_id,
                         conversation_id.as_deref(),
                         &synthesized,
@@ -384,6 +448,8 @@ impl ChannelMessageLoop {
                         &msg_svc,
                         &session_mgr,
                         &sender,
+                        &shutdown,
+                        &child_tasks,
                         &session_id,
                         conversation_id.as_deref(),
                         platform,
@@ -440,6 +506,7 @@ impl ChannelMessageLoop {
                 );
             }
         });
+        track_child_task(&self.child_tasks, task).await;
     }
 }
 
@@ -483,6 +550,8 @@ async fn handle_dispatched(
     msg_svc: &Arc<ChannelMessageService>,
     session_mgr: &Arc<SessionManager>,
     sender: &Arc<dyn ChannelSender>,
+    shutdown: &CancellationToken,
+    child_tasks: &ChildTaskRegistry,
     session_id: &str,
     conversation_id: Option<&str>,
     text: &str,
@@ -723,7 +792,14 @@ async fn handle_dispatched(
             msg_svc.stop_confirmations(),
             msg_svc.asset_resolver(),
         );
-        tokio::spawn(relay.run(rx));
+        let shutdown = shutdown.clone();
+        track_child_task(child_tasks, tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown.cancelled() => {}
+                _ = relay.run(rx) => {}
+            }
+        }))
+        .await;
     } else {
         warn!(
             conversation_id = %send_result.conversation_id,
@@ -741,6 +817,8 @@ async fn handle_regenerate(
     msg_svc: &Arc<ChannelMessageService>,
     session_mgr: &Arc<SessionManager>,
     sender: &Arc<dyn ChannelSender>,
+    shutdown: &CancellationToken,
+    child_tasks: &ChildTaskRegistry,
     session_id: &str,
     conversation_id: Option<&str>,
     platform: crate::types::PluginType,
@@ -762,6 +840,8 @@ async fn handle_regenerate(
                 msg_svc,
                 session_mgr,
                 sender,
+                shutdown,
+                child_tasks,
                 session_id,
                 Some(conversation_id),
                 &text,

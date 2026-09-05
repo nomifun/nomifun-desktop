@@ -296,16 +296,16 @@ fn generated_tauri_context<R: tauri::Runtime>() -> tauri::Context<R> {
 ///    `nomifun_app::cli::default_data_dir()`: stable builds use `NomiFun`,
 ///    non-stable builds a sibling such as `NomiFun-dev`.
 ///
-/// `resolve_startup_data_root` then maps known self-export/default locations
-/// (including values inherited from affected releases) onto the channel
-/// default and runs the one-shot legacy layout migration
-/// (`NomiFun/Nomi` → `NomiFun`).
+/// The desktop currently runs the original in-process Nomi core.  A previous
+/// Fresh-v4 experiment may have left a ready root beside the channel default;
+/// the Nomi-core resolver selects an isolated sibling in that case instead of
+/// opening or mutating the experimental database.
 fn default_data_dir() -> PathBuf {
     let requested = std::env::var_os("NOMIFUN_DATA_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(nomifun_app::cli::default_data_dir);
-    nomifun_app::bootstrap::resolve_startup_data_root(requested)
+    nomifun_app::bootstrap::resolve_nomi_core_data_root(requested)
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -2672,9 +2672,10 @@ fn main() -> std::process::ExitCode {
     let merged_path = unsafe { nomifun_runtime::enhance_process_path() };
 
     // Backend config. The desktop does NOT use `--local`: `DesktopServer::start`
-    // runs the backend under `TrustLocalToken` (trusts only its own webview via
-    // a per-boot secret) so the LAN listener can require login. Only the data
-    // dir + log level flow from here; the listeners bind their own ports.
+    // selects the explicit Nomi-core composition and runs it under
+    // `TrustLocalToken` (trusts only its own webview via a per-boot secret) so
+    // the LAN listener can require login. Only the data dir + log level flow
+    // from here; the listeners bind their own ports.
     let mut cli = nomifun_app::cli::Cli::parse_from(["nomifun-desktop"]);
     cli.data_dir = data_dir;
     // Opt-in verbose backend logging without a custom build, e.g.

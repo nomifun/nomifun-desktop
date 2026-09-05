@@ -53,7 +53,8 @@ pub use profile::{
 pub use registry::CompanionRegistry;
 pub use routes::{companion_public_routes, companion_routes};
 pub use session_port::{
-    CompanionHostPorts, CompanionSessionPort, conversation_companion_ports,
+    CompanionHostPorts, CompanionSessionPort, companion_ports_with_session,
+    conversation_companion_ports,
 };
 pub use service::CompanionService;
 pub use state::CompanionRouterState;

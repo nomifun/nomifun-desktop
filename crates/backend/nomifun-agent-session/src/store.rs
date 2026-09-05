@@ -33,7 +33,8 @@ use crate::types::{
     EffectReconcileOutcome, EffectTerminalState, ForkRequest, ForkResult, MessageProjection,
     ChatCausalityFacts, RuntimeAppendContext, RuntimeEventAppendResult, SessionCreateResult,
     ChatOperationClaimRequest, SessionEventAppendResult, SessionEventPage,
-    SessionHeadProjection, SessionObservation, SessionRehydrationInput,
+    SessionHeadProjection, SessionObservation, SessionRehydrationInput, TurnReceipt,
+    TurnReceiptStatus,
 };
 
 pub const MAX_INLINE_JSON_BYTES: usize = 64 * 1024;
@@ -168,13 +169,25 @@ impl AgentSessionStore {
 
     #[cfg(test)]
     pub(crate) async fn open_in_memory() -> Result<Self, SessionStoreError> {
+        Self::open_in_memory_with_connections(1).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn open_in_memory_with_connections(
+        max_connections: u32,
+    ) -> Result<Self, SessionStoreError> {
         let options = SqliteConnectOptions::new()
+            .filename(format!(
+                "file:nomifun-agent-session-test-{}",
+                Uuid::now_v7()
+            ))
             .in_memory(true)
+            .shared_cache(true)
             .foreign_keys(true)
             .journal_mode(SqliteJournalMode::Memory)
             .synchronous(SqliteSynchronous::Normal);
         let pool = SqlitePoolOptions::new()
-            .max_connections(1)
+            .max_connections(max_connections)
             .connect_with(options)
             .await?;
         sqlx::raw_sql(FRESH_V4_BASELINE_SQL).execute(&pool).await?;
@@ -184,6 +197,15 @@ impl AgentSessionStore {
 
     pub fn event_registry(&self) -> &nomifun_agent_contracts::SessionEventRegistryPayload {
         self.registry.payload()
+    }
+
+    async fn begin_write_transaction(
+        &self,
+    ) -> Result<Transaction<'static, Sqlite>, SessionStoreError> {
+        // SQLite's deferred BEGIN allows two writers to validate the same
+        // head snapshot before either one obtains the write lock.  Lifecycle
+        // mutations need one serialized validation/append boundary.
+        Ok(self.pool.begin_with("BEGIN IMMEDIATE").await?)
     }
 
     #[cfg(test)]
@@ -302,7 +324,7 @@ impl AgentSessionStore {
         append: &SessionEventAppend,
         payload: Option<&SessionPayloadRecord>,
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write_transaction().await?;
         let result = self.append_event_tx(&mut tx, append, payload).await?;
         tx.commit().await?;
         Ok(result)
@@ -329,7 +351,7 @@ impl AgentSessionStore {
                 "chat completion append has an invalid terminal event shape".to_owned(),
             ));
         }
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx, message.agent_session_id.as_ref()).await?;
         if message.agent_session_id != turn.agent_session_id {
             return Err(SessionStoreError::InvalidEvent(
@@ -369,7 +391,7 @@ impl AgentSessionStore {
                 "turn terminal append has an invalid event shape".to_owned(),
             ));
         }
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx, append.agent_session_id.as_ref()).await?;
         let duplicate = duplicate_event_tx(&mut tx, append).await?;
         if duplicate.is_none() {
@@ -398,7 +420,7 @@ impl AgentSessionStore {
         idempotency_key: IdempotencyKey,
         producer_id: EventProducerId,
     ) -> Result<(OperationId, SessionEventAppendResult), SessionStoreError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write_transaction().await?;
         require_live_session_tx(&mut tx, session_id.as_ref()).await?;
 
         if let Some(existing) = event_by_producer_key_tx(
@@ -775,6 +797,83 @@ impl AgentSessionStore {
         })
     }
 
+    /// Read the canonical turn receipt for an exact
+    /// `(AgentSessionId, OperationId)` pair.
+    ///
+    /// Both reads are bounded by `LIMIT 1` and share one read-only
+    /// transaction. A terminal event is considered part of the selected turn
+    /// only when it was committed after the original matching `turn/started`.
+    /// The first terminal fact wins; the write-side lifecycle fence prevents a
+    /// later terminal from replacing it. No message content, projection state,
+    /// or timeout is used to infer completion.
+    pub async fn read_turn_receipt(
+        &self,
+        session_id: &AgentSessionId,
+        operation_id: &OperationId,
+    ) -> Result<TurnReceipt, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+
+        let started_row = sqlx::query_as::<_, StoredEventRow>(
+            "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
+                    runtime_binding_id, runtime_producer_seq, kind, kind_version, \
+                    correlation_id, causation_event_id, inline_json, payload_id \
+             FROM session_events \
+             WHERE session_id = ? AND correlation_id = ? AND kind = 'turn/started' \
+             ORDER BY seq ASC LIMIT 1",
+        )
+        .bind(session_id.as_ref())
+        .bind(operation_id.as_ref())
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(started_row) = started_row else {
+            tx.commit().await?;
+            return Ok(TurnReceipt {
+                agent_session_id: session_id.clone(),
+                operation_id: operation_id.clone(),
+                status: TurnReceiptStatus::NotFound,
+                started_event: None,
+                terminal_event: None,
+            });
+        };
+        let started_event = event_from_row(started_row)?;
+
+        let terminal_row = sqlx::query_as::<_, StoredEventRow>(
+            "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
+                    runtime_binding_id, runtime_producer_seq, kind, kind_version, \
+                    correlation_id, causation_event_id, inline_json, payload_id \
+             FROM session_events \
+             WHERE session_id = ? AND correlation_id = ? \
+               AND kind IN ('turn/completed', 'turn/failed', 'turn/cancelled') \
+               AND seq > ? \
+             ORDER BY seq ASC LIMIT 1",
+        )
+        .bind(session_id.as_ref())
+        .bind(operation_id.as_ref())
+        .bind(as_i64(started_event.seq, "turn start seq")?)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let terminal_event = terminal_row.map(event_from_row).transpose()?;
+        let status = terminal_event.as_ref().map_or(TurnReceiptStatus::Running, |event| {
+            match event.kind.0.as_str() {
+                "turn/completed" => TurnReceiptStatus::Completed,
+                "turn/failed" => TurnReceiptStatus::Failed,
+                "turn/cancelled" => TurnReceiptStatus::Cancelled,
+                _ => unreachable!("turn receipt query returned a non-terminal event"),
+            }
+        });
+
+        tx.commit().await?;
+        Ok(TurnReceipt {
+            agent_session_id: session_id.clone(),
+            operation_id: operation_id.clone(),
+            status,
+            started_event: Some(started_event),
+            terminal_event,
+        })
+    }
+
     pub async fn observe(
         &self,
         session_id: &AgentSessionId,
@@ -886,7 +985,7 @@ impl AgentSessionStore {
             },
         };
 
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.begin_write_transaction().await?;
         let _session = require_live_session_tx(&mut tx, request.agent_session_id.as_ref()).await?;
         let head = head_by_id_tx(&mut tx, request.agent_session_id.as_ref()).await?;
         if head.status != "running"
@@ -1597,6 +1696,7 @@ impl AgentSessionStore {
 
         let head = head_by_id_tx(tx, append.agent_session_id.as_ref()).await?;
         validate_session_event_transition(&head, append)?;
+        validate_turn_lifecycle_tx(tx, &head, append).await?;
         validate_predecessor_tx(tx, append, &registry_entry).await?;
         validate_runtime_sequence_tx(tx, append).await?;
         validate_effect_transition_tx(tx, append).await?;
@@ -1651,6 +1751,111 @@ fn validate_session_event_transition(
         )));
     }
     Ok(())
+}
+
+async fn validate_turn_lifecycle_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    head: &SessionHeadProjection,
+    append: &SessionEventAppend,
+) -> Result<(), SessionStoreError> {
+    let kind = append.semantic_event.kind.0.as_str();
+    let operation_id = append.semantic_event.correlation_id.as_ref();
+
+    if kind == "turn/started" {
+        if head.status != "ready" || head.active_turn_id.is_some() {
+            return Err(SessionStoreError::Conflict(
+                "turn start requires a ready Session with no active turn".to_owned(),
+            ));
+        }
+        if let Some(existing_kind) =
+            first_turn_lifecycle_kind_tx(tx, append.agent_session_id.as_ref(), operation_id)
+                .await?
+        {
+            return Err(SessionStoreError::Conflict(format!(
+                "turn operation {operation_id} already has a committed {existing_kind} fact"
+            )));
+        }
+        return Ok(());
+    }
+
+    if !is_turn_terminal_kind(kind) {
+        return Ok(());
+    }
+
+    if let Some(existing_kind) =
+        first_turn_terminal_kind_tx(tx, append.agent_session_id.as_ref(), operation_id).await?
+    {
+        return Err(SessionStoreError::Conflict(format!(
+            "turn operation {operation_id} already crossed the terminal fence with {existing_kind}"
+        )));
+    }
+    if head.status != "running"
+        || head.active_turn_id.as_deref() != Some(operation_id)
+    {
+        return Err(SessionStoreError::Conflict(
+            "turn terminal requires the exact active turn boundary".to_owned(),
+        ));
+    }
+    if !turn_started_exists_tx(tx, append.agent_session_id.as_ref(), operation_id).await? {
+        return Err(SessionStoreError::Conflict(
+            "turn terminal requires a committed turn/started event".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_turn_terminal_kind(kind: &str) -> bool {
+    matches!(kind, "turn/completed" | "turn/failed" | "turn/cancelled")
+}
+
+async fn first_turn_lifecycle_kind_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session_id: &str,
+    operation_id: &str,
+) -> Result<Option<String>, SessionStoreError> {
+    Ok(sqlx::query_scalar(
+        "SELECT kind FROM session_events \
+         WHERE session_id = ? AND correlation_id = ? \
+           AND kind IN ('turn/started', 'turn/completed', 'turn/failed', 'turn/cancelled') \
+         ORDER BY seq ASC LIMIT 1",
+    )
+    .bind(session_id)
+    .bind(operation_id)
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+async fn first_turn_terminal_kind_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session_id: &str,
+    operation_id: &str,
+) -> Result<Option<String>, SessionStoreError> {
+    Ok(sqlx::query_scalar(
+        "SELECT kind FROM session_events \
+         WHERE session_id = ? AND correlation_id = ? \
+           AND kind IN ('turn/completed', 'turn/failed', 'turn/cancelled') \
+         ORDER BY seq ASC LIMIT 1",
+    )
+    .bind(session_id)
+    .bind(operation_id)
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+async fn turn_started_exists_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session_id: &str,
+    operation_id: &str,
+) -> Result<bool, SessionStoreError> {
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM session_events \
+         WHERE session_id = ? AND correlation_id = ? AND kind = 'turn/started')",
+    )
+    .bind(session_id)
+    .bind(operation_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(exists != 0)
 }
 
 #[derive(Debug, sqlx::FromRow)]

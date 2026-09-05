@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 
 const page = readFileSync(new URL('./AgentSessionPage.tsx', import.meta.url), 'utf8');
 const bridge = readFileSync(new URL('../../../common/adapter/ipcBridge.ts', import.meta.url), 'utf8');
+const agentModel = readFileSync(new URL('../agentSettings/model.ts', import.meta.url), 'utf8');
 const card = readFileSync(new URL('./SessionProjectionCard.tsx', import.meta.url), 'utf8');
 const inspector = readFileSync(new URL('./SessionInspector.tsx', import.meta.url), 'utf8');
 
@@ -16,10 +17,10 @@ describe('canonical AgentSession UI', () => {
   });
 
   test('covers fork, delete, active generation, and SESSION_DELETED', () => {
-    expect(page.includes('active_set_generation')).toBe(true);
+    expect(inspector.includes('active_set_generation')).toBe(true);
     expect(page.includes('sessions.fork')).toBe(true);
     expect(page.includes('sessions.delete')).toBe(true);
-    expect(page.includes('SESSION_DELETED')).toBe(true);
+    expect(agentModel.includes("code === 'SESSION_DELETED'")).toBe(true);
     expect(bridge.includes('/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/messages')).toBe(true);
   });
 

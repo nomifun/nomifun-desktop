@@ -549,6 +549,12 @@ impl AgentBootstrap {
                     .with_write_root(write_root.clone())
                     .with_cwd(Some(cwd_path.to_path_buf())),
             ));
+            // VCS capabilities have their own typed native owner. Never map
+            // a VCS grant to the general-purpose Bash tool: the Git family
+            // enforces repository/workspace scope and serializes mutations.
+            for tool in nomi_tools::vcs::local_vcs_tools(cwd_path.to_path_buf()) {
+                registry.register(tool);
+            }
             // Experimental `Lsp` code-navigation tool: registered only when at least
             // one language server is configured (default off → no behaviour change).
             {

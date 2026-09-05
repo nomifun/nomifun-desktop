@@ -2137,10 +2137,11 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use futures_util::StreamExt;
+    #[cfg(any(feature = "browser-use", feature = "computer-use"))]
+    use nomifun_agent_contracts::ActionId;
     use nomifun_agent_contracts::{
-        ActionId, AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload,
-        AgentSessionId, CapabilityExposure, CapabilityId, CapabilityRef, CapabilitySelection,
-        CorrelationId,
+        AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, AgentSessionId,
+        CapabilityExposure, CapabilityId, CapabilityRef, CapabilitySelection, CorrelationId,
         ChatRouteCandidate, ChatRouteFeature, ChatRouteIdentity, ChatRouteProtocol,
         ChatRouteRecord, ChatRouteRecordSchema, ChatRouteTask, IdempotencyKey,
         OperationId, PluginStateEntry, PresetRevisionRef, ResourceBindingId, ResourceId,

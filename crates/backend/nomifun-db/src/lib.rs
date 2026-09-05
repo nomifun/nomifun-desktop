@@ -38,6 +38,7 @@ pub use models::{
     UpdateKnowledgeTagParams,
     UpsertAgentMetadataParams, UpsertSkillTagParams, WebhookRow,
     WorkshopAssetRow, ConversationExecutionLinkRow,
+    NomiRemoteEventPage, NomiRemoteEventRow, NomiRemoteSessionRow, RemoteBindingRow,
 };
 pub use models::{
     CreatePresetTagParams, PresetAgentPreferenceRow, PresetExampleRow,
@@ -139,6 +140,12 @@ pub use repository::{
     SqliteUserRepository, SqliteWebhookRepository, TerminalTurnAdmissionClaim,
     TerminalTurnAdmissionKey, TerminalTurnAdmissionScope, TerminalTurnEffectsStart,
     TerminalTurnOutcome, TerminalTurnSettlement, TTL_MS,
+};
+pub use repository::{
+    AppendNomiRemoteEventParams, AppendNomiRemoteEventResult, CreateRemoteBindingParams,
+    GetOrCreateRemoteSessionParams, IRemoteBindingRepository, NomiRemoteStateTransitionResult,
+    RemoteOpenResult, SqliteRemoteBindingRepository, TransitionNomiRemoteSessionParams,
+    UpdateRemoteBindingParams,
 };
 pub use repository::{
     BindManagedKnowledgeEntryParams, CreateKnowledgeSourceItemParams,

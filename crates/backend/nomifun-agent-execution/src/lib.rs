@@ -13,6 +13,7 @@ mod conversation_effect;
 mod domain_mapper;
 mod engine;
 mod event_publisher;
+mod lifecycle;
 mod participant_resolver;
 mod participant_router;
 mod plan_materializer;
@@ -22,8 +23,9 @@ mod routes;
 mod scheduler;
 mod template_routes;
 
-pub use attempt_runner::{AgentExecutionSessionPort, conversation_session_port};
+pub use attempt_runner::AgentExecutionSessionPort;
 pub use engine::AgentExecutionEngine;
+pub use lifecycle::AgentExecutionLifecycle;
 pub use production::AgentExecutionEngineConfig;
 pub use routes::agent_execution_routes;
 pub use template_routes::agent_execution_template_routes;

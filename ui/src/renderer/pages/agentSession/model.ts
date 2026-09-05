@@ -13,6 +13,7 @@ export interface SessionCardModel {
   title: string;
   content?: string;
   details?: unknown;
+  detailText?: string;
   firstSeq: number;
   lastSeq: number;
 }
@@ -77,6 +78,48 @@ const firstSummaryString = (
   return undefined;
 };
 
+const INTERNAL_UUID_PATTERN =
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
+const INTERNAL_DIGEST_PATTERN = /\b[a-f0-9]{64}\b/i;
+
+const containsInternalValue = (value: string): boolean =>
+  INTERNAL_UUID_PATTERN.test(value) ||
+  INTERNAL_DIGEST_PATTERN.test(value) ||
+  /[{}\[\]"]/.test(value);
+
+const humanizeLabel = (value: unknown, fallback: string): string => {
+  if (typeof value !== 'string' || !value.trim()) return fallback;
+  const normalized = value.trim();
+  if (containsInternalValue(normalized)) return fallback;
+  const label = normalized
+    .replace(/^message[/:_-]*/i, '')
+    .replace(/[._/:_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!label) return fallback;
+  return label.length > 80 ? `${label.slice(0, 77)}...` : label;
+};
+
+const safeDetailText = (value: unknown, intent: string): string | undefined => {
+  const record = asRecord(inlinePayload(value));
+  if (!record) {
+    if (typeof value !== 'string' || containsInternalValue(value)) return undefined;
+    return value.trim() || undefined;
+  }
+
+  const summary = firstSummaryString(record, ['summary', 'message', 'description']);
+  if (summary && !containsInternalValue(summary)) {
+    return summary.length > 160 ? `${summary.slice(0, 157)}...` : summary;
+  }
+  const state = firstSummaryString(record, ['result_state', 'state', 'status']);
+  if (state) {
+    return `Status: ${humanizeLabel(state, 'Recorded')}`;
+  }
+  if (intent === 'effect') return 'Effect recorded';
+  if (intent === 'tool') return 'Tool action recorded';
+  return undefined;
+};
+
 const latestKind = (document: ProjectionDocument, fallback: string): string =>
   legacyEvents(document).at(-1)?.kind ?? document.state ?? fallback;
 
@@ -109,7 +152,7 @@ export function projectionCard(projection: IAgentSessionMessageProjection): Sess
       kind: 'message',
       role: user ? 'user' : 'assistant',
       state: document.state,
-      title: user ? 'user' : 'assistant',
+      title: user ? 'User message' : 'Agent message',
       content:
         document.content ??
         (typeof payloadRecord?.content === 'string'
@@ -124,14 +167,17 @@ export function projectionCard(projection: IAgentSessionMessageProjection): Sess
       id: projection.projection_id,
       kind: 'tool',
       state: document.state,
-      title:
+      title: humanizeLabel(
         firstSummaryString(document.tool_summary, [
           'action_id',
           'capability_id',
           'name',
           'tool',
         ]) ?? latestKind(document, intent),
+        'Tool action'
+      ),
       details: payload,
+      detailText: safeDetailText(payload, intent),
       firstSeq: projection.first_seq,
       lastSeq: projection.last_seq,
     };
@@ -141,13 +187,16 @@ export function projectionCard(projection: IAgentSessionMessageProjection): Sess
       id: projection.projection_id,
       kind: 'effect',
       state: document.state,
-      title:
+      title: humanizeLabel(
         firstSummaryString(document.terminal_effect, [
           'action_id',
           'capability_id',
           'effect',
         ]) ?? latestKind(document, intent),
+        'Effect'
+      ),
       details: payload,
+      detailText: safeDetailText(payload, intent),
       firstSeq: projection.first_seq,
       lastSeq: projection.last_seq,
     };
@@ -156,8 +205,9 @@ export function projectionCard(projection: IAgentSessionMessageProjection): Sess
     id: projection.projection_id,
     kind: 'status',
     state: document.state,
-    title: latestKind(document, intent),
+    title: humanizeLabel(latestKind(document, intent), 'Session update'),
     details: payload,
+    detailText: safeDetailText(payload, intent),
     firstSeq: projection.first_seq,
     lastSeq: projection.last_seq,
   };
@@ -170,5 +220,10 @@ export const projectionCards = (
     .map(projectionCard)
     .sort((left, right) => left.firstSeq - right.firstSeq);
 
+/**
+ * Compatibility name retained for callers/tests from the first UI slice.
+ * It now returns a short, non-JSON summary so a projection can never dump
+ * internal payloads into the normal Session transcript.
+ */
 export const jsonDetails = (value: unknown): string =>
-  value == null ? '' : JSON.stringify(value, null, 2);
+  safeDetailText(value, 'status') ?? '';

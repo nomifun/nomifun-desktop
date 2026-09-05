@@ -36,7 +36,7 @@ use nomifun_agent_platform::{
     ChatMinimalHiddenInitialization,
 };
 use nomifun_agent_session::{
-    CreateSessionRequest, RuntimeAppendContext, SessionStoreError,
+    CreateSessionRequest, RuntimeAppendContext, SessionStoreError, TurnReceiptStatus,
 };
 use nomifun_api_types::{
     CreateAgentPresetFromTemplateRequest, ResolveSavedRevisionPreviewRequest,
@@ -728,6 +728,17 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
         json!({"message_event_id": message_completed.event_id}),
     )
     .await?;
+    let completed_receipt = platform
+        .read_turn_receipt(&owner_ref, &session_id, &turn_operation)
+        .await?;
+    assert_eq!(completed_receipt.status, TurnReceiptStatus::Completed);
+    assert_eq!(
+        completed_receipt
+            .terminal_event
+            .as_ref()
+            .map(|event| event.event_id.as_ref()),
+        Some(turn_completed.event_id.as_ref())
+    );
     let successful = platform
         .session_store()
         .observe(&session_id, None, 500)
@@ -802,6 +813,10 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
         json!({"operation_id": cancelled_operation}),
     )
     .await?;
+    let cancelled_receipt = platform
+        .read_turn_receipt(&owner_ref, &session_id, &cancelled_operation)
+        .await?;
+    assert_eq!(cancelled_receipt.status, TurnReceiptStatus::Cancelled);
     let cancelled = platform
         .session_store()
         .observe(&session_id, None, 500)

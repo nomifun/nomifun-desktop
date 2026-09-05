@@ -36,6 +36,7 @@
     "readOnly": "官方只读模板",
     "capabilityHint": "冻结 seed 定义了 exact initial/on-demand 能力版本。Fork 后才能编辑。",
     "resourceHint": "模板只声明 typed resource slot，不保存任何用户的具体资源 ID。",
+    "hostUnavailable": "该模板包含当前 Nomi-core 主机不可用的能力。真实 owner 可用前不会允许 Fork。",
     "zeroToolTitle": "精确零工具 Profile",
     "zeroToolBody": "不会构造 Capability、Skill、MCP、Workspace、Coding Context 或隐藏的能力搜索。",
     "chat": {

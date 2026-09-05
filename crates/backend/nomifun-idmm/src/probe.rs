@@ -234,13 +234,13 @@ pub trait ConversationSessionPort: Send + Sync {
 /// Stateless adapter over the existing Conversation session owner.  IDMM
 /// receives only the exact query/command operations it needs; it cannot retain
 /// session state or construct a replacement runtime.
-pub struct ConversationServiceSessionPort {
+struct ConversationServiceSessionPort {
     service: ConversationService,
     runtime_registry: Arc<dyn AgentRuntimeRegistry>,
 }
 
 impl ConversationServiceSessionPort {
-    pub fn new(
+    fn new(
         service: ConversationService,
         runtime_registry: Arc<dyn AgentRuntimeRegistry>,
     ) -> Self {
