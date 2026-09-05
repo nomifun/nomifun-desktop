@@ -1,6 +1,6 @@
 # NomiFun 一期止损修订：简化重构与可替换系统能力基础
 
-> 状态：**USER-CONFIRMED PHASE 1 STOP-LOSS DIRECTIVE / 立即执行 / 尚未完成代码实施**
+> 状态：**USER-CONFIRMED PHASE 1 STOP-LOSS DIRECTIVE / AgentPreset AP-0～AP-7 前置 TODO / 尚未完成代码实施**
 >
 > 发布日期：2026-09-02
 >
@@ -8,7 +8,7 @@
 >
 > 适用范围：正在进行的 Agent Capability Platform v2 一期重构，包括主集成分支、机器 2 SSH lane、后续 Browser/Computer、Sidecar 与原生平台验证任务。
 >
-> 明确排除：二期 `06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md` 继续保持本地未提交，不得随本文发布、引用为一期合同或带入实施分支。
+> 阶段门禁：二期 `06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md` 可以继续作为设计文档修订，但在本文新增的 AgentPreset 前置 TODO（AP-0～AP-7）完成并通过门禁前，不得进入 Plugin/MiniApp 代码实施；本文不把 06 的设计状态视为一期代码合同。
 
 ## 0. 本文的权威与执行方式
 
@@ -17,7 +17,7 @@
 本文不是在旧方案外面再加一层兼容规则，而是一期当前的定向修订：
 
 - Thin Kernel、统一 Plugin/Capability 主链、单一 AgentSession、Codex-derived Runtime 和 clean v4 等总目标继续有效；
-- 本文明确列出的 Gate、Evidence、生命周期、Compiler、Snapshot、Effect、文件边界、产品 UI 与平台矩阵改用本文的新策略；
+- 本文明确列出的 Gate、Evidence、生命周期、Compiler、Snapshot、Effect、文件边界、产品 UI 与平台矩阵改用本文的新策略；文末新增的 AgentPreset 平台级能力建设（§15）是进入二期 06 前必须完成的后续 TODO；
 - 01～04 与 `DECISIONS` 保留为核心设计依据，并按本文删除或改写其中已经判定错误的条款；不得因局部设计被止损而整体删除这些文档。旧 `IMPLEMENTATION-STATUS`、旧 `START-PROMPT` 和过期 handoff 只保留在 Git 历史；当前状态只由 `GLOBAL-CLOSURE-TODO.zh.md` 记录；
 - `GLOBAL-CLOSURE-TODO` 的 84 个工作包不再是一期必须逐个关闭的阻断清单；只把其中仍属于本文最小交付的项目迁入新的收口清单；
 - 已生成的 Manifest、fixture、digest 或结构测试不能因为自身存在而阻止删除；证明系统不具有高于产品系统的优先级；
@@ -25,7 +25,7 @@
 
 本文中的伪代码和字段名是设计输入。实施后仍以 canonical Rust、SQL、API schema 和行为测试为机器事实；不得复制第二套文档结构并要求逐字段长期同步。
 
-施工机器的最短阅读路径：先读第一部分 §0、§1、§3、§10、§12、§14，立即停止错误方向；随后完整读取第二部分，按保留的一期 Role/Provider 合同实施 Browser/Computer。产品与架构复核应阅读全文。
+施工机器的最短阅读路径：先读第一部分 §0、§1、§3、§10、§12、§14，立即停止错误方向；随后完整读取第二部分，按保留的一期 Role/Provider 合同实施 Browser/Computer；准备进入二期前还必须完整读取文末 §15。产品与架构复核应阅读全文。
 
 ## 1. 所有正在施工的机器先做什么
 
@@ -346,13 +346,13 @@ Manifest 是声明事实源，Registration builder 从实际 handlers/services �
 - Knowledge hidden render、Gateway 和 computer stdio 等旁路清理；
 - 第一方 Provider 与 test alternate Provider 走同一 materializer/index/dispatch。
 
-二期只负责开放 Node Plugin/MCP Provider、用户切换 UI、Chat Dev 和后续 CLI/Skill adapter；不能把一期完整接缝推迟到二期。
+在本部分一期 Role/Provider seam 完成且 §15 的 AP-0～AP-7 门禁通过后，二期 06 才负责开放平台级 Node Plugin/MCP/MiniApp contribution、用户选择 UI、Chat Dev 和后续 CLI/Skill adapter；Plugin/MiniApp 的能力不能被设计成 Agent 专属，也不能把一期完整接缝推迟到二期。
 
 ## 8. 产品体验止损
 
 后端 Revision、Snapshot、typed resource 和 digest 可以保留，但普通用户界面不再原样暴露这些概念。
 
-Agent 编辑器默认只展示：
+Agent 工作台的编辑视图默认只展示：
 
 - 名称与用途；
 - 模型选择；
@@ -456,7 +456,7 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 - 不 reset、force-push 或改写远程历史；
 - 不回滚包含真实用户功能的整批提交，只因其中部分设计复杂；
 - 不通过兼容 alias 保留被删除合同；
-- 不把 06 加入任何 commit；
+- 不把尚未通过 §15 门禁的 06 代码加入任何一期 commit；06 的设计修订可以继续，但不能被误当成已授权实施；
 - 不在机器 2 分支盲目 merge 主分支；主机发布本文后，由任务 owner 明确通知它更新基线或重新领取精简 lane。
 
 ## 11. Release-required 产品闭环
@@ -494,7 +494,7 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 ### S0：发布与暂停
 
 - 提交并推送本文、经本文修订的 01～04/`DECISIONS`、README 和 GLOBAL TODO；
-- 二期 06 仍保持本地未提交，不得随一期核心设计发布；
+- 二期 06 继续保持“设计中、未授权实施”的状态，不得随一期核心代码发布；是否提交 06 设计不改变其实施门禁；
 - 主机和机器 2 在新 commit 后重新读取本文；
 - 旧 GLOBAL TODO/Machine Prompt 冲突部分停止执行。
 
@@ -522,7 +522,7 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 
 ### S4：产品 UI
 
-- 普通 Agent 编辑器只保留产品语言和 picker；
+- 普通 Agent 工作台只保留产品语言和 picker；
 - 技术 Inspector 默认隐藏；
 - 四条真实用户流程通过；
 - source-string structure tests 删除。
@@ -542,7 +542,7 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 - 两个 revert 候选已有明确 keep/revert 结果；
 - 84 项旧 TODO 已缩减为 release-required 清单；
 - 旧机器 Prompt 不再驱动新复杂度；
-- 06 未发布。
+- 06 没有进入一期代码发布，且其实现仍被 §15 AP 门禁阻断。
 
 ### 13.2 一期功能完成
 
@@ -575,7 +575,7 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 5. Browser/Computer 先做 Role seam，再做具体 owner；
 6. 机器 2 SSH lane 按 §6.2 缩减，旧 Prompt 不再是完成标准；
 7. 不等待五格两轮 Gate，不为未交付平台生成 synthetic evidence；
-8. 不读取、提交或实现本地 06；
+8. 可以阅读和修订本地 06 设计，但不读取其作为已冻结代码合同，也不实现未通过 §15 门禁的 06；
 9. 每个提交说明它删除了什么旧复杂度，不能只增加新 abstraction；
 10. 遇到“继续兼容更快”与“普通 revert 后重做更干净”的选择时，优先后者，但必须先保护真实用户数据和已完成用户功能。
 
@@ -1149,15 +1149,15 @@ P1-R2/C8 的 residual-zero 只针对新的 v4/Codex、Knowledge、Gateway 和 st
 - IDMM、模型路由、UI Shell 等其他 Role 的本轮迁移；
 - Browser Engine 与 Embedded Surface 选型。
 
-#### 7.3 二期 06 后续应完成，但本轮不修改
+#### 7.3 二期 06 的前置条件与后续边界
 
-05 已确认并在一期落地后，06 再单独进入第八组决策与修改：
+05 的 Role/Provider 合同落地后，仍必须先完成本文 §15 的 AgentPreset 平台级能力建设；只有 AP-0～AP-7 全部通过，06 才能进入机器合同冻结和代码实施。06 的产品决策可以在本轮同步修订，但不能绕过该前置条件：
 
 1. 在 Node Plugin SDK/loader 中公开并复用一期已冻结的 Browser/Computer Provider contribution shape；
 2. Extension Host 把 JS Provider 适配到一期统一的 typed Provider exports；
 3. 标准 MCP Toolset 直接映射；Schema 不一致时由 Chat Dev 生成薄 JS Adapter Plugin；
-4. 为一期已冻结的 installation binding 和 Agent Revision override 增加用户 mutation application service 与“继承默认 / 精确指定”产品入口；
-5. 设置页、Agent Editor、来源/provenance、Test、影响清单、切换和 Restore Built-in；
+4. 为一期已冻结的 installation binding 和 Agent Revision override 增加统一 application service；如需暴露精确实现选择，只能作为 Agent 工作台能力详情中的高级动作，不得再建一个“运行时 Agent 设定”产品；
+5. 在同一个 Agent 工作台中提供来源/provenance、Test、影响清单、切换和 Restore Built-in；Runtime Manager 仍是系统基础设施设置，不属于 AgentPreset 内容；
 6. 新 Session 使用新 Provider，已有 Session 保持 frozen Snapshot；
 7. Provider 失败时提供 Retry、Switch、Restore，不静默 fallback；
 8. CLI 首期通过 Plugin Adapter 接入，待 managed stdio protocol 成熟后再成为一等 binding；
@@ -1189,7 +1189,7 @@ P1-R2/C8 的 residual-zero 只针对新的 v4/Codex、Knowledge、Gateway 和 st
 - Materializer 接收 Provider contribution；
 - Registry generation 发布内部 flat `role_provider_index`；
 - Fresh-v4 seed installation bindings，Revision absence 表示继承默认；
-- Preset Compiler 先解析 override/default Provider，再计算实际 member platform/resource 并写入 Snapshot lock；
+- AgentPreset Compiler 先解析 override/default Provider，再计算实际 member platform/resource 并写入 Snapshot lock；
 - non-Agent operation admission 生成同一种 exact lock；
 - D-025 compatibility 比较 Provider/contract/contribution digest。
 
@@ -1260,7 +1260,7 @@ P1-R2/C8 的 residual-zero 只针对新的 v4/Codex、Knowledge、Gateway 和 st
 - 完成 clean Windows checkpoint 后，再按原计划进入 macOS arm64；
 - 不把未提交的二期 06 带入一期实施分支或提交。
 
-如果远程任务已经开始直接接线 Browser/Computer，应暂停该局部接线并按本文重新划分依赖；不在现有直连上继续叠加 Provider Adapter。
+如果远程任务已经开始直接接线 Browser/Computer，应暂停该局部接线并按本文重新划分依赖；不在现有直连上继续叠加 Provider Adapter。进入二期 Plugin/MiniApp 实现前，还必须完成文末 §15 的 AP-0～AP-7。
 
 ### 12. 完成定义
 
@@ -1268,7 +1268,7 @@ P1-R2/C8 的 residual-zero 只针对新的 v4/Codex、Knowledge、Gateway 和 st
 
 - 用户已经确认本文方案和一期/二期边界；
 - 05 单独进入版本控制；
-- 不修改或提交 06；
+- 不把未通过 §15 门禁的 06 代码视为一期交付；06 设计可以单独修订，但实现必须等待 AP-0～AP-7；
 - 远程实施 Prompt 明确从 05 开始，不从聊天摘要猜测合同。
 
 #### 12.2 一期功能完成
@@ -1290,4 +1290,532 @@ P1-R2/C8 的 residual-zero 只针对新的 v4/Codex、Knowledge、Gateway 和 st
 - 用 Chat Dev 生成 Adapter；
 - 使用一等 CLI Provider，或把 Skill 与可执行 Provider 组合。
 
-这些必须在 06 后续正式修改、再次验收并完成二期实现后才能宣称。
+这些必须在 06 通过 §15 门禁、正式实现并再次验收后才能宣称。
+
+## 15. AgentPreset 平台级能力建设（Phase N1 前置 TODO）
+
+> 状态：**DESIGN FOLLOW-UP / 06 IMPLEMENTATION BLOCKED**
+>
+> 本节是用户确认“只保留一个 Agent 工作台”之后，对 AgentPreset 的最终实施合同。它不是在旧“设定”旁边再增加一个新设置页，也不是把 Plugin/MiniApp 改造成 Agent 专属子系统。
+
+### 15.1 产品名称与领域边界
+
+产品层只保留一个一级入口：**Agent 工作台**（导航和按钮可简称为“Agent”）。用户在这里完成 Agent 的能力设计、保存、试用和继续使用；不再保留“旧设定”“Agent 设定”“启动方案”或“运行时 Agent 设定”等并列概念。
+
+`AgentPreset` 只保留为后端的 canonical authoring aggregate。普通用户不需要理解 `Preset` 这个内部名称，也不直接编辑 Revision、Snapshot、Digest、Mount 或 Contribution ID。
+
+本节覆盖 02、`DECISIONS` 及其他前置文档中与公共命名、Package template 或 Agent-only Capability 相关的冲突条款；在 AP-0/AP-6 中完成全量引用清理前，阅读者应以本节为准，不得把旧文案当作新的产品入口。
+
+各领域的 owner 和关系必须固定如下：
+
+| 对象 | 所属领域 | 负责什么 | 与 AgentPreset 的关系 |
+|---|---|---|---|
+| Package / Plugin | 平台扩展与 Package 域 | 安装、启停、配置、数据、版本和贡献发布 | 贡献能力，但不属于 AgentPreset |
+| MiniApp / Active Release | MiniApp 产品域 | Surface、Release、Service、业务数据和发布生命周期 | Active Release 可贡献能力，但不属于 AgentPreset |
+| Capability Catalog | 平台能力目录域 | 物化已发布、可用、带 provenance 的平台能力合同 | 被多个消费者查询和解析 |
+| Skill Catalog | 平台技能目录域 | instruction、workflow 和资源说明 | Agent 可选择，Skill 不成为执行器 |
+| AgentPreset | Agent authoring 域 | 描述一个 Agent 想使用的能力集合和行为 | 是一个消费者声明，不拥有 Capability |
+| AgentPresetRevision | Agent authoring 域 | 保存一次不可变的用户设计结果 | 由 Compiler 生成 ContributionLock |
+| ResolvedSnapshot | 执行解析域 | 锁定一次实际执行闭包和精确来源 | 被 Session、Binding 或一次性操作消费 |
+| AgentSession / AgentBinding | Agent 运行域 | 承载会话、Remote、Automation 等 Agent 使用关系 | 消费 Revision/Snapshot，不反向修改它 |
+| Runtime Manager | 系统基础设施域 | Node、Host、进程、Runtime protocol 和恢复 | 不是 AgentPreset 内容，也不是 Agent 的能力选择 |
+
+核心边界是：
+
+1. Capability 的语义 owning domain 是平台 Package、Plugin、MiniApp 或业务域；Capability Catalog 只负责物化索引和可用性视图，不接管能力语义；AgentPreset 不拥有 Capability。
+2. 同一个 Capability 可以同时服务 Agent、Gateway/Remote、UI/业务域、Automation、MiniApp/Service 或其他正式平台入口。
+3. 某项 Capability 也可以完全不支持 `agent` Surface；Agent 可选性不是平台能力成立的必要条件。
+4. Plugin/MiniApp 的安装、替换、发布、Credential、KV、`dataDir` 和 Service 生命周期由各自产品管理；AgentPreset 只保存 typed reference。
+5. Agent 工作台可以显示能力来源和可用性，但不接管 Plugin/MiniApp 管理。
+6. Runtime 的选择、下载、Host 重建和进程诊断属于系统基础设施设置；它不再以“Agent 设定”的形式出现，也不能被 Agent Revision 自行选择或 fallback。
+
+### 15.2 平台 Capability 与多消费者模型
+
+面向一个或多个消费者的 Plugin/MiniApp Capability、Skill、Tool、Context 或 Resource contribution 必须先进入平台 Capability Catalog，再由不同消费者按各自合同选择。仅作为 canonical façade 内部实现的 `RoleProviderContribution`、Host-only contribution 等，可以进入共享 Materializer/Registry 的内部索引，但不得伪装成用户可选择的独立 Capability。Agent 只是其中一个消费者：
+
+```text
+Package / Plugin Release / MiniApp Active Release / Built-in / MCP
+                              │
+                              v
+                  Contribution Materializer
+                              │
+                              v
+                  Platform Capability Catalog
+                              │
+             ┌────────────────┼────────────────┐
+             v                v                v
+       AgentPreset       Gateway/Remote     UI/业务/Automation
+        Compiler          Operation Lock      Consumer Resolver
+             │
+             v
+      ResolvedSnapshot
+             │
+       AgentSession / Binding
+```
+
+Catalog entry 至少必须能表达以下事实：
+
+- 稳定 `capability_id`、合同版本和 `contract_digest`；
+- owning Package/业务域与发布身份；
+- `contribution_id`、来源类型、Mount/Release 和 Artifact provenance；
+- 支持的消费者或 Surface（例如 `agent`、`gateway`、`remote`、`automation`、`ui`、`miniapp_service`）；
+- Tool、Context Contributor、Resource Provider、Skill、MCP-backed Capability 等 typed contribution；
+- 所需 Runtime feature、typed resource contract 和当前 availability；
+- `active / unavailable / disabled / needs-runtime / contract-mismatch` 等可解释状态。
+
+`supported_surfaces` 或等价字段只表示“该能力可以被哪些平台消费者理解”，不是授权，也不是把 Capability 转移给 Agent。每个消费者仍要经过自己的 policy、resource binding 和 exact resolver。
+
+Catalog 的“已物化”与“对某消费者可用”必须分开：同一贡献可以已经进入平台 Catalog，但只对 UI 或 Gateway 可用、对 Agent 不可用。availability 诊断应按 consumer/surface 给出，不能用一个全局布尔值让 Agent 或其他消费者互相误判。
+
+只有正式发布且当前可执行的贡献才能进入 Catalog：
+
+- Plugin 必须经过 Package current/Enable/Contribution materialization；
+- MiniApp 只有 Active Release 的正式贡献可以进入 Catalog；
+- Ready Candidate、未发布 Release、未启动 Service、Project Source、Plugin 私有 `dataDir` 和测试 Host 都不能进入 Agent Snapshot 或正式 Catalog；
+- Candidate Test 与 Agent Test 是两条不同链：前者验证候选代码，后者创建普通 AgentSession。
+
+### 15.3 最终 AgentPreset 合同
+
+#### 15.3.1 用户可编辑内容
+
+Agent 工作台只允许用户编辑产品语义和 typed 选择：
+
+```text
+identity
+persona / instructions
+model route
+selected capabilities
+selected skills
+selected MCP capabilities
+typed resource defaults / overrides
+starter prompts
+```
+
+其中：
+
+- `selected capabilities` 使用 Catalog 中的能力引用和实际 action allowlist；用户不填写 Package、Mount 或 Artifact；
+- `selected MCP capabilities` 指向已物化、已绑定、带 schema/provenance 的 MCP 能力，不接受裸 MCP tool JSON；
+- `typed resource defaults / overrides` 只表达工作区、知识库、连接器等正式资源绑定，不保存 Secret 明文或 Plugin 私有数据路径；
+- 如果同一 canonical 能力存在多个合法实现，用户只能通过能力详情中的显式“实现来源”高级动作选择，后台由 application service 生成锁；不增加第二个“运行时 Agent 设定”对象；
+- 保存和试用都调用同一个 canonical Compiler，前端不自行拼 Snapshot。
+
+#### 15.3.2 系统生成内容
+
+Compiler 必须生成并持久化不可变 Revision 的以下事实：
+
+```text
+ContributionLock[]
+revision_digest
+compiler diagnostics
+```
+
+最小持久化关系保持单一主链：
+
+```text
+AgentPreset {
+    preset_id
+    owner_ref
+    display
+    current_revision_id
+}
+
+AgentPresetRevision {
+    revision_id
+    preset_id
+    revision_no
+    payload
+    contribution_locks
+    revision_digest
+}
+```
+
+`current_revision_id` 只指向已经通过 Compiler 的不可变 Revision；Draft 不可被 Session、Remote 或 Automation 直接执行。Snapshot、Binding 和 Session 继续引用 Revision/Snapshot，而不是复制一份可编辑 Agent 配置。
+
+`revision_digest` 必须覆盖规范化的 `payload + contribution_locks` Revision envelope；ContributionLock 不能作为未被 digest 覆盖的旁路 JSON。若实现仍保留 payload digest 供编辑器比较，必须另外持久化并校验 lock digest，不能用旧 payload-only digest 冒充最终 Revision 身份。
+
+`AgentPresetSource` 只保留 `official | user` 两种 provenance；`package` 不是 AgentPreset 的来源类型。官方 seed 与用户创建的 Agent 都必须最终生成同一类 User-facing AgentPresetRevision。
+
+`ContributionLock` 是系统生成的依赖事实，不是用户手填的 Package 选择。最小语义为：
+
+```text
+ContributionLock {
+    source_kind: platform_builtin | plugin_mount | miniapp_active_release | mcp_binding
+    source_identity: StableSourceIdentity
+    mount_id?: PluginMountId
+    miniapp_id?: MiniAppId
+    mcp_binding_id?: McpBindingId
+    contribution_id: ContributionId
+    contract_digest: DigestHex
+}
+```
+
+`source_identity` 必须是稳定、可审计的来源身份；不得用显示名称、当前版本字符串或注册顺序代替。Snapshot 在此基础上继续锁定本次实际执行所需的：
+
+- 每个选中的 Capability/Skill 的来源和合同事实（Skill 仍是 instruction/workflow，不成为执行器）；
+- exact Package/Plugin target 或 MiniApp Release version/digest；
+- Tool schema、Context/Resource implementation 和 MCP schema digest；
+- Model Route、typed resource binding 和所需 Runtime features；
+- initial/on-demand 分组及其他真实执行闭包；
+- Snapshot digest 和 provenance。
+
+因此要明确区分：
+
+```text
+AgentPresetRevision = 用户意图 + 稳定贡献锁
+ResolvedSnapshot    = 某次执行的完整、精确、不可变闭包
+AgentSession        = 消费一个 Snapshot 的运行事实
+```
+
+#### 15.3.3 Revision 生命周期与 Compiler 不变量
+
+Agent 工作台中的编辑内容先存在于不可执行的 Draft；只有 Save 成功后才创建新的不可变 `AgentPresetRevision`，并原子推进 AgentPreset 的 `current_revision_id`。Preview 和 Test 可以读取 Draft 的编译结果，但不能把 Draft 当作正式 Session 的长期来源。
+
+canonical Compiler 的步骤固定为：
+
+```text
+normalize user payload
+  → validate catalog capability/skill/resource references
+  → resolve default or explicitly requested implementation source
+  → generate ContributionLock[]
+  → materialize exact capability closure and typed resources
+  → calculate revision/snapshot digest and diagnostics
+  → persist immutable Revision or return fail-closed diagnostics
+```
+
+Compiler 必须满足以下不变量：
+
+1. 同一规范化输入、同一 Catalog generation 和同一资源事实产生同一 Revision/Snapshot 结果；
+2. 未发布、不可用、合同不匹配或 owner 不允许的贡献不能被编译成成功结果；
+3. Compiler 不安装 Package、不启动 Plugin/MiniApp、不修改 Credential/Runtime，也不自行授予授权；
+4. 任何未知字段、未知来源、未知合同或无法比较的变化都 fail closed；
+5. Session Open 只读取已保存 Snapshot 并做当前执行可用性检查，不在 Turn 中重新选择 latest 来源；
+6. Revision 失败不改变当前 Revision，Snapshot 失败不创建可执行 Session。
+
+#### 15.3.4 明确禁止的字段和能力
+
+以下内容不得进入 AgentPresetRevision 的用户 payload，也不得通过兼容字段继续保留：
+
+```text
+preferred_agent_id
+agent_preferences
+runtime selector
+fallback engine
+raw plugin dataDir
+raw MCP tool definition
+plugin install / replace / publish authorization
+arbitrary Package or Mount mutation
+latest / follow / silent fallback selector
+raw `context_policy` / `execution_constraints` / `runtime_budget` JSON
+arbitrary `surfaces` or destination policy
+```
+
+Runtime、Plugin Config、Credential、KV、Files、MiniApp DB 和发布授权必须留在所属平台域。Agent 可以请求使用它们，但不能借 AgentPreset 获得 owner 权限。若某个 context、execution 或 budget 约束确实有运行时语义，必须由平台定义 typed contract 并由 Compiler 生成/校验，不能把任意 JSON 重新塞回 AgentPreset。
+
+### 15.4 四种模式是创建模板，不是四种持久化类型
+
+用户创建 Agent 时先选择预期能力级别，工作台用一个模板生成初始草稿：
+
+| 模式 | 默认含义 | 首次生成内容 | 明确不做 |
+|---|---|---|---|
+| 轻量 | 零工具、零外部能力的轻量对话 | 基础身份、指令和模型路由 | 不隐式加入 Workspace、MCP、Plugin 或 MiniApp 能力 |
+| 通用 | 官方通用任务能力 | 官方维护的常用 Capability/Skill 种子 | 不自动吸收用户已安装的全部扩展 |
+| 全面 | 完整 Coding/工作台基线 | 文件、进程、VCS、Workspace 等官方 Coding 能力 | 不因名称“全面”而自动安装或纳入所有 Plugin/MiniApp |
+| 自定义 | 用户明确组合 | 空白或可选种子 + 能力/技能/资源 picker | 不允许用户直接填写内部 ID、Digest 或运行时参数 |
+
+四种模式不是四种 Agent 类型，也不是四张并行数据库表。创建后的 Agent 统一落到 `AgentPreset → AgentPresetRevision → Snapshot` 主链。
+
+- 模板更新只影响之后创建的 Agent；
+- 已存在的 Revision 不因官方模板更新而漂移；
+- 用户要求把已有 Agent 从一种模式调整到另一种模式时，系统生成可审阅的 capability diff，由用户确认后保存新 Revision，不直接覆盖用户选择；
+- Plugin/MiniApp 若未来贡献 `agent_template`，它只能是创建种子，不能复活旧的 `contributes.presets`、自动授予能力或绕过用户确认；N1 首版默认不把该能力作为实现前提。
+
+官方四种模式可以继续由只读的 `agent_preset_templates` seed catalog 提供，但它不是 AgentPreset，也不是 Plugin contribution。AP-3/AP-6 必须把该 catalog 收敛为 `source_kind=official`：删除 `AgentPresetSource::Package`、Package-owned template foreign key 和任何“安装 Package 即获得模板”的路径。未来若确有 Package 模板需求，另立版本化的 `agent_template` contribution 合同，并按本节的“只提供 seed、不授予能力”规则接入。
+
+### 15.5 Agent 工作台的一级交互合同
+
+Agent 工作台的最短用户路径应为：
+
+```text
+首页侧边栏 Agent（公共路由 `/agent`）
+  → 新建 Agent
+  → 选择轻量 / 通用 / 全面 / 自定义
+  → 编辑身份、指令、模型、能力、技能和资源
+  → 查看能力来源与可用性
+  → 保存并试用
+  → 在新会话中继续使用
+```
+
+首页侧边栏不再用“设定”作为 Agent 入口；通用系统设置（例如 Runtime、网络或外观）仍可由全局设置入口提供，但不与 Agent 工作台共用名称、页面或数据模型。
+
+页面只需要展示：
+
+- Agent 名称、用途和当前模式种子；
+- 按任务分组的能力和技能 picker；
+- 工作区、知识库、MCP 连接和其他连接器等 typed resource picker；
+- 模型路由和 starter prompts；
+- 能力来源、版本状态、缺失原因和影响提示；
+- 保存、试用、复制/Fork、删除等用户动作。
+
+以下内容默认放入折叠的技术详情或导出诊断，不作为普通编辑项：
+
+- Revision、Snapshot、Digest、ContributionLock；
+- Package/Mount/Release provenance；
+- Runtime protocol、Host generation 和内部错误上下文。
+
+不可用能力必须在工作台中显示为可解释状态，并提供“补充资源”“启用来源”“复制为新 Revision”或“在新会话继续”等明确动作；不得用空能力、第一方 fallback 或静默降级制造成功感。
+
+### 15.6 Agent 与非 Agent 消费者的统一执行边界
+
+Agent 使用路径固定为：
+
+```text
+Agent 工作台 Save/Preview
+        → canonical AgentPreset Compiler
+        → immutable AgentPresetRevision
+        → ResolvedSnapshot
+        → AgentSession / AgentBinding
+```
+
+Gateway、Remote、Automation、UI/业务域和 MiniApp Service 不需要伪造一个 AgentPreset。它们直接使用同一 Materializer、Catalog、typed resource resolver 和 exact operation lock：
+
+```text
+非 Agent 操作
+        → consumer-specific Resolver
+        → exact OperationLock
+        → owning runtime/service
+```
+
+统一主链的含义是共享能力合同和来源锁，而不是强迫所有消费者创建 AgentSession：
+
+1. AgentSession 只属于 Agent 对话和明确的 Agent 运行场景；
+2. 一次性 Gateway、Knowledge、Automation 或 MiniApp 操作可以没有 Session，但必须记录自己的 exact lock；
+3. 消费者不得直接引用 Plugin/Browser/Computer 的具体实现；
+4. AgentPreset 不拥有 Knowledge、Browser、Plugin、MiniApp 业务数据，只绑定正式资源；
+5. Capability 缺失、合同变化、Credential/Resource 不可用时返回 typed failure，不能由消费者各自实现 fallback。
+
+### 15.7 Plugin/MiniApp 变化对 Agent 的影响
+
+| 变化 | AgentPreset/Revision 行为 | 新使用行为 | 禁止行为 |
+|---|---|---|---|
+| Compatible Replace | 不修改既有 Revision；新 Snapshot 按稳定来源和合同重新解析并记录 exact target | 能力可继续使用，或按 Snapshot exact lock 给出 unavailable | 不静默改写旧 Revision，不跨来源替换 |
+| Breaking Replace | 派生受影响 Agent Revision、Binding、Automation、Remote 清单 | 旧 Revision 返回 typed contract mismatch，用户显式修复或 Fork | 不自动迁移、不自动扩大能力、不静默 fallback |
+| Plugin Disable/Uninstall | Revision 和历史 Session 保留 | 新 Session/新操作返回 capability unavailable | 不把其他 Package 当作替代实现 |
+| MiniApp 非 Active Release | 不进入正式 Agent Catalog | 不能被 Agent 选择或调用 | Ready/Previous/测试 Release 不伪装成 Active |
+| Active MiniApp Release 变更 | 以 `miniapp_id + contribution_id + contract_digest` 重新解析并记录实际 Release digest | 合同兼容时继续；不兼容时显式失败 | 不让 Agent 改写 MiniApp Publish/Service 状态 |
+| Candidate/Source/Build 变化 | 不影响现有 Agent Revision | 只有 Apply/Publish 后的正式贡献才可能产生影响 | Candidate Test 结果不能直接满足 Agent 正式执行资格 |
+
+已有 Session 的 Snapshot 不因全局 Catalog 变化而被改写。若其精确执行来源不再可用，必须返回明确的 Snapshot/Executor unavailable；用户可以显式 Fork 或创建新 Session，但不能在后台换实现。
+
+### 15.8 Canonical API、应用服务与旧模型删除
+
+Agent 相关公共 API 统一收敛为：
+
+```text
+/api/agent-presets/*
+/api/agent-preset-templates/*   # 只读官方创建种子
+/api/agent-sessions/*
+/api/agent-bindings/*
+```
+
+API 保留 `agent-presets` 作为稳定机器资源名，不代表 UI 必须显示“Agent 设定”；用户界面统一使用 Agent/Agent 工作台。
+
+平台 Capability Catalog 使用自己的通用资源 API；Plugin、MiniApp、Runtime 和 Credential 继续使用各自 owner API。前端和外部调用方应通过 application service 完成高层动作：
+
+- 创建 Agent 和初始模板草稿；
+- 保存/复制/Fork AgentPresetRevision；
+- Preview、Save、Test；
+- 使用 Agent、创建 AgentSession、应用 AgentBinding；
+- 查询能力来源、可用性和影响清单。
+
+`from-template` 只允许引用官方 seed catalog；它创建的是 AgentPreset Draft，不直接创建可执行 Snapshot，也不从 Package/Plugin 自动继承能力或授权。
+
+客户端不得提交 Snapshot digest、内部 Revision ID、Mount ID、完整 Binding、内部 owner ID 或 canonical JSON 来驱动执行。需要展示时由服务端返回面向产品的 DTO，技术详情只读。
+
+在 AP-6 中必须删除而不是保留兼容别名的旧形态：
+
+- `/api/presets` 及其路由、DTO、handler；
+- `/api/extensions/presets` 及其 Extension/Plugin preset adapter；
+- `PresetService`、旧 Preset resolver/compiler 和旧 `ResolvedPresetSnapshot` 链；
+- 旧 `presets` 表/迁移/fixture（若仍存在）、旧 preset 子表及只写不读的 preset projection；
+- Extension/Plugin 的 `contributes.presets`、`ExtPreset`、`ResolvedPreset` 等旧贡献模型；
+- 任何把 `preferred_agent_id`、`agent_preferences`、`system_prompt`、fallback 或 runtime selector 当作旧兼容字段继续读写的路径。
+
+Fresh-v4 采用 clean cut：
+
+- 不做旧 `/api/presets` 与新 `/api/agent-presets` 的双读双写；
+- 不在运行时按版本猜测旧数据；
+- 旧 v3 数据根按归档/清理规则处理，不进入新 Agent 主链；
+- 代码、路由、数据库、生成 schema 和文档中的生产可达旧路径必须达到 0；
+- 真实用户数据若需要保留，必须由 owning domain 提供显式、一次性的导出/归档流程，不把兼容负担塞回 AgentPreset。
+
+#### 15.8.1 当前仓库的实施切片基线
+
+下面是 AP 施工前已经确认的引用面，作用是领取任务和做 residual 扫描，不替代实现后的 canonical source：
+
+| 层 | 当前主要位置 | AP 处置 |
+|---|---|---|
+| Contract/Schema | `crates/backend/nomifun-agent-contracts/src/preset.rs`、`crates/backend/nomifun-api-types/src/preset.rs`、`crates/backend/nomifun-agent-contracts/schema/0001_fresh_v4.sql` | 按 AP-2 收敛 payload、ContributionLock、模板 seed 和最小索引 |
+| Generated inventory | `crates/backend/nomifun-agent-contracts/contracts/generated/*`、`contracts/presets/*` | 重新生成 Agent API、template API、禁止旧路由和 schema inventory |
+| Compiler/Control Plane | `crates/backend/nomifun-agent-control-plane/src/compiler.rs`、`service.rs`、`routes.rs` | 统一 Preview/Save/Test/Session application service，不让前端拼 Snapshot |
+| Platform/Session | `crates/backend/nomifun-agent-platform/src/platform.rs`、`crates/backend/nomifun-agent-session/src/*`、`crates/backend/nomifun-v4-root/src/database.rs` | 接入唯一 Revision/Snapshot/Binding/Session 主链，删除重复投影 |
+| 新 Agent UI | `ui/src/renderer/pages/agentSettings/*`、`ui/src/renderer/pages/agentSession/CanonicalAgentRoutes.tsx`、`ui/src/renderer/components/layout/Router.tsx` | 挪到公共 `/agent`，保留产品语言和 picker，技术详情折叠 |
+| 旧 Agent UI 入口 | `ui/src/renderer/pages/settings/PresetSettings/*`、`ui/src/renderer/pages/settings/AgentSettings/*`、`ui/src/renderer/components/settings/SettingsModal/contents/AgentModalContent.tsx` | 从 Settings/Modal 删除 Agent authoring surface；`/presets`、`/settings/agent-presets`、`/settings/agent` 只做限期迁移跳转 |
+| 旧 Preset 主链 | `crates/backend/nomifun-preset/*`、`crates/backend/nomifun-agent-execution/*`、Guid/Conversation/Cron/Companion/Creative Studio/Extension/Gateway 等消费者 | 逐个迁移到 Agent application service 后删除旧路由、服务、DTO 和 fallback |
+
+本表中的路径是当前扫描结果，不构成“只改这些文件”的豁免。AP-6 必须以全仓生产引用扫描、路由测试、Schema inventory 和真实消费者行为为最终判断。
+
+### 15.9 AgentPreset 实施 TODO（AP-0～AP-7）
+
+以下任务是 06 Plugin/MiniApp 开发的前置项目。每项都必须有对应的合同、实施产物和行为验证证据；代码、Schema、UI 和测试按任务适用，但只完成文档或只添加类型不能视为完成。
+
+#### AP-0：产品与领域边界冻结
+
+交付：
+
+- 冻结“Agent 工作台”一级入口和中文术语；
+- 发布 Package、Plugin、MiniApp、Capability、Skill、AgentPreset、Revision、Snapshot、Binding、Session、Runtime 的 owner 矩阵；
+- 明确 Plugin/MiniApp 是平台能力供给层，不是 Agent 子系统；
+- 标记 Runtime/Plugin Config/Credential/KV/`dataDir` 不属于 Agent 编辑内容；
+- 选定 AP-1/AP-4 使用的现有 first-party shared Capability、non-Agent-only Capability 和真实非 Agent consumer；
+- 把本节和 06 的依赖关系写入实现 Prompt、Schema 目录和发布清单。
+
+通过条件：产品导航、API 命名、数据库 owner 和文档中不存在两个含义相同的“设定”；任何新设计都能回答“谁拥有它、哪些消费者使用它”。
+
+#### AP-1：平台级 Capability 消费模型
+
+交付：
+
+- 通用 Capability Catalog entry、Contribution、provenance、availability 和 `supported_surfaces/consumers` 合同；
+- Plugin、MiniApp、Built-in、MCP contribution 的统一 materialization 入口；
+- Candidate/未发布 Release 不得进入正式 Catalog 的 admission 规则；
+- Agent、至少一个非 Agent 消费者使用同一 Catalog/resolver 的代表实现；同时用一个明确标记为 non-Agent-only 的 Capability 验证 Agent 工作台会正确过滤它。上述代表实现可以使用现有 first-party Capability，不以 06 Plugin/MiniApp 代码先行交付为前提。
+
+通过条件：同一真实 Capability 可以被 Agent 和一个非 Agent 消费者使用，且 non-Agent-only Capability 不会出现在 Agent picker；没有因为 AgentPreset 存在而转移 owner 或复制一套 Agent 专属 Catalog。
+
+#### AP-2：AgentPreset Revision、ContributionLock 与 Compiler
+
+交付：
+
+- `AgentPresetRevisionPayload` 的 canonical schema；
+- 系统生成的 `ContributionLock`、Revision digest 和 Snapshot envelope；
+- Revision digest 覆盖 payload 与 ContributionLock，Snapshot digest 覆盖实际执行闭包；
+- Preview、Save、Test、Session Open 共用一个纯函数 Compiler；
+- typed resource binding、MCP schema/provenance 和 Role Provider lock 接入同一解析边界；
+- 删除未被真实消费者读取的 `required/exposure/destination_constraints/context_budget_override/tool_budget_override/config` 等旧选择字段、重复的 preset capability/model/skill 子表和 raw JSON runtime knobs；保留的字段必须有明确执行语义；
+- 禁止字段清单和未知字段 fail-closed 校验。
+
+通过条件：同一输入在 Preview/Save/Test/Session Open 得到相同结果；用户不能通过 API 或 UI 直接伪造 Snapshot、Mount、Digest 或 fallback。
+
+#### AP-3：四种模式与 Agent 工作台
+
+交付：
+
+- 轻量、通用、全面、自定义四个创建模板；
+- 模式只是 seed，不产生四种持久化类型；
+- 首页一级入口（公共路由 `/agent`；Session 使用 `/agent-sessions/:id`）、能力/技能/资源 picker、来源状态、保存和试用流程；
+- 从 `settings/AgentSettings`、`SettingsModal` 和 `/settings/agent-presets` 中移除 Agent authoring surface；旧深层链接最多保留一次性迁移跳转，不形成长期第二入口；
+- 模式转换的显式 diff/确认和模板更新不漂移既有 Revision；
+- 技术 Inspector 与产品编辑表单分离。
+
+通过条件：新用户不需要进入深层设置即可完成“建 Agent → 配能力 → 试用”；全面模式不会自动加入全部 Plugin/MiniApp；轻量模式不会暗含工具或外部能力。
+
+#### AP-4：Agent 与非 Agent 消费者接入
+
+交付：
+
+- AgentSession、AgentBinding、Remote、Automation、Gateway、Knowledge/MiniApp 等实际消费者的统一 application service；
+- 有 Session 与无 Session 的 exact lock 两条清晰调用路径；
+- 前端不提交内部执行锁，后端负责生成 Revision/Snapshot/OperationLock；
+- 真实消费者的高层 API 和 typed failure。
+
+通过条件：至少一个真实 Agent 流程和一个真实非 Agent 流程通过同一 Capability materialization；消费者代码不认识具体 Plugin/MiniApp implementation。
+
+#### AP-5：来源、生命周期和影响处理
+
+交付：
+
+- `mount_id/miniapp_id + contribution_id + contract_digest` 的稳定绑定；
+- Compatible Replace、Breaking Replace、Disable、Uninstall、MiniApp Active Release 变化的 impact diff；
+- Agent 工作台的来源、可用性、影响清单、Retry/Switch/Restore/Fork 体验；
+- Candidate、Test、正式执行之间的边界和 typed errors。
+
+通过条件：合同变化不会自动改写旧 Revision 或静默替换来源；历史 Session 保留事实，新使用失败可解释且不 fallback。
+
+#### AP-6：旧 API 与旧数据模型 clean cut
+
+交付：
+
+- 旧 `/api/presets`、`PresetService`、旧 DTO/resolver、旧表/迁移/fixture（若仍存在）和旧 Extension Preset contribution 的生产可达性清单；
+- 删除旧路由、双写、兼容 alias、旧 fallback 和旧 projection；
+- Fresh-v4 schema、generated inventory、主导航和代码引用同步更新；
+- 删除设置页中的 Agent authoring 入口和 `SettingsModal` 内的 Agent 入口；`/presets`、`/settings/agent-presets`、`/settings/agent` 只允许有明确期限的一次性迁移跳转，完成迁移后必须移除；`/settings/execution-engines` 只保留 Runtime Manager，不再承载 Agent authoring；
+- 保留官方 `agent_preset_templates` 只读 seed catalog，移除 Package-owned template/source 分支；删除 `AgentPresetSource::Package` 和重复的 preset capability/model/skill/resource projection；
+- v3 数据归档/清理说明和必要的显式导出入口。
+
+通过条件：生产路由、应用服务、数据库读写和前端入口中旧 Preset 主链为 0；新 Agent 主链不依赖旧数据猜测或隐式转换。
+
+#### AP-7：验证、发布和 06 admission gate
+
+交付：
+
+- Contract、Compiler、Catalog、Consumer、Impact、No-fallback 和旧路径 residual 测试；
+- 至少一个真实 Agent 消费者与一个真实非 Agent 消费者的端到端证据；
+- API/Schema/generated inventory、README、05/06 交叉引用和实施 Prompt 更新；
+- 06 N1-0 的 admission checklist 和阻断状态。
+
+通过条件：下列门禁全部为真，才允许开始 06 的 Plugin/MiniApp 代码：
+
+```text
+AP-0..AP-6 completed
+AP-7 admission evidence signed
+AgentPreset API/Revision/Snapshot/Binding frozen
+one real Agent consumer + one real non-Agent consumer
+non-Agent-only capability filtered from Agent picker
+ContributionLock and impact diff representative tests passed
+legacy /api/presets production reachability = 0
+Fresh-v4 schema/generated inventory updated
+Plugin/MiniApp contribution no longer depends on old Preset
+```
+
+### 15.10 实施顺序与 06 的明确依赖
+
+AgentPreset 的实际施工顺序固定为：
+
+```text
+05 P1-R0～P1-R3（Role/Provider 基础合同）
+  →
+AP-0 术语/owner/入口冻结
+  → AP-1 通用 Capability Catalog
+  → AP-2 AgentPreset Compiler/Revision/Snapshot
+  → AP-3 Agent 工作台与四种模板
+  → AP-4 Agent + 非 Agent 消费者
+  → AP-5 provenance/impact/lifecycle
+  → AP-6 删除旧 API/模型
+  → AP-7 验证与 admission gate
+  → 06 N1-0 Plugin/MiniApp 机器合同冻结
+  → 06 N1-1 及后续实现
+```
+
+06 可以在 AP 阶段继续做设计审阅、交叉引用和合同修订，但不能提前实现 Node Host、Plugin Loader、MiniApp Release 或任何以旧 Preset 为入口的代码。若 AP-1 或 AP-2 尚未完成，06 中的 Catalog/Agent integration 章节只能视为未授权的设计草案。
+
+建议的消费者迁移顺序是：先完成 Agent 工作台与 AgentSession 的 canonical application service，再迁移普通 Conversation/Guid/Chat；随后迁移 Cron/Automation/Remote，最后迁移 Companion、Creative Studio、Extension 和其他低频入口。每迁移一类消费者都要删除其旧 `PresetService` 注入，直到 AP-6 的生产可达性为 0；不能用“新旧同时调用一段时间”的长期双主链替代迁移完成。
+
+### 15.11 本版默认锁定与仍可拍板的事项
+
+为减少后续反复，本版默认锁定以下决策：
+
+1. 对用户只保留一个 Agent 工作台一级入口；
+2. `AgentPreset` 是内部统一聚合根，不再保留旧 Preset 产品和旧数据模型；
+3. 四种模式是创建模板，不是四种 Agent 类型；
+4. Plugin/MiniApp 先向平台 Capability Catalog 供给能力，再由 Agent 或其他消费者选择；
+5. Runtime/Plugin/MiniApp 管理不进入 AgentPreset payload；
+6. 旧 `/api/presets`、旧服务和旧贡献模型 clean cut，不做双读写和静默迁移；
+7. 缺失、合同变化和来源失效都 typed fail，不使用隐式 fallback。
+
+在 AP-0 评审时仍可以明确拍板、但不应阻塞总体方向的三个产品细节是：
+
+- **公开名称：**建议导航显示“Agent”，页面标题显示“Agent 工作台”；
+- **实现来源选择：**建议只在能力详情中提供高级显式动作，不建设独立 Provider/Runtime 设定页；
+- **Plugin 模板：**建议 N1 首版先不开放 `agent_template` contribution，后续只作为不授予能力的创建种子。
+
+除非 AP-0 评审明确否决上述默认值，否则实施者应按本节合同继续，不得重新引入“旧设定 + Agent 设定”双轨。
