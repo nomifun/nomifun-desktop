@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::http::{Method, Request, StatusCode, header};
+use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use git2::{Repository, StatusOptions};
 use nomifun_app::bootstrap::{NomiCoreApplication, ServerEnvironment};
 use serde_json::{Value, json};
@@ -32,6 +32,7 @@ const TURN_COMMAND_DEADLINE: Duration = Duration::from_secs(180);
 const TURN_RESULT_DEADLINE: Duration = Duration::from_secs(120);
 const CODING_STAGE_DEADLINE: Duration = Duration::from_secs(180);
 const REMOTE_CANCEL_DEADLINE: Duration = Duration::from_secs(70);
+const REMOTE_MCP_DEADLINE: Duration = Duration::from_secs(180);
 const CRON_RESULT_DEADLINE: Duration = Duration::from_secs(180);
 const CRON_REPLAY_SETTLE_DEADLINE: Duration = Duration::from_secs(10);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(60);
@@ -2333,6 +2334,490 @@ async fn cancel_remote(router: &Router, session_id: &str) -> Result<(), SmokeFai
     .await
 }
 
+async fn mint_live_remote_token(router: &Router) -> Result<Zeroizing<String>, SmokeFailure> {
+    let response = successful_json(
+        router,
+        "remote.mcp_token",
+        Method::POST,
+        "/api/webui/access-token",
+        None,
+        LOCAL_API_DEADLINE,
+        &[StatusCode::OK],
+    )
+    .await?;
+    Ok(Zeroizing::new(required_string(
+        "remote.mcp_token",
+        &response,
+        "/data/token",
+        "REMOTE_MCP_TOKEN_MISSING",
+    )?))
+}
+
+async fn dispatch_mcp_request(
+    router: &Router,
+    phase: &'static str,
+    token: &str,
+    session_id: Option<&str>,
+    request: Value,
+    duration: Duration,
+) -> Result<(StatusCode, HeaderMap, Vec<u8>), SmokeFailure> {
+    hard_deadline(
+        phase,
+        "REMOTE_MCP_HTTP_DEADLINE_EXCEEDED",
+        duration,
+        async {
+            let mut builder = Request::builder()
+                .method(Method::POST)
+                .uri("/mcp")
+                .header(header::HOST, "127.0.0.1")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT, "application/json, text/event-stream");
+            if let Some(session_id) = session_id {
+                builder = builder
+                    .header("mcp-session-id", session_id)
+                    .header("mcp-protocol-version", "2025-06-18");
+            }
+            let request = builder
+                .body(Body::from(serde_json::to_vec(&request).map_err(|_| {
+                    SmokeFailure::new(
+                        phase,
+                        "REMOTE_MCP_REQUEST_SERIALIZATION_FAILED",
+                        StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    )
+                })?))
+                .map_err(|_| {
+                    SmokeFailure::new(
+                        phase,
+                        "REMOTE_MCP_REQUEST_BUILD_FAILED",
+                        StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    )
+                })?;
+            let response = router.clone().oneshot(request).await.map_err(|_| {
+                SmokeFailure::new(
+                    phase,
+                    "REMOTE_MCP_ROUTER_DISPATCH_FAILED",
+                    StatusCode::BAD_GATEWAY.as_u16(),
+                )
+            })?;
+            let status = response.status();
+            let headers = response.headers().clone();
+            let body = to_bytes(response.into_body(), BODY_LIMIT)
+                .await
+                .map_err(|_| {
+                    SmokeFailure::new(
+                        phase,
+                        "REMOTE_MCP_RESPONSE_BODY_FAILED",
+                        StatusCode::BAD_GATEWAY.as_u16(),
+                    )
+                })?;
+            Ok((status, headers, body.to_vec()))
+        },
+    )
+    .await
+}
+
+fn parse_mcp_json(phase: &'static str, body: &[u8]) -> Result<Value, SmokeFailure> {
+    if let Ok(value) = serde_json::from_slice(body) {
+        return Ok(value);
+    }
+    let text = String::from_utf8_lossy(body);
+    let data = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:").map(str::trim))
+        .find(|line| !line.is_empty())
+        .ok_or_else(|| {
+            SmokeFailure::new(
+                phase,
+                "REMOTE_MCP_RESPONSE_JSON_MISSING",
+                StatusCode::BAD_GATEWAY.as_u16(),
+            )
+        })?;
+    serde_json::from_str(data).map_err(|_| {
+        SmokeFailure::new(
+            phase,
+            "REMOTE_MCP_RESPONSE_JSON_INVALID",
+            StatusCode::BAD_GATEWAY.as_u16(),
+        )
+    })
+}
+
+fn mcp_tool_value(
+    phase: &'static str,
+    response: Value,
+) -> Result<Value, SmokeFailure> {
+    let text = response
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            SmokeFailure::new(
+                phase,
+                "REMOTE_MCP_TOOL_RESULT_MISSING",
+                StatusCode::BAD_GATEWAY.as_u16(),
+            )
+        })?;
+    let text = text.strip_prefix("Error: ").unwrap_or(text);
+    let payload: Value = serde_json::from_str(text).map_err(|_| {
+        SmokeFailure::new(
+            phase,
+            "REMOTE_MCP_TOOL_RESULT_INVALID",
+            StatusCode::BAD_GATEWAY.as_u16(),
+        )
+    })?;
+    if response.pointer("/result/isError") == Some(&Value::Bool(true)) {
+        let code = payload
+            .pointer("/error/code")
+            .or_else(|| payload.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("REMOTE_MCP_TOOL_FAILED");
+        return Err(SmokeFailure::new(
+            phase,
+            code,
+            StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+        ));
+    }
+    Ok(payload)
+}
+
+async fn call_live_remote_mcp_tool(
+    router: &Router,
+    token: &str,
+    transport_session_id: &str,
+    request_id: u64,
+    phase: &'static str,
+    name: &str,
+    arguments: Value,
+) -> Result<Value, SmokeFailure> {
+    let (status, _, body) = dispatch_mcp_request(
+        router,
+        phase,
+        token,
+        Some(transport_session_id),
+        json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": arguments
+            }
+        }),
+        REMOTE_MCP_DEADLINE,
+    )
+    .await?;
+    if status != StatusCode::OK {
+        let response = parse_mcp_json(phase, &body)?;
+        return Err(SmokeFailure::new(
+            phase,
+            response
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("REMOTE_MCP_HTTP_FAILURE"),
+            status.as_u16(),
+        ));
+    }
+    mcp_tool_value(phase, parse_mcp_json(phase, &body)?)
+}
+
+async fn run_remote_mcp_chain(
+    router: &Router,
+    remote_binding_id: &str,
+) -> Result<(), SmokeFailure> {
+    let token = mint_live_remote_token(router).await?;
+    let (status, headers, body) = dispatch_mcp_request(
+        router,
+        "remote.mcp.initialize",
+        token.as_str(),
+        None,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "nomifun-live-provider-smoke",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        }),
+        LOCAL_API_DEADLINE,
+    )
+    .await?;
+    if status != StatusCode::OK {
+        return Err(SmokeFailure::new(
+            "remote.mcp.initialize",
+            "REMOTE_MCP_INITIALIZE_FAILED",
+            status.as_u16(),
+        ));
+    }
+    let transport_session_id = headers
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            SmokeFailure::new(
+                "remote.mcp.initialize",
+                "REMOTE_MCP_SESSION_ID_MISSING",
+                StatusCode::BAD_GATEWAY.as_u16(),
+            )
+        })?
+        .to_owned();
+    let initialize = parse_mcp_json("remote.mcp.initialize", &body)?;
+    if initialize.pointer("/result/protocolVersion").is_none() {
+        return Err(SmokeFailure::new(
+            "remote.mcp.initialize",
+            "REMOTE_MCP_INITIALIZE_RESULT_INVALID",
+            StatusCode::BAD_GATEWAY.as_u16(),
+        ));
+    }
+
+    let (status, _, _) = dispatch_mcp_request(
+        router,
+        "remote.mcp.initialized",
+        token.as_str(),
+        Some(&transport_session_id),
+        json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }),
+        LOCAL_API_DEADLINE,
+    )
+    .await?;
+    if status != StatusCode::ACCEPTED {
+        return Err(SmokeFailure::new(
+            "remote.mcp.initialized",
+            "REMOTE_MCP_INITIALIZED_STATUS_INVALID",
+            status.as_u16(),
+        ));
+    }
+
+    let (status, _, body) = dispatch_mcp_request(
+        router,
+        "remote.mcp.tools_list",
+        token.as_str(),
+        Some(&transport_session_id),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }),
+        LOCAL_API_DEADLINE,
+    )
+    .await?;
+    if status != StatusCode::OK {
+        return Err(SmokeFailure::new(
+            "remote.mcp.tools_list",
+            "REMOTE_MCP_TOOLS_LIST_FAILED",
+            status.as_u16(),
+        ));
+    }
+    let tools = parse_mcp_json("remote.mcp.tools_list", &body)?
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| {
+            SmokeFailure::new(
+                "remote.mcp.tools_list",
+                "REMOTE_MCP_TOOLS_MISSING",
+                StatusCode::BAD_GATEWAY.as_u16(),
+            )
+        })?;
+    let tool_names = tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    if tool_names != ["open", "turn", "observe", "cancel"] {
+        return Err(SmokeFailure::new(
+            "remote.mcp.tools_list",
+            "REMOTE_MCP_TOOL_SET_INVALID",
+            StatusCode::BAD_GATEWAY.as_u16(),
+        ));
+    }
+
+    let opened = call_live_remote_mcp_tool(
+        router,
+        token.as_str(),
+        &transport_session_id,
+        3,
+        "remote.mcp.open",
+        "open",
+        json!({
+            "binding_id": remote_binding_id,
+            "idempotency_key": "live-stepfun-mcp-open"
+        }),
+    )
+    .await?;
+    let remote_session_id = required_string(
+        "remote.mcp.open",
+        &opened,
+        "/agent_session_id",
+        "REMOTE_MCP_SESSION_ID_MISSING",
+    )?;
+    if opened.pointer("/open_state/state").and_then(Value::as_str) != Some("ready") {
+        return Err(SmokeFailure::new(
+            "remote.mcp.open",
+            "REMOTE_MCP_OPEN_STATE_INVALID",
+            StatusCode::BAD_GATEWAY.as_u16(),
+        ));
+    }
+
+    let turned = call_live_remote_mcp_tool(
+        router,
+        token.as_str(),
+        &transport_session_id,
+        4,
+        "remote.mcp.turn",
+        "turn",
+        json!({
+            "agent_session_id": remote_session_id,
+            "input": {
+                "content": format!("Reply with exactly {REMOTE_MARKER} and no other text.")
+            },
+            "idempotency_key": "live-stepfun-mcp-turn"
+        }),
+    )
+    .await?;
+    if turned.get("agent_session_id").and_then(Value::as_str) != Some(remote_session_id.as_str()) {
+        return Err(SmokeFailure::new(
+            "remote.mcp.turn",
+            "REMOTE_MCP_TURN_IDENTITY_MISMATCH",
+            StatusCode::CONFLICT.as_u16(),
+        ));
+    }
+
+    let deadline = tokio::time::Instant::now() + TURN_RESULT_DEADLINE;
+    let mut after_seq = 0_u64;
+    let mut request_id = 5_u64;
+    loop {
+        let observed = call_live_remote_mcp_tool(
+            router,
+            token.as_str(),
+            &transport_session_id,
+            request_id,
+            "remote.mcp.observe",
+            "observe",
+            json!({
+                "agent_session_id": remote_session_id,
+                "after_cursor": {
+                    "agent_session_id": remote_session_id,
+                    "seq": after_seq
+                },
+                "limit": SESSION_MESSAGE_PAGE_LIMIT
+            }),
+        )
+        .await?;
+        if value_contains(&observed, REMOTE_MARKER) {
+            let completed = observed
+                .get("events")
+                .and_then(Value::as_array)
+                .is_some_and(|events| {
+                    events.iter().any(|event| event["kind"] == "turn/completed")
+                });
+            if completed {
+                break;
+            }
+        }
+        if observed
+            .get("events")
+            .and_then(Value::as_array)
+            .is_some_and(|events| events.iter().any(|event| event["kind"] == "turn/failed"))
+        {
+            return Err(SmokeFailure::new(
+                "remote.mcp.observe",
+                "REMOTE_MCP_TURN_FAILED",
+                StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+            ));
+        }
+        if observed
+            .get("events")
+            .and_then(Value::as_array)
+            .is_some_and(|events| events.iter().any(|event| event["kind"] == "turn/unknown"))
+        {
+            return Err(SmokeFailure::new(
+                "remote.mcp.observe",
+                "REMOTE_MCP_TURN_UNKNOWN",
+                StatusCode::GATEWAY_TIMEOUT.as_u16(),
+            ));
+        }
+        after_seq = observed
+            .pointer("/next_cursor/seq")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                SmokeFailure::new(
+                    "remote.mcp.observe",
+                    "REMOTE_MCP_CURSOR_MISSING",
+                    StatusCode::BAD_GATEWAY.as_u16(),
+                )
+            })?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(SmokeFailure::new(
+                "remote.mcp.observe",
+                "REMOTE_MCP_TURN_DEADLINE_EXCEEDED",
+                StatusCode::REQUEST_TIMEOUT.as_u16(),
+            ));
+        }
+        request_id += 1;
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    let cancelled = call_live_remote_mcp_tool(
+        router,
+        token.as_str(),
+        &transport_session_id,
+        request_id + 1,
+        "remote.mcp.cancel",
+        "cancel",
+        json!({
+            "agent_session_id": remote_session_id,
+            "idempotency_key": "live-stepfun-mcp-cancel"
+        }),
+    )
+    .await?;
+    if cancelled.get("session_status").and_then(Value::as_str) != Some("cancelled") {
+        return Err(SmokeFailure::new(
+            "remote.mcp.cancel",
+            "REMOTE_MCP_CANCEL_STATE_INVALID",
+            StatusCode::BAD_GATEWAY.as_u16(),
+        ));
+    }
+
+    successful_json(
+        router,
+        "remote.mcp_token_revoke",
+        Method::DELETE,
+        "/api/webui/access-token",
+        None,
+        LOCAL_API_DEADLINE,
+        &[StatusCode::OK],
+    )
+    .await?;
+    let (status, _, _) = dispatch_mcp_request(
+        router,
+        "remote.mcp.revoked_token",
+        token.as_str(),
+        Some(&transport_session_id),
+        json!({
+            "jsonrpc": "2.0",
+            "id": request_id + 2,
+            "method": "tools/list",
+            "params": {}
+        }),
+        LOCAL_API_DEADLINE,
+    )
+    .await?;
+    if status != StatusCode::UNAUTHORIZED {
+        return Err(SmokeFailure::new(
+            "remote.mcp.revoked_token",
+            "REMOTE_MCP_REVOKED_TOKEN_ACCEPTED",
+            status.as_u16(),
+        ));
+    }
+    Ok(())
+}
+
 fn value_contains(value: &Value, marker: &str) -> bool {
     match value {
         Value::String(text) => text.contains(marker),
@@ -2515,7 +3000,8 @@ async fn run_product_chain(
         TURN_RESULT_DEADLINE,
     )
     .await?;
-    cancel_remote(router, &remote_session_id).await
+    cancel_remote(router, &remote_session_id).await?;
+    run_remote_mcp_chain(router, &remote_binding_id).await
 }
 
 async fn run_live_provider_smoke() -> Result<(), SmokeFailure> {
