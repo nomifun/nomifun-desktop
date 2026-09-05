@@ -1,11 +1,10 @@
 -- One authoritative sales workspace per authenticated WebUI user.
 --
--- The workspace is intentionally stored as a versioned JSON document for the
--- first multi-tenant phase.  Ownership lives in a first-class SQL column and
--- is never accepted from client input; route handlers always bind the current
--- authenticated user id.  This makes the isolation boundary enforceable now
--- without freezing the still-evolving sales task/result schema too early.
-CREATE TABLE sales_workspaces (
+-- Custom product migrations use a date-based range so they cannot collide
+-- with upstream NomiFun's sequential migration numbers. IF NOT EXISTS keeps
+-- upgrades safe for local databases that already created this table before
+-- the migration-number split was introduced.
+CREATE TABLE IF NOT EXISTS sales_workspaces (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id        TEXT NOT NULL UNIQUE
                    CHECK (
@@ -20,5 +19,5 @@ CREATE TABLE sales_workspaces (
     updated_at     INTEGER NOT NULL
 );
 
-CREATE INDEX idx_sales_workspaces_user_id ON sales_workspaces(user_id);
-CREATE INDEX idx_sales_workspaces_updated_at ON sales_workspaces(updated_at);
+CREATE INDEX IF NOT EXISTS idx_sales_workspaces_user_id ON sales_workspaces(user_id);
+CREATE INDEX IF NOT EXISTS idx_sales_workspaces_updated_at ON sales_workspaces(updated_at);

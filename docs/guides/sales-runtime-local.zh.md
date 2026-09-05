@@ -60,6 +60,8 @@ node tools/sales-local/setup-phase2.mjs
 NOMIFUN_ADMIN_PASSWORD='你的本地密码' node tools/sales-local/setup-phase2.mjs
 ```
 
+本地脚本也会自动读取仓库根目录中被 Git 忽略的 `.env`，因此账号、密码和令牌可以只保存在本机，不必写入命令历史或提交到仓库。
+
 脚本是幂等的：重复执行会更新同名的用户设定，不会创建重复记录。成功时会确认：
 
 - `sales-contact-operator` 已被 NomiFun 发现；

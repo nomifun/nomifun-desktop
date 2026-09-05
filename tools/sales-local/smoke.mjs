@@ -1,3 +1,7 @@
+try {
+  process.loadEnvFile?.();
+} catch {}
+
 const nomifunUrl = process.env.NOMIFUN_SALES_URL || "http://127.0.0.1:8787";
 const mockUrl = process.env.NOMIFUN_MOCK_CONTACT_URL || "http://127.0.0.1:8088";
 const browserTarget =

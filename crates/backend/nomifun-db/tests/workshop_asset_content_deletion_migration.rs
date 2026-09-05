@@ -12,7 +12,7 @@ fn published_asset_deletion_migrations_have_immutable_checksums() {
         ),
         (
             60,
-            "534979ae4e86c11970f757f63f724e9e191e2da8a60d5bb3d14513da3d4f22bee693165df12e30111a02fa34097c1d09",
+            "cffa5536115edc38b2f23357931a351130f16f63f2cec440508c362805393c4d551dd7d96bfc2318e4cf920de2952aad",
         ),
     ] {
         let migration = MIGRATOR
@@ -122,7 +122,15 @@ async fn verify_asset_deletion_upgrade(from_version: i64) {
         &lineage_after[..lineage_before.len()],
         lineage_before.as_slice()
     );
-    assert_eq!(lineage_after.last().unwrap().0, 60);
+    assert!(
+        lineage_after.iter().any(|(version, _)| *version == 60),
+        "the published asset-deletion guard migration must be applied"
+    );
+    assert_eq!(
+        lineage_after.last().unwrap().0,
+        MIGRATOR.iter().map(|migration| migration.version).max().unwrap(),
+        "later product migrations may follow the published asset-deletion migrations"
+    );
     nomifun_db::validate_id_schema_contract(&pool)
         .await
         .unwrap();

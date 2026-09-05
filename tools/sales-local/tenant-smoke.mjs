@@ -1,3 +1,7 @@
+try {
+  process.loadEnvFile?.();
+} catch {}
+
 const baseUrl = process.env.NOMIFUN_SALES_URL || "http://127.0.0.1:8787";
 const adminUsername = process.env.NOMIFUN_ADMIN_USERNAME || "admin";
 const adminPassword =
