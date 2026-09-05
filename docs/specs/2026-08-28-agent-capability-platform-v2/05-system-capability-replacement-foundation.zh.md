@@ -47,8 +47,9 @@
 - 当前 Web、Desktop 和 `nomicore` 仍统一由 `NomiCoreApplication` 组合原有 Nomi
   engine。App 内只有一个 `NomiCoreSessionOwner` 作为 Nomi-core Session facade，
   供普通 Session、Remote、Cron、AutoWork、Channel、Companion、IDMM 和
-  AgentExecution 共享；这不是第二套 Session authority，也不代表已完成
-  Conversation-backed consumer 的最终迁移。
+  AgentExecution 共享；这不是第二套 Session authority。各 consumer crate 的
+  Conversation-backed 生产依赖已移到 app-owned host composition 或明确的测试支持，
+  但这不等于未来 canonical Session 直接替换合同已经全部具备。
 - Remote 的本机实现已经收敛到原子状态转移加事件追加、精确 operation payload
   冲突、terminal outcome 吸收迟到完成和 Remote event cursor。逐操作 deadline、
   detached recovery 与 persistence-blocked typed error 只负责保留未知结果，不能
@@ -57,16 +58,20 @@
   exact claim cleanup；Cron/AutoWork 的 durable receipt、accepted 等待、丢失 receipt
   和 reconciliation 错误继续 fail-closed。当前 Cron、Requirement/AutoWork 和
   AgentExecution 的生产消费者已通过 host-owned typed boundary 接入；Companion
-  archive 也已由 host 直接提供 owner-scoped window/reset contract。Channel 与
-  IDMM 仍保留边界 adapter，因为 canonical Session 尚缺它们所需的事件流、完整
-  receipt 和活动 turn supervision 合同；这不等于自动完成 `SL-S3-10`。
+  archive 也已由 host 直接提供 owner-scoped window/reset contract。Channel 现在
+  只在生产 crate 中保留 Channel-owned receipt/event port，Conversation bridge
+  仅位于 integration-test support；IDMM 只暴露 IDMM-owned `SupervisionTurnScope`，
+  Conversation scope 的转换由 app composition wrapper 负责。canonical Session 尚
+  缺它们未来所需的直接 live event、完整跨域 receipt 和更宽 continuation/failover
+  surface，但这些不是本次 `SL-S3-10` host-boundary 收口的生产 legacy 阻断。
 - Agent Settings/AgentSession 已完成产品表面和定向 UI build/test 收口。当前
   Nomi-core 没有 canonical on-demand activation port 时，Coding/on-demand 继续
   显式 unavailable；不得通过 metadata-only success 或静态 fixture 宣称完整 Coding。
 - 2026-09-05 通过 Windows Credential Manager runner 完成真实 StepFun Nomi-core
   Chat/Coding smoke，结果为 `live_smoke_status=pass code=OK status=200`。该结果
-  关闭 `SL-S3-07` 的真实 owner smoke，但不替代 `SL-S3-10` 的 automation
-  canonical 合同或 `SL-S4-02` 的 Desktop 人工验收。Nomi-core Remote REST 的
+  关闭 `SL-S3-07` 的真实 owner smoke；它本身不替代 `SL-S3-10` 的独立
+  automation boundary evidence 或 `SL-S4-02` 的 Desktop 人工验收，前者已由
+  host-owned typed boundary 与依赖审计单独收口。Nomi-core Remote REST 的
   installation Bearer、owner JWT/local-trust 兼容、旧 selector query fail-closed
   和 canonical MCP transport 均已由独立回归及真实 smoke 覆盖，`SL-S3-11` 已关闭。
 - Nomi-core `/mcp` 只复用公共 Streamable HTTP transport/session admission 和四工具
@@ -91,12 +96,15 @@
   `extra` 对象中的非 AutoWork 字段。
 - Companion archive 的生产组合使用 `companion_ports_from_typed_host`，由
   `NomiCoreSessionOwner` 提供有界消息窗口与上下文清理；Conversation 元数据投影
-  只留在测试兼容边界。IDMM 的 supervision scope/admission 核心同样使用
-  IDMM-owned typed contract，但 canonical Session 仍未提供完整 live event /
-  continuation / failover surface。
+  只留在测试兼容边界。Channel 的 receipt projection 和 test-only Conversation
+  bridge 已分离；IDMM 的 supervision scope/admission 核心使用 IDMM-owned typed
+  contract，且 Conversation hook 的 token 翻译只存在 app composition。
+  canonical Session 仍未提供未来完整 live event/continuation/failover surface，
+  本项不把它们伪装成已交付。
 - 本次定向结果包括：App lib `399 passed`、DB Conversation repository `83 passed`、
   Cron lib/integration `192/62 passed`、Requirement lib/tests `115/120 passed`、
-  IDMM `196 passed`、Channel `345 passed`、Companion `275 passed`；UI build、
+  AgentExecution `87 passed`、IDMM `195 passed`、Channel 全套 `473 passed`、
+  Companion `275 passed`；UI build、
   i18n、live smoke runner self-test/compile-only 和真实 StepFun smoke 均通过。真实
   Provider smoke 的安全命令、覆盖范围和仍未关闭的独立合同，以
   `GLOBAL-CLOSURE-TODO.zh.md` 的 2026-09-05 checkpoint 为准。

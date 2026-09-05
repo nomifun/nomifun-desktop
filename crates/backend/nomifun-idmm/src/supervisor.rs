@@ -26,8 +26,6 @@ use crate::session::{SessionSupervisionPort, SupervisionTurnScope};
 use crate::sidecar::{OpenQuestionAsk, SidecarClient};
 use crate::signal::{DecisionKind, SessionSignal, StallClass, WakeAction};
 
-type IdmmTurnScope = SupervisionTurnScope;
-
 /// `detail`/`reason` are truncated to this many chars before persisting (the
 /// row is an audit trail, not a transcript store — keeps a runaway model reply
 /// from bloating the table).
@@ -112,7 +110,7 @@ pub struct LoopDeps {
 /// would silently upgrade an old signal into authority over the successor.
 #[derive(Clone, Debug)]
 enum ObservedActionScope {
-    Exact(IdmmTurnScope),
+    Exact(SupervisionTurnScope),
     Unavailable(String),
     Unsupported,
 }
@@ -188,7 +186,7 @@ async fn run_supervisor_for_owner(
     shared: Arc<SupervisorShared>,
     cancel: Arc<AtomicBool>,
     expected_owner_id: Option<String>,
-    admitted_scope: Option<IdmmTurnScope>,
+    admitted_scope: Option<SupervisionTurnScope>,
 ) {
     let (kind, target_id) = probe.target();
     // Resolve the persisted session owner once, before any realtime emission.
@@ -221,7 +219,7 @@ async fn run_supervisor_for_owner(
     // is immutable for the lifetime of the task: queued events do not carry
     // enough identity to sample safely after `recv`, because an old event may
     // wait in the channel until a successor turn is already current. The
-    // ConversationService hook supplies the admission-time scope in production;
+    // The application host hook supplies the admission-time scope in production;
     // direct/manual arms capture once through the exact-authority boundary.
     let observed_scope = match admitted_scope {
         Some(scope) => ObservedActionScope::Exact(scope),
@@ -1493,7 +1491,7 @@ impl IdmmInner {
         &self,
         kind: IdmmTargetKind,
         target_id: &str,
-        admitted_scope: Option<IdmmTurnScope>,
+        admitted_scope: Option<SupervisionTurnScope>,
     ) {
         let admitted_turn_generation = admitted_scope.as_ref().map(|scope| scope.generation);
         let Some(probe) = self.factory.build(kind, target_id) else {
@@ -1626,7 +1624,7 @@ impl IdmmInner {
     async fn replace_conversation_turn(
         &self,
         target_id: &str,
-        admitted_scope: IdmmTurnScope,
+        admitted_scope: SupervisionTurnScope,
     ) {
         // Detached turn hooks may complete out of order. Remove only an
         // older/unknown generation; a delayed hook for turn A must not cancel
@@ -1711,7 +1709,7 @@ impl nomifun_requirement::IdmmHandle for IdmmManager {
     }
 }
 
-/// ConversationService → IDMM seam. A user-driven desktop turn arms supervision
+/// Application host → IDMM seam. A user-driven desktop turn arms supervision
 /// for the conversation (the path that has no AutoWork loop / boot-resume to do
 /// it). Sync + fire-and-forget: spawns the async `ensure`, which is a no-op when
 /// IDMM is disabled for the target or already supervising it.
@@ -1876,8 +1874,8 @@ mod tests {
         }
         async fn action_scope(
             &self,
-        ) -> Result<Option<IdmmTurnScope>, nomifun_common::AppError> {
-            Ok((self.kind == IdmmTargetKind::Conversation).then(|| IdmmTurnScope {
+        ) -> Result<Option<SupervisionTurnScope>, nomifun_common::AppError> {
+            Ok((self.kind == IdmmTargetKind::Conversation).then(|| SupervisionTurnScope {
                 wire_turn_id: CONVERSATION_TURN_ID.into(),
                 generation: CONVERSATION_TURN_GENERATION,
             }))
@@ -1885,12 +1883,12 @@ mod tests {
         async fn inject_reserved(
             &self,
             action: &WakeAction,
-            scope: Option<&IdmmTurnScope>,
+            scope: Option<&SupervisionTurnScope>,
         ) -> Result<(), nomifun_common::AppError> {
             match self.kind {
                 IdmmTargetKind::Conversation
                     if scope
-                        == Some(&IdmmTurnScope {
+                        == Some(&SupervisionTurnScope {
                             wire_turn_id: CONVERSATION_TURN_ID.into(),
                             generation: CONVERSATION_TURN_GENERATION,
                         }) => {}
@@ -1926,7 +1924,7 @@ mod tests {
     /// signal-time capture; the second is pre-reservation revalidation.
     struct ScopeBarrierProbe {
         receiver: Mutex<Option<mpsc::Receiver<SessionSignal>>>,
-        current_scope: Mutex<Option<IdmmTurnScope>>,
+        current_scope: Mutex<Option<SupervisionTurnScope>>,
         scope_reads: AtomicUsize,
         revalidation_read: Option<usize>,
         revalidation_entered: Arc<Barrier>,
@@ -1956,7 +1954,7 @@ mod tests {
             (
                 Arc::new(Self {
                     receiver: Mutex::new(Some(rx)),
-                    current_scope: Mutex::new(Some(IdmmTurnScope {
+                    current_scope: Mutex::new(Some(SupervisionTurnScope {
                         wire_turn_id: CONVERSATION_TURN_ID.into(),
                         generation: CONVERSATION_TURN_GENERATION,
                     })),
@@ -1992,7 +1990,7 @@ mod tests {
             (
                 Arc::new(Self {
                     receiver: Mutex::new(Some(rx)),
-                    current_scope: Mutex::new(Some(IdmmTurnScope {
+                    current_scope: Mutex::new(Some(SupervisionTurnScope {
                         wire_turn_id: CONVERSATION_TURN_ID.into(),
                         generation: CONVERSATION_TURN_GENERATION,
                     })),
@@ -2014,7 +2012,7 @@ mod tests {
         }
 
         fn replace_with_successor_scope(&self) {
-            *self.current_scope.lock().unwrap() = Some(IdmmTurnScope {
+            *self.current_scope.lock().unwrap() = Some(SupervisionTurnScope {
                 wire_turn_id: "0190f5fe-7c00-7a00-8000-000000000005".into(),
                 generation: CONVERSATION_TURN_GENERATION + 1,
             });
@@ -2045,7 +2043,7 @@ mod tests {
                 .expect("scope barrier probe can be observed only once")
         }
 
-        async fn action_scope(&self) -> Result<Option<IdmmTurnScope>, AppError> {
+        async fn action_scope(&self) -> Result<Option<SupervisionTurnScope>, AppError> {
             let read = self.scope_reads.fetch_add(1, Ordering::SeqCst);
             if self.revalidation_read == Some(read) {
                 self.revalidation_entered.wait().await;
@@ -2057,7 +2055,7 @@ mod tests {
         async fn inject_reserved(
             &self,
             action: &WakeAction,
-            scope: Option<&IdmmTurnScope>,
+            scope: Option<&SupervisionTurnScope>,
         ) -> Result<(), AppError> {
             self.delivery_calls.fetch_add(1, Ordering::SeqCst);
             let current = self.current_scope.lock().unwrap().clone();
@@ -2401,7 +2399,7 @@ mod tests {
     }
 
     fn exact_observed_scope() -> ObservedActionScope {
-        ObservedActionScope::Exact(IdmmTurnScope {
+        ObservedActionScope::Exact(SupervisionTurnScope {
             wire_turn_id: CONVERSATION_TURN_ID.into(),
             generation: CONVERSATION_TURN_GENERATION,
         })
@@ -3288,7 +3286,7 @@ mod tests {
                 .expect("fresh live probe is observed once")
         }
 
-        async fn action_scope(&self) -> Result<Option<IdmmTurnScope>, AppError> {
+        async fn action_scope(&self) -> Result<Option<SupervisionTurnScope>, AppError> {
             Ok(None)
         }
 
@@ -3357,11 +3355,11 @@ mod tests {
             Arc::new(FreshLiveProbeFactory),
             Arc::new(EnabledConfigReader(rule_cfg())),
         );
-        let old_scope = IdmmTurnScope {
+        let old_scope = SupervisionTurnScope {
             wire_turn_id: CONVERSATION_TURN_ID.into(),
             generation: CONVERSATION_TURN_GENERATION,
         };
-        let successor_scope = IdmmTurnScope {
+        let successor_scope = SupervisionTurnScope {
             wire_turn_id: "0190f5fe-7c00-7a00-8000-000000000005".into(),
             generation: CONVERSATION_TURN_GENERATION + 1,
         };

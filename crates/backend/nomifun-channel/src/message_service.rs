@@ -312,7 +312,7 @@ impl ChannelMessageService {
     ///
     /// 1. Ensures the session has a backing conversation (creates one if needed)
     /// 2. Warms up the backing Agent runtime so stream subscription is available
-    /// 3. Sends the message via ConversationService
+    /// 3. Sends the message through the typed ChannelSessionPort
     /// 4. Returns the conversation_id and stream receiver for relay
     ///
     /// The caller is responsible for subscribing to stream events and
@@ -1038,7 +1038,7 @@ fn stop_denied_target(
 
 /// Picks the newest visible user-authored text from a newest-first message
 /// page. User messages are persisted as `type: "text"`, `position: "right"`
-/// with content `{"content": "..."}` (see `ConversationService::send_message`),
+/// with content `{"content": "..."}` (see the host Session implementation),
 /// so this is the inverse of that write path.
 fn extract_last_user_text(items: &[MessageResponse]) -> Option<String> {
     items

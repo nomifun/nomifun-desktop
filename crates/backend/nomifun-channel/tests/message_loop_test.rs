@@ -37,6 +37,9 @@ use nomifun_db::{
 use nomifun_realtime::UserEventSink;
 use tokio::sync::{broadcast, mpsc};
 
+#[path = "support/channel_session_port.rs"]
+mod channel_session_port;
+
 const TEST_PROVIDER: &str = "018f1234-5678-7abc-8def-012345678932";
 const TEST_OWNER: &str = "018f1234-5678-7abc-8def-012345678933";
 
@@ -438,7 +441,7 @@ async fn build_harness() -> Harness {
         .with_runtime_state(Arc::clone(&runtime)),
     );
     let message_svc = Arc::new(ChannelMessageService::new(
-        nomifun_channel::conversation_channel_session_port(
+        channel_session_port::conversation_channel_session_port(
             Arc::clone(&conversation_svc),
             Arc::clone(&runtime_registry),
         ),

@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
 use nomifun_ai_agent::{AgentStreamEvent, TurnStopReason};
 use nomifun_api_types::{
     ConversationRuntimeStateKind, ConversationRuntimeSummary, IdmmTargetKind, SendMessageRequest,
@@ -16,7 +15,6 @@ use nomifun_api_types::{
 use nomifun_common::{AppError, ConversationId, ConversationStatus, TerminalId, UserId};
 #[cfg(test)]
 use nomifun_common::CompanionId;
-use nomifun_conversation::{ConversationService, IdmmTurnScope as ConversationTurnScope};
 use nomifun_db::{IConversationRepository, SortOrder};
 use nomifun_terminal::TerminalDriver;
 use tokio::sync::{broadcast, mpsc};
@@ -26,43 +24,8 @@ use crate::detector::{TerminalDetector, signal_from_agent_error};
 use crate::detector::{detect_chat_open_question, has_open_intent};
 #[cfg(test)]
 use crate::signal::{DecisionKind, DecisionPrompt, DecisionSource};
-use crate::session::{SessionSupervisionPort, SupervisionTurnScope};
+use crate::session::SupervisionTurnScope;
 use crate::signal::{SessionSignal, WakeAction};
-
-/// Translate the current product's Conversation admission token at the one
-/// compatibility boundary. The supervisor never carries the Conversation
-/// implementation's token type.
-impl From<ConversationTurnScope> for SupervisionTurnScope {
-    fn from(scope: ConversationTurnScope) -> Self {
-        Self::new(scope.wire_turn_id, scope.generation)
-    }
-}
-
-impl From<&SupervisionTurnScope> for ConversationTurnScope {
-    fn from(scope: &SupervisionTurnScope) -> Self {
-        Self {
-            wire_turn_id: scope.wire_turn_id().to_owned(),
-            generation: scope.generation(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod scope_contract_tests {
-    use super::*;
-
-    #[test]
-    fn conversation_scope_round_trips_through_idmm_contract() {
-        let host_scope = ConversationTurnScope {
-            wire_turn_id: "0190f5fe-7c00-7a00-8000-000000000005".into(),
-            generation: 42,
-        };
-        let idmm_scope = SupervisionTurnScope::from(host_scope.clone());
-        assert_eq!(idmm_scope.wire_turn_id(), host_scope.wire_turn_id);
-        assert_eq!(idmm_scope.generation(), host_scope.generation);
-        assert_eq!(ConversationTurnScope::from(&idmm_scope), host_scope);
-    }
-}
 
 /// Lightweight session metadata for gating + ownership.
 #[derive(Debug, Clone)]
@@ -255,129 +218,23 @@ pub trait ConversationSessionPort: Send + Sync {
         &self,
         owner_id: &str,
         conversation_id: &str,
-    ) -> Result<ConversationTurnScope, AppError>;
+    ) -> Result<SupervisionTurnScope, AppError>;
     async fn continue_active_turn(
         &self,
         owner_id: &str,
         conversation_id: &str,
-        expected_scope: &ConversationTurnScope,
+        expected_scope: &SupervisionTurnScope,
         request: SendMessageRequest,
     ) -> Result<String, AppError>;
     async fn failover(&self, owner_id: &str, conversation_id: &str)
         -> Result<bool, AppError>;
 }
 
-/// Stateless adapter over the existing Conversation session owner.  IDMM
-/// receives only the exact query/command operations it needs; it cannot retain
-/// session state or construct a replacement runtime.
-struct ConversationServiceSessionPort {
-    service: ConversationService,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
-}
-
-impl ConversationServiceSessionPort {
-    fn new(
-        service: ConversationService,
-        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
-    ) -> Self {
-        Self {
-            service,
-            runtime_registry,
-        }
-    }
-}
-
-/// Build IDMM's transitional Conversation-backed session port.
-///
-/// The returned object is a stateless delegate over the existing session
-/// owner. It does not cache runtime handles, mint identities, retry commands,
-/// or introduce another lifecycle authority.
-pub fn conversation_session_port(
-    service: ConversationService,
-    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
-) -> Arc<dyn ConversationSessionPort> {
-    Arc::new(ConversationServiceSessionPort::new(
-        service,
-        runtime_registry,
-    ))
-}
-
-#[async_trait]
-impl ConversationSessionPort for ConversationServiceSessionPort {
-    fn subscribe(
-        &self,
-        conversation_id: &str,
-    ) -> Option<broadcast::Receiver<AgentStreamEvent>> {
-        self.runtime_registry
-            .get_runtime(conversation_id)
-            .map(|runtime| runtime.subscribe())
-    }
-
-    async fn runtime_summary(&self, conversation_id: &str) -> ConversationRuntimeSummary {
-        self.service.runtime_summary_for(conversation_id).await
-    }
-
-    fn user_cancelled_since(&self, conversation_id: &str, since_ms: i64) -> bool {
-        self.service.user_cancelled_since(conversation_id, since_ms)
-    }
-
-    fn is_alive(&self, conversation_id: &str) -> bool {
-        self.runtime_registry.get_runtime(conversation_id).is_some()
-    }
-
-    async fn active_turn_scope(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-    ) -> Result<ConversationTurnScope, AppError> {
-        self.service
-            .idmm_active_turn_scope(owner_id, conversation_id, &self.runtime_registry)
-            .await
-    }
-
-    async fn continue_active_turn(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-        expected_scope: &ConversationTurnScope,
-        request: SendMessageRequest,
-    ) -> Result<String, AppError> {
-        self.service
-            .idmm_continue_active_turn(
-                owner_id,
-                conversation_id,
-                expected_scope,
-                request,
-                &self.runtime_registry,
-            )
-            .await
-    }
-
-    async fn failover(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-    ) -> Result<bool, AppError> {
-        self.service
-            .idmm_failover_conversation(owner_id, conversation_id, &self.runtime_registry)
-            .await
-    }
-}
-
-/// Compatibility bridge for the current Conversation service's turn-admission
-/// hook. New supervision code speaks `SessionSupervisionPort`; this impl is
-/// intentionally kept beside the other Conversation adapter code.
-impl nomifun_conversation::ConversationSupervisionHook for crate::supervisor::IdmmManager {
-    fn on_turn_start(&self, conversation_id: &str, admitted_scope: ConversationTurnScope) {
-        SessionSupervisionPort::admit_conversation_turn(self, conversation_id, admitted_scope.into());
-    }
-}
-
 /// Supervises a chat conversation's Agent runtime.
 #[derive(Clone)]
 pub struct ConversationProbe {
     /// A narrow command/query view over the canonical session owner.  The
-    /// probe never receives a runtime registry or ConversationService and
+    /// probe never receives a runtime registry or concrete session service and
     /// therefore cannot build, replace, or address a second session.
     pub session: Arc<dyn ConversationSessionPort>,
     pub conversation_repo: Arc<dyn IConversationRepository>,
@@ -512,7 +369,7 @@ impl SessionProbe for ConversationProbe {
                 self.conversation_id.as_str(),
             )
             .await
-            .map(|scope| Some(scope.into()))
+            .map(Some)
     }
 
     async fn inject_reserved(
@@ -529,7 +386,6 @@ impl SessionProbe for ConversationProbe {
                     .into(),
             )
         })?;
-        let conversation_scope = ConversationTurnScope::from(expected_scope);
         let owner_id = self.owner_id().await?;
         // Only the send-loop owns the AgentTurnHandle/relay continuity needed
         // for a same-turn model failover. The external IDMM observer may ask the
@@ -563,12 +419,12 @@ impl SessionProbe for ConversationProbe {
             channel_platform: None,
         };
         self.session
-                .continue_active_turn(
-                    &owner_id,
-                    self.conversation_id.as_str(),
-                    &conversation_scope,
-                    req,
-                )
+            .continue_active_turn(
+                &owner_id,
+                self.conversation_id.as_str(),
+                expected_scope,
+                req,
+            )
             .await
             .map(|_| ())
     }
