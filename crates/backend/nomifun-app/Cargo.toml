@@ -140,6 +140,10 @@ path = "tests/suites/content.rs"
 name = "nomi_core_route_gap"
 path = "tests/nomi_core_route_gap.rs"
 
+[[test]]
+name = "nomi_core_live_provider_smoke"
+path = "tests/nomi_core_live_provider_smoke.rs"
+
 [features]
 default = ["telegram", "lark", "dingtalk", "weixin", "wecom", "discord", "matrix", "mattermost", "slack", "twitch", "nostr", "qqbot"]
 telegram = ["nomifun-channel/telegram"]
@@ -254,6 +258,7 @@ rmcp = { version = "1.5", features = ["server", "transport-io", "schemars"] }
 anyhow.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
+dashmap.workspace = true
 sqlx.workspace = true
 git2.workspace = true
 # Network-interface enumeration for desktop LAN-IP detection (WebUI remote access).

@@ -184,7 +184,7 @@ first-party dogfood 和具体实现旁路清理也已完成。当前主线是
 | `SL-S3-07` | open | 主机 lane | 收口 Nomi-core 真实本地 owner | `SL-S2-06` | Chat、Workspace/File、Process、VCS、Knowledge search/read 保持真实调用；Coding 读写/patch/shell/diff/commit 接入 Nomi-core 的同一 Session 主链；非首批 Wave 3/4 不注册默认模板；不引入 Codex Sidecar 作为当前前置 | `cargo test --locked -p nomifun-app --lib -- --test-threads=1`；`bun run build:ui`；`bun run dev` 启动烟测；配置已授权 Provider 后运行 Nomi-core Chat/Coding 定向测试 | `bun run dev` 已新增 Windows MSVC/SDK 子进程环境加载并完成真实 Tauri WebView smoke；Web/Desktop/`nomicore` 默认入口均选择 `NomiCoreApplication`；2026-09-03 受控 Broker smoke 返回 `ProviderUnavailable` / HTTP 503，未继续重试；当前仍缺可重复的 Nomi-core Chat/Coding 产品语义 PASS |
 | `SL-S3-08` | closed | 主机 lane | 接入一个真实 MCP Tool 调用 | `SL-S2-06` | v4 `mcp_servers` identity、materialization、MCP package runtime catalog、exact tool/schema 和 credential authority 经 canonical capability；连接失败 typed fail；没有 Gateway/legacy fallback；owner 使用 no-redirect、bounded response 和一次 cleanup | `cargo test --locked -p nomifun-mcp --lib`（250）；`cargo test --locked -p nomifun-app --lib router::agent_wave2_mcp::tests -- --test-threads=1`（7）；`cargo test --locked -p nomifun-app --lib router::agent_wave2_host::tests -- --test-threads=1`（30） | 本机 disposable Streamable HTTP MCP fixture 已执行真实 `tools/call`；OAuth/stdio 仍明确 typed unavailable，不作为本项隐式扩张 |
 | `SL-S3-09` | closed | 主机 | 实现精简 SSH read/write/exec/sudo owner primitive | 无 | 真实 host binding；最小 typed command/outcome；path/payload/output/timeout 有界；exec/sudo credential 分离；host-key changed fail；cancel 后回收且不自动重放 | `77bd45279`; `cargo check --locked -p nomi-ssh -p nomifun-ssh`; `cargo test --locked -p nomifun-ssh --lib` | live sshd/sudo 未运行时只记录未运行，不构造 PASS |
-| `SL-S3-10` | open | 主机 | 完成一个真实 scheduled/automation Nomi-core AgentSession | `SL-S2-05`、`SL-S2-07`、`SL-S3-07` | Schedule/Cron/AutoWork/Requirement 复用 canonical Session command/query 和 NomiCore runtime；计划、执行、取消、恢复不创建第二份 Conversation/Session identity；Conversation-backed adapter 只作为待移除的迁移边界 | 对应 automation crate 定向 tests；一次短周期真实 schedule E2E | 已补齐 canonical `AgentSessionQueryPort::read_turn_receipt`；Cron/AutoWork 当前已强化 durable receipt 与 bounded fail-closed，但真实消费者仍有 Conversation-backed port，当前主机可继续迁移并在完成后要求用户确认结果 |
+| `SL-S3-10` | open | 主机 | 完成一个真实 scheduled/automation Nomi-core AgentSession | `SL-S2-05`、`SL-S2-07`、`SL-S3-07` | Schedule/Cron/AutoWork/Requirement 复用 canonical Session command/query 和 NomiCore runtime；计划、执行、取消、恢复不创建第二份 Conversation/Session identity；Conversation-backed adapter 只作为待移除的迁移边界 | 对应 automation crate 定向 tests；一次短周期真实 schedule E2E | 已接入共享 `NomiCoreSessionOwner` 的 Cron/AutoWork typed port、durable receipt、revision/lease fence 和 bounded fail-closed；生产 legacy 文件扫描为 0，但 Channel/IDMM 仍有真实合同缺口，且尚未完成真实 Provider schedule E2E，因此保持 open |
 | `SL-S3-11` | open | 主机 | 闭合 Nomi-core Remote open/turn/observe/cancel 产品主链 | `SL-S2-03`、`SL-S3-07` | explicit AgentSession ID；binding/owner/provenance 不漂移；rotate/revoke 不挂起；cancel/delete/cursor/idempotency 明确；Remote 通过 NomiCore runtime，不依赖 Codex Sidecar；无最近会话或旧 selector 旁路 | Remote REST/MCP 定向 tests；真实 `open -> turn -> observe -> cancel` | Remote REST 已增加逐操作 deadline、超时 detached mutation 和 persistence-blocked typed error；Remote REST 单测 7 项、Runtime 单测 3 项、Remote E2E 2 项通过；当前仍需 installation token/Provider 配置和人工确认，但不再等待 exact Sidecar |
 | `SL-S3-12` | deferred | 后续阶段 | 保留 Codex app-server 协议/Sidecar 研究与未来 Runtime host 接入 | `SL-S2-10`、未来 Codex 立项 | 只有未来正式立项后，才验证 source/build、exact binary、Provider/Model、工具回调、历史、取消/删除和平台证据；本阶段不实现、不重试、不作为 Nomi-core 交付条件 | 已完成的 upstream spike、协议 fixture 和生命周期回归仅作研究证据 | 当前不需要 exact pinned Sidecar 或 live Codex credential；fixture、adapter、Broker smoke 不得升级为 Codex-native PASS |
 
@@ -333,8 +333,9 @@ Codex app-server 或其他 Runtime。当前没有运行中 Runtime selector、pe
   仍在同一 SQLite 事务；相同 operation key 的 payload 冲突不会被当作 replay；terminal
   outcome 会吸收迟到完成；Remote open/turn/cancel 返回 Remote event cursor。
 - AutoWork 生命周期复核通过：`cargo test --locked -p nomifun-requirement --lib --
-  --test-threads=1` 为 `102 passed`。sweeper、boot resume 和 active target loop 均有
-  cancellation/join 或 exact claim cleanup；关闭不会在数据库关闭后继续运行这些任务。
+  --test-threads=1` 为 `115 passed`，`--tests` 合计 `120 passed`。sweeper、boot
+  resume 和 active target loop 均有 cancellation/join 或 exact claim cleanup；
+  关闭不会在数据库关闭后继续运行这些任务。
 - UI 收口复核通过：`bun test --cwd ui src/renderer/pages/agentSession
   src/renderer/pages/agentSettings` 为 `20 passed`，`bun run build:ui` 和
   `bun run check:i18n` 通过。AgentSession 结构测试已改为检查实际渲染 generation 的
@@ -343,10 +344,27 @@ Codex app-server 或其他 Runtime。当前没有运行中 Runtime selector、pe
   时不把 on-demand 能力伪装为已启用；Coding 的真实 Nomi-core Chat/写入语义仍没有
   可重复 PASS。2026-09-03 受控 Broker smoke 的首个完整结果仍为
   `ProviderUnavailable` / HTTP `503`，本轮没有凭据也没有无界重试。
-- `SL-S3-10` 不作虚假关闭：`bun run check:automation-session-boundary` 继续以
-  非零退出，并报告 `production_legacy_files=21`、`transitional_adapters=6`；Cron、
-  AutoWork、AgentExecution 等生产消费者仍有 Conversation-backed compatibility，
-  canonical scheduled-session lookup/runtime-preparation/reconciliation 合同尚未具备。
+- `SL-S3-10` 不作虚假关闭：最新 `bun run check:automation-session-boundary` 扫描
+  `scanned=193`、`production=175`、`tests=18`，`production_legacy_files=0`、
+  `transitional_adapters=2`、`test_compat_files=4`、`app_composition=6/6`。
+  Cron、Requirement/AutoWork、AgentExecution 的生产消费者已不再携带旧
+  Conversation/Runtime 引用；Companion archive 已由 host 直接实现 typed contract。
+  Channel 和 IDMM 仍保留各自边界 adapter，因为 canonical Session 尚缺事件流、
+  完整 Channel receipt、活动 turn continuation/failover 等合同。审计仍以非零状态
+  报告 adapter 阻断，不能把它写成 `SL-S3-10` 产品完成。
+- 本轮主机接线已补齐：Cron 使用封闭 `CronTurnRuntimeOverlay`、原子双侧关系绑定和
+  typed receipt/reconciliation；AutoWork 使用 host-owned opaque lease issuer、
+  Session projection revision fence、owner/revision/operation-aware 配置 CAS；
+  Companion archive 使用 `NomiCoreSessionOwner` 的 owner-scoped window/reset
+  contract；IDMM 的 scope/admission 核心改用 IDMM-owned typed contract。
+- SQLite `conversation.extra` CAS 已有顺序 stale-writer 与跨 repository handle
+  并发 winner 测试。该 CAS 只更新 AutoWork-owned metadata 并保留其他 extra 字段，
+  不改变 Conversation/AgentSession 的唯一身份。
+- 安全 live Provider runner 已通过 `--self-test` 与 `--compile-only`：
+  `live_smoke_runner_self_test_status=pass code=OK status=200`、
+  `live_smoke_compile_status=pass code=OK status=200`。真实 StepFun 请求尚未在本机
+  执行；真实 Provider、桌面人工流程和跨平台原生验证仍属于下一次外部环境交接，
+  不得把编译或 evidence tests 记为产品语义 PASS。
 - `SL-S3-11` 不作虚假关闭：Remote 的本地状态、deadline、detached recovery 和
   persistence-blocked 语义已有证据，但尚无 installation token/Provider 凭据下真实
   `open -> turn -> observe -> cancel` 的产品证据。`SL-S4-02` 仍需要用户在桌面中完成
@@ -363,18 +381,23 @@ handoff 或跨机 attestation。
 
 ## 推荐顺序
 
-1. 主机按互斥写集推进 `SL-S3-07`，把真实 Chat/Coding/File/Process/VCS/Knowledge
-   owner 收口到 Nomi-core Session 主链；MCP `SL-S3-08` 与 Agent Settings `SL-S4-01`
-   已完成，中央文件串行合流。
-2. 并行推进 `SL-S3-10` 和 `SL-S3-11`，分别迁移 automation 与 Remote；二者都不等待
-   Codex Sidecar，均使用 NomiCoreApplication/Nomi engine。
-3. 完成 `SL-S4-02` 的四条真实 UI 流程人工验收；遇到环境或 harness 障碍记录首个失败并转人工，
-   不重复盲跑。
-4. `SL-S3-07`、`SL-S3-10`、`SL-S3-11` 和 `SL-S4-02` 收口后，运行
-   `SL-S5-01` 的 Nomi-core Windows 候选检查。
-5. Windows 候选冻结后，交给 macOS arm64 与 Linux Desktop x64 只做真实 Nomi-core
-   原生验证；发现问题返回当前主机修复，不建立开发分支或交接材料。
-6. 三平台 Nomi-core RC 通过后再评估当前阶段 Stable；Codex Sidecar、C9/Nomi-free RC
+1. 冻结当前主机提交和验证结果。`NomiCoreSessionOwner` 的 Cron/AutoWork/
+   Companion archive/IDMM typed 边界已经接线；除外部验证暴露的确定性缺陷外，
+   暂不继续扩大本机兼容层。
+2. 在隔离的外部验证环境中运行安全 Provider smoke：Nomi-core Chat/Coding、
+   Cron 同 Session 的 run/replay、Remote `open -> turn -> observe -> cancel`。
+   凭据只通过受控 runner 的一次性 stdin 交接，不写入仓库、命令行、子进程环境、
+   日志或文档；失败记录首个 typed 结果，不盲目重试。
+3. 完成 `SL-S4-02` 的四条真实 Desktop UI 流程人工验收，保留截图、console 和
+   backend 日志引用；外部 Chrome 直连等缺少壳内 trust 的 harness 不当作产品证据。
+4. 真实 Provider 与人工流程通过后，运行 `SL-S5-01` 的 Windows x64 Nomi-core
+   候选检查并冻结同一候选 bytes。
+5. 将冻结候选交给 macOS arm64 与 Linux Desktop x64 只做原生 Nomi-core 验证；
+   发现问题返回当前主机修复，不建立跨机开发分支、Prompt、交接包或 attestation。
+6. 若外部验证要求继续本机重构，优先补 Channel 的 typed event cursor/receipt/
+   exact cancel contract，再补 IDMM 的 active-turn supervision query；不要先做
+   Codex Sidecar、C9/Nomi-free RC 或通用 coordinator。
+7. 三平台 Nomi-core RC 通过后再评估当前阶段 Stable；Codex Sidecar、C9/Nomi-free RC
    保留为后续阶段，不进入本次关键路径。
 
 ## 阶段退出条件

@@ -5,7 +5,7 @@
 //! is out of scope for this service-layer test).
 //!
 //! Covers test-plan items: CJ-1..CJ-12, SK-1..SK-7, SC-1..SC-8,
-//! OC-1, SR-1, ICronService trait integration.
+//! OC-1, SR-1, embedded-command integration.
 
 use std::collections::HashMap;
 use std::sync::{
@@ -16,6 +16,7 @@ use std::sync::{
 use nomifun_ai_agent::AgentRegistry;
 use nomifun_ai_agent::runtime_handle::AgentRuntimeHandle;
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
+use nomifun_agent_contracts::AgentSessionId;
 use nomifun_api_types::{
     ConversationResponse, CreateConversationRequest, CreateCronJobRequest, CronAgentConfigDto,
     CronScheduleDto, ListCronJobsQuery, ResolvedPresetSnapshot, SaveCronSkillRequest,
@@ -23,8 +24,10 @@ use nomifun_api_types::{
 };
 use nomifun_common::{PaginatedResult, TimestampMs, now_ms};
 use nomifun_conversation::ConversationService;
-use nomifun_conversation::response_middleware::{CronCreateParams, CronUpdateParams};
-use nomifun_conversation::service::BackgroundTurnRuntimePreparation;
+use nomifun_conversation::service::{
+    BackgroundTurnReconciliationDisposition, BackgroundTurnRuntimePreparation,
+    PublicTurnDeliveryState,
+};
 use nomifun_db::{
     ConversationFilters, ConversationRowUpdate, IAgentMetadataRepository,
     IConversationRepository, ICronRepository, MessageRowUpdate, MessageSearchRow, SortOrder,
@@ -37,11 +40,16 @@ use nomifun_cron::busy_guard::CronBusyGuard;
 use nomifun_cron::events::CronEventEmitter;
 use nomifun_cron::executor::JobExecutor;
 use nomifun_cron::scheduler::CronScheduler;
-use nomifun_cron::service::CronService;
+use nomifun_cron::service::{
+    CronEmbeddedCreateCommand, CronEmbeddedUpdateCommand, CronService,
+};
 use nomifun_cron::{
-    CronSessionPort, CronTurnDelivery, CronTurnReceiptState, CronTurnReconciliation,
-    CronTurnRequest, turn_delivery_from_conversation, turn_reconciliation_from_conversation,
-    turn_state_from_conversation,
+    CronPreparedTurnDelivery, CronRuntimePreparationRequest, CronScheduledSession,
+    CronScheduledSessionLookup, CronSessionCronBindingRequest, CronSessionLookup,
+    CronSessionPort, CronSessionProjection, CronTurnDelivery, CronTurnDeliveryQuery,
+    CronTurnMessage, CronTurnReceiptQuery, CronTurnReceiptState, CronTurnReconciliation,
+    CronTurnReconciliationRequest, CronTurnRequest, CronTurnRuntimeOverlay,
+    CronTurnRuntimePreparation,
 };
 use nomifun_cron::skill_file::{CRON_SKILLS_REL_DIR, SKILL_FILE_NAME, write_raw_skill_file};
 use nomifun_cron::types::JobStatus;
@@ -203,6 +211,177 @@ impl nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry for StubAgentRunti
     }
 }
 
+fn test_turn_delivery_from_conversation(
+    delivery: nomifun_conversation::IdempotentMessageDelivery,
+) -> CronTurnDelivery {
+    CronTurnDelivery {
+        message_id: delivery.message_id,
+        replayed: delivery.replayed,
+        completed: delivery.completed,
+        result_ok: delivery.result_ok,
+        result_text: delivery.result_text,
+        result_error: delivery.result_error,
+        result_error_code: delivery.result_error_code,
+        result_error_retryable: delivery.result_error_retryable,
+    }
+}
+
+fn test_session_handle_from_response(
+    response: ConversationResponse,
+) -> Result<nomifun_cron::CronSessionHandle, nomifun_common::AppError> {
+    let workspace = response
+        .extra
+        .get("workspace")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|workspace| !workspace.is_empty())
+        .ok_or_else(|| {
+            nomifun_common::AppError::Conflict(format!(
+                "AgentSession {} has no canonical workspace",
+                response.conversation_id
+            ))
+        })?
+        .to_owned();
+    let agent_session_id = AgentSessionId::from(response.conversation_id);
+    nomifun_common::validate_uuidv7(agent_session_id.as_ref()).map_err(|error| {
+        nomifun_common::AppError::Conflict(format!(
+            "AgentSession identity is not canonical UUIDv7: {error}"
+        ))
+    })?;
+    Ok(nomifun_cron::CronSessionHandle {
+        agent_session_id,
+        workspace,
+    })
+}
+
+fn test_session_projection_from_response(
+    owner_id: &str,
+    response: ConversationResponse,
+    cron_job_id: Option<String>,
+) -> Result<CronSessionProjection, nomifun_common::AppError> {
+    let ConversationResponse {
+        conversation_id,
+        name,
+        r#type: agent_type,
+        model,
+        preset_id,
+        preset_revision,
+        preset_snapshot,
+        extra,
+        ..
+    } = response;
+    let extra = extra.as_object().ok_or_else(|| {
+        nomifun_common::AppError::Internal(format!(
+            "conversation {conversation_id} extra must be a JSON object"
+        ))
+    })?;
+    let workspace = extra
+        .get("workspace")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|workspace| !workspace.is_empty())
+        .ok_or_else(|| {
+            nomifun_common::AppError::Conflict(format!(
+                "AgentSession {conversation_id} has no canonical workspace"
+            ))
+        })?
+        .to_owned();
+    let agent_session_id = AgentSessionId::from(conversation_id);
+    nomifun_common::validate_uuidv7(agent_session_id.as_ref()).map_err(|error| {
+        nomifun_common::AppError::Conflict(format!(
+            "AgentSession identity is not canonical UUIDv7: {error}"
+        ))
+    })?;
+    Ok(CronSessionProjection {
+        agent_session_id,
+        owner_id: owner_id.to_owned(),
+        name,
+        agent_type,
+        model,
+        workspace,
+        cron_job_id,
+        temp_workspace_id: extra
+            .get("temp_workspace_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        skills: extra
+            .get("skills")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        agent_name: extra
+            .get("agent_name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        cli_path: extra
+            .get("cli_path")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                extra
+                    .get("gateway")
+                    .and_then(|gateway| gateway.get("cli_path"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .map(str::to_owned),
+        custom_agent_id: extra
+            .get("custom_agent_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        preset_id,
+        preset_revision,
+        preset_snapshot,
+    })
+}
+
+fn test_send_message_request(message: CronTurnMessage) -> SendMessageRequest {
+    SendMessageRequest {
+        content: message.content,
+        files: message.files,
+        inject_skills: message.inject_skills,
+        hidden: message.hidden,
+        origin: message.origin,
+        channel_platform: message.channel_platform,
+    }
+}
+
+fn test_turn_state_from_conversation(
+    state: PublicTurnDeliveryState,
+) -> CronTurnReceiptState {
+    match state {
+        PublicTurnDeliveryState::Missing => CronTurnReceiptState::Missing,
+        PublicTurnDeliveryState::Accepted { message_id } => {
+            CronTurnReceiptState::Accepted { message_id }
+        }
+        PublicTurnDeliveryState::Completed(delivery) => {
+            CronTurnReceiptState::Completed(test_turn_delivery_from_conversation(delivery))
+        }
+    }
+}
+
+const fn test_turn_reconciliation_from_conversation(
+    disposition: BackgroundTurnReconciliationDisposition,
+) -> CronTurnReconciliation {
+    match disposition {
+        BackgroundTurnReconciliationDisposition::LiveExactOwnerWait => {
+            CronTurnReconciliation::LiveExactOwnerWait
+        }
+        BackgroundTurnReconciliationDisposition::ReconciledOrTerminalReRead => {
+            CronTurnReconciliation::ReconciledOrTerminalReRead
+        }
+        BackgroundTurnReconciliationDisposition::ExternalProofRequiredFailClosed => {
+            CronTurnReconciliation::ExternalProofRequiredFailClosed
+        }
+        BackgroundTurnReconciliationDisposition::StaleConflict => {
+            CronTurnReconciliation::StaleConflict
+        }
+    }
+}
+
 /// Test-only host adapter for the integration fixture.
 ///
 /// Production Cron receives its port from the app-owned NomiCore Session
@@ -217,36 +396,115 @@ struct TestCronSessionPort {
 
 #[async_trait::async_trait]
 impl CronSessionPort for TestCronSessionPort {
-    async fn list_by_cron_job(
+    async fn get_session(
         &self,
-        user_id: &str,
-        cron_job_id: &str,
-    ) -> Result<Vec<ConversationResponse>, nomifun_common::AppError> {
-        self.service.list_by_cron_job(user_id, cron_job_id).await
+        query: &CronSessionLookup,
+    ) -> Result<CronSessionProjection, nomifun_common::AppError> {
+        let row = self
+            .service
+            .conversation_repo()
+            .get(query.agent_session_id.as_ref())
+            .await?
+            .filter(|row| row.user_id == query.owner_id)
+            .ok_or_else(|| {
+                nomifun_common::AppError::NotFound(format!(
+                    "AgentSession {} not found",
+                    query.agent_session_id.as_ref()
+                ))
+            })?;
+        let response = self
+            .service
+            .get(&query.owner_id, query.agent_session_id.as_ref())
+            .await?;
+        test_session_projection_from_response(&query.owner_id, response, row.cron_job_id)
     }
 
-    async fn public_turn_delivery_state(
+    async fn lookup_scheduled_sessions(
         &self,
-        user_id: &str,
-        session_id: &str,
-        idempotency_key: &str,
+        query: &CronScheduledSessionLookup,
+    ) -> Result<Vec<CronScheduledSession>, nomifun_common::AppError> {
+        self.service
+            .list_by_cron_job(&query.owner_id, &query.cron_job_id)
+            .await?
+            .into_iter()
+            .map(|response| {
+                test_session_projection_from_response(
+                    &query.owner_id,
+                    response,
+                    Some(query.cron_job_id.clone()),
+                )
+            })
+            .collect()
+    }
+
+    async fn list_conversation_responses_for_cron(
+        &self,
+        query: &CronScheduledSessionLookup,
+    ) -> Result<Vec<ConversationResponse>, nomifun_common::AppError> {
+        self.service
+            .list_by_cron_job(&query.owner_id, &query.cron_job_id)
+            .await
+    }
+
+    async fn bind_cron_relation(
+        &self,
+        request: &CronSessionCronBindingRequest,
+    ) -> Result<(), nomifun_common::AppError> {
+        let row = self
+            .service
+            .conversation_repo()
+            .get(request.agent_session_id.as_ref())
+            .await?
+            .filter(|row| row.user_id == request.owner_id)
+            .ok_or_else(|| {
+                nomifun_common::AppError::NotFound(format!(
+                    "AgentSession {} not found",
+                    request.agent_session_id.as_ref()
+                ))
+            })?;
+        if row.cron_job_id.as_deref() == Some(request.cron_job_id.as_str()) {
+            return Ok(());
+        }
+        if let Some(existing) = row.cron_job_id {
+            return Err(nomifun_common::AppError::Conflict(format!(
+                "AgentSession {} is already bound to cron job {existing}",
+                request.agent_session_id.as_ref()
+            )));
+        }
+        self.service
+            .conversation_repo()
+            .bind_cron_relation(
+                &request.owner_id,
+                request.agent_session_id.as_ref(),
+                &request.cron_job_id,
+                now_ms(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn read_turn_receipt(
+        &self,
+        query: &CronTurnReceiptQuery,
     ) -> Result<CronTurnReceiptState, nomifun_common::AppError> {
-        Ok(turn_state_from_conversation(self.service
-            .public_turn_delivery_state(user_id, session_id, idempotency_key)
+        Ok(test_turn_state_from_conversation(self.service
+            .public_turn_delivery_state(
+                &query.owner_id,
+                query.agent_session_id.as_ref(),
+                &query.idempotency_key,
+            )
             .await?))
     }
 
-    async fn reconcile_quiescent_running_turn(
+    async fn reconcile_turn_receipt(
         &self,
-        user_id: &str,
-        session_id: &str,
-        idempotency_key: &str,
+        request: &CronTurnReconciliationRequest,
     ) -> Result<CronTurnReconciliation, nomifun_common::AppError> {
-        Ok(turn_reconciliation_from_conversation(self.service
+        Ok(test_turn_reconciliation_from_conversation(self.service
             .reconcile_quiescent_running_turn_for_background(
-                user_id,
-                session_id,
-                idempotency_key,
+                &request.owner_id,
+                request.agent_session_id.as_ref(),
+                &request.idempotency_key,
                 &self.runtime_registry,
             )
             .await?))
@@ -276,65 +534,82 @@ impl CronSessionPort for TestCronSessionPort {
                     .await
             }
         }?;
-        nomifun_cron::session_handle_from_response(response)
+        test_session_handle_from_response(response)
     }
 
-    async fn send_observed_turn(
+    async fn prepare_runtime_and_send(
         &self,
-        user_id: &str,
-        session_id: &str,
-        idempotency_key: &str,
-        turn: CronTurnRequest,
-    ) -> Result<CronTurnDelivery, nomifun_common::AppError> {
+        request: CronRuntimePreparationRequest,
+    ) -> Result<CronPreparedTurnDelivery, nomifun_common::AppError> {
+        let CronRuntimePreparationRequest {
+            owner_id,
+            agent_session_id,
+            idempotency_key,
+            turn,
+        } = request;
+        let CronTurnRequest {
+            message,
+            runtime:
+                CronTurnRuntimePreparation {
+                    overlay,
+                    clear_context,
+                },
+        } = turn;
         let build_lease = self
             .service
-            .begin_public_runtime_preparation(session_id, user_id)?;
-        let session = self.service.get(user_id, session_id).await?;
+            .begin_public_runtime_preparation(agent_session_id.as_ref(), &owner_id)?;
+        let session = self
+            .service
+            .get(&owner_id, agent_session_id.as_ref())
+            .await?;
         build_lease.ensure_active()?;
-        let runtime_options =
-            test_runtime_options_from_session(user_id, session, turn.runtime_extra)?;
+        let requested_skills = message.inject_skills.clone();
+        let (mut runtime_options, workspace) =
+            test_runtime_options_from_session(&owner_id, session, &overlay)?;
+        append_test_requested_skills(&mut runtime_options, &requested_skills);
         let observed = self.service
             .send_observed_background_message_with_idempotency_key(
-                user_id,
-                session_id,
-                idempotency_key,
-                turn.message,
+                &owner_id,
+                agent_session_id.as_ref(),
+                &idempotency_key,
+                test_send_message_request(message),
                 &self.runtime_registry,
                 build_lease,
                 BackgroundTurnRuntimePreparation {
                     runtime_options,
-                    clear_context: turn.clear_context,
+                    clear_context,
                     pre_send_hook: None,
                 },
             )
             .await?;
-        Ok(turn_delivery_from_conversation(observed.delivery))
+        Ok(CronPreparedTurnDelivery {
+            delivery: test_turn_delivery_from_conversation(observed.delivery),
+            workspace,
+        })
     }
 
     async fn delivery_result(
         &self,
-        user_id: &str,
-        session_id: &str,
-        idempotency_key: &str,
-        request: &SendMessageRequest,
+        query: &CronTurnDeliveryQuery,
     ) -> Result<Option<CronTurnDelivery>, nomifun_common::AppError> {
+        let request = test_send_message_request(query.message.clone());
         Ok(self.service
             .idempotent_delivery_result_with_idempotency_key(
-                user_id,
-                session_id,
-                idempotency_key,
-                request,
+                &query.owner_id,
+                query.agent_session_id.as_ref(),
+                &query.idempotency_key,
+                &request,
             )
             .await?
-            .map(turn_delivery_from_conversation))
+            .map(test_turn_delivery_from_conversation))
     }
 }
 
 fn test_runtime_options_from_session(
     user_id: &str,
     session: ConversationResponse,
-    runtime_extra: serde_json::Value,
-) -> Result<AgentRuntimeBuildOptions, nomifun_common::AppError> {
+    overlay: &CronTurnRuntimeOverlay,
+) -> Result<(AgentRuntimeBuildOptions, String), nomifun_common::AppError> {
     let ConversationResponse {
         conversation_id,
         r#type: agent_type,
@@ -349,12 +624,15 @@ fn test_runtime_options_from_session(
             "conversation {conversation_id} extra must be a JSON object"
         ))
     })?;
-    let runtime_extra = runtime_extra.as_object().ok_or_else(|| {
-        nomifun_common::AppError::BadRequest("Cron runtime extra must be a JSON object".to_owned())
+    nomifun_common::CronJobId::parse(&overlay.cron_job_id).map_err(|error| {
+        nomifun_common::AppError::BadRequest(format!(
+            "invalid Cron runtime annotation: {error}"
+        ))
     })?;
-    for (key, value) in runtime_extra {
-        session_extra.insert(key.clone(), value.clone());
-    }
+    session_extra.insert(
+        "cron_job_id".to_owned(),
+        serde_json::Value::String(overlay.cron_job_id.clone()),
+    );
     let workspace = session_extra
         .get("workspace")
         .and_then(serde_json::Value::as_str)
@@ -366,17 +644,46 @@ fn test_runtime_options_from_session(
             ))
         })?
         .to_owned();
-    Ok(AgentRuntimeBuildOptions {
-        user_id: user_id.to_owned(),
-        agent_type,
+    Ok((
+        AgentRuntimeBuildOptions {
+            user_id: user_id.to_owned(),
+            agent_type,
+            workspace: workspace.clone(),
+            model,
+            conversation_id,
+            delegation_policy,
+            extra: session_extra.clone().into(),
+            conversation_created_at: Some(created_at),
+            workspace_binding_lease: None,
+        },
         workspace,
-        model,
-        conversation_id,
-        delegation_policy,
-        extra: session_extra.clone().into(),
-        conversation_created_at: Some(created_at),
-        workspace_binding_lease: None,
-    })
+    ))
+}
+
+fn append_test_requested_skills(
+    runtime_options: &mut AgentRuntimeBuildOptions,
+    requested_skills: &[String],
+) {
+    if requested_skills.is_empty() {
+        return;
+    }
+    let Some(extra) = runtime_options.extra.as_object_mut() else {
+        return;
+    };
+    let mut skills = extra
+        .get("skills")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for skill in requested_skills {
+        if !skills
+            .iter()
+            .any(|existing| existing.as_str() == Some(skill.as_str()))
+        {
+            skills.push(serde_json::Value::String(skill.clone()));
+        }
+    }
+    extra.insert("skills".to_owned(), serde_json::Value::Array(skills));
 }
 
 struct StubConvRepo {
@@ -718,6 +1025,36 @@ impl IConversationRepository for StubConvRepo {
             .unwrap()
             .insert(row.conversation_id.clone(), row.clone());
         Ok(row.conversation_id.clone())
+    }
+    async fn bind_cron_relation(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        cron_job_id: &str,
+        updated_at: TimestampMs,
+    ) -> Result<(), nomifun_db::DbError> {
+        if self.fail_cron_binding.load(Ordering::SeqCst) {
+            return Err(nomifun_db::DbError::Conflict(
+                "fixture cron binding failure".into(),
+            ));
+        }
+        let mut rows = self.rows.lock().unwrap();
+        let row = rows
+            .get_mut(conversation_id)
+            .ok_or_else(|| nomifun_db::DbError::NotFound(conversation_id.to_owned()))?;
+        if row.user_id != user_id {
+            return Err(nomifun_db::DbError::NotFound(conversation_id.to_owned()));
+        }
+        if let Some(existing) = row.cron_job_id.as_deref()
+            && existing != cron_job_id
+        {
+            return Err(nomifun_db::DbError::Conflict(format!(
+                "AgentSession '{conversation_id}' is already bound to Cron job '{existing}'"
+            )));
+        }
+        row.cron_job_id = Some(cron_job_id.to_owned());
+        row.updated_at = updated_at;
+        Ok(())
     }
     async fn update(
         &self,
@@ -2223,6 +2560,24 @@ async fn cj7c_list_conversations_uses_session_port_and_preserves_owner_check() {
 }
 
 #[tokio::test]
+async fn cj7d_canonical_scheduled_session_lookup_uses_typed_projection() {
+    let (svc, _, _, _, _, _) = setup_with_conv_repo().await;
+
+    let mut req = make_create_req("Typed Scheduled Session", every_60s());
+    req.conversation_id = Some(CONV_4.to_owned());
+    let job = svc.add_job(TEST_USER_ID, req).await.unwrap();
+
+    let sessions = svc
+        .lookup_scheduled_sessions(TEST_USER_ID, &job.cron_job_id)
+        .await
+        .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].agent_session_id.as_ref(), CONV_4);
+    assert_eq!(sessions[0].owner_id, TEST_USER_ID);
+    assert!(!sessions[0].workspace.trim().is_empty());
+}
+
+#[tokio::test]
 async fn cj7d_existing_conversation_binding_is_one_to_one_and_fail_closed() {
     let (svc, _, _, conv_repo, _, _) = setup_with_conv_repo().await;
 
@@ -2805,7 +3160,7 @@ async fn oc1b_new_conversation_rejects_conversation_id_without_persisting() {
 
 #[tokio::test]
 async fn oc2_init_cleans_jobs_with_missing_conversation() {
-    let (svc, repo, _, conversations, _pool, _data_dir) =
+    let (svc, repo, _, conversations, pool, _data_dir) =
         setup_with_conv_repo().await;
 
     let mut missing_req = make_create_req("Missing Conversation", every_60s());
@@ -2832,6 +3187,15 @@ async fn oc2_init_cleans_jobs_with_missing_conversation() {
                 ..Default::default()
             },
         )
+        .await
+        .unwrap();
+    // The atomic Cron relation is persisted in the real SQLite Conversation
+    // table as well as in this test-only service stub. Clear both sides before
+    // attaching the replacement fixture; otherwise the stub and SQLite
+    // relation intentionally disagree.
+    sqlx::query("UPDATE conversations SET cron_job_id = NULL WHERE conversation_id = ?")
+        .bind(CONV_7)
+        .execute(&pool)
         .await
         .unwrap();
 
@@ -2873,22 +3237,20 @@ async fn delete_skill_clears_content() {
     assert!(!svc.has_skill(TEST_USER_ID, &job.cron_job_id).await.unwrap().has_skill);
 }
 
-// ── ICronService trait: create ─────────────────────────────────────
+// ── Embedded commands: create ──────────────────────────────────────
 
 #[tokio::test]
 async fn icron_service_create_job() {
     let (svc, _, _, conv_repo, _, _) = setup_with_conv_repo().await;
 
-    use nomifun_conversation::response_middleware::ICronService;
-
-    let params = CronCreateParams {
+    let params = CronEmbeddedCreateCommand {
         name: "Agent Job".into(),
         schedule: "0 */10 * * * *".into(),
         schedule_description: "every 10 min".into(),
         message: "do agent work".into(),
     };
 
-    let result = ICronService::create_job(&svc, TEST_USER_ID, CONV_1, &params).await;
+    let result = svc.execute_embedded_create(TEST_USER_ID, CONV_1, &params).await;
     assert!(result.success);
     assert!(result.message.contains("Agent Job"));
 
@@ -2900,16 +3262,16 @@ async fn icron_service_create_job() {
 async fn icron_service_create_job_inherits_conversation_provider_model_and_workspace() {
     let (svc, _, _) = setup().await;
 
-    use nomifun_conversation::response_middleware::ICronService;
-
-    let params = CronCreateParams {
+    let params = CronEmbeddedCreateCommand {
         name: "Agent Job".into(),
         schedule: "0 */10 * * * *".into(),
         schedule_description: "every 10 min".into(),
         message: "do agent work".into(),
     };
 
-    let result = ICronService::create_job(&svc, TEST_USER_ID, CONV_GEMINI, &params).await;
+    let result = svc
+        .execute_embedded_create(TEST_USER_ID, CONV_GEMINI, &params)
+        .await;
     assert!(result.success);
 
     let jobs = svc
@@ -2940,9 +3302,7 @@ async fn icron_service_create_job_inherits_conversation_provider_model_and_works
 async fn icron_service_create_job_preserves_provider_model_and_workspace_for_generated_crons() {
     let (svc, _, _) = setup().await;
 
-    use nomifun_conversation::response_middleware::ICronService;
-
-    let params = CronCreateParams {
+    let params = CronEmbeddedCreateCommand {
         name: "Generated Agent Job".into(),
         schedule: "0 */10 * * * *".into(),
         schedule_description: "every 10 min".into(),
@@ -2979,7 +3339,9 @@ async fn icron_service_create_job_preserves_provider_model_and_workspace_for_gen
             "Nomi",
         ),
     ] {
-        let created = ICronService::create_job(&svc, TEST_USER_ID, conversation_id, &params).await;
+        let created = svc
+            .execute_embedded_create(TEST_USER_ID, conversation_id, &params)
+            .await;
         assert!(created.success, "cron creation for {conversation_id}");
 
         let jobs = svc
@@ -3000,15 +3362,13 @@ async fn icron_service_create_job_preserves_provider_model_and_workspace_for_gen
     }
 }
 
-// ── ICronService trait: list ───────────────────────────────────────
+// ── Embedded commands: list ────────────────────────────────────────
 
 #[tokio::test]
 async fn icron_service_list_jobs() {
     let (svc, _, _) = setup().await;
 
-    use nomifun_conversation::response_middleware::ICronService;
-
-    let result = ICronService::list_jobs(&svc, TEST_USER_ID, CONV_1).await;
+    let result = svc.execute_embedded_list(TEST_USER_ID, CONV_1).await;
     assert!(result.success);
     assert!(
         result
@@ -3020,7 +3380,7 @@ async fn icron_service_list_jobs() {
     req.conversation_id = Some(CONV_1.to_owned());
     svc.add_job(TEST_USER_ID, req).await.unwrap();
 
-    let result = ICronService::list_jobs(&svc, TEST_USER_ID, CONV_1).await;
+    let result = svc.execute_embedded_list(TEST_USER_ID, CONV_1).await;
     assert!(result.success);
     assert!(
         result
@@ -3030,19 +3390,17 @@ async fn icron_service_list_jobs() {
     assert!(result.message.contains("Listed Job"));
 }
 
-// ── ICronService trait: update ─────────────────────────────────────
+// ── Embedded commands: update ──────────────────────────────────────
 
 #[tokio::test]
 async fn icron_service_update_job() {
     let (svc, _, _, conv_repo, _, _) = setup_with_conv_repo().await;
 
-    use nomifun_conversation::response_middleware::ICronService;
-
     let mut request = make_create_req("Update Via Trait", every_60s());
     request.conversation_id = Some(CONV_1.to_owned());
     let job = svc.add_job(TEST_USER_ID, request).await.unwrap();
 
-    let params = CronUpdateParams {
+    let params = CronEmbeddedUpdateCommand {
         job_id: job.cron_job_id.clone(),
         name: "Updated Via Trait".into(),
         schedule: "0 */10 * * * *".into(),
@@ -3050,7 +3408,7 @@ async fn icron_service_update_job() {
         message: "do updated work".into(),
     };
 
-    let result = ICronService::update_job(&svc, TEST_USER_ID, CONV_1, &params).await;
+    let result = svc.execute_embedded_update(TEST_USER_ID, CONV_1, &params).await;
     assert!(result.success);
     assert!(result.message.contains("Updated Via Trait"));
 
@@ -3069,13 +3427,11 @@ async fn icron_service_update_job() {
 async fn icron_service_update_job_rejects_cross_conversation_scope() {
     let (svc, _, _, _, _, _) = setup_with_conv_repo().await;
 
-    use nomifun_conversation::response_middleware::ICronService;
-
     let job = svc
         .add_job(TEST_USER_ID, make_create_req("Scoped Update", every_60s()))
         .await
         .unwrap();
-    let params = CronUpdateParams {
+    let params = CronEmbeddedUpdateCommand {
         job_id: job.cron_job_id.clone(),
         name: "Must Not Change".into(),
         schedule: "0 */10 * * * *".into(),
@@ -3083,7 +3439,7 @@ async fn icron_service_update_job_rejects_cross_conversation_scope() {
         message: "must not change".into(),
     };
 
-    let result = ICronService::update_job(&svc, TEST_USER_ID, CONV_2, &params).await;
+    let result = svc.execute_embedded_update(TEST_USER_ID, CONV_2, &params).await;
     assert!(!result.success);
     assert!(result.message.contains("is not bound to conversation"));
 
@@ -3095,23 +3451,25 @@ async fn icron_service_update_job_rejects_cross_conversation_scope() {
     assert_eq!(persisted.message, "test message");
 }
 
-// ── ICronService trait: delete ─────────────────────────────────────
+// ── Embedded commands: delete ──────────────────────────────────────
 
 #[tokio::test]
 async fn icron_service_delete_job() {
     let (svc, _, _) = setup().await;
-
-    use nomifun_conversation::response_middleware::ICronService;
 
     let job = svc
         .add_job(TEST_USER_ID, make_create_req("Delete Via Trait", every_60s()))
         .await
         .unwrap();
 
-    let result = ICronService::delete_job(&svc, TEST_USER_ID, &job.cron_job_id).await;
+    let result = svc
+        .execute_embedded_delete(TEST_USER_ID, &job.cron_job_id)
+        .await;
     assert!(result.success);
 
-    let result = ICronService::delete_job(&svc, TEST_USER_ID, MISSING_JOB_ID).await;
+    let result = svc
+        .execute_embedded_delete(TEST_USER_ID, MISSING_JOB_ID)
+        .await;
     assert!(!result.success);
 }
 
@@ -3478,8 +3836,6 @@ async fn cd2_cascade_delete_no_matching_jobs() {
 
 #[tokio::test]
 async fn cd3_on_conversation_delete_trait() {
-    use nomifun_common::OnConversationDelete;
-
     let (svc, _repo, bc) = setup().await;
 
     let mut req = make_create_req("Trait Cascade", every_60s());
@@ -3487,7 +3843,7 @@ async fn cd3_on_conversation_delete_trait() {
     let job = svc.add_job(TEST_USER_ID, req).await.unwrap();
     bc.take_events();
 
-    svc.on_conversation_deleted(TEST_USER_ID, CONV_6).await;
+    svc.delete_jobs_by_conversation(TEST_USER_ID, CONV_6).await;
 
     assert!(svc.get_job(TEST_USER_ID, &job.cron_job_id).await.is_err());
 
@@ -3560,7 +3916,28 @@ async fn cd4_conversation_transaction_hands_captured_job_ids_to_post_commit_clea
         Arc::new(SqliteAgentMetadataRepository::new(pool.clone())),
         Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
     );
-    conversation_service.with_delete_hook(cron_service.clone());
+    struct TestCronDeleteHook {
+        service: Arc<CronService>,
+    }
+
+    #[async_trait::async_trait]
+    impl nomifun_common::OnConversationDelete for TestCronDeleteHook {
+        async fn on_conversation_deleted(&self, user_id: &str, conversation_id: &str) {
+            if let Some(job_ids) =
+                nomifun_conversation::service::current_deleted_cron_job_ids()
+            {
+                self.service.cleanup_deleted_jobs(user_id, &job_ids).await;
+            } else {
+                self.service
+                    .delete_jobs_by_conversation(user_id, conversation_id)
+                    .await;
+            }
+        }
+    }
+
+    conversation_service.with_delete_hook(Arc::new(TestCronDeleteHook {
+        service: cron_service.clone(),
+    }));
     conversation_service
         .delete(TEST_USER_ID, CONV_GEMINI)
         .await

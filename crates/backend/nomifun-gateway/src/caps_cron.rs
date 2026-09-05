@@ -1,15 +1,16 @@
-//! Cron-domain capabilities (registry form). Create/update reuse the
-//! `ICronService` implementation behind the `[CRON_*]` text protocol, so a
-//! gateway session gets the same context derivation (agent type / model from
-//! the bound conversation) and bind-back behavior as the in-chat protocol.
+//! Cron-domain capabilities (registry form). Create/update reuse Cron's own
+//! typed embedded-command boundary, so gateway and in-chat commands share the
+//! same Session projection and bind-back behavior without importing the legacy
+//! Conversation middleware contract.
 
 use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_api_types::{ListCronJobsQuery, UpdateConversationRequest};
 use nomifun_common::{ConversationId, CronJobId};
-use nomifun_conversation::response_middleware::{
-    CronCreateParams as SvcCronCreate, CronUpdateParams as SvcCronUpdate, ICronService,
+use nomifun_cron::{
+    CronEmbeddedCommandResult, CronEmbeddedCreateCommand, CronEmbeddedMutationRequest,
+    CronEmbeddedUpdateCommand,
 };
 use nomifun_cron::types::cron_job_to_response;
 use schemars::JsonSchema;
@@ -128,6 +129,10 @@ async fn list(deps: Arc<CronCapabilityDeps>, ctx: CallerCtx, p: CronListParams) 
 }
 
 async fn create(deps: Arc<CronCapabilityDeps>, ctx: CallerCtx, p: CronCreateParams) -> Value {
+    let operation_id = match authenticated_operation_id(&ctx) {
+        Ok(operation_id) => operation_id,
+        Err(error) => return command_result(error),
+    };
     let target_conversation_id = p
         .conversation_id
         .map(ConversationId::into_string)
@@ -218,17 +223,18 @@ async fn create(deps: Arc<CronCapabilityDeps>, ctx: CallerCtx, p: CronCreatePara
         }
     }
 
-    let params = SvcCronCreate {
+    let params = CronEmbeddedCreateCommand {
         name: p.name,
         schedule: p.cron,
         schedule_description: p.description.unwrap_or_default(),
         message: p.message,
     };
-    let result = ICronService::create_job(
-        deps.service.as_ref(),
-        ctx.user_id.as_str(),
+    let result = submit_embedded_create(
+        &deps.service,
+        &ctx,
         &target_conversation,
-        &params,
+        operation_id,
+        params,
     )
     .await;
     if result.success {
@@ -239,6 +245,10 @@ async fn create(deps: Arc<CronCapabilityDeps>, ctx: CallerCtx, p: CronCreatePara
 }
 
 async fn update(deps: Arc<CronCapabilityDeps>, ctx: CallerCtx, p: CronUpdateParams) -> Value {
+    let operation_id = match authenticated_operation_id(&ctx) {
+        Ok(operation_id) => operation_id,
+        Err(error) => return command_result(error),
+    };
     let Some(target_conversation) = p
         .conversation_id
         .map(ConversationId::into_string)
@@ -246,7 +256,7 @@ async fn update(deps: Arc<CronCapabilityDeps>, ctx: CallerCtx, p: CronUpdatePara
     else {
         return json!({ "error": "missing required field: conversation_id" });
     };
-    let params = SvcCronUpdate {
+    let params = CronEmbeddedUpdateCommand {
         job_id: p.cron_job_id.into_string(),
         name: p.name,
         schedule: p.cron,
@@ -254,28 +264,115 @@ async fn update(deps: Arc<CronCapabilityDeps>, ctx: CallerCtx, p: CronUpdatePara
         message: p.message,
     };
     command_result(
-        ICronService::update_job(
-            deps.service.as_ref(),
-            ctx.user_id.as_str(),
+        submit_embedded_update(
+            &deps.service,
+            &ctx,
             &target_conversation,
-            &params,
+            operation_id,
+            params,
         )
         .await,
     )
 }
 
 async fn delete(deps: Arc<CronCapabilityDeps>, ctx: CallerCtx, p: CronDeleteParams) -> Value {
+    let operation_id = match authenticated_operation_id(&ctx) {
+        Ok(operation_id) => operation_id,
+        Err(error) => return command_result(error),
+    };
     command_result(
-        ICronService::delete_job(
-            deps.service.as_ref(),
-            ctx.user_id.as_str(),
+        submit_embedded_delete(
+            &deps.service,
+            &ctx,
+            operation_id,
             p.cron_job_id.as_str(),
         )
         .await,
     )
 }
 
-fn command_result(result: nomifun_conversation::response_middleware::CronCommandResult) -> Value {
+fn authenticated_operation_id(ctx: &CallerCtx) -> Result<String, CronEmbeddedCommandResult> {
+    ctx.operation_id
+        .as_deref()
+        .filter(|operation_id| !operation_id.trim().is_empty())
+        .map(|operation_id| format!("gateway:{operation_id}"))
+        .ok_or_else(|| CronEmbeddedCommandResult {
+            success: false,
+            message: "Cron mutation requires a transport-authenticated operation identity"
+                .to_owned(),
+        })
+}
+
+async fn submit_embedded_create(
+    service: &nomifun_cron::service::CronService,
+    ctx: &CallerCtx,
+    session_id: &str,
+    operation_id: String,
+    command: CronEmbeddedCreateCommand,
+) -> CronEmbeddedCommandResult {
+    match service.submit_embedded_create(
+        ctx.user_id.as_str(),
+        session_id,
+        CronEmbeddedMutationRequest {
+            operation_id,
+            command,
+        },
+    ) {
+        Ok(waiter) => waiter.wait().await,
+        Err(error) => CronEmbeddedCommandResult {
+            success: false,
+            message: error.to_string(),
+        },
+    }
+}
+
+async fn submit_embedded_update(
+    service: &nomifun_cron::service::CronService,
+    ctx: &CallerCtx,
+    session_id: &str,
+    operation_id: String,
+    command: CronEmbeddedUpdateCommand,
+) -> CronEmbeddedCommandResult {
+    match service.submit_embedded_update(
+        ctx.user_id.as_str(),
+        session_id,
+        CronEmbeddedMutationRequest {
+            operation_id,
+            command,
+        },
+    ) {
+        Ok(waiter) => waiter.wait().await,
+        Err(error) => CronEmbeddedCommandResult {
+            success: false,
+            message: error.to_string(),
+        },
+    }
+}
+
+async fn submit_embedded_delete(
+    service: &nomifun_cron::service::CronService,
+    ctx: &CallerCtx,
+    operation_id: String,
+    job_id: &str,
+) -> CronEmbeddedCommandResult {
+    match service.submit_embedded_delete(
+        ctx.user_id.as_str(),
+        CronEmbeddedMutationRequest {
+            operation_id,
+            command: nomifun_cron::CronEmbeddedDeleteCommand {
+                job_id: job_id.to_owned(),
+            },
+        },
+    ) {
+        Ok(waiter) => waiter.wait().await,
+        Err(error) => CronEmbeddedCommandResult {
+            success: false,
+            message: error.to_string(),
+        },
+    }
+}
+
+fn command_result(result: CronEmbeddedCommandResult) -> Value {
     if result.success {
         json!({ "result": result.message })
     } else {
@@ -403,5 +500,16 @@ mod tests {
             assert_eq!(schema.get("type"), Some(&json!("string")), "{name}");
             assert!(schema.get("pattern").and_then(Value::as_str).is_some(), "{name}");
         }
+    }
+
+    #[test]
+    fn cron_mutations_require_a_transport_operation_identity() {
+        let mut ctx = CallerCtx::default();
+        assert!(authenticated_operation_id(&ctx).is_err());
+        ctx.operation_id = Some("request-7".to_owned());
+        assert_eq!(
+            authenticated_operation_id(&ctx).unwrap(),
+            "gateway:request-7"
+        );
     }
 }

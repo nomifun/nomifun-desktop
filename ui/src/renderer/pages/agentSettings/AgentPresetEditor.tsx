@@ -9,6 +9,7 @@ import type {
   InstallationTokenStateResponse,
   OfficialPresetTemplate,
   ResolveAgentPresetPreviewResponse,
+  TypedResourceBinding,
 } from '@/common/types/agentPlatform';
 import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
 import type { IMcpServer } from '@/common/config/storage';
@@ -39,20 +40,22 @@ import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSe
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { WorkspaceFolderSelect } from '@/renderer/components/workspace';
 import {
+  DEFAULT_PROCESS_SESSION_RESOURCE_ID,
   DEFAULT_WORKSPACE_RESOURCE_ID,
   WORKSPACE_ROOT_PARAMETER,
   bindWorkspaceResource,
   bindKnowledgeBaseResource,
   chatRouteCandidateKey,
   defaultResourceBinding,
-  ensureWorkspaceBinding,
   removeResourceBinding,
+  resolveHostManagedResourceBindings,
   resourceKindsForDraft,
   selectChatRouteCandidate,
   previewDiagnosticMessage,
   TEMPLATE_I18N_PATH,
   updateDocument,
   updateResourceBinding,
+  workspaceRootForDraft,
 } from './model';
 import PreviewInspector from './PreviewInspector';
 import styles from './AgentSettingsPage.module.css';
@@ -212,6 +215,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
     () => resourceKindsForDraft(draft, catalog.capabilities),
     [catalog.capabilities, draft]
   );
+  const selectedWorkspaceRoot = workspaceRootForDraft(draft, hostWorkDir);
   const templateDefaults = useMemo(
     () =>
       new Map(
@@ -225,18 +229,16 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   const missingRequiredKinds = useMemo(
     () =>
       requiredKinds.filter((resourceKind) => {
-        const resourceDefault = templateDefaults.get(resourceKind);
-        if (resourceDefault?.required === false) return false;
         const binding = draft.document.resource_bindings.find(
           (candidate) => candidate.resource_kind === resourceKind
         );
         if (!binding?.resource_id.trim()) return true;
-        if (resourceKind === 'workspace') {
+        if (resourceKind === 'workspace' || resourceKind === 'process_session') {
           return !binding.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]?.trim();
         }
         return false;
       }),
-    [draft.document.resource_bindings, requiredKinds, templateDefaults]
+    [draft.document.resource_bindings, requiredKinds]
   );
 
   const patchDocument = (transform: Parameters<typeof updateDocument>[1]) =>
@@ -279,16 +281,33 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   ): AgentPresetDraft => {
     const nextDocument = placeCapability(draft.document, capability, placement);
     const nextDraft = updateDocument(draft, () => nextDocument);
-    return ensureWorkspaceBinding(
+    return resolveHostManagedResourceBindings(
       nextDraft,
       hostWorkDir,
-      resourceKindsForDraft(nextDraft, catalog.capabilities),
+      catalog.capabilities,
       editor.preset.owner_user_id ?? ''
     );
   };
 
   const place = (capability: CapabilityCatalogItem['capability'], placement: CapabilityPlacement) =>
     onDraftChange(nextDraftForCapability(capability, placement));
+  const updateWorkspaceSelection = (
+    binding: TypedResourceBinding,
+    workspaceRoot: string
+  ) => {
+    const nextDraft = updateResourceBinding(
+      draft,
+      bindWorkspaceResource(binding, workspaceRoot)
+    );
+    onDraftChange(
+      resolveHostManagedResourceBindings(
+        nextDraft,
+        hostWorkDir,
+        catalog.capabilities,
+        editor.preset.owner_user_id ?? ''
+      )
+    );
+  };
 
   const selectedSkills = new Set(draft.document.skill_bindings.map((skill) => skill.id));
   const chatRouteRecord = draft.document.chat_route_records[AGENT_CHAT_MODEL_TASK];
@@ -575,11 +594,15 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                   resourceKind,
                   editor.preset.owner_user_id ?? '',
                   resourceDefault?.operations ?? ['read'],
-                  resourceKind === 'workspace' && hostWorkDir
+                  (resourceKind === 'workspace' || resourceKind === 'process_session') &&
+                  selectedWorkspaceRoot
                     ? {
-                        resourceId: DEFAULT_WORKSPACE_RESOURCE_ID,
+                        resourceId:
+                          resourceKind === 'workspace'
+                            ? DEFAULT_WORKSPACE_RESOURCE_ID
+                            : DEFAULT_PROCESS_SESSION_RESOURCE_ID,
                         typedParameters: {
-                          [WORKSPACE_ROOT_PARAMETER]: hostWorkDir,
+                          [WORKSPACE_ROOT_PARAMETER]: selectedWorkspaceRoot,
                         },
                       }
                     : undefined
@@ -589,13 +612,9 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                   <div className={styles.resourceEditorHeader}>
                     <div>
                       <strong>{resourceLabelFor(resourceKind)}</strong>
-                      <span>
-                        {resourceDefault?.required
-                          ? t('agentSettings.resources.required')
-                          : t('agentSettings.resources.optional')}
-                      </span>
+                      <span>{t('agentSettings.resources.required')}</span>
                     </div>
-                    {existing && (
+                    {existing && resourceKind !== 'process_session' && (
                       <Tooltip content={t('agentSettings.actions.remove')}>
                         <Button
                           type='text'
@@ -615,21 +634,9 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                           binding.typed_parameters?.[WORKSPACE_ROOT_PARAMETER] ?? hostWorkDir ?? ''
                         }
                         onChange={(workspaceRoot: string) =>
-                          onDraftChange(
-                            updateResourceBinding(
-                              draft,
-                              bindWorkspaceResource(binding, workspaceRoot)
-                            )
-                          )
+                          updateWorkspaceSelection(binding, workspaceRoot)
                         }
-                        onClear={() =>
-                          onDraftChange(
-                            updateResourceBinding(
-                              draft,
-                              bindWorkspaceResource(binding, hostWorkDir ?? '')
-                            )
-                          )
-                        }
+                        onClear={() => updateWorkspaceSelection(binding, hostWorkDir ?? '')}
                         placeholder={t('terminal.create.workspacePlaceholder')}
                         recentLabel={t('terminal.create.recent')}
                         chooseDifferentLabel={t('terminal.create.chooseFolder')}

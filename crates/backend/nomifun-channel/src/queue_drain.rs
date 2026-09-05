@@ -27,6 +27,7 @@ use tracing::{error, info, warn};
 use crate::group_policy::GroupPolicyFence;
 use crate::message_service::ChannelMessageService;
 use crate::session::SessionManager;
+use crate::session_port::ChannelTurnReceiptState;
 use crate::stream_relay::{ChannelSender, ChannelStreamRelay, RelayConfig};
 use crate::types::{OutgoingMessageType, PluginType, UnifiedOutgoingMessage};
 
@@ -290,13 +291,13 @@ impl QueueDrain {
                 .turn_outcome(conversation_id, &attempt_key)
                 .await
             {
-                Ok(nomifun_conversation::PublicTurnDeliveryState::Missing) => {}
-                Ok(nomifun_conversation::PublicTurnDeliveryState::Accepted { .. }) => {
+                Ok(ChannelTurnReceiptState::Missing) => {}
+                Ok(ChannelTurnReceiptState::Accepted { .. }) => {
                     // In flight (or quarantined after a crash) — judged by its
                     // completion event / a later sweep.
                     return;
                 }
-                Ok(nomifun_conversation::PublicTurnDeliveryState::Completed(delivery)) => {
+                Ok(ChannelTurnReceiptState::Completed(delivery)) => {
                     if delivery.result_ok == Some(true) {
                         self.settle(&head, "delivered").await;
                         continue;

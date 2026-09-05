@@ -76,7 +76,7 @@ use nomifun_system::{
 use nomifun_terminal::TerminalRouterState;
 use nomifun_webhook::WebhookRouterState;
 
-use crate::services::AppServices;
+use crate::services::{AppServices, BackgroundTaskRegistry};
 use super::nomi_core_control_plane::NomiCoreControlPlaneStore;
 use super::nomi_core_chat_route::NomiCoreDefaultChatRouteResolver;
 use super::nomi_core_session::{
@@ -948,8 +948,120 @@ fn attach_cron_service(
     conversation_service: &ConversationService,
     cron_service: Arc<nomifun_cron::service::CronService>,
 ) {
-    conversation_service.with_delete_hook(cron_service.clone());
-    conversation_service.with_cron_service(Some(cron_service));
+    conversation_service.with_delete_hook(Arc::new(CronConversationDeleteAdapter {
+        service: cron_service.clone(),
+    }));
+    conversation_service.with_cron_service(Some(Arc::new(CronConversationCommandAdapter {
+        service: cron_service,
+    })));
+}
+
+struct CronConversationCommandAdapter {
+    service: Arc<nomifun_cron::service::CronService>,
+}
+
+#[async_trait::async_trait]
+impl nomifun_conversation::response_middleware::ICronService
+    for CronConversationCommandAdapter
+{
+    async fn create_job(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        params: &nomifun_conversation::response_middleware::CronCreateParams,
+    ) -> nomifun_conversation::response_middleware::CronCommandResult {
+        cron_conversation_command_result(
+            self.service
+                .execute_embedded_create(
+                    user_id,
+                    conversation_id,
+                    &nomifun_cron::CronEmbeddedCreateCommand {
+                        name: params.name.clone(),
+                        schedule: params.schedule.clone(),
+                        schedule_description: params.schedule_description.clone(),
+                        message: params.message.clone(),
+                    },
+                )
+                .await,
+        )
+    }
+
+    async fn update_job(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        params: &nomifun_conversation::response_middleware::CronUpdateParams,
+    ) -> nomifun_conversation::response_middleware::CronCommandResult {
+        cron_conversation_command_result(
+            self.service
+                .execute_embedded_update(
+                    user_id,
+                    conversation_id,
+                    &nomifun_cron::CronEmbeddedUpdateCommand {
+                        job_id: params.job_id.clone(),
+                        name: params.name.clone(),
+                        schedule: params.schedule.clone(),
+                        schedule_description: params.schedule_description.clone(),
+                        message: params.message.clone(),
+                    },
+                )
+                .await,
+        )
+    }
+
+    async fn list_jobs(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> nomifun_conversation::response_middleware::CronCommandResult {
+        cron_conversation_command_result(
+            self.service
+                .execute_embedded_list(user_id, conversation_id)
+                .await,
+        )
+    }
+
+    async fn delete_job(
+        &self,
+        user_id: &str,
+        job_id: &str,
+    ) -> nomifun_conversation::response_middleware::CronCommandResult {
+        cron_conversation_command_result(
+            self.service.execute_embedded_delete(user_id, job_id).await,
+        )
+    }
+}
+
+fn cron_conversation_command_result(
+    result: nomifun_cron::CronEmbeddedCommandResult,
+) -> nomifun_conversation::response_middleware::CronCommandResult {
+    nomifun_conversation::response_middleware::CronCommandResult {
+        success: result.success,
+        message: result.message,
+    }
+}
+
+struct CronConversationDeleteAdapter {
+    service: Arc<nomifun_cron::service::CronService>,
+}
+
+#[async_trait::async_trait]
+impl OnConversationDelete for CronConversationDeleteAdapter {
+    async fn on_conversation_deleted(&self, user_id: &str, conversation_id: &str) {
+        if let Some(job_ids) = nomifun_conversation::service::current_deleted_cron_job_ids() {
+            self.service.cleanup_deleted_jobs(user_id, &job_ids).await;
+        } else {
+            self.service
+                .delete_jobs_by_conversation(user_id, conversation_id)
+                .await;
+        }
+    }
+}
+
+impl nomifun_cron::CronBackgroundTaskRegistrar for BackgroundTaskRegistry {
+    fn register(&self, task: tokio::task::JoinHandle<()>) {
+        BackgroundTaskRegistry::register(self, task);
+    }
 }
 
 /// Build the default `ConversationRouterState` from application services.
@@ -1409,6 +1521,7 @@ pub fn build_requirement_state(
         (*services.requirement_service)
             .clone()
             .with_conversation_port(autowork_conversation.clone(), conv_repo.clone())
+            .with_scheduled_session_lookup(conversation_owner.clone())
             .with_terminal_driver(terminal_driver.clone())
             .with_terminal_repo(terminal_repo)
             .with_autowork_waker(autowork_waker.clone()),
@@ -1435,7 +1548,6 @@ pub fn build_requirement_state(
         authoritative_user_id: services.authoritative_user_id.clone(),
         service: requirement_service.clone(),
         conversation: autowork_conversation,
-        conversation_repo: conv_repo,
         agent_registry: services.agent_registry.clone(),
         terminal_driver: Some(terminal_driver),
         idmm: Some(idmm_handle),
@@ -1693,10 +1805,15 @@ pub fn build_companion_state(
     });
     services.register_background_task(repair_task);
 
-    let companion_ports = nomifun_companion::companion_ports_with_session(
+    let transcript: Arc<dyn nomifun_companion::evolution::TranscriptSource> =
+        Arc::new(nomifun_companion::evolution::ConversationTranscriptSource::new(
+            conv_service.conversation_repo().clone(),
+        ));
+    let companion_ports = nomifun_companion::companion_ports_from_typed_host(
         services.authoritative_user_id.clone(),
-        conv_service.clone(),
+        conversation_owner.clone(),
         conversation_owner,
+        transcript,
     );
     services.companion_service.attach_companion(companion_ports);
     CompanionRouterState::new(services.companion_service.clone())
@@ -2141,9 +2258,9 @@ pub fn build_cron_state(
         emitter,
         services.data_dir.clone(),
     ));
-    cron_service.with_background_task_registrar(
+    cron_service.with_cron_background_task_registrar(
         services.background_tasks.clone()
-            as Arc<dyn nomifun_conversation::BackgroundTaskRegistrar>,
+            as Arc<dyn nomifun_cron::CronBackgroundTaskRegistrar>,
     );
     services.set_cron_service(cron_service.clone());
 
@@ -2151,7 +2268,6 @@ pub fn build_cron_state(
 
     CronRouterState {
         cron_service,
-        conversation_service,
     }
 }
 

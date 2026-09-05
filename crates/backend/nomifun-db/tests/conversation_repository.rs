@@ -4677,6 +4677,58 @@ async fn update_extra_replaces_json() {
 }
 
 #[tokio::test]
+async fn compare_and_swap_extra_accepts_one_writer_and_rejects_stale_writer() {
+    let (repo, _db) = setup().await;
+    let mut conv = make_conversation("extra-cas");
+    conv.conversation_id = repo.create(&conv).await.unwrap();
+
+    let expected = conv.extra.clone();
+    let first = r#"{"workspace":"/new","autowork":{"enabled":true,"tag":"release","_revision":1}}"#;
+    let stale = r#"{"workspace":"/stale","autowork":{"enabled":true,"tag":"wrong","_revision":2}}"#;
+
+    assert!(
+        repo.compare_and_swap_extra(USER_ID, &conv.conversation_id, &expected, first, 10)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .compare_and_swap_extra(USER_ID, &conv.conversation_id, &expected, stale, 11)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        repo.get(&conv.conversation_id).await.unwrap().unwrap().extra,
+        first
+    );
+}
+
+#[tokio::test]
+async fn compare_and_swap_extra_has_one_winner_across_repository_handles() {
+    let (repo, db) = setup().await;
+    let mut conv = make_conversation("extra-cas-race");
+    conv.conversation_id = repo.create(&conv).await.unwrap();
+    let expected = conv.extra.clone();
+    let left = r#"{"workspace":"/left","autowork":{"enabled":true,"tag":"left","_revision":1}}"#;
+    let right = r#"{"workspace":"/right","autowork":{"enabled":true,"tag":"right","_revision":1}}"#;
+    let left_repo = SqliteConversationRepository::new(db.pool().clone());
+    let right_repo = SqliteConversationRepository::new(db.pool().clone());
+    let conversation_id = conv.conversation_id.clone();
+
+    let (left_result, right_result) = tokio::join!(
+        left_repo.compare_and_swap_extra(USER_ID, &conversation_id, &expected, left, 10),
+        right_repo.compare_and_swap_extra(USER_ID, &conversation_id, &expected, right, 11),
+    );
+    let winners = [left_result.unwrap(), right_result.unwrap()]
+        .into_iter()
+        .filter(|won| *won)
+        .count();
+    assert_eq!(winners, 1);
+    let stored = repo.get(&conversation_id).await.unwrap().unwrap().extra;
+    assert!(stored == left || stored == right);
+}
+
+#[tokio::test]
 async fn get_messages_excludes_synthetic_protocol_rows() {
     let (repo, _db) = setup().await;
     let mut conv = make_conversation("message-filter");

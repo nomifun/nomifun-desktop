@@ -77,6 +77,8 @@
 | D-027 | Nomi 排空 | 后续阶段 | 原在线 drain 设计撤销；C9 bounded shutdown 只在未来 Codex 切换并决定删除 Nomi 时执行 |
 | D-028 | 发布平台矩阵 | 已修订（2026-09-03） | 当前首发验证针对 Nomi-core 候选：Windows x64、macOS arm64、Linux Desktop x64；macOS x64/Linux Headless 后续交付 |
 | D-029 | 当前产品 Runtime 与多-runtime host boundary | 已确认（2026-09-05） | Web/Desktop/`nomicore` 默认使用 NomiCoreApplication；由单一 NomiCoreSessionOwner 共享当前 Nomi engine Session 生命周期；FreshV4Application 是显式未来 host；不支持运行中切换或 fallback |
+| D-030 | Automation 使用 host-owned typed Session boundary | 已修订（2026-09-05） | Cron 只提交封闭 runtime overlay 并通过原子关系/typed receipt 工作；AutoWork 使用 issuer-scoped opaque lease、Session projection revision fence 和 owner/revision/operation-aware config CAS；不得把任意 runtime `extra` 当作 Session authority |
+| D-031 | 领域 adapter 的真实迁移判定 | 已修订（2026-09-05） | 生产 legacy 文件清零不等于 canonical Session migration 完成；Companion archive 可直接由 host 提供 typed contract，Channel/IDMM 在缺少事件流、完整 receipt 或 supervision contract 时保留边界 adapter，并由审计明确报告阻断 |
 
 ## 全局有效约束
 
@@ -599,12 +601,60 @@ S0 STOP-LOSS
 理由：保留未来扩展所需的最小组合边界，同时让当前产品只有一个可验证的执行所有者，
 避免在 Nomi-core 稳定前维护双 Runtime 主链。
 
+### D-030：Automation 使用 host-owned typed Session boundary
+
+- 状态：`已修订（2026-09-05）`
+- Cron 的执行请求只携带用户可见消息和封闭的 `CronTurnRuntimeOverlay`。workspace、
+  model、delegation policy、creation time、Session identity 等字段必须从 host 的
+  最新 Session projection 解析；Cron/Session 双侧关系由单事务 CAS 绑定。
+- AutoWork 的 runtime preparation capability 由同一个 host 实例签发，并绑定 owner
+  与 Session。attachment planning 产生的 snapshot token 必须在 durable admission 前
+  用最新 Session projection revision 重校验；issuer、作用域或 revision 不一致时
+  fail-closed。
+- Gateway 的 Cron create/update/delete 在任何会话 model 补写或 Cron 数据库写入前，
+  必须取得 transport-derived operation identity，再提交给 Cron 的 process-owned
+  mutation waiter；调用方超时只放弃观察，不取消已经被 owner 接管的 mutation。
+  当前没有 operation identity 的旧 native tool 入口只作为明确的兼容边界保留。
+- AutoWork 配置写入使用 owner-scoped expected revision 和 operation identity，在同一
+  `extra` 对象中只改 AutoWork-owned metadata；相同 operation 重放只接受相同配置，
+  过期 writer 不得覆盖其他字段。运行中的 loop 由 per-target transition lock
+  串行化，相同配置保持 no-op。
+- durable receipt、accepted 等待、丢失 receipt、reconciliation 和 shutdown cleanup
+  仍由 owning domain 负责；typed boundary 不将未知结果转换成成功，也不自动重放
+  可能已经跨过不可逆边界的请求。
+
+理由：Automation 的主要风险不是再增加一个通用状态机，而是防止 Cron/AutoWork
+在准备、配置变化、进程中断和重放时重新取得一份不一致的 Session authority。封闭
+overlay、不可伪造的 host capability、revision CAS 和每目标锁足以覆盖当前 Nomi-core
+产品需要，同时保留未来 canonical Session host 的替换空间。
+
+### D-031：领域 adapter 的真实迁移判定
+
+- 状态：`已修订（2026-09-05）`
+- 依赖审计同时报告三类事实：生产模块是否仍直接依赖旧实现、typed adapter 是否
+  仍承担转换、以及测试是否仍使用 Conversation-backed fixture。不能因为第一项为
+  零就把后两项抹掉，也不能把 adapter 单测当成产品级 canonical Session 证据。
+- Companion archive 的消息窗口和上下文清理已经可以由 `NomiCoreSessionOwner`
+  直接提供 typed host contract；其 Conversation 元数据投影只保留在测试兼容边界。
+- Channel 只有在 canonical Session 提供带 operation/Session identity 的事件流、
+  完整 terminal receipt、消息页和精确 cancel contract 后，才能删除当前 adapter。
+  IDMM 只有在 canonical Session 提供活动 turn scope、作用域化 continuation/failover
+  和 live event subscription 后，才能删除当前 adapter。
+- 当前 audit 的非零退出是有意的阻断信号，而不是需要通过改脚本或增加兼容 alias
+  抹平的质量指标。
+
+理由：把“生产 legacy 清零”“边界转换收口”和“canonical Session 已具备完整产品
+语义”分开，能让并行 lane 共享同一事实而不提前关闭 `SL-S3-10` 或掩盖 Channel/
+IDMM 的真实合同缺口。
+
 ## 当前阅读与实施规则
 
-1. 先完整读取 `05-system-capability-replacement-foundation.zh.md`，再用本文追溯 D-001～D-029 的决策理由。
+1. 先完整读取 `05-system-capability-replacement-foundation.zh.md`，再用本文追溯 D-001～D-031 的决策理由。
 2. 领取和关闭工作只看 `GLOBAL-CLOSURE-TODO.zh.md`；不得从本文推断某项已经实现或通过 Gate。
 3. Browser/Computer 实施必须先落 Role/Provider seam，再接具体 owner；不能在旧直连上叠加 adapter。
 4. Codex Sidecar 只按未来宿主研究维护；不能继续围绕不存在的私有 patch 扩大当前
    Nomi-core Host contract，也不能把研究 evidence 当作产品完成。
 5. 新实现优先删除重复 Compiler、全局 Snapshot 事实、通用 Effect 状态机、虚假 zero proof 和旧生产旁路。
 6. 任何需要恢复旧固定 ROM、在线 canary、五平台首发、全量 exact-zero/evidence 或复杂 handoff 的变化，都必须重新提出产品理由并获得明确决策。
+7. 读取 automation audit 时同时记录 production legacy、transitional adapter 和真实
+   blocker；不得只看一个数字判断是否已经完成。

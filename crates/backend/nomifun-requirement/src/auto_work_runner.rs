@@ -4,34 +4,29 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use dashmap::DashMap;
-use nomifun_ai_agent::AgentStreamEvent;
 use nomifun_ai_agent::registry::AgentRegistry;
-use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
-use nomifun_api_types::{AutoWorkState, AutoWorkTargetKind, Requirement, RequirementStatus, SendMessageRequest};
-use nomifun_common::{AppError, ConversationId, TerminalId, UserId};
-use nomifun_conversation::{
-    IdempotentMessageDelivery, PublicTurnDeliveryState, runtime_state::RuntimeBuildLease,
-};
-use nomifun_conversation::service::{
-    BackgroundTurnPreSendHook, BackgroundTurnReconciliationDisposition,
-    BackgroundTurnRuntimePreparation, ObservedIdempotentMessageDelivery,
-};
+use nomifun_api_types::{AutoWorkState, AutoWorkTargetKind, Requirement, RequirementStatus};
+use nomifun_common::{AppError, ConversationId, TerminalId};
 use nomifun_db::{
-    IConversationRepository, TerminalTurnAdmissionKey, TerminalTurnAdmissionRow,
-    RequirementConversationTurnAuthority, TerminalTurnAdmissionScope,
-    TerminalTurnEffectsStart, TerminalTurnOutcome,
+    RequirementConversationTurnAuthority, TerminalTurnAdmissionKey, TerminalTurnAdmissionRow,
+    TerminalTurnAdmissionScope, TerminalTurnEffectsStart, TerminalTurnOutcome,
 };
 use nomifun_terminal::{ExactTerminalLifecycleReceiver, LifecycleKind, TerminalDriver};
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::{interval, sleep, timeout};
+use tokio::time::{Instant, interval, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::prompt::{build_requirement_prompt, build_terminal_requirement_prompt};
 use crate::service::{DEFAULT_LEASE_MS, RequirementService};
 use crate::attachments::PromptAttachmentPlan;
-use crate::conversation_port::AutoWorkSessionPort;
+use crate::autowork_config::{AutoWorkConfig, AutoWorkConfigSnapshot};
+use crate::conversation_port::{
+    AutoWorkBindingLookup, AutoWorkMessage, AutoWorkMessageDelivery, AutoWorkPreSendHook,
+    AutoWorkReconciliationDisposition, AutoWorkRuntimeBuildLease, AutoWorkRuntimeOverlay,
+    AutoWorkSessionPort, AutoWorkTurnDeliveryState, AutoWorkTurnRequest,
+};
 
 /// Lease is renewed on this cadence while a turn is in flight.
 const LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(30);
@@ -55,6 +50,11 @@ const IDLE_POLL: Duration = Duration::from_secs(10);
 /// Cap on the completion note captured from a tool-free agent's final message,
 /// in characters. The tail is kept (agents usually summarise at the end).
 const MAX_NOTE_CHARS: usize = 4000;
+/// API callers wait only this long for deterministic target cleanup. The
+/// cleanup task itself remains owned and continues after the waiter returns.
+const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// One global shutdown ceiling for coordinator joins and every target cleanup.
+const SHUTDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Shared dependencies for all AutoWork loops.
 pub struct AutoWorkRunnerDeps {
@@ -64,7 +64,6 @@ pub struct AutoWorkRunnerDeps {
     pub authoritative_user_id: Arc<str>,
     pub service: Arc<RequirementService>,
     pub conversation: Arc<dyn AutoWorkSessionPort>,
-    pub conversation_repo: Arc<dyn IConversationRepository>,
     pub agent_registry: Arc<AgentRegistry>,
     /// Drives terminal targets (write PTY input, observe output). `None` if the
     /// terminal subsystem is not wired (e.g. some test harnesses).
@@ -82,7 +81,7 @@ pub struct AutoWorkRunnerDeps {
     /// TERMINAL sessions (bootstrap-level flag). When true, those terminals
     /// expose the `requirement_complete` / `requirement_update_status`
     /// declaration tools over the stdio bridge, so the runner expects an
-    /// explicit verdict (a clean turn with no declaration → needs_review, not
+    /// explicit verdict (a clean turn with no declaration -> needs_review, not
     /// done). Chat-engine sessions register the same tools in-process instead;
     /// see [`crate::prompt::has_native_requirement_tools`].
     pub requirement_mcp_enabled: bool,
@@ -98,7 +97,7 @@ struct AutoWorkAttachmentActivation {
 }
 
 #[async_trait::async_trait]
-impl BackgroundTurnPreSendHook for AutoWorkAttachmentActivation {
+impl AutoWorkPreSendHook for AutoWorkAttachmentActivation {
     async fn prepare(&self) -> Result<(), AppError> {
         self.service.activate_attachment_plan(&self.plan).await
     }
@@ -165,6 +164,8 @@ struct AutoWorkHandle {
     cancelled: Arc<AtomicBool>,
     join: tokio::task::JoinHandle<()>,
     tag: String,
+    max_requirements: Option<u32>,
+    config_revision: String,
     /// Target kind, kept so `stop()` knows whether an in-flight turn lives in a
     /// conversation agent (cancellable) or a terminal PTY (left untouched).
     kind: AutoWorkTargetKind,
@@ -181,6 +182,59 @@ struct AutoWorkHandle {
     /// Orders an asynchronously spawned Drop custodian against a later explicit
     /// stop/restart transition for the same handle generation.
     cleanup_barrier: Arc<tokio::sync::Mutex<()>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoWorkStartOutcome {
+    Started,
+    Restarted,
+    AlreadyRunning,
+    StalePersistedConfig,
+    CleanupPending,
+    ShuttingDown,
+    InvalidTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoWorkStopOutcome {
+    AlreadyStopped,
+    Stopped,
+    CleanupPending,
+}
+
+#[derive(Default)]
+struct CleanupCompletion {
+    done: AtomicBool,
+    notify: Notify,
+}
+
+impl CleanupCompletion {
+    fn finish(&self) {
+        self.done.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        loop {
+            let notified = self.notify.notified();
+            if self.done.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+struct CleanupOwner {
+    generation: u64,
+    completion: Arc<CleanupCompletion>,
+    join: JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct CoordinatorTasks {
+    sweeper: Option<JoinHandle<()>>,
+    resume: Option<JoinHandle<()>>,
 }
 
 /// Removes a loop's handle from the map on task exit —normal OR panic (Drop runs
@@ -245,13 +299,15 @@ pub struct AutoWorkRunner {
     /// its abort/receipt cleanup completes must not let a racing start install a
     /// replacement loop, and two concurrent starts must not both spawn.
     transitions: Arc<TargetTransitionMap>,
+    /// Exact-claim cleanup owners outlive bounded API waiters. A replacement
+    /// generation cannot start while its target remains in this map.
+    cleanups: Arc<DashMap<TargetKey, CleanupOwner>>,
     next_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Process-lifetime owner for the sweeper and boot-resume coordinators.
     /// Per-target loops keep their exact claim cleanup protocol in `handles`;
     /// this token only governs the two host-owned coordinator tasks.
     shutdown: CancellationToken,
-    sweeper: Arc<Mutex<Option<JoinHandle<()>>>>,
-    resume: Arc<Mutex<Option<JoinHandle<()>>>>,
+    coordinators: Arc<Mutex<CoordinatorTasks>>,
 }
 
 impl AutoWorkRunner {
@@ -260,10 +316,10 @@ impl AutoWorkRunner {
             deps,
             handles: Arc::new(DashMap::new()),
             transitions: Arc::new(DashMap::new()),
+            cleanups: Arc::new(DashMap::new()),
             next_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             shutdown: CancellationToken::new(),
-            sweeper: Arc::new(Mutex::new(None)),
-            resume: Arc::new(Mutex::new(None)),
+            coordinators: Arc::new(Mutex::new(CoordinatorTasks::default())),
         }
     }
 
@@ -293,33 +349,205 @@ impl AutoWorkRunner {
             .map(|h| (h.progress.current(), h.progress.completed()))
     }
 
-    /// Start (or restart) the autowork loop for a target bound to `tag`.
-    /// Stops after `max_requirements` completions when set.
+    /// Atomically reconcile persisted config and the live loop under the same
+    /// per-target transition barrier.
+    pub async fn apply_config(
+        &self,
+        owner_id: &str,
+        kind: AutoWorkTargetKind,
+        target_id: &str,
+        config: AutoWorkConfig,
+        expected_revision: Option<&str>,
+        operation_id: Option<&str>,
+    ) -> Result<AutoWorkConfigSnapshot, AppError> {
+        let canonical = AutoWorkConfig::normalize(
+            config.enabled,
+            config.tag.as_deref(),
+            config.max_requirements,
+        )?;
+        if canonical != config {
+            return Err(AppError::BadRequest(
+                "AutoWork config must use its canonical normalized tag".to_owned(),
+            ));
+        }
+        if !valid_target_id(kind, target_id) {
+            return Err(AppError::BadRequest(format!(
+                "target_id is not a canonical {} ID",
+                kind.as_str()
+            )));
+        }
+        if self.shutdown.is_cancelled() {
+            return Err(AppError::Conflict(
+                "AutoWork runner is shutting down".to_owned(),
+            ));
+        }
+
+        let key = (kind, target_id.to_owned());
+        let transition = self.transition_lock(&key);
+        let _transition_guard = transition.lock().await;
+        if self.shutdown.is_cancelled() {
+            return Err(AppError::Conflict(
+                "AutoWork runner is shutting down".to_owned(),
+            ));
+        }
+
+        let current = self
+            .deps
+            .service
+            .read_autowork_config_snapshot(owner_id, kind, target_id)
+            .await?;
+        if expected_revision.is_some_and(|revision| revision != current.revision) {
+            return Err(AppError::Conflict(format!(
+                "AutoWork config for {} {target_id} changed concurrently",
+                kind.as_str()
+            )));
+        }
+
+        // A semantic reconfiguration must quiesce the old generation before
+        // publishing the new durable binding. An identical enable deliberately
+        // leaves the active Requirement and runtime untouched.
+        if config.enabled && !self.running_config_matches(&key, &config) {
+            match self.stop_locked(kind, target_id).await {
+                AutoWorkStopOutcome::CleanupPending => {
+                    return Err(AppError::Conflict(format!(
+                        "AutoWork cleanup for {} {target_id} is still in progress",
+                        kind.as_str()
+                    )));
+                }
+                AutoWorkStopOutcome::AlreadyStopped | AutoWorkStopOutcome::Stopped => {}
+            }
+        }
+
+        let saved = self
+            .deps
+            .service
+            .save_autowork_config(
+                owner_id,
+                kind,
+                target_id,
+                config.clone(),
+                &current.revision,
+                operation_id,
+            )
+            .await?;
+
+        if config.enabled {
+            let tag = config.enabled_tag()?.to_owned();
+            if let Err(error) = self.deps.service.resume_tag_for_enable(&tag).await {
+                warn!(
+                    tag,
+                    %error,
+                    "AutoWork enable persisted, but shared tag resume failed"
+                );
+            }
+            if self.start_snapshot_locked(kind, target_id, saved.clone()).await
+                == AutoWorkStartOutcome::CleanupPending
+            {
+                return Err(AppError::Conflict(format!(
+                    "AutoWork cleanup for {} {target_id} is still in progress",
+                    kind.as_str()
+                )));
+            }
+        } else if self.stop_locked(kind, target_id).await
+            == AutoWorkStopOutcome::CleanupPending
+        {
+            return Err(AppError::Conflict(format!(
+                "AutoWork was disabled, but cleanup for {} {target_id} is still in progress",
+                kind.as_str()
+            )));
+        }
+
+        Ok(saved)
+    }
+
+    /// Start AutoWork only when the supplied config still matches the latest
+    /// persisted owner-scoped snapshot.
     pub async fn start(
         &self,
         kind: AutoWorkTargetKind,
         target_id: String,
         tag: String,
         max_requirements: Option<u32>,
-    ) {
+    ) -> AutoWorkStartOutcome {
         if self.shutdown.is_cancelled() {
-            return;
+            return AutoWorkStartOutcome::ShuttingDown;
         }
         if !valid_target_id(kind, &target_id) {
             error!(target_id, ?kind, "Refusing to start AutoWork for an invalid target id");
-            return;
+            return AutoWorkStartOutcome::InvalidTarget;
         }
+        let config = match AutoWorkConfig::normalize(true, Some(&tag), max_requirements) {
+            Ok(config) => config,
+            Err(error) => {
+                warn!(target_id, ?kind, %error, "Refusing invalid AutoWork config");
+                return AutoWorkStartOutcome::StalePersistedConfig;
+            }
+        };
         let key: TargetKey = (kind, target_id.clone());
         let transition = self.transition_lock(&key);
         let _transition_guard = transition.lock().await;
         if self.shutdown.is_cancelled() {
-            return;
+            return AutoWorkStartOutcome::ShuttingDown;
         }
-        // A replacement generation cannot start until the prior loop has
-        // stopped and its exact durable claim/admission has been settled. This
-        // closes the old abort-then-spawn race where the new loop recovered an
-        // effects-started claim before asynchronous cleanup reached the DB.
-        self.stop_locked(kind, &target_id).await;
+        let snapshot = match self
+            .deps
+            .service
+            .read_autowork_config_snapshot(
+                &self.deps.authoritative_user_id,
+                kind,
+                &target_id,
+            )
+            .await
+        {
+            Ok(snapshot) if snapshot.config == config => snapshot,
+            Ok(_) => return AutoWorkStartOutcome::StalePersistedConfig,
+            Err(error) => {
+                warn!(
+                    target_id,
+                    ?kind,
+                    %error,
+                    "Refusing to start AutoWork without a current persisted config"
+                );
+                return AutoWorkStartOutcome::StalePersistedConfig;
+            }
+        };
+        self.start_snapshot_locked(kind, &target_id, snapshot).await
+    }
+
+    /// Caller must hold this target's `transition_lock`.
+    async fn start_snapshot_locked(
+        &self,
+        kind: AutoWorkTargetKind,
+        target_id: &str,
+        snapshot: AutoWorkConfigSnapshot,
+    ) -> AutoWorkStartOutcome {
+        if self.shutdown.is_cancelled() {
+            return AutoWorkStartOutcome::ShuttingDown;
+        }
+        let tag = match snapshot.config.enabled_tag() {
+            Ok(tag) => tag.to_owned(),
+            Err(_) => return AutoWorkStartOutcome::StalePersistedConfig,
+        };
+        let max_requirements = snapshot.config.max_requirements;
+        let key = (kind, target_id.to_owned());
+        if !self.wait_for_cleanup_locked(&key, STOP_WAIT_TIMEOUT).await {
+            return AutoWorkStartOutcome::CleanupPending;
+        }
+        if let Some(mut handle) = self.handles.get_mut(&key)
+            && !handle.join.is_finished()
+            && !handle.cancelled.load(Ordering::SeqCst)
+            && handle.tag == tag
+            && handle.max_requirements == max_requirements
+        {
+            handle.config_revision = snapshot.revision;
+            return AutoWorkStartOutcome::AlreadyRunning;
+        }
+        let restarted = self.handles.contains_key(&key);
+        if restarted
+            && self.stop_locked(kind, target_id).await == AutoWorkStopOutcome::CleanupPending
+        {
+            return AutoWorkStartOutcome::CleanupPending;
+        }
 
         let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -330,18 +558,24 @@ impl AutoWorkRunner {
         let progress_for_task = progress.clone();
         let deps = self.deps.clone();
         let handles = self.handles.clone();
-        let conv = target_id.clone();
+        let conv = target_id.to_owned();
         let loop_tag = tag.clone();
         let guard_key = key.clone();
         let cleanup_handoff_for_task = cleanup_handoff.clone();
         let cleanup_barrier_for_task = cleanup_barrier.clone();
         let guard_deps = deps.clone();
+        let config_revision = snapshot.revision;
+        let config_revision_for_task = config_revision.clone();
+        let (published_tx, published_rx) = oneshot::channel();
 
-        // Insert the handle BEFORE the loop's first await can reach its Drop-guard
-        // cleanup (run_loop always awaits `claim_next` before any cleanup), so the
-        // guard never removes a not-yet-inserted entry.
+        // The spawned task cannot construct its Drop guard or enter run_loop
+        // until the handle has been published. This closes the ready-future race
+        // where ownership validation could fail before `handles.insert`.
         let join = tokio::spawn(async move {
-            // Drop runs on normal exit AND panic-unwind → handle always removed.
+            if published_rx.await.is_err() {
+                return;
+            }
+            // Drop runs on normal exit AND panic-unwind -> handle always removed.
             let _guard = HandleGuard {
                 handles,
                 key: guard_key,
@@ -360,17 +594,20 @@ impl AutoWorkRunner {
                 cancelled_for_task,
                 progress_for_task,
                 max_requirements,
+                config_revision_for_task,
             )
             .await;
             info!(target_id = %conv, ?kind, tag = %loop_tag, "AutoWork loop exited");
         });
 
         self.handles.insert(
-            key,
+            key.clone(),
             AutoWorkHandle {
                 cancelled,
                 join,
                 tag,
+                max_requirements,
+                config_revision,
                 kind,
                 progress,
                 generation,
@@ -378,6 +615,25 @@ impl AutoWorkRunner {
                 cleanup_barrier,
             },
         );
+        if published_tx.send(()).is_err() {
+            self.handles
+                .remove_if(&key, |_, handle| handle.generation == generation);
+            return AutoWorkStartOutcome::CleanupPending;
+        }
+        if restarted {
+            AutoWorkStartOutcome::Restarted
+        } else {
+            AutoWorkStartOutcome::Started
+        }
+    }
+
+    fn running_config_matches(&self, key: &TargetKey, config: &AutoWorkConfig) -> bool {
+        self.handles.get(key).is_some_and(|handle| {
+            !handle.join.is_finished()
+                && !handle.cancelled.load(Ordering::SeqCst)
+                && handle.tag.as_str() == config.tag.as_deref().unwrap_or_default()
+                && handle.max_requirements == config.max_requirements
+        })
     }
 
     /// Stop a session's loop. Sets the cancel flag, aborts the task, cancels
@@ -387,31 +643,116 @@ impl AutoWorkRunner {
     /// matters: disabling AutoWork must actually stop the work —historically
     /// the orphan turn kept the conversation showing "running" after the user
     /// flipped the switch off, and raced any later re-enable.
-    pub async fn stop(&self, kind: AutoWorkTargetKind, target_id: &str) {
+    pub async fn stop(
+        &self,
+        kind: AutoWorkTargetKind,
+        target_id: &str,
+    ) -> AutoWorkStopOutcome {
         if !valid_target_id(kind, target_id) {
-            return;
+            return AutoWorkStopOutcome::AlreadyStopped;
         }
         let key = (kind, target_id.to_string());
         let transition = self.transition_lock(&key);
         let _transition_guard = transition.lock().await;
-        self.stop_locked(kind, target_id).await;
+        self.stop_locked(kind, target_id).await
     }
 
     /// Caller must hold this target's `transition_lock`.
-    async fn stop_locked(&self, kind: AutoWorkTargetKind, target_id: &str) {
-        if let Some((_, handle)) = self.handles.remove(&(kind, target_id.to_string())) {
-            handle.cancelled.store(true, Ordering::SeqCst);
-            handle.cleanup_handoff.store(true, Ordering::SeqCst);
-            handle.join.abort();
-            // Await cancellation before durable cleanup. A claim/admission DB
-            // future that won the race is therefore visible to the cleanup
-            // below; a future that lost cannot later resume and write.
-            let _ = handle.join.await;
-            // If a natural-exit/panic Drop custodian started just before this
-            // explicit stop took ownership, wait until it has either finished
-            // or observed `cleanup_handoff` and skipped. The transition lock
-            // remains held, so a replacement loop cannot race either cleanup.
-            let _cleanup_guard = handle.cleanup_barrier.lock().await;
+    async fn stop_locked(
+        &self,
+        kind: AutoWorkTargetKind,
+        target_id: &str,
+    ) -> AutoWorkStopOutcome {
+        let key = (kind, target_id.to_owned());
+        if !self.wait_for_cleanup_locked(&key, STOP_WAIT_TIMEOUT).await {
+            return AutoWorkStopOutcome::CleanupPending;
+        }
+        let Some((_, handle)) = self.handles.remove(&key) else {
+            return AutoWorkStopOutcome::AlreadyStopped;
+        };
+        handle.cancelled.store(true, Ordering::SeqCst);
+        handle.cleanup_handoff.store(true, Ordering::SeqCst);
+        handle.join.abort();
+
+        let completion = self.spawn_cleanup_owner_locked(key, handle);
+        if timeout(STOP_WAIT_TIMEOUT, completion.wait()).await.is_ok() {
+            AutoWorkStopOutcome::Stopped
+        } else {
+            AutoWorkStopOutcome::CleanupPending
+        }
+    }
+
+    /// Caller must hold this target's `transition_lock`.
+    async fn wait_for_cleanup_locked(&self, key: &TargetKey, wait: Duration) -> bool {
+        let Some(completion) = self
+            .cleanups
+            .get(key)
+            .map(|owner| owner.completion.clone())
+        else {
+            return true;
+        };
+        timeout(wait, completion.wait()).await.is_ok()
+    }
+
+    /// Caller must hold this target's `transition_lock`.
+    fn spawn_cleanup_owner_locked(
+        &self,
+        key: TargetKey,
+        handle: AutoWorkHandle,
+    ) -> Arc<CleanupCompletion> {
+        let completion = Arc::new(CleanupCompletion::default());
+        let completion_for_task = completion.clone();
+        let this = self.clone();
+        let cleanups = self.cleanups.clone();
+        let cleanup_key = key.clone();
+        let generation = handle.generation;
+        let kind = key.0;
+        let target_id = key.1.clone();
+        let (published_tx, published_rx) = oneshot::channel();
+        let join = tokio::spawn(async move {
+            if published_rx.await.is_err() {
+                completion_for_task.finish();
+                return;
+            }
+            this.cleanup_stopped_handle(kind, &target_id, handle)
+                .await;
+            completion_for_task.finish();
+            cleanups.remove_if(&cleanup_key, |_, owner| {
+                owner.generation == generation
+            });
+        });
+        self.cleanups.insert(
+            key.clone(),
+            CleanupOwner {
+                generation,
+                completion: completion.clone(),
+                join,
+            },
+        );
+        if published_tx.send(()).is_err() {
+            completion.finish();
+            self.cleanups.remove_if(&key, |_, owner| {
+                owner.generation == generation
+            });
+        }
+        completion
+    }
+
+    async fn cleanup_stopped_handle(
+        &self,
+        kind: AutoWorkTargetKind,
+        target_id: &str,
+        handle: AutoWorkHandle,
+    ) {
+        // Await cancellation before durable cleanup. A claim/admission DB
+        // future that won the race is therefore visible to the cleanup below;
+        // a future that lost cannot later resume and write.
+        let _ = handle.join.await;
+        // If a natural-exit/panic Drop custodian started just before this
+        // explicit stop took ownership, wait until it has either finished or
+        // observed `cleanup_handoff` and skipped. The retained `cleanups` entry
+        // blocks a replacement generation even after the bounded waiter leaves.
+        let _cleanup_guard = handle.cleanup_barrier.lock().await;
             // Do not trust only the process-local progress slot here. The
             // claim transaction can COMMIT immediately before task abortion
             // and the task can then be dropped before `progress.set_current`.
@@ -624,7 +965,6 @@ impl AutoWorkRunner {
                         "Failed to park Terminal admissions without a recovered claim"
                     );
                 }
-            }
         }
     }
 
@@ -633,16 +973,19 @@ impl AutoWorkRunner {
     /// Expiry alone never makes an execution safe to repeat.
     /// Detached for the process lifetime (the runner lives in router state).
     pub fn start_sweeper(&self) {
-        if self.shutdown.is_cancelled() {
+        let mut coordinators = self
+            .coordinators
+            .lock()
+            .expect("AutoWork coordinator lock");
+        if self.shutdown.is_cancelled()
+            || coordinators
+                .sweeper
+                .as_ref()
+                .is_some_and(|task| !task.is_finished())
+        {
             return;
         }
-        {
-            let mut slot = self.sweeper.lock().expect("AutoWork sweeper lock");
-            if slot.as_ref().is_some_and(|task| !task.is_finished()) {
-                return;
-            }
-            let _ = slot.take();
-        }
+        let _ = coordinators.sweeper.take();
         let handles = self.handles.clone();
         let service = self.deps.service.clone();
         let shutdown = self.shutdown.clone();
@@ -687,7 +1030,7 @@ impl AutoWorkRunner {
                 }
             }
         });
-        *self.sweeper.lock().expect("AutoWork sweeper lock") = Some(task);
+        coordinators.sweeper = Some(task);
     }
 
     /// Resume every persisted-enabled AutoWork binding across all users at boot.
@@ -702,50 +1045,43 @@ impl AutoWorkRunner {
     /// a terminal whose PTY is not yet live idles until the user relaunches it
     /// (the loop self-heals —see `run_loop`). Detached + best-effort.
     pub fn resume_persisted_bindings(&self) {
-        if self.shutdown.is_cancelled() {
+        let mut coordinators = self
+            .coordinators
+            .lock()
+            .expect("AutoWork coordinator lock");
+        if self.shutdown.is_cancelled()
+            || coordinators
+                .resume
+                .as_ref()
+                .is_some_and(|task| !task.is_finished())
+        {
             return;
         }
-        {
-            let mut slot = self.resume.lock().expect("AutoWork resume lock");
-            if slot.as_ref().is_some_and(|task| !task.is_finished()) {
-                return;
-            }
-            let _ = slot.take();
-        }
+        let _ = coordinators.resume.take();
         let this = self.clone();
         let shutdown = self.shutdown.clone();
         let task = tokio::spawn(async move {
             let mut resumed = 0usize;
             let owner_id = this.deps.authoritative_user_id.clone();
-            let groups = match tokio::select! {
+            let bindings = match tokio::select! {
                 _ = shutdown.cancelled() => return,
-                result = this.deps.service.tag_bindings(&owner_id) => result,
+                result = this.deps.service.list_enabled_autowork_bindings(&owner_id) => result,
             } {
-                Ok(groups) => groups,
+                Ok(bindings) => bindings,
                 Err(error) => {
-                    warn!(user_id = %owner_id, %error, "AutoWork resume: owner tag_bindings failed");
+                    warn!(
+                        user_id = %owner_id,
+                        %error,
+                        "AutoWork resume: persisted binding lookup failed"
+                    );
                     return;
                 }
             };
-            for group in groups {
-                for binding in group.bindings {
-                    if shutdown.is_cancelled() {
-                        return;
-                    }
-                    // Skip if already running (idempotent re-entry / racing toggle).
-                    if this.is_running(binding.kind, &binding.target_id) {
-                        continue;
-                    }
-                    let max = tokio::select! {
-                        _ = shutdown.cancelled() => return,
-                        result = this.deps.service.read_autowork_config(
-                            binding.kind,
-                            &binding.target_id,
-                        ) => result.ok().and_then(|(_, _, m)| m),
-                    };
-                    this
-                        .start(binding.kind, binding.target_id.clone(), group.tag.clone(), max)
-                        .await;
+            for binding in bindings {
+                if shutdown.is_cancelled() {
+                    return;
+                }
+                if this.resume_binding_if_current(binding).await {
                     resumed += 1;
                 }
             }
@@ -753,7 +1089,55 @@ impl AutoWorkRunner {
                 info!(resumed, "AutoWork resumed persisted bindings on boot");
             }
         });
-        *self.resume.lock().expect("AutoWork resume lock") = Some(task);
+        coordinators.resume = Some(task);
+    }
+
+    async fn resume_binding_if_current(
+        &self,
+        binding: crate::conversation_port::PersistedAutoWorkBinding,
+    ) -> bool {
+        let key = (binding.kind, binding.target_id.clone());
+        let transition = self.transition_lock(&key);
+        let _transition_guard = tokio::select! {
+            _ = self.shutdown.cancelled() => return false,
+            guard = transition.lock() => guard,
+        };
+        let latest = match tokio::select! {
+            _ = self.shutdown.cancelled() => return false,
+            result = self.deps.service.read_autowork_config_snapshot(
+                &self.deps.authoritative_user_id,
+                binding.kind,
+                &binding.target_id,
+            ) => result,
+        } {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                warn!(
+                    target_id = binding.target_id,
+                    ?binding.kind,
+                    %error,
+                    "AutoWork boot resume quarantined a binding that could not be re-read"
+                );
+                return false;
+            }
+        };
+        let still_current = latest.config.enabled
+            && latest.config.tag.as_deref() == Some(binding.tag.as_str())
+            && latest.config.max_requirements == binding.max_requirements
+            && latest.revision == binding.config_revision;
+        if !still_current {
+            debug!(
+                target_id = binding.target_id,
+                ?binding.kind,
+                "AutoWork boot snapshot became stale before its transition lock"
+            );
+            return false;
+        }
+        matches!(
+            self.start_snapshot_locked(binding.kind, &binding.target_id, latest)
+                .await,
+            AutoWorkStartOutcome::Started | AutoWorkStartOutcome::Restarted
+        )
     }
 
     /// Stop the host-owned sweeper/resume coordinators and every active target
@@ -761,15 +1145,27 @@ impl AutoWorkRunner {
     /// existing exact claim cleanup path instead of simply dropping handles.
     pub async fn shutdown(&self) -> Result<(), String> {
         self.shutdown.cancel();
+        let deadline = Instant::now() + SHUTDOWN_WAIT_TIMEOUT;
 
-        let sweeper = self.sweeper.lock().expect("AutoWork sweeper lock").take();
-        let resume = self.resume.lock().expect("AutoWork resume lock").take();
+        let (sweeper, resume) = {
+            let mut coordinators = self
+                .coordinators
+                .lock()
+                .expect("AutoWork coordinator lock");
+            (coordinators.sweeper.take(), coordinators.resume.take())
+        };
         let mut errors = Vec::new();
         for (name, task) in [("sweeper", sweeper), ("boot resume", resume)] {
             let Some(mut task) = task else {
                 continue;
             };
-            match timeout(Duration::from_secs(5), &mut task).await {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                task.abort();
+                errors.push(format!("AutoWork {name} shutdown timed out"));
+                continue;
+            }
+            match timeout(remaining, &mut task).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) if error.is_cancelled() => {}
                 Ok(Err(error)) => errors.push(format!("AutoWork {name} join failed: {error}")),
@@ -787,12 +1183,38 @@ impl AutoWorkRunner {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for (kind, target_id) in keys {
-            self.stop(kind, &target_id).await;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                errors.push("AutoWork target shutdown deadline elapsed".to_owned());
+                break;
+            }
+            if timeout(remaining, self.stop(kind, &target_id)).await.is_err() {
+                errors.push(format!(
+                    "AutoWork {} {target_id} stop waiter timed out",
+                    kind.as_str()
+                ));
+                break;
+            }
+        }
+
+        while !self.cleanups.is_empty() && Instant::now() < deadline {
+            sleep(Duration::from_millis(20)).await;
         }
         if !self.handles.is_empty() {
             errors.push(format!(
                 "AutoWork retained {} target loop(s) after shutdown",
                 self.handles.len()
+            ));
+        }
+        if !self.cleanups.is_empty() {
+            let unfinished = self
+                .cleanups
+                .iter()
+                .filter(|owner| !owner.join.is_finished())
+                .count();
+            errors.push(format!(
+                "AutoWork retained {} exact cleanup owner(s), {unfinished} still running",
+                self.cleanups.len()
             ));
         }
         if errors.is_empty() {
@@ -810,7 +1232,7 @@ fn valid_target_id(kind: AutoWorkTargetKind, target_id: &str) -> bool {
     }
 }
 
-/// The autowork loop body. Claims → injects → waits → finalizes → repeats.
+/// The autowork loop body. Claims -> injects -> waits -> finalizes -> repeats.
 ///
 /// The loop is *persistent*: it does NOT exit when the tag drains or a claim
 /// errors —it idles (waking on `deps.wake`, with `IDLE_POLL` as a fallback) and
@@ -1187,7 +1609,7 @@ async fn cleanup_abandoned_loop_claim(
 enum TurnResult {
     /// Turn finished and finalized as done.
     Done,
-    /// Turn errored (re-pended or, when exhausted, failed → tag paused).
+    /// Turn errored (re-pended or, when exhausted, failed -> tag paused).
     Errored,
     /// Inject was rejected because the session was busy; the claim was reverted
     /// without consuming an attempt. Back off and retry.
@@ -1220,7 +1642,7 @@ enum TurnEnd {
 }
 
 enum DurableConversationReceiptWait {
-    Completed(IdempotentMessageDelivery),
+    Completed(AutoWorkMessageDelivery),
     Ambiguous(String),
 }
 
@@ -1260,6 +1682,7 @@ async fn run_loop(
     cancelled: Arc<AtomicBool>,
     progress: Arc<LiveProgress>,
     max_requirements: Option<u32>,
+    config_revision: String,
 ) {
     let owner_id = target_id;
     // Close the startup preflight window as well as the per-claim window. The
@@ -1408,7 +1831,7 @@ async fn run_loop(
             {
                 Ok(Some(claim)) => claim,
                 Ok(None) => {
-                    // Tag drained (or paused) → not a failure spin; reset backoff.
+                    // Tag drained (or paused) -> not a failure spin; reset backoff.
                     consecutive_failures = 0;
                     drop(conversation_build_lease.take());
                     tokio::select! {
@@ -1446,7 +1869,7 @@ async fn run_loop(
             recovered_active,
             "AutoWork claimed requirement"
         );
-        // active: a requirement is now in flight → broadcast so the session-list
+        // active: a requirement is now in flight -> broadcast so the session-list
         // icon turns active-coloured in step with the per-session control.
         emit_autowork_progress(&deps, kind, target_id, tag, &progress, true);
 
@@ -1613,14 +2036,14 @@ async fn run_loop(
                             }
                         }
                     }
-                    // The session backing this loop is GONE (deleted mid-flight →
-                    // inject_and_wait's conversation_repo.get returns NotFound). This
-                    // is NOT the requirement's fault: revert the claim WITHOUT
+                    // The Session backing this loop is gone (for example,
+                    // deleted while the claim was in flight). This is NOT the
+                    // requirement's fault: revert the claim WITHOUT
                     // consuming an attempt (so a deleted session can't burn a
                     // requirement's retries and PAUSE the whole tag for sibling
-                    // conversations bound to it — the observed "delete conv 29 →
-                    // tag test stuck" cascade), then STOP this loop (no target left
-                    // to drive).
+                    // conversations bound to it (the observed
+                    // "delete conv 29 -> tag test stuck" cascade), then STOP
+                    // this loop (no target left to drive).
                     Err(AppError::NotFound(not_found)) => {
                         warn!(
                             target_id,
@@ -1650,7 +2073,7 @@ async fn run_loop(
                     }
                     Err(e) => {
                         error!(target_id, requirement_id = %req_id, error = %e, "AutoWork inject failed");
-                        // errored turn → expects_verdict is irrelevant (re-pend / fail).
+                        // errored turn -> expects_verdict is irrelevant (re-pend / fail).
                         if let Err(e) = deps
                             .service
                             .finalize_claim_if_needed(
@@ -1792,20 +2215,36 @@ async fn run_loop(
                 );
                 // Persist disabled so the cap survives restarts: boot resume must
                 // not resurrect a binding that already met its completion cap.
+                let disabled = AutoWorkConfig::normalize(false, None, None)
+                    .expect("disabled AutoWork config is canonical");
+                let operation_id =
+                    format!("autowork:max:v1:{target_id}:{config_revision}");
                 if let Err(e) = deps
                     .service
-                    .save_autowork_config(kind, target_id, false, None, None)
+                    .save_autowork_config(
+                        &deps.authoritative_user_id,
+                        kind,
+                        target_id,
+                        disabled,
+                        &config_revision,
+                        Some(&operation_id),
+                    )
                     .await
                 {
-                    warn!(target_id, tag, error = %e, "Failed to persist autowork disable on max");
+                    warn!(
+                        target_id,
+                        tag,
+                        error = %e,
+                        "AutoWork cap did not overwrite a newer persisted config"
+                    );
                 }
-                // off: the cap disabled the binding → drop the session-list icon.
+                // off: the cap disabled the binding -> drop the session-list icon.
                 emit_autowork_progress(&deps, kind, target_id, tag, &progress, false);
                 break;
             }
         }
 
-        // idle: the turn finished and no requirement is in flight → broadcast so
+        // idle: the turn finished and no requirement is in flight -> broadcast so
         // the session-list icon returns to the idle colour in step with the
         // per-session control (which only looks fresh because it re-GETs on open).
         emit_autowork_progress(&deps, kind, target_id, tag, &progress, true);
@@ -1852,48 +2291,27 @@ async fn inject_and_wait(
     claim_generation: i64,
     claim_token: &str,
     recovered_active: bool,
-    build_lease: RuntimeBuildLease,
+    build_lease: AutoWorkRuntimeBuildLease,
 ) -> Result<(TurnEnd, Option<String>, bool), AppError> {
     let conv_id = conversation_id;
+    build_lease.ensure_scope(&deps.authoritative_user_id, conversation_id)?;
     build_lease.ensure_active()?;
-    // Load the conversation row to resolve agent_type / model / workspace / user.
-    let row = deps
-        .conversation_repo
-        .get(conv_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("conversation {conversation_id}")))?;
+    let preparation = deps
+        .conversation
+        .prepare_autowork_turn(
+            &deps.authoritative_user_id,
+            conversation_id,
+            &build_lease,
+        )
+        .await?;
+    preparation
+        .snapshot
+        .ensure_scope(&deps.authoritative_user_id, conversation_id)?;
+    build_lease.ensure_snapshot(&preparation.snapshot)?;
     build_lease.ensure_active()?;
-
-    let user_id = UserId::parse(&row.user_id).map_err(|error| {
-        AppError::Forbidden(format!("AutoWork conversation has invalid owner identity: {error}"))
-    })?;
-    if user_id.as_str() != deps.authoritative_user_id.as_ref() {
-        return Err(AppError::Forbidden(
-            "AutoWork requires an installation-owner Conversation".into(),
-        ));
-    }
-    let user_id = user_id.into_string();
-
-    let agent_type = parse_agent_type(&row.r#type)?;
-    let model = nomifun_conversation::runtime_options::provider_model_from_conversation_row(&row)?;
-    let delegation_policy =
-        nomifun_conversation::runtime_options::delegation_policy_from_conversation_row(&row)?;
-    let extra: serde_json::Value = serde_json::from_str(&row.extra).map_err(|error| {
-        AppError::Internal(format!(
-            "conversation {conversation_id} has invalid extra JSON: {error}"
-        ))
-    })?;
-    if !extra.is_object() {
-        return Err(AppError::Internal(format!(
-            "conversation {conversation_id} extra must be a JSON object"
-        )));
-    }
-    let workspace = extra
-        .get("workspace")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let user_id = deps.authoritative_user_id.to_string();
+    let agent_type = preparation.agent_type;
+    let workspace = preparation.workspace;
 
     // Plan without creating the workspace. This yields the exact prompt paths
     // needed for full-payload receipt preflight before runtime/KB activation.
@@ -1904,6 +2322,8 @@ async fn inject_and_wait(
         .service
         .plan_attachments_for_prompt(&req.requirement_id, ws_path)
         .await?;
+    build_lease.ensure_snapshot(&preparation.snapshot)?;
+    build_lease.ensure_active()?;
     let prompt = build_requirement_prompt(
         tag,
         req,
@@ -1912,7 +2332,7 @@ async fn inject_and_wait(
         agent_type,
         &attachment_plan.attachments,
     );
-    let send_req = SendMessageRequest {
+    let send_message = AutoWorkMessage {
         content: prompt,
         files: vec![],
         inject_skills: vec![],
@@ -1924,14 +2344,7 @@ async fn inject_and_wait(
     // The send seam consumes `send_req`; an error may nevertheless arrive
     // after its atomic receipt INSERT committed, and treating that as
     // pre-admission would mint a new generation and duplicate the turn.
-    let send_receipt_probe = SendMessageRequest {
-        content: send_req.content.clone(),
-        files: send_req.files.clone(),
-        inject_skills: send_req.inject_skills.clone(),
-        hidden: send_req.hidden,
-        origin: send_req.origin.clone(),
-        channel_platform: send_req.channel_platform.clone(),
-    };
+    let send_receipt_probe = send_message.clone();
     let operation_id =
         autowork_turn_idempotency_key(&req.requirement_id, claim_generation, claim_token);
     let expects_verdict = crate::prompt::has_native_requirement_tools(agent_type);
@@ -1959,48 +2372,34 @@ async fn inject_and_wait(
     }
     build_lease.ensure_active()?;
 
-    let options = AgentRuntimeBuildOptions {
-        user_id: user_id.clone(),
-        agent_type,
-        workspace,
-        model,
-        conversation_id: conversation_id.to_string(),
-        delegation_policy,
-        extra,
-        // Stamp/validate the nomi session against this conversation instance so
-        // a reused integer id never resumes a stale (e.g. deleted) conversation.
-        conversation_created_at: Some(row.created_at),
-        workspace_binding_lease: None,
-    };
-
-    // Runtime construction, knowledge mounting, attachment activation and event
-    // subscription are receiver-owned. The Session owner performs them only
-    // after the raw Requirement capability is validated in the same SQLite
-    // transaction as receipt INSERT + Conversation Running, and keeps one
-    // preparation fence until the local turn owner has been handed off.
+    // Runtime construction and canonical Session projection are receiver-owned.
+    // The host resolves model/delegation/workspace/creation identity and applies
+    // this narrow overlay only after durable admission.
     let authority = RequirementConversationTurnAuthority {
         requirement_id: req.requirement_id.clone(),
         claim_generation,
         claim_token: claim_token.to_owned(),
     };
     let authority_probe = authority.clone();
-    let runtime_preparation = BackgroundTurnRuntimePreparation {
-        runtime_options: options,
-        clear_context: false,
-        pre_send_hook: Some(Arc::new(AutoWorkAttachmentActivation {
-            service: Arc::clone(&deps.service),
-            plan: attachment_plan,
-        })),
+    let request = AutoWorkTurnRequest {
+        message: send_message,
+        runtime_overlay: AutoWorkRuntimeOverlay {
+            clear_context: false,
+            pre_send_hook: Some(Arc::new(AutoWorkAttachmentActivation {
+                service: Arc::clone(&deps.service),
+                plan: attachment_plan,
+            })),
+        },
+        session_snapshot: preparation.snapshot,
     };
-    let (observed, send_error_context) = match deps
+    let (delivery, send_error_context) = match deps
         .conversation
-        .send_observed_turn(
+        .send_turn(
             &user_id,
             conversation_id,
             &operation_id,
-            send_req,
+            request,
             build_lease,
-            runtime_preparation,
             authority,
         )
         .await
@@ -2025,14 +2424,7 @@ async fn inject_and_wait(
                 )
                 .await
             {
-                Ok(Some(delivery)) => (
-                    ObservedIdempotentMessageDelivery {
-                        delivery,
-                        runtime: None,
-                        events: None,
-                    },
-                    Some(error_message),
-                ),
+                Ok(Some(delivery)) => (delivery, Some(error_message)),
                 Ok(None) => return Err(error),
                 Err(lookup_error) => {
                     return Ok(autowork_blocked_delivery_outcome(format!(
@@ -2043,11 +2435,6 @@ async fn inject_and_wait(
             }
         }
     };
-    let ObservedIdempotentMessageDelivery {
-        delivery,
-        runtime,
-        events,
-    } = observed;
     let reconciled = match reconcile_accepted_autowork_delivery(
         deps.conversation.as_ref(),
         &user_id,
@@ -2088,11 +2475,8 @@ async fn inject_and_wait(
         }
     }
 
-    // The early event subscription returned by the receiver is auxiliary only.
-    // Durable completion is polled by the same logical Requirement operation,
-    // so an extremely fast finish, lagged broadcast, runtime eviction, or
-    // process scheduling gap cannot lose the terminal boundary.
-    drop(runtime);
+    // Durable completion is polled by the same logical Requirement operation;
+    // runtime/event internals remain entirely inside the canonical Session host.
     let outcome = wait_for_conversation_receipt_with_renewal(
         deps.service.as_ref(),
         deps.conversation.as_ref(),
@@ -2105,7 +2489,6 @@ async fn inject_and_wait(
         &operation_id,
         &delivery.message_id,
         expects_verdict,
-        events,
     )
     .await;
     Ok((
@@ -2136,7 +2519,7 @@ fn autowork_turn_idempotency_key(
 }
 
 struct ReconciledAutoWorkDelivery {
-    delivery: IdempotentMessageDelivery,
+    delivery: AutoWorkMessageDelivery,
     /// An accepted replay may wait only after the Session owner proves that
     /// the exact operation still has a live local owner or has completed the
     /// audited local orphan-reconciliation path.
@@ -2144,19 +2527,19 @@ struct ReconciledAutoWorkDelivery {
 }
 
 fn authorize_accepted_receipt_wait(
-    disposition: BackgroundTurnReconciliationDisposition,
+    disposition: AutoWorkReconciliationDisposition,
     message_id: &str,
 ) -> Result<(), AppError> {
     match disposition {
-        BackgroundTurnReconciliationDisposition::LiveExactOwnerWait
-        | BackgroundTurnReconciliationDisposition::ReconciledOrTerminalReRead => Ok(()),
-        BackgroundTurnReconciliationDisposition::ExternalProofRequiredFailClosed => {
+        AutoWorkReconciliationDisposition::LiveExactOwnerWait
+        | AutoWorkReconciliationDisposition::ReconciledOrTerminalReRead => Ok(()),
+        AutoWorkReconciliationDisposition::ExternalProofRequiredFailClosed => {
             Err(AppError::Conflict(format!(
                 "accepted delivery {message_id} belongs to an external or unknown runtime whose \
                  terminal state cannot be proven locally"
             )))
         }
-        BackgroundTurnReconciliationDisposition::StaleConflict => {
+        AutoWorkReconciliationDisposition::StaleConflict => {
             Err(AppError::Conflict(format!(
                 "accepted delivery {message_id} no longer owns the exact Conversation operation \
                  generation"
@@ -2171,7 +2554,7 @@ async fn reconcile_accepted_autowork_delivery(
     user_id: &str,
     conversation_id: &str,
     idempotency_key: &str,
-    delivery: IdempotentMessageDelivery,
+    delivery: AutoWorkMessageDelivery,
 ) -> Result<ReconciledAutoWorkDelivery, AppError> {
     reconcile_accepted_autowork_delivery_timed(
         conversation,
@@ -2190,7 +2573,7 @@ async fn reconcile_accepted_autowork_delivery_timed(
     user_id: &str,
     conversation_id: &str,
     idempotency_key: &str,
-    delivery: IdempotentMessageDelivery,
+    delivery: AutoWorkMessageDelivery,
     reconciliation_timeout: Duration,
 ) -> Result<ReconciledAutoWorkDelivery, AppError> {
     if !delivery.replayed || delivery.completed {
@@ -2220,7 +2603,7 @@ async fn reconcile_accepted_autowork_delivery_timed(
             .public_turn_delivery_state(user_id, conversation_id, idempotency_key)
             .await?
         {
-            PublicTurnDeliveryState::Accepted { message_id }
+            AutoWorkTurnDeliveryState::Accepted { message_id }
                 if message_id == expected_message_id =>
             {
                 Ok(ReconciledAutoWorkDelivery {
@@ -2228,7 +2611,7 @@ async fn reconcile_accepted_autowork_delivery_timed(
                     accepted_wait_authorized: true,
                 })
             }
-            PublicTurnDeliveryState::Completed(refreshed)
+            AutoWorkTurnDeliveryState::Completed(refreshed)
                 if refreshed.message_id == expected_message_id =>
             {
                 Ok(ReconciledAutoWorkDelivery {
@@ -2236,14 +2619,14 @@ async fn reconcile_accepted_autowork_delivery_timed(
                     accepted_wait_authorized: false,
                 })
             }
-            PublicTurnDeliveryState::Accepted { message_id }
-            | PublicTurnDeliveryState::Completed(IdempotentMessageDelivery { message_id, .. }) => {
+            AutoWorkTurnDeliveryState::Accepted { message_id }
+            | AutoWorkTurnDeliveryState::Completed(AutoWorkMessageDelivery { message_id, .. }) => {
                 Err(AppError::Conflict(format!(
                     "accepted delivery {} resolved to a different immutable message {message_id}",
                     expected_message_id
                 )))
             }
-            PublicTurnDeliveryState::Missing => Err(AppError::Conflict(format!(
+            AutoWorkTurnDeliveryState::Missing => Err(AppError::Conflict(format!(
                 "accepted delivery {} disappeared during exact quiescent reconciliation",
                 expected_message_id
             ))),
@@ -2271,13 +2654,13 @@ fn autowork_blocked_delivery_outcome(reason: String) -> (TurnEnd, Option<String>
 }
 
 fn recovered_claim_receipt_gate(
-    state: &PublicTurnDeliveryState,
+    state: &AutoWorkTurnDeliveryState,
     claim_generation: i64,
 ) -> Result<(), String> {
     match state {
-        PublicTurnDeliveryState::Accepted { .. }
-        | PublicTurnDeliveryState::Completed(_) => Ok(()),
-        PublicTurnDeliveryState::Missing => Err(format!(
+        AutoWorkTurnDeliveryState::Accepted { .. }
+        | AutoWorkTurnDeliveryState::Completed(_) => Ok(()),
+        AutoWorkTurnDeliveryState::Missing => Err(format!(
             "recovered Conversation claim generation {claim_generation} has no durable \
              delivery receipt; its prior execution outcome cannot be proven"
         )),
@@ -2285,7 +2668,7 @@ fn recovered_claim_receipt_gate(
 }
 
 fn autowork_replayed_delivery_outcome(
-    delivery: &IdempotentMessageDelivery,
+    delivery: &AutoWorkMessageDelivery,
     claim_generation: i64,
     expects_verdict: bool,
 ) -> Option<(TurnEnd, Option<String>, bool)> {
@@ -2310,8 +2693,9 @@ fn autowork_replayed_delivery_outcome(
 
     let note = delivery
         .result_text
-        .clone()
-        .or_else(|| delivery.result_error.clone());
+        .as_deref()
+        .and_then(finalize_note)
+        .or_else(|| delivery.result_error.as_deref().and_then(finalize_note));
     match delivery.result_ok {
         Some(true) => Some((TurnEnd::Clean, note, expects_verdict)),
         // A completed error proves only that the observer saw an error; it
@@ -2346,11 +2730,9 @@ fn autowork_replayed_delivery_outcome(
 /// Observe one already-admitted AutoWork Conversation turn through its durable
 /// receipt while renewing the exact Requirement capability.
 ///
-/// The event receiver is deliberately auxiliary: it improves the human note,
-/// but Closed/Lagged/very-fast completion cannot decide whether the work
-/// finished. Only the unique logical AutoWork receipt can do that. Once this
-/// function starts, absence, lookup failure, lease loss and timeout are all
-/// ambiguous post-admission outcomes and therefore force NeedsReview.
+/// Only the unique logical AutoWork receipt decides whether the work finished.
+/// Once this function starts, absence, lookup failure, lease loss and timeout
+/// are all ambiguous post-admission outcomes and therefore force NeedsReview.
 #[derive(Clone, Copy)]
 struct ConversationReceiptWaitTiming {
     lease_renew_interval: Duration,
@@ -2379,7 +2761,6 @@ async fn wait_for_conversation_receipt_with_renewal(
     operation_id: &str,
     expected_message_id: &str,
     expects_verdict: bool,
-    events: Option<broadcast::Receiver<AgentStreamEvent>>,
 ) -> (TurnEnd, Option<String>, bool) {
     wait_for_conversation_receipt_with_renewal_timed(
         service,
@@ -2393,7 +2774,6 @@ async fn wait_for_conversation_receipt_with_renewal(
         operation_id,
         expected_message_id,
         expects_verdict,
-        events,
         ConversationReceiptWaitTiming::PRODUCTION,
     )
     .await
@@ -2412,15 +2792,11 @@ async fn wait_for_conversation_receipt_with_renewal_timed(
     operation_id: &str,
     expected_message_id: &str,
     expects_verdict: bool,
-    mut events: Option<broadcast::Receiver<AgentStreamEvent>>,
     timing: ConversationReceiptWaitTiming,
 ) -> (TurnEnd, Option<String>, bool) {
     let mut renew = interval(timing.lease_renew_interval);
     renew.tick().await;
     let mut receipts = interval(timing.receipt_poll_interval);
-    let mut event_note = String::new();
-    let mut event_note_checkpoint: Option<String> = None;
-
     let wait = async {
         loop {
             tokio::select! {
@@ -2468,12 +2844,12 @@ async fn wait_for_conversation_receipt_with_renewal_timed(
                         )
                         .await
                     {
-                        Ok(PublicTurnDeliveryState::Completed(delivery))
+                        Ok(AutoWorkTurnDeliveryState::Completed(delivery))
                             if delivery.message_id == expected_message_id && delivery.completed =>
                         {
                             return DurableConversationReceiptWait::Completed(delivery);
                         }
-                        Ok(PublicTurnDeliveryState::Completed(delivery)) => {
+                        Ok(AutoWorkTurnDeliveryState::Completed(delivery)) => {
                             return DurableConversationReceiptWait::Ambiguous(format!(
                                 "The durable AutoWork receipt for Conversation claim generation \
                                  {claim_generation} changed message identity or was not \
@@ -2482,9 +2858,9 @@ async fn wait_for_conversation_receipt_with_renewal_timed(
                                 delivery.message_id
                             ));
                         }
-                        Ok(PublicTurnDeliveryState::Accepted { message_id })
+                        Ok(AutoWorkTurnDeliveryState::Accepted { message_id })
                             if message_id == expected_message_id => {}
-                        Ok(PublicTurnDeliveryState::Accepted { message_id }) => {
+                        Ok(AutoWorkTurnDeliveryState::Accepted { message_id }) => {
                             return DurableConversationReceiptWait::Ambiguous(format!(
                                 "The accepted AutoWork receipt for Conversation claim generation \
                                  {claim_generation} changed message identity (expected \
@@ -2492,7 +2868,7 @@ async fn wait_for_conversation_receipt_with_renewal_timed(
                                  not executed again."
                             ));
                         }
-                        Ok(PublicTurnDeliveryState::Missing) => {
+                        Ok(AutoWorkTurnDeliveryState::Missing) => {
                             return DurableConversationReceiptWait::Ambiguous(format!(
                                 "The exact AutoWork receipt for Conversation claim generation \
                                  {claim_generation} disappeared after admission; the Requirement \
@@ -2508,41 +2884,13 @@ async fn wait_for_conversation_receipt_with_renewal_timed(
                         }
                     }
                 }
-                event = async {
-                    match events.as_mut() {
-                        Some(receiver) => receiver.recv().await,
-                        None => std::future::pending::<
-                            Result<AgentStreamEvent, broadcast::error::RecvError>
-                        >().await,
-                    }
-                } => {
-                    match event {
-                        Ok(event) => observe_event_note(
-                            &mut event_note,
-                            &mut event_note_checkpoint,
-                            event,
-                        ),
-                        Err(broadcast::error::RecvError::Closed) => {
-                            // Receipt polling remains authoritative even if a
-                            // runtime is torn down before this observer runs.
-                            events = None;
-                        }
-                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            warn!(
-                                conversation_id,
-                                skipped,
-                                "Auxiliary AutoWork event stream lagged; relying on durable receipt"
-                            );
-                        }
-                    }
-                }
             }
         }
     };
 
     match timeout(timing.hard_timeout, wait).await {
         Ok(DurableConversationReceiptWait::Completed(delivery)) => {
-            let mut outcome = autowork_replayed_delivery_outcome(
+            autowork_replayed_delivery_outcome(
                 &delivery,
                 claim_generation,
                 expects_verdict,
@@ -2551,11 +2899,7 @@ async fn wait_for_conversation_receipt_with_renewal_timed(
                 autowork_blocked_delivery_outcome(
                     "durable receipt observation returned fresh execution authority".to_owned(),
                 )
-            });
-            if outcome.1.is_none() {
-                outcome.1 = finalize_note(&event_note);
-            }
-            outcome
+            })
         }
         Ok(DurableConversationReceiptWait::Ambiguous(detail)) => {
             (TurnEnd::Ambiguous, Some(detail), true)
@@ -2569,51 +2913,6 @@ async fn wait_for_conversation_receipt_with_renewal_timed(
             )),
             true,
         ),
-    }
-}
-
-/// Append `chunk` to `buf`, keeping it bounded (tail-biased) so a long streaming
-/// turn cannot grow the buffer without limit. Truncation respects char boundaries.
-fn append_bounded(buf: &mut String, chunk: &str) {
-    buf.push_str(chunk);
-    // chars are 鈮? bytes; keep roughly twice the char cap as a byte ceiling.
-    let max_bytes = MAX_NOTE_CHARS * 4 * 2;
-    if buf.len() > max_bytes {
-        let mut cut = buf.len() - MAX_NOTE_CHARS * 4;
-        while cut < buf.len() && !buf.is_char_boundary(cut) {
-            cut += 1;
-        }
-        buf.drain(..cut);
-    }
-}
-
-fn observe_event_note(
-    event_note: &mut String,
-    checkpoint: &mut Option<String>,
-    event: AgentStreamEvent,
-) {
-    match event {
-        AgentStreamEvent::Start(_) => {
-            *checkpoint = Some(event_note.clone());
-        }
-        AgentStreamEvent::OutputDiscarded(data) => {
-            if let Some(retained) = checkpoint.as_ref() {
-                event_note.clone_from(retained);
-                *checkpoint = Some(event_note.clone());
-            } else {
-                event_note.clear();
-                append_bounded(
-                    event_note,
-                    &format!(
-                        "Attempt {} discarded output without an AutoWork stream checkpoint",
-                        data.restart_attempt
-                    ),
-                );
-            }
-        }
-        AgentStreamEvent::Text(text) => append_bounded(event_note, &text.content),
-        AgentStreamEvent::Error(error) => append_bounded(event_note, &error.message),
-        _ => {}
     }
 }
 
@@ -3242,30 +3541,21 @@ async fn wait_terminal_turn_end(
     }
 }
 
-/// Resolve a conversation's `type` column to a live engine.
-///
-/// Rejects anything that is not a live engine. This column is free-form TEXT,
-/// so a conversation bound to a retired engine is still readable — coercing it
-/// to a surviving engine would resurrect it with the wrong runtime and the
-/// wrong `extra` shape, failing much later and far from the cause.
-fn parse_agent_type(agent_type_str: &str) -> Result<nomifun_common::AgentType, AppError> {
-    match agent_type_str {
-        "nomi" => Ok(nomifun_common::AgentType::Nomi),
-        other => Err(AppError::Internal(format!(
-            "conversation names agent type '{other}', which no longer exists in this build"
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conversation_port::compatibility::{
+        TestMessageDelivery as IdempotentMessageDelivery,
+        TestReconciliationDisposition as BackgroundTurnReconciliationDisposition,
+        TestRuntimeBuildLease as RuntimeBuildLease,
+        TestTurnDeliveryState as PublicTurnDeliveryState,
+    };
     use nomifun_terminal::TerminalDescription;
     use nomifun_terminal::error::TerminalError;
 
     #[test]
     fn failure_backoff_escalates_and_caps() {
-        // 1-based consecutive failures → 1s, 2s, 4s, 8s, 16s, then capped at 30s.
+        // 1-based consecutive failures -> 1s, 2s, 4s, 8s, 16s, then capped at 30s.
         assert_eq!(failure_backoff(1), Duration::from_secs(1));
         assert_eq!(failure_backoff(2), Duration::from_secs(2));
         assert_eq!(failure_backoff(3), Duration::from_secs(4));
@@ -3275,55 +3565,6 @@ mod tests {
         assert_eq!(failure_backoff(100), Duration::from_secs(30), "stays capped");
         // Never zero —a failure must always insert some delay before re-claim.
         assert!(failure_backoff(1) > Duration::ZERO);
-    }
-
-    #[test]
-    fn autowork_event_note_retracts_only_text_after_the_latest_start() {
-        use nomifun_ai_agent::protocol::events::{
-            OutputDiscardedEventData, StartEventData, TextEventData,
-        };
-
-        let mut note = String::new();
-        let mut checkpoint = None;
-        observe_event_note(
-            &mut note,
-            &mut checkpoint,
-            AgentStreamEvent::Start(StartEventData::default()),
-        );
-        observe_event_note(
-            &mut note,
-            &mut checkpoint,
-            AgentStreamEvent::Text(TextEventData {
-                content: "prefix ".to_owned(),
-            }),
-        );
-        observe_event_note(
-            &mut note,
-            &mut checkpoint,
-            AgentStreamEvent::Start(StartEventData::default()),
-        );
-        observe_event_note(
-            &mut note,
-            &mut checkpoint,
-            AgentStreamEvent::Text(TextEventData {
-                content: "discarded".to_owned(),
-            }),
-        );
-        observe_event_note(
-            &mut note,
-            &mut checkpoint,
-            AgentStreamEvent::OutputDiscarded(OutputDiscardedEventData {
-                restart_attempt: 2,
-            }),
-        );
-        observe_event_note(
-            &mut note,
-            &mut checkpoint,
-            AgentStreamEvent::Text(TextEventData {
-                content: "answer".to_owned(),
-            }),
-        );
-        assert_eq!(note, "prefix answer");
     }
 
     #[test]
@@ -3630,6 +3871,488 @@ mod tests {
         assert!(entered.load(Ordering::SeqCst));
     }
 
+    struct RunnerTestHostLease {
+        active: bool,
+    }
+
+    struct RunnerTestSessionPort {
+        issuer: crate::AutoWorkRuntimeLeaseIssuer,
+        owner_id: String,
+        session_id: String,
+        config: Mutex<AutoWorkConfigSnapshot>,
+        revision: std::sync::atomic::AtomicU64,
+        cancel_count: std::sync::atomic::AtomicUsize,
+        fail_begin: AtomicBool,
+        block_cancel: AtomicBool,
+        cancel_started: Notify,
+        cancel_release: Notify,
+    }
+
+    impl RunnerTestSessionPort {
+        fn new(owner_id: String, session_id: String) -> Self {
+            Self {
+                issuer: crate::AutoWorkRuntimeLeaseIssuer::new(),
+                owner_id,
+                session_id,
+                config: Mutex::new(AutoWorkConfigSnapshot {
+                    config: AutoWorkConfig::default(),
+                    revision: "session:0".to_owned(),
+                    operation_id: None,
+                }),
+                revision: std::sync::atomic::AtomicU64::new(0),
+                cancel_count: std::sync::atomic::AtomicUsize::new(0),
+                fail_begin: AtomicBool::new(false),
+                block_cancel: AtomicBool::new(false),
+                cancel_started: Notify::new(),
+                cancel_release: Notify::new(),
+            }
+        }
+
+        fn set_snapshot(&self, config: AutoWorkConfig, revision: u64) {
+            self.revision.store(revision, Ordering::SeqCst);
+            *self.config.lock().expect("runner test config lock") =
+                AutoWorkConfigSnapshot {
+                    config,
+                    revision: format!("session:{revision}"),
+                    operation_id: None,
+                };
+        }
+
+        fn assert_scope(&self, owner_id: &str, session_id: &str) -> Result<(), AppError> {
+            if owner_id != self.owner_id || session_id != self.session_id {
+                return Err(AppError::Forbidden(
+                    "runner test Session scope mismatch".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AutoWorkSessionPort for RunnerTestSessionPort {
+        async fn prepare_autowork_turn(
+            &self,
+            owner_id: &str,
+            session_id: &str,
+            build_lease: &AutoWorkRuntimeBuildLease,
+        ) -> Result<crate::AutoWorkSessionPreparation, AppError> {
+            self.assert_scope(owner_id, session_id)?;
+            build_lease.ensure_scope(owner_id, session_id)?;
+            let snapshot = self.config.lock().expect("runner test config lock").clone();
+            Ok(crate::AutoWorkSessionPreparation {
+                agent_type: nomifun_common::AgentType::Nomi,
+                workspace: "C:\\runner-test".to_owned(),
+                snapshot: self
+                    .issuer
+                    .issue_snapshot(owner_id, session_id, snapshot.revision)?,
+            })
+        }
+
+        fn begin_runtime_preparation(
+            &self,
+            session_id: &str,
+            requester_user_id: &str,
+        ) -> Result<AutoWorkRuntimeBuildLease, AppError> {
+            self.assert_scope(requester_user_id, session_id)?;
+            if self.fail_begin.load(Ordering::SeqCst) {
+                return Err(AppError::Conflict(
+                    "runner test preparation fenced".to_owned(),
+                ));
+            }
+            self.issuer.issue(
+                requester_user_id,
+                session_id,
+                RunnerTestHostLease { active: true },
+                |lease| {
+                    lease
+                        .active
+                        .then_some(())
+                        .ok_or_else(|| AppError::Conflict("inactive test lease".to_owned()))
+                },
+            )
+        }
+
+        fn user_cancelled_since(&self, _conversation_id: &str, _since_ms: i64) -> bool {
+            false
+        }
+
+        async fn cancel_active_turn(&self, conversation_id: &str) -> Result<(), AppError> {
+            self.assert_scope(&self.owner_id, conversation_id)?;
+            self.cancel_count.fetch_add(1, Ordering::SeqCst);
+            if self.block_cancel.load(Ordering::SeqCst) {
+                self.cancel_started.notify_one();
+                self.cancel_release.notified().await;
+            }
+            Ok(())
+        }
+
+        async fn read_config(
+            &self,
+            owner_id: &str,
+            session_id: &str,
+        ) -> Result<AutoWorkConfigSnapshot, AppError> {
+            self.assert_scope(owner_id, session_id)?;
+            Ok(self.config.lock().expect("runner test config lock").clone())
+        }
+
+        async fn save_config(
+            &self,
+            command: crate::AutoWorkSessionConfigCommand,
+        ) -> Result<AutoWorkConfigSnapshot, AppError> {
+            self.assert_scope(&command.owner_id, &command.session_id)?;
+            let mut current = self.config.lock().expect("runner test config lock");
+            if command.operation_id.is_some()
+                && current.operation_id == command.operation_id
+            {
+                if current.config == command.config {
+                    return Ok(current.clone());
+                }
+                return Err(AppError::Conflict(
+                    "runner test operation replay changed payload".to_owned(),
+                ));
+            }
+            if current.revision != command.expected_revision {
+                return Err(AppError::Conflict(
+                    "runner test config revision changed".to_owned(),
+                ));
+            }
+            let revision = if current.config == command.config {
+                current.revision.clone()
+            } else {
+                let next = self.revision.fetch_add(1, Ordering::SeqCst) + 1;
+                format!("session:{next}")
+            };
+            *current = AutoWorkConfigSnapshot {
+                config: command.config,
+                revision,
+                operation_id: command.operation_id,
+            };
+            Ok(current.clone())
+        }
+
+        async fn send_turn(
+            &self,
+            _user_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+            _request: AutoWorkTurnRequest,
+            _build_lease: AutoWorkRuntimeBuildLease,
+            _authority: RequirementConversationTurnAuthority,
+        ) -> Result<AutoWorkMessageDelivery, AppError> {
+            Err(AppError::Conflict(
+                "runner lifecycle test does not send turns".to_owned(),
+            ))
+        }
+
+        async fn delivery_result(
+            &self,
+            _user_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+            _request: &AutoWorkMessage,
+            _authority: &RequirementConversationTurnAuthority,
+        ) -> Result<Option<AutoWorkMessageDelivery>, AppError> {
+            Ok(None)
+        }
+
+        async fn public_turn_delivery_state(
+            &self,
+            _user_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+        ) -> Result<AutoWorkTurnDeliveryState, AppError> {
+            Ok(AutoWorkTurnDeliveryState::Missing)
+        }
+
+        async fn reconcile_quiescent_running_turn(
+            &self,
+            _user_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+        ) -> Result<AutoWorkReconciliationDisposition, AppError> {
+            Ok(AutoWorkReconciliationDisposition::ExternalProofRequiredFailClosed)
+        }
+    }
+
+    struct BlockingScheduledLookup {
+        binding: Mutex<crate::ScheduledAutoWorkSession>,
+        listed: Notify,
+        release: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::AutoWorkScheduledSessionLookup for BlockingScheduledLookup {
+        async fn list_enabled_scheduled_sessions(
+            &self,
+            _owner_id: &str,
+        ) -> Result<crate::ScheduledAutoWorkSessionScan, AppError> {
+            let binding = self
+                .binding
+                .lock()
+                .expect("blocking scheduled lookup")
+                .clone();
+            self.listed.notify_one();
+            self.release.notified().await;
+            Ok(crate::ScheduledAutoWorkSessionScan {
+                sessions: vec![binding],
+                quarantined: Vec::new(),
+            })
+        }
+    }
+
+    async fn runner_fixture(
+        lookup: Option<Arc<dyn crate::AutoWorkScheduledSessionLookup>>,
+    ) -> (
+        AutoWorkRunner,
+        Arc<RunnerTestSessionPort>,
+        nomifun_db::Database,
+        String,
+        String,
+    ) {
+        use nomifun_db::{
+            IAgentMetadataRepository, IConversationRepository, IRequirementRepository,
+            SqliteAgentMetadataRepository, SqliteConversationRepository,
+            SqliteRequirementRepository, init_database_memory,
+        };
+        use nomifun_realtime::UserEventSink;
+
+        #[derive(Default)]
+        struct RunnerNoopBroadcaster;
+        impl UserEventSink for RunnerNoopBroadcaster {
+            fn send_to_user(
+                &self,
+                _user_id: &str,
+                _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+            ) {
+            }
+        }
+
+        let database = init_database_memory().await.expect("runner test database");
+        let owner_id = nomifun_db::installation_owner_id(database.pool())
+            .await
+            .expect("installation owner");
+        let session_id = ConversationId::new().into_string();
+        sqlx::query(
+            "INSERT INTO conversations \
+                 (conversation_id, user_id, name, type, extra, created_at, updated_at) \
+             VALUES (?1, ?2, 'AutoWork Runner Test', 'nomi', '{}', 0, 0)",
+        )
+        .bind(&session_id)
+        .bind(&owner_id)
+        .execute(database.pool())
+        .await
+        .expect("runner test Session");
+
+        let session_port = Arc::new(RunnerTestSessionPort::new(
+            owner_id.clone(),
+            session_id.clone(),
+        ));
+        let conversation_repo: Arc<dyn IConversationRepository> = Arc::new(
+            SqliteConversationRepository::new(database.pool().clone()),
+        );
+        let requirement_repo: Arc<dyn IRequirementRepository> = Arc::new(
+            SqliteRequirementRepository::new(database.pool().clone()),
+        );
+        let mut service = RequirementService::new(
+            requirement_repo,
+            crate::RequirementEventEmitter::new(
+                Arc::new(RunnerNoopBroadcaster),
+                Arc::from(owner_id.as_str()),
+            ),
+        )
+        .with_session_port(session_port.clone(), conversation_repo);
+        if let Some(lookup) = lookup {
+            service = service.with_scheduled_session_lookup(lookup);
+        }
+        let agent_repo: Arc<dyn IAgentMetadataRepository> = Arc::new(
+            SqliteAgentMetadataRepository::new(database.pool().clone()),
+        );
+        let runner = AutoWorkRunner::new(Arc::new(AutoWorkRunnerDeps {
+            authoritative_user_id: Arc::from(owner_id.as_str()),
+            service: Arc::new(service),
+            conversation: session_port.clone(),
+            agent_registry: AgentRegistry::new(agent_repo),
+            terminal_driver: None,
+            idmm: None,
+            wake: Arc::new(Notify::new()),
+            requirement_mcp_enabled: false,
+        }));
+        (runner, session_port, database, owner_id, session_id)
+    }
+
+    #[tokio::test]
+    async fn identical_enable_is_idempotent_and_keeps_the_same_loop_generation() {
+        let (runner, port, _database, owner_id, session_id) =
+            runner_fixture(None).await;
+        let config = AutoWorkConfig::normalize(true, Some("release"), Some(4)).unwrap();
+        let first = runner
+            .apply_config(
+                &owner_id,
+                AutoWorkTargetKind::Conversation,
+                &session_id,
+                config.clone(),
+                None,
+                Some("test:enable:1"),
+            )
+            .await
+            .expect("first enable");
+        let key = (AutoWorkTargetKind::Conversation, session_id.clone());
+        let first_generation = runner
+            .handles
+            .get(&key)
+            .expect("running handle")
+            .generation;
+
+        let replay = runner
+            .apply_config(
+                &owner_id,
+                AutoWorkTargetKind::Conversation,
+                &session_id,
+                config,
+                Some(&first.revision),
+                Some("test:enable:2"),
+            )
+            .await
+            .expect("identical enable");
+        let second_generation = runner
+            .handles
+            .get(&key)
+            .expect("same running handle")
+            .generation;
+
+        assert_eq!(first_generation, second_generation);
+        assert_eq!(first.revision, replay.revision);
+        assert_eq!(port.cancel_count.load(Ordering::SeqCst), 0);
+        runner.shutdown().await.expect("runner shutdown");
+    }
+
+    #[tokio::test]
+    async fn failed_start_after_publication_does_not_leave_a_ghost_handle() {
+        let (runner, port, _database, owner_id, session_id) =
+            runner_fixture(None).await;
+        port.fail_begin.store(true, Ordering::SeqCst);
+        let config = AutoWorkConfig::normalize(true, Some("ghost"), None).unwrap();
+        runner
+            .apply_config(
+                &owner_id,
+                AutoWorkTargetKind::Conversation,
+                &session_id,
+                config,
+                None,
+                Some("test:ghost"),
+            )
+            .await
+            .expect("config may persist before startup preflight");
+
+        timeout(Duration::from_secs(1), async {
+            while runner.is_running(AutoWorkTargetKind::Conversation, &session_id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed loop must remove its published handle");
+        assert!(runner.handles.is_empty());
+        runner.shutdown().await.expect("runner shutdown");
+    }
+
+    #[tokio::test]
+    async fn boot_resume_rechecks_revision_and_does_not_revive_a_disabled_snapshot() {
+        let enabled = AutoWorkConfig::normalize(true, Some("boot"), Some(2)).unwrap();
+        let lookup = Arc::new(BlockingScheduledLookup {
+            binding: Mutex::new(crate::ScheduledAutoWorkSession {
+                session_id: ConversationId::new().into_string(),
+                display_name: "Boot".to_owned(),
+                tag: "boot".to_owned(),
+                max_requirements: Some(2),
+                config_revision: "session:1".to_owned(),
+            }),
+            listed: Notify::new(),
+            release: Notify::new(),
+        });
+        let (runner, port, _database, _owner_id, session_id) =
+            runner_fixture(Some(lookup.clone())).await;
+        lookup
+            .binding
+            .lock()
+            .expect("blocking scheduled lookup")
+            .session_id = session_id.clone();
+        port.set_snapshot(enabled, 1);
+        runner.resume_persisted_bindings();
+        lookup.listed.notified().await;
+        port.set_snapshot(AutoWorkConfig::default(), 2);
+        lookup.release.notify_one();
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let finished = runner
+                    .coordinators
+                    .lock()
+                    .expect("coordinator lock")
+                    .resume
+                    .as_ref()
+                    .is_some_and(JoinHandle::is_finished);
+                if finished {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("boot resume coordinator");
+        assert!(!runner.is_running(AutoWorkTargetKind::Conversation, &session_id));
+        runner.shutdown().await.expect("runner shutdown");
+    }
+
+    #[tokio::test]
+    async fn bounded_stop_retains_cleanup_owner_until_exact_cleanup_finishes() {
+        let (runner, port, _database, owner_id, session_id) =
+            runner_fixture(None).await;
+        let config = AutoWorkConfig::normalize(true, Some("cleanup"), None).unwrap();
+        runner
+            .apply_config(
+                &owner_id,
+                AutoWorkTargetKind::Conversation,
+                &session_id,
+                config,
+                None,
+                Some("test:cleanup"),
+            )
+            .await
+            .expect("enable");
+        port.block_cancel.store(true, Ordering::SeqCst);
+        // Keep database fixture setup on a normal clock. Freeze only after the
+        // target is running so SQLx pool acquisition cannot be starved by a
+        // paused runtime clock.
+        tokio::time::pause();
+
+        let runner_for_stop = runner.clone();
+        let session_for_stop = session_id.clone();
+        let stop = tokio::spawn(async move {
+            runner_for_stop
+                .stop(AutoWorkTargetKind::Conversation, &session_for_stop)
+                .await
+        });
+        port.cancel_started.notified().await;
+        tokio::time::advance(STOP_WAIT_TIMEOUT + Duration::from_millis(1)).await;
+        let outcome = stop.await.expect("stop task");
+        assert_eq!(outcome, AutoWorkStopOutcome::CleanupPending);
+        let key = (AutoWorkTargetKind::Conversation, session_id.clone());
+        assert!(
+            runner.cleanups.contains_key(&key),
+            "the exact cleanup owner must survive the bounded waiter"
+        );
+
+        port.cancel_release.notify_one();
+        timeout(Duration::from_secs(1), async {
+            while runner.cleanups.contains_key(&key) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retained cleanup must finish");
+        runner.shutdown().await.expect("runner shutdown");
+    }
+
     #[test]
     fn autowork_delivery_key_is_stable_per_exact_durable_claim_capability() {
         let requirement_id = nomifun_common::RequirementId::new().into_string();
@@ -3887,6 +4610,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AutoWorkSessionPort for ScriptedConversationPort {
+        async fn prepare_autowork_turn(
+            &self,
+            _owner_id: &str,
+            _session_id: &str,
+            _build_lease: &AutoWorkRuntimeBuildLease,
+        ) -> Result<crate::conversation_port::AutoWorkSessionPreparation, AppError> {
+            Err(AppError::Conflict("not used by receipt wait test".into()))
+        }
+
         fn begin_runtime_preparation(
             &self,
             _conversation_id: &str,
@@ -3903,26 +4635,34 @@ mod tests {
             Ok(())
         }
 
-        async fn save_config(
+        async fn read_config(
             &self,
-            _conversation_id: &str,
-            _enabled: bool,
-            _tag: Option<&str>,
-            _max_requirements: Option<u32>,
-        ) -> Result<(), AppError> {
-            Ok(())
+            _owner_id: &str,
+            _session_id: &str,
+        ) -> Result<AutoWorkConfigSnapshot, AppError> {
+            Err(AppError::Conflict(
+                "not used by receipt wait test".into(),
+            ))
         }
 
-        async fn send_observed_turn(
+        async fn save_config(
+            &self,
+            _command: crate::AutoWorkSessionConfigCommand,
+        ) -> Result<AutoWorkConfigSnapshot, AppError> {
+            Err(AppError::Conflict(
+                "not used by receipt wait test".into(),
+            ))
+        }
+
+        async fn send_turn(
             &self,
             _user_id: &str,
             _conversation_id: &str,
             _operation_id: &str,
-            _request: SendMessageRequest,
+            _request: AutoWorkTurnRequest,
             _build_lease: RuntimeBuildLease,
-            _runtime_preparation: BackgroundTurnRuntimePreparation,
             _authority: RequirementConversationTurnAuthority,
-        ) -> Result<ObservedIdempotentMessageDelivery, AppError> {
+        ) -> Result<AutoWorkMessageDelivery, AppError> {
             Err(AppError::Conflict("not used by receipt wait test".into()))
         }
 
@@ -3931,7 +4671,7 @@ mod tests {
             _user_id: &str,
             _conversation_id: &str,
             _operation_id: &str,
-            _request: &SendMessageRequest,
+            _request: &AutoWorkMessage,
             _authority: &RequirementConversationTurnAuthority,
         ) -> Result<Option<IdempotentMessageDelivery>, AppError> {
             Err(AppError::Conflict("receipt wait must use typed state".into()))
@@ -4101,7 +4841,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversation_wait_ignores_text_until_typed_receipt_completes() {
+    async fn conversation_wait_uses_durable_receipt_text_as_the_note() {
         let (service, _db, conversation_id, requirement_id, generation, claim_token, user_id) =
             receipt_wait_fixture().await;
         let message_id = nomifun_common::MessageId::new().into_string();
@@ -4111,7 +4851,6 @@ mod tests {
             },
             BackgroundTurnReconciliationDisposition::LiveExactOwnerWait,
         ));
-        let (events_tx, events_rx) = broadcast::channel(8);
         let wait = wait_for_conversation_receipt_with_renewal_timed(
             &service,
             port.as_ref(),
@@ -4124,25 +4863,17 @@ mod tests {
             "autowork:test-receipt-wait",
             &message_id,
             false,
-            Some(events_rx),
             receipt_wait_timing(Duration::from_secs(1)),
         );
         tokio::pin!(wait);
 
-        events_tx
-            .send(AgentStreamEvent::Text(
-                nomifun_ai_agent::protocol::events::TextEventData {
-                    content: "ordinary output is not a completion verdict".into(),
-                },
-            ))
-            .expect("event receiver");
         let early = tokio::select! {
             outcome = &mut wait => Some(outcome),
             _ = sleep(Duration::from_millis(30)) => None,
         };
         assert!(
             early.is_none(),
-            "ordinary text must not complete an accepted turn"
+            "an accepted receipt must not complete before durable settlement"
         );
         assert!(port.poll_count() > 0, "the typed receipt must be polled");
 
@@ -4152,7 +4883,7 @@ mod tests {
                 replayed: true,
                 completed: true,
                 result_ok: Some(true),
-                result_text: None,
+                result_text: Some("durable completion note".to_owned()),
                 result_error: None,
                 result_error_code: None,
                 result_error_retryable: None,
@@ -4167,8 +4898,8 @@ mod tests {
             outcome
                 .1
                 .as_deref()
-                .is_some_and(|note| note.contains("ordinary output")),
-            "stream text may enrich the note only after durable completion"
+                .is_some_and(|note| note == "durable completion note"),
+            "the completed receipt text is the authoritative note"
         );
     }
 
@@ -4192,7 +4923,6 @@ mod tests {
             "autowork:test-missing-receipt",
             &nomifun_common::MessageId::new().into_string(),
             false,
-            None,
             receipt_wait_timing(Duration::from_secs(1)),
         )
         .await;
@@ -4228,7 +4958,6 @@ mod tests {
             "autowork:test-timeout",
             &message_id,
             false,
-            None,
             receipt_wait_timing(Duration::from_millis(35)),
         )
         .await;
@@ -4383,7 +5112,7 @@ mod tests {
     fn terminal_expects_verdict_true_when_mcp_enabled() {
         // The AutoWork runner passes `expects_verdict = true` when the requirement
         // MCP is enabled (the tools are injected into the terminal). A clean turn
-        // where the agent did NOT call them → needs_review (not silently done).
+        // where the agent did NOT call them -> needs_review (not silently done).
         assert!(crate::prompt::terminal_expects_verdict(true));
         assert!(!crate::prompt::terminal_expects_verdict(false));
     }
@@ -4415,7 +5144,7 @@ mod tests {
         .unwrap();
 
         // Simulate the inner select logic directly (without AutoWorkRunnerDeps):
-        // recv from the channel, match TurnEnd → Clean.
+        // recv from the channel, match TurnEnd -> Clean.
         let mut rx = rx;
         let ev = rx.recv().await.unwrap();
         assert_eq!(ev.kind, LifecycleKind::TurnEnd);

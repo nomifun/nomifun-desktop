@@ -13,6 +13,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { WorkspaceFolderSelect } from '@/renderer/components/workspace';
 import {
+  DEFAULT_PROCESS_SESSION_RESOURCE_ID,
   DEFAULT_WORKSPACE_RESOURCE_ID,
   KNOWLEDGE_NAME_PARAMETER,
   KNOWLEDGE_ROOT_PARAMETER,
@@ -67,28 +68,47 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
   const templateUnavailable = unavailableTemplateCapabilities.length > 0;
   const [resourceIds, setResourceIds] = useState<Record<string, string>>({});
   const [workspaceRoots, setWorkspaceRoots] = useState<Record<string, string>>({});
+  const workspaceDefaults = useMemo(
+    () =>
+      template.seed.typed_resource_defaults.filter(
+        (resource) => resource.resource_kind === 'workspace'
+      ),
+    [template.seed.typed_resource_defaults]
+  );
+  const selectedWorkspaceRoot =
+    workspaceDefaults
+      .map((resource) => workspaceRoots[resource.slot_key]?.trim())
+      .find((workspaceRoot): workspaceRoot is string => Boolean(workspaceRoot)) ??
+    hostWorkDir?.trim() ??
+    null;
 
   useEffect(() => {
-    setResourceIds(
-      template.template_key === 'coding.codex' && hostWorkDir
-        ? { workspace: DEFAULT_WORKSPACE_RESOURCE_ID }
+    setResourceIds({});
+    setWorkspaceRoots(
+      hostWorkDir
+        ? Object.fromEntries(
+            workspaceDefaults.map((resource) => [resource.slot_key, hostWorkDir])
+          )
         : {}
     );
-    setWorkspaceRoots(hostWorkDir ? { workspace: hostWorkDir } : {});
-  }, [hostWorkDir, template.template_key]);
+  }, [hostWorkDir, template.template_key, workspaceDefaults]);
 
   const resources = useMemo(
     () =>
       template.seed.typed_resource_defaults
         .map((resource): TemplateResourceSelection | null => {
           const workspaceRoot =
-            workspaceRoots[resource.slot_key] ??
-            (resource.resource_kind === 'workspace' ? hostWorkDir : null);
+            resource.resource_kind === 'workspace'
+              ? workspaceRoots[resource.slot_key]?.trim() || hostWorkDir?.trim() || null
+              : resource.resource_kind === 'process_session'
+                ? selectedWorkspaceRoot
+                : null;
           const resourceId =
-            resourceIds[resource.slot_key] ??
-            (resource.resource_kind === 'workspace' && workspaceRoot
+            workspaceRoot && resource.resource_kind === 'workspace'
               ? DEFAULT_WORKSPACE_RESOURCE_ID
-              : '');
+              : workspaceRoot && resource.resource_kind === 'process_session'
+                ? DEFAULT_PROCESS_SESSION_RESOURCE_ID
+                : resourceIds[resource.slot_key] ?? '';
           if (!resourceId) return null;
           const knowledgeBase =
             resource.resource_kind === 'knowledge_base'
@@ -101,7 +121,9 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
             resource_kind: resource.resource_kind,
             resource_id: resourceId,
             typed_parameters:
-              resource.resource_kind === 'workspace' && workspaceRoot
+              (resource.resource_kind === 'workspace' ||
+                resource.resource_kind === 'process_session') &&
+              workspaceRoot
                 ? { [WORKSPACE_ROOT_PARAMETER]: workspaceRoot }
                 : knowledgeBase
                   ? {
@@ -116,18 +138,14 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
       hostWorkDir,
       knowledgeBases,
       resourceIds,
+      selectedWorkspaceRoot,
       template.seed.typed_resource_defaults,
       workspaceRoots,
     ]
   );
+  const selectedResourceSlots = new Set(resources.map((resource) => resource.slot_key));
   const missingRequired = template.seed.typed_resource_defaults.some(
-    (resource) =>
-      resource.required &&
-      !(
-        resourceIds[resource.slot_key]?.trim() ||
-        (resource.resource_kind === 'workspace' &&
-          (workspaceRoots[resource.slot_key] || hostWorkDir))
-      )
+    (resource) => resource.required && !selectedResourceSlots.has(resource.slot_key)
   );
   const resourceLabelFor = (resourceKind: string): string => {
     switch (resourceKind) {
@@ -137,6 +155,8 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
         return t('agentSettings.resources.knowledgeBase');
       case 'mcp_server':
         return t('agentSettings.sections.mcp');
+      case 'process_session':
+        return t('agentSettings.sections.test');
       case 'companion':
       case 'companion_memory':
         return t('agentSettings.template.companion.default.name');
@@ -159,12 +179,6 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
     setWorkspaceRoots((current) => {
       const next = { ...current };
       if (workspaceRoot) next[slotKey] = workspaceRoot;
-      else delete next[slotKey];
-      return next;
-    });
-    setResourceIds((current) => {
-      const next = { ...current };
-      if (workspaceRoot) next[slotKey] = DEFAULT_WORKSPACE_RESOURCE_ID;
       else delete next[slotKey];
       return next;
     });
@@ -293,7 +307,21 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
                       }
                     />
                   )}
-                  {!['workspace', 'knowledge_base', 'mcp_server'].includes(
+                  {resource.resource_kind === 'process_session' && (
+                    <div className={styles.managedResource}>
+                      <Tag size='small' color={selectedWorkspaceRoot ? 'green' : 'gray'}>
+                        {selectedWorkspaceRoot
+                          ? t('common.added')
+                          : t('agentSettings.common.none')}
+                      </Tag>
+                      <span>
+                        {resource.required
+                          ? t('agentSettings.resources.required')
+                          : t('agentSettings.resources.optional')}
+                      </span>
+                    </div>
+                  )}
+                  {!['workspace', 'process_session', 'knowledge_base', 'mcp_server'].includes(
                     resource.resource_kind
                   ) && (
                     <Tag size='small' color='orange'>

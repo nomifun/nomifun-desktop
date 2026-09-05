@@ -22,8 +22,8 @@ import {
 } from '@/common/types/agentPlatform';
 import {
   agentUiErrorMessage,
+  resolveHostManagedResourceBindings,
   saveDraftRevisionWithPreview,
-  withHostResolvedWorkspaceBinding,
 } from './model';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
@@ -122,15 +122,24 @@ export function useAgentSettingsController() {
 
   const applyEditor = useCallback(
     (response: AgentPresetEditorResponse) => {
-      const nextDraft = withHostResolvedWorkspaceBinding(cloneDraft(response.draft), hostWorkDir);
+      const savedResponseDraft = cloneDraft(response.draft);
+      const nextDraft = resolveHostManagedResourceBindings(
+        cloneDraft(savedResponseDraft),
+        hostWorkDir,
+        catalog.capabilities,
+        response.preset.owner_user_id ?? ''
+      );
       setEditor(response);
       setDraftState(nextDraft);
-      setSavedDraft(response.revision ? cloneDraft(nextDraft) : null);
+      // Host-derived bindings are real draft changes. Keep the exact persisted
+      // document as the clean baseline so Test saves a newly completed binding
+      // before opening a Session instead of referring to an unpersisted preview.
+      setSavedDraft(response.revision ? savedResponseDraft : null);
       setSelection({ kind: 'preset', preset: response.preset });
       setPreview(null);
       setTestResult(null);
     },
-    [hostWorkDir]
+    [catalog.capabilities, hostWorkDir]
   );
 
   const openPreset = useCallback(
@@ -224,7 +233,12 @@ export function useAgentSettingsController() {
     setBusyAction('preview');
     setError(null);
     try {
-      const resolvedDraft = withHostResolvedWorkspaceBinding(draft, hostWorkDir);
+      const resolvedDraft = resolveHostManagedResourceBindings(
+        draft,
+        hostWorkDir,
+        catalog.capabilities,
+        editor?.preset.owner_user_id ?? ''
+      );
       if (resolvedDraft !== draft) setDraftState(resolvedDraft);
       const response = await resolveDraftPreview(resolvedDraft);
       setPreview(response);
@@ -235,14 +249,25 @@ export function useAgentSettingsController() {
     } finally {
       setBusyAction(null);
     }
-  }, [draft, hostWorkDir, resolveDraftPreview]);
+  }, [
+    catalog.capabilities,
+    draft,
+    editor?.preset.owner_user_id,
+    hostWorkDir,
+    resolveDraftPreview,
+  ]);
 
   const saveRevision = useCallback(async () => {
     if (!draft) return null;
     setBusyAction('save');
     setError(null);
     try {
-      const resolvedDraft = withHostResolvedWorkspaceBinding(draft, hostWorkDir);
+      const resolvedDraft = resolveHostManagedResourceBindings(
+        draft,
+        hostWorkDir,
+        catalog.capabilities,
+        editor?.preset.owner_user_id ?? ''
+      );
       if (resolvedDraft !== draft) setDraftState(resolvedDraft);
       const result = await saveDraftRevisionWithPreview(resolvedDraft, {
         preview: resolveDraftPreview,
@@ -283,7 +308,14 @@ export function useAgentSettingsController() {
     } finally {
       setBusyAction(null);
     }
-  }, [draft, hostWorkDir, load, resolveDraftPreview]);
+  }, [
+    catalog.capabilities,
+    draft,
+    editor?.preset.owner_user_id,
+    hostWorkDir,
+    load,
+    resolveDraftPreview,
+  ]);
 
   const runTest = useCallback(
     async (input: string) => {
@@ -291,7 +323,12 @@ export function useAgentSettingsController() {
       setBusyAction('test');
       setError(null);
       try {
-        const resolvedDraft = withHostResolvedWorkspaceBinding(draft, hostWorkDir);
+        const resolvedDraft = resolveHostManagedResourceBindings(
+          draft,
+          hostWorkDir,
+          catalog.capabilities,
+          editor?.preset.owner_user_id ?? ''
+        );
         if (resolvedDraft !== draft) setDraftState(resolvedDraft);
         const dirty = isDraftDirty(savedDraft, resolvedDraft);
         const result = await runAgentPresetTest({
@@ -340,7 +377,15 @@ export function useAgentSettingsController() {
         setBusyAction(null);
       }
     },
-    [draft, hostWorkDir, load, resolveDraftPreview, savedDraft]
+    [
+      catalog.capabilities,
+      draft,
+      editor?.preset.owner_user_id,
+      hostWorkDir,
+      load,
+      resolveDraftPreview,
+      savedDraft,
+    ]
   );
 
   const dirty = useMemo(

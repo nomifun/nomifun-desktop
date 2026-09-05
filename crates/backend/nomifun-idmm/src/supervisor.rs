@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use nomifun_api_types::{AutoWorkTargetKind, IdmmConfig, IdmmState, IdmmTargetKind, InterventionRecord};
 use nomifun_common::{AppError, UserId, now_ms};
-use nomifun_conversation::IdmmTurnScope;
 use nomifun_db::{
     IIdmmInterventionRepository, IdmmActionReservationKey, IdmmActionReservationRow,
     IdmmActionReserveResult, IdmmActionSettleResult, IdmmActionSettlement,
@@ -23,8 +22,11 @@ use tracing::{debug, info, warn};
 use crate::events::IdmmEventEmitter;
 use crate::policy::{PolicyState, PolicyStep, SidecarStep};
 use crate::probe::SessionProbe;
+use crate::session::{SessionSupervisionPort, SupervisionTurnScope};
 use crate::sidecar::{OpenQuestionAsk, SidecarClient};
 use crate::signal::{DecisionKind, SessionSignal, StallClass, WakeAction};
+
+type IdmmTurnScope = SupervisionTurnScope;
 
 /// `detail`/`reason` are truncated to this many chars before persisting (the
 /// row is an audit trail, not a transcript store — keeps a runaway model reply
@@ -1713,17 +1715,13 @@ impl nomifun_requirement::IdmmHandle for IdmmManager {
 /// for the conversation (the path that has no AutoWork loop / boot-resume to do
 /// it). Sync + fire-and-forget: spawns the async `ensure`, which is a no-op when
 /// IDMM is disabled for the target or already supervising it.
-impl nomifun_conversation::ConversationSupervisionHook for IdmmManager {
-    fn on_turn_start(
-        &self,
-        conversation_id: &str,
-        admitted_scope: nomifun_conversation::IdmmTurnScope,
-    ) {
+impl SessionSupervisionPort for IdmmManager {
+    fn admit_conversation_turn(&self, conversation_id: &str, scope: SupervisionTurnScope) {
         let inner = self.inner.clone();
         let target_id = conversation_id.to_string();
         tokio::spawn(async move {
             inner
-                .replace_conversation_turn(&target_id, admitted_scope)
+                .replace_conversation_turn(&target_id, scope)
                 .await;
         });
     }

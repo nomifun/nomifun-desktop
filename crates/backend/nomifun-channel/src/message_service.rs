@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::channel_settings::{ChannelSettingsService, resolved_model_to_provider};
 use crate::error::ChannelError;
-use crate::session_port::ChannelSessionPort;
+use crate::session_port::{ChannelSessionPort, ChannelTurnReceiptState};
 use crate::types::{OutgoingMessageType, PluginType, UnifiedOutgoingMessage};
 
 /// 客服域接缝 (customer-service routing seam) — the channel layer's ONLY
@@ -267,9 +267,9 @@ impl ChannelMessageService {
         &self,
         conversation_id: &str,
         idempotency_key: &str,
-    ) -> Result<nomifun_conversation::PublicTurnDeliveryState, ChannelError> {
+    ) -> Result<ChannelTurnReceiptState, ChannelError> {
         self.sessions
-            .turn_outcome(&self.owner_user_id, conversation_id, idempotency_key)
+            .read_turn_receipt(&self.owner_user_id, conversation_id, idempotency_key)
             .await
             .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))
     }

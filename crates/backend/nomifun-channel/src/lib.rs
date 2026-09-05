@@ -23,5 +23,6 @@ pub mod types;
 
 pub use routes::{ChannelRouterState, channel_routes};
 pub use session_port::{
-    ChannelSessionPort, ChannelTurnDelivery, conversation_channel_session_port,
+    ChannelCompletedTurnReceipt, ChannelSessionPort, ChannelTurnDelivery,
+    ChannelTurnReceiptState, conversation_channel_session_port,
 };

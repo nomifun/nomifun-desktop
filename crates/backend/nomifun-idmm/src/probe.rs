@@ -16,7 +16,7 @@ use nomifun_api_types::{
 use nomifun_common::{AppError, ConversationId, ConversationStatus, TerminalId, UserId};
 #[cfg(test)]
 use nomifun_common::CompanionId;
-use nomifun_conversation::{ConversationService, IdmmTurnScope};
+use nomifun_conversation::{ConversationService, IdmmTurnScope as ConversationTurnScope};
 use nomifun_db::{IConversationRepository, SortOrder};
 use nomifun_terminal::TerminalDriver;
 use tokio::sync::{broadcast, mpsc};
@@ -26,7 +26,43 @@ use crate::detector::{TerminalDetector, signal_from_agent_error};
 use crate::detector::{detect_chat_open_question, has_open_intent};
 #[cfg(test)]
 use crate::signal::{DecisionKind, DecisionPrompt, DecisionSource};
+use crate::session::{SessionSupervisionPort, SupervisionTurnScope};
 use crate::signal::{SessionSignal, WakeAction};
+
+/// Translate the current product's Conversation admission token at the one
+/// compatibility boundary. The supervisor never carries the Conversation
+/// implementation's token type.
+impl From<ConversationTurnScope> for SupervisionTurnScope {
+    fn from(scope: ConversationTurnScope) -> Self {
+        Self::new(scope.wire_turn_id, scope.generation)
+    }
+}
+
+impl From<&SupervisionTurnScope> for ConversationTurnScope {
+    fn from(scope: &SupervisionTurnScope) -> Self {
+        Self {
+            wire_turn_id: scope.wire_turn_id().to_owned(),
+            generation: scope.generation(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod scope_contract_tests {
+    use super::*;
+
+    #[test]
+    fn conversation_scope_round_trips_through_idmm_contract() {
+        let host_scope = ConversationTurnScope {
+            wire_turn_id: "0190f5fe-7c00-7a00-8000-000000000005".into(),
+            generation: 42,
+        };
+        let idmm_scope = SupervisionTurnScope::from(host_scope.clone());
+        assert_eq!(idmm_scope.wire_turn_id(), host_scope.wire_turn_id);
+        assert_eq!(idmm_scope.generation(), host_scope.generation);
+        assert_eq!(ConversationTurnScope::from(&idmm_scope), host_scope);
+    }
+}
 
 /// Lightweight session metadata for gating + ownership.
 #[derive(Debug, Clone)]
@@ -47,7 +83,7 @@ pub trait SessionProbe: Send + Sync {
     /// Snapshot the exact live Conversation turn that a durable action
     /// reservation will bind. Terminals currently have no durable Conversation
     /// turn identity and therefore return `None`.
-    async fn action_scope(&self) -> Result<Option<IdmmTurnScope>, AppError> {
+    async fn action_scope(&self) -> Result<Option<SupervisionTurnScope>, AppError> {
         Ok(None)
     }
     /// Deliver an action after its durable reservation was acquired.
@@ -58,7 +94,7 @@ pub trait SessionProbe: Send + Sync {
     async fn inject_reserved(
         &self,
         _action: &WakeAction,
-        _scope: Option<&IdmmTurnScope>,
+        _scope: Option<&SupervisionTurnScope>,
     ) -> Result<(), AppError> {
         Err(AppError::Conflict(
             "IDMM action rejected: this session has no exact durable action scope".into(),
@@ -219,12 +255,12 @@ pub trait ConversationSessionPort: Send + Sync {
         &self,
         owner_id: &str,
         conversation_id: &str,
-    ) -> Result<IdmmTurnScope, AppError>;
+    ) -> Result<ConversationTurnScope, AppError>;
     async fn continue_active_turn(
         &self,
         owner_id: &str,
         conversation_id: &str,
-        expected_scope: &IdmmTurnScope,
+        expected_scope: &ConversationTurnScope,
         request: SendMessageRequest,
     ) -> Result<String, AppError>;
     async fn failover(&self, owner_id: &str, conversation_id: &str)
@@ -293,7 +329,7 @@ impl ConversationSessionPort for ConversationServiceSessionPort {
         &self,
         owner_id: &str,
         conversation_id: &str,
-    ) -> Result<IdmmTurnScope, AppError> {
+    ) -> Result<ConversationTurnScope, AppError> {
         self.service
             .idmm_active_turn_scope(owner_id, conversation_id, &self.runtime_registry)
             .await
@@ -303,7 +339,7 @@ impl ConversationSessionPort for ConversationServiceSessionPort {
         &self,
         owner_id: &str,
         conversation_id: &str,
-        expected_scope: &IdmmTurnScope,
+        expected_scope: &ConversationTurnScope,
         request: SendMessageRequest,
     ) -> Result<String, AppError> {
         self.service
@@ -325,6 +361,15 @@ impl ConversationSessionPort for ConversationServiceSessionPort {
         self.service
             .idmm_failover_conversation(owner_id, conversation_id, &self.runtime_registry)
             .await
+    }
+}
+
+/// Compatibility bridge for the current Conversation service's turn-admission
+/// hook. New supervision code speaks `SessionSupervisionPort`; this impl is
+/// intentionally kept beside the other Conversation adapter code.
+impl nomifun_conversation::ConversationSupervisionHook for crate::supervisor::IdmmManager {
+    fn on_turn_start(&self, conversation_id: &str, admitted_scope: ConversationTurnScope) {
+        SessionSupervisionPort::admit_conversation_turn(self, conversation_id, admitted_scope.into());
     }
 }
 
@@ -458,7 +503,7 @@ impl SessionProbe for ConversationProbe {
         rx
     }
 
-    async fn action_scope(&self) -> Result<Option<IdmmTurnScope>, AppError> {
+    async fn action_scope(&self) -> Result<Option<SupervisionTurnScope>, AppError> {
         let owner_id = self.owner_id().await?;
         self.ensure_live_turn_authority().await?;
         self.session
@@ -467,13 +512,13 @@ impl SessionProbe for ConversationProbe {
                 self.conversation_id.as_str(),
             )
             .await
-            .map(Some)
+            .map(|scope| Some(scope.into()))
     }
 
     async fn inject_reserved(
         &self,
         action: &WakeAction,
-        scope: Option<&IdmmTurnScope>,
+        scope: Option<&SupervisionTurnScope>,
     ) -> Result<(), AppError> {
         if matches!(action, WakeAction::Wait(_) | WakeAction::Stop(_)) {
             return Ok(());
@@ -484,6 +529,7 @@ impl SessionProbe for ConversationProbe {
                     .into(),
             )
         })?;
+        let conversation_scope = ConversationTurnScope::from(expected_scope);
         let owner_id = self.owner_id().await?;
         // Only the send-loop owns the AgentTurnHandle/relay continuity needed
         // for a same-turn model failover. The external IDMM observer may ask the
@@ -517,12 +563,12 @@ impl SessionProbe for ConversationProbe {
             channel_platform: None,
         };
         self.session
-            .continue_active_turn(
-                &owner_id,
-                self.conversation_id.as_str(),
-                expected_scope,
-                req,
-            )
+                .continue_active_turn(
+                    &owner_id,
+                    self.conversation_id.as_str(),
+                    &conversation_scope,
+                    req,
+                )
             .await
             .map(|_| ())
     }
@@ -582,9 +628,7 @@ impl SessionProbe for ConversationProbe {
             .get(self.conversation_id.as_ref())
             .await
             .ok()??;
-        let pm = nomifun_conversation::runtime_options::provider_model_from_conversation_row(&row)
-            .ok()??;
-        Some((pm.provider_id, pm.model))
+        crate::session::conversation_fallback_model(&row).ok()?
     }
 
 }
