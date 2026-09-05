@@ -133,6 +133,173 @@ async fn default_nomi_core_router_answers_canonical_catalog_requests() {
 }
 
 #[tokio::test]
+async fn nomi_core_catalog_keeps_initial_capabilities_materialized() {
+    let (router, services) = common::build_local_trust_app("catalog-placement-local-trust").await;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/capabilities")
+                .header("x-nomi-local-trust", "catalog-placement-local-trust")
+                .body(Body::empty())
+                .expect("build capability catalog request"),
+        )
+        .await
+        .expect("dispatch capability catalog request");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("read capability catalog response");
+    let value: Value = serde_json::from_slice(&body).expect("capability catalog JSON");
+    let capabilities = value["data"]
+        .as_array()
+        .expect("capability catalog array");
+
+    for capability_id in ["fs.read", "vcs.stage", "vcs.commit"] {
+        let capability = capabilities
+            .iter()
+            .find(|item| item["capability"]["id"] == capability_id)
+            .unwrap_or_else(|| panic!("missing capability {capability_id}"));
+        assert_eq!(
+            capability["materialization_state"],
+            "materialized",
+            "{capability_id} must remain selectable as an initial capability"
+        );
+        assert_eq!(
+            capability["required_resource_kinds"].as_array().map(Vec::len),
+            Some(1),
+            "{capability_id} must retain its single typed workspace resource"
+        );
+    }
+
+    let templates = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/agent-preset-templates?source=official")
+                .header("x-nomi-local-trust", "catalog-placement-local-trust")
+                .body(Body::empty())
+                .expect("build official template request"),
+        )
+        .await
+        .expect("dispatch official template request");
+    assert_eq!(templates.status(), StatusCode::OK);
+    let template_body = axum::body::to_bytes(templates.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("read official template response");
+    let template_value: Value =
+        serde_json::from_slice(&template_body).expect("official template JSON");
+    let coding = template_value["data"]["official_templates"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["template_key"] == "coding.codex")
+        })
+        .expect("coding template");
+    let on_demand = coding["seed"]["on_demand_capabilities"]
+        .as_array()
+        .expect("coding on-demand capabilities");
+    for capability_id in ["vcs.stage", "vcs.commit"] {
+        assert!(
+            on_demand
+                .iter()
+                .any(|item| item["id"] == capability_id),
+            "{capability_id} must remain an on-demand placement in the coding seed"
+        );
+    }
+
+    services.shutdown_browser_platform().await.expect("browser cleanup");
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn nomi_core_rejects_on_demand_placement_without_hiding_the_capability() {
+    let trust_secret = "on-demand-placement-local-trust";
+    let (router, services) = common::build_local_trust_app(trust_secret).await;
+    let created = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/agent-presets/from-template/chat.minimal")
+                .header("x-nomi-local-trust", trust_secret)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "display_name": "On-demand placement smoke",
+                        "resource_bindings": [],
+                        "model_route_refs": {},
+                        "chat_route_records": {}
+                    }))
+                    .expect("serialize placement template request"),
+                ))
+                .expect("build placement template request"),
+        )
+        .await
+        .expect("dispatch placement template request");
+    assert_eq!(created.status(), StatusCode::OK);
+    let created_body = axum::body::to_bytes(created.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("read placement template response");
+    let mut created_value: Value =
+        serde_json::from_slice(&created_body).expect("placement template JSON");
+    let preset_id = created_value["data"]["preset"]["preset_id"]
+        .as_str()
+        .expect("placement preset id")
+        .to_owned();
+    let revision = created_value["data"]["revision"]["reference"].clone();
+    created_value["data"]["draft"]["document"]["on_demand_capabilities"] = json!([{
+        "capability": {"id": "vcs.stage", "version": "1.0.0"},
+        "required": true,
+        "exposure": "discoverable",
+        "config": {}
+    }]);
+    let preview = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/agent-presets/{preset_id}/resolve-preview"))
+                .header("x-nomi-local-trust", trust_secret)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "expected_current_revision": revision,
+                        "draft": created_value["data"]["draft"],
+                        "scene": "agent_settings",
+                        "surface": "desktop",
+                        "audience": "owner"
+                    }))
+                    .expect("serialize on-demand preview request"),
+                ))
+                .expect("build on-demand preview request"),
+        )
+        .await
+        .expect("dispatch on-demand preview request");
+    assert_eq!(preview.status(), StatusCode::OK);
+    let preview_body = axum::body::to_bytes(preview.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("read on-demand preview response");
+    let preview_value: Value = serde_json::from_slice(&preview_body).expect("preview JSON");
+    assert_eq!(preview_value["data"]["status"], "blocked");
+    assert!(
+        preview_value["data"]["diagnostics"]
+            .as_array()
+            .is_some_and(|diagnostics| {
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic["code"] == "CAPABILITY_UNAVAILABLE"
+                        && diagnostic["subject"] == "on-demand-capabilities"
+                })
+            }),
+        "on-demand placement must fail closed even when the capability is materialized"
+    );
+
+    services.shutdown_browser_platform().await.expect("browser cleanup");
+    services.database.close().await;
+}
+
+#[tokio::test]
 async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
     let (router, services) = common::build_local_trust_app("agent-settings-local-trust").await;
     let response = router

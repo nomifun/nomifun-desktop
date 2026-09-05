@@ -49,8 +49,8 @@ impl VcsOperation {
                  that is nested inside a larger repository are omitted."
             }
             Self::Diff => {
-                "Read staged and unstaged Git patches for the session workspace. An optional \
-                 normalized workspace-relative path narrows the result."
+                "Read staged, modified, and untracked Git patches for the session workspace. \
+                 An optional normalized workspace-relative path narrows the result."
             }
             Self::Stage => {
                 "Stage one normalized workspace-relative file or directory, including tracked \
@@ -428,6 +428,10 @@ fn vcs_diff(workspace: &Path, path: Option<&str>) -> Result<Value, VcsToolError>
         })?;
 
     let mut unstaged_options = git2::DiffOptions::new();
+    unstaged_options
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .show_untracked_content(true);
     if let Some(pathspec) = scope_pathspec {
         unstaged_options.pathspec(pathspec);
     }
@@ -910,6 +914,19 @@ mod tests {
             repository.head().unwrap().peel_to_commit().unwrap().message(),
             Some("record typed VCS change")
         );
+    }
+
+    #[tokio::test]
+    async fn diff_includes_untracked_file_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let _repository = git2::Repository::init(directory.path()).unwrap();
+        std::fs::write(directory.path().join("new.txt"), "alpha\nbeta\n").unwrap();
+        let tools = local_vcs_tools(directory.path());
+
+        let diff = invoke(tools[1].as_ref(), json!({"path": "new.txt"})).await;
+        assert!(!diff.is_error, "{}", diff.content);
+        assert!(diff.content.contains("new.txt"), "{}", diff.content);
+        assert!(diff.content.contains("+beta"), "{}", diff.content);
     }
 
     #[tokio::test]

@@ -1187,12 +1187,26 @@ fn validate_apply_patch_args(args: &Value, workspace: &Path) -> bool {
     let [edit] = edits.as_slice() else {
         return false;
     };
-    object_has_only_keys(edit, &["old_string", "new_string", "replace_all"])
-        && edit.get("old_string").and_then(Value::as_str) == Some("alpha\n")
-        && edit.get("new_string").and_then(Value::as_str) == Some(CODING_FILE_CONTENT)
-        && edit
+    if !object_has_only_keys(edit, &["old_string", "new_string", "replace_all"])
+        || edit
             .get("replace_all")
-            .is_none_or(|replace_all| replace_all.as_bool() == Some(false))
+            .is_some_and(|replace_all| replace_all.as_bool() != Some(false))
+    {
+        return false;
+    }
+    let old = edit.get("old_string").and_then(Value::as_str);
+    let new = edit.get("new_string").and_then(Value::as_str);
+    let exact_replacement = old == Some("alpha\n") && new == Some(CODING_FILE_CONTENT);
+    // A model may preserve the existing terminal newline by replacing only
+    // the first line. Require the actual workspace contents to be exact so
+    // this remains equivalent to the full replacement rather than accepting
+    // an arbitrary partial patch.
+    let preserved_terminal_newline =
+        old == Some("alpha")
+            && new == Some("alpha\nbeta")
+            && std::fs::read_to_string(workspace.join(CODING_FILE)).ok().as_deref()
+                == Some(CODING_FILE_CONTENT);
+    exact_replacement || preserved_terminal_newline
 }
 
 fn validate_exec_command_args(args: &Value, workspace: &Path) -> bool {
@@ -1545,7 +1559,7 @@ async fn run_coding_chain(
         session_id,
         "live-stepfun-coding-patch",
         format!(
-            "Use Read on {CODING_FILE}. Then use ApplyPatch, not Write, Edit, Bash, or exec_command, to change its exact content from `alpha\\n` to `alpha\\nbeta\\n`. After both tools complete, reply with exactly {CODING_PATCH_MARKER}."
+            "Use Read on {CODING_FILE}. Then use ApplyPatch, not Write, Edit, Bash, or exec_command, to change its exact content from `alpha\\n` to `alpha\\nbeta\\n`. You may either replace `alpha\\n` with `alpha\\nbeta\\n`, or replace `alpha` with `alpha\\nbeta` while preserving the existing final newline. After the tool completes, reply with exactly {CODING_PATCH_MARKER}."
         ),
         CODING_PATCH_MARKER,
         CODING_PATCH_TOOLS,
@@ -2680,6 +2694,36 @@ mod evidence_tests {
                 }]
             }),
             root.path(),
+        ));
+        let preserved_newline_root = tempfile::tempdir().expect("preserved newline workspace");
+        std::fs::write(
+            preserved_newline_root.path().join(CODING_FILE),
+            CODING_FILE_CONTENT,
+        )
+        .expect("seed preserved newline workspace");
+        assert!(validate_apply_patch_args(
+            &json!({
+                "files": [{
+                    "file_path": CODING_FILE,
+                    "edits": [{
+                        "old_string": "alpha",
+                        "new_string": "alpha\nbeta"
+                    }]
+                }]
+            }),
+            preserved_newline_root.path(),
+        ));
+        assert!(!validate_apply_patch_args(
+            &json!({
+                "files": [{
+                    "file_path": CODING_FILE,
+                    "edits": [{
+                        "old_string": "alpha",
+                        "new_string": "beta"
+                    }]
+                }]
+            }),
+            preserved_newline_root.path(),
         ));
         assert!(validate_exec_command_args(
             &json!({"cmd": "git --version"}),

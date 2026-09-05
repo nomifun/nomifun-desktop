@@ -63,10 +63,11 @@
 - Agent Settings/AgentSession 已完成产品表面和定向 UI build/test 收口。当前
   Nomi-core 没有 canonical on-demand activation port 时，Coding/on-demand 继续
   显式 unavailable；不得通过 metadata-only success 或静态 fixture 宣称完整 Coding。
-- 2026-09-03 的受控真实 Broker smoke 首个完整结果为 `ProviderUnavailable` /
-  HTTP `503`。因此 `SL-S3-07`、`SL-S3-10`、`SL-S3-11` 和 `SL-S4-02` 继续按
-  `GLOBAL-CLOSURE-TODO` 保持未关闭；Windows candidate、macOS arm64 和 Linux
-  Desktop x64 只在这些前置项完成后进入原生验证。
+- 2026-09-05 通过 Windows Credential Manager runner 完成真实 StepFun Nomi-core
+  Chat/Coding smoke，结果为 `live_smoke_status=pass code=OK status=200`。该结果
+  关闭 `SL-S3-07` 的真实 owner smoke，但不替代 `SL-S3-10` 的 automation
+  canonical 合同、`SL-S3-11` 的 installation-token/MCP transport 验证或
+  `SL-S4-02` 的 Desktop 人工验收。
 
 ### 2026-09-05 主机续接实现事实
 
@@ -91,8 +92,9 @@
 - 本次定向结果包括：App lib `399 passed`、DB Conversation repository `83 passed`、
   Cron lib/integration `192/62 passed`、Requirement lib/tests `115/120 passed`、
   IDMM `196 passed`、Channel `345 passed`、Companion `275 passed`；UI build、
-  i18n、live smoke runner self-test/compile-only 均通过。精确命令和未运行的真实
-  Provider smoke 以 `GLOBAL-CLOSURE-TODO.zh.md` 的 2026-09-05 checkpoint 为准。
+  i18n、live smoke runner self-test/compile-only 和真实 StepFun smoke 均通过。真实
+  Provider smoke 的安全命令、覆盖范围和仍未关闭的独立合同，以
+  `GLOBAL-CLOSURE-TODO.zh.md` 的 2026-09-05 checkpoint 为准。
 
 ## 0. 本文的权威与执行方式
 
