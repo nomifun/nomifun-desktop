@@ -9,8 +9,8 @@
 > 当前结论：S0-S2 的止损、P0 与基础收缩已按定向 evidence 收口；MCP canonical owner
 > 已在 S3 收口，Agent Settings 产品表面已在 S4 收口。当前产品执行内核是 NomiCore/Nomi
 > engine，Web、Desktop 和 `nomicore` 默认入口均已选择 `NomiCoreApplication`。
-> Remote 的原子阶段图、幂等重放/cursor 和 AutoWork 关闭生命周期已有本机定向证据；
-> `SL-S3-07`、`SL-S3-10`、`SL-S3-11` 仍未满足完成定义，`SL-S4-02` 等待人工验收；
+> 2026-09-05 本机受控 StepFun live provider smoke 已通过，`SL-S3-07` 已关闭；
+> `SL-S3-10`、`SL-S3-11` 仍因各自 canonical 合同缺口保持 open，`SL-S4-02` 等待人工验收。
 > Windows 候选和 macOS/Linux 原生验证尚未完成。Codex Sidecar、C9/Nomi-free RC 已明确
 > 延后，不再阻塞当前 Nomi-core 交付。
 
@@ -94,6 +94,7 @@ C9/Nomi 删除和 Nomi-free RC 已延后，不新增当前阶段阻断。
 | `SL-S2-10` official app-server spike | `a7ac1d124`；`bun scripts/validation/codex-app-server-spike.mjs --self-test`；`bun test scripts/validation/codex-app-server-spike.test.mjs` | 已确认 pinned upstream 协议；不等同于 exact binary 或 live model 验证 |
 | `SL-S3-09` SSH owner primitive | `77bd45279`；`cargo check --locked -p nomi-ssh -p nomifun-ssh`；`cargo test --locked -p nomifun-ssh --lib` | 已实现有界输入、超时、取消回收和 no-retry；live sshd/sudo 未运行时不构造 PASS |
 | `SL-S3-08` MCP owner/source | `cargo test --locked -p nomifun-mcp --lib`；`cargo test --locked -p nomifun-app --lib router::agent_wave2_mcp::tests -- --test-threads=1`；`cargo test --locked -p nomifun-app --lib router::agent_wave2_host::tests -- --test-threads=1` | v4 source、exact lock、Streamable HTTP owner、typed failure、no-redirect 和 bounded cleanup 已通过；OAuth/stdio 不在本项隐式扩张 |
+| `SL-S3-07` Nomi-core 真实 owner | `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\validation\run-nomi-core-live-provider-from-windows-credential-manager.ps1`；`cargo test --locked -p nomifun-app --test nomi_core_route_gap -- --test-threads=1`；`cargo test --locked -p nomi-tools vcs::tests --lib`；`cargo test --locked -p nomifun-knowledge --lib` | 真实 StepFun Plan provider、Nomi-core Session、Chat/Coding、Workspace/File、Process、VCS、Knowledge search/read、Cron 同 Session run/replay、Remote open/turn/observe/cancel、凭据持久化审计和关闭清理均通过；输出 `live_smoke_status=pass code=OK status=200`。不替代 `SL-S3-10`/`SL-S3-11` 的独立合同或 `SL-S4-02` 人工验收 |
 
 ## 汇总
 
@@ -102,29 +103,29 @@ C9/Nomi 删除和 Nomi-free RC 已延后，不新增当前阶段阻断。
 | S0 止损发布 | 2 | 0 | 0 | 0 | 0 | 0 | 2 |
 | S1 Revert/keep 审计 | 3 | 0 | 0 | 0 | 0 | 0 | 3 |
 | S2 P0 与基础收缩 | 10 | 0 | 0 | 0 | 0 | 0 | 10 |
-| S3 Role seam 与 Nomi-core owner | 8 | 3 | 0 | 0 | 0 | 1 | 12 |
+| S3 Role seam 与 Nomi-core owner | 9 | 2 | 0 | 0 | 0 | 1 | 12 |
 | S4 产品 UI | 1 | 0 | 1 | 0 | 0 | 0 | 2 |
 | S5 三平台与 Nomi-core RC | 0 | 0 | 2 | 2 | 0 | 1 | 5 |
-| **总计** | **24** | **3** | **3** | **2** | **0** | **2** | **34** |
+| **总计** | **25** | **2** | **3** | **2** | **0** | **2** | **34** |
 
 旧台账 84 项现已收敛为 34 项。任务数量不是质量指标；只有完成定义和最小验证满足后
 才能修改状态。
 
 ## 当前剩余 TODO 快照
 
-当前还剩 10 项未关闭，其中 2 项已明确延后，不属于本阶段阻断；当前阶段实际待处理 8 项：
+当前还剩 9 项未关闭，其中 2 项已明确延后，不属于本阶段阻断；当前阶段实际待处理 7 项：
 
 | 分类 | 数量 | TODO |
 | --- | ---: | --- |
-| 主机当前实施 | 3 | `SL-S3-07`、`SL-S3-10`、`SL-S3-11` |
+| 主机当前实施 | 2 | `SL-S3-10`、`SL-S3-11` |
 | 依赖阻塞 | 2 | `SL-S5-01`、`SL-S5-05` |
 | 人工/产品验收阻塞 | 1 | `SL-S4-02` |
 | 外部原生环境 | 2 | `SL-S5-02` macOS arm64、`SL-S5-03` Linux Desktop x64 |
 | 后续阶段 | 2 | `SL-S3-12` Codex app-server、`SL-S5-04` C9/Nomi 删除 |
 
-主机关键路径已完成 `SL-S3-01 -> SL-S3-02 -> SL-S3-03`，Browser/Computer
+主机关键路径已完成 `SL-S3-01 -> SL-S3-02 -> SL-S3-03 -> SL-S3-07`，Browser/Computer
 first-party dogfood 和具体实现旁路清理也已完成。当前主线是
-`SL-S3-07 -> SL-S3-10/SL-S3-11 -> SL-S4-02 -> SL-S5-01`；Codex Sidecar
+`SL-S3-10/SL-S3-11 -> SL-S4-02 -> SL-S5-01`；Codex Sidecar
 和 C9 不在当前关键路径。
 上述主机项全部由当前主机执行。主机可以按互斥写集启用多个本机 lane；中央合同、
 组合根、Gate、锁文件和 GLOBAL TODO 由集成 Owner 串行合流。外部 macOS/Linux 只验证
@@ -181,11 +182,11 @@ first-party dogfood 和具体实现旁路清理也已完成。当前主线是
 | `SL-S3-04` | closed | 主机 | 第一方 Browser dogfood 同一 Role 主链 | `SL-S3-03` | observe/navigate/act 和 hidden `browser.render_content` 经同一 Provider lock；保留 owner/lane/close/process cleanup；Provider 平台约束不写死在 façade | `cargo test --locked -p nomifun-app --features browser-use --lib browser_role_owner_runs_the_canonical_observe_navigate_act_render_chain -- --ignored --test-threads=1`；Wave2 owner/lifecycle tests；alternate Provider parity test | 无；本机 data URL 作为可访问测试页 |
 | `SL-S3-05` | closed | 主机 | 第一方 Computer/A11y dogfood 同一 Role 主链 | `SL-S3-03` | observe/input 基线和可选 launch/a11y 经 exact Provider；按 target resource 串行；observation generation 过期 typed fail；无具体 Registry 旁路 | `cargo test --locked -p nomifun-app --features computer-use --lib computer_role_owner_runs_the_canonical_observe_input_chain -- --ignored --test-threads=1`；Computer serialization/generation/platform-unavailable tests；`cargo test --locked -p nomi-computer --lib -- --ignored --test-threads=1` | 本机 Windows Desktop/UI Automation 权限已通过；macOS 权限仍由外部主机验证 |
 | `SL-S3-06` | closed | 主机 | 删除 Browser/Computer production concrete bypass | `SL-S3-04`、`SL-S3-05` | Wave 2 first-party Role owner 可用；Knowledge rendered source 只经 typed `browser.render_content`；Gateway Browser/Computer registry、capability module 和 standalone `mcp-computer-stdio` 已物理删除；Nomi engine 内部旧接线不得增长或成为消费者旁路，未来 Runtime 替换时再决定删除 | `cargo test --locked -p nomifun-knowledge --lib`（315）；`cargo test --locked -p nomifun-gateway --lib`（122）；`cargo test --locked -p nomifun-gateway --test production_bypass_audit`；`bun run check:browser-platform-boundary` | 无；旧 Gateway Browser/Computer 工具不再作为兼容入口提供 |
-| `SL-S3-07` | open | 主机 lane | 收口 Nomi-core 真实本地 owner | `SL-S2-06` | Chat、Workspace/File、Process、VCS、Knowledge search/read 保持真实调用；Coding 读写/patch/shell/diff/commit 接入 Nomi-core 的同一 Session 主链；非首批 Wave 3/4 不注册默认模板；不引入 Codex Sidecar 作为当前前置 | `cargo test --locked -p nomifun-app --lib -- --test-threads=1`；`bun run build:ui`；`bun run dev` 启动烟测；配置已授权 Provider 后运行 Nomi-core Chat/Coding 定向测试 | `bun run dev` 已新增 Windows MSVC/SDK 子进程环境加载并完成真实 Tauri WebView smoke；Web/Desktop/`nomicore` 默认入口均选择 `NomiCoreApplication`；2026-09-03 受控 Broker smoke 返回 `ProviderUnavailable` / HTTP 503，未继续重试；当前仍缺可重复的 Nomi-core Chat/Coding 产品语义 PASS |
+| `SL-S3-07` | closed | 主机 lane | 收口 Nomi-core 真实本地 owner | `SL-S2-06` | Chat、Workspace/File、Process、VCS、Knowledge search/read 保持真实调用；Coding 读写/patch/shell/diff/commit 接入 Nomi-core 的同一 Session 主链；非首批 Wave 3/4 不注册默认模板；不引入 Codex Sidecar 作为当前前置 | `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\validation\run-nomi-core-live-provider-from-windows-credential-manager.ps1`；`cargo test --locked -p nomifun-app --test nomi_core_route_gap -- --test-threads=1`；`cargo test --locked -p nomi-tools vcs::tests --lib` | 2026-09-05 真实 StepFun Plan provider smoke 通过：Nomi-core Chat/Coding、Workspace/File、Process、VCS、同一 Session 的 Cron run/replay、Remote open/turn/observe/cancel、凭据持久化审计和关闭清理均完成；`live_smoke_status=pass code=OK status=200`。凭据未进入源码、参数、日志或仓库；不替代 automation/Remote 的独立合同和 Desktop 人工验收 |
 | `SL-S3-08` | closed | 主机 lane | 接入一个真实 MCP Tool 调用 | `SL-S2-06` | v4 `mcp_servers` identity、materialization、MCP package runtime catalog、exact tool/schema 和 credential authority 经 canonical capability；连接失败 typed fail；没有 Gateway/legacy fallback；owner 使用 no-redirect、bounded response 和一次 cleanup | `cargo test --locked -p nomifun-mcp --lib`（250）；`cargo test --locked -p nomifun-app --lib router::agent_wave2_mcp::tests -- --test-threads=1`（7）；`cargo test --locked -p nomifun-app --lib router::agent_wave2_host::tests -- --test-threads=1`（30） | 本机 disposable Streamable HTTP MCP fixture 已执行真实 `tools/call`；OAuth/stdio 仍明确 typed unavailable，不作为本项隐式扩张 |
 | `SL-S3-09` | closed | 主机 | 实现精简 SSH read/write/exec/sudo owner primitive | 无 | 真实 host binding；最小 typed command/outcome；path/payload/output/timeout 有界；exec/sudo credential 分离；host-key changed fail；cancel 后回收且不自动重放 | `77bd45279`; `cargo check --locked -p nomi-ssh -p nomifun-ssh`; `cargo test --locked -p nomifun-ssh --lib` | live sshd/sudo 未运行时只记录未运行，不构造 PASS |
-| `SL-S3-10` | open | 主机 | 完成一个真实 scheduled/automation Nomi-core AgentSession | `SL-S2-05`、`SL-S2-07`、`SL-S3-07` | Schedule/Cron/AutoWork/Requirement 复用 canonical Session command/query 和 NomiCore runtime；计划、执行、取消、恢复不创建第二份 Conversation/Session identity；Conversation-backed adapter 只作为待移除的迁移边界 | 对应 automation crate 定向 tests；一次短周期真实 schedule E2E | 已接入共享 `NomiCoreSessionOwner` 的 Cron/AutoWork typed port、durable receipt、revision/lease fence 和 bounded fail-closed；生产 legacy 文件扫描为 0，但 Channel/IDMM 仍有真实合同缺口，且尚未完成真实 Provider schedule E2E，因此保持 open |
-| `SL-S3-11` | open | 主机 | 闭合 Nomi-core Remote open/turn/observe/cancel 产品主链 | `SL-S2-03`、`SL-S3-07` | explicit AgentSession ID；binding/owner/provenance 不漂移；rotate/revoke 不挂起；cancel/delete/cursor/idempotency 明确；Remote 通过 NomiCore runtime，不依赖 Codex Sidecar；无最近会话或旧 selector 旁路 | Remote REST/MCP 定向 tests；真实 `open -> turn -> observe -> cancel` | Remote REST 已增加逐操作 deadline、超时 detached mutation 和 persistence-blocked typed error；Remote REST 单测 7 项、Runtime 单测 3 项、Remote E2E 2 项通过；当前仍需 installation token/Provider 配置和人工确认，但不再等待 exact Sidecar |
+| `SL-S3-10` | open | 主机 | 完成一个真实 scheduled/automation Nomi-core AgentSession | `SL-S2-05`、`SL-S2-07`、`SL-S3-07` | Schedule/Cron/AutoWork/Requirement 复用 canonical Session command/query 和 NomiCore runtime；计划、执行、取消、恢复不创建第二份 Conversation/Session identity；Conversation-backed adapter 只作为待移除的迁移边界 | 对应 automation crate 定向 tests；一次短周期真实 schedule E2E | 本次真实 smoke 已证明同一 Session 的 Cron run/replay/delete 可执行，但 `check:automation-session-boundary` 仍报告 `transitional_adapters=2`、`test_compat_files=4`；Channel/IDMM 尚缺事件流、完整 receipt 和活动 turn supervision 合同，因此保持 open |
+| `SL-S3-11` | open | 主机 | 闭合 Nomi-core Remote open/turn/observe/cancel 产品主链 | `SL-S2-03`、`SL-S3-07` | explicit AgentSession ID；binding/owner/provenance 不漂移；rotate/revoke 不挂起；cancel/delete/cursor/idempotency 明确；Remote 通过 NomiCore runtime，不依赖 Codex Sidecar；无最近会话或旧 selector 旁路 | Remote REST/MCP 定向 tests；真实 `open -> turn -> observe -> cancel` | 本次真实 smoke 已通过本机 local-trust/in-process 的 `open -> turn -> observe -> cancel`；仍未覆盖 installation-token HTTP auth 和 MCP transport，因此不能据此关闭完整 Remote 产品合同 |
 | `SL-S3-12` | deferred | 后续阶段 | 保留 Codex app-server 协议/Sidecar 研究与未来 Runtime host 接入 | `SL-S2-10`、未来 Codex 立项 | 只有未来正式立项后，才验证 source/build、exact binary、Provider/Model、工具回调、历史、取消/删除和平台证据；本阶段不实现、不重试、不作为 Nomi-core 交付条件 | 已完成的 upstream spike、协议 fixture 和生命周期回归仅作研究证据 | 当前不需要 exact pinned Sidecar 或 live Codex credential；fixture、adapter、Broker smoke 不得升级为 Codex-native PASS |
 
 ## S4：产品 UI
@@ -199,7 +200,7 @@ first-party dogfood 和具体实现旁路清理也已完成。当前主线是
 
 | ID | 状态 | Owner | 目标 | 依赖 | 完成定义 | 最小测试 | 人工 / 外部输入 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `SL-S5-01` | blocked | 主机 | Windows Desktop x64 完成 Nomi-core 核心候选 | S0-S4 除原生外部项 | package/install/fresh/launch；Nomi-core Chat/Coding/File/Process/VCS/MCP/Browser/Computer/Knowledge/automation/Remote；cancel/crash/process-tree cleanup；无 P0、数据损坏或 secret 泄漏 | 收缩后的 `bun run gate:agent-v2 -- c8-win-pre`，每个 E2E 有独立 deadline | Windows SDK/VS Build Tools 已由 `bun run dev` launcher 自动加载并完成链接；当前阻塞来自 `SL-S3-07`、`SL-S3-10`、`SL-S3-11` 和 `SL-S4-02` 的收口，不是 Codex Sidecar |
+| `SL-S5-01` | blocked | 主机 | Windows Desktop x64 完成 Nomi-core 核心候选 | S0-S4 除原生外部项 | package/install/fresh/launch；Nomi-core Chat/Coding/File/Process/VCS/MCP/Browser/Computer/Knowledge/automation/Remote；cancel/crash/process-tree cleanup；无 P0、数据损坏或 secret 泄漏 | 收缩后的 `bun run gate:agent-v2 -- c8-win-pre`，每个 E2E 有独立 deadline | Windows SDK/VS Build Tools 已由 `bun run dev` launcher 自动加载并完成链接；当前仍等待 `SL-S3-10`、`SL-S3-11` 和 `SL-S4-02` 收口，不是 Codex Sidecar 阻塞 |
 | `SL-S5-02` | external | 外部 | macOS Desktop arm64 Nomi-core 候选 smoke | `SL-S5-01` | 真 Apple Silicon 上对当前 Nomi-core 候选完成 package/install/launch、critical capability、anchored FS 和 dispose；非 Rosetta；只验证冻结候选真实 bytes | macOS arm64 native gate/critical suite | 需要 Apple Silicon、签名/打包环境和对应 Nomi-core 候选；不要求 arm64 Codex Sidecar |
 | `SL-S5-03` | external | 外部 | Linux Desktop x64 Nomi-core 候选 smoke | `SL-S5-01` | 真 Linux Desktop x64 上对当前 Nomi-core 候选完成 package/install/launch、Coding、MCP、Browser availability、dispose；Computer 按一期声明明确 available 或 unavailable | Linux Desktop native gate/critical suite | 需要真实 Linux Desktop x64 和 Nomi-core 候选；不要求 Linux Codex Sidecar |
 | `SL-S5-04` | deferred | 后续阶段 | 未来 Codex 切换后的 C9 shutdown 与 Nomi 物理删除 | 未来 Codex 立项、source/build、替代 Runtime 证据 | 只有未来 Runtime 正式接替且用户确认后，才停止 Nomi admission、清理进程树、标记 uncertain、删除 Nomi runtime/factory/route/artifact 并运行 residual scan | 未来 `c9-hard-delete` 及对应 dependency scan | 当前不执行；Nomi 是本阶段产品内核，不得把此项作为当前阻塞 |
@@ -233,7 +234,8 @@ Codex app-server 或其他 Runtime。当前没有运行中 Runtime selector、pe
 
 当前可实施或可并行准备的本机 lane：
 
-- Core owner lane：`SL-S3-07`，按消费者写集迁移，中央 composition 由集成 Owner 收口；
+- Core owner lane：`SL-S3-07` 已关闭；后续只处理真实 smoke 暴露的确定性缺陷，中央 composition
+  由集成 Owner 收口；
 - Automation lane：`SL-S3-10`，迁移 Cron/AutoWork/Requirement 到 Nomi-core canonical
   Session ports；
 - Remote lane：`SL-S3-11`，在不依赖 Codex Sidecar 的前提下收口 Nomi-core
@@ -278,9 +280,12 @@ Codex app-server 或其他 Runtime。当前没有运行中 Runtime selector、pe
   和 Browser boundary scanner 均通过；Gateway 保留的 `nomi_*` 工具不再包含 Browser/
   Computer 具体实现，canonical AgentPlatform Role 是唯一入口。
 - Chat/Coding live：新增有界的生产 Broker smoke，临时创建 Step Plan provider/model/
-  capability/route 图并只从环境读取凭据。2026-09-03 使用本机代理执行一次，准确结果为
-  `ProviderUnavailable`、HTTP `503`；测试配置错误已修正，未把该失败归因于代码或继续
-  无界重试。凭据没有进入源码、报告或命令参数。
+  capability/route 图并只从受控输入读取凭据。2026-09-03 首次代理请求曾返回
+  `ProviderUnavailable`、HTTP `503`；该配置问题已修正，2026-09-05 通过 Windows
+  Credential Manager runner 完成真实 StepFun smoke，结果为
+  `live_smoke_status=pass code=OK status=200`。凭据没有进入源码、报告、命令参数、
+  Cargo/build、测试二进制或应用子进程环境，也没有进入仓库；仅短暂存在于受控
+  runner 进程内。
 - Desktop：`cargo check/build --locked -p nomifun-desktop --no-default-features` 通过；
   真实 `bun run dev` 已启动 `nomifun-desktop` 窗口，Vite 在 `127.0.0.1:5173` 监听，
   Chrome 加载后显示登录页，未出现 `storage generation must be a canonical lowercase
@@ -341,9 +346,10 @@ Codex app-server 或其他 Runtime。当前没有运行中 Runtime selector、pe
   `bun run check:i18n` 通过。AgentSession 结构测试已改为检查实际渲染 generation 的
   `SessionInspector` 与共享错误分类器，不再依赖已移动的页面字面量。
 - Coding/on-demand 继续 fail-closed：当前 Nomi-core 没有 canonical activation port
-  时不把 on-demand 能力伪装为已启用；Coding 的真实 Nomi-core Chat/写入语义仍没有
-  可重复 PASS。2026-09-03 受控 Broker smoke 的首个完整结果仍为
-  `ProviderUnavailable` / HTTP `503`，本轮没有凭据也没有无界重试。
+  时不把 on-demand 能力伪装为已启用；真实 Coding smoke 使用 initial capabilities，
+  并同时回归验证 on-demand placement 会显式阻断。2026-09-05 真实 StepFun
+  Nomi-core Chat/Coding 写入语义已通过；这只关闭 `SL-S3-07`，不改变 on-demand
+  activation、automation、Remote 或 Desktop 人工验收的独立完成定义。
 - `SL-S3-10` 不作虚假关闭：最新 `bun run check:automation-session-boundary` 扫描
   `scanned=193`、`production=175`、`tests=18`，`production_legacy_files=0`、
   `transitional_adapters=2`、`test_compat_files=4`、`app_composition=6/6`。
@@ -362,16 +368,20 @@ Codex app-server 或其他 Runtime。当前没有运行中 Runtime selector、pe
   不改变 Conversation/AgentSession 的唯一身份。
 - 安全 live Provider runner 已通过 `--self-test` 与 `--compile-only`：
   `live_smoke_runner_self_test_status=pass code=OK status=200`、
-  `live_smoke_compile_status=pass code=OK status=200`。真实 StepFun 请求尚未在本机
-  执行；真实 Provider、桌面人工流程和跨平台原生验证仍属于下一次外部环境交接，
-  不得把编译或 evidence tests 记为产品语义 PASS。
-- `SL-S3-11` 不作虚假关闭：Remote 的本地状态、deadline、detached recovery 和
-  persistence-blocked 语义已有证据，但尚无 installation token/Provider 凭据下真实
-  `open -> turn -> observe -> cancel` 的产品证据。`SL-S4-02` 仍需要用户在桌面中完成
-  四条业务流程人工验收。
-- 截至本 checkpoint，当前主机可确定验证的代码工作已完成；下一步进入真实 Provider、
-  桌面人工验收、Windows candidate 及 macOS arm64/Linux Desktop x64 原生环境的交接
-  边界。不得用 mock、fixture、静态 adapter 或 synthetic PASS 关闭这些项目。
+  `live_smoke_compile_status=pass code=OK status=200`；随后用
+  `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File
+  .\scripts\validation\run-nomi-core-live-provider-from-windows-credential-manager.ps1`
+  完成真实请求，结果为 `live_smoke_status=pass code=OK status=200`。runner 从
+  Windows Credential Manager 读取 secret，并在 Cargo/build 完成后只向测试进程 stdin
+  发送一次；runner 在启动 Cargo/build、测试二进制和应用子进程前剥离环境变量，
+  应用关闭后完成明文持久化审计。
+- `SL-S3-11` 不作虚假关闭：本次真实 smoke 已覆盖本机 local-trust/in-process 的
+  `open -> turn -> observe -> cancel`，但尚未覆盖 installation-token HTTP auth 和
+  MCP transport。`SL-S4-02` 仍需要用户在桌面中完成四条业务流程人工验收。
+- 截至本 checkpoint，真实 Provider 的主机 smoke 已完成，当前剩余边界是
+  `SL-S3-10/SL-S3-11` 的独立合同收口、Desktop 人工验收、Windows candidate 以及
+  macOS arm64/Linux Desktop x64 原生环境验证。不得用 mock、fixture、静态 adapter
+  或 synthetic PASS 关闭这些项目。
 
 所有 lane 都在当前主机使用互斥路径写集；不得同时编辑同一文件或争用共享数据库、固定
 端口、Cargo 构建目录和进程树。`Cargo.lock`、中央 Compiler/Snapshot、Fresh-v4 schema、
@@ -381,13 +391,13 @@ handoff 或跨机 attestation。
 
 ## 推荐顺序
 
-1. 冻结当前主机提交和验证结果。`NomiCoreSessionOwner` 的 Cron/AutoWork/
-   Companion archive/IDMM typed 边界已经接线；除外部验证暴露的确定性缺陷外，
-   暂不继续扩大本机兼容层。
-2. 在隔离的外部验证环境中运行安全 Provider smoke：Nomi-core Chat/Coding、
-   Cron 同 Session 的 run/replay、Remote `open -> turn -> observe -> cancel`。
-   凭据只通过受控 runner 的一次性 stdin 交接，不写入仓库、命令行、子进程环境、
-   日志或文档；失败记录首个 typed 结果，不盲目重试。
+1. 冻结当前主机提交和真实 Provider smoke 结果。`SL-S3-07` 已关闭；
+   `NomiCoreSessionOwner` 的 Cron/AutoWork/Companion archive/IDMM typed 边界继续
+   按独占写集推进，除确定性合同缺口外不扩大兼容层。
+2. 在本机并行收口 `SL-S3-10`/`SL-S3-11` 的剩余合同：先处理
+   Channel/IDMM 的 canonical event/receipt/supervision 缺口，再补 Remote
+   installation-token HTTP auth 与 MCP transport；真实 StepFun smoke 作为回归，
+   不重复作为关闭依据。自动化审计和 Remote transport evidence 必须分别满足完成定义。
 3. 完成 `SL-S4-02` 的四条真实 Desktop UI 流程人工验收，保留截图、console 和
    backend 日志引用；外部 Chrome 直连等缺少壳内 trust 的 harness 不当作产品证据。
 4. 真实 Provider 与人工流程通过后，运行 `SL-S5-01` 的 Windows x64 Nomi-core

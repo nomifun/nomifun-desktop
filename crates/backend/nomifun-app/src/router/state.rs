@@ -3,7 +3,6 @@
 //! `ModuleStates` is the bundle returned by `build_module_states`; each
 //! `build_*_state` constructs one `*RouterState` from `AppServices`.
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,8 +11,8 @@ use nomifun_ai_agent::{
     AgentRouterState, AgentRuntimeRegistry, AgentService,
 };
 use nomifun_agent_contracts::{
-    CanonicalErrorCode, CodingRuntimeFeatureInventoryPayload, OfficialPresetKey,
-    RuntimeProfileKind, RuntimeTarget, VersionString, digest_payload,
+    CodingRuntimeFeatureInventoryPayload, RuntimeProfileKind, RuntimeTarget, VersionString,
+    digest_payload,
     fresh_v4_schema_manifest_payload, official_preset_seed_manifest_payload,
 };
 use nomifun_agent_control_plane::{
@@ -720,25 +719,13 @@ fn build_nomi_core_agent_api_state(
     let compiler = PresetPreviewCompiler::new(release, templates.clone())
         .with_materialized_registry(materialized, environment)
         .reject_on_demand_capabilities();
-    // The current Nomi engine has no canonical on-demand activation port.
-    // Keep the manifests discoverable for diagnostics, but mark every
-    // declarative on-demand identity unavailable in this host composition so
-    // Preview cannot return a metadata-only executable success.
-    let unavailable_on_demand = OfficialPresetKey::ALL
-        .into_iter()
-        .filter_map(|key| templates.seed(key))
-        .flat_map(|seed| seed.on_demand_capabilities.iter())
-        .map(|capability| {
-            (
-                capability.id.clone(),
-                CanonicalErrorCode::from("CAPABILITY_UNAVAILABLE"),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let catalog = Arc::new(
-        KernelCatalogProvider::new(kernel)
-            .with_unavailable_capabilities(unavailable_on_demand),
-    );
+    // Capability materialization and placement/activation are separate
+    // contracts. The current Nomi engine can execute the host-owned Coding
+    // tools when they are in the immutable initial set, but it has no
+    // canonical on-demand activation port. The compiler above rejects
+    // on-demand selections; marking those identities unavailable in the
+    // catalog would also incorrectly disable valid initial selections.
+    let catalog = Arc::new(KernelCatalogProvider::new(kernel));
     let store = Arc::new(NomiCoreControlPlaneStore::new(
         services.database.pool().clone(),
     ));
