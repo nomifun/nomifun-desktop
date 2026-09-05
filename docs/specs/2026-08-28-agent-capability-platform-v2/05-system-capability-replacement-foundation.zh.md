@@ -88,7 +88,7 @@
   只留在测试兼容边界。IDMM 的 supervision scope/admission 核心同样使用
   IDMM-owned typed contract，但 canonical Session 仍未提供完整 live event /
   continuation / failover surface。
-- 本次定向结果包括：App lib `398 passed`、DB Conversation repository `83 passed`、
+- 本次定向结果包括：App lib `399 passed`、DB Conversation repository `83 passed`、
   Cron lib/integration `192/62 passed`、Requirement lib/tests `115/120 passed`、
   IDMM `196 passed`、Channel `345 passed`、Companion `275 passed`；UI build、
   i18n、live smoke runner self-test/compile-only 均通过。精确命令和未运行的真实
