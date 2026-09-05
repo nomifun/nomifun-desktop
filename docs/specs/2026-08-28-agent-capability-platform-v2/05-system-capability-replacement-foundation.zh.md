@@ -66,10 +66,13 @@
 - 2026-09-05 通过 Windows Credential Manager runner 完成真实 StepFun Nomi-core
   Chat/Coding smoke，结果为 `live_smoke_status=pass code=OK status=200`。该结果
   关闭 `SL-S3-07` 的真实 owner smoke，但不替代 `SL-S3-10` 的 automation
-  canonical 合同、`SL-S3-11` 的 Nomi-core canonical MCP transport 验证或
-  `SL-S4-02` 的 Desktop 人工验收。Nomi-core Remote REST 的 installation Bearer
-  已由独立 route-gap 回归覆盖，并保留 owner JWT/local-trust 兼容及旧 selector
-  query 的 fail-closed 行为。
+  canonical 合同或 `SL-S4-02` 的 Desktop 人工验收。Nomi-core Remote REST 的
+  installation Bearer、owner JWT/local-trust 兼容、旧 selector query fail-closed
+  和 canonical MCP transport 均已由独立回归及真实 smoke 覆盖，`SL-S3-11` 已关闭。
+- Nomi-core `/mcp` 只复用公共 Streamable HTTP transport/session admission 和四工具
+  schema；host 通过 `CanonicalRemoteOperations` 注入既有 Remote handler，不构造
+  Fresh-v4 `AgentPlatform` 或第二套 Session authority。REST 与 MCP 共用同一
+  owner/provenance/idempotency/cursor 语义。
 
 ### 2026-09-05 主机续接实现事实
 

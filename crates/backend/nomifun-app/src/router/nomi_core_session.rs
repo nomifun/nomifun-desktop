@@ -37,8 +37,9 @@ use nomifun_api_types::{
     CreateAgentSessionTurnResponseDto, ErrorResponse, ForkAgentSessionRequestDto,
     ForkAgentSessionResponseDto, ListMessagesQuery, MessageListResponse, MessageResponse,
     ListConversationsQuery,
-    RemoteCancelRequestDto, RemoteMutationResponseDto, RemoteObserveResponseDto,
-    RemoteOpenRequestDto, RemoteOpenResponseDto, RemoteOpenStateViewDto, RemoteTurnRequestDto,
+    RemoteCancelRequestDto, RemoteMutationResponseDto, RemoteObserveRequestDto,
+    RemoteObserveResponseDto, RemoteOpenRequestDto, RemoteOpenResponseDto,
+    RemoteOpenStateViewDto, RemoteTurnRequestDto,
     ResolveSavedRevisionPreviewRequest, ResolvedPresetSnapshot, SessionCursorDto,
     SendMessageRequest, UpdateConversationRequest,
 };
@@ -2067,6 +2068,104 @@ fn nomi_core_remote_routes(state: NomiCoreAgentApiState) -> Router {
         .with_state(state)
 }
 
+pub(crate) async fn run_nomi_core_remote_open(
+    state: NomiCoreAgentApiState,
+    owner: &nomifun_common::UserId,
+    request: RemoteOpenRequestDto,
+) -> Result<Value, nomifun_public::CanonicalRemoteOperationError> {
+    let response = open_nomi_core_remote(
+        State(state),
+        Extension(AuthenticatedOwner(nomifun_agent_contracts::UserId::from(
+            owner.as_ref().to_owned(),
+        ))),
+        Json(request),
+    )
+    .await
+    .map_err(NomiCoreApiError::into_remote_operation_error)?;
+    serde_json::to_value(response.0).map_err(|error| {
+        nomifun_public::CanonicalRemoteOperationError::new(
+            "REMOTE_RESPONSE_SERIALIZATION_FAILED",
+            format!("Nomi-core Remote open response could not be serialized: {error}"),
+        )
+    })
+}
+
+pub(crate) async fn run_nomi_core_remote_turn(
+    state: NomiCoreAgentApiState,
+    owner: &nomifun_common::UserId,
+    request: RemoteTurnRequestDto,
+) -> Result<Value, nomifun_public::CanonicalRemoteOperationError> {
+    let response = turn_nomi_core_remote(
+        State(state),
+        Extension(AuthenticatedOwner(nomifun_agent_contracts::UserId::from(
+            owner.as_ref().to_owned(),
+        ))),
+        Json(request),
+    )
+    .await
+    .map_err(NomiCoreApiError::into_remote_operation_error)?;
+    serde_json::to_value(response.0).map_err(|error| {
+        nomifun_public::CanonicalRemoteOperationError::new(
+            "REMOTE_RESPONSE_SERIALIZATION_FAILED",
+            format!("Nomi-core Remote turn response could not be serialized: {error}"),
+        )
+    })
+}
+
+pub(crate) async fn run_nomi_core_remote_observe(
+    state: NomiCoreAgentApiState,
+    owner: &nomifun_common::UserId,
+    request: RemoteObserveRequestDto,
+) -> Result<Value, nomifun_public::CanonicalRemoteOperationError> {
+    if request.after_cursor.agent_session_id != request.agent_session_id {
+        return Err(nomifun_public::CanonicalRemoteOperationError::new(
+            "REMOTE_SESSION_NOT_FOUND",
+            "after_cursor must reference the same AgentSession",
+        ));
+    }
+    let response = observe_nomi_core_remote(
+        State(state),
+        Extension(AuthenticatedOwner(nomifun_agent_contracts::UserId::from(
+            owner.as_ref().to_owned(),
+        ))),
+        Query(NomiCoreRemoteObserveQuery {
+            agent_session_id: request.agent_session_id,
+            after_seq: request.after_cursor.seq,
+            limit: request.limit,
+        }),
+    )
+    .await
+    .map_err(NomiCoreApiError::into_remote_operation_error)?;
+    serde_json::to_value(response.0).map_err(|error| {
+        nomifun_public::CanonicalRemoteOperationError::new(
+            "REMOTE_RESPONSE_SERIALIZATION_FAILED",
+            format!("Nomi-core Remote observe response could not be serialized: {error}"),
+        )
+    })
+}
+
+pub(crate) async fn run_nomi_core_remote_cancel(
+    state: NomiCoreAgentApiState,
+    owner: &nomifun_common::UserId,
+    request: RemoteCancelRequestDto,
+) -> Result<Value, nomifun_public::CanonicalRemoteOperationError> {
+    let response = cancel_nomi_core_remote(
+        State(state),
+        Extension(AuthenticatedOwner(nomifun_agent_contracts::UserId::from(
+            owner.as_ref().to_owned(),
+        ))),
+        Json(request),
+    )
+    .await
+    .map_err(NomiCoreApiError::into_remote_operation_error)?;
+    serde_json::to_value(response.0).map_err(|error| {
+        nomifun_public::CanonicalRemoteOperationError::new(
+            "REMOTE_RESPONSE_SERIALIZATION_FAILED",
+            format!("Nomi-core Remote cancel response could not be serialized: {error}"),
+        )
+    })
+}
+
 #[derive(Clone)]
 struct NomiCoreRemoteAuthState {
     validator: Arc<InstanceTokenValidator>,
@@ -2231,6 +2330,19 @@ impl NomiCoreApiError {
                 "cursor": "not_issued",
             }),
         )
+    }
+
+    pub(crate) fn into_remote_operation_error(
+        self,
+    ) -> nomifun_public::CanonicalRemoteOperationError {
+        match self.details {
+            Some(details) => nomifun_public::CanonicalRemoteOperationError::with_details(
+                self.code,
+                self.message,
+                details,
+            ),
+            None => nomifun_public::CanonicalRemoteOperationError::new(self.code, self.message),
+        }
     }
 }
 

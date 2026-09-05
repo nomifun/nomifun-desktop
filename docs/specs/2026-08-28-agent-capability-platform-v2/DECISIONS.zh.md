@@ -6,7 +6,7 @@
 >
 > 状态来源：`GLOBAL-CLOSURE-TODO.zh.md` 是当前实施进度、阻塞项和关闭状态的唯一来源。本文只记录架构决策及理由，不声明代码、Gate、平台验证或发布已经完成。
 >
-> 历史处理：保留 D-001～D-032 的决策编号、仍有效的结论和形成理由。已被 05 否定的旧要求只保留极短撤销原因，不再作为正文中的候选方案、实施步骤或验收合同。
+> 历史处理：保留 D-001～D-033 的决策编号、仍有效的结论和形成理由。已被 05 否定的旧要求只保留极短撤销原因，不再作为正文中的候选方案、实施步骤或验收合同。
 
 ## 状态约定
 
@@ -46,11 +46,14 @@
 8. 2026-09-05 本机通过 Windows Credential Manager runner 完成真实 StepFun
    Nomi-core Chat/Coding、Cron 同 Session run/replay 和 Remote
    `open -> turn -> observe -> cancel` smoke，结果为
-   `live_smoke_status=pass code=OK status=200`。该 evidence 只关闭
-   `SL-S3-07`；不把 automation 的 canonical Session 缺口、Remote 的
-   canonical MCP transport 缺口或 Desktop 人工验收隐式视为完成。Nomi-core
-   Remote REST 的 installation Bearer 已由独立 route-gap 回归覆盖，并保留
-   owner JWT/local-trust 兼容和旧 selector query 的 fail-closed 行为。
+   `live_smoke_status=pass code=OK status=200`。该 evidence 关闭
+   `SL-S3-07` 和 `SL-S3-11`；不把 automation 的 canonical Session 缺口或
+   Desktop 人工验收隐式视为完成。Nomi-core Remote REST/MCP 的 installation
+   Bearer、owner JWT/local-trust 兼容、旧 selector query fail-closed、cursor、
+   idempotency、revoke 和 delete 后不可复活均有独立或真实 smoke 证据。
+9. Nomi-core `/mcp` 复用公共 Streamable HTTP transport 的会话 admission、四工具
+   schema 和 installation Bearer boundary；host 只注入四个 Nomi-core Remote
+   operation，不伪造 Fresh-v4 `AgentPlatform` 或第二套 Session authority。
 
 ## 决策总览
 
@@ -87,7 +90,8 @@
 | D-029 | 当前产品 Runtime 与多-runtime host boundary | 已确认（2026-09-05） | Web/Desktop/`nomicore` 默认使用 NomiCoreApplication；由单一 NomiCoreSessionOwner 共享当前 Nomi engine Session 生命周期；FreshV4Application 是显式未来 host；不支持运行中切换或 fallback |
 | D-030 | Automation 使用 host-owned typed Session boundary | 已修订（2026-09-05） | Cron 只提交封闭 runtime overlay 并通过原子关系/typed receipt 工作；AutoWork 使用 issuer-scoped opaque lease、Session projection revision fence 和 owner/revision/operation-aware config CAS；不得把任意 runtime `extra` 当作 Session authority |
 | D-031 | 领域 adapter 的真实迁移判定 | 已修订（2026-09-05） | 生产 legacy 文件清零不等于 canonical Session migration 完成；Companion archive 可直接由 host 提供 typed contract，Channel/IDMM 在缺少事件流、完整 receipt 或 supervision contract 时保留边界 adapter，并由审计明确报告阻断 |
-| D-032 | 真实 Provider smoke 与凭据边界 | 已确认（2026-09-05） | 真实证据必须经过 Nomi-core AgentSession、Provider/Model route、代表性工具调用和关闭审计；Windows 凭据只经受控 Credential Manager/Bun runner 短暂持有，在构建完成后一次性 stdin 交接，不进入仓库、参数、日志或 Cargo/build/test/application 子进程环境；一次 smoke 只关闭其明确覆盖的 TODO，不能跳过独立 MCP transport 合同 |
+| D-032 | 真实 Provider smoke 与凭据边界 | 已确认（2026-09-05） | 真实证据必须经过 Nomi-core AgentSession、Provider/Model route、代表性工具调用和关闭审计；Windows 凭据只经受控 Credential Manager/Bun runner 短暂持有，在构建完成后一次性 stdin 交接，不进入仓库、参数、日志或 Cargo/build/test/application 子进程环境；一次 smoke 只关闭其明确覆盖的 TODO |
+| D-033 | Nomi-core Remote MCP transport | 已确认（2026-09-05） | Streamable HTTP transport/session admission/tool schema 由 `nomifun-public` 统一持有；Nomi-core 通过 `CanonicalRemoteOperations` 注入既有 Remote handler，复用 owner、provenance、idempotency、cursor 和 runtime，不构造伪 `AgentPlatform` 或第二套状态机 |
 
 ## 全局有效约束
 
@@ -673,11 +677,10 @@ IDMM 的真实合同缺口。
   不得进入源码、文档、fixture、argv、日志、Cargo/build/test/application 子进程环境
   或 Git。
 - 真实 smoke 的覆盖范围必须按 TODO 分项解释：本次 StepFun smoke 关闭
-  `SL-S3-07`；Cron/Remote 的同时通过只作为各自后续合同的输入，不能绕过
-  `SL-S3-10` 的 canonical Session/adapter 缺口、`SL-S3-11` 的 Nomi-core
-  canonical MCP transport 缺口或 `SL-S4-02` 的人工验收。Remote REST 的
-  installation Bearer、owner JWT 兼容和旧 selector query 拒绝另由 route-gap
-  回归证明。
+  `SL-S3-07` 和 `SL-S3-11`；Cron 的同时通过只作为 `SL-S3-10` 后续合同的输入，
+  不能绕过其 canonical Session/adapter 缺口或 `SL-S4-02` 的人工验收。Remote
+  REST/MCP 的 installation Bearer、owner JWT 兼容和旧 selector query 拒绝另由
+  route-gap 回归证明。
 - 凭据一旦不再需要应从本机 Credential Manager 删除并向 Provider 轮换；任何
   失败只记录首个 typed phase/code/status，不通过放宽证据检查来制造 PASS。
 
@@ -685,9 +688,30 @@ IDMM 的真实合同缺口。
 transport 与产品 evidence 分离，既能复用本机并行验证效率，又不会把一次可运行的
 provider 请求误当成完整迁移或跨传输发布证明。
 
+### D-033：Nomi-core Remote MCP transport
+
+- 状态：`已确认（2026-09-05）`
+- MCP 的 Streamable HTTP handshake、transport `mcp-session-id` admission、
+  installation Bearer 验证、四个固定工具 schema 和 bounded transport lifecycle
+  由公共 `nomifun-public` transport 统一提供。
+- Nomi-core 只实现 `CanonicalRemoteOperations` 适配，将 `open`、`turn`、`observe`、
+  `cancel` 调用转交既有 Nomi-core Remote handler；REST 与 MCP 因而共享同一
+  `NomiCoreSessionOwner`、Remote repository、owner/provenance、idempotency、
+  event cursor 和关闭语义。
+- 不把 Fresh-v4 `AgentPlatform` 塞入 Nomi-core，也不通过 MCP transport session
+  id 创建第二个产品 Session identity。transport session 只表达连接生命周期，
+  `agent_session_id` 始终是显式产品身份。
+- 真实 StepFun smoke 已通过 MCP `initialize/tools/list/open/turn/observe/cancel`
+  和 token revoke；transport 回归仍必须保留错误、超时、session header 和
+  owner boundary 的 fail-closed 测试。
+
+理由：公共 transport 统一协议和 admission，host adapter 只负责产品行为，能同时
+降低 Fresh-v4/Nomi-core 的重复代码和后续替换成本；显式 operation trait 也让
+真实 Nomi-core 语义不会被一个“看起来能连通”的伪 Platform 掩盖。
+
 ## 当前阅读与实施规则
 
-1. 先完整读取 `05-system-capability-replacement-foundation.zh.md`，再用本文追溯 D-001～D-032 的决策理由。
+1. 先完整读取 `05-system-capability-replacement-foundation.zh.md`，再用本文追溯 D-001～D-033 的决策理由。
 2. 领取和关闭工作只看 `GLOBAL-CLOSURE-TODO.zh.md`；不得从本文推断某项已经实现或通过 Gate。
 3. Browser/Computer 实施必须先落 Role/Provider seam，再接具体 owner；不能在旧直连上叠加 adapter。
 4. Codex Sidecar 只按未来宿主研究维护；不能继续围绕不存在的私有 patch 扩大当前

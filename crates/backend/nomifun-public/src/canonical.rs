@@ -52,6 +52,101 @@ pub const CANONICAL_REMOTE_TURN_TOOL: &str = "turn";
 pub const CANONICAL_REMOTE_OBSERVE_TOOL: &str = "observe";
 pub const CANONICAL_REMOTE_CANCEL_TOOL: &str = "cancel";
 
+/// The boxed future returned by a [`CanonicalRemoteOperations`] implementation.
+pub type CanonicalRemoteOperationFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<Value, CanonicalRemoteOperationError>>
+            + Send
+            + 'a,
+    >,
+>;
+
+/// Typed errors returned by an injected canonical Remote operation handler.
+///
+/// The error is kept as ordinary tool data instead of being collapsed into an
+/// MCP transport error, so callers can reliably consume the stable `code`,
+/// human-readable `message`, and optional structured `details` fields.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CanonicalRemoteOperationError {
+    pub code: String,
+    pub message: String,
+    pub details: Option<Value>,
+}
+
+impl CanonicalRemoteOperationError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    pub fn with_details(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        details: Value,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            details: Some(details),
+        }
+    }
+
+    fn into_tool_result(self) -> CallToolResult {
+        let mut error = json!({
+            "code": self.code,
+            "message": self.message,
+        });
+        if let Some(details) = self.details
+            && let Value::Object(map) = &mut error
+        {
+            map.insert("details".to_owned(), details);
+        }
+        build_tool_result(json!({ "error": error }))
+    }
+}
+
+impl std::fmt::Display for CanonicalRemoteOperationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for CanonicalRemoteOperationError {}
+
+/// Host-provided implementation of the four canonical Remote operations.
+///
+/// The transport owns authentication, MCP session admission, and the fixed
+/// tool schemas. Implementations only own product behavior and receive the
+/// authenticated installation owner explicitly.
+pub trait CanonicalRemoteOperations: Send + Sync {
+    fn open<'a>(
+        &'a self,
+        owner: &'a UserId,
+        request: RemoteOpenRequestDto,
+    ) -> CanonicalRemoteOperationFuture<'a>;
+
+    fn turn<'a>(
+        &'a self,
+        owner: &'a UserId,
+        request: RemoteTurnRequestDto,
+    ) -> CanonicalRemoteOperationFuture<'a>;
+
+    fn observe<'a>(
+        &'a self,
+        owner: &'a UserId,
+        request: RemoteObserveRequestDto,
+    ) -> CanonicalRemoteOperationFuture<'a>;
+
+    fn cancel<'a>(
+        &'a self,
+        owner: &'a UserId,
+        request: RemoteCancelRequestDto,
+    ) -> CanonicalRemoteOperationFuture<'a>;
+}
+
 /// Host-owned Runtime admission for the post-commit Remote open step.
 ///
 /// The public crate does not know how a host resolves or launches its pinned
@@ -64,27 +159,39 @@ pub trait CanonicalRemoteRuntimeAdmission: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
 }
 
-#[derive(Clone)]
-pub struct CanonicalRemoteMcpHandler {
+struct CanonicalRemotePlatformOperations {
     platform: Arc<AgentPlatform>,
     commands: Arc<dyn CanonicalAgentSessionCommandPort>,
     queries: Arc<dyn AgentSessionQueryPort>,
     runtime: Arc<dyn CanonicalRemoteRuntimeAdmission>,
 }
 
+#[derive(Clone)]
+pub struct CanonicalRemoteMcpHandler {
+    operations: Arc<dyn CanonicalRemoteOperations>,
+}
+
 impl CanonicalRemoteMcpHandler {
+    /// Construct a transport handler around an injected operation provider.
+    pub fn with_operations(
+        operations: Arc<dyn CanonicalRemoteOperations>,
+    ) -> Self {
+        Self { operations }
+    }
+
+    /// Retained constructor for the original AgentPlatform-backed API.
     pub fn new(
         platform: Arc<AgentPlatform>,
         commands: Arc<dyn CanonicalAgentSessionCommandPort>,
         queries: Arc<dyn AgentSessionQueryPort>,
         runtime: Arc<dyn CanonicalRemoteRuntimeAdmission>,
     ) -> Self {
-        Self {
+        Self::with_operations(Arc::new(CanonicalRemotePlatformOperations {
             platform,
             commands,
             queries,
             runtime,
-        }
+        }))
     }
 }
 
@@ -102,6 +209,29 @@ pub fn canonical_remote_mcp_router(
     authoritative_user_id: UserId,
     runtime: Arc<dyn CanonicalRemoteRuntimeAdmission>,
 ) -> Router {
+    canonical_remote_mcp_router_with_operations(
+        Arc::new(CanonicalRemotePlatformOperations {
+            platform,
+            commands,
+            queries,
+            runtime,
+        }),
+        validator,
+        authoritative_user_id,
+    )
+}
+
+/// Build the canonical Remote MCP front door around host-injected operations.
+///
+/// This keeps the same Streamable HTTP transport, installation-token
+/// middleware, transport-session admission, and four fixed tool schemas as
+/// [`canonical_remote_mcp_router`], without requiring the host to construct or
+/// impersonate an [`AgentPlatform`].
+pub fn canonical_remote_mcp_router_with_operations(
+    operations: Arc<dyn CanonicalRemoteOperations>,
+    validator: Arc<InstanceTokenValidator>,
+    authoritative_user_id: UserId,
+) -> Router {
     let transport_admission =
         RemoteMcpSessionAdmissionAuthority::for_owner(&authoritative_user_id);
     let sessions = Arc::new(RemoteSessionManager::with_owner_admission_authority(
@@ -110,16 +240,10 @@ pub fn canonical_remote_mcp_router(
     ));
     let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
         {
-            let platform = Arc::clone(&platform);
-            let commands = Arc::clone(&commands);
-            let queries = Arc::clone(&queries);
-            let runtime = Arc::clone(&runtime);
+            let operations = Arc::clone(&operations);
             move || {
-                Ok(CanonicalRemoteMcpHandler::new(
-                    Arc::clone(&platform),
-                    Arc::clone(&commands),
-                    Arc::clone(&queries),
-                    Arc::clone(&runtime),
+                Ok(CanonicalRemoteMcpHandler::with_operations(
+                    Arc::clone(&operations),
                 ))
             }
         },
@@ -188,32 +312,32 @@ impl ServerHandler for CanonicalRemoteMcpHandler {
             CANONICAL_REMOTE_OPEN_TOOL => {
                 decode_and_run::<RemoteOpenRequestDto, _, _>(
                     arguments,
-                    |request| self.open(&owner, request),
+                    |request| self.operations.open(&owner, request),
                 )
                 .await
             }
             CANONICAL_REMOTE_TURN_TOOL => {
                 decode_and_run::<RemoteTurnRequestDto, _, _>(
                     arguments,
-                    |request| self.turn(&owner, request),
+                    |request| self.operations.turn(&owner, request),
                 )
                 .await
             }
             CANONICAL_REMOTE_OBSERVE_TOOL => {
                 decode_and_run::<RemoteObserveRequestDto, _, _>(
                     arguments,
-                    |request| self.observe(&owner, request),
+                    |request| self.operations.observe(&owner, request),
                 )
                 .await
             }
             CANONICAL_REMOTE_CANCEL_TOOL => {
                 decode_and_run::<RemoteCancelRequestDto, _, _>(
                     arguments,
-                    |request| self.cancel(&owner, request),
+                    |request| self.operations.cancel(&owner, request),
                 )
                 .await
             }
-            _ => Err(CanonicalRemoteError::new(
+            _ => Err(CanonicalRemoteOperationError::new(
                 "REMOTE_OPERATION_NOT_FOUND",
                 format!("unknown canonical Remote operation {name}"),
             )),
@@ -243,8 +367,8 @@ where
     run(request).await
 }
 
-impl CanonicalRemoteMcpHandler {
-    async fn open(
+impl CanonicalRemotePlatformOperations {
+    async fn open_impl(
         &self,
         owner: &UserId,
         request: RemoteOpenRequestDto,
@@ -332,7 +456,7 @@ impl CanonicalRemoteMcpHandler {
         serde_json::to_value(response).map_err(CanonicalRemoteError::from)
     }
 
-    async fn turn(
+    async fn turn_impl(
         &self,
         owner: &UserId,
         request: RemoteTurnRequestDto,
@@ -409,7 +533,7 @@ impl CanonicalRemoteMcpHandler {
         .map_err(CanonicalRemoteError::from)
     }
 
-    async fn observe(
+    async fn observe_impl(
         &self,
         owner: &UserId,
         request: RemoteObserveRequestDto,
@@ -481,7 +605,7 @@ impl CanonicalRemoteMcpHandler {
         .map_err(CanonicalRemoteError::from)
     }
 
-    async fn cancel(
+    async fn cancel_impl(
         &self,
         owner: &UserId,
         request: RemoteCancelRequestDto,
@@ -512,47 +636,41 @@ impl CanonicalRemoteMcpHandler {
     }
 }
 
-#[derive(Debug)]
-struct CanonicalRemoteError {
-    code: String,
-    message: String,
-    details: Option<Value>,
-}
-
-impl CanonicalRemoteError {
-    fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            details: None,
-        }
+impl CanonicalRemoteOperations for CanonicalRemotePlatformOperations {
+    fn open<'a>(
+        &'a self,
+        owner: &'a UserId,
+        request: RemoteOpenRequestDto,
+    ) -> CanonicalRemoteOperationFuture<'a> {
+        Box::pin(self.open_impl(owner, request))
     }
 
-    fn with_details(
-        code: impl Into<String>,
-        message: impl Into<String>,
-        details: Value,
-    ) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            details: Some(details),
-        }
+    fn turn<'a>(
+        &'a self,
+        owner: &'a UserId,
+        request: RemoteTurnRequestDto,
+    ) -> CanonicalRemoteOperationFuture<'a> {
+        Box::pin(self.turn_impl(owner, request))
     }
 
-    fn into_tool_result(self) -> CallToolResult {
-        let mut error = json!({
-            "code": self.code,
-            "message": self.message,
-        });
-        if let Some(details) = self.details
-            && let Value::Object(map) = &mut error
-        {
-            map.insert("details".to_owned(), details);
-        }
-        build_tool_result(json!({ "error": error }))
+    fn observe<'a>(
+        &'a self,
+        owner: &'a UserId,
+        request: RemoteObserveRequestDto,
+    ) -> CanonicalRemoteOperationFuture<'a> {
+        Box::pin(self.observe_impl(owner, request))
+    }
+
+    fn cancel<'a>(
+        &'a self,
+        owner: &'a UserId,
+        request: RemoteCancelRequestDto,
+    ) -> CanonicalRemoteOperationFuture<'a> {
+        Box::pin(self.cancel_impl(owner, request))
     }
 }
+
+type CanonicalRemoteError = CanonicalRemoteOperationError;
 
 impl From<AgentPlatformError> for CanonicalRemoteError {
     fn from(error: AgentPlatformError) -> Self {
@@ -863,6 +981,148 @@ fn open_state(status: &str) -> Result<RemoteOpenStateViewDto, CanonicalRemoteErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Method, Request, StatusCode};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tower::ServiceExt;
+
+    #[derive(Default)]
+    struct InjectedOperations {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CanonicalRemoteOperations for InjectedOperations {
+        fn open<'a>(
+            &'a self,
+            owner: &'a UserId,
+            request: RemoteOpenRequestDto,
+        ) -> CanonicalRemoteOperationFuture<'a> {
+            let calls = Arc::clone(&self.calls);
+            let owner = owner.as_ref().to_owned();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::AcqRel);
+                Ok(json!({
+                    "operation": CANONICAL_REMOTE_OPEN_TOOL,
+                    "owner": owner,
+                    "binding_id": request.binding_id,
+                }))
+            })
+        }
+
+        fn turn<'a>(
+            &'a self,
+            owner: &'a UserId,
+            request: RemoteTurnRequestDto,
+        ) -> CanonicalRemoteOperationFuture<'a> {
+            let calls = Arc::clone(&self.calls);
+            let owner = owner.as_ref().to_owned();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::AcqRel);
+                Ok(json!({
+                    "operation": CANONICAL_REMOTE_TURN_TOOL,
+                    "owner": owner,
+                    "idempotency_key": request.idempotency_key,
+                }))
+            })
+        }
+
+        fn observe<'a>(
+            &'a self,
+            owner: &'a UserId,
+            request: RemoteObserveRequestDto,
+        ) -> CanonicalRemoteOperationFuture<'a> {
+            let calls = Arc::clone(&self.calls);
+            let owner = owner.as_ref().to_owned();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::AcqRel);
+                Ok(json!({
+                    "operation": CANONICAL_REMOTE_OBSERVE_TOOL,
+                    "owner": owner,
+                    "agent_session_id": request.agent_session_id,
+                }))
+            })
+        }
+
+        fn cancel<'a>(
+            &'a self,
+            owner: &'a UserId,
+            request: RemoteCancelRequestDto,
+        ) -> CanonicalRemoteOperationFuture<'a> {
+            let calls = Arc::clone(&self.calls);
+            let owner = owner.as_ref().to_owned();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::AcqRel);
+                Err(CanonicalRemoteOperationError::with_details(
+                    "TEST_CANCELLED",
+                    format!("cancelled for {}", owner),
+                    json!({ "idempotency_key": request.idempotency_key }),
+                ))
+            })
+        }
+    }
+
+    async fn dispatch_mcp(
+        router: &Router,
+        session_id: Option<&str>,
+        body: Value,
+    ) -> (StatusCode, axum::http::HeaderMap, String) {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp")
+            .header("authorization", "Bearer test-token")
+            .header("host", "localhost")
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json");
+        if let Some(session_id) = session_id {
+            builder = builder.header("mcp-session-id", session_id);
+            builder = builder.header("mcp-protocol-version", "2025-06-18");
+        }
+        let response = router
+            .clone()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .expect("dispatch MCP request");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = to_bytes(response.into_body(), nomifun_common::constants::BODY_LIMIT)
+            .await
+            .expect("read MCP response");
+        (
+            status,
+            headers,
+            String::from_utf8(body.to_vec()).expect("MCP response is UTF-8"),
+        )
+    }
+
+    fn response_json(body: &str) -> Value {
+        if let Ok(value) = serde_json::from_str(body) {
+            return value;
+        }
+        let data = body
+            .lines()
+            .find_map(|line| line.strip_prefix("data: ").filter(|data| !data.is_empty()))
+            .expect("SSE response contains a data event");
+        serde_json::from_str(data)
+            .unwrap_or_else(|error| panic!("SSE data is JSON: {error}; body={body:?}"))
+    }
+
+    #[test]
+    fn legacy_router_constructor_signature_remains_available() {
+        let _router_constructor: fn(
+            Arc<AgentPlatform>,
+            Arc<dyn CanonicalAgentSessionCommandPort>,
+            Arc<dyn AgentSessionQueryPort>,
+            Arc<InstanceTokenValidator>,
+            UserId,
+            Arc<dyn CanonicalRemoteRuntimeAdmission>,
+        ) -> Router = canonical_remote_mcp_router;
+        let _handler_constructor: fn(
+            Arc<AgentPlatform>,
+            Arc<dyn CanonicalAgentSessionCommandPort>,
+            Arc<dyn AgentSessionQueryPort>,
+            Arc<dyn CanonicalRemoteRuntimeAdmission>,
+        ) -> CanonicalRemoteMcpHandler = CanonicalRemoteMcpHandler::new;
+    }
 
     #[test]
     fn canonical_tools_are_exactly_the_four_remote_operations() {
@@ -914,5 +1174,124 @@ mod tests {
             "AgentSession principal ownership check failed".to_owned(),
         ));
         assert_eq!(error.code, "REMOTE_SESSION_NOT_FOUND");
+    }
+
+    #[test]
+    fn operation_error_constructors_preserve_typed_fields() {
+        let simple = CanonicalRemoteOperationError::new("TEST_CODE", "test message");
+        assert_eq!(simple.code, "TEST_CODE");
+        assert_eq!(simple.message, "test message");
+        assert_eq!(simple.details, None);
+
+        let detailed = CanonicalRemoteOperationError::with_details(
+            "TEST_DETAILED",
+            "detailed message",
+            json!({"retryable": true}),
+        );
+        assert_eq!(detailed.code, "TEST_DETAILED");
+        assert_eq!(detailed.message, "detailed message");
+        assert_eq!(detailed.details, Some(json!({"retryable": true})));
+    }
+
+    #[tokio::test]
+    async fn injected_operations_are_used_by_list_tools_and_call_tool() {
+        let operations = Arc::new(InjectedOperations::default());
+        let owner = UserId::new();
+        let router = canonical_remote_mcp_router_with_operations(
+            operations.clone(),
+            Arc::new(InstanceTokenValidator::new(Some(
+                nomifun_auth::token_sha256_hex("test-token"),
+            ))),
+            owner.clone(),
+        );
+
+        let (status, headers, body) = dispatch_mcp(
+            &router,
+            None,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "nomifun-public-test", "version": "1"}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "initialize response: {body}");
+        let session_id = headers
+            .get("mcp-session-id")
+            .expect("initialize returns an MCP session id")
+            .to_str()
+            .expect("session id is valid UTF-8")
+            .to_owned();
+        let initialize = response_json(&body);
+        assert!(initialize.get("result").is_some());
+
+        let (status, _, _) = dispatch_mcp(
+            &router,
+            Some(&session_id),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        let (status, _, body) = dispatch_mcp(
+            &router,
+            Some(&session_id),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let list = response_json(&body);
+        let names = list["result"]["tools"]
+            .as_array()
+            .expect("tools/list returns tools")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name").to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["open", "turn", "observe", "cancel"]);
+
+        let (status, _, body) = dispatch_mcp(
+            &router,
+            Some(&session_id),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "turn",
+                    "arguments": {
+                        "agent_session_id": UserId::new().as_ref(),
+                        "input": {"hello": "world"},
+                        "idempotency_key": "injected-turn"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let call = response_json(&body);
+        assert_ne!(call["result"]["isError"], true);
+        let operation_result: Value = serde_json::from_str(
+            call["result"]["content"][0]["text"]
+                .as_str()
+                .expect("tool result has text"),
+        )
+        .expect("injected operation result is JSON");
+        assert_eq!(operation_result["operation"], CANONICAL_REMOTE_TURN_TOOL);
+        assert_eq!(operation_result["owner"], owner.as_ref());
+        assert_eq!(operation_result["idempotency_key"], "injected-turn");
+        assert_eq!(operations.calls.load(Ordering::Acquire), 1);
     }
 }

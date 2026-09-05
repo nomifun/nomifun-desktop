@@ -43,6 +43,10 @@ pub async fn csrf_middleware(
 
     // Validate CSRF for state-changing requests
     let needs_validation = matches!(method, Method::POST | Method::PUT | Method::DELETE | Method::PATCH);
+    // Canonical Streamable HTTP MCP uses the same non-ambient installation
+    // Bearer gate; do not require a browser cookie/header pair before its
+    // transport middleware can return the typed auth result.
+    let is_mcp_transport = path == "/mcp" || path.starts_with("/mcp/");
     let is_exempt = path == "/login"
         || path == "/api/auth/qr-login"
         || path == "/api/auth/setup"
@@ -56,7 +60,7 @@ pub async fn csrf_middleware(
     // not an ambient cookie, so they are not a CSRF target — skip validation.
     let local_trusted = request.extensions().get::<crate::trust::LocalTrusted>().is_some();
 
-    if needs_validation && !is_exempt && !local_trusted {
+    if needs_validation && !is_exempt && !is_mcp_transport && !local_trusted {
         let header_token = request
             .headers()
             .get(CSRF_HEADER_NAME)

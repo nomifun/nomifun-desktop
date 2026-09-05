@@ -42,6 +42,10 @@ fn default_nomi_core_router_keeps_legacy_and_execution_surfaces_explicit() {
         "default Nomi-core router must mount the app-local Agent adapter"
     );
     assert!(
+        routes.contains(".nest(\"/mcp\", nomi_core_remote_mcp)"),
+        "default Nomi-core router must mount the canonical Remote MCP transport"
+    );
+    assert!(
         !routes.contains("remote_rest::build("),
         "default Nomi-core router must not mount the Fresh-v4 Remote adapter"
     );
@@ -857,10 +861,83 @@ async fn nomi_core_remote_replays_frozen_binding_and_persists_event_cursor() {
                     .expect("serialize post-cancel turn request"),
                 ))
                 .expect("build post-cancel turn request"),
+    )
+    .await
+    .expect("dispatch post-cancel turn");
+    assert_eq!(turn_after_cancel.status(), StatusCode::CONFLICT);
+
+    let delete_session = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/agent-sessions/{session_id}"))
+                .header("x-nomi-local-trust", "remote-local-trust")
+                .body(Body::empty())
+                .expect("build Remote Session delete request"),
         )
         .await
-        .expect("dispatch post-cancel turn");
-    assert_eq!(turn_after_cancel.status(), StatusCode::CONFLICT);
+        .expect("delete Remote Session");
+    assert_eq!(delete_session.status(), StatusCode::OK);
+
+    let post_delete_requests = [
+        Request::builder()
+            .uri(format!(
+                "/api/remote/observe?agent_session_id={session_id}&after_seq=0&limit=1"
+            ))
+            .header("x-nomi-local-trust", "remote-local-trust")
+            .body(Body::empty())
+            .expect("build post-delete observe request"),
+        Request::builder()
+            .method("POST")
+            .uri("/api/remote/turn")
+            .header("x-nomi-local-trust", "remote-local-trust")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "agent_session_id": session_id,
+                    "input": {"content": "must not resurrect"},
+                    "idempotency_key": "remote-turn-after-delete"
+                }))
+                .expect("serialize post-delete turn request"),
+            ))
+            .expect("build post-delete turn request"),
+        Request::builder()
+            .method("POST")
+            .uri("/api/remote/cancel")
+            .header("x-nomi-local-trust", "remote-local-trust")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "agent_session_id": session_id,
+                    "idempotency_key": "remote-cancel-after-delete"
+                }))
+                .expect("serialize post-delete cancel request"),
+            ))
+            .expect("build post-delete cancel request"),
+    ];
+    for request in post_delete_requests {
+        let response = router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("dispatch post-delete Remote request");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("read post-delete Remote response");
+        let value: Value = serde_json::from_slice(&body).expect("post-delete Remote JSON");
+        assert!(
+            matches!(
+                value["code"].as_str(),
+                Some("REMOTE_SESSION_NOT_FOUND")
+                    | Some("NOMI_CORE_AGENT_SESSION_NOT_FOUND")
+                    | Some("SESSION_NOT_FOUND")
+                    | Some("NOT_FOUND")
+            ),
+            "deleted Remote Session must not be resurrected: {value}"
+        );
+    }
 
     services.shutdown_browser_platform().await.expect("browser cleanup");
     services.database.close().await;
@@ -935,6 +1012,265 @@ async fn nomi_core_remote_accepts_installation_bearer_without_local_trust() {
     let authenticated_value: Value =
         serde_json::from_slice(&authenticated_body).expect("authenticated Remote JSON");
     assert_eq!(authenticated_value["code"], "REMOTE_SESSION_NOT_FOUND");
+
+    let revoked = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/webui/access-token")
+                .header("x-nomi-local-trust", trust_secret)
+                .body(Body::empty())
+                .expect("build installation token revoke request"),
+        )
+        .await
+        .expect("dispatch installation token revoke request");
+    assert_eq!(revoked.status(), StatusCode::OK);
+    let revoked_request = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/remote/observe?agent_session_id=0190f5fe-7c00-7a00-8000-000000000001")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .expect("build revoked-token Remote request"),
+        )
+        .await
+        .expect("dispatch revoked-token Remote request");
+    assert_eq!(revoked_request.status(), StatusCode::UNAUTHORIZED);
+    let revoked_body = axum::body::to_bytes(revoked_request.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("read revoked-token Remote response");
+    let revoked_value: Value =
+        serde_json::from_slice(&revoked_body).expect("revoked-token Remote JSON");
+    assert_eq!(revoked_value["code"], "REMOTE_AUTH_REQUIRED");
+
+    services.shutdown_browser_platform().await.expect("browser cleanup");
+    services.database.close().await;
+}
+
+async fn mcp_response(
+    router: &axum::Router,
+    token: &str,
+    session_id: Option<&str>,
+    request: Value,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("host", "127.0.0.1")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream");
+    if let Some(session_id) = session_id {
+        builder = builder
+            .header("mcp-session-id", session_id)
+            .header("mcp-protocol-version", "2025-06-18");
+    }
+    let response = router
+        .clone()
+        .oneshot(
+            builder
+                .body(Body::from(
+                    serde_json::to_vec(&request).expect("serialize MCP request"),
+                ))
+                .expect("build MCP request"),
+        )
+        .await
+        .expect("dispatch MCP request");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("read MCP response body");
+    (status, headers, body.to_vec())
+}
+
+fn parse_mcp_response(body: &[u8]) -> Value {
+    if let Ok(value) = serde_json::from_slice(body) {
+        return value;
+    }
+    let text = String::from_utf8_lossy(body);
+    let data = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:").map(str::trim))
+        .find(|line| !line.is_empty())
+        .unwrap_or_else(|| panic!("MCP response must contain a JSON data event: {text:?}"));
+    serde_json::from_str(data).expect("MCP data event must be JSON")
+}
+
+fn mcp_tool_error_code(response: &Value) -> String {
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("MCP tool result must contain text");
+    let text = text.strip_prefix("Error: ").unwrap_or(text);
+    let payload: Value = serde_json::from_str(text)
+        .unwrap_or_else(|error| panic!("MCP tool text must be JSON ({error}): {text:?}"));
+    payload
+        .pointer("/error/code")
+        .or_else(|| payload.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("MCP tool error must contain a typed code: {response:?}"))
+        .to_owned()
+}
+
+#[tokio::test]
+async fn nomi_core_remote_mcp_uses_installation_auth_and_nomi_core_operations() {
+    let trust_secret = "remote-mcp-local-trust";
+    let (router, services) = common::build_local_trust_app(trust_secret).await;
+
+    let minted = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/webui/access-token")
+                .header("x-nomi-local-trust", trust_secret)
+                .body(Body::empty())
+                .expect("build MCP token mint request"),
+        )
+        .await
+        .expect("dispatch MCP token mint request");
+    assert_eq!(minted.status(), StatusCode::OK);
+    let minted_body = axum::body::to_bytes(minted.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("read MCP token response");
+    let token = serde_json::from_slice::<Value>(&minted_body)
+        .expect("MCP token response JSON")["data"]["token"]
+        .as_str()
+        .expect("MCP token")
+        .to_owned();
+
+    let (status, _, unauthorized_body) = mcp_response(
+        &router,
+        "not-the-installation-token",
+        None,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "nomi-core-route-gap", "version": "1"}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let unauthorized = serde_json::from_slice::<Value>(&unauthorized_body)
+        .expect("unauthorized MCP JSON");
+    assert_eq!(unauthorized["code"], "REMOTE_AUTH_REQUIRED");
+
+    let (status, headers, body) = mcp_response(
+        &router,
+        &token,
+        None,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "nomi-core-route-gap", "version": "1"}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = headers
+        .get("mcp-session-id")
+        .expect("MCP initialize must pin a transport session")
+        .to_str()
+        .expect("MCP session id must be valid UTF-8")
+        .to_owned();
+    assert!(parse_mcp_response(&body)["result"].is_object());
+
+    let (status, _, _) = mcp_response(
+        &router,
+        &token,
+        Some(&session_id),
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let (status, _, body) = mcp_response(
+        &router,
+        &token,
+        Some(&session_id),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let list = parse_mcp_response(&body);
+    let names = list["result"]["tools"]
+        .as_array()
+        .expect("MCP tools/list array")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("MCP tool name"))
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["open", "turn", "observe", "cancel"]);
+
+    let session = "0190f5fe-7c00-7a00-8000-000000000001";
+    let calls = [
+        (
+            "open",
+            json!({
+                "binding_id": "missing-binding",
+                "idempotency_key": "mcp-open-gap"
+            }),
+            "REMOTE_BINDING_NOT_FOUND",
+        ),
+        (
+            "turn",
+            json!({
+                "agent_session_id": session,
+                "input": {"content": "unused"},
+                "idempotency_key": "mcp-turn-gap"
+            }),
+            "REMOTE_SESSION_NOT_FOUND",
+        ),
+        (
+            "observe",
+            json!({
+                "agent_session_id": session,
+                "after_cursor": {"agent_session_id": session, "seq": 0},
+                "limit": 1
+            }),
+            "REMOTE_SESSION_NOT_FOUND",
+        ),
+        (
+            "cancel",
+            json!({
+                "agent_session_id": session,
+                "idempotency_key": "mcp-cancel-gap"
+            }),
+            "REMOTE_SESSION_NOT_FOUND",
+        ),
+    ];
+    for (index, (name, arguments, expected_code)) in calls.into_iter().enumerate() {
+        let (status, _, body) = mcp_response(
+            &router,
+            &token,
+            Some(&session_id),
+            json!({
+                "jsonrpc": "2.0",
+                "id": index + 3,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "MCP tool call {name}");
+        assert_eq!(mcp_tool_error_code(&parse_mcp_response(&body)), expected_code, "{name}");
+    }
 
     services.shutdown_browser_platform().await.expect("browser cleanup");
     services.database.close().await;

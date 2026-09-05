@@ -12,8 +12,10 @@ mod session;
 pub use canonical::{
     CANONICAL_REMOTE_CANCEL_TOOL, CANONICAL_REMOTE_OBSERVE_TOOL,
     CANONICAL_REMOTE_OPEN_TOOL, CANONICAL_REMOTE_TURN_TOOL,
-    CanonicalRemoteMcpHandler, CanonicalRemoteRuntimeAdmission,
-    canonical_remote_mcp_router,
+    CanonicalRemoteMcpHandler, CanonicalRemoteOperationError,
+    CanonicalRemoteOperationFuture, CanonicalRemoteOperations,
+    CanonicalRemoteRuntimeAdmission, canonical_remote_mcp_router,
+    canonical_remote_mcp_router_with_operations,
 };
 pub use result::build_tool_result;
 pub use router::{
