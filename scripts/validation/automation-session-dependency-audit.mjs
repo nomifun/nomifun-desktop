@@ -97,7 +97,7 @@ const DOMAIN_SPECS = [
         /Arc<\s*dyn\s+nomifun_channel::ChannelSessionPort\s*>\s*=\s*conversation_owner/,
       ],
     },
-    compatibilityFactory: 'conversation_channel_session_port',
+    compatibilityFactory: null,
   },
   {
     id: 'requirement-autowork',
@@ -169,7 +169,7 @@ const DOMAIN_SPECS = [
         /conversation_session\s*:\s*conversation_owner/,
       ],
     },
-    compatibilityFactory: 'conversation_session_port',
+    compatibilityFactory: null,
   },
 ];
 
@@ -829,7 +829,8 @@ function printHumanReport(report) {
     `scanned=${report.summary.scannedRustFiles} production=${report.summary.productionFiles} ` +
       `tests=${report.summary.testFiles} ` +
       `production_legacy_files=${report.summary.productionFilesWithLegacyDependencies} ` +
-      `transitional_adapters=${report.summary.transitionalAdaptersWithLegacyDependencies} ` +
+      `adapters=${report.summary.transitionalAdapters} ` +
+      `transitional_adapters_with_legacy_dependencies=${report.summary.transitionalAdaptersWithLegacyDependencies} ` +
       `test_compat_files=${report.summary.testCompatFilesWithLegacyDependencies} ` +
       `app_composition=${report.summary.appCompositionCoveredDomains}/${report.scope.length}`,
   );
@@ -840,7 +841,7 @@ function printHumanReport(report) {
     console.log(
       `${domain.rank}. ${domain.id}: ${domain.readiness}; ` +
         `app_composition=${composition?.status ?? 'missing'}; ` +
-        `transitional_adapter=${domain.transitionalAdapter.present ? 'yes' : 'missing'}; ` +
+        `typed_adapter=${domain.transitionalAdapter.present ? 'yes' : 'missing'}; ` +
         `compat_factory=${domain.compatibilityFactory.present ? domain.compatibilityFactory.name : 'missing'}; ` +
         `adapter_legacy=${domain.adapterLegacyReferences.length}; ` +
         `production_legacy_files=${domain.productionFilesWithLegacyDependencies}; ` +

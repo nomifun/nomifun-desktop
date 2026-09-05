@@ -24,7 +24,7 @@ pub mod supervisor;
 pub mod util;
 
 pub use events::IdmmEventEmitter;
-pub use probe::{ConversationSessionPort, conversation_session_port};
+pub use probe::ConversationSessionPort;
 pub use routes::idmm_routes;
 pub use service::{IdmmService, ProbeDeps};
 pub use session::{SessionSupervisionPort, SupervisionTurnScope};

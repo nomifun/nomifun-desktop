@@ -28,6 +28,9 @@ use nomifun_db::{
 use nomifun_realtime::UserEventSink;
 use tokio::sync::broadcast;
 
+#[path = "support/channel_session_port.rs"]
+mod channel_session_port;
+
 const DEFAULT_PROVIDER: &str = "018f1234-5678-7abc-8def-012345678940";
 const COMPANION_PROVIDER: &str = "018f1234-5678-7abc-8def-012345678941";
  const SESSION_A: &str = "018f1234-5678-7abc-8def-012345678943";
@@ -287,7 +290,7 @@ async fn send_to_agent_warms_cold_task_before_returning_stream_subscription() {
         SqliteClientPreferenceRepository::new(pool.clone()),
     )));
     let message_svc = ChannelMessageService::new(
-        nomifun_channel::conversation_channel_session_port(
+        channel_session_port::conversation_channel_session_port(
             Arc::clone(&conversation_svc),
             Arc::clone(&runtime_registry),
         ),
@@ -364,7 +367,7 @@ async fn build_stack(pool: nomifun_db::SqlitePool) -> TestStack {
     )));
     let channel_repo = Arc::new(SqliteChannelRepository::new(pool));
     let message_svc = ChannelMessageService::new(
-        nomifun_channel::conversation_channel_session_port(
+        channel_session_port::conversation_channel_session_port(
             Arc::clone(&conversation_svc),
             Arc::clone(&runtime_registry),
         ),

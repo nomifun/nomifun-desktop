@@ -28,7 +28,9 @@ use nomifun_auth::extract_token_from_ws_headers;
 use nomifun_channel::ChannelRouterState;
 use nomifun_common::{AppError, OnConversationDelete, OnTerminalDelete};
 use nomifun_conversation::service::QuiescentOrphanReconciliation;
-use nomifun_conversation::{ConversationRouterState, ConversationService};
+use nomifun_conversation::{
+    ConversationRouterState, ConversationService, ConversationSupervisionHook, IdmmTurnScope,
+};
 use nomifun_cron::{CronEventEmitter, CronRouterState};
 use nomifun_db::{
     IAgentExecutionRepository, IAgentExecutionTemplateRepository,
@@ -48,7 +50,9 @@ use nomifun_extension::{
     resolve_scan_paths_for_data_dir, resolve_state_file_path,
 };
 use nomifun_file::{FileRouterState, FileService, FileWatchService, SnapshotService};
-use nomifun_idmm::{IdmmManager, IdmmRouterState};
+use nomifun_idmm::{
+    IdmmManager, IdmmRouterState, SessionSupervisionPort, SupervisionTurnScope,
+};
 use nomifun_knowledge::KnowledgeRouterState;
 use nomifun_mcp::{
     ClaudeAdapter, CodeBuddyAdapter, CodexAdapter, GeminiAdapter, McpAgentAdapter, McpConfigService,
@@ -585,9 +589,15 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
     // Arm the shared service before execution recovery can start. Every clone
     // shares this hook slot, so normal chat and Agent attempts observe the same
     // IDMM supervisor without a boot-time race.
-    let idmm_hook = Arc::new(idmm_state.service.manager().clone());
-    conversation.service.with_supervision_hook(idmm_hook.clone());
-    services.terminal_service.with_terminal_supervision_hook(idmm_hook);
+    let idmm_manager = idmm_state.service.manager().clone();
+    conversation
+        .service
+        .with_supervision_hook(Arc::new(NomiCoreConversationSupervisionHook::new(
+            idmm_manager.clone(),
+        )));
+    services
+        .terminal_service
+        .with_terminal_supervision_hook(Arc::new(idmm_manager));
     let states = ModuleStates {
         system: build_system_state(services),
         conversation,
@@ -1696,6 +1706,34 @@ pub fn build_idmm_state(
     services.register_background_task(janitor);
 
     IdmmRouterState::new(service)
+}
+
+/// App-owned composition adapter for the two crates' supervision contracts.
+///
+/// `nomifun-conversation` deliberately does not depend on IDMM, while IDMM
+/// deliberately does not depend on the Conversation implementation. The app
+/// is the only layer that can translate the host admission token into the
+/// IDMM-owned supervision scope and wire the shared manager into the live
+/// Conversation service.
+#[derive(Clone)]
+struct NomiCoreConversationSupervisionHook {
+    manager: IdmmManager,
+}
+
+impl NomiCoreConversationSupervisionHook {
+    fn new(manager: IdmmManager) -> Self {
+        Self { manager }
+    }
+}
+
+impl ConversationSupervisionHook for NomiCoreConversationSupervisionHook {
+    fn on_turn_start(&self, conversation_id: &str, admitted_scope: IdmmTurnScope) {
+        SessionSupervisionPort::admit_conversation_turn(
+            &self.manager,
+            conversation_id,
+            SupervisionTurnScope::new(admitted_scope.wire_turn_id, admitted_scope.generation),
+        );
+    }
 }
 
 /// Spawn the IDMM record TTL janitor: sweeps rows older than `TTL_MS` and

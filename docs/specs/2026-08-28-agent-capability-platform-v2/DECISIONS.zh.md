@@ -89,9 +89,10 @@
 | D-028 | 发布平台矩阵 | 已修订（2026-09-03） | 当前首发验证针对 Nomi-core 候选：Windows x64、macOS arm64、Linux Desktop x64；macOS x64/Linux Headless 后续交付 |
 | D-029 | 当前产品 Runtime 与多-runtime host boundary | 已确认（2026-09-05） | Web/Desktop/`nomicore` 默认使用 NomiCoreApplication；由单一 NomiCoreSessionOwner 共享当前 Nomi engine Session 生命周期；FreshV4Application 是显式未来 host；不支持运行中切换或 fallback |
 | D-030 | Automation 使用 host-owned typed Session boundary | 已修订（2026-09-05） | Cron 只提交封闭 runtime overlay 并通过原子关系/typed receipt 工作；AutoWork 使用 issuer-scoped opaque lease、Session projection revision fence 和 owner/revision/operation-aware config CAS；不得把任意 runtime `extra` 当作 Session authority |
-| D-031 | 领域 adapter 的真实迁移判定 | 已修订（2026-09-05） | 生产 legacy 文件清零不等于 canonical Session migration 完成；Companion archive 可直接由 host 提供 typed contract，Channel/IDMM 在缺少事件流、完整 receipt 或 supervision contract 时保留边界 adapter，并由审计明确报告阻断 |
+| D-031 | 领域 adapter 的真实迁移判定 | 已修订（2026-09-05） | 以生产 legacy 清零、共享 host owner、typed boundary 和行为回归判定本阶段 host-boundary 收口；Channel/IDMM 的未来 canonical live event、完整 receipt 与 continuation contract 仍单独跟踪，不伪装为已完成 |
 | D-032 | 真实 Provider smoke 与凭据边界 | 已确认（2026-09-05） | 真实证据必须经过 Nomi-core AgentSession、Provider/Model route、代表性工具调用和关闭审计；Windows 凭据只经受控 Credential Manager/Bun runner 短暂持有，在构建完成后一次性 stdin 交接，不进入仓库、参数、日志或 Cargo/build/test/application 子进程环境；一次 smoke 只关闭其明确覆盖的 TODO |
 | D-033 | Nomi-core Remote MCP transport | 已确认（2026-09-05） | Streamable HTTP transport/session admission/tool schema 由 `nomifun-public` 统一持有；Nomi-core 通过 `CanonicalRemoteOperations` 注入既有 Remote handler，复用 owner、provenance、idempotency、cursor 和 runtime，不构造伪 `AgentPlatform` 或第二套状态机 |
+| D-034 | `SL-S3-10` host-boundary 收口 | 已确认（2026-09-05） | Cron/AutoWork/Requirement/AgentExecution/Channel/IDMM 均经同一个 `NomiCoreSessionOwner` 接收领域自有 typed contract；Conversation-backed bridge 仅保留在测试支持或 app composition，审计必须报告 `production_legacy_files=0`、`transitional_adapters_with_legacy_dependencies=0`、`candidate=none`，但不宣称 canonical Session 已具备所有未来 live event/receipt 能力 |
 
 ## 全局有效约束
 
@@ -651,18 +652,31 @@ overlay、不可伪造的 host capability、revision CAS 和每目标锁足以�
 - 依赖审计同时报告三类事实：生产模块是否仍直接依赖旧实现、typed adapter 是否
   仍承担转换、以及测试是否仍使用 Conversation-backed fixture。不能因为第一项为
   零就把后两项抹掉，也不能把 adapter 单测当成产品级 canonical Session 证据。
+- 本阶段对 `SL-S3-10` 的迁移判定是：真实 consumer crate 只能依赖自己的 typed
+  port；Conversation/Runtime registry 的转换必须集中在 app-owned
+  `NomiCoreSessionOwner` composition，或明确标注的 integration-test support；
+  不允许在领域 crate 中保留第二份生命周期、identity map 或隐藏 fallback。
+  因此“生产 legacy 清零 + 共享 host owner + 行为回归通过”可以关闭本阶段
+  host-boundary 任务，而不等同于删除 Nomi-core 内部实现。
 - Companion archive 的消息窗口和上下文清理已经可以由 `NomiCoreSessionOwner`
   直接提供 typed host contract；其 Conversation 元数据投影只保留在测试兼容边界。
-- Channel 只有在 canonical Session 提供带 operation/Session identity 的事件流、
-  完整 terminal receipt、消息页和精确 cancel contract 后，才能删除当前 adapter。
-  IDMM 只有在 canonical Session 提供活动 turn scope、作用域化 continuation/failover
-  和 live event subscription 后，才能删除当前 adapter。
-- 当前 audit 的非零退出是有意的阻断信号，而不是需要通过改脚本或增加兼容 alias
-  抹平的质量指标。
+- Channel 的生产 crate 现在只保留 Channel-owned receipt/event port；其
+  Conversation-backed bridge 已移到测试支持目录。未来 canonical Session 若提供带
+  operation/Session identity 的直接事件流、完整 terminal receipt、消息页和精确
+  cancel contract，再评估是否删除 app host 内的转换实现。
+- IDMM 的生产 crate 现在只保留 IDMM-owned `SupervisionTurnScope` 和
+  `ConversationSessionPort`；Conversation scope 与 hook 的转换由 app composition
+  wrapper 完成。未来 canonical Session 若提供活动 turn scope、作用域化
+  continuation/failover 和 live event subscription，再评估是否进一步下沉或删除
+  host conversion。
+- 当前 audit 的非零退出仍是有意的阻断信号；本次审计已报告
+  `production_legacy_files=0`、`transitional_adapters_with_legacy_dependencies=0`、
+  `candidate=none`，所以 `SL-S3-10` 的 host-boundary 任务可以关闭。测试兼容文件
+  和未来 canonical contract 缺口继续显式记录，不通过 alias 抹平。
 
-理由：把“生产 legacy 清零”“边界转换收口”和“canonical Session 已具备完整产品
-语义”分开，能让并行 lane 共享同一事实而不提前关闭 `SL-S3-10` 或掩盖 Channel/
-IDMM 的真实合同缺口。
+理由：把“生产 legacy 清零”“边界转换收口”“本阶段 host-boundary 完成”和
+“canonical Session 已具备完整产品语义”分开，能让并行 lane 共享同一事实，在关闭
+`SL-S3-10` 的同时不掩盖 Channel/IDMM 的未来合同缺口。
 
 ### D-032：真实 Provider smoke 与凭据边界
 

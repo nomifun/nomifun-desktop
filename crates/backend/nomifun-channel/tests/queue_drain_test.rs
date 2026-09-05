@@ -34,6 +34,9 @@ use nomifun_realtime::{BroadcastEventBus, UserEventSink};
 use nomifun_db::sqlx;
 use tokio::sync::broadcast;
 
+#[path = "support/channel_session_port.rs"]
+mod channel_session_port;
+
 const PROVIDER: &str = "018f1234-5678-7abc-8def-0123456789a0";
 
 struct NoopSkillResolver;
@@ -322,7 +325,7 @@ async fn build_stack(pool: nomifun_db::SqlitePool, fail_first: u32) -> Stack {
     )));
     let channel_repo = Arc::new(SqliteChannelRepository::new(pool));
     let message_svc = Arc::new(ChannelMessageService::new(
-        nomifun_channel::conversation_channel_session_port(
+        channel_session_port::conversation_channel_session_port(
             Arc::clone(&conversation_svc),
             Arc::clone(&runtime_registry),
         ),

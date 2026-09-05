@@ -24,7 +24,6 @@ nomifun-common.workspace = true
 nomifun-db.workspace = true
 nomifun-api-types.workspace = true
 nomifun-realtime.workspace = true
-nomifun-conversation.workspace = true
 nomifun-ai-agent.workspace = true
 nomifun-extension.workspace = true
 # Telegram update-watermark persistence anchors on the process-global
@@ -58,5 +57,6 @@ md-5 = { workspace = true, optional = true }
 
 [dev-dependencies]
 nomifun-ai-agent = { workspace = true, features = ["test-support"] }
+nomifun-conversation.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true

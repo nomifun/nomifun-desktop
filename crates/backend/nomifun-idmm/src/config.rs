@@ -142,10 +142,35 @@ mod tests {
     use nomifun_api_types::{DecisionWatchConfig, FaultWatchConfig, IdmmConfig, WatchBase, WatchTier};
 
     #[test]
-    fn provider_fault_policy_matches_the_existing_failover_contract() {
+    fn provider_fault_policy_is_explicit_and_self_contained() {
         use AgentErrorCode::*;
 
-        let all_codes = [
+        let provider_fault_codes = [
+            UserLlmProviderAuthFailed,
+            UserLlmProviderPermissionDenied,
+            UserLlmProviderBillingRequired,
+            UserLlmProviderConfigError,
+            UserLlmProviderModelNotFound,
+            UserLlmProviderUnsupportedModel,
+            UserLlmProviderEndpointNotFound,
+            UserLlmProviderInvalidRequest,
+            UserLlmProviderInvalidToolSchema,
+            UserLlmProviderContextTooLarge,
+            UserLlmProviderRateLimited,
+            UserLlmProviderTimeout,
+            UserLlmProviderNetworkError,
+            UserLlmProviderEmptyResponse,
+            UserLlmProviderGatewayError,
+            UnknownUpstreamError,
+        ];
+        for code in provider_fault_codes {
+            assert!(
+                is_provider_fault(code),
+                "expected IDMM provider-fault classification for {code:?}"
+            );
+        }
+
+        let non_provider_fault_codes = [
             NomifunConversationBusy,
             NomifunStreamBroken,
             NomifunStateInconsistent,
@@ -168,31 +193,13 @@ mod tests {
             UserAgentMissingEnv,
             UserAgentUnsupportedMethod,
             UserAgentInvalidParams,
-            UserLlmProviderAuthFailed,
-            UserLlmProviderPermissionDenied,
-            UserLlmProviderBillingRequired,
-            UserLlmProviderConfigError,
-            UserLlmProviderModelNotFound,
-            UserLlmProviderUnsupportedModel,
-            UserLlmProviderEndpointNotFound,
-            UserLlmProviderInvalidRequest,
             UserLlmProviderImageUnsupported,
-            UserLlmProviderInvalidToolSchema,
-            UserLlmProviderContextTooLarge,
-            UserLlmProviderRateLimited,
-            UserLlmProviderTimeout,
-            UserLlmProviderNetworkError,
-            UserLlmProviderEmptyResponse,
             UserLlmProviderUnbackedCompletion,
-            UserLlmProviderGatewayError,
-            UnknownUpstreamError,
         ];
-
-        for code in all_codes {
-            assert_eq!(
-                is_provider_fault(code),
-                nomifun_conversation::model_failover::is_provider_fault(code),
-                "IDMM provider-fault policy drifted for {code:?}"
+        for code in non_provider_fault_codes {
+            assert!(
+                !is_provider_fault(code),
+                "unexpected IDMM provider-fault classification for {code:?}"
             );
         }
     }

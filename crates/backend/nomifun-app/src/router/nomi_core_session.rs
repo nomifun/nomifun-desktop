@@ -456,10 +456,11 @@ impl nomifun_channel::ChannelSessionPort for NomiCoreSessionOwner {
         owner_id: &str,
         session_id: &str,
         idempotency_key: &str,
-    ) -> Result<PublicTurnDeliveryState, AppError> {
+    ) -> Result<nomifun_channel::ChannelTurnReceiptState, AppError> {
         self.service
             .public_turn_delivery_state(owner_id, session_id, idempotency_key)
             .await
+            .map(channel_turn_receipt_state_from_conversation)
     }
 
     async fn cancel(&self, owner_id: &str, session_id: &str) -> Result<(), AppError> {
@@ -499,7 +500,10 @@ impl nomifun_channel::ChannelSessionPort for NomiCoreSessionOwner {
         } else {
             wait_for_runtime_subscription(&self.runtime_registry, session_id).await
         };
-        Ok(nomifun_channel::ChannelTurnDelivery { delivery, events })
+        Ok(nomifun_channel::ChannelTurnDelivery {
+            delivery: channel_delivery_from_conversation(delivery),
+            events,
+        })
     }
 
     async fn get(
@@ -1085,24 +1089,31 @@ impl nomifun_idmm::ConversationSessionPort for NomiCoreSessionOwner {
         &self,
         owner_id: &str,
         conversation_id: &str,
-    ) -> Result<IdmmTurnScope, AppError> {
+    ) -> Result<nomifun_idmm::SupervisionTurnScope, AppError> {
         self.service
             .idmm_active_turn_scope(owner_id, conversation_id, &self.runtime_registry)
             .await
+            .map(|scope| {
+                nomifun_idmm::SupervisionTurnScope::new(scope.wire_turn_id, scope.generation)
+            })
     }
 
     async fn continue_active_turn(
         &self,
         owner_id: &str,
         conversation_id: &str,
-        expected_scope: &IdmmTurnScope,
+        expected_scope: &nomifun_idmm::SupervisionTurnScope,
         request: SendMessageRequest,
     ) -> Result<String, AppError> {
+        let conversation_scope = IdmmTurnScope {
+            wire_turn_id: expected_scope.wire_turn_id().to_owned(),
+            generation: expected_scope.generation(),
+        };
         self.service
             .idmm_continue_active_turn(
                 owner_id,
                 conversation_id,
-                expected_scope,
+                &conversation_scope,
                 request,
                 &self.runtime_registry,
             )
@@ -1264,6 +1275,45 @@ fn agent_execution_delivery_from_conversation(
         result_error: delivery.result_error,
         result_error_code: delivery.result_error_code,
         result_error_retryable: delivery.result_error_retryable,
+    }
+}
+
+fn channel_delivery_from_conversation(
+    delivery: IdempotentMessageDelivery,
+) -> nomifun_channel::ChannelTurnDeliveryReceipt {
+    nomifun_channel::ChannelTurnDeliveryReceipt {
+        message_id: delivery.message_id,
+        replayed: delivery.replayed,
+        completed: delivery.completed,
+        result_ok: delivery.result_ok,
+        result_text: delivery.result_text,
+        result_error: delivery.result_error,
+        result_error_code: delivery.result_error_code,
+        result_error_retryable: delivery.result_error_retryable,
+    }
+}
+
+fn channel_turn_receipt_state_from_conversation(
+    state: PublicTurnDeliveryState,
+) -> nomifun_channel::ChannelTurnReceiptState {
+    match state {
+        PublicTurnDeliveryState::Missing => nomifun_channel::ChannelTurnReceiptState::Missing,
+        PublicTurnDeliveryState::Accepted { message_id } => {
+            nomifun_channel::ChannelTurnReceiptState::Accepted { message_id }
+        }
+        PublicTurnDeliveryState::Completed(delivery) => {
+            nomifun_channel::ChannelTurnReceiptState::Completed(
+                nomifun_channel::ChannelCompletedTurnReceipt {
+                    message_id: delivery.message_id,
+                    replayed: delivery.replayed,
+                    result_ok: delivery.result_ok,
+                    result_text: delivery.result_text,
+                    result_error: delivery.result_error,
+                    result_error_code: delivery.result_error_code,
+                    result_error_retryable: delivery.result_error_retryable,
+                },
+            )
+        }
     }
 }
 

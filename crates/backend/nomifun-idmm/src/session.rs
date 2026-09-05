@@ -1,17 +1,17 @@
 //! IDMM-owned supervision primitives.
 //!
 //! The supervisor consumes this small contract instead of reaching into the
-//! Conversation implementation. The host adapter in `probe.rs` is responsible
-//! for translating the current product runtime into these values.
+//! Conversation implementation. The application host adapter is responsible
+//! for translating its runtime into these values.
 
 use nomifun_common::{AppError, ProviderWithModel};
 use nomifun_db::models::ConversationRow;
 
 /// Typed admission hook consumed by the supervisor lifecycle.
 ///
-/// The current host's Conversation hook is translated to this contract in
-/// `probe.rs`. The lifecycle manager therefore carries only the IDMM-owned
-/// turn token.
+/// The current host's Conversation hook is translated to this contract by the
+/// application composition layer. The lifecycle manager therefore carries only
+/// the IDMM-owned turn token.
 pub trait SessionSupervisionPort: Send + Sync {
     fn admit_conversation_turn(&self, conversation_id: &str, scope: SupervisionTurnScope);
 }
