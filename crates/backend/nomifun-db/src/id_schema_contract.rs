@@ -116,6 +116,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "requirement_pre_effect_abandon_guards",
     "requirement_tags",
     "requirements",
+    "sales_workspaces",
     "skill_tags",
     "ssh_hosts",
     "system_settings",
@@ -607,6 +608,7 @@ macro_rules! protocol_uuidv7_ref {
 /// entries are deliberate cross-store references; the database audit reports
 /// them as externally owned instead of pretending SQLite can verify them.
 pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
+    text_ref!("sales_workspaces", "user_id" => "users", "user_id", false, "idx_sales_workspaces_user_id", Cascade),
     text_ref!("conversations", "user_id" => "users", "user_id", false, "idx_conversations_user_id", Cascade),
     opaque_text_ref!("conversations", "active_turn_operation_id" => "conversation_delivery_receipts", "operation_id", true, "idx_conversations_active_turn_operation", Restrict)
         .with_parent_predicate("parent.kind = 'turn' AND parent.status = 'accepted'")

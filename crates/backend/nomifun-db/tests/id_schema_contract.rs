@@ -228,6 +228,7 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "requirement_pre_effect_abandon_guards",
     "requirement_tags",
     "requirements",
+    "sales_workspaces",
     "skill_tags",
     "ssh_hosts",
     "system_settings",

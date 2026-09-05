@@ -9,14 +9,18 @@ export type SkillContentReaders = {
  * Read the canonical SKILL.md for a listed skill.
  *
  * Built-in skills use the dedicated embedded-resource route. Custom and
- * extension skills use the absolute location returned by GET /api/skills.
+ * extension skill listings may expose either their package directory or the
+ * manifest itself, so normalize the absolute location to SKILL.md first.
  */
 export const readSkillContent = async (skill: SkillInfo, readers: SkillContentReaders): Promise<string> => {
   if (skill.source === 'builtin' && skill.relative_location) {
     return readers.readBuiltinSkill(skill.relative_location);
   }
 
-  const content = await readers.readFile(skill.location);
+  const location = /(?:^|[\\/])SKILL\.md$/.test(skill.location)
+    ? skill.location
+    : `${skill.location.replace(/[\\/]+$/, '')}${skill.location.includes('\\') ? '\\' : '/'}SKILL.md`;
+  const content = await readers.readFile(location);
   if (content === null) throw new Error('SKILL_CONTENT_NOT_FOUND');
   return content;
 };

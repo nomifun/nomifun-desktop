@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Northstar Labs — Contact</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+        color: #15231d;
+        background: #f0f4ee;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; }
+      main {
+        width: min(920px, calc(100% - 32px));
+        margin: 48px auto;
+        display: grid;
+        grid-template-columns: 0.8fr 1.2fr;
+        background: #fff;
+        border: 1px solid #d9e2db;
+        box-shadow: 0 24px 70px rgba(28, 54, 39, 0.12);
+      }
+      aside { padding: 48px; background: #173c2b; color: #f4f6ee; }
+      aside p { color: #c9d8cf; line-height: 1.65; }
+      .eyebrow { color: #d8ab62; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; font-size: 12px; }
+      section { padding: 48px; }
+      h1 { margin: 10px 0 18px; font: 600 38px/1.1 Georgia, serif; }
+      h2 { margin: 0 0 8px; font: 600 30px/1.2 Georgia, serif; }
+      .hint { margin: 0 0 28px; color: #607067; }
+      label { display: block; margin: 18px 0 7px; font-size: 14px; font-weight: 700; }
+      input, textarea {
+        width: 100%; border: 1px solid #bdc9c0; border-radius: 3px;
+        padding: 12px 13px; font: inherit; color: inherit; background: #fbfcfa;
+      }
+      input:focus, textarea:focus { outline: 3px solid #dbe9df; border-color: #2b6b4c; }
+      textarea { min-height: 120px; resize: vertical; }
+      .consent { display: flex; gap: 10px; align-items: flex-start; font-weight: 500; line-height: 1.45; }
+      .consent input { width: auto; margin-top: 3px; }
+      button {
+        margin-top: 22px; border: 0; border-radius: 3px; padding: 13px 20px;
+        background: #bf7c35; color: white; font: 700 15px/1 inherit; cursor: pointer;
+      }
+      button:hover { background: #9d6127; }
+      button:disabled { opacity: .55; cursor: wait; }
+      #status { min-height: 24px; margin: 18px 0 0; font-weight: 700; }
+      .success { color: #24643f; }
+      .error { color: #a1362f; }
+      @media (max-width: 720px) {
+        main { grid-template-columns: 1fr; margin: 16px auto; }
+        aside, section { padding: 30px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <aside>
+        <div class="eyebrow">Local simulation</div>
+        <h1>Build something useful with Northstar.</h1>
+        <p>This is a private test destination for NomiFun’s sales workflow. No email is sent and no third-party service receives the submitted data.</p>
+      </aside>
+      <section>
+        <h2>Contact our team</h2>
+        <p class="hint">Tell us what you are exploring. We usually reply within one business day.</p>
+        <form id="contact-form" action="/api/contact" method="post">
+          <label for="name">Full name</label>
+          <input id="name" name="name" autocomplete="name" required />
+
+          <label for="email">Work email</label>
+          <input id="email" name="email" type="email" autocomplete="email" required />
+
+          <label for="company">Company</label>
+          <input id="company" name="company" autocomplete="organization" />
+
+          <label for="message">How can we help?</label>
+          <textarea id="message" name="message" required></textarea>
+
+          <label class="consent" for="consent">
+            <input id="consent" name="consent" type="checkbox" required />
+            <span>I agree that Northstar Labs may contact me about this request.</span>
+          </label>
+
+          <button id="submit" type="submit">Send inquiry</button>
+          <p id="status" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>

@@ -59,6 +59,35 @@ describe('skill detail content', () => {
     expect(builtinCalls).toEqual([]);
   });
 
+  test('resolves a custom skill package directory to its SKILL.md manifest', async () => {
+    const fileCalls: string[] = [];
+
+    const content = await readSkillContent(skill({ location: '/data/skills/example' }), {
+      readBuiltinSkill: async () => '',
+      readFile: async (location) => {
+        fileCalls.push(location);
+        return '# Custom skill';
+      },
+    });
+
+    expect(content).toBe('# Custom skill');
+    expect(fileCalls).toEqual(['/data/skills/example/SKILL.md']);
+  });
+
+  test('resolves a Windows skill package directory to its SKILL.md manifest', async () => {
+    const fileCalls: string[] = [];
+
+    await readSkillContent(skill({ location: 'C:\\Users\\nomi\\skills\\example\\' }), {
+      readBuiltinSkill: async () => '',
+      readFile: async (location) => {
+        fileCalls.push(location);
+        return '# Custom skill';
+      },
+    });
+
+    expect(fileCalls).toEqual(['C:\\Users\\nomi\\skills\\example\\SKILL.md']);
+  });
+
   test('rejects a missing skill file instead of rendering an empty document', async () => {
     let error: unknown;
     try {

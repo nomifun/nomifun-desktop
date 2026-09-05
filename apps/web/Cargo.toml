@@ -11,6 +11,9 @@ path = "src/main.rs"
 [features]
 default = []
 static-webui = []
+# Opt-in headless runtime for browser-driven workflows. Keep the default web
+# image lean; the sales-local Compose stack enables this feature explicitly.
+sales-runtime = ["nomifun-app/browser-use"]
 
 [build-dependencies]
 serde_json.workspace = true

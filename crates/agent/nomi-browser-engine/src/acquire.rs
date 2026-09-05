@@ -294,8 +294,33 @@ fn resolve_chrome_path_in(
 /// - [`ChromeSource::Managed`]（默认）：托管 CfT 优先，未找到回退系统浏览器（保持现行为）。
 ///
 /// 返回 `None` → 本地无任何可用 chrome，交 [`resolve_chrome_path_with_source`] 走下载兜底。
+#[cfg(test)]
 fn resolve_local_chrome(
     platform: &str,
+    os: &str,
+    source: ChromeSource,
+    env_get: impl Fn(&str) -> Option<String>,
+    exists: impl Fn(&Path) -> bool,
+    bundled_dir: Option<&Path>,
+    data_dir: &Path,
+) -> Option<PathBuf> {
+    resolve_local_chrome_for_optional_platform(
+        Some(platform),
+        os,
+        source,
+        env_get,
+        exists,
+        bundled_dir,
+        data_dir,
+    )
+}
+
+/// Resolve local browser sources even when Chrome for Testing does not publish
+/// a build for the current architecture (for example Linux arm64). An explicit
+/// env override and an installed system Chromium do not depend on CfT metadata
+/// and must remain usable on those platforms.
+fn resolve_local_chrome_for_optional_platform(
+    platform: Option<&str>,
     os: &str,
     source: ChromeSource,
     env_get: impl Fn(&str) -> Option<String>,
@@ -306,7 +331,11 @@ fn resolve_local_chrome(
     if let Some(p) = env_chrome_path(&env_get, &exists) {
         return Some(p);
     }
-    let cft = || cft_chrome_path(platform, bundled_dir, data_dir, &exists);
+    let cft = || {
+        platform.and_then(|platform| {
+            cft_chrome_path(platform, bundled_dir, data_dir, &exists)
+        })
+    };
     let sys = || detect_system_browser_in(os, &env_get, &exists);
     match source {
         ChromeSource::System => sys().or_else(cft),
@@ -419,20 +448,11 @@ pub async fn resolve_chrome_path_with_source(
     bundled_dir: Option<&Path>,
     source: ChromeSource,
 ) -> Result<PathBuf, BrowserError> {
-    let platform = cft_platform_id(std::env::consts::OS, std::env::consts::ARCH).ok_or_else(|| {
-        BrowserError::Unsupported {
-            capability: "chrome-for-testing".into(),
-            hint: format!(
-                "no Chrome for Testing build for {}/{}",
-                std::env::consts::OS,
-                std::env::consts::ARCH
-            ),
-        }
-    })?;
+    let platform = cft_platform_id(std::env::consts::OS, std::env::consts::ARCH);
 
     // 1-4：env / 系统浏览器 / 打包 CfT / 已下载 CfT，顺序由 source 决定，存在即返回。
     // 永远配专属 user-data-dir 起独立托管实例（launch.rs 红线：绝不碰用户 profile）。
-    if let Some(p) = resolve_local_chrome(
+    if let Some(p) = resolve_local_chrome_for_optional_platform(
         platform,
         std::env::consts::OS,
         source,
@@ -443,6 +463,15 @@ pub async fn resolve_chrome_path_with_source(
     ) {
         return Ok(p);
     }
+
+    let platform = platform.ok_or_else(|| BrowserError::Unsupported {
+        capability: "chrome-for-testing".into(),
+        hint: format!(
+            "no local Chromium and no Chrome for Testing build for {}/{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ),
+    })?;
 
     // 5：下载兜底（本地无 CfT 且系统无任何 Chromium 系浏览器时的最后手段）。下载的是 CfT。
     download_chrome(platform, data_dir).await?;
@@ -1910,6 +1939,26 @@ mod tests {
             );
             assert!(got.is_none(), "expected None for {source:?}");
         }
+    }
+
+    #[test]
+    fn explicit_browser_does_not_require_a_cft_platform() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let env_exe = tmp.path().join("chromium");
+        std::fs::write(&env_exe, b"test browser").unwrap();
+        let env_str = env_exe.to_string_lossy().to_string();
+
+        let got = resolve_local_chrome_for_optional_platform(
+            None,
+            "linux",
+            ChromeSource::Managed,
+            |key| (key == CHROME_BINARY_ENV).then(|| env_str.clone()),
+            |path| path.is_file(),
+            None,
+            tmp.path(),
+        );
+
+        assert_eq!(got, Some(env_exe));
     }
 
     /// 本机集成（需已装 Chrome/Edge）：验证**无 env 时**真实文件系统能探到系统浏览器。

@@ -1111,7 +1111,8 @@ impl CdpBackend {
     ///    代际表 → [`BrowserError::NodeStale`]（文案引导 re-observe，**不进浏览器**）。
     /// 3. **abort 作用域**：[`Self::arm_act_abort`] 据 record.frame_id 派生子 [`Progress`] + 装 detach/
     ///    crash 监听 guard；整个动作跑在子 Progress 上（page.close/frame.detach → 立即 abort）。
-    /// 4. **retry 包裹**：[`run_act_with_retry`]（irreversible=false，C1 分类器在 E2/F1）。op 内**每次
+    /// 4. **retry 包裹**：[`run_act_with_retry`]。调用方明确传入 `irreversible`；click 恒为 true，
+    ///    因为 ref 可能指向 Submit/Send/Delete，动作一旦投递就绝不能在引擎内部自动重试。op 内**每次
     ///    重解析 ref**（外层自愈：resolve 不到 → 触发代际/重拍；check Missing → 退避重判）。
     /// 5. **group 释放**：finally 式——无论成功/失败，末尾 [`Self::release_act_group_by_ref`] 一次，
     ///    释放本动作 objectGroup 的全部句柄（无泄漏）。
@@ -1191,6 +1192,7 @@ impl CdpBackend {
         &self,
         llm_ref: &str,
         parent: &Progress,
+        irreversible: bool,
         op: F,
     ) -> Result<ActResult, BrowserError>
     where
@@ -1208,9 +1210,12 @@ impl CdpBackend {
         //    正常返回 / `?` 早返 / await 点 panic，guard 离开作用域即释放本动作 objectGroup（act-<seq>）的
         //    全部句柄（无泄漏、只释放一次）。**必须**在 run_act_with_retry 之前 arm（覆盖整个动作）。
         let mut release_guard = self.arm_act_group_release(&rec, seq).await;
-        // 5) retry 包裹（irreversible=false，C1）：op 每次 attempt 重解析 ref（外层自愈）。
+        // 5) retry 包裹：op 每次 attempt 重解析 ref（外层自愈）。不可逆动作只有一个尝试槽。
         let rec_for_op = rec.clone();
-        let result = run_act_with_retry(&child, false, move |_attempt| op(seq, rec_for_op.clone())).await;
+        let result = run_act_with_retry(&child, irreversible, move |_attempt| {
+            op(seq, rec_for_op.clone())
+        })
+        .await;
         // 6) 正常 finally：在 operation permit 仍由上层持有时 await 精确释放。guard 跨 await 保持
         //    armed；若 caller 在这里取消，Drop 会把同一 key 交给固定有界 dispatcher。成功后 disarm，
         //    随后的 Drop 是 no-op，故正常路径恰好发一次 releaseObjectGroup。
@@ -1228,7 +1233,7 @@ impl CdpBackend {
     /// （当前 `ActSpec::Click` 无 mode 字段，故 C1 走 actionable；见模块 TODO）。
     async fn act_click(&self, llm_ref: &str, parent: &Progress) -> Result<ActResult, BrowserError> {
         let llm_ref_owned = llm_ref.to_string();
-        self.act_with_skeleton(llm_ref, parent, move |seq, rec| {
+        self.act_with_skeleton(llm_ref, parent, true, move |seq, rec| {
             let this = self;
             let llm_ref = llm_ref_owned.clone();
             async move {
@@ -1306,7 +1311,7 @@ impl CdpBackend {
         let llm_ref_owned = llm_ref.to_string();
         let to_type = type_input_text(text).to_string();
         let is_secret = matches!(text, TypeInput::Secret(_));
-        self.act_with_skeleton(llm_ref, parent, move |seq, rec| {
+        self.act_with_skeleton(llm_ref, parent, false, move |seq, rec| {
             let this = self;
             let llm_ref = llm_ref_owned.clone();
             let to_type = to_type.clone();
@@ -1397,7 +1402,7 @@ impl CdpBackend {
     ) -> Result<ActResult, BrowserError> {
         let llm_ref_owned = llm_ref.to_string();
         let value_owned = value.to_string();
-        self.act_with_skeleton(llm_ref, parent, move |seq, rec| {
+        self.act_with_skeleton(llm_ref, parent, false, move |seq, rec| {
             let this = self;
             let llm_ref = llm_ref_owned.clone();
             let value = value_owned.clone();
@@ -1480,7 +1485,7 @@ impl CdpBackend {
     /// 记 changed=true（已投递 mouseMoved）+ before/after 取 URL（hover 一般不改 URL，但保持锚点形态）。
     async fn act_hover(&self, llm_ref: &str, parent: &Progress) -> Result<ActResult, BrowserError> {
         let llm_ref_owned = llm_ref.to_string();
-        self.act_with_skeleton(llm_ref, parent, move |seq, rec| {
+        self.act_with_skeleton(llm_ref, parent, false, move |seq, rec| {
             let this = self;
             let llm_ref = llm_ref_owned.clone();
             async move {
@@ -1543,7 +1548,7 @@ impl CdpBackend {
     ) -> Result<ActResult, BrowserError> {
         let llm_ref_owned = llm_ref.to_string();
         let options_owned = options.to_vec();
-        self.act_with_skeleton(llm_ref, parent, move |seq, rec| {
+        self.act_with_skeleton(llm_ref, parent, false, move |seq, rec| {
             let this = self;
             let llm_ref = llm_ref_owned.clone();
             let options = options_owned.clone();
@@ -1744,7 +1749,7 @@ impl CdpBackend {
         parent: &Progress,
     ) -> Result<ActResult, BrowserError> {
         let llm_ref_owned = llm_ref.to_string();
-        self.act_with_skeleton(llm_ref, parent, move |seq, rec| {
+        self.act_with_skeleton(llm_ref, parent, false, move |seq, rec| {
             let this = self;
             let llm_ref = llm_ref_owned.clone();
             async move {
@@ -2333,7 +2338,7 @@ impl CdpBackend {
         parent: &Progress,
     ) -> Result<ActResult, BrowserError> {
         let llm_ref_owned = llm_ref.to_string();
-        self.act_with_skeleton(llm_ref, parent, move |seq, rec| {
+        self.act_with_skeleton(llm_ref, parent, false, move |seq, rec| {
             let this = self;
             let llm_ref = llm_ref_owned.clone();
             async move {
@@ -2753,7 +2758,7 @@ impl CdpBackend {
             .iter()
             .map(|p| dunce::simplified(p).to_string_lossy().into_owned())
             .collect();
-        self.act_with_skeleton(llm_ref, parent, move |seq, rec| {
+        self.act_with_skeleton(llm_ref, parent, false, move |seq, rec| {
             let this = self;
             let llm_ref = llm_ref_owned.clone();
             let file_strings = file_strings.clone();
