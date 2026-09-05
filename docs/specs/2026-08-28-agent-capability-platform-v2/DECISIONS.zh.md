@@ -48,7 +48,9 @@
    `open -> turn -> observe -> cancel` smoke，结果为
    `live_smoke_status=pass code=OK status=200`。该 evidence 只关闭
    `SL-S3-07`；不把 automation 的 canonical Session 缺口、Remote 的
-   installation-token/MCP transport 缺口或 Desktop 人工验收隐式视为完成。
+   canonical MCP transport 缺口或 Desktop 人工验收隐式视为完成。Nomi-core
+   Remote REST 的 installation Bearer 已由独立 route-gap 回归覆盖，并保留
+   owner JWT/local-trust 兼容和旧 selector query 的 fail-closed 行为。
 
 ## 决策总览
 
@@ -85,7 +87,7 @@
 | D-029 | 当前产品 Runtime 与多-runtime host boundary | 已确认（2026-09-05） | Web/Desktop/`nomicore` 默认使用 NomiCoreApplication；由单一 NomiCoreSessionOwner 共享当前 Nomi engine Session 生命周期；FreshV4Application 是显式未来 host；不支持运行中切换或 fallback |
 | D-030 | Automation 使用 host-owned typed Session boundary | 已修订（2026-09-05） | Cron 只提交封闭 runtime overlay 并通过原子关系/typed receipt 工作；AutoWork 使用 issuer-scoped opaque lease、Session projection revision fence 和 owner/revision/operation-aware config CAS；不得把任意 runtime `extra` 当作 Session authority |
 | D-031 | 领域 adapter 的真实迁移判定 | 已修订（2026-09-05） | 生产 legacy 文件清零不等于 canonical Session migration 完成；Companion archive 可直接由 host 提供 typed contract，Channel/IDMM 在缺少事件流、完整 receipt 或 supervision contract 时保留边界 adapter，并由审计明确报告阻断 |
-| D-032 | 真实 Provider smoke 与凭据边界 | 已确认（2026-09-05） | 真实证据必须经过 Nomi-core AgentSession、Provider/Model route、代表性工具调用和关闭审计；Windows 凭据只经受控 Credential Manager/Bun runner 短暂持有，在构建完成后一次性 stdin 交接，不进入仓库、参数、日志或 Cargo/build/test/application 子进程环境；一次 smoke 只关闭其明确覆盖的 TODO |
+| D-032 | 真实 Provider smoke 与凭据边界 | 已确认（2026-09-05） | 真实证据必须经过 Nomi-core AgentSession、Provider/Model route、代表性工具调用和关闭审计；Windows 凭据只经受控 Credential Manager/Bun runner 短暂持有，在构建完成后一次性 stdin 交接，不进入仓库、参数、日志或 Cargo/build/test/application 子进程环境；一次 smoke 只关闭其明确覆盖的 TODO，不能跳过独立 MCP transport 合同 |
 
 ## 全局有效约束
 
@@ -672,8 +674,10 @@ IDMM 的真实合同缺口。
   或 Git。
 - 真实 smoke 的覆盖范围必须按 TODO 分项解释：本次 StepFun smoke 关闭
   `SL-S3-07`；Cron/Remote 的同时通过只作为各自后续合同的输入，不能绕过
-  `SL-S3-10` 的 canonical Session/adapter 缺口、`SL-S3-11` 的
-  installation-token/MCP transport 缺口或 `SL-S4-02` 的人工验收。
+  `SL-S3-10` 的 canonical Session/adapter 缺口、`SL-S3-11` 的 Nomi-core
+  canonical MCP transport 缺口或 `SL-S4-02` 的人工验收。Remote REST 的
+  installation Bearer、owner JWT 兼容和旧 selector query 拒绝另由 route-gap
+  回归证明。
 - 凭据一旦不再需要应从本机 Credential Manager 删除并向 Provider 轮换；任何
   失败只记录首个 typed phase/code/status，不通过放宽证据检查来制造 PASS。
 

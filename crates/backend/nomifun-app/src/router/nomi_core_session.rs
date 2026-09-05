@@ -14,7 +14,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::middleware::{Next, from_fn};
+use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -57,6 +57,9 @@ use nomifun_db::{
 use nomifun_db::models::{MessageRow, NomiRemoteEventRow, NomiRemoteSessionRow};
 use nomifun_agent_session::{
     MessageProjection, SessionHeadProjection, SessionObservation,
+};
+use nomifun_auth::{
+    CurrentUser, InstanceTokenValidator, JwtService, extract_token_from_headers,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1982,8 +1985,7 @@ where
     }
 }
 
-/// Build all app-local Nomi-core Agent Settings, AgentSession, and Remote
-/// endpoints.
+/// Build all app-local Nomi-core Agent Settings and AgentSession endpoints.
 ///
 /// The returned router is intentionally independent of the top-level auth
 /// middleware.  It only projects `CurrentUser` into the control-plane's
@@ -1992,11 +1994,38 @@ where
 pub(crate) fn build_nomi_core_agent_router(state: NomiCoreAgentApiState) -> Router {
     Router::new()
         .merge(nomi_core_session_routes(state.clone()))
-        .merge(nomi_core_remote_routes(state.clone()))
         .merge(control_plane_router_without_legacy_skills(
             state.control_plane.clone(),
         ))
         .route_layer(from_fn(project_authenticated_owner))
+}
+
+/// Build the Nomi-core Remote REST surface with both local/JWT owner
+/// authentication and the installation-scoped Bearer token.
+///
+/// Remote is a separately authenticated transport boundary. The installation
+/// token is translated directly to the canonical owner identity; it never
+/// creates a second Session authority or bypasses the owner checks in the
+/// handlers.
+pub(crate) fn build_nomi_core_remote_router(
+    state: NomiCoreAgentApiState,
+    validator: Arc<InstanceTokenValidator>,
+    authoritative_user_id: Arc<str>,
+    jwt_service: Arc<JwtService>,
+    user_repo: Arc<dyn nomifun_db::IUserRepository>,
+) -> Router {
+    Router::new()
+        .merge(nomi_core_remote_routes(state))
+        .route_layer(from_fn(reject_nomi_core_remote_query_parameters))
+        .route_layer(from_fn_with_state(
+            NomiCoreRemoteAuthState {
+                validator,
+                authoritative_user_id,
+                jwt_service,
+                user_repo,
+            },
+            authenticate_nomi_core_remote,
+        ))
 }
 
 fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
@@ -2036,6 +2065,107 @@ fn nomi_core_remote_routes(state: NomiCoreAgentApiState) -> Router {
         .route("/api/remote/observe", get(observe_nomi_core_remote))
         .route("/api/remote/cancel", post(cancel_nomi_core_remote))
         .with_state(state)
+}
+
+#[derive(Clone)]
+struct NomiCoreRemoteAuthState {
+    validator: Arc<InstanceTokenValidator>,
+    authoritative_user_id: Arc<str>,
+    jwt_service: Arc<JwtService>,
+    user_repo: Arc<dyn nomifun_db::IUserRepository>,
+}
+
+async fn authenticate_nomi_core_remote(
+    State(state): State<NomiCoreRemoteAuthState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let owner = if let Some(current) = request.extensions().get::<CurrentUser>() {
+        if current.id.as_str() != state.authoritative_user_id.as_ref() {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse::new(
+                    "Remote access is restricted to the installation owner",
+                    "REMOTE_OWNER_REQUIRED",
+                )),
+            )
+                .into_response();
+        }
+        current.id.as_str().to_owned().into()
+    } else {
+        let presented = extract_token_from_headers(request.headers()).unwrap_or_default();
+        if state.validator.validate(&presented) {
+            state.authoritative_user_id.as_ref().to_owned().into()
+        } else {
+            let Ok(payload) = state.jwt_service.verify(&presented) else {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse::new(
+                        "Remote installation authentication is required",
+                        "REMOTE_AUTH_REQUIRED",
+                    )),
+                )
+                    .into_response();
+            };
+            let user = match state.user_repo.find_by_id(payload.user_id.as_str()).await {
+                Ok(Some(user)) => user,
+                Ok(None) => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(ErrorResponse::new(
+                            "Remote installation authentication is required",
+                            "REMOTE_AUTH_REQUIRED",
+                        )),
+                    )
+                        .into_response();
+                }
+                Err(_) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(ErrorResponse::new(
+                            "Remote authentication is temporarily unavailable",
+                            "REMOTE_AUTH_UNAVAILABLE",
+                        )),
+                    )
+                        .into_response();
+                }
+            };
+            if user.user_id.as_str() != state.authoritative_user_id.as_ref() {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorResponse::new(
+                        "Remote access is restricted to the installation owner",
+                        "REMOTE_OWNER_REQUIRED",
+                    )),
+                )
+                    .into_response();
+            }
+            payload.user_id.as_str().to_owned().into()
+        }
+    };
+    request.extensions_mut().insert(AuthenticatedOwner(owner));
+    next.run(request).await
+}
+
+async fn reject_nomi_core_remote_query_parameters(request: Request, next: Next) -> Response {
+    let Some(query) = request.uri().query() else {
+        return next.run(request).await;
+    };
+    let allow_observe = request.uri().path() == "/api/remote/observe";
+    let invalid = url::form_urlencoded::parse(query.as_bytes()).any(|(key, _)| {
+        !allow_observe || !matches!(key.as_ref(), "agent_session_id" | "after_seq" | "limit")
+    });
+    if invalid {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "Nomi-core Remote endpoints do not accept undeclared query parameters",
+                "REMOTE_INVALID_REQUEST",
+            )),
+        )
+            .into_response();
+    }
+    next.run(request).await
 }
 
 async fn project_authenticated_owner(
