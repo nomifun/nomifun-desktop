@@ -708,7 +708,7 @@ GitHub Issues。
 <div align="center">
 <table>
   <tr>
-    <td align="center"><img src="docs/assets/nomifun-wechat-group.jpg" alt="NomiFun 微信交流群二维码" width="220"><br/><sub><b>NomiFun 微信交流群</b></sub></td>
+    <td align="center"><img src="docs/assets/nomifun-wecom-group.png" alt="NomiFun 企业微信群二维码" width="220"><br/><sub><b>NomiFun 企业微信群</b></sub></td>
     <td align="center"><img src="docs/images/contact/qq-group-qr.png" alt="QQ 群二维码" width="220"><br/><sub><b>QQ 群</b></sub></td>
   </tr>
 </table>

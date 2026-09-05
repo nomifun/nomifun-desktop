@@ -41,7 +41,7 @@ impl SqliteWorkshopRepository {
     ) -> Result<Option<WorkshopAssetRow>, DbError> {
         let row = sqlx::query_as::<_, WorkshopAssetRow>(
             "SELECT * FROM workshop_assets \
-             WHERE kind = 'text' AND (\
+             WHERE kind = 'text' AND deleted_at IS NULL AND (\
                  (json_extract(origin, '$.prompt_library_source') = ?1 \
                   AND json_extract(origin, '$.prompt_library_id') = ?2) \
                  OR (?1 = 'catalog' \
@@ -70,13 +70,11 @@ impl SqliteWorkshopRepository {
         row: WorkshopAssetRow,
         now: i64,
     ) -> Result<Option<WorkshopAssetRow>, DbError> {
-        if row.in_library {
-            return Ok(Some(row));
-        }
         let restored = sqlx::query_as::<_, WorkshopAssetRow>(
             "UPDATE workshop_assets \
-             SET in_library = 1, updated_at = MAX(updated_at, ?) \
-             WHERE asset_id = ? \
+             SET in_library = 1, updated_at = CASE WHEN in_library = 1 \
+                 THEN updated_at ELSE MAX(updated_at, ?) END \
+             WHERE asset_id = ? AND deleted_at IS NULL \
              RETURNING *",
         )
         .bind(now)
@@ -268,12 +266,31 @@ fn validate_asset_row(row: &WorkshopAssetRow) -> Result<(), DbError> {
             row.asset_id
         ))
     })?;
+    if row.deleted_at.is_some_and(|at| at < 0 || row.in_library || row.text_content.is_some())
+        || row.content_deleted_at.is_some_and(|at| {
+            row.deleted_at.is_none_or(|deleted_at| at < deleted_at)
+                || row.rel_path.is_some()
+                || row.thumb_rel_path.is_some()
+        })
+    {
+        return Err(DbError::Conflict(format!(
+            "workshop asset {} has invalid content deletion state", row.asset_id
+        )));
+    }
     Ok(())
 }
 
 fn validate_asset_rows(rows: &[WorkshopAssetRow]) -> Result<(), DbError> {
     for row in rows {
         validate_asset_row(row)?;
+    }
+    Ok(())
+}
+
+fn validate_new_asset_row(row: &WorkshopAssetRow) -> Result<(), DbError> {
+    validate_asset_row(row)?;
+    if row.deleted_at.is_some() || row.content_deleted_at.is_some() {
+        return Err(DbError::Conflict("new workshop asset cannot be a tombstone".into()));
     }
     Ok(())
 }
@@ -992,7 +1009,14 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                     .into(),
             ));
         }
-        validate_asset_rows(assets)?;
+        for asset in assets {
+            validate_asset_row(asset)?;
+            if asset.deleted_at.is_some() && asset.content_deleted_at.is_none() {
+                return Err(DbError::Conflict(
+                    "imported workshop asset cannot have pending file cleanup".into(),
+                ));
+            }
+        }
         for asset in assets {
             let references = origin_references(asset.origin.as_deref())?;
             if references.provider_id.is_some()
@@ -1012,8 +1036,8 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
             sqlx::query(
                 "INSERT INTO workshop_assets \
                     (asset_id, kind, title, collection, tags, rel_path, thumb_rel_path, mime, width, height, bytes, \
-                     text_content, in_library, origin, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     text_content, in_library, origin, deleted_at, content_deleted_at, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&asset.asset_id)
             .bind(&asset.kind)
@@ -1029,6 +1053,8 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
             .bind(&asset.text_content)
             .bind(asset.in_library)
             .bind(&asset.origin)
+            .bind(asset.deleted_at)
+            .bind(asset.content_deleted_at)
             .bind(asset.created_at)
             .bind(asset.updated_at)
             .execute(&mut *tx)
@@ -1295,6 +1321,21 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
             ));
         }
         let mut tx = self.pool.begin().await?;
+        // Exact request replay reads durable history even when its content was
+        // deleted after completion. Only a new run needs available inputs.
+        // This no-op write also serializes concurrent first submissions.
+        if let Some(existing) = sqlx::query_as::<_, CreativeStudioTemplateRunRow>(
+            "UPDATE creative_studio_template_runs SET updated_at = updated_at \
+             WHERE template_run_id = ? RETURNING *",
+        )
+        .bind(&row.template_run_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            validate_creative_template_run_row_ids(&existing)?;
+            tx.commit().await?;
+            return Ok(existing);
+        }
         for asset_id in referenced_asset_ids {
             nomifun_common::WorkshopAssetId::parse(asset_id).map_err(|error| {
                 DbError::Conflict(format!(
@@ -1303,7 +1344,7 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
             })?;
             let locked = sqlx::query(
                 "UPDATE workshop_assets SET updated_at = updated_at \
-                 WHERE asset_id = ? AND kind = 'image'",
+                 WHERE asset_id = ? AND kind = 'image' AND deleted_at IS NULL",
             )
             .bind(asset_id)
             .execute(&mut *tx)
@@ -1331,7 +1372,7 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         .bind(row.created_at)
         .bind(row.updated_at)
         .execute(&mut *tx)
-        .await?;
+        .await.map_err(DbError::from_asset_reference_guard)?;
         let persisted = sqlx::query_as::<_, CreativeStudioTemplateRunRow>(
             "SELECT * FROM creative_studio_template_runs WHERE template_run_id = ?",
         )
@@ -1375,7 +1416,7 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         .bind(template_run_id)
         .bind(expected_revision)
         .fetch_optional(&self.pool)
-        .await?;
+        .await.map_err(DbError::from_asset_reference_guard)?;
         if let Some(saved) = saved {
             return Ok(saved);
         }
@@ -1396,7 +1437,7 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
     // ---- assets ----
 
     async fn create_asset(&self, row: &WorkshopAssetRow) -> Result<WorkshopAssetRow, DbError> {
-        validate_asset_row(row)?;
+        validate_new_asset_row(row)?;
         let references = origin_references(row.origin.as_deref())?;
         let mut tx = self.pool.begin().await?;
         if let Some(provider_id) = references.provider_id {
@@ -1552,7 +1593,7 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         row: &WorkshopAssetRow,
         identity: PromptLibraryAssetIdentity<'_>,
     ) -> Result<WorkshopAssetRow, DbError> {
-        validate_asset_row(row)?;
+        validate_new_asset_row(row)?;
         validate_prompt_library_asset_identity(row, identity)?;
 
         // Existing catalog saves used only `prompt_catalog_id`. Prefer a row
@@ -1631,7 +1672,7 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                      WHEN in_library = 1 THEN MAX(updated_at, ?3) \
                      ELSE updated_at \
                  END \
-             WHERE kind = 'text' AND (\
+             WHERE kind = 'text' AND deleted_at IS NULL AND (\
                  (json_extract(origin, '$.prompt_library_source') = ?1 \
                   AND json_extract(origin, '$.prompt_library_id') = ?2) \
                  OR (?1 = 'catalog' \
@@ -1671,10 +1712,9 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
     async fn list_assets(&self, params: ListAssetsParams<'_>) -> Result<(Vec<WorkshopAssetRow>, i64), DbError> {
         // Shared WHERE assembly for both the COUNT and the page query.
         fn push_filters<'a>(qb: &mut QueryBuilder<'a, Sqlite>, p: &ListAssetsParams<'a>) {
-            let mut first = true;
-            let mut clause = |qb: &mut QueryBuilder<'a, Sqlite>| {
-                qb.push(if first { " WHERE " } else { " AND " });
-                first = false;
+            qb.push(" WHERE deleted_at IS NULL");
+            let clause = |qb: &mut QueryBuilder<'a, Sqlite>| {
+                qb.push(" AND ");
             };
             if let Some(kind) = p.kind {
                 clause(qb);
@@ -1737,45 +1777,34 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         params: UpdateAssetParams<'_>,
         now: i64,
     ) -> Result<WorkshopAssetRow, DbError> {
-        let existing = self
-            .get_asset(id)
-            .await?
-            .ok_or_else(|| DbError::NotFound(format!("workshop asset '{id}' not found")))?;
-
-        let title = params.title.unwrap_or(&existing.title).to_string();
-        let collection = match params.collection {
-            Some(c) => c.map(str::to_string),
-            None => existing.collection.clone(),
-        };
-        let tags = params.tags.unwrap_or(&existing.tags).to_string();
-        let in_library = params.in_library.unwrap_or(existing.in_library);
-
-        sqlx::query(
-            "UPDATE workshop_assets SET title = ?, collection = ?, tags = ?, in_library = ?, updated_at = ? \
-             WHERE asset_id = ?",
+        // Patch only supplied columns in one statement. A read/replace cycle
+        // can overwrite concurrent metadata edits or restore a deleted row.
+        let row = sqlx::query_as::<_, WorkshopAssetRow>(
+            "UPDATE workshop_assets \
+             SET title = COALESCE(?1, title), \
+                 collection = CASE WHEN ?2 THEN ?3 ELSE collection END, \
+                 tags = COALESCE(?4, tags), in_library = COALESCE(?5, in_library), \
+                 updated_at = MAX(updated_at, ?6) \
+             WHERE asset_id = ?7 AND deleted_at IS NULL RETURNING *",
         )
-        .bind(&title)
-        .bind(&collection)
-        .bind(&tags)
-        .bind(in_library)
+        .bind(params.title)
+        .bind(params.collection.is_some())
+        .bind(params.collection.flatten())
+        .bind(params.tags)
+        .bind(params.in_library)
         .bind(now)
         .bind(id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(WorkshopAssetRow {
-            title,
-            collection,
-            tags,
-            in_library,
-            updated_at: now,
-            ..existing
-        })
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| DbError::NotFound(format!("workshop asset '{id}' not found or deleted")))?;
+        validate_asset_row(&row)?;
+        Ok(row)
     }
 
     async fn set_asset_thumb(&self, id: &str, thumb_rel_path: &str, now: i64) -> Result<(), DbError> {
         let result = sqlx::query(
-            "UPDATE workshop_assets SET thumb_rel_path = ?, updated_at = ? WHERE asset_id = ?",
+            "UPDATE workshop_assets SET thumb_rel_path = ?, updated_at = ? \
+             WHERE asset_id = ? AND deleted_at IS NULL",
         )
             .bind(thumb_rel_path)
             .bind(now)
@@ -1786,6 +1815,96 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
             return Err(DbError::NotFound(format!("workshop asset '{id}' not found")));
         }
         Ok(())
+    }
+
+    async fn mark_asset_content_deleted(&self, id: &str, now: i64) -> Result<WorkshopAssetRow, DbError> {
+        let mut tx = self.pool.begin().await?;
+        let existing = sqlx::query_as::<_, WorkshopAssetRow>(
+            "UPDATE workshop_assets SET updated_at = updated_at WHERE asset_id = ? RETURNING *",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| DbError::NotFound(format!("workshop asset '{id}' not found")))?;
+        if existing.deleted_at.is_some() {
+            tx.commit().await?;
+            return Ok(existing);
+        }
+        let origin = origin_references(existing.origin.as_deref())?;
+
+        let task_id: Option<String> = sqlx::query_scalar(
+            "SELECT creation_task_id FROM creation_tasks \
+             WHERE status IN ('queued', 'running') AND ( \
+                 creation_task_id = ?2 \
+                 OR EXISTS (SELECT 1 FROM json_each(input_bindings) input \
+                         WHERE json_extract(input.value, '$.asset_id') = ?1) \
+                 OR EXISTS (SELECT 1 FROM json_each(result_asset_ids) result \
+                            WHERE result.value = ?1) \
+             ) ORDER BY creation_task_id LIMIT 1",
+        )
+        .bind(id)
+        .bind(origin.creation_task_id.as_deref())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(task_id) = task_id {
+            return Err(DbError::Conflict(format!(
+                "workshop asset '{id}' is used by live creation task '{task_id}'"
+            )));
+        }
+        let live_runs: Vec<(String, String)> = sqlx::query_as(
+            "SELECT template_run_id, aggregate_json FROM creative_studio_template_runs \
+             WHERE status NOT IN ('succeeded', 'failed', 'cancelled')",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        for (run_id, aggregate_json) in live_runs {
+            // Results are persisted before they are committed into task/run
+            // history. Provenance covers that interval, including successful
+            // sibling tasks in a template run that is still executing.
+            if origin.template_run_id.as_deref() == Some(run_id.as_str())
+                || template_run_json_references_asset(&aggregate_json, id)?
+            {
+                return Err(DbError::Conflict(format!(
+                    "workshop asset '{id}' is used by live template run '{run_id}'"
+                )));
+            }
+        }
+        let deleted = sqlx::query_as::<_, WorkshopAssetRow>(
+            "UPDATE workshop_assets SET deleted_at = ?2, in_library = 0, text_content = NULL, \
+             updated_at = MAX(updated_at, ?2) WHERE asset_id = ?1 RETURNING *",
+        )
+        .bind(id)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(deleted)
+    }
+
+    async fn list_pending_asset_content_deletions(&self) -> Result<Vec<WorkshopAssetRow>, DbError> {
+        Ok(sqlx::query_as::<_, WorkshopAssetRow>(
+            "SELECT * FROM workshop_assets \
+             WHERE deleted_at IS NOT NULL AND content_deleted_at IS NULL \
+             ORDER BY deleted_at, asset_id",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    async fn finish_asset_content_deletion(&self, id: &str, now: i64) -> Result<WorkshopAssetRow, DbError> {
+        sqlx::query_as::<_, WorkshopAssetRow>(
+            "UPDATE workshop_assets \
+             SET rel_path = NULL, thumb_rel_path = NULL, text_content = NULL, in_library = 0, \
+                 content_deleted_at = COALESCE(content_deleted_at, MAX(deleted_at, ?2)), \
+                 updated_at = CASE WHEN content_deleted_at IS NULL \
+                     THEN MAX(updated_at, ?2) ELSE updated_at END \
+             WHERE asset_id = ?1 AND deleted_at IS NOT NULL RETURNING *",
+        )
+        .bind(id)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| DbError::NotFound(format!("workshop asset '{id}' has no pending content deletion")))
     }
 
     async fn delete_asset(&self, id: &str) -> Result<(), DbError> {
@@ -1844,7 +1963,7 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
     }
 
     async fn rename_collection(&self, from: &str, to: Option<&str>, now: i64) -> Result<u64, DbError> {
-        let result = sqlx::query("UPDATE workshop_assets SET collection = ?, updated_at = ? WHERE collection = ?")
+        let result = sqlx::query("UPDATE workshop_assets SET collection = ?, updated_at = ? WHERE collection = ? AND deleted_at IS NULL")
             .bind(to)
             .bind(now)
             .bind(from)
@@ -1973,6 +2092,8 @@ mod tests {
             text_content: None,
             in_library: true,
             origin: None,
+            deleted_at: None,
+            content_deleted_at: None,
             created_at: 1000,
             updated_at: 1000,
         }
@@ -2992,6 +3113,235 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(retained, 1, "terminal CanvasNode history survives project deletion");
+    }
+
+    #[tokio::test]
+    async fn asset_content_deletion_is_retryable_and_cannot_be_restored() {
+        let (repo, db) = repo().await;
+        let mut original = sample_asset(0, ASSET_1, "image", "Historical result");
+        original.thumb_rel_path = Some("workshop/thumbs/history.jpg".into());
+        repo.create_asset(&original).await.unwrap();
+        assert!(repo.finish_asset_content_deletion(ASSET_1, 1500).await.is_err());
+
+        let marked = repo.mark_asset_content_deleted(ASSET_1, 2000).await.unwrap();
+        assert_eq!(marked.deleted_at, Some(2000));
+        assert_eq!(marked.content_deleted_at, None);
+        assert_eq!(marked.rel_path, original.rel_path);
+        assert_eq!(marked.thumb_rel_path, original.thumb_rel_path);
+        assert!(!marked.in_library);
+        assert_eq!(repo.list_pending_asset_content_deletions().await.unwrap().len(), 1);
+        assert_eq!(repo.list_assets(ListAssetsParams::default()).await.unwrap().1, 0);
+        assert_eq!(repo.list_all_assets().await.unwrap().len(), 1);
+        assert_eq!(repo.get_asset(ASSET_1).await.unwrap().unwrap().title, original.title);
+        assert!(repo.update_asset(ASSET_1, UpdateAssetParams {
+            in_library: Some(true), ..Default::default()
+        }, 3000).await.is_err());
+        assert!(repo.set_asset_thumb(ASSET_1, "new.jpg", 3000).await.is_err());
+        for mutation in [
+            "deleted_at = NULL, in_library = 1",
+            "rel_path = 'replacement.png'",
+            "text_content = 'restored'",
+            "asset_id = '0190f5fe-7c00-7a00-8abc-000000000102'",
+        ] {
+            assert!(sqlx::query(&format!("UPDATE workshop_assets SET {mutation} WHERE asset_id = ?"))
+                .bind(ASSET_1).execute(db.pool()).await.is_err());
+        }
+        let retried = repo.mark_asset_content_deleted(ASSET_1, 4000).await.unwrap();
+        assert_eq!(retried.deleted_at, Some(2000));
+        assert_eq!(retried.updated_at, 2000);
+        let finished = repo.finish_asset_content_deletion(ASSET_1, 5000).await.unwrap();
+        assert_eq!(finished.content_deleted_at, Some(5000));
+        assert!(finished.rel_path.is_none() && finished.thumb_rel_path.is_none());
+        assert_eq!(finished.mime, original.mime);
+        assert_eq!(finished.width, original.width);
+        assert!(repo.list_pending_asset_content_deletions().await.unwrap().is_empty());
+        let replayed = repo.finish_asset_content_deletion(ASSET_1, 6000).await.unwrap();
+        assert_eq!(replayed.content_deleted_at, Some(5000));
+        assert_eq!(replayed.updated_at, 5000);
+    }
+
+    #[tokio::test]
+    async fn asset_content_deletion_allows_resaving_prompt_with_new_identity() {
+        let (repo, _db) = repo().await;
+        let mut original = sample_asset(0, ASSET_1, "text", "saved prompt");
+        original.rel_path = None;
+        original.text_content = Some("Original prompt".into());
+        original.origin = Some(serde_json::json!({
+            "prompt_library_source": "catalog", "prompt_library_id": "prompt-one",
+            "prompt_catalog_id": "prompt-one"
+        }).to_string());
+        let identity = PromptLibraryAssetIdentity { source: "catalog", prompt_library_id: "prompt-one" };
+        repo.create_prompt_library_asset(&original, identity).await.unwrap();
+        repo.mark_asset_content_deleted(ASSET_1, 2000).await.unwrap();
+        repo.finish_asset_content_deletion(ASSET_1, 2000).await.unwrap();
+        let replacement = WorkshopAssetRow { asset_id: ASSET_2.into(), ..original };
+        let saved = repo.create_prompt_library_asset(&replacement, identity).await.unwrap();
+        assert_eq!(saved.asset_id, ASSET_2);
+        assert_eq!(saved.text_content.as_deref(), Some("Original prompt"));
+        assert!(repo.get_asset(ASSET_1).await.unwrap().unwrap().deleted_at.is_some());
+        assert_eq!(repo.create_prompt_library_asset(&replacement, identity).await.unwrap().asset_id, ASSET_2);
+    }
+
+    #[tokio::test]
+    async fn asset_partial_updates_preserve_concurrent_fields_and_deletion() {
+        let (repo, _db) = repo().await;
+        repo.create_asset(&sample_asset(0, ASSET_1, "image", "original")).await.unwrap();
+        let (title, tags) = tokio::join!(
+            repo.update_asset(ASSET_1, UpdateAssetParams { title: Some("renamed"), ..Default::default() }, 3000),
+            repo.update_asset(ASSET_1, UpdateAssetParams { tags: Some("[\"tag\"]"), ..Default::default() }, 2000)
+        );
+        title.unwrap(); tags.unwrap();
+        let patched = repo.get_asset(ASSET_1).await.unwrap().unwrap();
+        assert_eq!(patched.title, "renamed");
+        assert_eq!(patched.tags, "[\"tag\"]");
+        assert_eq!(patched.updated_at, 3000);
+        let (deleted, patch) = tokio::join!(
+            repo.mark_asset_content_deleted(ASSET_1, 4000),
+            repo.update_asset(ASSET_1, UpdateAssetParams { in_library: Some(true), ..Default::default() }, 5000)
+        );
+        deleted.unwrap();
+        assert!(patch.is_ok() || matches!(patch, Err(DbError::NotFound(_))));
+        let row = repo.get_asset(ASSET_1).await.unwrap().unwrap();
+        assert!(row.deleted_at.is_some());
+        assert!(!row.in_library);
+    }
+
+    #[tokio::test]
+    async fn creative_archive_import_preserves_completed_asset_tombstones() {
+        let (repo, _db) = repo().await;
+        let project = CreativeStudioProjectRow {
+            id: 0, project_id: CREATIVE_PROJECT_A.into(), title: "deleted history".into(),
+            revision: 1, node_count: 0, connection_count: 0,
+            document_json: serde_json::json!({ "projectId": CREATIVE_PROJECT_A, "nodes": [] }).to_string(),
+            created_at: 1000, updated_at: 1000,
+        };
+        let deleted = WorkshopAssetRow {
+            rel_path: None, in_library: false, deleted_at: Some(1000), content_deleted_at: Some(1000),
+            ..sample_asset(0, ASSET_1, "image", "missing archive image")
+        };
+        assert!(repo.create_asset(&deleted).await.is_err());
+        let pending = WorkshopAssetRow { content_deleted_at: None, ..deleted.clone() };
+        assert!(repo.import_creative_project_with_assets(&project, &[pending]).await.is_err());
+        repo.import_creative_project_with_assets(&project, &[deleted]).await.unwrap();
+        let restored = repo.get_asset(ASSET_1).await.unwrap().unwrap();
+        assert_eq!(restored.deleted_at, Some(1000));
+        assert_eq!(restored.content_deleted_at, Some(1000));
+        assert!(!restored.in_library);
+        assert_eq!(restored.width, Some(10));
+        assert!(repo.list_pending_asset_content_deletions().await.unwrap().is_empty());
+    }
+
+    fn deletion_template_run(status: &str, revision: i64) -> CreativeStudioTemplateRunRow {
+        CreativeStudioTemplateRunRow {
+            id: 0, template_run_id: CREATIVE_TEMPLATE_RUN_A.into(), template_id: CREATIVE_TEMPLATE_A.into(),
+            template_revision: 1, revision, status: status.into(),
+            step_ids_json: serde_json::json!([CREATIVE_TEMPLATE_STEP_A]).to_string(),
+            aggregate_json: serde_json::json!({
+                "kind": "nomifun.creative-studio.template-run", "version": 1, "revision": revision,
+                "templateSnapshot": { "id": CREATIVE_TEMPLATE_A, "revision": 1 },
+                "request": { "id": CREATIVE_TEMPLATE_RUN_A, "templateId": CREATIVE_TEMPLATE_A,
+                    "templateRevision": 1, "inputs": [{"assetId": ASSET_1}] },
+                "record": { "requestId": CREATIVE_TEMPLATE_RUN_A, "templateId": CREATIVE_TEMPLATE_A,
+                    "status": status, "resultAssetIds": [ASSET_2] }
+            }).to_string(),
+            created_at: 1000, updated_at: 1000 + revision,
+        }
+    }
+
+    #[tokio::test]
+    async fn asset_content_deletion_serializes_template_runs_and_preserves_terminal_history() {
+        let (repo, db) = repo().await;
+        for asset in [ASSET_1, ASSET_2] {
+            repo.create_asset(&sample_asset(0, asset, "image", "template asset")).await.unwrap();
+        }
+        repo.create_creative_template_run(&deletion_template_run("running", 1), &[ASSET_1.into()]).await.unwrap();
+        for asset in [ASSET_1, ASSET_2] {
+            assert!(matches!(repo.mark_asset_content_deleted(asset, 2000).await, Err(DbError::Conflict(_))));
+            assert!(repo.get_asset(asset).await.unwrap().unwrap().deleted_at.is_none());
+        }
+        repo.save_creative_template_run(CREATIVE_TEMPLATE_RUN_A, 1, &deletion_template_run("succeeded", 2)).await.unwrap();
+        for asset in [ASSET_1, ASSET_2] {
+            repo.mark_asset_content_deleted(asset, 2000).await.unwrap();
+        }
+        // Harmless terminal metadata refresh remains possible for history.
+        repo.save_creative_template_run(CREATIVE_TEMPLATE_RUN_A, 2, &deletion_template_run("succeeded", 3)).await.unwrap();
+        let replay = repo.create_creative_template_run(&deletion_template_run("requested", 1), &[ASSET_1.into()]).await.unwrap();
+        assert_eq!(replay.status, "succeeded");
+        assert_eq!(replay.revision, 3);
+        assert!(repo.save_creative_template_run(CREATIVE_TEMPLATE_RUN_A, 3, &deletion_template_run("queued", 4)).await.is_err());
+        sqlx::query("DELETE FROM creative_studio_template_runs WHERE template_run_id = ?")
+            .bind(CREATIVE_TEMPLATE_RUN_A).execute(db.pool()).await.unwrap();
+        assert!(repo.create_creative_template_run(&deletion_template_run("requested", 1), &[ASSET_1.into()]).await.is_err());
+        // Caller omissions cannot bypass the final aggregate-aware trigger.
+        assert!(repo.create_creative_template_run(&deletion_template_run("requested", 1), &[]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn asset_content_deletion_protects_uncommitted_results_by_live_origin() {
+        let (repo, db) = repo().await;
+        let task_id = nomifun_common::CreationTaskId::new().into_string();
+        let provider_id = nomifun_common::ProviderId::new().into_string();
+        sqlx::query("INSERT INTO providers (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, created_at, updated_at) VALUES (?, 'test', 'origin test', 'https://example.invalid', 'bearer', '', 1, 1)")
+            .bind(&provider_id).execute(db.pool()).await.unwrap();
+        sqlx::query("INSERT INTO creation_tasks (creation_task_id, workbench_kind, provider_id, model, capability, params, input_bindings, result_asset_ids, status, submitted_at, request_fingerprint) VALUES (?, 'image', ?, 'model', 't2i', '{}', '[]', '[]', 'running', 1, '{}')")
+            .bind(&task_id).bind(&provider_id).execute(db.pool()).await.unwrap();
+        let result = WorkshopAssetRow {
+            origin: Some(serde_json::json!({ "workbench_kind": "image", "creation_task_id": task_id }).to_string()),
+            ..sample_asset(0, ASSET_1, "image", "persisted before task commit")
+        };
+        repo.create_asset(&result).await.unwrap();
+        assert!(matches!(repo.mark_asset_content_deleted(ASSET_1, 2000).await,
+            Err(DbError::Conflict(message)) if message.contains(&task_id)));
+        sqlx::query("UPDATE creation_tasks SET status = 'succeeded' WHERE creation_task_id = ?")
+            .bind(&task_id).execute(db.pool()).await.unwrap();
+        repo.mark_asset_content_deleted(ASSET_1, 2000).await.unwrap();
+
+        repo.create_creative_template(&CreativeStudioTemplateRow {
+            id: 0, template_id: CREATIVE_TEMPLATE_A.into(), revision: 1,
+            name: "parallel template".into(), description: String::new(), category: String::new(),
+            visibility: "private".into(),
+            definition_json: serde_json::json!({"id": CREATIVE_TEMPLATE_A, "revision": 1}).to_string(),
+            created_at: 1000, updated_at: 1000,
+        }).await.unwrap();
+        let mut run = deletion_template_run("running", 1);
+        let mut aggregate: Value = serde_json::from_str(&run.aggregate_json).unwrap();
+        aggregate["request"]["inputs"] = serde_json::json!([]);
+        aggregate["record"]["resultAssetIds"] = serde_json::json!([]);
+        run.aggregate_json = aggregate.to_string();
+        repo.create_creative_template_run(&run, &[]).await.unwrap();
+        let partial_result = WorkshopAssetRow {
+            origin: Some(serde_json::json!({ "template_id": CREATIVE_TEMPLATE_A,
+                "template_run_id": CREATIVE_TEMPLATE_RUN_A, "template_step_id": CREATIVE_TEMPLATE_STEP_A }).to_string()),
+            ..sample_asset(0, ASSET_2, "image", "completed sibling output before run commit")
+        };
+        repo.create_asset(&partial_result).await.unwrap();
+        assert!(matches!(repo.mark_asset_content_deleted(ASSET_2, 2000).await,
+            Err(DbError::Conflict(message)) if message.contains(CREATIVE_TEMPLATE_RUN_A)));
+        aggregate["revision"] = serde_json::json!(2);
+        aggregate["record"]["status"] = serde_json::json!("succeeded");
+        run.revision = 2;
+        run.status = "succeeded".into();
+        run.aggregate_json = aggregate.to_string();
+        repo.save_creative_template_run(CREATIVE_TEMPLATE_RUN_A, 1, &run).await.unwrap();
+        repo.mark_asset_content_deleted(ASSET_2, 2000).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn asset_content_deletion_and_template_submission_cannot_both_succeed() {
+        let (repo, _db) = repo().await;
+        repo.create_asset(&sample_asset(0, ASSET_1, "image", "run input")).await.unwrap();
+        let run = deletion_template_run("requested", 1);
+        let refs = [ASSET_1.into()];
+        let (deleted, submitted) = tokio::join!(
+            repo.mark_asset_content_deleted(ASSET_1, 2000),
+            repo.create_creative_template_run(&run, &refs)
+        );
+        assert_ne!(deleted.is_ok(), submitted.is_ok());
+        if deleted.is_ok() {
+            assert!(repo.get_creative_template_run(CREATIVE_TEMPLATE_RUN_A).await.unwrap().is_none());
+        } else {
+            assert!(repo.get_asset(ASSET_1).await.unwrap().unwrap().deleted_at.is_none());
+        }
     }
 
     #[tokio::test]

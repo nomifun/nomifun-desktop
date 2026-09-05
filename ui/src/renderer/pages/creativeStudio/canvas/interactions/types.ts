@@ -51,11 +51,17 @@ export type CanvasIntegrationIntent =
       fixedNodeId: string;
       fixedHandle: 'source' | 'target';
       fixedHandleId: string | null;
+      fixedNodeIds?: readonly string[];
       worldPosition: CanvasPoint;
     }
   | {
       type: 'connection/rejected';
       code: CanvasConnectionErrorCode | 'no_valid_drop_target';
+    }
+  | {
+      type: 'connection/batch-created';
+      count: number;
+      skippedCount: number;
     }
   | {
       type: 'connection/created';

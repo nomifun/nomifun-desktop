@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CreativeAsset } from "../../assets";
+import { CreativeAssetDeletedError, isCreativeAssetDeleted, type CreativeAsset } from "../../assets";
 import type { CreativeCanvasNode, CreativeProjectDocument } from "../../domain";
 import {
   isCreativeProjectRepositoryError,
@@ -147,6 +147,7 @@ function validateTransfers(
         `截图 ${transfer.captureId} 没有解析为真实图片素材。`,
       );
     }
+    if (isCreativeAssetDeleted(transfer.asset)) throw new CreativeAssetDeletedError(transfer.asset.id);
   }
 }
 

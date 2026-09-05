@@ -60,7 +60,7 @@ describe('CreativeCanvasVideoComposer', () => {
     );
     expect(html.includes('data-canvas-video-composer="true"')).toBe(true);
     expect(html.includes('data-mode="t2v"')).toBe(true);
-    expect(html.includes('文生视频')).toBe(true);
+    expect(html.includes('文生视频')).toBe(false);
     expect(html.includes('视频创作提示词')).toBe(true);
     expect(html.includes('描述要生成的视频内容、动作与镜头')).toBe(true);
     expect(html.includes('打开视频提示词库')).toBe(true);
@@ -83,10 +83,27 @@ describe('CreativeCanvasVideoComposer', () => {
       />
     );
     expect(html.includes('data-mode="i2v"')).toBe(true);
-    expect(html.includes('图生视频·1张参考图')).toBe(true);
+    expect(html.includes('图生视频·1张参考图')).toBe(false);
     expect(html.includes('晨雾参考图.png')).toBe(true);
     expect(html.includes('reference.png')).toBe(true);
+    expect(html.includes('data-creative-media-preview="image"')).toBe(true);
+    expect(html.match(/<img\b/g)?.length).toBe(1);
     expect(html.includes('描述参考图要如何运动、变化与运镜')).toBe(true);
+  });
+
+  test('uses the original image when an image-to-video reference has no thumbnail', () => {
+    const html = renderToStaticMarkup(
+      <CreativeCanvasVideoComposer
+        {...props({
+          mode: 'i2v',
+          reference: { name: '参考图', originalUrl: '/reference-original.png' },
+        })}
+      />
+    );
+
+    expect(html.includes('src="/reference-original.png"')).toBe(true);
+    expect(html.match(/<img\b/g)?.length).toBe(1);
+    expect(html.includes('data-creative-media-preview="image"')).toBe(true);
   });
 
   test('keeps generation disabled when no exact video model exists', () => {
@@ -192,6 +209,7 @@ describe('CreativeCanvasVideoComposer', () => {
     expect(component.includes("['720p', '1080p']")).toBe(true);
     expect(component.includes("'16:9',\n  '9:16',\n  '1:1'")).toBe(true);
     expect(component.includes('[5, 10]')).toBe(true);
+    expect(component.includes('videoWorkbenchSizeOptionLabel')).toBe(false);
     expect(component.includes('credits')).toBe(false);
     expect(component.includes('camera')).toBe(false);
     expect(component.includes("'v2v'")).toBe(false);
@@ -213,8 +231,24 @@ describe('CreativeCanvasVideoComposer', () => {
     expect(shellCss.includes(":global([data-theme='dark']) .positioner")).toBe(true);
     expect(shellCss.includes('background: color-mix(in srgb, var(--color-bg-2)')).toBe(true);
     expect(shellCss.includes('background: rgb(var(--primary-6))')).toBe(true);
-    expect(shellCss.includes('height: 104px')).toBe(true);
+    expect(shellCss.includes('height: 92px')).toBe(true);
     expect(shellCss.includes('height: 30px')).toBe(true);
+    expect(/\.controls\s*\{[\s\S]*?flex-wrap:\s*nowrap;/.test(shellCss)).toBe(true);
+    expect(
+      /\.settingsButton\s*\{[\s\S]*?flex:\s*0 1 144px;[\s\S]*?flex-direction:\s*row;[\s\S]*?flex-wrap:\s*nowrap;[\s\S]*?overflow:\s*hidden;/.test(
+        shellCss
+      )
+    ).toBe(true);
+    expect(
+      /\.settingsSummary\s*\{[\s\S]*?flex:\s*1 1 auto;[\s\S]*?text-overflow:\s*ellipsis;[\s\S]*?white-space:\s*nowrap;/.test(
+        shellCss
+      )
+    ).toBe(true);
+    expect(
+      /\.settingsButton > button\s*\{[\s\S]*?display:\s*inline-flex;[\s\S]*?flex-direction:\s*row;[\s\S]*?flex-wrap:\s*nowrap;/.test(
+        shellCss
+      )
+    ).toBe(true);
     expect(shellCss.includes(".positioner[data-placement='above']")).toBe(true);
     expect(shellCss.includes('--creative-canvas-composer-offset-x')).toBe(true);
     expect(shellCss.includes(".positioner[data-overlay='true']")).toBe(true);

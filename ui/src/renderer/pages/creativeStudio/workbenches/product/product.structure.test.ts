@@ -65,7 +65,7 @@ describe('standalone workbench product wiring', () => {
     expect(image.includes('StandaloneHistoryRetireDialog')).toBe(true);
     expect(video.includes('StandaloneHistoryRetireDialog')).toBe(true);
     expect(wiring.includes('POST /api/creative-studio/tasks/retire')).toBe(true);
-    expect(wiring.includes('Retirement never deletes media')).toBe(true);
+    expect(wiring.includes('History retirement never deletes media')).toBe(true);
   });
 
   test('keeps both workbenches aligned with the active app theme', () => {

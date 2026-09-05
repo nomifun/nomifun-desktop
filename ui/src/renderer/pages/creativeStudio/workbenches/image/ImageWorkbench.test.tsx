@@ -11,8 +11,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import ImageWorkbench from './ImageWorkbench';
 import {
+  imageWorkbenchAspectRatioChoices,
+  imageWorkbenchResolutionLabel,
+  imageWorkbenchResolutionOptions,
   imageWorkbenchSizePolicyForModel,
-  imageWorkbenchSizeOptionLabel,
+  imageWorkbenchSizeOptionForAspectRatio,
   imageWorkbenchSelectableSizeOptions,
   normalizeImageWorkbenchSettingsSize,
   imageWorkbenchModelKey,
@@ -88,6 +91,15 @@ const resultBase = {
 };
 
 describe('ImageWorkbench visual states', () => {
+  test('renders deleted history outputs as an explicit placeholder without media requests', () => {
+    const html = renderWorkbench({ results: [{ ...resultBase, status: 'succeeded', hasDeletedInputs: true,
+      outputs: [{ assetId: 'deleted-output', imageUrl: '/deleted-original', alt: 'Old result', availability: 'deleted' }],
+    }] });
+    expect(html.includes('素材已删除')).toBe(true);
+    expect(html.includes('引用素材已删除')).toBe(true);
+    expect(html.includes('<img')).toBe(false);
+    expect(html.includes('/deleted-original')).toBe(false);
+  });
   test('renders the side composer and a real empty result state', () => {
     const html = renderWorkbench();
 
@@ -103,14 +115,19 @@ describe('ImageWorkbench visual states', () => {
   test('keeps workbench headings compact and reference content inside the sidebar', () => {
     const css = readFileSync(new URL('./ImageWorkbench.module.css', import.meta.url), 'utf8');
     const composerSource = readFileSync(new URL('./ImageWorkbenchComposer.tsx', import.meta.url), 'utf8');
+    const resultsSource = readFileSync(new URL('./ImageWorkbenchResults.tsx', import.meta.url), 'utf8');
 
     expect(composerSource.includes('className={styles.composerHeading}')).toBe(true);
     expect(composerSource.includes('<Pic size={20} />')).toBe(true);
     expect(composerSource.includes("'creativeStudio.image.header.settings'")).toBe(true);
     expect(/\.composerHeader\s*\{[\s\S]*?align-items:\s*center;/.test(css)).toBe(true);
     expect(/\.composerHeader h1\s*\{[\s\S]*?font-size:\s*14px;[\s\S]*?line-height:\s*18px;/.test(css)).toBe(true);
-    expect(/\.resultsTitle h2\s*\{[\s\S]*?font-size:\s*16px;[\s\S]*?line-height:\s*22px;/.test(css)).toBe(true);
+    expect(/\.resultsTitle h2\s*\{[\s\S]*?font-size:\s*14px;[\s\S]*?line-height:\s*20px;/.test(css)).toBe(true);
     expect(/\.layoutSwitch :global\(\.arco-btn\)\s*\{[\s\S]*?height:\s*28px;[\s\S]*?font-size:\s*12px;/.test(css)).toBe(true);
+    expect(/\.layoutSwitch :global\(\.arco-btn\) > :global\(\.i-icon\)[\s\S]*?line-height:\s*0;/.test(css)).toBe(true);
+    expect(/\.resultsHeader\s*\{[\s\S]*?min-height:\s*64px;[\s\S]*?padding:\s*12px 16px;/.test(css)).toBe(true);
+    expect(resultsSource.includes("<History size={15} />")).toBe(true);
+    expect(resultsSource.includes("<Tag size='small' bordered={false}>")).toBe(true);
     expect(/\.composerScroll\s*\{[\s\S]*?padding:\s*12px 16px 16px;/.test(css)).toBe(true);
     expect(/\.sectionHeader\s*\{[\s\S]*?box-sizing:\s*border-box;[\s\S]*?min-height:\s*34px;[\s\S]*?padding:\s*5px 10px;/.test(css)).toBe(true);
     expect(/\.referenceStrip\s*\{[\s\S]*?box-sizing:\s*border-box;[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*100%;/.test(css)).toBe(true);
@@ -119,15 +136,35 @@ describe('ImageWorkbench visual states', () => {
 
   test('keeps side controls dense and both workbench panes inside their viewport', () => {
     const css = readFileSync(new URL('./ImageWorkbench.module.css', import.meta.url), 'utf8');
+    const pickerCss = readFileSync(new URL('./ImageSizePicker.module.css', import.meta.url), 'utf8');
 
     expect(/\.sideLayout,\s*\.bottomLayout\s*\{[\s\S]*?box-sizing:\s*border-box;[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;/.test(css)).toBe(true);
     expect(/\.sideLayout\s*\{[\s\S]*?grid-template-columns:\s*minmax\(330px, 380px\) minmax\(0, 1fr\);/.test(css)).toBe(true);
-    expect(/\.aspectGrid\s*\{[\s\S]*?grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\);[\s\S]*?gap:\s*4px;/.test(css)).toBe(true);
-    expect(/\.aspectOption\s*\{[\s\S]*?min-height:\s*58px;[\s\S]*?font-size:\s*9px;/.test(css)).toBe(true);
+    expect(pickerCss.includes('grid-template-columns: repeat(3, minmax(0, 1fr))')).toBe(true);
+    expect(pickerCss.includes('min-height: 30px')).toBe(true);
     expect(/\.aspectShape\s*\{[\s\S]*?width:\s*18px;[\s\S]*?max-height:\s*16px;/.test(css)).toBe(true);
+    expect(css.includes('.compactResolutionField')).toBe(true);
     expect(/\.optionPill\s*\{[\s\S]*?height:\s*28px;[\s\S]*?font-size:\s*10px;/.test(css)).toBe(true);
     expect(css.includes('.dimensionGrid')).toBe(false);
-    expect(css.includes('.sizeOption')).toBe(true);
+    expect(css.includes('.sizeOptionIdentity')).toBe(true);
+  });
+
+  test('keeps the side-by-side workspace through compact desktop widths and adapts the result list', () => {
+    const css = readFileSync(new URL('./ImageWorkbench.module.css', import.meta.url), 'utf8');
+
+    expect(
+      /@media \(max-width:\s*820px\)\s*\{[\s\S]*?\.sideLayout\s*\{[\s\S]*?flex-direction:\s*column;/.test(
+        css
+      )
+    ).toBe(true);
+    expect(css.includes('@media (max-width: 900px)')).toBe(false);
+    expect(
+      /@media \(max-width:\s*1120px\)\s*\{[\s\S]*?\.resultGrid\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\);/.test(
+        css
+      )
+    ).toBe(true);
+    expect(/\.resultsPanel\s*\{[\s\S]*?overflow:\s*hidden;/.test(css)).toBe(true);
+    expect(/\.resultGrid\s*\{[\s\S]*?overflow-y:\s*auto;/.test(css)).toBe(true);
   });
 
   test('renders the floating bottom composer with exact model and parameter controls', () => {
@@ -142,6 +179,7 @@ describe('ImageWorkbench visual states', () => {
     expect(html.includes('Images')).toBe(true);
     expect(html.includes('Responses')).toBe(true);
     expect(html.includes('宽高比')).toBe(true);
+    expect(html.includes('分辨率')).toBe(true);
     expect(html.includes('质量')).toBe(true);
     expect(html.includes('数量')).toBe(true);
     expect(html.includes('2 个生成中')).toBe(true);
@@ -362,11 +400,7 @@ describe('ImageWorkbench model size policies', () => {
       width: option.width,
       height: option.height,
     });
-    expect(
-      imageWorkbenchSizeOptionLabel(option).includes(
-        `${option.width} × ${option.height}`
-      )
-    ).toBe(true);
+    expect(option.requestSize).toBe(`${option.width}x${option.height}`);
   });
 
   test('keeps automatic sizing without restoring manual width and height inputs', () => {
@@ -379,6 +413,25 @@ describe('ImageWorkbench model size policies', () => {
         policy
       )
     ).toMatchObject({ aspectRatio: 'auto', width: null, height: null });
+  });
+
+  test('splits ratio and resolution while preserving the exact provider option', () => {
+    const policy = imageWorkbenchSizePolicyForModel(null);
+    const ratios = imageWorkbenchAspectRatioChoices(policy.options);
+    expect(ratios.filter((option) => option.value === '16:9')).toHaveLength(1);
+
+    const resolutions = imageWorkbenchResolutionOptions(policy.options, '16:9');
+    expect(resolutions.map(imageWorkbenchResolutionLabel)).toEqual(['标准', '2K', '4K']);
+
+    const current = policy.options.find((option) => option.value === '2048x2048')!;
+    expect(
+      imageWorkbenchSizeOptionForAspectRatio(policy.options, current, '16:9')
+    ).toMatchObject({
+      value: '2048x1152',
+      width: 2048,
+      height: 1152,
+      requestSize: '2048x1152',
+    });
   });
 });
 
@@ -430,6 +483,6 @@ describe('ImageWorkbench controlled contract', () => {
     expect(componentSource.includes('useModelsForTask')).toBe(false);
     expect(css.includes('.bottomComposerDock {\n  position: absolute;')).toBe(true);
     expect(css.includes('position: fixed')).toBe(false);
-    expect(css.includes('@media (max-width: 640px)')).toBe(true);
+    expect(css.includes('@media (max-width: 560px)')).toBe(true);
   });
 });

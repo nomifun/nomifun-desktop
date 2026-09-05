@@ -14,13 +14,18 @@ import React, {
 } from 'react';
 
 import type { CreativeImagePromptMention } from '../../domain';
+import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 import styles from './CreativeCanvasReferencePromptInput.module.css';
 
 export interface CreativeCanvasPromptReferenceOption {
   /** Stable canvas node identity. Labels and ordinals are presentation only. */
   nodeId: string;
   label: string;
+  kind?: 'image' | 'text';
+  textContent?: string;
+  mentionLabel?: string;
   thumbnailUrl?: string | null;
+  originalUrl?: string | null;
   ordinal: number;
   disabledReason?: string | null;
 }
@@ -159,7 +164,7 @@ const normalizeReferences = (
           mentionLabel: reference.disabledReason
             ? label
             : normalizeReferenceLabel(
-                referenceMentionLabel(reference.ordinal),
+                reference.mentionLabel ?? referenceMentionLabel(reference.ordinal),
                 reference.ordinal
               ),
         },
@@ -767,7 +772,9 @@ const CreativeCanvasReferencePromptInput: React.FC<
             }
             if (onSubmit) {
               event.preventDefault();
-              if (value.trim().length > 0 && issues.length === 0) {
+              if ((value.trim().length > 0 || references.some((reference) =>
+                reference.kind === 'text' && reference.textContent?.trim() && !reference.disabledReason
+              )) && issues.length === 0) {
                 onSubmit({ value, mentions: [...mentions] });
               }
             }
@@ -824,11 +831,14 @@ const CreativeCanvasReferencePromptInput: React.FC<
                       onClick={() => chooseReference(reference)}
                     >
                       <span className={styles.thumbnail} aria-hidden='true'>
-                        {reference.thumbnailUrl ? (
-                          <img
-                            src={reference.thumbnailUrl}
+                        {reference.kind === 'text' ? (
+                          <span className={styles.thumbnailText}>{reference.textContent}</span>
+                        ) : reference.thumbnailUrl || reference.originalUrl ? (
+                          <CreativeMediaPreview
+                            kind='image'
+                            src={reference.originalUrl ?? reference.thumbnailUrl}
+                            posterSrc={reference.thumbnailUrl}
                             alt=''
-                            draggable={false}
                           />
                         ) : (
                           <span className={styles.thumbnailFallback}>@</span>
@@ -842,12 +852,8 @@ const CreativeCanvasReferencePromptInput: React.FC<
                           {reference.disabledReason
                             ? reference.disabledReason
                             : mentionedNodeIds.has(reference.nodeId)
-                              ? `${reference.label} · ${controlLabels.referenceOrdinal(
-                                  reference.ordinal
-                                )} · ${controlLabels.alreadyMentioned}`
-                              : `${reference.label} · ${controlLabels.referenceOrdinal(
-                                  reference.ordinal
-                                )}`}
+                              ? `${reference.label} · ${reference.kind === 'text' ? reference.mentionLabel : controlLabels.referenceOrdinal(reference.ordinal)} · ${controlLabels.alreadyMentioned}`
+                              : `${reference.label} · ${reference.kind === 'text' ? reference.mentionLabel : controlLabels.referenceOrdinal(reference.ordinal)}`}
                         </span>
                       </span>
                     </button>

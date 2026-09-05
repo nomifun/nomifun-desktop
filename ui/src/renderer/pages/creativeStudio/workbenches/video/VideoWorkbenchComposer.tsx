@@ -11,22 +11,20 @@ import {
   LayoutTwo,
   Left,
   MagicWand,
-  Pic,
   Play,
   Plus,
   Right,
   SettingTwo,
   VideoTwo,
-  Voice,
 } from '@icon-park/react';
 import { Button, Input } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 
 import { normalizeVideoTaskCount } from './presentation';
 import styles from './VideoWorkbench.module.css';
 import type {
-  VideoReferenceKind,
   VideoWorkbenchChoice,
   VideoWorkbenchLayout,
   VideoWorkbenchProps,
@@ -64,12 +62,6 @@ type ComposerProps = Pick<
   | 'tasks'
 >;
 
-const referenceIcon = (kind: VideoReferenceKind): React.ReactNode => {
-  if (kind === 'video') return <VideoTwo size={17} />;
-  if (kind === 'audio') return <Voice size={17} />;
-  return <Pic size={17} />;
-};
-
 const ReferenceItem: React.FC<{
   item: VideoWorkbenchReference;
   index: number;
@@ -81,11 +73,13 @@ const ReferenceItem: React.FC<{
   return (
   <article className={styles.referenceItem} data-reference-kind={item.kind}>
     <div className={styles.referencePreview}>
-      {item.previewUrl ? (
-        <img src={item.previewUrl} alt={item.name} />
-      ) : (
-        <span aria-hidden='true'>{referenceIcon(item.kind)}</span>
-      )}
+      <CreativeMediaPreview
+        kind={item.kind}
+        src={item.originalUrl ?? (item.kind === 'image' ? item.previewUrl : undefined)}
+        posterSrc={item.previewUrl}
+        alt={item.name}
+        className={styles.referenceMedia}
+      />
     </div>
     <span className={styles.referenceName} title={item.name}>
       {item.name}
@@ -272,13 +266,13 @@ const SettingsGrid: React.FC<SettingsGridProps> = ({
         <div>{modelSlot}</div>
       </div>
       <QuickSelect
-        label={t('creativeStudio.video.settings.resolution', { defaultValue: '清晰度' })}
+        label={t('creativeStudio.video.settings.resolution', { defaultValue: '分辨率' })}
         value={resolution}
         options={resolutionOptions}
         onChange={onResolutionChange}
       />
       <QuickSelect
-        label={t('creativeStudio.video.settings.size', { defaultValue: '尺寸' })}
+        label={t('creativeStudio.video.settings.aspectRatio', { defaultValue: '宽高比' })}
         value={size}
         options={sizeOptions}
         onChange={onSizeChange}

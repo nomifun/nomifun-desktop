@@ -8,6 +8,9 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 import CreativeAssetPickerModal from './components/CreativeAssetPickerModal';
 import type { CreativeAsset, CreativeAssetKind, CreativeAssetLibraryPort } from './types';
+import { isCreativeAssetDeleted } from './types';
+import { creativeAssetClient } from './client';
+import { CreativeAssetDeletedError, subscribeCreativeAssetDeletion } from './assetDeletion';
 import { useCreativeAssets } from './useCreativeAssets';
 
 export interface CreativeAssetPickerRequest {
@@ -24,7 +27,7 @@ export interface CreativeAssetPickerDialogController {
 }
 
 export interface UseCreativeAssetPickerDialogOptions {
-  client?: CreativeAssetLibraryPort;
+  client?: CreativeAssetLibraryPort & { get?(assetId: string): Promise<CreativeAsset> };
   pageSize?: number;
 }
 
@@ -50,6 +53,7 @@ export function toggleCreativeAssetPickerSelection(
 export function useCreativeAssetPickerDialog(
   options: UseCreativeAssetPickerDialogOptions = {}
 ): CreativeAssetPickerDialogController {
+  const client = options.client ?? creativeAssetClient;
   const assets = useCreativeAssets({
     client: options.client,
     pageSize: options.pageSize ?? 80,
@@ -57,6 +61,8 @@ export function useCreativeAssetPickerDialog(
   });
   const [request, setRequest] = useState<CreativeAssetPickerRequest | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [selectionError, setSelectionError] = useState<Error | null>(null);
+  const confirmingRef = useRef(false);
   const resolverRef = useRef<((value: string[] | null) => void) | null>(null);
 
   const settle = useCallback((value: string[] | null) => {
@@ -66,6 +72,10 @@ export function useCreativeAssetPickerDialog(
     setSelectedIds([]);
     resolve?.(value);
   }, []);
+
+  useEffect(() => subscribeCreativeAssetDeletion(client, (assetId) => {
+    setSelectedIds((current) => current.filter((id) => id !== assetId));
+  }), [client]);
 
   useEffect(
     () => () => {
@@ -89,6 +99,7 @@ export function useCreativeAssetPickerDialog(
       return Promise.reject(new Error('Creative asset picker is already open'));
     }
     setRequest({ ...nextRequest, acceptedKinds: [...new Set(nextRequest.acceptedKinds)] });
+    setSelectionError(null);
     setSelectedIds(normalizedSelection(
       nextRequest.initialSelectedIds ?? [],
       nextRequest.selectionLimit
@@ -99,6 +110,7 @@ export function useCreativeAssetPickerDialog(
   }, []);
 
   const toggle = useCallback((asset: CreativeAsset) => {
+    if (isCreativeAssetDeleted(asset)) return;
     if (!request || !request.acceptedKinds.includes(asset.kind)) return;
     setSelectedIds((current) =>
       toggleCreativeAssetPickerSelection(current, asset.id, request.selectionLimit)
@@ -119,7 +131,7 @@ export function useCreativeAssetPickerDialog(
         loading={assets.loading}
         loadingMore={assets.loadingMore}
         hasMore={assets.hasMore}
-        error={assets.error ?? assets.mutationError}
+        error={selectionError ?? assets.error ?? assets.mutationError}
         uploading={assets.mutating}
         onToggle={toggle}
         onLoadMore={() => void assets.loadMore()}
@@ -145,7 +157,22 @@ export function useCreativeAssetPickerDialog(
             .catch(() => undefined);
         }}
         onCancel={() => settle(null)}
-        onConfirm={() => settle([...selectedIds])}
+        onConfirm={() => {
+          if (confirmingRef.current) return;
+          const resolver = resolverRef.current;
+          const selection = [...selectedIds];
+          confirmingRef.current = true;
+          setSelectionError(null);
+          void Promise.all(selection.map(async (id) => {
+            const asset = client.get ? await client.get(id) : assets.assets.find((candidate) => candidate.id === id);
+            if (asset && isCreativeAssetDeleted(asset)) throw new CreativeAssetDeletedError(id);
+            return id;
+          })).then((ids) => {
+            if (resolverRef.current === resolver) settle(ids);
+          }).catch((reason) => {
+            if (resolverRef.current === resolver) setSelectionError(reason instanceof Error ? reason : new Error(String(reason)));
+          }).finally(() => { confirmingRef.current = false; });
+        }}
       />
     ) : null,
   };

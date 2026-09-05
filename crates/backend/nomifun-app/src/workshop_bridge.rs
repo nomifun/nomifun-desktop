@@ -463,6 +463,13 @@ impl WorkshopAssetBridge {
             return Ok(()); // idempotent: a prior rollback already removed it
         };
 
+        // A user-deletion record is historical identity, not a provisional
+        // artifact. Keep its retryable cleanup state even if task finalization
+        // races with deletion and subsequently rolls its outputs back.
+        if row.deleted_at.is_some() {
+            return Ok(());
+        }
+
         // Remove bytes before the index row. If row deletion subsequently
         // fails, retrying remains safe: NotFound files are accepted and the
         // still-present row retains the path needed to finish cleanup.
@@ -541,6 +548,32 @@ impl WorkshopAssetBridge {
         Ok(())
     }
 
+    fn verify_indexed_kind(row: &WorkshopAssetRow) -> Result<(), String> {
+        let mime = row
+            .mime
+            .as_deref()
+            .ok_or_else(|| "asset MIME is missing".to_string())?;
+        let mime = mime
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let expected_kind = if mime == "text/plain" {
+            Some("text")
+        } else {
+            ext_for_mime(&mime).and_then(|_| kind_for_mime(&mime))
+        }
+        .ok_or_else(|| format!("asset MIME '{mime}' is unsupported"))?;
+        if row.kind != expected_kind {
+            return Err(format!(
+                "asset kind '{}' does not match its MIME '{mime}'",
+                row.kind
+            ));
+        }
+        Ok(())
+    }
+
     async fn asset_is_locatable(&self, row: &WorkshopAssetRow) -> Result<(), String> {
         if let Some(rel_path) = row.rel_path.as_deref() {
             let path = self
@@ -609,6 +642,16 @@ impl WorkshopAssetBridge {
                         reason = Some(format!("committed asset '{asset_id}' does not belong to this task"));
                         break;
                     }
+                    if let Err(error) = Self::verify_indexed_kind(row) {
+                        reason = Some(format!("committed asset '{asset_id}' metadata is invalid: {error}"));
+                        break;
+                    }
+                    // Explicit user deletion retires only the content. The
+                    // task still owns this result identity and its original
+                    // output count; an unmarked missing row/file stays invalid.
+                    if row.deleted_at.is_some() {
+                        continue;
+                    }
                     if let Err(error) = self.asset_is_locatable(row).await {
                         reason = Some(format!("committed asset '{asset_id}' is not usable: {error}"));
                         break;
@@ -633,6 +676,7 @@ impl WorkshopAssetBridge {
         if cleanup_uncommitted {
             let remove = rows
                 .iter()
+                .filter(|row| row.deleted_at.is_none())
                 .filter_map(|row| {
                     let origin_task = Self::origin_creation_task_id(row)?;
                     let preserve = valid_committed
@@ -697,6 +741,8 @@ impl WorkshopAssetBridge {
             text_content: Some(text),
             in_library,
             origin: serde_json::to_string(origin).ok(),
+            deleted_at: None,
+            content_deleted_at: None,
             created_at: now,
             updated_at: now,
         };
@@ -774,6 +820,8 @@ impl AssetSink for WorkshopAssetBridge {
             text_content: None,
             in_library,
             origin: origin_json,
+            deleted_at: None,
+            content_deleted_at: None,
             created_at: now,
             updated_at: now,
         };
@@ -830,6 +878,13 @@ impl AssetSource for WorkshopAssetBridge {
             .await
             .map_err(|e| CreationError::new("asset_lookup", format!("asset lookup failed: {e}")))?
             .ok_or_else(|| CreationError::new("asset_not_found", format!("input asset '{asset_id}' not found")))?;
+
+        if row.deleted_at.is_some() {
+            return Err(CreationError::new(
+                "asset_deleted",
+                format!("input asset '{asset_id}' was permanently deleted"),
+            ));
+        }
 
         // File-backed assets (image/video) are read from disk; text assets carry
         // their body inline (`text_content`, no file) — return it as UTF-8 bytes
@@ -1327,6 +1382,188 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(tokio::fs::read(&target).await.unwrap(), b"complete asset");
         assert_eq!(tokio::fs::read(&second_source).await.unwrap(), b"must not replace");
+    }
+
+    #[tokio::test]
+    async fn deleted_result_content_preserves_task_history_and_boot_audit() {
+        let (bridge, dir, db) = bridge().await;
+        let bridge = Arc::new(bridge);
+        let creation_task_id = generate_id();
+        let origin = create_test_creation_task(&db, &creation_task_id).await;
+        let asset_id = bridge
+            .persist(PersistAsset {
+                bytes: valid_png(),
+                mime: "image/png".into(),
+                in_library: true,
+                origin,
+            })
+            .await
+            .unwrap();
+        let task_repo = Arc::new(SqliteCreationTaskRepository::new(db.pool().clone()));
+        let results = serde_json::to_string(&[&asset_id]).unwrap();
+        task_repo
+            .update_task(
+                &creation_task_id,
+                UpdateCreationTaskParams {
+                    result_asset_ids: Some(&results),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let service = nomifun_creation::CreationService::builder(task_repo.clone())
+            .with_asset_sink(bridge.clone())
+            .with_asset_source(bridge.clone())
+            .build();
+        service.audit_managed_data_on_boot().await.unwrap();
+
+        let tombstone = bridge
+            .repo
+            .mark_asset_content_deleted(&asset_id, now_ms())
+            .await
+            .unwrap();
+        let path = dir.path().join(tombstone.rel_path.as_deref().unwrap());
+        assert!(
+            path.is_file(),
+            "the deletion marker precedes durable file cleanup"
+        );
+        let error = bridge
+            .load(&asset_id)
+            .await
+            .err()
+            .expect("deleted inputs must be rejected immediately");
+        assert_eq!(error.kind, "asset_deleted");
+        bridge.rollback(std::slice::from_ref(&asset_id)).await.unwrap();
+        let pending = bridge.repo.get_asset(&asset_id).await.unwrap().unwrap();
+        assert!(pending.deleted_at.is_some());
+        assert!(pending.content_deleted_at.is_none());
+        assert!(path.is_file(), "rollback must preserve pending deletion cleanup state");
+        tokio::fs::remove_file(&path).await.unwrap();
+        bridge
+            .repo
+            .finish_asset_content_deletion(&asset_id, now_ms())
+            .await
+            .unwrap();
+
+        let history = service.get_task(&creation_task_id).await.unwrap();
+        assert_eq!(history.status, "succeeded");
+        assert_eq!(history.result_asset_ids, vec![asset_id.clone()]);
+        service.audit_managed_data_on_boot().await.unwrap();
+        assert_eq!(service.reconcile_on_boot().await.unwrap(), 0);
+        let retained = bridge.repo.get_asset(&asset_id).await.unwrap().unwrap();
+        assert!(retained.deleted_at.is_some());
+        assert!(retained.content_deleted_at.is_some());
+        assert!(!path.exists());
+
+        // A deletion marker cannot excuse an invalid task result count.
+        task_repo
+            .update_task(
+                &creation_task_id,
+                UpdateCreationTaskParams {
+                    result_asset_ids: Some("[]"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let error = service.get_task(&creation_task_id).await.unwrap_err();
+        assert!(error.to_string().contains("no result artifacts"));
+    }
+
+    #[tokio::test]
+    async fn deleted_result_audit_preserves_identity_kind_and_missing_content_checks() {
+        let (bridge, dir, db) = bridge().await;
+        let creation_task_id = generate_id();
+        let other_task_id = generate_id();
+        let origin = create_test_creation_task(&db, &creation_task_id).await;
+        create_test_creation_task(&db, &other_task_id).await;
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            ids.push(
+                bridge
+                    .persist(PersistAsset {
+                        bytes: valid_png(),
+                        mime: "image/png".into(),
+                        in_library: true,
+                        origin: origin.clone(),
+                    })
+                    .await
+                    .unwrap(),
+            );
+        }
+        bridge
+            .repo
+            .mark_asset_content_deleted(&ids[0], now_ms())
+            .await
+            .unwrap();
+        nomifun_db::sqlx::query("UPDATE workshop_assets SET kind = 'audio' WHERE asset_id = ?")
+            .bind(&ids[1])
+            .execute(db.pool())
+            .await
+            .unwrap();
+        bridge
+            .repo
+            .mark_asset_content_deleted(&ids[1], now_ms())
+            .await
+            .unwrap();
+        let missing_file = bridge.repo.get_asset(&ids[2]).await.unwrap().unwrap();
+        tokio::fs::remove_file(dir.path().join(missing_file.rel_path.unwrap()))
+            .await
+            .unwrap();
+
+        for (task_id, asset_id, reason) in [
+            (other_task_id, ids[0].clone(), "does not belong"),
+            (
+                creation_task_id.clone(),
+                ids[1].clone(),
+                "does not match its MIME",
+            ),
+            (creation_task_id.clone(), ids[2].clone(), "not usable"),
+            (
+                creation_task_id.clone(),
+                generate_id(),
+                "no workshop index record",
+            ),
+        ] {
+            let issues = bridge
+                .verify_task_artifacts(&[TaskArtifactManifest {
+                    creation_task_id: task_id,
+                    committed: true,
+                    asset_ids: vec![asset_id],
+                }])
+                .await
+                .unwrap();
+            assert_eq!(issues.len(), 1);
+            assert!(issues[0].reason.contains(reason), "{}", issues[0].reason);
+        }
+    }
+
+    #[tokio::test]
+    async fn deleted_text_inputs_are_unavailable_without_a_file() {
+        let (bridge, _dir, _db) = bridge().await;
+        let asset_id = bridge
+            .persist(PersistAsset {
+                bytes: b"private prompt input".to_vec(),
+                mime: "text/plain".into(),
+                in_library: true,
+                origin: json!({"prompt": "Input"}),
+            })
+            .await
+            .unwrap();
+        bridge
+            .repo
+            .mark_asset_content_deleted(&asset_id, now_ms())
+            .await
+            .unwrap();
+        let error = bridge
+            .load(&asset_id)
+            .await
+            .err()
+            .expect("deleted inline content must be rejected");
+        assert_eq!(error.kind, "asset_deleted");
+        let row = bridge.repo.get_asset(&asset_id).await.unwrap().unwrap();
+        assert!(row.text_content.is_none());
+        assert!(row.deleted_at.is_some());
     }
 
     #[tokio::test]

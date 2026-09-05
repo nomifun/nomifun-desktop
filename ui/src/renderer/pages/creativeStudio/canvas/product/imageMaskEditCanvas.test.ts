@@ -274,7 +274,13 @@ describe('canvas image mask edit product model', () => {
     expect(isCanvasImageMaskEditConfig(failed)).toBe(true);
   });
 
-  test('places results to the config right and skips arbitrary collisions', () => {
+  test('places results beside the source and ignores hidden task records', () => {
+    const source = testNode('image', 82, {
+      x: 0,
+      y: 0,
+      width: 340,
+      height: 240,
+    });
     const config = {
       ...testNode('config', 1, { x: 400, width: 340, height: 240 }),
       data: {
@@ -290,19 +296,19 @@ describe('canvas image mask edit product model', () => {
       },
     };
     const blocker = testNode('image', 2, {
-      x: 820,
+      x: 420,
       y: 0,
       width: 320,
       height: 500,
     });
-    expect(canvasImageMaskEditResultPosition([config], config)).toEqual({
-      x: 820,
+    expect(canvasImageMaskEditResultPosition([source, config], config)).toEqual({
+      x: 420,
       y: 0,
     });
     expect(
-      canvasImageMaskEditResultPosition([config, blocker], config)
+      canvasImageMaskEditResultPosition([source, config, blocker], config)
     ).toEqual({
-      x: 820,
+      x: 420,
       y: 560,
     });
   });

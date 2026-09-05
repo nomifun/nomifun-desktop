@@ -22,6 +22,7 @@ import type {
 import {
   CreativeWorkbenchRuntimeController,
   createAudioWorkbenchRuntimeProps,
+  imageWorkbenchModelOptions,
   imageWorkbenchReferencesFromAssets,
   mapImageWorkbenchRuntimeResults,
   prepareAudioWorkbenchRun,
@@ -599,6 +600,31 @@ describe("Creative workbench controller", () => {
 });
 
 describe("Creative workbench planning and presentation boundaries", () => {
+  test("keeps the exact image model id while projecting a configured alias", () => {
+    const base = catalog("image_edit");
+    const sourceProvider = base.providers[0];
+    const aliasedCatalog: CreativeModelCatalogSnapshot = {
+      ...base,
+      providers: [
+        {
+          ...sourceProvider,
+          models: sourceProvider.models.map((model) => ({
+            ...model,
+            display_name: "人像精修",
+          })),
+        },
+      ],
+    };
+
+    const [option] = imageWorkbenchModelOptions(aliasedCatalog, "image_edit");
+    expect(option).toMatchObject({
+      model: "image_edit-model",
+      label: "人像精修",
+      rawModelId: "image_edit-model",
+      providerLabel: "Provider A",
+    });
+  });
+
   test("does not fall back from image_edit to image_generation", () => {
     const error = captureError(() =>
       resolveExactWorkbenchModel(

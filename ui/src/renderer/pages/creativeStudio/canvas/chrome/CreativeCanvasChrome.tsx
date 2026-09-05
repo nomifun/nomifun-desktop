@@ -25,7 +25,6 @@ import {
   Redo,
   Robot,
   Setting,
-  SettingConfig,
   Square,
   Text,
   Timeline,
@@ -67,7 +66,6 @@ const NODE_LABEL_KEYS: Record<CreativeCanvasChromeNodeKind, string> = {
   panorama: 'creativeStudio.canvas.nodeKinds.panorama',
   video: 'creativeStudio.canvas.nodeKinds.video',
   audio: 'creativeStudio.canvas.nodeKinds.audio',
-  config: 'creativeStudio.canvas.nodeKinds.config',
   director: 'creativeStudio.canvas.nodeKinds.director',
   group: 'creativeStudio.canvas.nodeKinds.group',
 };
@@ -168,8 +166,6 @@ function nodeIcon(kind: CreativeCanvasChromeNodeKind): React.ReactNode {
       return <VideoTwo {...iconProps} />;
     case 'audio':
       return <Voice {...iconProps} />;
-    case 'config':
-      return <SettingConfig {...iconProps} />;
     case 'director':
       return <Magic {...iconProps} />;
     case 'group':

@@ -27,7 +27,7 @@ import {
   reconcileCanvasImageMaskEditConfig,
 } from './imageMaskEditCanvas';
 import { creativeStudioProductText } from './i18n';
-import { creativeNodeFromAsset } from './nodeFactory';
+import { creativeNodeFromHistoricalAsset } from './nodeFactory';
 
 export type CanvasImageMaskEditEditorPort = Pick<
   CreativeCanvasEditorHandle,
@@ -213,11 +213,11 @@ export async function settleCanvasImageMaskEditTask(input: {
           throw new Error(
             creativeStudioProductText(
               'creativeStudio.canvas.errors.mask.configRemoved',
-              '局部编辑配置节点在结果写入前被移除。'
+              '局部编辑任务记录在结果写入前丢失。'
             )
           );
         }
-        const created = creativeNodeFromAsset(
+        const created = creativeNodeFromHistoricalAsset(
           asset,
           state,
           input.viewportSize,

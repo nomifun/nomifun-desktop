@@ -508,7 +508,7 @@ export function prepareCanvasAudioCompose(input: {
     throw new Error(
       creativeStudioProductText(
         'creativeStudio.canvas.errors.audio.connectConfigFailed',
-        '无法连接音频创作配置节点：{{code}}。',
+        '无法保存音频创作任务关联：{{code}}。',
         { code: validation.code }
       )
     );
@@ -550,7 +550,7 @@ export function canvasAudioComposeConfigForReference(
     throw new Error(
       creativeStudioProductText(
         'creativeStudio.canvas.errors.audio.missingConfig',
-        '音频创作任务缺少 canonical 配置节点。'
+        '音频创作任务缺少必要任务记录。'
       )
     );
   }
@@ -564,7 +564,7 @@ export function canvasAudioComposeConfigForReference(
     throw new Error(
       creativeStudioProductText(
         'creativeStudio.canvas.errors.audio.identityMismatch',
-        '音频创作任务与配置节点身份不一致。'
+        '音频创作任务与其任务记录身份不一致。'
       )
     );
   }

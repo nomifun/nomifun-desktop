@@ -105,6 +105,7 @@ body {
   /* Components */
   --message-user-bg: #eeeeec;
   --message-tips-bg: #f5f5f4;
+  --feedback-bubble-bg: #ffffff;
   --workspace-btn-bg: #f0f0ef;
   --color-guid-agent-bar: #eeeeec;
   --sider-section-title-color: #777774;
@@ -248,6 +249,7 @@ body {
   /* Components */
   --message-user-bg: #2a2a2a;
   --message-tips-bg: #242424;
+  --feedback-bubble-bg: #202020;
   --workspace-btn-bg: #242424;
   --color-guid-agent-bar: #242424;
   --sider-section-title-color: #969696;

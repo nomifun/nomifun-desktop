@@ -45,7 +45,7 @@ Arco 自带的 `body[arco-theme='dark']` 暗色切换就被压制了——暗色
 | 文字 | `--text-primary` `--text-secondary` `--text-disabled` `--text-0` `--text-white` |
 | 边框 | `--border-base` `--border-light` |
 | 语义 | `--success` `--warning` `--danger` `--info` |
-| 组件 | `--message-tips-bg` `--color-guid-agent-bar`(首页 Agent 条) `--sider-section-title-color`(侧栏分组标题，仅暗色需要) |
+| 组件 | `--message-tips-bg` `--feedback-bubble-bg`(Toast/Notification 实体背景) `--color-guid-agent-bar`(首页 Agent 条) `--sider-section-title-color`(侧栏分组标题，仅暗色需要) |
 | 终端 | `--terminal-surface-bg`(保持深色，xterm 画布恒深) `--terminal-border` |
 
 ## B. Arco token（亮/暗各一份，必须在含 `body` 的选择器组里）
@@ -85,12 +85,15 @@ Arco 自带的 `body[arco-theme='dark']` 暗色切换就被压制了——暗色
    半透明玻璃建议 alpha ≥ `0.86`；如果使用渐变，每个作为主体底色的 color stop 也应 ≥ `0.86`。
    可继续使用 `backdrop-filter`，但不能依赖模糊来弥补过低透明度。弹层里有标题、说明、表单、列表时，
    读感应接近实体卡片，而不是透到底层页面发白。
-2. **不要给每条消息外层套主题背景**：禁止在预设主题里给 `.message-item` 添加
+2. **反馈气泡与 Tooltip 必须不透明**：`--feedback-bubble-bg` 与 `--color-tooltip-bg` 必须使用
+   不带 alpha 的实体颜色。Toast / Notification 会统一消费前者，Arco Tooltip 与自研即时 Tooltip
+   会统一消费后者；不要在主题点缀里重新写半透明气泡背景。
+3. **不要给每条消息外层套主题背景**：禁止在预设主题里给 `.message-item` 添加
    `background` / `background-color` / `backdrop-filter` / 玻璃边框等大容器样式。
    `.message-item` 是消息列表每条消息的外层排版容器，不是真正的消息气泡。给它加背景会形成
    “每条消息一块浅白底/大卡片”的突兀感。消息气泡颜色应通过 `--message-tips-bg`
    或具体消息组件自身样式控制。
-3. **主题点缀不要扩大到结构容器**：如果需要装饰工作区按钮、侧栏或面板，选择器必须指向真实目标
+4. **主题点缀不要扩大到结构容器**：如果需要装饰工作区按钮、侧栏或面板，选择器必须指向真实目标
    （例如 `.workspace-btn`、`.layout-sider`、`.arco-modal`），不要把同一组样式同时打到
    `.message-item` 这类通用排版节点上。
 
@@ -108,4 +111,5 @@ Arco 自带的 `body[arco-theme='dark']` 暗色切换就被压制了——暗色
 - [ ] 亮暗两种模式下正文对比度 ≥ 4.5:1
 - [ ] 没有布局属性、宽选择器、外联资源
 - [ ] Popover / Dropdown / Select 这类内容弹层背景不低于可读性红线，不能因为过透明而发白
+- [ ] Toast / Notification 与 Tooltip 的背景令牌为完全不透明的实体颜色
 - [ ] 没有给 `.message-item` 这类消息排版外层套大背景、玻璃边框或毛玻璃

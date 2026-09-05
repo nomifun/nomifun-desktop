@@ -720,6 +720,8 @@ mod send_file_tests {
             text_content: None,
             in_library: false,
             origin: None,
+            deleted_at: None,
+            content_deleted_at: None,
             created_at: 1,
             updated_at: 1,
         };

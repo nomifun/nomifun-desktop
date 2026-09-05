@@ -6,6 +6,9 @@
 
 import { describe, expect, test } from 'bun:test';
 import { BoxGeometry, Mesh, MeshStandardMaterial, Skeleton, Texture } from 'three';
+import { CreativeAssetDeletedError } from '../../assets';
+import { ThreeDirectorRuntime } from './ThreeDirectorRuntime';
+import type { DirectorRuntimeError } from './types';
 
 import {
   directorAssetResourcePath,
@@ -14,6 +17,33 @@ import {
 } from './resources';
 
 describe('Director trusted asset URLs', () => {
+  test('disposes an already decoded panorama when its retained asset id becomes a tombstone', async () => {
+    const texture = new Texture();
+    const material = new MeshStandardMaterial({ map: texture });
+    const sphere = { visible: true };
+    let disposed = false;
+    let imageClosed = false;
+    texture.addEventListener('dispose', () => { disposed = true; });
+    let report!: (error: DirectorRuntimeError) => void;
+    const reported = new Promise<DirectorRuntimeError>((resolve) => { report = resolve; });
+    // Exercise the real invalidation/load methods without creating WebGL: these
+    // are precisely the resources left alive after the original decode.
+    const runtime: ThreeDirectorRuntime = Object.assign(Object.create(ThreeDirectorRuntime.prototype), {
+      disposed: false, modelBindings: new Map(), panoramaAssetId: 'deleted-panorama',
+      panoramaRevision: 1, panoramaAbortController: null,
+      panorama: { assetId: 'deleted-panorama', texture, closeImage: () => { imageClosed = true; } },
+      panoramaMaterial: material, panoramaSphere: sphere, onError: report,
+    });
+    runtime.setAssetUrlResolver(async (id) => { throw new CreativeAssetDeletedError(id); });
+    expect(disposed).toBe(true);
+    expect(imageClosed).toBe(true);
+    expect(material.map).toBe(null);
+    expect(sphere.visible).toBe(false);
+    const error = await reported;
+    expect(error.cause instanceof CreativeAssetDeletedError).toBe(true);
+    expect(sphere.visible).toBe(false);
+    material.dispose();
+  });
   test('accepts backend-relative, HTTPS, and blob URLs', () => {
     expect(
       resolveTrustedDirectorAssetUrl(

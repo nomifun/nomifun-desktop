@@ -238,16 +238,31 @@ task state. Terminal settlement is idempotent, and an uncertain response does
 not invent success or discard the audit trail. A confirmed `404` is treated
 differently from a transient network failure.
 
+Deleting an asset from **My Assets** permanently removes its original file and
+thumbnail. Canvas nodes, completed generation tasks, and template history keep
+an explicit “Asset deleted” marker; the original content cannot be restored by
+reloading, replaying a task, or re-adding an old asset ID. Such markers are not
+listed as reusable assets. An asset used by a running generation or template
+run must wait until that work has finished or been canceled.
+
+Content deletion is idempotent. SQLite retains pending cleanup paths until all
+files have been removed, so a failed request can be retried and interrupted
+cleanup resumes on the next startup. A missing file without an explicit
+user-deletion marker still fails integrity checks. Existing external downloads
+and backups are outside this deletion operation.
+
 ## Canvas archives
 
-The canonical Canvas export is a version-2
+The canonical Canvas export is a version-3
 `*.nomifun-canvas.zip` archive. Its manifest uses Canvas identity and carries
 the validated Canvas document plus the complete referenced asset closure,
 including the Director sidecar and its referenced assets. Import validates the
 archive and remaps Canvas, node, connection, asset, operation, session, and
-Director references so the imported copy does not alias the source.
+Director references so the imported copy does not alias the source. Version 3
+preserves deleted-asset markers with empty content entries; import never
+recreates the deleted media.
 
-The reader must continue to accept the released version-1
+The reader also accepts version-2 Canvas archives and the released version-1
 `.nomifun-canvas.zip` format. A v1 manifest may contain historical
 `project/projectId` fields; those fields are compatibility wire data and do not
 reintroduce a Project domain into the product. Conversation messages and active

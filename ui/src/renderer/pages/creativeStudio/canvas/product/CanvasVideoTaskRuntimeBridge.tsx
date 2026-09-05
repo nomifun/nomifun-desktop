@@ -140,10 +140,10 @@ const CanvasVideoTaskRuntimeBridge = forwardRef<
           : task.status === 'failed'
             ? (task.error?.message ??
               t('creativeStudio.canvas.runtime.video.failed', {
-                defaultValue: '视频创作失败，配置节点已保留。',
+                defaultValue: '视频创作失败。',
               }))
             : t('creativeStudio.canvas.runtime.video.cancelled', {
-                defaultValue: '视频创作已取消，配置节点已保留。',
+                defaultValue: '视频创作已取消。',
               })
       );
     },

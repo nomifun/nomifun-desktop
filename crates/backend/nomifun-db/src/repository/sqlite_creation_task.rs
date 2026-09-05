@@ -709,6 +709,22 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
                 None,
             ),
         };
+        // The transaction already holds the SQLite write lock. Pair this
+        // check with content deletion's live-task check so neither operation
+        // can race past the other and schedule work with deleted content.
+        let deleted_input: Option<String> = sqlx::query_scalar(
+            "SELECT asset.asset_id FROM workshop_assets asset \
+             JOIN json_each(?1) input ON json_extract(input.value, '$.asset_id') = asset.asset_id \
+             WHERE asset.deleted_at IS NOT NULL LIMIT 1",
+        )
+        .bind(params.input_bindings)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(asset_id) = deleted_input {
+            return Err(DbError::Conflict(format!(
+                "Creation task input asset '{asset_id}' has been permanently deleted"
+            )));
+        }
         let inserted = sqlx::query(
             "INSERT INTO creation_tasks \
                 (creation_task_id, project_id, workbench_kind, template_id, template_run_id, template_step_id, \
@@ -1022,7 +1038,7 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         .bind(m.finished_at)
         .bind(creation_task_id)
         .execute(&mut *tx)
-        .await?;
+        .await.map_err(DbError::from_asset_reference_guard)?;
         if result.rows_affected() != 1 {
             return Err(DbError::NotFound(format!(
                 "creation task '{creation_task_id}' not found"
@@ -1080,7 +1096,7 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         .bind(m.finished_at)
         .bind(creation_task_id)
         .execute(&mut *tx)
-        .await?;
+        .await.map_err(DbError::from_asset_reference_guard)?;
         tx.commit().await?;
         Ok(res.rows_affected() > 0)
     }
@@ -2255,6 +2271,81 @@ mod tests {
             ));
         }
         validate_creation_task_id("0190f5fe-7c00-7a00-8000-000000000001").unwrap();
+    }
+
+    #[tokio::test]
+    async fn deleted_asset_guards_keep_terminal_history_and_reject_new_work() {
+        use crate::repository::{IWorkshopRepository, SqliteWorkshopRepository};
+        let (repo, db, provider_id) = repo().await;
+        let workshop = SqliteWorkshopRepository::new(db.pool().clone());
+        let asset_id = WorkshopAssetId::new().into_string();
+        sqlx::query("INSERT INTO workshop_assets (asset_id, kind, title, tags, in_library, created_at, updated_at) VALUES (?, 'image', 'input', '[]', 1, 1, 1)")
+            .bind(&asset_id).execute(db.pool()).await.unwrap();
+        let bindings = serde_json::json!([{"asset_id": asset_id, "kind": "image", "role": "reference"}]).to_string();
+        let task_id = CreationTaskId::new().into_string();
+        repo.get_or_create_creative_task(standalone_creative_params(
+            &task_id, "", "video", &provider_id, &bindings, r#"{"deletion-test":1}"#,
+        )).await.unwrap();
+        let result_asset_id = WorkshopAssetId::new().into_string();
+        sqlx::query("INSERT INTO workshop_assets (asset_id, kind, title, tags, in_library, created_at, updated_at) VALUES (?, 'video', 'result', '[]', 1, 1, 1)")
+            .bind(&result_asset_id).execute(db.pool()).await.unwrap();
+        let results = serde_json::json!([result_asset_id]).to_string();
+        repo.update_task(&task_id, UpdateCreationTaskParams {
+            result_asset_ids: Some(&results), ..Default::default()
+        }).await.unwrap();
+        assert!(matches!(workshop.mark_asset_content_deleted(&asset_id, 200).await, Err(DbError::Conflict(_))));
+        assert!(matches!(workshop.mark_asset_content_deleted(&result_asset_id, 200).await, Err(DbError::Conflict(_))));
+        repo.update_task(&task_id, UpdateCreationTaskParams {
+            status: Some("succeeded"), finished_at: Some(Some(200)), ..Default::default()
+        }).await.unwrap();
+        workshop.mark_asset_content_deleted(&asset_id, 300).await.unwrap();
+        workshop.finish_asset_content_deletion(&asset_id, 300).await.unwrap();
+        workshop.mark_asset_content_deleted(&result_asset_id, 300).await.unwrap();
+        workshop.finish_asset_content_deletion(&result_asset_id, 300).await.unwrap();
+        let historical = repo.update_task(&task_id, UpdateCreationTaskParams {
+            remote_task_id: Some(Some("remote-history")), ..Default::default()
+        }).await.unwrap();
+        assert_eq!(historical.input_bindings.as_deref(), Some(bindings.as_str()));
+        assert_eq!(historical.result_asset_ids, results);
+        let different_results = serde_json::json!([asset_id]).to_string();
+        assert!(matches!(repo.update_task(&task_id, UpdateCreationTaskParams {
+            result_asset_ids: Some(&different_results), ..Default::default()
+        }).await, Err(DbError::Conflict(_))));
+        assert!(repo.update_task(&task_id, UpdateCreationTaskParams {
+            status: Some("queued"), ..Default::default()
+        }).await.is_err());
+        let new_id = CreationTaskId::new().into_string();
+        let new_task = repo.get_or_create_creative_task(standalone_creative_params(
+            &new_id, "", "video", &provider_id, &bindings, r#"{"deletion-test":2}"#,
+        )).await;
+        assert!(matches!(new_task, Err(DbError::Conflict(message)) if message.contains("permanently deleted")));
+        assert!(repo.get_task(&new_id).await.unwrap().is_none());
+        assert!(sqlx::query("INSERT INTO creation_tasks (creation_task_id, workbench_kind, provider_id, model, capability, params, input_bindings, status, submitted_at, request_fingerprint) VALUES (?, 'video', ?, 'image-model-v1', 'i2v', '{}', ?, 'queued', 400, '{}')")
+            .bind(&new_id).bind(&provider_id).bind(&bindings).execute(db.pool()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn deleted_asset_and_creation_task_submission_serialize() {
+        use crate::repository::{IWorkshopRepository, SqliteWorkshopRepository};
+        let (repo, db, provider_id) = repo().await;
+        let workshop = SqliteWorkshopRepository::new(db.pool().clone());
+        let asset_id = WorkshopAssetId::new().into_string();
+        sqlx::query("INSERT INTO workshop_assets (asset_id, kind, title, tags, in_library, created_at, updated_at) VALUES (?, 'image', 'input', '[]', 1, 1, 1)")
+            .bind(&asset_id).execute(db.pool()).await.unwrap();
+        let bindings = serde_json::json!([{"asset_id": asset_id, "kind": "image", "role": "reference"}]).to_string();
+        let task_id = CreationTaskId::new().into_string();
+        let (deleted, submitted) = tokio::join!(
+            workshop.mark_asset_content_deleted(&asset_id, 200),
+            repo.get_or_create_creative_task(standalone_creative_params(
+                &task_id, "", "video", &provider_id, &bindings, r#"{"deletion-race":1}"#,
+            ))
+        );
+        assert_ne!(deleted.is_ok(), submitted.is_ok());
+        if deleted.is_ok() {
+            assert!(repo.get_task(&task_id).await.unwrap().is_none());
+        } else {
+            assert!(workshop.get_asset(&asset_id).await.unwrap().unwrap().deleted_at.is_none());
+        }
     }
 
     #[tokio::test]

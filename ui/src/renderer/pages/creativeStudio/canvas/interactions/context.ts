@@ -104,8 +104,11 @@ export function resolveCanvasContextAction(
       });
     }
     if (target.kind === 'edge') {
+      const edgeIds = state.selection.edgeIds.includes(target.edgeId)
+        ? state.selection.edgeIds
+        : [target.edgeId];
       return canvasInteractionResolution({
-        commands: [canvasCommands.deleteEdges([target.edgeId], { at: options.at })],
+        commands: [canvasCommands.deleteEdges(edgeIds, { at: options.at })],
       });
     }
     return unhandledCanvasInteraction();

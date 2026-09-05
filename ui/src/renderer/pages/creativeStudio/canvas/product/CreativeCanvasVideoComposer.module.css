@@ -43,10 +43,10 @@
   width: 24px;
   height: 24px;
   flex: 0 0 24px;
+  overflow: hidden;
   border: 1px solid var(--color-border-1);
   border-radius: 6px;
   background: var(--color-bg-3);
-  object-fit: cover;
 }
 
 .referenceName {

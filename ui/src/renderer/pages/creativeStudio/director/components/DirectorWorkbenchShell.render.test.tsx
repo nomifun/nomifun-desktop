@@ -211,6 +211,26 @@ describe('DirectorWorkbenchShell presentation', () => {
     expect(html.includes('data-rule-of-thirds="true"')).toBe(true);
   });
 
+  test('preserves panorama names and removal controls for both available and deleted covers', () => {
+    const panorama = {
+      assetId: 'panorama-01',
+      name: '海边全景',
+      thumbnailUrl: '/panorama-thumbnail.jpg',
+    };
+    const available = renderShell({ inspector: { ...environmentInspector, panorama } });
+    expect(available.includes('src="/panorama-thumbnail.jpg"')).toBe(true);
+    expect(available.includes('alt="海边全景 全景图缩略图"')).toBe(true);
+    expect(available.includes('aria-label="删除全景图"')).toBe(true);
+
+    const deleted = renderShell({
+      inspector: { ...environmentInspector, panorama: { ...panorama, availability: 'deleted' } },
+    });
+    expect(deleted.includes('data-asset-media-state="deleted"')).toBe(true);
+    expect(deleted.includes('/panorama-thumbnail.jpg')).toBe(false);
+    expect(deleted.includes('海边全景')).toBe(true);
+    expect(deleted.includes('aria-label="删除全景图"')).toBe(true);
+  });
+
   test('renders real model thumbnails and timeline keyframes without inventing 3D media', () => {
     const html = renderShell();
 
@@ -253,9 +273,19 @@ describe('DirectorWorkbenchShell presentation', () => {
     expect(html.includes('data-director-capture-list="true"')).toBe(true);
     expect(html.includes('当前机位截图')).toBe(true);
     expect(html.includes('nomifun-asset://capture-01/thumbnail')).toBe(true);
+    expect(html.includes('alt="机位01截图01 缩略图"')).toBe(true);
     expect(html.includes('查看截图 机位01截图01')).toBe(true);
     expect(html.includes('发送到画布 机位01截图01')).toBe(true);
     expect(html.includes('删除截图 机位01截图01')).toBe(true);
+
+    const deleted = renderShell({ inspector: {
+      ...cameraInspector,
+      captures: cameraInspector.captures.map((capture) => ({ ...capture, availability: 'deleted' })),
+    } });
+    expect(deleted.includes('data-asset-media-state="deleted"')).toBe(true);
+    expect(deleted.includes('nomifun-asset://capture-01/thumbnail')).toBe(false);
+    expect(deleted.includes('nomifun-asset://capture-01/original')).toBe(false);
+    expect(deleted.includes('删除截图 机位01截图01')).toBe(true);
   });
 
   test('removes both side panels in controlled full-viewport mode', () => {

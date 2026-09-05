@@ -293,6 +293,77 @@ describe('CreativeAssetQueryCache', () => {
 });
 
 describe('useCreativeAssets mutation reconciliation', () => {
+  test('removes a deleted asset and invalidates an in-flight list that still contains it', async () => {
+    const staleList = deferred<CreativeAssetPage>();
+    let listCalls = 0;
+    let removedId: string | undefined;
+    const client = createPort(async () => {
+      listCalls += 1;
+      if (listCalls === 1) return page();
+      if (listCalls === 2) return staleList.promise;
+      return page([]);
+    }, {
+      remove: async (assetId) => { removedId = assetId; },
+    });
+    const hook = renderHook(() =>
+      useCreativeAssets({ client, query: { kind: 'image' }, pageSize: 40 })
+    );
+    await waitFor(() => {
+      expect(hook.result.current.assets).toEqual([ASSET]);
+    });
+
+    let reload!: Promise<void>;
+    act(() => { reload = hook.result.current.reload(); });
+    await waitFor(() => { expect(listCalls).toBe(2); });
+    await act(async () => { await hook.result.current.remove(ASSET.id); });
+
+    expect(removedId).toBe(ASSET.id);
+    expect(hook.result.current.assets).toEqual([]);
+    expect(hook.result.current.total).toBe(0);
+    await act(async () => {
+      staleList.resolve(page());
+      await reload;
+    });
+    expect(hook.result.current.assets).toEqual([]);
+    expect(hook.result.current.total).toBe(0);
+    expect(hook.result.current.mutationError).toBeNull();
+
+    expect(await listCreativeAssetsCached(client, {
+      kind: 'image', page: 1, pageSize: 40,
+    })).toEqual(page([]));
+    expect(listCalls).toBe(3);
+  });
+
+  test('preserves an asset, count, and cached list when deletion is rejected', async () => {
+    const failure = new Error('Asset is still referenced by a canvas');
+    let listCalls = 0;
+    const client = createPort(async () => {
+      listCalls += 1;
+      return page();
+    }, {
+      remove: async () => { throw failure; },
+    });
+    const hook = renderHook(() =>
+      useCreativeAssets({ client, query: { kind: 'image' }, pageSize: 40 })
+    );
+    await waitFor(() => {
+      expect(hook.result.current.assets).toEqual([ASSET]);
+    });
+    await act(async () => {
+      const error = await hook.result.current.remove(ASSET.id).catch((reason) => reason);
+      expect(error).toBe(failure);
+    });
+
+    expect(hook.result.current.assets).toEqual([ASSET]);
+    expect(hook.result.current.total).toBe(1);
+    expect(hook.result.current.mutationError).toBe(failure);
+    expect(hook.result.current.mutating).toBe(false);
+    expect(await listCreativeAssetsCached(client, {
+      kind: 'image', page: 1, pageSize: 40,
+    })).toEqual(page());
+    expect(listCalls).toBe(1);
+  });
+
   test('keeps local update reconciliation while invalidating the query cache', async () => {
     let listCalls = 0;
     const client = createPort(async () => {

@@ -22,6 +22,8 @@ import {
 import { Button, Checkbox, Progress, Tag } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { CreativeAssetUnavailable } from '../../assets/components/CreativeAssetUnavailable';
+import CreativeVideoPlayer from '../../assets/components/CreativeVideoPlayer';
 
 import {
   clampVideoProgress,
@@ -70,6 +72,7 @@ const TaskMeta: React.FC<{
   const { t } = useTranslation();
   return (
   <div className={styles.taskMeta}>
+    {task.hasDeletedInputs ? <p role='status'>{t('creativeStudio.assets.deletedReference', { defaultValue: '引用素材已删除，请重新选择后再生成。' })}</p> : null}
     <div className={styles.taskPromptRow}>
       <p title={task.prompt}>{task.prompt}</p>
       {onCopyPrompt ? (
@@ -168,21 +171,22 @@ const SuccessVisual: React.FC<{
   const { t } = useTranslation();
   return (
   <div className={styles.successVisual}>
-    <video
+    {task.availability && task.availability !== 'available' ? <CreativeAssetUnavailable status={task.availability} /> : <CreativeVideoPlayer
+      className={styles.resultPlayer}
       src={task.videoUrl}
       poster={task.posterUrl}
-      controls
-      preload='metadata'
-      aria-label={t('creativeStudio.video.results.generatedVideo', {
+      label={t('creativeStudio.video.results.generatedVideo', {
         defaultValue: '生成视频：{{prompt}}',
         prompt: task.prompt,
       })}
-    />
-    <span className={styles.statusBadge} data-tone='success'>
-      <Check size={11} />
-      {t('creativeStudio.video.task.succeeded', { defaultValue: '成功' })}
-    </span>
-    {task.mediaMetaLabel ? <span className={styles.mediaMeta}>{task.mediaMetaLabel}</span> : null}
+    />}
+    <div className={styles.resultBadges}>
+      <span className={styles.statusBadge} data-tone='success'>
+        <Check size={11} />
+        {t('creativeStudio.video.task.succeeded', { defaultValue: '成功' })}
+      </span>
+      {task.mediaMetaLabel ? <span className={styles.mediaMeta}>{task.mediaMetaLabel}</span> : null}
+    </div>
   </div>
   );
 };
@@ -276,6 +280,7 @@ const TaskActions: React.FC<{
           <Button
             size='mini'
             icon={<Download />}
+            disabled={Boolean(task.availability && task.availability !== 'available')}
             onClick={() => onDownloadTask(task.id)}
           >
             {t('creativeStudio.video.actions.download', { defaultValue: '下载' })}
@@ -322,16 +327,16 @@ const VideoWorkbenchResults: React.FC<ResultsProps> = ({
     >
       <header className={styles.resultsHeader}>
         <div className={styles.resultsTitle}>
-          <History size={17} />
+          <History size={15} />
           <h2>{t('creativeStudio.video.results.title', { defaultValue: '全部成果' })}</h2>
-          <Tag>
+          <Tag size='small' bordered={false}>
             {t('creativeStudio.video.results.loadedCount', {
               defaultValue: '已加载 {{resultCount}}',
               resultCount: tasks.length,
             })}
           </Tag>
           {pendingCount ? (
-            <Tag color='arcoblue'>
+            <Tag size='small' bordered={false} color='arcoblue'>
               {t('creativeStudio.video.results.pendingCount', {
                 defaultValue: '{{taskCount}} 个处理中',
                 taskCount: pendingCount,

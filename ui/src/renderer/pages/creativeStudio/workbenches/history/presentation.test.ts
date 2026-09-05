@@ -9,7 +9,7 @@ import { describe, expect, test } from 'bun:test';
 import type { CreativeAssetPort } from '../../assets';
 import { testUuid } from '../../canvas/core/testFixtures';
 import type { CreativeTask } from '../../tasks';
-import type { CreativeWorkbenchRuntimeSnapshot } from '../runtime';
+import { mapImageWorkbenchRuntimeResults, type CreativeWorkbenchRuntimeSnapshot } from '../runtime';
 import {
   standaloneHistoryResumeRequests,
   standaloneHistoryRuntimeSnapshot,
@@ -49,6 +49,18 @@ const assets = {
 } as CreativeAssetPort;
 
 describe('standalone history presentation', () => {
+  test('preserves historical output identity and flags tombstones for placeholder rendering', () => {
+    const original = { ...task('succeeded'), inputs: [{ assetId: ASSET_B, kind: 'image' as const, role: 'reference' as const }] };
+    const snapshot = standaloneHistoryRuntimeSnapshot(scope, [original], runtime, assets, new Map([
+      [ASSET_A, 'available' as const], [ASSET_B, 'deleted' as const],
+    ]));
+    expect(snapshot.entries[0]?.task.resultAssetIds).toEqual([ASSET_A, ASSET_B]);
+    const result = mapImageWorkbenchRuntimeResults(snapshot)[0];
+    expect(result?.hasDeletedInputs).toBe(true);
+    expect(result?.retryable).toBe(false);
+    if (result?.status !== 'succeeded') throw new Error('Expected historical success');
+    expect(result.outputs.map((output) => output.availability)).toEqual(['available', 'deleted']);
+  });
   test('keeps a durable multi-output task as one runtime entry', () => {
     const snapshot = standaloneHistoryRuntimeSnapshot(scope, [task('succeeded')], runtime, assets);
     expect(snapshot.entries).toHaveLength(1);

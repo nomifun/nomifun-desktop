@@ -11,7 +11,6 @@ export {
   toggleAllVideoTasks,
   toggleVideoTaskSelection,
   videoWorkbenchDimensions,
-  videoWorkbenchSizeOptionLabel,
   videoResultsState,
 } from './presentation';
 export type {

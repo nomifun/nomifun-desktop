@@ -599,7 +599,10 @@ pub struct LoadedAsset {
 
 /// Durable task→artifact manifest used at the sink trust boundary. `committed`
 /// means the task row claims `succeeded`; the sink still verifies that every
-/// claimed id exists, belongs to the task, and is locatable.
+/// claimed id exists and belongs to the task. Content must remain locatable
+/// unless the asset row explicitly records permanent user deletion. Deleted
+/// results retain their identities here, so result counts and task provenance
+/// remain auditable without treating accidental file loss as user deletion.
 #[derive(Debug, Clone)]
 pub struct TaskArtifactManifest {
     pub creation_task_id: String,
@@ -646,17 +649,19 @@ pub trait AssetSink: Send + Sync {
     /// The service only passes ids returned by this sink for the current task.
     async fn rollback(&self, asset_ids: &[String]) -> Result<(), CreationError>;
 
-    /// Verify committed task manifests without mutating assets. Implementations
-    /// should batch this operation so list queries require one asset scan.
+    /// Verify committed task manifests without mutating assets. Explicit asset
+    /// deletion records may replace content availability, but never identity,
+    /// ownership, or metadata checks. Implementations should batch this
+    /// operation so list queries require one asset scan.
     async fn verify_task_artifacts(
         &self,
         committed_tasks: &[TaskArtifactManifest],
     ) -> Result<Vec<TaskArtifactIssue>, CreationError>;
 
     /// Boot-time complete-inventory reconciliation. Implementations scan their
-    /// asset inventory once, preserve only valid assets claimed by succeeded
-    /// tasks, and remove task-origin assets for every non-succeeded, missing,
-    /// unknown-status, or otherwise invalid task.
+    /// asset inventory once, preserve user-deletion records and valid assets
+    /// claimed by succeeded tasks, and remove provisional task-origin assets
+    /// for every non-succeeded, missing, unknown-status, or otherwise invalid task.
     async fn reconcile_task_artifacts(
         &self,
         all_tasks: &[TaskArtifactManifest],
