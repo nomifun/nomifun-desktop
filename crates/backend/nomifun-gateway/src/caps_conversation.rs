@@ -1067,7 +1067,7 @@ mod tests {
                 .unwrap(),
             ..Default::default()
         };
-        let error = require_companion_creator(&plain).unwrap_err();
+        let error = require_conversation_creator(&plain).unwrap_err();
         assert!(error["error"]
             .as_str()
             .is_some_and(|message| message.contains("conversation_creation_forbidden")));
@@ -1079,6 +1079,6 @@ mod tests {
             ),
             ..plain
         };
-        assert!(require_companion_creator(&companion).is_ok());
+        assert!(require_conversation_creator(&companion).is_ok());
     }
 }

@@ -1,0 +1,44 @@
+/**
+ * Computer-history settings page styles. Only the layout bits that UnoCSS
+ * utilities cannot express (the four-column segment grid) live here, mirroring
+ * how `settings.css` keeps its grid templates.
+ */
+
+.ch-settings-segment-row {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1.4fr) minmax(0, 1.6fr) 110px;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.ch-settings-segment-row--header {
+  padding: 6px 0;
+}
+
+.ch-settings-segment-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.ch-settings-segment-link:hover {
+  text-decoration: underline;
+}
+
+@media (max-width: 640px) {
+  .ch-settings-segment-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  /* On narrow screens the title/url columns stack under the app name and only
+     app + time stay on the grid line. */
+  .ch-settings-segment-row > :nth-child(2),
+  .ch-settings-segment-row > :nth-child(3) {
+    grid-column: 1 / -1;
+  }
+
+  .ch-settings-segment-row--header > :nth-child(2),
+  .ch-settings-segment-row--header > :nth-child(3) {
+    display: none;
+  }
+}

@@ -51,6 +51,7 @@ mod caps_channel;
 mod caps_companion;
 #[cfg(feature = "computer-use")]
 mod caps_computer;
+mod caps_computer_history;
 mod caps_confirmation;
 mod caps_conversation;
 mod caps_cron;

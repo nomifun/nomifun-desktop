@@ -227,6 +227,11 @@ nomifun-idmm.workspace = true
 nomifun-knowledge.workspace = true
 nomifun-agent-execution.workspace = true
 nomifun-companion.workspace = true
+# Computer-history observer + feature-local store (backs the `computer_history_*`
+# agent tools and gateway capabilities).
+nomifun-computer-history.workspace = true
+# RFC3339 `paused_until` rendering for the computer-history status route.
+chrono.workspace = true
 nomifun-customer-service.workspace = true
 nomifun-workshop.workspace = true
 nomifun-miniapp.workspace = true

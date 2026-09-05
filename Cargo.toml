@@ -32,6 +32,7 @@ nomifun-requirement = { path = "crates/backend/nomifun-requirement" }
 nomifun-idmm = { path = "crates/backend/nomifun-idmm" }
 nomifun-knowledge = { path = "crates/backend/nomifun-knowledge" }
 nomifun-companion = { path = "crates/backend/nomifun-companion" }
+nomifun-computer-history = { path = "crates/backend/nomifun-computer-history" }
 nomifun-gateway = { path = "crates/backend/nomifun-gateway" }
 nomifun-public = { path = "crates/backend/nomifun-public" }
 nomifun-webhook = { path = "crates/backend/nomifun-webhook" }

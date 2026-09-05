@@ -158,6 +158,11 @@ pub struct AgentFactoryDeps {
     /// (`companion_skill` tool + per-turn when_to_use ContextContributor). Only
     /// registered for companion sessions (`extra.companion_session` true).
     pub companion_skill_sink: Option<Arc<dyn CompanionSkillSink>>,
+    /// Optional sink enabling the nomi native computer-history tools
+    /// (`computer_history_*`). Only registered for installation-owner nomi
+    /// sessions; `None` (standalone, tests, restricted principals) leaves them
+    /// unregistered.
+    pub computer_history_sink: Option<Arc<dyn nomi_agent::computer_history_tools::ComputerHistorySink>>,
     /// Optional sink enabling the nomi native `knowledge_search` tool. When
     /// `Some` AND the session has bound knowledge bases, the tool is registered
     /// into the in-process engine. `None` (standalone) leaves it unregistered.

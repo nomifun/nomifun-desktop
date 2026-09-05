@@ -174,6 +174,7 @@ impl Registry {
         register_instance_owner_domain(&mut caps, crate::caps_knowledge_ext::register);
         register_instance_owner_domain(&mut caps, crate::caps_system::register);
         register_instance_owner_domain(&mut caps, crate::caps_companion::register);
+        register_instance_owner_domain(&mut caps, crate::caps_computer_history::register);
         register_instance_owner_domain(&mut caps, crate::caps_channel::register);
         crate::caps_scheduling_ext::register(&mut caps);
         register_instance_owner_domain(&mut caps, crate::caps_terminal_ext::register);
@@ -421,8 +422,13 @@ mod tests {
 
         for (name, cap) in reg.by_name.iter() {
             assert!(
-                name.starts_with("nomi_"),
-                "gateway tool names are nomi_-prefixed: {name}"
+                // Domains added after the collaboration-prefix retirement use
+                // domain-qualified snake_case without the `nomi_` prefix
+                // (e.g. `computer_history_*`); only the legacy families carry
+                // it. The RETIRED_COLLABORATION_TOOL_PREFIXES denylist above
+                // is what actually guards the forbidden namespaces.
+                name.starts_with("nomi_") || name.starts_with("computer_history_"),
+                "gateway tool names are nomi_-prefixed or domain-qualified: {name}"
             );
             assert!(
                 prefix + name.len() <= HARD_WIRE_LIMIT,

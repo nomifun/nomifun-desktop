@@ -5900,6 +5900,7 @@ dependencies = [
  "nomifun-auth",
  "nomifun-browser-platform",
  "nomifun-common",
+ "nomifun-computer-history",
  "nomifun-db",
  "nomifun-extension",
  "nomifun-knowledge",
@@ -5954,6 +5955,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "chrono",
  "clap",
  "dirs 6.0.0",
  "fs2",
@@ -5979,6 +5981,7 @@ dependencies = [
  "nomifun-channel",
  "nomifun-common",
  "nomifun-companion",
+ "nomifun-computer-history",
  "nomifun-conversation",
  "nomifun-creation",
  "nomifun-cron",
@@ -6180,6 +6183,29 @@ dependencies = [
  "tower",
  "tracing",
  "zip 2.4.2",
+]
+
+[[package]]
+name = "nomifun-computer-history"
+version = "0.7.5"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "core-foundation 0.10.1",
+ "dispatch2",
+ "futures",
+ "nomi-redact",
+ "nomifun-common",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -6412,6 +6438,7 @@ version = "0.7.5"
 dependencies = [
  "async-trait",
  "axum",
+ "chrono",
  "futures",
  "jsonschema",
  "nomi-browser",
@@ -6426,6 +6453,7 @@ dependencies = [
  "nomifun-channel",
  "nomifun-common",
  "nomifun-companion",
+ "nomifun-computer-history",
  "nomifun-conversation",
  "nomifun-creation",
  "nomifun-cron",
