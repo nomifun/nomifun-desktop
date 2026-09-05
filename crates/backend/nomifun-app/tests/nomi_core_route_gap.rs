@@ -133,6 +133,60 @@ async fn default_nomi_core_router_answers_canonical_catalog_requests() {
 }
 
 #[tokio::test]
+async fn nomi_core_remote_preserves_owner_jwt_and_rejects_selector_queries() {
+    let trust_secret = "remote-jwt-query-local-trust";
+    let (router, services) = common::build_local_trust_app(trust_secret).await;
+    let jwt = services
+        .jwt_service
+        .sign(services.authoritative_user_id.as_ref(), "admin")
+        .expect("sign installation owner JWT");
+
+    let jwt_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/remote/observe?agent_session_id=0190f5fe-7c00-7a00-8000-000000000001")
+                .header("authorization", format!("Bearer {jwt}"))
+                .body(Body::empty())
+                .expect("build JWT Remote request"),
+        )
+        .await
+        .expect("dispatch JWT Remote request");
+    assert_eq!(
+        jwt_response.status(),
+        StatusCode::NOT_FOUND,
+        "the installation owner's JWT must still reach the owner-scoped Remote handler"
+    );
+
+    for uri in [
+        "/api/remote/open?profile=agent",
+        "/api/remote/turn?domains=agent",
+        "/api/remote/cancel?selector=latest",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("x-nomi-local-trust", trust_secret)
+                    .body(Body::empty())
+                    .expect("build selector query request"),
+            )
+            .await
+            .expect("dispatch selector query request");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("read selector query response");
+        let value: Value = serde_json::from_slice(&body).expect("selector query JSON");
+        assert_eq!(value["code"], "REMOTE_INVALID_REQUEST", "{uri}");
+    }
+
+    services.shutdown_browser_platform().await.expect("browser cleanup");
+    services.database.close().await;
+}
+
+#[tokio::test]
 async fn nomi_core_catalog_keeps_initial_capabilities_materialized() {
     let (router, services) = common::build_local_trust_app("catalog-placement-local-trust").await;
     let response = router
@@ -807,6 +861,80 @@ async fn nomi_core_remote_replays_frozen_binding_and_persists_event_cursor() {
         .await
         .expect("dispatch post-cancel turn");
     assert_eq!(turn_after_cancel.status(), StatusCode::CONFLICT);
+
+    services.shutdown_browser_platform().await.expect("browser cleanup");
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn nomi_core_remote_accepts_installation_bearer_without_local_trust() {
+    let trust_secret = "remote-installation-token-local-trust";
+    let (router, services) = common::build_local_trust_app(trust_secret).await;
+
+    let missing = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/remote/observe?agent_session_id=0190f5fe-7c00-7a00-8000-000000000001")
+                .body(Body::empty())
+                .expect("build unauthenticated Remote request"),
+        )
+        .await
+        .expect("dispatch unauthenticated Remote request");
+    assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+    let missing_body = axum::body::to_bytes(missing.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("read unauthenticated Remote response");
+    let missing_value: Value =
+        serde_json::from_slice(&missing_body).expect("unauthenticated Remote JSON");
+    assert_eq!(missing_value["code"], "REMOTE_AUTH_REQUIRED");
+
+    let minted = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/webui/access-token")
+                .header("x-nomi-local-trust", trust_secret)
+                .body(Body::empty())
+                .expect("build installation token mint request"),
+        )
+        .await
+        .expect("dispatch installation token mint request");
+    assert_eq!(minted.status(), StatusCode::OK);
+    let minted_body = axum::body::to_bytes(minted.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("read installation token response");
+    let minted_value: Value =
+        serde_json::from_slice(&minted_body).expect("installation token JSON");
+    let token = minted_value["data"]["token"]
+        .as_str()
+        .expect("installation token must be returned once")
+        .to_owned();
+
+    let authenticated = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/remote/observe?agent_session_id=0190f5fe-7c00-7a00-8000-000000000001")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .expect("build installation-token Remote request"),
+        )
+        .await
+        .expect("dispatch installation-token Remote request");
+    assert_eq!(
+        authenticated.status(),
+        StatusCode::NOT_FOUND,
+        "valid installation token must reach the owner-scoped Remote handler"
+    );
+    let authenticated_body =
+        axum::body::to_bytes(authenticated.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("read authenticated Remote response");
+    let authenticated_value: Value =
+        serde_json::from_slice(&authenticated_body).expect("authenticated Remote JSON");
+    assert_eq!(authenticated_value["code"], "REMOTE_SESSION_NOT_FOUND");
 
     services.shutdown_browser_platform().await.expect("browser cleanup");
     services.database.close().await;

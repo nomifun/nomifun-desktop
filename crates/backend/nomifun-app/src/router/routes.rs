@@ -739,6 +739,14 @@ fn create_nomi_core_router_with_all_state(
         &auth_mw_state,
         &instance_owner_state,
     );
+    let nomi_core_remote_authenticated =
+        super::nomi_core_session::build_nomi_core_remote_router(
+            states.nomi_core_agent_api.clone(),
+            services.instance_token_validator.clone(),
+            services.authoritative_user_id.clone(),
+            services.jwt_service.clone(),
+            services.user_repo.clone(),
+        );
 
     // LAN robot gateway. Assembled here because this is where the
     // `ConversationService` the robot sessions dispatch through exists; the two
@@ -1146,6 +1154,7 @@ fn create_nomi_core_router_with_all_state(
         .merge(miniapp_authenticated)
         .merge(agent_authenticated)
         .merge(nomi_core_agent_authenticated)
+        .merge(nomi_core_remote_authenticated)
         .merge(model_failover_authenticated)
         .merge(connection_test_authenticated)
         .merge(file_authenticated)
