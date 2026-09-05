@@ -2,7 +2,9 @@
 
 > 状态：**CURRENT USER-CONFIRMED PHASE 1 ARCHITECTURE DIRECTIVE**
 >
-> 发布日期：2026-09-02
+> 发布日期：2026-09-03
+>
+> 最近执行修订：2026-09-05
 >
 > 审计基线：`f6e05d617e09eb71ebb11fababde46bb65039651`
 >
@@ -11,13 +13,66 @@
 >
 > 明确排除：二期 `06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md` 继续保持本地未提交，不得随本文发布、引用为一期合同或带入实施分支。
 
+## 2026-09-03 当前执行修订（用户确认）
+
+> 本节是对本文当前执行口径的覆盖说明。原有设计章节、接口推导和 Codex
+> app-server 复盘仍保留，供回顾设计依据和未来重新评估；但凡原文把
+> Codex-derived Runtime、Sidecar live binary 或 C9 删除 Nomi 写成当前一期交付前提，
+> 均以本节为准。
+
+- **本阶段唯一产品执行内核是 NomiFun 原有 Nomi engine。** 当前真实 Agent、Chat、Coding、工具、Provider/Model、历史、流式输出和 Session 生命周期继续由
+  `nomifun-ai-agent`、`nomifun-conversation`、`nomi-agent` 与现有
+  `AgentRuntimeRegistry` 承载。
+- **Web、Desktop 和 `nomicore` 默认入口统一选择 Nomi-core。** 当前入口通过
+  `NomiCoreApplication` 组合并启动原有 Nomi 执行图；`FreshV4Application` 保留为
+  显式、低成本的备用 host boundary，供二期/三期重新接入 Codex app-server 或其他
+  Runtime，不作为当前默认产品路径。
+- **不提供运行中 Runtime 切换或自动 fallback。** 一个 AgentSession 在创建和绑定后
+  只使用一个明确的 Runtime host；绑定不可用时必须显式失败或保持可读，不得按 turn
+  隐式切换、重选或降级到另一条执行主链。
+- **Codex app-server 当前只属于协议/Sidecar 研究和未来宿主。** `nomifun-codex-runtime`
+  的 client、supervisor、adapter、fixture、synthetic contract 和 Host Broker smoke
+  可以保留为研究或边界验证，但都不能作为 Codex-native 已移植、已成为核心或已完成
+  Coding 的证据。
+- **当前交付状态只由 `GLOBAL-CLOSURE-TODO.zh.md` 维护。** 本文和
+  `DECISIONS.zh.md` 负责约束设计与理由；没有把历史章节中的未来条件提前改写成
+  当前完成状态。
+
+## 2026-09-05 当前执行补充
+
+> 本节只补充当前主机 checkpoint 的执行事实，不替换本文合同，也不把定向测试
+> 解释成一期 Stable 或三平台发布证据。实时状态仍以
+> `GLOBAL-CLOSURE-TODO.zh.md` 为唯一来源。
+
+- 当前 Web、Desktop 和 `nomicore` 仍统一由 `NomiCoreApplication` 组合原有 Nomi
+  engine。App 内只有一个 `NomiCoreSessionOwner` 作为 Nomi-core Session facade，
+  供普通 Session、Remote、Cron、AutoWork、Channel、Companion、IDMM 和
+  AgentExecution 共享；这不是第二套 Session authority，也不代表已完成
+  Conversation-backed consumer 的最终迁移。
+- Remote 的本机实现已经收敛到原子状态转移加事件追加、精确 operation payload
+  冲突、terminal outcome 吸收迟到完成和 Remote event cursor。逐操作 deadline、
+  detached recovery 与 persistence-blocked typed error 只负责保留未知结果，不能
+  代替真实 Provider 下的产品 `open -> turn -> observe -> cancel` 验证。
+- AutoWork 的 sweeper、启动恢复和 active target loop 已纳入 cancellation/join 或
+  exact claim cleanup；Cron/AutoWork 的 durable receipt、accepted 等待、丢失 receipt
+  和 reconciliation 错误继续 fail-closed。生产消费者仍有 Conversation-backed
+  compatibility，canonical scheduled-session lookup/runtime-preparation/reconciliation
+  合同尚未因此自动成立。
+- Agent Settings/AgentSession 已完成产品表面和定向 UI build/test 收口。当前
+  Nomi-core 没有 canonical on-demand activation port 时，Coding/on-demand 继续
+  显式 unavailable；不得通过 metadata-only success 或静态 fixture 宣称完整 Coding。
+- 2026-09-03 的受控真实 Broker smoke 首个完整结果为 `ProviderUnavailable` /
+  HTTP `503`。因此 `SL-S3-07`、`SL-S3-10`、`SL-S3-11` 和 `SL-S4-02` 继续按
+  `GLOBAL-CLOSURE-TODO` 保持未关闭；Windows candidate、macOS arm64 和 Linux
+  Desktop x64 只在这些前置项完成后进入原生验证。
+
 ## 0. 本文的权威与执行方式
 
 用户已经明确授权立即止损：一期已经确认或实现的细分方向，如果继续实施的成本明显高于产品价值，可以普通回滚、删除并按更小合同重新设计；不得因为“已经写了很多代码”继续追加复杂度。
 
 本文不是在旧方案外面再加一层兼容规则，而是一期当前的定向修订：
 
-- Thin Kernel、统一 Plugin/Capability 主链、单一 AgentSession、Codex-derived Runtime 和 clean v4 等总目标继续有效；
+- Thin Kernel、统一 Plugin/Capability 主链、单一 AgentSession 和可显式扩展的 Runtime host boundary 等总目标继续有效；本阶段的唯一产品执行内核改为 NomiFun 原有 Nomi engine，Codex-derived Runtime 不再是本阶段交付前提；
 - 本文明确列出的 Gate、Evidence、生命周期、Compiler、Snapshot、Effect、文件边界、产品 UI 与平台矩阵改用本文的新策略；
 - 01～04 与 `DECISIONS` 保留为核心设计依据，并按本文删除或改写其中已经判定错误的条款；不得因局部设计被止损而整体删除这些文档。旧 `IMPLEMENTATION-STATUS`、旧 `START-PROMPT` 和过期 handoff 只保留在 Git 历史，且仅用于说明已撤销方案；当前状态只由 `GLOBAL-CLOSURE-TODO.zh.md` 记录；
 - `GLOBAL-CLOSURE-TODO` 的 84 个工作包不再是一期必须逐个关闭的阻断清单；只把其中仍属于本文最小交付的项目迁入新的收口清单；
@@ -43,7 +98,8 @@
 5. 没有 production repository、真实消费者和产品入口的 Wave 3/4 DTO、receipt、reconcile、migration 和 fault matrix；
 6. 要求用户直接编辑 Capability ID、Revision、Snapshot、Digest、Resource ID、operations 或 canonical JSON 的 UI；
 7. 读取 JSX/Rust 源码字符串并锁死组件、方法名、固定 Capability 数量的结构测试；
-8. Codex fork 新 patch，直至 §3.4 的最小 Sidecar 协议重新确认；
+8. Codex app-server 的生产接入、exact binary/live credential 和 fork patch；只保留
+   已记录的协议研究，不把它作为本阶段 Nomi-core 交付阻断；
 9. Browser/Computer 具体 owner 的中央接线，直至 §7 的 Role seam 先落地；
 10. 为并发 lane 预建跨任务的通用 uncertain receipt、中央 Effect journal 和旧 API
     长期兼容层。
@@ -129,10 +185,14 @@ Post-run release lock/platform result 属于外部或发布附件证据，不写
 - 不建设 grace、token→Session 索引或后台 revoke worker；
 - 保留 installation token、同 owner continuation 和明确 `REMOTE_AUTH_REQUIRED`。
 
-### 3.4 重开 Codex Sidecar 最小协议
+### 3.4 Codex app-server 最小协议研究（未来宿主，不是本期执行内核）
 
 此前计划依赖仓库外尚不存在的 `runtime/hello`、`native_action/start`、
 `runtime/session/dispose` patch source，导致真实 Sidecar 成为整个一期的外部硬阻塞。
+
+2026-09-03 起，本节只保留为未来 Runtime host 的协议研究记录。它不改变当前
+Nomi-core 产品路径，也不阻塞本阶段的 Agent、Chat、Coding、Remote 或桌面启动
+验收；只有未来明确重新启动 Codex 接入时，才按本节和复盘文档恢复实现与 live 验证。
 
 official app-server pinned source spike 已确认可直接采用：
 
@@ -174,6 +234,10 @@ live → deleting
 Runtime 使用真实 `RuntimeDisposeReport`；Session Store 只删除自己拥有的表。启动时发现 `deleting` 就重新执行幂等清理并完成 tombstone，不恢复复杂 Delete Operation 状态机。
 
 ### 4.2 D-027 从在线排空平台降为一次性 C9 shutdown
+
+> 2026-09-03 当前执行覆盖：本小节保留未来 Codex Runtime 替换时的删除流程和理由。
+> 当前 Nomi-core 阶段不执行 C9、不停止 Nomi admission，也不把 Nomi 删除作为
+> release 或平台验证前置。
 
 一期是尚未 Stable 的本地桌面重构，v4 又采用 fresh start。Internal Nomi canary 不需要服务器级零停机迁移。
 
@@ -305,8 +369,9 @@ Manifest 是声明事实源，Registration builder 从实际 handlers/services �
 
 ### 6.2 单机多并发中的 SSH slice
 
-SSH owner 是当前主机中的独立写集，可与不重叠的 Session/Effect、Compiler 和 Sidecar
-lane 并行。它只通过当前工作树和集成 Owner 收口，不建立第二台开发机或专用交接文件。
+SSH owner 是当前主机中的独立写集，可与不重叠的 Session/Effect、Compiler 和
+Nomi-core lane 并行。Codex Sidecar 只保留研究资料，不作为本阶段并行开发或交付依赖。
+它只通过当前工作树和集成 Owner 收口，不建立第二台开发机或专用交接文件。
 SSH slice 保留：
 
 - 真实 SSH connection/host binding；
@@ -382,15 +447,17 @@ Agent 编辑器默认只展示：
 
 ## 9. 发布与测试策略止损
 
-### 9.1 首批 release-blocking 平台
+### 9.1 当前 Nomi-core 首批 release-blocking 平台
 
-一期与二期统一优先级：
+当前一期以 Nomi-core 产品路径确定优先级：
 
 1. Windows Desktop x64；
 2. macOS Desktop arm64；
 3. Linux Desktop x64。
 
-macOS x64 与 Linux Headless x64 保留设计兼容和后续交付入口，但不阻塞首个 Stable。未来实际宣称交付时再在真实原生环境关闭各自 Gate。
+macOS x64 与 Linux Headless x64 保留设计兼容和后续交付入口，但不阻塞首个
+Nomi-core Stable。未来实际宣称交付时再在真实原生环境关闭各自 Gate。
+Codex app-server 的 binary、协议和平台验证不属于当前首发阻断项。
 
 ### 9.2 新收口链
 
@@ -401,29 +468,34 @@ S0 STOP-LOSS
 S1 FOUNDATION
   P0 Gate/Remote 修复 + 单 Compiler + 小 Snapshot/Schema/Event/Effect
 
-S2 CORE FUNCTIONAL
-  Windows 上完成 release-required 用户闭环和 Browser/Computer Role seam
+S2 NOMI-CORE FUNCTIONAL
+  Windows 上完成 Nomi-core release-required 用户闭环和 Browser/Computer Role seam
 
 S3 NATIVE SMOKE
-  Windows x64 + macOS arm64 + Linux Desktop x64
+  对 Nomi-core 候选执行 Windows x64 + macOS arm64 + Linux Desktop x64
   build/package/install/launch/critical capability/dispose
 
-S4 C9 CLEAN CUT
-  bounded shutdown + 删除 Nomi + release residual-zero
+S4 NOMI-CORE RC
+  三平台对同一 Nomi-core 候选执行最终功能、生命周期和制品验证
 
-S5 FINAL RC
-  三个平台对正式 RC 运行 package/install/fresh/critical E2E/lifecycle
+S5 STABLE
+  原样提升已验证的 Nomi-core RC bytes
 
-S6 STABLE
-  原样提升已验证 RC bytes
+Future C9 / Codex cutover
+  仅在未来 Codex-native 或 external Codex integration 正式立项后，
+  重新评估 Nomi 删除和 Nomi-free RC；不属于当前一期收口
 ```
 
 C8 不再在五个平台完整复制全部功能/fault；C10 不再重跑 C8 的所有内部合同测试。相同 Artifact digest 可以复用证据；只有真实产品 ABI、Runtime protocol、Package 或目标平台 Artifact 改变才使对应 cell stale。
 
 ### 9.3 两类 residual
 
-- 开发期：`production_legacy_reachability = 0`，只检查新 Session/public route 是否还能进入旧主链；
-- Release：`release_legacy_artifacts = 0`，检查最终 feature/package/binary/config/process 不含 Nomi。
+- 当前开发期：Nomi-core 是预期的产品执行主链；检查 Web/Desktop/`nomicore` 不会隐式
+  进入 Fresh-v4/Codex host，也不会出现 Runtime selector、per-turn 切换或 fallback。
+- 当前 Release：检查 Nomi-core 候选的真实 feature/package/binary/config/process、数据
+  和生命周期闭环；不以“删除 Nomi”作为本阶段 release residual 条件。
+- 未来 Codex 切换期：只有在 Codex 重新立项、完成 source/build/运行时和平台证据后，
+  才恢复 `release_legacy_artifacts = 0` 及 Nomi-free RC 的删除门禁。
 
 Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/unclassified 分类。Deletion manifest 保留为人工审查清单，不为每个旧符号建设长期规则引擎。
 
@@ -473,7 +545,9 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 首批必须：
 
 - `chat.minimal` 正常对话；
-- `coding.codex` 完整核心 Coding：读写、patch、shell/process、diff/commit；
+- Coding 完整核心闭环：读写、patch、shell/process、diff/commit，当前由 Nomi engine 执行；
+  `coding.codex`/`coding.codex-native` 仅作为历史或未来 Codex 设计名称，不是当前
+  Codex-native 完成证据；
 - Workspace/File/Process/VCS 高频能力；
 - MCP 连接与一个真实 Tool 调用；
 - Browser observe/navigate/act；
@@ -513,20 +587,22 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 - 为保留提交列出只需 forward 简化的代码；
 - 不开始新 Domain DTO 批量冻结。
 
-### S2：P0 与基础收缩
+### S2：P0、基础收缩与 Nomi-core 组合
 
 - 修复 source SHA/fixture digest Gate；
 - 删除 Response Body auth fence；
 - 用真实 dispose result 替换 ZeroOutstandingProof；
 - 单 Compiler、选中闭包 Snapshot、简化 schema/projection/effect；
-- 完成 Sidecar upstream spike并冻结最小协议。
+- 保留并验证 NomiCoreApplication 的统一组合；Codex upstream spike 只作为未来宿主
+  研究记录，不作为本阶段实现前置。
 
 ### S3：Role seam 与核心 owner
 
 - 先完成 Browser/Computer role index、exact lock 和 first-party dogfood；
 - 再接 Browser、Computer、Knowledge hidden render；
-- SSH/MCP/核心 automation 使用简化合同接入；
-- 新 v4/Codex concrete bypass 为 0。
+- SSH/MCP/核心 automation/Remote 使用简化合同接入 Nomi-core；
+- Web、Desktop、`nomicore` 默认入口只走 NomiCoreApplication；
+- 不新增 Codex Sidecar 生产旁路、运行时切换或 fallback。
 
 ### S4：产品 UI
 
@@ -535,12 +611,12 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 - 四条真实用户流程通过；
 - source-string structure tests 删除。
 
-### S5：三平台收口与 C9
+### S5：三平台 Nomi-core 收口
 
 - Windows 完整核心闭环；
 - macOS arm64/Linux Desktop package/launch/critical smoke；
-- bounded shutdown 后删除 Nomi；
-- 最终三平台 RC 验证与 same-bytes Stable。
+- 最终三平台 Nomi-core RC 验证与 same-bytes Stable；
+- C9/Nomi 删除保留为未来 Codex 切换条件，不在当前阶段执行。
 
 ## 13. 完成定义
 
@@ -552,12 +628,14 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 - 旧跨机执行材料只存在于 Git 历史，不再驱动新复杂度；
 - 06 未发布。
 
-### 13.2 一期功能完成
+### 13.2 一期 Nomi-core 功能完成
 
 - §11 的核心用户闭环在 Windows 可用；
 - Browser/Computer 经可替换 Role seam 调用，无 built-in shortcut；
 - 单 Compiler/小 Snapshot/小 Effect 策略生效；
-- Nomi 已从 production/release 主链删除；
+- Web、Desktop、`nomicore` 默认入口均由 NomiCoreApplication 组合并使用原有 Nomi engine；
+- FreshV4Application 作为显式 host boundary 保留，但不被默认入口隐式选择；
+- 不存在运行中 Runtime 切换或 fallback；
 - 非首批能力不会制造成功或阻塞核心交付。
 
 ### 13.3 内部 QA 可交付
@@ -567,12 +645,16 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 - 没有 P0 blocker、数据损坏或 Secret 泄漏；
 - 当前 release lock 与 platform results 可追溯。
 
-### 13.4 Stable
+### 13.4 Nomi-core Stable
 
 - 三个平台的正式 RC Gate 通过；
 - Stable 原样提升同一 RC bytes；
-- 不包含 Nomi Runtime/fallback；
+- 当前 RC 明确以 Nomi-core 为执行内核，不要求移除 Nomi；
 - macOS x64/Linux Headless 未交付时在产品和发布说明中明确，不伪装支持。
+
+> 未来 Codex-native 或 external Codex integration 另行立项后，才建立独立的
+> source/build、工具回调、平台和 Nomi 删除验收；不能把本节 Nomi-core Stable
+> 解释为 Codex-native 完成。
 
 ## 14. 当前主机执行指令
 
@@ -581,21 +663,27 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 3. 保存当前 WIP，先执行 S1 Revert/keep 审计；
 4. 立即处理 P0，再完成单 Compiler/小 Snapshot/Effect 分级；
 5. Browser/Computer 先做 Role seam，再做具体 owner；
-6. SSH、Session/Effect 和 Sidecar lane 按 §6.2 及 GLOBAL TODO 的本机互斥写集推进；
+6. SSH、Session/Effect、automation、Remote 和 Nomi-core lane 按 §6.2 及
+   GLOBAL TODO 的本机互斥写集推进；Codex Sidecar 只保留研究，不进入当前交付关键路径；
 7. 不等待五格两轮 Gate，不为未交付平台生成 synthetic evidence；
 8. 不读取、提交或实现本地 06；
 9. 每个提交说明它删除了什么旧复杂度，不能只增加新 abstraction；
-10. 遇到“继续兼容更快”与“普通 revert 后重做更干净”的选择时，优先后者，但必须先保护真实用户数据和已完成用户功能。
+10. 遇到“继续兼容更快”与“普通 revert 后重做更干净”的选择时，优先后者，但必须先保护真实用户数据和已完成用户功能；不得为了 Codex 未来接入提前改变当前 Nomi-core 执行主链。
 
 本文已经获得用户对止损方向和立即发布的明确授权。实现中的字段命名可以按 canonical source 收敛；任何需要重新扩大平台、状态机、权限、兼容或测试矩阵的变化，必须重新提出产品理由，不能自动恢复旧设计。
 
-## 第二部分：系统能力可替换基础（原 05 完整合同，继续作为一期必做）
+## 第二部分：系统能力可替换基础（原 05 完整合同，继续作为当前架构基础）
 
 > 状态：**USER CONFIRMED / PHASE 1 REQUIRED**
 >
 > 保留原则：本部分完整保留原 05 的产品与技术内容，不因第一部分的止损审计而降级、删除或推迟。
 >
 > 优先级：第一部分负责纠正 Gate、生命周期、Effect、文件边界、平台矩阵和 UI 等过度设计；本部分负责 Browser/Computer 可替换能力。二者发生文字冲突时，能力范围与 Role/Provider 主链以本部分为准，发布/验证编排以第一部分为准。
+>
+> 2026-09-03 执行覆盖：本部分的 Role/Provider、Snapshot 和消费者边界继续有效，
+> 但当前产品执行统一落在 NomiCoreApplication/Nomi engine；FreshV4Application 与
+> Codex app-server 只作为显式未来 host boundary。任何运行时切换、自动 fallback、
+> Codex-native 已完成或当前 C9 删除 Nomi 的表述，均不属于本阶段完成定义。
 >
 > Canonical source：本部分 Rust/SQL 结构仍是字段级设计输入；落地后由唯一 canonical Rust/SQL/schema 实现承载，不维护第二份漂移结构。
 
@@ -636,7 +724,7 @@ Role Binding 只回答“由谁实现”，不授予 Browser/Computer 能力。A
 | 当前事实 | 代码位置 | 对二期的影响 |
 |---|---|---|
 | Wave 2 compatibility Host 仍保留通用 unavailable/旧 owner 路径；Fresh-v4 已增加 Browser/Computer Role host | `crates/backend/nomifun-app/src/router/agent_wave2_host.rs`、`agent_role_host.rs` | first-party Role owner 已接通，但 compatibility bypass、完整消费者迁移和 live E2E 仍需收口 |
-| legacy Nomi Factory 使用一次性 `BrowserLaneClientProviderSlot` 晚绑定具体 Provider | `crates/backend/nomifun-ai-agent/src/factory/browser_lane.rs` | 新 v4/Codex 主链不能复用；该 Nomi-only Slot 按 D-020 精确留到 C9 后整体删除，不值得再做过渡改造 |
+| legacy Nomi Factory 使用一次性 `BrowserLaneClientProviderSlot` 晚绑定具体 Provider | `crates/backend/nomifun-ai-agent/src/factory/browser_lane.rs` | 当前 Nomi-core 继续承载真实产品；该旧 Slot 不得扩展为新的消费者旁路，未来 Codex 替换时再按 D-020 决定是否删除 |
 | Computer Gateway 的 `ComputerRegistry` 具体入口已删除 | 历史位置：`crates/backend/nomifun-gateway/src/caps_computer.rs`、`computer_registry.rs`；当前由 `production_bypass_audit` 守护 | Gateway 不再提供绕过 Snapshot Provider lock 的 Browser/Computer 具体执行入口 |
 | standalone `mcp-computer-stdio` 及其 `ComputerMcpConfig` 已物理删除 | 历史位置：`crates/backend/nomifun-app/src/commands/computer_stdio.rs`、`nomifun-api-types/src/mcp_bridge.rs` | Codex/ACP 只能使用带 AgentSession/Snapshot 的 canonical Host route；不存在第二执行主链 |
 | legacy Knowledge URL 渲染已改为 typed `BrowserRenderContentPort`；旧 `BrowserFetcher -> Hub` 生产接线已删除，缺少 canonical port 时 fail-closed | `crates/backend/nomifun-knowledge/src/source_url.rs`、`service.rs`、`nomifun-app/src/services.rs` | Knowledge 不会暗中启动第一方 Chromium；完整 canonical Knowledge consumer 组合仍需后续主线接入 |
@@ -1103,7 +1191,9 @@ Computer physical action 在进入 Provider handler 前，按 `serialized_target
 全局 clean cut 要求：
 
 1. Composition Root 构造第一方 Provider 后，通过普通 Plugin registration/materialization 发布；
-2. 新 v4/Codex first-party Provider 不得复用 `BrowserLaneClientProviderSlot`；现有 Nomi-only Slot 不增加 Role Adapter 或兼容层，按 D-020 作为有期限 legacy allowlist 留到 C9 并随 Nomi 整体删除；
+2. 未来 Fresh-v4/Codex first-party Provider 不得复用 `BrowserLaneClientProviderSlot`；
+   当前 Nomi-core 可以保留其既有内部接线，但不得增加 Role Adapter、兼容层或新的
+   consumer bypass；未来 Runtime 替换时再按 D-020 决定是否删除；
 3. `ComputerRegistry` 不再出现在 Gateway 或业务消费者的依赖 view 中，只属于 first-party Computer Provider；
 4. Wave 2 Browser/Computer 不再走永久 unavailable 分支，而是调用 canonical Dispatcher；
 5. Gateway Browser/Computer 入口若仍需存在，只能委托 canonical Agent Platform/Capability 主链，不得直接执行具体 Registry；
@@ -1118,7 +1208,9 @@ Computer physical action 在进入 Provider handler 前，按 `serialized_target
 - consumer-facing built-in Browser/Computer service fields；
 - Gateway 对 `ComputerRegistry.execute` 的直接生产调用；
 - `mcp-computer-stdio` 对 `ComputerTool::new` 的直接构造与执行；
-- 新 v4/Codex Agent Factory 对 native Browser slot 的任何引用；legacy Nomi-only Slot 到 C9 直接删除，不先改造；
+- 未来 Fresh-v4/Codex Agent Factory 对 native Browser slot 的任何引用；当前
+  Nomi-core 既有 Slot 只维持产品所需最小范围，未来 Runtime 替换时再决定删除，不先
+  扩展为通用 adapter；
 - `if plugin/mcp then ... else builtin ...` 分支；
 - 同一操作的 legacy Gateway Registry 与 canonical Capability 双执行入口；
 - Provider 缺失时回退旧 Browser/Computer 的代码；
@@ -1128,13 +1220,17 @@ Computer physical action 在进入 Provider handler 前，按 `serialized_target
 
 人类 Browser 管理、登录、诊断、Surface、进程生命周期、telemetry 和 shutdown 是 Browser Engine/产品控制面，不是 Agent/automation Browser Use 消费者；这些具名 owning surface 可以直接持有 `BrowserSessionHub`。允许清单必须精确到模块/用途，不能把 Knowledge、Agent Factory、Gateway 或自动化消费者归入“管理”例外。
 
-P1-R2/C8 的 residual-zero 只针对新的 v4/Codex、Knowledge、Gateway 和 stdio target 主链。D-020 deletion manifest 中已经登记的 Nomi-only Browser/Computer wiring 可以作为精确、有期限的 legacy allowlist 保留到 C9，但不得增长或接入新架构；C9 删除 Nomi 后，除上述人类 Browser owning surface 和 first-party Provider 实现外，全仓具体实现旁路才要求为 0。
+P1-R2/C8 的 residual-zero 只针对已经接入 Role/Provider 主链的生产旁路，不把当前
+Nomi-core 执行内核误列为 legacy。Nomi-only Browser/Computer wiring 在当前阶段只能
+作为已有、精确且不增长的内部接线保留；未来 Codex 替换成立后，才按 D-020 决定是否
+执行 C9 删除。不能以此接线为理由新增具体消费者旁路。
 
 截至 2026-09-03，Gateway Browser/Computer capability modules、具体 Registry 和
 standalone `mcp-computer-stdio` 已按本节删除边界物理移除；这一处置保留了本节的
 历史问题背景，但不再把已删除的错误形态当作当前实现状态。剩余的
-`BrowserLaneClientProviderSlot` 仅属于 D-020 的 Nomi-only legacy allowlist，等待 C9
-随旧 Nomi runtime 一并删除。
+`BrowserLaneClientProviderSlot` 仍是 Nomi-core 内部的历史接线，当前只允许维持真实
+产品所需的最小范围；它不构成 Codex 接入证据，也不应扩展。未来是否随 Nomi 删除，
+由重新立项后的 D-020/C9 决策决定。
 
 ### 7. 一期与二期的精确边界
 
@@ -1232,7 +1328,9 @@ server/connection ref。Credential 只经过 central authority，不进入 catal
 - 删除 Gateway、Factory、Service bag、`mcp-computer-stdio` direct tool 和业务消费者旁路；
 - 保留 Browser lane cleanup，并把 Computer ordering 收敛为按 exact target resource 的共享 arbiter。
 
-退出条件：v4/Codex target 生产依赖扫描中，只有 first-party Provider implementation，以及具名的人类 Browser 管理/登录/Surface/lifecycle owning modules 可以引用具体 Browser backend；Computer backend 只允许 first-party Provider 引用。v4/Codex Agent/automation、Knowledge、Gateway 和 stdio bridge 的具体实现旁路为 0；Nomi-only exact allowlist 不增长并明确等待 C9 删除。
+退出条件：Role/Provider 生产依赖扫描中，Browser/Computer 消费者不再绕过 canonical
+dispatch；当前 Nomi-core 必要内部实现可以保留，但不新增旁路。未来 Codex host
+正式接入时，再按独立 source/build 和 runtime evidence 评估其具体 backend 边界。
 
 #### P1-R3：一期 Gate 收口
 
@@ -1243,7 +1341,9 @@ server/connection ref。Credential 只经过 central authority，不进入 catal
 - 受影响的 Windows C8 Gate；
 - 后续 macOS/Linux 原生 Gate 按既有 D-028 批次执行，不因本文建立新的逐功能换机流程。
 
-退出条件：本次 Browser/Computer 变更已经进入当前 candidate source；实际 Host、Sidecar 和 Package digest 记录于 release lock，对应首发三平台结果记录于 platform result；旧证据不得冒充本次结果。
+退出条件：本次 Browser/Computer 变更已经进入当前 candidate source；当前 Nomi-core
+Host 与 Package digest 记录于 release lock，对应首发三平台结果记录于 platform
+result；未来候选若包含 Codex Sidecar，再单独记录其真实 digest；旧证据不得冒充本次结果。
 
 ### 9. 最小验证矩阵
 
@@ -1258,7 +1358,7 @@ server/connection ref。Credential 只经过 central authority，不进入 catal
 | Computer | first-party 单桌面行为保持；两个 Provider 绑定同一 target fixture 时由 target arbiter 串行 |
 | Consumer | Chat/Agent/自动化/Remote/Knowledge 等生产入口不引用具体实现；替换 fixture 不改消费者代码 |
 | Platform | D-028 first-party 默认保持 Headless typed unavailable；Provider availability 不再被 first-party build feature 提前锁死 |
-| Residual | v4/Codex built-in shortcut、dual registry、same-ID override、source switch、legacy fallback 为 0；Nomi-only exact allowlist 不增长并在 C9 删除 |
+| Residual | 当前 Nomi-core 生产旁路、dual registry、same-ID override、source switch、legacy fallback 为 0；Codex host 旁路只在未来正式接入时单独验收 |
 
 不要求一期测试 Node Plugin、MCP Schema drift、CLI 进程协议或 Skill 组合；这些属于二期。
 

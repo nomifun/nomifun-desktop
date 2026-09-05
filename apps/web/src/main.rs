@@ -233,12 +233,11 @@ fn main() -> Result<ExitCode> {
     let mut cli = nomifun_app::cli::Cli::parse_from(["nomifun-web"]);
     cli.host = args.host.clone();
     cli.port = args.port;
-    // Map known self-export/default locations onto the channel default and
-    // run the one-shot legacy layout migration (`NomiFun/Nomi<suffix>` →
-    // `NomiFun<suffix>`); explicit deployments (Docker `/data`, systemd
-    // `/var/lib/nomifun`) pass through verbatim.
+    // Resolve the current Nomi-core root. If a previous Fresh-v4 experiment
+    // owns the channel default, the resolver selects an isolated sibling so
+    // this host never opens or mutates that experimental dataset.
     cli.data_dir =
-        nomifun_app::bootstrap::resolve_startup_data_root(args.data_dir.clone());
+        nomifun_app::bootstrap::resolve_nomi_core_data_root(args.data_dir.clone());
     cli.local = insecure_no_auth;
 
     // Same ordering as the nomicore bin: runtime init + PATH enhancement BEFORE
@@ -287,20 +286,31 @@ async fn serve(
 
     // Boot the backend in-process (env → data layer → services), then mount the
     // real API router with the SPA as the fallback for non-/api routes.
-    let env = nomifun_app::bootstrap::init_environment(&cli, &merged_path)?;
-    let host = env.canonical_host()?;
-    let application = host.compose(&env.config).await?;
+    let env = nomifun_app::bootstrap::init_nomi_core_environment(&cli, &merged_path)?;
+    let application =
+        nomifun_app::bootstrap::NomiCoreApplication::compose(&env).await?;
 
     // First-run admin provisioning. No-op in local mode and once an admin
     // exists; otherwise a fresh authenticated install would have no way to set
     // the first password (the in-band setup routes are local-only). Returns
     // whether the install still awaits interactive first-run setup.
-    let needs_first_run_setup = application
+    let needs_first_run_setup = match application
         .ensure_admin_credentials(
             Some(&args.admin_user),
             args.admin_password.as_deref(),
         )
-        .await?;
+        .await
+    {
+        Ok(needs_first_run_setup) => needs_first_run_setup,
+        Err(error) => {
+            return Err(match application.close().await {
+                Ok(()) => error,
+                Err(cleanup_error) => anyhow::anyhow!(
+                    "{error:#}; Nomi-core runtime cleanup also failed: {cleanup_error:#}"
+                ),
+            });
+        }
+    };
     if needs_first_run_setup && !ip.is_loopback() {
         tracing::warn!(
             %ip,
@@ -335,7 +345,7 @@ async fn serve(
                 return Err(match application.close().await {
                     Ok(()) => error,
                     Err(cleanup_error) => anyhow::anyhow!(
-                        "{error:#}; Fresh-v4 runtime cleanup also failed: {cleanup_error:#}"
+                        "{error:#}; Nomi-core runtime cleanup also failed: {cleanup_error:#}"
                     ),
                 });
             }
@@ -348,16 +358,7 @@ async fn serve(
         );
     }
     nomifun_app::bootstrap::announce_bound_port(&cli.data_dir, &args.host, actual_port);
-    // Fresh-v4 Web is currently a Remote-only host and does not mount the
-    // legacy robot surface. Never pretend an advertise address was accepted:
-    // report the configuration as explicitly unsupported and keep the
-    // listener alive for the canonical Web/Remote API.
-    if robot_advertise.is_some() {
-        tracing::warn!(
-            requested_port = actual_port,
-            "NOMIFUN_ROBOT_ADVERTISE is disabled on the Fresh-v4 Web host: robot routes are not mounted"
-        );
-    }
+    application.publish_robot_endpoint(actual_port, robot_advertise);
     // ConnectInfo gives the rate limiter each client's real peer address. Without
     // it every browser in the deployment collapses into one shared "unknown"
     // bucket: a single user's login failures 429-lock everyone out, and aggregate
@@ -371,7 +372,7 @@ async fn serve(
         return Err(match application.close().await {
             Ok(()) => error.into(),
             Err(cleanup_error) => anyhow::anyhow!(
-                "{error}; Fresh-v4 runtime cleanup also failed: {cleanup_error:#}"
+                "{error}; Nomi-core runtime cleanup also failed: {cleanup_error:#}"
             ),
         });
     }

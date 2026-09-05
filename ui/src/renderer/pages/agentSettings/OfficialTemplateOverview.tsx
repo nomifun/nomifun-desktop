@@ -1,12 +1,13 @@
 import type {
+  AgentCatalogResponse,
   ChatRouteRecord,
   OfficialPresetTemplate,
   TemplateResourceSelection,
 } from '@/common/types/agentPlatform';
 import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
 import type { IMcpServer } from '@/common/config/storage';
-import { AGENT_CHAT_MODEL_TASK, CHAT_ROUTE_RECORD_SCHEMA } from '@/common/types/agentPlatform';
-import { Button, Collapse, Input, Select, Tag } from '@arco-design/web-react';
+import { AGENT_CHAT_MODEL_TASK } from '@/common/types/agentPlatform';
+import { Alert, Button, Select, Tag } from '@arco-design/web-react';
 import { Copy, Lock } from '@icon-park/react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -24,6 +25,7 @@ type OfficialTemplateOverviewProps = {
   template: OfficialPresetTemplate;
   busy: boolean;
   hostWorkDir: string | null;
+  catalog: AgentCatalogResponse;
   knowledgeBases: IKnowledgeBase[];
   knowledgeBasesLoading: boolean;
   connectors: IMcpServer[];
@@ -35,35 +37,11 @@ type OfficialTemplateOverviewProps = {
   ) => void;
 };
 
-const ExactRefList: React.FC<{
-  title: string;
-  items: Array<{ id: string; version: string }>;
-  emptyLabel: string;
-}> = ({ title, items, emptyLabel }) => (
-  <div className={styles.templateColumn}>
-    <div className={styles.templateColumnHeader}>
-      <span>{title}</span>
-      <span>{items.length}</span>
-    </div>
-    {items.length === 0 ? (
-      <div className={styles.inlineEmpty}>{emptyLabel}</div>
-    ) : (
-      <div className={styles.exactList}>
-        {items.map((item) => (
-          <div key={`${item.id}@${item.version}`} className={styles.exactRow}>
-            <span>{item.id}</span>
-            <code>{item.version}</code>
-          </div>
-        ))}
-      </div>
-    )}
-  </div>
-);
-
 const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
   template,
   busy,
   hostWorkDir,
+  catalog,
   knowledgeBases,
   knowledgeBasesLoading,
   connectors,
@@ -72,10 +50,23 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
   const { t } = useTranslation();
   const path = TEMPLATE_I18N_PATH[template.template_key];
   const name = t(`agentSettings.template.${path}.name`);
+  const unavailableTemplateCapabilities = useMemo(
+    () =>
+      [...template.seed.initial_capabilities, ...template.seed.on_demand_capabilities].filter(
+        (reference) => {
+          const item = catalog.capabilities.find(
+            (candidate) =>
+              candidate.capability.id === reference.id &&
+              candidate.capability.version === reference.version
+          );
+          return item == null || item.materialization_state === 'unavailable';
+        }
+      ),
+    [catalog.capabilities, template.seed.initial_capabilities, template.seed.on_demand_capabilities]
+  );
+  const templateUnavailable = unavailableTemplateCapabilities.length > 0;
   const [resourceIds, setResourceIds] = useState<Record<string, string>>({});
   const [workspaceRoots, setWorkspaceRoots] = useState<Record<string, string>>({});
-  const [chatRouteRecordText, setChatRouteRecordText] = useState('');
-  const [chatRouteRecord, setChatRouteRecord] = useState<ChatRouteRecord | null>(null);
 
   useEffect(() => {
     setResourceIds(
@@ -84,8 +75,6 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
         : {}
     );
     setWorkspaceRoots(hostWorkDir ? { workspace: hostWorkDir } : {});
-    setChatRouteRecordText('');
-    setChatRouteRecord(null);
   }, [hostWorkDir, template.template_key]);
 
   const resources = useMemo(
@@ -180,26 +169,6 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
       return next;
     });
   };
-  const updateChatRouteRecord = (text: string) => {
-    setChatRouteRecordText(text);
-    if (!text.trim()) {
-      setChatRouteRecord(null);
-      return;
-    }
-    try {
-      const parsed = JSON.parse(text) as ChatRouteRecord;
-      if (
-        parsed.schema === CHAT_ROUTE_RECORD_SCHEMA &&
-        parsed.task === AGENT_CHAT_MODEL_TASK &&
-        parsed.primary?.model_route_id
-      ) {
-        setChatRouteRecord(parsed);
-      }
-    } catch {
-      setChatRouteRecord(null);
-    }
-  };
-
   return (
     <main className={styles.editorSurface}>
       <header className={styles.editorHeader}>
@@ -215,23 +184,27 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
           type='primary'
           icon={<Copy theme='outline' size='15' />}
           loading={busy}
-          disabled={missingRequired}
+          disabled={missingRequired || templateUnavailable}
           onClick={() =>
             onFork(
               t('agentSettings.defaults.forkName', { name }),
               resources,
-              chatRouteRecord
-                ? {
-                    [AGENT_CHAT_MODEL_TASK]: chatRouteRecord.primary.model_route_id,
-                  }
-                : {},
-              chatRouteRecord ? { [AGENT_CHAT_MODEL_TASK]: chatRouteRecord } : {}
+              {},
+              {}
             )
           }
         >
           {t('agentSettings.actions.fork')}
         </Button>
       </header>
+      {templateUnavailable && (
+        <Alert
+          className={styles.inlineNotice}
+          type='warning'
+          showIcon
+          content={t('agentSettings.template.hostUnavailable')}
+        />
+      )}
 
       <section className={styles.section}>
         <div className={styles.sectionHeading}>
@@ -341,38 +314,14 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
             ))}
           </div>
         )}
-        <Collapse defaultActiveKey={[]} className={styles.technicalCollapse}>
-          <Collapse.Item name='template-technical-details' header={t('common.technical_details')}>
-            <label className={styles.field}>
-              <span>{t('agentSettings.fields.chatModelRouteRecord')}</span>
-              <Input.TextArea
-                value={chatRouteRecordText}
-                placeholder={t('agentSettings.fields.chatModelRouteRecordPlaceholder')}
-                autoSize={{ minRows: 4, maxRows: 12 }}
-                onChange={updateChatRouteRecord}
-              />
-            </label>
-            <div className={styles.dualGrid}>
-              <ExactRefList
-                title={t('agentSettings.capabilities.initial')}
-                items={template.seed.initial_capabilities}
-                emptyLabel={t('agentSettings.common.none')}
-              />
-              <ExactRefList
-                title={t('agentSettings.capabilities.onDemand')}
-                items={template.seed.on_demand_capabilities}
-                emptyLabel={t('agentSettings.common.none')}
-              />
-            </div>
-            <div className={styles.tagRow}>
-              {template.role_coverage.required_capability_categories.map((category) => (
-                <Tag key={category} size='small' color='gray'>
-                  {category}
-                </Tag>
-              ))}
-            </div>
-          </Collapse.Item>
-        </Collapse>
+        <div className={styles.inlineNotice}>
+          <span>
+            {t('agentSettings.fields.chatModelRouteUnavailable', {
+              defaultValue:
+                'The canonical Chat model route is supplied by the host. No JSON or internal ID entry is required.',
+            })}
+          </span>
+        </div>
       </section>
 
       {template.template_key === 'chat.minimal' && (

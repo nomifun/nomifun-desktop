@@ -46,6 +46,17 @@ use crate::bootstrap::FreshV4Application;
 use nomifun_auth::AuthPolicy;
 use nomifun_db::{IClientPreferenceRepository, IUserRepository};
 
+/// Host composition selected before any router or runtime state is built.
+///
+/// The product currently selects [`Self::NomiCore`]. [`Self::FreshV4`] remains
+/// an explicit, isolated host for the later migration phase; there is no
+/// per-session or per-turn runtime switching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopRuntimeComposition {
+    NomiCore,
+    FreshV4,
+}
+
 /// Stable, bookmarkable port for the LAN listener (matches the UI's
 /// `WEBUI_DEFAULT_PORT`). Falls back to an ephemeral port if occupied.
 pub const WEBUI_LAN_PORT: u16 = 25808;
@@ -484,8 +495,10 @@ pub struct DesktopServer {
     /// the backend's persistent resources alive while the host is exiting.
     database: Option<nomifun_db::Database>,
     /// Canonical Fresh-v4 application owned by the production desktop path.
-    /// Legacy startup keeps this absent.
+    /// Nomi-core startup keeps this absent.
     canonical_application: Option<FreshV4Application>,
+    /// Current product application owned by the Nomi-core desktop path.
+    nomi_core_application: Option<crate::bootstrap::NomiCoreApplication>,
     /// Complete startup authority. Keeping this alongside the published
     /// server prevents a listener failure from dropping the environment lock
     /// or long-lived services before cleanup has been verified.
@@ -537,6 +550,7 @@ struct DesktopKeepAliveInner {
 enum DesktopStartupCleanupAuthority {
     Services(AppServices),
     Startup(Arc<crate::services::StartupCleanupAuthority>),
+    NomiCore(crate::bootstrap::NomiCoreApplication),
     FreshV4(FreshV4Application),
 }
 
@@ -552,11 +566,17 @@ impl DesktopKeepAlive {
     pub async fn shutdown_after_startup_failure(&self) -> anyhow::Result<()> {
         match &self.inner.cleanup {
             DesktopStartupCleanupAuthority::Services(services) => {
+                services.request_background_shutdown();
+                services.shutdown_cron_timers();
+                services.shutdown_auto_work_runner().await?;
                 services.shutdown_browser_platform().await?;
                 services.database.close().await;
                 Ok(())
             }
             DesktopStartupCleanupAuthority::Startup(authority) => authority.cleanup().await,
+            DesktopStartupCleanupAuthority::NomiCore(application) => {
+                application.clone().close().await
+            }
             DesktopStartupCleanupAuthority::FreshV4(application) => {
                 application.clone().close().await
             }
@@ -601,6 +621,18 @@ impl DesktopKeepAlive {
         }
     }
 
+    fn from_nomi_core(
+        env: bootstrap::ServerEnvironment,
+        application: crate::bootstrap::NomiCoreApplication,
+    ) -> Self {
+        Self {
+            inner: Arc::new(DesktopKeepAliveInner {
+                _env: env,
+                cleanup: DesktopStartupCleanupAuthority::NomiCore(application),
+            }),
+        }
+    }
+
     fn from_fresh_v4(
         env: bootstrap::ServerEnvironment,
         application: FreshV4Application,
@@ -616,8 +648,15 @@ impl DesktopKeepAlive {
     fn services(&self) -> Option<&AppServices> {
         match &self.inner.cleanup {
             DesktopStartupCleanupAuthority::Services(services) => Some(services),
+            DesktopStartupCleanupAuthority::NomiCore(application) => Some(application.services()),
             DesktopStartupCleanupAuthority::Startup(_)
             | DesktopStartupCleanupAuthority::FreshV4(_) => None,
+        }
+    }
+
+    fn request_background_shutdown(&self) {
+        if let Some(services) = self.services() {
+            services.request_background_shutdown();
         }
     }
 }
@@ -652,22 +691,22 @@ impl DesktopServer {
     /// the SPA to the vite dev server so remote browsers match the live desktop.
     /// `webui_asset_source` is the preferred production source and should adapt
     /// the desktop host's compile-time embedded frontend assets.
-    pub async fn start_legacy_compatibility(
+    pub async fn start_nomi_core(
         cli: &Cli,
         merged_path: &str,
         spa_dir: Option<PathBuf>,
         dev_frontend_url: Option<String>,
         webui_asset_source: Option<WebUiAssetSource>,
     ) -> Result<(Arc<DesktopServer>, DesktopKeepAlive)> {
-        // This wrapper is retained for legacy in-process fixtures. The native
-        // desktop shell uses `start_with_outcome`, which is Fresh-v4-only.
+        // Tests and embedded callers use the same Nomi-core composition as the
+        // native desktop shell.
         Self::start_with_composition(
             cli,
             merged_path,
             spa_dir,
             dev_frontend_url,
             webui_asset_source,
-            true,
+            DesktopRuntimeComposition::NomiCore,
         )
         .await
         .map_err(DesktopStartError::into_inner)
@@ -675,7 +714,7 @@ impl DesktopServer {
 
     /// Typed desktop startup entry point used by the native shell.
     ///
-    /// Unlike [`Self::start_legacy_compatibility`], failures retain a positive cleanup disposition
+    /// Unlike [`Self::start_nomi_core`], failures retain a positive cleanup disposition
     /// so the shell can distinguish a safe-to-release runtime from a failed
     /// teardown that must retain runtime authority and fail closed.
     pub async fn start_with_outcome(
@@ -688,13 +727,16 @@ impl DesktopServer {
         (Arc<DesktopServer>, DesktopKeepAlive),
         DesktopStartError,
     > {
+        // The current desktop product runs the original in-process Nomi core.
+        // Fresh-v4/Codex composition remains an explicit future host and must
+        // not silently become the product runtime.
         Self::start_with_composition(
             cli,
             merged_path,
             spa_dir,
             dev_frontend_url,
             webui_asset_source,
-            false,
+            DesktopRuntimeComposition::NomiCore,
         )
         .await
     }
@@ -705,18 +747,21 @@ impl DesktopServer {
         spa_dir: Option<PathBuf>,
         dev_frontend_url: Option<String>,
         webui_asset_source: Option<WebUiAssetSource>,
-        legacy_compatibility: bool,
+        composition: DesktopRuntimeComposition,
     ) -> std::result::Result<
         (Arc<DesktopServer>, DesktopKeepAlive),
         DesktopStartError,
     > {
-        let env = if legacy_compatibility {
-            bootstrap::init_legacy_environment(cli, merged_path)
-        } else {
-            bootstrap::init_environment(cli, merged_path)
+        let env = match composition {
+            DesktopRuntimeComposition::NomiCore => {
+                bootstrap::init_nomi_core_environment(cli, merged_path)
+            }
+            DesktopRuntimeComposition::FreshV4 => {
+                bootstrap::init_environment(cli, merged_path)
+            }
         }
             .map_err(DesktopStartError::verified)?;
-        if !legacy_compatibility {
+        if composition == DesktopRuntimeComposition::FreshV4 {
             return Self::start_fresh_v4(
                 env,
                 spa_dir,
@@ -809,6 +854,18 @@ impl DesktopServer {
             }
         };
         let router = crate::router::create_router(&services).await;
+        let application =
+            crate::bootstrap::NomiCoreApplication::from_parts(services, router);
+        let (router, ssh_pool, robot, database, browser_platform_shutdown) = {
+            let app_services = application.services();
+            (
+                application.router(),
+                app_services.ssh_pool.clone(),
+                app_services.robot.clone(),
+                app_services.database.clone(),
+                app_services.browser_platform_shutdown.clone(),
+            )
+        };
 
         // Seed the initial status with the PERSISTED admin identity so the
         // desktop UI shows the real username / "password set" state immediately
@@ -826,10 +883,8 @@ impl DesktopServer {
         let (loopback_shutdown, _) = watch::channel(false);
         let loopback_termination = ListenerTermination::new();
         let (shutdown_complete_tx, shutdown_complete_rx) = watch::channel(false);
-        let keep_alive = DesktopKeepAlive::from_parts(env, services);
-        let services = keep_alive
-            .services()
-            .expect("DesktopKeepAlive built from AppServices");
+        let keep_alive =
+            DesktopKeepAlive::from_nomi_core(env, application.clone());
 
         tracing::info!(
             loopback_port,
@@ -845,12 +900,13 @@ impl DesktopServer {
             dev_frontend_url: dev_frontend_url.map(|u| Arc::from(u.trim_end_matches('/'))),
             runtime: Handle::current(),
             terminal_service: Some(terminal_service),
-            ssh_pool: Some(services.ssh_pool.clone()),
-            robot: services.robot.clone(),
-            database: Some(services.database.clone()),
+            ssh_pool: Some(ssh_pool),
+            robot,
+            database: Some(database),
             canonical_application: None,
+            nomi_core_application: Some(application),
             _keep_alive: keep_alive.clone(),
-            browser_platform_shutdown: Some(services.browser_platform_shutdown.clone()),
+            browser_platform_shutdown: Some(browser_platform_shutdown),
             failure_tx,
             loopback_shutdown,
             listener_lifecycle: ListenerLifecycle {
@@ -954,6 +1010,7 @@ impl DesktopServer {
             robot: None,
             database: None,
             canonical_application: Some(application),
+            nomi_core_application: None,
             _keep_alive: keep_alive.clone(),
             browser_platform_shutdown: None,
             failure_tx,
@@ -1207,32 +1264,41 @@ impl DesktopServer {
         // the final error retains every cleanup diagnostic.
         let mut errors = Vec::new();
 
+        self._keep_alive.request_background_shutdown();
         if let Err(error) = self.stop_listeners_and_wait().await {
             errors.push(format!("listener cleanup failed: {error:#}"));
         }
 
-        if let Some(terminal_service) = &self.terminal_service {
-            let terminal_result = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                terminal_service.shutdown_cleanup(),
-            )
-            .await;
-            match terminal_result {
-                Ok(Ok(deleted)) => {
-                    tracing::info!(deleted, "terminal sessions cleaned up during desktop shutdown");
+        let nomi_core_owned_cleanup = self.nomi_core_application.is_some();
+        if !nomi_core_owned_cleanup {
+            if let Some(terminal_service) = &self.terminal_service {
+                let terminal_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    terminal_service.shutdown_cleanup(),
+                )
+                .await;
+                match terminal_result {
+                    Ok(Ok(deleted)) => {
+                        tracing::info!(
+                            deleted,
+                            "terminal sessions cleaned up during desktop shutdown"
+                        );
+                    }
+                    Ok(Err(error)) => errors.push(format!("terminal cleanup failed: {error}")),
+                    Err(_) => {
+                        errors.push("terminal cleanup timed out after 5 seconds".to_owned())
+                    }
                 }
-                Ok(Err(error)) => errors.push(format!("terminal cleanup failed: {error}")),
-                Err(_) => errors.push(
-                    "terminal cleanup timed out after 5 seconds".to_owned(),
-                ),
             }
         }
 
-        if let Some(browser_platform_shutdown) = &self.browser_platform_shutdown {
-            let browser_result: anyhow::Result<()> =
-                browser_platform_shutdown.shutdown().await;
-            if let Err(error) = browser_result {
-                errors.push(format!("browser cleanup failed: {error:#}"));
+        if !nomi_core_owned_cleanup {
+            if let Some(browser_platform_shutdown) = &self.browser_platform_shutdown {
+                let browser_result: anyhow::Result<()> =
+                    browser_platform_shutdown.shutdown().await;
+                if let Err(error) = browser_result {
+                    errors.push(format!("browser cleanup failed: {error:#}"));
+                }
             }
         }
 
@@ -1240,36 +1306,40 @@ impl DesktopServer {
         // loopback MCP front are pure in-process tasks with nothing durable to
         // write, so this is unconditional and cannot fail. Live sessions end with
         // their own sockets when the listener closes.
-        if let Some(robot) = &self.robot {
-            robot.shutdown();
+        if !nomi_core_owned_cleanup {
+            if let Some(robot) = &self.robot {
+                robot.shutdown();
+            }
         }
 
         // Quiesce the SSH pool before the database closes: closing a link walks the
         // host row back from "connected", and a link let go of without exit evidence
         // is a real leak on someone else's machine, so it is reported rather than
         // silently counted as clean.
-        if let Some(ssh_pool) = &self.ssh_pool {
-            let ssh_result = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                ssh_pool.shutdown_all(),
-            )
-            .await;
-            match ssh_result {
-                Ok(report) => {
-                    tracing::info!(
-                        reaped = report.reaped,
-                        lost = report.lost,
-                        already_down = report.already_down,
-                        "ssh links closed during desktop shutdown"
-                    );
-                    if report.lost > 0 {
-                        errors.push(format!(
-                            "{} ssh link(s) were let go of without proof the remote shell died",
-                            report.lost
-                        ));
+        if !nomi_core_owned_cleanup {
+            if let Some(ssh_pool) = &self.ssh_pool {
+                let ssh_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    ssh_pool.shutdown_all(),
+                )
+                .await;
+                match ssh_result {
+                    Ok(report) => {
+                        tracing::info!(
+                            reaped = report.reaped,
+                            lost = report.lost,
+                            already_down = report.already_down,
+                            "ssh links closed during desktop shutdown"
+                        );
+                        if report.lost > 0 {
+                            errors.push(format!(
+                                "{} ssh link(s) were let go of without proof the remote shell died",
+                                report.lost
+                            ));
+                        }
                     }
+                    Err(_) => errors.push("ssh pool cleanup timed out after 5 seconds".to_owned()),
                 }
-                Err(_) => errors.push("ssh pool cleanup timed out after 5 seconds".to_owned()),
             }
         }
 
@@ -1280,8 +1350,14 @@ impl DesktopServer {
         // The database is therefore closed only after listeners, terminals, and
         // every explicit Host shutdown have all completed successfully.
         if errors.is_empty() {
-            if let Some(database) = &self.database {
-                database.close().await;
+            if let Some(application) = &self.nomi_core_application {
+                if let Err(error) = application.clone().close().await {
+                    errors.push(format!("Nomi-core runtime cleanup failed: {error:#}"));
+                }
+            } else {
+                if let Some(database) = &self.database {
+                    database.close().await;
+                }
             }
             if let Some(application) = &self.canonical_application {
                 if let Err(error) = application.clone().close().await {

@@ -10,6 +10,7 @@ mod builtin_skills;
 mod canonical_host;
 mod data_root;
 mod environment;
+mod nomi_core;
 mod relocation;
 pub(crate) mod runtime_artifact;
 mod server_lock;
@@ -24,12 +25,13 @@ pub use canonical_host::{CanonicalHost, FreshV4Application, FreshV4Host};
 pub use data_root::{
     LAYOUT_MIGRATION_PENDING_MARKER, RELOCATED_DONE_MARKER,
     RELOCATED_FROM_MARKER, RelocationMarker, is_known_default_location,
-    resolve_startup_data_root,
+    resolve_nomi_core_data_root, resolve_startup_data_root,
 };
 pub use environment::{
     ServerEnvironment, finalize_data_layer, init_data_layer, init_environment,
+    init_nomi_core_environment,
 };
-pub(crate) use environment::init_legacy_environment;
+pub use nomi_core::NomiCoreApplication;
 pub(crate) use environment::{
     acquire_distinct_work_root_lock, acquire_work_root_lock,
 };

@@ -6,7 +6,126 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-use crate::bootstrap::{FreshV4Application, ServerEnvironment};
+use crate::bootstrap::{FreshV4Application, NomiCoreApplication, ServerEnvironment};
+
+/// Start the current product server with the original in-process Nomi core.
+///
+/// `NomiCoreApplication` owns the `ConversationService`/`AgentRuntimeRegistry`
+/// graph and the complete product router.  Runtime alternatives are separate
+/// future host compositions; they are never selected per turn.
+pub async fn run_nomi_core_server(
+    env: ServerEnvironment,
+    application: NomiCoreApplication,
+) -> Result<ExitCode> {
+    let boot = Instant::now();
+    let robot_advertise =
+        match crate::lan_endpoint::robot_advertise_from_env() {
+            Ok(advertise) => advertise,
+            Err(error) => {
+                return Err(merge_nomi_core_cleanup_error(
+                    error,
+                    application.close().await,
+                ));
+            }
+        };
+
+    let has_users = match application
+        .services_has_users()
+        .await
+        .context("read configured users")
+    {
+        Ok(has_users) => has_users,
+        Err(error) => {
+            return Err(merge_nomi_core_cleanup_error(
+                error,
+                application.close().await,
+            ));
+        }
+    };
+    if !has_users {
+        info!("No configured users detected — initial setup required via /api/auth/status");
+    }
+
+    let ip: std::net::IpAddr = match env.config.host.parse().with_context(|| {
+        format!(
+            "invalid host '{}': expected an IP literal like 127.0.0.1 or 0.0.0.0",
+            env.config.host
+        )
+    }) {
+        Ok(ip) => ip,
+        Err(error) => {
+            return Err(merge_nomi_core_cleanup_error(
+                error,
+                application.close().await,
+            ));
+        }
+    };
+    let (actual_port, listener) =
+        match crate::bootstrap::bind_with_fallback(ip, env.config.port).await {
+            Ok(bound) => bound,
+            Err(error) => {
+                return Err(merge_nomi_core_cleanup_error(
+                    error,
+                    application.close().await,
+                ));
+            }
+        };
+    if actual_port != env.config.port {
+        warn!(
+            requested = env.config.port,
+            actual = actual_port,
+            "preferred port was busy; bound a fallback port"
+        );
+    }
+    crate::bootstrap::announce_bound_port(
+        &env.config.data_dir,
+        &env.config.host,
+        actual_port,
+    );
+    application.publish_robot_endpoint(actual_port, robot_advertise);
+    info!(
+        elapsed_ms = boot.elapsed().as_millis(),
+        host = %env.config.host,
+        port = actual_port,
+        "Nomi-core server listening"
+    );
+
+    let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+    let signal_shutdown_tx = shutdown_tx.clone();
+    let serve_result = axum::serve(listener, application.router())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            let _ = signal_shutdown_tx.send(true);
+        })
+        .await;
+    let _ = shutdown_tx.send(true);
+    let cleanup_result = application.close().await;
+    drop(env);
+
+    match (serve_result, cleanup_result) {
+        (Ok(()), Ok(())) => {
+            info!("Nomi-core server shut down gracefully");
+            Ok(ExitCode::SUCCESS)
+        }
+        (Err(error), Ok(())) => Err(anyhow::Error::new(error)),
+        (Ok(()), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(error), Err(cleanup_error)) => Err(anyhow::anyhow!(
+            "{error}; Nomi-core runtime cleanup also failed: {cleanup_error:#}"
+        )),
+    }
+}
+
+fn merge_nomi_core_cleanup_error(
+    error: anyhow::Error,
+    cleanup: anyhow::Result<()>,
+) -> anyhow::Error {
+    match cleanup {
+        Ok(()) => error,
+        Err(cleanup_error) => anyhow::anyhow!(
+            "{error:#}; Nomi-core runtime cleanup also failed: {cleanup_error:#}"
+        ),
+    }
+}
 
 /// Start the canonical Fresh-v4 HTTP server.
 ///

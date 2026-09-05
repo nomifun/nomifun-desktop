@@ -13,31 +13,88 @@ const SessionInspector: React.FC<{
 }> = ({ observation, capabilities }) => {
   const { t } = useTranslation();
   const { head, session } = observation;
+  const readOnly =
+    observation.continuation?.history_read_only === true ||
+    observation.continuation?.can_continue_same_session === false;
   return (
     <aside className={styles.inspector}>
       <div className={styles.inspectorTitle}>{t('agentSettings.session.inspector')}</div>
       <div className={styles.inspectorRows}>
-        <div><span>{t('agentSettings.session.generation')}</span><code>{head.active_set_generation}</code></div>
-        <div><span>{t('agentSettings.inspector.snapshotDigest')}</span><code>{head.snapshot_digest ?? session.agent_binding.resolved_snapshot_ref.snapshot_digest}</code></div>
-        <div><span>{t('agentSettings.inspector.protocol')}</span><code>{head.runtime_protocol_version ?? 'n/a'}</code></div>
-        <div><span>{t('agentSettings.session.lastSeq')}</span><code>{head.last_seq}</code></div>
-        <div><span>{t('agentSettings.session.checkpoint')}</span><code>{head.checkpoint_through_seq ?? 'n/a'}</code></div>
+        <div>
+          <span>{t('agentSettings.session.runtime')}</span>
+          <strong>{head.status}</strong>
+        </div>
+        <div>
+          <span>{t('agentSettings.session.generation')}</span>
+          <strong>{head.active_set_generation}</strong>
+        </div>
+        <div>
+          <span>{t('agentSettings.inspector.snapshot')}</span>
+          <strong>
+            {session.agent_binding.resolved_snapshot_ref
+              ? t('common.added', { defaultValue: 'Available' })
+              : t('agentSettings.common.unavailable')}
+          </strong>
+        </div>
+        <div>
+          <span>{t('agentSettings.session.activeCapabilities')}</span>
+          <strong>{capabilities?.active_capabilities.length ?? 0}</strong>
+        </div>
+        <div>
+          <span>{t('agentSettings.capabilities.onDemand')}</span>
+          <strong>{capabilities?.on_demand_capabilities.length ?? 0}</strong>
+        </div>
+        <div>
+          <span>{t('agentSettings.session.lastSeq')}</span>
+          <strong>{head.last_seq}</strong>
+        </div>
       </div>
+      {readOnly && (
+        <Tag color='orange' size='small'>
+          {t('agentSettings.session.readOnly', {
+            defaultValue: 'History is read-only',
+          })}
+        </Tag>
+      )}
       <Collapse className={styles.inspectorCollapse}>
         <Collapse.Item name='active' header={t('agentSettings.session.activeCapabilities')}>
           <div className={styles.tagList}>
-            {(capabilities?.active_capabilities ?? []).map((id) => <Tag key={id} size='small' color='green'>{id}</Tag>)}
+            {(capabilities?.active_capabilities ?? []).length > 0 ? (
+              <Tag size='small' color='green'>
+                {capabilities?.active_capabilities.length}{' '}
+                {t('agentSettings.session.activeCapabilities')}
+              </Tag>
+            ) : (
+              <span>{t('agentSettings.common.none')}</span>
+            )}
           </div>
         </Collapse.Item>
         <Collapse.Item name='on-demand' header={t('agentSettings.capabilities.onDemand')}>
           <div className={styles.tagList}>
-            {(capabilities?.on_demand_capabilities ?? []).map((id) => <Tag key={id} size='small' color='gray'>{id}</Tag>)}
+            {(capabilities?.compact_on_demand_index ?? []).map((item) => (
+              <Tag key={item.capability_id} size='small' color='gray'>
+                {item.display_name}
+              </Tag>
+            ))}
+            {(capabilities?.compact_on_demand_index ?? []).length === 0 && (
+              <span>{t('agentSettings.common.none')}</span>
+            )}
           </div>
         </Collapse.Item>
         <Collapse.Item name='runtime' header={t('agentSettings.session.runtime')}>
           <div className={styles.inspectorRows}>
-            <div><span>runtime_bound_event_id</span><code>{head.runtime_bound_event_id ?? 'n/a'}</code></div>
-            <div><span>checkpoint_digest</span><code>{head.runtime_checkpoint_digest ?? 'n/a'}</code></div>
+            <div>
+              <span>{t('agentSettings.inspector.protocol')}</span>
+              <strong>{head.runtime_protocol_version ?? 'n/a'}</strong>
+            </div>
+            <div>
+              <span>{t('agentSettings.session.checkpoint')}</span>
+              <strong>
+                {head.checkpoint_through_seq == null
+                  ? t('agentSettings.common.unavailable')
+                  : t('common.added', { defaultValue: 'Available' })}
+              </strong>
+            </div>
           </div>
         </Collapse.Item>
       </Collapse>

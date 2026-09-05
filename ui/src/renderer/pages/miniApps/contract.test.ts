@@ -27,6 +27,33 @@ const MINI_APP_ID = parseMiniAppId('0198f3b2-4c1a-7c3d-8e9f-0a1b2c3d4e5f');
 const recordingT = ((key: string, params?: Record<string, unknown>) =>
   `${key}::${JSON.stringify(params ?? {})}`) as unknown as TFunction;
 
+/**
+ * This assertion describes the desktop-shell contract. The full Bun suite may
+ * have already installed happy-dom, which makes the bridge correctly choose
+ * its same-origin WebUI branch unless the test explicitly supplies the
+ * desktop boot port.
+ */
+const withDesktopBackend = <T>(run: () => T): T => {
+  if (typeof window === 'undefined') return run();
+
+  const previous = Object.getOwnPropertyDescriptor(window, '__backendPort');
+  Object.defineProperty(window, '__backendPort', {
+    configurable: true,
+    enumerable: previous?.enumerable ?? false,
+    writable: true,
+    value: 13400,
+  });
+  try {
+    return run();
+  } finally {
+    if (previous) {
+      Object.defineProperty(window, '__backendPort', previous);
+    } else {
+      delete window.__backendPort;
+    }
+  }
+};
+
 describe('mini-app contract', () => {
   test('pins the single-artifact file name and the one extra marker key', () => {
     expect(MINI_APP_FILE_NAME).toBe('miniapp.html');
@@ -51,7 +78,7 @@ describe('mini-app contract', () => {
   });
 
   test('serve URL targets the unauthenticated per-app route', () => {
-    const url = resolveMiniAppServeUrl(MINI_APP_ID);
+    const url = withDesktopBackend(() => resolveMiniAppServeUrl(MINI_APP_ID));
     expect(url.endsWith(`/api/miniapps/${MINI_APP_ID}/serve`)).toBe(true);
     // Runner and preview iframes need an absolute origin in the desktop shell.
     expect(url.startsWith('http://127.0.0.1:')).toBe(true);

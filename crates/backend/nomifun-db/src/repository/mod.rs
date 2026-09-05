@@ -25,6 +25,7 @@ pub mod provider_model;
 pub mod provider_model_capability;
 pub mod preset;
 pub mod requirement;
+pub mod remote_binding;
 mod settings;
 pub mod skill_tag;
 pub mod ssh_host;
@@ -53,6 +54,7 @@ mod sqlite_provider_model_capability;
 mod sqlite_miniapp;
 mod sqlite_preset;
 mod sqlite_requirement;
+mod sqlite_remote_binding;
 mod sqlite_settings;
 mod sqlite_skill_tag;
 mod sqlite_ssh_host;
@@ -128,6 +130,11 @@ pub use requirement::{
     IRequirementRepository, ListRequirementsParams, RequirementClaim,
     RequirementClaimResolution,
 };
+pub use remote_binding::{
+    AppendNomiRemoteEventParams, AppendNomiRemoteEventResult, CreateRemoteBindingParams,
+    GetOrCreateRemoteSessionParams, IRemoteBindingRepository, NomiRemoteStateTransitionResult,
+    RemoteOpenResult, TransitionNomiRemoteSessionParams, UpdateRemoteBindingParams,
+};
 pub use settings::ISettingsRepository;
 pub use skill_tag::ISkillTagRepository;
 pub use sqlite_agent_metadata::SqliteAgentMetadataRepository;
@@ -153,6 +160,7 @@ pub use sqlite_provider_model_capability::SqliteProviderModelCapabilityRepositor
 pub use sqlite_miniapp::SqliteMiniAppRepository;
 pub use sqlite_preset::{SqlitePresetRepository, SqlitePresetStateRepository, SqlitePresetTagRepository};
 pub use sqlite_requirement::SqliteRequirementRepository;
+pub use sqlite_remote_binding::SqliteRemoteBindingRepository;
 pub use sqlite_settings::SqliteSettingsRepository;
 pub use sqlite_skill_tag::SqliteSkillTagRepository;
 pub use sqlite_ssh_host::SqliteSshHostRepository;

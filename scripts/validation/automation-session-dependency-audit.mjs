@@ -5,9 +5,10 @@
  *
  * This audit is intentionally read-only. It does not build a second Session
  * authority and it does not edit the central application composition. The
- * output separates production references from test fixtures and identifies
- * the smallest consumer boundary that can be migrated once the canonical
- * Session contract exposes the missing automation operations.
+ * output separates test/compatibility factories, app-composed transitional
+ * adapters, and real production legacy boundaries. The audit must retain
+ * genuine product findings rather than turning the check into an unconditional
+ * PASS.
  *
  * Usage:
  *   bun scripts/validation/automation-session-dependency-audit.mjs
@@ -22,6 +23,8 @@ import { fileURLToPath } from 'node:url';
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export const TASK_ID = 'SL-S3-10';
+export const APP_COMPOSITION_PATH =
+  'crates/backend/nomifun-app/src/router/state.rs';
 
 const DOMAIN_SPECS = [
   {
@@ -36,9 +39,17 @@ const DOMAIN_SPECS = [
     readiness: 'first-candidate',
     blockers: [
       'canonical Session has no scheduled-session lookup by cron relation',
-      'canonical Session has no operation-scoped delivery receipt query',
       'canonical Session has no background runtime-preparation/reconciliation port',
+      'Cron still stores legacy conversation_id values and has no production AgentSession binding adapter',
     ],
+    appComposition: {
+      function: 'build_cron_state',
+      evidence: [
+        /conversation_owner\s*:\s*Arc<\s*NomiCoreSessionOwner\s*>/,
+        /Arc<\s*dyn\s+nomifun_cron::CronSessionPort\s*>\s*=\s*conversation_owner/,
+      ],
+    },
+    compatibilityFactory: 'test_cron_session_port',
   },
   {
     id: 'agent-execution',
@@ -55,6 +66,14 @@ const DOMAIN_SPECS = [
       'steer and assistant-report projection are absent from canonical Session',
       'runtime token/error observations are not part of canonical Session query',
     ],
+    appComposition: {
+      function: 'build_agent_execution_engine',
+      evidence: [
+        /conversation_owner\s*:\s*Arc<\s*NomiCoreSessionOwner\s*>/,
+        /Arc<\s*dyn\s+nomifun_agent_execution::AgentExecutionSessionPort\s*>\s*=\s*conversation_owner/,
+      ],
+    },
+    compatibilityFactory: null,
   },
   {
     id: 'channel',
@@ -71,6 +90,14 @@ const DOMAIN_SPECS = [
       'canonical Session query has no channel delivery receipt type',
       'channel creation/get/list operations still use Conversation DTOs',
     ],
+    appComposition: {
+      function: 'build_channel_state',
+      evidence: [
+        /conversation_owner\s*:\s*Arc<\s*NomiCoreSessionOwner\s*>/,
+        /Arc<\s*dyn\s+nomifun_channel::ChannelSessionPort\s*>\s*=\s*conversation_owner/,
+      ],
+    },
+    compatibilityFactory: 'conversation_channel_session_port',
   },
   {
     id: 'requirement-autowork',
@@ -87,6 +114,14 @@ const DOMAIN_SPECS = [
       'attachment activation and runtime preparation are Conversation-owned',
       'reconciliation must distinguish accepted, missing, and ambiguous receipts',
     ],
+    appComposition: {
+      function: 'build_requirement_state',
+      evidence: [
+        /conversation_owner\s*:\s*Arc<\s*NomiCoreSessionOwner\s*>/,
+        /Arc<\s*dyn\s+nomifun_requirement::AutoWorkConversationPort\s*>\s*=\s*conversation_owner\.clone\(\)/,
+      ],
+    },
+    compatibilityFactory: null,
   },
   {
     id: 'companion',
@@ -103,6 +138,14 @@ const DOMAIN_SPECS = [
       'message-local-day indexing is not exposed by canonical Session query',
       'archive/transcript consumers still address Conversation repository rows',
     ],
+    appComposition: {
+      function: 'build_companion_state',
+      evidence: [
+        /conversation_owner\s*:\s*Arc<\s*NomiCoreSessionOwner\s*>/,
+        /companion_ports_with_session\([\s\S]*conversation_owner/,
+      ],
+    },
+    compatibilityFactory: 'conversation_companion_ports',
   },
   {
     id: 'idmm',
@@ -119,6 +162,14 @@ const DOMAIN_SPECS = [
       'IDMM needs scoped continuation/steering and provider failover commands',
       'canonical Session currently exposes no live event subscription primitive',
     ],
+    appComposition: {
+      function: 'build_idmm_state',
+      evidence: [
+        /conversation_owner\s*:\s*Arc<\s*NomiCoreSessionOwner\s*>/,
+        /conversation_session\s*:\s*conversation_owner/,
+      ],
+    },
+    compatibilityFactory: 'conversation_session_port',
   },
 ];
 
@@ -334,13 +385,26 @@ function matchesFor(source, masked, descriptor) {
 function fileRecord(path, root) {
   const absolute = resolve(root, path);
   const source = readFileSync(absolute, 'utf8');
-  const masked = lexicalMask(source);
+  const lexical = lexicalMask(source);
+  const masked = productionMask(source);
   const legacy = LEGACY_PATTERNS.flatMap((descriptor) =>
     matchesFor(source, masked, descriptor),
   );
   const canonical = CANONICAL_PATTERNS.flatMap((descriptor) =>
     matchesFor(source, masked, descriptor),
   );
+  const functions = [
+    ...masked.matchAll(/\b(?:pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g),
+  ].map((match) => ({
+    name: match[1],
+    line: lineNumber(source, match.index ?? 0),
+  }));
+  const allFunctions = [
+    ...lexical.matchAll(/\b(?:pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g),
+  ].map((match) => ({
+    name: match[1],
+    line: lineNumber(source, match.index ?? 0),
+  }));
   const isTest = /(^|\/)(tests?)(\/|$)|_test\.rs$/.test(path);
   return {
     path,
@@ -348,21 +412,129 @@ function fileRecord(path, root) {
     isAdapter: ADAPTER_FILE_SET.has(path),
     legacy,
     canonical,
+    functions,
+    allFunctions,
   };
 }
 
 function inCrate(path, crate) {
-  return path === `${crate}/src` || path.startsWith(`${crate}/src/`);
+  return (
+    path === `${crate}/src` ||
+    path.startsWith(`${crate}/src/`) ||
+    path === `${crate}/tests` ||
+    path.startsWith(`${crate}/tests/`)
+  );
+}
+
+function skipSpace(source, index) {
+  while (index < source.length && /\s/.test(source[index])) index += 1;
+  return index;
+}
+
+function attributeEnd(source, index) {
+  if (source[index] !== '#' || source[index + 1] !== '[') return null;
+  let depth = 1;
+  for (let cursor = index + 2; cursor < source.length; cursor += 1) {
+    if (source[cursor] === '[') depth += 1;
+    if (source[cursor] === ']') {
+      depth -= 1;
+      if (depth === 0) return cursor + 1;
+    }
+  }
+  return source.length;
+}
+
+function matchingBrace(source, open) {
+  let depth = 1;
+  for (let cursor = open + 1; cursor < source.length; cursor += 1) {
+    if (source[cursor] === '{') depth += 1;
+    if (source[cursor] === '}') {
+      depth -= 1;
+      if (depth === 0) return cursor + 1;
+    }
+  }
+  return source.length;
+}
+
+function isTestOnlyCfgAttribute(attribute) {
+  const compact = attribute.replace(/\s/g, '');
+  if (compact === '#[cfg(test)]') return true;
+  if (!compact.startsWith('#[cfg(all(') || !compact.endsWith('))]')) {
+    return false;
+  }
+  return compact.slice('#[cfg(all('.length, -3).split(',').includes('test');
+}
+
+/**
+ * Rust production modules may keep compatibility factories and fixtures
+ * inline under `#[cfg(test)]`. Remove those item ranges before classifying
+ * legacy references as production dependencies.
+ */
+function testOnlyRanges(source) {
+  const masked = lexicalMask(source);
+  const ranges = [];
+  let index = 0;
+  while (index < masked.length) {
+    if (masked[index] !== '#' || masked[index + 1] !== '[') {
+      index += 1;
+      continue;
+    }
+    const end = attributeEnd(masked, index);
+    if (end === null) break;
+    if (!isTestOnlyCfgAttribute(masked.slice(index, end))) {
+      index = end;
+      continue;
+    }
+    let cursor = skipSpace(masked, end);
+    while (masked[cursor] === '#') {
+      const next = attributeEnd(masked, cursor);
+      if (next === null) break;
+      cursor = skipSpace(masked, next);
+    }
+    let itemEnd = cursor;
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    for (; itemEnd < masked.length; itemEnd += 1) {
+      const char = masked[itemEnd];
+      if (char === '(') parenDepth += 1;
+      if (char === ')') parenDepth = Math.max(0, parenDepth - 1);
+      if (char === '[') bracketDepth += 1;
+      if (char === ']') bracketDepth = Math.max(0, bracketDepth - 1);
+      if (parenDepth !== 0 || bracketDepth !== 0) continue;
+      if (char === ';') {
+        itemEnd += 1;
+        break;
+      }
+      if (char === '{') {
+        itemEnd = matchingBrace(masked, itemEnd);
+        break;
+      }
+    }
+    ranges.push([index, itemEnd]);
+    index = Math.max(itemEnd, end);
+  }
+  return ranges;
+}
+
+function productionMask(source) {
+  let output = lexicalMask(source);
+  for (const [start, end] of testOnlyRanges(source)) {
+    output = replaceNonNewline(output, start, end);
+  }
+  return output;
 }
 
 function summarizeDomain(spec, files) {
   const domainFiles = files.filter((file) => inCrate(file.path, spec.crate));
   const production = domainFiles.filter((file) => file.kind === 'production');
   const tests = domainFiles.filter((file) => file.kind === 'test');
-  const productionLegacy = production.filter((file) => file.legacy.length > 0);
+  const productionLegacy = production.filter(
+    (file) => !file.isAdapter && file.legacy.length > 0,
+  );
+  const testCompatFiles = tests.filter((file) => file.legacy.length > 0);
   const productionCanonical = production.filter((file) => file.canonical.length > 0);
-  const adapterRecord = files.find((file) => file.path === spec.adapter);
   const consumerRecord = files.find((file) => file.path === spec.consumer);
+  const adapterRecord = files.find((file) => file.path === spec.adapter);
   return {
     id: spec.id,
     crate: spec.crate,
@@ -378,6 +550,34 @@ function summarizeDomain(spec, files) {
     testFiles: tests.length,
     productionFilesWithLegacyDependencies: productionLegacy.length,
     productionFilesWithCanonicalReferences: productionCanonical.length,
+    testCompatFilesWithLegacyDependencies: testCompatFiles.length,
+    transitionalAdapter: {
+      path: spec.adapter,
+      present: Boolean(adapterRecord),
+      legacyReferences: adapterRecord?.legacy ?? [],
+      canonicalReferences: adapterRecord?.canonical ?? [],
+    },
+    compatibilityFactory: {
+      name: spec.compatibilityFactory,
+      present:
+        spec.compatibilityFactory == null ||
+        Boolean(
+          adapterRecord?.functions.some(
+            (fn) => fn.name === spec.compatibilityFactory,
+          ) ||
+            // Compatibility factories are intentionally allowed to live in
+            // cfg(test) items.  `productionMask` removes those items for
+            // legacy-consumer classification, so inspect the lexical source
+            // separately when proving the test-only seam still exists.
+            adapterRecord?.allFunctions.some(
+              (fn) => fn.name === spec.compatibilityFactory,
+            ),
+        ),
+      line:
+        adapterRecord?.functions.find(
+          (fn) => fn.name === spec.compatibilityFactory,
+        )?.line ?? null,
+    },
     adapterLegacyReferences: adapterRecord?.legacy ?? [],
     adapterCanonicalReferences: adapterRecord?.canonical ?? [],
     consumerLegacyReferences: consumerRecord?.legacy ?? [],
@@ -386,6 +586,51 @@ function summarizeDomain(spec, files) {
       path: file.path,
       references: file.legacy,
     })),
+    testCompatFiles: testCompatFiles.map((file) => ({
+      path: file.path,
+      references: file.legacy,
+    })),
+  };
+}
+
+function findFunctionBody(source, functionName) {
+  const masked = lexicalMask(source);
+  const escaped = functionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const functionIndex = masked.search(new RegExp(`\\bfn\\s+${escaped}\\s*\\(`));
+  if (functionIndex < 0) return null;
+  const open = masked.indexOf('{', functionIndex);
+  if (open < 0) return null;
+  return source.slice(functionIndex, matchingBrace(masked, open));
+}
+
+function inspectAppComposition(root = REPO_ROOT) {
+  const source = readFileSync(resolve(root, APP_COMPOSITION_PATH), 'utf8');
+  const domains = DOMAIN_SPECS.map((spec) => {
+    const body = findFunctionBody(source, spec.appComposition.function);
+    const evidence = spec.appComposition.evidence.map((pattern) => {
+      pattern.lastIndex = 0;
+      return { pattern: pattern.source, matched: body !== null && pattern.test(body) };
+    });
+    return {
+      domain: spec.id,
+      function: spec.appComposition.function,
+      path: APP_COMPOSITION_PATH,
+      status:
+        body !== null && evidence.every((item) => item.matched)
+          ? 'covered'
+          : 'missing',
+      evidence,
+      missing: evidence
+        .filter((item) => !item.matched)
+        .map((item) => item.pattern),
+    };
+  });
+  return {
+    path: APP_COMPOSITION_PATH,
+    owner: 'NomiCoreSessionOwner',
+    domains,
+    coveredDomains: domains.filter((item) => item.status === 'covered').length,
+    missingDomains: domains.filter((item) => item.status !== 'covered').length,
   };
 }
 
@@ -396,12 +641,19 @@ export function collectAutomationDependencyInventory(root = REPO_ROOT) {
   const files = paths.map((path) => fileRecord(path, root));
   const domains = DOMAIN_SPECS.map((spec) => summarizeDomain(spec, files));
   const productionLegacyFiles = files.filter(
-    (file) => file.kind === 'production' && file.legacy.length > 0,
+    (file) =>
+      file.kind === 'production' &&
+      !file.isAdapter &&
+      file.legacy.length > 0,
   );
   const adapterPaths = domains.map((domain) => domain.adapter);
   const adaptersWithLegacy = domains.filter(
-    (domain) => domain.adapterLegacyReferences.length > 0,
+    (domain) => domain.transitionalAdapter.legacyReferences.length > 0,
   );
+  const testCompatFiles = files.filter(
+    (file) => file.kind === 'test' && file.legacy.length > 0,
+  );
+  const appComposition = inspectAppComposition(root);
   return {
     task: TASK_ID,
     scope: DOMAIN_SPECS.map((spec) => spec.id),
@@ -412,15 +664,20 @@ export function collectAutomationDependencyInventory(root = REPO_ROOT) {
       productionFilesWithLegacyDependencies: productionLegacyFiles.length,
       transitionalAdapters: adapterPaths.length,
       transitionalAdaptersWithLegacyDependencies: adaptersWithLegacy.length,
+      testCompatFilesWithLegacyDependencies: testCompatFiles.length,
+      appCompositionCoveredDomains: appComposition.coveredDomains,
+      appCompositionMissingDomains: appComposition.missingDomains,
     },
     domains,
+    appComposition,
     migrationCandidate: {
       domain: 'cron',
       path: 'crates/backend/nomifun-cron/src/session_port.rs',
       consumer: 'crates/backend/nomifun-cron/src/executor.rs',
       rationale:
         'Cron is the first scheduled producer, has the smallest consumer-facing port, and is already isolated behind one adapter. Migrate its adapter only after canonical Session adds receipt/reconciliation and cron-session lookup operations.',
-      currentStatus: 'not-safe-to-wire-without-central-composition',
+      currentStatus: 'blocked-by-canonical-automation-contract',
+      compositionStatus: 'covered-by-app-nomi-core-session-owner',
       nextRequiredContract: [
         'open or reuse an AgentSession from an explicit frozen binding',
         'start a keyed turn and query its terminal receipt',
@@ -441,8 +698,19 @@ export function assertAuditInvariants(report) {
   if (report.migrationCandidate.domain !== 'cron') {
     throw new Error('Cron must remain the first migration candidate');
   }
-  if (report.migrationCandidate.currentStatus !== 'not-safe-to-wire-without-central-composition') {
-    throw new Error('the audit must not claim a production migration without composition');
+  if (report.migrationCandidate.currentStatus !== 'blocked-by-canonical-automation-contract') {
+    throw new Error('the audit must keep Cron blocked on the missing canonical contract');
+  }
+  if (report.appComposition.missingDomains !== 0) {
+    throw new Error(
+      `app composition is missing: ${report.appComposition.domains
+        .filter((domain) => domain.status !== 'covered')
+        .map((domain) => domain.domain)
+        .join(', ')}`,
+    );
+  }
+  if (report.summary.productionFilesWithLegacyDependencies === 0) {
+    throw new Error('the audit must retain real production legacy findings');
   }
   for (const domain of report.domains) {
     if (!ADAPTER_FILE_SET.has(domain.adapter)) {
@@ -450,6 +718,23 @@ export function assertAuditInvariants(report) {
     }
     if (domain.adapterLegacyReferences.length === 0) {
       throw new Error(`${domain.id} adapter no longer exposes the expected legacy boundary`);
+    }
+    if (
+      domain.compatibilityFactory.name != null &&
+      !domain.compatibilityFactory.present
+    ) {
+      throw new Error(
+        `${domain.id} compatibility factory ${domain.compatibilityFactory.name} is missing`,
+      );
+    }
+    if (
+      domain.legacyFiles.some(
+        (file) =>
+          file.path === domain.adapter ||
+          file.path.split('/').includes('tests'),
+      )
+    ) {
+      throw new Error(`${domain.id} test/adapter references leaked into production legacy`);
     }
   }
   return report;
@@ -472,6 +757,24 @@ function assertSyntheticMask() {
   if (!realImport.includes('nomifun_conversation::')) {
     throw new Error('lexical mask removed a real import');
   }
+  const testOnly = `
+    #[cfg(test)]
+    mod tests {
+      use nomifun_conversation::ConversationService;
+    }
+    fn production() {}
+  `;
+  if (productionMask(testOnly).includes('nomifun_conversation::')) {
+    throw new Error('cfg(test) item was incorrectly classified as production');
+  }
+  const cfgAllTest = `
+    #[cfg(all(feature = "x", test))]
+    fn fixture() { let _ = nomifun_conversation::ConversationService; }
+    fn production() {}
+  `;
+  if (productionMask(cfgAllTest).includes('nomifun_conversation::')) {
+    throw new Error('cfg(all(..., test)) item was incorrectly classified as production');
+  }
 }
 
 export function assertSelfTest() {
@@ -490,19 +793,39 @@ function printHumanReport(report) {
   console.log(`${report.task} automation Session dependency audit`);
   console.log(
     `scanned=${report.summary.scannedRustFiles} production=${report.summary.productionFiles} ` +
-      `tests=${report.summary.testFiles} production_legacy_files=${report.summary.productionFilesWithLegacyDependencies}`,
+      `tests=${report.summary.testFiles} ` +
+      `production_legacy_files=${report.summary.productionFilesWithLegacyDependencies} ` +
+      `transitional_adapters=${report.summary.transitionalAdaptersWithLegacyDependencies} ` +
+      `test_compat_files=${report.summary.testCompatFilesWithLegacyDependencies} ` +
+      `app_composition=${report.summary.appCompositionCoveredDomains}/${report.scope.length}`,
   );
   for (const domain of report.domains) {
+    const composition = report.appComposition.domains.find(
+      (item) => item.domain === domain.id,
+    );
     console.log(
       `${domain.rank}. ${domain.id}: ${domain.readiness}; ` +
+        `app_composition=${composition?.status ?? 'missing'}; ` +
+        `transitional_adapter=${domain.transitionalAdapter.present ? 'yes' : 'missing'}; ` +
+        `compat_factory=${domain.compatibilityFactory.present ? domain.compatibilityFactory.name : 'missing'}; ` +
         `adapter_legacy=${domain.adapterLegacyReferences.length}; ` +
         `production_legacy_files=${domain.productionFilesWithLegacyDependencies}; ` +
+        `test_compat_files=${domain.testCompatFilesWithLegacyDependencies}; ` +
         `canonical_files=${domain.productionFilesWithCanonicalReferences}`,
     );
+    for (const file of domain.legacyFiles) {
+      console.log(`  production legacy: ${file.path}`);
+    }
+    for (const file of domain.testCompatFiles) {
+      console.log(`  test/compat: ${file.path}`);
+    }
   }
   console.log(
     `candidate=${report.migrationCandidate.path} ` +
       `(status=${report.migrationCandidate.currentStatus})`,
+  );
+  console.log(
+    `candidate composition=${report.migrationCandidate.compositionStatus}`,
   );
   console.log('candidate blockers:');
   for (const blocker of report.domains[0].blockers) {
@@ -520,6 +843,9 @@ function main(argv = process.argv.slice(2)) {
     console.log(JSON.stringify(report, null, 2));
   } else {
     printHumanReport(report);
+  }
+  if (report.summary.productionFilesWithLegacyDependencies > 0) {
+    process.exitCode = 1;
   }
 }
 

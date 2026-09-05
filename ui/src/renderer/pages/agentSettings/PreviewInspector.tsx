@@ -6,6 +6,7 @@ import { Alert, Collapse, Tag } from '@arco-design/web-react';
 import { CheckOne, CloseOne, Connection, Info, Terminal } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { previewDiagnosticMessage } from './model';
 import styles from './AgentSettingsPage.module.css';
 
 type PreviewInspectorProps = {
@@ -65,7 +66,6 @@ const PreviewInspector: React.FC<PreviewInspectorProps> = ({ preview, tokenState
             })}
           </span>
         </div>
-        <code title={preview.preview_digest}>{preview.preview_digest.slice(0, 12)}</code>
       </div>
 
       <div className={styles.metricGrid}>
@@ -81,11 +81,10 @@ const PreviewInspector: React.FC<PreviewInspectorProps> = ({ preview, tokenState
         <div className={styles.diagnosticList}>
           {preview.diagnostics.map((diagnostic, index) => (
             <Alert
-              key={`${diagnostic.code}-${diagnostic.subject ?? index}`}
+              key={index}
               type={diagnostic.severity === 'error' ? 'error' : 'warning'}
               showIcon
-              title={diagnostic.code}
-              content={diagnostic.message}
+              content={previewDiagnosticMessage(diagnostic)}
             />
           ))}
         </div>
@@ -97,79 +96,73 @@ const PreviewInspector: React.FC<PreviewInspectorProps> = ({ preview, tokenState
             <div>
               <span>{t('agentSettings.capabilities.initial')}</span>
               <div className={styles.tagRow}>
-                {preview.revision_diff.added_initial.map((id) => (
-                  <Tag key={`add-${id}`} size='small' color='green'>
-                    + {id}
+                {preview.revision_diff.added_initial.length +
+                  preview.revision_diff.removed_initial.length >
+                0 ? (
+                  <Tag size='small' color='blue'>
+                    {preview.revision_diff.added_initial.length +
+                      preview.revision_diff.removed_initial.length}{' '}
+                    {t('agentSettings.sections.capabilities')}
                   </Tag>
-                ))}
-                {preview.revision_diff.removed_initial.map((id) => (
-                  <Tag key={`remove-${id}`} size='small' color='red'>
-                    - {id}
-                  </Tag>
-                ))}
-                {preview.revision_diff.added_initial.length === 0 &&
-                  preview.revision_diff.removed_initial.length === 0 && (
-                    <span>{t('agentSettings.common.noChanges')}</span>
-                  )}
+                ) : (
+                  <span>{t('agentSettings.common.noChanges')}</span>
+                )}
               </div>
             </div>
             <div>
               <span>{t('agentSettings.capabilities.onDemand')}</span>
               <div className={styles.tagRow}>
-                {preview.revision_diff.added_on_demand.map((id) => (
-                  <Tag key={`add-${id}`} size='small' color='green'>
-                    + {id}
+                {preview.revision_diff.added_on_demand.length +
+                  preview.revision_diff.removed_on_demand.length >
+                0 ? (
+                  <Tag size='small' color='blue'>
+                    {preview.revision_diff.added_on_demand.length +
+                      preview.revision_diff.removed_on_demand.length}{' '}
+                    {t('agentSettings.sections.capabilities')}
                   </Tag>
-                ))}
-                {preview.revision_diff.removed_on_demand.map((id) => (
-                  <Tag key={`remove-${id}`} size='small' color='red'>
-                    - {id}
-                  </Tag>
-                ))}
-                {preview.revision_diff.added_on_demand.length === 0 &&
-                  preview.revision_diff.removed_on_demand.length === 0 && (
-                    <span>{t('agentSettings.common.noChanges')}</span>
-                  )}
+                ) : (
+                  <span>{t('agentSettings.common.noChanges')}</span>
+                )}
               </div>
             </div>
           </div>
         </Collapse.Item>
 
-        <Collapse.Item name='snapshot' header={t('agentSettings.inspector.snapshot')}>
-          <div className={styles.inspectorRows}>
-            <div>
-              <span>{t('agentSettings.inspector.snapshotDigest')}</span>
-              <code>
-                {preview.inspector.snapshot_ref?.snapshot_digest ??
-                  t('agentSettings.common.unavailable')}
-              </code>
+          <Collapse.Item name='snapshot' header={t('agentSettings.inspector.snapshot')}>
+            <div className={styles.inspectorRows}>
+              <div>
+                <span>{t('agentSettings.inspector.snapshot')}</span>
+                <strong>
+                  {preview.inspector.snapshot_ref
+                    ? t('common.added', { defaultValue: 'Resolved' })
+                    : t('agentSettings.common.unavailable')}
+                </strong>
+              </div>
+              <div>
+                <span>{t('agentSettings.inspector.runtimeProfile')}</span>
+                <strong>
+                  {preview.inspector.runtime_profile ?? t('agentSettings.common.unavailable')}
+                </strong>
+              </div>
+              <div>
+                <span>{t('agentSettings.inspector.protocol')}</span>
+                <strong>{preview.inspector.required_runtime_protocol_version}</strong>
+              </div>
+              <div>
+                <span>{t('agentSettings.inspector.tools')}</span>
+                <strong>{preview.inspector.tool_schema_refs.length}</strong>
+              </div>
+              <div>
+                <span>{t('agentSettings.inspector.context')}</span>
+                <strong>{preview.inspector.context_schema_refs.length}</strong>
+              </div>
             </div>
-            <div>
-              <span>{t('agentSettings.inspector.runtimeProfile')}</span>
-              <code>
-                {preview.inspector.runtime_profile ?? t('agentSettings.common.unavailable')}
-              </code>
-            </div>
-            <div>
-              <span>{t('agentSettings.inspector.protocol')}</span>
-              <code>{preview.inspector.required_runtime_protocol_version}</code>
-            </div>
-            <div>
-              <span>{t('agentSettings.inspector.tools')}</span>
-              <code>{preview.inspector.tool_schema_refs.length}</code>
-            </div>
-            <div>
-              <span>{t('agentSettings.inspector.context')}</span>
-              <code>{preview.inspector.context_schema_refs.length}</code>
-            </div>
-          </div>
-          <div className={styles.tagRow}>
-            {preview.inspector.required_runtime_features.map((feature) => (
-              <Tag key={feature} size='small' color='gray'>
-                {feature}
-              </Tag>
-            ))}
-          </div>
+            {preview.inspector.required_runtime_features.length > 0 && (
+              <div className={styles.inlineEmpty}>
+                {preview.inspector.required_runtime_features.length}{' '}
+                {t('agentSettings.inspector.runtimeProfile')}
+              </div>
+            )}
         </Collapse.Item>
 
         <Collapse.Item name='continuation' header={t('agentSettings.inspector.continuation')}>

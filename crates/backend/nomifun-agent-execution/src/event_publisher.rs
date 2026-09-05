@@ -16,6 +16,7 @@ use nomifun_realtime::UserEventSink;
 use serde_json::{json, to_value};
 
 use crate::domain_mapper;
+use crate::lifecycle::AgentExecutionLifecycle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LeadThinkingPhase {
@@ -53,6 +54,7 @@ pub(crate) struct AgentExecutionEventPublisher {
     drain_gate: Arc<tokio::sync::Mutex<()>>,
     retry_worker_started: Arc<AtomicBool>,
     retry_notify: Arc<tokio::sync::Notify>,
+    lifecycle: AgentExecutionLifecycle,
 }
 
 impl AgentExecutionEventPublisher {
@@ -62,7 +64,13 @@ impl AgentExecutionEventPublisher {
             drain_gate: Arc::new(tokio::sync::Mutex::new(())),
             retry_worker_started: Arc::new(AtomicBool::new(false)),
             retry_notify: Arc::new(tokio::sync::Notify::new()),
+            lifecycle: AgentExecutionLifecycle::new(),
         }
+    }
+
+    pub(crate) fn with_lifecycle(mut self, lifecycle: AgentExecutionLifecycle) -> Self {
+        self.lifecycle = lifecycle;
+        self
     }
 
     fn publish_change(&self, owner_id: &str, event: AgentExecutionChangedEvent) {
@@ -77,6 +85,9 @@ impl AgentExecutionEventPublisher {
     /// Drain committed outbox rows in sequence order. Safe to call after every
     /// mutation and once during boot; publication markers make it idempotent.
     pub async fn drain(&self, repository: Arc<dyn IAgentExecutionRepository>) {
+        if self.lifecycle.is_cancelled() {
+            return;
+        }
         self.ensure_retry_worker(repository.clone());
         if !self.drain_once(repository.as_ref()).await {
             self.retry_notify.notify_one();
@@ -89,6 +100,9 @@ impl AgentExecutionEventPublisher {
         // before either caller records its publication marker.
         let _guard = self.drain_gate.lock().await;
         loop {
+            if self.lifecycle.is_cancelled() {
+                return true;
+            }
             let events = match repository.list_unpublished_events(100).await {
                 Ok(events) => events,
                 Err(error) => {
@@ -150,14 +164,20 @@ impl AgentExecutionEventPublisher {
             return;
         }
         let publisher = self.clone();
-        tokio::spawn(async move {
+        self.lifecycle.spawn(async move {
             const MIN_DELAY: Duration = Duration::from_secs(1);
             const MAX_DELAY: Duration = Duration::from_secs(60);
             loop {
-                publisher.retry_notify.notified().await;
+                tokio::select! {
+                    _ = publisher.lifecycle.cancelled() => return,
+                    _ = publisher.retry_notify.notified() => {}
+                }
                 let mut delay = MIN_DELAY;
                 while !publisher.drain_once(repository.as_ref()).await {
-                    tokio::time::sleep(delay).await;
+                    tokio::select! {
+                        _ = publisher.lifecycle.cancelled() => return,
+                        _ = tokio::time::sleep(delay) => {}
+                    }
                     delay = delay.saturating_mul(2).min(MAX_DELAY);
                 }
             }

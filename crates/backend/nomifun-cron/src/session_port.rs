@@ -1,19 +1,25 @@
 //! Typed Session boundary used by Cron execution.
 
+#[cfg(test)]
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use nomifun_agent_contracts::AgentSessionId;
+#[cfg(test)]
 use nomifun_ai_agent::AgentRuntimeRegistry;
+#[cfg(test)]
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 use nomifun_api_types::{
     ConversationResponse, CreateConversationRequest, ResolvedPresetSnapshot, SendMessageRequest,
 };
 use nomifun_common::AppError;
 use nomifun_conversation::service::{
-    BackgroundTurnReconciliationDisposition, BackgroundTurnRuntimePreparation,
-    ObservedIdempotentMessageDelivery, PublicTurnDeliveryState,
+    BackgroundTurnReconciliationDisposition, PublicTurnDeliveryState,
 };
-use nomifun_conversation::{ConversationService, IdempotentMessageDelivery};
+#[cfg(test)]
+use nomifun_conversation::service::BackgroundTurnRuntimePreparation;
+#[cfg(test)]
+use nomifun_conversation::ConversationService;
 
 /// One Cron turn handed to the canonical Session owner.
 ///
@@ -27,6 +33,120 @@ pub struct CronTurnRequest {
     pub message: SendMessageRequest,
     pub runtime_extra: serde_json::Value,
     pub clear_context: bool,
+}
+
+/// Canonical handle exposed to Cron execution.  The scheduler does not need
+/// the legacy Conversation DTO or its mutable `extra` map; it only needs the
+/// stable AgentSession identity and the host-resolved workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronSessionHandle {
+    pub agent_session_id: AgentSessionId,
+    pub workspace: String,
+}
+
+/// Stable terminal receipt owned by the Cron boundary.  The consumer never
+/// needs the Conversation repository row or runtime handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronTurnDelivery {
+    pub message_id: String,
+    pub replayed: bool,
+    pub completed: bool,
+    pub result_ok: Option<bool>,
+    pub result_text: Option<String>,
+    pub result_error: Option<String>,
+    pub result_error_code: Option<String>,
+    pub result_error_retryable: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CronTurnReceiptState {
+    Missing,
+    Accepted { message_id: String },
+    Completed(CronTurnDelivery),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CronTurnReconciliation {
+    LiveExactOwnerWait,
+    ReconciledOrTerminalReRead,
+    ExternalProofRequiredFailClosed,
+    StaleConflict,
+}
+
+pub fn turn_delivery_from_conversation(
+    delivery: nomifun_conversation::IdempotentMessageDelivery,
+) -> CronTurnDelivery {
+    CronTurnDelivery {
+        message_id: delivery.message_id,
+        replayed: delivery.replayed,
+        completed: delivery.completed,
+        result_ok: delivery.result_ok,
+        result_text: delivery.result_text,
+        result_error: delivery.result_error,
+        result_error_code: delivery.result_error_code,
+        result_error_retryable: delivery.result_error_retryable,
+    }
+}
+
+pub fn turn_state_from_conversation(
+    state: PublicTurnDeliveryState,
+) -> CronTurnReceiptState {
+    match state {
+        PublicTurnDeliveryState::Missing => CronTurnReceiptState::Missing,
+        PublicTurnDeliveryState::Accepted { message_id } => {
+            CronTurnReceiptState::Accepted { message_id }
+        }
+        PublicTurnDeliveryState::Completed(delivery) => {
+            CronTurnReceiptState::Completed(turn_delivery_from_conversation(delivery))
+        }
+    }
+}
+
+pub const fn turn_reconciliation_from_conversation(
+    disposition: BackgroundTurnReconciliationDisposition,
+) -> CronTurnReconciliation {
+    match disposition {
+        BackgroundTurnReconciliationDisposition::LiveExactOwnerWait => {
+            CronTurnReconciliation::LiveExactOwnerWait
+        }
+        BackgroundTurnReconciliationDisposition::ReconciledOrTerminalReRead => {
+            CronTurnReconciliation::ReconciledOrTerminalReRead
+        }
+        BackgroundTurnReconciliationDisposition::ExternalProofRequiredFailClosed => {
+            CronTurnReconciliation::ExternalProofRequiredFailClosed
+        }
+        BackgroundTurnReconciliationDisposition::StaleConflict => {
+            CronTurnReconciliation::StaleConflict
+        }
+    }
+}
+
+pub fn session_handle_from_response(
+    response: ConversationResponse,
+) -> Result<CronSessionHandle, AppError> {
+    let workspace = response
+        .extra
+        .get("workspace")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|workspace| !workspace.is_empty())
+        .ok_or_else(|| {
+            AppError::Conflict(format!(
+                "AgentSession {} has no canonical workspace",
+                response.conversation_id
+            ))
+        })?
+        .to_owned();
+    let agent_session_id = AgentSessionId::from(response.conversation_id);
+    nomifun_common::validate_uuidv7(agent_session_id.as_ref()).map_err(|error| {
+        AppError::Conflict(format!(
+            "AgentSession identity is not canonical UUIDv7: {error}"
+        ))
+    })?;
+    Ok(CronSessionHandle {
+        agent_session_id,
+        workspace,
+    })
 }
 
 /// Exact Session operations needed by the Cron domain.
@@ -43,14 +163,14 @@ pub trait CronSessionPort: Send + Sync {
         user_id: &str,
         session_id: &str,
         idempotency_key: &str,
-    ) -> Result<PublicTurnDeliveryState, AppError>;
+    ) -> Result<CronTurnReceiptState, AppError>;
 
     async fn reconcile_quiescent_running_turn(
         &self,
         user_id: &str,
         session_id: &str,
         idempotency_key: &str,
-    ) -> Result<BackgroundTurnReconciliationDisposition, AppError>;
+    ) -> Result<CronTurnReconciliation, AppError>;
 
     async fn create_idempotent(
         &self,
@@ -58,7 +178,7 @@ pub trait CronSessionPort: Send + Sync {
         request: CreateConversationRequest,
         snapshot: Option<ResolvedPresetSnapshot>,
         creation_key: &str,
-    ) -> Result<ConversationResponse, AppError>;
+    ) -> Result<CronSessionHandle, AppError>;
 
     async fn send_observed_turn(
         &self,
@@ -66,7 +186,7 @@ pub trait CronSessionPort: Send + Sync {
         session_id: &str,
         idempotency_key: &str,
         turn: CronTurnRequest,
-    ) -> Result<ObservedIdempotentMessageDelivery, AppError>;
+    ) -> Result<CronTurnDelivery, AppError>;
 
     async fn delivery_result(
         &self,
@@ -74,16 +194,18 @@ pub trait CronSessionPort: Send + Sync {
         session_id: &str,
         idempotency_key: &str,
         request: &SendMessageRequest,
-    ) -> Result<Option<IdempotentMessageDelivery>, AppError>;
+    ) -> Result<Option<CronTurnDelivery>, AppError>;
 }
 
-struct ConversationCronSessionPort {
+#[cfg(test)]
+struct TestCronSessionPort {
     service: Arc<ConversationService>,
     runtime_registry: Arc<dyn AgentRuntimeRegistry>,
 }
 
+#[cfg(test)]
 #[async_trait]
-impl CronSessionPort for ConversationCronSessionPort {
+impl CronSessionPort for TestCronSessionPort {
     async fn list_by_cron_job(
         &self,
         user_id: &str,
@@ -97,10 +219,10 @@ impl CronSessionPort for ConversationCronSessionPort {
         user_id: &str,
         session_id: &str,
         idempotency_key: &str,
-    ) -> Result<PublicTurnDeliveryState, AppError> {
-        self.service
+    ) -> Result<CronTurnReceiptState, AppError> {
+        Ok(turn_state_from_conversation(self.service
             .public_turn_delivery_state(user_id, session_id, idempotency_key)
-            .await
+            .await?))
     }
 
     async fn reconcile_quiescent_running_turn(
@@ -108,15 +230,15 @@ impl CronSessionPort for ConversationCronSessionPort {
         user_id: &str,
         session_id: &str,
         idempotency_key: &str,
-    ) -> Result<BackgroundTurnReconciliationDisposition, AppError> {
-        self.service
+    ) -> Result<CronTurnReconciliation, AppError> {
+        Ok(turn_reconciliation_from_conversation(self.service
             .reconcile_quiescent_running_turn_for_background(
                 user_id,
                 session_id,
                 idempotency_key,
                 &self.runtime_registry,
             )
-            .await
+            .await?))
     }
 
     async fn create_idempotent(
@@ -125,22 +247,24 @@ impl CronSessionPort for ConversationCronSessionPort {
         request: CreateConversationRequest,
         snapshot: Option<ResolvedPresetSnapshot>,
         creation_key: &str,
-    ) -> Result<ConversationResponse, AppError> {
+    ) -> Result<CronSessionHandle, AppError> {
         match snapshot {
             Some(snapshot) => {
-                self.service
+                let response = self.service
                     .create_from_preset_snapshot_idempotent(
                         user_id,
                         request,
                         snapshot,
                         creation_key,
                     )
-                    .await
+                    .await?;
+                session_handle_from_response(response)
             }
             None => {
-                self.service
+                let response = self.service
                     .create_idempotent(user_id, request, creation_key)
-                    .await
+                    .await?;
+                session_handle_from_response(response)
             }
         }
     }
@@ -151,7 +275,7 @@ impl CronSessionPort for ConversationCronSessionPort {
         session_id: &str,
         idempotency_key: &str,
         turn: CronTurnRequest,
-    ) -> Result<ObservedIdempotentMessageDelivery, AppError> {
+    ) -> Result<CronTurnDelivery, AppError> {
         let build_lease = self
             .service
             .begin_public_runtime_preparation(session_id, user_id)?;
@@ -159,7 +283,7 @@ impl CronSessionPort for ConversationCronSessionPort {
         build_lease.ensure_active()?;
         let runtime_options =
             runtime_options_from_session(user_id, session, turn.runtime_extra)?;
-        self.service
+        let observed = self.service
             .send_observed_background_message_with_idempotency_key(
                 user_id,
                 session_id,
@@ -173,7 +297,8 @@ impl CronSessionPort for ConversationCronSessionPort {
                     pre_send_hook: None,
                 },
             )
-            .await
+            .await?;
+        Ok(turn_delivery_from_conversation(observed.delivery))
     }
 
     async fn delivery_result(
@@ -182,23 +307,25 @@ impl CronSessionPort for ConversationCronSessionPort {
         session_id: &str,
         idempotency_key: &str,
         request: &SendMessageRequest,
-    ) -> Result<Option<IdempotentMessageDelivery>, AppError> {
-        self.service
+    ) -> Result<Option<CronTurnDelivery>, AppError> {
+        Ok(self.service
             .idempotent_delivery_result_with_idempotency_key(
                 user_id,
                 session_id,
                 idempotency_key,
                 request,
             )
-            .await
+            .await?
+            .map(turn_delivery_from_conversation))
     }
 }
 
 /// Translate the canonical Session projection into the legacy runtime
-/// preparation shape at the one remaining host adapter boundary.
+/// preparation shape for the in-crate test adapter only.
 ///
 /// The caller may add per-run metadata, but cannot override Session-owned
 /// identity or policy fields by putting similarly named values in `extra`.
+#[cfg(test)]
 fn runtime_options_from_session(
     user_id: &str,
     session: ConversationResponse,
@@ -251,12 +378,15 @@ fn runtime_options_from_session(
     })
 }
 
-/// Build the transitional Conversation-backed Cron Session port.
-pub fn conversation_cron_session_port(
+/// Build the Conversation-backed adapter used only by unit tests in this
+/// crate. Production composition supplies a `CronSessionPort` implementation
+/// from the host-owned Session owner directly.
+#[cfg(test)]
+pub(crate) fn test_cron_session_port(
     service: Arc<ConversationService>,
     runtime_registry: Arc<dyn AgentRuntimeRegistry>,
 ) -> Arc<dyn CronSessionPort> {
-    Arc::new(ConversationCronSessionPort {
+    Arc::new(TestCronSessionPort {
         service,
         runtime_registry,
     })

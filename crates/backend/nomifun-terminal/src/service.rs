@@ -19,6 +19,7 @@ use nomifun_db::{
     TerminalTurnEffectsStart, TerminalTurnOutcome, TerminalTurnSettlement,
 };
 use tracing::{info, warn};
+use tokio_util::sync::CancellationToken;
 
 use crate::driver::{TerminalDescription, TerminalDriver};
 use crate::error::TerminalError;
@@ -1504,20 +1505,30 @@ impl TerminalService {
     /// Spawn exactly once at boot. The task holds only a weak reference so a
     /// failed startup or an explicit service teardown cannot be kept alive by
     /// the detached periodic worker itself.
-    pub fn spawn_scrollback_flusher(self: &Arc<Self>) {
+    pub fn spawn_scrollback_flusher_with_shutdown(
+        self: &Arc<Self>,
+        shutdown: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
         let svc = Arc::downgrade(self);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(SCROLLBACK_FLUSH_INTERVAL);
-            // The first tick fires immediately; skip it (nothing to flush yet).
+            // The first interval tick is immediate; preserve the historical
+            // behavior of waiting one full period before the first flush.
             ticker.tick().await;
             loop {
-                ticker.tick().await;
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = ticker.tick() => {}
+                }
+                if shutdown.is_cancelled() {
+                    break;
+                }
                 let Some(svc) = svc.upgrade() else {
                     break;
                 };
                 svc.flush_dirty_scrollback().await;
             }
-        });
+        })
     }
 
     /// One persistence pass: write every dirty live session's scrollback to the

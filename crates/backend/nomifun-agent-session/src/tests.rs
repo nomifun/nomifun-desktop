@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::{
     AgentSessionStore, ChatOperationClaimRequest, CreateSessionRequest, EffectEventRequest,
     EffectReconcileOutcome, EffectStrategy, EffectTerminalState, ForkRequest, RuntimeAppendContext,
-    SessionStoreError, evaluate_snapshot_compatibility, validate_checkpoint,
+    SessionStoreError, TurnReceiptStatus, evaluate_snapshot_compatibility, validate_checkpoint,
 };
 use crate::projector::reduce_message_projection;
 
@@ -196,6 +196,26 @@ async fn create_ready(store: &AgentSessionStore, key: &str) -> (AgentSessionLive
     );
     let ready_ack = store.append_event(&ready).await.unwrap().ack.unwrap();
     (created.session, ready_ack.event_id)
+}
+
+async fn create_turn(
+    store: &AgentSessionStore,
+    key: &str,
+    operation: &str,
+) -> (AgentSessionLiveRecord, EventId) {
+    let (session, ready_event) = create_ready(store, key).await;
+    let turn = append(
+        &session.agent_session_id,
+        &format!("event-turn-started-{key}"),
+        "session-api",
+        &format!("turn-started-{key}"),
+        "turn/started",
+        operation,
+        Some(ready_event),
+        json!({"operation_id": operation}),
+    );
+    let turn_ack = store.append_event(&turn).await.unwrap().ack.unwrap();
+    (session, turn_ack.event_id)
 }
 
 #[tokio::test]
@@ -779,6 +799,276 @@ async fn chat_operation_claim_is_atomic_and_respects_turn_fence() {
         .await
         .unwrap_err();
     assert!(matches!(fenced, SessionStoreError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn turn_receipt_is_running_without_a_terminal_fact_and_does_not_infer_from_text() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, turn_event) = create_turn(&store, "turn-receipt-running", "turn-running").await;
+    let content = append(
+        &session.agent_session_id,
+        "turn-receipt-content",
+        "runtime-supervisor",
+        "turn-receipt-content",
+        "message/content-part",
+        "turn-running",
+        Some(turn_event),
+        json!({"content": "ordinary text is not a turn terminal"}),
+    );
+    store.append_event(&content).await.unwrap();
+
+    let receipt = store
+        .read_turn_receipt(
+            &session.agent_session_id,
+            &OperationId::from("turn-running"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt.status, TurnReceiptStatus::Running);
+    assert!(receipt.started_event.is_some());
+    assert!(receipt.terminal_event.is_none());
+
+    let missing_operation = store
+        .read_turn_receipt(
+            &session.agent_session_id,
+            &OperationId::from("turn-does-not-exist"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_operation.status, TurnReceiptStatus::NotFound);
+
+    let missing_session = AgentSessionId::from(
+        "0199a8c0-0000-7000-8000-000000000099",
+    );
+    assert!(matches!(
+        store
+            .read_turn_receipt(&missing_session, &OperationId::from("turn-running"))
+            .await,
+        Err(SessionStoreError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn turn_receipt_reports_each_canonical_terminal_state() {
+    for (key, operation, kind, producer, payload, expected) in [
+        (
+            "turn-receipt-completed",
+            "turn-completed",
+            "turn/completed",
+            "runtime-supervisor",
+            json!({}),
+            TurnReceiptStatus::Completed,
+        ),
+        (
+            "turn-receipt-failed",
+            "turn-failed",
+            "turn/failed",
+            "runtime-supervisor",
+            json!({"error": "model failed"}),
+            TurnReceiptStatus::Failed,
+        ),
+        (
+            "turn-receipt-cancelled",
+            "turn-cancelled",
+            "turn/cancelled",
+            "session-api",
+            json!({"target_operation_id": "turn-cancelled"}),
+            TurnReceiptStatus::Cancelled,
+        ),
+    ] {
+        let store = AgentSessionStore::open_in_memory().await.unwrap();
+        let (session, turn_event) = create_turn(&store, key, operation).await;
+        let terminal = append(
+            &session.agent_session_id,
+            &format!("event-{key}-terminal"),
+            producer,
+            &format!("{key}-terminal"),
+            kind,
+            operation,
+            Some(turn_event),
+            payload,
+        );
+        store.append_event(&terminal).await.unwrap();
+
+        let receipt = store
+            .read_turn_receipt(&session.agent_session_id, &OperationId::from(operation))
+            .await
+            .unwrap();
+        assert_eq!(receipt.status, expected);
+        assert_eq!(
+            receipt.terminal_event.as_ref().map(|event| event.kind.0.as_str()),
+            Some(kind)
+        );
+    }
+}
+
+#[tokio::test]
+async fn turn_receipt_terminal_fence_is_monotonic_across_replays_and_late_events() {
+    for (key, operation, first_kind, first_producer, first_payload, expected) in [
+        (
+            "turn-receipt-fence-completed",
+            "turn-fence-completed",
+            "turn/completed",
+            "runtime-supervisor",
+            json!({}),
+            TurnReceiptStatus::Completed,
+        ),
+        (
+            "turn-receipt-fence-failed",
+            "turn-fence-failed",
+            "turn/failed",
+            "runtime-supervisor",
+            json!({"error": "first terminal"}),
+            TurnReceiptStatus::Failed,
+        ),
+        (
+            "turn-receipt-fence-cancelled",
+            "turn-fence-cancelled",
+            "turn/cancelled",
+            "session-api",
+            json!({"target_operation_id": "turn-fence-cancelled"}),
+            TurnReceiptStatus::Cancelled,
+        ),
+    ] {
+        let store = AgentSessionStore::open_in_memory().await.unwrap();
+        let (session, turn_event) = create_turn(&store, key, operation).await;
+        let first_terminal = append(
+            &session.agent_session_id,
+            &format!("event-{key}-first-terminal"),
+            first_producer,
+            &format!("{key}-first-terminal"),
+            first_kind,
+            operation,
+            Some(turn_event.clone()),
+            first_payload,
+        );
+        let first_result = store.append_event(&first_terminal).await.unwrap();
+        let first_event_id = first_result.ack.as_ref().unwrap().event_id.clone();
+
+        let replay = store.append_event(&first_terminal).await.unwrap();
+        assert!(replay.duplicate);
+        assert_eq!(
+            replay.ack.as_ref().unwrap().event_id,
+            first_event_id
+        );
+
+        let competing = append(
+            &session.agent_session_id,
+            &format!("event-{key}-competing-terminal"),
+            "runtime-supervisor",
+            &format!("{key}-competing-terminal"),
+            if first_kind == "turn/completed" {
+                "turn/failed"
+            } else {
+                "turn/completed"
+            },
+            operation,
+            Some(turn_event.clone()),
+            json!({"error": "late competing terminal"}),
+        );
+        assert!(matches!(
+            store.append_event(&competing).await,
+            Err(SessionStoreError::Conflict(message))
+                if message.contains("terminal fence")
+        ));
+
+        let late_start = append(
+            &session.agent_session_id,
+            &format!("event-{key}-late-start"),
+            "session-api",
+            &format!("{key}-late-start"),
+            "turn/started",
+            operation,
+            Some(first_terminal.event_id.clone()),
+            json!({"operation_id": operation, "retry": true}),
+        );
+        assert!(matches!(
+            store.append_event(&late_start).await,
+            Err(SessionStoreError::Conflict(_))
+        ));
+
+        let receipt = store
+            .read_turn_receipt(&session.agent_session_id, &OperationId::from(operation))
+            .await
+            .unwrap();
+        assert_eq!(receipt.status, expected);
+        assert_eq!(
+            receipt.terminal_event.as_ref().unwrap().event_id,
+            first_event_id
+        );
+        let head = store.head(&session.agent_session_id).await.unwrap();
+        assert_eq!(head.status, "ready");
+        assert!(head.active_turn_id.is_none());
+        let terminal_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM session_events \
+             WHERE session_id = ? AND correlation_id = ? \
+               AND kind IN ('turn/completed', 'turn/failed', 'turn/cancelled')",
+        )
+        .bind(session.agent_session_id.as_ref())
+        .bind(operation)
+        .fetch_one(store.test_pool())
+        .await
+        .unwrap();
+        assert_eq!(terminal_count, 1);
+    }
+}
+
+#[tokio::test]
+async fn concurrent_turn_terminal_attempts_have_one_durable_winner() {
+    let store = AgentSessionStore::open_in_memory_with_connections(4)
+        .await
+        .unwrap();
+    let (session, turn_event) = create_turn(&store, "turn-receipt-concurrent", "turn-concurrent").await;
+    let completed = append(
+        &session.agent_session_id,
+        "event-turn-receipt-concurrent-completed",
+        "runtime-supervisor",
+        "turn-receipt-concurrent-completed",
+        "turn/completed",
+        "turn-concurrent",
+        Some(turn_event.clone()),
+        json!({}),
+    );
+    let failed = append(
+        &session.agent_session_id,
+        "event-turn-receipt-concurrent-failed",
+        "runtime-supervisor",
+        "turn-receipt-concurrent-failed",
+        "turn/failed",
+        "turn-concurrent",
+        Some(turn_event),
+        json!({"error": "competing terminal"}),
+    );
+
+    let (completed_result, failed_result) =
+        tokio::join!(store.append_event(&completed), store.append_event(&failed));
+    assert_ne!(completed_result.is_ok(), failed_result.is_ok());
+    assert!(
+        matches!(
+            completed_result.as_ref().err(),
+            Some(SessionStoreError::Conflict(_))
+        ) || matches!(
+            failed_result.as_ref().err(),
+            Some(SessionStoreError::Conflict(_))
+        )
+    );
+
+    let receipt = store
+        .read_turn_receipt(
+            &session.agent_session_id,
+            &OperationId::from("turn-concurrent"),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        receipt.status,
+        TurnReceiptStatus::Completed | TurnReceiptStatus::Failed
+    ));
+    assert!(receipt.terminal_event.is_some());
+    assert_eq!(
+        store.head(&session.agent_session_id).await.unwrap().status,
+        "ready"
+    );
 }
 
 #[tokio::test]

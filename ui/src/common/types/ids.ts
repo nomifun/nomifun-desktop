@@ -138,8 +138,10 @@ export class InvalidEntityIdError extends TypeError {
   }
 }
 
+// `(?![\s\S])` is an absolute end-of-input assertion. JavaScript's `$` also
+// matches immediately before a final newline, which is not canonical here.
 export const CANONICAL_UUID_V7 =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?![\s\S])/;
 
 /**
  * Strictly validates a stable business ID received at a wire or storage

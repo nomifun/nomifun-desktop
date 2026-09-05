@@ -141,12 +141,12 @@ pub fn init_environment(cli: &Cli, merged_path: &str) -> Result<ServerEnvironmen
     init_environment_with_composition(cli, merged_path, composition)
 }
 
-/// Explicit compatibility bootstrap for in-process legacy test fixtures.
+/// Initialize the current in-process Nomi-core host.
 ///
-/// Production server entry points must use [`init_environment`]. Keeping this
-/// path named and crate-private prevents a missing Fresh-v4 root from becoming
-/// an implicit fallback in the production composition.
-pub(crate) fn init_legacy_environment(
+/// This is the product startup path for the present phase.  The Fresh-v4
+/// coordinator remains available as an explicitly selected future composition,
+/// but it is not implicitly selected for the Nomi desktop/Web hosts.
+pub fn init_nomi_core_environment(
     cli: &Cli,
     merged_path: &str,
 ) -> Result<ServerEnvironment> {

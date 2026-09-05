@@ -197,6 +197,11 @@ import type {
   SkillCatalogItem,
   UpdateRemoteBindingRequest,
 } from '../types/agentPlatform';
+import {
+  asAgentPresetId,
+  asAgentSessionId,
+  asResolvedSnapshotId,
+} from '../types/agentPlatform';
 import type {
   TAgentExecutionTemplate,
   TAgentExecutionTemplateDetail,
@@ -220,6 +225,7 @@ import {
   toApiModelOptional,
 } from './apiModelMapper';
 import {
+  CANONICAL_UUID_V7,
   parseAgentId,
   parseAttachmentId,
   parseChannelPluginId,
@@ -706,7 +712,10 @@ export const agentPlatform = {
     '/api/agent-preset-templates?source=official'
   ),
   capabilities: httpGet<CapabilityCatalogItem[], void>('/api/capabilities'),
-  skills: httpGet<SkillCatalogItem[], void>('/api/skills'),
+  // The legacy `/api/skills` endpoint remains the skill-management surface.
+  // Agent Settings consumes the canonical catalog projection on its
+  // Nomi-core-specific path to avoid a response-shape collision.
+  skills: httpGet<SkillCatalogItem[], void>('/api/agent-catalog/skills'),
   mcpTools: httpGet<McpToolCatalogItem[], void>('/api/mcp-tool-mappings'),
   createPreset: httpPost<AgentPresetEditorResponse, CreateAgentPresetRequest>(
     '/api/agent-presets'

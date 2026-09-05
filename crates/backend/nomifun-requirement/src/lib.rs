@@ -15,7 +15,7 @@ pub mod sink;
 pub mod state;
 
 pub use attachments::{AttachmentStore, PromptAttachment};
-pub use conversation_port::{AutoWorkConversationPort, conversation_autowork_port};
+pub use conversation_port::{AutoWorkConversationPort, AutoWorkSessionPort};
 pub use events::RequirementEventEmitter;
 pub use hooks::IdmmHandle;
 pub use mcp_server::RequirementMcpServer;

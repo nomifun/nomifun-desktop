@@ -130,6 +130,40 @@ pub struct SessionObservation {
     pub next_cursor: SessionEventCursor,
 }
 
+/// The durable outcome of a canonical turn.
+///
+/// This status is derived only from the matching `turn/*` facts. In
+/// particular, text events, projections, and elapsed time never imply a
+/// terminal outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnReceiptStatus {
+    NotFound,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// A bounded, read-only view of the canonical turn facts for one
+/// `(AgentSessionId, OperationId)` pair.
+///
+/// `started_event` is present for every status except `NotFound`. A
+/// `terminal_event` is present only for a terminal status and is always the
+/// first matching terminal fact committed after the original start fact.
+/// Once present, that terminal outcome is immutable for the operation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnReceipt {
+    pub agent_session_id: AgentSessionId,
+    pub operation_id: OperationId,
+    pub status: TurnReceiptStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_event: Option<SessionEventRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_event: Option<SessionEventRecord>,
+}
+
 /// One atomic, read-only snapshot of the AgentSession facts needed by a
 /// provider/chat admission gate.
 ///

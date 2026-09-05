@@ -14,7 +14,6 @@ import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
 import type { IMcpServer } from '@/common/config/storage';
 import {
   AGENT_CHAT_MODEL_TASK,
-  CHAT_ROUTE_RECORD_SCHEMA,
   capabilityPlacement,
   missingSkillCapabilities,
   placeCapability,
@@ -33,7 +32,7 @@ import {
   Tooltip,
 } from '@arco-design/web-react';
 import { CloseSmall, Info, LinkCloud, PlayOne, PreviewOpen, Save, Search } from '@icon-park/react';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { modelDisplayLabel } from '@/common/utils/modelPresentation';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
@@ -46,9 +45,11 @@ import {
   bindKnowledgeBaseResource,
   chatRouteCandidateKey,
   defaultResourceBinding,
+  ensureWorkspaceBinding,
   removeResourceBinding,
   resourceKindsForDraft,
   selectChatRouteCandidate,
+  previewDiagnosticMessage,
   TEMPLATE_I18N_PATH,
   updateDocument,
   updateResourceBinding,
@@ -221,30 +222,25 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       ),
     [sourceTemplate]
   );
+  const missingRequiredKinds = useMemo(
+    () =>
+      requiredKinds.filter((resourceKind) => {
+        const resourceDefault = templateDefaults.get(resourceKind);
+        if (resourceDefault?.required === false) return false;
+        const binding = draft.document.resource_bindings.find(
+          (candidate) => candidate.resource_kind === resourceKind
+        );
+        if (!binding?.resource_id.trim()) return true;
+        if (resourceKind === 'workspace') {
+          return !binding.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]?.trim();
+        }
+        return false;
+      }),
+    [draft.document.resource_bindings, requiredKinds, templateDefaults]
+  );
 
   const patchDocument = (transform: Parameters<typeof updateDocument>[1]) =>
     onDraftChange(updateDocument(draft, transform));
-  const place = (capability: CapabilityCatalogItem['capability'], placement: CapabilityPlacement) =>
-    patchDocument((document) => placeCapability(document, capability, placement));
-
-  const selectedSkills = new Set(draft.document.skill_bindings.map((skill) => skill.id));
-  const chatRouteRecord = draft.document.chat_route_records[AGENT_CHAT_MODEL_TASK];
-  const [chatRouteRecordText, setChatRouteRecordText] = useState(() =>
-    chatRouteRecord ? JSON.stringify(chatRouteRecord, null, 2) : ''
-  );
-  useEffect(() => {
-    setChatRouteRecordText(chatRouteRecord ? JSON.stringify(chatRouteRecord, null, 2) : '');
-  }, [chatRouteRecord]);
-  const previewBlocked = preview?.status === 'blocked';
-  const selectedCapabilityIds = useMemo(
-    () =>
-      new Set([
-        ...draft.document.initial_capabilities.map((item) => item.capability.id),
-        ...draft.document.on_demand_capabilities.map((item) => item.capability.id),
-      ]),
-    [draft.document.initial_capabilities, draft.document.on_demand_capabilities]
-  );
-
   const resourceLabelFor = (resourceKind: string): string => {
     switch (resourceKind) {
       case 'workspace':
@@ -277,8 +273,36 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
     }
   };
 
+  const nextDraftForCapability = (
+    capability: CapabilityCatalogItem['capability'],
+    placement: CapabilityPlacement
+  ): AgentPresetDraft => {
+    const nextDocument = placeCapability(draft.document, capability, placement);
+    const nextDraft = updateDocument(draft, () => nextDocument);
+    return ensureWorkspaceBinding(
+      nextDraft,
+      hostWorkDir,
+      resourceKindsForDraft(nextDraft, catalog.capabilities),
+      editor.preset.owner_user_id ?? ''
+    );
+  };
+
+  const place = (capability: CapabilityCatalogItem['capability'], placement: CapabilityPlacement) =>
+    onDraftChange(nextDraftForCapability(capability, placement));
+
+  const selectedSkills = new Set(draft.document.skill_bindings.map((skill) => skill.id));
+  const chatRouteRecord = draft.document.chat_route_records[AGENT_CHAT_MODEL_TASK];
+  const previewBlocked = preview?.status === 'blocked';
+  const selectedCapabilityIds = useMemo(
+    () =>
+      new Set([
+        ...draft.document.initial_capabilities.map((item) => item.capability.id),
+        ...draft.document.on_demand_capabilities.map((item) => item.capability.id),
+      ]),
+    [draft.document.initial_capabilities, draft.document.on_demand_capabilities]
+  );
+
   const applyChatRouteRecord = (record: ChatRouteRecord) => {
-    setChatRouteRecordText(JSON.stringify(record, null, 2));
     patchDocument((document) => ({
       ...document,
       model_route_refs: {
@@ -290,37 +314,6 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
         [AGENT_CHAT_MODEL_TASK]: record,
       },
     }));
-  };
-
-  const applyChatRouteRecordText = (text: string) => {
-    setChatRouteRecordText(text);
-    if (!text.trim()) {
-      patchDocument((document) => {
-        const modelRouteRefs = { ...document.model_route_refs };
-        const chatRouteRecords = { ...document.chat_route_records };
-        delete modelRouteRefs[AGENT_CHAT_MODEL_TASK];
-        delete chatRouteRecords[AGENT_CHAT_MODEL_TASK];
-        return {
-          ...document,
-          model_route_refs: modelRouteRefs,
-          chat_route_records: chatRouteRecords,
-        };
-      });
-      return;
-    }
-    try {
-      const parsed = JSON.parse(text) as ChatRouteRecord;
-      if (
-        parsed.schema !== CHAT_ROUTE_RECORD_SCHEMA ||
-        parsed.task !== AGENT_CHAT_MODEL_TASK ||
-        !parsed.primary?.model_route_id
-      ) {
-        return;
-      }
-      applyChatRouteRecord(parsed);
-    } catch {
-      // Keep the draft unchanged until the JSON is complete and valid.
-    }
   };
 
   return (
@@ -378,6 +371,17 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             />
           </label>
         </div>
+        {!chatRouteRecord && (
+          <Alert
+            className={styles.inlineNotice}
+            type='warning'
+            showIcon
+            content={t('agentSettings.fields.chatModelRouteUnavailable', {
+              defaultValue:
+                'This host did not provide an available Chat model route. Saving or testing will remain blocked until the canonical route is available; no JSON or ID entry is required.',
+            })}
+          />
+        )}
       </section>
 
       <section className={styles.section} id='agent-settings-capabilities'>
@@ -544,6 +548,18 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             <h3>{t('agentSettings.sections.resources')}</h3>
           </div>
         </div>
+        {missingRequiredKinds.length > 0 && (
+          <Alert
+            className={styles.inlineNotice}
+            type='warning'
+            showIcon
+            content={t('agentSettings.resources.missingRequired', {
+              defaultValue: `Select the required resources before saving or testing this setup (${missingRequiredKinds
+                .map(resourceLabelFor)
+                .join(', ')}).`,
+            })}
+          />
+        )}
         {requiredKinds.length === 0 ? (
           <div className={styles.inlineEmpty}>{t('agentSettings.resources.noneRequired')}</div>
         ) : (
@@ -791,7 +807,11 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
           <Alert
             type='error'
             showIcon
-            content={preview.diagnostics[0]?.message ?? t('agentSettings.preview.blocked')}
+            content={
+              preview.diagnostics[0]
+                ? previewDiagnosticMessage(preview.diagnostics[0])
+                : t('agentSettings.preview.blocked')
+            }
           />
         </div>
       )}
@@ -863,84 +883,53 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
 
               <div className={styles.technicalGroup}>
                 <div className={styles.technicalGroupHeader}>
-                  <strong>{t('agentSettings.fields.chatModelRouteRecord')}</strong>
-                  <span>{t('agentSettings.fields.chatModelRoute')}</span>
+                  <strong>{t('agentSettings.fields.chatModelRoute')}</strong>
+                  <span>{t('agentSettings.sections.basicHint')}</span>
                 </div>
-                <Input.TextArea
-                  value={chatRouteRecordText}
-                  placeholder={t('agentSettings.fields.chatModelRouteRecordPlaceholder')}
-                  autoSize={{ minRows: 4, maxRows: 12 }}
-                  onChange={applyChatRouteRecordText}
-                />
+                <Tag size='small' color={chatRouteRecord ? 'green' : 'orange'}>
+                  {chatRouteRecord
+                    ? t('common.added', { defaultValue: 'Available' })
+                    : t('agentSettings.common.unavailable')}
+                </Tag>
               </div>
 
               <div className={styles.inspectorRows}>
                 <div>
-                  <span>{t('agentSettings.fields.chatModelRoute')}</span>
-                  <code>
-                    {draft.document.model_route_refs[AGENT_CHAT_MODEL_TASK] ??
-                      t('agentSettings.common.unavailable')}
-                  </code>
+                  <span>{t('agentSettings.status.currentRevision', { revision: '' })}</span>
+                  <strong>{editor.revision?.reference.revision ?? 0}</strong>
                 </div>
                 <div>
-                  <span>
-                    {t('agentSettings.status.currentRevision', {
-                      revision: editor.revision?.reference.revision ?? 0,
-                    })}
-                  </span>
-                  <code>
-                    {editor.revision?.reference.revision_digest ??
-                      t('agentSettings.common.unavailable')}
-                  </code>
+                  <span>{t('agentSettings.library.bindingCount', { count: editor.preset.bound_target_count })}</span>
+                  <strong>{editor.preset.bound_target_count}</strong>
                 </div>
                 <div>
-                  <span>
-                    {t('agentSettings.library.bindingCount', {
-                      count: editor.preset.bound_target_count,
-                    })}
-                  </span>
-                  <code>{draft.preset_id}</code>
+                  <span>{t('agentSettings.sections.resources')}</span>
+                  <strong>{draft.document.resource_bindings.length}</strong>
                 </div>
               </div>
-
-              {draft.document.resource_bindings.length > 0 && (
-                <div className={styles.technicalGroup}>
-                  <div className={styles.technicalGroupHeader}>
-                    <strong>{t('agentSettings.sections.resources')}</strong>
-                    <span>{t('common.technical_details')}</span>
-                  </div>
-                  <div className={styles.technicalBindingList}>
-                    {draft.document.resource_bindings.map((binding) => (
-                      <pre key={binding.binding_id} className={styles.technicalBinding}>
-                        {JSON.stringify(binding, null, 2)}
-                      </pre>
-                    ))}
-                  </div>
-                </div>
-              )}
 
               {testResult && (
                 <div className={styles.technicalGroup}>
                   <div className={styles.technicalGroupHeader}>
                     <strong>{t('agentSettings.sections.test')}</strong>
-                    <span>{t('agentSettings.test.session')}</span>
+                    <span>{t('common.success')}</span>
                   </div>
                   <div className={styles.inspectorRows}>
                     <div>
                       <span>{t('agentSettings.test.session')}</span>
-                      <code>{testResult.session.agent_session_id}</code>
+                      <strong>{t('common.success')}</strong>
                     </div>
                     <div>
                       <span>{t('agentSettings.test.turn')}</span>
-                      <code>{testResult.turn.status}</code>
+                      <strong>{t('common.success')}</strong>
                     </div>
                     <div>
                       <span>{t('agentSettings.test.revision')}</span>
-                      <code>
+                      <strong>
                         {testResult.savedRevision
                           ? testResult.savedRevision.revision.reference.revision
                           : testResult.preview.candidate_revision_ref.revision}
-                      </code>
+                      </strong>
                     </div>
                   </div>
                 </div>

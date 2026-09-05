@@ -95,6 +95,10 @@ async fn bootstrap_registers_all_expected_tools() {
         "Glob",
         "exec_command",
         "write_stdin",
+        "vcs.status",
+        "vcs.diff",
+        "vcs.stage",
+        "vcs.commit",
         "update_plan",
     ] {
         assert!(

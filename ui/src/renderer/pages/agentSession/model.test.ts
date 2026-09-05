@@ -43,7 +43,7 @@ describe('AgentSession projection cards', () => {
         },
       } as never,
     });
-    expect(card.title).toBe('files.read');
+    expect(card.title).toBe('files read');
     expect(card.details).toEqual({
       action_id: 'files.read',
       result_state: 'recorded',
@@ -69,7 +69,7 @@ describe('AgentSession projection cards', () => {
     });
     expect(card.kind).toBe('effect');
     expect(card.state).toBe('uncertain');
-    expect(card.title).toBe('workspace.write');
+    expect(card.title).toBe('workspace write');
   });
 
   test('reads legacy events only as a compatibility fallback', () => {

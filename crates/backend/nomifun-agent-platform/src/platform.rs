@@ -45,7 +45,7 @@ use nomifun_agent_session::{
     AgentSessionStore, CreateSessionRequest, DeleteResult, EffectEventRequest, ForkRequest,
     EffectStrategy, EffectTerminalState, ForkResult, RuntimeAppendContext, SessionCreateResult,
     SessionEventAppendResult, SessionEventPage, SessionHeadProjection, SessionObservation,
-    SessionRehydrationInput, SessionStoreError,
+    SessionRehydrationInput, SessionStoreError, TurnReceipt,
 };
 use nomifun_api_types::{
     CreateAgentSessionRequestDto, CreateAgentSessionResponseDto, CreateAgentSessionTurnRequestDto,
@@ -449,6 +449,13 @@ pub trait AgentSessionQueryPort: Send + Sync {
         principal: &PrincipalRef,
         session_id: &AgentSessionId,
     ) -> Result<SessionRehydrationInput, AgentPlatformError>;
+
+    async fn read_turn_receipt(
+        &self,
+        principal: &PrincipalRef,
+        session_id: &AgentSessionId,
+        operation_id: &OperationId,
+    ) -> Result<TurnReceipt, AgentPlatformError>;
 }
 
 #[async_trait]
@@ -2010,11 +2017,27 @@ where
 
 pub struct KernelCatalogProvider {
     registry: Arc<KernelRegistry>,
+    unavailable_capabilities: BTreeMap<CapabilityId, nomifun_agent_contracts::CanonicalErrorCode>,
 }
 
 impl KernelCatalogProvider {
     pub fn new(registry: Arc<KernelRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            unavailable_capabilities: BTreeMap::new(),
+        }
+    }
+
+    /// Mark capability identities unavailable for a specific host composition
+    /// without removing their canonical manifests from the catalog.  This is
+    /// used by Nomi-core for capabilities whose declarative contract is known
+    /// but whose current runtime has no safe activation/owner port.
+    pub fn with_unavailable_capabilities(
+        mut self,
+        unavailable: impl IntoIterator<Item = (CapabilityId, nomifun_agent_contracts::CanonicalErrorCode)>,
+    ) -> Self {
+        self.unavailable_capabilities = unavailable.into_iter().collect();
+        self
     }
 }
 
@@ -2057,7 +2080,7 @@ impl CatalogProvider for KernelCatalogProvider {
             skills,
             mcp_tools,
             package_sources,
-            unavailable_capabilities: BTreeMap::new(),
+            unavailable_capabilities: self.unavailable_capabilities.clone(),
             service_key_diagnostics: Vec::new(),
         }))
     }
@@ -2355,6 +2378,20 @@ impl AgentPlatform {
             limit,
         )
         .await
+    }
+
+    /// Read the durable terminal fact for one exact turn operation.
+    ///
+    /// This is intentionally a query-only helper. It does not inspect runtime
+    /// idleness, message text, or the current provider; callers must use the
+    /// returned canonical receipt when deciding whether a turn is terminal.
+    pub async fn read_turn_receipt(
+        &self,
+        principal: &PrincipalRef,
+        session_id: &AgentSessionId,
+        operation_id: &OperationId,
+    ) -> Result<TurnReceipt, AgentPlatformError> {
+        AgentSessionQueryPort::read_turn_receipt(self, principal, session_id, operation_id).await
     }
 
     pub async fn cancel_turn(
@@ -3892,6 +3929,19 @@ impl AgentSessionQueryPort for AgentPlatform {
     ) -> Result<SessionRehydrationInput, AgentPlatformError> {
         self.require_owned_session(principal, session_id).await?;
         Ok(self.sessions.rehydration_input(session_id).await?)
+    }
+
+    async fn read_turn_receipt(
+        &self,
+        principal: &PrincipalRef,
+        session_id: &AgentSessionId,
+        operation_id: &OperationId,
+    ) -> Result<TurnReceipt, AgentPlatformError> {
+        self.require_owned_session(principal, session_id).await?;
+        Ok(self
+            .sessions
+            .read_turn_receipt(session_id, operation_id)
+            .await?)
     }
 }
 

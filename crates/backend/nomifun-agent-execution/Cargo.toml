@@ -16,6 +16,7 @@ nomifun-conversation.workspace = true
 nomifun-preset.workspace = true
 axum.workspace = true
 tokio.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

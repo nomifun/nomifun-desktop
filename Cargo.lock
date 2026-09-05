@@ -5893,6 +5893,7 @@ version = "0.7.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "git2",
  "globset",
  "jsonschema",
  "junction",
@@ -6045,6 +6046,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -6372,6 +6374,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite 0.26.2",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -6534,6 +6537,7 @@ dependencies = [
  "chrono-tz",
  "cron",
  "dashmap",
+ "nomifun-agent-contracts",
  "nomifun-ai-agent",
  "nomifun-api-types",
  "nomifun-auth",
@@ -6989,6 +6993,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -7153,6 +7158,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]

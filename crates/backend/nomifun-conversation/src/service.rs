@@ -52,6 +52,7 @@ use nomifun_realtime::UserEventSink;
 use nomifun_runtime::resolve_command_path;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{broadcast, oneshot};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -991,6 +992,17 @@ pub trait TurnCompletionObserver: Send + Sync {
         result_ok: bool, result_text: Option<&str>, result_error_code: Option<&str>);
 }
 
+/// Host-owned sink for detached service tasks.
+///
+/// ConversationService deliberately remains independent of the application
+/// composition root, but its completion observer still performs repository
+/// work after a turn has released its runtime.  Production hosts install this
+/// registrar so those tasks are joined before SQLite closes; isolated tests
+/// may leave it unset and retain the historical detached behavior.
+pub trait BackgroundTaskRegistrar: Send + Sync {
+    fn register(&self, task: JoinHandle<()>);
+}
+
 /// Outcome of a delivery-notify registration attempt (spec D2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryNotifyRegistration {
@@ -1059,6 +1071,8 @@ pub struct ConversationService {
     /// keyed turn's terminal receipt is durably persisted. `None` (default /
     /// tests) disables completion push entirely.
     turn_completion_observer: Arc<RwLock<Option<Arc<dyn TurnCompletionObserver>>>>,
+    /// Optional host shutdown/join sink for completion-observer tasks.
+    background_task_registrar: Arc<RwLock<Option<Arc<dyn BackgroundTaskRegistrar>>>>,
     /// Phase 3 模型故障转移(plan D5)。挑选器要读 `providers` 表、配置要读
     /// `client_preferences`,而 `ConversationService::new` 不带这两个仓库。沿用
     /// `cron_service` / `supervision_hook` 的「构造后注册」槽位模式而非改 `new()`
@@ -2236,6 +2250,7 @@ impl ConversationService {
             agent_metadata_repo,
             supervision_hook: Arc::new(RwLock::new(None)),
             turn_completion_observer: Arc::new(RwLock::new(None)),
+            background_task_registrar: Arc::new(RwLock::new(None)),
             failover_provider_repo: Arc::new(RwLock::new(None)),
             failover_provider_model_repo: Arc::new(RwLock::new(None)),
             failover_provider_model_capability_repo: Arc::new(RwLock::new(None)),
@@ -2312,6 +2327,17 @@ impl ConversationService {
     pub fn with_turn_completion_observer(&self, observer: Arc<dyn TurnCompletionObserver>) {
         if let Ok(mut guard) = self.turn_completion_observer.write() {
             *guard = Some(observer);
+        }
+    }
+
+    /// Install the host task registrar used to join detached completion
+    /// observers during application shutdown.
+    pub fn with_background_task_registrar(
+        &self,
+        registrar: Arc<dyn BackgroundTaskRegistrar>,
+    ) {
+        if let Ok(mut guard) = self.background_task_registrar.write() {
+            *guard = Some(registrar);
         }
     }
 
@@ -3939,7 +3965,7 @@ impl ConversationService {
             let result_ok = completion.result_ok;
             let result_text = completion.result_text.clone();
             let result_error_code = completion.result_error_code.clone();
-            tokio::spawn(async move {
+            let observer_task = tokio::spawn(async move {
                 observer
                     .on_turn_completed(
                         &conversation_id,
@@ -3950,6 +3976,14 @@ impl ConversationService {
                     )
                     .await;
             });
+            if let Some(registrar) = self
+                .background_task_registrar
+                .read()
+                .ok()
+                .and_then(|slot| slot.clone())
+            {
+                registrar.register(observer_task);
+            }
         }
         let turn_generation = turn_handle.turn_id();
         if !turn_handle.release() {
@@ -4043,7 +4077,14 @@ impl ConversationService {
         user_id: &str,
         req: CreateConversationRequest,
     ) -> Result<ConversationResponse, AppError> {
-        self.create_inner(user_id, req, None, None, None)
+        self.create_inner(
+            user_id,
+            req,
+            None,
+            None,
+            None,
+            TrustedSnapshotOrigin::LegacyPreset,
+        )
             .await
             .map(|(response, _)| response)
     }
@@ -4057,7 +4098,14 @@ impl ConversationService {
         req: CreateConversationRequest,
         creation_key: &str,
     ) -> Result<ConversationResponse, AppError> {
-        self.create_inner(user_id, req, None, Some(creation_key), None)
+        self.create_inner(
+            user_id,
+            req,
+            None,
+            Some(creation_key),
+            None,
+            TrustedSnapshotOrigin::LegacyPreset,
+        )
             .await
             .map(|(response, _)| response)
     }
@@ -4074,7 +4122,14 @@ impl ConversationService {
     ) -> Result<ConversationResponse, AppError> {
         req.preset_id = None;
         req.preset_overrides = None;
-        self.create_inner(user_id, req, Some(snapshot), None, None)
+        self.create_inner(
+            user_id,
+            req,
+            Some(snapshot),
+            None,
+            None,
+            TrustedSnapshotOrigin::LegacyPreset,
+        )
             .await
             .map(|(response, _)| response)
     }
@@ -4095,6 +4150,38 @@ impl ConversationService {
             Some(snapshot),
             Some(creation_key),
             None,
+            TrustedSnapshotOrigin::LegacyPreset,
+        )
+        .await
+        .map(|(response, _)| response)
+    }
+
+    /// Trusted Nomi-core creation path for a binding/snapshot owned by the
+    /// app-local Agent control plane.
+    ///
+    /// Nomi-core Preset IDs live in its own control-plane tables, not in the
+    /// legacy v3 `presets` catalog.  The immutable binding is carried in the
+    /// server-owned `extra.nomi_core_session` metadata, while the projected
+    /// model/instructions/resources still flow through the normal Nomi
+    /// creation owner.  Do not persist the v3 preset foreign-key lineage for
+    /// this path: doing so would make the conversation repository reject a
+    /// valid Nomi-core Preset as a missing legacy Preset.
+    pub async fn create_from_nomi_core_snapshot_idempotent(
+        &self,
+        user_id: &str,
+        mut req: CreateConversationRequest,
+        snapshot: nomifun_api_types::ResolvedPresetSnapshot,
+        creation_key: &str,
+    ) -> Result<ConversationResponse, AppError> {
+        req.preset_id = None;
+        req.preset_overrides = None;
+        self.create_inner(
+            user_id,
+            req,
+            Some(snapshot),
+            Some(creation_key),
+            None,
+            TrustedSnapshotOrigin::NomiCore,
         )
         .await
         .map(|(response, _)| response)
@@ -4127,6 +4214,7 @@ impl ConversationService {
         trusted_snapshot: Option<nomifun_api_types::ResolvedPresetSnapshot>,
         creation_key: Option<&str>,
         creative_studio_target: Option<CreativeStudioAgentCreationTarget>,
+        trusted_snapshot_origin: TrustedSnapshotOrigin,
     ) -> Result<(ConversationResponse, bool), AppError> {
         if creation_key.is_some() && creative_studio_target.is_some() {
             return Err(AppError::Internal(
@@ -4522,8 +4610,11 @@ impl ConversationService {
             }
             None => None,
         };
-        let preset_snapshot_value = resolved_preset_snapshot
-            .as_ref()
+        let persist_legacy_preset_lineage =
+            matches!(trusted_snapshot_origin, TrustedSnapshotOrigin::LegacyPreset);
+        let preset_snapshot_value = persist_legacy_preset_lineage
+            .then(|| resolved_preset_snapshot.as_ref())
+            .flatten()
             .map(serde_json::to_value)
             .transpose()
             .map_err(|e| AppError::Internal(format!("Failed to serialize preset snapshot: {e}")))?;
@@ -4532,18 +4623,26 @@ impl ConversationService {
             .map(serde_json::to_string)
             .transpose()
             .map_err(|e| AppError::BadRequest(format!("Invalid preset_snapshot: {e}")))?;
-        let preset_id = preset_snapshot_value
-            .as_ref()
-            .and_then(|value| value.get("preset_id"))
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| extra.get("preset_id").and_then(serde_json::Value::as_str))
-            .filter(|value| !value.trim().is_empty())
-            .map(ToOwned::to_owned);
-        let preset_revision = preset_snapshot_value
-            .as_ref()
-            .and_then(|value| value.get("preset_revision"))
-            .and_then(serde_json::Value::as_i64)
-            .or_else(|| extra.get("preset_revision").and_then(serde_json::Value::as_i64));
+        let preset_id = if persist_legacy_preset_lineage {
+            preset_snapshot_value
+                .as_ref()
+                .and_then(|value| value.get("preset_id"))
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| extra.get("preset_id").and_then(serde_json::Value::as_str))
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned)
+        } else {
+            None
+        };
+        let preset_revision = if persist_legacy_preset_lineage {
+            preset_snapshot_value
+                .as_ref()
+                .and_then(|value| value.get("preset_revision"))
+                .and_then(serde_json::Value::as_i64)
+                .or_else(|| extra.get("preset_revision").and_then(serde_json::Value::as_i64))
+        } else {
+            None
+        };
 
         if let Some(pool) = req.execution_model_pool.as_ref() {
             pool.validate().map_err(AppError::BadRequest)?;
@@ -4756,7 +4855,8 @@ impl ConversationService {
             }
         };
 
-        if let Some(snapshot) = resolved_preset_snapshot.as_ref()
+        if persist_legacy_preset_lineage
+            && let Some(snapshot) = resolved_preset_snapshot.as_ref()
             && let Some(service) = self
                 .preset_service
                 .read()
@@ -12018,6 +12118,12 @@ impl ConversationService {
 enum CancelOrigin {
     User,
     AgentExecution,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrustedSnapshotOrigin {
+    LegacyPreset,
+    NomiCore,
 }
 
 // ── Internal Helpers ────────────────────────────────────────────────

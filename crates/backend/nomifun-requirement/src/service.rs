@@ -17,7 +17,7 @@ use nomifun_terminal::TerminalDriver;
 use tracing::warn;
 
 use crate::attachments::AttachmentStore;
-use crate::conversation_port::AutoWorkConversationPort;
+use crate::conversation_port::AutoWorkSessionPort;
 use crate::convert::row_to_dto;
 use crate::events::RequirementEventEmitter;
 use crate::notifier::CompletionNotifier;
@@ -98,7 +98,7 @@ pub struct RequirementService {
     emitter: RequirementEventEmitter,
     /// Attached for AutoWork config persistence (`extra.autowork`
     /// merge-write) through the current Session owner.
-    conversation: Option<Arc<dyn AutoWorkConversationPort>>,
+    conversation: Option<Arc<dyn AutoWorkSessionPort>>,
     /// Attached for reading a conversation row when loading AutoWork config.
     conversation_repo: Option<Arc<dyn IConversationRepository>>,
     /// Attached for terminal AutoWork config + ownership/eligibility checks.
@@ -137,16 +137,30 @@ impl RequirementService {
         }
     }
 
-    /// Attach the typed Conversation-backed Session port + repo for AutoWork
-    /// config persistence and reads.
-    pub fn with_conversation_port(
+    /// Attach the typed host-owned Session port + repository for AutoWork
+    /// configuration persistence and reads.
+    pub fn with_session_port(
         mut self,
-        conversation: Arc<dyn AutoWorkConversationPort>,
+        session: Arc<dyn AutoWorkSessionPort>,
         conv_repo: Arc<dyn IConversationRepository>,
     ) -> Self {
-        self.conversation = Some(conversation);
+        self.conversation = Some(session);
         self.conversation_repo = Some(conv_repo);
         self
+    }
+
+    /// Source-compatible composition name for callers that have not yet
+    /// renamed their local variable from `conversation` to `session`.
+    ///
+    /// The method no longer constructs or accepts a Conversation-backed
+    /// adapter; it stores the already-composed typed Session port.
+    #[doc(hidden)]
+    pub fn with_conversation_port(
+        self,
+        session: Arc<dyn AutoWorkSessionPort>,
+        conv_repo: Arc<dyn IConversationRepository>,
+    ) -> Self {
+        self.with_session_port(session, conv_repo)
     }
 
     /// Attach the terminal driver for terminal AutoWork config + ownership.
@@ -162,7 +176,7 @@ impl RequirementService {
     }
 
     /// Attach only the conversation repo (without the full conversation service).
-    /// `with_conversation_port` also sets it; this is for callers/tests that
+    /// `with_session_port` also sets it; this is for callers/tests that
     /// need just the read side (e.g. `tag_bindings`).
     pub fn with_conversation_repo(mut self, repo: Arc<dyn IConversationRepository>) -> Self {
         self.conversation_repo = Some(repo);
@@ -1721,7 +1735,7 @@ impl RequirementService {
 /// the deleted Conversation. Inactive rows detach; ambiguous execution
 /// evidence retains its typed owner and is parked for review. There is no FK
 /// cascade, so the deletion path drives this explicitly. Wired in
-/// `nomifun-app` via `ConversationService::with_delete_hook`.
+/// `nomifun-app` via the host's existing delete hook.
 #[async_trait::async_trait]
 impl nomifun_common::OnConversationDelete for RequirementService {
     async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: &str) {

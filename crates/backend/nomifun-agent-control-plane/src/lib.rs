@@ -23,8 +23,10 @@ pub use continuation::{
     rotated_installation_token,
 };
 pub use error::ControlPlaneError;
-pub use routes::{AuthenticatedOwner, control_plane_router};
-pub use service::AgentControlPlane;
+pub use routes::{
+    AuthenticatedOwner, control_plane_router, control_plane_router_without_legacy_skills,
+};
+pub use service::{AgentControlPlane, DefaultChatRouteResolver};
 pub use store::{
     AgentBindingTarget, ControlPlaneStore, InMemoryControlPlaneStore, StoredAgentBinding,
     StoredPreset,

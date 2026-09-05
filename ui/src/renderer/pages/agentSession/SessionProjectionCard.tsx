@@ -3,7 +3,6 @@ import { Collapse, Tag } from '@arco-design/web-react';
 import { Caution, Code, Lightning, MessageOne } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { jsonDetails } from './model';
 import styles from './AgentSessionPage.module.css';
 
 const icon = (kind: SessionCardModel['kind']) => {
@@ -32,13 +31,17 @@ const SessionProjectionCard: React.FC<{ card: SessionCardModel }> = ({ card }) =
       <div className={styles.cardHeader}>
         {icon(card.kind)}
         <strong>{card.title}</strong>
-        {card.state && <Tag size='small' color={card.state === 'uncertain' ? 'orange' : 'gray'}>{card.state}</Tag>}
+        {card.state === 'uncertain' && (
+          <Tag size='small' color='orange'>
+            {t('agentSettings.session.needsAttention', { defaultValue: 'Needs attention' })}
+          </Tag>
+        )}
         <span>#{card.firstSeq}-{card.lastSeq}</span>
       </div>
-      {card.details != null && (
+      {card.detailText && (
         <Collapse className={styles.detailCollapse}>
           <Collapse.Item name='details' header={t('agentSettings.session.details')}>
-            <pre>{jsonDetails(card.details)}</pre>
+            <span className={styles.detailText}>{card.detailText}</span>
           </Collapse.Item>
         </Collapse>
       )}

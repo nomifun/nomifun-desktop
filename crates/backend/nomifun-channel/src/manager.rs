@@ -14,6 +14,7 @@ use nomifun_db::{IChannelRepository, UpdatePluginStatusParams};
 use nomifun_realtime::UserEventSink;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::constants::{
@@ -899,6 +900,18 @@ impl ChannelManager {
     /// Errors on individual plugins are logged but don't prevent other
     /// plugins from starting.
     pub async fn restore_plugins(&self, factory: &PluginFactory) -> Result<(), ChannelError> {
+        self.restore_plugins_with_shutdown(factory, CancellationToken::new())
+            .await
+    }
+
+    /// Restore enabled plugins while observing a process-lifetime shutdown
+    /// token. This prevents a delayed startup restore from reviving a plugin
+    /// after the host has begun teardown.
+    pub async fn restore_plugins_with_shutdown(
+        &self,
+        factory: &PluginFactory,
+        shutdown: CancellationToken,
+    ) -> Result<(), ChannelError> {
         let rows = self.load_all_plugin_rows().await?;
 
         let enabled: Vec<ChannelPluginRow> = rows.into_iter().filter(|r| r.enabled).collect();
@@ -911,6 +924,9 @@ impl ChannelManager {
         info!(count = enabled.len(), "restoring enabled plugins");
 
         for row in enabled {
+            if shutdown.is_cancelled() {
+                break;
+            }
             if PluginType::from_str_opt(&row.r#type).is_none() {
                 info!(
                     plugin_id = %row.channel_plugin_id,
@@ -1022,6 +1038,18 @@ impl ChannelManager {
     /// sweep it persists the real status, broadcasts
     /// `channel.plugin-status-changed`, and attempts a rate-limited restart.
     pub fn spawn_watchdog(self: &Arc<Self>, factory: Arc<PluginFactory>, config: WatchdogConfig) -> JoinHandle<()> {
+        self.spawn_watchdog_with_shutdown(factory, config, CancellationToken::new())
+    }
+
+    /// Spawn the watchdog with an explicit process-lifetime cancellation
+    /// boundary.  The legacy `spawn_watchdog` method remains for standalone
+    /// callers/tests that own the returned handle themselves.
+    pub fn spawn_watchdog_with_shutdown(
+        self: &Arc<Self>,
+        factory: Arc<PluginFactory>,
+        config: WatchdogConfig,
+        shutdown: CancellationToken,
+    ) -> JoinHandle<()> {
         let manager = Arc::clone(self);
         tokio::spawn(async move {
             let mut state = WatchdogState::default();
@@ -1031,8 +1059,12 @@ impl ChannelManager {
             // startup (restore_plugins may still be in flight).
             ticker.tick().await;
             loop {
-                ticker.tick().await;
-                manager.check_and_heal_plugins(&factory, &config, &mut state).await;
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = ticker.tick() => {
+                        manager.check_and_heal_plugins(&factory, &config, &mut state).await;
+                    }
+                }
             }
         })
     }

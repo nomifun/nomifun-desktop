@@ -223,7 +223,39 @@ export function withHostResolvedWorkspaceBinding(
         ...document,
         resource_bindings: resourceBindings,
       }))
-    : draft;
+      : draft;
+}
+
+/**
+ * Materialize the host workspace binding as soon as a capability selection
+ * starts requiring it.  The editor may render a host default before the
+ * binding exists in the draft; persisting the same value here prevents Preview
+ * and Save from sending a visually selected, but actually unbound, workspace.
+ */
+export function ensureWorkspaceBinding(
+  draft: AgentPresetDraft,
+  hostWorkDir: string | null,
+  requiredResourceKinds: string[],
+  ownerId: string,
+  operations: string[] = ['read', 'write', 'execute']
+): AgentPresetDraft {
+  const root = hostWorkDir?.trim();
+  if (!root || !requiredResourceKinds.includes('workspace')) return draft;
+
+  const existing = draft.document.resource_bindings.find(
+    (binding) => binding.resource_kind === 'workspace'
+  );
+  const binding = existing ?? defaultResourceBinding('workspace', ownerId, operations);
+  const resolved = bindWorkspaceResource(binding, root);
+  if (
+    existing &&
+    existing.resource_id === resolved.resource_id &&
+    existing.typed_parameters?.[WORKSPACE_ROOT_PARAMETER] ===
+      resolved.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]
+  ) {
+    return draft;
+  }
+  return updateResourceBinding(draft, resolved);
 }
 
 export function resourceKindsForDraft(
@@ -281,3 +313,188 @@ export const selectedCapabilityIds = (draft: AgentPresetDraft): CapabilityId[] =
 
 export const editorDraft = (editor: AgentPresetEditorResponse): AgentPresetDraft =>
   structuredClone(editor.draft);
+
+/**
+ * Keep transport/runtime details out of the product surface.  The canonical
+ * APIs intentionally return machine-readable error codes and, in some cases,
+ * diagnostic payloads.  Those are useful to logs and tests, but rendering the
+ * thrown Error directly leaks endpoint paths, UUIDs, digests, and JSON into a
+ * normal user flow.
+ */
+export type AgentUiOperation =
+  | 'load'
+  | 'open'
+  | 'create'
+  | 'fork'
+  | 'preview'
+  | 'save'
+  | 'test'
+  | 'session-load'
+  | 'turn'
+  | 'session-fork'
+  | 'session-delete'
+  | 'resources';
+
+export type AgentUiErrorKind =
+  | 'route-unavailable'
+  | 'network'
+  | 'timeout'
+  | 'session-deleted'
+  | 'session-not-found'
+  | 'snapshot-unavailable'
+  | 'resource'
+  | 'model'
+  | 'conflict'
+  | 'runtime'
+  | 'unknown';
+
+type ErrorShape = {
+  code?: unknown;
+  status?: unknown;
+  kind?: unknown;
+};
+
+const errorShape = (error: unknown): ErrorShape | null =>
+  error && typeof error === 'object' ? (error as ErrorShape) : null;
+
+const errorCode = (error: unknown): string => {
+  const code = errorShape(error)?.code;
+  return typeof code === 'string' ? code.toUpperCase() : '';
+};
+
+const errorStatus = (error: unknown): number | null => {
+  const status = errorShape(error)?.status;
+  return typeof status === 'number' && Number.isFinite(status) ? status : null;
+};
+
+const errorKind = (error: unknown): string => {
+  const kind = errorShape(error)?.kind;
+  return typeof kind === 'string' ? kind.toLowerCase() : '';
+};
+
+export function classifyAgentUiError(
+  error: unknown,
+  operation: AgentUiOperation
+): AgentUiErrorKind {
+  const code = errorCode(error);
+  const status = errorStatus(error);
+  const kind = errorKind(error);
+
+  if (code === 'SESSION_DELETED') return 'session-deleted';
+  if (code === 'SESSION_NOT_FOUND' || code === 'REMOTE_SESSION_NOT_FOUND') {
+    return 'session-not-found';
+  }
+  if (code === 'SNAPSHOT_EXECUTOR_UNAVAILABLE') return 'snapshot-unavailable';
+  if (
+    code === 'PRESET_RESOURCE_NOT_BOUND' ||
+    code === 'RESOURCE_OWNER_MISMATCH' ||
+    code === 'CAPABILITY_RESOURCE_NOT_BOUND'
+  ) {
+    return 'resource';
+  }
+  if (
+    code === 'MODEL_ROUTE_RECORD_INVALID' ||
+    code === 'MODEL_ROUTE_NOT_FOUND' ||
+    code === 'CAPABILITY_NOT_MATERIALIZED' ||
+    code === 'CAPABILITY_UNAVAILABLE' ||
+    code === 'CAPABILITY_UNAVAILABLE_ON_PLATFORM'
+  ) {
+    return 'model';
+  }
+  if (
+    code === 'PRESET_REVISION_DIGEST_MISMATCH' ||
+    code === 'IDEMPOTENCY_CONFLICT' ||
+    status === 409
+  ) {
+    return 'conflict';
+  }
+  if (
+    code === 'AGENT_PLATFORM_RUNTIME_FAILED' ||
+    code === 'AGENT_PLATFORM_INTERNAL' ||
+    code === 'REMOTE_OPEN_FAILED'
+  ) {
+    return 'runtime';
+  }
+  if (kind === 'timeout') return 'timeout';
+  if (kind === 'network') return 'network';
+
+  // A 404/405 from a canonical endpoint is normally an unmounted route, not a
+  // malformed user action.  Preserve the more specific Session codes above.
+  if (
+    status === 404 ||
+    status === 405 ||
+    code === 'NON_JSON_RESPONSE' ||
+    code === 'ROUTE_NOT_FOUND'
+  ) {
+    return 'route-unavailable';
+  }
+
+  // A missing code on a load operation is commonly an HTML/404 response from
+  // an older Nomi-core assembly.  Do not show that response body to the user.
+  if (operation === 'load' && status == null) return 'route-unavailable';
+  return 'unknown';
+}
+
+export function agentUiErrorMessage(
+  error: unknown,
+  operation: AgentUiOperation
+): string {
+  switch (classifyAgentUiError(error, operation)) {
+    case 'route-unavailable':
+      return 'The current Nomi-core build does not expose the canonical Agent workflow. Start the matching service or update the application, then retry.';
+    case 'network':
+      return 'The Nomi-core service could not be reached. Check that the desktop service is running, then retry.';
+    case 'timeout':
+      return 'The Nomi-core service did not respond before the deadline. Retry once; if the result is uncertain, inspect the existing Session before submitting again.';
+    case 'session-deleted':
+      return 'This Session was deleted and can no longer be continued.';
+    case 'session-not-found':
+      return 'This Session is no longer available. Return to Agent Settings and choose another setup.';
+    case 'snapshot-unavailable':
+      return 'This saved setup cannot run on the current runtime. Its history is read-only; create a new Session from the current setup.';
+    case 'resource':
+      return 'Select every required resource before saving or testing this setup.';
+    case 'model':
+      return 'Choose an available Chat model before saving or testing this setup.';
+    case 'conflict':
+      return 'This setup changed elsewhere. Reload it before saving again.';
+    case 'runtime':
+      return 'Nomi-core could not start this operation. Check the selected model and resources, then retry.';
+    case 'unknown':
+    default:
+      return 'The Agent operation could not be completed. Review the selected model and resources, then retry.';
+  }
+}
+
+/**
+ * Preview diagnostics are deliberately reduced to product language.  The
+ * backend diagnostic code/subject/details remain available in the response
+ * for non-UI callers, but never become a visible error payload.
+ */
+export function previewDiagnosticMessage(
+  diagnostic: PreviewDiagnostic
+): string {
+  switch (diagnostic.code.toUpperCase()) {
+    case 'PRESET_RESOURCE_NOT_BOUND':
+    case 'RESOURCE_OWNER_MISMATCH':
+      return 'Select every required resource before continuing.';
+    case 'MODEL_ROUTE_RECORD_INVALID':
+    case 'MODEL_ROUTE_NOT_FOUND':
+      return 'Choose an available Chat model before continuing.';
+    case 'CAPABILITY_NOT_MATERIALIZED':
+    case 'CAPABILITY_UNAVAILABLE':
+    case 'CAPABILITY_UNAVAILABLE_ON_PLATFORM':
+      return 'One selected capability is unavailable on this installation.';
+    case 'PRESET_REVISION_DIGEST_MISMATCH':
+      return 'This setup changed while it was open. Reload it before saving.';
+    case 'SNAPSHOT_EXECUTOR_UNAVAILABLE':
+      return 'This setup is read-only on the current runtime. Fork a new Session to continue.';
+    case 'ROLE_COVERAGE_INCOMPLETE':
+    case 'CODING_CODEX_NATIVE_INCOMPLETE':
+      return 'This setup requires a runtime feature that is not available on this host.';
+    default:
+      return diagnostic.severity === 'warning'
+        ? 'An optional part of this setup is unavailable on the current host.'
+        : 'This setup cannot be executed on the current host.';
+  }
+}

@@ -35,6 +35,6 @@ pub use routes_aux::conversation_ops_routes;
 pub use service::{
     ConversationService, ConversationSupervisionHook, DELIVERY_NOTIFY_ORIGIN,
     DeliveryNotifyRegistration, IdempotentMessageDelivery, IdmmTurnScope,
-    PublicTurnDeliveryState, TurnCompletionObserver,
+    BackgroundTaskRegistrar, PublicTurnDeliveryState, TurnCompletionObserver,
 };
 pub use state::ConversationRouterState;

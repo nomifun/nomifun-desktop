@@ -2037,6 +2037,7 @@
       "reviewRequired": "Review prompts before generation",
       "save": "Save",
       "seriesPlanning": "Multi-image prompt planning",
+      "size": "Size",
       "splitInstruction": "Series breakdown requirements",
       "splitPlaceholder": "Explain the role of each image and how the series should stay coherent",
       "variableKeyPlaceholder": "Variable key, e.g. product_name",

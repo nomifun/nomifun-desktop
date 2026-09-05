@@ -21,6 +21,7 @@ use nomifun_model_invoke::ModelInvokeService;
 use crate::attempt_runner::{AgentExecutionSessionPort, AgentSessionAttemptRunner};
 use crate::engine::{AgentExecutionEngine, AgentExecutionEngineDeps};
 use crate::event_publisher::AgentExecutionEventPublisher;
+use crate::lifecycle::AgentExecutionLifecycle;
 use crate::planner::{LlmPlanProducer, PlanProducer};
 use crate::scheduler::ConversationEffects;
 
@@ -41,6 +42,7 @@ pub struct AgentExecutionEngineConfig {
     pub session: Arc<dyn AgentExecutionSessionPort>,
     pub model_invoke: Arc<ModelInvokeService>,
     pub workspace_root: PathBuf,
+    pub lifecycle: AgentExecutionLifecycle,
 }
 
 struct ProductionConversationEffects {
@@ -122,7 +124,8 @@ impl ConversationEffects for ProductionConversationEffects {
 impl AgentExecutionEngine {
     /// Construct the canonical production engine.
     pub fn new(config: AgentExecutionEngineConfig) -> Self {
-        let publisher = AgentExecutionEventPublisher::new(config.realtime);
+        let publisher = AgentExecutionEventPublisher::new(config.realtime)
+            .with_lifecycle(config.lifecycle.clone());
         let session = config.session;
         let attempt_runner = Arc::new(AgentSessionAttemptRunner::new(session.clone()));
         // The immutable participant snapshot supplies the actual lead model;
@@ -145,6 +148,7 @@ impl AgentExecutionEngine {
             conversation_effects,
             publisher,
             config.workspace_root,
+            config.lifecycle,
         );
         Self::from_dependencies(deps)
     }

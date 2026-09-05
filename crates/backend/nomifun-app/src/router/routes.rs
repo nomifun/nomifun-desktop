@@ -215,7 +215,7 @@ fn protect_instance_owner(
         .route_layer(from_fn_with_state(auth_state.clone(), auth_middleware))
 }
 
-/// Fallible transitional compatibility-router assembly with all legacy routes
+/// Fallible Nomi-core router assembly with the current product routes
 /// and global middleware.
 ///
 /// Middleware stack (outermost → innermost):
@@ -223,26 +223,39 @@ fn protect_instance_owner(
 /// 2. CSRF protection (Double Submit Cookie)
 /// 3. Route handlers (auth routes + system routes + conversation routes + file routes + health check)
 pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router> {
-    services.require_legacy_compatibility_root("try_create_router")?;
+    services.require_nomi_core_root("try_create_router")?;
     let boot = Instant::now();
-    tracing::info!("startup: transitional compatibility router assembly started");
+    tracing::info!("startup: Nomi-core router assembly started");
 
     // Bridge event bus → WebSocket manager: forward all broadcast events
     // to connected WebSocket clients.
     let event_rx = services.event_bus.subscribe();
     let ws_manager = services.ws_manager.clone();
-    tokio::spawn(forward_instance_events(
-        event_rx,
-        ws_manager,
-        services.authoritative_user_id.clone(),
-    ));
+    let authoritative_user_id = services.authoritative_user_id.clone();
+    let shutdown = services.background_shutdown.clone();
+    services.register_background_task(tokio::spawn(async move {
+        tokio::select! {
+            _ = shutdown.cancelled() => {}
+            _ = forward_instance_events(
+                event_rx,
+                ws_manager,
+                authoritative_user_id,
+            ) => {}
+        }
+    }));
 
     // User-scoped events travel on a separate internal channel. Server-side
     // observers can subscribe without exposing those events to other users,
     // while this bridge delivers each envelope only to its authenticated owner.
     let user_event_rx = services.event_bus.subscribe_user();
     let ws_manager = services.ws_manager.clone();
-    tokio::spawn(forward_user_events(user_event_rx, ws_manager));
+    let shutdown = services.background_shutdown.clone();
+    services.register_background_task(tokio::spawn(async move {
+        tokio::select! {
+            _ = shutdown.cancelled() => {}
+            _ = forward_user_events(user_event_rx, ws_manager) => {}
+        }
+    }));
     match services.knowledge_service.drain_pending_tree_events().await {
         Ok(published) if published > 0 => {
             tracing::info!(published, "startup: published pending knowledge-tree events");
@@ -333,21 +346,28 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
         "startup: gateway MCP deps injected"
     );
 
-    // Start the channel message loop.
-    tokio::spawn(
-        channel_components
-            .message_loop
-            .run(channel_components.message_rx),
-    );
+    // Start the channel message loop. Keep its child relays under the same
+    // process-lifetime cancellation/join boundary.
+    let channel_message_loop = channel_components.message_loop;
+    let mut channel_message_rx = channel_components.message_rx;
+    let shutdown = services.background_shutdown.clone();
+    services.register_background_task(tokio::spawn(async move {
+        channel_message_loop
+            .run_with_shutdown(&mut channel_message_rx, shutdown)
+            .await;
+    }));
     // Start the busy-time queue drain (spec D1): it consumes `turn.completed`
     // envelopes from the same in-process bus the conversation service
     // publishes through, recovers persisted queued prompts on startup, and
     // expires stale ones.
-    tokio::spawn(
-        channel_components
-            .queue_drain
-            .run(services.event_bus.subscribe_user()),
-    );
+    let channel_queue_drain = channel_components.queue_drain;
+    let user_event_rx = services.event_bus.subscribe_user();
+    let shutdown = services.background_shutdown.clone();
+    services.register_background_task(tokio::spawn(async move {
+        channel_queue_drain
+            .run_with_shutdown(user_event_rx, shutdown)
+            .await;
+    }));
 
     // Spec D2: register the delivery-notify observer on the conversation
     // service instance that executes gateway `nomi_send_to_conversation`
@@ -355,16 +375,23 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
     // turn completes, the observer injects a receipt message into the
     // requester session; a channel-bound requester relays the companion's
     // summary to its IM chat through the standard stream relay.
-    let delivery_notify_observer = Arc::new(crate::delivery_notify::DeliveryNotifyObserver::new(
-        states.conversation.service.clone(),
-        services.agent_runtime_registry.clone(),
-        services.authoritative_user_id.clone(),
-        states.channel.repo.clone(),
-        channel_components.manager.clone()
-            as Arc<dyn nomifun_channel::stream_relay::ChannelSender>,
-        channel_components.message_service.stop_confirmations(),
-        channel_components.message_service.asset_resolver(),
-    ));
+    let delivery_notify_observer = Arc::new(
+        crate::delivery_notify::DeliveryNotifyObserver::new(
+            states.conversation.service.clone(),
+            services.agent_runtime_registry.clone(),
+            services.authoritative_user_id.clone(),
+            states.channel.repo.clone(),
+            channel_components.manager.clone()
+                as Arc<dyn nomifun_channel::stream_relay::ChannelSender>,
+            channel_components.message_service.stop_confirmations(),
+            channel_components.message_service.asset_resolver(),
+            services.background_shutdown.clone(),
+        )
+        .with_background_task_registrar(
+            services.background_tasks.clone()
+                as Arc<dyn nomifun_conversation::BackgroundTaskRegistrar>,
+        ),
+    );
     states
         .conversation
         .service
@@ -377,11 +404,13 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
     // Restore enabled channel plugins (starts receiving IM messages)
     let chan_mgr = channel_components.manager;
     let chan_factory = channel_components.plugin_factory;
+    services.set_channel_manager(chan_mgr.clone());
     {
         let mgr = chan_mgr.clone();
         let factory = chan_factory.clone();
         let companion_service = services.companion_service.clone();
-        tokio::spawn(async move {
+        let shutdown = services.background_shutdown.clone();
+        services.register_background_task(tokio::spawn(async move {
             // Self-heal ghost owner bindings BEFORE restoring: a channel row
             // bound to a 伙伴 that was deleted before the delete-hook existed
             // (or missed by it) keeps reserving its bot identity
@@ -407,10 +436,16 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
                 mgr.reconcile_orphaned_owners(&live_companions).await;
             }
 
-            if let Err(e) = mgr.restore_plugins(&factory).await {
+            if shutdown.is_cancelled() {
+                return;
+            }
+            if let Err(e) = mgr
+                .restore_plugins_with_shutdown(&factory, shutdown.clone())
+                .await
+            {
                 tracing::warn!(error = %e, "failed to restore channel plugins");
             }
-        });
+        }));
     }
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
@@ -421,10 +456,12 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
     // reconnect budget, leaving DB + frontend claiming "running" for a dead
     // plugin. The watchdog persists the real status, broadcasts the change,
     // and attempts rate-limited automatic restarts.
-    let _channel_watchdog = chan_mgr.spawn_watchdog(
+    let channel_watchdog = chan_mgr.spawn_watchdog_with_shutdown(
         chan_factory,
         nomifun_channel::manager::WatchdogConfig::default(),
+        services.background_shutdown.clone(),
     );
+    services.register_background_task(channel_watchdog);
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: channel plugin watchdog spawned"
@@ -437,7 +474,7 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
     let ws_state = build_ws_state(services);
     let remote_auth_admission =
         Arc::new(nomifun_auth::RemoteAuthAdmissionFence::new());
-    let router = create_transitional_router_with_all_state(
+    let router = create_nomi_core_router_with_all_state(
         services,
         states,
         ws_state,
@@ -445,16 +482,15 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
     );
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
-        "startup: transitional compatibility route assembly completed"
+        "startup: Nomi-core route assembly completed"
     );
     Ok(router)
 }
 
-/// Create the transitional compatibility router.
+/// Create the current Nomi-core product router.
 ///
-/// Fresh-v4 production hosts must use `FreshV4Application::router`; this
-/// `AppServices` graph remains only for legacy-compatible tests and explicitly
-/// selected transitional embeddings.
+/// Fresh-v4 remains a separate, explicitly selected future host and uses
+/// `FreshV4Application::router`; it never shares this `AppServices` graph.
 pub async fn create_router(services: &AppServices) -> Router {
     try_create_router(services)
         .await
@@ -639,7 +675,7 @@ mod realtime_bridge_tests {
 /// (e.g. injecting a mock HTTP server URL for version check).
 pub fn create_router_with_states(services: &AppServices, states: ModuleStates) -> Router {
     services
-        .require_legacy_compatibility_root("create_router_with_states")
+        .require_nomi_core_root("create_router_with_states")
         .unwrap_or_else(|error| panic!("application router assembly failed: {error:#}"));
     let ws_state = build_ws_state(services);
     create_router_with_all_state(services, states, ws_state)
@@ -655,9 +691,9 @@ pub fn create_router_with_all_state(
     ws_state: WsHandlerState,
 ) -> Router {
     services
-        .require_legacy_compatibility_root("create_router_with_all_state")
+        .require_nomi_core_root("create_router_with_all_state")
         .unwrap_or_else(|error| panic!("application router assembly failed: {error:#}"));
-    create_transitional_router_with_all_state(
+    create_nomi_core_router_with_all_state(
         services,
         states,
         ws_state,
@@ -665,7 +701,7 @@ pub fn create_router_with_all_state(
     )
 }
 
-fn create_transitional_router_with_all_state(
+fn create_nomi_core_router_with_all_state(
     services: &AppServices,
     states: ModuleStates,
     ws_state: WsHandlerState,
@@ -691,6 +727,18 @@ fn create_transitional_router_with_all_state(
     };
     let instance_owner_state =
         InstanceOwnerState::new(services.authoritative_user_id.clone());
+
+    // Current Nomi-core Agent Settings/AgentSession/Remote surface.  This is
+    // deliberately built from the shared NomiCoreSessionOwner and the
+    // app-local persistent control plane; it does not mount the Fresh-v4
+    // AgentPlatform or its Codex runtime.
+    let nomi_core_agent_authenticated = protect_instance_owner(
+        super::nomi_core_session::build_nomi_core_agent_router(
+            states.nomi_core_agent_api.clone(),
+        ),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
 
     // LAN robot gateway. Assembled here because this is where the
     // `ConversationService` the robot sessions dispatch through exists; the two
@@ -809,9 +857,9 @@ fn create_transitional_router_with_all_state(
         &instance_owner_state,
     );
 
-    // This router is itself the explicitly selected transitional composition.
-    // Fresh-v4 owns its canonical control-plane routes in its own application
-    // router and never reaches this legacy skill catalog.
+    // This router is the explicitly selected Nomi-core composition. Fresh-v4
+    // owns its control-plane routes in its own application router and never
+    // reaches this Nomi-core skill catalog.
     let skill_authenticated = Some(protect_instance_owner(
         skill_routes(states.skill),
         &auth_mw_state,
@@ -1097,6 +1145,7 @@ fn create_transitional_router_with_all_state(
         .merge(ssh_host_authenticated)
         .merge(miniapp_authenticated)
         .merge(agent_authenticated)
+        .merge(nomi_core_agent_authenticated)
         .merge(model_failover_authenticated)
         .merge(connection_test_authenticated)
         .merge(file_authenticated)

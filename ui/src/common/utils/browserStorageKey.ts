@@ -9,7 +9,7 @@ import type {
   EntityKind,
   SessionTarget,
 } from '@/common/types/ids';
-import { parseEntityId } from '@/common/types/ids';
+import { CANONICAL_UUID_V7 } from '@/common/types/ids';
 import { uuidv7 } from './uuidv7';
 
 export const BROWSER_STORAGE_SCHEMA_VERSION = 1 as const;
@@ -41,23 +41,20 @@ let provisionalStorageGeneration: string | null = null;
  * bootstrap. Keeping the generation in every entity-scoped key prevents
  * browser state surviving a reset or restore from binding to a new graph.
  */
-export function setBrowserStorageGeneration(value: string): void {
-  try {
-    parseEntityId('user', value);
-  } catch {
+export function setBrowserStorageGeneration(value: unknown): void {
+  if (!isCanonicalBrowserStorageGeneration(value)) {
     throw new TypeError('storage generation must be a canonical lowercase UUIDv7 string');
   }
   storageGeneration = value;
 }
 
-function isCanonicalStorageGeneration(value: unknown): value is string {
-  if (typeof value !== 'string') return false;
-  try {
-    parseEntityId('user', value);
-    return true;
-  } catch {
-    return false;
-  }
+/**
+ * Storage generation is a dataset identity, not a user identity. Keep its
+ * runtime check explicit so a future change to another entity parser cannot
+ * loosen this boundary accidentally.
+ */
+export function isCanonicalBrowserStorageGeneration(value: unknown): value is string {
+  return typeof value === 'string' && CANONICAL_UUID_V7.test(value);
 }
 
 function defaultBrowserStorage(): BrowserStoragePersistence | undefined {
@@ -74,7 +71,7 @@ function readPersistedStorageGeneration(storage: BrowserStoragePersistence | und
   try {
     const value = storage.getItem(BROWSER_STORAGE_GENERATION_STORAGE_KEY);
     if (value === null) return null;
-    if (isCanonicalStorageGeneration(value)) return value;
+    if (isCanonicalBrowserStorageGeneration(value)) return value;
 
     // Do not let a legacy or corrupted value poison the next bootstrap.
     try {
@@ -115,7 +112,7 @@ export function initializeBrowserStorageGeneration(
   backendValue: unknown,
   storage: BrowserStoragePersistence | undefined = defaultBrowserStorage(),
 ): string {
-  if (isCanonicalStorageGeneration(backendValue)) {
+  if (isCanonicalBrowserStorageGeneration(backendValue)) {
     setBrowserStorageGeneration(backendValue);
     provisionalStorageGeneration = null;
     persistStorageGeneration(storage, backendValue);

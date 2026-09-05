@@ -163,6 +163,9 @@ nomicore remote cancel <agent_session_id> \
 | `REMOTE_SESSION_OPENING` | Runtime admission 尚未到达 durable 终态。 |
 | `REMOTE_OPEN_FAILED` | Runtime admission 失败；应读取 Session Event。 |
 | `REMOTE_SESSION_BUSY` | Turn/cancel 与当前 Session 状态冲突。 |
+| `REMOTE_OPERATION_TIMEOUT` | 某个 Remote 操作超过有界 deadline；结果可能未知，应复用同一 idempotency key 并通过 observe 恢复。 |
+| `REMOTE_OPERATION_BLOCKED` | 操作在结果未知时发生 panic 或不可恢复阻塞；不要新建操作，先检查同一 Session 并重启宿主。 |
+| `REMOTE_SESSION_PERSISTENCE_BLOCKED` | `session/open-failed` 无法持久化；恢复存储后重启宿主进行 reconciliation。 |
 | `SNAPSHOT_EXECUTOR_UNAVAILABLE` | 冻结 Snapshot 当前无法执行。 |
 
 ## 相关文档

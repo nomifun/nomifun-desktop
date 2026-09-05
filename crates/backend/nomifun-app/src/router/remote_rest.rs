@@ -6,7 +6,9 @@
 //! package's manifest-declared AgentSession command/query ports. The concrete
 //! platform is retained only for RemoteBinding control-plane lookup.
 
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Query, Request, State};
 use axum::http::StatusCode;
@@ -39,7 +41,37 @@ use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::remote_runtime::RemoteRuntimeCoordinator;
+use super::remote_runtime::{
+    RemoteDetachedMutationAdmissionError, RemoteDetachedMutationPermit,
+    RemoteDetachedMutationRegistry, RemoteRuntimeCoordinator,
+};
+
+const REMOTE_OPERATION_TIMEOUT_CODE: &str = "REMOTE_OPERATION_TIMEOUT";
+const REMOTE_REQUEST_TIMEOUT_CODE: &str = "REMOTE_REQUEST_TIMEOUT";
+const REMOTE_OPERATION_BLOCKED_CODE: &str = "REMOTE_OPERATION_BLOCKED";
+const REMOTE_PERSISTENCE_BLOCKED_CODE: &str = "REMOTE_SESSION_PERSISTENCE_BLOCKED";
+
+// Each boundary has its own budget. The request timeout is only a final
+// protection for body extraction/middleware and must not replace operation
+// budgets below.
+const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+const REMOTE_OPEN_BINDING_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_OPEN_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+const REMOTE_OPEN_WORKFLOW_TIMEOUT: Duration = Duration::from_secs(60);
+const REMOTE_OPEN_ADMISSION_TIMEOUT: Duration = Duration::from_secs(20);
+const REMOTE_OPEN_HEAD_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_TURN_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_TURN_ADMISSION_TIMEOUT: Duration = Duration::from_secs(20);
+const REMOTE_TURN_DISPATCH_TIMEOUT: Duration = Duration::from_secs(150);
+const REMOTE_TURN_HEAD_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_OBSERVE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_OBSERVE_ADMISSION_TIMEOUT: Duration = Duration::from_secs(20);
+const REMOTE_OBSERVE_HEAD_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_OBSERVE_PAGE_TIMEOUT: Duration = Duration::from_secs(15);
+const REMOTE_CANCEL_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_CANCEL_HEAD_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_CANCEL_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const REMOTE_CANCEL_FINAL_HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 struct RemoteRestState {
@@ -47,6 +79,7 @@ struct RemoteRestState {
     session_command: Arc<dyn CanonicalAgentSessionCommandPort>,
     session_query: Arc<dyn AgentSessionQueryPort>,
     runtime: Arc<RemoteRuntimeCoordinator>,
+    detached_mutations: RemoteDetachedMutationRegistry,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +97,21 @@ struct RemoteHttpError {
     code: String,
     message: String,
     details: Option<Value>,
+}
+
+#[derive(Debug)]
+enum DetachedCallFailure<E> {
+    Failed(E),
+    TimedOut(RemoteHttpError),
+    Panicked,
+    Admission(RemoteDetachedMutationAdmissionError),
+}
+
+#[derive(Debug)]
+enum RemoteOpenWorkflowFailure {
+    Session(AgentPlatformError),
+    SessionTimedOut,
+    SessionPanicked,
 }
 
 impl RemoteHttpError {
@@ -212,11 +260,13 @@ pub fn build(
     authoritative_user_id: UserId,
     runtime: Arc<RemoteRuntimeCoordinator>,
 ) -> Router {
+    let detached_mutations = runtime.detached_mutation_registry();
     let state = RemoteRestState {
         platform,
         session_command,
         session_query,
         runtime,
+        detached_mutations,
     };
     Router::new()
         .route("/api/remote/open", post(open))
@@ -224,6 +274,7 @@ pub fn build(
         .route("/api/remote/observe", get(observe))
         .route("/api/remote/cancel", post(cancel))
         .with_state(state)
+        .layer(from_fn(remote_request_deadline))
         .layer(from_fn(reject_undeclared_query_parameters))
         .layer(from_fn_with_state(
             PublicMcpState {
@@ -232,6 +283,29 @@ pub fn build(
             },
             instance_token_middleware,
         ))
+}
+
+/// A final request-level guard for body extraction and any future middleware.
+/// Individual Remote operations still use their own deadlines so a timeout
+/// can identify whether a mutation's outcome is unknown.
+async fn remote_request_deadline(request: Request, next: Next) -> Response {
+    match tokio::time::timeout(REMOTE_REQUEST_TIMEOUT, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => RemoteHttpError::canonical_with_details(
+            REMOTE_REQUEST_TIMEOUT_CODE,
+            StatusCode::GATEWAY_TIMEOUT,
+            format!(
+                "Remote request exceeded its {} ms deadline",
+                REMOTE_REQUEST_TIMEOUT.as_millis()
+            ),
+            serde_json::json!({
+                "operation": "remote.request",
+                "timeout_ms": REMOTE_REQUEST_TIMEOUT.as_millis() as u64,
+                "recovery": "retry_same_request"
+            }),
+        )
+        .into_response(),
+    }
 }
 
 async fn reject_undeclared_query_parameters(request: Request, next: Next) -> Response {
@@ -259,17 +333,27 @@ async fn open(
     Extension(RemoteInstanceOwner(owner)): Extension<RemoteInstanceOwner>,
     Json(request): Json<RemoteOpenRequestDto>,
 ) -> Result<Json<RemoteOpenResponseDto>, RemoteHttpError> {
-    let idempotency_key = nonempty(&request.idempotency_key, "idempotency_key")?;
+    let idempotency_key = validated_idempotency_key(&request.idempotency_key)?;
     let binding_id = nonempty(&request.binding_id, "binding_id")?;
     let initial_input = request
         .initial_input
         .map(|value| bounded_json(value, "initial_input"))
         .transpose()?;
-    let binding = state
-        .platform
-        .control_plane()
-        .get_remote_binding(&contract_user_id(&owner), &binding_id)
-        .await?
+    let binding = with_remote_deadline(
+        "open.binding_lookup",
+        REMOTE_OPEN_BINDING_TIMEOUT,
+        "retry_same_request",
+        None,
+        async {
+            state
+                .platform
+                .control_plane()
+                .get_remote_binding(&contract_user_id(&owner), &binding_id)
+                .await
+                .map_err(RemoteHttpError::from)
+        },
+    )
+    .await?
         .ok_or_else(|| {
             RemoteHttpError::canonical(
                 "REMOTE_BINDING_NOT_FOUND",
@@ -297,27 +381,93 @@ async fn open(
     open.audience = "owner".to_owned();
     open.initial_input = initial_input.map(StrictJsonValue);
 
-    let created = state.session_command.open_session(open).await?;
+    let workflow_permit = state
+        .detached_mutations
+        .try_admit(remote_mutation_key(
+            "open.workflow",
+            &owner,
+            None,
+            &idempotency_key,
+        ))
+        .map_err(|error| remote_detached_admission_error("open.workflow", None, error))?;
+    let session_permit = workflow_permit.clone();
+    let admission_parent_permit = workflow_permit.clone();
+    let command = Arc::clone(&state.session_command);
+    let runtime = Arc::clone(&state.runtime);
+    let detached_mutations = state.detached_mutations.clone();
+    let workflow = run_detached_with_permit(
+        workflow_permit,
+        "open.workflow",
+        REMOTE_OPEN_WORKFLOW_TIMEOUT,
+        "retry_same_idempotency_key_and_observe",
+        None,
+        async move {
+            open_session_and_admit(
+                command,
+                runtime,
+                detached_mutations,
+                session_permit,
+                admission_parent_permit,
+                open,
+            )
+            .await
+        },
+    )
+    .await;
+    let (created, admission) = match workflow {
+        Ok(result) => result,
+        Err(DetachedCallFailure::Failed(RemoteOpenWorkflowFailure::Session(error))) => {
+            return Err(error.into());
+        }
+        Err(DetachedCallFailure::Failed(RemoteOpenWorkflowFailure::SessionTimedOut)) => {
+            return Err(remote_operation_timeout(
+                "open.session_command",
+                REMOTE_OPEN_SESSION_TIMEOUT,
+                "retry_same_idempotency_key_and_observe",
+                None,
+            ));
+        }
+        Err(DetachedCallFailure::Failed(RemoteOpenWorkflowFailure::SessionPanicked)) => {
+            return Err(remote_operation_blocked(
+                "open.session_command",
+                "the open command panicked before its durable outcome was known",
+                None,
+            ));
+        }
+        Err(DetachedCallFailure::Panicked) => {
+            return Err(remote_operation_blocked(
+                "open.workflow",
+                "the open workflow panicked before its durable outcome was known",
+                None,
+            ));
+        }
+        Err(DetachedCallFailure::TimedOut(error)) => return Err(error),
+        Err(DetachedCallFailure::Admission(error)) => {
+            return Err(remote_detached_admission_error(
+                "open.workflow",
+                None,
+                error,
+            ));
+        }
+    };
     let session_id = created.session.agent_session_id.clone();
     let principal = user_principal(&owner);
-    let admission_error = state.runtime.ensure_started(session_id.clone()).await.err();
-    let (status, last_seq) = if created.duplicate || admission_error.is_some() {
-        let head = state
-            .session_query
-            .session_head(&principal, &session_id)
-            .await?;
-        if let Some(error) = admission_error {
+    let (status, last_seq) = if created.duplicate || admission.is_err() {
+        let head = read_session_head(
+            state.session_query.as_ref(),
+            &principal,
+            &session_id,
+            "open.session_head",
+            REMOTE_OPEN_HEAD_TIMEOUT,
+        )
+        .await?;
+        if let Err(error) = admission {
             if head.status == "opening" {
-                return Err(RemoteHttpError::canonical_with_details(
-                    "REMOTE_SESSION_OPENING",
-                    StatusCode::CONFLICT,
-                    "Remote Runtime admission did not settle; the Session remains opening",
-                    serde_json::json!({
-                        "agent_session_id": session_id,
-                        "cursor": cursor(&session_id, head.last_seq),
-                        "recovery": "host_restart_reconcile",
-                        "cause": error.to_string()
-                    }),
+                return Err(runtime_admission_error(
+                    &state.runtime,
+                    &session_id,
+                    &head,
+                    error,
                 ));
             }
         }
@@ -342,56 +492,113 @@ async fn turn(
     Extension(RemoteInstanceOwner(owner)): Extension<RemoteInstanceOwner>,
     Json(request): Json<RemoteTurnRequestDto>,
 ) -> Result<Json<RemoteMutationResponseDto>, RemoteHttpError> {
-    let idempotency_key = nonempty(&request.idempotency_key, "idempotency_key")?;
+    let idempotency_key = validated_idempotency_key(&request.idempotency_key)?;
     let session_id = parse_session_id(&request.agent_session_id)?;
     let input = bounded_json(request.input, "input")?;
-    ensure_remote_session(state.session_query.as_ref(), &owner, &session_id).await?;
-    let mut current_head = state
-        .session_query
-        .session_head(&user_principal(&owner), &session_id)
-        .await?;
+    ensure_remote_session(
+        state.session_query.as_ref(),
+        &owner,
+        &session_id,
+        "turn.session_lookup",
+        REMOTE_TURN_LOOKUP_TIMEOUT,
+    )
+    .await?;
+    let principal = user_principal(&owner);
+    let mut current_head = read_session_head(
+        state.session_query.as_ref(),
+        &principal,
+        &session_id,
+        "turn.session_head",
+        REMOTE_TURN_HEAD_TIMEOUT,
+    )
+    .await?;
     if current_head.status == "opening" {
-        if let Err(error) = state.runtime.ensure_started(session_id.clone()).await {
-            current_head = state
-                .session_query
-                .session_head(&user_principal(&owner), &session_id)
-                .await?;
+        let admission = detached_runtime_admission(
+            &state.runtime,
+            state.detached_mutations.clone(),
+            session_id.clone(),
+            REMOTE_TURN_ADMISSION_TIMEOUT,
+            None,
+        )
+        .await;
+        if let Err(error) = admission {
+            current_head = read_session_head(
+                state.session_query.as_ref(),
+                &principal,
+                &session_id,
+                "turn.opening_recheck",
+                REMOTE_TURN_HEAD_TIMEOUT,
+            )
+            .await?;
             if current_head.status == "opening" {
-                return Err(remote_opening_error(&session_id, &current_head, &error));
+                return Err(runtime_admission_error(
+                    &state.runtime,
+                    &session_id,
+                    &current_head,
+                    error,
+                ));
             }
         }
-        current_head = state
-            .session_query
-            .session_head(&user_principal(&owner), &session_id)
-            .await?;
-    }
-    if current_head.status == "opening" {
-        return Err(RemoteHttpError::canonical(
-            "REMOTE_SESSION_OPENING",
-            StatusCode::CONFLICT,
-            "AgentSession runtime opening has not completed",
-        ));
-    }
-    if current_head.status == "open_failed" {
-        return Err(RemoteHttpError::canonical(
-            "REMOTE_OPEN_FAILED",
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "AgentSession runtime opening failed",
-        ));
-    }
-    let dispatch = state
-        .session_command
-        .start_turn(StartAgentTurnRequest {
-            agent_session_id: session_id.clone(),
-            principal: user_principal(&owner),
-            input: StrictJsonValue(input),
-            idempotency_key: IdempotencyKey::from(format!("remote-turn:{idempotency_key}")),
-        })
+        current_head = read_session_head(
+            state.session_query.as_ref(),
+            &principal,
+            &session_id,
+            "turn.ready_recheck",
+            REMOTE_TURN_HEAD_TIMEOUT,
+        )
         .await?;
-    let head = state
-        .session_query
-        .session_head(&user_principal(&owner), &session_id)
-        .await?;
+    }
+    ensure_turn_ready(&session_id, &current_head)?;
+    let turn_request = StartAgentTurnRequest {
+        agent_session_id: session_id.clone(),
+        principal: principal.clone(),
+        input: StrictJsonValue(input),
+        idempotency_key: IdempotencyKey::from(format!("remote-turn:{idempotency_key}")),
+    };
+    let command = Arc::clone(&state.session_command);
+    let mutation_key = remote_mutation_key(
+        "turn.dispatch",
+        &owner,
+        Some(&session_id),
+        &idempotency_key,
+    );
+    let dispatch = match run_detached_with_deadline(
+        state.detached_mutations.clone(),
+        mutation_key,
+        "turn.dispatch",
+        REMOTE_TURN_DISPATCH_TIMEOUT,
+        "retry_same_idempotency_key_and_observe",
+        Some(&session_id),
+        async move { command.start_turn(turn_request).await },
+    )
+    .await
+    {
+        Ok(dispatch) => dispatch,
+        Err(DetachedCallFailure::Failed(error)) => return Err(error.into()),
+        Err(DetachedCallFailure::TimedOut(error)) => return Err(error),
+        Err(DetachedCallFailure::Panicked) => {
+            return Err(remote_operation_blocked(
+                "turn.dispatch",
+                "the turn command panicked before its durable outcome was known",
+                Some(&session_id),
+            ));
+        }
+        Err(DetachedCallFailure::Admission(error)) => {
+            return Err(remote_detached_admission_error(
+                "turn.dispatch",
+                Some(&session_id),
+                error,
+            ));
+        }
+    };
+    let head = read_session_head(
+        state.session_query.as_ref(),
+        &principal,
+        &session_id,
+        "turn.final_head",
+        REMOTE_TURN_HEAD_TIMEOUT,
+    )
+    .await?;
     Ok(Json(RemoteMutationResponseDto {
         agent_session_id: dispatch.agent_session_id.as_ref().to_owned(),
         cursor: cursor(&session_id, head.last_seq),
@@ -406,19 +613,48 @@ async fn observe(
 ) -> Result<Json<RemoteObserveResponseDto>, RemoteHttpError> {
     validate_observe_limit(request.limit)?;
     let session_id = parse_session_id(&request.agent_session_id)?;
-    ensure_remote_session(state.session_query.as_ref(), &owner, &session_id).await?;
-    let current_head = state
-        .session_query
-        .session_head(&user_principal(&owner), &session_id)
-        .await?;
+    ensure_remote_session(
+        state.session_query.as_ref(),
+        &owner,
+        &session_id,
+        "observe.session_lookup",
+        REMOTE_OBSERVE_LOOKUP_TIMEOUT,
+    )
+    .await?;
+    let principal = user_principal(&owner);
+    let current_head = read_session_head(
+        state.session_query.as_ref(),
+        &principal,
+        &session_id,
+        "observe.session_head",
+        REMOTE_OBSERVE_HEAD_TIMEOUT,
+    )
+    .await?;
     if current_head.status == "opening" {
-        if let Err(error) = state.runtime.ensure_started(session_id.clone()).await {
-            let latest_head = state
-                .session_query
-                .session_head(&user_principal(&owner), &session_id)
-                .await?;
+        let admission = detached_runtime_admission(
+            &state.runtime,
+            state.detached_mutations.clone(),
+            session_id.clone(),
+            REMOTE_OBSERVE_ADMISSION_TIMEOUT,
+            None,
+        )
+        .await;
+        if let Err(error) = admission {
+            let latest_head = read_session_head(
+                state.session_query.as_ref(),
+                &principal,
+                &session_id,
+                "observe.opening_recheck",
+                REMOTE_OBSERVE_HEAD_TIMEOUT,
+            )
+            .await?;
             if latest_head.status == "opening" {
-                return Err(remote_opening_error(&session_id, &latest_head, &error));
+                return Err(runtime_admission_error(
+                    &state.runtime,
+                    &session_id,
+                    &latest_head,
+                    error,
+                ));
             }
         }
     }
@@ -426,15 +662,20 @@ async fn observe(
         agent_session_id: session_id.clone(),
         seq: request.after_seq,
     };
-    let observation = state
-        .session_query
-        .observe_session(
-            &user_principal(&owner),
-            &session_id,
-            Some(&after),
-            request.limit,
-        )
-        .await?;
+    let observation = with_remote_deadline(
+        "observe.page",
+        REMOTE_OBSERVE_PAGE_TIMEOUT,
+        "retry_same_session_and_cursor",
+        Some(&session_id),
+        async {
+            state
+                .session_query
+                .observe_session(&principal, &session_id, Some(&after), request.limit)
+                .await
+                .map_err(RemoteHttpError::from)
+        },
+    )
+    .await?;
     let events = observation
         .events
         .into_iter()
@@ -458,21 +699,81 @@ async fn cancel(
     Extension(RemoteInstanceOwner(owner)): Extension<RemoteInstanceOwner>,
     Json(request): Json<RemoteCancelRequestDto>,
 ) -> Result<Json<RemoteMutationResponseDto>, RemoteHttpError> {
-    let idempotency_key = nonempty(&request.idempotency_key, "idempotency_key")?;
+    let idempotency_key = validated_idempotency_key(&request.idempotency_key)?;
     let session_id = parse_session_id(&request.agent_session_id)?;
-    ensure_remote_session(state.session_query.as_ref(), &owner, &session_id).await?;
-    state
-        .session_command
-        .cancel_remote_turn(
-            &user_principal(&owner),
-            &session_id,
-            IdempotencyKey::from(format!("remote-cancel:{idempotency_key}")),
-        )
-        .await?;
-    let head = state
-        .session_query
-        .session_head(&user_principal(&owner), &session_id)
-        .await?;
+    ensure_remote_session(
+        state.session_query.as_ref(),
+        &owner,
+        &session_id,
+        "cancel.session_lookup",
+        REMOTE_CANCEL_LOOKUP_TIMEOUT,
+    )
+    .await?;
+    let principal = user_principal(&owner);
+    let current_head = read_session_head(
+        state.session_query.as_ref(),
+        &principal,
+        &session_id,
+        "cancel.session_head",
+        REMOTE_CANCEL_HEAD_TIMEOUT,
+    )
+    .await?;
+    ensure_cancel_allowed(&session_id, &current_head)?;
+
+    let command = Arc::clone(&state.session_command);
+    let cancel_principal = principal.clone();
+    let cancel_session_id = session_id.clone();
+    let mutation_key = remote_mutation_key(
+        "cancel.command",
+        &owner,
+        Some(&session_id),
+        &idempotency_key,
+    );
+    let cancel_result = run_detached_with_deadline(
+        state.detached_mutations.clone(),
+        mutation_key,
+        "cancel.command",
+        REMOTE_CANCEL_COMMAND_TIMEOUT,
+        "retry_same_idempotency_key_and_observe",
+        Some(&session_id),
+        async move {
+            command
+                .cancel_remote_turn(
+                    &cancel_principal,
+                    &cancel_session_id,
+                    IdempotencyKey::from(format!("remote-cancel:{idempotency_key}")),
+                )
+                .await
+        },
+    )
+    .await;
+    match cancel_result {
+        Ok(_) => {}
+        Err(DetachedCallFailure::Failed(error)) => return Err(error.into()),
+        Err(DetachedCallFailure::TimedOut(error)) => return Err(error),
+        Err(DetachedCallFailure::Panicked) => {
+            return Err(remote_operation_blocked(
+                "cancel.command",
+                "the cancel command panicked before its durable outcome was known",
+                Some(&session_id),
+            ));
+        }
+        Err(DetachedCallFailure::Admission(error)) => {
+            return Err(remote_detached_admission_error(
+                "cancel.command",
+                Some(&session_id),
+                error,
+            ));
+        }
+    }
+    let head = read_session_head(
+        state.session_query.as_ref(),
+        &principal,
+        &session_id,
+        "cancel.final_head",
+        REMOTE_CANCEL_FINAL_HEAD_TIMEOUT,
+    )
+    .await?;
     Ok(Json(RemoteMutationResponseDto {
         agent_session_id: session_id.as_ref().to_owned(),
         cursor: cursor(&session_id, head.last_seq),
@@ -484,12 +785,23 @@ async fn ensure_remote_session(
     session_query: &dyn AgentSessionQueryPort,
     owner: &UserId,
     session_id: &AgentSessionId,
+    operation: &'static str,
+    timeout: Duration,
 ) -> Result<(), RemoteHttpError> {
     let expected = user_principal(owner);
-    let observation = session_query
-        .observe_session(&expected, session_id, None, 1)
-        .await
-        .map_err(remote_session_lookup_error)?;
+    let observation = with_remote_deadline(
+        operation,
+        timeout,
+        "retry_same_session",
+        Some(session_id),
+        async {
+            session_query
+                .observe_session(&expected, session_id, None, 1)
+                .await
+                .map_err(remote_session_lookup_error)
+        },
+    )
+    .await?;
     if observation.session.remote_binding_provenance.is_none() {
         return Err(RemoteHttpError::canonical(
             "REMOTE_SESSION_NOT_FOUND",
@@ -498,6 +810,281 @@ async fn ensure_remote_session(
         ));
     }
     Ok(())
+}
+
+async fn read_session_head(
+    session_query: &dyn AgentSessionQueryPort,
+    principal: &PrincipalRef,
+    session_id: &AgentSessionId,
+    operation: &'static str,
+    timeout: Duration,
+) -> Result<nomifun_agent_session::SessionHeadProjection, RemoteHttpError> {
+    with_remote_deadline(
+        operation,
+        timeout,
+        "retry_same_session",
+        Some(session_id),
+        async {
+            session_query
+                .session_head(principal, session_id)
+                .await
+                .map_err(RemoteHttpError::from)
+        },
+    )
+    .await
+}
+
+async fn with_remote_deadline<T, F>(
+    operation: &'static str,
+    timeout: Duration,
+    recovery: &'static str,
+    session_id: Option<&AgentSessionId>,
+    future: F,
+) -> Result<T, RemoteHttpError>
+where
+    F: Future<Output = Result<T, RemoteHttpError>>,
+{
+    match tokio::time::timeout(timeout, future).await {
+        Ok(result) => result,
+        Err(_) => Err(remote_operation_timeout(
+            operation,
+            timeout,
+            recovery,
+            session_id,
+        )),
+    }
+}
+
+async fn run_detached_with_deadline<T, E, F>(
+    registry: RemoteDetachedMutationRegistry,
+    key: String,
+    operation: &'static str,
+    timeout: Duration,
+    recovery: &'static str,
+    session_id: Option<&AgentSessionId>,
+    future: F,
+) -> Result<T, DetachedCallFailure<E>>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+    F: Future<Output = Result<T, E>> + Send + 'static,
+{
+    let permit = registry
+        .try_admit(key)
+        .map_err(DetachedCallFailure::Admission)?;
+    run_detached_with_permit(
+        permit,
+        operation,
+        timeout,
+        recovery,
+        session_id,
+        future,
+    )
+    .await
+}
+
+async fn run_detached_with_permit<T, E, F>(
+    permit: RemoteDetachedMutationPermit,
+    operation: &'static str,
+    timeout: Duration,
+    recovery: &'static str,
+    session_id: Option<&AgentSessionId>,
+    future: F,
+) -> Result<T, DetachedCallFailure<E>>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+    F: Future<Output = Result<T, E>> + Send + 'static,
+{
+    run_detached_with_permits(
+        vec![permit],
+        operation,
+        timeout,
+        recovery,
+        session_id,
+        future,
+    )
+    .await
+}
+
+async fn run_detached_with_permits<T, E, F>(
+    permits: Vec<RemoteDetachedMutationPermit>,
+    operation: &'static str,
+    timeout: Duration,
+    recovery: &'static str,
+    session_id: Option<&AgentSessionId>,
+    future: F,
+) -> Result<T, DetachedCallFailure<E>>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+    F: Future<Output = Result<T, E>> + Send + 'static,
+{
+    // A dropped JoinHandle detaches the mutation. This is intentional: a
+    // client deadline must not cancel a command after it may have committed
+    // its input/turn/cancel fact but before its own durable finalizer runs.
+    // The permit remains in the task until the future reaches a terminal
+    // state, so detached work is still bounded and observable by shutdown.
+    let abort_registration = permits.first().cloned();
+    let task = tokio::spawn(async move {
+        let _permits = permits;
+        future.await
+    });
+    if let Some(permit) = abort_registration {
+        permit.register_abort_handle(task.abort_handle());
+    }
+    match tokio::time::timeout(timeout, task).await {
+        Ok(Ok(Ok(value))) => Ok(value),
+        Ok(Ok(Err(error))) => Err(DetachedCallFailure::Failed(error)),
+        Ok(Err(_)) => Err(DetachedCallFailure::Panicked),
+        Err(_) => Err(DetachedCallFailure::TimedOut(remote_operation_timeout(
+            operation,
+            timeout,
+            recovery,
+            session_id,
+        ))),
+    }
+}
+
+async fn open_session_and_admit(
+    command: Arc<dyn CanonicalAgentSessionCommandPort>,
+    runtime: Arc<RemoteRuntimeCoordinator>,
+    detached_mutations: RemoteDetachedMutationRegistry,
+    session_permit: RemoteDetachedMutationPermit,
+    admission_parent_permit: RemoteDetachedMutationPermit,
+    request: OpenAgentSessionRequest,
+) -> Result<
+    (
+        nomifun_agent_session::SessionCreateResult,
+        Result<(), DetachedCallFailure<AgentPlatformError>>,
+    ),
+    RemoteOpenWorkflowFailure,
+> {
+    let created = match run_detached_with_permit(
+        session_permit,
+        "open.session_command",
+        REMOTE_OPEN_SESSION_TIMEOUT,
+        "retry_same_idempotency_key_and_observe",
+        None,
+        async move { command.open_session(request).await },
+    )
+    .await
+    {
+        Ok(created) => created,
+        Err(DetachedCallFailure::Failed(error)) => {
+            return Err(RemoteOpenWorkflowFailure::Session(error));
+        }
+        Err(DetachedCallFailure::TimedOut(_)) => {
+            return Err(RemoteOpenWorkflowFailure::SessionTimedOut);
+        }
+        Err(DetachedCallFailure::Panicked) => {
+            return Err(RemoteOpenWorkflowFailure::SessionPanicked);
+        }
+        Err(DetachedCallFailure::Admission(_)) => {
+            unreachable!("a pre-admitted workflow permit cannot be rejected")
+        }
+    };
+    let session_id = created.session.agent_session_id.clone();
+    let admission = detached_runtime_admission(
+        &runtime,
+        detached_mutations,
+        session_id,
+        REMOTE_OPEN_ADMISSION_TIMEOUT,
+        Some(admission_parent_permit),
+    )
+    .await;
+    Ok((created, admission))
+}
+
+async fn detached_runtime_admission(
+    runtime: &Arc<RemoteRuntimeCoordinator>,
+    detached_mutations: RemoteDetachedMutationRegistry,
+    session_id: AgentSessionId,
+    timeout: Duration,
+    parent_permit: Option<RemoteDetachedMutationPermit>,
+) -> Result<(), DetachedCallFailure<AgentPlatformError>> {
+    let runtime = Arc::clone(runtime);
+    let session_id_for_task = session_id.clone();
+    let runtime_key = format!("runtime.admission:{}", session_id.as_ref());
+    let runtime_permit = detached_mutations
+        .try_admit(runtime_key)
+        .map_err(DetachedCallFailure::Admission)?;
+    let permits = match parent_permit {
+        Some(parent_permit) => vec![parent_permit, runtime_permit],
+        None => vec![runtime_permit],
+    };
+    run_detached_with_permits(
+        permits,
+        "runtime.admission",
+        timeout,
+        "observe_same_session_or_restart_host",
+        Some(&session_id),
+        async move { runtime.ensure_started(session_id_for_task).await },
+    )
+    .await
+}
+
+fn runtime_admission_error(
+    runtime: &RemoteRuntimeCoordinator,
+    session_id: &AgentSessionId,
+    head: &nomifun_agent_session::SessionHeadProjection,
+    failure: DetachedCallFailure<AgentPlatformError>,
+) -> RemoteHttpError {
+    if let Some(reason) = runtime.failure_persistence_blocker(session_id) {
+        return remote_persistence_blocked(session_id, head, &reason);
+    }
+    match failure {
+        DetachedCallFailure::Failed(error) => remote_opening_error(session_id, head, &error),
+        DetachedCallFailure::TimedOut(error) => error,
+        DetachedCallFailure::Panicked => remote_operation_blocked(
+            "runtime.admission",
+            "Runtime admission panicked before a durable Session state was known",
+            Some(session_id),
+        ),
+        DetachedCallFailure::Admission(error) => {
+            remote_detached_admission_error("runtime.admission", Some(session_id), error)
+        }
+    }
+}
+
+fn ensure_turn_ready(
+    session_id: &AgentSessionId,
+    head: &nomifun_agent_session::SessionHeadProjection,
+) -> Result<(), RemoteHttpError> {
+    match head.status.as_str() {
+        "opening" => Err(remote_opening_state_error(session_id, head)),
+        "open_failed" => Err(RemoteHttpError::canonical(
+            "REMOTE_OPEN_FAILED",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "AgentSession runtime opening failed",
+        )),
+        "failed" => Err(RemoteHttpError::canonical(
+            "REMOTE_OPEN_FAILED",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "AgentSession is terminally failed",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn ensure_cancel_allowed(
+    session_id: &AgentSessionId,
+    head: &nomifun_agent_session::SessionHeadProjection,
+) -> Result<(), RemoteHttpError> {
+    match head.status.as_str() {
+        "opening" => Err(remote_opening_state_error(session_id, head)),
+        "open_failed" => Err(RemoteHttpError::canonical(
+            "REMOTE_OPEN_FAILED",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "AgentSession runtime opening failed",
+        )),
+        "failed" => Err(RemoteHttpError::canonical(
+            "REMOTE_OPEN_FAILED",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "AgentSession is terminally failed",
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn remote_session_lookup_error(error: AgentPlatformError) -> RemoteHttpError {
@@ -567,6 +1154,166 @@ fn remote_opening_error(
     )
 }
 
+fn remote_opening_state_error(
+    session_id: &AgentSessionId,
+    head: &nomifun_agent_session::SessionHeadProjection,
+) -> RemoteHttpError {
+    RemoteHttpError::canonical_with_details(
+        "REMOTE_SESSION_OPENING",
+        StatusCode::CONFLICT,
+        "AgentSession runtime opening has not completed",
+        serde_json::json!({
+            "agent_session_id": session_id,
+            "cursor": cursor(session_id, head.last_seq),
+            "recovery": "observe_same_session_or_host_restart_reconcile"
+        }),
+    )
+}
+
+fn remote_persistence_blocked(
+    session_id: &AgentSessionId,
+    head: &nomifun_agent_session::SessionHeadProjection,
+    reason: &str,
+) -> RemoteHttpError {
+    RemoteHttpError::canonical_with_details(
+        REMOTE_PERSISTENCE_BLOCKED_CODE,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Remote Runtime failure could not be durably recorded as session/open-failed",
+        serde_json::json!({
+            "agent_session_id": session_id,
+            "cursor": cursor(session_id, head.last_seq),
+            "recovery": "restore_storage_then_restart_host",
+            "blocker": reason
+        }),
+    )
+}
+
+fn remote_operation_timeout(
+    operation: &'static str,
+    timeout: Duration,
+    recovery: &'static str,
+    session_id: Option<&AgentSessionId>,
+) -> RemoteHttpError {
+    let details = match session_id {
+        Some(session_id) => serde_json::json!({
+            "operation": operation,
+            "timeout_ms": timeout.as_millis() as u64,
+            "agent_session_id": session_id,
+            "outcome": "unknown",
+            "recovery": recovery
+        }),
+        None => serde_json::json!({
+            "operation": operation,
+            "timeout_ms": timeout.as_millis() as u64,
+            "outcome": "unknown",
+            "recovery": recovery
+        }),
+    };
+    RemoteHttpError::canonical_with_details(
+        REMOTE_OPERATION_TIMEOUT_CODE,
+        StatusCode::GATEWAY_TIMEOUT,
+        format!(
+            "Remote {operation} exceeded its {} ms deadline",
+            timeout.as_millis()
+        ),
+        details,
+    )
+}
+
+fn remote_operation_blocked(
+    operation: &'static str,
+    message: &'static str,
+    session_id: Option<&AgentSessionId>,
+) -> RemoteHttpError {
+    let details = match session_id {
+        Some(session_id) => serde_json::json!({
+            "operation": operation,
+            "agent_session_id": session_id,
+            "outcome": "unknown",
+            "recovery": "observe_same_session_and_reuse_same_idempotency_key"
+        }),
+        None => serde_json::json!({
+            "operation": operation,
+            "outcome": "unknown",
+            "recovery": "observe_same_session_and_reuse_same_idempotency_key"
+        }),
+    };
+    RemoteHttpError::canonical_with_details(
+        REMOTE_OPERATION_BLOCKED_CODE,
+        StatusCode::SERVICE_UNAVAILABLE,
+        message,
+        details,
+    )
+}
+
+fn remote_detached_admission_error(
+    operation: &'static str,
+    session_id: Option<&AgentSessionId>,
+    admission: RemoteDetachedMutationAdmissionError,
+) -> RemoteHttpError {
+    let (status, message, outcome, recovery, reason) = match admission {
+        RemoteDetachedMutationAdmissionError::AlreadyRunning => (
+            StatusCode::CONFLICT,
+            "Remote operation with the same idempotency key is already in flight",
+            "unknown",
+            "observe_same_session_and_reuse_same_idempotency_key",
+            "already_in_flight",
+        ),
+        RemoteDetachedMutationAdmissionError::CapacityExceeded => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Remote detached mutation capacity is temporarily exhausted",
+            "not_started",
+            "retry_same_idempotency_key_after_capacity_recovers",
+            "capacity_exhausted",
+        ),
+        RemoteDetachedMutationAdmissionError::Closed => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Remote detached mutation admission is closed during host shutdown",
+            "not_started",
+            "restart_host_then_retry_same_idempotency_key",
+            "coordinator_closed",
+        ),
+    };
+    let details = match session_id {
+        Some(session_id) => serde_json::json!({
+            "operation": operation,
+            "agent_session_id": session_id,
+            "outcome": outcome,
+            "recovery": recovery,
+            "reason": reason
+        }),
+        None => serde_json::json!({
+            "operation": operation,
+            "outcome": outcome,
+            "recovery": recovery,
+            "reason": reason
+        }),
+    };
+    RemoteHttpError::canonical_with_details(
+        REMOTE_OPERATION_BLOCKED_CODE,
+        status,
+        message,
+        details,
+    )
+}
+
+fn remote_mutation_key(
+    operation: &'static str,
+    owner: &UserId,
+    session_id: Option<&AgentSessionId>,
+    idempotency_key: &str,
+) -> String {
+    let session = session_id.map(|id| id.as_ref()).unwrap_or("none");
+    let scope = format!(
+        "nomifun-remote-detached-mutation-v1\0{operation}\0{}\0{session}\0{idempotency_key}",
+        owner.as_ref()
+    );
+    format!(
+        "remote:{operation}:{}",
+        nomifun_auth::token_sha256_hex(&scope)
+    )
+}
+
 fn user_principal(owner: &UserId) -> PrincipalRef {
     PrincipalRef {
         principal_kind: "user".to_owned(),
@@ -591,6 +1338,23 @@ fn nonempty(value: &str, field: &str) -> Result<String, RemoteHttpError> {
             "REMOTE_INVALID_REQUEST",
             StatusCode::BAD_REQUEST,
             format!("{field} must be canonical and non-empty"),
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn validated_idempotency_key(value: &str) -> Result<String, RemoteHttpError> {
+    if !nomifun_common::is_visible_ascii_key(
+        value,
+        nomifun_common::MAX_IDEMPOTENCY_KEY_LEN,
+    ) {
+        return Err(RemoteHttpError::canonical(
+            "REMOTE_INVALID_REQUEST",
+            StatusCode::BAD_REQUEST,
+            format!(
+                "idempotency_key must contain 1..={} visible ASCII bytes",
+                nomifun_common::MAX_IDEMPOTENCY_KEY_LEN
+            ),
         ));
     }
     Ok(value.to_owned())
@@ -722,9 +1486,23 @@ mod tests {
 
     #[test]
     fn request_validation_errors_use_the_shared_invalid_request_code() {
-        let error = nonempty("  ", "idempotency_key").expect_err("blank key must fail");
+        let error = validated_idempotency_key("  ").expect_err("blank key must fail");
         assert_eq!(error.code, "REMOTE_INVALID_REQUEST");
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        for invalid in [
+            "contains space".to_owned(),
+            "non-ascii-键".to_owned(),
+            "x".repeat(nomifun_common::MAX_IDEMPOTENCY_KEY_LEN + 1),
+        ] {
+            let error = validated_idempotency_key(&invalid)
+                .expect_err("non-canonical idempotency key must fail");
+            assert_eq!(error.code, "REMOTE_INVALID_REQUEST");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(
+            validated_idempotency_key("remote-turn-abc_123").unwrap(),
+            "remote-turn-abc_123"
+        );
 
         let error = nonempty("", "binding_id").expect_err("blank binding id must fail");
         assert_eq!(error.code, "REMOTE_INVALID_REQUEST");
@@ -743,6 +1521,28 @@ mod tests {
         let error = validate_observe_limit(0).expect_err("zero observe limit must fail");
         assert_eq!(error.code, "REMOTE_INVALID_REQUEST");
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn detached_admission_preserves_unknown_result_for_same_key_retries() {
+        let session_id = AgentSessionId::from(
+            "0190f5fe-7c00-7a00-8000-000000000001".to_owned(),
+        );
+        let error = remote_detached_admission_error(
+            "turn.dispatch",
+            Some(&session_id),
+            RemoteDetachedMutationAdmissionError::AlreadyRunning,
+        );
+
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code, REMOTE_OPERATION_BLOCKED_CODE);
+        let details = error.details.expect("admission details");
+        assert_eq!(details["outcome"], "unknown");
+        assert_eq!(
+            details["recovery"],
+            "observe_same_session_and_reuse_same_idempotency_key"
+        );
+        assert_eq!(details["reason"], "already_in_flight");
     }
 
     #[tokio::test]
@@ -778,5 +1578,76 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(calls.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn timed_out_remote_mutation_stays_detached_for_idempotent_recovery() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let marker = Arc::clone(&finished);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first_calls = Arc::clone(&calls);
+        let registry = RemoteDetachedMutationRegistry::new();
+        let retry_registry = registry.clone();
+        let result = run_detached_with_deadline(
+            registry,
+            "test.mutation:key".to_owned(),
+            "test.mutation",
+            Duration::from_millis(20),
+            "retry_same_idempotency_key_and_observe",
+            None,
+            async move {
+                first_calls.fetch_add(1, Ordering::AcqRel);
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                marker.store(true, Ordering::Release);
+                Ok::<_, ()>(())
+            },
+        )
+        .await;
+
+        let error = match result {
+            Err(DetachedCallFailure::TimedOut(error)) => error,
+            other => panic!("expected a bounded timeout, got {other:?}"),
+        };
+        assert_eq!(error.code, REMOTE_OPERATION_TIMEOUT_CODE);
+        assert_eq!(error.status, StatusCode::GATEWAY_TIMEOUT);
+
+        let retry_calls = Arc::clone(&calls);
+        let retry = run_detached_with_deadline(
+            retry_registry,
+            "test.mutation:key".to_owned(),
+            "test.mutation",
+            Duration::from_millis(20),
+            "retry_same_idempotency_key_and_observe",
+            None,
+            async move {
+                retry_calls.fetch_add(1, Ordering::AcqRel);
+                Ok::<_, ()>(())
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                retry,
+                Err(DetachedCallFailure::Admission(
+                    RemoteDetachedMutationAdmissionError::AlreadyRunning
+                ))
+            ),
+            "same-key retry must not start a second detached command"
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !finished.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("timed-out mutation should remain alive for durable convergence");
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            1,
+            "the timed-out command must be invoked exactly once"
+        );
     }
 }

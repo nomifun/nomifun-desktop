@@ -20,7 +20,11 @@ import {
   runAgentPresetTest,
   type RunAgentPresetTestResult,
 } from '@/common/types/agentPlatform';
-import { saveDraftRevisionWithPreview, withHostResolvedWorkspaceBinding } from './model';
+import {
+  agentUiErrorMessage,
+  saveDraftRevisionWithPreview,
+  withHostResolvedWorkspaceBinding,
+} from './model';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 type Selection =
@@ -96,7 +100,7 @@ export function useAgentSettingsController() {
         return firstTemplate ? { kind: 'template', template: firstTemplate } : null;
       });
     } catch (loadError) {
-      setError(String(loadError));
+      setError(agentUiErrorMessage(loadError, 'load'));
     } finally {
       setLoading(false);
     }
@@ -140,7 +144,7 @@ export function useAgentSettingsController() {
         });
         applyEditor(response);
       } catch (openError) {
-        setError(String(openError));
+        setError(agentUiErrorMessage(openError, 'open'));
       } finally {
         setBusyAction(null);
       }
@@ -160,7 +164,7 @@ export function useAgentSettingsController() {
         await load();
         setSelection({ kind: 'preset', preset: response.preset });
       } catch (createError) {
-        setError(String(createError));
+        setError(agentUiErrorMessage(createError, 'create'));
       } finally {
         setBusyAction(null);
       }
@@ -192,7 +196,7 @@ export function useAgentSettingsController() {
         await load();
         setSelection({ kind: 'preset', preset: response.preset });
       } catch (forkError) {
-        setError(String(forkError));
+        setError(agentUiErrorMessage(forkError, 'fork'));
       } finally {
         setBusyAction(null);
       }
@@ -226,7 +230,7 @@ export function useAgentSettingsController() {
       setPreview(response);
       return response;
     } catch (previewError) {
-      setError(String(previewError));
+      setError(agentUiErrorMessage(previewError, 'preview'));
       return null;
     } finally {
       setBusyAction(null);
@@ -274,7 +278,7 @@ export function useAgentSettingsController() {
       setSelection({ kind: 'preset', preset: saved.preset });
       return saved;
     } catch (saveError) {
-      setError(String(saveError));
+      setError(agentUiErrorMessage(saveError, 'save'));
       return null;
     } finally {
       setBusyAction(null);
@@ -331,7 +335,7 @@ export function useAgentSettingsController() {
           setSelection({ kind: 'preset', preset: result.savedRevision.preset });
         }
       } catch (testError) {
-        setError(String(testError));
+        setError(agentUiErrorMessage(testError, 'test'));
       } finally {
         setBusyAction(null);
       }

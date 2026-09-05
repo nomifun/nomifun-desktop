@@ -72,6 +72,7 @@ const AgentSettingsPage: React.FC = () => {
               template={selectedTemplate}
               busy={controller.busyAction === 'fork'}
               hostWorkDir={controller.hostWorkDir}
+              catalog={controller.catalog}
               knowledgeBases={knowledgeBases}
               knowledgeBasesLoading={knowledgeBasesLoading}
               connectors={controller.connectors}

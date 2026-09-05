@@ -25,7 +25,7 @@ use nomifun_agent_kernel::{
 use nomifun_agent_session::{
     DeleteResult, ForkRequest, ForkResult, SessionCreateResult,
     SessionEventAppendResult, SessionEventPage, SessionHeadProjection,
-    SessionObservation, SessionRehydrationInput,
+    SessionObservation, SessionRehydrationInput, TurnReceipt,
 };
 
 use crate::{
@@ -236,6 +236,21 @@ impl AgentSessionQueryPort for AgentSessionServiceProxy {
             self.platform()?.as_ref(),
             principal,
             session_id,
+        )
+        .await
+    }
+
+    async fn read_turn_receipt(
+        &self,
+        principal: &PrincipalRef,
+        session_id: &AgentSessionId,
+        operation_id: &OperationId,
+    ) -> Result<TurnReceipt, AgentPlatformError> {
+        AgentSessionQueryPort::read_turn_receipt(
+            self.platform()?.as_ref(),
+            principal,
+            session_id,
+            operation_id,
         )
         .await
     }

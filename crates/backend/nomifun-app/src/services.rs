@@ -2,13 +2,14 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nomifun_ai_agent::{
     AgentFactoryDeps, AgentRegistry, AgentRuntimeRegistry,
     InMemoryAgentRuntimeRegistry, build_agent_factory, build_agent_model_config_resolver,
 };
+use nomifun_agent_execution::AgentExecutionLifecycle;
 use nomifun_api_types::{GatewayMcpConfig, RequirementMcpConfig};
 use nomifun_auth::{
     AuthPolicy, CookieConfig, InstanceTokenValidator, JwtService, QrTokenStore, resolve_jwt_secret,
@@ -32,8 +33,11 @@ use nomifun_db::{
 use nomifun_db::{IClientPreferenceRepository, SqliteClientPreferenceRepository};
 use nomifun_realtime::{BroadcastEventBus, WebSocketManager};
 use nomifun_terminal::{TerminalEventEmitter, TerminalLifecycleServer, TerminalService};
+use tokio_util::sync::CancellationToken;
+use tokio::task::JoinHandle;
 
 use crate::config::{AppConfig, load_or_create_data_encryption_key};
+use crate::router::remote_runtime::NomiCoreRemoteRuntimeCoordinator;
 
 fn require_utf8_executable_path(path: &std::path::Path) -> anyhow::Result<String> {
     path.to_str().map(str::to_owned).ok_or_else(|| {
@@ -41,6 +45,88 @@ fn require_utf8_executable_path(path: &std::path::Path) -> anyhow::Result<String
             "backend executable path is not valid Unicode; refusing to configure child-process bridges or lifecycle hooks: {path:?}"
         )
     })
+}
+
+/// Process-lifetime task registry for background loops that retain
+/// repository/service handles.
+///
+/// A cancellation token alone is not sufficient for shutdown proof: a task
+/// may observe cancellation only after its current await completes.  The
+/// registry therefore keeps every host-owned loop's join handle and drains
+/// them before the database is closed.  It is intentionally small and
+/// app-local; domain services retain ownership of their own internal workers.
+pub(crate) struct BackgroundTaskRegistry {
+    shutdown: CancellationToken,
+    tasks: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl BackgroundTaskRegistry {
+    fn new(shutdown: CancellationToken) -> Self {
+        Self {
+            shutdown,
+            tasks: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn register(&self, handle: JoinHandle<()>) {
+        if self.shutdown.is_cancelled() {
+            handle.abort();
+            return;
+        }
+        let mut tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Finished handles no longer need to be retained. Reaping them on
+        // every registration keeps timer/observer-heavy installations from
+        // growing an unbounded vector while preserving active join ownership.
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(handle);
+    }
+
+    pub(crate) async fn shutdown(&self, timeout: Duration) -> Vec<String> {
+        self.shutdown.cancel();
+        let tasks = std::mem::take(
+            &mut *self
+                .tasks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        if tasks.is_empty() {
+            return Vec::new();
+        }
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut errors = Vec::new();
+        for mut task in tasks {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                task.abort();
+                errors.push("background task did not quiesce before shutdown deadline".to_owned());
+                continue;
+            }
+            match tokio::time::timeout(remaining, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    if !error.is_cancelled() {
+                        errors.push(format!("background task join failed: {error}"));
+                    }
+                }
+                Err(_) => {
+                    task.abort();
+                    let _ = task.await;
+                    errors.push("background task shutdown timed out".to_owned());
+                }
+            }
+        }
+        errors
+    }
+}
+
+impl nomifun_conversation::BackgroundTaskRegistrar for BackgroundTaskRegistry {
+    fn register(&self, task: JoinHandle<()>) {
+        BackgroundTaskRegistry::register(self, task);
+    }
 }
 
 /// Stateless Creative Studio Template draft bridge.
@@ -1552,6 +1638,29 @@ async fn forward_browser_inventory_events(
 
 pub struct AppServices {
     pub database: Database,
+    /// Process-lifetime cancellation shared by background domain tasks that
+    /// must stop before the database is closed.
+    pub(crate) background_shutdown: CancellationToken,
+    pub(crate) background_tasks: Arc<BackgroundTaskRegistry>,
+    /// Channel plugin manager registered during router assembly. It is
+    /// stopped after ingress/queue tasks have quiesced and before SQLite
+    /// closes.
+    pub(crate) channel_manager:
+        Mutex<Option<Arc<nomifun_channel::manager::ChannelManager>>>,
+    /// Cron timer owner. Timers must be cancelled before the host joins
+    /// occurrence tasks and closes SQLite.
+    pub(crate) cron_service:
+        Mutex<Option<Arc<nomifun_cron::service::CronService>>>,
+    /// Singleton AutoWork runner. Its sweeper, boot-resume task, and active
+    /// target loops must stop before the shared SQLite pool is closed.
+    pub(crate) auto_work_runner:
+        Mutex<Option<Arc<nomifun_requirement::AutoWorkRunner>>>,
+    /// Lifecycle authority shared with the Agent Execution engine so its
+    /// scheduler, planning, cleanup, and outbox tasks stop before SQLite.
+    pub(crate) agent_execution_lifecycle: AgentExecutionLifecycle,
+    /// Sidecar-free Nomi-core Remote task supervisor. It tracks only bounded
+    /// receipt/event convergence tasks and is shut down before SQLite.
+    pub(crate) nomi_core_remote_runtime: NomiCoreRemoteRuntimeCoordinator,
     /// Present only when the process owns the canonical OS server lock for the
     /// exact data directory backing `database`. Boot orphan reconciliation is
     /// forbidden without this retained authority.
@@ -1979,13 +2088,12 @@ impl std::error::Error for RetainedStartupCleanupError {
 }
 
 impl AppServices {
-    /// Reject the legacy service graph once a Fresh-v4 root is ready.
+    /// Reject Nomi-core composition once an isolated Fresh-v4 root is ready.
     ///
-    /// `AppServices` is retained for transitional compatibility consumers only.
-    /// The canonical production host composes its own `AgentPlatform` and router
-    /// from the Fresh-v4 root; allowing this graph to assemble against that same
-    /// root would create two competing session/runtime authorities.
-    pub(crate) fn require_legacy_compatibility_root(
+    /// `AppServices` is the current in-process Nomi-core graph. Fresh-v4 owns a
+    /// separate AgentPlatform, Session authority, and router; composing both
+    /// graphs against one root would create competing runtime authorities.
+    pub(crate) fn require_nomi_core_root(
         &self,
         consumer: &str,
     ) -> anyhow::Result<()> {
@@ -1994,16 +2102,16 @@ impl AppServices {
             .join(nomifun_v4_root::FRESH_V4_READY_MARKER_FILE);
         match std::fs::symlink_metadata(&ready_marker) {
             Ok(metadata) if metadata.is_file() => anyhow::bail!(
-                "{consumer} is transitional-only and cannot consume a Fresh-v4 root: {}",
+                "{consumer} cannot compose Nomi-core against a Fresh-v4 root: {}",
                 self.data_dir.display()
             ),
             Ok(_) => anyhow::bail!(
-                "Fresh-v4 ready marker is not a regular file; refusing transitional app composition: {}",
+                "Fresh-v4 ready marker is not a regular file; refusing Nomi-core composition: {}",
                 ready_marker.display()
             ),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(anyhow::Error::new(error).context(format!(
-                "inspect Fresh-v4 ready marker for transitional consumer {consumer}"
+                "inspect Fresh-v4 ready marker for Nomi-core consumer {consumer}"
             ))),
         }
     }
@@ -2138,9 +2246,120 @@ impl AppServices {
         self.browser_platform_shutdown.shutdown().await
     }
 
+    /// Stop process-lifetime background tasks before their repositories close.
+    pub(crate) fn request_background_shutdown(&self) {
+        self.background_shutdown.cancel();
+    }
+
+    pub(crate) fn register_background_task(&self, handle: JoinHandle<()>) {
+        self.background_tasks.register(handle);
+    }
+
+    pub(crate) fn set_cron_service(
+        &self,
+        service: Arc<nomifun_cron::service::CronService>,
+    ) {
+        *self
+            .cron_service
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(service);
+    }
+
+    pub(crate) fn set_auto_work_runner(
+        &self,
+        runner: Arc<nomifun_requirement::AutoWorkRunner>,
+    ) {
+        *self
+            .auto_work_runner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(runner);
+    }
+
+    pub(crate) async fn shutdown_auto_work_runner(&self) -> anyhow::Result<()> {
+        let runner = self
+            .auto_work_runner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(runner) = runner {
+            runner
+                .shutdown()
+                .await
+                .map_err(|error| anyhow::anyhow!(error))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn shutdown_cron_timers(&self) {
+        if let Some(service) = self
+            .cron_service
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            service.shutdown_timers();
+        }
+    }
+
+    pub(crate) fn spawn_knowledge_resume_task(&self) {
+        self.register_background_task(tokio::spawn(
+            Arc::clone(&self.knowledge_service).resume_pending_source_fetches(),
+        ));
+    }
+
+    pub(crate) async fn shutdown_background_tasks(&self, timeout: Duration) -> Vec<String> {
+        self.background_tasks.shutdown(timeout).await
+    }
+
+    pub(crate) fn set_channel_manager(
+        &self,
+        manager: Arc<nomifun_channel::manager::ChannelManager>,
+    ) {
+        *self
+            .channel_manager
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(manager);
+    }
+
+    pub(crate) async fn shutdown_channel_manager(&self) -> anyhow::Result<()> {
+        let manager = self
+            .channel_manager
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(manager) = manager {
+            manager.shutdown().await;
+        }
+        Ok(())
+    }
+
     /// Close browser resources and the database after a startup-stage failure,
     /// preserving the original failure as the primary error.
     pub async fn cleanup_after_startup_failure(&self, error: anyhow::Error) -> anyhow::Error {
+        self.request_background_shutdown();
+        if let Err(cleanup_error) = self.shutdown_auto_work_runner().await {
+            tracing::error!(
+                %cleanup_error,
+                "AutoWork runner did not shut down during startup cleanup"
+            );
+        }
+        let background_errors = self
+            .shutdown_background_tasks(Duration::from_secs(10))
+            .await;
+        if !background_errors.is_empty() {
+            tracing::error!(
+                errors = ?background_errors,
+                "background tasks did not fully quiesce during startup cleanup"
+            );
+        }
+        if let Err(error) = self.shutdown_channel_manager().await {
+            tracing::error!(%error, "channel manager did not shut down during startup cleanup");
+        }
+        if !self.nomi_core_remote_runtime.shutdown().await {
+            tracing::error!(
+                "Nomi-core Remote tasks remained active during startup failure cleanup"
+            );
+        }
         let authority = Arc::new(StartupCleanupAuthority::new(self.database.clone()));
         authority
             .install_browser_platform(self.browser_platform_shutdown.clone())
@@ -3094,8 +3313,17 @@ impl AppServices {
         let runtime_registry_delete_hook: Arc<dyn OnConversationDelete> = runtime_registry_concrete;
         let conversation_runtime_state = Arc::new(ConversationRuntimeStateService::default());
 
+        let background_shutdown = CancellationToken::new();
+        let background_tasks = Arc::new(BackgroundTaskRegistry::new(background_shutdown.clone()));
         let services = Self {
             database,
+            background_shutdown,
+            background_tasks,
+            channel_manager: Mutex::new(None),
+            cron_service: Mutex::new(None),
+            auto_work_runner: Mutex::new(None),
+            agent_execution_lifecycle: AgentExecutionLifecycle::new(),
+            nomi_core_remote_runtime: NomiCoreRemoteRuntimeCoordinator::new(),
             _boot_reconciliation_authority: None,
             provider_lifecycle,
             authoritative_user_id,
@@ -3166,10 +3394,14 @@ impl AppServices {
                     %reason,
                     "Browser Hub composition skipped; all Browser entry points remain fail-closed"
                 );
-                services.terminal_service.spawn_scrollback_flusher();
-                tokio::spawn(
-                    Arc::clone(&services.knowledge_service).resume_pending_source_fetches(),
+                services.register_background_task(
+                    services
+                        .terminal_service
+                        .spawn_scrollback_flusher_with_shutdown(
+                            services.background_shutdown.clone(),
+                        ),
                 );
+                services.spawn_knowledge_resume_task();
                 return Ok(services);
             }
 
@@ -3290,19 +3522,27 @@ impl AppServices {
             // explicit unavailable state is safer than silently selecting a
             // first-party implementation outside the frozen Provider lock.
             let services = services.with_browser_session_hub(hub).await?;
-            services.terminal_service.spawn_scrollback_flusher();
-            tokio::spawn(
-                Arc::clone(&services.knowledge_service).resume_pending_source_fetches(),
+            services.register_background_task(
+                services
+                    .terminal_service
+                    .spawn_scrollback_flusher_with_shutdown(
+                        services.background_shutdown.clone(),
+                    ),
             );
+            services.spawn_knowledge_resume_task();
             return Ok(services);
         }
 
         #[cfg(not(feature = "browser-use"))]
         {
-            services.terminal_service.spawn_scrollback_flusher();
-            tokio::spawn(
-                Arc::clone(&services.knowledge_service).resume_pending_source_fetches(),
+            services.register_background_task(
+                services
+                    .terminal_service
+                    .spawn_scrollback_flusher_with_shutdown(
+                        services.background_shutdown.clone(),
+                    ),
             );
+            services.spawn_knowledge_resume_task();
             Ok(services)
         }
     }
