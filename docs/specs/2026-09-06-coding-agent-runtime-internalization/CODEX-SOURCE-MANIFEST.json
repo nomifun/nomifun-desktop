@@ -1,0 +1,258 @@
+{
+  "schema_version": "1.0.0",
+  "manifest_kind": "codex-coding-source-manifest",
+  "status": "verified-baseline",
+  "audited_on": "2026-09-06",
+  "upstream": {
+    "repository_alias": "../codex",
+    "branch": "main",
+    "pinned_commit": "6af345407d9c2a568da9d01b6c4b81a9e61495c0",
+    "license": "Apache-2.0",
+    "license_file": "../codex/LICENSE",
+    "notice_file": "../codex/NOTICE",
+    "moving_head_allowed": false,
+    "production_path_dependency_allowed": false,
+    "external_runtime_binary_allowed": false
+  },
+  "selected_sources": [
+    {
+      "id": "turn-loop",
+      "upstream_paths": [
+        "codex-rs/core/src/session/turn.rs",
+        "codex-rs/core/src/session/turn_input.rs",
+        "codex-rs/core/src/session/turn_suspension.rs"
+      ],
+      "destination": "crates/backend/nomifun-coding-engine/src/turn.rs",
+      "disposition": "rewrite",
+      "owner": "nomifun-coding-engine",
+      "behavior": [
+        "multi-step sampling",
+        "Tool Call continuation",
+        "steer/follow-up boundary",
+        "cancellation race"
+      ]
+    },
+    {
+      "id": "session-actor",
+      "upstream_paths": [
+        "codex-rs/core/src/session/session.rs",
+        "codex-rs/core/src/session/mod.rs"
+      ],
+      "destination": "crates/backend/nomifun-coding-engine/src/engine.rs",
+      "disposition": "rewrite",
+      "owner": "nomifun-coding-engine",
+      "behavior": [
+        "one active turn",
+        "terminal admission",
+        "dispose idempotency",
+        "actor cleanup"
+      ]
+    },
+    {
+      "id": "tool-routing",
+      "upstream_paths": [
+        "codex-rs/core/src/tools/registry.rs",
+        "codex-rs/core/src/tools/router.rs",
+        "codex-rs/core/src/tools/parallel.rs"
+      ],
+      "destination": "crates/backend/nomifun-coding-engine/src/tool.rs",
+      "disposition": "adapt",
+      "owner": "nomifun-coding-engine",
+      "behavior": [
+        "tool schema/exposure",
+        "argument delta assembly",
+        "parallel read-only dispatch",
+        "serial effectful dispatch"
+      ]
+    },
+    {
+      "id": "unified-exec",
+      "upstream_paths": [
+        "codex-rs/core/src/unified_exec/",
+        "codex-rs/core/src/tools/handlers/unified_exec.rs",
+        "codex-rs/core/src/tools/handlers/unified_exec/"
+      ],
+      "destination": "crates/backend/nomifun-coding-engine/src/process.rs",
+      "disposition": "adapt",
+      "owner": "nomi-process-runtime",
+      "behavior": [
+        "bounded output",
+        "stdin/poll",
+        "PTY",
+        "timeout/cancel",
+        "process-tree cleanup"
+      ]
+    },
+    {
+      "id": "patch",
+      "upstream_paths": [
+        "codex-rs/core/src/apply_patch.rs",
+        "codex-rs/core/src/tools/handlers/apply_patch.rs",
+        "codex-rs/core/src/tools/handlers/apply_patch_spec.rs"
+      ],
+      "destination": "crates/backend/nomifun-coding-engine/src/patch.rs",
+      "disposition": "adapt",
+      "owner": "nomifun-file",
+      "behavior": [
+        "strict patch parsing",
+        "hunk/context validation",
+        "bounded failure diagnostics",
+        "atomic mutation handoff"
+      ]
+    },
+    {
+      "id": "workspace-instructions",
+      "upstream_paths": [
+        "codex-rs/core/src/agents_md.rs",
+        "codex-rs/core/src/agents_md_manager.rs",
+        "codex-rs/core/src/context/world_state/agents_md.rs"
+      ],
+      "destination": "crates/backend/nomifun-coding-engine/src/agents_md.rs",
+      "disposition": "adapt",
+      "owner": "nomifun-coding-engine",
+      "behavior": [
+        "root-to-current discovery",
+        "instruction precedence",
+        "bounded reads",
+        "containment"
+      ]
+    },
+    {
+      "id": "context-compaction",
+      "upstream_paths": [
+        "codex-rs/core/src/context/compaction_summary.rs",
+        "codex-rs/core/src/context/contextual_user_message.rs",
+        "codex-rs/core/src/context/environment_context.rs",
+        "codex-rs/core/src/context/internal_model_context.rs",
+        "codex-rs/core/src/context/token_budget_context.rs",
+        "codex-rs/core/src/context/turn_aborted.rs",
+        "codex-rs/core/src/context/world_state/context_window_guidance.rs",
+        "codex-rs/core/src/context/world_state/environment.rs",
+        "codex-rs/core/src/context/world_state/managed_developer_instructions.rs",
+        "codex-rs/core/src/context/world_state/model.rs",
+        "codex-rs/core/src/context/world_state/persistent_mode.rs",
+        "codex-rs/core/src/context/world_state/tools.rs",
+        "codex-rs/core/src/context_manager/history.rs",
+        "codex-rs/core/src/compact.rs",
+        "codex-rs/core/src/compact_token_budget.rs"
+      ],
+      "destination": "crates/backend/nomifun-coding-engine/src/context.rs",
+      "disposition": "rewrite",
+      "owner": "nomifun-coding-engine",
+      "behavior": [
+        "history reconstruction",
+        "retained facts",
+        "context window accounting",
+        "compaction replacement",
+        "checkpoint discard/rebuild"
+      ]
+    },
+    {
+      "id": "coding-workflows",
+      "upstream_paths": [
+        "codex-rs/core/src/tools/handlers/plan.rs",
+        "codex-rs/core/src/tools/handlers/plan_spec.rs"
+      ],
+      "destination": "crates/backend/nomifun-coding-engine/src/review.rs",
+      "disposition": "adapt",
+      "owner": "nomifun-coding-engine",
+      "behavior": [
+        "plan/review presentation",
+        "diff/test workflow continuation"
+      ]
+    }
+  ],
+  "excluded_sources": [
+    {
+      "upstream_path": "codex-rs/voice-host/",
+      "reason": "outside Coding Runtime scope"
+    },
+    {
+      "upstream_path": "codex-rs/realtime-webrtc/",
+      "reason": "outside Coding Runtime scope"
+    },
+    {
+      "upstream_path": "codex-rs/core/src/realtime_*",
+      "reason": "audio/realtime excluded"
+    },
+    {
+      "upstream_path": "codex-rs/app-server/",
+      "reason": "external app-server is prohibited"
+    },
+    {
+      "upstream_path": "codex-rs/app-server-client/",
+      "reason": "external protocol client is not a NomiFun Port"
+    },
+    {
+      "upstream_path": "codex-rs/app-server-daemon/",
+      "reason": "external Runtime process is prohibited"
+    },
+    {
+      "upstream_path": "codex-rs/app-server-protocol/",
+      "reason": "NomiFun uses in-process contracts"
+    },
+    {
+      "upstream_path": "codex-rs/core/src/client.rs",
+      "reason": "model/auth belong to ChatModelBroker"
+    },
+    {
+      "upstream_path": "codex-rs/core/src/connectors.rs",
+      "reason": "provider/connector ownership belongs to NomiFun"
+    },
+    {
+      "upstream_path": "codex-rs/core/src/guardian/",
+      "reason": "NomiFun does not use Codex approval/Guardian state"
+    },
+    {
+      "upstream_path": "codex-rs/core/src/mcp_openai_file.rs",
+      "reason": "provider-specific file transport is excluded"
+    },
+    {
+      "upstream_path": "codex-rs/tui/",
+      "reason": "NomiFun owns product UI"
+    },
+    {
+      "upstream_path": "codex-rs/cli/",
+      "reason": "NomiFun owns product entry points"
+    }
+  ],
+  "dependency_replacements": [
+    {
+      "codex_area": "API/auth/model provider",
+      "nomifun_owner": "nomifun-chat-model-broker",
+      "port": "AgentModelPort"
+    },
+    {
+      "codex_area": "history/rollout/thread store",
+      "nomifun_owner": "nomifun-agent-session",
+      "port": "SessionEvent history port"
+    },
+    {
+      "codex_area": "tool registry/handler execution",
+      "nomifun_owner": "nomifun-agent-kernel",
+      "port": "CapabilityInvoker"
+    },
+    {
+      "codex_area": "file/patch",
+      "nomifun_owner": "nomifun-file",
+      "port": "Workspace/File owner"
+    },
+    {
+      "codex_area": "process/shell lifecycle",
+      "nomifun_owner": "nomi-process-runtime",
+      "port": "ProcessPort"
+    },
+    {
+      "codex_area": "MCP/Skill/Plugin/MiniApp",
+      "nomifun_owner": "NomiFun Catalog and owning domains",
+      "port": "materialized contribution"
+    }
+  ],
+  "license_review": {
+    "root_license_required": true,
+    "root_notice_required": true,
+    "per_file_attribution_review_required": true,
+    "modified_file_notice_required": true,
+    "transitive_dependency_audit_required_before_release": true
+  }
+}
