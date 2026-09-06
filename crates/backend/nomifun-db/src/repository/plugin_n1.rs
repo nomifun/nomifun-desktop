@@ -1,0 +1,221 @@
+use serde_json::Value;
+
+use crate::DbError;
+use crate::models::{
+    PluginArtifactRow, PluginCandidateTestReceiptRow, PluginKvRow, PluginMountRow,
+    PluginCandidateOrigin, PluginProjectRow, PluginReadyCandidateRow, ProductOperationKind,
+    ProductOperationRow, ProductOperationState,
+};
+
+pub const MAX_PRODUCT_OPERATION_LOG_LINES: usize = 200;
+pub const MAX_PRODUCT_OPERATION_LOG_LINE_CHARS: usize = 4096;
+
+#[derive(Debug, Clone)]
+pub struct CreatePluginArtifactParams {
+    pub artifact_id: String,
+    pub artifact_digest: String,
+    pub package_id: String,
+    pub package_version: String,
+    pub manifest_digest: String,
+    pub manifest: Value,
+    pub managed_path: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreatePluginProjectParams {
+    pub project_id: String,
+    pub owner_user_id: String,
+    pub package_id: String,
+    pub managed_source_path: Option<String>,
+    pub source_head_digest: Option<String>,
+    pub dependency_lock_digest: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdatePluginProjectSourceParams {
+    pub project_id: String,
+    pub expected_generation: i64,
+    pub source_head_digest: String,
+    pub dependency_lock_digest: Option<String>,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StartProductOperationParams {
+    pub operation_id: String,
+    pub kind: ProductOperationKind,
+    pub owner_kind: String,
+    pub owner_id: String,
+    pub progress_percent: Option<u8>,
+    pub bounded_log_tail: Vec<String>,
+    pub started_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FinishProductOperationParams {
+    pub operation_id: String,
+    pub state: ProductOperationState,
+    pub progress_percent: Option<u8>,
+    pub last_error_code: Option<String>,
+    pub bounded_log_tail: Vec<String>,
+    pub finished_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordPluginReadyCandidateParams {
+    pub candidate_id: String,
+    pub project_id: String,
+    pub candidate_digest: String,
+    pub origin: PluginCandidateOrigin,
+    pub artifact_id: String,
+    pub artifact_digest: String,
+    pub base_target_digest: Option<String>,
+    pub source_snapshot_digest: Option<String>,
+    pub dependency_lock_digest: Option<String>,
+    pub contract_diff: Value,
+    pub origin_operation_id: String,
+    pub expected_generation: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordPluginCandidateTestReceiptParams {
+    pub receipt_id: String,
+    pub candidate_id: String,
+    pub candidate_digest: String,
+    pub artifact_id: String,
+    pub artifact_digest: String,
+    pub receipt_digest: String,
+    pub runtime_fingerprint_digest: String,
+    pub receipt: Value,
+    pub tested_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApplyPluginCandidateParams {
+    pub project_id: String,
+    pub candidate_id: String,
+    pub expected_project_generation: i64,
+    pub expected_mount_revision: Option<i64>,
+    pub expected_current_artifact_digest: Option<String>,
+    pub new_mount_id: Option<String>,
+    pub new_data_dir_path: Option<String>,
+    pub applied_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestorePluginMountParams {
+    pub mount_id: String,
+    pub expected_revision: i64,
+    pub expected_current_artifact_digest: String,
+    pub expected_previous_artifact_digest: String,
+    pub restored_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct UninstallPluginMountParams {
+    pub mount_id: String,
+    pub expected_revision: i64,
+    pub expected_current_artifact_digest: String,
+    pub uninstalled_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PutPluginKvParams {
+    pub mount_id: String,
+    pub namespace: String,
+    pub key: String,
+    pub value: Value,
+    pub expected_revision: Option<i64>,
+    pub updated_at: i64,
+}
+
+#[async_trait::async_trait]
+pub trait IPluginN1Repository: Send + Sync {
+    async fn put_artifact(
+        &self,
+        params: &CreatePluginArtifactParams,
+    ) -> Result<PluginArtifactRow, DbError>;
+
+    async fn create_project(
+        &self,
+        params: &CreatePluginProjectParams,
+    ) -> Result<PluginProjectRow, DbError>;
+
+    async fn update_project_source_cas(
+        &self,
+        params: &UpdatePluginProjectSourceParams,
+    ) -> Result<PluginProjectRow, DbError>;
+
+    async fn start_operation(
+        &self,
+        params: &StartProductOperationParams,
+    ) -> Result<ProductOperationRow, DbError>;
+
+    async fn finish_operation(
+        &self,
+        params: &FinishProductOperationParams,
+    ) -> Result<ProductOperationRow, DbError>;
+
+    async fn record_ready_candidate(
+        &self,
+        params: &RecordPluginReadyCandidateParams,
+    ) -> Result<PluginReadyCandidateRow, DbError>;
+
+    async fn record_candidate_test_receipt(
+        &self,
+        params: &RecordPluginCandidateTestReceiptParams,
+    ) -> Result<PluginCandidateTestReceiptRow, DbError>;
+
+    async fn apply_candidate(
+        &self,
+        params: &ApplyPluginCandidateParams,
+    ) -> Result<PluginMountRow, DbError>;
+
+    async fn restore_previous(
+        &self,
+        params: &RestorePluginMountParams,
+    ) -> Result<PluginMountRow, DbError>;
+
+    async fn uninstall_retain_data(
+        &self,
+        params: &UninstallPluginMountParams,
+    ) -> Result<PluginMountRow, DbError>;
+
+    async fn mark_mount_delete_pending(
+        &self,
+        mount_id: &str,
+        expected_revision: i64,
+        updated_at: i64,
+    ) -> Result<PluginMountRow, DbError>;
+
+    async fn complete_mount_data_delete(&self, mount_id: &str) -> Result<bool, DbError>;
+
+    async fn bind_credential(
+        &self,
+        mount_id: &str,
+        slot: &str,
+        credential_id: &str,
+        updated_at: i64,
+    ) -> Result<(), DbError>;
+
+    async fn put_kv_cas(&self, params: &PutPluginKvParams) -> Result<PluginKvRow, DbError>;
+
+    async fn get_kv(
+        &self,
+        mount_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<PluginKvRow>, DbError>;
+
+    async fn get_project(&self, project_id: &str) -> Result<Option<PluginProjectRow>, DbError>;
+
+    async fn get_ready_candidate(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<PluginReadyCandidateRow>, DbError>;
+
+    async fn get_mount(&self, mount_id: &str) -> Result<Option<PluginMountRow>, DbError>;
+}

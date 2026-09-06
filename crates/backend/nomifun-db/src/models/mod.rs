@@ -5,6 +5,7 @@ mod attachment;
 mod channel;
 mod client_preference;
 mod instance_token;
+mod javascript_runtime_selection;
 mod conversation;
 mod conversation_artifact;
 mod cron_job;
@@ -18,6 +19,7 @@ mod mcp_server;
 mod message;
 mod miniapp;
 mod oauth_token;
+mod plugin_n1;
 mod provider;
 mod provider_connection;
 mod provider_model;
@@ -51,6 +53,9 @@ pub use channel::{
 };
 pub use client_preference::ClientPreference;
 pub use instance_token::InstanceApiTokenRow;
+pub use javascript_runtime_selection::{
+    JavaScriptRuntimeSelectionRecord, JavaScriptRuntimeSelectionRow,
+};
 pub use conversation::{
     ConversationDeliveryNotifyRow, ConversationDeliveryReceiptRow, ConversationRow,
     CreativeStudioAgentSessionBindingRow,
@@ -87,6 +92,11 @@ pub use mcp_server::McpServerRow;
 pub use message::MessageRow;
 pub use miniapp::{MiniAppDocumentRow, MiniAppRow};
 pub use oauth_token::OAuthTokenRow;
+pub use plugin_n1::{
+    PluginArtifactRow, PluginCandidateTestReceiptRow, PluginCredentialBindingRow, PluginKvRow,
+    PluginMountRevisionRow, PluginMountRow, PluginProjectRow, PluginReadyCandidateRow,
+    PluginCandidateOrigin, ProductOperationKind, ProductOperationRow, ProductOperationState,
+};
 pub use provider::Provider;
 pub use provider_connection::{ProviderConnectionRow, UpsertProviderConnectionParams};
 pub use provider_model::{

@@ -1,0 +1,192 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PluginArtifactRow {
+    pub id: i64,
+    pub artifact_id: String,
+    pub artifact_digest: String,
+    pub package_id: String,
+    pub package_version: String,
+    pub manifest_digest: String,
+    pub manifest_json: String,
+    pub managed_path: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PluginProjectRow {
+    pub id: i64,
+    pub project_id: String,
+    pub owner_user_id: String,
+    pub package_id: String,
+    pub managed_source_path: Option<String>,
+    pub source_head_digest: Option<String>,
+    pub dependency_lock_digest: Option<String>,
+    pub build_generation: i64,
+    pub linked_mount_id: Option<String>,
+    pub ready_candidate_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PluginReadyCandidateRow {
+    pub id: i64,
+    pub candidate_id: String,
+    pub project_id: String,
+    pub candidate_digest: String,
+    pub origin_kind: String,
+    pub artifact_id: String,
+    pub artifact_digest: String,
+    pub target_package_id: String,
+    pub target_package_version: String,
+    pub target_manifest_digest: String,
+    pub base_target_digest: Option<String>,
+    pub source_snapshot_digest: Option<String>,
+    pub dependency_lock_digest: Option<String>,
+    pub contract_diff_json: String,
+    pub origin_operation_id: String,
+    pub build_generation: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PluginCandidateTestReceiptRow {
+    pub id: i64,
+    pub receipt_id: String,
+    pub candidate_id: String,
+    pub candidate_digest: String,
+    pub artifact_id: String,
+    pub artifact_digest: String,
+    pub receipt_digest: String,
+    pub runtime_fingerprint_digest: String,
+    pub receipt_json: String,
+    pub tested_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PluginMountRow {
+    pub id: i64,
+    pub mount_id: String,
+    pub package_id: String,
+    pub current_artifact_digest: Option<String>,
+    pub previous_artifact_digest: Option<String>,
+    pub current_revision_id: Option<String>,
+    pub previous_revision_id: Option<String>,
+    pub enabled: bool,
+    pub retained: bool,
+    pub delete_pending: bool,
+    pub revision: i64,
+    pub config_json: String,
+    pub data_dir_path: String,
+    pub last_error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PluginMountRevisionRow {
+    pub id: i64,
+    pub mount_revision_id: String,
+    pub mount_id: String,
+    pub revision: i64,
+    pub artifact_id: String,
+    pub artifact_digest: String,
+    pub candidate_key: String,
+    pub candidate_digest: String,
+    pub base_target_digest: Option<String>,
+    pub applied_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PluginCredentialBindingRow {
+    pub id: i64,
+    pub mount_id: String,
+    pub slot: String,
+    pub credential_id: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PluginKvRow {
+    pub id: i64,
+    pub mount_id: String,
+    pub namespace: String,
+    pub key: String,
+    pub value_json: String,
+    pub revision: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductOperationKind {
+    Build,
+    Import,
+    Export,
+    MiniappPermanentDelete,
+}
+
+impl ProductOperationKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Build => "build",
+            Self::Import => "import",
+            Self::Export => "export",
+            Self::MiniappPermanentDelete => "miniapp_permanent_delete",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginCandidateOrigin {
+    Build,
+    Import,
+}
+
+impl PluginCandidateOrigin {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Build => "build",
+            Self::Import => "import",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductOperationState {
+    Running,
+    Succeeded,
+    Failed,
+    Canceled,
+}
+
+impl ProductOperationState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Canceled => "canceled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ProductOperationRow {
+    pub id: i64,
+    pub operation_id: String,
+    pub kind: String,
+    pub owner_kind: String,
+    pub owner_id: String,
+    pub state: String,
+    pub progress_percent: Option<i64>,
+    pub last_error_code: Option<String>,
+    pub bounded_log_tail_json: String,
+    pub started_at_ms: i64,
+    pub finished_at_ms: Option<i64>,
+}
