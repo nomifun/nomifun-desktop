@@ -11,14 +11,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use nomifun_agent_contracts::{
-    ActionId, AgentBindingValue, AgentPreset, AgentPresetId, AgentPresetRevision, AgentPresetSource,
-    AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata, CanonicalDigestError,
+    ActionId, AgentBindingValue, AgentPreset, AgentPresetId, AgentPresetRevision,
+    AgentPresetRevisionPayload, AgentPresetSource, AgentSessionId, AgentSessionLiveRecord,
+    AgentSessionMetadata, CanonicalDigestError,
     CapabilityCatalogContractError, CapabilityCatalogEntry,
     CapabilityCatalogMaterialization, CapabilityCatalogMaterializer,
     CapabilityConsumer, CapabilityId, CapabilityKind, CapabilityOwner,
     CapabilityProvenance, CapabilityReleaseState, CatalogAvailability,
     ChatRouteIdentity, ChatRouteLookupError, ChatRouteLookupKey, ChatRouteRecord,
-    ChatRouteRecordRow, CompactOnDemandCapabilityEntry, ContributionId,
+    ChatRouteRecordRow, CompactOnDemandCapabilityEntry, ContributionId, ContributionLock,
     ContributionSourceKind, CorrelationId, DeleteAgentSessionCommand, DigestHex,
     EventId, EventProducerId,
     ExactRoleContractRef, ExecutionRoleId, FullAutoExecutionWire, IdempotencyKey,
@@ -1472,7 +1473,7 @@ async fn insert_revision_snapshot_tx(
     );
     sqlx::query(
         "INSERT INTO agent_preset_revisions \
-         (revision_id, preset_id, revision_no, schema_version, editor_document_json, \
+         (revision_id, preset_id, revision_no, schema_version, payload_json, \
           revision_digest, created_by, created_at, reason) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
@@ -1484,72 +1485,19 @@ async fn insert_revision_snapshot_tx(
     .bind(revision.reference.revision_digest.as_ref())
     .bind(revision.created_by.as_ref())
     .bind(revision.created_at_ms)
-    .bind(revision.reason.as_deref().unwrap_or_default())
+    .bind(revision.reason.as_deref())
     .execute(&mut **tx)
     .await
     .map_err(control_sql)?;
 
-    for (task, route) in &revision.payload.model_route_refs {
-        let route_json = canonical_chat_route_json(revision, task, route)?;
+    for lock in &revision.contribution_locks {
         sqlx::query(
-            "INSERT INTO agent_preset_model_routes \
-             (revision_id, model_task, route_json) VALUES (?, ?, ?)",
+            "INSERT INTO agent_preset_contribution_locks \
+             (revision_id, contribution_id, lock_json) VALUES (?, ?, ?)",
         )
         .bind(&revision_id)
-        .bind(task)
-        .bind(route_json)
-        .execute(&mut **tx)
-        .await
-        .map_err(control_sql)?;
-    }
-    for selection in &revision.payload.initial_capabilities {
-        sqlx::query(
-            "INSERT INTO preset_initial_capabilities \
-             (revision_id, capability_id, capability_version, selection_json) \
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind(&revision_id)
-        .bind(selection.capability.id.as_ref())
-        .bind(selection.capability.version.as_ref())
-        .bind(encode_control_json(selection)?)
-        .execute(&mut **tx)
-        .await
-        .map_err(control_sql)?;
-    }
-    for selection in &revision.payload.on_demand_capabilities {
-        sqlx::query(
-            "INSERT INTO preset_on_demand_capabilities \
-             (revision_id, capability_id, capability_version, selection_json) \
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind(&revision_id)
-        .bind(selection.capability.id.as_ref())
-        .bind(selection.capability.version.as_ref())
-        .bind(encode_control_json(selection)?)
-        .execute(&mut **tx)
-        .await
-        .map_err(control_sql)?;
-    }
-    for skill in &revision.payload.skill_bindings {
-        sqlx::query(
-            "INSERT INTO preset_skill_bindings \
-             (revision_id, skill_id, skill_version) VALUES (?, ?, ?)",
-        )
-        .bind(&revision_id)
-        .bind(skill.id.as_ref())
-        .bind(skill.version.as_ref())
-        .execute(&mut **tx)
-        .await
-        .map_err(control_sql)?;
-    }
-    for binding in &revision.payload.resource_bindings {
-        sqlx::query(
-            "INSERT INTO preset_resource_bindings \
-             (revision_id, resource_binding_id, binding_json) VALUES (?, ?, ?)",
-        )
-        .bind(&revision_id)
-        .bind(binding.binding_id.as_ref())
-        .bind(encode_control_json(binding)?)
+        .bind(lock.contribution_id.as_ref())
+        .bind(encode_control_json(lock)?)
         .execute(&mut **tx)
         .await
         .map_err(control_sql)?;
@@ -1570,52 +1518,6 @@ async fn insert_revision_snapshot_tx(
     Ok(())
 }
 
-fn canonical_chat_route_json(
-    revision: &AgentPresetRevision,
-    model_task: &str,
-    route_id: &ModelRouteId,
-) -> Result<String, ControlPlaneError> {
-    if model_task != nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT {
-        return Err(ControlPlaneError::Wire(format!(
-            "model task {model_task:?} has no canonical Chat route writer"
-        )));
-    }
-    let record = revision
-        .payload
-        .chat_route_records
-        .get(model_task)
-        .ok_or_else(|| {
-            ControlPlaneError::Wire(format!(
-                "model route {model_task:?} has no canonical chat route record"
-            ))
-        })?;
-    let identity = ChatRouteIdentity::new(
-        revision.reference.revision_id(),
-        model_task,
-        route_id.clone(),
-        record.primary.model_route_revision,
-    );
-    record
-        .validate_for(&identity)
-        .map_err(|error| {
-            ControlPlaneError::Wire(format!(
-                "model route {model_task:?} is not a valid canonical chat route record: {error}"
-            ))
-        })?;
-    let route_json = record
-        .to_canonical_json()
-        .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
-    if !serde_json::from_str::<Value>(&route_json)
-        .map_err(ControlPlaneError::from)?
-        .is_object()
-    {
-        return Err(ControlPlaneError::Wire(
-            "canonical chat route record did not serialize as an object".to_owned(),
-        ));
-    }
-    Ok(route_json)
-}
-
 pub async fn load_exact_chat_route_record(
     pool: &SqlitePool,
     lookup: &ChatRouteLookupKey,
@@ -1623,41 +1525,31 @@ pub async fn load_exact_chat_route_record(
     lookup.validate().map_err(|error| {
         ControlPlaneError::Wire(format!("invalid exact chat route lookup: {error}"))
     })?;
-    let route_revision = i64_from_u64(lookup.route_revision, "route_revision")?;
-    let exact_rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT revision_id, model_task, route_json \
-         FROM agent_preset_model_routes \
-         WHERE revision_id = ? AND model_task = ? \
-           AND json_type(route_json, '$.primary.model_route_id') = 'text' \
-           AND json_extract(route_json, '$.primary.model_route_id') = ? \
-           AND json_type(route_json, '$.primary.model_route_revision') = 'integer' \
-           AND json_extract(route_json, '$.primary.model_route_revision') = ?",
+    let payload_json: Option<String> = sqlx::query_scalar(
+        "SELECT payload_json FROM agent_preset_revisions WHERE revision_id = ?",
     )
     .bind(&lookup.preset_revision_id)
-    .bind(&lookup.model_task)
-    .bind(lookup.route_id.as_ref())
-    .bind(route_revision)
-    .fetch_all(pool)
+    .fetch_optional(pool)
     .await
     .map_err(control_sql)?;
-    if !exact_rows.is_empty() {
-        return resolve_persisted_route_rows(exact_rows, lookup);
-    }
-
-    let outer_rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT revision_id, model_task, route_json \
-         FROM agent_preset_model_routes \
-         WHERE revision_id = ? AND model_task = ?",
-    )
-    .bind(&lookup.preset_revision_id)
-    .bind(&lookup.model_task)
-    .fetch_all(pool)
-    .await
-    .map_err(control_sql)?;
-    if outer_rows.is_empty() {
+    let Some(payload_json) = payload_json else {
         return Ok(None);
-    }
-    resolve_persisted_route_rows(outer_rows, lookup)
+    };
+    let payload: AgentPresetRevisionPayload =
+        serde_json::from_str(&payload_json).map_err(ControlPlaneError::from)?;
+    let Some(record) = payload.chat_route_records.get(&lookup.model_task) else {
+        return Ok(None);
+    };
+    resolve_persisted_route_rows(
+        vec![(
+            lookup.preset_revision_id.clone(),
+            lookup.model_task.clone(),
+            record
+                .to_canonical_json()
+                .map_err(|error| ControlPlaneError::Wire(error.to_string()))?,
+        )],
+        lookup,
+    )
 }
 
 fn resolve_persisted_route_rows(
@@ -1687,20 +1579,25 @@ async fn load_chat_route_record_for_id(
     revision_id: &str,
     route_id: &ModelRouteId,
 ) -> Result<Option<ChatRouteRecord>, ControlPlaneError> {
-    let row: Option<String> = sqlx::query_scalar(
-        "SELECT route_json FROM agent_preset_model_routes \
-         WHERE revision_id = ? AND model_task = ?",
+    let payload_json: Option<String> = sqlx::query_scalar(
+        "SELECT payload_json FROM agent_preset_revisions WHERE revision_id = ?",
     )
     .bind(revision_id)
-    .bind(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT)
     .fetch_optional(pool)
     .await
     .map_err(control_sql)?;
-    let Some(route_json) = row else {
+    let Some(payload_json) = payload_json else {
         return Ok(None);
     };
-    let record = ChatRouteRecord::from_json(&route_json)
-        .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
+    let payload: AgentPresetRevisionPayload =
+        serde_json::from_str(&payload_json).map_err(ControlPlaneError::from)?;
+    let Some(record) = payload
+        .chat_route_records
+        .get(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT)
+        .cloned()
+    else {
+        return Ok(None);
+    };
     let identity = ChatRouteIdentity::new(
         revision_id,
         nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
@@ -1718,8 +1615,8 @@ async fn load_revision(
     preset_id: &AgentPresetId,
     revision: u64,
 ) -> Result<Option<AgentPresetRevision>, ControlPlaneError> {
-    let row: Option<(i64, String, String, String, i64, String)> = sqlx::query_as(
-        "SELECT revision_no, revision_digest, editor_document_json, created_by, \
+    let row: Option<(i64, String, String, String, i64, Option<String>)> = sqlx::query_as(
+        "SELECT revision_no, revision_digest, payload_json, created_by, \
                 created_at, reason \
          FROM agent_preset_revisions WHERE preset_id = ? AND revision_no = ?",
     )
@@ -1728,20 +1625,34 @@ async fn load_revision(
     .fetch_optional(pool)
     .await
     .map_err(control_sql)?;
-    let Some((revision_no, digest, document, created_by, created_at, reason)) = row else {
+    let Some((revision_no, digest, payload_json, created_by, created_at, reason)) = row else {
         return Ok(None);
     };
+    let revision_id = format!("{}@{}", preset_id.as_ref(), revision_no);
+    let lock_rows: Vec<String> = sqlx::query_scalar(
+        "SELECT lock_json FROM agent_preset_contribution_locks \
+         WHERE revision_id = ? ORDER BY contribution_id",
+    )
+    .bind(&revision_id)
+    .fetch_all(pool)
+    .await
+    .map_err(control_sql)?;
+    let contribution_locks = lock_rows
+        .into_iter()
+        .map(|row| serde_json::from_str::<ContributionLock>(&row))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ControlPlaneError::from)?;
     let revision = AgentPresetRevision {
         reference: PresetRevisionRef {
             preset_id: preset_id.clone(),
             revision: u64_from_i64(revision_no, "revision_no")?,
             revision_digest: DigestHex::from(digest),
         },
-        payload: serde_json::from_str(&document).map_err(ControlPlaneError::from)?,
-        contribution_locks: Vec::new(),
+        payload: serde_json::from_str(&payload_json).map_err(ControlPlaneError::from)?,
+        contribution_locks,
         created_by: UserId::from(created_by),
         created_at_ms: created_at,
-        reason: (!reason.is_empty()).then_some(reason),
+        reason,
     };
     revision.validate().map_err(|violation| {
         ControlPlaneError::canonical(
@@ -2454,9 +2365,13 @@ impl AgentPlatform {
         request: CreateAgentSessionRequestDto,
         idempotency_key: impl Into<IdempotencyKey>,
     ) -> Result<CreateAgentSessionResponseDto, AgentPlatformError> {
+        let binding = self
+            .control_plane
+            .resolve_agent_session_binding(owner, &request.preset_id)
+            .await?;
         let mut open = OpenAgentSessionRequest::user(
             owner,
-            platform_cast::<_, AgentBindingValue>(&request.agent_binding)?,
+            platform_cast::<_, AgentBindingValue>(&binding)?,
             idempotency_key,
         );
         open.metadata.title = request.title;
@@ -4864,103 +4779,6 @@ fn platform_wire<T: Serialize>(value: &T) -> Result<String, AgentPlatformError> 
 #[cfg(test)]
 mod route_writer_tests {
     use super::*;
-    use nomifun_agent_contracts::{
-        AgentPresetRevisionPayload, ChatRouteCandidate, ChatRouteFeature, ChatRouteProtocol,
-        ChatRouteRecordSchema, ChatRouteTask,
-    };
-
-    fn revision_with_routes(
-        model_route_refs: BTreeMap<String, ModelRouteId>,
-        chat_route_records: BTreeMap<String, ChatRouteRecord>,
-    ) -> AgentPresetRevision {
-        let payload = AgentPresetRevisionPayload {
-            schema_version: VersionString::from("1.0.0"),
-            model_route_refs,
-            chat_route_records,
-            initial_capabilities: Vec::new(),
-            on_demand_capabilities: Vec::new(),
-            skill_bindings: Vec::new(),
-            resource_bindings: Vec::new(),
-            system_role_provider_overrides: BTreeMap::new(),
-            persona: String::new(),
-            instructions: String::new(),
-            starter_prompts: Vec::new(),
-        };
-        let mut revision = AgentPresetRevision {
-            reference: PresetRevisionRef {
-                preset_id: AgentPresetId::from("preset"),
-                revision: 1,
-                revision_digest: DigestHex::from(""),
-            },
-            payload,
-            contribution_locks: Vec::new(),
-            created_by: UserId::from("owner"),
-            created_at_ms: 0,
-            reason: None,
-        };
-        revision.reference.revision_digest = revision
-            .revision_digest()
-            .expect("route-writer fixture revision digest");
-        revision
-    }
-
-    fn route_record() -> ChatRouteRecord {
-        ChatRouteRecord {
-            schema: ChatRouteRecordSchema::V1,
-            task: ChatRouteTask::AgentChat,
-            primary: ChatRouteCandidate {
-                model_route_id: ModelRouteId::from("opaque-route"),
-                model_route_revision: 1,
-                provider_id: "provider".to_owned(),
-                model: "model".to_owned(),
-                protocol: ChatRouteProtocol::OpenaiChat,
-                connection_config_ref: nomifun_agent_contracts::ConnectionConfigRef::from(
-                    "connection",
-                ),
-                config_revision_digest: DigestHex::from("b".repeat(64)),
-                credential_ref: "credential".to_owned(),
-                features: BTreeSet::from([
-                    ChatRouteFeature::TextInput,
-                    ChatRouteFeature::TextOutput,
-                ]),
-            },
-            failovers: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn route_writer_rejects_an_opaque_id_without_a_record() {
-        let route_id = ModelRouteId::from("opaque-route");
-        let revision = revision_with_routes(
-            BTreeMap::from([(
-                "agent_chat".to_owned(),
-                route_id.clone(),
-            )]),
-            BTreeMap::new(),
-        );
-        let error = canonical_chat_route_json(&revision, "agent_chat", &route_id).unwrap_err();
-        assert!(matches!(
-            error,
-            ControlPlaneError::Wire(message) if message.contains("no canonical chat route record")
-        ));
-    }
-
-    #[test]
-    fn route_writer_serializes_the_complete_record_as_an_object() {
-        let route_id = ModelRouteId::from("opaque-route");
-        let revision = revision_with_routes(
-            BTreeMap::from([(
-                "agent_chat".to_owned(),
-                route_id.clone(),
-            )]),
-            BTreeMap::from([("agent_chat".to_owned(), route_record())]),
-        );
-        let route_json = canonical_chat_route_json(&revision, "agent_chat", &route_id).unwrap();
-        let value: Value = serde_json::from_str(&route_json).unwrap();
-        assert!(value.is_object());
-        assert_eq!(value["primary"]["model_route_id"], "opaque-route");
-        assert!(value.get("provider_id").is_none());
-    }
 
     #[test]
     fn session_creation_event_ids_are_stable_before_session_id_allocation() {

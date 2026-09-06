@@ -473,7 +473,7 @@ async fn configure_stepfun(
                     "protocol": "openai.chat_text",
                     "connection_role": "default",
                     "provider_params": {"temperature": 0.0},
-                    "output_limit": 1024
+                    "output_limit": 4096
                 }]
             },
             "connections": []
@@ -510,12 +510,12 @@ async fn configure_stepfun(
     )
 }
 
-async fn create_agent_binding(
+async fn create_agent_preset(
     router: &Router,
     provider_id: &str,
     model: &str,
     workspace: &Path,
-) -> Result<Value, SmokeFailure> {
+) -> Result<(String, Value), SmokeFailure> {
     let created = successful_json(
         router,
         "agent_settings.create",
@@ -643,10 +643,8 @@ async fn create_agent_binding(
                 "id": capability_id,
                 "version": version
             },
-            "required": true,
-            "exposure": "advertised",
-            "resource_binding_refs": [resource_binding_ref],
-            "config": {}
+            "action_allowlist": [],
+            "resource_binding_refs": [resource_binding_ref]
         }));
     }
     let workspace_root = std::fs::canonicalize(workspace)
@@ -834,22 +832,25 @@ async fn create_agent_binding(
         "/revision/document/resource_bindings",
         "SAVED_RESOURCE_BINDINGS_MISSING",
     )?;
-    Ok(json!({
-        "preset_revision_ref": saved_revision,
-        "resolved_snapshot_ref": snapshot,
-        "typed_resource_bindings": resources,
-        "binding_version": 1
-    }))
+    Ok((
+        preset_id,
+        json!({
+            "preset_revision_ref": saved_revision,
+            "resolved_snapshot_ref": snapshot,
+            "typed_resource_bindings": resources,
+            "binding_version": 1
+        }),
+    ))
 }
 
-async fn create_session(router: &Router, binding: &Value) -> Result<String, SmokeFailure> {
+async fn create_session(router: &Router, preset_id: &str) -> Result<String, SmokeFailure> {
     let created = successful_json(
         router,
         "session.create",
         Method::POST,
         "/api/agent-sessions",
         Some(json!({
-            "agent_binding": binding,
+            "preset_id": preset_id,
             "title": "Live Step Plan session"
         })),
         LOCAL_API_DEADLINE,
@@ -1343,7 +1344,10 @@ fn inspect_coding_evidence(
         let Some(args) = projection.get("args") else {
             return CodingEvidence::Incomplete("CODING_TOOL_ARGUMENTS_INVALID");
         };
-        if projection.get("input") != Some(args) || !(expected.validate_args)(args, workspace) {
+        if projection.get("input") != Some(args) {
+            return CodingEvidence::Incomplete("CODING_TOOL_INPUT_MISMATCH");
+        }
+        if !(expected.validate_args)(args, workspace) {
             return CodingEvidence::Incomplete("CODING_TOOL_ARGUMENTS_INVALID");
         }
         if expected.output_contains.is_some_and(|needle| {
@@ -2953,9 +2957,10 @@ async fn run_product_chain(
     workspace: &Path,
 ) -> Result<(), SmokeFailure> {
     let provider_id = configure_stepfun(router, api_key, base_url, model).await?;
-    let binding = create_agent_binding(router, &provider_id, model, workspace).await?;
+    let (preset_id, binding) =
+        create_agent_preset(router, &provider_id, model, workspace).await?;
 
-    let session_id = create_session(router, &binding).await?;
+    let session_id = create_session(router, &preset_id).await?;
     run_coding_chain(router, &session_id, workspace).await?;
 
     let cron_job_id = create_cron_job(router, &session_id).await?;

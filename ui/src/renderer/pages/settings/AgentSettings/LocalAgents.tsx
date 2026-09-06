@@ -4,15 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AgentMetadata } from '@/renderer/utils/model/agentTypes';
 import { useAgents } from '@/renderer/hooks/agent/useAgents';
 import { Button, Typography } from '@arco-design/web-react';
 import { IconRefresh } from '@arco-design/web-react/icon';
 import React, { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
 import AgentCard from './AgentCard';
-import { getAgentKey } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
 
 /**
  * 卡片网格按「内容容器实际宽度」自动定列，而非视口断点 —— 模型管理内容面板
@@ -26,7 +23,6 @@ const CARD_GRID_COLS = 'repeat(auto-fill, minmax(min(168px, 100%), 1fr))';
 
 const LocalAgents: React.FC = () => {
   const { t } = useTranslation();
-  const navigate = useNavigate();
 
   const { agents: detectedAgents, refreshCustomAgents } = useAgents();
   const [refreshingDetection, setRefreshingDetection] = useState(false);
@@ -45,13 +41,6 @@ const LocalAgents: React.FC = () => {
   // Nomi first among detected agents
   const nomiAgent = detectedAgents?.find((a) => a.agent_type === 'nomi' || a.backend === 'nomi');
   const otherDetected = detectedAgents?.filter((a) => a.agent_type !== 'nomi' && a.backend !== 'nomi') ?? [];
-
-  const goToChatWithAgent = useCallback(
-    (agent: AgentMetadata) => {
-      navigate('/guid', { state: { selectedAgentKey: getAgentKey(agent) } });
-    },
-    [navigate]
-  );
 
   return (
     <div className='flex flex-col gap-8px py-16px'>
@@ -77,19 +66,8 @@ const LocalAgents: React.FC = () => {
         </Typography.Text>
       </div>
       <div className='grid gap-10px px-16px' style={{ gridTemplateColumns: CARD_GRID_COLS }}>
-        {nomiAgent && (
-          <AgentCard
-            agent={nomiAgent}
-            onGoToChat={() => goToChatWithAgent(nomiAgent)}
-          />
-        )}
-        {otherDetected.map((agent) => (
-          <AgentCard
-            key={agent.backend || agent.agent_type}
-            agent={agent}
-            onGoToChat={() => goToChatWithAgent(agent)}
-          />
-        ))}
+        {nomiAgent && <AgentCard agent={nomiAgent} />}
+        {otherDetected.map((agent) => <AgentCard key={agent.backend || agent.agent_type} agent={agent} />)}
       </div>
       {(!detectedAgents || detectedAgents.length === 0) && (
         <Typography.Text type='secondary' className='block px-16px py-16px text-center text-12px'>

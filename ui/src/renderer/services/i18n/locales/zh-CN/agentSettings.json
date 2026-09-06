@@ -14,6 +14,7 @@
     "retry": "重试",
     "preview": "Preview",
     "test": "Test",
+    "startConversation": "使用 Agent",
     "saveRevision": "保存 Revision"
   },
   "defaults": {
@@ -215,7 +216,7 @@
     "title": "Agent 工作台操作未完成"
   },
   "navigation": {
-    "railTitle": "Agent"
+    "railTitle": "Agent 工作台"
   },
   "session": {
     "title": "Agent 会话",

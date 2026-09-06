@@ -888,7 +888,8 @@ pub struct AgentPresetEditorTestPlanDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentSessionRequestDto {
-    pub agent_binding: AgentBindingValueDto,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_preset_id")]
+    pub preset_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 }
@@ -1106,6 +1107,32 @@ mod snapshot_tests {
             "\"user\""
         );
         assert!(serde_json::from_str::<AgentPresetSourceDto>("\"package\"").is_err());
+    }
+
+    #[test]
+    fn create_agent_session_request_rejects_client_binding() {
+        let request = json!({
+            "preset_id": PRESET_ID,
+            "title": "Session",
+            "agent_binding": {
+                "preset_revision_ref": {
+                    "preset_id": PRESET_ID,
+                    "revision": 1,
+                    "revision_digest": "revision"
+                },
+                "resolved_snapshot_ref": {
+                    "snapshot_id": "snapshot",
+                    "snapshot_digest": "snapshot"
+                },
+                "typed_resource_bindings": [],
+                "binding_version": 1
+            }
+        });
+
+        assert!(
+            serde_json::from_value::<CreateAgentSessionRequestDto>(request).is_err(),
+            "agent_binding must remain a server-owned output"
+        );
     }
 
     #[test]

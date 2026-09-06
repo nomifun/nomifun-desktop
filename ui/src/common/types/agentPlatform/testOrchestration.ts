@@ -1,5 +1,4 @@
 import type {
-  AgentBindingValue,
   AgentPresetDraft,
   CreateAgentSessionRequest,
   CreateAgentSessionResponse,
@@ -35,22 +34,6 @@ export interface RunAgentPresetTestResult {
   turn: CreateAgentSessionTurnResponse;
 }
 
-const bindingFromPreview = (
-  draft: AgentPresetDraft,
-  preview: ResolveAgentPresetPreviewResponse,
-  saved?: SaveAgentPresetRevisionResponse
-): AgentBindingValue => {
-  const presetRevision = saved?.revision.reference ?? preview.candidate_revision_ref;
-  const snapshot = saved?.resolved_snapshot_ref ?? preview.resolved_snapshot_ref;
-  if (!snapshot) throw new Error('PREVIEW_SNAPSHOT_MISSING');
-  return {
-    preset_revision_ref: presetRevision,
-    resolved_snapshot_ref: snapshot,
-    typed_resource_bindings: draft.document.resource_bindings,
-    binding_version: 1,
-  };
-};
-
 /**
  * D-022 client orchestration. There is deliberately no backend Test endpoint:
  * dirty drafts use ordinary Save Revision, then both clean and dirty paths use
@@ -76,9 +59,8 @@ export async function runAgentPresetTest(
     throw new Error('CLEAN_DRAFT_REVISION_MISSING');
   }
 
-  const agentBinding = bindingFromPreview(input.draft, preview, savedRevision);
   const session = await input.ports.createSession({
-    agent_binding: agentBinding,
+    preset_id: input.draft.preset_id,
     title: `${input.draft.display_name} Test`,
   });
   const turn = await input.ports.createTurn(

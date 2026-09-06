@@ -14,6 +14,7 @@
     "retry": "Retry",
     "preview": "Preview",
     "test": "Test",
+    "startConversation": "Start conversation",
     "saveRevision": "Save Revision"
   },
   "defaults": {
@@ -215,7 +216,7 @@
     "title": "Agent Workbench could not complete the operation"
   },
   "navigation": {
-    "railTitle": "Agent"
+    "railTitle": "Agent Workbench"
   },
   "session": {
     "title": "Agent Session",

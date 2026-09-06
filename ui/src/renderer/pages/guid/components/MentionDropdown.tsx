@@ -28,7 +28,7 @@ const MentionDropdown: React.FC<MentionDropdownProps> = ({ menuRef, options, sel
     >
       <Menu
         selectedKeys={[selectedKey]}
-        onClickMenuItem={(key) => onSelect(String(key))}
+        onClickMenuItem={(key: string) => onSelect(key)}
         className='min-w-180px max-h-200px overflow-auto'
       >
         {options.length > 0 ? (
@@ -93,7 +93,7 @@ export const MentionSelectorBadge: React.FC<MentionSelectorBadgeProps> = ({
       <Dropdown
         trigger='click'
         popupVisible={open}
-        onVisibleChange={(v) => {
+        onVisibleChange={(v: boolean) => {
           onOpenChange(v);
           if (v) {
             onResetQuery();

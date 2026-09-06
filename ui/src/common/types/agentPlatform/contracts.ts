@@ -512,7 +512,7 @@ export interface SessionCursor {
 }
 
 export interface CreateAgentSessionRequest {
-  agent_binding: AgentBindingValue;
+  preset_id: AgentPresetId;
   title?: string;
 }
 

@@ -1,15 +1,11 @@
 {
-  "agentFallbackNotice": "{{original}} 不可用，已自动切换到 {{fallback}}。",
   "noAgentAvailable": "没有可用的 Main Agent。请登录 Google 或安装 Claude/Codex CLI。是否前往设置？",
   "noAgentAvailableShort": "没有可用的 Main Agent。点击配置。",
   "agentTabAutoSwitch": "模型不兼容 Gemini，已自动切换到 {{fallback}}",
   "autoSwitchToAgent": "Gemini 未配置，正在自动切换到 {{agent}}",
   "autoSwitchedAgent": "{{from}} 不可用，已自动切换到 {{to}}",
-  "promptExamplesHint": "试试这些可点击的案例提示词：",
-  "selectPresetHint": "选择一位设定开始任务",
-  "agentSwitcherLabel": "Agent",
-  "switchedToAgent": "已切换到 {{agent}}",
   "modelRequired": "请先选择模型",
+  "agentPresetRequired": "请先从 Agent 工作台选择一个已保存的 Agent。",
   "collaboration": {
     "models": {
       "title": "协作模型",
@@ -45,41 +41,5 @@
     "draftOn": "已预设 · 创建后启用",
     "draftOff": "未预设",
     "willMount": "将挂载 {{count}} 个知识库"
-  },
-  "entry": {
-    "free": "自由发挥",
-    "usePreset": "使用设定",
-    "skills": "使用 Skills",
-    "skillsActive": "使用 Skills · 已启用",
-    "skillsAdjustAria": "调整本次会话已启用的 {{count}} 个 Skills",
-    "skillsActiveAria": "查看本次会话已启用的 {{count}} 个 Skills",
-    "backToFree": "自由发挥"
-  },
-  "skillsPopover": {
-    "title": "本次会话使用的 Skills",
-    "description": "这些 Skills 会随本次会话注入，可在发送前由「使用 Skills」调整。",
-    "enabledCount": "已启用 {{count}} 个",
-    "overflowCount": "还有 {{count}} 个 Skills",
-    "adjustHint": "点击「使用 Skills」调整本次会话。"
-  },
-  "drawer": {
-    "presetTab": "设定",
-    "skillsTab": "Skills",
-    "searchPreset": "搜索设定名称或描述…",
-    "searchSkill": "搜索 Skill 名称或描述…",
-    "usePreset": "使用",
-    "keepFree": "保持自由发挥",
-    "applySkills": "应用到本次会话",
-    "selectedCount": "已选 {{count}} 个 Skill",
-    "sourceCustom": "自定义",
-    "sourceBuiltin": "内置",
-    "sourceExtension": "扩展",
-    "autoInject": "自动注入",
-    "presetCount": "个设定",
-    "skillCount": "个 Skill",
-    "presetHint": "选择一个设定，本次会话将由后端解析并固化配置快照。",
-    "presetEmpty": "还没有设定。可前往设定页创建，或保持自由发挥。",
-    "presetNoMatch": "没有匹配当前搜索与筛选条件的设定。",
-    "skillNoMatch": "没有匹配当前搜索与筛选条件的 Skill。"
   }
 }

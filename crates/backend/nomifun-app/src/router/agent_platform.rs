@@ -19,7 +19,7 @@ use nomifun_agent_control_plane::{
 };
 use nomifun_agent_platform::{
     AgentPlatform, AgentPlatformError, AgentSessionCommandPort, AgentSessionDeletePort,
-    AgentSessionQueryPort, OpenAgentSessionRequest, StartAgentTurnRequest,
+    AgentSessionQueryPort, StartAgentTurnRequest,
 };
 use nomifun_agent_session::ForkRequest;
 use nomifun_api_types::{
@@ -274,34 +274,15 @@ async fn create_agent_session(
     axum::Extension(owner): axum::Extension<AuthenticatedOwner>,
     Json(request): Json<CreateAgentSessionRequestDto>,
 ) -> Result<Json<ApiResponse<CreateAgentSessionResponseDto>>, AgentPlatformHttpError> {
-    let binding = serde_json::from_value(
-        serde_json::to_value(&request.agent_binding)
-            .map_err(AgentPlatformError::from)?,
-    )
-    .map_err(AgentPlatformError::from)?;
-    let idempotency_key = IdempotencyKey::from(format!(
-        "agent-session-create:{}",
-        Uuid::now_v7()
-    ));
-    let mut open = OpenAgentSessionRequest::user(&owner, binding, idempotency_key);
-    open.metadata.title = request.title;
-    let created = state.platform.open_session(open).await?;
-    let principal = user_principal(&owner);
-    let head = state
+    let response = state
         .platform
-        .session_head(&principal, &created.session.agent_session_id)
+        .create_session_from_dto(
+            &owner,
+            request,
+            IdempotencyKey::from(format!("agent-session-create:{}", Uuid::now_v7())),
+        )
         .await?;
-    let agent_binding = serde_json::from_value(
-        serde_json::to_value(&created.session.agent_binding)
-            .map_err(AgentPlatformError::from)?,
-    )
-    .map_err(AgentPlatformError::from)?;
-    Ok(Json(ApiResponse::ok(CreateAgentSessionResponseDto {
-        agent_session_id: created.session.agent_session_id.as_ref().to_owned(),
-        agent_binding,
-        state: head.status,
-        cursor: session_cursor(&created.session.agent_session_id, head.last_seq),
-    })))
+    Ok(Json(ApiResponse::ok(response)))
 }
 
 async fn create_agent_session_turn(

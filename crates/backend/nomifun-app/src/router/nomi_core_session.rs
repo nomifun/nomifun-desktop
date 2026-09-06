@@ -3908,10 +3908,14 @@ async fn create_nomi_core_agent_session(
     headers: HeaderMap,
     Json(request): Json<CreateAgentSessionRequestDto>,
 ) -> Result<Json<ApiResponse<CreateAgentSessionResponseDto>>, NomiCoreApiError> {
+    let binding = state
+        .control_plane
+        .resolve_agent_session_binding(&owner.0, &request.preset_id)
+        .await?;
     let projection = resolve_saved_binding_projection(
         &state,
         &owner,
-        &request.agent_binding,
+        &binding,
         request.title.as_deref(),
         "agent_session",
         "desktop",
@@ -3941,7 +3945,7 @@ async fn create_nomi_core_agent_session(
     let cursor = durable_message_cursor(&state.session_owner, &session_id).await?;
     Ok(Json(ApiResponse::ok(CreateAgentSessionResponseDto {
         agent_session_id: session_id.as_ref().to_owned(),
-        agent_binding: request.agent_binding,
+        agent_binding: binding,
         state: projected_session_status(&response),
         cursor,
     })))

@@ -8,8 +8,8 @@ use nomifun_agent_contracts::{
     RemoteBindingId, UserId, compare_revision_contribution_locks,
 };
 use nomifun_api_types::{
-    AgentBindingRecordDto, AgentBindingSummaryDto, AgentBindingTargetDto, AgentCatalogResponse,
-    AgentPresetDraftDto, AgentPresetEditorResponse, AgentPresetLibraryResponse,
+    AgentBindingRecordDto, AgentBindingSummaryDto, AgentBindingTargetDto, AgentBindingValueDto,
+    AgentCatalogResponse, AgentPresetDraftDto, AgentPresetEditorResponse, AgentPresetLibraryResponse,
     AgentPresetRevisionImpactResponse, AgentPresetSummaryDto,
     CreateAgentPresetFromTemplateRequest, CreateAgentPresetRequest, CreateRemoteBindingRequest,
     EditorDraftStateDto, ExactCatalogRefDto, FreshStartPresentationDto, PutAgentBindingRequest,
@@ -654,6 +654,55 @@ impl AgentControlPlane {
             })
     }
 
+    /// Freeze the authenticated owner's current stable Preset revision into a
+    /// Session binding using only the persisted immutable Snapshot.
+    pub async fn resolve_agent_session_binding(
+        &self,
+        owner: &UserId,
+        preset_id: &str,
+    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
+        let stored = self
+            .store
+            .get_preset(&AgentPresetId::from(preset_id.to_owned()))
+            .await?
+            .ok_or_else(|| {
+                ControlPlaneError::canonical(
+                    "CAPABILITY_NOT_MATERIALIZED",
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    "AgentPreset is not available for Session creation",
+                )
+            })?;
+        if stored.preset.owner_user_id.as_ref() != Some(owner) {
+            return Err(ControlPlaneError::canonical(
+                "RESOURCE_OWNER_MISMATCH",
+                axum::http::StatusCode::FORBIDDEN,
+                "AgentPreset owner does not match the authenticated owner",
+            ));
+        }
+        let stable = stored
+            .preset
+            .current_stable_revision
+            .clone()
+            .ok_or_else(|| {
+                ControlPlaneError::canonical(
+                    "CAPABILITY_NOT_MATERIALIZED",
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    "AgentPreset has no current stable Revision for Session creation",
+                )
+            })?;
+        let revision = self
+            .store
+            .get_revision(&stable)
+            .await?;
+        let snapshot = self
+            .store
+            .get_snapshot(&stable)
+            .await?;
+        let binding = session_binding_from_stable_artifacts(owner, stable, revision, snapshot)?;
+        self.validate_agent_binding(owner, &binding).await?;
+        wire_cast(&binding)
+    }
+
     pub async fn preview_saved_revision(
         &self,
         owner: &UserId,
@@ -1228,6 +1277,71 @@ where
     }
 }
 
+fn session_binding_from_stable_artifacts(
+    owner: &UserId,
+    stable: PresetRevisionRef,
+    revision: Option<AgentPresetRevision>,
+    snapshot: Option<nomifun_agent_contracts::ResolvedSnapshotEnvelope>,
+) -> Result<AgentBindingValue, ControlPlaneError> {
+    let revision = revision.ok_or_else(|| {
+        ControlPlaneError::canonical(
+            "PRESET_REVISION_DIGEST_MISMATCH",
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "AgentPreset current stable Revision is unavailable",
+        )
+    })?;
+    revision.validate().map_err(|violation| {
+        ControlPlaneError::canonical(
+            violation.code,
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            violation.message,
+        )
+    })?;
+    let snapshot = snapshot.ok_or_else(|| {
+        ControlPlaneError::canonical(
+            "CAPABILITY_NOT_MATERIALIZED",
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "AgentPreset current stable Revision has no persisted Snapshot",
+        )
+    })?;
+    snapshot.validate().map_err(|violation| {
+        ControlPlaneError::canonical(
+            violation.code,
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            violation.message,
+        )
+    })?;
+    if revision.reference != stable
+        || snapshot.content.preset_revision_ref != stable
+        || snapshot.content.typed_resource_bindings != revision.payload.resource_bindings
+    {
+        return Err(ControlPlaneError::canonical(
+            "PRESET_REVISION_DIGEST_MISMATCH",
+            axum::http::StatusCode::CONFLICT,
+            "persisted Revision and Snapshot do not match current_stable_revision",
+        ));
+    }
+    if snapshot
+        .content
+        .typed_resource_bindings
+        .iter()
+        .any(|resource| resource.owner_id != owner.as_ref())
+    {
+        return Err(ControlPlaneError::canonical(
+            "RESOURCE_OWNER_MISMATCH",
+            axum::http::StatusCode::FORBIDDEN,
+            "frozen typed resource owner does not match the authenticated owner",
+        ));
+    }
+
+    Ok(AgentBindingValue {
+        preset_revision_ref: stable,
+        resolved_snapshot_ref: snapshot.snapshot_ref,
+        typed_resource_bindings: snapshot.content.typed_resource_bindings,
+        binding_version: 1,
+    })
+}
+
 fn ensure_expected_current(
     current: Option<&PresetRevisionRef>,
     expected: Option<&nomifun_api_types::PresetRevisionRefDto>,
@@ -1496,6 +1610,144 @@ mod tests {
             .await
             .unwrap();
         assert!(reloaded.draft.source_template_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_binding_is_owner_scoped_and_freezes_current_stable_snapshot() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
+        let templates = OfficialTemplateCatalog::load().unwrap();
+        let compiler = test_compiler(&templates);
+        let control_plane = AgentControlPlane::new(
+            store.clone(),
+            catalog,
+            templates,
+            compiler,
+        );
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let other_owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        let created = control_plane
+            .create_from_template(
+                &owner,
+                "chat.minimal",
+                CreateAgentPresetFromTemplateRequest {
+                    display_name: "Minimal".into(),
+                    description: None,
+                    resource_bindings: Vec::new(),
+                    model_route_refs: BTreeMap::new(),
+                    chat_route_records: BTreeMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let revision = created.revision.as_ref().expect("initial Revision");
+
+        let binding = control_plane
+            .resolve_agent_session_binding(&owner, &created.preset.preset_id)
+            .await
+            .unwrap();
+        assert_eq!(binding.preset_revision_ref, revision.reference);
+        assert_eq!(
+            binding.typed_resource_bindings,
+            revision.document.resource_bindings
+        );
+        assert_eq!(binding.binding_version, 1);
+
+        let stable: PresetRevisionRef = wire_cast(&revision.reference).unwrap();
+        let stored_revision = store
+            .get_revision(&stable)
+            .await
+            .unwrap()
+            .expect("persisted stable Revision");
+        let snapshot_error = session_binding_from_stable_artifacts(
+            &owner,
+            stable,
+            Some(stored_revision),
+            None,
+        )
+        .expect_err("a missing persisted Snapshot must fail closed");
+        assert_eq!(
+            snapshot_error.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            snapshot_error.code().as_ref(),
+            "CAPABILITY_NOT_MATERIALIZED"
+        );
+
+        let mut next_draft = control_plane
+            .editor(&owner, &created.preset.preset_id, None)
+            .await
+            .unwrap()
+            .draft;
+        next_draft.document.instructions = "Revision two".into();
+        let next_preview_request = ResolveAgentPresetPreviewRequest {
+            expected_current_revision: Some(revision.reference.clone()),
+            draft: next_draft.clone(),
+            scene: SETTINGS_SCENE.into(),
+            surface: SETTINGS_SURFACE.into(),
+            audience: SETTINGS_AUDIENCE.into(),
+        };
+        let next_preview = control_plane
+            .preview(
+                &owner,
+                &created.preset.preset_id,
+                next_preview_request,
+            )
+            .await
+            .unwrap();
+        let saved = control_plane
+            .save_revision(
+                &owner,
+                &created.preset.preset_id,
+                SaveAgentPresetRevisionRequest {
+                    expected_current_revision: Some(revision.reference.clone()),
+                    preview_digest: next_preview.preview_digest,
+                    draft: next_draft,
+                    reason: Some("freeze test".into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.revision.reference.revision, 2);
+        let next_binding = control_plane
+            .resolve_agent_session_binding(&owner, &created.preset.preset_id)
+            .await
+            .unwrap();
+        assert_eq!(binding.preset_revision_ref.revision, 1);
+        assert_eq!(next_binding.preset_revision_ref.revision, 2);
+
+        let owner_error = control_plane
+            .resolve_agent_session_binding(&other_owner, &created.preset.preset_id)
+            .await
+            .expect_err("another owner must not bind this Preset");
+        assert_eq!(owner_error.status(), axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(owner_error.code().as_ref(), "RESOURCE_OWNER_MISMATCH");
+
+        let no_stable = control_plane
+            .create_preset(
+                &owner,
+                CreateAgentPresetRequest {
+                    display_name: "No stable Revision".into(),
+                    description: None,
+                    fork_from_revision: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(no_stable.preset.current_stable_revision.is_none());
+        let stable_error = control_plane
+            .resolve_agent_session_binding(&owner, &no_stable.preset.preset_id)
+            .await
+            .expect_err("a Preset without a stable Revision must not create a Session");
+        assert_eq!(
+            stable_error.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            stable_error.code().as_ref(),
+            "CAPABILITY_NOT_MATERIALIZED"
+        );
     }
 
     #[tokio::test]

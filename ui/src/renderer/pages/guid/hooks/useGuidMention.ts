@@ -4,14 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { resolveAgentLogo } from '@/renderer/utils/model/agentLogo';
-import {
-  isEmoji,
-  resolveAgentAvatarImageSrc,
-} from '@/renderer/utils/model/agentPresentation';
-import { CUSTOM_AVATAR_IMAGE_MAP } from '../constants';
-import type { AvailableAgent, MentionOption } from '../types';
-import { getAgentKey } from './agentSelectionUtils';
+import type { AgentPresetSummary } from '@/common/types/agentPlatform';
+import type { ExecutableAgentPreset, MentionOption } from '../types';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 export type GuidMentionResult = {
@@ -35,24 +29,20 @@ export type GuidMentionResult = {
 };
 
 type UseGuidMentionOptions = {
-  availableAgents: AvailableAgent[] | undefined;
-  customAgentAvatarMap: Map<string, string | undefined>;
-  selectedAgentKey: string;
-  setSelectedAgentKey: (key: string) => void;
+  presets: ExecutableAgentPreset[];
+  selectedPresetId: string;
+  setSelectedPresetId: (presetId: string) => void;
+  selectedPreset: AgentPresetSummary | undefined;
   setInput: React.Dispatch<React.SetStateAction<string>>;
-  selectedAgentInfo: AvailableAgent | undefined;
 };
 
-/**
- * Hook that manages the @ mention system for agent selection.
- */
+/** Manages AgentPreset selection through the Guid @ mention UI. */
 export const useGuidMention = ({
-  availableAgents,
-  customAgentAvatarMap,
-  selectedAgentKey,
-  setSelectedAgentKey,
+  presets,
+  selectedPresetId,
+  setSelectedPresetId,
+  selectedPreset,
   setInput,
-  selectedAgentInfo,
 }: UseGuidMentionOptions): GuidMentionResult => {
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionOpen, setMentionOpen] = useState(false);
@@ -62,96 +52,91 @@ export const useGuidMention = ({
   const mentionMenuRef = useRef<HTMLDivElement>(null);
   const mentionMatchRegex = useMemo(() => /(?:^|\s)@([^\s@]*)$/, []);
 
-  const mentionOptions = useMemo(() => {
-    const agents = availableAgents || [];
-    return agents.map((agent) => {
-      const key = getAgentKey(agent);
-      const label = agent.name || agent.backend || agent.agent_type;
-      const agentIdentity = agent.id;
-      const avatarValue = agentIdentity ? agent.avatar || customAgentAvatarMap.get(agentIdentity) : agent.avatar;
-      const avatar = avatarValue ? avatarValue.trim() : undefined;
-      const tokens = new Set<string>();
-      const normalizedLabel = label.toLowerCase();
-      tokens.add(normalizedLabel);
-      tokens.add(normalizedLabel.replace(/\s+/g, '-'));
-      tokens.add(normalizedLabel.replace(/\s+/g, ''));
-      tokens.add(agent.agent_type.toLowerCase());
-      if (agent.backend) {
-        tokens.add(agent.backend.toLowerCase());
-      }
-      if (agentIdentity) {
-        tokens.add(agentIdentity.toLowerCase());
-      }
-      const avatarImage = resolveAgentAvatarImageSrc(avatar, CUSTOM_AVATAR_IMAGE_MAP);
-      const avatarEmoji = avatar && !avatarImage && isEmoji(avatar) ? avatar : undefined;
-      return {
-        key,
-        label,
-        tokens,
-        avatarEmoji,
-        avatarImage,
-        logo:
-          resolveAgentLogo({
-            icon: agent.icon,
-            backend: agent.backend || agent.agent_type,
-            agentId: agentIdentity,
-            isExtension: agent.isExtension,
-          }) || undefined,
-        isExtension: agent.isExtension,
-      };
-    });
-  }, [availableAgents, customAgentAvatarMap]);
+  const mentionOptions = useMemo(
+    () =>
+      presets.map((preset) => {
+        const label = preset.display_name;
+        const normalizedLabel = label.toLowerCase();
+        return {
+          key: preset.preset_id,
+          label,
+          tokens: new Set([
+            normalizedLabel,
+            normalizedLabel.replace(/\s+/g, '-'),
+            normalizedLabel.replace(/\s+/g, ''),
+            preset.preset_id.toLowerCase(),
+          ]),
+          avatarEmoji: undefined,
+          avatarImage: undefined,
+          logo: undefined,
+        };
+      }),
+    [presets]
+  );
 
   const filteredMentionOptions = useMemo(() => {
     if (!mentionQuery) return mentionOptions;
     const query = mentionQuery.toLowerCase();
-    return mentionOptions.filter((option) => Array.from(option.tokens).some((token) => token.startsWith(query)));
+    return mentionOptions.filter((option) =>
+      Array.from(option.tokens).some((token) => token.startsWith(query))
+    );
   }, [mentionOptions, mentionQuery]);
 
   const stripMentionToken = useCallback(
     (value: string) => {
       if (!mentionMatchRegex.test(value)) return value;
-      return value.replace(mentionMatchRegex, (_match, _query) => '').trimEnd();
+      return value.replace(mentionMatchRegex, '').trimEnd();
     },
     [mentionMatchRegex]
   );
 
   const selectMentionAgent = useCallback(
     (key: string) => {
-      setSelectedAgentKey(key);
-      setInput((prev) => stripMentionToken(prev));
+      setSelectedPresetId(key);
+      setInput((previous) => stripMentionToken(previous));
       setMentionOpen(false);
       setMentionSelectorOpen(false);
       setMentionSelectorVisible(true);
       setMentionQuery(null);
       setMentionActiveIndex(0);
     },
-    [stripMentionToken, setSelectedAgentKey, setInput]
+    [setInput, setSelectedPresetId, stripMentionToken]
   );
 
-  const selectedAgentLabel = selectedAgentInfo?.name || selectedAgentKey;
-  const mentionMenuActiveOption = filteredMentionOptions[mentionActiveIndex] || filteredMentionOptions[0];
+  const selectedAgentLabel = selectedPreset?.display_name || selectedPresetId;
+  const mentionMenuActiveOption =
+    filteredMentionOptions[mentionActiveIndex] || filteredMentionOptions[0];
   const mentionMenuSelectedKey =
-    mentionOpen || mentionSelectorOpen ? mentionMenuActiveOption?.key || selectedAgentKey : selectedAgentKey;
+    mentionOpen || mentionSelectorOpen
+      ? mentionMenuActiveOption?.key || selectedPresetId
+      : selectedPresetId;
 
-  // Reset active index on open/query change
   useEffect(() => {
     if (mentionOpen) {
       setMentionActiveIndex(0);
       return;
     }
     if (mentionSelectorOpen) {
-      const selectedIndex = filteredMentionOptions.findIndex((option) => option.key === selectedAgentKey);
+      const selectedIndex = filteredMentionOptions.findIndex(
+        (option) => option.key === selectedPresetId
+      );
       setMentionActiveIndex(selectedIndex >= 0 ? selectedIndex : 0);
     }
-  }, [filteredMentionOptions, mentionOpen, mentionQuery, mentionSelectorOpen, selectedAgentKey]);
+  }, [
+    filteredMentionOptions,
+    mentionOpen,
+    mentionQuery,
+    mentionSelectorOpen,
+    selectedPresetId,
+  ]);
 
-  // Scroll active mention item into view
   useEffect(() => {
     if (!mentionOpen && !mentionSelectorOpen) return;
     const container = mentionMenuRef.current;
     if (!container) return;
-    const target = container.querySelector<HTMLElement>(`[data-mention-index="${mentionActiveIndex}"]`);
+    const target = container.querySelector<HTMLElement>(
+      `[data-mention-index="${mentionActiveIndex}"]`
+    );
     if (!target) return;
     target.scrollIntoView({ block: 'nearest' });
   }, [mentionActiveIndex, mentionOpen, mentionSelectorOpen]);

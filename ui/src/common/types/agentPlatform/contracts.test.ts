@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
   OFFICIAL_PRESET_KEYS,
+  asAgentPresetId,
   type AgentBindingValue,
+  type CreateAgentSessionRequest,
   type RemoteCredentialContinuation,
   type RemoteBinding,
 } from './contracts';
@@ -42,6 +44,19 @@ describe('Agent Platform TypeScript contracts', () => {
       'owner_user_id',
       'remote_binding_id',
     ]);
+  });
+
+  test('CreateAgentSessionRequest contains only preset identity and optional title', () => {
+    const request: CreateAgentSessionRequest = {
+      preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001'),
+      title: 'Coding Test',
+    };
+
+    expect(request).toEqual({
+      preset_id: '0190f5fe-7c00-7a00-8000-000000000001',
+      title: 'Coding Test',
+    });
+    expect('agent_binding' in request).toBe(false);
   });
 
   test('D-026 continuation requires same owner and explicit Session identity', () => {

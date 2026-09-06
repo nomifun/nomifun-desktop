@@ -1,15 +1,11 @@
 {
-  "agentFallbackNotice": "{{original}} is unavailable, using {{fallback}} instead.",
   "noAgentAvailable": "No Main Agent is available. Please login to Google or install Claude/Codex CLI. Go to settings?",
   "noAgentAvailableShort": "No Main Agent available. Click to configure.",
   "agentTabAutoSwitch": "Model not compatible with Gemini, auto-switched to {{fallback}}",
   "autoSwitchToAgent": "Gemini is not configured, auto-switching to {{agent}}",
   "autoSwitchedAgent": "{{from}} is not available, switched to {{to}}",
-  "promptExamplesHint": "Try example prompts:",
-  "selectPresetHint": "Select an preset to start a task",
-  "agentSwitcherLabel": "Agent",
-  "switchedToAgent": "Switched to {{agent}}",
   "modelRequired": "Select a model first",
+  "agentPresetRequired": "Select a saved Agent from Agent Workbench to start.",
   "collaboration": {
     "models": {
       "title": "Collaborator models",
@@ -45,41 +41,5 @@
     "draftOn": "Preset · enabled after creation",
     "draftOff": "Not preset",
     "willMount": "{{count}} base(s) will be mounted"
-  },
-  "entry": {
-    "free": "Free-form",
-    "usePreset": "Use preset",
-    "skills": "Use Skills",
-    "skillsActive": "Use Skills · Enabled",
-    "skillsAdjustAria": "Adjust the {{count}} Skills enabled for this chat",
-    "skillsActiveAria": "View {{count}} Skills enabled for this chat",
-    "backToFree": "Free-form"
-  },
-  "skillsPopover": {
-    "title": "Skills used in this chat",
-    "description": "These Skills are injected into this chat. Use “Use Skills” to adjust them before sending.",
-    "enabledCount": "{{count}} enabled",
-    "overflowCount": "{{count}} more Skills",
-    "adjustHint": "Click “Use Skills” to adjust this chat."
-  },
-  "drawer": {
-    "presetTab": "Presets",
-    "skillsTab": "Skills",
-    "searchPreset": "Search presets…",
-    "searchSkill": "Search skills…",
-    "usePreset": "Use",
-    "keepFree": "Stay free-form",
-    "applySkills": "Apply to this chat",
-    "selectedCount": "{{count}} skill(s) selected",
-    "sourceCustom": "Custom",
-    "sourceBuiltin": "Built-in",
-    "sourceExtension": "Extension",
-    "autoInject": "Auto-inject",
-    "presetCount": "preset(s)",
-    "skillCount": "skill(s)",
-    "presetHint": "Choose one preset; the backend resolves and snapshots it for this conversation.",
-    "presetEmpty": "No presets yet. Create one in Presets, or stay free-form.",
-    "presetNoMatch": "No presets match the current search and filters.",
-    "skillNoMatch": "No Skills match the current search and filters."
   }
 }

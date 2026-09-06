@@ -5610,6 +5610,177 @@ function ap7RunCommand(command, commandArgs) {
   };
 }
 
+function ap7AgentPresetLaunchContract() {
+  const paths = {
+    page: 'ui/src/renderer/pages/guid/GuidPage.tsx',
+    pill: 'ui/src/renderer/pages/guid/components/AgentPillBar.tsx',
+    send: 'ui/src/renderer/pages/guid/hooks/useGuidSend.ts',
+    types: 'ui/src/common/types/agentPlatform/contracts.ts',
+    dto: 'crates/backend/nomifun-api-types/src/agent_platform.rs',
+    service: 'crates/backend/nomifun-agent-control-plane/src/service.rs',
+    engines:
+      'ui/src/renderer/pages/settings/AgentSettings/LocalAgents.tsx',
+  };
+  const source = Object.fromEntries(
+    Object.entries(paths).map(([key, path]) => [
+      key,
+      readFileSafe(join(repoRoot, path)) || '',
+    ])
+  );
+  const requestPayload =
+    source.send.match(
+      /agentPlatform\.sessions\.create\.invoke\(\{([\s\S]*?)\}\)/
+    )?.[1] || '';
+  const tsRequest =
+    source.types.match(
+      /export interface CreateAgentSessionRequest\s*\{([\s\S]*?)\n\}/
+    )?.[1] || '';
+  const rustRequest =
+    source.dto.match(
+      /pub struct CreateAgentSessionRequestDto\s*\{([\s\S]*?)\n\}/
+    )?.[1] || '';
+  const findings = [];
+  const require = (condition, message) => {
+    if (!condition) findings.push(message);
+  };
+
+  require(
+    source.page.includes('presets={agentSelection.presets}') &&
+      source.page.includes(
+        'selectedPresetId={agentSelection.selectedPresetId}'
+      ) &&
+      source.page.includes('selectedAgentPresetId'),
+    'Guid must render and preselect the executable AgentPreset list'
+  );
+  require(
+    ![
+      'GuidModelSelector',
+      'GuidSkillsDrawer',
+      'KnowledgeControl',
+      'GuidCollaboratorSelector',
+      'CollaborationPolicyControl',
+      'ensureBackendMcpCatalog',
+    ].some((marker) => source.page.includes(marker)),
+    'ordinary Guid must not expose preset-owned model/resource overrides'
+  );
+  require(
+    source.pill.includes('{preset.display_name}') &&
+      source.pill.includes('onSelectPreset(presetId)') &&
+      source.pill.includes("navigate('/agent')"),
+    'the home pill bar must visibly list presets and link + to /agent'
+  );
+  require(
+    requestPayload.includes('preset_id: selectedPreset.preset_id') &&
+      requestPayload.includes('title: entryPlan.conversationName') &&
+      !requestPayload.includes('agent_binding') &&
+      !requestPayload.includes('model') &&
+      !requestPayload.includes('snapshot'),
+    'Guid Session create must submit only preset_id and title'
+  );
+  require(
+    tsRequest.includes('preset_id: AgentPresetId') &&
+      !tsRequest.includes('agent_binding'),
+    'the TypeScript Session request must be preset-native'
+  );
+  require(
+    rustRequest.includes('pub preset_id: String') &&
+      !rustRequest.includes('agent_binding'),
+    'the Rust Session request DTO must reject client bindings'
+  );
+  require(
+    source.service.includes('resolve_agent_session_binding') &&
+      source.service.includes('current_stable_revision') &&
+      source.service.includes('get_snapshot'),
+    'the server must resolve the stable Revision and persisted Snapshot'
+  );
+  require(
+    !source.engines.includes("navigate('/guid'") &&
+      !source.engines.includes('selectedAgentKey'),
+    'execution-engine metadata must not launch a product Agent'
+  );
+
+  return { valid: findings.length === 0, findings, paths };
+}
+
+function ap7RevisionStorageContract() {
+  const paths = {
+    migration:
+      'crates/backend/nomifun-db/migrations/064_agent_preset_revision_payload.sql',
+    freshSchema:
+      'crates/backend/nomifun-agent-contracts/schema/0001_fresh_v4.sql',
+    freshRoot: 'crates/backend/nomifun-v4-root/src/database.rs',
+    platform: 'crates/backend/nomifun-agent-platform/src/platform.rs',
+    broker: 'crates/backend/nomifun-app/src/router/chat_broker_host.rs',
+    host: 'crates/backend/nomifun-app/src/router/agent_platform_host.rs',
+    nomiCore:
+      'crates/backend/nomifun-app/src/router/nomi_core_control_plane.rs',
+  };
+  const source = Object.fromEntries(
+    Object.entries(paths).map(([key, path]) => [
+      key,
+      readFileSafe(join(repoRoot, path)) || '',
+    ])
+  );
+  const activeStorageSources = [
+    source.freshRoot,
+    source.platform,
+    source.broker,
+    source.host,
+    source.nomiCore,
+  ];
+  const forbiddenActiveMarkers = [
+    'editor_document_json',
+    'agent_preset_model_routes',
+    'preset_initial_capabilities',
+    'preset_on_demand_capabilities',
+    'preset_skill_bindings',
+    'preset_resource_bindings',
+  ];
+  const findings = [];
+  const require = (condition, message) => {
+    if (!condition) findings.push(message);
+  };
+
+  require(
+    source.migration.includes(
+      'RENAME COLUMN editor_document_json TO payload_json'
+    ) &&
+      !source.migration.includes('ADD COLUMN') &&
+      !source.migration.includes('CREATE VIEW'),
+    'migration 064 must physically rename the Nomi-core Revision payload column'
+  );
+  require(
+    /CREATE TABLE agent_preset_templates[\s\S]*source_kind TEXT NOT NULL CHECK \(source_kind = 'official'\)/.test(
+      source.freshSchema
+    ) &&
+      !/CREATE TABLE agent_preset_templates[\s\S]*source_package_id[\s\S]*\) STRICT;/.test(
+        source.freshSchema
+      ),
+    'Fresh-v4 templates must be official seed-only without Package ownership'
+  );
+  require(
+    source.freshRoot.includes(
+      '(template_key, source_kind, template_json, template_digest)'
+    ) &&
+      !source.freshRoot.includes('source_package_id') &&
+      !source.freshRoot.includes('INSERT INTO agent_presets'),
+    'Fresh-v4 bootstrap must seed templates only'
+  );
+  require(
+    source.platform.includes('payload_json') &&
+      source.platform.includes('agent_preset_contribution_locks'),
+    'Fresh AgentPlatform must persist one Revision payload plus canonical locks'
+  );
+  require(
+    forbiddenActiveMarkers.every((marker) =>
+      activeStorageSources.every((value) => !value.includes(marker))
+    ),
+    'active Revision storage must not reference retired projection tables or columns'
+  );
+
+  return { valid: findings.length === 0, findings, paths };
+}
+
 function runAp7Gate() {
   const sourceSha = c8ReadGitHeadForReport();
   const checks = [];
@@ -5655,6 +5826,11 @@ function runAp7Gate() {
     [
       '062_agent_preset_contribution_locks.sql',
       'the ContributionLock migration',
+      AP7_DOC_PATHS.slice(2),
+    ],
+    [
+      '064_agent_preset_revision_payload.sql',
+      'the canonical Revision payload migration',
       AP7_DOC_PATHS.slice(2),
     ],
   ];
@@ -5769,12 +5945,25 @@ function runAp7Gate() {
     { transitional_redirect_count: legacyRouteMatches }
   );
 
+  const launchContract = ap7AgentPresetLaunchContract();
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'ui.guid_agent_preset_launch_contract',
+    launchContract.valid,
+    'Guid and Agent Workbench must launch Sessions through one visible AgentPreset selector and preset_id-only request',
+    launchContract
+  );
+
   const migration061Path =
     'crates/backend/nomifun-db/migrations/061_agent_snapshot_naming.sql';
   const migration062Path =
     'crates/backend/nomifun-db/migrations/062_agent_preset_contribution_locks.sql';
+  const migration064Path =
+    'crates/backend/nomifun-db/migrations/064_agent_preset_revision_payload.sql';
   const migration061 = readFileSafe(join(repoRoot, migration061Path)) || '';
   const migration062 = readFileSafe(join(repoRoot, migration062Path)) || '';
+  const migration064 = readFileSafe(join(repoRoot, migration064Path)) || '';
   const migration061Valid =
     migration061.includes('RENAME COLUMN preset_snapshot TO agent_snapshot') &&
     (migration061.match(/RENAME COLUMN preset_snapshot TO agent_snapshot/g) || [])
@@ -5784,6 +5973,12 @@ function runAp7Gate() {
     migration062.includes('contribution_locks_json') &&
     migration062.includes('nomi_agent_preset_revisions') &&
     migration062.includes('json_type(contribution_locks_json) = \'array\'');
+  const migration064Valid =
+    migration064.includes(
+      'RENAME COLUMN editor_document_json TO payload_json'
+    ) &&
+    !migration064.includes('ADD COLUMN') &&
+    !migration064.includes('CREATE VIEW');
   ap7AddCheck(
     checks,
     localFailures,
@@ -5799,6 +5994,24 @@ function runAp7Gate() {
     migration062Valid,
     'migration 062 must persist the generated ContributionLock array on AgentPreset revisions',
     { path: migration062Path }
+  );
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'db.migration.064_revision_payload',
+    migration064Valid,
+    'migration 064 must physically rename the Nomi-core AgentPreset Revision payload column',
+    { path: migration064Path }
+  );
+
+  const storageContract = ap7RevisionStorageContract();
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'db.agent_preset_revision_single_payload',
+    storageContract.valid,
+    'Fresh-v4 and Nomi-core must use one canonical Revision payload without retired projection tables',
+    storageContract
   );
 
   const residualScan = ap7FindResiduals(sourceFiles);
@@ -6081,6 +6294,14 @@ function runAp7SelfTest() {
       ap7PathClass('crates/backend/nomifun-agent-control-plane/src/compiler.rs') ===
         'production',
     'AP residual scope classification must distinguish historical schema, tests, and production'
+  );
+  c8SelfTestAssert(
+    ap7AgentPresetLaunchContract().valid,
+    'AP-7 must reject a missing or model-based Guid AgentPreset selector'
+  );
+  c8SelfTestAssert(
+    ap7RevisionStorageContract().valid,
+    'AP-7 must reject stale AgentPreset Revision projection storage'
   );
   const dependencySource = [
     '[dependencies]',

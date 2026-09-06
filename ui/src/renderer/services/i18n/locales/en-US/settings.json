@@ -1274,7 +1274,6 @@
   },
   "agentManagement": {
     "localAgentsDescription": "Nomi ships with NomiFun. Engines such as Claude Code and Codex require their command-line tool to be installed before NomiFun can detect them.",
-    "goToChat": "New Conversation",
     "discoverMoreAgents": "Discover More Execution Engines",
     "refreshDetection": "Detect Again",
     "localAgentsEmpty": "No local execution engines are ready",

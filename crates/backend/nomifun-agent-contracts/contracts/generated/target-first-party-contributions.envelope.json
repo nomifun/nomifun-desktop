@@ -726,7 +726,7 @@
                   "id": "browser.observe",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "b298ada8d1ae3a1e22f484aa781bfef49df7a02e1e0edd569025bbd189df580b",
+                "capability_manifest_digest": "48ca38b98ffb1d45f215051fef173714be5599efd33455197167f03a7ad05bef",
                 "requirement": "required"
               },
               {
@@ -734,7 +734,7 @@
                   "id": "browser.navigate",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "bf6b1d2b0755ccc2ed1c8a783ec4da1df9b8ebe4972267ceacf95dc3f7b1a3b8",
+                "capability_manifest_digest": "290bf05063e780e22f98751378457664815a481786daf134bf0ce7d017ca9ba6",
                 "requirement": "required"
               },
               {
@@ -742,7 +742,7 @@
                   "id": "browser.act",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "716fb74fefa8a4127ff7f68157842cce7649d646e3b6c70972fae7aa788e824a",
+                "capability_manifest_digest": "a3295d23450cdcb836130a8b9c770d70bc6818647cf143abf5d1889309b32c86",
                 "requirement": "required"
               },
               {
@@ -750,7 +750,7 @@
                   "id": "browser.identity",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "58e5a0bf3914404fa064b46c61b39e53f1066cb20a1ed787d40a7b7f8674ab5f",
+                "capability_manifest_digest": "1140080b6fa7e6b9d93ea487131a98752302c2c66c33d5de5d8149a43954b286",
                 "requirement": "optional"
               },
               {
@@ -758,7 +758,7 @@
                   "id": "browser.render_content",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "59cb4fbc75eb451f98e3ec1e0d4a31a9833c81c6fb90d4777dddb284c9d5210d",
+                "capability_manifest_digest": "e685aaddf02bc379c11c3520d8cfe7a5621adac0f3aeceb06bc32b45ebeccd25",
                 "requirement": "optional"
               },
               {
@@ -766,7 +766,7 @@
                   "id": "browser.download",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "65ae691c35cf9e723625534df3b46a7d32c0aa057d5c6b0044eed65d576ce54e",
+                "capability_manifest_digest": "6fea1d2b7f1f4b8072b247662aa9c421e19c842d05ec92a75cffb6ea241c151a",
                 "requirement": "optional"
               },
               {
@@ -774,7 +774,7 @@
                   "id": "browser.upload",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "d3719f71ee8f38c1e0d80ee2a9a136cb4122b52e973f4012d0ce4ab7197c0111",
+                "capability_manifest_digest": "021f5b63ad87d83303f0cd12e50972408fd21d0e06af052de11e2bc84bae8e2e",
                 "requirement": "optional"
               },
               {
@@ -782,7 +782,7 @@
                   "id": "browser.evaluate",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "19ddbede3e3d77db61d7c2820fc7b77024b175fbc72fdc698c1bb865a1150ca9",
+                "capability_manifest_digest": "6d8d550f0b3f378886bc8c9c24bfc6850f006827b88e153ad11946b290362a2d",
                 "requirement": "optional"
               },
               {
@@ -790,7 +790,7 @@
                   "id": "browser.site_memory",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "f6bce6a3f5e9ef23aa32aaa234e08059faccef2dbf14ac1c22cafc50350231fc",
+                "capability_manifest_digest": "a0bddc207d724fb27bc8d8f319d62bfe4f17ab85fb38cb814a3b5b54262fe655",
                 "requirement": "optional"
               },
               {
@@ -798,7 +798,7 @@
                   "id": "browser.takeover",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "dde4c52154629abc64f380c431593224af544ea2708353d2d738c777a04bd7a8",
+                "capability_manifest_digest": "f83f17aafff11821d62b021c3328d4d6066547be05584ce06934f508e1491e58",
                 "requirement": "optional"
               }
             ]
@@ -811,7 +811,7 @@
                 "role_id": "system.browser_use",
                 "contract_version": "1.0.0"
               },
-              "contract_digest": "05c47b0fc7ab7ee1f723ba9fd82c28774ca930644fbe02099496b6a94a834543"
+              "contract_digest": "7c2515404eb1ad46a70d25238f636da71d3f5769520b721efce06511a504de2a"
             },
             "display": {
               "name": "Browser Use",
@@ -1065,7 +1065,7 @@
                   "id": "computer.observe",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "293d30c9dbdbac575babc04ede07418984c9a249d86301a5f871dfc550df0818",
+                "capability_manifest_digest": "dcf5fffe7335f26b7b49444c3bc6e399672538e0017638bb98969e63d09f9285",
                 "requirement": "required"
               },
               {
@@ -1073,7 +1073,7 @@
                   "id": "computer.input",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "9a48382e830771f801cb2747d34457d61122285abbf71fb32be1365ec6bf492e",
+                "capability_manifest_digest": "d759a20646411d294796167e5b53d861eac2ba5cb8680a69513f8d727e48c5b4",
                 "requirement": "required"
               },
               {
@@ -1081,7 +1081,7 @@
                   "id": "computer.launch",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "a8449dd77cf9b5c3c8342c59d19e96d9f9056d6efcaced057c107463983a28dc",
+                "capability_manifest_digest": "7fdaf2bb86cb0c8a9302af3990e352e459692589b7e0ee8cd7773d200d7443ca",
                 "requirement": "optional"
               },
               {
@@ -1089,7 +1089,7 @@
                   "id": "a11y.observe",
                   "version": "1.0.0"
                 },
-                "capability_manifest_digest": "0df42ea63d094f27483c5ac0a6d9b2c339dab412eef9c92eb4d13bb1436a4644",
+                "capability_manifest_digest": "7feddf32098d0132004e076b19a1ed0f49432ea0f3e7cd09eb9304c1cbdfb0d6",
                 "requirement": "optional"
               }
             ],
@@ -1103,7 +1103,7 @@
                 "role_id": "system.computer_use",
                 "contract_version": "1.0.0"
               },
-              "contract_digest": "270f0d8a5504a16a0f72508438e64ab4a3098ce43bf46409544ffbcfb6067c05"
+              "contract_digest": "07c35de54579f8399467362d33a82814d4e50166a81cd3b0d0a6fee79df74b41"
             },
             "display": {
               "name": "Computer Use",
@@ -1769,5 +1769,5 @@
       }
     ]
   },
-  "payload_digest": "f8b5460165689bb463bd286573b5b2731a20803107e2b27ca3d86420dad62d1b"
+  "payload_digest": "0f4605524f780eb8584862aa93f7dee34a246c537f1983baca7a5f4a03dbe58f"
 }

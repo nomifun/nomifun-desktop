@@ -5,14 +5,12 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { IMcpServer } from '@/common/config/storage';
-import type { McpServerId } from '@/common/types/ids';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { getCleanFileNames, FileService } from '@/renderer/services/FileService';
 import { iconColors } from '@/renderer/styles/colors';
 import { isDesktopShell } from '@/renderer/utils/platform';
-import { Button, Checkbox, Dropdown, Menu, Message, Tooltip } from '@arco-design/web-react';
-import { ArrowUp, Plus, Robot, Shield, UploadOne } from '@icon-park/react';
+import { Button, Dropdown, Menu, Message, Tooltip } from '@arco-design/web-react';
+import { ArrowUp, Plus, Robot, UploadOne } from '@icon-park/react';
 import React, { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import styles from '../index.module.css';
@@ -21,15 +19,6 @@ type GuidActionRowProps = {
   // File handling
   files: string[];
   onFilesUploaded: (paths: string[]) => void;
-
-  // Model selector node (rendered by parent)
-  modelSelectorNode: React.ReactNode;
-  collaboratorSelectorNode?: React.ReactNode;
-
-  // MCP management
-  mcpServers: IMcpServer[];
-  selectedMcpServerIds: McpServerId[];
-  onToggleMcpServer: (serverId: McpServerId) => void;
 
   // Send button
   loading: boolean;
@@ -45,11 +34,6 @@ type GuidActionRowProps = {
 const GuidActionRow: React.FC<GuidActionRowProps> = ({
   files,
   onFilesUploaded,
-  modelSelectorNode,
-  collaboratorSelectorNode,
-  mcpServers,
-  selectedMcpServerIds,
-  onToggleMcpServer,
   loading,
   isButtonDisabled,
   speechInputNode,
@@ -60,7 +44,6 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   const layout = useLayoutContext();
   const isMobile = layout?.isMobile ?? false;
   const [isPlusDropdownOpen, setIsPlusDropdownOpen] = useState(false);
-  const configOptionCount = (modelSelectorNode ? 1 : 0) + (collaboratorSelectorNode ? 1 : 0);
 
   // Browser file picker ref (WebUI only)
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -89,12 +72,10 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
 
   const isWebUI = !isDesktopShell();
 
-  const activeMcpCount = selectedMcpServerIds.length;
-
   const menuContent = (
     <Menu
       className='min-w-200px'
-      onClickMenuItem={(key) => {
+      onClickMenuItem={(key: string) => {
         if (key === 'file') {
           ipcBridge.dialog.showOpen
             .invoke({ properties: ['openFile', 'multiSelections'] })
@@ -133,48 +114,6 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
             <span>{t('common.fileAttach.addFiles')}</span>
           </div>
         </Menu.Item>
-      )}
-      {mcpServers.length > 0 && (
-        <Menu.SubMenu
-          key='mcp'
-          title={
-            <div className='flex items-center gap-8px'>
-              <Shield theme='outline' size='16' fill={iconColors.primary} style={{ lineHeight: 0 }} />
-              <span>
-                {t('mcp.label')} ({activeMcpCount}/{mcpServers.length})
-              </span>
-            </div>
-          }
-          triggerProps={{
-            popupStyle: {
-              maxHeight: 360,
-              overflowY: 'auto',
-              overflowX: 'hidden',
-            },
-          }}
-        >
-          {mcpServers.map((server) => (
-            <Menu.Item
-              key={`mcp-${server.mcp_server_id}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                onToggleMcpServer(server.mcp_server_id);
-              }}
-            >
-              <Checkbox
-                checked={selectedMcpServerIds.includes(server.mcp_server_id)}
-                className='guid-mcp-selection-checkbox'
-                onClick={(e: React.MouseEvent) => e.stopPropagation()}
-                onChange={() => onToggleMcpServer(server.mcp_server_id)}
-              >
-                <span className='text-13px'>
-                  {server.name}
-                  {server.tools?.length ? ` (${server.tools.length} ${t('mcp.tools')})` : ''}
-                </span>
-              </Checkbox>
-            </Menu.Item>
-          ))}
-        </Menu.SubMenu>
       )}
     </Menu>
   );
@@ -216,16 +155,6 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
         </div>
       </div>
       <div className={`${styles.actionSubmit} ${!isMobile ? styles.actionSubmitResponsive : ''}`}>
-        {configOptionCount > 0 && (
-          <div
-            className={`${styles.actionConfigGroup} ${!isMobile ? styles.actionConfigGroupResponsive : ''}`}
-            data-mobile={isMobile ? 'true' : undefined}
-          >
-            {modelSelectorNode}
-            {collaboratorSelectorNode}
-          </div>
-        )}
-
         {speechInputNode}
         <Tooltip
           content={t('requirements.autowork.startSession')}

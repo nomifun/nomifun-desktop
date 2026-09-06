@@ -24,8 +24,8 @@ describe('Agent Settings locale contract', () => {
   test('uses Agent Workbench as the sole public authoring label', () => {
     expect(en.title).toBe('Agent Workbench');
     expect(zh.title).toBe('Agent 工作台');
-    expect(en.navigation.railTitle).toBe('Agent');
-    expect(zh.navigation.railTitle).toBe('Agent');
+    expect(en.navigation.railTitle).toBe('Agent Workbench');
+    expect(zh.navigation.railTitle).toBe('Agent 工作台');
     expect(Object.hasOwn(en.navigation, 'entryDescription')).toBe(false);
     expect(Object.hasOwn(en.navigation, 'open')).toBe(false);
     expect(Object.hasOwn(zh.navigation, 'entryDescription')).toBe(false);
