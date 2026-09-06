@@ -14,7 +14,7 @@ fn builtin_presets_root() -> PathBuf {
 
 fn builtin_skills_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../nomifun-extension/assets/builtin-skills")
+        .join("../nomifun-skill-library/assets/builtin-skills")
 }
 
 fn read_to_string(path: impl AsRef<Path>) -> String {
@@ -271,9 +271,9 @@ fn builtin_skill_display_metadata_matches_the_packaged_corpus() {
 #[tokio::test]
 async fn ui_ux_pro_max_skill_materializes_from_embedded_builtin_corpus() {
     let tmp = TempDir::new().unwrap();
-    let wrote = nomifun_extension::materialize_if_needed(
+    let wrote = nomifun_skill_library::materialize_if_needed(
         tmp.path(),
-        nomifun_extension::builtin_skills_corpus(),
+        nomifun_skill_library::builtin_skills_corpus(),
         "asset-contract-test",
     )
     .await

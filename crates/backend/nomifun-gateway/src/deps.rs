@@ -113,7 +113,7 @@ pub struct CompatibilityCapabilityHost {
     pub extension_registry: nomifun_extension::ExtensionRegistry,
     pub hub_index_manager: nomifun_extension::HubIndexManager,
     pub hub_installer: nomifun_extension::HubInstaller,
-    pub skill_paths: nomifun_extension::SkillPaths,
+    pub skill_paths: nomifun_skill_library::SkillPaths,
     /// Agent catalog (same instance as the agent routes).
     pub agent_service: Arc<AgentService>,
     /// Client-preference repo backing the global model-failover config.

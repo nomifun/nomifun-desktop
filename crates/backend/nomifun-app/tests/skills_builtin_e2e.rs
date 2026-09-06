@@ -14,7 +14,7 @@ use nomifun_app::compatibility::{
     ModuleStates, build_module_states, create_router_with_states,
 };
 use nomifun_db::init_database_memory;
-use nomifun_extension::{ExternalPathsManager, SkillPaths, SkillRouterState};
+use nomifun_skill_library::{ExternalPathsManager, SkillPaths, SkillRouterState};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -52,9 +52,13 @@ async fn fixture_embedded() -> Fixture {
 
     // Materialize the embedded corpus onto the temp data dir so the
     // per-test router can read it just like production would.
-    nomifun_extension::materialize_if_needed(&data_dir, nomifun_extension::builtin_skills_corpus(), "test-fixture")
-        .await
-        .expect("failed to materialize embedded builtin skills for test fixture");
+    nomifun_skill_library::materialize_if_needed(
+        &data_dir,
+        nomifun_skill_library::builtin_skills_corpus(),
+        "test-fixture",
+    )
+    .await
+    .expect("failed to materialize embedded builtin skills for test fixture");
 
     let db = init_database_memory().await.unwrap();
     let services = nomifun_app::compatibility::AppServices::from_config(

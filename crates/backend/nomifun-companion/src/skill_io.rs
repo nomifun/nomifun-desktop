@@ -5,8 +5,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use nomifun_common::AppError;
-use nomifun_extension::constants::SKILL_MANIFEST_FILE;
-use nomifun_extension::skill_service::{self, SkillDraftInput, SkillPaths, SkillScope};
+use nomifun_skill_library::constants::SKILL_MANIFEST_FILE;
+use nomifun_skill_library::skill_service::{self, SkillDraftInput, SkillPaths, SkillScope};
 
 use crate::store::CompanionSkill;
 

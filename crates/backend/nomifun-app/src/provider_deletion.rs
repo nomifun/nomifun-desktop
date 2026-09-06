@@ -186,7 +186,7 @@ mod tests {
             Arc::new(nomifun_realtime::BroadcastEventBus::new(16)),
             &installation_owner,
             Arc::new(NoopCompleter),
-            Arc::new(nomifun_extension::skill_service::resolve_skill_paths(dir, dir)),
+            Arc::new(nomifun_skill_library::skill_service::resolve_skill_paths(dir, dir)),
         )
         .await
         .unwrap();

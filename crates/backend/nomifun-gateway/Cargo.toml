@@ -35,6 +35,7 @@ nomifun-shell.workspace = true
 # MCP-server + extensions/hub/skills domain capabilities.
 nomifun-mcp.workspace = true
 nomifun-extension.workspace = true
+nomifun-skill-library.workspace = true
 axum.workspace = true
 tokio.workspace = true
 async-trait.workspace = true

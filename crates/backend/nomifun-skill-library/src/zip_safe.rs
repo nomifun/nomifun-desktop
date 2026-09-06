@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use nomifun_common::zip_safe::{self, ZipColonPolicy, ZipExtractionBudget};
 
-use crate::error::ExtensionError;
+use crate::error::SkillError;
 
 /// Extract every entry of `archive_path` into `destination`, rejecting any entry
 /// whose name escapes `destination` (absolute, `..`, backslash, drive prefix),
@@ -21,7 +21,7 @@ use crate::error::ExtensionError;
 /// [`ZipExtractionBudget::DEFAULT_MAX_TOTAL_UNCOMPRESSED_BYTES`] cumulative
 /// uncompressed bytes).
 /// Synchronous — run under `tokio::task::spawn_blocking` off the reactor.
-pub(crate) fn extract_zip_archive(archive_path: &Path, destination: &Path) -> Result<(), ExtensionError> {
+pub(crate) fn extract_zip_archive(archive_path: &Path, destination: &Path) -> Result<(), SkillError> {
     extract_zip_archive_with_budget(archive_path, destination, ZipExtractionBudget::default())
 }
 
@@ -31,13 +31,13 @@ fn extract_zip_archive_with_budget(
     archive_path: &Path,
     destination: &Path,
     mut budget: ZipExtractionBudget,
-) -> Result<(), ExtensionError> {
+) -> Result<(), SkillError> {
     let file = std::fs::File::open(archive_path)?;
     let mut archive = zip::ZipArchive::new(file).map_err(zip_error)?;
 
     budget
         .check_entry_count(archive.len())
-        .map_err(|e| ExtensionError::InvalidSkillPath(e.to_string()))?;
+        .map_err(|e| SkillError::InvalidSkillPath(e.to_string()))?;
 
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(zip_error)?;
@@ -60,7 +60,7 @@ fn extract_zip_archive_with_budget(
         let written = io::copy(&mut entry, &mut output)?;
         budget
             .record_written(written)
-            .map_err(|e| ExtensionError::InvalidSkillPath(e.to_string()))?;
+            .map_err(|e| SkillError::InvalidSkillPath(e.to_string()))?;
     }
 
     Ok(())
@@ -69,22 +69,22 @@ fn extract_zip_archive_with_budget(
 /// Resolve a zip entry name to a safe relative path, or reject it. Rejects
 /// empty names, backslashes, absolute paths, drive prefixes, and any
 /// `..`/root component (shared [`zip_safe`] policy).
-pub(crate) fn safe_zip_entry_path(name: &str) -> Result<PathBuf, ExtensionError> {
+pub(crate) fn safe_zip_entry_path(name: &str) -> Result<PathBuf, SkillError> {
     zip_safe::safe_zip_entry_path(name, ZipColonPolicy::RejectDrivePrefix)
-        .ok_or_else(|| ExtensionError::PathTraversal(name.to_string()))
+        .ok_or_else(|| SkillError::PathTraversal(name.to_string()))
 }
 
 /// Reject symlink entries (unix mode `S_IFLNK`), which could otherwise redirect
 /// a subsequent write outside `destination`.
-fn reject_zip_symlink(entry: &zip::read::ZipFile<'_>) -> Result<(), ExtensionError> {
+fn reject_zip_symlink(entry: &zip::read::ZipFile<'_>) -> Result<(), SkillError> {
     if zip_safe::zip_entry_is_symlink(entry.unix_mode()) {
-        return Err(ExtensionError::PathTraversal(entry.name().to_string()));
+        return Err(SkillError::PathTraversal(entry.name().to_string()));
     }
     Ok(())
 }
 
-fn zip_error(err: zip::result::ZipError) -> ExtensionError {
-    ExtensionError::InvalidSkillPath(format!("Invalid zip archive: {err}"))
+fn zip_error(err: zip::result::ZipError) -> SkillError {
+    SkillError::InvalidSkillPath(format!("Invalid zip archive: {err}"))
 }
 
 #[cfg(test)]

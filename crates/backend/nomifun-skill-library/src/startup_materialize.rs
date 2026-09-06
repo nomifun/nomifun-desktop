@@ -22,7 +22,7 @@ use fs2::FileExt;
 use include_dir::Dir;
 use tracing::{info, warn};
 
-use crate::error::ExtensionError;
+use crate::error::SkillError;
 
 const VERSION_FILE: &str = ".version";
 const LOCK_FILE_NAME: &str = ".builtin-skills.lock";
@@ -48,7 +48,7 @@ pub async fn materialize_if_needed(
     data_dir: &Path,
     corpus: &Dir<'static>,
     binary_version: &str,
-) -> Result<bool, ExtensionError> {
+) -> Result<bool, SkillError> {
     let target = data_dir.join(crate::constants::BUILTIN_SKILLS_DIR_NAME);
 
     if version_file_matches(&target, binary_version).await {
@@ -108,7 +108,7 @@ pub async fn materialize_embedded_builtin_skills(
     data_dir: &Path,
     corpus: &Dir<'static>,
     binary_version: &str,
-) -> Result<(), ExtensionError> {
+) -> Result<(), SkillError> {
     let _guard = MaterializeLockGuard::acquire(data_dir).await?;
     materialize_embedded_builtin_skills_unlocked(data_dir, corpus, binary_version).await
 }
@@ -117,7 +117,7 @@ async fn materialize_embedded_builtin_skills_unlocked(
     data_dir: &Path,
     corpus: &Dir<'static>,
     binary_version: &str,
-) -> Result<(), ExtensionError> {
+) -> Result<(), SkillError> {
     let target = data_dir.join(crate::constants::BUILTIN_SKILLS_DIR_NAME);
     let staging = data_dir.join(STAGING_DIR_NAME);
     let old = data_dir.join(OLD_DIR_NAME);
@@ -132,7 +132,7 @@ async fn materialize_embedded_builtin_skills_unlocked(
         })
         .await
         .map_err(|e| {
-            ExtensionError::Io(std::io::Error::new(
+            SkillError::Io(std::io::Error::new(
                 e.kind(),
                 format!("failed to clean staging dir {}: {e}", staging.display()),
             ))
@@ -155,7 +155,7 @@ async fn materialize_embedded_builtin_skills_unlocked(
 /// restores `old` on failure, then best-effort removes `old`. `old` must be a
 /// sibling scratch path the caller owns. Reused by the builtin-skills
 /// materialization path, so the subtle Windows-safe rename/restore logic lives once here.
-pub(crate) async fn commit_staging_dir(target: &Path, staging: &Path, old: &Path) -> Result<(), ExtensionError> {
+pub(crate) async fn commit_staging_dir(target: &Path, staging: &Path, old: &Path) -> Result<(), SkillError> {
     if target.exists() {
         if old.exists() {
             // Tolerate leftover .old from a crashed rename sequence.
@@ -181,7 +181,7 @@ pub(crate) async fn commit_staging_dir(target: &Path, staging: &Path, old: &Path
                 "failed to restore old tree after refresh failure"
             );
         }
-        return Err(ExtensionError::Io(std::io::Error::new(
+        return Err(SkillError::Io(std::io::Error::new(
             e.kind(),
             format!(
                 "atomic rename staging→target failed ({} → {}): {e}",
@@ -287,7 +287,7 @@ impl Drop for MaterializeLockGuard {
 
 /// Recursively copy every file in an `include_dir::Dir` tree into `dest`.
 /// Directories are created as needed. Files overwrite silently.
-pub(crate) async fn write_dir_recursive(dir: &Dir<'static>, dest: &Path) -> Result<(), ExtensionError> {
+pub(crate) async fn write_dir_recursive(dir: &Dir<'static>, dest: &Path) -> Result<(), SkillError> {
     // The include_dir API is synchronous; we flatten into a Vec then
     // feed the writes through tokio::fs to stay off the reactor's thread
     // for big IO bursts.

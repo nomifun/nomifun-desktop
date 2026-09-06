@@ -10,7 +10,7 @@ use crate::constants::{
     BUILTIN_AUTO_SKILLS_SUBDIR, BUILTIN_RULES_DIR_NAME, COMMON_SKILL_DIRS, CRON_SKILLS_DIR_NAME, SKILL_MANIFEST_FILE,
     SKILLS_DIR_NAME,
 };
-use crate::error::ExtensionError;
+use crate::error::SkillError;
 
 /// Built-in skill corpus embedded into the binary at compile time.
 ///
@@ -160,7 +160,7 @@ pub fn skill_dir_for(
     scope: &SkillScope,
     name: &str,
     draft: bool,
-) -> Result<PathBuf, ExtensionError> {
+) -> Result<PathBuf, SkillError> {
     validate_filename(name)?;
     let base = match (scope, draft) {
         (SkillScope::Companion(cid), false) => {
@@ -222,10 +222,10 @@ pub async fn create_skill(
     scope: &SkillScope,
     draft: bool,
     input: &SkillDraftInput,
-) -> Result<PathBuf, ExtensionError> {
+) -> Result<PathBuf, SkillError> {
     validate_filename(&input.name)?;
     if input.description.trim().is_empty() {
-        return Err(ExtensionError::InvalidSkillPath(format!(
+        return Err(SkillError::InvalidSkillPath(format!(
             "skill '{}' has empty description",
             input.name
         )));
@@ -245,12 +245,12 @@ pub async fn write_skill(
     draft: bool,
     name: &str,
     full_markdown: &str,
-) -> Result<(), ExtensionError> {
+) -> Result<(), SkillError> {
     let (_n, desc) = parse_frontmatter_fields(full_markdown).ok_or_else(|| {
-        ExtensionError::InvalidSkillPath(format!("invalid frontmatter for skill '{name}'"))
+        SkillError::InvalidSkillPath(format!("invalid frontmatter for skill '{name}'"))
     })?;
     if desc.trim().is_empty() {
-        return Err(ExtensionError::InvalidSkillPath(format!(
+        return Err(SkillError::InvalidSkillPath(format!(
             "skill '{name}' has empty description"
         )));
     }
@@ -267,7 +267,7 @@ pub async fn copy_skill(
     from: &SkillScope,
     to: &SkillScope,
     name: &str,
-) -> Result<(), ExtensionError> {
+) -> Result<(), SkillError> {
     let src = skill_dir_for(paths, from, name, false)?;
     let content = tokio::fs::read_to_string(src.join(SKILL_MANIFEST_FILE)).await?;
     write_skill(paths, to, false, name, &content).await
@@ -284,7 +284,7 @@ pub async fn copy_skill(
 pub async fn read_builtin_rule(
     paths: &SkillPaths,
     file_name: &str,
-) -> Result<String, ExtensionError> {
+) -> Result<String, SkillError> {
     validate_filename(file_name)?;
     let file_path = paths.builtin_rules_dir.join(file_name);
     read_file_or_empty(&file_path).await
@@ -305,7 +305,7 @@ pub async fn read_builtin_rule(
 pub async fn read_builtin_skill(
     paths: &SkillPaths,
     file_name: &str,
-) -> Result<String, ExtensionError> {
+) -> Result<String, SkillError> {
     validate_builtin_skill_path(file_name)?;
     let file_path = paths.builtin_skills_dir.join(file_name);
     read_file_or_empty(&file_path).await
@@ -361,7 +361,7 @@ pub struct SkillListItem {
 /// built-ins only.
 pub async fn list_available_skills(
     paths: &SkillPaths,
-) -> Result<Vec<SkillListItem>, ExtensionError> {
+) -> Result<Vec<SkillListItem>, SkillError> {
     let mut builtin_skills = std::collections::HashMap::new();
 
     // 1. Built-in skills (lower priority)
@@ -496,7 +496,7 @@ pub struct BuiltinAutoSkillItem {
 /// graceful-degradation semantics used elsewhere in this module.
 pub async fn list_builtin_auto_skills(
     paths: &SkillPaths,
-) -> Result<Vec<BuiltinAutoSkillItem>, ExtensionError> {
+) -> Result<Vec<BuiltinAutoSkillItem>, SkillError> {
     let auto_dir = paths.builtin_skills_dir.join(BUILTIN_AUTO_SKILLS_SUBDIR);
     let mut items = list_auto_skills_from_disk(&auto_dir).await;
     items.sort_by(|a, b| a.name.cmp(&b.name));
@@ -601,7 +601,7 @@ async fn list_auto_skills_from_disk(auto_dir: &Path) -> Vec<BuiltinAutoSkillItem
 /// Read skill info from a SKILL.md file without importing.
 ///
 /// Returns `(name, description)` extracted from frontmatter.
-pub async fn read_skill_info(skill_path: &Path) -> Result<(String, String), ExtensionError> {
+pub async fn read_skill_info(skill_path: &Path) -> Result<(String, String), SkillError> {
     let skill_file = if skill_path.is_dir() {
         skill_path.join(SKILL_MANIFEST_FILE)
     } else {
@@ -610,10 +610,10 @@ pub async fn read_skill_info(skill_path: &Path) -> Result<(String, String), Exte
 
     let content = tokio::fs::read_to_string(&skill_file)
         .await
-        .map_err(|_| ExtensionError::SkillNotFound(skill_path.display().to_string()))?;
+        .map_err(|_| SkillError::SkillNotFound(skill_path.display().to_string()))?;
 
     let (name, description) = parse_frontmatter_fields(&content).ok_or_else(|| {
-        ExtensionError::InvalidSkillPath(format!(
+        SkillError::InvalidSkillPath(format!(
             "No valid frontmatter in {}",
             skill_file.display()
         ))
@@ -639,7 +639,7 @@ pub async fn read_skill_info(skill_path: &Path) -> Result<(String, String), Exte
 /// Import a skill by copying its directory to the user skills directory.
 ///
 /// Returns the skill name.
-pub async fn import_skill(paths: &SkillPaths, skill_path: &Path) -> Result<String, ExtensionError> {
+pub async fn import_skill(paths: &SkillPaths, skill_path: &Path) -> Result<String, SkillError> {
     let (name, _) = read_skill_info(skill_path).await?;
     validate_filename(&name)?;
 
@@ -662,7 +662,7 @@ pub async fn import_skill(paths: &SkillPaths, skill_path: &Path) -> Result<Strin
 pub async fn import_skill_with_symlink(
     paths: &SkillPaths,
     skill_path: &Path,
-) -> Result<String, ExtensionError> {
+) -> Result<String, SkillError> {
     let (name, _) = read_skill_info(skill_path).await?;
     validate_filename(&name)?;
 
@@ -705,7 +705,7 @@ const MAX_IMPORT_SCAN_DEPTH: usize = 6;
 pub async fn import_skills_with_symlink(
     paths: &SkillPaths,
     source_path: &Path,
-) -> Result<Vec<String>, ExtensionError> {
+) -> Result<Vec<String>, SkillError> {
     if is_zip_path(source_path) {
         return import_skills_from_zip(paths, source_path).await;
     }
@@ -720,14 +720,14 @@ pub async fn import_skills_with_symlink(
         let mut skill_dirs = Vec::new();
         collect_skill_dirs_recursive(&source_path, &mut skill_dirs, MAX_IMPORT_SCAN_DEPTH).await?;
         if skill_dirs.is_empty() {
-            return Err(ExtensionError::InvalidSkillPath(format!(
+            return Err(SkillError::InvalidSkillPath(format!(
                 "No skill directories found in {}",
                 source_path.display()
             )));
         }
 
         let mut imported = Vec::new();
-        let mut last_err: Option<ExtensionError> = None;
+        let mut last_err: Option<SkillError> = None;
         for skill_dir in &skill_dirs {
             match import_skill_with_symlink(paths, skill_dir).await {
                 Ok(name) => imported.push(name),
@@ -739,7 +739,7 @@ pub async fn import_skills_with_symlink(
         }
         if imported.is_empty() {
             return Err(last_err.unwrap_or_else(|| {
-                ExtensionError::InvalidSkillPath(format!(
+                SkillError::InvalidSkillPath(format!(
                     "No importable skills found in {}",
                     source_path.display()
                 ))
@@ -750,7 +750,7 @@ pub async fn import_skills_with_symlink(
         return Ok(imported);
     }
 
-    Err(ExtensionError::InvalidSkillPath(format!(
+    Err(SkillError::InvalidSkillPath(format!(
         "Expected a skill directory, parent directory, SKILL.md, or zip archive: {}",
         source_path.display()
     )))
@@ -759,7 +759,7 @@ pub async fn import_skills_with_symlink(
 async fn import_skills_from_zip(
     paths: &SkillPaths,
     archive_path: &Path,
-) -> Result<Vec<String>, ExtensionError> {
+) -> Result<Vec<String>, SkillError> {
     let temp_root = paths.user_skills_dir.join(".import-tmp");
     tokio::fs::create_dir_all(&temp_root).await?;
 
@@ -776,7 +776,7 @@ async fn import_skills_from_zip(
         tokio::task::spawn_blocking(move || crate::zip_safe::extract_zip_archive(&archive, &destination))
             .await
             .map_err(|e| {
-                ExtensionError::InvalidSkillPath(format!("Zip extraction task failed: {e}"))
+                SkillError::InvalidSkillPath(format!("Zip extraction task failed: {e}"))
             })?;
 
     if let Err(err) = extraction {
@@ -789,7 +789,7 @@ async fn import_skills_from_zip(
         let mut skill_dirs = Vec::new();
         collect_skill_dirs_recursive(&extract_dir, &mut skill_dirs, MAX_IMPORT_SCAN_DEPTH).await?;
         if skill_dirs.is_empty() {
-            return Err(ExtensionError::InvalidSkillPath(format!(
+            return Err(SkillError::InvalidSkillPath(format!(
                 "No skill directories found in {}",
                 archive_path.display()
             )));
@@ -822,7 +822,7 @@ fn skill_modified_time(path: &str) -> SystemTime {
         .unwrap_or(UNIX_EPOCH)
 }
 
-fn normalize_import_source_path(source_path: &Path) -> Result<PathBuf, ExtensionError> {
+fn normalize_import_source_path(source_path: &Path) -> Result<PathBuf, SkillError> {
     if source_path.is_file() {
         let file_name = source_path
             .file_name()
@@ -830,7 +830,7 @@ fn normalize_import_source_path(source_path: &Path) -> Result<PathBuf, Extension
             .unwrap_or_default();
         if file_name == SKILL_MANIFEST_FILE {
             return source_path.parent().map(Path::to_path_buf).ok_or_else(|| {
-                ExtensionError::InvalidSkillPath(source_path.display().to_string())
+                SkillError::InvalidSkillPath(source_path.display().to_string())
             });
         }
     }
@@ -841,11 +841,11 @@ fn normalize_import_source_path(source_path: &Path) -> Result<PathBuf, Extension
 pub async fn export_skill_with_symlink(
     skill_path: &Path,
     target_dir: &Path,
-) -> Result<(), ExtensionError> {
+) -> Result<(), SkillError> {
     let skill_name = skill_path
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
-        .ok_or_else(|| ExtensionError::InvalidSkillPath(skill_path.display().to_string()))?;
+        .ok_or_else(|| SkillError::InvalidSkillPath(skill_path.display().to_string()))?;
 
     let target_link = target_dir.join(&skill_name);
     tokio::fs::create_dir_all(target_dir).await?;
@@ -865,7 +865,7 @@ pub async fn export_skill_with_symlink(
 /// Delete a user-custom skill by name.
 ///
 /// Returns an error if the skill is built-in or does not exist.
-pub async fn delete_skill(paths: &SkillPaths, skill_name: &str) -> Result<(), ExtensionError> {
+pub async fn delete_skill(paths: &SkillPaths, skill_name: &str) -> Result<(), SkillError> {
     // Safety: reject path traversal. Shares [`validate_filename`] rather than
     // re-deriving the rules — this join feeds a *recursive delete*, so an
     // escape here is the costliest in the module, and the inline check this
@@ -879,9 +879,9 @@ pub async fn delete_skill(paths: &SkillPaths, skill_name: &str) -> Result<(), Ex
         // Check if it exists as a built-in (disk override → filesystem,
         // otherwise embedded corpus).
         if builtin_skill_exists(paths, skill_name) {
-            return Err(ExtensionError::BuiltinSkillDeletion(skill_name.to_string()));
+            return Err(SkillError::BuiltinSkillDeletion(skill_name.to_string()));
         }
-        return Err(ExtensionError::SkillNotFound(skill_name.to_string()));
+        return Err(SkillError::SkillNotFound(skill_name.to_string()));
     }
 
     debug!(skill = %skill_name, "skill deleted");
@@ -899,11 +899,11 @@ pub async fn delete_skill(paths: &SkillPaths, skill_name: &str) -> Result<(), Ex
 /// links that `Path::exists` would otherwise hide.
 ///
 /// Returns `false` only when no directory entry exists at `path`.
-async fn remove_path_entry(path: &Path) -> Result<bool, ExtensionError> {
+async fn remove_path_entry(path: &Path) -> Result<bool, SkillError> {
     let metadata = match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(ExtensionError::Io(error)),
+        Err(error) => return Err(SkillError::Io(error)),
     };
 
     if metadata.file_type().is_symlink() {
@@ -913,7 +913,7 @@ async fn remove_path_entry(path: &Path) -> Result<bool, ExtensionError> {
                 tokio::fs::remove_file(path).await?;
                 return Ok(true);
             }
-            Err(error) => return Err(ExtensionError::Io(error)),
+            Err(error) => return Err(SkillError::Io(error)),
         }
     }
 
@@ -1013,7 +1013,7 @@ pub async fn materialize_skills_for_agent(
     paths: &SkillPaths,
     conversation_id: &str,
     skills: &[String],
-) -> Result<Vec<ResolvedAgentSkill>, ExtensionError> {
+) -> Result<Vec<ResolvedAgentSkill>, SkillError> {
     validate_filename(conversation_id)?;
 
     let mut resolved = Vec::with_capacity(skills.len());
@@ -1057,7 +1057,7 @@ pub async fn link_workspace_skills(
     workspace: &Path,
     skills_rel_dirs: &[&str],
     skills: &[ResolvedAgentSkill],
-) -> Result<usize, ExtensionError> {
+) -> Result<usize, SkillError> {
     let mut created = 0usize;
     for rel in skills_rel_dirs {
         let target_skills_dir = workspace.join(rel);
@@ -1134,7 +1134,7 @@ fn resolve_skill_source_path(paths: &SkillPaths, name: &str) -> Option<PathBuf> 
 // ---------------------------------------------------------------------------
 
 /// Scan a directory for subdirectories containing SKILL.md.
-pub async fn scan_for_skills(folder_path: &Path) -> Result<Vec<ScannedSkill>, ExtensionError> {
+pub async fn scan_for_skills(folder_path: &Path) -> Result<Vec<ScannedSkill>, SkillError> {
     scan_skill_dirs(folder_path).await
 }
 
@@ -1253,11 +1253,11 @@ pub fn get_skill_paths(paths: &SkillPaths) -> (String, String) {
 // ---------------------------------------------------------------------------
 
 /// Read a file and return its content, or an empty string if it does not exist.
-async fn read_file_or_empty(path: &Path) -> Result<String, ExtensionError> {
+async fn read_file_or_empty(path: &Path) -> Result<String, SkillError> {
     match tokio::fs::read_to_string(path).await {
         Ok(content) => Ok(content),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(ExtensionError::Io(e)),
+        Err(e) => Err(SkillError::Io(e)),
     }
 }
 
@@ -1275,7 +1275,7 @@ async fn read_file_or_empty(path: &Path) -> Result<String, ExtensionError> {
 ///
 /// A lone `"."` is rejected because `base.join(".")` resolves back to `base`,
 /// which would aim a per-skill delete or write at the whole skills tree.
-fn validate_filename(name: &str) -> Result<(), ExtensionError> {
+fn validate_filename(name: &str) -> Result<(), SkillError> {
     if name.is_empty()
         || name == "."
         || name.contains('/')
@@ -1283,7 +1283,7 @@ fn validate_filename(name: &str) -> Result<(), ExtensionError> {
         || name.contains("..")
         || name.contains(':')
     {
-        return Err(ExtensionError::PathTraversal(name.to_string()));
+        return Err(SkillError::PathTraversal(name.to_string()));
     }
     Ok(())
 }
@@ -1295,30 +1295,30 @@ fn validate_filename(name: &str) -> Result<(), ExtensionError> {
 /// Rejects `':'` in any segment for the reasons given on [`validate_filename`]
 /// — note that `Path::new("z:x/y").is_absolute()` is `false` on Windows, so the
 /// absolute check below does not cover a drive prefix.
-fn validate_builtin_skill_path(rel: &str) -> Result<(), ExtensionError> {
+fn validate_builtin_skill_path(rel: &str) -> Result<(), SkillError> {
     if rel.is_empty() || rel.contains('\\') || rel.contains("..") || rel.starts_with('/') {
-        return Err(ExtensionError::PathTraversal(rel.to_string()));
+        return Err(SkillError::PathTraversal(rel.to_string()));
     }
     if rel.contains(':') {
-        return Err(ExtensionError::PathTraversal(rel.to_string()));
+        return Err(SkillError::PathTraversal(rel.to_string()));
     }
     if rel.split('/').any(|seg| seg.is_empty() || seg == ".") {
-        return Err(ExtensionError::PathTraversal(rel.to_string()));
+        return Err(SkillError::PathTraversal(rel.to_string()));
     }
     if Path::new(rel).is_absolute() {
-        return Err(ExtensionError::PathTraversal(rel.to_string()));
+        return Err(SkillError::PathTraversal(rel.to_string()));
     }
     Ok(())
 }
 
 /// Scan a directory for subdirectories containing a SKILL.md file.
-async fn scan_skill_dirs(dir: &Path) -> Result<Vec<ScannedSkill>, ExtensionError> {
+async fn scan_skill_dirs(dir: &Path) -> Result<Vec<ScannedSkill>, SkillError> {
     let mut result = Vec::new();
 
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(result),
-        Err(e) => return Err(ExtensionError::Io(e)),
+        Err(e) => return Err(SkillError::Io(e)),
     };
 
     while let Ok(Some(entry)) = entries.next_entry().await {
@@ -1373,7 +1373,7 @@ async fn collect_skill_dirs_recursive(
     dir: &Path,
     result: &mut Vec<PathBuf>,
     max_depth: usize,
-) -> Result<(), ExtensionError> {
+) -> Result<(), SkillError> {
     if dir.join(SKILL_MANIFEST_FILE).exists() {
         result.push(dir.to_path_buf());
         return Ok(());
@@ -1386,7 +1386,7 @@ async fn collect_skill_dirs_recursive(
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(ExtensionError::Io(e)),
+        Err(e) => return Err(SkillError::Io(e)),
     };
 
     while let Ok(Some(entry)) = entries.next_entry().await {
@@ -1518,7 +1518,7 @@ fn unquote(s: &str) -> &str {
 }
 
 /// Recursively copy a directory.
-async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), ExtensionError> {
+async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), SkillError> {
     tokio::fs::create_dir_all(dst).await?;
 
     let mut entries = tokio::fs::read_dir(src).await?;
@@ -1555,14 +1555,14 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), ExtensionError
 /// user-identifying data is logged — only the source/target paths
 /// (already considered safe to log elsewhere in this module) and the
 /// error code.
-async fn link_skill_or_fallback_copy(src: &Path, dst: &Path) -> Result<(), ExtensionError> {
+async fn link_skill_or_fallback_copy(src: &Path, dst: &Path) -> Result<(), SkillError> {
     match create_symlink_for_link(src, dst).await {
         Ok(()) => Ok(()),
         Err(e) => {
             // Surface the raw OS error so dashboards can keep counting 1314
             // (ERROR_PRIVILEGE_NOT_HELD) separately from other failure modes.
             let raw_os_error = match &e {
-                ExtensionError::Io(io_err) => io_err.raw_os_error(),
+                SkillError::Io(io_err) => io_err.raw_os_error(),
                 _ => None,
             };
             warn!(
@@ -1580,14 +1580,14 @@ async fn link_skill_or_fallback_copy(src: &Path, dst: &Path) -> Result<(), Exten
 /// Wrapper around [`create_symlink`] that allows tests to inject a
 /// synthetic failure. In non-test builds this is a thin call-through to
 /// the platform-specific [`create_symlink`] below.
-async fn create_symlink_for_link(src: &Path, dst: &Path) -> Result<(), ExtensionError> {
+async fn create_symlink_for_link(src: &Path, dst: &Path) -> Result<(), SkillError> {
     #[cfg(test)]
     {
         if test_overrides::should_force_symlink_failure() {
             // Use PermissionDenied to mimic the shape Windows returns
             // for ERROR_PRIVILEGE_NOT_HELD. The exact raw_os_error is
             // platform-specific so we only assert on kind in tests.
-            return Err(ExtensionError::Io(std::io::Error::new(
+            return Err(SkillError::Io(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "forced symlink failure (test)",
             )));
@@ -1632,14 +1632,14 @@ mod test_overrides {
 
 /// Create a symlink (platform-aware).
 #[cfg(unix)]
-async fn create_symlink(src: &Path, dst: &Path) -> Result<(), ExtensionError> {
+async fn create_symlink(src: &Path, dst: &Path) -> Result<(), SkillError> {
     tokio::fs::symlink(src, dst)
         .await
-        .map_err(ExtensionError::Io)
+        .map_err(SkillError::Io)
 }
 
 #[cfg(windows)]
-async fn create_symlink(src: &Path, dst: &Path) -> Result<(), ExtensionError> {
+async fn create_symlink(src: &Path, dst: &Path) -> Result<(), SkillError> {
     // On Windows, directory symlinks require `SeCreateSymbolicLink`
     // (Developer Mode or Admin), which most users don't have — this is
     // the source of the Sentry I1 family of `os error 1314` failures.
@@ -1657,16 +1657,16 @@ async fn create_symlink(src: &Path, dst: &Path) -> Result<(), ExtensionError> {
         tokio::task::spawn_blocking(move || junction::create(&src, &dst))
             .await
             .map_err(|e| {
-                ExtensionError::Io(std::io::Error::new(
+                SkillError::Io(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     format!("junction::create join error: {e}"),
                 ))
             })?
-            .map_err(ExtensionError::Io)
+            .map_err(SkillError::Io)
     } else {
         tokio::fs::symlink_file(src, dst)
             .await
-            .map_err(ExtensionError::Io)
+            .map_err(SkillError::Io)
     }
 }
 
@@ -2409,7 +2409,7 @@ mod tests {
         write_test_zip(&zip_path, &[("../escape.txt", "outside")]);
 
         let result = import_skills_with_symlink(&paths, &zip_path).await;
-        assert!(matches!(result, Err(ExtensionError::PathTraversal(_))));
+        assert!(matches!(result, Err(SkillError::PathTraversal(_))));
         assert!(!tmp.path().join("escape.txt").exists());
     }
 
@@ -2428,7 +2428,7 @@ mod tests {
         .unwrap();
 
         let result = import_skill(&paths, &source_dir).await;
-        assert!(matches!(result, Err(ExtensionError::PathTraversal(_))));
+        assert!(matches!(result, Err(SkillError::PathTraversal(_))));
     }
 
     #[tokio::test]
@@ -2445,7 +2445,7 @@ mod tests {
         .unwrap();
 
         let result = import_skill_with_symlink(&paths, &source_dir).await;
-        assert!(matches!(result, Err(ExtensionError::PathTraversal(_))));
+        assert!(matches!(result, Err(SkillError::PathTraversal(_))));
     }
 
     #[tokio::test]
@@ -2550,7 +2550,7 @@ mod tests {
         let result = delete_skill(&paths, "protected").await;
         assert!(matches!(
             result,
-            Err(ExtensionError::BuiltinSkillDeletion(_))
+            Err(SkillError::BuiltinSkillDeletion(_))
         ));
     }
 
@@ -2560,7 +2560,7 @@ mod tests {
         let paths = make_test_paths(tmp.path());
 
         let result = delete_skill(&paths, "ghost").await;
-        assert!(matches!(result, Err(ExtensionError::SkillNotFound(_))));
+        assert!(matches!(result, Err(SkillError::SkillNotFound(_))));
     }
 
     #[tokio::test]
@@ -2569,7 +2569,7 @@ mod tests {
         let paths = make_test_paths(tmp.path());
 
         let result = delete_skill(&paths, "../etc").await;
-        assert!(matches!(result, Err(ExtensionError::PathTraversal(_))));
+        assert!(matches!(result, Err(SkillError::PathTraversal(_))));
     }
 
     // -----------------------------------------------------------------------
@@ -2746,10 +2746,10 @@ mod tests {
         let paths = make_embedded_paths(tmp.path()).await;
 
         let result = read_builtin_skill(&paths, "../etc/passwd").await;
-        assert!(matches!(result, Err(ExtensionError::PathTraversal(_))));
+        assert!(matches!(result, Err(SkillError::PathTraversal(_))));
 
         let result = read_builtin_skill(&paths, "auto-inject/../../secret").await;
-        assert!(matches!(result, Err(ExtensionError::PathTraversal(_))));
+        assert!(matches!(result, Err(SkillError::PathTraversal(_))));
     }
 
     #[tokio::test]
@@ -2991,7 +2991,7 @@ mod tests {
         let err = materialize_skills_for_agent(&paths, "../evil", &[])
             .await
             .unwrap_err();
-        assert!(matches!(err, ExtensionError::PathTraversal(_)));
+        assert!(matches!(err, SkillError::PathTraversal(_)));
     }
 
     #[tokio::test]

@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use nomifun_common::{AppError, CompanionSkillId, generate_id, now_ms};
-use nomifun_extension::constants::SKILL_MANIFEST_FILE;
-use nomifun_extension::skill_service::{self, SkillDraftInput, SkillPaths, SkillScope};
+use nomifun_skill_library::constants::SKILL_MANIFEST_FILE;
+use nomifun_skill_library::skill_service::{self, SkillDraftInput, SkillPaths, SkillScope};
 
 use crate::collector::{EVOLVE_CURSOR_KEY, SharedEventStoreLock, read_events_since};
 use crate::events::CompanionEventEmitter;

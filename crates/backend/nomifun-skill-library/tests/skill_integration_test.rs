@@ -1,13 +1,13 @@
 //! Black-box integration tests for skill & rule management (test-plan SM, RM, CP).
 //!
-//! These tests exercise the public API surface of `nomifun_extension::skill_service`
-//! and `nomifun_extension::external_paths` against the functional requirements in
+//! These tests exercise the public API surface of `nomifun_skill_library::skill_service`
+//! and `nomifun_skill_library::external_paths` against the functional requirements in
 //! `08-file-workspace.md` §B.
 
 use std::path::Path;
 
-use nomifun_extension::external_paths::ExternalPathsManager;
-use nomifun_extension::skill_service::{
+use nomifun_skill_library::external_paths::ExternalPathsManager;
+use nomifun_skill_library::skill_service::{
     NamedPath, SkillPaths, delete_skill, detect_and_count_external_skills, export_skill_with_symlink, import_skill,
     import_skill_with_symlink, list_available_skills, read_builtin_rule, read_builtin_skill, read_skill_info,
     resolve_skill_paths, scan_for_skills,

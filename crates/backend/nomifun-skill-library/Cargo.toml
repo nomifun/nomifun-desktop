@@ -1,24 +1,32 @@
 [package]
-name = "nomifun-extension"
+name = "nomifun-skill-library"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 nomifun-common.workspace = true
 nomifun-api-types.workspace = true
-nomifun-realtime.workspace = true
-nomi-process-runtime.workspace = true
+nomifun-db.workspace = true
 axum.workspace = true
 dirs.workspace = true
-semver.workspace = true
+fs2.workspace = true
+include_dir.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-mime_guess.workspace = true
+zip.workspace = true
+reqwest.workspace = true
+regex.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+junction = "1"
 
 [dev-dependencies]
-http-body-util.workspace = true
+async-trait.workspace = true
+include_dir.workspace = true
+serial_test.workspace = true
 tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }

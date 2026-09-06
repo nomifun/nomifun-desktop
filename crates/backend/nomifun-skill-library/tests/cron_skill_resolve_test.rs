@@ -1,5 +1,5 @@
 use nomifun_common::ConversationId;
-use nomifun_extension::{resolve_skill_paths, skill_service};
+use nomifun_skill_library::{resolve_skill_paths, skill_service};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CRON_JOB_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
@@ -9,7 +9,7 @@ fn unique_temp_dir(label: &str) -> std::path::PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    std::env::temp_dir().join(format!("nomifun-extension-{label}-{}-{nanos}", std::process::id()))
+    std::env::temp_dir().join(format!("nomifun-skill-library-{label}-{}-{nanos}", std::process::id()))
 }
 
 #[tokio::test]

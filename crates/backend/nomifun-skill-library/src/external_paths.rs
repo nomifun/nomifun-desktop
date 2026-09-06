@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 use crate::constants::{CUSTOM_SKILL_PATHS_FILE, SKILLS_MARKET_NAME, SKILLS_MARKET_PATH};
-use crate::error::ExtensionError;
+use crate::error::SkillError;
 use crate::skill_service::NamedPath;
 
 /// Persistent storage for custom external skill paths.
@@ -64,7 +64,7 @@ impl ExternalPathsManager {
     /// Add a custom external path.
     ///
     /// If a path with the same value already exists, it is updated with the new name.
-    pub async fn add_custom_external_path(&self, name: &str, path: &str) -> Result<(), ExtensionError> {
+    pub async fn add_custom_external_path(&self, name: &str, path: &str) -> Result<(), SkillError> {
         let mut paths = self.paths.write().await;
 
         // Update existing or add new
@@ -83,7 +83,7 @@ impl ExternalPathsManager {
     }
 
     /// Remove a custom external path by its path value.
-    pub async fn remove_custom_external_path(&self, path: &str) -> Result<(), ExtensionError> {
+    pub async fn remove_custom_external_path(&self, path: &str) -> Result<(), SkillError> {
         let mut paths = self.paths.write().await;
         let before_len = paths.len();
         paths.retain(|p| p.path != path);
@@ -97,13 +97,13 @@ impl ExternalPathsManager {
     }
 
     /// Enable the nomifun skills market by adding it to external paths.
-    pub async fn enable_skills_market(&self) -> Result<(), ExtensionError> {
+    pub async fn enable_skills_market(&self) -> Result<(), SkillError> {
         self.add_custom_external_path(SKILLS_MARKET_NAME, SKILLS_MARKET_PATH)
             .await
     }
 
     /// Disable the nomifun skills market by removing it from external paths.
-    pub async fn disable_skills_market(&self) -> Result<(), ExtensionError> {
+    pub async fn disable_skills_market(&self) -> Result<(), SkillError> {
         self.remove_custom_external_path(SKILLS_MARKET_PATH).await
     }
 }
@@ -135,7 +135,7 @@ async fn load_from_file(file_path: &Path) -> Vec<PersistedNamedPath> {
 }
 
 /// Save paths to the persistence file.
-async fn save_to_file(file_path: &Path, paths: &[PersistedNamedPath]) -> Result<(), ExtensionError> {
+async fn save_to_file(file_path: &Path, paths: &[PersistedNamedPath]) -> Result<(), SkillError> {
     // Ensure parent directory exists
     if let Some(parent) = file_path.parent() {
         tokio::fs::create_dir_all(parent).await?;

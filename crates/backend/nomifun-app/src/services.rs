@@ -1926,7 +1926,7 @@ pub struct AppServices {
     pub app_version: String,
     /// Resolved skill paths. Shared with the `ConversationService` for
     /// snapshot resolution at create time.
-    pub skill_paths: Arc<nomifun_extension::SkillPaths>,
+    pub skill_paths: Arc<nomifun_skill_library::SkillPaths>,
     /// Process-private Requirement MCP issuer (port, root secret, binary path).
     /// It is non-serializable; only per-session child capabilities leave the
     /// main process. `None` when the server failed to start. Its presence drives
@@ -2968,7 +2968,7 @@ impl AppServices {
             .and_then(|p| p.canonicalize().ok())
             .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let skill_paths = Arc::new(nomifun_extension::resolve_skill_paths(
+        let skill_paths = Arc::new(nomifun_skill_library::resolve_skill_paths(
             &app_resource_dir,
             &data_dir,
         ));

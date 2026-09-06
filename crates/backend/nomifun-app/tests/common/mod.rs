@@ -13,8 +13,8 @@ use nomifun_app::compatibility::{
     AppServices, build_module_states, create_router, create_router_with_states,
 };
 use nomifun_auth::AuthPolicy;
-use nomifun_extension::{ExternalPathsManager, SkillPaths, SkillRouterState};
 use nomifun_file::FileService;
+use nomifun_skill_library::{ExternalPathsManager, SkillPaths, SkillRouterState};
 use nomifun_system::VersionCheckService;
 
 fn isolated_config(prefix: &str) -> AppConfig {

@@ -29,8 +29,8 @@ use crate::store::{
     CompanionMemory, CompanionSkill, CompanionStore,
     memory_contents_similar,
 };
-use nomifun_extension::skill_service::{self, SkillPaths, SkillScope};
-use nomifun_extension::constants::SKILL_MANIFEST_FILE;
+use nomifun_skill_library::skill_service::{self, SkillPaths, SkillScope};
+use nomifun_skill_library::constants::SKILL_MANIFEST_FILE;
 
 /// Map the stored owner to the extension skill scope. `None` is only the
 /// vestigial legacy row the boot re-homing has not claimed, whose body still
@@ -2019,7 +2019,7 @@ mod tests {
             Arc::new(BroadcastEventBus::new(16)),
             "owner-a",
             Arc::new(NoopCompleter),
-            Arc::new(nomifun_extension::skill_service::resolve_skill_paths(data_dir, data_dir)),
+            Arc::new(nomifun_skill_library::skill_service::resolve_skill_paths(data_dir, data_dir)),
         )
         .await
         .unwrap()
@@ -2185,7 +2185,7 @@ mod tests {
             Arc::new(BroadcastEventBus::new(16)),
             "  ",
             Arc::new(NoopCompleter),
-            Arc::new(nomifun_extension::skill_service::resolve_skill_paths(
+            Arc::new(nomifun_skill_library::skill_service::resolve_skill_paths(
                 dir.path(),
                 dir.path(),
             )),
@@ -2266,7 +2266,7 @@ mod tests {
         let cid = companion.companion_id;
 
         // A reviewed draft: SKILL.md on disk (draft dir) + a draft registry row.
-        let input = nomifun_extension::skill_service::SkillDraftInput {
+        let input = nomifun_skill_library::skill_service::SkillDraftInput {
             name: "demo".into(),
             description: "演示技能".into(),
             when_to_use: None,
@@ -2318,7 +2318,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
         let cid = svc.registry.create("测试", "ink").await.unwrap().companion_id;
-        let input = nomifun_extension::skill_service::SkillDraftInput {
+        let input = nomifun_skill_library::skill_service::SkillDraftInput {
             name: "cleanup".into(),
             description: "删除测试".into(),
             when_to_use: None,
@@ -2347,7 +2347,7 @@ mod tests {
 
     /// Seed a draft skill (SKILL.md on disk + registry row).
     async fn seed_draft_skill(svc: &CompanionService, cid: &str, name: &str) {
-        let input = nomifun_extension::skill_service::SkillDraftInput {
+        let input = nomifun_skill_library::skill_service::SkillDraftInput {
             name: name.into(),
             description: "原始描述".into(),
             when_to_use: None,
@@ -2487,7 +2487,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let svc = service(dir.path()).await;
         let cid = svc.registry.create("测试", "ink").await.unwrap().companion_id;
-        let input = nomifun_extension::skill_service::SkillDraftInput {
+        let input = nomifun_skill_library::skill_service::SkillDraftInput {
             name: "rej-sig".into(),
             description: "d".into(),
             when_to_use: None,
@@ -2575,7 +2575,7 @@ mod tests {
         let svc = service(dir.path()).await;
         let a = svc.registry.create("A", "ink").await.unwrap().companion_id;
         let b = svc.registry.create("B", "ink").await.unwrap().companion_id;
-        let input = nomifun_extension::skill_service::SkillDraftInput {
+        let input = nomifun_skill_library::skill_service::SkillDraftInput {
             name: "mine".into(),
             description: "d".into(),
             when_to_use: None,
@@ -3029,7 +3029,7 @@ mod tests {
             Arc::new(BroadcastEventBus::new(16)),
             "owner-a",
             Arc::new(NoopCompleter),
-            Arc::new(nomifun_extension::skill_service::resolve_skill_paths(
+            Arc::new(nomifun_skill_library::skill_service::resolve_skill_paths(
                 dir.path(),
                 dir.path(),
             )),

@@ -476,7 +476,7 @@ pub struct CompanionThreads {
     pub config: SharedConfig,
     pub registry: Arc<CompanionRegistry>,
     pub sessions: Arc<dyn CompanionSessionPort>,
-    pub skill_paths: Arc<nomifun_extension::SkillPaths>,
+    pub skill_paths: Arc<nomifun_skill_library::SkillPaths>,
 }
 
 /// Resolve the authoritative effective skill set for one companion profile.
@@ -491,7 +491,7 @@ pub struct CompanionThreads {
 /// - a non-empty configuration resolves to nothing (source tree transiently
 ///   unreadable — resolve failures are silently skipped per name upstream).
 pub(crate) async fn effective_skill_names(
-    skill_paths: &nomifun_extension::SkillPaths,
+    skill_paths: &nomifun_skill_library::SkillPaths,
     profile: &CompanionProfileConfig,
 ) -> Result<Vec<String>, AppError> {
     if !skill_paths.builtin_skills_dir.is_dir() {
@@ -500,13 +500,13 @@ pub(crate) async fn effective_skill_names(
             skill_paths.builtin_skills_dir.display()
         )));
     }
-    let auto_names: Vec<String> = nomifun_extension::list_builtin_auto_skills(skill_paths)
+    let auto_names: Vec<String> = nomifun_skill_library::list_builtin_auto_skills(skill_paths)
         .await?
         .into_iter()
         .map(|skill| skill.name)
         .collect();
     let configured = normalized_effective_skill_names(auto_names, &profile.skills);
-    let resolved = nomifun_extension::materialize_skills_for_agent(
+    let resolved = nomifun_skill_library::materialize_skills_for_agent(
         skill_paths,
         &profile.companion_id,
         &configured,
@@ -534,7 +534,7 @@ pub(crate) async fn effective_skill_names(
 /// unloads every manifest-owned entry, e.g. after 解除召唤). Returns the
 /// resolved desired skill names.
 pub(crate) async fn sync_managed_workspace_skills(
-    skill_paths: &nomifun_extension::SkillPaths,
+    skill_paths: &nomifun_skill_library::SkillPaths,
     conversation_id: &str,
     workspace: &Path,
     skill_names: &[String],
@@ -547,7 +547,7 @@ pub(crate) async fn sync_managed_workspace_skills(
     if skill_names.is_empty() && load_manifest(&nomi_dir).managed.is_empty() {
         return Vec::new();
     }
-    let resolved = match nomifun_extension::materialize_skills_for_agent(
+    let resolved = match nomifun_skill_library::materialize_skills_for_agent(
         skill_paths,
         conversation_id,
         skill_names,
@@ -578,7 +578,7 @@ pub(crate) async fn sync_managed_workspace_skills(
         .filter(|skill| !skills_dir.join(&skill.name).exists())
         .cloned()
         .collect();
-    if let Err(error) = nomifun_extension::link_workspace_skills(
+    if let Err(error) = nomifun_skill_library::link_workspace_skills(
         workspace,
         &[".nomi/skills"],
         &to_link,
@@ -610,7 +610,7 @@ pub(crate) async fn sync_managed_workspace_skills(
 
 impl CompanionThreads {
     async fn builtin_auto_skill_names(&self) -> Vec<String> {
-        match nomifun_extension::list_builtin_auto_skills(&self.skill_paths).await {
+        match nomifun_skill_library::list_builtin_auto_skills(&self.skill_paths).await {
             Ok(skills) => skills.into_iter().map(|skill| skill.name).collect(),
             Err(error) => {
                 tracing::warn!(error = %error, "list builtin auto skills for companion failed");
@@ -1138,12 +1138,12 @@ mod skill_resolution_tests {
     use super::*;
     use crate::profile::CompanionSkillConfig;
 
-    fn skill_paths(root: &Path) -> nomifun_extension::SkillPaths {
+    fn skill_paths(root: &Path) -> nomifun_skill_library::SkillPaths {
         // A present builtin corpus dir is the baseline healthy state: its
         // absence is the exact macOS "startup materialization failed" signal
         // that resolution must treat as an error, so tests opt out explicitly.
         std::fs::create_dir_all(root.join("builtin-skills")).unwrap();
-        nomifun_extension::SkillPaths {
+        nomifun_skill_library::SkillPaths {
             data_dir: root.to_path_buf(),
             user_skills_dir: root.join("skills"),
             cron_skills_dir: root.join("cron/skills"),
