@@ -1,14 +1,15 @@
 {
   "title": "Agent 工作台",
-  "subtitle": "设计 Agent 的身份、能力、模型与资源，并在保存前试用。",
+  "subtitle": "设计 Agent 的身份、模型与能力边界，并在保存前试用。",
   "loading": "正在加载 Agent 工作台…",
-  "loadingEditor": "正在加载所选 AgentPreset…",
+  "loadingEditor": "正在加载所选 Agent…",
   "freshStart": {
     "title": "全新 v4 工作区",
-    "body": "本代从 {{count}} 个官方模板和空的个人列表开始。旧设定不会导入；请在这里 fork 模板或新建 AgentPreset。"
+    "body": "本代从 {{count}} 个官方模板和空的个人列表开始。旧设定不会导入；请在这里 Fork 模板或新建 Agent。"
   },
   "actions": {
     "create": "新建",
+    "delete": "删除",
     "fork": "Fork",
     "remove": "移除",
     "retry": "重试",
@@ -22,21 +23,23 @@
     "forkName": "{{name}} 副本"
   },
   "library": {
-    "ariaLabel": "AgentPreset 列表",
-    "title": "AgentPreset 列表",
-    "subtitle": "官方模板与你的不可变 Revision 线",
+    "ariaLabel": "Agent 列表",
+    "title": "Agent 列表",
+    "subtitle": "官方模板和你的 Agent 设定",
     "official": "官方模板",
-    "mine": "我的 AgentPreset",
-    "empty": "还没有个人 AgentPreset。",
+    "mine": "我的 Agent",
+    "empty": "还没有自定义 Agent。",
     "capabilityCount": "{{count}} 项能力",
     "revision": "Revision {{revision}}",
     "unsaved": "尚无已保存 Revision",
-    "bindingCount": "{{count}} 个绑定"
+    "bindingCount": "{{count}} 个使用目标",
+    "deleteConfirmTitle": "删除“{{name}}”？",
+    "deleteConfirmBody": "删除后将不能再编辑或用于新会话；已有会话历史会保留。",
+    "deleteAria": "删除 Agent“{{name}}”"
   },
   "template": {
     "readOnly": "官方只读模板",
-    "capabilityHint": "冻结 seed 定义了 exact initial/on-demand 能力版本。Fork 后才能编辑。",
-    "resourceHint": "模板只声明 typed resource slot，不保存任何用户的具体资源 ID。",
+    "capabilityHint": "模板明确列出启动即用和可按需申请的能力。Fork 后可调整能力边界。",
     "hostUnavailable": "该模板包含当前 Nomi-core 主机不可用的能力。真实 owner 可用前不会允许 Fork。",
     "zeroToolTitle": "精确零工具 Profile",
     "zeroToolBody": "不会构造 Capability、Skill、MCP、Workspace、Coding Context 或隐藏的能力搜索。",
@@ -85,16 +88,13 @@
   },
   "sections": {
     "basic": "身份与模型",
-    "basicHint": "命名 AgentPreset，选择 Chat 模型路由，并编写稳定 Persona 与 instructions。",
+    "basicHint": "命名 Agent，选择 Chat 模型，并编写稳定的 Persona 与 Instructions。",
     "capabilities": "能力",
-    "capabilitiesHint": "Initial 能力在 Session 创建时激活；on-demand 能力已预解析，只在完成 Turn 的边界激活。",
+    "capabilitiesHint": "为每项能力选择关闭、启动即用或可按需申请。这里声明能力边界，不绑定具体资源。",
     "skillsMcp": "Skills 与 MCP",
-    "skillsMcpHint": "Skill 只贡献 instructions；MCP Tool 通过已物化 Capability 进入 AgentPreset。",
+    "skillsMcpHint": "Skill 只贡献 Instructions；MCP Tool 通过可用的能力进入这个 Agent。",
     "skills": "Skills",
     "mcp": "MCP 物化",
-    "resources": "Typed resources",
-    "resourcesHint": "只渐进显示当前能力所需的资源类型；资源 owner 会同步校验。",
-    "advanced": "高级预算与执行约束",
     "previewInspector": "Preview 与 Inspector",
     "previewInspectorHint": "解析 exact initial/on-demand ceiling、Tool/Context 投影、资源、RuntimeProfile 与 Revision diff。",
     "test": "使用真实 Session 测试",
@@ -107,6 +107,7 @@
     "chatModelRoutePlaceholder": "Exact model route ID",
     "chatModelRouteRecord": "Chat 路由记录",
     "chatModelRouteRecordPlaceholder": "Canonical Chat 路由 JSON",
+    "chatModelRouteUnavailable": "当前主机没有提供可用的 Chat 模型。选择模型后才能保存或测试。",
     "persona": "Persona",
     "instructions": "Instructions"
   },
@@ -121,14 +122,17 @@
   },
   "capabilities": {
     "search": "搜索能力和来源 Package",
-    "initial": "Initial 能力",
-    "onDemand": "On-demand 能力",
-    "initialShort": "Initial",
-    "onDemandShort": "On-demand",
+    "initial": "启动即用",
+    "onDemand": "可按需申请",
+    "initialShort": "启动即用",
+    "onDemandShort": "按需申请",
     "notSelected": "关闭",
     "emptySelection": "该集合暂无能力。",
-    "emptyCatalog": "没有匹配的已物化能力。",
+    "emptyCatalog": "没有匹配的能力。",
     "source": "来源",
+    "catalogUnavailable": "当前安装中没有这项能力的可用实现。",
+    "unavailableReason": "当前安装尚未接入这项能力的可执行实现，因此不能选用。",
+    "modeAria": "设置“{{name}}”的能力模式",
     "tools": "{{count}} 个 action",
     "contexts": "{{count}} 个 Context contributor"
   },
@@ -140,24 +144,31 @@
     "empty": "暂无 MCP Tool 物化。"
   },
   "resources": {
-    "noneRequired": "当前能力选择不需要 typed resource。",
-    "required": "必需",
-    "optional": "可选",
-    "resourceId": "资源 ID",
-    "operations": "操作",
-    "connectionRef": "连接引用",
-    "hostPath": "主机工作区路径",
-    "hostPathUnavailable": "主机工作区路径不可用",
-    "knowledgeBase": "知识库",
-    "knowledgeBasePlaceholder": "选择一个根目录可用的知识库",
-    "knowledgeName": "知识库名称",
-    "knowledgeRoot": "知识库主机路径"
-  },
-  "advanced": {
-    "systemTokens": "系统 Context tokens",
-    "dynamicTokens": "动态 Context tokens",
-    "activeCapabilities": "最大 active capabilities",
-    "toolCalls": "每 Turn 最大 Tool 调用"
+    "noneRequired": "无需额外资源",
+    "requiredAtUse": "使用时需要",
+    "requiredKinds": "所需资源种类",
+    "bindingPolicyTitle": "具体资源在使用 Agent 时选择",
+    "bindingPolicyBody": "Agent 只声明可使用哪些能力和需要哪些资源种类。知识库、工作区与连接由具体会话、伙伴或自动化目标选择和管理。",
+    "kinds": {
+      "assetLibrary": "资产库",
+      "browser": "浏览器会话",
+      "canvas": "画布",
+      "channel": "渠道",
+      "companion": "伙伴",
+      "companionMemory": "伙伴记忆",
+      "computer": "电脑控制",
+      "customer": "客户",
+      "generationProvider": "生成服务",
+      "knowledgeBase": "知识库",
+      "mcpConnection": "MCP 连接",
+      "miniApp": "小程序",
+      "processSession": "进程会话",
+      "projectMemory": "项目记忆",
+      "robot": "机器人",
+      "sshHost": "SSH 主机",
+      "terminal": "终端会话",
+      "workspace": "工作区"
+    }
   },
   "preview": {
     "emptyTitle": "尚未 Preview",
@@ -173,7 +184,7 @@
       "context_contributor_count": "Context 来源",
       "skill_count": "Skills",
       "mcp_count": "MCP mapping",
-      "resource_binding_count": "资源"
+      "required_resource_kind_count": "所需资源种类"
     }
   },
   "inspector": {
@@ -201,8 +212,8 @@
     "continuation": "Rotate/revoke 只阻止新的 Remote 请求 admission。既有 Session 不变；replacement token 必须属于同一 owner，并显式提交原 AgentSession ID。"
   },
   "test": {
-    "realEffectWarning": "Test 会在需要时自动保存当前修改，创建普通持久 Session，并以 FullAuto 对当前绑定的真实资源执行。Tool 与外部 Effect 不会模拟。",
-    "inputPlaceholder": "输入该 AgentPreset 的第一个普通 Turn…",
+    "realEffectWarning": "测试会在需要时自动保存当前修改并创建普通持久会话。工具和外部效果不会模拟；所需资源由测试会话的实际运行场景提供。",
+    "inputPlaceholder": "输入该 Agent 的第一条测试消息…",
     "session": "AgentSession",
     "turn": "Turn 状态",
     "revision": "Revision"
@@ -210,10 +221,12 @@
   "common": {
     "none": "无",
     "noChanges": "无变化",
+    "available": "可用",
     "unavailable": "不可用"
   },
   "errors": {
-    "title": "Agent 工作台操作未完成"
+    "title": "Agent 工作台操作未完成",
+    "presetCapabilitiesLoadFailed": "无法加载所选 Agent 的能力。请重试或选择其他 Agent。"
   },
   "navigation": {
     "railTitle": "Agent 工作台"

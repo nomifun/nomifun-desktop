@@ -1520,7 +1520,6 @@ mod tests {
                 CreateAgentPresetFromTemplateRequest {
                     display_name: "Remote smoke preset".to_owned(),
                     description: None,
-                    resource_bindings: Vec::new(),
                     model_route_refs: std::collections::BTreeMap::new(),
                     chat_route_records: std::collections::BTreeMap::new(),
                 },

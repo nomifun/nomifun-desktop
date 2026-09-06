@@ -9,7 +9,7 @@
         "initial_capabilities": [],
         "on_demand_capabilities": [],
         "skill_bindings": [],
-        "typed_resource_defaults": [],
+        "required_resource_kinds": [],
         "required_runtime_features": []
       },
       "assistant.general": {
@@ -62,36 +62,10 @@
           }
         ],
         "skill_bindings": [],
-        "typed_resource_defaults": [
-          {
-            "slot_key": "knowledge",
-            "resource_kind": "knowledge_base",
-            "required": false,
-            "operations": [
-              "read",
-              "search"
-            ],
-            "binding_policy": "select_only_owned_resource"
-          },
-          {
-            "slot_key": "project_memory",
-            "resource_kind": "project_memory",
-            "required": false,
-            "operations": [
-              "read",
-              "write"
-            ],
-            "binding_policy": "select_only_owned_resource"
-          },
-          {
-            "slot_key": "workspace",
-            "resource_kind": "workspace",
-            "required": false,
-            "operations": [
-              "read"
-            ],
-            "binding_policy": "require_explicit_selection"
-          }
+        "required_resource_kinds": [
+          "knowledge_base",
+          "project_memory",
+          "workspace"
         ],
         "required_runtime_features": []
       },
@@ -241,39 +215,10 @@
           }
         ],
         "skill_bindings": [],
-        "typed_resource_defaults": [
-          {
-            "slot_key": "workspace",
-            "resource_kind": "workspace",
-            "required": true,
-            "operations": [
-              "execute",
-              "read",
-              "write"
-            ],
-            "binding_policy": "require_explicit_selection"
-          },
-          {
-            "slot_key": "process_session",
-            "resource_kind": "process_session",
-            "required": false,
-            "operations": [
-              "execute",
-              "observe"
-            ],
-            "binding_policy": "leave_unbound"
-          },
-          {
-            "slot_key": "mcp_server",
-            "resource_kind": "mcp_server",
-            "required": false,
-            "operations": [
-              "connect",
-              "invoke",
-              "read"
-            ],
-            "binding_policy": "require_explicit_selection"
-          }
+        "required_resource_kinds": [
+          "mcp_server",
+          "process_session",
+          "workspace"
         ],
         "required_runtime_features": [
           "code_mode",
@@ -370,49 +315,11 @@
           }
         ],
         "skill_bindings": [],
-        "typed_resource_defaults": [
-          {
-            "slot_key": "companion",
-            "resource_kind": "companion",
-            "required": true,
-            "operations": [
-              "read",
-              "write"
-            ],
-            "binding_policy": "require_explicit_selection"
-          },
-          {
-            "slot_key": "companion_memory",
-            "resource_kind": "companion_memory",
-            "required": true,
-            "operations": [
-              "read",
-              "write"
-            ],
-            "binding_policy": "select_only_owned_resource"
-          },
-          {
-            "slot_key": "knowledge",
-            "resource_kind": "knowledge_base",
-            "required": true,
-            "operations": [
-              "read",
-              "search"
-            ],
-            "binding_policy": "select_only_owned_resource"
-          },
-          {
-            "slot_key": "channel",
-            "resource_kind": "channel",
-            "required": true,
-            "operations": [
-              "manage",
-              "receive",
-              "reply",
-              "send"
-            ],
-            "binding_policy": "require_explicit_selection"
-          }
+        "required_resource_kinds": [
+          "channel",
+          "companion",
+          "companion_memory",
+          "knowledge_base"
         ],
         "required_runtime_features": []
       },
@@ -474,59 +381,12 @@
           }
         ],
         "skill_bindings": [],
-        "typed_resource_defaults": [
-          {
-            "slot_key": "robot",
-            "resource_kind": "robot",
-            "required": true,
-            "operations": [
-              "audio",
-              "display",
-              "link",
-              "motion",
-              "vision"
-            ],
-            "binding_policy": "require_explicit_selection"
-          },
-          {
-            "slot_key": "companion",
-            "resource_kind": "companion",
-            "required": false,
-            "operations": [
-              "read"
-            ],
-            "binding_policy": "select_only_owned_resource"
-          },
-          {
-            "slot_key": "companion_memory",
-            "resource_kind": "companion_memory",
-            "required": false,
-            "operations": [
-              "read",
-              "write"
-            ],
-            "binding_policy": "select_only_owned_resource"
-          },
-          {
-            "slot_key": "knowledge",
-            "resource_kind": "knowledge_base",
-            "required": false,
-            "operations": [
-              "read",
-              "search"
-            ],
-            "binding_policy": "select_only_owned_resource"
-          },
-          {
-            "slot_key": "channel",
-            "resource_kind": "channel",
-            "required": false,
-            "operations": [
-              "receive",
-              "reply"
-            ],
-            "binding_policy": "require_explicit_selection"
-          }
+        "required_resource_kinds": [
+          "channel",
+          "companion",
+          "companion_memory",
+          "knowledge_base",
+          "robot"
         ],
         "required_runtime_features": []
       },
@@ -572,38 +432,10 @@
           }
         ],
         "skill_bindings": [],
-        "typed_resource_defaults": [
-          {
-            "slot_key": "customer",
-            "resource_kind": "customer",
-            "required": true,
-            "operations": [
-              "read",
-              "write"
-            ],
-            "binding_policy": "require_explicit_selection"
-          },
-          {
-            "slot_key": "knowledge",
-            "resource_kind": "knowledge_base",
-            "required": true,
-            "operations": [
-              "read",
-              "search"
-            ],
-            "binding_policy": "select_only_owned_resource"
-          },
-          {
-            "slot_key": "channel",
-            "resource_kind": "channel",
-            "required": true,
-            "operations": [
-              "receive",
-              "reply",
-              "send"
-            ],
-            "binding_policy": "require_explicit_selection"
-          }
+        "required_resource_kinds": [
+          "channel",
+          "customer",
+          "knowledge_base"
         ],
         "required_runtime_features": []
       },
@@ -673,51 +505,11 @@
           }
         ],
         "skill_bindings": [],
-        "typed_resource_defaults": [
-          {
-            "slot_key": "canvas",
-            "resource_kind": "canvas",
-            "required": true,
-            "operations": [
-              "read",
-              "write"
-            ],
-            "binding_policy": "require_explicit_selection"
-          },
-          {
-            "slot_key": "asset_library",
-            "resource_kind": "asset_library",
-            "required": true,
-            "operations": [
-              "read",
-              "write"
-            ],
-            "binding_policy": "select_only_owned_resource"
-          },
-          {
-            "slot_key": "generation_provider",
-            "resource_kind": "generation_provider",
-            "required": false,
-            "operations": [
-              "audio",
-              "image",
-              "text",
-              "video"
-            ],
-            "binding_policy": "select_only_owned_resource"
-          },
-          {
-            "slot_key": "miniapp",
-            "resource_kind": "miniapp",
-            "required": false,
-            "operations": [
-              "edit",
-              "publish",
-              "read",
-              "serve"
-            ],
-            "binding_policy": "require_explicit_selection"
-          }
+        "required_resource_kinds": [
+          "asset_library",
+          "canvas",
+          "generation_provider",
+          "miniapp"
         ],
         "required_runtime_features": []
       }
@@ -970,5 +762,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "86a2d9c9d05f89d6378ccf61a08cd362537d02308001505c49d1d1166c46376f"
+  "payload_digest": "81500aa2e90aff90399f37e1edb77c48e13e2b0f6f7cc1f7ab715a0219ed0457"
 }

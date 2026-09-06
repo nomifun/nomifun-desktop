@@ -4,6 +4,10 @@
  * Compile and run the ignored Nomi-core live-provider smoke without exposing
  * its credential to Cargo, build scripts, argv, files, logs, or tool children.
  *
+ * The smoke is intentionally pinned to StepFun Coding Plan
+ * (`stepfun-plan` / `step-3.7-flash`) in the Rust fixture. The only local
+ * secret input is the Credential Manager value.
+ *
  * Usage:
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --compile-only

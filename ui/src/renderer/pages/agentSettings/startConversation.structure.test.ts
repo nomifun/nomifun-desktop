@@ -20,7 +20,7 @@ describe('Agent Workbench start conversation boundary', () => {
     expect(editor.includes('hasStableRevision={Boolean(editor.preset.current_stable_revision)}')).toBe(
       true
     );
-    expect(editor.includes('disabled={!hasStableRevision || dirty}')).toBe(true);
+    expect(editor.includes('disabled={busy || !hasStableRevision || dirty}')).toBe(true);
     expect(page.includes('dirty={controller.dirty}')).toBe(true);
   });
 

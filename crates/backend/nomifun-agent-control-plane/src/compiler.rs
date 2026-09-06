@@ -84,7 +84,6 @@ pub struct PresetPreviewCompiler {
     official_templates: OfficialTemplateCatalog,
     canonical_registry: Option<Arc<dyn CanonicalRegistryProvider>>,
     canonical_environment: Option<CompilerEnvironment>,
-    reject_on_demand_capabilities: bool,
 }
 
 impl PresetPreviewCompiler {
@@ -97,7 +96,6 @@ impl PresetPreviewCompiler {
             official_templates,
             canonical_registry: None,
             canonical_environment: None,
-            reject_on_demand_capabilities: false,
         }
     }
 
@@ -125,15 +123,6 @@ impl PresetPreviewCompiler {
             Arc::new(StaticCanonicalRegistryProvider { registry }),
             environment,
         )
-    }
-
-    /// Configure a host composition that has no safe runtime activation port
-    /// for deferred capabilities.  Such hosts must return a blocked Preview
-    /// rather than persisting a Snapshot whose on-demand set can never be
-    /// activated.
-    pub fn reject_on_demand_capabilities(mut self) -> Self {
-        self.reject_on_demand_capabilities = true;
-        self
     }
 
     pub fn compile(
@@ -197,23 +186,6 @@ impl PresetPreviewCompiler {
             ));
         }
         validate_direct_catalog_availability(&payload, catalog, &mut diagnostics);
-        if self.reject_on_demand_capabilities
-            && !payload.on_demand_capabilities.is_empty()
-        {
-            let ids = payload
-                .on_demand_capabilities
-                .iter()
-                .map(|selection| selection.capability.id.as_ref().to_owned())
-                .collect::<Vec<_>>();
-            diagnostics.push(error_diagnostic(
-                CanonicalErrorCode::from("CAPABILITY_UNAVAILABLE"),
-                format!(
-                    "the selected host has no on-demand activation port for [{}]",
-                    ids.join(", ")
-                ),
-                Some("on-demand-capabilities".to_owned()),
-            ));
-        }
         validate_template_baseline(
             transient_template_key,
             &self.official_templates,
@@ -611,6 +583,12 @@ fn preview_summary(
         .iter()
         .filter(|capability| initial_ids.contains(&capability.id))
         .collect::<Vec<_>>();
+    let required_resource_kinds = catalog
+        .capabilities
+        .iter()
+        .filter(|capability| selected_ids.contains(&capability.id))
+        .flat_map(|capability| capability.contributions.resource_kinds.iter())
+        .collect::<BTreeSet<_>>();
     PreviewSummaryDto {
         initial_count: payload.initial_capabilities.len() as u32,
         on_demand_count: payload.on_demand_capabilities.len() as u32,
@@ -632,13 +610,8 @@ fn preview_summary(
             .iter()
             .filter(|mapping| selected_ids.contains(&mapping.capability.id))
             .count() as u32,
-        resource_binding_count: payload.resource_bindings.len() as u32,
-        provider_initialization_count: (payload.model_route_refs.len()
-            + payload
-                .resource_bindings
-                .iter()
-                .filter(|binding| binding.connection_config_ref.is_some())
-                .count()) as u32,
+        required_resource_kind_count: required_resource_kinds.len() as u32,
+        provider_initialization_count: payload.model_route_refs.len() as u32,
     }
 }
 
@@ -736,6 +709,18 @@ fn preview_inspector(
         .filter(|mapping| selected_ids.contains(&mapping.capability.id))
         .map(mcp_mapping_api)
         .collect();
+    let required_resource_kinds = catalog
+        .capabilities
+        .iter()
+        .filter(|capability| selected_ids.contains(&capability.id))
+        .flat_map(|capability| {
+            capability
+                .contributions
+                .resource_kinds
+                .iter()
+                .map(|kind| kind.as_ref().to_owned())
+        })
+        .collect();
     Ok(SnapshotInspectorDto {
         snapshot_ref: snapshot
             .map(|snapshot| wire_cast(&snapshot.snapshot_ref))
@@ -776,7 +761,7 @@ fn preview_inspector(
         tool_schema_refs: tool_schema_refs.into_iter().collect(),
         context_schema_refs: context_schema_refs.into_iter().collect(),
         mcp_materializations,
-        typed_resource_bindings: wire_cast(&payload.resource_bindings)?,
+        required_resource_kinds,
         service_key_diagnostics: catalog.service_key_diagnostics.clone(),
     })
 }
@@ -868,8 +853,6 @@ fn revision_diff(
             .collect(),
         added_skills: after_skills.difference(&before_skills).cloned().collect(),
         removed_skills: before_skills.difference(&after_skills).cloned().collect(),
-        resource_bindings_changed: current
-            .is_none_or(|revision| revision.payload.resource_bindings != payload.resource_bindings),
         model_routes_changed: current
             .is_none_or(|revision| revision.payload.model_route_refs != payload.model_route_refs),
         instructions_changed: current.is_none_or(|revision| {

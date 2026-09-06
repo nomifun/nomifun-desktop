@@ -474,6 +474,10 @@ fn validate_api_inventory(
         ),
         ("agent_presets.create", "/api/agent-presets"),
         (
+            "agent_presets.delete",
+            "/api/agent-presets/{preset_id}",
+        ),
+        (
             "agent_preset_revisions.create",
             "/api/agent-presets/{preset_id}/revisions",
         ),
@@ -677,6 +681,33 @@ fn validate_generated_schemas(
     if !revision.contains("\"contribution_locks\"") {
         return Err("agent_preset_revision schema does not include ContributionLock".into());
     }
+    for field in [
+        "resource_bindings",
+        "resource_binding_refs",
+        "typed_resource_bindings",
+        "typed_resource_defaults",
+    ] {
+        if revision.contains(&format!("\"{field}\"")) {
+            return Err(format!(
+                "agent_preset_revision schema must not freeze {field}"
+            )
+            .into());
+        }
+    }
+    let official_seed = serde_json::to_string(
+        schemas
+            .get("official_preset_seed")
+            .expect("official_preset_seed schema is generated"),
+    )?;
+    if official_seed.contains("\"typed_resource_defaults\"")
+        || official_seed.contains("\"TypedResourceDefault\"")
+        || official_seed.contains("\"ResourceDefaultBindingPolicy\"")
+        || !official_seed.contains("\"required_resource_kinds\"")
+    {
+        return Err(
+            "official_preset_seed schema must declare only required_resource_kinds".into(),
+        );
+    }
     let catalog = serde_json::to_string(
         schemas
             .get("capability_catalog_entry")
@@ -702,6 +733,29 @@ fn validate_generated_schemas(
     }
     if snapshot.contains(&["preset_", "snapshot"].concat()) {
         return Err("agent_snapshot schema contains a legacy snapshot alias".into());
+    }
+    for field in [
+        "resource_bindings",
+        "resource_binding_refs",
+        "typed_resource_bindings",
+        "typed_resource_defaults",
+    ] {
+        if snapshot.contains(&format!("\"{field}\"")) {
+            return Err(format!(
+                "agent_snapshot schema must not freeze {field}"
+            )
+            .into());
+        }
+    }
+    let agent_binding = serde_json::to_string(
+        schemas
+            .get("agent_binding")
+            .expect("agent_binding schema is generated"),
+    )?;
+    if !agent_binding.contains("\"typed_resource_bindings\"") {
+        return Err(
+            "agent_binding schema must retain target-scoped typed_resource_bindings".into(),
+        );
     }
     Ok(())
 }

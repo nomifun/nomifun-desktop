@@ -5,7 +5,6 @@ import { Refresh } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { useKnowledgeBases } from '@/renderer/pages/knowledge/useKnowledge';
 import AgentPresetEditor from './AgentPresetEditor';
 import AgentPresetLibrary from './AgentPresetLibrary';
 import OfficialTemplateOverview from './OfficialTemplateOverview';
@@ -16,7 +15,6 @@ const AgentSettingsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const controller = useAgentSettingsController();
-  const { bases: knowledgeBases, loading: knowledgeBasesLoading } = useKnowledgeBases();
   const sourceTemplate =
     controller.draft?.source_template_key == null
       ? undefined
@@ -71,26 +69,25 @@ const AgentSettingsPage: React.FC = () => {
           <AgentPresetLibrary
             library={controller.library}
             selection={controller.selection}
-            busy={controller.busyAction === 'create' || controller.busyAction === 'fork'}
+            busy={controller.busyAction !== null}
+            creating={controller.busyAction === 'create'}
+            openingPresetId={controller.openingPresetId}
+            deletingPresetId={controller.deletingPresetId}
             onSelectTemplate={controller.openTemplate}
             onSelectPreset={(preset) => void controller.openPreset(preset)}
             onCreatePreset={(displayName) => void controller.createPreset(displayName)}
+            onDeletePreset={(preset) => controller.deletePreset(preset)}
           />
 
           {selectedTemplate ? (
             <OfficialTemplateOverview
               template={selectedTemplate}
               busy={controller.busyAction === 'fork'}
-              hostWorkDir={controller.hostWorkDir}
               catalog={controller.catalog}
-              knowledgeBases={knowledgeBases}
-              knowledgeBasesLoading={knowledgeBasesLoading}
-              connectors={controller.connectors}
-              onFork={(displayName, resources, modelRoutes, routeRecords) =>
+              onFork={(displayName, modelRoutes, routeRecords) =>
                 void controller.forkTemplate(
                   selectedTemplate.template_key,
                   displayName,
-                  resources,
                   modelRoutes,
                   routeRecords
                 )
@@ -104,10 +101,6 @@ const AgentSettingsPage: React.FC = () => {
               preview={controller.preview}
               testResult={controller.testResult}
               tokenState={controller.tokenState}
-              hostWorkDir={controller.hostWorkDir}
-              connectors={controller.connectors}
-              knowledgeBases={knowledgeBases}
-              knowledgeBasesLoading={knowledgeBasesLoading}
               sourceTemplate={sourceTemplate}
               busyAction={controller.busyAction}
               dirty={controller.dirty}

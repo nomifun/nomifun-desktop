@@ -16,8 +16,7 @@ use nomifun_api_types::{
     RemoteBindingDto, RevisionImpactConsumerDto, RevisionImpactConsumerKindDto,
     ResolveAgentPresetPreviewRequest, ResolveAgentPresetPreviewResponse,
     ResolveSavedRevisionPreviewRequest, SaveAgentPresetRevisionRequest,
-    SaveAgentPresetRevisionResponse, TemplateResourceSelectionDto, TypedResourceBindingDto,
-    UpdateRemoteBindingRequest,
+    SaveAgentPresetRevisionResponse, UpdateRemoteBindingRequest,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -260,6 +259,16 @@ impl AgentControlPlane {
         .await
     }
 
+    pub async fn retire_preset(
+        &self,
+        owner: &UserId,
+        preset_id: &str,
+    ) -> Result<(), ControlPlaneError> {
+        self.store
+            .retire_preset(owner, &AgentPresetId::from(preset_id.to_owned()))
+            .await
+    }
+
     pub async fn create_from_template(
         &self,
         owner: &UserId,
@@ -273,8 +282,6 @@ impl AgentControlPlane {
             .seed(template_key)
             .ok_or_else(|| not_found("OfficialPresetTemplate"))?;
         let display_name = nonempty_name(request.display_name)?;
-        let resource_bindings =
-            template_resource_bindings(owner, seed, request.resource_bindings)?;
         let mut model_route_refs = request.model_route_refs;
         let mut chat_route_records = request.chat_route_records;
         if !model_route_refs.contains_key(CHAT_MODEL_TASK)
@@ -313,7 +320,6 @@ impl AgentControlPlane {
                 .iter()
                 .map(exact_ref_api)
                 .collect(),
-            resource_bindings,
             system_role_provider_overrides: BTreeMap::new(),
             persona: String::new(),
             instructions: String::new(),
@@ -654,6 +660,30 @@ impl AgentControlPlane {
             })
     }
 
+    /// Load the immutable artifacts frozen into an existing target binding.
+    ///
+    /// Product retirement closes authoring and new-binding admission, but it
+    /// must not erase or hide the exact Revision/Snapshot already referenced by
+    /// a Session, Remote session, companion, or automation history record.
+    pub async fn saved_binding_artifacts(
+        &self,
+        owner: &UserId,
+        binding: &AgentBindingValueDto,
+    ) -> Result<
+        (
+            AgentBindingValue,
+            AgentPresetRevision,
+            nomifun_agent_contracts::ResolvedSnapshotEnvelope,
+        ),
+        ControlPlaneError,
+    > {
+        let binding: AgentBindingValue = wire_cast(binding)?;
+        let (revision, snapshot) = self
+            .load_binding_artifacts(owner, &binding)
+            .await?;
+        Ok((binding, revision, snapshot))
+    }
+
     /// Freeze the authenticated owner's current stable Preset revision into a
     /// Session binding using only the persisted immutable Snapshot.
     pub async fn resolve_agent_session_binding(
@@ -665,13 +695,7 @@ impl AgentControlPlane {
             .store
             .get_preset(&AgentPresetId::from(preset_id.to_owned()))
             .await?
-            .ok_or_else(|| {
-                ControlPlaneError::canonical(
-                    "CAPABILITY_NOT_MATERIALIZED",
-                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                    "AgentPreset is not available for Session creation",
-                )
-            })?;
+            .ok_or_else(|| not_found("AgentPreset"))?;
         if stored.preset.owner_user_id.as_ref() != Some(owner) {
             return Err(ControlPlaneError::canonical(
                 "RESOURCE_OWNER_MISMATCH",
@@ -698,7 +722,7 @@ impl AgentControlPlane {
             .store
             .get_snapshot(&stable)
             .await?;
-        let binding = session_binding_from_stable_artifacts(owner, stable, revision, snapshot)?;
+        let binding = session_binding_from_stable_artifacts(stable, revision, snapshot)?;
         self.validate_agent_binding(owner, &binding).await?;
         wire_cast(&binding)
     }
@@ -1028,6 +1052,31 @@ impl AgentControlPlane {
         owner: &UserId,
         binding: &AgentBindingValue,
     ) -> Result<(), ControlPlaneError> {
+        let _ = self.load_binding_artifacts(owner, binding).await?;
+        let preset = self
+            .store
+            .get_preset(&binding.preset_revision_ref.preset_id)
+            .await?
+            .ok_or_else(|| not_found("AgentPreset"))?;
+        if preset.preset.owner_user_id.as_ref() != Some(owner)
+            || preset.preset.source != AgentPresetSource::User
+        {
+            return Err(not_found("AgentPreset"));
+        }
+        Ok(())
+    }
+
+    async fn load_binding_artifacts(
+        &self,
+        owner: &UserId,
+        binding: &AgentBindingValue,
+    ) -> Result<
+        (
+            AgentPresetRevision,
+            nomifun_agent_contracts::ResolvedSnapshotEnvelope,
+        ),
+        ControlPlaneError,
+    > {
         if binding
             .typed_resource_bindings
             .iter()
@@ -1044,6 +1093,9 @@ impl AgentControlPlane {
             .get_revision(&binding.preset_revision_ref)
             .await?
             .ok_or_else(|| not_found("AgentPresetRevision"))?;
+        if revision.created_by != *owner {
+            return Err(not_found("AgentPresetRevision"));
+        }
         revision.validate().map_err(|violation| {
             ControlPlaneError::canonical(
                 violation.code,
@@ -1062,6 +1114,18 @@ impl AgentControlPlane {
                     "resolved Snapshot is missing for the exact Preset revision",
                 )
             })?;
+        snapshot.validate().map_err(|violation| {
+            ControlPlaneError::canonical(
+                violation.code,
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                violation.message,
+            )
+        })?;
+        if snapshot.actor.principal_kind != "user"
+            || snapshot.actor.principal_id != owner.as_ref()
+        {
+            return Err(not_found("AgentPresetRevision"));
+        }
         if snapshot.snapshot_ref != binding.resolved_snapshot_ref {
             return Err(ControlPlaneError::canonical(
                 "PRESET_REVISION_DIGEST_MISMATCH",
@@ -1069,7 +1133,7 @@ impl AgentControlPlane {
                 "ResolvedSnapshotRef does not match the saved exact revision",
             ));
         }
-        Ok(())
+        Ok((revision, snapshot))
     }
 
     async fn bound_count(
@@ -1103,70 +1167,11 @@ fn empty_document() -> nomifun_api_types::AgentPresetDocumentDto {
         initial_capabilities: Vec::new(),
         on_demand_capabilities: Vec::new(),
         skill_bindings: Vec::new(),
-        resource_bindings: Vec::new(),
         system_role_provider_overrides: BTreeMap::new(),
         persona: String::new(),
         instructions: String::new(),
         starter_prompts: Vec::new(),
     }
-}
-
-fn template_resource_bindings(
-    owner: &UserId,
-    seed: &nomifun_agent_contracts::OfficialPresetSeed,
-    selections: Vec<TemplateResourceSelectionDto>,
-) -> Result<Vec<TypedResourceBindingDto>, ControlPlaneError> {
-    let defaults = seed
-        .typed_resource_defaults
-        .iter()
-        .map(|resource| (resource.slot_key.as_str(), resource))
-        .collect::<BTreeMap<_, _>>();
-    let mut selected_slots = BTreeSet::new();
-    let mut bindings = Vec::new();
-    for selection in selections {
-        let Some(resource_default) = defaults.get(selection.slot_key.as_str()) else {
-            return Err(ControlPlaneError::canonical(
-                "PRESET_RESOURCE_NOT_BOUND",
-                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                format!("template has no resource slot {}", selection.slot_key),
-            ));
-        };
-        if !selected_slots.insert(selection.slot_key.clone())
-            || selection.resource_kind != resource_default.resource_kind.as_ref()
-            || selection.resource_id.trim().is_empty()
-        {
-            return Err(ControlPlaneError::canonical(
-                "PRESET_RESOURCE_NOT_BOUND",
-                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                format!(
-                    "resource selection for slot {} is duplicate, empty, or has the wrong kind",
-                    selection.slot_key
-                ),
-            ));
-        }
-        bindings.push(TypedResourceBindingDto {
-            binding_id: selection.slot_key,
-            resource_kind: selection.resource_kind,
-            resource_id: selection.resource_id.trim().to_owned(),
-            owner_id: owner.as_ref().to_owned(),
-            operations: resource_default.operations.clone(),
-            connection_config_ref: selection.connection_config_ref,
-            typed_parameters: selection.typed_parameters,
-        });
-    }
-    for resource_default in &seed.typed_resource_defaults {
-        if resource_default.required && !selected_slots.contains(&resource_default.slot_key) {
-            return Err(ControlPlaneError::canonical(
-                "PRESET_RESOURCE_NOT_BOUND",
-                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                format!(
-                    "required template resource slot {} is not bound",
-                    resource_default.slot_key
-                ),
-            ));
-        }
-    }
-    Ok(bindings)
 }
 
 fn editor_response(
@@ -1263,7 +1268,6 @@ fn selection_api(
     wire_cast(&CapabilitySelection {
         capability: reference.clone(),
         action_allowlist: BTreeSet::new(),
-        resource_binding_refs: Vec::new(),
     })
 }
 
@@ -1278,7 +1282,6 @@ where
 }
 
 fn session_binding_from_stable_artifacts(
-    owner: &UserId,
     stable: PresetRevisionRef,
     revision: Option<AgentPresetRevision>,
     snapshot: Option<nomifun_agent_contracts::ResolvedSnapshotEnvelope>,
@@ -1311,33 +1314,18 @@ fn session_binding_from_stable_artifacts(
             violation.message,
         )
     })?;
-    if revision.reference != stable
-        || snapshot.content.preset_revision_ref != stable
-        || snapshot.content.typed_resource_bindings != revision.payload.resource_bindings
-    {
+    if revision.reference != stable || snapshot.content.preset_revision_ref != stable {
         return Err(ControlPlaneError::canonical(
             "PRESET_REVISION_DIGEST_MISMATCH",
             axum::http::StatusCode::CONFLICT,
             "persisted Revision and Snapshot do not match current_stable_revision",
         ));
     }
-    if snapshot
-        .content
-        .typed_resource_bindings
-        .iter()
-        .any(|resource| resource.owner_id != owner.as_ref())
-    {
-        return Err(ControlPlaneError::canonical(
-            "RESOURCE_OWNER_MISMATCH",
-            axum::http::StatusCode::FORBIDDEN,
-            "frozen typed resource owner does not match the authenticated owner",
-        ));
-    }
 
     Ok(AgentBindingValue {
         preset_revision_ref: stable,
         resolved_snapshot_ref: snapshot.snapshot_ref,
-        typed_resource_bindings: snapshot.content.typed_resource_bindings,
+        typed_resource_bindings: Vec::new(),
         binding_version: 1,
     })
 }
@@ -1383,6 +1371,10 @@ fn not_found(subject: &str) -> ControlPlaneError {
         ),
         "RemoteBinding" => (
             "REMOTE_BINDING_NOT_FOUND",
+            axum::http::StatusCode::NOT_FOUND,
+        ),
+        "AgentPreset" => (
+            "AGENT_PRESET_NOT_FOUND",
             axum::http::StatusCode::NOT_FOUND,
         ),
         _ => (
@@ -1441,6 +1433,15 @@ mod tests {
                 availability_evidence_revision: release.availability_evidence_revision,
             },
         )
+    }
+
+    fn test_control_plane(
+        store: Arc<InMemoryControlPlaneStore>,
+    ) -> AgentControlPlane {
+        let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
+        let templates = OfficialTemplateCatalog::load().unwrap();
+        let compiler = test_compiler(&templates);
+        AgentControlPlane::new(store, catalog, templates, compiler)
     }
 
     fn catalog_manifest(
@@ -1564,7 +1565,6 @@ mod tests {
                 CreateAgentPresetFromTemplateRequest {
                     display_name: "Minimal".into(),
                     description: None,
-                    resource_bindings: Vec::new(),
                     model_route_refs: BTreeMap::new(),
                     chat_route_records: BTreeMap::new(),
                 },
@@ -1613,6 +1613,162 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retire_preset_closes_product_admission_but_preserves_immutable_artifacts() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control_plane = test_control_plane(store.clone());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let other_owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        let created = control_plane
+            .create_from_template(
+                &owner,
+                "chat.minimal",
+                CreateAgentPresetFromTemplateRequest {
+                    display_name: "Retire me".into(),
+                    description: None,
+                    model_route_refs: BTreeMap::new(),
+                    chat_route_records: BTreeMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let revision = created.revision.clone().expect("initial Revision");
+        let stable: PresetRevisionRef = wire_cast(&revision.reference).unwrap();
+        let snapshot = store
+            .get_snapshot(&stable)
+            .await
+            .unwrap()
+            .expect("initial Snapshot");
+        let binding_value = AgentBindingValue {
+            preset_revision_ref: stable.clone(),
+            resolved_snapshot_ref: snapshot.snapshot_ref.clone(),
+            typed_resource_bindings: Vec::new(),
+            binding_version: 1,
+        };
+        store
+            .put_agent_binding(
+                StoredAgentBinding {
+                    target: AgentBindingTarget {
+                        target_kind: "conversation".into(),
+                        target_id: "conversation-1".into(),
+                    },
+                    owner_user_id: owner.clone(),
+                    value: binding_value.clone(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .insert_remote_binding(RemoteBinding {
+                remote_binding_id: RemoteBindingId::from("remote-retirement"),
+                owner_user_id: owner.clone(),
+                name: "Remote retirement".into(),
+                agent_binding: binding_value,
+            })
+            .await
+            .unwrap();
+        let preview = control_plane
+            .preview(
+                &owner,
+                &created.preset.preset_id,
+                ResolveAgentPresetPreviewRequest {
+                    expected_current_revision: Some(revision.reference.clone()),
+                    draft: created.draft.clone(),
+                    scene: SETTINGS_SCENE.into(),
+                    surface: SETTINGS_SURFACE.into(),
+                    audience: SETTINGS_AUDIENCE.into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let owner_error = control_plane
+            .retire_preset(&other_owner, &created.preset.preset_id)
+            .await
+            .expect_err("another owner must see the same response as a missing Preset");
+        assert_eq!(owner_error.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(owner_error.code().as_ref(), "AGENT_PRESET_NOT_FOUND");
+        assert!(
+            control_plane
+                .library(&owner)
+                .await
+                .unwrap()
+                .user_presets
+                .iter()
+                .any(|preset| preset.preset_id == created.preset.preset_id)
+        );
+
+        control_plane
+            .retire_preset(&owner, &created.preset.preset_id)
+            .await
+            .unwrap();
+        assert!(
+            control_plane
+                .library(&owner)
+                .await
+                .unwrap()
+                .user_presets
+                .is_empty()
+        );
+        assert!(store.list_agent_bindings(&owner).await.unwrap().is_empty());
+        assert!(store.list_remote_bindings(&owner).await.unwrap().is_empty());
+        for error in [
+            control_plane
+                .editor(&owner, &created.preset.preset_id, None)
+                .await
+                .expect_err("retired Preset must leave the editor"),
+            control_plane
+                .save_revision(
+                    &owner,
+                    &created.preset.preset_id,
+                    SaveAgentPresetRevisionRequest {
+                        expected_current_revision: Some(revision.reference.clone()),
+                        preview_digest: preview.preview_digest,
+                        draft: created.draft,
+                        reason: Some("must not save after retirement".into()),
+                    },
+                )
+                .await
+                .expect_err("retired Preset must not save"),
+            control_plane
+                .resolve_agent_session_binding(&owner, &created.preset.preset_id)
+                .await
+                .expect_err("retired Preset must not admit a new Session"),
+        ] {
+            assert_eq!(error.status(), axum::http::StatusCode::NOT_FOUND);
+            assert_eq!(error.code().as_ref(), "AGENT_PRESET_NOT_FOUND");
+        }
+        assert!(
+            store
+                .get_revision(&stable)
+                .await
+                .unwrap()
+                .is_some(),
+            "immutable Revision history must survive product retirement"
+        );
+        assert!(
+            store
+                .get_snapshot(&stable)
+                .await
+                .unwrap()
+                .is_some(),
+            "immutable Snapshot history must survive product retirement"
+        );
+        let repeated_error = control_plane
+            .retire_preset(&owner, &created.preset.preset_id)
+            .await
+            .expect_err("a retired Preset is no longer a deletable product entry");
+        assert_eq!(repeated_error.code().as_ref(), "AGENT_PRESET_NOT_FOUND");
+
+        let official_error = control_plane
+            .retire_preset(&owner, "chat.minimal")
+            .await
+            .expect_err("official template seeds must not be deleted");
+        assert_eq!(official_error.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(official_error.code().as_ref(), "AGENT_PRESET_NOT_FOUND");
+    }
+
+    #[tokio::test]
     async fn session_binding_is_owner_scoped_and_freezes_current_stable_snapshot() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
@@ -1633,7 +1789,6 @@ mod tests {
                 CreateAgentPresetFromTemplateRequest {
                     display_name: "Minimal".into(),
                     description: None,
-                    resource_bindings: Vec::new(),
                     model_route_refs: BTreeMap::new(),
                     chat_route_records: BTreeMap::new(),
                 },
@@ -1647,10 +1802,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(binding.preset_revision_ref, revision.reference);
-        assert_eq!(
-            binding.typed_resource_bindings,
-            revision.document.resource_bindings
-        );
+        assert!(binding.typed_resource_bindings.is_empty());
         assert_eq!(binding.binding_version, 1);
 
         let stable: PresetRevisionRef = wire_cast(&revision.reference).unwrap();
@@ -1660,7 +1812,6 @@ mod tests {
             .unwrap()
             .expect("persisted stable Revision");
         let snapshot_error = session_binding_from_stable_artifacts(
-            &owner,
             stable,
             Some(stored_revision),
             None,
@@ -1766,6 +1917,19 @@ mod tests {
         let other_owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000002");
         let binding_id = RemoteBindingId::from("remote-binding-1");
         store
+            .insert_preset(StoredPreset {
+                preset: AgentPreset {
+                    preset_id: AgentPresetId::from("preset-1"),
+                    owner_user_id: Some(owner.clone()),
+                    source: AgentPresetSource::User,
+                    display_name: "Preset".into(),
+                    description: None,
+                    current_stable_revision: None,
+                },
+            })
+            .await
+            .unwrap();
+        store
             .insert_remote_binding(RemoteBinding {
                 remote_binding_id: binding_id.clone(),
                 owner_user_id: owner.clone(),
@@ -1839,7 +2003,6 @@ mod tests {
                 CreateAgentPresetFromTemplateRequest {
                     display_name: "Minimal".into(),
                     description: None,
-                    resource_bindings: Vec::new(),
                     model_route_refs: BTreeMap::new(),
                     chat_route_records: BTreeMap::new(),
                 },

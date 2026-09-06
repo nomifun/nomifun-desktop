@@ -15,6 +15,7 @@ describe('ChatLayout advanced controls', () => {
 
     expect(source.includes("<AutoWorkControl target={{ kind: 'conversation', id: conversation_id }} />")).toBe(true);
     expect(source.includes("<IdmmControl target={{ kind: 'conversation', id: conversation_id }} />")).toBe(true);
+    expect(source.includes('(props.knowledgeEnabled ?? true) && (')).toBe(true);
     expect(source.includes("<KnowledgeControl target={{ kind: 'conversation', id: conversation_id }} />")).toBe(true);
   });
 

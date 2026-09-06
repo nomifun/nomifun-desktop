@@ -62,6 +62,20 @@ pub trait CronBackgroundTaskRegistrar: Send + Sync {
     fn register(&self, task: JoinHandle<()>);
 }
 
+/// Host-owned resolver for a saved AgentPreset.
+///
+/// Cron does not own AgentPreset storage or compiler state. The application
+/// host may inject this narrow admission port so a scheduled job can freeze
+/// the same immutable Snapshot used by an interactive AgentSession.
+#[async_trait::async_trait]
+pub trait CronAgentPresetResolver: Send + Sync {
+    async fn resolve_snapshot(
+        &self,
+        owner_id: &str,
+        preset_id: &str,
+    ) -> Result<AgentResolvedSnapshot, AppError>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CronEmbeddedCreateCommand {
     pub name: String,
@@ -164,6 +178,7 @@ pub struct CronService {
     active_runs: Arc<DashMap<String, String>>,
     embedded_mutations: Arc<DashMap<String, Arc<EmbeddedMutationEntry>>>,
     background_task_registrar: Arc<RwLock<Option<Arc<dyn CronBackgroundTaskRegistrar>>>>,
+    agent_preset_resolver: Arc<RwLock<Option<Arc<dyn CronAgentPresetResolver>>>>,
 }
 
 #[derive(Debug, Default)]
@@ -207,6 +222,7 @@ impl CronService {
             active_runs: Arc::new(DashMap::new()),
             embedded_mutations: Arc::new(DashMap::new()),
             background_task_registrar: Arc::new(RwLock::new(None)),
+            agent_preset_resolver: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -219,6 +235,61 @@ impl CronService {
         if let Ok(mut guard) = self.background_task_registrar.write() {
             *guard = Some(registrar);
         }
+    }
+
+    /// Install the application-owned AgentPreset admission resolver.
+    ///
+    /// The resolver is read only when a request contains a preset identity
+    /// without an already-frozen snapshot. It is never consulted during a
+    /// scheduled turn; execution uses the snapshot persisted with the job.
+    pub fn with_agent_preset_resolver(
+        &self,
+        resolver: Arc<dyn CronAgentPresetResolver>,
+    ) {
+        if let Ok(mut guard) = self.agent_preset_resolver.write() {
+            *guard = Some(resolver);
+        }
+    }
+
+    async fn materialize_agent_preset_snapshot(
+        &self,
+        owner_id: &str,
+        config: &mut CronAgentConfigDto,
+        existing_snapshot: Option<&AgentResolvedSnapshot>,
+    ) -> Result<(), CronError> {
+        let Some(preset_id) = config
+            .preset_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return Ok(());
+        };
+        if config.agent_snapshot.is_some() {
+            return Ok(());
+        }
+        if let Some(existing_snapshot) = existing_snapshot.filter(|snapshot| {
+            snapshot.preset_id == preset_id && config.preset_revision.is_none()
+        }) {
+            config.agent_snapshot = Some(existing_snapshot.clone());
+            return Ok(());
+        }
+        let resolver = self
+            .agent_preset_resolver
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .ok_or_else(|| {
+                CronError::InvalidAgentConfig(
+                    "AgentPreset scheduling is unavailable until the host provides a Snapshot resolver"
+                        .to_owned(),
+                )
+            })?;
+        let snapshot = resolver
+            .resolve_snapshot(owner_id, preset_id)
+            .await
+            .map_err(CronError::App)?;
+        config.agent_snapshot = Some(snapshot);
+        Ok(())
     }
 
     /// Stop timer admission before the host begins joining background work.
@@ -424,6 +495,8 @@ impl CronService {
             }
         }
         if controls_host && let Some(config) = req.agent_config.as_mut() {
+            self.materialize_agent_preset_snapshot(user_id, config, None)
+                .await?;
             enforce_agent_snapshot_boundary(
                 config,
                 &req.agent_type,
@@ -599,6 +672,14 @@ impl CronService {
             }
         }
         if controls_host && let Some(config) = req.agent_config.as_mut() {
+            self.materialize_agent_preset_snapshot(
+                user_id,
+                config,
+                job.agent_config
+                    .as_ref()
+                    .and_then(|existing| existing.agent_snapshot.as_ref()),
+            )
+            .await?;
             enforce_agent_snapshot_boundary(
                 config,
                 &job.agent_type,
@@ -3338,7 +3419,6 @@ fn is_model_only_config(config: &CronAgentConfigDto) -> bool {
         && config.cli_path.is_none()
         && config.custom_agent_id.is_none()
         && config.config_options.is_none()
-        && config.workspace.is_none()
         && config.preset_id.is_none()
         && config.preset_revision.is_none()
         && config.agent_snapshot.is_none()
@@ -3856,12 +3936,13 @@ mod tests {
             "instructions": "Use the frozen Agent contract.",
             "included_skills": [],
             "excluded_auto_skills": [],
+            "initial_capabilities": [],
+            "on_demand_capabilities": [],
             "knowledge_policy": {
                 "enabled": false,
                 "writeback": false,
                 "grounded": false
             },
-            "knowledge_base_ids": [],
             "warnings": []
         }))
         .expect("valid frozen Agent snapshot")

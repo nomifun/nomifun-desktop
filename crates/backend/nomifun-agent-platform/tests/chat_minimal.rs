@@ -412,7 +412,6 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
             CreateAgentPresetFromTemplateRequest {
                 display_name: "Minimal Chat".to_owned(),
                 description: None,
-                resource_bindings: Vec::new(),
                 model_route_refs: BTreeMap::from([(
                     "agent_chat".to_owned(),
                     MODEL_ROUTE.to_owned(),
@@ -544,6 +543,7 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
     let compiled = CompiledSnapshot {
         envelope: snapshot.clone(),
         authority_policies: BTreeMap::new(),
+        target_resource_bindings: Vec::new(),
         registry_generation: registry.generation,
         registry_digest: registry.registry_digest.clone(),
     };

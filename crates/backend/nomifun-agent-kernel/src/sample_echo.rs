@@ -755,7 +755,7 @@ fn role_resource_binding(owner_id: &str) -> TypedResourceBinding {
 
 fn role_operation_lock(
     materialized: &crate::MaterializedRegistry,
-    binding_id: ResourceBindingId,
+    _binding_id: ResourceBindingId,
 ) -> ResolvedRoleProviderLock {
     let provider = materialized
         .role_provider(
@@ -767,7 +767,6 @@ fn role_operation_lock(
         provider: provider.provider.clone(),
         source: provider.source.clone(),
         supported_members: provider.contribution.members.keys().cloned().collect(),
-        resource_binding_refs: vec![binding_id],
     }
 }
 
@@ -807,15 +806,11 @@ fn sample_revision(owner_id: &str) -> AgentPresetRevision {
                 version: VersionString::from(VERSION),
             },
             action_allowlist: BTreeSet::from([ActionId::from(SAMPLE_ACTION)]),
-            resource_binding_refs: vec![ResourceBindingId::from(
-                "sample-echo-target",
-            )],
         }],
         skill_bindings: vec![SkillRef {
             id: SkillId::from(SAMPLE_SKILL),
             version: VersionString::from(VERSION),
         }],
-        resource_bindings: vec![resource_binding(owner_id)],
         system_role_provider_overrides: BTreeMap::new(),
         persona: "Echo fixture".to_owned(),
         instructions: "Use the selected echo capability.".to_owned(),
@@ -997,11 +992,21 @@ async fn sample_echo_uses_materialize_compile_activate_authorize_invoke_and_rest
         &compiler_environment(materialized.registry_digest.clone()),
         compile_request(revision.clone(), owner.clone()),
     )
+    .unwrap()
+    .with_target_resource_bindings(
+        &owner,
+        vec![resource_binding(&owner.principal_id)],
+    )
     .unwrap();
     let replayed = AgentPresetCompiler::compile(
         &materialized,
         &compiler_environment(materialized.registry_digest.clone()),
         compile_request(revision, owner.clone()),
+    )
+    .unwrap()
+    .with_target_resource_bindings(
+        &owner,
+        vec![resource_binding(&owner.principal_id)],
     )
     .unwrap();
     assert_eq!(
@@ -1061,6 +1066,11 @@ async fn sample_echo_uses_materialize_compile_activate_authorize_invoke_and_rest
         &restarted_materialized,
         &compiler_environment(restarted_materialized.registry_digest.clone()),
         compile_request(sample_revision(&owner.principal_id), owner.clone()),
+    )
+    .unwrap()
+    .with_target_resource_bindings(
+        &owner,
+        vec![resource_binding(&owner.principal_id)],
     )
     .unwrap();
     let restarted_active = SessionCapabilityState::new(&restarted_compiled);
@@ -1362,6 +1372,11 @@ async fn authority_rejects_wrong_principal_and_resource_without_invoking() {
         &materialized,
         &compiler_environment(materialized.registry_digest.clone()),
         compile_request(sample_revision("owner"), owner.clone()),
+    )
+    .unwrap()
+    .with_target_resource_bindings(
+        &owner,
+        vec![resource_binding(&owner.principal_id)],
     )
     .unwrap();
     let active = SessionCapabilityState::new(&compiled);

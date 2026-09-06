@@ -2771,11 +2771,9 @@ mod tests {
                     version: VersionString::from(CONTRACT_VERSION),
                 },
                 action_allowlist: BTreeSet::from([action.clone()]),
-                resource_binding_refs: vec![binding.binding_id.clone()],
             }],
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
-            resource_bindings: vec![binding],
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Wave 2 state test".to_owned(),
             instructions: "Invoke the selected capability.".to_owned(),
@@ -2821,7 +2819,9 @@ mod tests {
                 resolver_run_id: OperationId::from("wave2-state-resolve"),
             },
         )
-        .expect("compile selected capability");
+        .expect("compile selected capability")
+        .with_target_resource_bindings(&principal, vec![binding.clone()])
+        .expect("bind selected target resource");
         let active = SessionCapabilityState::new(&snapshot)
             .snapshot()
             .expect("initial active set");
@@ -3085,7 +3085,6 @@ mod tests {
                         action_allowlist: BTreeSet::from([ActionId::from(
                             "browser.navigate.invoke",
                         )]),
-                        resource_binding_refs: vec![binding.binding_id.clone()],
                     },
                     CapabilitySelection {
                         capability: CapabilityRef {
@@ -3093,7 +3092,6 @@ mod tests {
                             version: VersionString::from(CONTRACT_VERSION),
                         },
                         action_allowlist: BTreeSet::new(),
-                        resource_binding_refs: vec![binding.binding_id.clone()],
                     },
                     CapabilitySelection {
                         capability: CapabilityRef {
@@ -3101,12 +3099,10 @@ mod tests {
                             version: VersionString::from(CONTRACT_VERSION),
                         },
                         action_allowlist: BTreeSet::new(),
-                        resource_binding_refs: vec![binding.binding_id.clone()],
                     },
                 ],
                 on_demand_capabilities: Vec::new(),
                 skill_bindings: Vec::new(),
-                resource_bindings: vec![binding.clone()],
                 system_role_provider_overrides: overrides,
                 persona: "Browser provider fixture".to_owned(),
                 instructions: "Navigate with the selected Browser provider.".to_owned(),
@@ -3179,7 +3175,9 @@ mod tests {
                 resolver_run_id: OperationId::from("browser-provider-selected"),
             },
         )
-        .expect("compile selected alternate Browser provider");
+        .expect("compile selected alternate Browser provider")
+        .with_target_resource_bindings(&principal, vec![binding.clone()])
+        .expect("bind alternate Browser target resource");
         assert_eq!(
             compiled
                 .role_provider(&role_id)
@@ -3718,7 +3716,19 @@ mod tests {
             );
             assert_eq!(
                 capability.manifest.supported_surfaces,
-                BTreeSet::from(["desktop".to_owned(), "headless".to_owned()])
+                if *capability_id == "browser.render_content" {
+                    BTreeSet::from([
+                        "consumer:knowledge".to_owned(),
+                        "desktop".to_owned(),
+                        "headless".to_owned(),
+                    ])
+                } else {
+                    BTreeSet::from([
+                        "consumer:agent".to_owned(),
+                        "desktop".to_owned(),
+                        "headless".to_owned(),
+                    ])
+                }
             );
             assert!(check_platform_availability(
                 &CapabilityId::from(*capability_id),
@@ -3745,7 +3755,10 @@ mod tests {
             );
             assert_eq!(
                 capability.manifest.supported_surfaces,
-                BTreeSet::from(["desktop".to_owned()])
+                BTreeSet::from([
+                    "consumer:agent".to_owned(),
+                    "desktop".to_owned(),
+                ])
             );
             for (target, surface) in [
                 ("x86_64-unknown-linux-gnu", "desktop"),

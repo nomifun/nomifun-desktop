@@ -26,9 +26,9 @@ describe('CreateTaskDialog preset identity presentation', () => {
   });
 
   test('prevents presets that the backend cannot resolve for scheduled tasks from being selected', () => {
-    expect(source.includes("const supportsCron = presetSupportsTarget(preset, 'cron')")).toBe(true);
+    expect(source.includes('const supportsCron = Boolean(preset.current_stable_revision)')).toBe(true);
     expect(source.includes('disabled={!supportsCron}')).toBe(true);
-    expect(source.includes("if (!presetSupportsTarget(preset, 'cron'))")).toBe(true);
+    expect(source.includes('if (!supportsCron)')).toBe(true);
     expect(source.includes("aria-disabled={!supportsCron || undefined}")).toBe(true);
   });
 });

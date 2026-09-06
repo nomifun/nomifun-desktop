@@ -1,6 +1,6 @@
 # NomiFun 一期止损修订：简化重构与可替换系统能力基础
 
-> 状态：**USER-CONFIRMED PHASE 1 STOP-LOSS DIRECTIVE / AgentPreset AP-0～AP-7 已完成并重新签署 / Desktop 人工验收待执行**
+> 状态：**USER-CONFIRMED PHASE 1 STOP-LOSS DIRECTIVE / AgentPreset AP-0～AP-6 与 Desktop 产品验收已完成 / AP-7 待干净提交重新签署**
 >
 > 发布日期：2026-09-03
 >
@@ -70,8 +70,9 @@
 - 2026-09-05 通过 Windows Credential Manager runner 完成真实 StepFun Nomi-core
   Chat/Coding smoke，结果为 `live_smoke_status=pass code=OK status=200`。该结果
   关闭 `SL-S3-07` 的真实 owner smoke；它本身不替代 `SL-S3-10` 的独立
-  automation boundary evidence 或 `SL-S4-02` 的 Desktop 人工验收，前者已由
-  host-owned typed boundary 与依赖审计单独收口。Nomi-core Remote REST 的
+  automation boundary evidence 或当时尚未执行的 `SL-S4-02` Desktop 人工验收；
+  两者后来均由独立证据关闭。前者由 host-owned typed boundary 与依赖审计收口，
+  后者由 2026-09-06 真实 Tauri Desktop 产品走查收口。Nomi-core Remote REST 的
   installation Bearer、owner JWT/local-trust 兼容、旧 selector query fail-closed
   和 canonical MCP transport 均已由独立回归及真实 smoke 覆盖，`SL-S3-11` 已关闭。
 - Nomi-core `/mcp` 只复用公共 Streamable HTTP transport/session admission 和四工具
@@ -101,13 +102,44 @@
   contract，且 Conversation hook 的 token 翻译只存在 app composition。
   canonical Session 仍未提供未来完整 live event/continuation/failover surface，
   本项不把它们伪装成已交付。
-- 本次定向结果包括：App lib `399 passed`、DB Conversation repository `83 passed`、
+- 2026-09-05 当日定向结果包括：App lib `399 passed`、DB Conversation repository `83 passed`、
   Cron lib/integration `192/62 passed`、Requirement lib/tests `115/120 passed`、
   AgentExecution `87 passed`、IDMM `195 passed`、Channel 全套 `473 passed`、
   Companion `275 passed`；UI build、
   i18n、live smoke runner self-test/compile-only 和真实 StepFun smoke 均通过。真实
   Provider smoke 的安全命令、覆盖范围和仍未关闭的独立合同，以
   `GLOBAL-CLOSURE-TODO.zh.md` 的 2026-09-05 checkpoint 为准。
+
+## 2026-09-06 AgentPreset 收口补充
+
+本节记录 §15 在当前主机完成后的最终一期产品合同。它覆盖前述“仍待 Desktop
+人工验收”与旧资源绑定描述，但不提前声明 AP-7 已在 Git 上签署：
+
+- Agent 工作台、首页 Guid AgentPreset pill、`+` 返回工作台和“使用 Agent”预选已在
+  真实 Tauri Desktop 中闭环。普通 Nomi 保留模型选择器；AgentPreset 会话的模型由
+  冻结 Snapshot 持有，UI 不提供模型切换，公开 Conversation PATCH 也拒绝改写模型。
+- canonical `ResolvedSnapshotContent` 冻结 `required_resource_kinds` 并参与 Snapshot
+  digest。Conversation projection 直接保存该集合；桌面会话 Header 只按冻结声明提供
+  Knowledge/Workspace 等目标级资源入口，不再按 Capability ID 从当前 Catalog 猜测版本。
+- AgentPreset Revision/Snapshot 不保存具体资源实例。KnowledgeBase、Workspace 和后续
+  Connector 仍由 Session、伙伴或 Automation 等消费目标选择；不同会话互不继承。
+- `065_agent_preset_retirement.sql` 增加用户 Preset retirement tombstone；
+  `066_retire_resource_bound_presets.sql` 退役包含旧资源字段的 Preset 并删除活动
+  Agent/Remote Binding，同时保留 Revision、Snapshot 与历史 Session。当前 migration
+  head 为 66。
+- Cron 不拥有 AgentPreset store 或 Compiler。App 注入
+  `NomiCoreCronAgentPresetResolver` 实现 `CronAgentPresetResolver`，在任务持久化前解析
+  owner-scoped 稳定 Revision/Snapshot 并写入 `agent_config.agent_snapshot`；执行与重放
+  只使用冻结 Snapshot，不重新解析 latest Preset。model-only Cron 保持独立显式路径。
+- 当前验证结果为：UI `3211 passed`；App lib `405 passed / 1 ignored`；Conversation CRUD
+  `34 passed`；Cron E2E `34 passed`；Control Plane `16 passed`；Kernel `18 passed`；
+  AgentPlatform `16 passed`；API types `530 passed`；workspace check、UI build、i18n、
+  icons、dead CSS、Agent vocabulary、generated contract 均通过。真实 Tauri Desktop
+  验证了默认 Nomi、AgentPreset 选择/删除/能力三态、冻结模型和目标级资源；真实
+  StepFun Coding Plan `step-3.7-flash` smoke 输出
+  `live_smoke_status=pass code=OK status=200`。
+- 手机模式不属于 `nomifun-desktop` 本期服务与验收范围。AP-7 当前只剩把实现形成干净
+  提交、写入 `implementation_commit`、签署 evidence，并在签署提交上运行最终 Gate。
 
 ## 0. 本文的权威与执行方式
 
@@ -152,7 +184,7 @@
 以下工作仍有直接产品价值，可以保留或在新合同下继续：
 
 - 真实 Chat/Coding、文件、进程、VCS、Knowledge read、SSH、MCP、Browser、Computer owner；
-- 用户选择工作区、知识库和连接器的产品化 picker；
+- 在会话、伙伴和自动化目标中选择工作区、知识库和连接器；
 - Package/Capability ID、owner/resource binding、Secret 不泄漏和最小输入上限；
 - Runtime cooperative stop、timeout 后 whole process-tree hard kill；
 - 外部不可逆 Effect 的 idempotency identity 与 unknown-result no-retry；
@@ -345,10 +377,17 @@ Control Plane 只把 diagnostics 映射成产品 DTO，不再复制依赖解析�
 必须冻结：
 
 - 实际选中的 Capability/Provider/Package contribution；
-- 实际 Tool schema、Model Route 和 typed resource binding；
+- 实际 Tool schema 和 Model Route；
 - 当前需要的 Runtime protocol/features；
 - initial/on-demand 分组；
+- 能力声明的 required resource kinds（只记录资源种类，不记录资源实例）；
 - Snapshot 自身 digest。
+
+具体 Workspace、Knowledge、MCP/Connector 或其他资源实例属于消费目标的
+`AgentBinding`/target context。它们可以在 Session、伙伴或 Automation admission
+时注入执行上下文，但不进入 AgentPreset Revision，也不进入 ResolvedSnapshot
+digest。这样同一份 Agent 设计可以在不同会话中选择不同知识库，而不会改写或复制
+Preset/Snapshot。
 
 不再用以下全局事实决定旧 Session 是否可执行：
 
@@ -366,9 +405,12 @@ Control Plane 只把 diagnostics 映射成产品 DTO，不再复制依赖解析�
 
 - capability ref；
 - action allowlist；
-- resource binding refs。
 
-`required`、`exposure`、destination constraints、context/tool budget override、未传入 Handler 的 config 等字段在有真实执行语义前删除。Initial/on-demand 由所在集合表达。
+`resource_binding_refs`、具体 resource ID、operations、owner 和 typed parameters
+不得进入 CapabilitySelection。`required`、`exposure`、destination constraints、
+context/tool budget override、未传入 Handler 的 config 等字段在有真实执行语义前删除。
+Initial/on-demand 由所在集合表达；资源需求由 Capability manifest 的
+`required_resource_kinds` 表达。
 
 ### 5.4 删除重复和无人读取的数据库投影
 
@@ -401,7 +443,7 @@ Manifest 是声明事实源，Registration builder 从实际 handlers/services �
 
 必须保留：
 
-- 用户明确选择的 Workspace/Knowledge root；
+- 用户在具体消费目标中明确选择的 Workspace/Knowledge root；
 - canonicalize、root containment、拒绝 `..` 和明显越界；
 - 文件类型、单文件和总量上限；
 - 写入使用同目录临时文件 + rename；
@@ -454,7 +496,7 @@ SSH slice 保留：
 - source-neutral RoleProviderContribution；
 - installation default binding 与 Agent Revision override 机器字段；
 - ResolvedRoleProviderLock；
-- Agent Snapshot 与 non-Agent operation exact binding；
+- Agent Snapshot 与消费目标 target resource binding；
 - Tool、ContextContributor、ResourceProvider 所需的 typed runtime seam；
 - Kernel 第一次路由直接选择 Provider Mount；
 - Provider-specific platform/resource availability；
@@ -465,28 +507,32 @@ SSH slice 保留：
 
 ## 8. 产品体验止损
 
-后端 Revision、Snapshot、typed resource 和 digest 可以保留，但普通用户界面不再原样暴露这些概念。
+后端 Revision、Snapshot、target resource binding 和 digest 可以保留，但普通用户
+界面不再原样暴露这些概念。
 
 Agent 工作台的编辑视图默认只展示：
 
 - 名称与用途；
 - 模型选择；
-- 按用户任务分组的能力/能力包开关；
-- 工作区、知识库和连接器 picker；
+- 按用户任务分组的能力开关：关闭、启动即用、可按需申请；
+- 能力所声明的 required resource kinds；
 - 保存；
 - 试用 Agent。
 
 默认行为：
 
-- Initial/on-demand 由模板和 Capability metadata 自动决定；只在开发者模式覆盖；
-- binding ID、resource ID、operations、owner 和 typed parameters 由后台生成；
+- Initial/on-demand 由模板预置，用户可以在工作台显式调整；
+- 具体 resource binding 只在 Session、伙伴或 Automation 等消费目标中生成；
+- binding ID、resource ID、operations、owner 和 typed parameters 不进入 Preset 编辑器；
 - Save/Test 自动执行内部 Preview；不要求用户先点 Preview；
 - Test 只保留一个“试用 Agent”，打开普通真实 Session；
 - Revision、Snapshot、digest、protocol、raw Event/JSON 放入默认折叠的“技术详情/导出诊断”；
 - Snapshot 不兼容时显示“在新会话中继续”，后台执行显式 fork；
 - 删除提示只说删除内容且无法恢复，不列 Projection、checkpoint 等内部表。
 
-测试只覆盖主要用户流程：从模板创建、修改并保存、选择资源并试用、在新会话继续。删除读取源码字符串、固定组件存在、ASCII 分隔符和固定 `137` Capability 数量的结构测试。
+测试只覆盖主要用户流程：从模板创建、修改能力三态并保存、在 Session 中
+选择资源并试用、在新会话继续。删除读取源码字符串、固定组件存在、ASCII
+分隔符和固定 Capability 数量的结构测试。
 
 ## 9. 发布与测试策略止损
 
@@ -559,7 +605,7 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 | Commit/范围 | 处置 | 理由 |
 |---|---|---|
 | `3f835174` canonical Session services | 保留 | 单一 AgentPlatform/Session authority 是必要基础 |
-| `280841b3` Knowledge picker | 保留 | 直接改善用户体验，避免手填内部 ID/path |
+| `280841b3` Knowledge picker | 保留在会话/消费目标 | 直接改善用户体验，避免在 AgentPreset 中手填内部 ID/path |
 | `8aade375` VCS push owner | 保留真实 owner，forward 简化 journal/receipt | 已有用户功能和真实调用，不因附加复杂度删除主体 |
 | Knowledge search/read | 保留真实功能，forward 简化 anchored FS | 已有生产消费者；不继续扩大极端本机攻击保证 |
 | File/Process/VCS 现有真实 owner | 保留 | 属于 release-required 高频闭环 |
@@ -648,7 +694,7 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 
 ### S4：产品 UI
 
-- 普通 Agent 工作台只保留产品语言和 picker；
+- 普通 Agent 工作台只保留产品语言、能力三态和资源种类说明；
 - 技术 Inspector 默认隐藏；
 - 四条真实用户流程通过；
 - source-string structure tests 删除。
@@ -741,7 +787,9 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 6. Provider 缺失或不兼容时明确失败，不静默换回第一方实现；
 7. 用户未来可以看见实际执行的是哪个 Package、Mount、版本和 Artifact，而不是把第三方实现伪装成第一方实现。
 
-Role Binding 只回答“由谁实现”，不授予 Browser/Computer 能力。Agent 是否能够调用某个 member，仍由现有 Revision/Snapshot Capability selection、allowlist 和 typed resource binding 决定；选择 Provider 不能扩大 capability ceiling。
+Role Binding 只回答“由谁实现”，不授予 Browser/Computer 能力。Agent 是否能够调用
+某个 member，仍由 Revision/Snapshot Capability selection、allowlist 与当前消费目标
+的 resource binding 共同决定；选择 Provider 不能扩大 capability ceiling。
 
 一句话完成定义：
 
@@ -756,7 +804,7 @@ Role Binding 只回答“由谁实现”，不授予 Browser/Computer 能力。A
 - `browser.*` 与 `computer.*` 已拥有 canonical Capability ID；
 - Browser、Computer/A11y 已作为 bundled Package 进入普通 `PluginRegistration`；
 - Capability Materializer 和 Kernel Registry 已按 Capability ID 统一物化和调度；
-- Agent Revision、Resolved Snapshot、Capability allowlist 与 typed resource binding 已形成唯一主链；
+- Agent Revision、Resolved Snapshot、Capability allowlist 与 target resource binding 已形成唯一主链；
 - Browser 已有 owner/lane 生命周期模型，Computer 已有单物理桌面和全局串行模型。
 
 因此，本课题不是另起一套插件系统，而是把已经存在的 Capability 主链从“固定后端”改成“稳定 façade + 精确后端”。
@@ -772,7 +820,7 @@ Role Binding 只回答“由谁实现”，不授予 Browser/Computer 能力。A
 | legacy Knowledge URL 渲染已改为 typed `BrowserRenderContentPort`；旧 `BrowserFetcher -> Hub` 生产接线已删除，缺少 canonical port 时 fail-closed | `crates/backend/nomifun-knowledge/src/source_url.rs`、`service.rs`、`nomifun-app/src/services.rs` | Knowledge 不会暗中启动第一方 Chromium；完整 canonical Knowledge consumer 组合仍需后续主线接入 |
 | canonical `CapabilityManifest` 已改为 source-neutral；具体平台范围由选定 Provider member 声明 | `crates/backend/nomifun-agent-domain-wave2/src/lib.rs`、`nomifun-agent-domain-support/src/lib.rs` | Provider 解析前不再被第一方平台条件提前拒绝，仍需完成各 Provider 的真实原生验证 |
 | Materialized Registry 已有 `(ExecutionRoleId, PluginMountId)` Provider 平表和 typed exports | `crates/backend/nomifun-agent-kernel/src/materialize.rs`、`registry.rs` | non-Agent operation 仍需由实际业务消费者使用该 exact dispatch |
-| Resolved Snapshot 已冻结 Browser/Computer Provider lock、member 和 typed resource refs | `crates/backend/nomifun-agent-contracts/src/preset.rs`、`nomifun-agent-kernel/src/compiler.rs` | 旧 Session 的实现恢复边界已具备，仍需完成生产消费者迁移和不可用场景验收 |
+| Resolved Snapshot 已冻结 Browser/Computer Provider lock 和 member；Session target binding 独立持有资源实例 | `crates/backend/nomifun-agent-contracts/src/preset.rs`、`nomifun-agent-kernel/src/compiler.rs` | 旧 Session 的实现恢复边界已具备，且资源实例不会被写回 Preset/Snapshot |
 
 #### 2.3 如果全部留到二期会发生什么
 
@@ -1114,7 +1162,6 @@ struct ResolvedRoleProviderLock {
     provider: ExactRoleProviderRef,
     source: PluginSourceMetadata,
     supported_members: BTreeSet<CapabilityId>,
-    resource_binding_refs: Vec<ResourceBindingId>,
 }
 
 resolved_role_providers: BTreeMap<ExecutionRoleId, ResolvedRoleProviderLock>
@@ -1157,9 +1204,18 @@ Canonical Browser/Computer façade 不得硬编码第一方实现特有的资源
 - 未来 MCP Provider 可以要求 MCP server/connection binding；
 - 未来 Plugin Provider 可以只使用自身配置和 Credential，或声明其他 typed resource。
 
-Provider 在 materialization 时按 member 声明 resource kinds，Compiler 只为实际选择的 member 解析 exact binding refs，Dispatcher 只得到 Snapshot 或 non-Agent operation 已冻结的资源。不得把 Provider identity 或任意 JSON 配置塞进 `TypedResourceBinding.typed_parameters` 形成 stringly-typed 旁路。
+Provider 在 materialization 时按 member 声明 resource kinds。Preset Compiler 只冻结
+所选 member 的资源种类约束，不解析或保存具体 binding refs；Session、伙伴、
+Automation 或 non-Agent operation 在自己的 admission 中解析 target resource
+bindings，Dispatcher 只得到该目标已经校验的资源。不得把 Provider identity 或任意
+JSON 配置塞进 `TypedResourceBinding.typed_parameters` 形成 stringly-typed 旁路。
 
-Compiler/activation 只校验和冻结 resource binding refs，不得在 resolve、Session create 或 on-demand turn-boundary 仅因“可能会用”就启动 Browser、MCP 或其他 Provider。`ResourceProviderFactory` 只在首次真实 member 调用或 Context 组装确实需要时 lazy acquire，并登记现有 `ResourceHandle`，随 Session/non-Agent operation teardown 清理；Context factory 同样使用 frozen Provider Mount 的 context，不回到 façade Mount。
+Compiler/activation 只校验 required resource kinds 与当前 target bindings 的兼容性，
+不得把具体资源写回 Revision/Snapshot，也不得在 resolve、Session create 或
+on-demand turn-boundary 仅因“可能会用”就启动 Browser、MCP 或其他 Provider。
+`ResourceProviderFactory` 只在首次真实 member 调用或 Context 组装确实需要时 lazy
+acquire，并登记现有 `ResourceHandle`，随 Session/non-Agent operation teardown 清理；
+Context factory 同样使用 frozen Provider Mount 的 context，不回到 façade Mount。
 
 平台可用性属于具体 Provider，而不是 Role 的永久全局禁令。D-028 的 Headless Browser/Computer unavailable 继续约束一期 first-party 默认和首个 Stable；未来 Provider 若明确支持 Headless，可以在后续阶段通过自己的 `supported_platforms` 和原生 Gate 扩大产品能力，而不修改 Role Contract。
 
@@ -1174,7 +1230,7 @@ Tool 调用固定为：
 1. `KernelRegistry::invoke` 继续先对 canonical Capability 执行现有 ThinAuthority；
 2. 在选择 handler 时，根据 canonical Capability 找到 Role，并从传入的完整 `CompiledSnapshot` 读取 `ResolvedRoleProviderLock`；
 3. 在同一个 published Registry generation 的 `role_provider_index` 中找到 exact Provider member export；
-4. 使用 **Provider Mount** 的 config、state、service view 和 Snapshot resource bindings 构造 invocation context；
+4. 使用 **Provider Mount** 的 config、state、service view 和当前 target resource bindings 构造 invocation context；
 5. 保持原 canonical Capability ID、Action ID、Operation/Effect/Idempotency identity，只调用一次 Provider handler；
 6. 原样返回 canonical result 或 typed error，不查找第二个 Provider。
 
@@ -1394,7 +1450,7 @@ result；未来候选若包含 Codex Sidecar，再单独记录其真实 digest�
 | Contract | Role、Package/Mount Provider identity、digest、required/optional member、typed error exact-set |
 | Materializer | first-party 与 fixture 使用同一入口；duplicate Provider hard-fail；Capability ID 无抢占 |
 | Resolver | Revision override 优先、absence 继承 installation default；缺失/不兼容明确失败；source kind 和安装顺序不影响选择 |
-| Snapshot/Operation | exact Provider/contract/resource lock 进入 digest 或 operation context；执行中不重新 resolve latest |
+| Snapshot/Operation | exact Provider/contract lock 与 required resource kinds 进入 Snapshot；具体 target resource 只进入 operation/Session context；执行中不重新 resolve latest |
 | Dispatch | Tool、Context、Resource 都只读取同一 frozen Provider；使用 Provider Mount context；不产生 façade→Kernel 二次调用；无 fallback/retry |
 | Browser | owner/lane/profile/cancel/close 保持；`browser.*` 和 Knowledge `render_content` 全部经 exact route |
 | Computer | first-party 单桌面行为保持；两个 Provider 绑定同一 target fixture 时由 target arbiter 串行 |
@@ -1490,7 +1546,7 @@ AP-0～AP-7。
 | MiniApp / Active Release | MiniApp 产品域 | Surface、Release、Service、业务数据和发布生命周期 | Active Release 可贡献能力，但不属于 AgentPreset |
 | Capability Catalog | 平台能力目录域 | 物化已发布、可用、带 provenance 的平台能力合同 | 被多个消费者查询和解析 |
 | Skill Catalog | 平台技能目录域 | instruction、workflow 和资源说明 | Agent 可选择，Skill 不成为执行器 |
-| AgentPreset | Agent authoring 域 | 描述一个 Agent 想使用的能力集合和行为 | 是一个消费者声明，不拥有 Capability |
+| AgentPreset | Agent authoring 域 | 描述一个 Agent 想使用的能力集合、能力模式和行为 | 是一个消费者声明，不拥有 Capability 或资源实例 |
 | AgentPresetRevision | Agent authoring 域 | 保存一次不可变的用户设计结果 | 由 Compiler 生成 ContributionLock |
 | ResolvedSnapshot | 执行解析域 | 锁定一次实际执行闭包和精确来源 | 被 Session、Binding 或一次性操作消费 |
 | AgentSession / AgentBinding | Agent 运行域 | 承载会话、Remote、Automation 等 Agent 使用关系 | 消费 Revision/Snapshot，不反向修改它 |
@@ -1501,7 +1557,7 @@ AP-0～AP-7。
 1. Capability 的语义 owning domain 是平台 Package、Plugin、MiniApp 或业务域；Capability Catalog 只负责物化索引和可用性视图，不接管能力语义；AgentPreset 不拥有 Capability。
 2. 同一个 Capability 可以同时服务 Agent、Gateway/Remote、UI/业务域、Automation、MiniApp/Service 或其他正式平台入口。
 3. 某项 Capability 也可以完全不支持 `agent` Surface；Agent 可选性不是平台能力成立的必要条件。
-4. Plugin/MiniApp 的安装、替换、发布、Credential、KV、`dataDir` 和 Service 生命周期由各自产品管理；AgentPreset 只保存 typed reference。
+4. Plugin/MiniApp 的安装、替换、发布、Credential、KV、`dataDir` 和 Service 生命周期由各自产品管理；AgentPreset 只声明可使用的能力和 required resource kinds。
 5. Agent 工作台可以显示能力来源和可用性，但不接管 Plugin/MiniApp 管理。
 6. Runtime 的选择、下载、Host 重建和进程诊断属于系统基础设施设置；它不再以“Agent 设定”的形式出现，也不能被 Agent Revision 自行选择或 fallback。
 
@@ -1554,7 +1610,7 @@ Catalog 的“已物化”与“对某消费者可用”必须分开：同一贡
 
 #### 15.3.1 用户可编辑内容
 
-Agent 工作台只允许用户编辑产品语义和 typed 选择：
+Agent 工作台只允许用户编辑产品语义和能力边界：
 
 ```text
 identity
@@ -1563,7 +1619,7 @@ model route
 selected capabilities
 selected skills
 selected MCP capabilities
-typed resource defaults / overrides
+required resource kinds（由所选 Capability 自动汇总展示）
 starter prompts
 ```
 
@@ -1571,9 +1627,13 @@ starter prompts
 
 - `selected capabilities` 使用 Catalog 中的能力引用和实际 action allowlist；用户不填写 Package、Mount 或 Artifact；
 - `selected MCP capabilities` 指向已物化、已绑定、带 schema/provenance 的 MCP 能力，不接受裸 MCP tool JSON；
-- `typed resource defaults / overrides` 只表达工作区、知识库、连接器等正式资源绑定，不保存 Secret 明文或 Plugin 私有数据路径；
+- `required resource kinds` 只表达能力运行所需的资源种类，不绑定具体 Workspace、Knowledge、MCP/Connector 实例，也不保存 Secret 明文、路径或 Plugin 私有数据；
 - 如果同一 canonical 能力存在多个合法实现，用户只能通过能力详情中的显式“实现来源”高级动作选择，后台由 application service 生成锁；不增加第二个“运行时 Agent 设定”对象；
 - 保存和试用都调用同一个 canonical Compiler，前端不自行拼 Snapshot。
+
+`AgentPresetRevisionPayload` 不得包含 `resource_bindings` 或
+`resource_binding_refs`。具体资源只由消费目标在创建/更新 Session、伙伴或
+Automation Binding 时选择；同一 Preset 可以在不同目标绑定不同资源。
 
 #### 15.3.2 系统生成内容
 
@@ -1630,7 +1690,8 @@ ContributionLock {
 - 每个选中的 Capability/Skill 的来源和合同事实（Skill 仍是 instruction/workflow，不成为执行器）；
 - exact Package/Plugin target 或 MiniApp Release version/digest；
 - Tool schema、Context/Resource implementation 和 MCP schema digest；
-- Model Route、typed resource binding 和所需 Runtime features；
+- Model Route、required resource kinds 和所需 Runtime features；
+- 消费目标在 admission 时注入的 target resource bindings（不属于 Snapshot 身份）；
 - initial/on-demand 分组及其他真实执行闭包；
 - Snapshot digest 和 provenance。
 
@@ -1650,17 +1711,17 @@ canonical Compiler 的步骤固定为：
 
 ```text
 normalize user payload
-  → validate catalog capability/skill/resource references
+  → validate catalog capability/skill references and required resource kinds
   → resolve default or explicitly requested implementation source
   → generate ContributionLock[]
-  → materialize exact capability closure and typed resources
+  → materialize exact capability closure without concrete target resources
   → calculate revision/snapshot digest and diagnostics
   → persist immutable Revision or return fail-closed diagnostics
 ```
 
 Compiler 必须满足以下不变量：
 
-1. 同一规范化输入、同一 Catalog generation 和同一资源事实产生同一 Revision/Snapshot 结果；
+1. 同一规范化输入、同一 Catalog generation 产生同一 Revision/Snapshot 结果；
 2. 未发布、不可用、合同不匹配或 owner 不允许的贡献不能被编译成成功结果；
 3. Compiler 不安装 Package、不启动 Plugin/MiniApp、不修改 Credential/Runtime，也不自行授予授权；
 4. 任何未知字段、未知来源、未知合同或无法比较的变化都 fail closed；
@@ -1696,7 +1757,7 @@ Runtime、Plugin Config、Credential、KV、Files、MiniApp DB 和发布授权�
 | 轻量 | 零工具、零外部能力的轻量对话 | 基础身份、指令和模型路由 | 不隐式加入 Workspace、MCP、Plugin 或 MiniApp 能力 |
 | 通用 | 官方通用任务能力 | 官方维护的常用 Capability/Skill 种子 | 不自动吸收用户已安装的全部扩展 |
 | 全面 | 完整 Coding/工作台基线 | 文件、进程、VCS、Workspace 等官方 Coding 能力 | 不因名称“全面”而自动安装或纳入所有 Plugin/MiniApp |
-| 自定义 | 用户明确组合 | 空白或可选种子 + 能力/技能/资源 picker | 不允许用户直接填写内部 ID、Digest 或运行时参数 |
+| 自定义 | 用户明确组合 | 空白或可选种子 + 能力/技能选择 | 不允许用户直接填写内部 ID、Digest、资源实例或运行时参数 |
 
 四种模式不是四种 Agent 类型，也不是四张并行数据库表。创建后的 Agent 统一落到 `AgentPreset → AgentPresetRevision → Snapshot` 主链。
 
@@ -1715,24 +1776,30 @@ Agent 工作台的最短用户路径应为：
 首页侧边栏 Agent 工作台（公共路由 `/agent`）
   → 新建 Agent
   → 选择轻量 / 通用 / 全面 / 自定义
-  → 编辑身份、指令、模型、能力、技能和资源
+  → 编辑身份、指令、模型、能力三态和技能
+  → 查看能力需要的资源种类
   → 查看能力来源与可用性
   → 保存
   → “使用 Agent”进入首页 Guid 并预选该 AgentPreset
   → 创建新会话
+  → 在会话中选择具体工作区、知识库或连接器
 ```
 
 首页侧边栏明确显示“Agent 工作台”，不再只显示“Agent”或使用“设定”作为入口；通用系统设置（例如 Runtime、网络或外观）仍可由全局设置入口提供，但不与 Agent 工作台共用名称、页面或数据模型。
 
 首页 Guid composer 上方的 pill bar 是标准 AgentPreset 启动选择器：它只列出当前用户已保存且具有稳定 Revision 的可执行 AgentPreset；选择 pill 会改变后续 Session 的 `preset_id`，`+` 打开 `/agent`。工作台“使用 Agent”进入 Guid 时必须预选对应 Preset。execution engine、Runtime 或模型不能作为产品 Agent 出现在该列表中。
 
-普通 Guid 不是第二个 Agent 编辑器。模型、Skills、MCP、Knowledge、Workspace 与其他 typed resources 由选中 AgentPreset 的稳定 Revision 决定；普通 Guid 不再提供覆盖这些内容的第二套控件。会话级附件、消息以及明确属于会话的 AutoWork/IDMM/summon 状态可以继续保留。
+普通 Guid 不是第二个 Agent 编辑器。模型、能力模式、Skills 和已声明的 MCP
+Capability 由选中 AgentPreset 的稳定 Revision 决定；具体 Knowledge、Workspace、
+MCP/Connector 实例由当前会话或其他消费目标在自己的绑定交互中选择。普通 Guid
+不再提供第二套能力覆盖控件，但必须提供已声明资源的目标级选择入口。会话级附件、
+消息以及明确属于会话的 AutoWork/IDMM/summon 状态可以继续保留。
 
 页面只需要展示：
 
 - Agent 名称、用途和当前模式种子；
-- 按任务分组的能力和技能 picker；
-- 工作区、知识库、MCP 连接和其他连接器等 typed resource picker；
+- 按任务分组的能力三态和技能选择；
+- 所选能力汇总出的 required resource kinds；
 - 模型路由和 starter prompts；
 - 能力来源、版本状态、缺失原因和影响提示；
 - 保存、试用、复制/Fork、删除等用户动作。
@@ -1743,7 +1810,9 @@ Agent 工作台的最短用户路径应为：
 - Package/Mount/Release provenance；
 - Runtime protocol、Host generation 和内部错误上下文。
 
-不可用能力必须在工作台中显示为可解释状态，并提供“补充资源”“启用来源”“复制为新 Revision”或“在新会话继续”等明确动作；不得用空能力、第一方 fallback 或静默降级制造成功感。
+不可用能力必须在工作台中显示为可解释状态，并提供“启用来源”“移除能力”
+或“复制为新 Revision”等明确动作；具体资源缺失应在消费目标中提示并允许补充，
+不得用空能力、第一方 fallback 或静默降级制造成功感。
 
 ### 15.6 Agent 与非 Agent 消费者的统一执行边界
 
@@ -1771,7 +1840,8 @@ Gateway、Remote、Automation、UI/业务域和 MiniApp Service 不需要伪造�
 1. AgentSession 只属于 Agent 对话和明确的 Agent 运行场景；
 2. 一次性 Gateway、Knowledge、Automation 或 MiniApp 操作可以没有 Session，但必须记录自己的 exact lock；
 3. 消费者不得直接引用 Plugin/Browser/Computer 的具体实现；
-4. AgentPreset 不拥有 Knowledge、Browser、Plugin、MiniApp 业务数据，只绑定正式资源；
+4. AgentPreset 不拥有 Knowledge、Browser、Plugin、MiniApp 业务数据，也不绑定资源实例；
+   消费目标的 AgentBinding 才持有该目标选中的资源；
 5. Capability 缺失、合同变化、Credential/Resource 不可用时返回 typed failure，不能由消费者各自实现 fallback。
 
 ### 15.7 Plugin/MiniApp 变化对 Agent 的影响
@@ -1821,7 +1891,12 @@ API 保留 `agent-presets` 作为稳定机器资源名，不代表 UI 必须显�
 }
 ```
 
-服务端按 authenticated owner 读取该 Preset 的 `current_stable_revision`、对应的持久化 Revision/Snapshot 与 typed resources，构造冻结 AgentBinding 后创建 Session。客户端提交 `agent_binding`、model、Skills、MCP、Knowledge、Workspace、Revision 或 Snapshot 必须被拒绝；缺少稳定 Revision、Snapshot 不一致或 owner 不匹配必须 typed fail，不允许 fallback。
+服务端按 authenticated owner 读取该 Preset 的 `current_stable_revision` 和对应的
+持久化 Revision/Snapshot，构造不带具体资源的 AgentBinding 后创建 Session。
+Workspace、Knowledge、MCP/Connector 等目标资源在 Session 创建后的目标级交互中
+绑定，并只影响该目标。客户端提交 `agent_binding`、model、Skills、MCP、
+Knowledge、Workspace、Revision 或 Snapshot 作为 Session 创建请求字段必须被拒绝；
+缺少稳定 Revision、Snapshot 不一致或 owner 不匹配必须 typed fail，不允许 fallback。
 
 在 AP-6 中必须删除而不是保留兼容别名的旧形态：
 
@@ -1853,7 +1928,7 @@ Fresh-v4 采用 clean cut：
 | Generated inventory | `crates/backend/nomifun-agent-contracts/contracts/generated/*`、`contracts/presets/*` | 重新生成 Agent API、template API、禁止旧路由和 schema inventory |
 | Compiler/Control Plane | `crates/backend/nomifun-agent-control-plane/src/compiler.rs`、`service.rs`、`routes.rs` | 统一 Preview/Save/Test/Session application service，不让前端拼 Snapshot |
 | Platform/Session | `crates/backend/nomifun-agent-platform/src/platform.rs`、`crates/backend/nomifun-agent-session/src/*`、`crates/backend/nomifun-v4-root/src/database.rs` | 接入唯一 Revision/Snapshot/Binding/Session 主链，删除重复投影 |
-| 新 Agent UI | `ui/src/renderer/pages/agentSettings/*`、`ui/src/renderer/pages/agentSession/CanonicalAgentRoutes.tsx`、`ui/src/renderer/components/layout/Router.tsx` | 挪到公共 `/agent`，保留产品语言和 picker，技术详情折叠 |
+| 新 Agent UI | `ui/src/renderer/pages/agentSettings/*`、`ui/src/renderer/pages/agentSession/CanonicalAgentRoutes.tsx`、`ui/src/renderer/components/layout/Router.tsx` | 挪到公共 `/agent`，保留能力三态、资源种类说明和折叠技术详情；具体资源 picker 放在消费目标 |
 | 旧 Agent UI 入口 | `ui/src/renderer/pages/settings/PresetSettings/*`、`ui/src/renderer/pages/settings/AgentSettings/*`、`ui/src/renderer/components/settings/SettingsModal/contents/AgentModalContent.tsx` | 从 Settings/Modal 删除 Agent authoring surface；`/presets`、`/settings/agent-presets`、`/settings/agent` 只做限期迁移跳转 |
 | 旧 Preset 主链 | `crates/backend/nomifun-preset/*`、`crates/backend/nomifun-agent-execution/*`、Guid/Conversation/Cron/Companion/Creative Studio/Extension/Gateway 等消费者 | 逐个迁移到 Agent application service 后删除旧路由、服务、DTO 和 fallback |
 
@@ -1893,9 +1968,11 @@ Fresh-v4 采用 clean cut：
 
 - `AgentPresetRevisionPayload` 的 canonical schema；
 - 系统生成的 `ContributionLock`、Revision digest 和 Snapshot envelope；
-- Revision digest 覆盖 payload 与 ContributionLock，Snapshot digest 覆盖实际执行闭包；
+- Revision digest 覆盖 payload 与 ContributionLock，Snapshot digest 覆盖实际执行闭包、
+  精确模型和 `required_resource_kinds`；
 - Preview、Save、Test、Session Open 共用一个纯函数 Compiler；
-- typed resource binding、MCP schema/provenance 和 Role Provider lock 接入同一解析边界；
+- target resource binding、MCP schema/provenance 和 Role Provider lock 接入各自的消费解析边界；
+- AgentPreset Revision/Snapshot 不冻结具体 resource ID、binding ref 或路径；
 - 删除未被真实消费者读取的 `required/exposure/destination_constraints/context_budget_override/tool_budget_override/config` 等旧选择字段、重复的 preset capability/model/skill 子表和 raw JSON runtime knobs；保留的字段必须有明确执行语义；
 - 禁止字段清单和未知字段 fail-closed 校验。
 
@@ -1907,7 +1984,7 @@ Fresh-v4 采用 clean cut：
 
 - 轻量、通用、全面、自定义四个创建模板；
 - 模式只是 seed，不产生四种持久化类型；
-- 侧边栏“Agent 工作台”一级入口 `/agent`、首页 Guid AgentPreset pill selector、`+` 返回工作台、工作台“使用 Agent”预选 Guid，以及能力/技能/资源 picker、来源状态、保存和试用流程；
+- 侧边栏“Agent 工作台”一级入口 `/agent`、首页 Guid AgentPreset pill selector、`+` 返回工作台、工作台“使用 Agent”预选 Guid，以及能力三态、能力明细、来源状态、保存、试用和消费目标资源选择流程；
 - 从 `settings/AgentSettings`、`SettingsModal` 和 `/settings/agent-presets` 中移除 Agent authoring surface；旧深层链接最多保留一次性迁移跳转，不形成长期第二入口；
 - 模式转换的显式 diff/确认和模板更新不漂移既有 Revision；
 - 技术 Inspector 与产品编辑表单分离。
@@ -1922,9 +1999,13 @@ Fresh-v4 采用 clean cut：
 - 有 Session 与无 Session 的 exact lock 两条清晰调用路径；
 - 前端不提交内部执行锁，后端负责生成 Revision/Snapshot/OperationLock；
 - 标准 Session 创建只接受 `preset_id` 与可选 `title`，服务端从当前稳定 Revision 和持久化 Snapshot 构造冻结 Binding；
+- Preset-backed Session 的顶层模型由 Snapshot 冻结；会话 UI 不提供模型切换，公开
+  Conversation PATCH 不得改写该模型。普通 Nomi 会话继续保留显式模型选择；
 - 真实消费者的高层 API 和 typed failure。
 
-通过条件：至少一个真实 Agent 流程和一个真实非 Agent 流程通过同一 Capability materialization；消费者代码不认识具体 Plugin/MiniApp implementation。
+通过条件：至少一个真实 Agent 流程和一个真实非 Agent 流程通过同一 Capability
+materialization；消费者代码不认识具体 Plugin/MiniApp implementation；已创建
+AgentPreset Session 的模型与资源种类不会被当前 Catalog 或普通会话设置漂移。
 
 #### AP-5：来源、生命周期和影响处理
 
@@ -1946,6 +2027,9 @@ Fresh-v4 采用 clean cut：
 - Fresh-v4 schema、generated inventory、主导航和代码引用同步更新；bootstrap 只 seed 官方模板，Revision 使用 `payload_json` 与 ContributionLock，不访问旧 preset projection 表；
 - 删除设置页中的 Agent authoring 入口和 `SettingsModal` 内的 Agent 入口；`/presets`、`/settings/agent-presets`、`/settings/agent` 只允许有明确期限的一次性迁移跳转，完成迁移后必须移除；`/settings/execution-engines` 只保留 Runtime Manager，不再承载 Agent authoring；
 - 保留官方 `agent_preset_templates` 只读 seed catalog，移除 Package-owned template/source 分支；删除 `AgentPresetSource::Package` 和重复的 preset capability/model/skill/resource projection；
+- 使用 `065_agent_preset_retirement.sql` 关闭用户 Preset 新 admission；使用
+  `066_retire_resource_bound_presets.sql` 一次性退役旧资源绑定 Preset 并清理活动
+  Binding，同时保留不可变 Revision/Snapshot/Session 历史；
 - v3 数据归档/清理说明和必要的显式导出入口。
 
 通过条件：生产路由、应用服务、数据库读写和前端入口中旧 Preset 主链为 0；新 Agent 主链不依赖旧数据猜测或隐式转换。

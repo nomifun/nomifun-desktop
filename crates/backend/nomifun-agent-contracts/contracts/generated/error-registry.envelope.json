@@ -4,6 +4,14 @@
     "registry_version": "canonical-errors-v1",
     "entries": [
       {
+        "code": "AGENT_PRESET_NOT_FOUND",
+        "version": 1,
+        "class": "resource",
+        "retry": "never",
+        "terminal_scope": "request",
+        "http_status": 404
+      },
+      {
         "code": "SESSION_DELETED",
         "version": 1,
         "class": "session",
@@ -301,5 +309,5 @@
       }
     ]
   },
-  "payload_digest": "407818c56712956e541a4e1a4d07ee3d308d98524abf04f47edc612a9b1b26d8"
+  "payload_digest": "fe64ac21087f7c86594f0c9ccd1158e3b97616288e3d0cf295d376276f99d62c"
 }

@@ -118,6 +118,12 @@ const installFetchRecorder = (): FetchCall[] => {
     ) {
       return jsonResponse(conversationProjection(PRESET_CONVERSATION_ID));
     }
+    if (
+      method === 'PATCH' &&
+      url.endsWith(`/api/conversations/${PRESET_CONVERSATION_ID}`)
+    ) {
+      return jsonResponse(conversationProjection(PRESET_CONVERSATION_ID));
+    }
 
     throw new Error(`Unexpected request: ${method} ${url}`);
   }) as typeof fetch;
@@ -133,6 +139,8 @@ const createDeps = ({
   currentModel,
   input = INPUT,
   loading = false,
+  workspaceEnabled = true,
+  resourceResolutionReady = true,
   navigations = [],
 }: {
   selection: GuidAgentSelection;
@@ -140,6 +148,8 @@ const createDeps = ({
   currentModel?: TProviderWithModel;
   input?: string;
   loading?: boolean;
+  workspaceEnabled?: boolean;
+  resourceResolutionReady?: boolean;
   navigations?: string[];
 }): GuidSendDeps => ({
   input,
@@ -153,6 +163,8 @@ const createDeps = ({
   selection,
   selectedPreset,
   current_model: currentModel,
+  workspaceEnabled,
+  resourceResolutionReady,
   autoWork: { enabled: false },
   setMentionOpen: noopDispatch<boolean>(),
   setMentionQuery: noopDispatch<string | null>(),
@@ -257,7 +269,7 @@ describe('useGuidSend HTTP behavior', () => {
       await hook.result.current.handleSend();
     });
 
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(4);
     expect(calls[0]).toEqual({
       method: 'POST',
       url: '/api/agent-sessions',
@@ -274,6 +286,20 @@ describe('useGuidSend HTTP behavior', () => {
       url: `/api/conversations/${PRESET_CONVERSATION_ID}`,
       body: undefined,
     });
+    expect(calls[2]).toEqual({
+      method: 'PATCH',
+      url: `/api/conversations/${PRESET_CONVERSATION_ID}`,
+      body: {
+        extra: {
+          workspace: WORKSPACE,
+        },
+      },
+    });
+    expect(calls[3]).toEqual({
+      method: 'GET',
+      url: `/api/conversations/${PRESET_CONVERSATION_ID}`,
+      body: undefined,
+    });
     expect(readOnlyHandoff()).toMatchObject({
       conversation_id: parseConversationId(PRESET_CONVERSATION_ID),
       input: INPUT,
@@ -283,6 +309,50 @@ describe('useGuidSend HTTP behavior', () => {
     expect(navigations).toEqual([
       `/conversation/${PRESET_CONVERSATION_ID}`,
     ]);
+  });
+
+  test('preset mode does not submit a workspace that the selected capabilities do not allow', async () => {
+    resetBrowserStorage();
+    const calls = installFetchRecorder();
+    const navigations: string[] = [];
+    const hook = renderHook(() =>
+      useGuidSend(
+        createDeps({
+          selection: { kind: 'preset', presetId: PRESET_ID },
+          selectedPreset: PRESET,
+          workspaceEnabled: false,
+          navigations,
+        })
+      )
+    );
+
+    await act(async () => {
+      await hook.result.current.handleSend();
+    });
+
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      'POST /api/agent-sessions',
+      `GET /api/conversations/${PRESET_CONVERSATION_ID}`,
+    ]);
+    expect(calls.some((call) => call.method === 'PATCH')).toBe(false);
+    expect(navigations).toEqual([
+      `/conversation/${PRESET_CONVERSATION_ID}`,
+    ]);
+  });
+
+  test('preset mode remains disabled until exact capability resource resolution completes', () => {
+    resetBrowserStorage();
+    const hook = renderHook(() =>
+      useGuidSend(
+        createDeps({
+          selection: { kind: 'preset', presetId: PRESET_ID },
+          selectedPreset: PRESET,
+          resourceResolutionReady: false,
+        })
+      )
+    );
+
+    expect(hook.result.current.isButtonDisabled).toBe(true);
   });
 
   test('disables only when the active mode lacks its own launch target', () => {

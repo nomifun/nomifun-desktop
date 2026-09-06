@@ -448,6 +448,14 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
       if (!preset) {
         throw new Error(t('cron.page.form.removedPresetRequired'));
       }
+      const supportsCron = Boolean(preset.current_stable_revision);
+      if (!supportsCron) {
+        throw new Error(
+          t('cron.page.form.presetCronUnavailable', {
+            defaultValue: 'This Agent has no saved revision that can run yet.',
+          })
+        );
+      }
       resolvedAgentType = 'nomi';
       agent_config = {
         name: preset.display_name,
@@ -630,6 +638,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           } else if (selection?.kind === 'preset') {
             const preset = agentPresets.find((item) => item.preset_id === selection.id);
             if (preset) {
+              const supportsCron = Boolean(preset.current_stable_revision);
               const frozenName =
                 editJob?.metadata.agent_config?.preset_id === preset.preset_id
                   ? editJob.metadata.agent_config.name
@@ -638,6 +647,13 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
                 <CronPresetOptionIdentity
                   preset={preset}
                   nameOverride={frozenName}
+                  statusLabel={
+                    supportsCron
+                      ? undefined
+                      : t('cron.page.form.presetCronUnavailable', {
+                          defaultValue: 'No saved revision',
+                        })
+                  }
                   compact
                 />
               );
@@ -714,14 +730,24 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
               </Option>
             )}
             {agentPresets.map((preset) => {
+              const supportsCron = Boolean(preset.current_stable_revision);
               const optionValue = getCronPresetOptionValue(preset.preset_id);
               return (
                 <Option
                   key={optionValue}
                   value={optionValue}
+                  disabled={!supportsCron}
+                  aria-disabled={!supportsCron || undefined}
                 >
                   <CronPresetOptionIdentity
                     preset={preset}
+                    statusLabel={
+                      supportsCron
+                        ? undefined
+                        : t('cron.page.form.presetCronUnavailable', {
+                            defaultValue: 'No saved revision',
+                          })
+                    }
                   />
                 </Option>
               );

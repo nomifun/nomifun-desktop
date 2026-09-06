@@ -9,6 +9,7 @@ import type {
   AgentPresetId,
   AgentResolvedSnapshot,
 } from '@/common/types/agentPlatform';
+import { getAgentLogo } from '@/renderer/utils/model/agentLogo';
 import { useMemo } from 'react';
 
 export interface AgentInfo {
@@ -60,6 +61,9 @@ export function useAgentInfo(conversation: TChatConversation | undefined): {
       info: {
         preset_id: presetId,
         name: resolveAgentDisplayName(conversation, snapshot),
+        logo:
+          getAgentLogo(snapshot.resolved_agent_backend || conversation.type) ??
+          undefined,
         isEmoji: false,
         revision: snapshot.preset_revision,
       },

@@ -4,8 +4,19 @@ import type {
   OfficialPresetKey,
   OfficialPresetTemplate,
 } from '@/common/types/agentPlatform';
-import { Button, Empty, Tooltip } from '@arco-design/web-react';
-import { AddOne, Code, Customer, Edit, Magic, MessageOne, Robot, User } from '@icon-park/react';
+import { Button, Empty, Popconfirm, Tooltip } from '@arco-design/web-react';
+import {
+  AddOne,
+  Code,
+  Customer,
+  Delete,
+  Edit,
+  Loading,
+  Magic,
+  MessageOne,
+  Robot,
+  User,
+} from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { TEMPLATE_I18N_PATH, templateCapabilityCount } from './model';
@@ -20,9 +31,13 @@ type AgentPresetLibraryProps = {
   library: AgentPresetLibraryResponse;
   selection: Selection;
   busy: boolean;
+  creating: boolean;
+  openingPresetId: string | null;
+  deletingPresetId: string | null;
   onSelectTemplate: (template: OfficialPresetTemplate) => void;
   onSelectPreset: (preset: AgentPresetSummary) => void;
   onCreatePreset: (displayName: string) => void;
+  onDeletePreset: (preset: AgentPresetSummary) => void | Promise<void>;
 };
 
 const templateIcon = (key: OfficialPresetKey): React.ReactNode => {
@@ -48,9 +63,13 @@ const AgentPresetLibrary: React.FC<AgentPresetLibraryProps> = ({
   library,
   selection,
   busy,
+  creating,
+  openingPresetId,
+  deletingPresetId,
   onSelectTemplate,
   onSelectPreset,
   onCreatePreset,
+  onDeletePreset,
 }) => {
   const { t } = useTranslation();
   const createLabel = t('agentSettings.actions.create');
@@ -66,7 +85,8 @@ const AgentPresetLibrary: React.FC<AgentPresetLibraryProps> = ({
             type='primary'
             size='small'
             icon={<AddOne theme='outline' size='15' />}
-            loading={busy}
+            loading={creating}
+            disabled={busy}
             onClick={() => onCreatePreset(t('agentSettings.defaults.untitledName'))}
           >
             {createLabel}
@@ -94,6 +114,7 @@ const AgentPresetLibrary: React.FC<AgentPresetLibraryProps> = ({
                 <button
                   type='button'
                   className={`${styles.librarySelect} ${styles.librarySelectFull}`}
+                  disabled={busy}
                   onClick={() => onSelectTemplate(template)}
                 >
                   <span className={styles.libraryIcon}>{templateIcon(template.template_key)}</span>
@@ -123,7 +144,9 @@ const AgentPresetLibrary: React.FC<AgentPresetLibraryProps> = ({
           <div className={styles.libraryList}>
             {library.user_presets.map((preset) => {
               const selected =
-                selection?.kind === 'preset' && selection.preset.preset_id === preset.preset_id;
+                (selection?.kind === 'preset' &&
+                  selection.preset.preset_id === preset.preset_id) ||
+                openingPresetId === preset.preset_id;
               return (
                 <div
                   key={preset.preset_id}
@@ -131,11 +154,21 @@ const AgentPresetLibrary: React.FC<AgentPresetLibraryProps> = ({
                 >
                   <button
                     type='button'
-                    className={`${styles.librarySelect} ${styles.librarySelectFull}`}
+                    className={styles.librarySelect}
+                    disabled={busy}
+                    aria-busy={openingPresetId === preset.preset_id}
                     onClick={() => onSelectPreset(preset)}
                   >
                     <span className={styles.libraryIcon}>
-                      <Edit theme='outline' size='17' />
+                      {openingPresetId === preset.preset_id ? (
+                        <Loading
+                          theme='outline'
+                          size='17'
+                          className='animate-spin'
+                        />
+                      ) : (
+                        <Edit theme='outline' size='17' />
+                      )}
                     </span>
                     <span className={styles.libraryCopy}>
                       <span className={styles.libraryName}>{preset.display_name}</span>
@@ -144,6 +177,31 @@ const AgentPresetLibrary: React.FC<AgentPresetLibraryProps> = ({
                       )}
                     </span>
                   </button>
+                  <Popconfirm
+                      title={t('agentSettings.library.deleteConfirmTitle', {
+                        name: preset.display_name,
+                      })}
+                      content={t('agentSettings.library.deleteConfirmBody')}
+                      okText={t('agentSettings.actions.delete')}
+                      cancelText={t('common.cancel')}
+                      disabled={busy}
+                      okButtonProps={{ status: 'danger' }}
+                      onOk={() => onDeletePreset(preset)}
+                    >
+                      <Button
+                        type='text'
+                        status='danger'
+                        size='mini'
+                        className={styles.rowAction}
+                        aria-label={t('agentSettings.library.deleteAria', {
+                          name: preset.display_name,
+                        })}
+                        title={t('agentSettings.actions.delete')}
+                        icon={<Delete theme='outline' size='14' />}
+                        loading={deletingPresetId === preset.preset_id}
+                        disabled={busy}
+                      />
+                    </Popconfirm>
                 </div>
               );
             })}

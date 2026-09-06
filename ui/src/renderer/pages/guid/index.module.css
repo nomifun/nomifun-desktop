@@ -1006,6 +1006,10 @@ button.guidResourceCard:focus-visible {
   gap: 12px;
 }
 
+.guidPresetCapabilityError {
+  margin-bottom: 12px;
+}
+
 @media (max-width: 768px) {
   .guidAdvancedControls {
     display: none;

@@ -6,29 +6,19 @@
 //! understands.  It must not be used as an authority to persist a binding or
 //! to start a Remote lifecycle.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use nomifun_agent_contracts::{
-    AgentBindingValue, AgentPresetRevision, AgentPresetRevisionPayload, ChatRouteIdentity,
-    ChatRouteRecord, PresetRevisionRef, ResolvedSnapshotEnvelope, TypedResourceBinding,
+    AgentBindingValue, AgentPresetRevision, ChatRouteIdentity, ChatRouteRecord,
+    ResolvedSnapshotEnvelope,
 };
 use nomifun_api_types::{
-    AgentBindingValueDto, AgentKnowledgePolicy, AgentPresetEditorResponse, AgentResolvedSnapshot,
-    CreateConversationRequest, ExecutionModelRef, KnowledgeMountInfo, PreviewStatusDto,
-    ResolveAgentPresetPreviewResponse,
+    AgentKnowledgePolicy, AgentResolvedSnapshot, CreateConversationRequest, ExecutionModelRef,
 };
-use nomifun_common::{AgentType, AppError, ProviderWithModel, UserId, validate_uuidv7};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use serde_json::{Value, json};
+use nomifun_common::{AgentType, AppError, ProviderWithModel, UserId};
+use serde_json::json;
 
 const CHAT_TASK: &str = nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT;
-const WORKSPACE_KIND: &str = "workspace";
-const WORKSPACE_ROOT: &str = "workspace_root";
-const PROCESS_SESSION_KIND: &str = "process_session";
-const KNOWLEDGE_KIND: &str = "knowledge_base";
-const MCP_KIND: &str = "mcp_server";
-
 /// Inputs to [`project`].  All four values must come from the same
 /// authenticated, persisted control-plane read.
 #[derive(Debug, Clone, Copy)]
@@ -49,97 +39,36 @@ pub struct NomiCoreAgentProjection {
     pub request: CreateConversationRequest,
 }
 
-/// Exact control-plane inputs required by the app-local Nomi-core adapter.
-///
-/// The control-plane repository remains behind `AgentControlPlane`; callers
-/// must first load the editor revision and its saved-revision preview under the
-/// authenticated owner.  This prevents the adapter from resolving a newer
-/// revision or silently selecting a default resource.
-#[derive(Debug, Clone, Copy)]
-pub struct SavedBindingProjectionInput<'a> {
-    pub owner: &'a UserId,
-    pub binding: &'a AgentBindingValueDto,
-    pub editor: &'a AgentPresetEditorResponse,
-    pub preview: &'a ResolveAgentPresetPreviewResponse,
-    pub title: Option<&'a str>,
-}
-
 #[derive(Debug)]
 pub struct NomiCoreSavedBindingProjection {
     pub binding: AgentBindingValue,
+    pub revision: AgentPresetRevision,
+    pub snapshot: ResolvedSnapshotEnvelope,
     pub projection: NomiCoreAgentProjection,
 }
 
-/// Project the exact saved Agent Settings binding into the existing Nomi
-/// Conversation creator.
+/// Project one exact persisted Binding/Revision/Snapshot chain.
 ///
-/// Unlike [`project`], this is the DTO-facing bridge used by the app router.
-/// It accepts a control-plane `ready` preview as the source of the immutable
-/// snapshot reference, validates all identities that are available through the
-/// public DTO API, and fails closed when the preview is blocked or incomplete.
-pub fn project_saved_binding(
-    input: SavedBindingProjectionInput<'_>,
+/// Product retirement may hide the mutable Agent entry, but it cannot rewrite
+/// or invalidate immutable artifacts already frozen into a Session.
+pub fn project_saved_artifacts(
+    owner: &UserId,
+    binding: AgentBindingValue,
+    revision: AgentPresetRevision,
+    snapshot: ResolvedSnapshotEnvelope,
+    title: Option<&str>,
 ) -> Result<NomiCoreSavedBindingProjection, AppError> {
-    let binding: AgentBindingValue = wire_cast(input.binding)?;
-    if binding
-        .typed_resource_bindings
-        .iter()
-        .any(|resource| resource.owner_id.as_str() != input.owner.as_ref())
-    {
-        return Err(AppError::Forbidden(
-            "typed resource binding owner does not match the authenticated owner".into(),
-        ));
-    }
-
-    let revision_dto = input.editor.revision.as_ref().ok_or_else(|| {
-        AppError::UnprocessableEntity(
-            "the saved Agent Preset has no immutable revision to project".into(),
-        )
+    let projection = project(ProjectionInput {
+        owner,
+        binding: &binding,
+        revision: &revision,
+        snapshot: &snapshot,
+        title,
     })?;
-    let revision = revision_from_dto(revision_dto)?;
-    if revision.reference != binding.preset_revision_ref {
-        return Err(AppError::Conflict(
-            "AgentBinding revision does not match the exact editor revision".into(),
-        ));
-    }
-    if input.preview.status != PreviewStatusDto::Ready || !input.preview.can_create_session {
-        return Err(AppError::UnprocessableEntity(format!(
-            "saved Agent Preset preview is not ready for a Nomi-core Session: {}",
-            serde_json::to_string(&input.preview.diagnostics)
-                .unwrap_or_else(|_| "preview diagnostics unavailable".to_owned())
-        )));
-    }
-
-    let preview_revision: PresetRevisionRef = wire_cast(&input.preview.candidate_revision_ref)?;
-    if preview_revision != revision.reference {
-        return Err(AppError::Conflict(
-            "saved Agent Preset preview revision does not match the binding".into(),
-        ));
-    }
-    let snapshot_ref: nomifun_agent_contracts::ResolvedSnapshotRef = input
-        .preview
-        .resolved_snapshot_ref
-        .as_ref()
-        .ok_or_else(|| {
-            AppError::UnprocessableEntity(
-                "ready Agent Preset preview did not return a resolved Snapshot reference".into(),
-            )
-        })
-        .and_then(wire_cast)?;
-    if snapshot_ref != binding.resolved_snapshot_ref {
-        return Err(AppError::Conflict(
-            "AgentBinding Snapshot reference does not match the saved preview".into(),
-        ));
-    }
-
-    let projection = project_revision(
-        input.owner,
-        &binding,
-        &revision,
-        input.title.or(Some(input.editor.preset.display_name.as_str())),
-    )?;
     Ok(NomiCoreSavedBindingProjection {
         binding,
+        revision,
+        snapshot,
         projection,
     })
 }
@@ -148,21 +77,26 @@ pub fn project_saved_binding(
 /// the current Nomi conversation request.
 ///
 /// The returned `extra` contains only request/build inputs recognized by the
-/// existing Nomi path (`system_prompt`, `allowed_tools`, `workspace`,
-/// `knowledge_mounts`, and `selected_mcp_server_ids`).  It never contains
-/// Remote provenance or lifecycle state.
+/// existing Nomi path (`system_prompt`, `allowed_tools`, and
+/// `deferred_tools`). Concrete resources remain owned by the target Session,
+/// companion, workpath, or automation binding.
 #[allow(dead_code)] // The typed seam is retained for a future native Nomi adapter.
 pub fn project(input: ProjectionInput<'_>) -> Result<NomiCoreAgentProjection, AppError> {
     validate_identity_chain(&input)?;
     let route = exact_chat_route(input.revision, input.snapshot)?;
-    let resources = project_resources(input.owner, input.binding, input.revision)?;
-    let allowed_tools = project_capabilities(input.revision)?;
+    let capability_tools = project_capabilities(input.revision)?;
     project_revision_parts(
         input.revision,
         input.title,
         route,
-        resources,
-        allowed_tools,
+        capability_tools,
+        input
+            .snapshot
+            .content
+            .required_resource_kinds
+            .iter()
+            .map(|kind| kind.as_ref().to_owned())
+            .collect(),
         input
             .snapshot
             .content
@@ -173,58 +107,12 @@ pub fn project(input: ProjectionInput<'_>) -> Result<NomiCoreAgentProjection, Ap
     )
 }
 
-fn project_revision(
-    owner: &UserId,
-    binding: &AgentBindingValue,
-    revision: &AgentPresetRevision,
-    title: Option<&str>,
-) -> Result<NomiCoreAgentProjection, AppError> {
-    let route = exact_chat_route_from_revision(revision)?;
-    let resources = project_resources(owner, binding, revision)?;
-    validate_on_demand_projection(revision)?;
-    let allowed_tools = project_capabilities(revision)?;
-    project_revision_parts(
-        revision,
-        title,
-        route,
-        resources,
-        allowed_tools,
-        revision
-            .payload
-            .skill_bindings
-            .iter()
-            .map(|skill| skill.id.as_ref().to_owned())
-            .collect(),
-    )
-}
-
-fn validate_on_demand_projection(revision: &AgentPresetRevision) -> Result<(), AppError> {
-    if revision.payload.on_demand_capabilities.is_empty() {
-        return Ok(());
-    }
-    let ids = revision
-        .payload
-        .on_demand_capabilities
-        .iter()
-        .map(|selection| selection.capability.id.as_ref())
-        .collect::<Vec<_>>();
-    Err(unsupported(
-        "on-demand capability activation",
-        format!(
-            "the current Nomi-core runtime has no activation port for [{}]; \
-             Preview/Session creation must remain unavailable instead of \
-             treating deferred capabilities as always active",
-            ids.join(", ")
-        ),
-    ))
-}
-
 fn project_revision_parts(
     revision_document: &AgentPresetRevision,
     title_input: Option<&str>,
     route: ChatRouteRecord,
-    resources: ProjectedResources,
-    allowed_tools: Vec<String>,
+    capability_tools: ProjectedCapabilityTools,
+    required_resource_kinds: BTreeSet<String>,
     included_skills: Vec<String>,
 ) -> Result<NomiCoreAgentProjection, AppError> {
     let instructions = merge_instructions(
@@ -240,16 +128,16 @@ fn project_revision_parts(
         AppError::UnprocessableEntity("preset revision does not fit Nomi's integer field".into())
     })?;
 
-    let knowledge_base_ids = resources
-        .knowledge_mounts
-        .iter()
-        .map(|mount| mount.knowledge_base_id.clone())
-        .collect::<Vec<_>>();
+    let knowledge_enabled = capability_tools
+        .all_capability_ids()
+        .any(|id| matches!(id, "knowledge.search" | "knowledge.read" | "knowledge.write"));
     let knowledge_policy = AgentKnowledgePolicy {
-        enabled: !knowledge_base_ids.is_empty(),
-        writeback: allowed_tools.iter().any(|tool| tool == "knowledge_write"),
+        enabled: knowledge_enabled,
+        writeback: capability_tools
+            .all_capability_ids()
+            .any(|id| id == "knowledge.write"),
         eagerness: None,
-        grounded: !knowledge_base_ids.is_empty(),
+        grounded: knowledge_enabled,
     };
     let resolved_model = ExecutionModelRef {
         provider_id: route.primary.provider_id.clone(),
@@ -267,43 +155,21 @@ fn project_revision_parts(
         resolved_model: Some(resolved_model.clone()),
         included_skills,
         excluded_auto_skills: Vec::new(),
+        initial_capabilities: capability_tools.initial_capability_ids.clone(),
+        on_demand_capabilities: capability_tools.on_demand_capability_ids.clone(),
+        required_resource_kinds,
         knowledge_policy,
-        knowledge_base_ids,
         warnings: Vec::new(),
     };
 
-    let mut extra = json!({
+    let extra = json!({
         "system_prompt": instructions,
-        "allowed_tools": allowed_tools,
+        "allowed_tools": capability_tools.allowed_tools,
+        "enforce_tool_allowlist": true,
+        "deferred_tools": capability_tools.deferred_tools,
+        "browser_use": capability_tools.browser_use,
+        "computer_use": capability_tools.computer_use,
     });
-    let object = extra
-        .as_object_mut()
-        .expect("projection extra literal is an object");
-    if let Some(workspace) = resources.workspace {
-        object.insert("workspace".into(), Value::String(workspace));
-    }
-    if !resources.knowledge_mounts.is_empty() {
-        object.insert(
-            "knowledge_mounts".into(),
-            serde_json::to_value(&resources.knowledge_mounts)
-                .map_err(|error| AppError::Internal(error.to_string()))?,
-        );
-        object.insert(
-            "knowledge_writeback".into(),
-            Value::Bool(
-                projected_snapshot
-                    .knowledge_policy
-                    .writeback,
-            ),
-        );
-    }
-    if !resources.mcp_server_ids.is_empty() {
-        object.insert(
-            "selected_mcp_server_ids".into(),
-            serde_json::to_value(&resources.mcp_server_ids)
-                .map_err(|error| AppError::Internal(error.to_string()))?,
-        );
-    }
 
     Ok(NomiCoreAgentProjection {
         snapshot: projected_snapshot,
@@ -325,63 +191,6 @@ fn project_revision_parts(
             extra,
         },
     })
-}
-
-fn exact_chat_route_from_revision(
-    revision: &AgentPresetRevision,
-) -> Result<ChatRouteRecord, AppError> {
-    let route_id = revision
-        .payload
-        .model_route_refs
-        .get(CHAT_TASK)
-        .ok_or_else(|| unsupported("model route", "agent_chat route is required"))?;
-    let record = revision
-        .payload
-        .chat_route_records
-        .get(CHAT_TASK)
-        .ok_or_else(|| {
-            unsupported(
-                "model route",
-                "agent_chat canonical route record is required",
-            )
-        })?;
-    let identity = ChatRouteIdentity::new(
-        revision.reference.revision_id(),
-        CHAT_TASK,
-        route_id.clone(),
-        record.primary.model_route_revision,
-    );
-    record
-        .validate_for(&identity)
-        .map_err(|error| unsupported("model route", error.to_string()))?;
-    Ok(record.clone())
-}
-
-fn revision_from_dto(
-    revision: &nomifun_api_types::AgentPresetRevisionDto,
-) -> Result<AgentPresetRevision, AppError> {
-    let payload: AgentPresetRevisionPayload = wire_cast(&revision.document)?;
-    let reference: PresetRevisionRef = wire_cast(&revision.reference)?;
-    let contribution_locks = wire_cast(&revision.contribution_locks)?;
-    let created_by = UserId::parse(revision.created_by.clone())
-        .map_err(|error| AppError::UnprocessableEntity(format!("invalid revision owner: {error}")))?;
-    let revision = AgentPresetRevision {
-        reference,
-        payload,
-        contribution_locks,
-        created_by: nomifun_agent_contracts::UserId::from(created_by.as_ref().to_owned()),
-        created_at_ms: revision.created_at_ms,
-        reason: revision.reason.clone(),
-    };
-    revision.validate().map_err(contract_error)?;
-    Ok(revision)
-}
-
-fn wire_cast<T: Serialize, U: DeserializeOwned>(value: &T) -> Result<U, AppError> {
-    serde_json::from_value(serde_json::to_value(value).map_err(|error| {
-        AppError::Internal(format!("Nomi-core DTO serialization failed: {error}"))
-    })?)
-    .map_err(|error| AppError::UnprocessableEntity(format!("Nomi-core DTO conversion failed: {error}")))
 }
 
 #[allow(dead_code)] // Used by the source-neutral projection seam above.
@@ -415,15 +224,6 @@ fn validate_identity_chain(input: &ProjectionInput<'_>) -> Result<(), AppError> 
     if input.binding.resolved_snapshot_ref != input.snapshot.snapshot_ref {
         return Err(AppError::Conflict(
             "AgentBindingValue snapshot reference does not exactly match the saved snapshot".into(),
-        ));
-    }
-    if input.binding.typed_resource_bindings != input.revision.payload.resource_bindings
-        || input.binding.typed_resource_bindings
-            != input.snapshot.content.typed_resource_bindings
-    {
-        return Err(AppError::Conflict(
-            "AgentBindingValue resources do not exactly match the saved revision and snapshot"
-                .into(),
         ));
     }
     Ok(())
@@ -468,209 +268,244 @@ fn exact_chat_route(
 }
 
 #[derive(Debug, Default)]
-struct ProjectedResources {
-    workspace: Option<String>,
-    process_workspace: Option<String>,
-    knowledge_mounts: Vec<KnowledgeMountInfo>,
-    mcp_server_ids: Vec<String>,
+struct ProjectedCapabilityTools {
+    initial_capability_ids: Vec<String>,
+    on_demand_capability_ids: Vec<String>,
+    allowed_tools: Vec<String>,
+    deferred_tools: Vec<String>,
+    browser_use: bool,
+    computer_use: bool,
 }
 
-fn project_resources(
-    owner: &UserId,
-    binding: &AgentBindingValue,
+impl ProjectedCapabilityTools {
+    fn all_capability_ids(&self) -> impl Iterator<Item = &str> {
+        self.initial_capability_ids
+            .iter()
+            .chain(&self.on_demand_capability_ids)
+            .map(String::as_str)
+    }
+}
+
+/// The Nomi-core host projection is deliberately explicit. A capability may
+/// either map to one or more native Nomi tools, or be a host-only declaration
+/// consumed by the conversation/session boundary. Everything else is
+/// unavailable until a real Nomi owner is implemented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NomiCapabilityProjection {
+    Tools(&'static [&'static str]),
+    BrowserTools,
+    ComputerTools,
+    HostOnly {
+        browser: bool,
+        computer: bool,
+    },
+}
+
+/// Return the Nomi-core projection for one canonical capability identity.
+///
+/// This function is also the availability authority used by the app-local
+/// control-plane adapter. Keeping the table next to the actual request
+/// projection prevents a catalog entry from claiming support that the Nomi
+/// runtime cannot execute.
+pub(crate) fn nomi_capability_projection(
+    capability_id: &str,
+) -> Result<NomiCapabilityProjection, AppError> {
+    let projection = match capability_id {
+        // Native filesystem family.
+        "fs.read" => NomiCapabilityProjection::Tools(&["Read"]),
+        "fs.search" => NomiCapabilityProjection::Tools(&["Grep", "Glob"]),
+        "fs.write" => NomiCapabilityProjection::Tools(&["Write"]),
+        "fs.patch" => NomiCapabilityProjection::Tools(&["Edit", "ApplyPatch"]),
+
+        // Native process and VCS families.
+        "process.exec" => {
+            NomiCapabilityProjection::Tools(&["Bash", "exec_command", "write_stdin"])
+        }
+        "vcs.status" => NomiCapabilityProjection::Tools(&["vcs.status"]),
+        "vcs.diff" => NomiCapabilityProjection::Tools(&["vcs.diff"]),
+        "vcs.stage" => NomiCapabilityProjection::Tools(&["vcs.stage"]),
+        "vcs.commit" => NomiCapabilityProjection::Tools(&["vcs.commit"]),
+
+        // The plan checklist is always registered by the Nomi bootstrap. Its
+        // deferred placement is applied by the host registry when requested.
+        "agent.execution.plan" => NomiCapabilityProjection::Tools(&["update_plan"]),
+
+        // Knowledge and Skill tools are registered by the manager after the
+        // target-scoped resource/sink wiring has been resolved.
+        "knowledge.search" => NomiCapabilityProjection::Tools(&["knowledge_search"]),
+        "knowledge.read" => NomiCapabilityProjection::Tools(&["knowledge_read"]),
+        "knowledge.write" => NomiCapabilityProjection::Tools(&["knowledge_write"]),
+        "skill.invoke" => NomiCapabilityProjection::Tools(&["Skill"]),
+
+        // Project/session declarations are consumed outside the model tool
+        // list. They do not freeze concrete resource identities.
+        "chat.basic"
+        | "chat.minimal"
+        | "session.attachments.read"
+        | "memory.project.read"
+        | "memory.project.citation"
+        | "memory.session.scratch"
+        | "process.session"
+        | "terminal.pty"
+        | "workspace.bind"
+        | "workspace.artifacts"
+        | "skill.catalog"
+        | "skill.describe"
+        | "skill.hooks" => NomiCapabilityProjection::HostOnly {
+            browser: false,
+            computer: false,
+        },
+
+        // `remember` is the native project-memory write owner. Distillation
+        // remains a host-side output projection, not a second model tool.
+        "memory.project.write" => NomiCapabilityProjection::Tools(&["remember"]),
+        "memory.project.distill" => NomiCapabilityProjection::HostOnly {
+            browser: false,
+            computer: false,
+        },
+
+        // Browser is one native tool with an action discriminator. The
+        // compile-time feature is part of the host availability contract.
+        "browser.identity" => {
+            if cfg!(feature = "browser-use") {
+                NomiCapabilityProjection::HostOnly {
+                    browser: true,
+                    computer: false,
+                }
+            } else {
+                return Err(unsupported(
+                    "capability",
+                    "browser.identity has no Browser owner in this build",
+                ));
+            }
+        }
+        "browser.observe"
+        | "browser.navigate"
+        | "browser.act"
+        | "browser.download"
+        | "browser.upload"
+        | "browser.evaluate"
+        | "browser.takeover" => {
+            if cfg!(feature = "browser-use") {
+                NomiCapabilityProjection::BrowserTools
+            } else {
+                return Err(unsupported(
+                    "capability",
+                    format!("{capability_id:?} has no Browser owner in this build"),
+                ));
+            }
+        }
+
+        // Computer is one native tool with an action discriminator.
+        "a11y.observe" | "computer.observe" | "computer.input" | "computer.launch" => {
+            if cfg!(feature = "computer-use") {
+                NomiCapabilityProjection::ComputerTools
+            } else {
+                return Err(unsupported(
+                    "capability",
+                    format!("{capability_id:?} has no Computer owner in this build"),
+                ));
+            }
+        }
+
+        other => {
+            return Err(unsupported(
+                "capability",
+                format!("{other:?} has no Nomi projection on this host"),
+            ));
+        }
+    };
+    Ok(projection)
+}
+
+/// Validate all capability selections against the concrete Nomi projection.
+///
+/// The control-plane store calls this as a defense-in-depth check. Preview
+/// should reject the same revision earlier through the host catalog, but a
+/// persisted revision must never bypass the runtime projection boundary.
+pub(crate) fn validate_nomi_capability_projection(
     revision: &AgentPresetRevision,
-) -> Result<ProjectedResources, AppError> {
-    let selected = binding
-        .typed_resource_bindings
+) -> Result<(), AppError> {
+    revision
+        .payload
+        .initial_capabilities
         .iter()
-        .map(|resource| (resource.binding_id.as_ref(), resource))
-        .collect::<HashMap<_, _>>();
-    let mut projected = ProjectedResources::default();
-    for resource in &revision.payload.resource_bindings {
-        if resource.owner_id != owner.as_ref() {
-            return Err(AppError::Forbidden(format!(
-                "typed resource binding {} is owned by a different authenticated owner",
-                resource.binding_id.as_ref()
-            )));
-        }
-        let Some(bound) = selected.get(resource.binding_id.as_ref()) else {
-            return Err(AppError::Conflict(format!(
-                "typed resource binding {} is not present in the exact binding",
-                resource.binding_id.as_ref()
-            )));
-        };
-        if *bound != resource {
-            return Err(AppError::Conflict(format!(
-                "typed resource binding {} differs from the saved revision",
-                resource.binding_id.as_ref()
-            )));
-        }
-        match resource.resource_kind.as_ref() {
-            WORKSPACE_KIND => {
-                let root = required_parameter(resource, WORKSPACE_ROOT)?;
-                if projected.workspace.replace(root).is_some() {
-                    return Err(unsupported(
-                        "workspace resource",
-                        "multiple workspace bindings cannot be projected to one Nomi conversation",
-                    ));
-                }
-            }
-            PROCESS_SESSION_KIND => {
-                if !resource.operations.contains("execute") {
-                    return Err(unsupported(
-                        "process session resource",
-                        format!(
-                            "binding {} does not grant execute",
-                            resource.binding_id.as_ref()
-                        ),
-                    ));
-                }
-                let root = required_parameter(resource, WORKSPACE_ROOT)?;
-                if projected.process_workspace.replace(root).is_some() {
-                    return Err(unsupported(
-                        "process session resource",
-                        "multiple process_session bindings cannot be projected to one Nomi runtime",
-                    ));
-                }
-            }
-            KNOWLEDGE_KIND => {
-                let knowledge_base_id = nomifun_common::KnowledgeBaseId::parse(
-                    resource.resource_id.as_ref().to_owned(),
-                )
-                .map_err(|error| unsupported("knowledge resource", error.to_string()))?;
-                let name = resource
-                    .typed_parameters
-                    .get("knowledge_name")
-                    .cloned()
-                    .unwrap_or_else(|| resource.resource_id.as_ref().to_owned());
-                let rel_path = resource
-                    .typed_parameters
-                    .get("knowledge_rel_path")
-                    .cloned()
-                    .unwrap_or_else(|| format!(".nomi/knowledge/{name}"));
-                let root = required_parameter(resource, "knowledge_root")?;
-                projected.knowledge_mounts.push(KnowledgeMountInfo {
-                    knowledge_base_id,
-                    name,
-                    description: resource
-                        .typed_parameters
-                        .get("knowledge_description")
-                        .cloned()
-                        .unwrap_or_default(),
-                    rel_path,
-                    toc: Vec::new(),
-                    summary: None,
-                    live_sources: Vec::new(),
-                });
-                if projected.workspace.is_none() {
-                    projected.workspace = Some(root);
-                }
-            }
-            MCP_KIND => {
-                validate_uuidv7(resource.resource_id.as_ref())
-                    .map_err(|error| unsupported("MCP resource", error.to_string()))?;
-                projected
-                    .mcp_server_ids
-                    .push(resource.resource_id.as_ref().to_owned());
-            }
-            other => {
-                return Err(unsupported(
-                    "typed resource",
-                    format!("resource kind {other:?} has no Nomi-core projection"),
-                ));
-            }
-        }
-    }
-    if let Some(process_workspace) = projected.process_workspace.as_deref() {
-        match projected.workspace.as_deref() {
-            Some(workspace) if workspace == process_workspace => {}
-            Some(_) => {
-                return Err(unsupported(
-                    "process session resource",
-                    "process_session workspace_root must exactly match the bound workspace",
-                ));
-            }
-            None => {
-                projected.workspace = Some(process_workspace.to_owned());
-            }
-        }
-    }
-    projected.mcp_server_ids.sort();
-    projected.mcp_server_ids.dedup();
-    Ok(projected)
+        .try_for_each(|selection| {
+            nomi_capability_projection(selection.capability.id.as_ref()).map(|_| ())
+        })?;
+    revision
+        .payload
+        .on_demand_capabilities
+        .iter()
+        .try_for_each(|selection| {
+            nomi_capability_projection(selection.capability.id.as_ref()).map(|_| ())
+        })?;
+    Ok(())
 }
 
-fn required_parameter(
-    resource: &TypedResourceBinding,
-    key: &str,
-) -> Result<String, AppError> {
-    resource
-        .typed_parameters
-        .get(key)
-        .map(String::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| {
-            unsupported(
-                "typed resource",
-                format!(
-                    "{} resource {} lacks required parameter {key:?}",
-                    resource.resource_kind.as_ref(),
-                    resource.binding_id.as_ref()
-                ),
-            )
-        })
-}
+fn project_capabilities(
+    revision: &AgentPresetRevision,
+) -> Result<ProjectedCapabilityTools, AppError> {
+    let mut initial_tools = BTreeSet::new();
+    let mut deferred_tools = BTreeSet::new();
+    let mut browser_use = false;
+    let mut computer_use = false;
 
-fn project_capabilities(revision: &AgentPresetRevision) -> Result<Vec<String>, AppError> {
-    let mut tools = BTreeSet::new();
-    // The current Nomi engine has no canonical deferred-capability activation
-    // port.  Only the immutable initial set may therefore shape its native
-    // tool allowlist.  Silently merging on-demand selections here would turn a
-    // discoverable capability into an always-authorized tool.
+    let mut project = |
+        selection: &nomifun_agent_contracts::CapabilitySelection,
+        target: &mut BTreeSet<String>,
+    | -> Result<(), AppError> {
+        match nomi_capability_projection(selection.capability.id.as_ref())? {
+            NomiCapabilityProjection::Tools(tools) => {
+                target.extend(tools.iter().map(|tool| (*tool).to_owned()));
+            }
+            NomiCapabilityProjection::BrowserTools => {
+                browser_use = true;
+                target.insert("Browser".to_owned());
+            }
+            NomiCapabilityProjection::ComputerTools => {
+                computer_use = true;
+                target.insert("Computer".to_owned());
+            }
+            NomiCapabilityProjection::HostOnly { browser, computer } => {
+                browser_use |= browser;
+                computer_use |= computer;
+            }
+        }
+        Ok(())
+    };
+
     for selection in &revision.payload.initial_capabilities {
-        let id = selection.capability.id.as_ref();
-        let mapped = match id {
-            "fs.read" => &["Read"][..],
-            "fs.search" => &["Grep", "Glob"][..],
-            "fs.write" | "fs.patch" | "fs.delete" => &["Write", "Edit", "ApplyPatch"][..],
-            "process.exec" | "terminal.pty" => &["Bash", "exec_command", "write_stdin"][..],
-            "process.session" => &["exec_command", "write_stdin"][..],
-            "agent.execution.plan" => &["update_plan"][..],
-            // VCS has a distinct native Nomi owner. Do not widen this family to
-            // Bash: a VCS grant must not become a general shell grant.
-            "vcs.status" => &["vcs.status"][..],
-            "vcs.diff" => &["vcs.diff"][..],
-            "vcs.stage" => &["vcs.stage"][..],
-            "vcs.commit" => &["vcs.commit"][..],
-            "vcs.push" => {
-                return Err(unsupported(
-                    "capability",
-                    format!(
-                        "{id:?} has no typed Nomi owner in the current Nomi runtime; \
-                         external push remains unavailable until a credential-aware \
-                         owner is commissioned"
-                    ),
-                ));
-            }
-            "knowledge.search" => &["knowledge_search"][..],
-            "knowledge.read" => &["knowledge_read"][..],
-            "knowledge.write" => &["knowledge_write"][..],
-            "skill.invoke" => &["Skill"][..],
-            "chat.basic" | "chat.minimal" => &[][..],
-            other => {
-                return Err(unsupported(
-                    "capability",
-                    format!(
-                        "capability {other:?} cannot be represented by the current Nomi runtime"
-                    ),
-                ));
-            }
-        };
-        tools.extend(mapped.iter().map(|tool| (*tool).to_owned()));
+        project(selection, &mut initial_tools)?;
     }
-    Ok(tools.into_iter().collect())
+    for selection in &revision.payload.on_demand_capabilities {
+        project(selection, &mut deferred_tools)?;
+    }
+
+    let mut allowed_tools = initial_tools.clone();
+    allowed_tools.extend(deferred_tools.iter().cloned());
+    if !deferred_tools.is_empty() {
+        allowed_tools.insert("ToolSearch".to_owned());
+    }
+
+    Ok(ProjectedCapabilityTools {
+        initial_capability_ids: revision
+            .payload
+            .initial_capabilities
+            .iter()
+            .map(|selection| selection.capability.id.as_ref().to_owned())
+            .collect(),
+        on_demand_capability_ids: revision
+            .payload
+            .on_demand_capabilities
+            .iter()
+            .map(|selection| selection.capability.id.as_ref().to_owned())
+            .collect(),
+        allowed_tools: allowed_tools.into_iter().collect(),
+        deferred_tools: deferred_tools.into_iter().collect(),
+        browser_use,
+        computer_use,
+    })
 }
 
 fn merge_instructions(persona: &str, instructions: &str) -> String {
@@ -693,16 +528,14 @@ mod tests {
         CapabilityRef, ChatRouteCandidate, ChatRouteFeature, ChatRouteProtocol,
         ChatRouteRecordSchema, ChatRouteTask, ConnectionConfigRef, DigestHex, ModelRouteId,
         OperationId, PresetRevisionRef, PrincipalRef, ResolvedCapability, ResolvedSnapshotContent,
-        ResolvedSnapshotId, ResolvedSnapshotRef, RuntimeFeatureId, RuntimeProfileKind,
-        SkillRef,
+        ResolvedSnapshotId, ResolvedSnapshotRef, RuntimeFeatureId, RuntimeProfileKind, SkillRef,
+        TypedResourceBinding,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
     const DIGEST: &str =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const OWNER: &str = "0190f5fe-7c00-7a00-8000-000000000003";
-    const MCP: &str = "0190f5fe-7c00-7a00-8000-000000000004";
-    const KB: &str = "0190f5fe-7c00-7a00-8000-000000000005";
 
     fn route() -> nomifun_agent_contracts::ChatRouteRecord {
         ChatRouteRecord {
@@ -723,46 +556,12 @@ mod tests {
         }
     }
 
-    fn resource(
-        binding_id: &str,
-        kind: &str,
-        resource_id: &str,
-        parameters: BTreeMap<String, String>,
-    ) -> TypedResourceBinding {
-        TypedResourceBinding {
-            binding_id: binding_id.into(),
-            resource_kind: kind.into(),
-            resource_id: resource_id.into(),
-            owner_id: OWNER.into(),
-            operations: BTreeSet::new(),
-            connection_config_ref: None,
-            typed_parameters: parameters,
-        }
-    }
-
     fn fixture() -> (
         UserId,
         AgentBindingValue,
         AgentPresetRevision,
         ResolvedSnapshotEnvelope,
     ) {
-        let workspace = resource(
-            "workspace-binding",
-            WORKSPACE_KIND,
-            "workspace-1",
-            BTreeMap::from([(WORKSPACE_ROOT.into(), "C:\\work".into())]),
-        );
-        let knowledge = resource(
-            "knowledge-binding",
-            KNOWLEDGE_KIND,
-            KB,
-            BTreeMap::from([
-                ("knowledge_root".into(), "C:\\work\\.nomi\\knowledge\\docs".into()),
-                ("knowledge_name".into(), "docs".into()),
-            ]),
-        );
-        let mcp = resource("mcp-binding", MCP_KIND, MCP, BTreeMap::new());
-        let resources = vec![workspace, knowledge, mcp];
         let payload = AgentPresetRevisionPayload {
             schema_version: "1.0.0".into(),
             model_route_refs: BTreeMap::from([(CHAT_TASK.into(), "route-1".into())]),
@@ -778,7 +577,6 @@ mod tests {
                 id: "skill.review".into(),
                 version: "1.0.0".into(),
             }],
-            resource_bindings: resources.clone(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: "You are Nomi.".into(),
             instructions: "Be precise.".into(),
@@ -825,6 +623,7 @@ mod tests {
             ),
             initial_capabilities: vec![resolved_capability("fs.read")],
             on_demand_capabilities: Vec::new(),
+            required_resource_kinds: BTreeSet::from(["workspace".into()]),
             on_demand_activation_plans: BTreeMap::new(),
             compact_on_demand_index: Vec::new(),
             capability_allowlist: BTreeSet::from(["fs.read".into()]),
@@ -838,7 +637,6 @@ mod tests {
             }],
             mcp_tool_locks: Vec::new(),
             resolved_role_providers: BTreeMap::new(),
-            typed_resource_bindings: resources.clone(),
             canonical_schema_manifest_digest: DIGEST.into(),
             target_contribution_manifest_digest: DIGEST.into(),
         };
@@ -863,7 +661,7 @@ mod tests {
         let binding = AgentBindingValue {
             preset_revision_ref: reference,
             resolved_snapshot_ref: snapshot_ref,
-            typed_resource_bindings: resources,
+            typed_resource_bindings: Vec::new(),
             binding_version: 1,
         };
         (
@@ -881,7 +679,6 @@ mod tests {
                 version: "1.0.0".into(),
             },
             action_allowlist: BTreeSet::new(),
-            resource_binding_refs: Vec::new(),
         }
     }
 
@@ -935,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_binding_projects_chat_route_and_resources() {
+    fn exact_binding_projects_chat_route_without_freezing_target_resources() {
         let fixture = fixture();
         let result = project(input(&fixture)).unwrap();
         assert_eq!(
@@ -943,70 +740,60 @@ mod tests {
             "step-3.7-flash"
         );
         assert_eq!(result.request.model.as_ref().unwrap().provider_id, OWNER);
-        assert_eq!(result.request.extra["workspace"], "C:\\work");
-        assert_eq!(result.request.extra["selected_mcp_server_ids"], json!([MCP]));
-        assert_eq!(result.snapshot.knowledge_base_ids.len(), 1);
-        assert!(result.request.extra["allowed_tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|tool| tool == "Bash"));
-    }
-
-    #[test]
-    fn process_session_binding_projects_real_nomi_process_tools() {
-        let mut fixture = fixture();
-        let mut process = resource(
-            "process-session",
-            PROCESS_SESSION_KIND,
-            "local-process-session",
-            BTreeMap::from([(WORKSPACE_ROOT.into(), "C:\\work".into())]),
+        assert!(
+            result.request.extra.get("workspace").is_none(),
+            "workspace selection belongs to the consuming target"
         );
-        process.operations = BTreeSet::from(["execute".to_owned(), "observe".to_owned()]);
-        fixture
-            .2
-            .payload
-            .initial_capabilities
-            .iter_mut()
-            .find(|selection| selection.capability.id.as_ref() == "process.exec")
-            .expect("fixture process.exec capability")
-            .resource_binding_refs = vec!["process-session".into()];
-        fixture.2.payload.resource_bindings.push(process.clone());
-        fixture.1.typed_resource_bindings.push(process.clone());
-        fixture.3.content.typed_resource_bindings.push(process);
-        refresh_fixture_identity(&mut fixture);
-
-        let result = project(input(&fixture)).expect("typed process projection");
+        assert!(
+            result.request.extra.get("knowledge_mounts").is_none(),
+            "knowledge-base selection belongs to the consuming target"
+        );
+        assert!(
+            result.request.extra.get("selected_mcp_server_ids").is_none(),
+            "MCP selection belongs to the consuming target"
+        );
+        assert_eq!(result.snapshot.knowledge_policy.enabled, true);
+        assert!(result.snapshot.knowledge_policy.writeback == false);
+        assert_eq!(
+            result.snapshot.required_resource_kinds,
+            BTreeSet::from(["workspace".to_owned()])
+        );
         let tools = result.request.extra["allowed_tools"]
             .as_array()
             .expect("native tool allowlist");
-        for expected in ["Bash", "exec_command", "write_stdin"] {
+        for expected in ["Read", "Write", "Bash", "knowledge_read"] {
             assert!(
                 tools.iter().any(|tool| tool == expected),
-                "{expected} must be backed by the admitted process_session"
+                "{expected} must be projected from the declared capability"
             );
         }
-        assert_eq!(result.request.extra["workspace"], "C:\\work");
     }
 
     #[test]
-    fn process_session_cannot_escape_the_bound_workspace() {
+    fn target_resource_bindings_are_accepted_but_not_frozen_into_the_projection() {
         let mut fixture = fixture();
-        let mut process = resource(
-            "process-session",
-            PROCESS_SESSION_KIND,
-            "local-process-session",
-            BTreeMap::from([(WORKSPACE_ROOT.into(), "C:\\other".into())]),
-        );
-        process.operations = BTreeSet::from(["execute".to_owned(), "observe".to_owned()]);
-        fixture.2.payload.resource_bindings.push(process.clone());
-        fixture.1.typed_resource_bindings.push(process.clone());
-        fixture.3.content.typed_resource_bindings.push(process);
-        refresh_fixture_identity(&mut fixture);
+        fixture.1.typed_resource_bindings.push(TypedResourceBinding {
+            binding_id: "target-workspace".into(),
+            resource_kind: "workspace".into(),
+            resource_id: "workspace-opaque-id".into(),
+            owner_id: OWNER.into(),
+            operations: BTreeSet::from(["read".to_owned()]),
+            connection_config_ref: None,
+            typed_parameters: BTreeMap::from([(
+                "workspace_root".to_owned(),
+                "C:\\target".to_owned(),
+            )]),
+        });
 
-        let error = project(input(&fixture))
-            .expect_err("process execution must not target a different workspace");
-        assert!(error.to_string().contains("must exactly match"));
+        let result = project(input(&fixture)).expect("target resource binding is valid");
+        assert!(
+            result.request.extra.get("workspace").is_none(),
+            "target resource identity must remain outside the Preset projection"
+        );
+        assert!(
+            result.request.extra.get("knowledge_mounts").is_none(),
+            "target knowledge resources must be selected by the consuming Session"
+        );
     }
 
     #[test]
@@ -1038,26 +825,68 @@ mod tests {
             .2
             .payload
             .initial_capabilities
-            .push(capability("browser.navigate", true));
+            .push(capability("vcs.push", true));
         refresh_fixture_identity(&mut fixture);
         assert!(matches!(
             project(input(&fixture)),
-            Err(AppError::UnprocessableEntity(message)) if message.contains("browser.navigate")
+            Err(AppError::UnprocessableEntity(message)) if message.contains("vcs.push")
         ));
     }
 
     #[test]
-    fn on_demand_capability_without_activation_port_fails_closed() {
+    fn on_demand_capability_is_deferred_and_gets_tool_search() {
         let mut fixture = fixture();
         fixture
             .2
             .payload
             .on_demand_capabilities
-            .push(capability("fs.delete", false));
-        let error = validate_on_demand_projection(&fixture.2)
-            .expect_err("deferred capability activation must not be silently widened");
-        assert!(error.to_string().contains("activation port"));
-        assert!(error.to_string().contains("fs.delete"));
+            .push(capability("vcs.stage", false));
+        refresh_fixture_identity(&mut fixture);
+
+        let result = project(input(&fixture)).expect("on-demand capability projection");
+        let allowed = result.request.extra["allowed_tools"]
+            .as_array()
+            .expect("allowlist");
+        let deferred = result.request.extra["deferred_tools"]
+            .as_array()
+            .expect("deferred tool list");
+        assert!(allowed.iter().any(|tool| tool == "vcs.stage"));
+        assert!(deferred.iter().any(|tool| tool == "vcs.stage"));
+        assert!(allowed.iter().any(|tool| tool == "ToolSearch"));
+        assert_eq!(
+            result.snapshot.on_demand_capabilities,
+            vec!["vcs.stage".to_owned()]
+        );
+    }
+
+    #[test]
+    fn zero_capability_preset_projects_to_deny_all() {
+        let mut fixture = fixture();
+        fixture.2.payload.initial_capabilities.clear();
+        fixture.2.payload.on_demand_capabilities.clear();
+        refresh_fixture_identity(&mut fixture);
+
+        let result = project(input(&fixture)).expect("zero-capability projection");
+        assert_eq!(result.request.extra["allowed_tools"], json!([]));
+        assert_eq!(result.request.extra["deferred_tools"], json!([]));
+        assert_eq!(result.request.extra["enforce_tool_allowlist"], true);
+        assert!(result.snapshot.initial_capabilities.is_empty());
+        assert!(result.snapshot.on_demand_capabilities.is_empty());
+    }
+
+    #[test]
+    fn initial_capability_is_full_schema_candidate_and_not_deferred() {
+        let mut fixture = fixture();
+        fixture.2.payload.initial_capabilities = vec![capability("vcs.stage", true)];
+        refresh_fixture_identity(&mut fixture);
+
+        let result = project(input(&fixture)).expect("initial capability projection");
+        assert_eq!(result.request.extra["allowed_tools"], json!(["vcs.stage"]));
+        assert_eq!(result.request.extra["deferred_tools"], json!([]));
+        assert_eq!(
+            result.snapshot.initial_capabilities,
+            vec!["vcs.stage".to_owned()]
+        );
     }
 
     #[test]
@@ -1078,5 +907,47 @@ mod tests {
             tools.iter().filter(|tool| *tool == "vcs.status").count(),
             1
         );
+    }
+
+    #[test]
+    fn projection_table_rejects_capabilities_without_a_nomi_owner() {
+        for capability_id in [
+            "fs.delete",
+            "fs.watch",
+            "fs.snapshot",
+            "vcs.push",
+            "web.search",
+            "web.fetch",
+            "agent.execution.observe",
+            "agent.execution.steer",
+            "llm.vision",
+        ] {
+            let error = nomi_capability_projection(capability_id)
+                .expect_err("unsupported capability must fail closed");
+            assert!(
+                error.to_string().contains(capability_id),
+                "error should identify {capability_id}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_capability_availability_matches_the_host_build() {
+        let result = nomi_capability_projection("browser.navigate");
+        if cfg!(feature = "browser-use") {
+            assert_eq!(result.unwrap(), NomiCapabilityProjection::BrowserTools);
+        } else {
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn computer_capability_availability_matches_the_host_build() {
+        let result = nomi_capability_projection("computer.input");
+        if cfg!(feature = "computer-use") {
+            assert_eq!(result.unwrap(), NomiCapabilityProjection::ComputerTools);
+        } else {
+            assert!(result.is_err());
+        }
     }
 }

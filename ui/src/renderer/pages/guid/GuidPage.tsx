@@ -13,12 +13,13 @@ import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
 import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
+import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
 import { usePendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
 import {
   SummonDrawer,
   useCompanionRoster,
 } from '@/renderer/pages/conversation/components/SummonPanel';
-import { ConfigProvider } from '@arco-design/web-react';
+import { Alert, ConfigProvider } from '@arco-design/web-react';
 import React, {
   useCallback,
   useEffect,
@@ -49,6 +50,7 @@ import { useGuidAgentSelection } from './hooks/useGuidAgentSelection';
 import { useGuidInput } from './hooks/useGuidInput';
 import { useGuidMention } from './hooks/useGuidMention';
 import { useGuidModelSelection } from './hooks/useGuidModelSelection';
+import { useGuidPresetCapabilities } from './hooks/useGuidPresetCapabilities';
 import { useGuidSend } from './hooks/useGuidSend';
 import { useTypewriterPlaceholder } from './hooks/useTypewriterPlaceholder';
 import type { GuidAgentSelection } from './types';
@@ -89,6 +91,11 @@ const GuidPage: React.FC = () => {
     locationState: navigationState,
   });
   const advancedConfig = useGuidAdvancedConfig();
+  const presetCapabilities = useGuidPresetCapabilities(
+    agentSelection.selection.kind === 'preset'
+      ? agentSelection.selection.presetId
+      : undefined
+  );
 
   const [miniAppMode, setMiniAppMode] = useState(false);
   const miniAppQuickStart = useMiniAppQuickStart();
@@ -96,9 +103,22 @@ const GuidPage: React.FC = () => {
 
   const isAutoWorkMode = isAutoWorkEntry(advancedConfig.autoWork);
   const isDefaultAgent = agentSelection.selection.kind === 'default';
+  const presetResourceResolutionReady =
+    isDefaultAgent ||
+    (!presetCapabilities.isLoading && !presetCapabilities.error);
+  const presetResourceKinds = presetCapabilities.requiredResourceKinds;
+  const knowledgeEnabled =
+    isDefaultAgent ||
+    (presetResourceResolutionReady && presetResourceKinds.has('knowledge_base'));
+  const workspaceEnabled =
+    isDefaultAgent ||
+    (presetResourceResolutionReady && presetResourceKinds.has('workspace'));
   const hasLaunchTarget = isDefaultAgent
     ? Boolean(modelSelection.current_model)
-    : Boolean(agentSelection.selectedPreset?.current_stable_revision);
+    : Boolean(
+        agentSelection.selectedPreset?.current_stable_revision &&
+          presetResourceResolutionReady
+      );
 
   useEffect(() => {
     if (isAutoWorkMode) setMiniAppMode(false);
@@ -140,8 +160,13 @@ const GuidPage: React.FC = () => {
     selection: agentSelection.selection,
     selectedPreset: agentSelection.selectedPreset,
     current_model: modelSelection.current_model,
-    applyAdvancedConfig: advancedConfig.applyToConversation,
+    applyAdvancedConfig: (conversationId) =>
+      advancedConfig.applyToConversation(conversationId, {
+        allowKnowledgeBinding: knowledgeEnabled,
+      }),
     autoWork: advancedConfig.autoWork,
+    workspaceEnabled,
+    resourceResolutionReady: presetResourceResolutionReady,
     setMentionOpen: mention.setMentionOpen,
     setMentionQuery: mention.setMentionQuery,
     setMentionSelectorOpen: mention.setMentionSelectorOpen,
@@ -389,7 +414,12 @@ const GuidPage: React.FC = () => {
 
   useEffect(() => {
     if (!resetAgentRequested && !preselectedPresetId) return;
-    if (preselectedPresetId && agentSelection.isLoading) return;
+    if (
+      preselectedPresetId &&
+      (agentSelection.isLoading || !agentSelection.isLoaded)
+    ) {
+      return;
+    }
     if (preselectedPresetId && agentSelection.loadError) return;
     const preselectionResolved =
       !preselectedPresetId ||
@@ -409,6 +439,7 @@ const GuidPage: React.FC = () => {
     location.search,
     navigate,
     agentSelection.isLoading,
+    agentSelection.isLoaded,
     agentSelection.loadError,
     agentSelection.presets,
     agentSelection.selection,
@@ -462,6 +493,16 @@ const GuidPage: React.FC = () => {
         }}
         applyNote={t('guid.advanced.applyNote')}
       />
+      {knowledgeEnabled && (
+        <KnowledgeControl
+          key={`knowledge-${location.key}`}
+          draft={{
+            value: advancedConfig.knowledge,
+            onChange: advancedConfig.setKnowledge,
+          }}
+          applyNote={t('guid.advanced.applyNote')}
+        />
+      )}
     </>
   );
 
@@ -526,6 +567,16 @@ const GuidPage: React.FC = () => {
               </p>
             </div>
 
+            {!isDefaultAgent && presetCapabilities.error && (
+              <Alert
+                type='error'
+                showIcon
+                title={t('common.error')}
+                content={t('agentSettings.errors.presetCapabilitiesLoadFailed')}
+                className={styles.guidPresetCapabilityError}
+              />
+            )}
+
             <AgentPillBar
               presets={agentSelection.presets}
               selection={agentSelection.selection}
@@ -578,7 +629,7 @@ const GuidPage: React.FC = () => {
               files={guidInput.files}
               onRemoveFile={guidInput.handleRemoveFile}
               actionRow={actionRowNode}
-              showWorkspace={isDefaultAgent}
+              showWorkspace={workspaceEnabled}
               workspaceDir={guidInput.dir}
               onSelectWorkspace={guidInput.setDir}
               onClearWorkspace={() => guidInput.setDir('')}

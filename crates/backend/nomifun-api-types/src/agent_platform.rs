@@ -9,8 +9,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use nomifun_common::KnowledgeBaseId;
-
 use crate::ExecutionModelRef;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -69,9 +67,13 @@ pub struct AgentResolvedSnapshot {
     #[serde(default)]
     pub excluded_auto_skills: Vec<String>,
     #[serde(default)]
-    pub knowledge_policy: AgentKnowledgePolicy,
+    pub initial_capabilities: Vec<String>,
     #[serde(default)]
-    pub knowledge_base_ids: Vec<KnowledgeBaseId>,
+    pub on_demand_capabilities: Vec<String>,
+    #[serde(default)]
+    pub required_resource_kinds: BTreeSet<String>,
+    #[serde(default)]
+    pub knowledge_policy: AgentKnowledgePolicy,
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -153,8 +155,6 @@ pub struct CapabilitySelectionDto {
     pub capability: ExactCatalogRefDto,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub action_allowlist: BTreeSet<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub resource_binding_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,7 +191,6 @@ pub struct AgentPresetDocumentDto {
     pub initial_capabilities: Vec<CapabilitySelectionDto>,
     pub on_demand_capabilities: Vec<CapabilitySelectionDto>,
     pub skill_bindings: Vec<ExactCatalogRefDto>,
-    pub resource_bindings: Vec<TypedResourceBindingDto>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub system_role_provider_overrides: BTreeMap<String, RoleProviderSelectionDto>,
     pub persona: String,
@@ -231,31 +230,13 @@ pub struct AgentPresetSummaryDto {
     pub bound_target_count: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResourceDefaultBindingPolicyDto {
-    RequireExplicitSelection,
-    SelectOnlyOwnedResource,
-    LeaveUnbound,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TypedResourceDefaultDto {
-    pub slot_key: String,
-    pub resource_kind: String,
-    pub required: bool,
-    pub operations: BTreeSet<String>,
-    pub binding_policy: ResourceDefaultBindingPolicyDto,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OfficialPresetSeedDto {
     pub initial_capabilities: Vec<ExactCatalogRefDto>,
     pub on_demand_capabilities: Vec<ExactCatalogRefDto>,
     pub skill_bindings: Vec<ExactCatalogRefDto>,
-    pub typed_resource_defaults: Vec<TypedResourceDefaultDto>,
+    pub required_resource_kinds: BTreeSet<String>,
     pub required_runtime_features: BTreeSet<String>,
 }
 
@@ -413,7 +394,7 @@ pub struct PreviewSummaryDto {
     pub on_demand_index_count: u32,
     pub skill_count: u32,
     pub mcp_count: u32,
-    pub resource_binding_count: u32,
+    pub required_resource_kind_count: u32,
     pub provider_initialization_count: u32,
 }
 
@@ -426,7 +407,6 @@ pub struct RevisionDiffDto {
     pub removed_on_demand: BTreeSet<String>,
     pub added_skills: BTreeSet<String>,
     pub removed_skills: BTreeSet<String>,
-    pub resource_bindings_changed: bool,
     pub model_routes_changed: bool,
     pub instructions_changed: bool,
 }
@@ -448,7 +428,7 @@ pub struct SnapshotInspectorDto {
     pub tool_schema_refs: Vec<String>,
     pub context_schema_refs: Vec<String>,
     pub mcp_materializations: Vec<McpToolCatalogItemDto>,
-    pub typed_resource_bindings: Vec<TypedResourceBindingDto>,
+    pub required_resource_kinds: BTreeSet<String>,
     pub service_key_diagnostics: Vec<String>,
 }
 
@@ -505,23 +485,9 @@ pub struct CreateAgentPresetFromTemplateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default)]
-    pub resource_bindings: Vec<TemplateResourceSelectionDto>,
-    #[serde(default)]
     pub model_route_refs: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub chat_route_records: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TemplateResourceSelectionDto {
-    pub slot_key: String,
-    pub resource_kind: String,
-    pub resource_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_config_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub typed_parameters: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1043,7 +1009,9 @@ mod snapshot_tests {
                 "writeback": false,
                 "grounded": false
             },
-            "knowledge_base_ids": [],
+            "initial_capabilities": [],
+            "on_demand_capabilities": [],
+            "required_resource_kinds": [],
             "included_skills": [],
             "excluded_auto_skills": [],
             "warnings": []

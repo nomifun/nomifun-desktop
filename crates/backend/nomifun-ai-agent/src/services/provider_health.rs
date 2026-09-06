@@ -195,6 +195,8 @@ impl ProviderHealthCheckService {
             owner_token: None,
             install_embedded_agent_execution: false,
             allowed_tools: Vec::new(),
+            enforce_tool_allowlist: false,
+            deferred_tools: Vec::new(),
             write_root: None,
         })
     }

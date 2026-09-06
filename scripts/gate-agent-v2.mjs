@@ -4049,24 +4049,24 @@ function c8ValidateAllSceneCoverage(report, manifest, platformValidation) {
   }
 
   for (const [key, template] of Object.entries(templates)) {
-    const slots = template.typed_resource_defaults || [];
+    const requiredResourceKinds = template.required_resource_kinds || [];
     result.resource_slots[key] = {
-      count: slots.length,
-      required: slots.filter((slot) => slot.required).map((slot) => slot.slot_key),
-      status: slots.every(
-        (slot) =>
-          typeof slot.slot_key === 'string' &&
-          typeof slot.resource_kind === 'string' &&
-          Array.isArray(slot.operations)
-      )
-        ? 'pass'
-        : 'fail',
+      count: requiredResourceKinds.length,
+      required: requiredResourceKinds,
+      status:
+        Array.isArray(requiredResourceKinds) &&
+        requiredResourceKinds.every(
+          (resourceKind) =>
+            typeof resourceKind === 'string' && resourceKind.trim().length > 0
+        )
+          ? 'pass'
+          : 'fail',
     };
     c8Require(
       report,
       result.resource_slots[key].status === 'pass',
       'scene_resource_slot',
-      `C8 template ${key} has an invalid typed resource slot declaration`
+      `C8 template ${key} has an invalid required resource kind declaration`
     );
   }
   result.status = report.failure_details.some((failure) =>
@@ -5619,6 +5619,14 @@ function ap7AgentPresetLaunchContract() {
     send: 'ui/src/renderer/pages/guid/hooks/useGuidSend.ts',
     selection:
       'ui/src/renderer/pages/guid/hooks/useGuidAgentSelection.ts',
+    conversation:
+      'ui/src/renderer/pages/conversation/components/ChatConversation.tsx',
+    sendBox:
+      'ui/src/renderer/pages/conversation/platforms/nomi/NomiSendBox.tsx',
+    chatLayout:
+      'ui/src/renderer/pages/conversation/components/ChatLayout/index.tsx',
+    conversationService:
+      'crates/backend/nomifun-conversation/src/service.rs',
     config: 'ui/src/common/config/configKeys.ts',
     types: 'ui/src/common/types/agentPlatform/contracts.ts',
     dto: 'crates/backend/nomifun-api-types/src/agent_platform.rs',
@@ -5675,14 +5683,33 @@ function ap7AgentPresetLaunchContract() {
     'plain Nomi must expose the model selector and AgentPreset mode must hide it'
   );
   require(
+    source.conversation.includes(
+      'const modelLocked = Boolean(conversation.preset_id);'
+    ) &&
+      source.conversation.includes('if (modelLocked) return false;') &&
+      source.conversation.includes('if (modelLocked) return;') &&
+      source.sendBox.includes('{!modelLocked && (') &&
+      source.conversationService.includes(
+        'top-level `model` is immutable for AgentPreset conversations'
+      ),
+    'AgentPreset conversations must retain their frozen model in the UI and public update service'
+  );
+  require(
     ![
       'GuidSkillsDrawer',
-      'KnowledgeControl',
       'GuidCollaboratorSelector',
       'CollaborationPolicyControl',
       'ensureBackendMcpCatalog',
     ].some((marker) => source.page.includes(marker)),
     'Guid must not restore preset-owned resource or collaboration overrides'
+  );
+  require(
+    source.page.includes('knowledgeEnabled && (') &&
+      source.page.includes('<KnowledgeControl') &&
+      source.chatLayout.includes(
+        "target={{ kind: 'conversation', id: conversation_id }}"
+      ),
+    'Guid and conversation headers may expose Knowledge only as a target-scoped control for declared capability resources'
   );
   require(
     source.pill.includes('{preset.display_name}') &&
@@ -5732,8 +5759,12 @@ function ap7AgentPresetLaunchContract() {
 
 function ap7RevisionStorageContract() {
   const paths = {
-    migration:
+    migration064:
       'crates/backend/nomifun-db/migrations/064_agent_preset_revision_payload.sql',
+    migration065:
+      'crates/backend/nomifun-db/migrations/065_agent_preset_retirement.sql',
+    migration066:
+      'crates/backend/nomifun-db/migrations/066_retire_resource_bound_presets.sql',
     freshSchema:
       'crates/backend/nomifun-agent-contracts/schema/0001_fresh_v4.sql',
     freshRoot: 'crates/backend/nomifun-v4-root/src/database.rs',
@@ -5742,6 +5773,12 @@ function ap7RevisionStorageContract() {
     host: 'crates/backend/nomifun-app/src/router/agent_platform_host.rs',
     nomiCore:
       'crates/backend/nomifun-app/src/router/nomi_core_control_plane.rs',
+    snapshotContract:
+      'crates/backend/nomifun-agent-contracts/src/preset.rs',
+    snapshotCompiler:
+      'crates/backend/nomifun-agent-kernel/src/compiler.rs',
+    snapshotProjection:
+      'crates/backend/nomifun-app/src/router/nomi_core_agent_projection.rs',
   };
   const source = Object.fromEntries(
     Object.entries(paths).map(([key, path]) => [
@@ -5770,12 +5807,27 @@ function ap7RevisionStorageContract() {
   };
 
   require(
-    source.migration.includes(
+    source.migration064.includes(
       'RENAME COLUMN editor_document_json TO payload_json'
     ) &&
-      !source.migration.includes('ADD COLUMN') &&
-      !source.migration.includes('CREATE VIEW'),
+      !source.migration064.includes('ADD COLUMN') &&
+      !source.migration064.includes('CREATE VIEW'),
     'migration 064 must physically rename the Nomi-core Revision payload column'
+  );
+  require(
+    source.migration065.includes('ADD COLUMN retired_at_ms INTEGER') &&
+      source.migration065.includes('idx_nomi_agent_presets_active_owner') &&
+      source.migration065.includes('WHERE retired_at_ms IS NULL'),
+    'migration 065 must add the owner-scoped AgentPreset retirement tombstone'
+  );
+  require(
+    source.migration066.includes('json_tree(revision.payload_json)') &&
+      source.migration066.includes('json_tree(revision.snapshot_json)') &&
+      source.migration066.includes('DELETE FROM nomi_agent_bindings') &&
+      source.migration066.includes('DELETE FROM remote_bindings') &&
+      source.migration066.includes('UPDATE nomi_agent_presets') &&
+      source.migration066.includes("'resource_binding_refs'"),
+    'migration 066 must retire resource-bound Presets and clear active bindings without deleting history'
   );
   require(
     /CREATE TABLE agent_preset_templates[\s\S]*source_kind TEXT NOT NULL CHECK \(source_kind = 'official'\)/.test(
@@ -5798,6 +5850,18 @@ function ap7RevisionStorageContract() {
     source.platform.includes('payload_json') &&
       source.platform.includes('agent_preset_contribution_locks'),
     'Fresh AgentPlatform must persist one Revision payload plus canonical locks'
+  );
+  require(
+    source.snapshotContract.includes(
+      'pub required_resource_kinds: BTreeSet<ResourceKind>'
+    ) &&
+      source.snapshotCompiler.includes(
+        'let required_resource_kinds = authority_policies'
+      ) &&
+      source.snapshotProjection.includes(
+        'required_resource_kinds: BTreeSet<String>'
+      ),
+    'the immutable Snapshot must freeze required resource kinds for historical target controls'
   );
   require(
     forbiddenActiveMarkers.every((marker) =>
@@ -5859,6 +5923,16 @@ function runAp7Gate() {
     [
       '064_agent_preset_revision_payload.sql',
       'the canonical Revision payload migration',
+      AP7_DOC_PATHS.slice(2),
+    ],
+    [
+      '065_agent_preset_retirement.sql',
+      'the AgentPreset retirement migration',
+      AP7_DOC_PATHS.slice(2),
+    ],
+    [
+      '066_retire_resource_bound_presets.sql',
+      'the resource-bound AgentPreset retirement migration',
       AP7_DOC_PATHS.slice(2),
     ],
   ];
@@ -5989,9 +6063,15 @@ function runAp7Gate() {
     'crates/backend/nomifun-db/migrations/062_agent_preset_contribution_locks.sql';
   const migration064Path =
     'crates/backend/nomifun-db/migrations/064_agent_preset_revision_payload.sql';
+  const migration065Path =
+    'crates/backend/nomifun-db/migrations/065_agent_preset_retirement.sql';
+  const migration066Path =
+    'crates/backend/nomifun-db/migrations/066_retire_resource_bound_presets.sql';
   const migration061 = readFileSafe(join(repoRoot, migration061Path)) || '';
   const migration062 = readFileSafe(join(repoRoot, migration062Path)) || '';
   const migration064 = readFileSafe(join(repoRoot, migration064Path)) || '';
+  const migration065 = readFileSafe(join(repoRoot, migration065Path)) || '';
+  const migration066 = readFileSafe(join(repoRoot, migration066Path)) || '';
   const migration061Valid =
     migration061.includes('RENAME COLUMN preset_snapshot TO agent_snapshot') &&
     (migration061.match(/RENAME COLUMN preset_snapshot TO agent_snapshot/g) || [])
@@ -6007,6 +6087,17 @@ function runAp7Gate() {
     ) &&
     !migration064.includes('ADD COLUMN') &&
     !migration064.includes('CREATE VIEW');
+  const migration065Valid =
+    migration065.includes('ADD COLUMN retired_at_ms INTEGER') &&
+    migration065.includes('idx_nomi_agent_presets_active_owner') &&
+    migration065.includes('WHERE retired_at_ms IS NULL');
+  const migration066Valid =
+    migration066.includes('json_tree(revision.payload_json)') &&
+    migration066.includes('json_tree(revision.snapshot_json)') &&
+    migration066.includes('DELETE FROM nomi_agent_bindings') &&
+    migration066.includes('DELETE FROM remote_bindings') &&
+    migration066.includes('UPDATE nomi_agent_presets') &&
+    migration066.includes("'resource_binding_refs'");
   ap7AddCheck(
     checks,
     localFailures,
@@ -6030,6 +6121,22 @@ function runAp7Gate() {
     migration064Valid,
     'migration 064 must physically rename the Nomi-core AgentPreset Revision payload column',
     { path: migration064Path }
+  );
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'db.migration.065_preset_retirement',
+    migration065Valid,
+    'migration 065 must add the owner-scoped AgentPreset retirement tombstone',
+    { path: migration065Path }
+  );
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'db.migration.066_resource_boundary',
+    migration066Valid,
+    'migration 066 must retire resource-bound Presets and clear active bindings without deleting history',
+    { path: migration066Path }
   );
 
   const storageContract = ap7RevisionStorageContract();
@@ -6144,8 +6251,8 @@ function runAp7Gate() {
   );
 
   const behaviorEvidencePaths = [
-    'build.noindex/agent-capability-v2/ap-7-admission-evidence.json',
     'docs/specs/2026-08-28-agent-capability-platform-v2/AP-7-ADMISSION-EVIDENCE.json',
+    'build.noindex/agent-capability-v2/ap-7-admission-evidence.json',
   ];
   const evidencePath = behaviorEvidencePaths.find((path) =>
     statSafe(join(repoRoot, path))?.isFile()
@@ -6187,6 +6294,53 @@ function runAp7Gate() {
     signedAdmissionEvidence,
     'AP-7 admission evidence must be a committed, signed local record with AP-0..AP-7 closed',
     { evidence_path: evidencePath || null }
+  );
+  const implementationCommit =
+    typeof admissionEvidence?.signing?.implementation_commit === 'string'
+      ? admissionEvidence.signing.implementation_commit
+      : '';
+  const implementationCommitShape = /^[0-9a-f]{7,40}$/.test(implementationCommit);
+  const implementationCommitExists = implementationCommitShape
+    ? ap7RunCommand('git', [
+        'cat-file',
+        '-e',
+        `${implementationCommit}^{commit}`,
+      ])
+    : {
+        command: 'git cat-file -e <implementation_commit>^{commit}',
+        started_at: new Date().toISOString(),
+        exit_code: 1,
+        stdout: '',
+        stderr: 'implementation_commit is missing or malformed',
+      };
+  localCommands.push(implementationCommitExists);
+  const implementationCommitAncestor =
+    implementationCommitExists.exit_code === 0
+      ? ap7RunCommand('git', [
+          'merge-base',
+          '--is-ancestor',
+          implementationCommit,
+          sourceSha,
+        ])
+      : {
+          command: 'git merge-base --is-ancestor <implementation_commit> <source_sha>',
+          started_at: new Date().toISOString(),
+          exit_code: 1,
+          stdout: '',
+          stderr: 'implementation_commit does not exist',
+        };
+  localCommands.push(implementationCommitAncestor);
+  const implementationAttestationValid =
+    implementationCommitShape &&
+    implementationCommitExists.exit_code === 0 &&
+    implementationCommitAncestor.exit_code === 0;
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'evidence.implementation_commit',
+    implementationAttestationValid,
+    'AP-7 evidence implementation_commit must name an existing ancestor commit',
+    { implementation_commit: implementationCommit || null }
   );
 
   const statusResult = ap7RunCommand('git', [
@@ -6242,6 +6396,7 @@ function runAp7Gate() {
     staleInventory.length === 0 &&
     behaviorEvidencePresent &&
     signedAdmissionEvidence &&
+    implementationAttestationValid &&
     cleanWorktree;
 
   const report = {
@@ -6273,10 +6428,15 @@ function runAp7Gate() {
     admission_evidence: {
       path: evidencePath || null,
       signed: signedAdmissionEvidence,
+      implementation_commit: implementationCommit || null,
+      implementation_attestation_valid: implementationAttestationValid,
     },
     migrations: {
       '061_agent_snapshot_naming': migration061Valid,
       '062_agent_preset_contribution_locks': migration062Valid,
+      '064_agent_preset_revision_payload': migration064Valid,
+      '065_agent_preset_retirement': migration065Valid,
+      '066_retire_resource_bound_presets': migration066Valid,
     },
     commands: localCommands,
     failures: localFailures,

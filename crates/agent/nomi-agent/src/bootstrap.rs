@@ -510,6 +510,7 @@ impl AgentBootstrap {
         };
 
         let mut registry = nomi_tools::registry::ToolRegistry::new();
+        registry.force_deferred_named(&self.config.tools.deferred_allowlist);
         // Opt-in write-root containment (§3.6): when `tools.write_root` is set,
         // resolve it to an absolute path the write tools enforce. Empty = off.
         let write_root: Option<std::path::PathBuf> = {
@@ -918,7 +919,11 @@ impl AgentBootstrap {
         if !allowed_tools.is_empty() && !allowed_tools.iter().any(|name| name == "ToolSearch") {
             allowed_tools.push("ToolSearch".to_owned());
         }
-        registry.retain_named(&allowed_tools);
+        if self.config.tools.enforce_builtin_allowlist {
+            registry.retain_only_named(&allowed_tools);
+        } else {
+            registry.retain_named(&allowed_tools);
+        }
 
         let mut engine = if let Some(session) = self.resume_session {
             AgentEngine::resume_with_provider(

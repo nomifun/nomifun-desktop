@@ -72,12 +72,14 @@ const NomiConversationLayout: React.FC<{
   chatLayoutProps: Omit<ChatLayoutProps, 'children' | 'workspaceCollaboration' | 'workspaceExtraTabs'>;
   modelSelection: React.ComponentProps<typeof NomiChat>['modelSelection'];
   collaborationControlNode: React.ReactNode;
+  modelLocked: boolean;
   presetPresetName?: string;
 }> = ({
   conversation,
   chatLayoutProps,
   modelSelection,
   collaborationControlNode,
+  modelLocked,
   presetPresetName,
 }) => {
   const workspaceExtraTabs = useWorkspaceExtraTabs(conversation);
@@ -99,6 +101,7 @@ const NomiConversationLayout: React.FC<{
           (conversation.extra as { mcp_statuses?: IConversationMcpStatus[] } | undefined)?.mcp_statuses
         }
         agent_name={presetPresetName}
+        modelLocked={modelLocked}
         collaboratorSelectorNode={collaborationControlNode}
         isProcessing={isConversationProcessing(conversation)}
       />
@@ -110,6 +113,7 @@ const NomiConversationPanel: React.FC<{
   conversation: NomiConversation;
   sliderTitle: React.ReactNode;
 }> = ({ conversation, sliderTitle }) => {
+  const modelLocked = Boolean(conversation.preset_id);
   const [collaborators, setCollaboratorsState] = useState<TExecutionModelRef[]>(() => {
     const pool = conversation.execution_model_pool;
     return pool?.mode === 'range' ? pool.models.slice(1) : [];
@@ -175,6 +179,7 @@ const NomiConversationPanel: React.FC<{
   const { t } = useTranslation();
   const onSelectModel = useCallback(
     async (_provider: IProvider, modelName: string) => {
+      if (modelLocked) return false;
       const selected = {
         ..._provider,
         use_model: modelName,
@@ -202,7 +207,7 @@ const NomiConversationPanel: React.FC<{
       }
       return Boolean(ok);
     },
-    [activeCollaborators, conversation.id],
+    [activeCollaborators, conversation.id, modelLocked],
   );
 
   const modelSelection = useNomiModelSelection({
@@ -316,6 +321,7 @@ const NomiConversationPanel: React.FC<{
   );
   const { providers: healProviders, getAvailableModels: healGetAvailable } = healPool;
   useEffect(() => {
+    if (modelLocked) return;
     if (!healProviders.length) return;
     const saved = configService.get('nomi.defaultModel');
     const heal = resolveHealModel(
@@ -357,11 +363,19 @@ const NomiConversationPanel: React.FC<{
     conversation.model?.use_model,
     healProviders,
     healGetAvailable,
+    modelLocked,
     t,
   ]);
 
-  const workspaceEnabled = Boolean(conversation.extra?.workspace);
   const { info: presetPresetInfo } = useAgentInfo(conversation);
+  const presetResourceKinds = new Set(
+    conversation.agent_snapshot?.required_resource_kinds ?? []
+  );
+  const workspaceEnabled =
+    Boolean(conversation.extra?.workspace) &&
+    (!modelLocked || presetResourceKinds.has('workspace'));
+  const knowledgeEnabled =
+    !modelLocked || presetResourceKinds.has('knowledge_base');
   const sshHostId = sshHostIdOf(conversation);
 
   const chatLayoutProps = {
@@ -392,6 +406,7 @@ const NomiConversationPanel: React.FC<{
       ?.is_temporary_workspace,
     backend: 'nomi' as const,
     preset: presetPresetInfo ?? undefined,
+    knowledgeEnabled,
   };
 
   return (
@@ -400,6 +415,7 @@ const NomiConversationPanel: React.FC<{
       chatLayoutProps={chatLayoutProps}
       modelSelection={modelSelection}
       collaborationControlNode={collaborationControlNode}
+      modelLocked={modelLocked}
       presetPresetName={presetPresetInfo?.name}
     />
   );

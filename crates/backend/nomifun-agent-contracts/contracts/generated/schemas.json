@@ -150,12 +150,6 @@
           "persona": {
             "type": "string"
           },
-          "resource_bindings": {
-            "items": {
-              "$ref": "#/$defs/TypedResourceBinding"
-            },
-            "type": "array"
-          },
           "schema_version": {
             "type": "string"
           },
@@ -184,7 +178,6 @@
           "initial_capabilities",
           "on_demand_capabilities",
           "skill_bindings",
-          "resource_bindings",
           "persona",
           "instructions"
         ],
@@ -202,12 +195,6 @@
           },
           "capability": {
             "$ref": "#/$defs/ExactVersionRef"
-          },
-          "resource_binding_refs": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
           }
         },
         "required": [
@@ -468,50 +455,6 @@
           "provider_mount_id"
         ],
         "type": "object"
-      },
-      "TypedResourceBinding": {
-        "additionalProperties": false,
-        "properties": {
-          "binding_id": {
-            "type": "string"
-          },
-          "connection_config_ref": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "operations": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "owner_id": {
-            "type": "string"
-          },
-          "resource_id": {
-            "type": "string"
-          },
-          "resource_kind": {
-            "type": "string"
-          },
-          "typed_parameters": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          }
-        },
-        "required": [
-          "binding_id",
-          "resource_kind",
-          "resource_id",
-          "owner_id",
-          "operations"
-        ],
-        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -589,12 +532,6 @@
           "persona": {
             "type": "string"
           },
-          "resource_bindings": {
-            "items": {
-              "$ref": "#/$defs/TypedResourceBinding"
-            },
-            "type": "array"
-          },
           "schema_version": {
             "type": "string"
           },
@@ -623,7 +560,6 @@
           "initial_capabilities",
           "on_demand_capabilities",
           "skill_bindings",
-          "resource_bindings",
           "persona",
           "instructions"
         ],
@@ -641,12 +577,6 @@
           },
           "capability": {
             "$ref": "#/$defs/ExactVersionRef"
-          },
-          "resource_binding_refs": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
           }
         },
         "required": [
@@ -885,50 +815,6 @@
           "provider_mount_id"
         ],
         "type": "object"
-      },
-      "TypedResourceBinding": {
-        "additionalProperties": false,
-        "properties": {
-          "binding_id": {
-            "type": "string"
-          },
-          "connection_config_ref": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "operations": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "owner_id": {
-            "type": "string"
-          },
-          "resource_id": {
-            "type": "string"
-          },
-          "resource_kind": {
-            "type": "string"
-          },
-          "typed_parameters": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          }
-        },
-        "required": [
-          "binding_id",
-          "resource_kind",
-          "resource_id",
-          "owner_id",
-          "operations"
-        ],
-        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -965,12 +851,6 @@
           },
           "capability": {
             "$ref": "#/$defs/ExactVersionRef"
-          },
-          "resource_binding_refs": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
           }
         },
         "required": [
@@ -1158,50 +1038,6 @@
           "provider_mount_id"
         ],
         "type": "object"
-      },
-      "TypedResourceBinding": {
-        "additionalProperties": false,
-        "properties": {
-          "binding_id": {
-            "type": "string"
-          },
-          "connection_config_ref": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "operations": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "owner_id": {
-            "type": "string"
-          },
-          "resource_id": {
-            "type": "string"
-          },
-          "resource_kind": {
-            "type": "string"
-          },
-          "typed_parameters": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          }
-        },
-        "required": [
-          "binding_id",
-          "resource_kind",
-          "resource_id",
-          "owner_id",
-          "operations"
-        ],
-        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1238,12 +1074,6 @@
       "persona": {
         "type": "string"
       },
-      "resource_bindings": {
-        "items": {
-          "$ref": "#/$defs/TypedResourceBinding"
-        },
-        "type": "array"
-      },
       "schema_version": {
         "type": "string"
       },
@@ -1272,7 +1102,6 @@
       "initial_capabilities",
       "on_demand_capabilities",
       "skill_bindings",
-      "resource_bindings",
       "persona",
       "instructions"
     ],
@@ -1773,12 +1602,6 @@
             },
             "type": "array"
           },
-          "resource_binding_refs": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
           "root_capability_id": {
             "type": "string"
           },
@@ -1794,7 +1617,6 @@
           "capability_bundle",
           "tool_schema_refs",
           "context_schema_refs",
-          "resource_binding_refs",
           "model_route_refs"
         ],
         "type": "object"
@@ -1908,12 +1730,6 @@
           "provider": {
             "$ref": "#/$defs/ExactRoleProviderRef"
           },
-          "resource_binding_refs": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
           "source": {
             "$ref": "#/$defs/PluginSourceMetadata"
           },
@@ -1928,8 +1744,7 @@
         "required": [
           "provider",
           "source",
-          "supported_members",
-          "resource_binding_refs"
+          "supported_members"
         ],
         "type": "object"
       },
@@ -2022,6 +1837,13 @@
           "preset_revision_ref": {
             "$ref": "#/$defs/PresetRevisionRef"
           },
+          "required_resource_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
           "required_runtime_features": {
             "items": {
               "type": "string"
@@ -2058,12 +1880,6 @@
           },
           "target_contribution_manifest_digest": {
             "type": "string"
-          },
-          "typed_resource_bindings": {
-            "items": {
-              "$ref": "#/$defs/TypedResourceBinding"
-            },
-            "type": "array"
           }
         },
         "required": [
@@ -2083,7 +1899,6 @@
           "capability_allowlist",
           "skill_locks",
           "mcp_tool_locks",
-          "typed_resource_bindings",
           "canonical_schema_manifest_digest",
           "target_contribution_manifest_digest"
         ],
@@ -2127,50 +1942,6 @@
           "managed_minimal"
         ],
         "type": "string"
-      },
-      "TypedResourceBinding": {
-        "additionalProperties": false,
-        "properties": {
-          "binding_id": {
-            "type": "string"
-          },
-          "connection_config_ref": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "operations": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "owner_id": {
-            "type": "string"
-          },
-          "resource_id": {
-            "type": "string"
-          },
-          "resource_kind": {
-            "type": "string"
-          },
-          "typed_parameters": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          }
-        },
-        "required": [
-          "binding_id",
-          "resource_kind",
-          "resource_id",
-          "owner_id",
-          "operations"
-        ],
-        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3589,6 +3360,13 @@
             },
             "type": "array"
           },
+          "required_resource_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
           "required_runtime_features": {
             "items": {
               "type": "string"
@@ -3601,60 +3379,14 @@
               "$ref": "#/$defs/ExactVersionRef"
             },
             "type": "array"
-          },
-          "typed_resource_defaults": {
-            "items": {
-              "$ref": "#/$defs/TypedResourceDefault"
-            },
-            "type": "array"
           }
         },
         "required": [
           "initial_capabilities",
           "on_demand_capabilities",
           "skill_bindings",
-          "typed_resource_defaults",
+          "required_resource_kinds",
           "required_runtime_features"
-        ],
-        "type": "object"
-      },
-      "ResourceDefaultBindingPolicy": {
-        "enum": [
-          "require_explicit_selection",
-          "select_only_owned_resource",
-          "leave_unbound"
-        ],
-        "type": "string"
-      },
-      "TypedResourceDefault": {
-        "additionalProperties": false,
-        "properties": {
-          "binding_policy": {
-            "$ref": "#/$defs/ResourceDefaultBindingPolicy"
-          },
-          "operations": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "required": {
-            "type": "boolean"
-          },
-          "resource_kind": {
-            "type": "string"
-          },
-          "slot_key": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "slot_key",
-          "resource_kind",
-          "required",
-          "operations",
-          "binding_policy"
         ],
         "type": "object"
       }

@@ -191,6 +191,10 @@ pub struct NomiResolvedConfig {
     /// Per-session 工具白名单（空 = 不限制），源自 `NomiBuildExtra.allowed_tools`，
     /// 由 manager 灌进 `config.tools.builtin_allowlist`。
     pub allowed_tools: Vec<String>,
+    pub enforce_tool_allowlist: bool,
+    /// Allowed tools whose full schema is activated on demand through the
+    /// Nomi session's ToolSearch boundary.
+    pub deferred_tools: Vec<String>,
     /// 原生文件工具（Write/Edit/ApplyPatch）的写根钳制，按会话**信任面**解析：
     /// 本地桌面（`Private` 且非渠道）= `None`（OS 用户全权，不钳制，今日行为）；
     /// 渠道 / 远程 / 对外 = `Some(workspace)`（收窄到会话工作区，堵住对外面过度开放）。

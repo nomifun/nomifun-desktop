@@ -8,7 +8,6 @@ import type { ITerminalSession } from '@/common/adapter/ipcBridge';
 import type { KnowledgeBindingKind } from '@/common/adapter/ipcBridge';
 import type { ConversationId } from '@/common/types/ids';
 import {
-  workpathKeyForConversation,
   workpathKeyForTerminal,
 } from '@/renderer/pages/conversation/SessionList/utils/sessionWorkpath';
 
@@ -41,6 +40,13 @@ export interface ResolvedKnowledgeBindingTarget {
   target_id: string;
 }
 
+/** Only workpath-backed sessions have a workspace scope to display. */
+export function workpathDisplayForKnowledgeTarget(
+  target: ResolvedKnowledgeBindingTarget | null | undefined
+): string | null {
+  return target?.kind === 'workpath' ? target.target_id : null;
+}
+
 /**
  * Which knowledge-binding row a session actually reads and writes.
  *
@@ -51,11 +57,7 @@ export interface ResolvedKnowledgeBindingTarget {
  * to its workpath:
  *
  * 1. `extra.companion_id` present     → ('companion', companion_id)
- * 2. `extra.preset_knowledge_binding` → ('conversation', conversation_id)
- * 3. otherwise                        → ('workpath', workpathKey(workspace))
- *
- * Branch 2 is the one `KnowledgeControl`'s inline memo is missing, which is why
- * this lives in its own tested function instead of being copied again.
+ * 2. otherwise                        → ('conversation', conversation_id)
  */
 export function resolveKnowledgeBindingTarget(source: SessionKnowledgeSource): ResolvedKnowledgeBindingTarget {
   if (source.kind === 'terminal') {
@@ -69,11 +71,7 @@ export function resolveKnowledgeBindingTarget(source: SessionKnowledgeSource): R
     return { kind: 'companion', target_id: companionId };
   }
 
-  if (extra.preset_knowledge_binding === true) {
-    return { kind: 'conversation', target_id: source.conversationId };
-  }
-
-  return { kind: 'workpath', target_id: workpathKeyForConversation(extra) };
+  return { kind: 'conversation', target_id: source.conversationId };
 }
 
 /** Stable cache/subscription key for a resolved target. */

@@ -219,6 +219,7 @@ mod tests {
                     chat_route_identity: None,
                     initial_capabilities: Vec::new(),
                     on_demand_capabilities: Vec::new(),
+                    required_resource_kinds: BTreeSet::new(),
                     on_demand_activation_plans: BTreeMap::from([(
                         capability.clone(),
                         PrecomputedActivationPlan {
@@ -226,7 +227,6 @@ mod tests {
                             capability_bundle: vec![capability.clone()],
                             tool_schema_refs: Vec::new(),
                             context_schema_refs: Vec::new(),
-                            resource_binding_refs: Vec::new(),
                             model_route_refs: Vec::new(),
                         },
                     )]),
@@ -241,7 +241,6 @@ mod tests {
                     skill_locks: Vec::new(),
                     mcp_tool_locks: Vec::new(),
                     resolved_role_providers: BTreeMap::new(),
-                    typed_resource_bindings: Vec::new(),
                     canonical_schema_manifest_digest: DigestHex::from("schema"),
                     target_contribution_manifest_digest: DigestHex::from("target"),
                 },
@@ -257,6 +256,7 @@ mod tests {
                 availability_evidence_revision: "test".to_owned(),
             },
             authority_policies: BTreeMap::new(),
+            target_resource_bindings: Vec::new(),
             registry_generation: 1,
             registry_digest: DigestHex::from("registry"),
         }

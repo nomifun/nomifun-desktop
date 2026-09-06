@@ -1,14 +1,15 @@
 {
   "title": "Agent Workbench",
-  "subtitle": "Design an Agent's identity, capabilities, model, and resources, then test it before saving.",
+  "subtitle": "Design an Agent's identity, model, and capability boundary, then test it before saving.",
   "loading": "Loading Agent Workbench…",
-  "loadingEditor": "Loading the selected AgentPreset…",
+  "loadingEditor": "Loading the selected Agent…",
   "freshStart": {
     "title": "Fresh v4 workspace",
-    "body": "This generation starts with {{count}} official templates and an empty personal library. Previous settings are not imported; fork a template or create a new AgentPreset here."
+    "body": "This generation starts with {{count}} official templates and an empty personal library. Previous settings are not imported; fork a template or create a new Agent here."
   },
   "actions": {
     "create": "Create",
+    "delete": "Delete",
     "fork": "Fork",
     "remove": "Remove",
     "retry": "Retry",
@@ -22,21 +23,23 @@
     "forkName": "{{name}} Copy"
   },
   "library": {
-    "ariaLabel": "AgentPreset library",
-    "title": "AgentPreset library",
-    "subtitle": "Official templates and your immutable revision lines",
+    "ariaLabel": "Agent library",
+    "title": "Agent library",
+    "subtitle": "Official templates and your Agent setups",
     "official": "Official templates",
-    "mine": "My AgentPresets",
-    "empty": "No personal AgentPresets yet.",
+    "mine": "My Agents",
+    "empty": "No custom Agents yet.",
     "capabilityCount": "{{count}} capabilities",
     "revision": "Revision {{revision}}",
     "unsaved": "No saved revision",
-    "bindingCount": "{{count}} bindings"
+    "bindingCount": "{{count}} usage targets",
+    "deleteConfirmTitle": "Delete “{{name}}”?",
+    "deleteConfirmBody": "It can no longer be edited or used for new conversations. Existing conversation history is preserved.",
+    "deleteAria": "Delete Agent “{{name}}”"
   },
   "template": {
     "readOnly": "Official read-only template",
-    "capabilityHint": "The frozen seed defines exact initial and on-demand capability versions. Fork it to edit.",
-    "resourceHint": "Templates declare typed resource slots, never a specific user's resource IDs.",
+    "capabilityHint": "The template explicitly lists capabilities available at startup and capabilities the Agent may request. Fork it to change that boundary.",
     "hostUnavailable": "This template includes capabilities that are unavailable on the current Nomi-core host. Forking stays blocked until a real owner is available.",
     "zeroToolTitle": "Exact zero-tool profile",
     "zeroToolBody": "No capability, Skill, MCP, workspace, Coding context, or hidden capability search is constructed.",
@@ -85,16 +88,13 @@
   },
   "sections": {
     "basic": "Identity and model",
-    "basicHint": "Name the AgentPreset, select a Chat model route, and write the stable persona and instructions.",
+    "basicHint": "Name the Agent, select a Chat model, and write its stable persona and instructions.",
     "capabilities": "Capabilities",
-    "capabilitiesHint": "Initial capabilities are active at Session start. On-demand capabilities are pre-resolved and activate only at a completed-turn boundary.",
+    "capabilitiesHint": "Set each capability to Off, Available at startup, or May request. This declares the capability boundary without binding resource instances.",
     "skillsMcp": "Skills and MCP",
-    "skillsMcpHint": "Skills contribute instructions only. MCP tools enter the AgentPreset through their materialized Capability.",
+    "skillsMcpHint": "Skills contribute instructions only. MCP tools enter this Agent through their available capability.",
     "skills": "Skills",
     "mcp": "MCP materializations",
-    "resources": "Typed resources",
-    "resourcesHint": "Only resource kinds required by selected capabilities are shown. Resource ownership is validated synchronously.",
-    "advanced": "Advanced budgets and execution constraints",
     "previewInspector": "Preview and Inspector",
     "previewInspectorHint": "Resolve the exact initial/on-demand ceiling, Tool/Context projection, resources, RuntimeProfile, and revision diff.",
     "test": "Test with a real Session",
@@ -107,6 +107,7 @@
     "chatModelRoutePlaceholder": "Exact model route ID",
     "chatModelRouteRecord": "Chat route record",
     "chatModelRouteRecordPlaceholder": "Canonical Chat route JSON",
+    "chatModelRouteUnavailable": "This host has no available Chat model. Choose one before saving or testing.",
     "persona": "Persona",
     "instructions": "Instructions"
   },
@@ -121,14 +122,17 @@
   },
   "capabilities": {
     "search": "Search capabilities and source Packages",
-    "initial": "Initial capabilities",
-    "onDemand": "On-demand capabilities",
-    "initialShort": "Initial",
-    "onDemandShort": "On-demand",
+    "initial": "Available at startup",
+    "onDemand": "May request",
+    "initialShort": "At startup",
+    "onDemandShort": "May request",
     "notSelected": "Off",
     "emptySelection": "No capabilities in this set.",
-    "emptyCatalog": "No matching materialized capabilities.",
+    "emptyCatalog": "No matching capabilities.",
     "source": "Source",
+    "catalogUnavailable": "No usable implementation of this capability is available on this installation.",
+    "unavailableReason": "This installation does not currently provide an executable owner for this capability, so it cannot be selected.",
+    "modeAria": "Set the capability mode for {{name}}",
     "tools": "{{count}} actions",
     "contexts": "{{count}} context contributors"
   },
@@ -140,24 +144,31 @@
     "empty": "No MCP tool materializations."
   },
   "resources": {
-    "noneRequired": "The current capability selection requires no typed resources.",
-    "required": "Required",
-    "optional": "Optional",
-    "resourceId": "Resource ID",
-    "operations": "Operations",
-    "connectionRef": "Connection reference",
-    "hostPath": "Host workspace path",
-    "hostPathUnavailable": "Host workspace path unavailable",
-    "knowledgeBase": "Knowledge base",
-    "knowledgeBasePlaceholder": "Select a knowledge base with an available root",
-    "knowledgeName": "Knowledge base name",
-    "knowledgeRoot": "Knowledge base host path"
-  },
-  "advanced": {
-    "systemTokens": "System context tokens",
-    "dynamicTokens": "Dynamic context tokens",
-    "activeCapabilities": "Maximum active capabilities",
-    "toolCalls": "Maximum Tool calls per Turn"
+    "noneRequired": "No additional resources",
+    "requiredAtUse": "Required when used",
+    "requiredKinds": "Required resource kinds",
+    "bindingPolicyTitle": "Choose actual resources when using the Agent",
+    "bindingPolicyBody": "An Agent only declares its capability boundary and required resource kinds. Each conversation, companion, or automation target selects and manages its own knowledge bases, workspace, and connections.",
+    "kinds": {
+      "assetLibrary": "Asset library",
+      "browser": "Browser session",
+      "canvas": "Canvas",
+      "channel": "Channel",
+      "companion": "Companion",
+      "companionMemory": "Companion memory",
+      "computer": "Computer control",
+      "customer": "Customer",
+      "generationProvider": "Generation service",
+      "knowledgeBase": "Knowledge base",
+      "mcpConnection": "MCP connection",
+      "miniApp": "MiniApp",
+      "processSession": "Process session",
+      "projectMemory": "Project memory",
+      "robot": "Robot",
+      "sshHost": "SSH host",
+      "terminal": "Terminal session",
+      "workspace": "Workspace"
+    }
   },
   "preview": {
     "emptyTitle": "No Preview yet",
@@ -173,7 +184,7 @@
       "context_contributor_count": "Context sources",
       "skill_count": "Skills",
       "mcp_count": "MCP mappings",
-      "resource_binding_count": "Resources"
+      "required_resource_kind_count": "Required resource kinds"
     }
   },
   "inspector": {
@@ -201,8 +212,8 @@
     "continuation": "Rotate or revoke fences only new Remote request admission. Existing Sessions remain unchanged; a replacement token must resolve to the same owner and explicitly submit the original AgentSession ID."
   },
   "test": {
-    "realEffectWarning": "Test will automatically save current changes when needed, create an ordinary persistent Session, and execute FullAuto against the currently bound real resources. Tool and external Effects are not simulated.",
-    "inputPlaceholder": "Enter the first ordinary Turn for this AgentPreset…",
+    "realEffectWarning": "Test saves current changes when needed and creates an ordinary persistent conversation. Tools and external effects are not simulated; required resources come from the real test context.",
+    "inputPlaceholder": "Enter the first test message for this Agent…",
     "session": "AgentSession",
     "turn": "Turn status",
     "revision": "Revision"
@@ -210,10 +221,12 @@
   "common": {
     "none": "None",
     "noChanges": "No changes",
+    "available": "Available",
     "unavailable": "Unavailable"
   },
   "errors": {
-    "title": "Agent Workbench could not complete the operation"
+    "title": "Agent Workbench could not complete the operation",
+    "presetCapabilitiesLoadFailed": "The selected Agent's capabilities could not be loaded. Retry or choose another Agent."
   },
   "navigation": {
     "railTitle": "Agent Workbench"

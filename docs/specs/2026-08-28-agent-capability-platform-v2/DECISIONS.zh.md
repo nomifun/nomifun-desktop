@@ -6,7 +6,7 @@
 >
 > 状态来源：`GLOBAL-CLOSURE-TODO.zh.md` 是当前实施进度、阻塞项和关闭状态的唯一来源。本文只记录架构决策及理由，不声明代码、Gate、平台验证或发布已经完成。
 >
-> 历史处理：保留 D-001～D-038 的决策编号、仍有效的结论和形成理由。已被 05 否定的旧要求只保留极短撤销原因，不再作为正文中的候选方案、实施步骤或验收合同。
+> 历史处理：保留 D-001～D-039 的决策编号、仍有效的结论和形成理由。已被 05 否定的旧要求只保留极短撤销原因，不再作为正文中的候选方案、实施步骤或验收合同。
 
 ## 状态约定
 
@@ -61,27 +61,30 @@
     `/agent-sessions/:agentSessionId`；旧 `/presets`、`/settings/agent-presets`、
     `/settings/agent` 只能作为限期迁移围栏，不能继续承载 authoring。
 12. 持久化执行投影统一使用 `agent_snapshot`。061/062/064 分别完成 snapshot 命名、
-    ContributionLock 和 `payload_json` 的物理收口；Fresh-v4 只 seed 官方模板且没有旧
-    preset projection 表。历史 baseline 中的旧列只作为 migration source，不是运行时
-    兼容别名。
+    ContributionLock 和 `payload_json` 的物理收口；065 增加用户 Preset retirement
+    tombstone，066 退役包含旧资源实例字段的 Preset 并删除活动 Binding，同时保留
+    Revision/Snapshot/Session 历史。Fresh-v4 只 seed 官方模板且没有旧 preset
+    projection 表；当前 migration head 为 66。
 13. 2026-09-06 人工走查确认首页 Guid 未真正提供 AgentPreset 选择，旧 AP-7
-    admission 因而撤销。纠偏实现已在 `582932377` 完成父级验证并重新签署；
-    `SL-S4-02` 仍独立等待真实 Desktop UI 人工走查。
+    admission 因而撤销。后续纠偏已经通过真实 Tauri Desktop 产品走查：默认 Nomi
+    保留模型选择，AgentPreset 会话锁定 Snapshot 模型，能力三态/明细、删除、首页
+    预选和目标级 Workspace/Knowledge 已闭环。`SL-S4-02` 已关闭；AP-7 只等待干净
+    实现提交、重新签署和最终 Gate。手机模式不属于 `nomifun-desktop` 本期服务范围。
 
 ## 决策总览
 
 | ID | 决策 | 状态 | 当前有效结论 |
 |---|---|---|---|
-| D-001 | 产品与内部领域命名 | 已确认 | 产品称“Agent 设定”；内部使用 `AgentPreset` / `AgentPresetRevision`，运行实例使用 `AgentSession` |
+| D-001 | 产品与内部领域命名 | 已确认 | 产品统一称“Agent 工作台”；内部使用 `AgentPreset` / `AgentPresetRevision`，运行实例使用 `AgentSession` |
 | D-002 | Agent 执行模式 | 已确认 | 只保留 FullAuto；不保留审批、确认、Grant/Lease/Permit 状态机 |
 | D-003 | 平台事实与 Runtime 所有权 | 已修订（2026-09-03） | NomiFun 持有平台和业务事实；当前产品 host 是 NomiCore/Nomi engine；任一 Runtime 都必须经 frozen Snapshot 和显式 host boundary 接入 |
 | D-004 | Codex 基座与 Nomi 替换 | 后续阶段 | 当前不切换或删除 Nomi；Codex app-server 仅保留协议/Sidecar 研究和未来宿主入口，重新立项后再评估 Codex-native 或 external integration |
 | D-005 | 普通插件运行模型 | 已确认 | 普通第一方和第三方插件按 trusted in-process code 处理；不建设通用 sandbox/权限平台 |
 | D-006 | Thin Kernel 与业务边界 | 已确认 | Kernel 只保留不可由普通插件自举的基础事实；业务域进入统一插件主链 |
 | D-007 | Package/Capability/Skill/MCP 分层 | 已修订（05） | 保留四层语义；Browser/Computer 增加 canonical Role/Provider seam，所有消费者仍只调用 canonical Capability |
-| D-008 | initial/on-demand 能力 | 已修订（05） | 保留两个集合和按需激活；Selection 只保留真实消费字段，不建设未执行的配置面 |
+| D-008 | initial/on-demand 能力 | 已修订（05） | 保留两个集合和按需激活；用户可将每项能力设为关闭、启动即用或可按需申请；Selection 只保留能力引用和真实 action allowlist |
 | D-009 | 官方 Agent 模板 | 已确认 | 保留角色型模板与业务边界；精确 seed 来自 canonical inventory，不以固定数量测试作为 Gate |
-| D-010 | Agent 设定编辑体验 | 已修订（05） | 普通界面只展示产品语言、能力分组和资源 picker；Revision/Snapshot/digest 等进入折叠技术详情 |
+| D-010 | Agent 工作台编辑体验 | 已修订（05） | 普通界面展示能力明细与三态控制、模型和产品语义；只展示所需资源种类，具体资源 picker 放在会话/伙伴/自动化消费目标；Revision/Snapshot/digest 等进入折叠技术详情 |
 | D-011 | 首个 Vertical Slice | 已修订（2026-09-03） | `chat.minimal` 与 Nomi-backed Coding 是当前真实切片；`coding.codex`/fixture 只保留为历史或未来 Codex 研究，不是当前完成证据 |
 | D-012 | v4 数据代际 | 已修订（2026-09-03） | Fresh-v4 保留为显式备用 host/data boundary；当前 Web/Desktop/`nomicore` 使用 NomiCore/Nomi data root，不迁移 pre-v4 数据 |
 | D-013 | 旧数据目录处理 | 已确认 | 同文件系统 whole-root rename 后创建空 v4 root；归档不进入运行、恢复或兼容主链 |
@@ -96,7 +99,7 @@
 | D-022 | Test Revision 与真实 Effect | 已修订（05） | Test 走普通 Revision/Session；Effect 只分 `read_only`、`managed_effect`、`external_uncertain_effect` |
 | D-023 | 官方模板 Seed 政策 | 已修订（05） | 保留 role-complete/context-minimal；不以固定模板或 Capability 数量生成结构 Gate |
 | D-024 | Session 删除 | 已修订（05） | 简化为 `live → deleting → dispose/kill → 幂等删除 → minimal tombstone` |
-| D-025 | Snapshot 可执行性 | 已修订（05） | 只保留一个 canonical Compiler；Snapshot 只冻结实际执行闭包，结构不兼容时只读并显式 fork |
+| D-025 | Snapshot 可执行性 | 已修订（05） | 只保留一个 canonical Compiler；Snapshot 冻结能力/Provider/Tool/Model 闭包和资源种类约束，不冻结消费目标资源实例；结构不兼容时只读并显式 fork |
 | D-026 | Remote token rotate/revoke | 已修订（05） | 原子 generation/hash 是 admission fence；不跨 Response Body 持锁，不增加 grace/worker/Session 索引 |
 | D-027 | Nomi 排空 | 后续阶段 | 原在线 drain 设计撤销；C9 bounded shutdown 只在未来 Codex 切换并决定删除 Nomi 时执行 |
 | D-028 | 发布平台矩阵 | 已修订（2026-09-03） | 当前首发验证针对 Nomi-core 候选：Windows x64、macOS arm64、Linux Desktop x64；macOS x64/Linux Headless 后续交付 |
@@ -107,9 +110,10 @@
 | D-033 | Nomi-core Remote MCP transport | 已确认（2026-09-05） | Streamable HTTP transport/session admission/tool schema 由 `nomifun-public` 统一持有；Nomi-core 通过 `CanonicalRemoteOperations` 注入既有 Remote handler，复用 owner、provenance、idempotency、cursor 和 runtime，不构造伪 `AgentPlatform` 或第二套状态机 |
 | D-034 | `SL-S3-10` host-boundary 收口 | 已确认（2026-09-05） | Cron/AutoWork/Requirement/AgentExecution/Channel/IDMM 均经同一个 `NomiCoreSessionOwner` 接收领域自有 typed contract；Conversation-backed bridge 仅保留在测试支持或 app composition，审计必须报告 `production_legacy_files=0`、`transitional_adapters_with_legacy_dependencies=0`、`candidate=none`，但不宣称 canonical Session 已具备所有未来 live event/receipt 能力 |
 | D-035 | Agent 工作台公共入口与迁移围栏 | 已修订（2026-09-06） | 侧边栏明确显示“Agent 工作台”并进入 `/agent`；首页 Guid 是选择已保存 AgentPreset 并启动会话的入口，不是第二个 authoring surface；旧 preset 深层路由必须删除 |
-| D-036 | `agent_snapshot`、Revision payload/locks 与 Fresh-v4 clean cut | 已修订（2026-09-06） | 061/062/064 使用物理命名且不做 alias；Fresh-v4 只 seed 官方模板，Revision 使用 `payload_json` 与 ContributionLock，不保留 Package template source 或旧 preset projection 表 |
-| D-037 | AP-7 admission 证据边界 | 已修订（2026-09-06） | 旧签署因缺失真实 AgentPreset 启动选择器而撤销；纠偏实现 `582932377` 已完成父级验证并重新签署，06 仍保持独立边界 |
-| D-038 | 首页 AgentPreset 选择与高层 Session 创建 | 已确认（2026-09-06） | Guid pill bar 只列可执行用户 AgentPreset，`+` 打开 `/agent`，工作台启动会话会预选；客户端只提交 `preset_id/title`，服务端解析稳定 Revision/Snapshot/Binding；普通 Guid 不提供模型或资源覆盖，执行引擎只属基础设施 |
+| D-036 | `agent_snapshot`、Revision payload/locks 与 Fresh-v4 clean cut | 已修订（2026-09-06） | 061/062/064 使用物理命名且不做 alias；065/066 完成 retirement 与旧资源绑定 Preset 退役；Fresh-v4 只 seed 官方模板，Revision 使用 `payload_json` 与 ContributionLock，不保留 Package template source 或旧 preset projection 表 |
+| D-037 | AP-7 admission 证据边界 | 已修订（2026-09-06） | 旧签署因缺失真实 AgentPreset 启动选择器而撤销；纠偏实现和真实 Tauri Desktop 产品走查已完成，当前只在干净实现提交后重新签署；06 仍保持独立边界 |
+| D-038 | 首页 AgentPreset 选择与高层 Session 创建 | 已修订（2026-09-06） | Guid pill bar 只列可执行用户 AgentPreset，`+` 打开 `/agent`，工作台启动会话会预选；客户端只提交 `preset_id/title`，服务端解析稳定 Revision/Snapshot/Binding；普通 Nomi 保留模型选择，Preset 会话锁定 Snapshot 模型；具体 Workspace/Knowledge/Connector 只在消费目标选择；执行引擎只属基础设施 |
+| D-039 | Preset Session 模型与资源种类冻结 | 已确认（2026-09-06） | Snapshot digest 冻结精确模型和 `required_resource_kinds`；Preset Session 不允许 UI 或公开 PATCH 改模型，桌面资源入口只读冻结资源种类；当前 Catalog 升级不得改写历史 Session |
 
 ## 全局有效约束
 
@@ -125,7 +129,7 @@
 ### D-001：产品与内部领域命名
 
 - 状态：`已确认`
-- 产品对象统一称 **Agent 设定**。
+- 产品入口和用户可见对象统一称 **Agent 工作台 / Agent**；“Preset”只保留为内部聚合名。
 - 内部可编辑对象为 `AgentPreset`，不可变版本为 `AgentPresetRevision`。
 - 产品运行实例为 `AgentSession`，不使用“系统 Agent”或 `AgentDefinition` 指代完整设定。
 - 产品不提供 Runtime/Engine catalog；执行实现是内部基础设施。
@@ -136,7 +140,8 @@
 
 - 状态：`已确认`
 - 产品只保留 FullAuto。`YOLO` 只能作为历史或研发别名，不能成为第二套机器合同。
-- Agent 只能调用 Snapshot 已冻结的 Capability、Tool 和 typed resources；范围外调用明确失败。
+- Agent 只能调用 Snapshot 已冻结的 Capability/Tool ceiling，并只能使用当前消费目标
+  已绑定且满足 required resource kinds 的资源；范围外调用明确失败。
 - v4 不保存 approval、confirmation、permission mode、Grant、Consent、Lease 或 Permit。
 - 未来若出现真实审批需求，必须作为独立产品需求重新设计，不能预埋等待状态。
 
@@ -239,7 +244,9 @@ Browser/Computer 的一期增补合同：
 - Preset 保留 `initial_capabilities` 与 `on_demand_capabilities` 两个集合。
 - Compiler 在创建 Snapshot 时解析两个集合；Runtime 只能激活 frozen on-demand ceiling，不能从全局 Catalog 扩权。
 - initial 进入首轮 Tool/Context；on-demand 只保留紧凑索引，并在真实使用时 lazy acquire 对应 Provider/resource。
-- Capability Selection 首版只保留 capability ref、action allowlist 和 resource binding refs。
+- Capability Selection 首版只保留 capability ref 和 action allowlist。
+- `resource_binding_refs` 与具体资源实例不得进入 Preset/Revision/Snapshot；资源需求由
+  Capability 的 `required_resource_kinds` 表达，实例由消费目标绑定。
 - `required`、`exposure`、destination constraints、budget override 和未传入 Handler 的 config 在出现真实执行语义前删除。
 - initial/on-demand 由所在集合表达，不复制第二套字段。
 
@@ -259,17 +266,21 @@ Browser/Computer 的一期增补合同：
 ### D-010：Agent 设定编辑器与产品导航
 
 - 状态：`已修订（05）`
-- 默认界面只展示名称、用途、模型、按用户任务分组的能力/能力包、工作区/知识库/连接器 picker、保存和“试用 Agent”。
+- 默认界面只展示名称、用途、模型、每项能力的名称/说明/来源/可用性/资源种类，
+  以及关闭、启动即用、可按需申请三态、保存和“试用 Agent”。
 - Save/Test 自动执行内部 Preview，不要求用户理解或先操作 Preview。
-- initial/on-demand 默认由模板和 Capability metadata 决定；只有开发者模式可以覆盖。
-- binding ID、resource ID、owner、operation 和 typed parameters 由后台生成，不要求用户手填。
+- initial/on-demand 由模板预置，用户可以在工作台显式调整。
+- 工作区、知识库、MCP/Connector 等具体资源在会话、伙伴或自动化目标中选择。
+- binding ID、resource ID、owner、operation 和 typed parameters 不进入 Preset 编辑器。
 - Revision、Snapshot、digest、protocol、raw Event 和 JSON 放入默认折叠的技术详情/导出诊断。
 - Snapshot 不兼容时，界面只展示“在新会话中继续”，后台执行显式 fork。
 - Package、Capability、Skill 和 MCP 仍保持各自清晰的管理入口；不恢复“设定市场”混合对象。
 
 原“在普通编辑器直接展示完整 exact-set、digest、内部 ID 和复杂 Preview”的要求已撤销，因为它把实施合同泄漏成用户操作。
 
-理由：用户需要配置任务能力和资源，而不是维护内部编译产物。隐藏技术细节可以保留诊断能力，同时缩短核心流程。
+理由：用户需要声明 Agent 有什么能力、哪些能力可按需申请，并在具体使用场景中
+绑定资源，而不是把某个知识库或路径永久冻结进 Agent 设计。隐藏技术细节可以保留
+诊断能力，同时缩短核心流程。
 
 ### D-011：首个端到端 Vertical Slice
 
@@ -354,7 +365,8 @@ Browser/Computer 的一期增补合同：
 ### D-017：Remote 调用与 Agent 设定映射
 
 - 状态：`已确认`
-- `RemoteBinding` 复用 canonical Agent binding，固定 exact Preset revision、Snapshot 和 typed resources。
+- `RemoteBinding` 复用 canonical Agent binding，固定 exact Preset revision 和 Snapshot；
+  Remote 自己的具体资源在其消费目标 admission 中绑定，不写回 Preset/Snapshot。
 - Remote 协议只提供显式 `open/turn/observe/cancel`；REST/MCP 是传输适配器，不定义第二套 Session 模型。
 - `open` 返回唯一 `agent_session_id`；后续请求必须显式提交该 ID，不按 token、连接、IP、客户端名或“最近会话”隐式复用。
 - Binding 更新只影响之后创建的 Session；既有 Session 使用 frozen Snapshot。
@@ -383,7 +395,8 @@ Browser/Computer 的一期增补合同：
 - 2026-09-05 的真实 StepFun smoke 已证明上述 Nomi-core Chat/Coding owner 链路可在
   本机执行；它使用 initial capability 闭包，并同时验证 on-demand placement 会
   fail-closed。该结果是 `SL-S3-07` evidence，不改变独立 automation、Remote
-  transport 或 Desktop UI 的完成定义。
+  transport 或 Desktop UI 的完成定义；这些项目随后各自验证，其中 `SL-S4-02` 已于
+  2026-09-06 由真实 Tauri Desktop 走查关闭。
 - `coding.codex-native` 的原生协议和工作流要求保留为未来 Codex 重新立项输入。
 - 不建设 token/TTFT/P50/P95、reference-device、paired corpus、统计显著性、长期观察窗口或独立性能平台。
 
@@ -437,7 +450,8 @@ Nomi 删除，因此不会把 C9 作为当前交付阻断。
 
 - 状态：`已修订（05）`
 - dirty draft 点击 Test 时先保存普通、可见、immutable `AgentPresetRevision`；clean draft 复用当前 Revision。
-- Test 通过普通 AgentSession API 创建真实持久 Session，使用真实 Snapshot、资源和 FullAuto 主链。
+- Test 通过普通 AgentSession API 创建真实持久 Session，使用真实 Snapshot、当前
+  Test 目标提供的资源和 FullAuto 主链。
 - 不建设 test-only Session、DraftSnapshot、模拟 Runtime、测试专用表或审批弹窗。
 - UI 可以明确提示会产生真实副作用，但提示不能创建第二套确认状态。
 
@@ -515,10 +529,13 @@ Session Open ─> 读取已保存 Snapshot + 当前执行兼容检查
 Snapshot 只冻结实际执行闭包：
 
 - 已选择的 Capability、Provider 和 Package contribution；
-- 实际 Tool schema、Model Route 和 typed resource binding；
+- 实际 Tool schema、Model Route 和 required resource kinds；
 - 当前需要的 Runtime protocol/features；
 - initial/on-demand 分组；
 - Snapshot 自身 digest。
+
+具体 target resource bindings 属于 Session、伙伴、Automation 或 non-Agent
+operation admission，不参与 Preset Revision/Snapshot digest。
 
 以下全局事实不决定旧 Session 是否可执行：
 
@@ -527,7 +544,10 @@ Snapshot 只冻结实际执行闭包：
 - 决策文档 digest；
 - 与当前 Session 无关的全局 schema ledger。
 
-兼容性只在 Runtime binding 建立、实际 Capability 激活或其执行实现变化时检查并缓存。结构不兼容时，原 Session 保持可读，执行返回 `SNAPSHOT_EXECUTOR_UNAVAILABLE`；用户显式选择当前 binding/resources 后 fork 新 Session。不得静默换 Provider、重写旧 Snapshot、resolve latest 或降级 Coding。
+兼容性只在 Runtime binding 建立、实际 Capability 激活或其执行实现变化时检查并缓存。
+结构不兼容时，原 Session 保持可读，执行返回 `SNAPSHOT_EXECUTOR_UNAVAILABLE`；
+用户显式选择当前 target resources 后 fork 新 Session。不得静默换 Provider、重写旧
+Snapshot、resolve latest 或降级 Coding。
 
 原“每次 resume/turn 对完整全局 ceiling、inventory 和多组 digest 做 exact compatibility proof”的要求已撤销，因为无关全局变化不应使既有 Session 失效。
 
@@ -642,6 +662,12 @@ S0 STOP-LOSS
 - Cron 的执行请求只携带用户可见消息和封闭的 `CronTurnRuntimeOverlay`。workspace、
   model、delegation policy、creation time、Session identity 等字段必须从 host 的
   最新 Session projection 解析；Cron/Session 双侧关系由单事务 CAS 绑定。
+- Cron 不拥有 AgentPreset store 或 Compiler。App 注入
+  `NomiCoreCronAgentPresetResolver` 实现 `CronAgentPresetResolver`；创建或更新任务时，
+  resolver 在 owner scope 内取得稳定 Revision 与持久化 Snapshot，并在写入 Cron job 前
+  冻结为 `agent_config.agent_snapshot`。执行、重放和普通任务编辑不重新解析 latest
+  Preset；缺少 resolver、稳定 Revision 或 Snapshot 时 fail-closed。model-only Cron
+  是独立显式路径。
 - AutoWork 的 runtime preparation capability 由同一个 host 实例签发，并绑定 owner
   与 Session。attachment planning 产生的 snapshot token 必须在 durable admission 前
   用最新 Session projection revision 重校验；issuer、作用域或 revision 不一致时
@@ -709,7 +735,8 @@ overlay、不可伪造的 host capability、revision CAS 和每目标锁足以�
   或 Git。
 - 真实 smoke 的覆盖范围必须按 TODO 分项解释：本次 StepFun smoke 关闭
   `SL-S3-07` 和 `SL-S3-11`；Cron 的同时通过只作为 `SL-S3-10` 后续合同的输入，
-  不能绕过其 canonical Session/adapter 缺口或 `SL-S4-02` 的人工验收。Remote
+  不能绕过其 canonical Session/adapter 缺口或当时尚未执行的 `SL-S4-02` 人工验收；
+  两者后来均由独立证据关闭。Remote
   REST/MCP 的 installation Bearer、owner JWT 兼容和旧 selector query 拒绝另由
   route-gap 回归证明。
 - 凭据一旦不再需要应从本机 Credential Manager 删除并向 Provider 轮换；任何
@@ -775,6 +802,11 @@ provider 请求误当成完整迁移或跨传输发布证明。
 - Revision 的 canonical 内容列是 `payload_json`。Nomi 数据线通过
   `064_agent_preset_revision_payload.sql` 做物理重命名，
   Fresh-v4 baseline 直接使用该名称；不保留 `editor_document_json` alias 或双读写。
+- `065_agent_preset_retirement.sql` 增加 owner-scoped `retired_at_ms` tombstone；
+  `066_retire_resource_bound_presets.sql` 扫描旧 Revision/Snapshot 的资源实例字段，
+  删除活动 Agent/Remote Binding 并退役对应 Preset，但保留不可变 Revision、
+  Snapshot 和历史 Session。`nomifun-db/build.rs` 让新增 migration 触发 SQLx 重编译，
+  当前 migration head 为 66。
 - Fresh-v4 `agent_preset_templates` 只保存 `source_kind=official` 的创建 seed，不带
   `source_package_id/source_package_version`，bootstrap 不自动创建官方 AgentPreset 或
   Revision。ContributionLock 由 canonical lock 存储持有，旧 capability/skill/resource
@@ -798,7 +830,7 @@ provider 请求误当成完整迁移或跨传输发布证明。
   2. 活动 API、UI、DTO、override 和 snapshot residual；
   3. 历史 baseline、删除合同和回归断言；
   4. generated API/schema inventory 是否已同步；
-  5. 061/062/064 migration 与 Fresh-v4 canonical schema 是否存在且形状正确；
+  5. 061/062/064/065/066 migration 与 Fresh-v4 canonical schema 是否存在且形状正确；
   6. 真实 Agent 与非 Agent consumer 的行为证据；
   7. 干净提交和签署 admission evidence。
 - 已删除的 `nomifun-preset` 不再作为通用“legacy/product dependency”规则扫描对象。
@@ -808,10 +840,11 @@ provider 请求误当成完整迁移或跨传输发布证明。
 - 旧 `8e3f1eee8`/`c7f67eefb` evidence 在 2026-09-06 人工走查发现首页缺少真实
   AgentPreset selector 后被撤销。旧测试结果只保留历史审计，不能继续表示当前
   admission。
-- 纠偏实现已在 `582932377` 完成父级集成验证；新 evidence 使用
-  `admission=admitted`、`signed=true`，并在干净签署提交上重跑 Gate 后重新关闭 AP-7。
-- `SL-S4-02` 的真实 Desktop UI 人工走查保持独立 `blocked`；重新签署 AP-7 不得把
-  该人工验收暗写为已完成。06 仍保持独立二期边界。
+- 纠偏实现已经完成真实 Tauri Desktop 产品走查、broad checks 和当前 StepFun smoke；
+  `SL-S4-02` 已关闭。新 evidence 仍必须在干净实现提交形成后填写
+  `implementation_commit`、使用 `admission=admitted` 与 `signed=true`，并在干净签署
+  提交上重跑 Gate 后关闭 AP-7。
+- 手机模式不属于 `nomifun-desktop` 本期服务范围；06 仍保持独立二期边界。
 
 理由：AP-7 的职责是防止“有类型/有 fixture/有 self-test”被误报为产品合同已经闭合。
 把删除包的历史文字与真实依赖分开，既保留 clean-cut 的安全断言，也避免旧 Gate 因
@@ -819,32 +852,58 @@ provider 请求误当成完整迁移或跨传输发布证明。
 
 ### D-038：首页 AgentPreset 选择与高层 Session 创建
 
-- 状态：`已确认（2026-09-06）`
+- 状态：`已修订（2026-09-06）`
 - 首页 Guid composer 上方的 pill bar 必须可见列出当前 owner 在 Agent 工作台中保存的、
   具有 `current_stable_revision` 的可执行用户 AgentPreset；它选择的是 AgentPreset，
   不是模型、Runtime 或 execution engine。
 - pill bar 的 `+` 只打开 `/agent`。Agent 工作台的“使用 Agent / Start conversation”
   进入 `/guid` 并携带 `selectedAgentPresetId`，Guid 必须预选对应 Preset。
 - 普通 Guid 只负责会话级消息、附件和明确属于会话的 AutoWork/IDMM/summon 状态。
-  模型、Skills、MCP、Knowledge、Workspace 与其他 typed resources 由选中
-  AgentPreset 的稳定 Revision 拥有；Guid 不再提供第二套覆盖控件。
+  模型、能力模式、Skills 和 MCP Capability 由选中 AgentPreset 的稳定 Revision
+  拥有；Guid 不提供第二套能力覆盖控件。具体 Knowledge、Workspace、MCP/Connector
+  实例属于消费目标，必须在当前会话中选择，并且不同会话互不继承。
 - 标准 Session 创建请求只有 `preset_id` 与可选 `title`。客户端不得提交
   `agent_binding`、Revision、Snapshot、digest、model route 或 typed resources。
 - 服务端在 owner scope 内读取 `current_stable_revision`、该 Revision 的持久化
-  Snapshot 和 typed resources，构造 `binding_version=1` 的 AgentBinding 后创建
-  Session。缺少稳定 Revision、Snapshot 不匹配或 owner 不匹配必须 typed fail，
-  不选择 latest、不 fallback。
+  Snapshot，构造初始无具体资源的 `binding_version=1` AgentBinding 后创建 Session。
+  目标级资源在 Session 创建后由会话交互绑定。缺少稳定 Revision、Snapshot 不匹配
+  或 owner 不匹配必须 typed fail，不选择 latest、不 fallback。
 - Session 创建后冻结当时的 Revision/Snapshot；之后保存新 Revision 只影响新 Session。
+- Snapshot 同时冻结精确模型与 `required_resource_kinds`。Preset Session 的 UI 不显示
+  模型选择器，公开 Conversation PATCH 也拒绝改写顶层模型；普通 Nomi Session 继续
+  允许显式选择模型。桌面 Workspace/Knowledge 入口只读取冻结资源种类，不回查当前
+  Catalog 按 Capability ID 猜测版本。
+- 删除用户 Agent 时，工作台和所有新 admission 立即隐藏/拒绝它，活动
+  AgentBinding/RemoteBinding 被解除；不可变 Revision/Snapshot 与已有 Session
+  历史保留，已有 Session 继续从冻结产物读取能力，不依赖已退役工作台条目。
 - execution engine 是 Runtime 基础设施，只能在对应系统设置中检测和管理，不得作为
   Agent pill、AgentPreset ID 或“新建会话”产品入口。
 
-理由：用户选择的是一份完整、可复现的 Agent 设计。若 Guid 再允许选择模型或重新组合
-资源，或者把执行引擎伪装成 Agent，就会产生第二份配置事实，并使 Snapshot/Binding
-无法证明会话实际使用了工作台中保存的 Preset。
+理由：用户选择的是一份完整、可复现的 Agent 能力设计，但具体知识库和工作区属于
+每次使用的场景。把模型或能力重新放进 Guid 会制造第二份 Agent 配置；把资源实例
+冻结进 Preset 又会阻止同一 Agent 在不同会话中使用不同资源。两者都必须避免。
+
+### D-039：Preset Session 模型与资源种类冻结
+
+- 状态：`已确认（2026-09-06）`
+- `ResolvedSnapshotContent.required_resource_kinds` 是 canonical Snapshot 内容的一部分，
+  由 Compiler 从实际 capability authority policies 汇总并参与 Snapshot digest。
+- Nomi Conversation projection 将该冻结集合保存到 `AgentResolvedSnapshot`；历史
+  Session 的桌面资源入口直接读取该集合，不从当前 Catalog 按 ID 合并不同版本。
+- `resolved_model` 是 Preset Session 的 lead model authority。UI 不显示
+  `NomiModelSelector`，自动模型 heal 不运行，公开 Conversation PATCH 修改顶层模型
+  必须返回 typed 4xx；切换模型需要保存新 Revision 并创建新 Session。
+- 普通 Nomi 会话不是 AgentPreset，因此继续保留模型选择器、默认模型 heal 和显式模型
+  PATCH。协作模型、Workspace 和 Knowledge 等消费目标配置仍可在 Preset Session 中按
+  各自边界修改，但不得替换 lead model。
+
+理由：只锁 Revision 而允许会话改写模型，会让实际 Provider/Model 与 Snapshot
+provenance 分叉；只保存 Capability ID 再回查当前 Catalog，会让升级后的资源入口重写
+历史 Session。模型和资源种类都必须成为同一冻结执行事实。
 
 ## 当前阅读与实施规则
 
-1. 先完整读取 `05-system-capability-replacement-foundation.zh.md`，再用本文追溯 D-001～D-038 的决策理由。
+1. 先完整读取 `05-system-capability-replacement-foundation.zh.md`，再用本文追溯 D-001～D-039 的决策理由。
 2. 领取和关闭工作只看 `GLOBAL-CLOSURE-TODO.zh.md`；不得从本文推断某项已经实现或通过 Gate。
 3. Browser/Computer 实施必须先落 Role/Provider seam，再接具体 owner；不能在旧直连上叠加 adapter。
 4. Codex Sidecar 只按未来宿主研究维护；不能继续围绕不存在的私有 patch 扩大当前

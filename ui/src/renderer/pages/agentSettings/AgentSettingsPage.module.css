@@ -70,8 +70,7 @@
 }
 
 .librarySectionTitle,
-.selectionHeader,
-.templateColumnHeader {
+.selectionHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -86,9 +85,8 @@
 
 .libraryList,
 .selectionList,
-.catalogList,
-.resourceEditorList,
-.resourceDefaults,
+.capabilityGroups,
+.capabilityList,
 .previewStack,
 .diagnosticList,
 .inspectorRows {
@@ -181,8 +179,9 @@
 
 .rowAction {
   border: 0;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -349,8 +348,7 @@
   gap: 12px;
 }
 
-.selectionColumn,
-.templateColumn {
+.selectionColumn {
   min-width: 0;
   border: 1px solid var(--agent-border);
   border-radius: 7px;
@@ -358,81 +356,64 @@
   background: var(--agent-surface);
 }
 
-.selectionRow,
-.exactRow,
-.resourceDefaultRow {
-  min-width: 0;
+.capabilitySelectionSummary {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 9px;
-  border-radius: 6px;
-  padding: 7px 8px;
-  background: var(--color-fill-1);
-}
-
-.selectionRow > div,
-.resourceDefaultRow > div:first-child {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.selectionRow strong,
-.resourceDefaultRow strong,
-.exactRow span {
-  overflow: hidden;
-  color: var(--color-text-1);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 16px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.selectionRow span,
-.resourceDefaultRow span,
-.exactRow code {
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 10px;
   color: var(--agent-muted);
-  font-size: 10px;
-  line-height: 15px;
+  font-size: 11px;
 }
 
-.catalogList {
-  margin-top: 12px;
+.capabilitySelectionSummary strong {
+  margin-left: 3px;
+  color: var(--color-text-1);
+  font-size: 12px;
 }
 
-.enabledSummary {
+.capabilityGroups {
+  gap: 18px;
+}
+
+.capabilityGroup {
+  min-width: 0;
+}
+
+.capabilityGroupHeader {
+  min-height: 30px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 9px 10px;
-  border-radius: 7px;
-  background: var(--agent-surface);
+  border-bottom: 1px solid var(--agent-border);
   color: var(--agent-muted);
   font-size: 11px;
 }
 
-.enabledSummary strong {
-  color: var(--color-text-1);
-  font-size: 14px;
+.capabilityGroupHeader strong {
+  color: var(--color-text-2);
+  font-size: 12px;
 }
 
-.catalogRow {
+.capabilityList {
+  gap: 0;
+}
+
+.capabilityRow {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 14px;
-  padding: 10px 0;
-  border-top: 1px solid var(--agent-border);
+  grid-template-columns: minmax(0, 1fr) minmax(264px, auto);
+  align-items: start;
+  gap: 18px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--agent-border);
 }
 
-.catalogCopy {
+.capabilityMain {
   min-width: 0;
 }
 
-.catalogTitle,
+.capabilityTitle,
 .tagRow {
   display: flex;
   align-items: center;
@@ -440,10 +421,21 @@
   gap: 6px;
 }
 
-.catalogTitle strong {
+.capabilityTitle strong {
   color: var(--color-text-1);
   font-size: 12px;
   line-height: 18px;
+}
+
+.capabilityIdentity {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--agent-muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .previewStatus code,
@@ -457,11 +449,88 @@
   white-space: nowrap;
 }
 
-.catalogCopy p {
+.capabilityMain p {
   margin: 3px 0;
   color: var(--color-text-3);
   font-size: 11px;
   line-height: 16px;
+}
+
+.capabilityUnavailableReason {
+  margin-top: 5px;
+  color: rgb(var(--warning-6));
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.capabilityMetadata {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 5px;
+  color: var(--agent-muted);
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.capabilityMetadata span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.capabilityResources {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.capabilityResources > span {
+  color: var(--agent-muted);
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.capabilityNoResource {
+  color: var(--agent-muted);
+  font-size: 10px;
+}
+
+.capabilityMode {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(76px, 1fr));
+  align-self: center;
+  min-width: 264px;
+}
+
+.capabilityMode :global(.arco-radio-button) {
+  min-width: 0;
+  text-align: center;
+  white-space: normal;
+  line-height: 18px;
+}
+
+.requirementPolicy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 14px;
+  padding: 11px 0 0;
+  border-top: 1px solid var(--agent-border);
+}
+
+.requirementPolicy strong {
+  color: var(--color-text-2);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.requirementPolicy span {
+  color: var(--agent-muted);
+  font-size: 11px;
+  line-height: 17px;
 }
 
 .skillRow,
@@ -505,58 +574,6 @@
   color: rgb(var(--warning-6));
   font-size: 10px;
   line-height: 15px;
-}
-
-.resourceEditorRow {
-  border: 1px solid var(--agent-border);
-  border-radius: 7px;
-  padding: 11px;
-  background: var(--agent-surface);
-}
-
-.resourcePicker {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.resourcePicker > * {
-  min-width: 0;
-  flex: 1;
-}
-
-.managedResource {
-  min-height: 32px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--agent-muted);
-  font-size: 11px;
-}
-
-.resourceEditorHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 9px;
-}
-
-.resourceEditorHeader > div {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-}
-
-.resourceEditorHeader strong {
-  color: var(--color-text-1);
-  font-size: 12px;
-}
-
-.resourceEditorHeader span {
-  color: var(--agent-muted);
-  font-size: 10px;
 }
 
 .advancedCollapse,
@@ -615,27 +632,6 @@
   gap: 7px;
   padding-top: 10px;
   border-top: 1px solid var(--agent-border);
-}
-
-.technicalBindingList {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.technicalBinding {
-  max-height: 180px;
-  overflow: auto;
-  margin: 0;
-  padding: 9px;
-  border-radius: 6px;
-  background: var(--color-fill-1);
-  color: var(--color-text-3);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 10px;
-  line-height: 15px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 
 .previewEmpty,
@@ -882,7 +878,7 @@
     width: 100%;
   }
 
-  .catalogRow,
+  .capabilityRow,
   .skillRow,
   .mcpRow,
   .testComposer {
@@ -898,9 +894,9 @@
     min-width: 0;
   }
 
-  .resourceDefaultRow,
-  .resourcePicker {
-    align-items: stretch;
-    flex-direction: column;
+  .capabilityMode {
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }

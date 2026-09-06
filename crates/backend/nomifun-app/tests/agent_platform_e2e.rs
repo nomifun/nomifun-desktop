@@ -9,7 +9,8 @@ use axum::http::{Request, StatusCode, header};
 use axum::Extension;
 use http_body_util::BodyExt;
 use nomifun_agent_contracts::{
-    PresetRevisionRef, PrincipalRef, RuntimeProfileKind, RuntimeTarget, VersionString,
+    AgentBindingValue, PresetRevisionRef, PrincipalRef, RuntimeProfileKind, RuntimeTarget,
+    VersionString,
     official_preset_seed_manifest_payload,
 };
 use nomifun_agent_control_plane::{
@@ -90,7 +91,6 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
         json!({
             "display_name": "Minimal route E2E",
             "description": null,
-            "resource_bindings": [],
             "model_route_refs": {}
         }),
     )
@@ -166,10 +166,7 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
         create.agent_binding.resolved_snapshot_ref.snapshot_id,
         snapshot.snapshot_ref.snapshot_id.as_ref()
     );
-    assert_eq!(
-        create.agent_binding.typed_resource_bindings,
-        revision.document.resource_bindings
-    );
+    assert!(create.agent_binding.typed_resource_bindings.is_empty());
     assert_eq!(create.agent_binding.binding_version, 1);
 
     let mut next_draft = editor_response.draft;
@@ -312,6 +309,113 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
     assert!(!fork.copies_full_transcript);
     assert!(!fork.migrates_runtime_private_handles);
     assert!(!fork.replays_tool_or_effect);
+    let active_binding_json = serde_json::to_string(&create.agent_binding).unwrap();
+    sqlx::query(
+        "INSERT INTO agent_bindings \
+         (target_kind, target_id, agent_binding_json) \
+         VALUES ('conversation', 'retirement-target', ?)",
+    )
+    .bind(&active_binding_json)
+    .execute(platform.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_bindings \
+         (remote_binding_id, owner_user_id, name, agent_binding_json) \
+         VALUES ('retirement-remote', ?, 'Retirement Remote', ?)",
+    )
+    .bind(&owner_id)
+    .bind(&active_binding_json)
+    .execute(platform.pool())
+    .await
+    .unwrap();
+
+    let cross_owner_delete = delete(
+        &other_router,
+        &format!("/api/agent-presets/{preset_id}"),
+    )
+    .await;
+    assert_eq!(cross_owner_delete.status(), StatusCode::NOT_FOUND);
+    let cross_owner_error: nomifun_api_types::ErrorResponse =
+        response_json(cross_owner_delete).await;
+    assert_eq!(cross_owner_error.code, "AGENT_PRESET_NOT_FOUND");
+
+    let retired = delete(&router, &format!("/api/agent-presets/{preset_id}")).await;
+    assert_eq!(retired.status(), StatusCode::OK);
+    let retired_at_ms: Option<i64> = sqlx::query_scalar(
+        "SELECT retired_at_ms FROM agent_presets WHERE preset_id = ?",
+    )
+    .bind(&preset_id)
+    .fetch_one(platform.pool())
+    .await
+    .unwrap();
+    assert!(retired_at_ms.is_some());
+    let active_agent_binding_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_bindings")
+            .fetch_one(platform.pool())
+            .await
+            .unwrap();
+    let active_remote_binding_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM remote_bindings")
+            .fetch_one(platform.pool())
+            .await
+            .unwrap();
+    assert_eq!(active_agent_binding_count, 0);
+    assert_eq!(active_remote_binding_count, 0);
+    let revision_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_preset_revisions WHERE preset_id = ?",
+    )
+    .bind(&preset_id)
+    .fetch_one(platform.pool())
+    .await
+    .unwrap();
+    assert_eq!(revision_count, 2);
+    let frozen_binding: AgentBindingValue =
+        serde_json::from_value(serde_json::to_value(&create.agent_binding).unwrap()).unwrap();
+    let recompiled = platform
+        .compile_saved_binding(
+            &PrincipalRef {
+                principal_kind: "user".to_owned(),
+                principal_id: owner_id.clone(),
+            },
+            &frozen_binding,
+            "agent_session",
+            "desktop",
+            "owner",
+        )
+        .await
+        .expect("historical Session binding must compile after Preset retirement");
+    assert!(recompiled.resource_bindings().is_empty());
+
+    let retired_editor = get(
+        &router,
+        &format!("/api/agent-presets/{preset_id}/editor"),
+    )
+    .await;
+    assert_eq!(retired_editor.status(), StatusCode::NOT_FOUND);
+    let retired_editor_error: nomifun_api_types::ErrorResponse =
+        response_json(retired_editor).await;
+    assert_eq!(retired_editor_error.code, "AGENT_PRESET_NOT_FOUND");
+    let retired_session = post_response(
+        &router,
+        "/api/agent-sessions",
+        json!({ "preset_id": preset_id, "title": "Must not start" }),
+    )
+    .await;
+    assert_eq!(retired_session.status(), StatusCode::NOT_FOUND);
+    let retired_session_error: nomifun_api_types::ErrorResponse =
+        response_json(retired_session).await;
+    assert_eq!(retired_session_error.code, "AGENT_PRESET_NOT_FOUND");
+    assert_eq!(
+        get(
+            &router,
+            &format!("/api/agent-sessions/{}", create.agent_session_id),
+        )
+        .await
+        .status(),
+        StatusCode::OK,
+        "retiring a Preset must not invalidate an existing Session"
+    );
 
     for session_id in [
         fork.child_agent_session_id.as_str(),
@@ -371,7 +475,6 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
         json!({
             "display_name": "Missing snapshot",
             "description": null,
-            "resource_bindings": [],
             "model_route_refs": {}
         }),
     )

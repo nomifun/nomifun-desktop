@@ -26,8 +26,8 @@ pub use session_port::{
     CronTurnRuntimeOverlay, CronTurnRuntimePreparation,
 };
 pub use service::{
-    CronBackgroundTaskRegistrar, CronEmbeddedCommandResult, CronEmbeddedCreateCommand,
-    CronEmbeddedDeleteCommand, CronEmbeddedMutationRequest, CronEmbeddedMutationWaiter,
-    CronEmbeddedUpdateCommand,
+    CronAgentPresetResolver, CronBackgroundTaskRegistrar, CronEmbeddedCommandResult,
+    CronEmbeddedCreateCommand, CronEmbeddedDeleteCommand, CronEmbeddedMutationRequest,
+    CronEmbeddedMutationWaiter, CronEmbeddedUpdateCommand,
 };
 pub use state::CronRouterState;

@@ -323,6 +323,7 @@ pub struct ToolRegistry {
     input_contracts: BTreeMap<String, ToolInputContract>,
     deferred_state: DeferredToolState,
     registration_policy: RegistrationPolicy,
+    forced_deferred: BTreeSet<String>,
 }
 
 /// The exact schema advertised for a registered route and its compiled
@@ -346,6 +347,7 @@ impl ToolRegistry {
             input_contracts: BTreeMap::new(),
             deferred_state: DeferredToolState::default(),
             registration_policy: RegistrationPolicy::Unrestricted,
+            forced_deferred: BTreeSet::new(),
         }
     }
 
@@ -528,7 +530,7 @@ impl ToolRegistry {
             name: name.clone(),
             description: tool.description().to_string(),
             input_schema: input_schema.clone(),
-            deferred: tool.is_deferred(),
+            deferred: self.is_deferred_tool(tool.as_ref()),
         };
         self.tools.push(tool);
         self.input_contracts.insert(
@@ -549,6 +551,7 @@ impl ToolRegistry {
         self.input_contracts.clear();
         self.deferred_state.clear();
         self.registration_policy = RegistrationPolicy::DenyAll;
+        self.forced_deferred.clear();
     }
 
     /// Find a tool by name
@@ -655,7 +658,7 @@ impl ToolRegistry {
         self.tools
             .iter()
             .filter(|tool| {
-                tool.is_deferred()
+                self.is_deferred_tool(tool.as_ref())
                     && !self
                         .deferred_state
                         .is_activated(tool.activation_identity())
@@ -695,7 +698,7 @@ impl ToolRegistry {
             name: tool.name().to_string(),
             description: tool.description().to_string(),
             input_schema: contract.schema.clone(),
-            deferred: tool.is_deferred()
+            deferred: self.is_deferred_tool(tool)
                 && !self
                     .deferred_state
                     .is_activated(tool.activation_identity()),
@@ -710,6 +713,11 @@ impl ToolRegistry {
         if allowed.is_empty() {
             return;
         }
+        self.retain_only_named(allowed);
+    }
+
+    /// Apply an exact allowlist, including deny-all when the list is empty.
+    pub fn retain_only_named(&mut self, allowed: &[String]) {
         self.registration_policy
             .retain(allowed.iter().cloned().collect());
         let policy = &self.registration_policy;
@@ -718,7 +726,26 @@ impl ToolRegistry {
             self.tools.iter().map(|tool| tool.name().to_owned()).collect();
         self.input_contracts
             .retain(|name, _| retained_names.contains(name));
+        self.forced_deferred
+            .retain(|name| policy.allows(name));
         self.deferred_state.retain_definitions(&retained_names);
+    }
+
+    /// Mark an exact host-authorized subset as ToolSearch-activated. This is a
+    /// presentation/activation policy over already allowed routes, never a
+    /// grant: names absent from the registry or later removed by `retain_named`
+    /// remain unavailable.
+    pub fn force_deferred_named(&mut self, names: &[String]) {
+        self.forced_deferred = names
+            .iter()
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+    }
+
+    fn is_deferred_tool(&self, tool: &dyn Tool) -> bool {
+        tool.is_deferred() || self.forced_deferred.contains(tool.name())
     }
 }
 
@@ -2637,6 +2664,35 @@ mod tests {
         let definition = registry.to_tool_defs().pop().unwrap();
         assert!(!definition.deferred);
         assert_eq!(definition.input_schema["properties"]["x"]["type"], "string");
+    }
+
+    #[test]
+    fn forced_deferred_policy_survives_exact_allowlist_before_late_registration() {
+        let mut registry = ToolRegistry::new();
+        registry.force_deferred_named(&["knowledge_search".to_owned()]);
+        registry.retain_only_named(&[
+            "ToolSearch".to_owned(),
+            "knowledge_search".to_owned(),
+        ]);
+
+        assert!(registry.register(make_tool(
+            "knowledge_search",
+            "late target-scoped knowledge tool",
+        )));
+        let definition = registry
+            .to_tool_defs()
+            .into_iter()
+            .find(|definition| definition.name == "knowledge_search")
+            .expect("late knowledge tool definition");
+        assert!(
+            definition.deferred,
+            "a host-deferred dynamic tool must remain hidden until ToolSearch activates it"
+        );
+        assert!(
+            registry
+                .provider_deferred_tool_names()
+                .contains("knowledge_search")
+        );
     }
 
     #[test]

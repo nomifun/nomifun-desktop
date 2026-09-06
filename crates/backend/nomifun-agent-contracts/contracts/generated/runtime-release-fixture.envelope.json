@@ -34,8 +34,8 @@
       "coding_native",
       "managed_minimal"
     ],
-    "runtime_profile_contract_digest": "31fff433f1c2604465a1f6b21de35e1dbd8994a0c796c6870c930f8ad5248e4b",
-    "coding_capability_pack_digest": "f699f376a9414b7830b90a68c890d39010687499e6d16ee1687f5c370cd0127a",
+    "runtime_profile_contract_digest": "cc5fb8a25804353f3128b3661709dba2fd73897ac0b436c3289659b690a6f165",
+    "coding_capability_pack_digest": "62687467ddfe329fedbb37e2576e598d5fb787fda24ab2de395377e8d93f9bdc",
     "native_feature_contract_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
     "native_action_contract_digest": "ae08f636e6c349505d95281e93279427641399e7fff498c30b85760b2c415665",
     "target_matrix": {
@@ -163,5 +163,5 @@
       "digest": "99fe64193883d1fd84dc939207839c080a45bd166d2eb6a7759d42b58d59448b"
     }
   },
-  "payload_digest": "82186bbe748c4dde20a92094ccda0a26c6360f70390abf0739c638d8201124c2"
+  "payload_digest": "9f9e29e822da382336d92c406bf8d28ce0a01394d1c7d44022e33b9da9ee741a"
 }

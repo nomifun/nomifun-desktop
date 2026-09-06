@@ -64,6 +64,9 @@ export interface ChatLayoutProps {
    * desktop companion chat tab. Defaults to false (full conversation page).
    */
   hideAdvancedControls?: boolean;
+  /** Whether this Agent's immutable capability ceiling permits target-scoped
+   * knowledge binding. Plain Nomi defaults to enabled. */
+  knowledgeEnabled?: boolean;
   /**
    * Make the header title read-only (no click-to-rename). Used by single-session
    * surfaces like the companion chat, where the title tracks an external source
@@ -333,7 +336,9 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
             <SummonHeaderBadge conversationId={conversation_id} />
             <AutoWorkControl target={{ kind: 'conversation', id: conversation_id }} />
             <IdmmControl target={{ kind: 'conversation', id: conversation_id }} />
-            <KnowledgeControl target={{ kind: 'conversation', id: conversation_id }} />
+            {(props.knowledgeEnabled ?? true) && (
+              <KnowledgeControl target={{ kind: 'conversation', id: conversation_id }} />
+            )}
           </>
         )}
         {props.headerExtra}

@@ -3,25 +3,19 @@ import type {
   AgentPresetDraft,
   AgentPresetEditorResponse,
   AgentPresetSummary,
-  CapabilityCatalogItem,
   CapabilityPlacement,
-  ChatRouteRecord,
   ChatRouteCandidate,
+  ChatRouteRecord,
   InstallationTokenStateResponse,
   OfficialPresetTemplate,
   ResolveAgentPresetPreviewResponse,
-  TypedResourceBinding,
+  RunAgentPresetTestResult,
 } from '@/common/types/agentPlatform';
-import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
-import type { IMcpServer } from '@/common/config/storage';
 import {
   AGENT_CHAT_MODEL_TASK,
-  capabilityPlacement,
   missingSkillCapabilities,
-  placeCapability,
   toggleSkill,
 } from '@/common/types/agentPlatform';
-import type { RunAgentPresetTestResult } from '@/common/types/agentPlatform';
 import {
   Alert,
   Button,
@@ -30,10 +24,8 @@ import {
   Input,
   Select,
   Tag,
-  Tooltip,
 } from '@arco-design/web-react';
 import {
-  CloseSmall,
   Info,
   LinkCloud,
   MessageOne,
@@ -47,24 +39,20 @@ import { useTranslation } from 'react-i18next';
 import { modelDisplayLabel } from '@/common/utils/modelPresentation';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
-import { WorkspaceFolderSelect } from '@/renderer/components/workspace';
+import AgentCapabilityList from './AgentCapabilityList';
 import {
-  DEFAULT_PROCESS_SESSION_RESOURCE_ID,
-  DEFAULT_WORKSPACE_RESOURCE_ID,
-  WORKSPACE_ROOT_PARAMETER,
-  bindWorkspaceResource,
-  bindKnowledgeBaseResource,
-  chatRouteCandidateKey,
-  defaultResourceBinding,
-  removeResourceBinding,
-  resolveHostManagedResourceBindings,
-  resourceKindsForDraft,
-  selectChatRouteCandidate,
-  previewDiagnosticMessage,
   TEMPLATE_I18N_PATH,
+  capabilityMatchesSearch,
+  capabilityPlacement,
+  capabilityReferenceKey,
+  chatRouteCandidateKey,
+  editorCapabilityReferences,
+  placeCapability,
+  previewDiagnosticMessage,
+  selectChatRouteCandidate,
+  selectedRequiredResourceKinds,
+  sortCapabilitiesByPlacement,
   updateDocument,
-  updateResourceBinding,
-  workspaceRootForDraft,
 } from './model';
 import PreviewInspector from './PreviewInspector';
 import styles from './AgentSettingsPage.module.css';
@@ -76,12 +64,16 @@ type AgentPresetEditorProps = {
   preview: ResolveAgentPresetPreviewResponse | null;
   testResult: RunAgentPresetTestResult | null;
   tokenState: InstallationTokenStateResponse | null;
-  hostWorkDir: string | null;
-  connectors: IMcpServer[];
-  knowledgeBases: IKnowledgeBase[];
-  knowledgeBasesLoading: boolean;
   sourceTemplate?: OfficialPresetTemplate;
-  busyAction: 'preview' | 'save' | 'test' | 'fork' | 'create' | null;
+  busyAction:
+    | 'preview'
+    | 'save'
+    | 'test'
+    | 'fork'
+    | 'create'
+    | 'open'
+    | 'delete'
+    | null;
   dirty: boolean;
   onDraftChange: (draft: AgentPresetDraft) => void;
   onPreview: () => void;
@@ -93,15 +85,16 @@ type AgentPresetEditorProps = {
 export const AgentConversationAction: React.FC<{
   hasStableRevision: boolean;
   dirty: boolean;
+  busy?: boolean;
   onClick: () => void;
-}> = ({ hasStableRevision, dirty, onClick }) => {
+}> = ({ hasStableRevision, dirty, busy = false, onClick }) => {
   const { t } = useTranslation();
 
   return (
     <Button
       type='primary'
       icon={<MessageOne theme='outline' size='15' />}
-      disabled={!hasStableRevision || dirty}
+      disabled={busy || !hasStableRevision || dirty}
       onClick={onClick}
     >
       {t('agentSettings.actions.startConversation')}
@@ -128,7 +121,7 @@ const AgentChatModelPicker: React.FC<{
     const providerName = provider ? providerLabel(provider) : '';
     const model = provider?.models.find((item) => item.model === candidate.model);
     const modelName = modelDisplayLabel(candidate.model, model?.display_name);
-    return providerName ? `${providerName} · ${modelName}` : modelName;
+    return providerName ? `${providerName} / ${modelName}` : modelName;
   };
 
   return (
@@ -158,50 +151,6 @@ const AgentChatModelPicker: React.FC<{
   );
 };
 
-const SelectedCapabilityList: React.FC<{
-  title: string;
-  items: AgentPresetDraft['document']['initial_capabilities'];
-  catalogById: Map<string, CapabilityCatalogItem>;
-  onRemove: (item: CapabilityCatalogItem['capability']) => void;
-}> = ({ title, items, catalogById, onRemove }) => {
-  const { t } = useTranslation();
-  return (
-    <div className={styles.selectionColumn}>
-      <div className={styles.selectionHeader}>
-        <span>{title}</span>
-        <span>{items.length}</span>
-      </div>
-      {items.length === 0 ? (
-        <div className={styles.inlineEmpty}>{t('agentSettings.capabilities.emptySelection')}</div>
-      ) : (
-        <div className={styles.selectionList}>
-          {items.map((selection) => {
-            const catalogItem = catalogById.get(selection.capability.id);
-            return (
-              <div key={selection.capability.id} className={styles.selectionRow}>
-                <div>
-                  <strong>{catalogItem?.display_name ?? selection.capability.id}</strong>
-                  <span>
-                    {selection.capability.id}@{selection.capability.version}
-                  </span>
-                </div>
-                <Tooltip content={t('agentSettings.actions.remove')}>
-                  <Button
-                    type='text'
-                    size='mini'
-                    icon={<CloseSmall theme='outline' size='14' />}
-                    onClick={() => onRemove(selection.capability)}
-                  />
-                </Tooltip>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-};
-
 const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   editor,
   draft,
@@ -209,10 +158,6 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   preview,
   testResult,
   tokenState,
-  hostWorkDir,
-  connectors,
-  knowledgeBases,
-  knowledgeBasesLoading,
   sourceTemplate,
   busyAction,
   dirty,
@@ -222,134 +167,54 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   onTest,
   onStartConversation,
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [capabilitySearch, setCapabilitySearch] = useState('');
   const [testInput, setTestInput] = useState('');
-
-  const catalogById = useMemo(
-    () => new Map(catalog.capabilities.map((item) => [item.capability.id, item])),
+  const catalogByReference = useMemo(
+    () =>
+      new Map(
+        catalog.capabilities.map((item) => [
+          capabilityReferenceKey(item.capability),
+          item,
+        ])
+      ),
     [catalog.capabilities]
   );
   const filteredCapabilities = useMemo(() => {
-    const query = capabilitySearch.trim().toLowerCase();
-    if (!query) return catalog.capabilities;
     return catalog.capabilities.filter((item) =>
-      [item.display_name, item.description, item.capability.id, item.source_package.id]
-        .join(' ')
-        .toLowerCase()
-        .includes(query)
+      capabilityMatchesSearch(item, capabilitySearch, i18n.language)
     );
-  }, [capabilitySearch, catalog.capabilities]);
-  const requiredKinds = useMemo(
-    () => resourceKindsForDraft(draft, catalog.capabilities),
-    [catalog.capabilities, draft]
+  }, [capabilitySearch, catalog.capabilities, i18n.language]);
+  const visibleCapabilities = useMemo(
+    () => sortCapabilitiesByPlacement(draft.document, filteredCapabilities),
+    [draft.document, filteredCapabilities]
   );
-  const selectedWorkspaceRoot = workspaceRootForDraft(draft, hostWorkDir);
-  const templateDefaults = useMemo(
+  const visibleCapabilityReferences = useMemo(
     () =>
-      new Map(
-        (sourceTemplate?.seed.typed_resource_defaults ?? []).map((resource) => [
-          resource.resource_kind,
-          resource,
-        ])
+      editorCapabilityReferences(
+        draft.document,
+        visibleCapabilities,
+        catalog.capabilities
       ),
-    [sourceTemplate]
+    [catalog.capabilities, draft.document, visibleCapabilities]
   );
-  const missingRequiredKinds = useMemo(
-    () =>
-      requiredKinds.filter((resourceKind) => {
-        const binding = draft.document.resource_bindings.find(
-          (candidate) => candidate.resource_kind === resourceKind
-        );
-        if (!binding?.resource_id.trim()) return true;
-        if (resourceKind === 'workspace' || resourceKind === 'process_session') {
-          return !binding.typed_parameters?.[WORKSPACE_ROOT_PARAMETER]?.trim();
-        }
-        return false;
-      }),
-    [draft.document.resource_bindings, requiredKinds]
-  );
-
-  const patchDocument = (transform: Parameters<typeof updateDocument>[1]) =>
-    onDraftChange(updateDocument(draft, transform));
-  const resourceLabelFor = (resourceKind: string): string => {
-    switch (resourceKind) {
-      case 'workspace':
-        return t('terminal.create.workspace');
-      case 'knowledge_base':
-        return t('agentSettings.resources.knowledgeBase');
-      case 'mcp_server':
-        return t('agentSettings.sections.mcp');
-      case 'process_session':
-        return t('agentSettings.sections.test');
-      case 'companion':
-        return t('agentSettings.template.companion.default.name');
-      case 'companion_memory':
-        return t('agentSettings.template.companion.default.name');
-      case 'channel':
-        return t('agentSettings.template.customerService.default.name');
-      case 'customer':
-        return t('agentSettings.template.customerService.default.name');
-      case 'robot':
-        return t('agentSettings.template.robot.default.name');
-      case 'canvas':
-      case 'asset_library':
-      case 'generation_provider':
-      case 'miniapp':
-        return t('agentSettings.template.creativeStudio.default.name');
-      case 'project_memory':
-        return t('agentSettings.sections.resources');
-      default:
-        return t('agentSettings.sections.resources');
-    }
-  };
-
-  const nextDraftForCapability = (
-    capability: CapabilityCatalogItem['capability'],
-    placement: CapabilityPlacement
-  ): AgentPresetDraft => {
-    const nextDocument = placeCapability(draft.document, capability, placement);
-    const nextDraft = updateDocument(draft, () => nextDocument);
-    return resolveHostManagedResourceBindings(
-      nextDraft,
-      hostWorkDir,
-      catalog.capabilities,
-      editor.preset.owner_user_id ?? ''
-    );
-  };
-
-  const place = (capability: CapabilityCatalogItem['capability'], placement: CapabilityPlacement) =>
-    onDraftChange(nextDraftForCapability(capability, placement));
-  const updateWorkspaceSelection = (
-    binding: TypedResourceBinding,
-    workspaceRoot: string
-  ) => {
-    const nextDraft = updateResourceBinding(
-      draft,
-      bindWorkspaceResource(binding, workspaceRoot)
-    );
-    onDraftChange(
-      resolveHostManagedResourceBindings(
-        nextDraft,
-        hostWorkDir,
-        catalog.capabilities,
-        editor.preset.owner_user_id ?? ''
-      )
-    );
-  };
-
   const selectedSkills = new Set(draft.document.skill_bindings.map((skill) => skill.id));
   const chatRouteRecord = draft.document.chat_route_records[AGENT_CHAT_MODEL_TASK];
   const previewBlocked = preview?.status === 'blocked';
-  const selectedCapabilityIds = useMemo(
-    () =>
-      new Set([
-        ...draft.document.initial_capabilities.map((item) => item.capability.id),
-        ...draft.document.on_demand_capabilities.map((item) => item.capability.id),
-      ]),
-    [draft.document.initial_capabilities, draft.document.on_demand_capabilities]
+  const initialCount = draft.document.initial_capabilities.length;
+  const onDemandCount = draft.document.on_demand_capabilities.length;
+  const requiredResourceKinds = useMemo(
+    () => selectedRequiredResourceKinds(draft.document, catalog.capabilities),
+    [catalog.capabilities, draft.document]
   );
+  const busy = busyAction !== null;
 
+  const patchDocument = (transform: Parameters<typeof updateDocument>[1]) =>
+    onDraftChange(updateDocument(draft, transform));
+  const setPlacement = (
+    capability: (typeof catalog.capabilities)[number]['capability'],
+    placement: CapabilityPlacement
+  ) => patchDocument((document) => placeCapability(document, capability, placement));
   const applyChatRouteRecord = (record: ChatRouteRecord) => {
     patchDocument((document) => ({
       ...document,
@@ -362,6 +227,16 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
         [AGENT_CHAT_MODEL_TASK]: record,
       },
     }));
+  };
+  const placementLabel = (placement: CapabilityPlacement): string => {
+    switch (placement) {
+      case 'initial':
+        return t('agentSettings.capabilities.initialShort');
+      case 'on_demand':
+        return t('agentSettings.capabilities.onDemandShort');
+      case 'none':
+        return t('agentSettings.capabilities.notSelected');
+    }
   };
 
   return (
@@ -384,6 +259,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
         <div className={styles.sectionHeading}>
           <div>
             <h3>{t('agentSettings.sections.basic')}</h3>
+            <p>{t('agentSettings.sections.basicHint')}</p>
           </div>
         </div>
         <div className={styles.formGrid}>
@@ -392,6 +268,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             <Input
               value={draft.display_name}
               maxLength={80}
+              disabled={busy}
               onChange={(displayName: string) =>
                 onDraftChange({ ...draft, display_name: displayName })
               }
@@ -401,7 +278,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             <span>{t('common.model')}</span>
             <AgentChatModelPicker
               record={chatRouteRecord}
-              disabled={busyAction !== null}
+              disabled={busy}
               onChange={applyChatRouteRecord}
             />
           </label>
@@ -410,6 +287,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             <Input
               value={draft.description ?? ''}
               maxLength={240}
+              disabled={busy}
               onChange={(description: string) =>
                 onDraftChange({
                   ...draft,
@@ -423,6 +301,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             <Input.TextArea
               value={draft.document.persona}
               autoSize={{ minRows: 2, maxRows: 5 }}
+              disabled={busy}
               onChange={(persona: string) =>
                 patchDocument((document) => ({ ...document, persona }))
               }
@@ -433,6 +312,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             <Input.TextArea
               value={draft.document.instructions}
               autoSize={{ minRows: 4, maxRows: 10 }}
+              disabled={busy}
               onChange={(instructions: string) =>
                 patchDocument((document) => ({ ...document, instructions }))
               }
@@ -446,7 +326,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             showIcon
             content={t('agentSettings.fields.chatModelRouteUnavailable', {
               defaultValue:
-                'This host did not provide an available Chat model route. Saving or testing will remain blocked until the canonical route is available; no JSON or ID entry is required.',
+                'This host did not provide an available Chat model route. Saving or testing remains blocked until one is available.',
             })}
           />
         )}
@@ -456,6 +336,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
         <div className={styles.sectionHeading}>
           <div>
             <h3>{t('agentSettings.sections.capabilities')}</h3>
+            <p>{t('agentSettings.sections.capabilitiesHint')}</p>
           </div>
           <div className={styles.searchField}>
             <Search theme='outline' size='14' />
@@ -463,6 +344,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
               value={capabilitySearch}
               aria-label={t('agentSettings.capabilities.search')}
               placeholder={t('agentSettings.capabilities.search')}
+              disabled={busy}
               onChange={(event: React.ChangeEvent<HTMLInputElement>) =>
                 setCapabilitySearch(event.target.value)
               }
@@ -470,64 +352,30 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
           </div>
         </div>
 
-        <div className={styles.enabledSummary}>
-          <span>{t('agentSettings.sections.capabilities')}</span>
-          <strong>{selectedCapabilityIds.size}</strong>
+        <div className={styles.capabilitySelectionSummary}>
+          <span>
+            {t('agentSettings.capabilities.initial')}: <strong>{initialCount}</strong>
+          </span>
+          <span>
+            {t('agentSettings.capabilities.onDemand')}: <strong>{onDemandCount}</strong>
+          </span>
         </div>
 
-        <div className={styles.catalogList}>
-          {filteredCapabilities.map((item) => {
-            const placement = capabilityPlacement(draft.document, item.capability.id);
-            const unavailable = item.materialization_state === 'unavailable';
-            return (
-              <div key={item.capability.id} className={styles.catalogRow}>
-                <div className={styles.catalogCopy}>
-                  <div className={styles.catalogTitle}>
-                    <strong>{item.display_name}</strong>
-                    {unavailable && (
-                      <Tag size='small' color='orange'>
-                        {t('agentSettings.common.unavailable')}
-                      </Tag>
-                    )}
-                  </div>
-                  <p>{item.description}</p>
-                </div>
-                <Checkbox
-                  checked={placement !== 'none'}
-                  disabled={unavailable || busyAction !== null}
-                  aria-label={item.display_name}
-                  onChange={(checked: boolean) =>
-                    place(
-                      item.capability,
-                      checked ? (placement === 'none' ? 'initial' : placement) : 'none'
-                    )
-                  }
-                />
-              </div>
-            );
-          })}
-          {filteredCapabilities.length === 0 && (
-            <div className={styles.inlineEmpty}>{t('agentSettings.capabilities.emptyCatalog')}</div>
-          )}
+        <AgentCapabilityList
+          references={visibleCapabilityReferences}
+          catalog={catalog.capabilities}
+          emptyLabel={t('agentSettings.capabilities.emptyCatalog')}
+          disabled={busy}
+          placementFor={(capability) =>
+            capabilityPlacement(draft.document, capability)
+          }
+          onPlacementChange={setPlacement}
+        />
+
+        <div className={styles.requirementPolicy}>
+          <strong>{t('agentSettings.resources.bindingPolicyTitle')}</strong>
+          <span>{t('agentSettings.resources.bindingPolicyBody')}</span>
         </div>
-        <Collapse defaultActiveKey={[]} className={styles.technicalCollapse}>
-          <Collapse.Item name='capability-details' header={t('common.technical_details')}>
-            <div className={styles.dualGrid}>
-              <SelectedCapabilityList
-                title={t('agentSettings.capabilities.initial')}
-                items={draft.document.initial_capabilities}
-                catalogById={catalogById}
-                onRemove={(capability) => place(capability, 'none')}
-              />
-              <SelectedCapabilityList
-                title={t('agentSettings.capabilities.onDemand')}
-                items={draft.document.on_demand_capabilities}
-                catalogById={catalogById}
-                onRemove={(capability) => place(capability, 'none')}
-              />
-            </div>
-          </Collapse.Item>
-        </Collapse>
       </section>
 
       <section className={styles.section} id='agent-settings-skills-mcp'>
@@ -547,6 +395,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                       <label key={skill.skill.id} className={styles.skillRow}>
                         <Checkbox
                           checked={selectedSkills.has(skill.skill.id)}
+                          disabled={busy}
                           onChange={() =>
                             patchDocument((document) => toggleSkill(document, skill.skill))
                           }
@@ -555,7 +404,11 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                           <strong>{skill.display_name}</strong>
                           <span>{skill.description}</span>
                           {missing.length > 0 && (
-                            <small>{t('agentSettings.common.unavailable')}</small>
+                            <small>
+                              {t('agentSettings.skills.missingCapabilities', {
+                                capabilities: missing.join(', '),
+                              })}
+                            </small>
                           )}
                         </div>
                       </label>
@@ -574,8 +427,13 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                 </div>
                 <div className={styles.selectionList}>
                   {catalog.mcp_tools.map((mapping) => {
-                    const capability = catalogById.get(mapping.capability.id);
-                    const placement = capabilityPlacement(draft.document, mapping.capability.id);
+                    const capability = catalogByReference.get(
+                      capabilityReferenceKey(mapping.capability)
+                    );
+                    const placement = capabilityPlacement(
+                      draft.document,
+                      mapping.capability
+                    );
                     return (
                       <div
                         key={`${mapping.server_id}:${mapping.canonical_tool_key}`}
@@ -584,19 +442,16 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                         <LinkCloud theme='outline' size='15' />
                         <div>
                           <strong>{mapping.canonical_tool_key}</strong>
-                          <span>{t('agentSettings.sections.mcp')}</span>
+                          <span>
+                            {capability?.display_name ?? mapping.capability.id}
+                          </span>
                         </div>
-                        <Checkbox
-                          checked={placement !== 'none'}
-                          disabled={!capability || busyAction !== null}
-                          aria-label={mapping.canonical_tool_key}
-                          onChange={(checked: boolean) =>
-                            place(
-                              mapping.capability,
-                              checked ? (placement === 'none' ? 'initial' : placement) : 'none'
-                            )
-                          }
-                        />
+                        <Tag
+                          size='small'
+                          color={placement === 'none' ? 'gray' : 'blue'}
+                        >
+                          {placementLabel(placement)}
+                        </Tag>
                       </div>
                     );
                   })}
@@ -608,153 +463,6 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             </div>
           </Collapse.Item>
         </Collapse>
-      </section>
-
-      <section className={styles.section} id='agent-settings-resources'>
-        <div className={styles.sectionHeading}>
-          <div>
-            <h3>{t('agentSettings.sections.resources')}</h3>
-          </div>
-        </div>
-        {missingRequiredKinds.length > 0 && (
-          <Alert
-            className={styles.inlineNotice}
-            type='warning'
-            showIcon
-            content={t('agentSettings.resources.missingRequired', {
-              defaultValue: `Select the required resources before saving or testing this setup (${missingRequiredKinds
-                .map(resourceLabelFor)
-                .join(', ')}).`,
-            })}
-          />
-        )}
-        {requiredKinds.length === 0 ? (
-          <div className={styles.inlineEmpty}>{t('agentSettings.resources.noneRequired')}</div>
-        ) : (
-          <div className={styles.resourceEditorList}>
-            {requiredKinds.map((resourceKind) => {
-              const existing = draft.document.resource_bindings.find(
-                (binding) => binding.resource_kind === resourceKind
-              );
-              const resourceDefault = templateDefaults.get(resourceKind);
-              const binding =
-                existing ??
-                defaultResourceBinding(
-                  resourceKind,
-                  editor.preset.owner_user_id ?? '',
-                  resourceDefault?.operations ?? ['read'],
-                  (resourceKind === 'workspace' || resourceKind === 'process_session') &&
-                  selectedWorkspaceRoot
-                    ? {
-                        resourceId:
-                          resourceKind === 'workspace'
-                            ? DEFAULT_WORKSPACE_RESOURCE_ID
-                            : DEFAULT_PROCESS_SESSION_RESOURCE_ID,
-                        typedParameters: {
-                          [WORKSPACE_ROOT_PARAMETER]: selectedWorkspaceRoot,
-                        },
-                      }
-                    : undefined
-                );
-              return (
-                <div key={resourceKind} className={styles.resourceEditorRow}>
-                  <div className={styles.resourceEditorHeader}>
-                    <div>
-                      <strong>{resourceLabelFor(resourceKind)}</strong>
-                      <span>{t('agentSettings.resources.required')}</span>
-                    </div>
-                    {existing && resourceKind !== 'process_session' && (
-                      <Tooltip content={t('agentSettings.actions.remove')}>
-                        <Button
-                          type='text'
-                          size='mini'
-                          icon={<CloseSmall theme='outline' size='14' />}
-                          onClick={() =>
-                            onDraftChange(removeResourceBinding(draft, existing.binding_id))
-                          }
-                        />
-                      </Tooltip>
-                    )}
-                  </div>
-                  <div className={styles.resourcePicker}>
-                    {resourceKind === 'workspace' && (
-                      <WorkspaceFolderSelect
-                        value={
-                          binding.typed_parameters?.[WORKSPACE_ROOT_PARAMETER] ?? hostWorkDir ?? ''
-                        }
-                        onChange={(workspaceRoot: string) =>
-                          updateWorkspaceSelection(binding, workspaceRoot)
-                        }
-                        onClear={() => updateWorkspaceSelection(binding, hostWorkDir ?? '')}
-                        placeholder={t('terminal.create.workspacePlaceholder')}
-                        recentLabel={t('terminal.create.recent')}
-                        chooseDifferentLabel={t('terminal.create.chooseFolder')}
-                      />
-                    )}
-                    {resourceKind === 'knowledge_base' && (
-                      <Select
-                        value={binding.resource_id || undefined}
-                        loading={knowledgeBasesLoading}
-                        showSearch
-                        placeholder={t('agentSettings.resources.knowledgeBasePlaceholder')}
-                        options={knowledgeBases.map((knowledgeBase) => ({
-                          label: knowledgeBase.name,
-                          value: knowledgeBase.knowledge_base_id,
-                          disabled: !knowledgeBase.root_exists,
-                        }))}
-                        onChange={(knowledgeBaseId: string) => {
-                          const knowledgeBase = knowledgeBases.find(
-                            (candidate) =>
-                              String(candidate.knowledge_base_id) === String(knowledgeBaseId)
-                          );
-                          if (!knowledgeBase) return;
-                          onDraftChange(
-                            updateResourceBinding(
-                              draft,
-                              bindKnowledgeBaseResource(binding, knowledgeBase)
-                            )
-                          );
-                        }}
-                      />
-                    )}
-                    {resourceKind === 'mcp_server' && (
-                      <Select
-                        value={binding.resource_id || undefined}
-                        showSearch
-                        disabled={connectors.length === 0}
-                        placeholder={t('common.select')}
-                        options={connectors.map((connector) => ({
-                          label: connector.name,
-                          value: String(connector.mcp_server_id),
-                        }))}
-                        onChange={(connectorId: string) =>
-                          onDraftChange(
-                            updateResourceBinding(draft, {
-                              ...binding,
-                              resource_id: connectorId,
-                            })
-                          )
-                        }
-                      />
-                    )}
-                    {!['workspace', 'knowledge_base', 'mcp_server'].includes(resourceKind) && (
-                      <div className={styles.managedResource}>
-                        <Tag size='small' color={binding.resource_id ? 'green' : 'gray'}>
-                          {binding.resource_id ? t('common.added') : t('agentSettings.common.none')}
-                        </Tag>
-                        <span>
-                          {binding.resource_id
-                            ? t('agentSettings.resources.required')
-                            : t('agentSettings.resources.optional')}
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
       </section>
 
       {preview?.status === 'blocked' && (
@@ -775,6 +483,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
         <div className={styles.sectionHeading}>
           <div>
             <h3>{t('agentSettings.actions.test')}</h3>
+            <p>{t('agentSettings.sections.testHint')}</p>
           </div>
         </div>
         <Alert
@@ -788,13 +497,14 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             value={testInput}
             autoSize={{ minRows: 2, maxRows: 6 }}
             placeholder={t('agentSettings.test.inputPlaceholder')}
+            disabled={busy}
             onChange={setTestInput}
           />
           <Button
             type='primary'
             icon={<PlayOne theme='outline' size='15' />}
             loading={busyAction === 'test'}
-            disabled={!testInput.trim() || previewBlocked}
+            disabled={busy || !testInput.trim() || previewBlocked}
             onClick={() => onTest(testInput.trim())}
           >
             {t('agentSettings.actions.test')}
@@ -825,11 +535,12 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                   <strong>{t('agentSettings.sections.previewInspector')}</strong>
                   <span>{t('agentSettings.sections.previewInspectorHint')}</span>
                 </div>
-                <Button
-                  size='small'
-                  icon={<PreviewOpen theme='outline' size='15' />}
-                  loading={busyAction === 'preview'}
-                  onClick={onPreview}
+                  <Button
+                    size='small'
+                    icon={<PreviewOpen theme='outline' size='15' />}
+                    loading={busyAction === 'preview'}
+                    disabled={busy}
+                    onClick={onPreview}
                 >
                   {t('agentSettings.actions.preview')}
                 </Button>
@@ -843,7 +554,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                 </div>
                 <Tag size='small' color={chatRouteRecord ? 'green' : 'orange'}>
                   {chatRouteRecord
-                    ? t('common.added', { defaultValue: 'Available' })
+                    ? t('agentSettings.common.available')
                     : t('agentSettings.common.unavailable')}
                 </Tag>
               </div>
@@ -854,12 +565,16 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                   <strong>{editor.revision?.reference.revision ?? 0}</strong>
                 </div>
                 <div>
-                  <span>{t('agentSettings.library.bindingCount', { count: editor.preset.bound_target_count })}</span>
+                  <span>
+                    {t('agentSettings.library.bindingCount', {
+                      count: editor.preset.bound_target_count,
+                    })}
+                  </span>
                   <strong>{editor.preset.bound_target_count}</strong>
                 </div>
                 <div>
-                  <span>{t('agentSettings.sections.resources')}</span>
-                  <strong>{draft.document.resource_bindings.length}</strong>
+                  <span>{t('agentSettings.resources.requiredKinds')}</span>
+                  <strong>{requiredResourceKinds.length}</strong>
                 </div>
               </div>
 
@@ -898,13 +613,14 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
         <AgentConversationAction
           hasStableRevision={Boolean(editor.preset.current_stable_revision)}
           dirty={dirty}
+          busy={busy}
           onClick={() => onStartConversation(editor.preset)}
         />
         <div className={styles.actionButtons}>
           <Button
             icon={<PlayOne theme='outline' size='15' />}
             loading={busyAction === 'test'}
-            disabled={!testInput.trim() || previewBlocked}
+            disabled={busy || !testInput.trim() || previewBlocked}
             onClick={() => onTest(testInput.trim())}
           >
             {t('agentSettings.actions.test')}
@@ -913,7 +629,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             type='primary'
             icon={<Save theme='outline' size='15' />}
             loading={busyAction === 'save'}
-            disabled={previewBlocked}
+            disabled={busy || previewBlocked}
             onClick={onSave}
           >
             {t('common.save')}

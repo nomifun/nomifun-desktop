@@ -15,7 +15,8 @@
  * of the earlier bespoke square icon-button + full-bleed-divider panel.
  *
  * Preserved behaviors from the original implementation:
- * - Three-target resolution: conversation/terminal → workpath, companion → per-profile
+ * - Three-target resolution: conversation → session, terminal → workpath,
+ *   companion → per-profile
  * - Draft mode (Guid page pre-creation binding)
  * - Binding read/write via `POST /api/knowledge/binding/{kind}/{target_id}`
  * - `knowledge.binding-changed` / base-created/updated/deleted WS refresh
@@ -35,13 +36,10 @@ import type {
   IKnowledgeBase,
   IKnowledgeBinding,
   IKnowledgeTag,
-  KnowledgeBindingKind,
   KnowledgeWritebackEagerness,
 } from '@/common/adapter/ipcBridge';
-import { useConversationHistoryContext } from '@/renderer/hooks/context/ConversationHistoryContext';
 import { useTerminalSessions } from '@/renderer/pages/terminal/useTerminalSessions';
 import {
-  workpathKeyForConversation,
   workpathKeyForTerminal,
 } from '@/renderer/pages/conversation/SessionList/utils/sessionWorkpath';
 import { useKnowledgeTags } from '@/renderer/pages/knowledge/useKnowledgeTags';
@@ -51,6 +49,10 @@ import {
   shouldShowKnowledgeBaseSearch,
 } from './KnowledgeControl.utils';
 import { capabilityHeaderButtonClass, capabilityHeaderButtonStyle } from './CapabilityHeaderButton';
+import {
+  workpathDisplayForKnowledgeTarget,
+  type ResolvedKnowledgeBindingTarget,
+} from '../Workspace/KnowledgePanel/knowledgeBindingTarget';
 
 export type KnowledgeTarget =
   | { kind: 'conversation'; id: ConversationId }
@@ -145,7 +147,6 @@ function kindLabel(kind: IKnowledgeBase['kind'], t: TFunction): string {
 const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disabledReason, applyNote, footer }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { conversations } = useConversationHistoryContext();
   const { sessions: terminalSessions } = useTerminalSessions();
   const { tags: allTags } = useKnowledgeTags();
 
@@ -171,32 +172,28 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
     [t]
   );
 
-  // ─── Target resolution (unchanged logic) ─────────────────────────────────
-  const resolved = useMemo((): { kind: KnowledgeBindingKind; id: string } | null => {
+  // ─── Target resolution ───────────────────────────────────────────────────
+  const resolved = useMemo((): ResolvedKnowledgeBindingTarget | null => {
     if (!target) return null;
-    if (target.kind === 'companion') return { kind: 'companion', id: target.id };
+    if (target.kind === 'companion') return { kind: 'companion', target_id: target.id };
     if (target.kind === 'conversation') {
-      const conv = conversations.find((c) => c.id === target.id);
-      if (!conv) return null;
-      return { kind: 'workpath', id: workpathKeyForConversation(conv.extra as Record<string, unknown>) };
+      return { kind: 'conversation', target_id: target.id };
     }
     if (target.kind === 'terminal') {
       const session = terminalSessions.find((s) => s.terminal_id === target.id);
       if (!session) return null;
-      return { kind: 'workpath', id: workpathKeyForTerminal(session) };
+      return { kind: 'workpath', target_id: workpathKeyForTerminal(session) };
     }
-    return { kind: 'workpath', id: target.id };
-  }, [target?.kind, target?.id, conversations, terminalSessions]);
+    return { kind: 'workpath', target_id: target.id };
+  }, [target?.kind, target?.id, terminalSessions]);
 
   const kind = resolved?.kind;
-  const id = resolved?.id;
+  const id = resolved?.target_id;
   const targetUnresolved = !draft && !!target && target.kind !== 'companion' && !resolved;
 
-  // The resolved workpath (for scope display)
-  const workpathDisplay = useMemo(() => {
-    if (!resolved || resolved.kind === 'companion') return null;
-    return resolved.id;
-  }, [resolved]);
+  // Only workpath targets use a shared workspace scope. Conversation targets
+  // remain isolated so a binding never appears to apply to another session.
+  const workpathDisplay = workpathDisplayForKnowledgeTarget(resolved);
 
   // ─── State ────────────────────────────────────────────────────────────────
   const [bases, setBases] = useState<IKnowledgeBase[]>([]);
@@ -643,7 +640,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
       trigger='click'
       position='br'
       content={panel}
-      onVisibleChange={(v) => {
+      onVisibleChange={(v: boolean) => {
         if (v) {
           dismissHint();
           setSearchQuery('');

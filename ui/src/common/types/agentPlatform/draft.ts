@@ -7,10 +7,7 @@ import type {
   ExactCatalogRef,
   OfficialPresetTemplate,
   SkillCatalogItem,
-  TypedResourceBinding,
 } from './contracts';
-
-const compareKey = (value: unknown): string => JSON.stringify(value);
 
 export function canonicalizeDraftValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalizeDraftValue);
@@ -39,7 +36,6 @@ export const createEmptyAgentPresetDocument = (): AgentPresetDocument => ({
   initial_capabilities: [],
   on_demand_capabilities: [],
   skill_bindings: [],
-  resource_bindings: [],
   system_role_provider_overrides: {},
   persona: '',
   instructions: '',
@@ -49,7 +45,6 @@ export const createEmptyAgentPresetDocument = (): AgentPresetDocument => ({
 const selection = (capability: ExactCatalogRef<'capability'>): CapabilitySelection => ({
   capability,
   action_allowlist: [],
-  resource_binding_refs: [],
 });
 
 export const draftFromOfficialTemplate = (
@@ -156,13 +151,4 @@ export function requiredResourceKinds(
     capability.required_resource_kinds.forEach((kind) => kinds.add(kind));
   }
   return [...kinds].sort();
-}
-
-export function upsertResourceBinding(
-  bindings: TypedResourceBinding[],
-  binding: TypedResourceBinding
-): TypedResourceBinding[] {
-  return [...bindings.filter((item) => item.binding_id !== binding.binding_id), binding].sort(
-    (left, right) => compareKey(left.binding_id).localeCompare(compareKey(right.binding_id))
-  );
 }

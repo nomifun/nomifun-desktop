@@ -2,6 +2,14 @@
   "registry_version": "canonical-errors-v1",
   "entries": [
     {
+      "code": "AGENT_PRESET_NOT_FOUND",
+      "version": 1,
+      "class": "resource",
+      "retry": "never",
+      "terminal_scope": "request",
+      "http_status": 404
+    },
+    {
       "code": "SESSION_DELETED",
       "version": 1,
       "class": "session",
