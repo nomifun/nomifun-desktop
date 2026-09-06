@@ -791,7 +791,9 @@ impl ControlPlaneStore for SqliteControlPlaneStore {
         let rows: Vec<(String, String, String, String, Option<i64>)> = sqlx::query_as(
             "SELECT preset_id, owner_ref_json, source_json, display_json, \
                     current_stable_revision \
-             FROM agent_presets ORDER BY preset_id",
+             FROM agent_presets \
+             WHERE retired_at_ms IS NULL \
+             ORDER BY preset_id",
         )
         .fetch_all(&self.pool)
         .await
@@ -813,7 +815,8 @@ impl ControlPlaneStore for SqliteControlPlaneStore {
         let row: Option<(String, String, String, String, Option<i64>)> = sqlx::query_as(
             "SELECT preset_id, owner_ref_json, source_json, display_json, \
                     current_stable_revision \
-             FROM agent_presets WHERE preset_id = ?",
+             FROM agent_presets \
+             WHERE preset_id = ? AND retired_at_ms IS NULL",
         )
         .bind(preset_id.as_ref())
         .fetch_optional(&self.pool)
@@ -861,7 +864,8 @@ impl ControlPlaneStore for SqliteControlPlaneStore {
             .transpose()?;
         let changed = sqlx::query(
             "UPDATE agent_presets SET owner_ref_json = ?, source_json = ?, display_json = ?, \
-                    current_stable_revision = ? WHERE preset_id = ?",
+                    current_stable_revision = ? \
+             WHERE preset_id = ? AND retired_at_ms IS NULL",
         )
         .bind(owner)
         .bind(source)
@@ -874,6 +878,66 @@ impl ControlPlaneStore for SqliteControlPlaneStore {
         if changed.rows_affected() != 1 {
             return Err(control_not_found("AgentPreset"));
         }
+        Ok(())
+    }
+
+    async fn retire_preset(
+        &self,
+        owner: &UserId,
+        preset_id: &AgentPresetId,
+    ) -> Result<(), ControlPlaneError> {
+        let mut tx = self.pool.begin().await.map_err(control_sql)?;
+        let row: Option<(String, String, Option<i64>)> = sqlx::query_as(
+            "SELECT owner_ref_json, source_json, retired_at_ms \
+             FROM agent_presets WHERE preset_id = ?",
+        )
+        .bind(preset_id.as_ref())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(control_sql)?;
+        let Some((owner_json, source_json, retired_at_ms)) = row else {
+            return Err(control_agent_preset_not_found());
+        };
+        if retired_at_ms.is_some()
+            || owner_from_json(&owner_json)?.as_ref() != Some(owner)
+            || source_from_json(&source_json)? != AgentPresetSource::User
+        {
+            return Err(control_agent_preset_not_found());
+        }
+
+        sqlx::query(
+            "DELETE FROM agent_bindings \
+             WHERE json_extract(agent_binding_json, '$.preset_revision_ref.preset_id') = ?",
+        )
+        .bind(preset_id.as_ref())
+        .execute(&mut *tx)
+        .await
+        .map_err(control_sql)?;
+        sqlx::query(
+            "DELETE FROM remote_bindings \
+             WHERE json_extract(agent_binding_json, '$.preset_revision_ref.preset_id') = ?",
+        )
+        .bind(preset_id.as_ref())
+        .execute(&mut *tx)
+        .await
+        .map_err(control_sql)?;
+
+        let changed = sqlx::query(
+            "UPDATE agent_presets SET retired_at_ms = ? \
+             WHERE preset_id = ? AND owner_ref_json = ? AND source_json = ? \
+               AND retired_at_ms IS NULL",
+        )
+        .bind(now_ms())
+        .bind(preset_id.as_ref())
+        .bind(owner_json)
+        .bind(source_json)
+        .execute(&mut *tx)
+        .await
+        .map_err(control_sql)?;
+        if changed.rows_affected() != 1 {
+            return Err(control_agent_preset_not_found());
+        }
+        tx.commit().await.map_err(control_sql)?;
         Ok(())
     }
 
@@ -939,7 +1003,7 @@ impl ControlPlaneStore for SqliteControlPlaneStore {
         })?;
         let changed = sqlx::query(
             "UPDATE agent_presets SET display_json = ?, current_stable_revision = ? \
-             WHERE preset_id = ?",
+             WHERE preset_id = ? AND retired_at_ms IS NULL",
         )
         .bind(display)
         .bind(i64_from_u64(revision.reference.revision, "revision")?)
@@ -1154,6 +1218,14 @@ impl ControlPlaneStore for SqliteControlPlaneStore {
         &self,
         binding: RemoteBinding,
     ) -> Result<RemoteBinding, ControlPlaneError> {
+        let mut tx = self.pool.begin().await.map_err(control_sql)?;
+        let preset_owner =
+            preset_owner_tx(&mut tx, &binding.agent_binding.preset_revision_ref.preset_id)
+                .await?
+                .ok_or_else(control_agent_preset_not_found)?;
+        if preset_owner != binding.owner_user_id {
+            return Err(control_agent_preset_not_found());
+        }
         sqlx::query(
             "INSERT INTO remote_bindings \
              (remote_binding_id, owner_user_id, name, agent_binding_json) \
@@ -1163,9 +1235,10 @@ impl ControlPlaneStore for SqliteControlPlaneStore {
         .bind(binding.owner_user_id.as_ref())
         .bind(&binding.name)
         .bind(encode_control_json(&binding.agent_binding)?)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(control_sql)?;
+        tx.commit().await.map_err(control_sql)?;
         Ok(binding)
     }
 
@@ -1202,6 +1275,13 @@ impl ControlPlaneStore for SqliteControlPlaneStore {
                 StatusCode::CONFLICT,
                 "RemoteBinding version or digest changed",
             ));
+        }
+        let preset_owner =
+            preset_owner_tx(&mut tx, &binding.agent_binding.preset_revision_ref.preset_id)
+                .await?
+                .ok_or_else(control_agent_preset_not_found)?;
+        if preset_owner != binding.owner_user_id {
+            return Err(control_agent_preset_not_found());
         }
         sqlx::query(
             "UPDATE remote_bindings SET name = ?, agent_binding_json = ? \
@@ -1252,10 +1332,23 @@ fn control_conflict(message: impl Into<String>) -> ControlPlaneError {
 }
 
 fn control_not_found(subject: &str) -> ControlPlaneError {
+    let code = if subject == "AgentPreset" {
+        "AGENT_PRESET_NOT_FOUND"
+    } else {
+        "PRESET_REVISION_DIGEST_MISMATCH"
+    };
     ControlPlaneError::canonical(
-        "PRESET_REVISION_DIGEST_MISMATCH",
+        code,
         StatusCode::NOT_FOUND,
         format!("{subject} was not found"),
+    )
+}
+
+fn control_agent_preset_not_found() -> ControlPlaneError {
+    ControlPlaneError::canonical(
+        "AGENT_PRESET_NOT_FOUND",
+        StatusCode::NOT_FOUND,
+        "AgentPreset does not exist",
     )
 }
 
@@ -1290,55 +1383,37 @@ fn preset_owner_ref(preset: &AgentPreset) -> PrincipalRef {
 }
 
 fn owner_from_json(value: &str) -> Result<Option<UserId>, ControlPlaneError> {
-    if let Ok(principal) = serde_json::from_str::<PrincipalRef>(value) {
-        return Ok((principal.principal_kind == "user")
-            .then(|| UserId::from(principal.principal_id)));
+    let principal = serde_json::from_str::<PrincipalRef>(value).map_err(|_| {
+        ControlPlaneError::Wire(
+            "agent_presets.owner_ref_json is not a canonical PrincipalRef".to_owned(),
+        )
+    })?;
+    match (principal.principal_kind.as_str(), principal.principal_id.as_str()) {
+        ("user", principal_id)
+            if !principal_id.is_empty() && principal_id == principal_id.trim() =>
+        {
+            Ok(Some(UserId::from(principal_id.to_owned())))
+        }
+        ("system", "official") => Ok(None),
+        _ => Err(ControlPlaneError::Wire(
+            "agent_presets.owner_ref_json has an unsupported canonical principal".to_owned(),
+        )),
     }
-    if let Ok(owner) = serde_json::from_str::<Option<UserId>>(value) {
-        return Ok(owner);
-    }
-    Err(ControlPlaneError::Wire(
-        "agent_presets.owner_ref_json is not a canonical PrincipalRef".to_owned(),
-    ))
 }
 
 fn source_from_json(value: &str) -> Result<AgentPresetSource, ControlPlaneError> {
-    if let Ok(source) = serde_json::from_str::<AgentPresetSource>(value) {
-        return Ok(source);
-    }
-    let value: Value = serde_json::from_str(value).map_err(ControlPlaneError::from)?;
-    let source = value
-        .get("source")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            ControlPlaneError::Wire(
-                "agent_presets.source_json has no canonical source".to_owned(),
-            )
-        })?;
-    serde_json::from_value(Value::String(source.to_owned())).map_err(ControlPlaneError::from)
+    serde_json::from_str::<AgentPresetSource>(value).map_err(|_| {
+        ControlPlaneError::Wire(
+            "agent_presets.source_json is not a canonical AgentPresetSource".to_owned(),
+        )
+    })
 }
 
 fn display_from_json(value: &str) -> Result<PersistedPresetDisplay, ControlPlaneError> {
-    if let Ok(display) = serde_json::from_str::<PersistedPresetDisplay>(value) {
-        return Ok(display);
-    }
-    let value: Value = serde_json::from_str(value).map_err(ControlPlaneError::from)?;
-    let display_name = value
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            ControlPlaneError::Wire(
-                "agent_presets.display_json has no display name".to_owned(),
-            )
-        })?
-        .to_owned();
-    let description = value
-        .get("description")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    Ok(PersistedPresetDisplay {
-        display_name,
-        description,
+    serde_json::from_str::<PersistedPresetDisplay>(value).map_err(|_| {
+        ControlPlaneError::Wire(
+            "agent_presets.display_json is not a canonical preset display".to_owned(),
+        )
     })
 }
 
@@ -1669,7 +1744,8 @@ async fn current_revision_ref_tx(
     preset_id: &AgentPresetId,
 ) -> Result<Option<PresetRevisionRef>, ControlPlaneError> {
     let revision: Option<i64> = sqlx::query_scalar(
-        "SELECT current_stable_revision FROM agent_presets WHERE preset_id = ?",
+        "SELECT current_stable_revision FROM agent_presets \
+         WHERE preset_id = ? AND retired_at_ms IS NULL",
     )
     .bind(preset_id.as_ref())
     .fetch_optional(&mut **tx)
@@ -1700,7 +1776,10 @@ async fn preset_owner(
     preset_id: &AgentPresetId,
 ) -> Result<Option<UserId>, ControlPlaneError> {
     let owner: Option<String> =
-        sqlx::query_scalar("SELECT owner_ref_json FROM agent_presets WHERE preset_id = ?")
+        sqlx::query_scalar(
+            "SELECT owner_ref_json FROM agent_presets \
+             WHERE preset_id = ? AND retired_at_ms IS NULL",
+        )
             .bind(preset_id.as_ref())
             .fetch_optional(pool)
             .await
@@ -1717,7 +1796,10 @@ async fn preset_owner_tx(
     preset_id: &AgentPresetId,
 ) -> Result<Option<UserId>, ControlPlaneError> {
     let owner: Option<String> =
-        sqlx::query_scalar("SELECT owner_ref_json FROM agent_presets WHERE preset_id = ?")
+        sqlx::query_scalar(
+            "SELECT owner_ref_json FROM agent_presets \
+             WHERE preset_id = ? AND retired_at_ms IS NULL",
+        )
             .bind(preset_id.as_ref())
             .fetch_optional(&mut **tx)
             .await
@@ -2310,7 +2392,7 @@ impl AgentPlatform {
                 .iter()
                 .map(|capability| capability.capability.id.clone())
                 .collect(),
-            typed_resource_bindings: compiled.content().typed_resource_bindings.clone(),
+            typed_resource_bindings: compiled.resource_bindings().to_vec(),
         }
     }
 
@@ -2348,7 +2430,7 @@ impl AgentPlatform {
                 .iter()
                 .map(|capability| capability.capability.id.clone())
                 .collect(),
-            typed_resource_bindings: compiled.content().typed_resource_bindings.clone(),
+            typed_resource_bindings: compiled.resource_bindings().to_vec(),
         })
     }
 
@@ -2588,35 +2670,6 @@ impl AgentPlatform {
         surface: impl Into<String>,
         audience: impl Into<String>,
     ) -> Result<Arc<CompiledSnapshot>, AgentPlatformError> {
-        if binding
-            .typed_resource_bindings
-            .iter()
-            .any(|resource| resource.owner_id != principal.principal_id)
-        {
-            return Err(AgentPlatformError::Contract(
-                "typed resource binding owner differs from the Session principal".to_owned(),
-            ));
-        }
-        let preset = self
-            .control_store
-            .get_preset(&binding.preset_revision_ref.preset_id)
-            .await?
-            .ok_or_else(|| {
-                AgentPlatformError::Contract(
-                    "AgentBinding references a missing AgentPreset".to_owned(),
-                )
-            })?;
-        if preset
-            .preset
-            .owner_user_id
-            .as_ref()
-            .map(|owner| owner.as_ref())
-            != Some(principal.principal_id.as_str())
-        {
-            return Err(AgentPlatformError::Contract(
-                "AgentBinding Preset owner differs from the Session principal".to_owned(),
-            ));
-        }
         let revision = self
             .control_store
             .get_revision(&binding.preset_revision_ref)
@@ -2626,6 +2679,11 @@ impl AgentPlatform {
                     "AgentBinding references a missing Preset revision".to_owned(),
                 )
             })?;
+        if revision.created_by.as_ref() != principal.principal_id {
+            return Err(AgentPlatformError::Contract(
+                "AgentBinding Preset owner differs from the Session principal".to_owned(),
+            ));
+        }
         let persisted = self
             .control_store
             .get_snapshot(&binding.preset_revision_ref)
@@ -2669,12 +2727,15 @@ impl AgentPlatform {
             },
         )?;
         validate_compiler_convergence(&persisted, &compiled)?;
-        Ok(Arc::new(CompiledSnapshot {
+        let compiled = CompiledSnapshot {
             envelope: persisted,
-            authority_policies: compiled.authority_policies,
-            registry_generation: compiled.registry_generation,
-            registry_digest: compiled.registry_digest,
-        }))
+            ..compiled
+        }
+        .with_target_resource_bindings(
+            principal,
+            binding.typed_resource_bindings.clone(),
+        )?;
+        Ok(Arc::new(compiled))
     }
 
     /// Admit one non-Agent Tool operation through the installation default
@@ -2853,7 +2914,7 @@ impl AgentPlatform {
                 .collect(),
             active_capabilities: active.active,
             compact_on_demand_index: content.compact_on_demand_index.clone(),
-            typed_resource_bindings: content.typed_resource_bindings.clone(),
+            typed_resource_bindings: execution.compiled.resource_bindings().to_vec(),
         })
     }
 
@@ -4152,8 +4213,6 @@ fn validate_compiler_convergence(
         || persisted_content.chat_route_identity != compiled_content.chat_route_identity
         || persisted_content.capability_allowlist != compiled_content.capability_allowlist
         || persisted_content.mcp_tool_locks != compiled_content.mcp_tool_locks
-        || persisted_content.typed_resource_bindings
-            != compiled_content.typed_resource_bindings
         || persisted_content.resolved_role_providers
             != compiled_content.resolved_role_providers
         || persisted_content.canonical_schema_manifest_digest
@@ -4813,5 +4872,211 @@ mod route_writer_tests {
         );
 
         assert_ne!(first, second);
+    }
+}
+
+#[cfg(test)]
+mod control_plane_store_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_store() -> SqliteControlPlaneStore {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(nomifun_agent_contracts::FRESH_V4_BASELINE_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        SqliteControlPlaneStore::new(pool)
+    }
+
+    fn user_preset(id: &str, owner: &UserId) -> StoredPreset {
+        StoredPreset {
+            preset: AgentPreset {
+                preset_id: AgentPresetId::from(id),
+                owner_user_id: Some(owner.clone()),
+                source: AgentPresetSource::User,
+                display_name: id.to_owned(),
+                description: None,
+                current_stable_revision: None,
+            },
+        }
+    }
+
+    #[test]
+    fn fresh_sqlite_preset_metadata_rejects_legacy_json_shapes() {
+        assert_eq!(
+            owner_from_json(
+                r#"{"principal_id":"owner-1","principal_kind":"user"}"#
+            )
+            .unwrap(),
+            Some(UserId::from("owner-1"))
+        );
+        assert_eq!(
+            owner_from_json(
+                r#"{"principal_id":"official","principal_kind":"system"}"#
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            source_from_json(r#""user""#).unwrap(),
+            AgentPresetSource::User
+        );
+        assert_eq!(
+            display_from_json(r#"{"display_name":"Canonical"}"#)
+                .unwrap()
+                .display_name,
+            "Canonical"
+        );
+
+        assert!(owner_from_json(r#""owner-1""#).is_err());
+        assert!(owner_from_json(r#"{"principal_kind":"legacy","principal_id":"owner-1"}"#).is_err());
+        assert!(source_from_json(r#"{"source":"user"}"#).is_err());
+        assert!(display_from_json(r#"{"name":"Legacy"}"#).is_err());
+    }
+
+    #[tokio::test]
+    async fn fresh_sqlite_retirement_hides_active_reads_and_preserves_history_rows() {
+        let store = test_store().await;
+        let owner = UserId::from("owner-1");
+        let other_owner = UserId::from("owner-2");
+        let preset_id = AgentPresetId::from("preset-1");
+        store
+            .insert_preset(user_preset(preset_id.as_ref(), &owner))
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_preset_revisions \
+             (revision_id, preset_id, revision_no, schema_version, payload_json, \
+              revision_digest, created_by, created_at, reason) \
+             VALUES ('preset-1@1', 'preset-1', 1, '1.0.0', '{}', ?, 'owner-1', 1, NULL)",
+        )
+        .bind("a".repeat(64))
+        .execute(store.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_runtime_snapshots \
+             (snapshot_id, snapshot_digest, content_json, envelope_json) \
+             VALUES ('snapshot-1', ?, '{}', '{}')",
+        )
+        .bind("b".repeat(64))
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let owner_error = store
+            .retire_preset(&other_owner, &preset_id)
+            .await
+            .expect_err("cross-owner retirement must not reveal the Preset");
+        assert_eq!(owner_error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(owner_error.code().as_ref(), "AGENT_PRESET_NOT_FOUND");
+
+        store.retire_preset(&owner, &preset_id).await.unwrap();
+        assert!(store.get_preset(&preset_id).await.unwrap().is_none());
+        assert!(store.list_presets(&owner).await.unwrap().is_empty());
+        let retired_at_ms: Option<i64> = sqlx::query_scalar(
+            "SELECT retired_at_ms FROM agent_presets WHERE preset_id = 'preset-1'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert!(retired_at_ms.is_some());
+        let revision_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_preset_revisions WHERE preset_id = 'preset-1'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        let snapshot_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_runtime_snapshots")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(revision_count, 1);
+        assert_eq!(snapshot_count, 1);
+
+        let repeated = store
+            .retire_preset(&owner, &preset_id)
+            .await
+            .expect_err("retirement is not a repeatable delete");
+        assert_eq!(repeated.code().as_ref(), "AGENT_PRESET_NOT_FOUND");
+        let official = store
+            .retire_preset(&owner, &AgentPresetId::from("chat.minimal"))
+            .await
+            .expect_err("official seed keys are not user Presets");
+        assert_eq!(official.code().as_ref(), "AGENT_PRESET_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn fresh_sqlite_retirement_clears_active_bindings_and_keeps_session_history() {
+        let store = test_store().await;
+        let owner = UserId::from("owner-1");
+        let preset_id = AgentPresetId::from("bound-preset");
+        store
+            .insert_preset(user_preset(preset_id.as_ref(), &owner))
+            .await
+            .unwrap();
+        let binding = serde_json::json!({
+            "preset_revision_ref": { "preset_id": preset_id.as_ref() }
+        })
+        .to_string();
+        sqlx::query(
+            "INSERT INTO agent_bindings \
+             (target_kind, target_id, agent_binding_json) VALUES ('conversation', '1', ?)",
+        )
+        .bind(&binding)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO remote_bindings \
+             (remote_binding_id, owner_user_id, name, agent_binding_json) \
+             VALUES ('remote-1', 'owner-1', 'Remote', ?)",
+        )
+        .bind(&binding)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_sessions \
+             (agent_session_id, owner_ref_json, state, title, archived, pinned, \
+              agent_binding_json, remote_binding_id, remote_binding_version, next_seq, created_at) \
+             VALUES ('session-1', '{\"principal_kind\":\"user\",\"principal_id\":\"owner-1\"}', \
+                     'live', 'History', 0, 0, ?, 'remote-1', 1, 1, 1)",
+        )
+        .bind(&binding)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        store.retire_preset(&owner, &preset_id).await.unwrap();
+        let agent_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_bindings")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        let remote_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM remote_bindings")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        let session_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        let retired_at_ms: Option<i64> = sqlx::query_scalar(
+            "SELECT retired_at_ms FROM agent_presets WHERE preset_id = ?",
+        )
+        .bind(preset_id.as_ref())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(agent_count, 0);
+        assert_eq!(remote_count, 0);
+        assert_eq!(session_count, 1);
+        assert!(retired_at_ms.is_some());
     }
 }

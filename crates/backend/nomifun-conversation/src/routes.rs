@@ -135,6 +135,8 @@ fn strip_server_owned_runtime_fields(extra: &mut serde_json::Value) {
             "open_mcp_config",
             "user_id",
             "allowed_tools",
+            "enforce_tool_allowlist",
+            "deferred_tools",
             "knowledge_mounts",
             "knowledge_writeback",
             "knowledge_channel_write_enabled",
@@ -179,7 +181,6 @@ fn strip_server_owned_preset_fields(extra: &mut serde_json::Value) {
             "agent_snapshot",
             "preset_rules",
             "preset_context",
-            "preset_knowledge_binding",
             "preset_instructions_embedded",
         ] {
             map.remove(key);
@@ -834,7 +835,6 @@ mod tests {
             "agent_snapshot": {"instructions": "forged"},
             "preset_rules": "forged",
             "preset_context": "forged",
-            "preset_knowledge_binding": true,
             "preset_instructions_embedded": true,
             "backend": "claude",
         });
@@ -847,7 +847,6 @@ mod tests {
             "agent_snapshot",
             "preset_rules",
             "preset_context",
-            "preset_knowledge_binding",
             "preset_instructions_embedded",
         ] {
             assert!(extra.get(key).is_none(), "{key} must be server-owned");

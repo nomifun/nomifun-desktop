@@ -4223,7 +4223,7 @@ impl ConversationService {
             .take()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
-        let mut resolved_agent_snapshot = authority
+        let resolved_agent_snapshot = authority
             .controls_host()
             .then_some(trusted_snapshot)
             .flatten();
@@ -4302,7 +4302,6 @@ impl ConversationService {
                 obj.remove("preset_context");
                 obj.insert("agent_enabled_skills".into(), serde_json::to_value(&snapshot.included_skills).unwrap_or_default());
                 obj.insert("exclude_auto_inject_skills".into(), serde_json::to_value(&snapshot.excluded_auto_skills).unwrap_or_default());
-                obj.insert("agent_knowledge_binding".into(), serde_json::Value::Bool(true));
             }
         }
 
@@ -4731,40 +4730,6 @@ impl ConversationService {
             let mut response = row_to_response(response_row, &self.workspace_root)?;
             self.project_execution_relation(user_id, &mut response).await?;
 
-            // Materialize the preset's knowledge policy last. This
-            // deliberately bypasses workpath inheritance at runtime:
-            // selecting a preset must reproduce its KB scope without silently
-            // sharing the user's general workspace binding.
-            if let Some(snapshot) = resolved_agent_snapshot.as_ref()
-                && let Some(service) = self
-                    .knowledge_service
-                    .read()
-                    .ok()
-                    .and_then(|guard| guard.as_ref().cloned())
-            {
-                let (target_kind, target_id) = knowledge_binding_target(&extra, &new_id)?;
-                service
-                    .set_binding(
-                        target_kind,
-                        target_id,
-                        nomifun_knowledge::KnowledgeBinding {
-                            enabled: snapshot.knowledge_policy.enabled,
-                            writeback: snapshot.knowledge_policy.writeback,
-                            // A preset that left the disposition unspecified gets
-                            // the restrained one, never the self-directed one.
-                            writeback_eagerness: snapshot
-                                .knowledge_policy
-                                .eagerness
-                                .clone()
-                                .unwrap_or_else(|| "manual".to_owned()),
-                            // Presets never self-authorize unattended channel writes.
-                            channel_write_enabled: false,
-                            kb_ids: snapshot.knowledge_base_ids.clone(),
-                        },
-                    )
-                    .await?;
-            }
-
             Ok(response)
         }
         .await;
@@ -5016,7 +4981,6 @@ impl ConversationService {
                 || incoming.get("exclude_auto_inject_skills").is_some()
                 || incoming.get("preset_rules").is_some()
                 || incoming.get("preset_context").is_some()
-                || incoming.get("preset_knowledge_binding").is_some()
                 || incoming.get("preset_instructions_embedded").is_some()
                 || incoming.get("mcp_server_ids").is_some()
                 || incoming.get("mcp_servers").is_some()
@@ -5041,6 +5005,17 @@ impl ConversationService {
                 "top-level `model` is only accepted for nomi conversations; pass model via `extra` for {}",
                 existing.r#type
             )));
+        }
+        if existing_type == AgentType::Nomi
+            && req.model.is_some()
+            && (existing.preset_id.is_some()
+                || existing.preset_revision.is_some()
+                || existing.agent_snapshot.is_some())
+        {
+            return Err(AppError::BadRequest(
+                "top-level `model` is immutable for AgentPreset conversations; create a new conversation to use another model"
+                    .to_owned(),
+            ));
         }
 
         let now = now_ms();
@@ -12463,20 +12438,9 @@ impl ConversationService {
         // back to the supported conversation-scoped binding on a full miss.
         // Companion sessions keep their `('companion', companion_id)` binding unchanged — they
         // are not per-workspace.
-        let preset_binding = binding_extra
-            .get("preset_knowledge_binding")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let plan = if target_kind == "conversation" && !preset_binding {
-            let wp_key = nomifun_knowledge::session_workpath_key(&workspace, &self.workspace_root);
-            service
-                .prepare_mounts_for_session(&wp_key, &workspace)
-                .await?
-        } else {
-            service
-                .prepare_mounts_for_target(target_kind, &target_id, &workspace)
-                .await?
-        };
+        let plan = service
+            .prepare_mounts_for_target(target_kind, &target_id, &workspace)
+            .await?;
         if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(AppError::Conflict(format!(
                 "knowledge mount preparation for conversation {} was cancelled",
@@ -13613,8 +13577,10 @@ mod tests {
             resolved_model: None,
             included_skills: Vec::new(),
             excluded_auto_skills: Vec::new(),
+            initial_capabilities: Vec::new(),
+            on_demand_capabilities: Vec::new(),
+            required_resource_kinds: std::collections::BTreeSet::new(),
             knowledge_policy: Default::default(),
-            knowledge_base_ids: Vec::new(),
             warnings: Vec::new(),
         }
     }

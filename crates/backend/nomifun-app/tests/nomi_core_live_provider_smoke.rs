@@ -19,8 +19,8 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 use zeroize::Zeroizing;
 
-const DEFAULT_STEPFUN_BASE_URL: &str = "https://api.stepfun.com/step_plan/v1";
-const DEFAULT_STEPFUN_MODEL: &str = "step-3.7-flash";
+const STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.com/step_plan/v1";
+const STEPFUN_PLAN_MODEL: &str = "step-3.7-flash";
 const LIVE_API_KEY_ENVIRONMENT_NAME: &str = "NOMIFUN_LIVE_STEPFUN_API_KEY";
 const STDIN_CREDENTIAL_LIMIT_BYTES: u64 = 16 * 1024;
 const BODY_LIMIT: usize = 4 * 1024 * 1024;
@@ -189,16 +189,6 @@ fn required_secret_from_stdin() -> Result<Zeroizing<String>, SmokeFailure> {
         ));
     }
     Ok(Zeroizing::new(credential.to_owned()))
-}
-
-fn process_environment_setting(name: &str, default: &str) -> String {
-    // Deliberately use only the test process environment. Do not load dotenv
-    // files or inherit settings from a command-line/config-file parser.
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| value.trim().to_owned())
-        .unwrap_or_else(|| default.to_owned())
 }
 
 async fn build_fixture(root: &TempDir) -> Result<LiveFixture, SmokeFailure> {
@@ -514,7 +504,6 @@ async fn create_agent_preset(
     router: &Router,
     provider_id: &str,
     model: &str,
-    workspace: &Path,
 ) -> Result<(String, Value), SmokeFailure> {
     let created = successful_json(
         router,
@@ -523,7 +512,6 @@ async fn create_agent_preset(
         "/api/agent-presets/from-template/chat.minimal",
         Some(json!({
             "display_name": "Live Step Plan product smoke",
-            "resource_bindings": [],
             "model_route_refs": {},
             "chat_route_records": {}
         })),
@@ -555,12 +543,6 @@ async fn create_agent_preset(
         &editor,
         "/revision/reference",
         "PRESET_REVISION_MISSING",
-    )?;
-    let owner_id = required_string(
-        "agent_settings.create",
-        &editor,
-        "/revision/created_by",
-        "PRESET_OWNER_MISSING",
     )?;
     let mut draft = require_value(
         "agent_settings.create",
@@ -596,12 +578,11 @@ async fn create_agent_preset(
     })?;
     let mut selections = Vec::with_capacity(CODING_CAPABILITIES.len());
     for capability_id in CODING_CAPABILITIES {
-        let (required_resource_kind, resource_binding_ref) =
-            if *capability_id == "process.exec" {
-                ("process_session", "process_session")
-            } else {
-                ("workspace", "workspace")
-            };
+        let required_resource_kind = if *capability_id == "process.exec" {
+            "process_session"
+        } else {
+            "workspace"
+        };
         let item = capabilities
             .iter()
             .find(|item| {
@@ -643,20 +624,9 @@ async fn create_agent_preset(
                 "id": capability_id,
                 "version": version
             },
-            "action_allowlist": [],
-            "resource_binding_refs": [resource_binding_ref]
+            "action_allowlist": []
         }));
     }
-    let workspace_root = std::fs::canonicalize(workspace)
-        .map_err(|_| {
-            SmokeFailure::new(
-                "agent_settings.draft",
-                "WORKSPACE_CANONICALIZE_FAILED",
-                StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            )
-        })?
-        .to_string_lossy()
-        .into_owned();
     let document = draft
         .pointer_mut("/document")
         .and_then(Value::as_object_mut)
@@ -673,31 +643,6 @@ async fn create_agent_preset(
     );
     document.insert("on_demand_capabilities".to_owned(), json!([]));
     document.insert("skill_bindings".to_owned(), json!([]));
-    document.insert(
-        "resource_bindings".to_owned(),
-        json!([
-            {
-                "binding_id": "process_session",
-                "resource_kind": "process_session",
-                "resource_id": "live-coding-process-session",
-                "owner_id": owner_id,
-                "operations": ["execute", "observe"],
-                "typed_parameters": {
-                    "workspace_root": workspace_root
-                }
-            },
-            {
-                "binding_id": "workspace",
-                "resource_kind": "workspace",
-                "resource_id": "live-coding-workspace",
-                "owner_id": owner_id,
-                "operations": ["execute", "read", "write"],
-                "typed_parameters": {
-                    "workspace_root": workspace_root
-                }
-            }
-        ]),
-    );
     document.insert(
         "persona".to_owned(),
         Value::String("You are a precise coding agent operating only in the bound workspace.".to_owned()),
@@ -826,18 +771,12 @@ async fn create_agent_preset(
         "/resolved_snapshot_ref",
         "SAVED_SNAPSHOT_REF_MISSING",
     )?;
-    let resources = require_value(
-        "agent_settings.save",
-        &saved,
-        "/revision/document/resource_bindings",
-        "SAVED_RESOURCE_BINDINGS_MISSING",
-    )?;
     Ok((
         preset_id,
         json!({
             "preset_revision_ref": saved_revision,
             "resolved_snapshot_ref": snapshot,
-            "typed_resource_bindings": resources,
+            "typed_resource_bindings": [],
             "binding_version": 1
         }),
     ))
@@ -864,6 +803,50 @@ async fn create_session(router: &Router, preset_id: &str) -> Result<String, Smok
         "/agent_session_id",
         "SESSION_ID_MISSING",
     )
+}
+
+async fn bind_session_workspace(
+    router: &Router,
+    session_id: &str,
+    workspace: &Path,
+) -> Result<(), SmokeFailure> {
+    let workspace = std::fs::canonicalize(workspace)
+        .map_err(|_| {
+            SmokeFailure::new(
+                "session.workspace",
+                "WORKSPACE_CANONICALIZE_FAILED",
+                StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            )
+        })?
+        .to_string_lossy()
+        .into_owned();
+    let response = successful_json(
+        router,
+        "session.workspace",
+        Method::PATCH,
+        format!("/api/conversations/{session_id}"),
+        Some(json!({
+            "extra": {
+                "workspace": workspace
+            }
+        })),
+        LOCAL_API_DEADLINE,
+        &[StatusCode::OK],
+    )
+    .await?;
+    let projection = envelope_data("session.workspace", response)?;
+    if projection
+        .pointer("/extra/workspace")
+        .and_then(Value::as_str)
+        != Some(workspace.as_str())
+    {
+        return Err(SmokeFailure::new(
+            "session.workspace",
+            "WORKSPACE_BINDING_NOT_PERSISTED",
+            StatusCode::CONFLICT.as_u16(),
+        ));
+    }
+    Ok(())
 }
 
 async fn start_session_turn(
@@ -2957,10 +2940,10 @@ async fn run_product_chain(
     workspace: &Path,
 ) -> Result<(), SmokeFailure> {
     let provider_id = configure_stepfun(router, api_key, base_url, model).await?;
-    let (preset_id, binding) =
-        create_agent_preset(router, &provider_id, model, workspace).await?;
+    let (preset_id, binding) = create_agent_preset(router, &provider_id, model).await?;
 
     let session_id = create_session(router, &preset_id).await?;
+    bind_session_workspace(router, &session_id, workspace).await?;
     run_coding_chain(router, &session_id, workspace).await?;
 
     let cron_job_id = create_cron_job(router, &session_id).await?;
@@ -3011,11 +2994,6 @@ async fn run_product_chain(
 
 async fn run_live_provider_smoke() -> Result<(), SmokeFailure> {
     let api_key = required_secret_from_stdin()?;
-    let base_url = process_environment_setting(
-        "NOMIFUN_LIVE_STEPFUN_BASE_URL",
-        DEFAULT_STEPFUN_BASE_URL,
-    );
-    let model = process_environment_setting("NOMIFUN_LIVE_STEPFUN_MODEL", DEFAULT_STEPFUN_MODEL);
     let root = tempfile::tempdir().map_err(|_| {
         SmokeFailure::new(
             "bootstrap",
@@ -3028,8 +3006,14 @@ async fn run_live_provider_smoke() -> Result<(), SmokeFailure> {
     let fixture = build_fixture(&root).await?;
     let router = fixture.application.router();
 
-    let result =
-        run_product_chain(&router, api_key.as_str(), &base_url, &model, &workspace).await;
+    let result = run_product_chain(
+        &router,
+        api_key.as_str(),
+        STEPFUN_PLAN_BASE_URL,
+        STEPFUN_PLAN_MODEL,
+        &workspace,
+    )
+    .await;
     drop(router);
     let LiveFixture {
         _environment: environment,

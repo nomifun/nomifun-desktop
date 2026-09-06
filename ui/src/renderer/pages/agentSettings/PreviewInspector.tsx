@@ -6,7 +6,11 @@ import { Alert, Collapse, Tag } from '@arco-design/web-react';
 import { CheckOne, CloseOne, Connection, Info, Terminal } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { previewDiagnosticMessage } from './model';
+import {
+  humanizeResourceKind,
+  previewDiagnosticMessage,
+  RESOURCE_KIND_I18N_KEYS,
+} from './model';
 import styles from './AgentSettingsPage.module.css';
 
 type PreviewInspectorProps = {
@@ -29,6 +33,15 @@ const PreviewInspector: React.FC<PreviewInspectorProps> = ({ preview, tokenState
     );
   }
 
+  const requiredResourceKinds = preview.inspector.required_resource_kinds;
+  const displayResourceKind = (resourceKind: string): string => {
+    const key = RESOURCE_KIND_I18N_KEYS[resourceKind];
+    return key
+      ? t(`agentSettings.resources.kinds.${key}`, {
+          defaultValue: humanizeResourceKind(resourceKind),
+        })
+      : humanizeResourceKind(resourceKind);
+  };
   const metrics = [
     ['initial_count', preview.summary.initial_count],
     ['on_demand_count', preview.summary.on_demand_count],
@@ -37,7 +50,7 @@ const PreviewInspector: React.FC<PreviewInspectorProps> = ({ preview, tokenState
     ['context_contributor_count', preview.summary.context_contributor_count],
     ['skill_count', preview.summary.skill_count],
     ['mcp_count', preview.summary.mcp_count],
-    ['resource_binding_count', preview.summary.resource_binding_count],
+    ['required_resource_kind_count', preview.summary.required_resource_kind_count],
   ] as const;
 
   return (
@@ -128,41 +141,54 @@ const PreviewInspector: React.FC<PreviewInspectorProps> = ({ preview, tokenState
           </div>
         </Collapse.Item>
 
-          <Collapse.Item name='snapshot' header={t('agentSettings.inspector.snapshot')}>
-            <div className={styles.inspectorRows}>
-              <div>
-                <span>{t('agentSettings.inspector.snapshot')}</span>
-                <strong>
-                  {preview.inspector.snapshot_ref
-                    ? t('common.added', { defaultValue: 'Resolved' })
-                    : t('agentSettings.common.unavailable')}
-                </strong>
-              </div>
-              <div>
-                <span>{t('agentSettings.inspector.runtimeProfile')}</span>
-                <strong>
-                  {preview.inspector.runtime_profile ?? t('agentSettings.common.unavailable')}
-                </strong>
-              </div>
-              <div>
-                <span>{t('agentSettings.inspector.protocol')}</span>
-                <strong>{preview.inspector.required_runtime_protocol_version}</strong>
-              </div>
-              <div>
-                <span>{t('agentSettings.inspector.tools')}</span>
-                <strong>{preview.inspector.tool_schema_refs.length}</strong>
-              </div>
-              <div>
-                <span>{t('agentSettings.inspector.context')}</span>
-                <strong>{preview.inspector.context_schema_refs.length}</strong>
-              </div>
+        <Collapse.Item name='snapshot' header={t('agentSettings.inspector.snapshot')}>
+          <div className={styles.inspectorRows}>
+            <div>
+              <span>{t('agentSettings.inspector.snapshot')}</span>
+              <strong>
+                {preview.inspector.snapshot_ref
+                  ? t('agentSettings.common.available')
+                  : t('agentSettings.common.unavailable')}
+              </strong>
             </div>
-            {preview.inspector.required_runtime_features.length > 0 && (
-              <div className={styles.inlineEmpty}>
-                {preview.inspector.required_runtime_features.length}{' '}
-                {t('agentSettings.inspector.runtimeProfile')}
-              </div>
-            )}
+            <div>
+              <span>{t('agentSettings.inspector.runtimeProfile')}</span>
+              <strong>
+                {preview.inspector.runtime_profile ?? t('agentSettings.common.unavailable')}
+              </strong>
+            </div>
+            <div>
+              <span>{t('agentSettings.inspector.protocol')}</span>
+              <strong>{preview.inspector.required_runtime_protocol_version}</strong>
+            </div>
+            <div>
+              <span>{t('agentSettings.inspector.tools')}</span>
+              <strong>{preview.inspector.tool_schema_refs.length}</strong>
+            </div>
+            <div>
+              <span>{t('agentSettings.inspector.context')}</span>
+              <strong>{preview.inspector.context_schema_refs.length}</strong>
+            </div>
+            <div>
+              <span>{t('agentSettings.resources.requiredKinds')}</span>
+              <strong>{requiredResourceKinds.length}</strong>
+            </div>
+          </div>
+          {requiredResourceKinds.length > 0 && (
+            <div className={styles.tagRow}>
+              {requiredResourceKinds.map((resourceKind) => (
+                <Tag key={resourceKind} size='small' color='gray'>
+                  {displayResourceKind(resourceKind)}
+                </Tag>
+              ))}
+            </div>
+          )}
+          {preview.inspector.required_runtime_features.length > 0 && (
+            <div className={styles.inlineEmpty}>
+              {preview.inspector.required_runtime_features.length}{' '}
+              {t('agentSettings.inspector.runtimeProfile')}
+            </div>
+          )}
         </Collapse.Item>
 
         <Collapse.Item name='continuation' header={t('agentSettings.inspector.continuation')}>

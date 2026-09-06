@@ -3,15 +3,18 @@
 //! `ModuleStates` is the bundle returned by `build_module_states`; each
 //! `build_*_state` constructs one `*RouterState` from `AppServices`.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use axum::http::StatusCode;
 use nomifun_ai_agent::{
     AgentRouterState, AgentRuntimeRegistry, AgentService,
 };
 use nomifun_agent_contracts::{
-    CodingRuntimeFeatureInventoryPayload, RuntimeProfileKind, RuntimeTarget, VersionString,
+    CapabilityConsumer, CanonicalErrorCode, CodingRuntimeFeatureInventoryPayload,
+    RuntimeProfileKind, RuntimeTarget, VersionString,
     digest_payload,
     fresh_v4_schema_manifest_payload, official_preset_seed_manifest_payload,
 };
@@ -22,7 +25,7 @@ use nomifun_agent_kernel::{
     CompilerEnvironment, InMemoryPluginStatePersistence, KernelRegistry, MaterializationPolicy,
 };
 use nomifun_agent_platform::KernelCatalogProvider;
-use nomifun_api_types::TerminalExitEvent;
+use nomifun_api_types::{AgentResolvedSnapshot, TerminalExitEvent};
 use nomifun_auth::extract_token_from_ws_headers;
 use nomifun_channel::ChannelRouterState;
 use nomifun_common::{AppError, OnConversationDelete, OnTerminalDelete};
@@ -495,7 +498,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
     let boot = Instant::now();
     tracing::info!("startup: module state build started");
 
-    let (ext_state, hub_state, mut skill_state) = build_extension_states(services).await;
+    let (ext_state, hub_state, skill_state) = build_extension_states(services).await;
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: extension states built"
@@ -520,6 +523,11 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         conversation_owner.clone(),
     );
     let cron = build_cron_state(services, conversation_owner.clone());
+    cron.cron_service.with_agent_preset_resolver(Arc::new(
+        NomiCoreCronAgentPresetResolver {
+            control_plane: nomi_core_agent_api.control_plane.clone(),
+        },
+    ));
 
     // Construct the route ConversationService before any producer starts, then
     // synchronously classify every unsettled generation while the exact
@@ -714,15 +722,37 @@ fn build_nomi_core_agent_api_state(
     let templates = OfficialTemplateCatalog::load()
         .unwrap_or_else(|error| panic!("official Agent template catalog failed: {error}"));
     let compiler = PresetPreviewCompiler::new(release, templates.clone())
-        .with_materialized_registry(materialized, environment)
-        .reject_on_demand_capabilities();
-    // Capability materialization and placement/activation are separate
-    // contracts. The current Nomi engine can execute the host-owned Coding
-    // tools when they are in the immutable initial set, but it has no
-    // canonical on-demand activation port. The compiler above rejects
-    // on-demand selections; marking those identities unavailable in the
-    // catalog would also incorrectly disable valid initial selections.
-    let catalog = Arc::new(KernelCatalogProvider::new(kernel));
+        .with_materialized_registry(materialized, environment);
+    // The Nomi engine exposes its existing session-scoped ToolSearch activation
+    // boundary. AgentPreset on-demand capabilities are projected onto that
+    // deferred tool set instead of being rejected by the control plane.
+    let unavailable_capabilities = kernel
+        .snapshot()
+        .unwrap_or_else(|error| panic!("Nomi-core Agent catalog snapshot failed: {error}"))
+        .capabilities
+        .values()
+        .filter(|capability| {
+            capability
+                .manifest
+                .supports_consumer(CapabilityConsumer::Agent)
+        })
+        .filter_map(|capability| {
+            super::nomi_core_agent_projection::nomi_capability_projection(
+                capability.manifest.id.as_ref(),
+            )
+            .err()
+            .map(|_| {
+                (
+                    capability.manifest.id.clone(),
+                    CanonicalErrorCode::from("CAPABILITY_UNAVAILABLE"),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    let catalog = Arc::new(
+        KernelCatalogProvider::new(kernel)
+            .with_unavailable_capabilities(unavailable_capabilities),
+    );
     let store = Arc::new(NomiCoreControlPlaneStore::new(
         services.database.pool().clone(),
     ));
@@ -744,6 +774,58 @@ fn build_nomi_core_agent_api_state(
         remote_repository,
         services.nomi_core_remote_runtime.clone(),
     )
+}
+
+struct NomiCoreCronAgentPresetResolver {
+    control_plane: Arc<AgentControlPlane>,
+}
+
+#[async_trait::async_trait]
+impl nomifun_cron::CronAgentPresetResolver for NomiCoreCronAgentPresetResolver {
+    async fn resolve_snapshot(
+        &self,
+        owner_id: &str,
+        preset_id: &str,
+    ) -> Result<AgentResolvedSnapshot, AppError> {
+        let owner = nomifun_agent_contracts::UserId::from(owner_id.to_owned());
+        let editor = self
+            .control_plane
+            .editor(&owner, preset_id, None)
+            .await
+            .map_err(control_plane_error_to_app)?;
+        let binding = self
+            .control_plane
+            .resolve_agent_session_binding(&owner, preset_id)
+            .await
+            .map_err(control_plane_error_to_app)?;
+        let (binding, revision, snapshot) = self
+            .control_plane
+            .saved_binding_artifacts(&owner, &binding)
+            .await
+            .map_err(control_plane_error_to_app)?;
+        let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
+            .map_err(|error| AppError::Forbidden(format!("invalid Cron owner: {error}")))?;
+        super::nomi_core_agent_projection::project_saved_artifacts(
+            &common_owner,
+            binding,
+            revision,
+            snapshot,
+            Some(&editor.preset.display_name),
+        )
+        .map(|resolved| resolved.projection.snapshot)
+    }
+}
+
+fn control_plane_error_to_app(error: nomifun_agent_control_plane::ControlPlaneError) -> AppError {
+    let message = format!("{}: {error}", error.code().as_ref());
+    match error.status() {
+        StatusCode::BAD_REQUEST => AppError::BadRequest(message),
+        StatusCode::FORBIDDEN => AppError::Forbidden(message),
+        StatusCode::NOT_FOUND => AppError::NotFound(message),
+        StatusCode::CONFLICT => AppError::Conflict(message),
+        StatusCode::UNPROCESSABLE_ENTITY => AppError::UnprocessableEntity(message),
+        _ => AppError::Internal(message),
+    }
 }
 
 fn nomi_core_runtime_target() -> RuntimeTarget {

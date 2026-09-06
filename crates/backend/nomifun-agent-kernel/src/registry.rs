@@ -1382,11 +1382,6 @@ fn resolve_role_member(
             role_id: role_id.clone(),
             capability_id: request.capability_id.clone(),
         })?;
-    let frozen_role_bindings = provider_lock
-        .resource_binding_refs
-        .iter()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
     let mut resource_bindings = if let Some(snapshot) = agent_snapshot {
         let policy = snapshot
             .policy(&request.capability_id)
@@ -1408,17 +1403,6 @@ fn resolve_role_member(
                 capability_id: request.capability_id.clone(),
                 binding_id: unexpected,
                 resource_kind: kind,
-            });
-        }
-        if !request
-            .resource_binding_ids
-            .is_subset(&frozen_role_bindings)
-        {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: format!(
-                    "role member {} references a binding outside the frozen provider lock",
-                    request.capability_id.as_ref()
-                ),
             });
         }
         request
@@ -1473,14 +1457,6 @@ fn resolve_role_member(
                 resource_kind: kind,
             });
         }
-        if request.resource_binding_ids != frozen_role_bindings {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: format!(
-                    "operation role member {} resource bindings do not match its exact Provider lock",
-                    request.capability_id.as_ref()
-                ),
-            });
-        }
         bindings
     };
     for binding in &resource_bindings {
@@ -1490,28 +1466,28 @@ fn resolve_role_member(
             });
         }
     }
-    if agent_snapshot.is_none() {
-        for resource_kind in &provider_member.required_resource_kinds {
-            let matches = resource_bindings
-                .iter()
-                .filter(|binding| &binding.resource_kind == resource_kind)
-                .count();
-            if matches == 0 {
-                return Err(KernelError::CapabilityResourceNotBound {
-                    capability_id: request.capability_id.clone(),
-                    resource_kind: resource_kind.as_ref().to_owned(),
-                });
-            }
-            if matches > 1 {
-                return Err(KernelError::InvalidPresetRevision {
-                    reason: format!(
-                        "operation role member {} has multiple bindings for resource kind {}",
-                        request.capability_id.as_ref(),
-                        resource_kind.as_ref()
-                    ),
-                });
-            }
+    for resource_kind in &provider_member.required_resource_kinds {
+        let matches = resource_bindings
+            .iter()
+            .filter(|binding| &binding.resource_kind == resource_kind)
+            .count();
+        if matches == 0 {
+            return Err(KernelError::CapabilityResourceNotBound {
+                capability_id: request.capability_id.clone(),
+                resource_kind: resource_kind.as_ref().to_owned(),
+            });
         }
+        if matches > 1 {
+            return Err(KernelError::InvalidPresetRevision {
+                reason: format!(
+                    "role member {} has multiple bindings for resource kind {}",
+                    request.capability_id.as_ref(),
+                    resource_kind.as_ref()
+                ),
+            });
+        }
+    }
+    if agent_snapshot.is_none() {
         if let Some(binding) = resource_bindings.iter().find(|binding| {
             !provider_member
                 .required_resource_kinds

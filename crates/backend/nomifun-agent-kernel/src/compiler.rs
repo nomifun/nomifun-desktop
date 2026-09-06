@@ -57,6 +57,7 @@ pub struct CompiledCapabilityPolicy {
 pub struct CompiledSnapshot {
     pub envelope: ResolvedSnapshotEnvelope,
     pub authority_policies: BTreeMap<CapabilityId, CompiledCapabilityPolicy>,
+    pub target_resource_bindings: Vec<TypedResourceBinding>,
     pub registry_generation: u64,
     pub registry_digest: DigestHex,
 }
@@ -81,11 +82,68 @@ impl CompiledSnapshot {
         &self,
         binding_id: &ResourceBindingId,
     ) -> Option<&TypedResourceBinding> {
-        self.envelope
-            .content
-            .typed_resource_bindings
+        self.target_resource_bindings
             .iter()
             .find(|binding| &binding.binding_id == binding_id)
+    }
+
+    pub fn resource_bindings(&self) -> &[TypedResourceBinding] {
+        &self.target_resource_bindings
+    }
+
+    /// Attach one target's concrete resources without changing the immutable
+    /// Preset Snapshot identity. Capabilities continue to own the required
+    /// resource kinds; this step only resolves those slots for a Session,
+    /// companion, automation target, or other consumer binding.
+    pub fn with_target_resource_bindings(
+        mut self,
+        principal: &PrincipalRef,
+        bindings: Vec<TypedResourceBinding>,
+    ) -> Result<Self, KernelError> {
+        let mut by_id = BTreeMap::new();
+        let mut by_kind = BTreeMap::<ResourceKind, Vec<ResourceBindingId>>::new();
+        for binding in bindings {
+            if binding.owner_id != principal.principal_id {
+                return Err(KernelError::ResourceOwnerMismatch {
+                    binding_id: binding.binding_id,
+                });
+            }
+            if by_id
+                .insert(binding.binding_id.clone(), binding.clone())
+                .is_some()
+            {
+                return Err(KernelError::InvalidPresetRevision {
+                    reason: format!(
+                        "duplicate target resource binding {}",
+                        binding.binding_id.as_ref()
+                    ),
+                });
+            }
+            by_kind
+                .entry(binding.resource_kind.clone())
+                .or_default()
+                .push(binding.binding_id);
+        }
+        for ids in by_kind.values_mut() {
+            ids.sort();
+        }
+        for policy in self.authority_policies.values_mut() {
+            policy.resource_binding_ids.clear();
+            for resource_kind in &policy.required_resource_kinds {
+                let matches = by_kind.get(resource_kind).cloned().unwrap_or_default();
+                if matches.len() > 1 {
+                    return Err(KernelError::InvalidPresetRevision {
+                        reason: format!(
+                            "target has multiple bindings for resource kind {}",
+                            resource_kind.as_ref()
+                        ),
+                    });
+                }
+                policy.resource_binding_ids.extend(matches);
+            }
+        }
+        self.target_resource_bindings = by_id.into_values().collect();
+        Ok(self)
     }
 
     pub fn role_provider(
@@ -124,10 +182,6 @@ impl AgentPresetCompiler {
             .map_err(|error| KernelError::InvalidPresetRevision {
                 reason: error.message,
             })?;
-        let bindings = validate_resource_bindings(
-            &request.revision.payload.resource_bindings,
-            &request.principal,
-        )?;
         let initial_direct = direct_selection_map(
             &request.revision.payload.initial_capabilities,
         );
@@ -185,7 +239,6 @@ impl AgentPresetCompiler {
             &on_demand_direct,
             &initial_ids,
             &on_demand_bundles,
-            &bindings,
         )?;
         let initial_capabilities =
             resolved_capabilities(registry, &initial_ids, &paths)?;
@@ -194,7 +247,6 @@ impl AgentPresetCompiler {
         let activation_plans = compile_activation_plans(
             registry,
             &on_demand_bundles,
-            &authority_policies,
             &request.revision.payload.model_route_refs,
         )?;
         let compact_on_demand_index = compile_compact_index(
@@ -213,7 +265,6 @@ impl AgentPresetCompiler {
             &request.revision.payload.system_role_provider_overrides,
             &environment.installation_role_bindings,
             &ceiling,
-            &bindings,
             environment,
         )?;
         let capability_runtime_features = ceiling
@@ -233,11 +284,6 @@ impl AgentPresetCompiler {
         } else {
             capability_runtime_features
         };
-        let mut typed_resource_bindings = bindings.into_values().collect::<Vec<_>>();
-        typed_resource_bindings.sort_by(|left, right| {
-            left.binding_id.cmp(&right.binding_id)
-        });
-
         let compiled_runtime_profile_digest =
             digest_payload(&CompiledRuntimeProfileDigestInput {
                 profile_kind: environment.required_runtime_profile,
@@ -264,6 +310,10 @@ impl AgentPresetCompiler {
             .map_err(|error| KernelError::InvalidPresetRevision {
                 reason: error.message,
             })?;
+        let required_resource_kinds = authority_policies
+            .values()
+            .flat_map(|policy| policy.required_resource_kinds.iter().cloned())
+            .collect();
         let content = ResolvedSnapshotContent {
             schema_version: VersionString::from("1.0.0"),
             resolver_version: environment.resolver_version.clone(),
@@ -281,13 +331,13 @@ impl AgentPresetCompiler {
             chat_route_identity,
             initial_capabilities,
             on_demand_capabilities,
+            required_resource_kinds,
             on_demand_activation_plans: activation_plans,
             compact_on_demand_index,
             capability_allowlist: ceiling,
             skill_locks,
             mcp_tool_locks,
             resolved_role_providers,
-            typed_resource_bindings,
             canonical_schema_manifest_digest: environment
                 .canonical_schema_manifest_digest
                 .clone(),
@@ -326,6 +376,7 @@ impl AgentPresetCompiler {
         Ok(CompiledSnapshot {
             envelope,
             authority_policies,
+            target_resource_bindings: Vec::new(),
             registry_generation: registry.generation,
             registry_digest: registry.registry_digest.clone(),
         })
@@ -377,32 +428,6 @@ fn validate_direct_selections(
         }
     }
     Ok(())
-}
-
-fn validate_resource_bindings(
-    bindings: &[TypedResourceBinding],
-    principal: &PrincipalRef,
-) -> Result<BTreeMap<ResourceBindingId, TypedResourceBinding>, KernelError> {
-    let mut resolved = BTreeMap::new();
-    for binding in bindings {
-        if binding.owner_id != principal.principal_id {
-            return Err(KernelError::ResourceOwnerMismatch {
-                binding_id: binding.binding_id.clone(),
-            });
-        }
-        if resolved
-            .insert(binding.binding_id.clone(), binding.clone())
-            .is_some()
-        {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: format!(
-                    "duplicate resource binding {}",
-                    binding.binding_id.as_ref()
-                ),
-            });
-        }
-    }
-    Ok(resolved)
 }
 
 fn dependency_bundle(
@@ -578,10 +603,9 @@ fn compile_authority_policies(
     on_demand_direct: &BTreeMap<CapabilityId, &CapabilitySelection>,
     initial_ids: &BTreeSet<CapabilityId>,
     on_demand_bundles: &BTreeMap<CapabilityId, Vec<CapabilityId>>,
-    bindings: &BTreeMap<ResourceBindingId, TypedResourceBinding>,
 ) -> Result<BTreeMap<CapabilityId, CompiledCapabilityPolicy>, KernelError> {
     let mut policies = BTreeMap::<CapabilityId, CompiledCapabilityPolicy>::new();
-    for (root, selection) in initial_direct.iter().chain(on_demand_direct.iter()) {
+    for root in initial_direct.keys().chain(on_demand_direct.keys()) {
         let bundle = if initial_ids.contains(root) {
             dependency_bundle(registry, root)?
         } else {
@@ -590,40 +614,10 @@ fn compile_authority_policies(
                 .cloned()
                 .unwrap_or_default()
         };
-        let selected_bindings = selection
-            .resource_binding_refs
-            .iter()
-            .map(|binding_id| {
-                bindings
-                    .get(binding_id)
-                    .ok_or_else(|| KernelError::ResourceBindingMissing {
-                        binding_id: binding_id.clone(),
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         for capability_id in bundle {
             let capability = &registry.capabilities[&capability_id].manifest;
             let required_resource_kinds =
                 capability.contributions.resource_kinds.clone();
-            for resource_kind in &required_resource_kinds {
-                if !selected_bindings
-                    .iter()
-                    .any(|binding| &binding.resource_kind == resource_kind)
-                {
-                    return Err(KernelError::CapabilityResourceNotBound {
-                        capability_id: capability_id.clone(),
-                        resource_kind: resource_kind.as_ref().to_owned(),
-                    });
-                }
-            }
-            let resource_binding_ids = selected_bindings
-                .iter()
-                .filter(|binding| {
-                    required_resource_kinds.is_empty()
-                        || required_resource_kinds.contains(&binding.resource_kind)
-                })
-                .map(|binding| binding.binding_id.clone())
-                .collect::<BTreeSet<_>>();
             let declared_actions = capability
                 .contributions
                 .actions
@@ -641,15 +635,12 @@ fn compile_authority_policies(
                 .and_modify(|policy| {
                     policy.allowed_actions.extend(allowed_actions.clone());
                     policy
-                        .resource_binding_ids
-                        .extend(resource_binding_ids.clone());
-                    policy
                         .required_resource_kinds
                         .extend(required_resource_kinds.clone());
                 })
                 .or_insert(CompiledCapabilityPolicy {
                     allowed_actions,
-                    resource_binding_ids,
+                    resource_binding_ids: BTreeSet::new(),
                     required_resource_kinds,
                 });
         }
@@ -691,7 +682,6 @@ fn resolved_capabilities(
 fn compile_activation_plans(
     registry: &MaterializedRegistry,
     bundles: &BTreeMap<CapabilityId, Vec<CapabilityId>>,
-    policies: &BTreeMap<CapabilityId, CompiledCapabilityPolicy>,
     model_routes: &BTreeMap<String, ModelRouteId>,
 ) -> Result<BTreeMap<CapabilityId, PrecomputedActivationPlan>, KernelError> {
     let model_route_refs = model_routes
@@ -705,7 +695,6 @@ fn compile_activation_plans(
         .map(|(root, bundle)| {
             let mut tool_schema_refs = BTreeSet::<CanonicalSchemaRef>::new();
             let mut context_schema_refs = BTreeSet::<CanonicalSchemaRef>::new();
-            let mut resource_binding_refs = BTreeSet::<ResourceBindingId>::new();
             for capability_id in bundle {
                 let capability = &registry.capabilities[capability_id].manifest;
                 for action in &capability.contributions.actions {
@@ -719,10 +708,6 @@ fn compile_activation_plans(
                         .iter()
                         .cloned(),
                 );
-                if let Some(policy) = policies.get(capability_id) {
-                    resource_binding_refs
-                        .extend(policy.resource_binding_ids.iter().cloned());
-                }
             }
             Ok((
                 root.clone(),
@@ -731,7 +716,6 @@ fn compile_activation_plans(
                     capability_bundle: bundle.clone(),
                     tool_schema_refs: tool_schema_refs.into_iter().collect(),
                     context_schema_refs: context_schema_refs.into_iter().collect(),
-                    resource_binding_refs: resource_binding_refs.into_iter().collect(),
                     model_route_refs: model_route_refs.clone(),
                 },
             ))
@@ -885,7 +869,6 @@ fn compile_role_provider_locks(
     overrides: &BTreeMap<ExecutionRoleId, RoleProviderSelection>,
     installation_bindings: &BTreeMap<ExecutionRoleId, InstallationRoleBinding>,
     ceiling: &BTreeSet<CapabilityId>,
-    bindings: &BTreeMap<ResourceBindingId, TypedResourceBinding>,
     environment: &CompilerEnvironment,
 ) -> Result<
     BTreeMap<ExecutionRoleId, ResolvedRoleProviderLock>,
@@ -916,12 +899,12 @@ fn compile_role_provider_locks(
             .collect::<BTreeSet<_>>();
         locks.insert(
             role_id.clone(),
-            resolve_exact_role_provider_lock(
+            resolve_role_provider_lock(
                 registry,
                 &role_id,
                 selection,
                 &selected_members,
-                bindings,
+                None,
                 environment,
             )?,
         );
@@ -940,6 +923,24 @@ pub fn resolve_exact_role_provider_lock(
     selection: &RoleProviderSelection,
     selected_members: &BTreeSet<CapabilityId>,
     bindings: &BTreeMap<ResourceBindingId, TypedResourceBinding>,
+    environment: &CompilerEnvironment,
+) -> Result<ResolvedRoleProviderLock, KernelError> {
+    resolve_role_provider_lock(
+        registry,
+        role_id,
+        selection,
+        selected_members,
+        Some(bindings),
+        environment,
+    )
+}
+
+fn resolve_role_provider_lock(
+    registry: &MaterializedRegistry,
+    role_id: &ExecutionRoleId,
+    selection: &RoleProviderSelection,
+    selected_members: &BTreeSet<CapabilityId>,
+    bindings: Option<&BTreeMap<ResourceBindingId, TypedResourceBinding>>,
     environment: &CompilerEnvironment,
 ) -> Result<ResolvedRoleProviderLock, KernelError> {
     let contract = registry
@@ -977,7 +978,6 @@ pub fn resolve_exact_role_provider_lock(
         });
     }
 
-    let mut resource_binding_refs = BTreeSet::new();
     for capability_id in selected_members {
         let member = provider
             .contribution
@@ -1002,34 +1002,34 @@ pub fn resolve_exact_role_provider_lock(
                 surface: environment.host_surface.clone(),
             });
         }
-        for resource_kind in &member.required_resource_kinds {
-            let matching = bindings
-                .values()
-                .filter(|binding| &binding.resource_kind == resource_kind)
-                .collect::<Vec<_>>();
-            if matching.is_empty() {
-                return Err(KernelError::CapabilityResourceNotBound {
-                    capability_id: capability_id.clone(),
-                    resource_kind: resource_kind.as_ref().to_owned(),
-                });
+        if let Some(bindings) = bindings {
+            for resource_kind in &member.required_resource_kinds {
+                let matching = bindings
+                    .values()
+                    .filter(|binding| &binding.resource_kind == resource_kind)
+                    .collect::<Vec<_>>();
+                if matching.is_empty() {
+                    return Err(KernelError::CapabilityResourceNotBound {
+                        capability_id: capability_id.clone(),
+                        resource_kind: resource_kind.as_ref().to_owned(),
+                    });
+                }
+                if matching.len() > 1 {
+                    return Err(KernelError::InvalidPresetRevision {
+                        reason: format!(
+                            "role {} has multiple bindings for resource kind {}",
+                            role_id.as_ref(),
+                            resource_kind.as_ref()
+                        ),
+                    });
+                }
             }
-            if matching.len() > 1 {
-                return Err(KernelError::InvalidPresetRevision {
-                    reason: format!(
-                        "role {} has multiple bindings for resource kind {}",
-                        role_id.as_ref(),
-                        resource_kind.as_ref()
-                    ),
-                });
-            }
-            resource_binding_refs.insert(matching[0].binding_id.clone());
         }
     }
     Ok(ResolvedRoleProviderLock {
         provider: provider.provider.clone(),
         source: provider.source.clone(),
         supported_members: provider.contribution.members.keys().cloned().collect(),
-        resource_binding_refs: resource_binding_refs.into_iter().collect(),
     })
 }
 

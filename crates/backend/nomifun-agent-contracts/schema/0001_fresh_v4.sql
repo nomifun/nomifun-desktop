@@ -159,8 +159,13 @@ CREATE TABLE agent_presets (
     display_json TEXT NOT NULL CHECK (json_valid(display_json)),
     current_stable_revision INTEGER,
     created_at INTEGER NOT NULL,
+    retired_at_ms INTEGER CHECK (retired_at_ms IS NULL OR retired_at_ms >= 0),
     CHECK (current_stable_revision IS NULL OR current_stable_revision >= 1)
 ) STRICT;
+
+CREATE INDEX idx_agent_presets_active
+    ON agent_presets(preset_id)
+    WHERE retired_at_ms IS NULL;
 
 CREATE TABLE agent_preset_revisions (
     revision_id TEXT PRIMARY KEY,

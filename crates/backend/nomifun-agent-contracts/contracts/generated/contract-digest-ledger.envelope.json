@@ -3,26 +3,26 @@
   "payload": {
     "ledger_version": "1.0.0",
     "artifacts": {
-      "canonical_api_inventory": "440d1e5fbd0997f5e04ade5fa4a51e9689f17c216bfe298d066833076e281666",
-      "canonical_schema_manifest": "9210c567bac731daff7688f768240ccad8126dc6d51f2960e3ccd5f98ad5ec1f",
+      "canonical_api_inventory": "61e8b668453d61c970ad49a3c7a468d688918894f504d93c8e5d9af6b804d9c2",
+      "canonical_schema_manifest": "a4181ff4aff2ba7ce57ee77626edd36d53e502e4a84cb0d3f492c9c30922c161",
       "capability_catalog_entry": "06a4bca7e916f7fd7e6c7684eeb9d283bcada138746155938bb2e96f06a3cd88",
       "cargo_lock": "6fe3472b35671ec10800d2596f1b10a6452eab96c6cf12222d51d840b9b9ae60",
-      "coding_codex_native_contract": "f699f376a9414b7830b90a68c890d39010687499e6d16ee1687f5c370cd0127a",
+      "coding_codex_native_contract": "62687467ddfe329fedbb37e2576e598d5fb787fda24ab2de395377e8d93f9bdc",
       "confirmed_decision_contract": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5",
-      "database_schema": "cad1e2b1a0363a9df394f477b4b029b0c976850434dc139222de32c8618f79a9",
+      "database_schema": "72acbb4645581cb8c7c2a9f7c03f81f21a417fb517faedc04300872b711d3d65",
       "deletion_manifest_set": "0fb2e5abf2638e3c3352d4549ddb6a46b5a29ee7d62d35aedd9319a8fb5feecb",
-      "error_registry": "407818c56712956e541a4e1a4d07ee3d308d98524abf04f47edc612a9b1b26d8",
-      "official_preset_seed_manifest": "86a2d9c9d05f89d6378ccf61a08cd362537d02308001505c49d1d1166c46376f",
+      "error_registry": "fe64ac21087f7c86594f0c9ccd1158e3b97616288e3d0cf295d376276f99d62c",
+      "official_preset_seed_manifest": "81500aa2e90aff90399f37e1edb77c48e13e2b0f6f7cc1f7ab715a0219ed0457",
       "package_schema": "50370fbc7d186a470405ddf7f2f1a54a3ab85be8b5c1ebf7a0a817204d7a8489",
       "platform_validation_contract": "a3f5180906c239d791a03281199d80f2ea957dbe8382fb849dc2926935672a9c",
-      "platform_validation_fixture": "f52bfeb75cd5304eccb039763eb5cb5fa5b1b54bfc2f8bcabd28e4045157ba6c",
+      "platform_validation_fixture": "ae867cae204147be23477729837283779680bccd62e8ba23100142aa2ae4f284",
       "runtime_feature_inventory": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
       "runtime_protocol": "f1c0422f04c9de923e18c7df40d814d3c9f5b2db5f1c5fef2745e77e6d62590f",
-      "runtime_release_fixture": "82186bbe748c4dde20a92094ccda0a26c6360f70390abf0739c638d8201124c2",
-      "rust_contract_schema": "31fff433f1c2604465a1f6b21de35e1dbd8994a0c796c6870c930f8ad5248e4b",
+      "runtime_release_fixture": "9f9e29e822da382336d92c406bf8d28ce0a01394d1c7d44022e33b9da9ee741a",
+      "rust_contract_schema": "cc5fb8a25804353f3128b3661709dba2fd73897ac0b436c3289659b690a6f165",
       "session_event_registry": "e2cec429a2166b519e364483f94e47edfe4bc8c208ddc6bbdb82d70c5e69c74c",
       "target_first_party_inventory": "0f4605524f780eb8584862aa93f7dee34a246c537f1983baca7a5f4a03dbe58f"
     }
   },
-  "payload_digest": "f2cd9da8894944634a32c41cb28c763645efb60883c2555253939fc2997b9b70"
+  "payload_digest": "ffca149b4b2a4e4f7ee05b5e7829d857b73159bd729493942a442830edfeaeba"
 }

@@ -614,6 +614,9 @@ export const agentPlatform = {
   createPreset: httpPost<AgentPresetEditorResponse, CreateAgentPresetRequest>(
     '/api/agent-presets'
   ),
+  deletePreset: httpDelete<void, { preset_id: AgentPresetId }>(
+    (params) => `/api/agent-presets/${encodeURIComponent(params.preset_id)}`
+  ),
   createFromTemplate: httpPost<
     AgentPresetEditorResponse,
     { template_id: OfficialPresetKey; request: CreateAgentPresetFromTemplateRequest }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::ops::Deref;
 
 use axum::extract::{Path, Query, State};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use nomifun_agent_contracts::UserId;
 use nomifun_api_types::{
@@ -62,6 +62,10 @@ fn control_plane_router_with_legacy_skill_route(
         .route("/api/capabilities", get(list_capabilities))
         .route("/api/mcp-tool-mappings", get(list_mcp_tools))
         .route("/api/agent-presets", post(create_preset))
+        .route(
+            "/api/agent-presets/{preset_id}",
+            delete(retire_preset),
+        )
         .route(
             "/api/agent-presets/from-template/{template_id}",
             post(create_from_template),
@@ -158,6 +162,15 @@ async fn create_preset(
     Ok(Json(ApiResponse::ok(
         control_plane.create_preset(&owner, request).await?,
     )))
+}
+
+async fn retire_preset(
+    State(control_plane): State<Arc<AgentControlPlane>>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(preset_id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, ControlPlaneError> {
+    control_plane.retire_preset(&owner, &preset_id).await?;
+    Ok(Json(ApiResponse::success()))
 }
 
 async fn create_from_template(
@@ -319,6 +332,41 @@ async fn delete_remote_binding(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use nomifun_agent_contracts::{
+        AgentPreset, AgentPresetId, AgentPresetSource, DigestHex, VersionString,
+    };
+    use tower::ServiceExt;
+
+    use crate::{
+        CompilerReleaseInputs, ControlPlaneStore, InMemoryControlPlaneStore,
+        OfficialTemplateCatalog, PresetPreviewCompiler, StaticCatalogProvider, StoredPreset,
+    };
+
+    fn test_control_plane(
+        store: Arc<InMemoryControlPlaneStore>,
+    ) -> Arc<AgentControlPlane> {
+        let templates = OfficialTemplateCatalog::load().unwrap();
+        Arc::new(AgentControlPlane::new(
+            store,
+            Arc::new(StaticCatalogProvider::new(Default::default())),
+            templates.clone(),
+            PresetPreviewCompiler::new(
+                CompilerReleaseInputs {
+                    resolver_version: VersionString::from("1.0.0"),
+                    runtime_protocol_version: VersionString::from("1.0.0"),
+                    runtime_feature_inventory_digest: DigestHex::from("runtime"),
+                    canonical_schema_manifest_digest: DigestHex::from("schema"),
+                    target_contribution_manifest_digest: DigestHex::from("contributions"),
+                    availability_evidence_revision: "route-test".to_owned(),
+                },
+                templates,
+            ),
+        ))
+    }
+
     #[test]
     fn router_source_has_no_editor_test_endpoint() {
         let source = include_str!("routes.rs");
@@ -336,5 +384,58 @@ mod tests {
             handler.contains("Extension(owner): Extension<AuthenticatedOwner>"),
             "impact inspection must remain authenticated and owner-scoped"
         );
+    }
+
+    #[tokio::test]
+    async fn delete_agent_preset_route_retires_once_and_returns_canonical_not_found_afterward() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let owner = UserId::from("owner-1");
+        let preset_id = AgentPresetId::from("preset-1");
+        store
+            .insert_preset(StoredPreset {
+                preset: AgentPreset {
+                    preset_id: preset_id.clone(),
+                    owner_user_id: Some(owner.clone()),
+                    source: AgentPresetSource::User,
+                    display_name: "Preset".to_owned(),
+                    description: None,
+                    current_stable_revision: None,
+                },
+            })
+            .await
+            .unwrap();
+        let router = control_plane_router(test_control_plane(store.clone()))
+            .layer(Extension(AuthenticatedOwner(owner)));
+
+        let retired = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/agent-presets/preset-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retired.status(), StatusCode::OK);
+        assert!(store.get_preset(&preset_id).await.unwrap().is_none());
+
+        let repeated = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/agent-presets/preset-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repeated.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(repeated.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let error: nomifun_api_types::ErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.code, "AGENT_PRESET_NOT_FOUND");
     }
 }

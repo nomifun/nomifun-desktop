@@ -100,6 +100,16 @@
         "canonical_errors": []
       },
       {
+        "operation_id": "agent_presets.delete",
+        "method": "DELETE",
+        "path": "/api/agent-presets/{preset_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "AGENT_PRESET_NOT_FOUND"
+        ]
+      },
+      {
         "operation_id": "agent_presets.create_from_template",
         "method": "POST",
         "path": "/api/agent-presets/from-template/{template_id}",
@@ -388,6 +398,7 @@
       }
     ],
     "canonical_error_codes": [
+      "AGENT_PRESET_NOT_FOUND",
       "CAPABILITY_NOT_ACTIVE",
       "CAPABILITY_NOT_IN_PRESET",
       "CAPABILITY_NOT_MATERIALIZED",
@@ -425,5 +436,5 @@
       "/v1/tools?profile"
     ]
   },
-  "payload_digest": "440d1e5fbd0997f5e04ade5fa4a51e9689f17c216bfe298d066833076e281666"
+  "payload_digest": "61e8b668453d61c970ad49a3c7a468d688918894f504d93c8e5d9af6b804d9c2"
 }

@@ -26,7 +26,7 @@ describe('Nomi sendbox control layout', () => {
     expect(contextRingIndex).toBeGreaterThan(rightToolsIndex);
     expect(modelIndex).toBeGreaterThan(contextRingIndex);
     expect(collaboratorIndex).toBeGreaterThan(modelIndex);
-    expect(source.includes('topRightTools={')).toBe(false);
+    expect(source.includes('topRightTools=')).toBe(false);
     expect(source.includes('ContextUsagePill')).toBe(false);
     expect(source.includes("data-testid='nomi-context-usage-slot'")).toBe(false);
     expect(source.includes("data-testid='nomi-turn-metrics'")).toBe(false);
@@ -104,6 +104,26 @@ describe('Nomi sendbox control layout', () => {
     expect(source.includes('embedded?: boolean')).toBe(true);
     expect(source.includes('if (embedded)')).toBe(true);
     expect(source.includes('return <div className={styles.embedded}>{content}</div>')).toBe(true);
+  });
+
+  test('locks the lead model for AgentPreset conversations without hiding other conversation tools', () => {
+    const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
+    const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
+    const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+
+    expect(chatSource.includes('const modelLocked = Boolean(conversation.preset_id);')).toBe(true);
+    expect(chatSource.includes('if (modelLocked) return false;')).toBe(true);
+    expect(chatSource.includes('if (modelLocked) return;')).toBe(true);
+    expect(chatSource.includes('modelLocked={modelLocked}')).toBe(true);
+    expect(chatSource.includes('useAgentCapabilityResourceKinds')).toBe(false);
+    expect(chatSource.includes('required_resource_kinds')).toBe(true);
+
+    expect(nomiChatSource.includes('modelLocked?: boolean;')).toBe(true);
+    expect(nomiChatSource.includes('modelLocked={modelLocked}')).toBe(true);
+    expect(sendBoxSource.includes('hideAdvancedControls || modelLocked')).toBe(true);
+    expect(sendBoxSource.includes('{!modelLocked && (')).toBe(true);
+    expect(sendBoxSource.includes('<NomiModelSelector')).toBe(true);
+    expect(sendBoxSource.includes('{collaboratorSelectorNode}')).toBe(true);
   });
 
   test('collapses text pills to icons and expands their labels inline on desktop hover', () => {

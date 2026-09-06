@@ -5,23 +5,29 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { IIdmmConfig } from '@/common/adapter/ipcBridge';
+import type { IIdmmConfig, IKnowledgeBinding } from '@/common/adapter/ipcBridge';
 import type { ConversationId } from '@/common/types/ids';
 import { Message } from '@arco-design/web-react';
 import { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { AutoWorkDraftValue } from '@/renderer/pages/conversation/components/AutoWorkControl';
 import { defaultIdmmConfig } from '@/renderer/pages/conversation/components/IdmmControl';
+import { defaultKnowledgeBinding } from '@/renderer/pages/conversation/components/KnowledgeControl';
 import type { SummonDraft } from '@/renderer/pages/conversation/components/SummonPanel';
 
 export type GuidAdvancedConfig = {
+  knowledge: IKnowledgeBinding;
+  setKnowledge: (next: IKnowledgeBinding) => void;
   autoWork: AutoWorkDraftValue;
   setAutoWork: (next: AutoWorkDraftValue) => void;
   idmm: IIdmmConfig;
   setIdmm: (next: IIdmmConfig) => void;
   summon: SummonDraft | null;
   setSummon: (next: SummonDraft | null) => void;
-  applyToConversation: (conversationId: ConversationId) => Promise<void>;
+  applyToConversation: (
+    conversationId: ConversationId,
+    options?: { allowKnowledgeBinding?: boolean }
+  ) => Promise<void>;
   reset: () => void;
 };
 
@@ -31,20 +37,48 @@ export type GuidAdvancedConfig = {
  */
 export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
   const { t } = useTranslation();
+  const [knowledge, setKnowledge] = useState<IKnowledgeBinding>(
+    defaultKnowledgeBinding
+  );
   const [autoWork, setAutoWork] = useState<AutoWorkDraftValue>({
     enabled: false,
   });
   const [idmm, setIdmm] = useState<IIdmmConfig>(defaultIdmmConfig);
   const [summon, setSummon] = useState<SummonDraft | null>(null);
 
-  const draftsRef = useRef({ autoWork, idmm, summon });
-  draftsRef.current = { autoWork, idmm, summon };
+  const draftsRef = useRef({ knowledge, autoWork, idmm, summon });
+  draftsRef.current = { knowledge, autoWork, idmm, summon };
 
   const applyToConversation = useCallback(
-    async (conversationId: ConversationId) => {
-      const { autoWork: aw, idmm: idm, summon: sm } = draftsRef.current;
+    async (
+      conversationId: ConversationId,
+      options?: { allowKnowledgeBinding?: boolean }
+    ) => {
+      const {
+        knowledge: kb,
+        autoWork: aw,
+        idmm: idm,
+        summon: sm,
+      } = draftsRef.current;
       const tasks: Array<{ label: string; run: () => Promise<unknown> }> = [];
 
+      if (
+        options?.allowKnowledgeBinding !== false &&
+        (kb.enabled ||
+          kb.writeback ||
+          kb.kb_ids.length > 0 ||
+          kb.writeback_eagerness !== 'manual')
+      ) {
+        tasks.push({
+          label: t('knowledge.control.label'),
+          run: () =>
+            ipcBridge.knowledge.setBinding.invoke({
+              kind: 'conversation',
+              target_id: conversationId,
+              ...kb,
+            }),
+        });
+      }
       if (idm.fault_watch.enabled || idm.decision_watch.enabled) {
         tasks.push({
           label: t('idmm.label'),
@@ -112,12 +146,15 @@ export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
   );
 
   const reset = useCallback(() => {
+    setKnowledge(defaultKnowledgeBinding());
     setAutoWork({ enabled: false });
     setIdmm(defaultIdmmConfig());
     setSummon(null);
   }, []);
 
   return {
+    knowledge,
+    setKnowledge,
     autoWork,
     setAutoWork,
     idmm,

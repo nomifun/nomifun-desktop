@@ -31,7 +31,7 @@ use nomifun_agent_contracts::{
     RuntimeSessionDisposeParams, RuntimeStartTurnParams,
     RuntimeTarget, ScopeKey, SemanticSessionEventDraft, SessionEventAppend, SessionEventKind,
     SessionEventPayloadRef, SkillDefinition, SkillId, StateKey, StrictJsonValue,
-    ToolPresentationKind, UserId, ValidatedPluginConfig, VersionString,
+    ToolPresentationKind, TypedResourceBinding, UserId, ValidatedPluginConfig, VersionString,
     capability_surface_declarations, digest_bytes, digest_payload,
 };
 use nomifun_agent_control_plane::{
@@ -658,7 +658,7 @@ fn resource_binding_dto(owner_id: &str) -> TypedResourceBindingDto {
     }
 }
 
-fn sample_document(owner_id: &str, instructions: &str) -> AgentPresetDocumentDto {
+fn sample_document(_owner_id: &str, instructions: &str) -> AgentPresetDocumentDto {
     AgentPresetDocumentDto {
         schema_version: VERSION.to_owned(),
         model_route_refs: BTreeMap::from([(
@@ -702,14 +702,12 @@ fn sample_document(owner_id: &str, instructions: &str) -> AgentPresetDocumentDto
                 version: VERSION.to_owned(),
             },
             action_allowlist: BTreeSet::from([SAMPLE_ACTION.to_owned()]),
-            resource_binding_refs: vec![SAMPLE_RESOURCE_BINDING.to_owned()],
         }],
         on_demand_capabilities: Vec::new(),
         skill_bindings: vec![ExactCatalogRefDto {
             id: SAMPLE_SKILL.to_owned(),
             version: VERSION.to_owned(),
         }],
-        resource_bindings: vec![resource_binding_dto(owner_id)],
         system_role_provider_overrides: BTreeMap::new(),
         persona: "Echo fixture".to_owned(),
         instructions: instructions.to_owned(),
@@ -997,7 +995,7 @@ fn compile_kernel_snapshot(
     revision: nomifun_agent_contracts::AgentPresetRevision,
     owner_ref: PrincipalRef,
 ) -> Result<CompiledSnapshot, SampleEchoGateError> {
-    Ok(AgentPresetCompiler::compile(
+    let compiled = AgentPresetCompiler::compile(
         registry,
         &CompilerEnvironment {
             resolver_version: VersionString::from(VERSION),
@@ -1017,14 +1015,20 @@ fn compile_kernel_snapshot(
         },
         CompileRequest {
             revision,
-            principal: owner_ref,
+            principal: owner_ref.clone(),
             scene: "agent_settings".to_owned(),
             surface: "desktop".to_owned(),
             audience: "owner".to_owned(),
             created_at_ms: now_ms(),
             resolver_run_id: OperationId::from(new_id("resolver")),
         },
-    )?)
+    )?;
+    let target_binding = serde_json::from_value::<TypedResourceBinding>(
+        serde_json::to_value(resource_binding_dto(owner_ref.principal_id.as_str()))?,
+    )?;
+    compiled
+        .with_target_resource_bindings(&owner_ref, vec![target_binding])
+        .map_err(Into::into)
 }
 
 fn bind_canonical_snapshot(
@@ -1059,8 +1063,6 @@ fn bind_canonical_snapshot(
         compiled_initial == canonical_initial
             && compiled_on_demand == canonical_on_demand
             && compiled.content().capability_allowlist == canonical.content.capability_allowlist
-            && compiled.content().typed_resource_bindings
-                == canonical.content.typed_resource_bindings
             && compiled.content().skill_locks == canonical.content.skill_locks
             && compiled.content().mcp_tool_locks == canonical.content.mcp_tool_locks,
         "Control Plane and Kernel execution ceilings differ",
@@ -1602,7 +1604,7 @@ async fn open_persistent_session(
     let binding = AgentBindingValue {
         preset_revision_ref: revision.reference.clone(),
         resolved_snapshot_ref: compiled.snapshot_ref().clone(),
-        typed_resource_bindings: revision.payload.resource_bindings.clone(),
+        typed_resource_bindings: compiled.resource_bindings().to_vec(),
         binding_version: 1,
     };
     let mut create_request = CreateSessionRequest::new(
@@ -1693,7 +1695,7 @@ async fn open_persistent_session(
             .iter()
             .map(|capability| capability.capability.id.clone())
             .collect(),
-        typed_resource_bindings: compiled.content().typed_resource_bindings.clone(),
+        typed_resource_bindings: compiled.resource_bindings().to_vec(),
     };
     let context = RuntimeCommandContext {
         agent_session_id: session_id.clone(),
@@ -1743,7 +1745,7 @@ async fn open_persistent_session(
                     .iter()
                     .map(|capability| capability.capability.id.clone())
                     .collect(),
-                typed_resource_bindings: compiled.content().typed_resource_bindings.clone(),
+                typed_resource_bindings: compiled.resource_bindings().to_vec(),
             }),
             ingress: ingress.clone(),
             client_limits: ClientLimits::default(),

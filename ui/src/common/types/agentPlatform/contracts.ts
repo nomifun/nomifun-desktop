@@ -2,7 +2,6 @@ import type {
   AgentId,
   AgentPresetId,
   AgentSessionId,
-  KnowledgeBaseId,
   ProviderId,
   RemoteBindingId,
   ResolvedSnapshotId,
@@ -135,20 +134,21 @@ export interface AgentResolvedSnapshot {
   };
   included_skills: string[];
   excluded_auto_skills: string[];
+  initial_capabilities: string[];
+  on_demand_capabilities: string[];
+  required_resource_kinds: string[];
   knowledge_policy: {
     enabled: boolean;
     writeback: boolean;
     eagerness?: 'manual' | 'auto';
     grounded: boolean;
   };
-  knowledge_base_ids: KnowledgeBaseId[];
   warnings: string[];
 }
 
 export interface CapabilitySelection {
   capability: ExactCatalogRef<'capability'>;
   action_allowlist?: string[];
-  resource_binding_refs?: string[];
 }
 
 export interface ExactRoleContractRef {
@@ -171,7 +171,6 @@ export interface AgentPresetDocument {
   initial_capabilities: CapabilitySelection[];
   on_demand_capabilities: CapabilitySelection[];
   skill_bindings: ExactCatalogRef<'skill'>[];
-  resource_bindings: TypedResourceBinding[];
   system_role_provider_overrides: Record<string, RoleProviderSelection>;
   persona: string;
   instructions: string;
@@ -198,18 +197,11 @@ export interface AgentPresetSummary {
   bound_target_count: number;
 }
 
-export interface TypedResourceDefault {
-  slot_key: string;
-  resource_kind: string;
-  operations: string[];
-  binding_policy: 'require_explicit_selection' | 'select_only_owned_resource' | 'leave_unbound';
-}
-
 export interface OfficialPresetSeed {
   initial_capabilities: ExactCatalogRef<'capability'>[];
   on_demand_capabilities: ExactCatalogRef<'capability'>[];
   skill_bindings: ExactCatalogRef<'skill'>[];
-  typed_resource_defaults: TypedResourceDefault[];
+  required_resource_kinds: string[];
   required_runtime_features: string[];
 }
 
@@ -319,7 +311,7 @@ export interface PreviewSummary {
   on_demand_index_count: number;
   skill_count: number;
   mcp_count: number;
-  resource_binding_count: number;
+  required_resource_kind_count: number;
   provider_initialization_count: number;
 }
 
@@ -330,7 +322,6 @@ export interface RevisionDiff {
   removed_on_demand: CapabilityId[];
   added_skills: SkillId[];
   removed_skills: SkillId[];
-  resource_bindings_changed: boolean;
   model_routes_changed: boolean;
   instructions_changed: boolean;
 }
@@ -347,7 +338,7 @@ export interface SnapshotInspector {
   tool_schema_refs: string[];
   context_schema_refs: string[];
   mcp_materializations: McpToolCatalogItem[];
-  typed_resource_bindings: TypedResourceBinding[];
+  required_resource_kinds: string[];
   service_key_diagnostics: string[];
 }
 
@@ -396,17 +387,8 @@ export interface CreateAgentPresetRequest {
 export interface CreateAgentPresetFromTemplateRequest {
   display_name: string;
   description?: string;
-  resource_bindings: TemplateResourceSelection[];
   model_route_refs: Record<string, string>;
   chat_route_records: Partial<Record<typeof AGENT_CHAT_MODEL_TASK, ChatRouteRecord>>;
-}
-
-export interface TemplateResourceSelection {
-  slot_key: string;
-  resource_kind: string;
-  resource_id: string;
-  connection_config_ref?: string;
-  typed_parameters?: Record<string, string>;
 }
 
 export interface SaveAgentPresetRevisionRequest {

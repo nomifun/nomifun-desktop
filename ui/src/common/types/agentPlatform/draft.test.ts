@@ -36,7 +36,7 @@ describe('AgentPreset draft model', () => {
     expect(draft.document.initial_capabilities).toEqual([]);
     expect(draft.document.on_demand_capabilities).toEqual([]);
     expect(draft.document.skill_bindings).toEqual([]);
-    expect(draft.document.resource_bindings).toEqual([]);
+    expect('resource_bindings' in draft.document).toBe(false);
     expect(draft.document.chat_route_records).toEqual({});
   });
 

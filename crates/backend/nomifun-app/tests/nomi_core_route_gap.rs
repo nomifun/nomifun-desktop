@@ -102,8 +102,25 @@ fn current_nomi_core_projection_is_not_a_runtime_or_route_authority() {
     }
 }
 
+#[test]
+fn nomi_core_projection_does_not_reintroduce_preset_resource_fields() {
+    let projection = repo_file("src/router/nomi_core_agent_projection.rs");
+    assert!(
+        !projection.contains("payload.resource_bindings"),
+        "Preset Revision projection must not own concrete resource bindings"
+    );
+    assert!(
+        !projection.contains("resource_binding_refs"),
+        "Capability selections must not carry target resource references"
+    );
+}
+
 #[path = "common/mod.rs"]
 mod common;
+
+#[allow(dead_code)]
+#[path = "../src/router/nomi_core_agent_projection.rs"]
+mod projection;
 
 #[tokio::test]
 async fn default_nomi_core_router_answers_canonical_catalog_requests() {
@@ -191,7 +208,7 @@ async fn nomi_core_remote_preserves_owner_jwt_and_rejects_selector_queries() {
 }
 
 #[tokio::test]
-async fn nomi_core_catalog_keeps_initial_capabilities_materialized() {
+async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
     let (router, services) = common::build_local_trust_app("catalog-placement-local-trust").await;
     let response = router
         .clone()
@@ -226,9 +243,19 @@ async fn nomi_core_catalog_keeps_initial_capabilities_materialized() {
         assert_eq!(
             capability["required_resource_kinds"].as_array().map(Vec::len),
             Some(1),
-            "{capability_id} must retain its single typed workspace resource"
+            "{capability_id} must retain its target resource-kind requirement"
         );
     }
+    let browser = capabilities
+        .iter()
+        .find(|item| item["capability"]["id"] == "browser.navigate")
+        .expect("browser capability remains visible in the shared catalog");
+    assert_eq!(
+        browser["materialization_state"],
+        "unavailable",
+        "Browser must not be reported as executable when this host has no Nomi Browser owner"
+    );
+    assert_eq!(browser["unavailable_code"], "CAPABILITY_UNAVAILABLE");
 
     let templates = router
         .clone()
@@ -272,7 +299,7 @@ async fn nomi_core_catalog_keeps_initial_capabilities_materialized() {
 }
 
 #[tokio::test]
-async fn nomi_core_rejects_on_demand_placement_without_hiding_the_capability() {
+async fn nomi_core_accepts_on_demand_placement_without_widening_initial_tools() {
     let trust_secret = "on-demand-placement-local-trust";
     let (router, services) = common::build_local_trust_app(trust_secret).await;
     let created = router
@@ -286,7 +313,6 @@ async fn nomi_core_rejects_on_demand_placement_without_hiding_the_capability() {
                 .body(Body::from(
                     serde_json::to_vec(&json!({
                         "display_name": "On-demand placement smoke",
-                        "resource_bindings": [],
                         "model_route_refs": {},
                         "chat_route_records": {}
                     }))
@@ -309,8 +335,7 @@ async fn nomi_core_rejects_on_demand_placement_without_hiding_the_capability() {
     let revision = created_value["data"]["revision"]["reference"].clone();
     created_value["data"]["draft"]["document"]["on_demand_capabilities"] = json!([{
         "capability": {"id": "vcs.stage", "version": "1.0.0"},
-        "action_allowlist": [],
-        "resource_binding_refs": []
+        "action_allowlist": []
     }]);
     let preview = router
         .clone()
@@ -339,17 +364,28 @@ async fn nomi_core_rejects_on_demand_placement_without_hiding_the_capability() {
         .await
         .expect("read on-demand preview response");
     let preview_value: Value = serde_json::from_slice(&preview_body).expect("preview JSON");
-    assert_eq!(preview_value["data"]["status"], "blocked");
+    assert_eq!(preview_value["data"]["status"], "ready");
     assert!(
         preview_value["data"]["diagnostics"]
             .as_array()
-            .is_some_and(|diagnostics| {
-                diagnostics.iter().any(|diagnostic| {
-                    diagnostic["code"] == "CAPABILITY_UNAVAILABLE"
-                        && diagnostic["subject"] == "on-demand-capabilities"
-                })
-            }),
-        "on-demand placement must fail closed even when the capability is materialized"
+            .is_some_and(|diagnostics| diagnostics.is_empty()),
+        "a supported on-demand capability must produce a clean preview"
+    );
+    assert_eq!(
+        preview_value["data"]["summary"]["initial_count"],
+        0,
+        "moving a capability to on-demand must remove it from the initial set"
+    );
+    assert_eq!(
+        preview_value["data"]["summary"]["on_demand_count"],
+        1,
+        "the preview must retain the on-demand placement"
+    );
+    assert!(
+        preview_value["data"]["inspector"]["on_demand_capabilities"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item["capability"]["id"] == "vcs.stage")),
+        "the immutable preview must expose the deferred capability"
     );
 
     services.shutdown_browser_platform().await.expect("browser cleanup");
@@ -370,7 +406,6 @@ async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
                         "display_name": "Nomi-core smoke preset",
-                        "resource_bindings": [],
                         "model_route_refs": {},
                         "chat_route_records": {}
                     }))
@@ -460,6 +495,147 @@ async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
         preset_id,
         "editor must reload the same persisted Preset"
     );
+    let binding_json = json!({
+        "preset_revision_ref": { "preset_id": preset_id }
+    })
+    .to_string();
+    sqlx::query(
+        "INSERT INTO nomi_agent_bindings \
+         (target_kind, target_id, owner_user_id, agent_binding_json) \
+         VALUES ('conversation', 'retirement-target', ?, ?)",
+    )
+    .bind(services.authoritative_user_id.as_ref())
+    .bind(&binding_json)
+    .execute(services.database.pool())
+    .await
+    .expect("insert active AgentBinding");
+    sqlx::query(
+        "INSERT INTO remote_bindings \
+         (remote_binding_id, owner_user_id, name, agent_binding_json, nomi_snapshot_json, \
+          provenance_json, agent_binding_digest, binding_version, created_at, updated_at) \
+         VALUES ('0190f5fe-7c00-7a00-8000-000000000099', ?, 'Retirement Remote', ?, \
+                 '{}', '{}', ?, 1, 1, 1)",
+    )
+    .bind(services.authoritative_user_id.as_ref())
+    .bind(&binding_json)
+    .bind("d".repeat(64))
+    .execute(services.database.pool())
+    .await
+    .expect("insert active RemoteBinding");
+
+    let retired = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/agent-presets/{preset_id}"))
+                .header("x-nomi-local-trust", "agent-settings-local-trust")
+                .body(Body::empty())
+                .expect("build Preset retirement request"),
+        )
+        .await
+        .expect("dispatch Preset retirement request");
+    assert_eq!(retired.status(), StatusCode::OK);
+    let retired_at_ms: Option<i64> = sqlx::query_scalar(
+        "SELECT retired_at_ms FROM nomi_agent_presets WHERE preset_id = ?",
+    )
+    .bind(&preset_id)
+    .fetch_one(services.database.pool())
+    .await
+    .expect("retired AgentPreset row");
+    assert!(retired_at_ms.is_some());
+    let revision_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM nomi_agent_preset_revisions WHERE preset_id = ?",
+    )
+    .bind(&preset_id)
+    .fetch_one(services.database.pool())
+    .await
+    .expect("retained AgentPreset revisions");
+    assert_eq!(revision_count, 1);
+    let agent_binding_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_bindings")
+            .fetch_one(services.database.pool())
+            .await
+            .expect("count active AgentBindings");
+    let remote_binding_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM remote_bindings")
+            .fetch_one(services.database.pool())
+            .await
+            .expect("count active RemoteBindings");
+    assert_eq!(agent_binding_count, 0);
+    assert_eq!(remote_binding_count, 0);
+
+    let library = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/agent-preset-templates?source=official")
+                .header("x-nomi-local-trust", "agent-settings-local-trust")
+                .body(Body::empty())
+                .expect("build post-retirement library request"),
+        )
+        .await
+        .expect("dispatch post-retirement library request");
+    assert_eq!(library.status(), StatusCode::OK);
+    let library_body = axum::body::to_bytes(library.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("read post-retirement library");
+    let library_value: Value =
+        serde_json::from_slice(&library_body).expect("post-retirement library JSON");
+    assert!(
+        library_value["data"]["user_presets"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    );
+
+    let retired_editor = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/agent-presets/{preset_id}/editor"))
+                .header("x-nomi-local-trust", "agent-settings-local-trust")
+                .body(Body::empty())
+                .expect("build retired editor request"),
+        )
+        .await
+        .expect("dispatch retired editor request");
+    assert_eq!(retired_editor.status(), StatusCode::NOT_FOUND);
+    let retired_editor_body =
+        axum::body::to_bytes(retired_editor.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("read retired editor response");
+    let retired_editor_error: Value =
+        serde_json::from_slice(&retired_editor_body).expect("retired editor error JSON");
+    assert_eq!(retired_editor_error["code"], "AGENT_PRESET_NOT_FOUND");
+
+    let retired_session = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/agent-sessions")
+                .header("x-nomi-local-trust", "agent-settings-local-trust")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "preset_id": preset_id,
+                        "title": "Must not start"
+                    }))
+                    .expect("serialize retired Session request"),
+                ))
+                .expect("build retired Session request"),
+        )
+        .await
+        .expect("dispatch retired Session request");
+    assert_eq!(retired_session.status(), StatusCode::NOT_FOUND);
+    let retired_session_body =
+        axum::body::to_bytes(retired_session.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("read retired Session response");
+    let retired_session_error: Value =
+        serde_json::from_slice(&retired_session_body).expect("retired Session error JSON");
+    assert_eq!(retired_session_error["code"], "AGENT_PRESET_NOT_FOUND");
+
     services.shutdown_browser_platform().await.expect("browser cleanup");
     services.database.close().await;
 }
@@ -478,7 +654,6 @@ async fn nomi_core_agent_session_projects_saved_chat_binding_without_internal_in
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
                         "display_name": "Nomi-core session smoke",
-                        "resource_bindings": [],
                         "model_route_refs": {},
                         "chat_route_records": {}
                     }))
@@ -620,6 +795,81 @@ async fn nomi_core_agent_session_projects_saved_chat_binding_without_internal_in
         expected_snapshot
     );
 
+    let retired = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/agent-presets/{preset_id}"))
+                .header("x-nomi-local-trust", "agent-session-local-trust")
+                .body(Body::empty())
+                .expect("build post-Session Preset retirement request"),
+        )
+        .await
+        .expect("dispatch post-Session Preset retirement request");
+    assert_eq!(retired.status(), StatusCode::OK);
+
+    let capabilities = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/agent-sessions/{session_id}/capabilities"))
+                .header("x-nomi-local-trust", "agent-session-local-trust")
+                .body(Body::empty())
+                .expect("build retired-Preset Session capability request"),
+        )
+        .await
+        .expect("dispatch retired-Preset Session capability request");
+    assert_eq!(
+        capabilities.status(),
+        StatusCode::OK,
+        "an existing Session must keep its frozen capability view after Preset retirement"
+    );
+    let capabilities_body =
+        axum::body::to_bytes(capabilities.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("read retired-Preset Session capabilities");
+    let capabilities_value: Value =
+        serde_json::from_slice(&capabilities_body).expect("Session capabilities JSON");
+    assert_eq!(
+        capabilities_value["data"]["resolved_snapshot_ref"],
+        expected_snapshot
+    );
+
+    let historical = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/agent-sessions/{session_id}"))
+                .header("x-nomi-local-trust", "agent-session-local-trust")
+                .body(Body::empty())
+                .expect("build retired-Preset historical Session request"),
+        )
+        .await
+        .expect("dispatch retired-Preset historical Session request");
+    assert_eq!(historical.status(), StatusCode::OK);
+
+    let new_session = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/agent-sessions")
+                .header("x-nomi-local-trust", "agent-session-local-trust")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "preset_id": preset_id,
+                        "title": "Retired Preset must not launch"
+                    }))
+                    .expect("serialize retired Preset Session request"),
+                ))
+                .expect("build retired Preset Session request"),
+        )
+        .await
+        .expect("dispatch retired Preset Session request");
+    assert_eq!(new_session.status(), StatusCode::NOT_FOUND);
+
     services.shutdown_browser_platform().await.expect("browser cleanup");
     services.database.close().await;
 }
@@ -638,7 +888,6 @@ async fn nomi_core_remote_replays_frozen_binding_and_persists_event_cursor() {
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
                         "display_name": "Nomi-core remote smoke",
-                        "resource_bindings": [],
                         "model_route_refs": {},
                         "chat_route_records": {}
                     }))

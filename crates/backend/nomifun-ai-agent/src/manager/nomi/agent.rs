@@ -1073,6 +1073,8 @@ impl NomiAgentManager {
         // Embedded AgentExecution 的 host composition 不写入 ToolsConfig，
         // 而是在 bootstrap builder 上单独注入。
         config.tools.builtin_allowlist = config_extra.allowed_tools.clone();
+        config.tools.enforce_builtin_allowlist = config_extra.enforce_tool_allowlist;
+        config.tools.deferred_allowlist = config_extra.deferred_tools.clone();
         // 原生文件工具写根钳制（Write/Edit/ApplyPatch），按会话信任面由工厂解析：
         // 本地桌面 = None（不钳制，OS 用户全权，今日行为）；渠道/远程/对外 =
         // Some(workspace)（收窄到会话工作区）。仅在有非空值时覆盖，故桌面会话保留
@@ -4243,6 +4245,8 @@ mod tests {
             owner_token: None,
             install_embedded_agent_execution: true,
             allowed_tools: Vec::new(),
+            enforce_tool_allowlist: false,
+            deferred_tools: Vec::new(),
             write_root: None,
         }
     }

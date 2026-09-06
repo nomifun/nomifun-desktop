@@ -13,7 +13,7 @@ use crate::{
     ActionId, AgentPresetId, ArtifactEnvelope, CanonicalErrorCode, CanonicalSchemaRef,
     ContributionId, ContributionSourceKind, DigestHex, ChatRouteIdentity, ChatRouteRecord,
     McpBindingId, McpServerId, McpToolKey, MiniAppId, ModelRouteId, OperationId, PluginMountId,
-    PrincipalRef, ResolvedSnapshotId, ResourceBindingId, ResourceKind, RuntimeFeatureId,
+    PrincipalRef, ResolvedSnapshotId, ResourceKind, RuntimeFeatureId,
     StableSourceIdentity, TypedResourceBindings, UserId, VersionString,
 };
 
@@ -21,6 +21,7 @@ pub const CAPABILITY_NOT_MATERIALIZED: &str = "CAPABILITY_NOT_MATERIALIZED";
 pub const CAPABILITY_NOT_IN_PRESET: &str = "CAPABILITY_NOT_IN_PRESET";
 pub const CAPABILITY_NOT_ACTIVE: &str = "CAPABILITY_NOT_ACTIVE";
 pub const CAPABILITY_UNAVAILABLE_ON_PLATFORM: &str = "CAPABILITY_UNAVAILABLE_ON_PLATFORM";
+pub const AGENT_PRESET_NOT_FOUND: &str = "AGENT_PRESET_NOT_FOUND";
 pub const PRESET_CAPABILITY_DUPLICATE: &str = "PRESET_CAPABILITY_DUPLICATE";
 pub const PRESET_CAPABILITY_SET_OVERLAP: &str = "PRESET_CAPABILITY_SET_OVERLAP";
 pub const PRESET_REVISION_DIGEST_MISMATCH: &str = "PRESET_REVISION_DIGEST_MISMATCH";
@@ -174,26 +175,6 @@ pub struct CapabilitySelection {
     pub capability: CapabilityRef,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub action_allowlist: BTreeSet<ActionId>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub resource_binding_refs: Vec<ResourceBindingId>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ResourceDefaultBindingPolicy {
-    RequireExplicitSelection,
-    SelectOnlyOwnedResource,
-    LeaveUnbound,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct TypedResourceDefault {
-    pub slot_key: String,
-    pub resource_kind: ResourceKind,
-    pub required: bool,
-    pub operations: BTreeSet<String>,
-    pub binding_policy: ResourceDefaultBindingPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -208,7 +189,6 @@ pub struct AgentPresetRevisionPayload {
     pub initial_capabilities: Vec<CapabilitySelection>,
     pub on_demand_capabilities: Vec<CapabilitySelection>,
     pub skill_bindings: Vec<SkillRef>,
-    pub resource_bindings: TypedResourceBindings,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub system_role_provider_overrides:
         BTreeMap<crate::ExecutionRoleId, RoleProviderSelection>,
@@ -404,7 +384,6 @@ pub struct PrecomputedActivationPlan {
     pub capability_bundle: Vec<crate::CapabilityId>,
     pub tool_schema_refs: Vec<CanonicalSchemaRef>,
     pub context_schema_refs: Vec<CanonicalSchemaRef>,
-    pub resource_binding_refs: Vec<ResourceBindingId>,
     pub model_route_refs: Vec<ModelRouteId>,
 }
 
@@ -454,7 +433,6 @@ pub struct ResolvedRoleProviderLock {
     pub provider: ExactRoleProviderRef,
     pub source: PluginSourceMetadata,
     pub supported_members: BTreeSet<crate::CapabilityId>,
-    pub resource_binding_refs: Vec<ResourceBindingId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -473,6 +451,8 @@ pub struct ResolvedSnapshotContent {
     pub chat_route_identity: Option<ChatRouteIdentity>,
     pub initial_capabilities: Vec<ResolvedCapability>,
     pub on_demand_capabilities: Vec<ResolvedCapability>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub required_resource_kinds: BTreeSet<ResourceKind>,
     pub on_demand_activation_plans:
         BTreeMap<crate::CapabilityId, PrecomputedActivationPlan>,
     pub compact_on_demand_index: Vec<CompactOnDemandCapabilityEntry>,
@@ -482,7 +462,6 @@ pub struct ResolvedSnapshotContent {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub resolved_role_providers:
         BTreeMap<crate::ExecutionRoleId, ResolvedRoleProviderLock>,
-    pub typed_resource_bindings: TypedResourceBindings,
     pub canonical_schema_manifest_digest: DigestHex,
     pub target_contribution_manifest_digest: DigestHex,
 }
@@ -543,19 +522,6 @@ fn validate_resolved_role_provider_locks(
                 code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
                 message: format!(
                     "resolved role provider lock {} has inconsistent identity",
-                    role_id.as_ref()
-                ),
-            });
-        }
-        if lock
-            .resource_binding_refs
-            .windows(2)
-            .any(|window| window[0] >= window[1])
-        {
-            return Err(PresetContractViolation {
-                code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
-                message: format!(
-                    "resolved role provider lock {} has unsorted resource bindings",
                     role_id.as_ref()
                 ),
             });
@@ -736,7 +702,7 @@ pub struct OfficialPresetSeed {
     pub initial_capabilities: Vec<CapabilityRef>,
     pub on_demand_capabilities: Vec<CapabilityRef>,
     pub skill_bindings: Vec<SkillRef>,
-    pub typed_resource_defaults: Vec<TypedResourceDefault>,
+    pub required_resource_kinds: BTreeSet<ResourceKind>,
     pub required_runtime_features: BTreeSet<RuntimeFeatureId>,
 }
 
@@ -800,37 +766,11 @@ impl OfficialPresetSeedManifestPayload {
                 .chain(&seed.on_demand_capabilities)
                 .map(|capability| capability.id.clone())
                 .collect::<BTreeSet<_>>();
-            let default_resource_kinds = seed
-                .typed_resource_defaults
-                .iter()
-                .map(|resource| resource.resource_kind.clone())
-                .collect::<BTreeSet<_>>();
-            let mut default_slot_keys = BTreeSet::new();
-            if seed
-                .typed_resource_defaults
-                .iter()
-                .any(|resource| {
-                    !default_slot_keys.insert(resource.slot_key.as_str())
-                        || (resource.required
-                            && resource.binding_policy
-                                == ResourceDefaultBindingPolicy::LeaveUnbound)
-                })
-            {
-                return Err(PresetContractViolation {
-                    code: CanonicalErrorCode::from(ROLE_COVERAGE_INCOMPLETE),
-                    message: format!(
-                        "{} has duplicate or unbound required typed resource defaults",
-                        key.as_str()
-                    ),
-                });
-            }
             if !coverage.required_capability_ids.is_subset(&selected)
                 || !coverage
                     .required_runtime_features
                     .is_subset(&seed.required_runtime_features)
-                || !coverage
-                    .required_resource_kinds
-                    .is_subset(&default_resource_kinds)
+                || coverage.required_resource_kinds != seed.required_resource_kinds
             {
                 return Err(PresetContractViolation {
                     code: CanonicalErrorCode::from(ROLE_COVERAGE_INCOMPLETE),
@@ -844,7 +784,7 @@ impl OfficialPresetSeedManifestPayload {
         if !chat.initial_capabilities.is_empty()
             || !chat.on_demand_capabilities.is_empty()
             || !chat.skill_bindings.is_empty()
-            || !chat.typed_resource_defaults.is_empty()
+            || !chat.required_resource_kinds.is_empty()
             || !chat.required_runtime_features.is_empty()
             || !chat_coverage.required_capability_categories.is_empty()
             || !chat_coverage.required_capability_ids.is_empty()
@@ -866,9 +806,9 @@ impl OfficialPresetSeedManifestPayload {
                 capability.id.as_ref().starts_with("browser.")
                     || capability.id.as_ref().starts_with("computer.")
             })
-            || coding.typed_resource_defaults.iter().any(|resource| {
-                resource.resource_kind.as_ref().starts_with("browser")
-                    || resource.resource_kind.as_ref().starts_with("computer")
+            || coding.required_resource_kinds.iter().any(|resource_kind| {
+                resource_kind.as_ref().starts_with("browser")
+                    || resource_kind.as_ref().starts_with("computer")
             })
         {
             return Err(PresetContractViolation {
@@ -1345,13 +1285,13 @@ mod tests {
             chat_route_identity: None,
             initial_capabilities,
             on_demand_capabilities,
+            required_resource_kinds: BTreeSet::new(),
             on_demand_activation_plans: BTreeMap::new(),
             compact_on_demand_index: Vec::new(),
             capability_allowlist: BTreeSet::new(),
             skill_locks: Vec::new(),
             mcp_tool_locks,
             resolved_role_providers: BTreeMap::new(),
-            typed_resource_bindings: Vec::new(),
             canonical_schema_manifest_digest: DigestHex::from("fixture-schema"),
             target_contribution_manifest_digest: DigestHex::from("fixture-target"),
         }
@@ -1376,6 +1316,66 @@ mod tests {
             resolver_run_id: OperationId::from("fixture-operation"),
             availability_evidence_revision: "1".to_owned(),
         }
+    }
+
+    #[test]
+    fn resource_neutral_preset_contract_rejects_legacy_resource_fields() {
+        let mut payload = serde_json::to_value(AgentPresetRevisionPayload {
+            schema_version: VersionString::from("1.0.0"),
+            model_route_refs: BTreeMap::new(),
+            chat_route_records: BTreeMap::new(),
+            initial_capabilities: Vec::new(),
+            on_demand_capabilities: Vec::new(),
+            skill_bindings: Vec::new(),
+            system_role_provider_overrides: BTreeMap::new(),
+            persona: String::new(),
+            instructions: String::new(),
+            starter_prompts: Vec::new(),
+        })
+        .unwrap();
+        payload["resource_bindings"] = serde_json::json!([]);
+        assert!(
+            serde_json::from_value::<AgentPresetRevisionPayload>(payload).is_err(),
+            "Revision payloads must not freeze concrete resource bindings"
+        );
+
+        let mut selection = serde_json::to_value(CapabilitySelection {
+            capability: capability("knowledge.search"),
+            action_allowlist: BTreeSet::new(),
+        })
+        .unwrap();
+        selection["resource_binding_refs"] = serde_json::json!(["knowledge"]);
+        assert!(
+            serde_json::from_value::<CapabilitySelection>(selection).is_err(),
+            "Capability selections must declare capability intent without resource identities"
+        );
+
+        let mut snapshot =
+            serde_json::to_value(snapshot_content(Vec::new(), Vec::new(), Vec::new()))
+                .unwrap();
+        snapshot["typed_resource_bindings"] = serde_json::json!([]);
+        assert!(
+            serde_json::from_value::<ResolvedSnapshotContent>(snapshot).is_err(),
+            "Snapshots must not freeze target-scoped resource bindings"
+        );
+
+        let mut nested_snapshot =
+            serde_json::to_value(snapshot_content(Vec::new(), Vec::new(), Vec::new()))
+                .unwrap();
+        nested_snapshot["on_demand_activation_plans"] = serde_json::json!({
+            "knowledge.search": {
+                "root_capability_id": "knowledge.search",
+                "capability_bundle": [],
+                "tool_schema_refs": [],
+                "context_schema_refs": [],
+                "resource_binding_refs": [],
+                "model_route_refs": []
+            }
+        });
+        assert!(
+            serde_json::from_value::<ResolvedSnapshotContent>(nested_snapshot).is_err(),
+            "Nested Snapshot records must fail closed on retired resource fields"
+        );
     }
 
     #[test]

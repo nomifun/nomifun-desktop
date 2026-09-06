@@ -2339,11 +2339,9 @@ mod tests {
                     version: VersionString::from(CONTRACT_VERSION),
                 },
                 action_allowlist: BTreeSet::from([test_action_id.clone()]),
-                resource_binding_refs: vec![binding.binding_id.clone()],
             }],
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
-            resource_bindings: vec![binding],
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Wave 1 test".to_owned(),
             instructions: "Invoke the selected capability.".to_owned(),
@@ -2389,7 +2387,9 @@ mod tests {
                 resolver_run_id: OperationId::from("wave1-resolve"),
             },
         )
-        .expect("compile selected capability");
+        .expect("compile selected capability")
+        .with_target_resource_bindings(&test_principal, vec![binding.clone()])
+        .expect("bind selected target resource");
         let active = SessionCapabilityState::new(&snapshot)
             .snapshot()
             .expect("initial active set");

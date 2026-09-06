@@ -17,8 +17,8 @@ describe('Agent Settings locale contract', () => {
   test('contains fresh-start and real-effect disclosure in both locales', () => {
     expect(en.freshStart.body.includes('not imported')).toBe(true);
     expect(zh.freshStart.body.includes('不会导入')).toBe(true);
-    expect(en.test.realEffectWarning.includes('real resources')).toBe(true);
-    expect(zh.test.realEffectWarning.includes('真实资源')).toBe(true);
+    expect(en.test.realEffectWarning.includes('not simulated')).toBe(true);
+    expect(zh.test.realEffectWarning.includes('不会模拟')).toBe(true);
   });
 
   test('uses Agent Workbench as the sole public authoring label', () => {
@@ -30,5 +30,26 @@ describe('Agent Settings locale contract', () => {
     expect(Object.hasOwn(en.navigation, 'open')).toBe(false);
     expect(Object.hasOwn(zh.navigation, 'entryDescription')).toBe(false);
     expect(Object.hasOwn(zh.navigation, 'open')).toBe(false);
+  });
+
+  test('describes capability modes and target-owned resource selection', () => {
+    expect(en.capabilities.initial).toBe('Available at startup');
+    expect(en.capabilities.onDemand).toBe('May request');
+    expect(zh.capabilities.initial).toBe('启动即用');
+    expect(zh.capabilities.onDemand).toBe('可按需申请');
+    expect(en.resources.bindingPolicyBody.includes('conversation')).toBe(true);
+    expect(zh.resources.bindingPolicyBody.includes('具体会话')).toBe(true);
+  });
+
+  test('does not expose the removed Typed resources product term', () => {
+    expect(JSON.stringify(en).toLowerCase().includes('typed resource')).toBe(false);
+    expect(JSON.stringify(zh).toLowerCase().includes('typed resource')).toBe(false);
+  });
+
+  test('contains localized user Agent deletion copy', () => {
+    expect(en.library.deleteConfirmTitle.includes('{{name}}')).toBe(true);
+    expect(zh.library.deleteConfirmTitle.includes('{{name}}')).toBe(true);
+    expect(en.library.deleteConfirmBody.includes('history')).toBe(true);
+    expect(zh.library.deleteConfirmBody.includes('历史')).toBe(true);
   });
 });

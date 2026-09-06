@@ -86,9 +86,6 @@ fn resolved_content(contract: &CodingCodexContract) -> ResolvedSnapshotContent {
                     capability_bundle: vec![reference.id.clone()],
                     tool_schema_refs: Vec::new(),
                     context_schema_refs: Vec::new(),
-                    resource_binding_refs: vec![ResourceBindingId::from(
-                        "workspace",
-                    )],
                     model_route_refs: Vec::new(),
                 },
             )
@@ -135,13 +132,13 @@ fn resolved_content(contract: &CodingCodexContract) -> ResolvedSnapshotContent {
             .iter()
             .map(resolved_capability)
             .collect(),
+        required_resource_kinds: contract.required_resource_kinds.clone(),
         on_demand_activation_plans: activation_plans,
         compact_on_demand_index,
         capability_allowlist: contract.ceiling_ids(),
         skill_locks: Vec::new(),
         mcp_tool_locks: Vec::new(),
         resolved_role_providers: BTreeMap::new(),
-        typed_resource_bindings: vec![workspace_binding()],
         canonical_schema_manifest_digest: DigestHex::from("schema"),
         target_contribution_manifest_digest: contract
             .target_contribution_manifest_digest
@@ -309,7 +306,7 @@ fn frozen_coding_contract_validates_snapshot_profile_and_native_ack() {
         enabled_runtime_features: contract.required_runtime_features.clone(),
         initial_capabilities: contract.initial_ids(),
         on_demand_capabilities: contract.on_demand_ids(),
-        typed_resource_bindings: content.typed_resource_bindings,
+        typed_resource_bindings: vec![workspace_binding()],
     };
     contract.validate_runtime_profile(&profile).unwrap();
 

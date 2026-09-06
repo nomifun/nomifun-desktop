@@ -126,6 +126,8 @@ const NomiSendBox: React.FC<{
   turnActivity: NomiMessageRuntime;
   /** Hide model and other editable controls on locked surfaces. */
   hideAdvancedControls?: boolean;
+  /** Keep the owning AgentPreset model immutable while preserving other tools. */
+  modelLocked?: boolean;
   /** Conversation collaborator-model control, rendered after the main model. */
   collaboratorSelectorNode?: React.ReactNode;
   /**
@@ -140,6 +142,7 @@ const NomiSendBox: React.FC<{
   agent_name,
   turnActivity,
   hideAdvancedControls,
+  modelLocked = false,
   collaboratorSelectorNode,
   extraRightTools,
 }) => {
@@ -713,7 +716,7 @@ const NomiSendBox: React.FC<{
 
     const entries: MobileActionSheetEntry[] = [
       // Locked surfaces keep their model pinned to the owning profile.
-      ...(hideAdvancedControls
+      ...(hideAdvancedControls || modelLocked
         ? []
         : [
             {
@@ -784,6 +787,7 @@ const NomiSendBox: React.FC<{
     handleSheetModelSelect,
     hideAdvancedControls,
     isMobile,
+    modelLocked,
     loadedMcpStatuses,
     loadedSkills,
     modelSelection,
@@ -934,7 +938,9 @@ const NomiSendBox: React.FC<{
                   reasoningTokens={tokenUsage?.reasoning_tokens}
                 />
               )}
-              <NomiModelSelector selection={modelSelection} className='nomi-sendbox-model-btn' />
+              {!modelLocked && (
+                <NomiModelSelector selection={modelSelection} className='nomi-sendbox-model-btn' />
+              )}
               {/* 召唤伙伴仅在普通工作会话显示；锁定面隐藏整个编辑组。 */}
               <SummonControl conversationId={conversation_id} />
               {collaboratorSelectorNode}

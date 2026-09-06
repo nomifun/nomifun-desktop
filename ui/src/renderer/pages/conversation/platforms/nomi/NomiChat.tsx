@@ -37,6 +37,8 @@ const NomiChat: React.FC<{
   isProcessing?: boolean;
   /** Hide model and other editable controls on locked surfaces. */
   hideAdvancedControls?: boolean;
+  /** Keep the owning AgentPreset model immutable while preserving other tools. */
+  modelLocked?: boolean;
   /** Conversation collaborator-model control rendered after the main model. */
   collaboratorSelectorNode?: React.ReactNode;
   /** Extra right-side tools used by projected task transcripts. */
@@ -54,6 +56,7 @@ const NomiChat: React.FC<{
   agent_name,
   isProcessing,
   hideAdvancedControls,
+  modelLocked,
   collaboratorSelectorNode,
   extraRightTools,
 }) => {
@@ -114,6 +117,7 @@ const NomiChat: React.FC<{
               modelSelection={modelSelection}
               agent_name={agent_name}
               hideAdvancedControls={hideAdvancedControls}
+              modelLocked={modelLocked}
               collaboratorSelectorNode={collaboratorSelectorNode}
               extraRightTools={extraRightTools}
               turnActivity={turnActivity}

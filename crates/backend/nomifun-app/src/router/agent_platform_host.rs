@@ -2353,7 +2353,6 @@ mod tests {
                     nomifun_agent_domain_wave1::action_id(capability_id)
                         .expect("Wave 1 capability has an action"),
                 ]),
-                resource_binding_refs: vec![binding.binding_id.clone()],
             })
             .collect();
         let payload = AgentPresetRevisionPayload {
@@ -2363,7 +2362,6 @@ mod tests {
             initial_capabilities,
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
-            resource_bindings: vec![binding.clone()],
             system_role_provider_overrides: BTreeMap::new(),
             persona: format!("Wave 1 {fixture_name} test"),
             instructions: format!("Exercise the Wave 1 {fixture_name} owner."),
@@ -2404,7 +2402,7 @@ mod tests {
             },
             CompileRequest {
                 revision,
-                principal: owner,
+                principal: owner.clone(),
                 scene: format!("wave1-{fixture_name}-test"),
                 surface: "desktop".to_owned(),
                 audience: "test".to_owned(),
@@ -2414,7 +2412,9 @@ mod tests {
                 )),
             },
         )
-        .expect("compile Wave 1 capabilities");
+        .expect("compile Wave 1 capabilities")
+        .with_target_resource_bindings(&owner, vec![binding.clone()])
+        .expect("bind Wave 1 target resource");
         let active = SessionCapabilityState::new(&snapshot)
             .snapshot()
             .expect("initial active set");
@@ -2765,7 +2765,6 @@ mod tests {
                         version: VersionString::from(CONTRACT_VERSION),
                     },
                     action_allowlist,
-                    resource_binding_refs: vec![binding.binding_id.clone()],
                 }
             };
             let payload = AgentPresetRevisionPayload {
@@ -2781,7 +2780,6 @@ mod tests {
                 ],
                 on_demand_capabilities: Vec::new(),
                 skill_bindings: Vec::new(),
-                resource_bindings: vec![binding.clone()],
                 system_role_provider_overrides: BTreeMap::new(),
                 persona: "Browser role live test".to_owned(),
                 instructions: "Exercise the canonical Browser role owner.".to_owned(),
@@ -2815,7 +2813,9 @@ mod tests {
                     resolver_run_id: OperationId::from("browser-role-live-resolve"),
                 },
             )
-            .expect("compile Browser role snapshot");
+            .expect("compile Browser role snapshot")
+            .with_target_resource_bindings(&owner, vec![binding.clone()])
+            .expect("bind Browser target resource");
             let snapshot = Arc::new(snapshot);
             let active = SessionCapabilityState::new(&snapshot)
                 .snapshot()
@@ -3056,7 +3056,6 @@ mod tests {
                         version: VersionString::from(CONTRACT_VERSION),
                     },
                     action_allowlist,
-                    resource_binding_refs: vec![binding.binding_id.clone()],
                 }
             };
             let payload = AgentPresetRevisionPayload {
@@ -3069,7 +3068,6 @@ mod tests {
                 ],
                 on_demand_capabilities: Vec::new(),
                 skill_bindings: Vec::new(),
-                resource_bindings: vec![binding.clone()],
                 system_role_provider_overrides: BTreeMap::new(),
                 persona: "Computer role live test".to_owned(),
                 instructions: "Exercise the canonical Computer role owner.".to_owned(),
@@ -3103,7 +3101,9 @@ mod tests {
                     resolver_run_id: OperationId::from("computer-role-live-resolve"),
                 },
             )
-            .expect("compile Computer role snapshot");
+            .expect("compile Computer role snapshot")
+            .with_target_resource_bindings(&owner, vec![binding.clone()])
+            .expect("bind Computer target resource");
             let snapshot = Arc::new(snapshot);
             let active = SessionCapabilityState::new(&snapshot)
                 .snapshot()
@@ -3396,7 +3396,6 @@ mod tests {
             initial_capabilities: Vec::new(),
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
-            resource_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Agent platform host chat fixture".to_owned(),
             instructions: "Exercise the exact persisted chat route.".to_owned(),
@@ -3669,7 +3668,7 @@ mod tests {
         let model = std::env::var("NOMIFUN_LIVE_STEPFUN_MODEL")
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "step-router-v1".to_owned());
+            .unwrap_or_else(|| "step-3.7-flash".to_owned());
 
         let directory = tempfile::tempdir().expect("live Step Plan temp root");
         let v4_dir = directory.path().join("v4");

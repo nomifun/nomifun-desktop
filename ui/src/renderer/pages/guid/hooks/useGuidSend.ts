@@ -43,6 +43,10 @@ export type GuidSendDeps = {
   current_model: TProviderWithModel | undefined;
   applyAdvancedConfig?: (conversationId: ConversationId) => Promise<void>;
   autoWork: AutoWorkDraftValue;
+  /** Whether the selected target may receive the staged workspace resource. */
+  workspaceEnabled: boolean;
+  /** Stable preset capability/resource resolution must finish before launch. */
+  resourceResolutionReady: boolean;
   setMentionOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setMentionQuery: React.Dispatch<React.SetStateAction<string | null>>;
   setMentionSelectorOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -75,6 +79,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     current_model,
     applyAdvancedConfig,
     autoWork,
+    workspaceEnabled,
+    resourceResolutionReady,
     setMentionOpen,
     setMentionQuery,
     setMentionSelectorOpen,
@@ -85,6 +91,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     endPending,
   } = deps;
   const sendingRef = useRef(false);
+  const selectedWorkspace = workspaceEnabled ? dir : '';
 
   const handleSend = useCallback(async () => {
     const entryPlan = planGuidEntry(input, autoWork);
@@ -99,8 +106,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         model: current_model,
         extra: {
           default_files: files,
-          workspace: dir,
-          custom_workspace: Boolean(dir),
+          workspace: selectedWorkspace,
+          custom_workspace: Boolean(selectedWorkspace),
         },
       });
       if (!conversation?.id) {
@@ -126,6 +133,23 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         throw new Error(
           'AgentSession was created without a Conversation projection'
         );
+      }
+      if (selectedWorkspace) {
+        const updated = await ipcBridge.conversation.update.invoke({
+          conversation_id: conversationId,
+          updates: { extra: { workspace: selectedWorkspace } },
+        });
+        if (!updated) {
+          throw new Error('AgentSession workspace was not bound');
+        }
+        conversation = await ipcBridge.conversation.get.invoke({
+          conversation_id: conversationId,
+        });
+        if (!conversation?.id) {
+          throw new Error(
+            'AgentSession workspace update lost its Conversation projection'
+          );
+        }
       }
     }
 
@@ -154,16 +178,17 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     applyAdvancedConfig,
     autoWork,
     current_model,
-    dir,
     files,
     input,
     navigate,
+    selectedWorkspace,
     selection,
     selectedPreset,
   ]);
 
   const sendMessageHandler = useCallback(() => {
     if (loading || sendingRef.current) return;
+    if (!resourceResolutionReady) return;
     if (selection.kind === 'default' && !current_model) {
       Message.warning(t('conversation.noModelConfigured'));
       return;
@@ -217,6 +242,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     input,
     loading,
     current_model,
+    resourceResolutionReady,
     selection,
     selectedPreset,
     setDir,
@@ -235,7 +261,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       ? Boolean(current_model)
       : Boolean(
           selectedPreset?.current_stable_revision &&
-            selectedPreset.preset_id === selection.presetId
+            selectedPreset.preset_id === selection.presetId &&
+            resourceResolutionReady
         );
   const isButtonDisabled = loading || !input.trim() || !hasLaunchTarget;
 

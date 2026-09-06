@@ -214,6 +214,14 @@ pub struct NomiBuildExtra {
     /// conversation 时设置；普通会话恒空 = 不限制。
     #[serde(default)]
     pub allowed_tools: Vec<String>,
+    /// When true, an empty `allowed_tools` means deny-all instead of the
+    /// ordinary unrestricted Nomi default.
+    #[serde(default)]
+    pub enforce_tool_allowlist: bool,
+    /// Host-projected subset of `allowed_tools` that remains schema-deferred
+    /// until the session activates it through ToolSearch.
+    #[serde(default)]
+    pub deferred_tools: Vec<String>,
     /// Conversation-level delegation intent. This shapes when the Agent uses
     /// the unified persistent execution tools; it never grants tool authority.
     /// The factory always overwrites this from the typed runtime build option;

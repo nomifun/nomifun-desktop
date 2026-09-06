@@ -1127,12 +1127,13 @@ mod tests {
             "instructions": "",
             "included_skills": [],
             "excluded_auto_skills": [],
+            "initial_capabilities": [],
+            "on_demand_capabilities": [],
             "knowledge_policy": {
                 "enabled": false,
                 "writeback": false,
                 "grounded": false
             },
-            "knowledge_base_ids": [],
             "warnings": []
         });
         let row = CronJobRow {
@@ -1159,12 +1160,13 @@ mod tests {
             "instructions": "",
             "included_skills": [],
             "excluded_auto_skills": [],
+            "initial_capabilities": [],
+            "on_demand_capabilities": [],
             "knowledge_policy": {
                 "enabled": false,
                 "writeback": false,
                 "grounded": false
             },
-            "knowledge_base_ids": [],
             "warnings": []
         });
         let row = CronJobRow {

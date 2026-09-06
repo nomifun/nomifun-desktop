@@ -482,6 +482,74 @@ async fn cj1_create_cron_job() {
     assert_eq!(data["metadata"]["created_by"], "user");
 }
 
+#[tokio::test]
+async fn cj1b_agent_preset_is_frozen_by_the_host_before_cron_persistence() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    seed_cron_provider(&services).await;
+
+    let preset_response = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            "/api/agent-presets/from-template/chat.minimal",
+            json!({
+                "display_name": "Cron preset",
+                "description": null,
+                "model_route_refs": {},
+                "chat_route_records": {}
+            }),
+            &token,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(preset_response.status(), StatusCode::OK);
+    let preset = body_json(preset_response).await["data"].clone();
+    let preset_id = preset["preset"]["preset_id"].as_str().unwrap();
+    assert!(preset["preset"]["current_stable_revision"].is_object());
+
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            "/api/cron/jobs",
+            json!({
+                "name": "Preset scheduled task",
+                "schedule": {
+                    "kind": "every",
+                    "every_ms": 600000,
+                    "description": "every ten minutes"
+                },
+                "message": "run the saved Agent",
+                "agent_type": "nomi",
+                "created_by": "user",
+                "execution_mode": "new_conversation",
+                "agent_config": {
+                    "name": "Cron preset",
+                    "preset_id": preset_id,
+                    "clear_context_each_run": false
+                }
+            }),
+            &token,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let job = body_json(response).await["data"].clone();
+    let config = &job["metadata"]["agent_config"];
+    assert_eq!(config["preset_id"], preset_id);
+    assert_eq!(
+        config["agent_snapshot"]["preset_id"],
+        preset_id,
+        "Cron must persist the frozen Agent snapshot, not only a preset id"
+    );
+    assert!(config["agent_snapshot"]["preset_revision"].as_i64().unwrap() > 0);
+    assert!(config["provider_id"].as_str().is_some());
+    assert!(config["model"].as_str().is_some());
+}
+
 // ── CJ-2: Create three schedule types ────────────────────────────────
 
 #[tokio::test]

@@ -18,6 +18,7 @@ export type GuidAgentSelectionResult = {
   selectedPreset: ExecutableAgentPreset | undefined;
   presets: ExecutableAgentPreset[];
   isLoading: boolean;
+  isLoaded: boolean;
   loadError: Error | undefined;
   setSelection: (selection: GuidAgentSelection) => void;
   selectDefaultAgent: () => void;
@@ -73,11 +74,13 @@ export const useGuidAgentSelection = ({
   });
 
   const {
+    library,
     presets: savedPresets,
     isLoading,
     error: loadError,
     refresh: refreshPresets,
   } = useAgentPresets();
+  const isLoaded = library !== undefined;
   const presets = useMemo(
     () => savedPresets.filter(isExecutableAgentPreset),
     [savedPresets]
@@ -122,7 +125,7 @@ export const useGuidAgentSelection = ({
       return;
     }
 
-    if (!selectedAgentPresetId || isLoading) return;
+    if (!selectedAgentPresetId || isLoading || !isLoaded) return;
 
     const preset = presets.find(
       (candidate) => candidate.preset_id === selectedAgentPresetId
@@ -138,6 +141,7 @@ export const useGuidAgentSelection = ({
     selectDefaultAgent();
   }, [
     isLoading,
+    isLoaded,
     loadError,
     presets,
     resetAgentSelection,
@@ -149,6 +153,7 @@ export const useGuidAgentSelection = ({
   useEffect(() => {
     if (
       isLoading ||
+      !isLoaded ||
       loadError ||
       resetAgentSelection ||
       selectedAgentPresetId ||
@@ -160,6 +165,7 @@ export const useGuidAgentSelection = ({
     selectDefaultAgent();
   }, [
     isLoading,
+    isLoaded,
     loadError,
     resetAgentSelection,
     selectedAgentPresetId,
@@ -173,6 +179,7 @@ export const useGuidAgentSelection = ({
     selectedPreset,
     presets,
     isLoading,
+    isLoaded,
     loadError,
     setSelection,
     selectDefaultAgent,

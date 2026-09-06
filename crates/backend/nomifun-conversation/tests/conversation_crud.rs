@@ -1,8 +1,10 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use nomifun_ai_agent::AgentRuntimeRegistry;
 use nomifun_api_types::{
-    CreateConversationRequest, ListConversationsQuery, UpdateConversationRequest, WebSocketMessage,
+    AgentResolvedSnapshot, CreateConversationRequest, ExecutionModelPool, ExecutionModelRef,
+    ListConversationsQuery, UpdateConversationRequest, WebSocketMessage,
 };
 use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationSource, ConversationStatus};
 use nomifun_conversation::ConversationService;
@@ -216,6 +218,30 @@ fn make_auto_workspace_create_req() -> CreateConversationRequest {
         "extra": {}
     }))
     .unwrap()
+}
+
+fn make_preset_snapshot(model: &str) -> AgentResolvedSnapshot {
+    AgentResolvedSnapshot {
+        preset_id: nomifun_common::generate_id(),
+        preset_revision: 1,
+        preset_name: "Frozen test preset".to_owned(),
+        routing_description: None,
+        instructions: "Keep the preset model fixed.".to_owned(),
+        resolved_agent_id: None,
+        resolved_agent_type: Some("nomi".to_owned()),
+        resolved_agent_backend: None,
+        resolved_model: Some(ExecutionModelRef {
+            provider_id: USER_ID.to_owned(),
+            model: model.to_owned(),
+        }),
+        included_skills: Vec::new(),
+        excluded_auto_skills: Vec::new(),
+        initial_capabilities: Vec::new(),
+        on_demand_capabilities: Vec::new(),
+        required_resource_kinds: BTreeSet::new(),
+        knowledge_policy: Default::default(),
+        warnings: Vec::new(),
+    }
 }
 
 // ── T1: Create conversation ────────────────────────────────────────
@@ -849,6 +875,94 @@ async fn update_accepts_top_level_model_for_nomi() {
     .unwrap();
     let updated = svc.update(USER_ID, &conv.conversation_id.to_string(), req, &runtime_registry).await.unwrap();
     assert_eq!(updated.model.unwrap().model, "gpt-4o-mini");
+}
+
+#[tokio::test]
+async fn update_rejects_top_level_model_for_preset_nomi() {
+    let (svc, _, runtime_registry) = setup().await;
+    let snapshot = make_preset_snapshot("gpt-4o");
+    let preset_id = snapshot.preset_id.clone();
+    let conv = svc
+        .create_from_agent_snapshot(USER_ID, make_create_req(), snapshot)
+        .await
+        .unwrap();
+
+    assert_eq!(conv.preset_id.as_deref(), Some(preset_id.as_str()));
+    assert!(conv.agent_snapshot.is_some());
+    assert_eq!(conv.model.as_ref().unwrap().model, "gpt-4o");
+
+    let req: UpdateConversationRequest = serde_json::from_value(json!({
+        "model": {
+            "provider_id": "0190f5fe-7c00-7a00-8000-000000000001",
+            "model": "gpt-4o-mini"
+        }
+    }))
+    .unwrap();
+    let error = svc
+        .update(USER_ID, &conv.conversation_id, req, &runtime_registry)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(error, AppError::BadRequest(message) if message.contains("immutable for AgentPreset conversations"))
+    );
+    let unchanged = svc.get(USER_ID, &conv.conversation_id).await.unwrap();
+    assert_eq!(unchanged.model.unwrap().model, "gpt-4o");
+}
+
+#[tokio::test]
+async fn update_preset_nomi_allows_conversation_collaboration_and_resource_changes() {
+    let (svc, _, runtime_registry) = setup().await;
+    let snapshot = make_preset_snapshot("gpt-4o");
+    let preset_id = snapshot.preset_id.clone();
+    let conv = svc
+        .create_from_agent_snapshot(USER_ID, make_create_req(), snapshot)
+        .await
+        .unwrap();
+
+    let req: UpdateConversationRequest = serde_json::from_value(json!({
+        "delegation_policy": "prefer_parallel",
+        "decision_policy": "ask_user",
+        "execution_model_pool": {
+            "mode": "range",
+            "models": [
+                {
+                    "provider_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                    "model": "gpt-4o"
+                },
+                {
+                    "provider_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                    "model": "gpt-4o-mini"
+                }
+            ]
+        },
+        "extra": { "workspace": "/preset-session-workspace" }
+    }))
+    .unwrap();
+    let updated = svc
+        .update(USER_ID, &conv.conversation_id, req, &runtime_registry)
+        .await
+        .unwrap();
+
+    assert_eq!(updated.preset_id.as_deref(), Some(preset_id.as_str()));
+    assert!(updated.agent_snapshot.is_some());
+    assert_eq!(updated.model.as_ref().unwrap().model, "gpt-4o");
+    assert_eq!(
+        updated.delegation_policy,
+        nomifun_common::DelegationPolicy::PreferParallel
+    );
+    assert_eq!(
+        updated.decision_policy,
+        nomifun_common::DecisionPolicy::AskUser
+    );
+    assert_eq!(updated.extra["workspace"], "/preset-session-workspace");
+    assert!(matches!(
+        updated.execution_model_pool,
+        Some(ExecutionModelPool::Range { ref models })
+            if models.len() == 2
+                && models[0].model == "gpt-4o"
+                && models[1].model == "gpt-4o-mini"
+    ));
 }
 
 #[tokio::test]

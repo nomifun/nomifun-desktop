@@ -1644,7 +1644,6 @@ mod tests {
             initial_capabilities: Vec::new(),
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
-            resource_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Route lookup test agent".to_owned(),
             instructions: "Exercise the persisted canonical route.".to_owned(),

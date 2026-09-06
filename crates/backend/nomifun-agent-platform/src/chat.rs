@@ -422,7 +422,7 @@ impl ChatMinimalContract {
         if !seed.initial_capabilities.is_empty()
             || !seed.on_demand_capabilities.is_empty()
             || !seed.skill_bindings.is_empty()
-            || !seed.typed_resource_defaults.is_empty()
+            || !seed.required_resource_kinds.is_empty()
             || !seed.required_runtime_features.is_empty()
             || !coverage.required_capability_categories.is_empty()
             || !coverage.required_capability_ids.is_empty()
@@ -456,7 +456,7 @@ impl ChatMinimalContract {
         if !template.seed.initial_capabilities.is_empty()
             || !template.seed.on_demand_capabilities.is_empty()
             || !template.seed.skill_bindings.is_empty()
-            || !template.seed.typed_resource_defaults.is_empty()
+            || !template.seed.required_resource_kinds.is_empty()
             || !template.seed.required_runtime_features.is_empty()
             || !template
                 .role_coverage
@@ -498,7 +498,6 @@ impl ChatMinimalContract {
         if !document.initial_capabilities.is_empty()
             || !document.on_demand_capabilities.is_empty()
             || !document.skill_bindings.is_empty()
-            || !document.resource_bindings.is_empty()
             || !document.persona.is_empty()
             || !document.instructions.is_empty()
         {
@@ -538,7 +537,7 @@ impl ChatMinimalContract {
             || summary.on_demand_index_count != 0
             || summary.skill_count != 0
             || summary.mcp_count != 0
-            || summary.resource_binding_count != 0
+            || summary.required_resource_kind_count != 0
             || summary.provider_initialization_count != 1
         {
             return Err(ChatMinimalError::Preview(
@@ -554,7 +553,7 @@ impl ChatMinimalContract {
             || !inspector.tool_schema_refs.is_empty()
             || !inspector.context_schema_refs.is_empty()
             || !inspector.mcp_materializations.is_empty()
-            || !inspector.typed_resource_bindings.is_empty()
+            || !inspector.required_resource_kinds.is_empty()
             || !inspector.service_key_diagnostics.is_empty()
         {
             return Err(ChatMinimalError::Preview(
@@ -592,7 +591,6 @@ impl ChatMinimalContract {
             || !snapshot.capability_allowlist.is_empty()
             || !snapshot.skill_locks.is_empty()
             || !snapshot.mcp_tool_locks.is_empty()
-            || !snapshot.typed_resource_bindings.is_empty()
         {
             return Err(ChatMinimalError::Snapshot(
                 "Snapshot is not exact-empty outside its one frozen model route".to_owned(),

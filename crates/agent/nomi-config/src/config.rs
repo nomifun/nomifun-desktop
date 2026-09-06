@@ -286,6 +286,12 @@ pub struct ToolsConfig {
     /// 空（默认）= 不限制。
     #[serde(default)]
     pub builtin_allowlist: Vec<String>,
+    #[serde(skip)]
+    pub enforce_builtin_allowlist: bool,
+    /// Host-owned deferred subset of `builtin_allowlist`. It is intentionally
+    /// excluded from user config serialization.
+    #[serde(skip)]
+    pub deferred_allowlist: Vec<String>,
 }
 
 /// One language-server entry for the `Lsp` tool (§3.3).
@@ -311,6 +317,8 @@ impl Default for ToolsConfig {
             delegation_token_budget: None,
             bash_sandbox: false,
             builtin_allowlist: Vec::new(),
+            enforce_builtin_allowlist: false,
+            deferred_allowlist: Vec::new(),
         }
     }
 }
@@ -1118,6 +1126,8 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         } else {
             global.tools.builtin_allowlist
         },
+        enforce_builtin_allowlist: false,
+        deferred_allowlist: Vec::new(),
     };
 
     // Session: project overrides global

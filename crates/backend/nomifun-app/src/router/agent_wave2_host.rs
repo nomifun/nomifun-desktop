@@ -2787,11 +2787,9 @@ mod tests {
                     version: VersionString::from(nomifun_agent_domain_wave2::CONTRACT_VERSION),
                 },
                 action_allowlist: BTreeSet::from([action.clone()]),
-                resource_binding_refs: vec![binding.binding_id.clone()],
             }],
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
-            resource_bindings: vec![binding],
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Wave 2 host test".to_owned(),
             instructions: "Invoke the selected capability.".to_owned(),
@@ -2837,7 +2835,9 @@ mod tests {
                 resolver_run_id: OperationId::from("wave2-host-resolve"),
             },
         )
-        .expect("compile selected capability");
+        .expect("compile selected capability")
+        .with_target_resource_bindings(&principal, vec![binding])
+        .expect("bind selected target resource");
         let active = SessionCapabilityState::new(&snapshot)
             .snapshot()
             .expect("initial active set");

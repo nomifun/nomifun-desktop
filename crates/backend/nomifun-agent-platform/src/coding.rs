@@ -310,7 +310,6 @@ impl CodingCodexContract {
                     .to_owned(),
             ));
         }
-        validate_api_workspace_binding(&document.resource_bindings)?;
         Ok(())
     }
 
@@ -334,7 +333,7 @@ impl CodingCodexContract {
             || summary.active_at_start_count != self.initial_capabilities.len() as u32
             || summary.on_demand_index_count != self.on_demand_capabilities.len() as u32
             || summary.model_tool_count == 0
-            || summary.resource_binding_count == 0
+            || summary.required_resource_kind_count == 0
             || summary.provider_initialization_count != 1
         {
             return Err(CodingCodexError::Preview(
@@ -377,7 +376,11 @@ impl CodingCodexContract {
                     .to_owned(),
             ));
         }
-        validate_api_workspace_binding(&inspector.typed_resource_bindings)?;
+        if !inspector.required_resource_kinds.contains("workspace") {
+            return Err(CodingCodexError::Preview(
+                "Preview inspector lost the Coding workspace requirement".to_owned(),
+            ));
+        }
         Ok(())
     }
 
@@ -1051,61 +1054,23 @@ fn coding_principal(owner: &UserId) -> PrincipalRef {
 }
 
 fn validate_resource_defaults(
-    snapshot: &ResolvedSnapshotContent,
+    _snapshot: &ResolvedSnapshotContent,
     contract: &CodingCodexContract,
 ) -> Result<(), CodingCodexError> {
     let seed_manifest = official_preset_seed_manifest_payload();
     let seed = &seed_manifest.templates[&OfficialPresetKey::CodingCodex];
-    let bindings = snapshot
-        .typed_resource_bindings
+    if !seed
+        .required_resource_kinds
         .iter()
-        .map(|binding| (binding.resource_kind.as_ref(), binding))
-        .collect::<BTreeMap<_, _>>();
-    for required in seed
-        .typed_resource_defaults
-        .iter()
-        .filter(|resource| resource.required)
+        .any(|resource_kind| resource_kind.as_ref() == "workspace")
     {
-        let Some(binding) = bindings.get(required.resource_kind.as_ref()) else {
-            return Err(CodingCodexError::Snapshot(format!(
-                "required Coding resource kind {} is unbound",
-                required.resource_kind.as_ref()
-            )));
-        };
-        if !required.operations.is_subset(&binding.operations) {
-            return Err(CodingCodexError::Snapshot(format!(
-                "resource {} lacks frozen Coding operations",
-                binding.binding_id.as_ref()
-            )));
-        }
+        return Err(CodingCodexError::FrozenContract(
+            "coding.codex must declare a target-scoped workspace requirement".to_owned(),
+        ));
     }
     if contract.initial_capabilities.is_empty() {
         return Err(CodingCodexError::FrozenContract(
             "coding.codex initial partition must not be empty".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_api_workspace_binding(
-    bindings: &[nomifun_api_types::TypedResourceBindingDto],
-) -> Result<(), CodingCodexError> {
-    let binding = bindings
-        .iter()
-        .find(|binding| binding.resource_kind == "workspace")
-        .ok_or_else(|| {
-            CodingCodexError::Revision(
-                "required workspace resource is not bound".to_owned(),
-            )
-        })?;
-    let required = BTreeSet::from([
-        "execute".to_owned(),
-        "read".to_owned(),
-        "write".to_owned(),
-    ]);
-    if !required.is_subset(&binding.operations) {
-        return Err(CodingCodexError::Revision(
-            "workspace binding lacks execute/read/write operations".to_owned(),
         ));
     }
     Ok(())

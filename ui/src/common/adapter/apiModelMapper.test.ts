@@ -28,12 +28,14 @@ const snapshot = (overrides: Record<string, unknown> = {}) => ({
   instructions: 'Write concise copy.',
   included_skills: [],
   excluded_auto_skills: [],
+  initial_capabilities: [],
+  on_demand_capabilities: [],
+  required_resource_kinds: ['workspace'],
   knowledge_policy: {
     enabled: false,
     writeback: false,
     grounded: false,
   },
-  knowledge_base_ids: [],
   warnings: [],
   ...overrides,
 });
@@ -116,6 +118,7 @@ describe('fromApiConversation Agent lineage boundary', () => {
     expect(mapped.preset_revision).toBe(3);
     expect(mapped.agent_snapshot?.preset_id).toBe(PRESET_ID);
     expect(mapped.agent_snapshot?.preset_revision).toBe(3);
+    expect(mapped.agent_snapshot?.required_resource_kinds).toEqual(['workspace']);
   });
 
   test('rejects partial lineage and non-canonical top-level preset ids', () => {
@@ -182,6 +185,11 @@ describe('fromApiConversation Agent lineage boundary', () => {
         ).includes('positive safe integer'),
       ).toBe(true);
     }
+    expect(
+      thrownMessage(() =>
+        fromApiAgentSnapshot(snapshot({ required_resource_kinds: null })),
+      ).includes('required_resource_kinds must be an array'),
+    ).toBe(true);
   });
 });
 

@@ -13,6 +13,7 @@
     {"operation_id":"mcp_servers.refresh_catalog","method":"POST","path":"/api/mcp-servers/{server_id}/refresh-catalog","request_schema":null,"response_schema":null,"canonical_errors":[]},
     {"operation_id":"agent_preset_templates.list_official","method":"GET","path":"/api/agent-preset-templates?source=official","request_schema":null,"response_schema":null,"canonical_errors":[]},
     {"operation_id":"agent_presets.create","method":"POST","path":"/api/agent-presets","request_schema":null,"response_schema":null,"canonical_errors":[]},
+    {"operation_id":"agent_presets.delete","method":"DELETE","path":"/api/agent-presets/{preset_id}","request_schema":null,"response_schema":null,"canonical_errors":["AGENT_PRESET_NOT_FOUND"]},
     {"operation_id":"agent_presets.create_from_template","method":"POST","path":"/api/agent-presets/from-template/{template_id}","request_schema":null,"response_schema":null,"canonical_errors":[]},
     {"operation_id":"agent_presets.editor","method":"GET","path":"/api/agent-presets/{preset_id}/editor?revision={revision}","request_schema":null,"response_schema":null,"canonical_errors":[]},
     {"operation_id":"agent_presets.resolve_preview","method":"POST","path":"/api/agent-presets/{preset_id}/resolve-preview","request_schema":null,"response_schema":null,"canonical_errors":["CAPABILITY_NOT_MATERIALIZED","CAPABILITY_UNAVAILABLE_ON_PLATFORM","PRESET_RESOURCE_NOT_BOUND","RESOURCE_OWNER_MISMATCH"]},
@@ -41,6 +42,7 @@
     {"operation_id":"agent_bindings.get","method":"GET","path":"/api/agent-bindings/{target_kind}/{target_id}","request_schema":null,"response_schema":null,"canonical_errors":[]}
   ],
   "canonical_error_codes": [
+    "AGENT_PRESET_NOT_FOUND",
     "CAPABILITY_NOT_ACTIVE",
     "CAPABILITY_NOT_IN_PRESET",
     "CAPABILITY_NOT_MATERIALIZED",

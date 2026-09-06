@@ -1,23 +1,23 @@
 {
   "schema_version": "1.0.0",
   "gate": "ap-7",
-  "admission": "admitted",
-  "signed": true,
-  "signed_at": "2026-09-06",
+  "admission": "pending-validation",
+  "signed": false,
+  "signed_at": null,
   "signing": {
     "kind": "local-commit-attestation",
     "owner": "main-host",
-    "implementation_commit": "582932377"
+    "implementation_commit": null
   },
   "previous_admission": {
     "status": "revoked",
     "revoked_at": "2026-09-06",
-    "reason": "Manual product walkthrough found that the home Guid surface did not provide a real AgentPreset selector and therefore did not launch sessions from the Agent Workbench preset.",
+    "reason": "Manual product walkthrough found that Agent Workbench still froze concrete resources into AgentPreset, omitted user deletion and capability details, and therefore did not satisfy the corrected product contract.",
     "admission": "admitted",
     "signed": true,
     "signed_at": "2026-09-06",
-    "implementation_commit": "8e3f1eee8",
-    "documentation_commit": "c7f67eefb"
+    "implementation_commit": "582932377",
+    "documentation_commit": "3ede5ef8c"
   },
   "ap_statuses": {
     "AP-0": "closed",
@@ -27,17 +27,25 @@
     "AP-4": "closed",
     "AP-5": "closed",
     "AP-6": "closed",
-    "AP-7": "closed"
+    "AP-7": "pending-validation"
   },
   "real_agent_consumer": {
     "status": "pass",
-    "consumer": "Home Guid AgentPreset selector and standard AgentSession launch",
+    "consumer": "Agent Workbench capability authoring, Home Guid AgentPreset selector, and target-scoped resources",
     "evidence": [
       "ui/src/renderer/pages/guid/components/AgentPillBar.tsx",
       "ui/src/renderer/pages/guid/hooks/useGuidAgentSelection.ts",
       "ui/src/renderer/pages/guid/hooks/useGuidSend.ts",
+      "ui/src/renderer/pages/agentSettings/AgentCapabilityList.tsx",
+      "ui/src/renderer/pages/agentSettings/AgentPresetLibrary.tsx",
       "ui/src/renderer/pages/agentSettings/AgentPresetEditor.tsx",
+      "ui/src/renderer/pages/conversation/components/ChatConversation.tsx",
+      "ui/src/renderer/pages/conversation/components/ChatLayout/index.tsx",
+      "ui/src/renderer/pages/conversation/platforms/nomi/NomiSendBox.tsx",
+      "crates/backend/nomifun-agent-kernel/src/compiler.rs::AgentPresetCompiler::compile",
+      "crates/backend/nomifun-conversation/src/service.rs::update",
       "crates/backend/nomifun-agent-control-plane/src/service.rs::resolve_agent_session_binding",
+      "crates/backend/nomifun-agent-control-plane/src/service.rs::retire_preset",
       "crates/backend/nomifun-app/tests/agent_platform_e2e.rs",
       "crates/backend/nomifun-app/tests/nomi_core_route_gap.rs"
     ],
@@ -54,7 +62,9 @@
       "skills",
       "mcp",
       "knowledge",
-      "workspace"
+      "workspace",
+      "resource_bindings",
+      "resource_binding_refs"
     ]
   },
   "real_non_agent_consumer": {
@@ -86,8 +96,8 @@
     {
       "name": "guid_and_workbench_agent_preset_selector",
       "status": "pass",
-      "command": "bun test --cwd ui src/renderer/pages/guid src/renderer/pages/agentSettings src/renderer/pages/settings/AgentSettings/LocalAgents.refresh.test.ts src/renderer/pages/settings/skill/skillLocalizationIntegration.test.ts src/common/types/agentPlatform/contracts.test.ts src/common/types/agentPlatform/testOrchestration.test.ts",
-      "result": "76 passed"
+      "command": "bun test --cwd ui",
+      "result": "3211 passed, 0 failed"
     },
     {
       "name": "ui_build_and_quality",
@@ -111,32 +121,44 @@
     {
       "name": "control_plane_and_api_types",
       "status": "pass",
-      "command": "cargo test --offline -p nomifun-agent-control-plane --lib; cargo test --offline -p nomifun-api-types --lib",
-      "result": "12 control-plane tests and 530 API type tests passed"
+      "command": "cargo test --locked -p nomifun-agent-control-plane --lib; cargo test --locked -p nomifun-agent-kernel --lib; cargo test --locked -p nomifun-api-types --lib",
+      "result": "16 control-plane tests, 18 Kernel tests and 530 API type tests passed"
     },
     {
       "name": "fresh_v4_and_agent_platform",
       "status": "pass",
       "command": "cargo test --offline -p nomifun-v4-root -- --test-threads=1; cargo test --offline -p nomifun-agent-platform --lib; cargo test --offline -p nomifun-agent-platform --test chat_minimal",
-      "result": "11 Fresh-v4 root tests, 13 AgentPlatform lib tests and 2 formal stack tests passed"
+      "result": "11 Fresh-v4 root tests, 16 AgentPlatform lib tests and 2 formal stack tests passed"
     },
     {
       "name": "fresh_and_nomi_core_routes",
       "status": "pass",
       "command": "cargo test --offline -p nomifun-app --test agent_platform_e2e; cargo test --offline -p nomifun-app --test nomi_core_route_gap -- --test-threads=1",
-      "result": "1 Fresh AgentPlatform E2E and 12 Nomi-core route tests passed"
+      "result": "1 Fresh AgentPlatform E2E and 26 Nomi-core route tests passed"
     },
     {
       "name": "application_regression",
       "status": "pass",
-      "command": "cargo test --offline -p nomifun-app --lib -- --test-threads=1",
-      "result": "399 passed, 1 credential-only test ignored, 0 failed"
+      "command": "cargo test --locked -p nomifun-app --lib -- --test-threads=1",
+      "result": "405 passed, 1 credential-only test ignored, 0 failed"
+    },
+    {
+      "name": "preset_session_model_and_resource_freeze",
+      "status": "pass",
+      "command": "cargo test --locked -p nomifun-conversation --test conversation_crud -- --test-threads=1; cargo test --locked -p nomifun-app --lib router::nomi_core_agent_projection::tests -- --test-threads=1",
+      "result": "34 Conversation CRUD tests and 13 Nomi-core projection tests passed; ordinary Nomi can change models while AgentPreset Sessions reject model changes and retain frozen required_resource_kinds"
+    },
+    {
+      "name": "cron_host_snapshot_freeze",
+      "status": "pass",
+      "command": "cargo test --locked -p nomifun-app --test cron_e2e -- --test-threads=1",
+      "result": "34 passed; NomiCoreCronAgentPresetResolver freezes the stable Revision/Snapshot before Cron persistence"
     },
     {
       "name": "database_migration_and_schema",
       "status": "pass",
-      "command": "cargo test --offline -p nomifun-db --test agent_preset_payload_migration --test id_schema_contract -- --test-threads=1; cargo test --offline -p nomifun-db --test db_lifecycle migration_file_versions_are_unique -- --exact --test-threads=1; cargo test --offline -p nomifun-db --test db_lifecycle v55_prefix_is_read_only_supported_then_file_init_applies_latest_suffix -- --exact --test-threads=1",
-      "result": "064 physical rename, 20 ID schema tests, unique migration versions and upgrade to migration 64 passed"
+      "command": "cargo test --locked -p nomifun-db --test agent_preset_resource_boundary_migration --test agent_preset_retirement_migration -- --test-threads=1; cargo test --locked -p nomifun-db --test db_lifecycle -- --test-threads=1",
+      "result": "065 retirement, 066 resource-bound Preset retirement, history retention and migration head 66 passed"
     },
     {
       "name": "workspace_integration",
@@ -151,10 +173,17 @@
       "result": "live_smoke_status=pass code=OK status=200"
     },
     {
-      "name": "admission_gate",
+      "name": "tauri_desktop_product_walkthrough",
       "status": "pass",
+      "command": "bun run dev with the real Tauri WebView2 host; inspect the desktop window and product APIs",
+      "result": "Default Nomi model selection, AgentPreset pills, Workbench preselection, capability tri-state/details, user deletion, frozen Preset model, target-scoped Knowledge/Workspace and clean desktop layout passed",
+      "scope": "NomiFun Desktop; phone mode is outside this product validation scope"
+    },
+    {
+      "name": "admission_gate",
+      "status": "pending-validation",
       "command": "node --check scripts/gate-agent-v2.mjs; bun scripts/gate-agent-v2.mjs --self-test; bun run gate:agent-v2 -- ap-7",
-      "result": "gate syntax, self-test and signed clean-checkpoint admission passed"
+      "result": "syntax and self-test passed; formal admission waits for the clean implementation commit and signed evidence"
     }
   ],
   "legacy_production_reachability": 0,
@@ -162,9 +191,11 @@
   "plugin_phase": "blocked_until_explicit_06_kickoff",
   "notes": [
     "The previously signed AP-7 evidence is superseded and revoked.",
+    "The current implementation uses capability tri-state authoring, a frozen AgentPreset model, Snapshot-owned required_resource_kinds, and target-scoped resource selection.",
     "Historical migration and deletion-contract strings remain only as audit material.",
     "No provider credential is part of this evidence or repository.",
-    "SL-S4-02 remains blocked for a human Tauri Desktop UI walkthrough.",
+    "SL-S4-02 passed in the real Tauri Desktop host; phone mode is outside the nomifun-desktop validation scope.",
+    "AP-7 remains unsigned only until the implementation is committed and the clean signed gate is rerun.",
     "06 Plugin/MiniApp implementation is intentionally not included in this admission."
   ]
 }

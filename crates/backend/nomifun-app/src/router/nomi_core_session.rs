@@ -40,7 +40,7 @@ use nomifun_api_types::{
     RemoteCancelRequestDto, RemoteMutationResponseDto, RemoteObserveRequestDto,
     RemoteObserveResponseDto, RemoteOpenRequestDto, RemoteOpenResponseDto,
     RemoteOpenStateViewDto, RemoteTurnRequestDto,
-    ResolveSavedRevisionPreviewRequest, AgentResolvedSnapshot, SessionCursorDto,
+    AgentResolvedSnapshot, SessionCursorDto,
     SendMessageRequest, UpdateConversationRequest,
 };
 use nomifun_common::{AppError, MessagePosition, MessageType};
@@ -3912,16 +3912,9 @@ async fn create_nomi_core_agent_session(
         .control_plane
         .resolve_agent_session_binding(&owner.0, &request.preset_id)
         .await?;
-    let projection = resolve_saved_binding_projection(
-        &state,
-        &owner,
-        &binding,
-        request.title.as_deref(),
-        "agent_session",
-        "desktop",
-        "owner",
-    )
-    .await?;
+    let projection =
+        resolve_saved_binding_projection(&state, &owner, &binding, request.title.as_deref())
+            .await?;
     let mut create_request = projection.projection.request;
     attach_session_metadata(&mut create_request.extra, &projection.binding, None)?;
     let creation_key = request_idempotency_key(
@@ -3979,60 +3972,32 @@ async fn get_nomi_core_agent_session_capabilities(
     let session_id = parse_agent_session_id(&agent_session_id)?;
     let response = load_owned_nomi_core_session(&state, &owner, &session_id).await?;
     let metadata = session_metadata(&response, &owner)?;
-    let projection = resolve_saved_binding_projection(
-        &state,
-        &owner,
-        &agent_binding_dto(&metadata.binding)?,
-        response.name.as_str().into(),
-        "agent_session",
-        "desktop",
-        "owner",
-    )
-    .await?;
-    let snapshot = state
-        .control_plane
-        .saved_snapshot(
-            &owner.0,
-            projection.binding.preset_revision_ref.preset_id.as_ref(),
-            projection.binding.preset_revision_ref.revision,
-        )
-        .await?;
-    if snapshot.snapshot_ref != metadata.binding.resolved_snapshot_ref {
+    let binding_dto = agent_binding_dto(&metadata.binding)?;
+    let projection =
+        resolve_saved_binding_projection(&state, &owner, &binding_dto, response.name.as_str().into())
+            .await?;
+    if projection.snapshot.snapshot_ref != metadata.binding.resolved_snapshot_ref {
         return Err(NomiCoreApiError::new(
             StatusCode::CONFLICT,
             "NOMI_CORE_SNAPSHOT_IDENTITY_CONFLICT",
             "the capability projection Snapshot differs from the Session binding",
         ));
     }
-    let editor_revision = state
-        .control_plane
-        .editor(
-            &owner.0,
-            projection.binding.preset_revision_ref.preset_id.as_ref(),
-            Some(projection.binding.preset_revision_ref.revision),
-        )
-        .await?
+    let initial_capabilities = projection
         .revision
-        .ok_or_else(|| {
-            NomiCoreApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "NOMI_CORE_PRESET_REVISION_UNAVAILABLE",
-                "the exact Agent Preset revision disappeared during capability projection",
-            )
-        })?;
-    let payload: nomifun_agent_contracts::AgentPresetRevisionPayload =
-        serde_json::from_value(serde_json::to_value(editor_revision.document)?)?;
-    let initial_capabilities = payload
+        .payload
         .initial_capabilities
         .iter()
         .map(|selection| selection.capability.id.as_ref().to_owned())
         .collect::<Vec<_>>();
-    let on_demand_capabilities = payload
+    let on_demand_capabilities = projection
+        .revision
+        .payload
         .on_demand_capabilities
         .iter()
         .map(|selection| selection.capability.id.as_ref().to_owned())
         .collect::<Vec<_>>();
-    let compact_on_demand_index = snapshot.content.compact_on_demand_index;
+    let compact_on_demand_index = projection.snapshot.content.compact_on_demand_index;
     Ok(Json(ApiResponse::ok(
         NomiCoreAgentSessionCapabilityResponse {
             resolved_snapshot_ref: metadata.binding.resolved_snapshot_ref,
@@ -4270,9 +4235,6 @@ async fn open_nomi_core_remote(
         &owner,
         &remote_binding.agent_binding,
         Some(remote_binding.name.as_str()),
-        "remote",
-        "remote",
-        "owner",
     )
     .await?;
     let binding_digest = remote_binding_digest(&projection.binding)?;
@@ -5053,41 +5015,20 @@ async fn resolve_saved_binding_projection(
     owner: &AuthenticatedOwner,
     binding: &AgentBindingValueDto,
     title: Option<&str>,
-    scene: &str,
-    surface: &str,
-    audience: &str,
 ) -> Result<
     super::nomi_core_agent_projection::NomiCoreSavedBindingProjection,
     NomiCoreApiError,
 > {
-    let preset_id = binding.preset_revision_ref.preset_id.clone();
-    let revision = binding.preset_revision_ref.revision;
-    let editor = state
+    let (binding, revision, snapshot) = state
         .control_plane
-        .editor(&owner.0, &preset_id, Some(revision))
+        .saved_binding_artifacts(&owner.0, binding)
         .await?;
-    let preview = state
-        .control_plane
-        .preview_saved_revision(
-            &owner.0,
-            &preset_id,
-            revision,
-            ResolveSavedRevisionPreviewRequest {
-                scene: scene.to_owned(),
-                surface: surface.to_owned(),
-                audience: audience.to_owned(),
-            },
-        )
-        .await?;
-    let _ = (surface, audience);
-    super::nomi_core_agent_projection::project_saved_binding(
-        super::nomi_core_agent_projection::SavedBindingProjectionInput {
-            owner: &common_owner_id(owner)?,
-            binding,
-            editor: &editor,
-            preview: &preview,
-            title,
-        },
+    super::nomi_core_agent_projection::project_saved_artifacts(
+        &common_owner_id(owner)?,
+        binding,
+        revision,
+        snapshot,
+        title,
     )
     .map_err(Into::into)
 }
