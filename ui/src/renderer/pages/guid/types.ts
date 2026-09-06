@@ -5,7 +5,6 @@
  */
 
 import type { AgentSource } from '@/renderer/utils/model/agentTypes';
-import type { PresetReference } from '@/common/types/agent/presetTypes';
 
 /**
  * Available agent entry returned by the backend.
@@ -23,8 +22,6 @@ export type AvailableAgent = {
   icon?: string;
   name: string;
   cli_path?: string;
-  is_preset?: boolean;
-  preset_id?: PresetReference;
   context?: string;
   avatar?: string;
   isExtension?: boolean;

@@ -6,15 +6,14 @@
 
 import React, { useState } from 'react';
 import { Robot } from '@icon-park/react';
-import type { Preset } from '@/common/types/agent/presetTypes';
+import type { AgentPresetSummary } from '@/common/types/agentPlatform';
 import { CUSTOM_AVATAR_IMAGE_MAP } from '@/renderer/pages/guid/constants';
 import { getAgentLogo } from '@/renderer/utils/model/agentLogo';
 import type { AgentMetadata } from '@/renderer/utils/model/agentTypes';
 import {
   isEmoji,
-  resolvePresetAvatarImageSrc,
-  resolvePresetCatalogName,
-} from '@/renderer/utils/model/presetPresentation';
+  resolveAgentAvatarImageSrc,
+} from '@/renderer/utils/model/agentPresentation';
 import { resolveCronAgentDisplayName } from './cronAgentSelection';
 
 const Identity: React.FC<{
@@ -25,7 +24,7 @@ const Identity: React.FC<{
   compact?: boolean;
 }> = ({ name, avatar, fallbackLogo, statusLabel, compact = false }) => {
   const avatarValue = avatar?.trim();
-  const resolvedAvatar = resolvePresetAvatarImageSrc(avatarValue, CUSTOM_AVATAR_IMAGE_MAP);
+  const resolvedAvatar = resolveAgentAvatarImageSrc(avatarValue, CUSTOM_AVATAR_IMAGE_MAP);
   const [failedImages, setFailedImages] = useState<ReadonlySet<string>>(() => new Set());
   const avatarImage = resolvedAvatar && !failedImages.has(resolvedAvatar) ? resolvedAvatar : undefined;
   // A mapped decorative image may fail offline; retain the original Emoji as
@@ -94,15 +93,13 @@ export const CronAgentOptionIdentity: React.FC<{
 );
 
 export const CronPresetOptionIdentity: React.FC<{
-  preset: Preset;
-  language: string;
+  preset: AgentPresetSummary;
   nameOverride?: string;
   statusLabel?: string;
   compact?: boolean;
-}> = ({ preset, language, nameOverride, statusLabel, compact }) => (
+}> = ({ preset, nameOverride, statusLabel, compact }) => (
   <Identity
-    name={nameOverride?.trim() || resolvePresetCatalogName(preset, language)}
-    avatar={preset.avatar}
+    name={nameOverride?.trim() || preset.display_name}
     statusLabel={statusLabel}
     compact={compact}
   />

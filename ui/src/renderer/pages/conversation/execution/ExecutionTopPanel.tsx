@@ -12,7 +12,6 @@ import { ExecutionControls } from './ExecutionControls';
 import { useExecution } from './ExecutionContext';
 import type { OpenStepPayload } from './DagCanvas';
 import { isTerminalExecutionStatus } from './executionStatusMeta';
-import ParticipantProfilePanel from './ParticipantProfilePanel';
 import { useExecutionModelPool } from './useExecutionModelPool';
 import styles from './executionTopPanel.module.css';
 
@@ -216,7 +215,6 @@ const ExecutionTopPanel: React.FC = () => {
   const completedCount = steps.filter((step) => step.status === 'completed').length;
   const failedCount = steps.filter((step) => step.status === 'failed').length;
   const completionPercent = steps.length > 0 ? Math.round((completedCount / steps.length) * 100) : 0;
-  const offersReusableProfiles = status === 'completed' || status === 'completed_with_failures';
   const waitingSteps = steps.filter(
     (step) => step.status === 'waiting_input' && Boolean(latestAttemptByStep.get(step.step_id)?.question?.trim()),
   );
@@ -296,7 +294,6 @@ const ExecutionTopPanel: React.FC = () => {
             >
               <span className={styles.progressBar} style={{ width: `${completionPercent}%` }} />
             </span>
-            {offersReusableProfiles && detail && <ParticipantProfilePanel detail={detail} />}
           </div>
 
           {waitingSteps.map((step) => {

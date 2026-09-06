@@ -35,7 +35,6 @@ const draft = (): AgentPresetDraft => ({
   display_name: 'Coding',
   document: {
     schema_version: '1.0.0',
-    surfaces: ['desktop'],
     model_route_refs: {},
     chat_route_records: {},
     initial_capabilities: [],
@@ -54,9 +53,7 @@ const draft = (): AgentPresetDraft => ({
     system_role_provider_overrides: {},
     persona: '',
     instructions: '',
-    context_policy: {},
-    execution_constraints: {},
-    runtime_budget: {},
+    starter_prompts: [],
   },
 });
 

@@ -25,7 +25,7 @@ describe('SkillMarketCard visual hierarchy', () => {
 
   test('shows at most three tags and summarizes the remainder', () => {
     expect(source.includes('const MAX_VISIBLE_TAGS = 3')).toBe(true);
-    expect(source.includes('totalTagCount - MAX_VISIBLE_TAGS')).toBe(true);
+    expect(source.includes('rawTags.length - MAX_VISIBLE_TAGS')).toBe(true);
     expect(source.includes('+{overflowCount}')).toBe(true);
   });
 

@@ -18,19 +18,12 @@ describe('Guid resource cards placement', () => {
     const primaryStageIndex = source.indexOf('className={styles.guidPrimaryStage}');
     const discoveryAreaIndex = source.indexOf('className={styles.guidDiscoveryArea}');
     const companionPreviewIndex = source.indexOf('<GuidCompanionPosterPreview', discoveryAreaIndex);
-    const editorHostIndex = source.indexOf('<GuidPresetEditorHost', inputIndex);
-    const discoveryAreaEndIndex = source.indexOf('{/* PresetPickerDrawer', discoveryAreaIndex);
-    const discoveryAreaSource = source.slice(discoveryAreaIndex, discoveryAreaEndIndex);
 
     expect(primaryStageIndex).toBeGreaterThan(-1);
     expect(inputIndex).toBeGreaterThan(-1);
     expect(resourceIndex).toBeGreaterThan(inputIndex);
-    expect(editorHostIndex).toBeGreaterThan(resourceIndex);
-    expect(discoveryAreaIndex).toBeGreaterThan(editorHostIndex);
+    expect(discoveryAreaIndex).toBeGreaterThan(resourceIndex);
     expect(companionPreviewIndex).toBeGreaterThan(discoveryAreaIndex);
-    expect(discoveryAreaSource.includes('activeSkillCount={activeSkillCount}')).toBe(false);
-    expect(discoveryAreaSource.includes('workspaceDir={guidInput.dir}')).toBe(false);
-    expect(discoveryAreaSource.includes('currentModelName={modelSelection.current_model')).toBe(false);
     expect(source.includes('onFillPrompt')).toBe(false);
   });
 

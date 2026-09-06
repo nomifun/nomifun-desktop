@@ -12,7 +12,7 @@ use nomifun_api_types::{
     ConversationResponse, CreateAgentExecutionRequest, CreateExecutionFromTemplateRequest,
     ExecutionModelPool, ExecutionModelRef, ExecutionStepProfile, PlannedExecutionStep,
     ReassignExecutionStepRequest,
-    RenameAgentExecutionRequest, ReplanAgentExecutionRequest, ResolvedPresetSnapshot,
+    RenameAgentExecutionRequest, ReplanAgentExecutionRequest, AgentResolvedSnapshot,
     RetryExecutionStepRequest, SteerExecutionStepRequest, UpdateExecutionStepRequest,
     VersionedAgentExecutionCommand,
 };
@@ -286,7 +286,7 @@ fn attempt_actor_allows_update(actor: &AgentExecutionActor) -> bool {
 
 struct CreateContext {
     conversation: Option<ConversationResponse>,
-    lead_preset: Option<ResolvedPresetSnapshot>,
+    lead_snapshot: Option<AgentResolvedSnapshot>,
     lead_conversation_id: Option<String>,
     /// Present only when the calling Conversation is an active Attempt. Work
     /// is appended to this aggregate; no child execution is created.
@@ -469,7 +469,7 @@ async fn create_context(
             explicit_pool.map(ExecutionModelPool::from),
         )?;
         return Ok(CreateContext {
-            lead_preset: None,
+            lead_snapshot: None,
             conversation: Some(conversation),
             lead_conversation_id: None,
             current_execution_id: Some(execution_id),
@@ -512,7 +512,7 @@ async fn create_context(
         .map(str::to_owned);
     let delegation_policy = conversation.delegation_policy;
     Ok(CreateContext {
-        lead_preset: conversation.preset_snapshot.clone(),
+        lead_snapshot: conversation.agent_snapshot.clone(),
         conversation: Some(conversation),
         lead_conversation_id: Some(conversation_id),
         current_execution_id: None,
@@ -661,7 +661,7 @@ async fn delegate(
     };
     let actor = defaults.actor.clone();
     let conversation = defaults.conversation.clone();
-    let lead_preset = defaults.lead_preset.clone();
+    let lead_snapshot = defaults.lead_snapshot.clone();
     if defaults.current_execution_id.is_some() {
         if work_dir.is_some()
             || adaptation_policy.is_some()
@@ -760,7 +760,7 @@ async fn delegate(
             }
             _ => {
                 deps.engine
-                    .create_for_agent(&owner_id, &actor, lead_preset.as_ref(), request)
+                    .create_for_agent(&owner_id, &actor, lead_snapshot.as_ref(), request)
                     .await
             }
         }

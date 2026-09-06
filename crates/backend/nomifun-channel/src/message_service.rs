@@ -647,7 +647,6 @@ impl ChannelMessageService {
             source: Some(source),
             channel_chat_id: session.chat_id.clone(),
             preset_id: None,
-            preset_overrides: None,
             delegation_policy: Default::default(),
             execution_model_pool: None,
             decision_policy: Default::default(),

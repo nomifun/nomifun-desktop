@@ -1048,7 +1048,7 @@ async fn delete_clears_all_idmm_session_bypass_references_but_preserves_watch_co
             cron_job_id: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             created_at: 1,
             updated_at: 1,
         })
@@ -1294,7 +1294,7 @@ fn conversation_with_model(
         cron_job_id: None,
         preset_id: None,
         preset_revision: None,
-        preset_snapshot: None,
+        agent_snapshot: None,
         created_at: now,
         updated_at: now,
     }

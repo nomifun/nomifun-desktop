@@ -12,6 +12,9 @@ use crate::models::{
     AgentExecutionTemplateDetailRows, AgentExecutionTemplateParticipantRow,
     AgentExecutionTemplateRow,
 };
+use crate::repository::agent_preset_lineage::{
+    validate_agent_preset_lineage, validate_and_lock_agent_preset_lineage,
+};
 use crate::repository::agent_execution_template::{
     CreateAgentExecutionTemplateParams, IAgentExecutionTemplateRepository,
     NewAgentExecutionTemplateParticipant, UpdateAgentExecutionTemplateParams,
@@ -75,31 +78,39 @@ fn validate_participant(
             ));
         }
     }
-    match (
+    validate_agent_preset_lineage(
+        participant.preset_id.as_deref(),
+        participant.preset_revision,
+        participant.agent_snapshot.as_deref(),
+        "Template participant",
+    )?;
+    if let (Some(preset_id), Some(preset_revision), Some(snapshot)) = (
         &participant.preset_id,
         participant.preset_revision,
-        &participant.preset_snapshot,
+        &participant.agent_snapshot,
     ) {
-        (None, None, None) => {}
-        (Some(preset_id), Some(preset_revision), Some(snapshot))
-            if !preset_id.trim().is_empty() && preset_revision > 0 =>
-        {
-            let snapshot = validate_json_object(snapshot, "template participant preset_snapshot")?;
+            let snapshot = validate_json_object(snapshot, "template participant agent_snapshot")?;
             if snapshot.get("preset_id").and_then(Value::as_str) != Some(preset_id.as_str())
                 || snapshot.get("preset_revision").and_then(Value::as_i64)
                     != Some(preset_revision)
-                || snapshot.get("target").and_then(Value::as_str) != Some("execution_step")
             {
                 return Err(invalid(
-                    "template participant preset lineage and snapshot are inconsistent",
+                    "template participant AgentPreset lineage and agent_snapshot are inconsistent",
                 ));
             }
-        }
-        _ => {
-            return Err(invalid(
-                "template participant preset lineage must be absent or complete",
-            ));
-        }
+            let legacy_override_field = ["preset_", "overrides"].concat();
+            for field in ["target", "source"] {
+                if snapshot.get(field).is_some() {
+                    return Err(invalid(format!(
+                        "template participant agent_snapshot contains removed legacy field '{field}'"
+                    )));
+                }
+            }
+            if snapshot.get(&legacy_override_field).is_some() {
+                return Err(invalid(
+                    "template participant agent_snapshot contains a removed legacy override field",
+                ));
+            }
     }
     if let Some(capability) = &participant.capability {
         validate_json_object(capability, "template participant capability")?;
@@ -123,9 +134,9 @@ fn resolved_provider_model(
         return Ok((provider_id.trim().to_owned(), model.trim().to_owned()));
     }
     let resolved = participant
-        .preset_snapshot
+        .agent_snapshot
         .as_deref()
-        .map(|snapshot| validate_json_object(snapshot, "template participant preset_snapshot"))
+        .map(|snapshot| validate_json_object(snapshot, "template participant agent_snapshot"))
         .transpose()?
         .and_then(|snapshot| snapshot.get("resolved_model").cloned());
     let provider_id = resolved
@@ -236,19 +247,14 @@ async fn insert_participants_tx(
                 participant.source_agent_id
             )));
         }
-        if let Some(preset_id) = participant.preset_id.as_deref() {
-            let preset = sqlx::query(
-                "UPDATE presets SET updated_at = updated_at WHERE preset_id = ?",
-            )
-            .bind(preset_id)
-            .execute(&mut **tx)
-            .await?;
-            if preset.rows_affected() == 0 {
-                return Err(invalid(format!(
-                    "template participant preset '{preset_id}' does not exist"
-                )));
-            }
-        }
+        validate_and_lock_agent_preset_lineage(
+            tx,
+            participant.preset_id.as_deref(),
+            participant.preset_revision,
+            participant.agent_snapshot.as_deref(),
+            "Template participant",
+        )
+        .await?;
         // Provider is a hard logical parent. Take SQLite's writer lock and
         // validate it in this transaction so provider deletion cannot race a
         // newly persisted Template participant. No FK/trigger is involved.
@@ -265,7 +271,7 @@ async fn insert_participants_tx(
         }
         sqlx::query(
             "INSERT INTO agent_execution_template_participants (\
-                template_participant_id, template_id, source_agent_id, preset_id, preset_revision, preset_snapshot, \
+                template_participant_id, template_id, source_agent_id, preset_id, preset_revision, agent_snapshot, \
                 provider_id, model, role, capability, constraints, description, system_prompt, \
                 enabled_skills, disabled_builtin_skills, sort_order, created_at, updated_at\
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -275,7 +281,7 @@ async fn insert_participants_tx(
         .bind(&participant.source_agent_id)
         .bind(&participant.preset_id)
         .bind(participant.preset_revision)
-        .bind(&participant.preset_snapshot)
+        .bind(&participant.agent_snapshot)
         .bind(&provider_id)
         .bind(&model)
         .bind(&participant.role)

@@ -5,10 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 #[cfg(test)]
 use nomifun_ai_agent::AgentRuntimeRegistry;
-use nomifun_api_types::{
-    ConversationResponse, CreateConversationRequest, ResolvedPresetSnapshot,
-    UpdateConversationRequest,
-};
+use nomifun_api_types::{ConversationResponse, CreateConversationRequest, UpdateConversationRequest};
 #[cfg(test)]
 use nomifun_api_types::{ListMessagesQuery, MessageResponse};
 use nomifun_common::AppError;
@@ -51,7 +48,6 @@ pub trait CompanionSessionPort: Send + Sync {
         &self,
         owner_id: &str,
         request: CreateConversationRequest,
-        snapshot: Option<ResolvedPresetSnapshot>,
     ) -> Result<ConversationResponse, AppError>;
 
     async fn delete(&self, owner_id: &str, session_id: &str) -> Result<(), AppError>;
@@ -168,16 +164,8 @@ impl CompanionSessionPort for ConversationCompanionSessionPort {
         &self,
         owner_id: &str,
         request: CreateConversationRequest,
-        snapshot: Option<ResolvedPresetSnapshot>,
     ) -> Result<ConversationResponse, AppError> {
-        match snapshot {
-            Some(snapshot) => {
-                self.service
-                    .create_from_preset_snapshot(owner_id, request, snapshot)
-                    .await
-            }
-            None => self.service.create(owner_id, request).await,
-        }
+        self.service.create(owner_id, request).await
     }
 
     async fn delete(&self, owner_id: &str, session_id: &str) -> Result<(), AppError> {

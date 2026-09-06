@@ -42,10 +42,10 @@ pub struct ConversationRow {
     pub pinned_at: Option<TimestampMs>,
     /// UUIDv7 logical reference to the cron job that created this conversation.
     pub cron_job_id: Option<String>,
-    /// Preset lineage and immutable resolved launch configuration.
+    /// AgentPreset provenance and immutable resolved Agent launch snapshot.
     pub preset_id: Option<String>,
     pub preset_revision: Option<i64>,
-    pub preset_snapshot: Option<String>,
+    pub agent_snapshot: Option<String>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }

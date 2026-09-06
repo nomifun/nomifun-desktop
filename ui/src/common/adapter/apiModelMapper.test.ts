@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { fromApiConversation, fromApiResolvedPresetSnapshot } from './apiModelMapper';
+import { fromApiAgentSnapshot, fromApiConversation } from './apiModelMapper';
 import { parseMcpServerId, parseMessageId } from '../types/ids';
 
 // 最小 ApiConversation 片段：只构造 mapper 关心的字段
@@ -101,21 +101,21 @@ describe('fromApiConversation first-class fields', () => {
   });
 });
 
-describe('fromApiConversation preset lineage boundary', () => {
-  test('canonically maps one complete immutable preset lineage', () => {
+describe('fromApiConversation Agent lineage boundary', () => {
+  test('canonically maps one complete immutable Agent lineage', () => {
     const mapped = fromApiConversation(
       apiConv({
         extra: {},
         preset_id: PRESET_ID,
         preset_revision: 3,
-        preset_snapshot: snapshot(),
+        agent_snapshot: snapshot(),
       }),
     );
 
     expect(mapped.preset_id).toBe(PRESET_ID);
     expect(mapped.preset_revision).toBe(3);
-    expect(mapped.preset_snapshot?.preset_id).toBe(PRESET_ID);
-    expect(mapped.preset_snapshot?.preset_revision).toBe(3);
+    expect(mapped.agent_snapshot?.preset_id).toBe(PRESET_ID);
+    expect(mapped.agent_snapshot?.preset_revision).toBe(3);
   });
 
   test('rejects partial lineage and non-canonical top-level preset ids', () => {
@@ -125,12 +125,12 @@ describe('fromApiConversation preset lineage boundary', () => {
       {
         preset_id: 'preset:0190f5fe-7c00-7a00-8000-000000000011',
         preset_revision: 3,
-        preset_snapshot: snapshot(),
+        agent_snapshot: snapshot(),
       },
       {
         preset_id: '0190F5FE-7C00-7A00-8000-000000000011',
         preset_revision: 3,
-        preset_snapshot: snapshot(),
+        agent_snapshot: snapshot(),
       },
     ];
 
@@ -149,7 +149,7 @@ describe('fromApiConversation preset lineage boundary', () => {
             extra: {},
             preset_id: PRESET_ID,
             preset_revision: 3,
-            preset_snapshot: snapshot({ preset_id: OTHER_PRESET_ID }),
+            agent_snapshot: snapshot({ preset_id: OTHER_PRESET_ID }),
           }),
         ),
       ).includes('preset_id must match'),
@@ -162,23 +162,23 @@ describe('fromApiConversation preset lineage boundary', () => {
             extra: {},
             preset_id: PRESET_ID,
             preset_revision: 3,
-            preset_snapshot: snapshot({ preset_revision: 4 }),
+            agent_snapshot: snapshot({ preset_revision: 4 }),
           }),
         ),
       ).includes('preset_revision must match'),
     ).toBe(true);
   });
 
-  test('canonical snapshot parser rejects legacy ids and invalid revisions', () => {
+  test('canonical Agent snapshot parser rejects legacy ids and invalid revisions', () => {
     expect(
       thrownMessage(() =>
-        fromApiResolvedPresetSnapshot(snapshot({ id: PRESET_ID })),
+        fromApiAgentSnapshot(snapshot({ id: PRESET_ID })),
       ).includes('legacy field "id"'),
     ).toBe(true);
     for (const preset_revision of [0, -1, 1.5, '3']) {
       expect(
         thrownMessage(() =>
-          fromApiResolvedPresetSnapshot(snapshot({ preset_revision })),
+          fromApiAgentSnapshot(snapshot({ preset_revision })),
         ).includes('positive safe integer'),
       ).toBe(true);
     }

@@ -15,6 +15,7 @@ use crate::models::{
     AgentExecutionStepDependencyRow, AgentExecutionStepDetailRow, AgentExecutionStepRow,
     ConversationDeliveryReceiptRow, ConversationExecutionLinkRow,
 };
+use crate::repository::agent_preset_lineage::validate_and_lock_agent_preset_lineage;
 use crate::repository::agent_execution::{
     AdoptAgentExecutionStepOutputParams, AgentExecutionLeaseToken,
     AgentExecutionAttemptRecoveryDisposition, AgentExecutionAttemptRecoveryResult,
@@ -1061,19 +1062,14 @@ async fn insert_participant_tx(
             participant.source_agent_id
         )));
     }
-    if let Some(preset_id) = participant.preset_id.as_deref() {
-        let preset = sqlx::query(
-            "UPDATE presets SET updated_at = updated_at WHERE preset_id = ?",
-        )
-        .bind(preset_id)
-        .execute(&mut **tx)
-        .await?;
-        if preset.rows_affected() == 0 {
-            return Err(DbError::Conflict(format!(
-                "Agent Execution participant preset '{preset_id}' does not exist"
-            )));
-        }
-    }
+    validate_and_lock_agent_preset_lineage(
+        tx,
+        participant.preset_id.as_deref(),
+        participant.preset_revision,
+        participant.agent_snapshot.as_deref(),
+        "Agent Execution participant",
+    )
+    .await?;
     match (
         participant.provider_id.as_deref(),
         participant.model.as_deref(),
@@ -1109,7 +1105,7 @@ async fn insert_participant_tx(
     }
     sqlx::query(
         "INSERT INTO agent_execution_participants (\
-            participant_id, execution_id, source_agent_id, preset_id, preset_revision, preset_snapshot, \
+            participant_id, execution_id, source_agent_id, preset_id, preset_revision, agent_snapshot, \
             provider_id, model, role, capability, constraints, description, system_prompt, \
             enabled_skills, disabled_builtin_skills, sort_order, introduced_in_revision, created_at\
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1119,7 +1115,7 @@ async fn insert_participant_tx(
     .bind(&participant.source_agent_id)
     .bind(&participant.preset_id)
     .bind(participant.preset_revision)
-    .bind(&participant.preset_snapshot)
+    .bind(&participant.agent_snapshot)
     .bind(&participant.provider_id)
     .bind(&participant.model)
     .bind(&participant.role)

@@ -16,9 +16,9 @@ use nomifun_api_types::{
     AgentExecutionTemplateParticipantInput, AnswerExecutionDecisionRequest,
     ConfigureExecutionStepRequest, ConversationResponse, CreateAgentExecutionRequest,
     CreateAgentExecutionTemplateRequest, CreateExecutionFromTemplateRequest, ExecutionModelPool,
-    ExecutionParticipant, ExecutionStep, PlannedExecution, PresetOverrides, PresetTarget,
+    ExecutionParticipant, ExecutionStep, PlannedExecution,
     ReassignExecutionStepRequest, RenameAgentExecutionRequest, ReplanAgentExecutionRequest,
-    ResolvedPresetSnapshot, RetryExecutionStepRequest,
+    AgentResolvedSnapshot, RetryExecutionStepRequest,
     SteerExecutionStepRequest, UpdateExecutionStepRequest, VersionedAgentExecutionCommand,
     UpdateAgentExecutionTemplateRequest, WorkspaceEntry,
 };
@@ -42,7 +42,6 @@ use nomifun_db::{
     RetryAgentExecutionStep, SettleAgentExecutionAttemptParams, UpdateAgentExecutionParams,
     UpdateAgentExecutionTemplateParams,
 };
-use nomifun_preset::PresetService;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -137,7 +136,6 @@ pub(crate) struct AgentExecutionEngineDeps {
     pub(crate) provider_model_repository: Arc<dyn nomifun_db::IProviderModelRepository>,
     pub(crate) provider_model_capability_repository:
         Arc<dyn nomifun_db::IProviderModelCapabilityRepository>,
-    pub(crate) preset_service: Arc<PresetService>,
     pub(crate) planner: Arc<dyn PlanProducer>,
     pub(crate) attempt_runner: Arc<dyn AttemptRunner>,
     pub(crate) publisher: AgentExecutionEventPublisher,
@@ -157,7 +155,6 @@ impl AgentExecutionEngineDeps {
         provider_model_capability_repository: Arc<
             dyn nomifun_db::IProviderModelCapabilityRepository,
         >,
-        preset_service: Arc<PresetService>,
         planner: Arc<dyn PlanProducer>,
         attempt_runner: Arc<dyn AttemptRunner>,
         conversation_effects: Arc<dyn ConversationEffects>,
@@ -171,7 +168,6 @@ impl AgentExecutionEngineDeps {
             provider_repository,
             provider_model_repository,
             provider_model_capability_repository,
-            preset_service,
             planner,
             attempt_runner,
             publisher,
@@ -187,7 +183,6 @@ impl AgentExecutionEngineDeps {
 pub struct AgentExecutionEngine {
     repository: Arc<dyn IAgentExecutionRepository>,
     template_repository: Arc<dyn IAgentExecutionTemplateRepository>,
-    preset_service: Arc<PresetService>,
     resolver: ParticipantResolver,
     planner: Arc<dyn PlanProducer>,
     publisher: AgentExecutionEventPublisher,
@@ -201,7 +196,6 @@ impl AgentExecutionEngine {
             deps.provider_repository.clone(),
             deps.provider_model_repository.clone(),
             deps.provider_model_capability_repository.clone(),
-            deps.preset_service.clone(),
         );
         let mut scheduler_deps = ExecutionSchedulerDeps::new(
             deps.repository.clone(),
@@ -215,7 +209,6 @@ impl AgentExecutionEngine {
         Self {
             repository: deps.repository,
             template_repository: deps.template_repository,
-            preset_service: deps.preset_service,
             resolver,
             planner: deps.planner,
             publisher: deps.publisher,
@@ -259,7 +252,7 @@ impl AgentExecutionEngine {
     /// Create an execution from an authenticated calling Conversation.
     ///
     /// The Conversation remains the interaction boundary while its frozen
-    /// preset is copied into the immutable lead Participant. This keeps one
+    /// Agent snapshot is copied into the immutable lead Participant. This keeps one
     /// execution state machine without silently dropping the caller's rules,
     /// skills or knowledge bindings when work is delegated.
     pub async fn create_from_conversation(
@@ -278,21 +271,21 @@ impl AgentExecutionEngine {
             owner_id,
             actor,
             request,
-            conversation.preset_snapshot.as_ref(),
+            conversation.agent_snapshot.as_ref(),
         )
         .await
     }
 
     /// Create an execution for an authenticated Agent identity that does not
     /// have a Conversation boundary (for example a Remote installation token).
-    /// The optional frozen preset enriches the immutable lead Participant; no
+    /// The optional frozen Agent snapshot supplies the immutable lead Participant; no
     /// synthetic Conversation is created and terminal reporting therefore
     /// cannot trigger an extra model turn.
     pub async fn create_for_agent(
         &self,
         owner_id: &str,
         actor: &AgentExecutionActor,
-        lead_preset: Option<&ResolvedPresetSnapshot>,
+        lead_snapshot: Option<&AgentResolvedSnapshot>,
         request: CreateAgentExecutionRequest,
     ) -> Result<AgentExecution, AppError> {
         if request.lead_conversation_id.is_some() {
@@ -301,7 +294,7 @@ impl AgentExecutionEngine {
                     .to_owned(),
             ));
         }
-        self.create_inner(owner_id, actor, request, lead_preset).await
+        self.create_inner(owner_id, actor, request, lead_snapshot).await
     }
 
     /// Instantiate reusable authoring input into one independent execution.
@@ -320,7 +313,7 @@ impl AgentExecutionEngine {
     }
 
     /// Conversation-authenticated variant used by `nomi_delegate`. The
-    /// caller's frozen preset is retained as the lead snapshot exactly as it is
+    /// caller's frozen Agent snapshot is retained exactly as it is
     /// for a non-template execution.
     pub async fn create_from_template_for_conversation(
         &self,
@@ -340,7 +333,7 @@ impl AgentExecutionEngine {
             actor,
             template_id,
             request,
-            conversation.preset_snapshot.as_ref(),
+            conversation.agent_snapshot.as_ref(),
         )
         .await
     }
@@ -351,7 +344,7 @@ impl AgentExecutionEngine {
         actor: &AgentExecutionActor,
         template_id: &str,
         request: CreateExecutionFromTemplateRequest,
-        lead_preset: Option<&ResolvedPresetSnapshot>,
+        lead_snapshot: Option<&AgentResolvedSnapshot>,
     ) -> Result<AgentExecution, AppError> {
         let template_id = canonical_id::<AgentExecutionTemplateId>("template_id", template_id)?;
         let rows = self
@@ -376,8 +369,8 @@ impl AgentExecutionEngine {
             .map(|raw| decode_json(raw, "template context"))
             .transpose()?;
         let mut participants = runtime_participants_from_template(&rows.participants)?;
-        if let Some(snapshot) = lead_preset {
-            ParticipantResolver::prepend_frozen_lead(
+        if let Some(snapshot) = lead_snapshot {
+            ParticipantResolver::prepend_frozen_snapshot(
                 &mut participants,
                 snapshot,
                 request.lead_model.as_ref(),
@@ -415,14 +408,14 @@ impl AgentExecutionEngine {
         owner_id: &str,
         actor: &AgentExecutionActor,
         request: CreateAgentExecutionRequest,
-        lead_preset: Option<&ResolvedPresetSnapshot>,
+        lead_snapshot: Option<&AgentResolvedSnapshot>,
     ) -> Result<AgentExecution, AppError> {
         let mut participants = self
             .resolver
             .resolve(&request.model_pool, request.lead_model.as_ref())
             .await?;
-        if let Some(snapshot) = lead_preset {
-            ParticipantResolver::prepend_frozen_lead(
+        if let Some(snapshot) = lead_snapshot {
+            ParticipantResolver::prepend_frozen_snapshot(
                 &mut participants,
                 snapshot,
                 request.lead_model.as_ref(),
@@ -550,9 +543,7 @@ impl AgentExecutionEngine {
         if let Some(max_parallel) = request.max_parallel {
             validate_max_parallel(Some(max_parallel))?;
         }
-        let participants = self
-            .resolve_template_participant_inputs(request.participants)
-            .await?;
+        let participants = self.resolve_template_participant_inputs(request.participants)?;
         let rows = self
             .template_repository
             .create_template(
@@ -585,8 +576,7 @@ impl AgentExecutionEngine {
         }
         let participants = match request.participants {
             Some(participants) => Some(
-                self.resolve_template_participant_inputs(participants)
-                    .await?,
+                self.resolve_template_participant_inputs(participants)?,
             ),
             None => None,
         };
@@ -640,7 +630,7 @@ impl AgentExecutionEngine {
         }
     }
 
-    async fn resolve_template_participant_inputs(
+    fn resolve_template_participant_inputs(
         &self,
         inputs: Vec<AgentExecutionTemplateParticipantInput>,
     ) -> Result<Vec<NewAgentExecutionTemplateParticipant>, AppError> {
@@ -652,8 +642,7 @@ impl AgentExecutionEngine {
         let mut participants = Vec::with_capacity(inputs.len());
         for (index, input) in inputs.into_iter().enumerate() {
             participants.push(
-                self.resolve_template_participant_input(input, index as i64)
-                .await?,
+                self.resolve_template_participant_input(input, index as i64)?,
             );
         }
         let models: HashSet<_> = participants
@@ -673,7 +662,7 @@ impl AgentExecutionEngine {
         Ok(participants)
     }
 
-    async fn resolve_template_participant_input(
+    fn resolve_template_participant_input(
         &self,
         input: AgentExecutionTemplateParticipantInput,
         default_sort_order: i64,
@@ -681,8 +670,7 @@ impl AgentExecutionEngine {
         let AgentExecutionTemplateParticipantInput {
             source_agent_id,
             preset_id,
-            preset_snapshot,
-            preset_overrides,
+            agent_snapshot,
             provider_id,
             model,
             role,
@@ -694,46 +682,31 @@ impl AgentExecutionEngine {
             disabled_builtin_skills,
             sort_order,
         } = input;
-        let snapshot = match (preset_snapshot, preset_id, preset_overrides) {
-            (Some(snapshot), explicit_id, None) => {
-                if explicit_id
+        let snapshot = match agent_snapshot {
+            Some(snapshot) => {
+                if preset_id
                     .as_deref()
                     .is_some_and(|id| id != snapshot.preset_id)
                 {
                     return Err(AppError::BadRequest(
-                        "template participant preset_id does not match preset_snapshot"
+                        "template participant preset_id does not match the frozen Agent snapshot"
                             .to_owned(),
                     ));
                 }
-                validate_template_snapshot(&snapshot)?;
+                validate_frozen_agent_snapshot(&snapshot)?;
                 Some(snapshot)
             }
-            (Some(_), _, Some(_)) => {
+            None if preset_id.is_some() => {
                 return Err(AppError::BadRequest(
-                    "preset_overrides cannot be combined with a frozen preset_snapshot"
+                    "template participants must provide a frozen Agent snapshot; preset_id is not resolved by AgentExecution"
                         .to_owned(),
                 ));
             }
-            (None, Some(preset_id), overrides) => Some(
-                self.preset_service
-                    .resolve(
-                        &non_empty("preset_id", preset_id)?,
-                        PresetTarget::ExecutionStep,
-                        None,
-                        overrides.unwrap_or_else(PresetOverrides::default),
-                    )
-                    .await?,
-            ),
-            (None, None, Some(_)) => {
-                return Err(AppError::BadRequest(
-                    "preset_overrides require preset_id".to_owned(),
-                ));
-            }
-            (None, None, None) => None,
+            None => None,
         };
         let snapshot_model = snapshot.as_ref().and_then(|snapshot| {
             let model = snapshot.resolved_model.as_ref()?;
-            Some((model.provider_id.clone()?, model.model.clone()))
+            Some((model.provider_id.clone(), model.model.clone()))
         });
         let (provider_id, model) = match (provider_id, model, snapshot_model) {
             (Some(provider_id), Some(model), _) => (
@@ -758,9 +731,9 @@ impl AgentExecutionEngine {
         };
         let preset_id = snapshot.as_ref().map(|snapshot| snapshot.preset_id.clone());
         let preset_revision = snapshot.as_ref().map(|snapshot| snapshot.preset_revision);
-        let preset_snapshot = snapshot
+        let agent_snapshot = snapshot
             .as_ref()
-            .map(|snapshot| encode_json(snapshot, "template preset snapshot"))
+            .map(|snapshot| encode_json(snapshot, "template Agent snapshot"))
             .transpose()?;
         let source_agent_id = source_agent_id
             .or_else(|| {
@@ -808,7 +781,7 @@ impl AgentExecutionEngine {
             source_agent_id,
             preset_id,
             preset_revision,
-            preset_snapshot,
+            agent_snapshot: agent_snapshot,
             provider_id,
             model,
             role,
@@ -2823,28 +2796,23 @@ fn decode_json<T: DeserializeOwned>(raw: &str, field: &str) -> Result<T, AppErro
         .map_err(|error| AppError::Internal(format!("invalid persisted {field}: {error}")))
 }
 
-fn validate_template_snapshot(snapshot: &ResolvedPresetSnapshot) -> Result<(), AppError> {
-    if snapshot.preset_id.trim().is_empty()
-        || snapshot.preset_revision <= 0
-        || snapshot.target != PresetTarget::ExecutionStep
-    {
+fn validate_frozen_agent_snapshot(snapshot: &AgentResolvedSnapshot) -> Result<(), AppError> {
+    if snapshot.preset_id.trim().is_empty() || snapshot.preset_revision <= 0 {
         return Err(AppError::BadRequest(
-            "template participant preset_snapshot must be a valid execution_step snapshot"
+            "template participant agent_snapshot must be a valid Agent snapshot"
                 .to_owned(),
         ));
     }
     if let Some(model) = snapshot.resolved_model.as_ref() {
-        if let Some(provider_id) = model.provider_id.as_deref()
-            && ProviderId::try_from(provider_id).is_err()
-        {
+        if ProviderId::try_from(model.provider_id.as_str()).is_err() {
             return Err(AppError::BadRequest(
-                "template participant preset_snapshot has a non-canonical provider_id"
+                "template participant Agent snapshot has a non-canonical provider_id"
                     .to_owned(),
             ));
         }
         if model.model.is_empty() || model.model.trim() != model.model {
             return Err(AppError::BadRequest(
-                "template participant preset_snapshot has an invalid model".to_owned(),
+                "template participant Agent snapshot has an invalid model".to_owned(),
             ));
         }
     }
@@ -2883,17 +2851,17 @@ fn runtime_participants_from_template(
         // snapshots are still copied verbatim; there is no lossy model-range
         // reconstruction.
         let snapshot = row
-            .preset_snapshot
+            .agent_snapshot
             .as_deref()
             .map(|snapshot| {
-                decode_json::<ResolvedPresetSnapshot>(
+                decode_json::<AgentResolvedSnapshot>(
                     snapshot,
                     "template participant preset snapshot",
                 )
             })
             .transpose()?;
         if let Some(snapshot) = snapshot.as_ref() {
-            validate_template_snapshot(&snapshot)?;
+            validate_frozen_agent_snapshot(&snapshot)?;
         }
         // The materialized participant row is the sole live provider binding.
         // A frozen preset may describe the historical resolution, but using it
@@ -2933,7 +2901,7 @@ fn runtime_participants_from_template(
             source_agent_id: row.source_agent_id.clone(),
             preset_id: row.preset_id.clone(),
             preset_revision: row.preset_revision,
-            preset_snapshot: row.preset_snapshot.clone(),
+            agent_snapshot: row.agent_snapshot.clone(),
             provider_id: Some(provider_id),
             model: Some(model),
             role: row.role.clone(),
@@ -3014,8 +2982,8 @@ fn map_template_participant(
         source_agent_id: row.source_agent_id,
         preset_id: row.preset_id,
         preset_revision: row.preset_revision,
-        preset_snapshot: row
-            .preset_snapshot
+        agent_snapshot: row
+            .agent_snapshot
             .as_deref()
             .map(|raw| decode_json(raw, "template participant preset snapshot"))
             .transpose()?,
@@ -3352,7 +3320,7 @@ fn participants_from_new(
                 source_agent_id: row.source_agent_id.clone(),
                 preset_id: row.preset_id.clone(),
                 preset_revision: row.preset_revision,
-                preset_snapshot: parse_optional("preset_snapshot", row.preset_snapshot.as_deref())?,
+                agent_snapshot: parse_optional("agent_snapshot", row.agent_snapshot.as_deref())?,
                 provider_id: row.provider_id.clone(),
                 model: row.model.clone(),
                 role: row.role.clone(),

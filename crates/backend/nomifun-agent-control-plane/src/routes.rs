@@ -6,9 +6,10 @@ use axum::routing::{get, post, put};
 use axum::{Extension, Json, Router};
 use nomifun_agent_contracts::UserId;
 use nomifun_api_types::{
-    AgentBindingRecordDto, AgentPresetEditorResponse, AgentPresetLibraryResponse, ApiResponse,
-    CapabilityCatalogItemDto, CreateAgentPresetFromTemplateRequest, CreateAgentPresetRequest,
-    CreateRemoteBindingRequest, McpToolCatalogItemDto, PutAgentBindingRequest, RemoteBindingDto,
+    AgentBindingRecordDto, AgentPresetEditorResponse, AgentPresetLibraryResponse,
+    AgentPresetRevisionImpactResponse, ApiResponse, CapabilityCatalogItemDto,
+    CreateAgentPresetFromTemplateRequest, CreateAgentPresetRequest, CreateRemoteBindingRequest,
+    McpToolCatalogItemDto, PutAgentBindingRequest, RemoteBindingDto,
     ResolveAgentPresetPreviewRequest, ResolveAgentPresetPreviewResponse,
     ResolveSavedRevisionPreviewRequest, SaveAgentPresetRevisionRequest,
     SaveAgentPresetRevisionResponse, SkillCatalogItemDto, UpdateRemoteBindingRequest,
@@ -80,6 +81,10 @@ fn control_plane_router_with_legacy_skill_route(
         .route(
             "/api/agent-presets/{preset_id}/revisions/{revision}",
             get(get_revision),
+        )
+        .route(
+            "/api/agent-presets/{preset_id}/revisions/{revision}/impact",
+            get(get_revision_impact),
         )
         .route(
             "/api/agent-presets/{preset_id}/revisions/{revision}/resolve-preview",
@@ -217,6 +222,18 @@ async fn get_revision(
     )))
 }
 
+async fn get_revision_impact(
+    State(control_plane): State<Arc<AgentControlPlane>>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path((preset_id, revision)): Path<(String, u64)>,
+) -> Result<Json<ApiResponse<AgentPresetRevisionImpactResponse>>, ControlPlaneError> {
+    Ok(Json(ApiResponse::ok(
+        control_plane
+            .revision_impact(&owner, &preset_id, revision)
+            .await?,
+    )))
+}
+
 async fn resolve_saved_revision_preview(
     State(control_plane): State<Arc<AgentControlPlane>>,
     Extension(owner): Extension<AuthenticatedOwner>,
@@ -308,5 +325,16 @@ mod tests {
         assert!(!source.contains(&("/api/".to_owned() + "test")));
         assert!(!source.contains(&("/test-".to_owned() + "sessions")));
         assert!(!source.contains(&("/api/agent-".to_owned() + "sessions")));
+        assert!(source.contains(
+            "/api/agent-presets/{preset_id}/revisions/{revision}/impact"
+        ));
+        let handler = source
+            .split("async fn get_revision_impact")
+            .nth(1)
+            .expect("revision impact handler");
+        assert!(
+            handler.contains("Extension(owner): Extension<AuthenticatedOwner>"),
+            "impact inspection must remain authenticated and owner-scoped"
+        );
     }
 }

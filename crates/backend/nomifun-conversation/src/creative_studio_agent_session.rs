@@ -9,8 +9,7 @@ use nomifun_db::models::{ConversationRow, MessageRow};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ConversationService, CreativeStudioAgentCreationTarget, TrustedSnapshotOrigin,
-    parse_provider_with_model,
+    parse_provider_with_model, ConversationService, CreativeStudioAgentCreationTarget,
 };
 
 const CREATIVE_STUDIO_PLANNING_TURN_KIND: &str =
@@ -446,7 +445,6 @@ impl ConversationService {
                     source: Some(ConversationSource::Nomifun),
                     channel_chat_id: None,
                     preset_id: None,
-                    preset_overrides: None,
                     delegation_policy: DelegationPolicy::Disabled,
                     execution_model_pool: None,
                     decision_policy: DecisionPolicy::default(),
@@ -465,7 +463,6 @@ impl ConversationService {
                         .clone(),
                     create_if_missing: request.pending_turn_idempotency_key.is_some(),
                 }),
-                TrustedSnapshotOrigin::LegacyPreset,
             )
             .await?;
 

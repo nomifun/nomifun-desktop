@@ -24,10 +24,6 @@ export async function saveNomiDefaultModel(provider_id: ProviderId, use_model: s
  * as the key — no namespace prefix. Builtin / internal agents keep `backend` or
  * `agent_type` as the key since there is only one row per type.
  *
- * Note: preset *presets* (not agents) still use a `preset:<presetId>`
- * form produced inline by `PresetSelectionArea`. That is a separate
- * selection path that points at the backend-merged preset catalog, not
- * `AgentRegistry`.
  */
 export const getAgentKey = (agent: {
   agent_type: string;
@@ -37,7 +33,6 @@ export const getAgentKey = (agent: {
   agent_id?: string;
   /** Local identity slot used by the mixed AvailableAgent display aggregate. */
   id?: string;
-  is_preset?: boolean;
 }): string => {
   const rowScoped = agent.agent_type === 'remote' || agent.agent_source === 'custom';
   const rowIdentity = agent.agent_id ?? agent.id;

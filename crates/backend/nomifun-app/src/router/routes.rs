@@ -11,8 +11,11 @@ use axum::{Router, middleware};
 use tower_http::cors::{Any, CorsLayer};
 
 use nomifun_ai_agent::agent_routes;
+use nomifun_agent_contracts::{
+    CapabilityConsumer, CapabilityOperationLock, CapabilityRef,
+};
+use nomifun_agent_control_plane::AgentControlPlane;
 use nomifun_assets::{AssetRouterState, asset_routes};
-use nomifun_preset::preset_routes;
 use nomifun_auth::{
     AuthRouterState, AuthState, InstanceOwnerState, TrustState, auth_middleware, auth_routes,
     csrf_middleware, require_instance_owner_middleware, require_local_trust_middleware,
@@ -55,6 +58,28 @@ use super::health::{
 use super::model_failover::{ModelFailoverRouterState, model_failover_routes};
 use super::state::{ModuleStates, build_module_states, build_ws_state};
 use super::trace::with_access_log;
+
+struct GatewayCatalogAdmission {
+    control_plane: Arc<AgentControlPlane>,
+}
+
+#[async_trait::async_trait]
+impl nomifun_gateway::CapabilityAdmissionPort for GatewayCatalogAdmission {
+    async fn admit(
+        &self,
+        capability: CapabilityRef,
+        consumer: CapabilityConsumer,
+    ) -> Result<CapabilityOperationLock, nomifun_gateway::CapabilityAdmissionError> {
+        self.control_plane
+            .resolve_capability(&capability, consumer)
+            .map_err(|error| {
+                nomifun_gateway::CapabilityAdmissionError::new(
+                    error.code().as_ref(),
+                    error.to_string(),
+                )
+            })
+    }
+}
 
 async fn forward_instance_events(
     mut receiver: tokio::sync::broadcast::Receiver<nomifun_api_types::WebSocketMessage<serde_json::Value>>,
@@ -286,6 +311,9 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
     // routes so a gateway toggle and a UI toggle act on the same state.
     let gateway_deps = Arc::new(nomifun_gateway::CompatibilityCapabilityHost {
         authoritative_user_id: services.authoritative_user_id.clone(),
+        capability_admission: Arc::new(GatewayCatalogAdmission {
+            control_plane: states.nomi_core_agent_api.control_plane.clone(),
+        }),
         conversation: Arc::new(super::legacy_conversation_port::LegacyConversationCapabilityPort::new(
             states.conversation.service.clone(),
             services.agent_runtime_registry.clone(),
@@ -986,13 +1014,6 @@ fn create_nomi_core_router_with_all_state(
         &instance_owner_state,
     );
 
-    // Preset catalog and resolver routes protected by auth middleware.
-    let preset_authenticated = protect_instance_owner(
-        preset_routes(states.preset),
-        &auth_mw_state,
-        &instance_owner_state,
-    );
-
     // Computer-use OS permission status + prompt (macOS TCC). Stateless: the
     // handlers probe/trigger the host process's own grants. Auth-gated like the
     // other diagnostic endpoints. Registered on every build (handlers degrade to
@@ -1185,8 +1206,7 @@ fn create_nomi_core_router_with_all_state(
         .merge(agent_execution_template_authenticated)
         .merge(terminal_authenticated)
         .merge(office_authenticated)
-        .merge(shell_authenticated)
-        .merge(preset_authenticated);
+        .merge(shell_authenticated);
     // Robot management face (owner-only), same group and same gates as the SSH
     // host book: the desktop UI is talking, not a device.
     let router = match robot_faces.as_ref() {

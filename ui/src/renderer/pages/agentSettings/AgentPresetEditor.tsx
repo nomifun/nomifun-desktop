@@ -27,7 +27,6 @@ import {
   Checkbox,
   Collapse,
   Input,
-  InputNumber,
   Select,
   Tag,
   Tooltip,
@@ -171,9 +170,6 @@ const SelectedCapabilityList: React.FC<{
     </div>
   );
 };
-
-const numberValue = (record: Record<string, unknown>, key: string, fallback: number): number =>
-  typeof record[key] === 'number' ? (record[key] as number) : fallback;
 
 const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   editor,
@@ -386,6 +382,26 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
                   ...draft,
                   description: description || undefined,
                 })
+              }
+            />
+          </label>
+          <label className={`${styles.field} ${styles.fieldWide}`}>
+            <span>{t('agentSettings.fields.persona')}</span>
+            <Input.TextArea
+              value={draft.document.persona}
+              autoSize={{ minRows: 2, maxRows: 5 }}
+              onChange={(persona: string) =>
+                patchDocument((document) => ({ ...document, persona }))
+              }
+            />
+          </label>
+          <label className={`${styles.field} ${styles.fieldWide}`}>
+            <span>{t('agentSettings.fields.instructions')}</span>
+            <Input.TextArea
+              value={draft.document.instructions}
+              autoSize={{ minRows: 4, maxRows: 10 }}
+              onChange={(instructions: string) =>
+                patchDocument((document) => ({ ...document, instructions }))
               }
             />
           </label>
@@ -706,107 +722,6 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             })}
           </div>
         )}
-      </section>
-
-      <section className={styles.section} id='agent-settings-advanced'>
-        <Collapse defaultActiveKey={[]} className={styles.advancedCollapse}>
-          <Collapse.Item name='advanced' header={t('agentSettings.sections.advanced')}>
-            <div className={styles.formGrid}>
-              <label className={`${styles.field} ${styles.fieldWide}`}>
-                <span>{t('agentSettings.fields.persona')}</span>
-                <Input.TextArea
-                  value={draft.document.persona}
-                  autoSize={{ minRows: 2, maxRows: 5 }}
-                  onChange={(persona: string) =>
-                    patchDocument((document) => ({ ...document, persona }))
-                  }
-                />
-              </label>
-              <label className={`${styles.field} ${styles.fieldWide}`}>
-                <span>{t('agentSettings.fields.instructions')}</span>
-                <Input.TextArea
-                  value={draft.document.instructions}
-                  autoSize={{ minRows: 4, maxRows: 10 }}
-                  onChange={(instructions: string) =>
-                    patchDocument((document) => ({ ...document, instructions }))
-                  }
-                />
-              </label>
-              <label className={styles.field}>
-                <span>{t('agentSettings.advanced.systemTokens')}</span>
-                <InputNumber
-                  min={0}
-                  value={numberValue(draft.document.context_policy, 'max_system_tokens', 12000)}
-                  onChange={(value: number | undefined) =>
-                    patchDocument((document) => ({
-                      ...document,
-                      context_policy: {
-                        ...document.context_policy,
-                        max_system_tokens: value ?? 0,
-                      },
-                    }))
-                  }
-                />
-              </label>
-              <label className={styles.field}>
-                <span>{t('agentSettings.advanced.dynamicTokens')}</span>
-                <InputNumber
-                  min={0}
-                  value={numberValue(
-                    draft.document.context_policy,
-                    'max_dynamic_context_tokens',
-                    16000
-                  )}
-                  onChange={(value: number | undefined) =>
-                    patchDocument((document) => ({
-                      ...document,
-                      context_policy: {
-                        ...document.context_policy,
-                        max_dynamic_context_tokens: value ?? 0,
-                      },
-                    }))
-                  }
-                />
-              </label>
-              <label className={styles.field}>
-                <span>{t('agentSettings.advanced.activeCapabilities')}</span>
-                <InputNumber
-                  min={0}
-                  value={numberValue(
-                    draft.document.execution_constraints,
-                    'max_active_capabilities',
-                    64
-                  )}
-                  onChange={(value: number | undefined) =>
-                    patchDocument((document) => ({
-                      ...document,
-                      execution_constraints: {
-                        ...document.execution_constraints,
-                        max_active_capabilities: value ?? 0,
-                      },
-                    }))
-                  }
-                />
-              </label>
-              <label className={styles.field}>
-                <span>{t('agentSettings.advanced.toolCalls')}</span>
-                <InputNumber
-                  min={0}
-                  value={numberValue(draft.document.runtime_budget, 'max_tool_calls_per_turn', 64)}
-                  onChange={(value: number | undefined) =>
-                    patchDocument((document) => ({
-                      ...document,
-                      runtime_budget: {
-                        ...document.runtime_budget,
-                        max_tool_calls_per_turn: value ?? 0,
-                      },
-                    }))
-                  }
-                />
-              </label>
-            </div>
-          </Collapse.Item>
-        </Collapse>
       </section>
 
       {preview?.status === 'blocked' && (

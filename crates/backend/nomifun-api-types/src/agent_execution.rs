@@ -175,7 +175,7 @@ pub struct ExecutionParticipant {
     )]
     pub preset_id: Option<String>,
     pub preset_revision: Option<i64>,
-    pub preset_snapshot: Option<crate::ResolvedPresetSnapshot>,
+    pub agent_snapshot: Option<crate::AgentResolvedSnapshot>,
     #[serde(
         default,
         deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
@@ -221,7 +221,7 @@ impl<'de> Deserialize<'de> for ExecutionParticipant {
             )]
             preset_id: Option<String>,
             preset_revision: Option<i64>,
-            preset_snapshot: Option<crate::ResolvedPresetSnapshot>,
+            agent_snapshot: Option<crate::AgentResolvedSnapshot>,
             #[serde(
                 default,
                 deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
@@ -259,7 +259,7 @@ impl<'de> Deserialize<'de> for ExecutionParticipant {
             source_agent_id: wire.source_agent_id,
             preset_id: wire.preset_id,
             preset_revision: wire.preset_revision,
-            preset_snapshot: wire.preset_snapshot,
+            agent_snapshot: wire.agent_snapshot,
             provider_id: wire.provider_id,
             model: wire.model,
             role: wire.role,
@@ -838,7 +838,7 @@ mod tests {
             "source_agent_id": "0190f5fe-7c00-7a00-8000-000000000003",
             "preset_id": "0190f5fe-7c00-7a00-8000-000000000004",
             "preset_revision": 1,
-            "preset_snapshot": null,
+            "agent_snapshot": null,
             "provider_id": PROVIDER_ID,
             "model": "model-a",
             "role": null,
@@ -876,7 +876,7 @@ mod tests {
             "source_agent_id": "nomi",
             "preset_id": null,
             "preset_revision": null,
-            "preset_snapshot": null,
+            "agent_snapshot": null,
             "provider_id": null,
             "model": null,
             "role": null,

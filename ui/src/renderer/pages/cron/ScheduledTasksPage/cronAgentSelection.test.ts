@@ -6,8 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import type { ICronJob } from '@/common/adapter/ipcBridge';
-import { parsePresetReference } from '@/common/types/agent/presetTypes';
-import { parseAgentId } from '@/common/types/ids';
+import { parseAgentId, parseAgentPresetId } from '@/common/types/ids';
 import type { AgentMetadata } from '@/renderer/utils/model/agentTypes';
 import {
   findCronSelectedAgent,
@@ -92,7 +91,7 @@ describe('scheduled task Agent selection identity', () => {
   });
 
   test('keeps a frozen preset unchanged even when its live catalog entry is unavailable', () => {
-    const presetId = parsePresetReference('0190f5fe-7c00-7a00-8000-000000000023');
+    const presetId = parseAgentPresetId('0190f5fe-7c00-7a00-8000-000000000023');
     const configured = job({
       name: 'Frozen reviewer preset',
       preset_id: presetId,

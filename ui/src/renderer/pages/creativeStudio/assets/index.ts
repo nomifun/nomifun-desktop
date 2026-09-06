@@ -30,7 +30,6 @@ export type {
   CreativeAssetPatch,
   CreativeAssetPort,
   CreativeCatalogPromptAssetOrigin,
-  CreativePresetPromptAssetOrigin,
   CreativePromptAssetOrigin,
   CreativePromptAssetPort,
   CreativePromptLibrarySource,

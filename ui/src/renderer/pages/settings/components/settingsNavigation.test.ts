@@ -26,24 +26,29 @@ describe('settings navigation', () => {
     expect(siderSource.indexOf("'computer-use'")).toBeLessThan(siderSource.indexOf("'about'"));
   });
 
-  test('routes execution engines directly and keeps legacy links compatible', () => {
+  test('routes execution engines directly without an Agent authoring entry', () => {
     const routerSource = readSource(new URL('../../../components/layout/Router.tsx', import.meta.url));
-    const engineContentSource = readSource(
-      new URL('../../../components/settings/SettingsModal/contents/AgentModalContent.tsx', import.meta.url)
-    );
+    const enginePageSource = readSource(new URL('../AgentSettings/index.tsx', import.meta.url));
+    const engineContentSource = readSource(new URL('../AgentSettings/ExecutionEnginesSettingsContent.tsx', import.meta.url));
 
     for (const path of ['/settings/execution-engines', '/settings/browser-use', '/settings/computer-use']) {
       expect(routerSource.includes(`path='${path}'`)).toBe(true);
     }
 
     expect(routerSource.includes("import('@renderer/pages/settings/AgentSettings')")).toBe(true);
+    expect(routerSource.includes("path='/agent'")).toBe(true);
+    expect(routerSource.includes('LegacyAgentAuthoringRedirect')).toBe(false);
+    expect(routerSource.includes("path='/settings/agent'")).toBe(false);
+    expect(routerSource.includes("path='/settings/agent-presets/*'")).toBe(false);
     expect(routerSource.includes("to='/settings/execution-engines'")).toBe(true);
     expect(routerSource.includes("to='/models?section=agents'")).toBe(false);
+    expect(enginePageSource.includes('AgentModalContent')).toBe(false);
     // One engine means one surface: no tab strip, and no separate runtime
     // timeout panel.
     expect(engineContentSource.includes('Tabs')).toBe(false);
     expect(engineContentSource.includes('AgentRuntimeSettingsContent')).toBe(false);
     expect(engineContentSource.includes('<LocalAgents />')).toBe(true);
+    expect(engineContentSource.includes('agentSettings.navigation')).toBe(false);
     expect(
       routerSource.includes(
         "path='/settings/browser-use' element={<Navigate to='/browser?tab=settings' replace />}"

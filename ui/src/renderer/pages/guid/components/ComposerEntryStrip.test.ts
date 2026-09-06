@@ -81,16 +81,14 @@ describe('Guid composer entry strip polish', () => {
     expect(css.includes('.entrySkillFooter')).toBe(false);
   });
 
-  test('removes the duplicate preset entry while keeping the shared collaboration policy', () => {
+  test('keeps the shared collaboration policy without a legacy Agent entry', () => {
     const source = readSource(new URL('./ComposerEntryStrip.tsx', import.meta.url));
 
     expect(source.includes('collaborationPolicyNode?: React.ReactNode')).toBe(true);
-    const defaultState = source.slice(source.indexOf('// --- Default state ---'));
-    const policyPos = defaultState.indexOf('{collaborationPolicyNode}');
-    expect(policyPos).toBeGreaterThan(-1);
-    expect(defaultState.includes('onChoosePreset')).toBe(false);
-    expect(defaultState.includes('guid.entry.usePreset')).toBe(false);
-    expect(defaultState.includes('{skillsEntry}')).toBe(true);
+    expect(source.includes('{collaborationPolicyNode}')).toBe(true);
+    expect(source.includes('onChoosePreset')).toBe(false);
+    expect(source.includes('guid.entry.usePreset')).toBe(false);
+    expect(source.includes('{skillsEntry}')).toBe(true);
   });
 
   test('offers the summon-companion entry before the Skills entry', () => {
@@ -102,15 +100,8 @@ describe('Guid composer entry strip polish', () => {
     expect(source.includes('conversation.summon.button')).toBe(true);
     expect(source.includes('onClick={onSummonCompanion}')).toBe(true);
 
-    const presetState = source.slice(
-      source.indexOf('// --- Preset selected state ---'),
-      source.indexOf('// --- Default state ---')
-    );
-    expect(presetState.includes('{summonEntry}')).toBe(true);
-
-    const defaultState = source.slice(source.indexOf('// --- Default state ---'));
-    const summonPos = defaultState.indexOf('{summonEntry}');
-    const skillsPos = defaultState.indexOf('{skillsEntry}');
+    const summonPos = source.indexOf('{summonEntry}');
+    const skillsPos = source.indexOf('{skillsEntry}');
     expect(summonPos).toBeGreaterThan(-1);
     expect(skillsPos).toBeGreaterThan(-1);
     expect(summonPos).toBeLessThan(skillsPos);

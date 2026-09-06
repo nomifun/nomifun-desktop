@@ -65,26 +65,8 @@ import type {
   TChatConversation,
   TProviderWithModel,
 } from '../config/storage';
-import type {
-  CreatePresetRequest,
-  CreatePresetTagRequest,
-  ImportPresetsRequest,
-  ImportPresetsResult,
-  Preset,
-  PresetReference,
-  PresetTag,
-  ResolvePresetRequest,
-  ResolvedPresetSnapshot,
-  SetPresetStateRequest,
-  UpdatePresetRequest,
-  UpdatePresetTagRequest,
-} from '../types/agent/presetTypes';
-import {
-  parsePresetReference,
-  parsePresetTagKey,
-} from '../types/agent/presetTypes';
 import type { PreviewHistoryTarget, PreviewSnapshotInfo, PreviewUrlResponse } from '../types/office/preview';
-import { parsePresetTagId, parsePreviewSnapshotId } from '../types/ids';
+import { parsePreviewSnapshotId } from '../types/ids';
 import {
   fromProviderResponse,
   toCreateProviderRequest,
@@ -160,9 +142,11 @@ import type {
 import type {
   AgentBindingRecord,
   AgentBindingValue,
+  AgentPresetId,
   AgentPresetEditorResponse,
   AgentPresetLibraryResponse,
   AgentPresetRevision,
+  AgentResolvedSnapshot,
   AgentSessionContinuationView,
   AgentSessionId,
   CapabilityCatalogItem,
@@ -197,11 +181,6 @@ import type {
   SkillCatalogItem,
   UpdateRemoteBindingRequest,
 } from '../types/agentPlatform';
-import {
-  asAgentPresetId,
-  asAgentSessionId,
-  asResolvedSnapshotId,
-} from '../types/agentPlatform';
 import type {
   TAgentExecutionTemplate,
   TAgentExecutionTemplateDetail,
@@ -221,12 +200,12 @@ import type {
 import {
   fromApiConversation,
   fromApiPaginatedConversations,
-  fromApiResolvedPresetSnapshot,
+  fromApiAgentSnapshot,
   toApiModelOptional,
 } from './apiModelMapper';
 import {
-  CANONICAL_UUID_V7,
   parseAgentId,
+  parseAgentPresetId,
   parseAttachmentId,
   parseChannelPluginId,
   parseChannelSessionId,
@@ -363,91 +342,6 @@ export const shell = {
   checkToolInstalled: httpPost<boolean, { tool: string }>('/api/shell/check-tool-installed'),
   openFolderWith: httpPost<void, { folder_path: string; tool: 'vscode' | 'terminal' | 'explorer' }>(
     '/api/shell/open-folder-with'
-  ),
-};
-
-// ---------------------------------------------------------------------------
-// Presets — reusable launch configuration catalog
-// ---------------------------------------------------------------------------
-
-const fromApiPreset = (preset: Preset): Preset => {
-  if (Object.prototype.hasOwnProperty.call(preset, 'id')) {
-    throw new TypeError('Preset response legacy field "id" is not accepted; use "preset_id"');
-  }
-  return {
-    ...preset,
-    preset_id: parsePresetReference(preset.preset_id, preset.source),
-    model_preferences: preset.model_preferences.map((model) => ({
-      ...model,
-      ...(model.provider_id == null ? {} : { provider_id: parseProviderId(model.provider_id) }),
-    })),
-    knowledge_bases: preset.knowledge_bases.map((binding) => ({
-      ...binding,
-      knowledge_base_id: parseKnowledgeBaseId(binding.knowledge_base_id),
-    })),
-    audience_tag_ids: preset.audience_tag_ids.map(parsePresetTagId),
-    scenario_tag_ids: preset.scenario_tag_ids.map(parsePresetTagId),
-  };
-};
-
-const fromApiPresetTag = (tag: PresetTag): PresetTag => ({
-  ...tag,
-  preset_tag_id: parsePresetTagId(tag.preset_tag_id),
-  key: parsePresetTagKey(tag.key),
-});
-
-export const presets = {
-  list: withResponseMap(httpGet<Preset[], void>('/api/presets'), (items) => items.map(fromApiPreset)),
-  get: withResponseMap(
-    httpGet<Preset, { preset_id: Preset['preset_id'] }>(
-      (p) => `/api/presets/${encodeURIComponent(p.preset_id)}`
-    ),
-    fromApiPreset
-  ),
-  create: withResponseMap(httpPost<Preset, CreatePresetRequest>('/api/presets'), fromApiPreset),
-  update: withResponseMap(httpPut<Preset, { preset_id: Preset['preset_id'] } & UpdatePresetRequest>(
-    (p) => `/api/presets/${encodeURIComponent(p.preset_id)}`,
-    (p) => {
-      const { preset_id: _presetId, ...body } = p;
-      return body;
-    }
-  ), fromApiPreset),
-  delete: httpDelete<void, { preset_id: Preset['preset_id'] }>(
-    (p) => `/api/presets/${encodeURIComponent(p.preset_id)}`
-  ),
-  setState: withResponseMap(httpPatch<Preset, SetPresetStateRequest>(
-    (p) => `/api/presets/${encodeURIComponent(p.preset_id)}/state`,
-    (p) => {
-      const { preset_id: _presetId, ...body } = p;
-      return body;
-    }
-  ), fromApiPreset),
-  resolve: withResponseMap(httpPost<ResolvedPresetSnapshot, ResolvePresetRequest>(
-    (p) => `/api/presets/${encodeURIComponent(p.preset_id)}/resolve`,
-    (p) => {
-      const { preset_id: _presetId, ...body } = p;
-      return body;
-    }
-  ), fromApiResolvedPresetSnapshot),
-  import: httpPost<ImportPresetsResult, ImportPresetsRequest>('/api/presets/import'),
-};
-
-// ---------------------------------------------------------------------------
-// Preset Tags
-// ---------------------------------------------------------------------------
-
-export const presetTags = {
-  list: withResponseMap(httpGet<PresetTag[], void>('/api/preset-tags'), (items) => items.map(fromApiPresetTag)),
-  create: withResponseMap(httpPost<PresetTag, CreatePresetTagRequest>('/api/preset-tags'), fromApiPresetTag),
-  update: withResponseMap(httpPut<PresetTag, UpdatePresetTagRequest>(
-    (p) => `/api/preset-tags/${encodeURIComponent(p.preset_tag_id)}`,
-    (p) => {
-      const { preset_tag_id: _presetTagId, ...body } = p;
-      return body;
-    }
-  ), fromApiPresetTag),
-  delete: httpDelete<void, { preset_tag_id: PresetTag['preset_tag_id'] }>(
-    (p) => `/api/preset-tags/${encodeURIComponent(p.preset_tag_id)}`
   ),
 };
 
@@ -1079,7 +973,6 @@ export const conversation = {
         type: p.type,
         name: p.name,
         preset_id: p.preset_id,
-        preset_overrides: p.preset_overrides,
         extra: p.extra,
       };
       if (isNomi) {
@@ -1684,10 +1577,6 @@ export const fs = {
   deleteSkill: httpDelete<void, { skill_name: string }>((p) => `/api/skills/${encodeURIComponent(p.skill_name)}`),
   // Assign tags to a skill (PUT /api/skills/{name}/tags). Tag keys reference the
   // shared preset tag vocabulary; the backend stores them in a sidecar table.
-  setSkillTags: httpPut<void, { skill_name: string; audience_tags: string[]; scenario_tags: string[] }>(
-    (p) => `/api/skills/${encodeURIComponent(p.skill_name)}/tags`,
-    (p) => ({ audience_tags: p.audience_tags, scenario_tags: p.scenario_tags })
-  ),
   getSkillPaths: httpGet<{ user_skills_dir: string; builtin_skills_dir: string }, void>('/api/skills/paths'),
   getCustomExternalPaths: httpGet<Array<{ name: string; path: string }>, void>('/api/skills/external-paths'),
   addCustomExternalPath: httpPost<void, { name: string; path: string }>('/api/skills/external-paths'),
@@ -3108,11 +2997,11 @@ function fromApiCronJob(job: ICronJob): ICronJob {
               preset_id:
                 job.metadata.agent_config.preset_id == null
                   ? undefined
-                  : parsePresetReference(job.metadata.agent_config.preset_id),
-              preset_snapshot:
-                job.metadata.agent_config.preset_snapshot == null
+                  : parseAgentPresetId(job.metadata.agent_config.preset_id),
+              agent_snapshot:
+                job.metadata.agent_config.agent_snapshot == null
                   ? undefined
-                  : fromApiResolvedPresetSnapshot(job.metadata.agent_config.preset_snapshot),
+                  : fromApiAgentSnapshot(job.metadata.agent_config.agent_snapshot),
               provider_id:
                 job.metadata.agent_config.provider_id == null
                   ? undefined
@@ -3245,10 +3134,10 @@ export interface ICronAgentConfig {
   cli_path?: string;
   /** Stable AgentRegistry identity required for every non-Nomi new conversation. */
   custom_agent_id?: AgentId;
-  preset_id?: PresetReference;
+  preset_id?: AgentPresetId;
   /** Frozen server-owned preset lineage returned by the API. */
   preset_revision?: number;
-  preset_snapshot?: ResolvedPresetSnapshot;
+  agent_snapshot?: AgentResolvedSnapshot;
   model?: string;
   /** Nomi logical reference to the provider business entity. */
   provider_id?: ProviderId;
@@ -3527,8 +3416,7 @@ export interface ICreateConversationParams {
   name?: string;
   model: TProviderWithModel;
   /** Backend-resolved reusable launch configuration. */
-  preset_id?: PresetReference;
-  preset_overrides?: import('../types/agent/presetTypes').PresetOverrides;
+  preset_id?: AgentPresetId;
   delegation_policy?: TDelegationPolicy;
   execution_model_pool?: TExecutionModelPool;
   decision_policy?: TDecisionPolicy;
@@ -3556,7 +3444,7 @@ export interface ICreateConversationParams {
     context_file_name?: string;
     /** Transient: preset opt-in skills. Consumed by backend create handler
      *  and stripped before persistence. */
-    preset_enabled_skills?: string[];
+    agent_enabled_skills?: string[];
     /** Transient: auto-inject skills the user opted out of on the Guid page.
      *  Consumed by backend create handler and stripped before persistence. */
     exclude_auto_inject_skills?: string[];
@@ -3912,7 +3800,6 @@ export interface IExtensionAgentActivitySnapshot {
 export const extensions = {
   getThemes: httpGet<ICssTheme[], void>('/api/extensions/themes'),
   getLoadedExtensions: httpGet<IExtensionInfo[], void>('/api/extensions'),
-  getPresets: httpGet<Record<string, unknown>[], void>('/api/extensions/presets'),
   getAgents: httpGet<Record<string, unknown>[], void>('/api/extensions/agents'),
   getMcpServers: httpGet<IExtensionMcpServerContribution[], void>('/api/extensions/mcp-servers'),
   getSkills: httpGet<Array<{ name: string; description: string; location: string }>, void>('/api/extensions/skills'),
@@ -4826,7 +4713,9 @@ const fromApiExecutionParticipant = (raw: unknown): TExecutionParticipant => {
     participant_id: parseExecutionParticipantId(value.participant_id),
     execution_id: parseExecutionId(value.execution_id),
     source_agent_id: parseAgentId(value.source_agent_id),
-    preset_id: value.preset_id as TExecutionParticipant['preset_id'],
+    preset_id: value.preset_id == null ? null : parseAgentPresetId(value.preset_id),
+    agent_snapshot:
+      value.agent_snapshot == null ? null : fromApiAgentSnapshot(value.agent_snapshot),
     provider_id: value.provider_id == null ? null : parseProviderId(value.provider_id),
   };
 };
@@ -4903,7 +4792,10 @@ const fromApiExecutionTemplateParticipant = (raw: unknown): TAgentExecutionTempl
     ...(value as unknown as TAgentExecutionTemplateParticipant),
     template_participant_id: parseExecutionTemplateParticipantId(value.template_participant_id),
     source_agent_id: parseAgentId(value.source_agent_id),
-    preset_id: value.preset_id as TAgentExecutionTemplateParticipant['preset_id'],
+    preset_id:
+      value.preset_id == null ? null : parseAgentPresetId(value.preset_id),
+    agent_snapshot:
+      value.agent_snapshot == null ? null : fromApiAgentSnapshot(value.agent_snapshot),
     provider_id: value.provider_id == null ? null : parseProviderId(value.provider_id),
   };
 };
@@ -5414,8 +5306,6 @@ export interface ICompanionProfile {
   evolve: ICompanionEvolveConfig;
   skills: ICompanionSkillConfig;
   appearance: ICompanionWindowConfig;
-  /** Frozen execution configuration last applied to this companion. */
-  applied_preset?: ResolvedPresetSnapshot;
   /**
    * User-chosen sidebar position. Absent = never reordered; such companions sort
    * after every explicitly ordered one, by creation time. Distinct from `seq`,
@@ -5947,20 +5837,6 @@ export const companion = {
     httpPatch<unknown, { companion_id: CompanionId; patch: ICompanionProfilePatch }>(
       (p) => `/api/companion/companions/${p.companion_id}`,
       (p) => p.patch
-    ),
-    fromApiCompanionProfile
-  ),
-  applyPreset: withResponseMap(
-    httpPost<
-      unknown,
-      { companion_id: CompanionId; preset_id: PresetReference; locale?: string; overrides?: import('../types/agent/presetTypes').PresetOverrides }
-    >(
-      (p) => `/api/companion/companions/${p.companion_id}/apply-preset`,
-      (p) => ({
-        preset_id: p.preset_id,
-        locale: p.locale,
-        overrides: p.overrides ?? {},
-      })
     ),
     fromApiCompanionProfile
   ),

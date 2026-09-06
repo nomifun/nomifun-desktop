@@ -472,11 +472,6 @@ pub struct CompanionProfileConfig {
     #[serde(default)]
     pub skills: CompanionSkillConfig,
     pub appearance: CompanionWindowConfig,
-    /// Frozen reusable configuration applied to this companion. Identity,
-    /// memories, evolved skills, window state and channel credentials remain
-    /// companion-owned; this snapshot only supplies execution preferences.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_preset: Option<nomifun_api_types::ResolvedPresetSnapshot>,
     /// User-chosen sidebar position. `None` = never reordered; such companions
     /// sort after every explicitly ordered one, by `created_at`. Distinct from
     /// [`Self::seq`], which is a registry-owned never-reused display ordinal and
@@ -506,7 +501,6 @@ impl CompanionProfileConfig {
             evolve: CompanionEvolveConfig::default(),
             skills: CompanionSkillConfig::default(),
             appearance: CompanionWindowConfig::default(),
-            applied_preset: None,
             order_index: None,
             created_at: now_ms(),
         }
@@ -583,16 +577,6 @@ impl CompanionProfileConfig {
                 path.display()
             ))
         })?;
-        if profile
-            .applied_preset
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.resolved_model.is_some())
-        {
-            return Err(nomifun_common::AppError::Internal(format!(
-                "companion profile {} duplicates a Provider reference inside applied_preset",
-                path.display()
-            )));
-        }
         Ok(Some(profile))
     }
 
@@ -628,15 +612,6 @@ impl CompanionProfileConfig {
         // legacy interval would take the whole install down over a schedule.
         self.learn.validate().map_err(std::io::Error::other)?;
         validate_persisted_appearance(&self.appearance).map_err(std::io::Error::other)?;
-        if self
-            .applied_preset
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.resolved_model.is_some())
-        {
-            return Err(std::io::Error::other(
-                "companion side store keeps Provider references only in the fixed model field",
-            ));
-        }
         crate::fsio::save_json_atomic(dir, "config.json", self)
     }
 }

@@ -80,10 +80,10 @@ pub fn row_to_response_with_extra(
     let source: Option<ConversationSource> = row.source.as_deref().map(string_to_enum).transpose()?;
 
     let model: Option<ProviderWithModel> = row.model.as_deref().map(parse_provider_with_model).transpose()?;
-    let preset_snapshot = row
-        .preset_snapshot
+    let agent_snapshot = row
+        .agent_snapshot
         .as_deref()
-        .map(serde_json::from_str::<nomifun_api_types::ResolvedPresetSnapshot>)
+        .map(serde_json::from_str::<nomifun_api_types::AgentResolvedSnapshot>)
         .transpose()
         .map_err(|error| AppError::Internal(format!("Invalid preset snapshot JSON: {error}")))?;
     let delegation_policy = string_to_enum(&row.delegation_policy)?;
@@ -113,7 +113,7 @@ pub fn row_to_response_with_extra(
         channel_chat_id: row.channel_chat_id,
         preset_id: row.preset_id,
         preset_revision: row.preset_revision,
-        preset_snapshot,
+        agent_snapshot,
         delegation_policy,
         execution_model_pool,
         decision_policy,
@@ -698,7 +698,7 @@ pub fn search_row_to_item(row: MessageSearchRow, data_dir: &Path) -> Result<Mess
         cron_job_id: None,
         preset_id: None,
         preset_revision: None,
-        preset_snapshot: None,
+        agent_snapshot: None,
         created_at: row.conversation_created_at,
         updated_at: row.conversation_updated_at,
     };
@@ -752,7 +752,7 @@ mod tests {
             cron_job_id: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             created_at: 1000,
             updated_at: 2000,
         }
@@ -831,7 +831,7 @@ mod tests {
             cron_job_id: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             created_at: 1000,
             updated_at: 2000,
         };
@@ -950,7 +950,7 @@ mod tests {
             cron_job_id: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             created_at: 1000,
             updated_at: 3000,
         };

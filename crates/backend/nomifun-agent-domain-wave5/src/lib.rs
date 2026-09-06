@@ -16,7 +16,8 @@ use std::sync::Arc;
 
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, ArtifactEnvelope, CapabilityActionDescriptor,
-    CapabilityContributions, CapabilityId, CapabilityKind, CapabilityManifest,
+    CapabilityConsumer, CapabilityContributions, CapabilityId, CapabilityKind,
+    CapabilityManifest,
     CancellationDescriptor, CanonicalErrorCode, CanonicalSchemaRef, CorrelationId,
     D026AdmissionOutcome, D026OrderingCaseKind, D026OrderingOutcome,
     D026OrderingOutcomeMatrix, D027DeadlineRule, D027DrainCaseKind, D027OutstandingSet,
@@ -32,8 +33,9 @@ use nomifun_agent_contracts::{
     RemoteAuthMutation, RemoteOperation, ResourceBindingId, ResourceId, ResourceKind, ScopeKey,
     ServiceHandleDescriptor, ServiceKeyRef, ServiceRequirement, StrictJsonValue,
     TypedCommandPortDescriptor, TypedResourceBinding, TypedResourceBindings, RuntimeTarget,
-    VersionString, REMOTE_AUTH_REQUIRED, agent_core_mount_id, agent_core_package_ref,
-    agent_session_command_service_ref, agent_session_query_service_ref,
+    VersionString, REMOTE_AUTH_REQUIRED, agent_core_mount_id,
+    agent_core_package_ref, agent_session_command_service_ref,
+    agent_session_query_service_ref, capability_surface_declarations,
 };
 use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, DeclaredServiceView, KernelError,
@@ -1716,11 +1718,10 @@ fn capability_manifest(
         display: display(spec.id, "Wave 5 capability contribution."),
         requires: Vec::new(),
         conflicts: Vec::new(),
-        supported_surfaces: spec
-            .surfaces
-            .iter()
-            .map(|surface| (*surface).to_owned())
-            .collect(),
+        supported_surfaces: capability_surface_declarations(
+            spec.surfaces.iter().copied(),
+            [CapabilityConsumer::Agent],
+        ),
         requires_runtime_features: Vec::new(),
         supported_platforms: vec![PlatformConstraint::Any],
         config_schema: schema_value(),
@@ -2091,9 +2092,9 @@ fn all_port_ids(ports: &PortSpec) -> BTreeSet<HostPortId> {
 mod tests {
     use super::*;
     use nomifun_agent_contracts::{
-        AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, CapabilityExposure,
-        CapabilityRef, CapabilitySelection, DigestHex, PresetRevisionRef, PrincipalRef,
-        RuntimeProfileKind, StateKey, UserId,
+        AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, CapabilityRef,
+        CapabilitySelection, DigestHex, PresetRevisionRef, PrincipalRef, RuntimeProfileKind,
+        StateKey, UserId,
     };
     use nomifun_agent_kernel::{
         AgentPresetCompiler, CapabilityInvocationRequest, CompileRequest, CompilerEnvironment,
@@ -2256,7 +2257,6 @@ mod tests {
         let materialized = registry.snapshot().expect("registry snapshot");
         let payload = AgentPresetRevisionPayload {
             schema_version: VersionString::from(VERSION),
-            surfaces: BTreeSet::from(["desktop".to_owned()]),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
             initial_capabilities: vec![CapabilitySelection {
@@ -2264,14 +2264,8 @@ mod tests {
                     id: CapabilityId::from(SCHEDULE_STORE),
                     version: VersionString::from(VERSION),
                 },
-                required: true,
-                exposure: CapabilityExposure::Advertised,
                 action_allowlist: BTreeSet::from([ActionId::from(SCHEDULE_STORE_ACTION)]),
                 resource_binding_refs: Vec::new(),
-                destination_constraints: BTreeSet::new(),
-                context_budget_override: None,
-                tool_budget_override: None,
-                config: StrictJsonValue(serde_json::json!({})),
             }],
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
@@ -2279,22 +2273,23 @@ mod tests {
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Wave 5 test".to_owned(),
             instructions: "Invoke the selected capability.".to_owned(),
-            context_policy: StrictJsonValue(serde_json::json!({})),
-            execution_constraints: StrictJsonValue(serde_json::json!({})),
-            runtime_budget: StrictJsonValue(serde_json::json!({})),
+            starter_prompts: Vec::new(),
         };
-        let revision = AgentPresetRevision {
+        let contribution_locks = Vec::new();
+        let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef {
                 preset_id: AgentPresetId::from("wave5-test"),
                 revision: 1,
-                revision_digest: nomifun_agent_contracts::digest_payload(&payload)
-                    .expect("revision digest"),
+                revision_digest: DigestHex::from(""),
             },
             payload,
+            contribution_locks,
             created_by: UserId::from(owner.principal_id.clone()),
             created_at_ms: 1,
             reason: None,
         };
+        revision.reference.revision_digest =
+            revision.revision_digest().expect("revision digest");
         let snapshot = AgentPresetCompiler::compile(
             &materialized,
             &CompilerEnvironment {

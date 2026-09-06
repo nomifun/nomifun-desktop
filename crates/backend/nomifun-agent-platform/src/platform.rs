@@ -13,9 +13,14 @@ use axum::http::StatusCode;
 use nomifun_agent_contracts::{
     ActionId, AgentBindingValue, AgentPreset, AgentPresetId, AgentPresetRevision, AgentPresetSource,
     AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata, CanonicalDigestError,
-    CapabilityId, CapabilityKind, ChatRouteIdentity, ChatRouteLookupError, ChatRouteLookupKey,
-    ChatRouteRecord, ChatRouteRecordRow, CompactOnDemandCapabilityEntry, CorrelationId,
-    DeleteAgentSessionCommand, DigestHex, EventId, EventProducerId,
+    CapabilityCatalogContractError, CapabilityCatalogEntry,
+    CapabilityCatalogMaterialization, CapabilityCatalogMaterializer,
+    CapabilityConsumer, CapabilityId, CapabilityKind, CapabilityOwner,
+    CapabilityProvenance, CapabilityReleaseState, CatalogAvailability,
+    ChatRouteIdentity, ChatRouteLookupError, ChatRouteLookupKey, ChatRouteRecord,
+    ChatRouteRecordRow, CompactOnDemandCapabilityEntry, ContributionId,
+    ContributionSourceKind, CorrelationId, DeleteAgentSessionCommand, DigestHex,
+    EventId, EventProducerId,
     ExactRoleContractRef, ExecutionRoleId, FullAutoExecutionWire, IdempotencyKey,
     InstallationRoleBinding, ModelRouteId, NativeActionStart, NativeActionStartAck, OperationId,
     PluginStateEntry, PluginMountId, PresetRevisionRef, PrincipalRef, RemoteBinding, RemoteBindingId,
@@ -26,7 +31,8 @@ use nomifun_agent_contracts::{
     RuntimeStartTurnParams, ScopeKey, SemanticSessionEventDraft, SessionEventAppend,
     SessionEventCursor, SessionEventKind,
     SessionEventPayloadRef, StrictJsonValue, TypedResourceBindings, UserId, VersionString,
-    canonical_json_bytes, digest_payload, resolve_exact_chat_route_record,
+    StableSourceIdentity, canonical_json_bytes, digest_payload,
+    resolve_exact_chat_route_record,
 };
 use nomifun_agent_control_plane::{
     AgentBindingTarget, AgentControlPlane, CatalogProvider, CatalogSnapshot, CompilerReleaseInputs,
@@ -1732,6 +1738,7 @@ async fn load_revision(
             revision_digest: DigestHex::from(digest),
         },
         payload: serde_json::from_str(&document).map_err(ControlPlaneError::from)?,
+        contribution_locks: Vec::new(),
         created_by: UserId::from(created_by),
         created_at_ms: created_at,
         reason: (!reason.is_empty()).then_some(reason),
@@ -2013,6 +2020,137 @@ where
         .map_err(|error| error.to_string())?
         .join()
         .map_err(|_| format!("{name} thread panicked"))?
+}
+
+pub fn materialize_capability_catalog_entries(
+    registry: &nomifun_agent_kernel::MaterializedRegistry,
+    unavailable_capabilities: &BTreeMap<
+        CapabilityId,
+        nomifun_agent_contracts::CanonicalErrorCode,
+    >,
+) -> Result<Vec<CapabilityCatalogEntry>, AgentPlatformError> {
+    let mut entries = Vec::new();
+    for capability in registry.capabilities.values() {
+        let manifest = &capability.manifest;
+        let package = registry.packages.get(&manifest.package.id).ok_or_else(|| {
+            AgentPlatformError::Contract(format!(
+                "materialized capability {} has no owning package",
+                manifest.id.as_ref()
+            ))
+        })?;
+        let release_state = match capability.source.source_kind {
+            nomifun_agent_contracts::PluginSourceKind::TestFixture => {
+                CapabilityReleaseState::TestHost
+            }
+            nomifun_agent_contracts::PluginSourceKind::Bundled
+            | nomifun_agent_contracts::PluginSourceKind::ManagedLocal => {
+                CapabilityReleaseState::PublishedActive
+            }
+        };
+        let mcp = registry
+            .mcp_for_capability(&manifest.id)
+            .and_then(|mapping| {
+                (mapping.mapping.capability.version == manifest.version)
+                    .then_some(mapping)
+            });
+        let provenance = if let Some(mapping) = mcp {
+            CapabilityProvenance {
+                owner: CapabilityOwner::Package {
+                    package: manifest.package.clone(),
+                },
+                source_kind: ContributionSourceKind::McpBinding,
+                source_identity: StableSourceIdentity::from(format!(
+                    "mcp:{}",
+                    mapping.mapping.server_id.as_ref()
+                )),
+                mount_id: Some(mapping.mount_id.clone()),
+                miniapp_id: None,
+                mcp_binding_id: Some(format!(
+                    "{}:{}",
+                    mapping.mapping.server_id.as_ref(),
+                    mapping.mapping.canonical_tool_key.as_ref()
+                ).into()),
+                artifact_digest: Some(mapping.mapping.schema_digest.clone()),
+            }
+        } else {
+            let artifact_digest = capability
+                .source
+                .source_digest
+                .clone()
+                .or_else(|| Some(package.manifest_digest.clone()));
+            match capability.source.source_kind {
+                nomifun_agent_contracts::PluginSourceKind::Bundled
+                | nomifun_agent_contracts::PluginSourceKind::TestFixture => {
+                    CapabilityProvenance {
+                        owner: CapabilityOwner::Package {
+                            package: manifest.package.clone(),
+                        },
+                        source_kind: ContributionSourceKind::PlatformBuiltin,
+                        source_identity: StableSourceIdentity::from(
+                            capability.source.source_identity.clone(),
+                        ),
+                        mount_id: None,
+                        miniapp_id: None,
+                        mcp_binding_id: None,
+                        artifact_digest,
+                    }
+                }
+                nomifun_agent_contracts::PluginSourceKind::ManagedLocal => {
+                    CapabilityProvenance {
+                        owner: CapabilityOwner::Package {
+                            package: manifest.package.clone(),
+                        },
+                        source_kind: ContributionSourceKind::PluginMount,
+                        source_identity: StableSourceIdentity::from(
+                            capability.source.source_identity.clone(),
+                        ),
+                        mount_id: Some(capability.mount_id.clone()),
+                        miniapp_id: None,
+                        mcp_binding_id: None,
+                        artifact_digest,
+                    }
+                }
+            }
+        };
+        let consumers = manifest.supported_consumers().map_err(|reason| {
+            AgentPlatformError::Contract(reason)
+        })?;
+        let mut availability = consumers
+            .iter()
+            .copied()
+            .map(|consumer| (consumer, CatalogAvailability::Active))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(code) = unavailable_capabilities.get(&manifest.id) {
+            if consumers.contains(&CapabilityConsumer::Agent) {
+                availability.insert(
+                    CapabilityConsumer::Agent,
+                    CatalogAvailability::Unavailable {
+                        reason: code.as_ref().to_owned(),
+                    },
+                );
+            }
+        }
+        match CapabilityCatalogMaterializer::materialize(
+            CapabilityCatalogMaterialization {
+                manifest: manifest.clone(),
+                contribution_id: ContributionId::from(format!(
+                    "capability:{}",
+                    manifest.id.as_ref()
+                )),
+                provenance,
+                release_state,
+                availability,
+            },
+        ) {
+            Ok(entry) => entries.push(entry),
+            Err(CapabilityCatalogContractError::CandidateRejected { .. }) => {}
+            Err(error) => {
+                return Err(AgentPlatformError::Contract(error.to_string()));
+            }
+        }
+    }
+    entries.sort_by(|left, right| left.capability.cmp(&right.capability));
+    Ok(entries)
 }
 
 pub struct KernelCatalogProvider {
@@ -4735,32 +4873,35 @@ mod route_writer_tests {
         model_route_refs: BTreeMap<String, ModelRouteId>,
         chat_route_records: BTreeMap<String, ChatRouteRecord>,
     ) -> AgentPresetRevision {
-        AgentPresetRevision {
+        let payload = AgentPresetRevisionPayload {
+            schema_version: VersionString::from("1.0.0"),
+            model_route_refs,
+            chat_route_records,
+            initial_capabilities: Vec::new(),
+            on_demand_capabilities: Vec::new(),
+            skill_bindings: Vec::new(),
+            resource_bindings: Vec::new(),
+            system_role_provider_overrides: BTreeMap::new(),
+            persona: String::new(),
+            instructions: String::new(),
+            starter_prompts: Vec::new(),
+        };
+        let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef {
                 preset_id: AgentPresetId::from("preset"),
                 revision: 1,
-                revision_digest: DigestHex::from("a".repeat(64)),
+                revision_digest: DigestHex::from(""),
             },
-            payload: AgentPresetRevisionPayload {
-                schema_version: VersionString::from("1.0.0"),
-                surfaces: BTreeSet::new(),
-                model_route_refs,
-                chat_route_records,
-                initial_capabilities: Vec::new(),
-                on_demand_capabilities: Vec::new(),
-                skill_bindings: Vec::new(),
-                resource_bindings: Vec::new(),
-                system_role_provider_overrides: BTreeMap::new(),
-                persona: String::new(),
-                instructions: String::new(),
-                context_policy: StrictJsonValue(Value::Object(Default::default())),
-                execution_constraints: StrictJsonValue(Value::Object(Default::default())),
-                runtime_budget: StrictJsonValue(Value::Object(Default::default())),
-            },
+            payload,
+            contribution_locks: Vec::new(),
             created_by: UserId::from("owner"),
             created_at_ms: 0,
             reason: None,
-        }
+        };
+        revision.reference.revision_digest = revision
+            .revision_digest()
+            .expect("route-writer fixture revision digest");
+        revision
     }
 
     fn route_record() -> ChatRouteRecord {

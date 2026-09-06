@@ -1,7 +1,7 @@
 {
-  "title": "Agent 设定",
-  "subtitle": "使用能力、Skills、MCP 物化、模型路由和 typed resources 构建不可变 AgentPreset Revision。",
-  "loading": "正在加载 Agent 设定…",
+  "title": "Agent 工作台",
+  "subtitle": "设计 Agent 的身份、能力、模型与资源，并在保存前试用。",
+  "loading": "正在加载 Agent 工作台…",
   "loadingEditor": "正在加载所选 AgentPreset…",
   "freshStart": {
     "title": "全新 v4 工作区",
@@ -212,17 +212,16 @@
     "unavailable": "不可用"
   },
   "errors": {
-    "title": "Agent 设定操作未完成"
+    "title": "Agent 工作台操作未完成"
   },
   "navigation": {
-    "entryDescription": "打开 canonical AgentPreset 编辑器、Preview、Revision、Test 与 Inspector。",
-    "open": "打开 Agent 设定"
+    "railTitle": "Agent"
   },
   "session": {
     "title": "Agent 会话",
     "open": "打开会话",
     "loading": "正在加载 canonical Session projection…",
-    "backToSettings": "Agent 设定",
+    "backToSettings": "Agent 工作台",
     "fork": "Fork 会话",
     "delete": "删除会话",
     "deleteConfirm": "永久删除该会话？Transcript、Projection、Runtime binding、checkpoint 与 Session-owned resource 都会被清除。",

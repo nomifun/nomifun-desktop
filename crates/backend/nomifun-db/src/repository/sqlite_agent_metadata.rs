@@ -244,10 +244,6 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
                     WHERE source_agent_id = ?1\
                 ) \
                 OR EXISTS(\
-                    SELECT 1 FROM preset_agent_preferences \
-                    WHERE agent_id = ?1\
-                ) \
-                OR EXISTS(\
                     SELECT 1 FROM conversations \
                     WHERE json_extract(extra, '$.agent_id') = ?1 \
                        OR json_extract(extra, '$.custom_agent_id') = ?1\
@@ -258,18 +254,9 @@ impl IAgentMetadataRepository for SqliteAgentMetadataRepository {
         .await?;
         if retained_reference_exists {
             return Err(DbError::Conflict(format!(
-                "Agent '{id}' is still referenced by execution, preset, or conversation state"
+                "Agent '{id}' is still referenced by execution or conversation state"
             )));
         }
-
-        sqlx::query(
-            "UPDATE preset_user_state \
-             SET preferred_agent_id = NULL \
-             WHERE preferred_agent_id = ?",
-        )
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
 
         let result = sqlx::query("DELETE FROM agent_metadata WHERE agent_id = ?")
             .bind(id)
@@ -288,7 +275,6 @@ mod tests {
     const CUSTOM_AGENT_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678921";
     const OTHER_CUSTOM_AGENT_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678922";
     const NOMI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000114";
-    const DELETE_FIXTURE_PRESET_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678923";
 
     async fn setup() -> (SqliteAgentMetadataRepository, crate::Database) {
         let db = init_database_memory().await.unwrap();
@@ -497,70 +483,6 @@ mod tests {
         assert!(repo.delete(CUSTOM_AGENT_ID).await.unwrap());
         assert!(repo.get(CUSTOM_AGENT_ID).await.unwrap().is_none());
         assert!(!repo.delete(CUSTOM_AGENT_ID).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn delete_restricts_live_references_and_clears_preferred_agent() {
-        let (repo, db) = setup().await;
-        repo.upsert(&custom_params(CUSTOM_AGENT_ID, "referenced"))
-            .await
-            .unwrap();
-        let now = now_ms();
-        sqlx::query(
-            "INSERT INTO presets \
-                (preset_id, source_kind, name, instructions, created_at, updated_at) \
-             VALUES (?, 'user', 'fixture', '', ?, ?)",
-        )
-        .bind(DELETE_FIXTURE_PRESET_ID)
-        .bind(now)
-        .bind(now)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO preset_agent_preferences \
-                (preset_id, agent_id, rank, required) \
-             VALUES (?, ?, 0, 1)",
-        )
-        .bind(DELETE_FIXTURE_PRESET_ID)
-        .bind(CUSTOM_AGENT_ID)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO preset_user_state \
-                (preset_id, enabled, auto_selectable, preferred_agent_id, updated_at) \
-             VALUES (?, 1, 0, ?, ?)",
-        )
-        .bind(DELETE_FIXTURE_PRESET_ID)
-        .bind(CUSTOM_AGENT_ID)
-        .bind(now)
-        .execute(db.pool())
-        .await
-        .unwrap();
-
-        let error = repo.delete(CUSTOM_AGENT_ID).await.unwrap_err();
-        assert!(matches!(error, DbError::Conflict(_)));
-
-        sqlx::query(
-            "DELETE FROM preset_agent_preferences \
-             WHERE preset_id = ?",
-        )
-        .bind(DELETE_FIXTURE_PRESET_ID)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        assert!(repo.delete(CUSTOM_AGENT_ID).await.unwrap());
-
-        let preferred_agent_id: Option<String> = sqlx::query_scalar(
-            "SELECT preferred_agent_id FROM preset_user_state \
-             WHERE preset_id = ?",
-        )
-        .bind(DELETE_FIXTURE_PRESET_ID)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-        assert!(preferred_agent_id.is_none());
     }
 
     #[tokio::test]

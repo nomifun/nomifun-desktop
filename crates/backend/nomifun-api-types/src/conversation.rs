@@ -49,8 +49,6 @@ pub struct CreateConversationRequest {
     )]
     pub preset_id: Option<String>,
     #[serde(default)]
-    pub preset_overrides: Option<crate::PresetOverrides>,
-    #[serde(default)]
     pub delegation_policy: DelegationPolicy,
     #[serde(default)]
     pub execution_model_pool: Option<crate::ExecutionModelPool>,
@@ -279,6 +277,7 @@ pub struct SearchMessagesQuery {
 /// keeps the wire shape tight and matches what the frontend mapper already
 /// tolerates (`'model' in r` guard handles missing keys).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConversationResponse {
     #[serde(deserialize_with = "crate::serde_util::deserialize_conversation_id")]
     pub conversation_id: String,
@@ -309,7 +308,7 @@ pub struct ConversationResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preset_revision: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub preset_snapshot: Option<crate::ResolvedPresetSnapshot>,
+    pub agent_snapshot: Option<crate::AgentResolvedSnapshot>,
     pub delegation_policy: DelegationPolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_model_pool: Option<crate::ExecutionModelPool>,
@@ -938,7 +937,7 @@ mod tests {
             modified_at: 1712345678000,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             delegation_policy: Default::default(),
             execution_model_pool: None,
             decision_policy: Default::default(),
@@ -997,7 +996,7 @@ mod tests {
             modified_at: 1,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             delegation_policy: Default::default(),
             execution_model_pool: None,
             decision_policy: Default::default(),
@@ -1048,7 +1047,7 @@ mod tests {
             modified_at: 2000,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             delegation_policy: Default::default(),
             execution_model_pool: None,
             decision_policy: Default::default(),
@@ -1202,7 +1201,7 @@ mod tests {
                 modified_at: 1712345678000,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 delegation_policy: Default::default(),
                 execution_model_pool: None,
                 decision_policy: Default::default(),
@@ -1252,7 +1251,7 @@ mod tests {
                 modified_at: 9000,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 delegation_policy: Default::default(),
                 execution_model_pool: None,
                 decision_policy: Default::default(),
@@ -1332,7 +1331,7 @@ mod tests {
                 modified_at: 1000,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 delegation_policy: Default::default(),
                 execution_model_pool: None,
                 decision_policy: Default::default(),
@@ -1386,7 +1385,7 @@ mod tests {
                     modified_at: 5000,
                     preset_id: None,
                     preset_revision: None,
-                    preset_snapshot: None,
+                    agent_snapshot: None,
                     delegation_policy: Default::default(),
                     execution_model_pool: None,
                     decision_policy: Default::default(),

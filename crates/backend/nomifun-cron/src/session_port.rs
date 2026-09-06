@@ -9,9 +9,7 @@ use nomifun_agent_contracts::AgentSessionId;
 use nomifun_ai_agent::AgentRuntimeRegistry;
 #[cfg(test)]
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
-use nomifun_api_types::{
-    ConversationResponse, CreateConversationRequest, ResolvedPresetSnapshot,
-};
+use nomifun_api_types::{AgentResolvedSnapshot, ConversationResponse, CreateConversationRequest};
 #[cfg(test)]
 use nomifun_api_types::SendMessageRequest;
 use nomifun_common::{AgentType, AppError, ProviderWithModel};
@@ -97,7 +95,7 @@ pub struct CronSessionProjection {
     pub custom_agent_id: Option<String>,
     pub preset_id: Option<String>,
     pub preset_revision: Option<i64>,
-    pub preset_snapshot: Option<ResolvedPresetSnapshot>,
+    pub agent_snapshot: Option<AgentResolvedSnapshot>,
 }
 
 pub type CronScheduledSession = CronSessionProjection;
@@ -304,7 +302,7 @@ pub trait CronSessionPort: Send + Sync {
         &self,
         user_id: &str,
         request: CreateConversationRequest,
-        snapshot: Option<ResolvedPresetSnapshot>,
+        snapshot: Option<AgentResolvedSnapshot>,
         creation_key: &str,
     ) -> Result<CronSessionHandle, AppError>;
 
@@ -446,13 +444,13 @@ impl CronSessionPort for TestCronSessionPort {
         &self,
         user_id: &str,
         request: CreateConversationRequest,
-        snapshot: Option<ResolvedPresetSnapshot>,
+        snapshot: Option<AgentResolvedSnapshot>,
         creation_key: &str,
     ) -> Result<CronSessionHandle, AppError> {
         match snapshot {
             Some(snapshot) => {
                 let response = self.service
-                    .create_from_preset_snapshot_idempotent(
+                    .create_from_agent_snapshot_idempotent(
                         user_id,
                         request,
                         snapshot,
@@ -553,9 +551,9 @@ fn session_projection_from_response(
         name,
         r#type: agent_type,
         model,
-        preset_id,
-        preset_revision,
-        preset_snapshot,
+        preset_id: response_preset_id,
+        preset_revision: response_preset_revision,
+        agent_snapshot,
         extra,
         ..
     } = response;
@@ -575,12 +573,34 @@ fn session_projection_from_response(
             ))
         })?
         .to_owned();
-    let agent_session_id = AgentSessionId::from(conversation_id);
+    let agent_session_id = AgentSessionId::from(conversation_id.clone());
     nomifun_common::validate_uuidv7(agent_session_id.as_ref()).map_err(|error| {
         AppError::Conflict(format!(
             "AgentSession identity is not canonical UUIDv7: {error}"
         ))
     })?;
+
+    let (preset_id, preset_revision) = match agent_snapshot.as_ref() {
+        Some(snapshot) => {
+            if response_preset_id
+                .as_deref()
+                .is_some_and(|value| value != snapshot.preset_id)
+                || response_preset_revision
+                    .is_some_and(|value| value != snapshot.preset_revision)
+            {
+                return Err(AppError::Conflict(format!(
+                    "AgentSession {conversation_id} has inconsistent Agent snapshot lineage"
+                )));
+            }
+            (Some(snapshot.preset_id.clone()), Some(snapshot.preset_revision))
+        }
+        None if response_preset_id.is_some() || response_preset_revision.is_some() => {
+            return Err(AppError::Conflict(format!(
+                "AgentSession {conversation_id} has preset lineage without a frozen agent_snapshot"
+            )));
+        }
+        None => (None, None),
+    };
 
     Ok(CronSessionProjection {
         agent_session_id,
@@ -624,7 +644,7 @@ fn session_projection_from_response(
             .map(str::to_owned),
         preset_id,
         preset_revision,
-        preset_snapshot,
+        agent_snapshot,
     })
 }
 
@@ -775,7 +795,7 @@ mod tests {
             channel_chat_id: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             delegation_policy: DelegationPolicy::PreferParallel,
             execution_model_pool: None,
             decision_policy: DecisionPolicy::Automatic,

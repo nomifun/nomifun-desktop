@@ -187,40 +187,6 @@ where
         .map_err(serde::de::Error::custom)
 }
 
-pub(crate) fn deserialize_uuidv7_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    <Vec<String> as serde::Deserialize>::deserialize(deserializer)?
-        .into_iter()
-        .map(|value| {
-            nomifun_common::validate_uuidv7(&value)
-                .map(|_| value)
-                .map_err(serde::de::Error::custom)
-        })
-        .collect()
-}
-
-pub(crate) fn deserialize_optional_uuidv7_vec<'de, D>(
-    deserializer: D,
-) -> Result<Option<Vec<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    <Option<Vec<String>> as serde::Deserialize>::deserialize(deserializer)?
-        .map(|values| {
-            values
-                .into_iter()
-                .map(|value| {
-                    nomifun_common::validate_uuidv7(&value)
-                        .map(|_| value)
-                        .map_err(serde::de::Error::custom)
-                })
-                .collect()
-        })
-        .transpose()
-}
-
 fn deserialize_optional_uuidv7<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -280,15 +246,6 @@ string_id_deserializers!(
     deserialize_optional_requirement_id,
     RequirementId
 );
-// Preset resources use the same bare UUIDv7 business identity everywhere.
-// Keep this named helper for the skill-resource DTOs, but do not reintroduce
-// the old catalog-key/preset-id union.
-string_id_deserializers!(
-    deserialize_preset_reference,
-    deserialize_optional_preset_reference,
-    PresetId
-);
-
 macro_rules! string_id_vec_deserializer {
     ($name:ident, $id:ty) => {
         pub(crate) fn $name<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -309,20 +266,6 @@ macro_rules! string_id_vec_deserializer {
 
 string_id_vec_deserializer!(deserialize_attachment_ids, AttachmentId);
 string_id_vec_deserializer!(deserialize_requirement_ids, RequirementId);
-
-pub(crate) fn deserialize_preset_tag_key<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
-    if is_natural_key(&value) {
-        Ok(value)
-    } else {
-        Err(serde::de::Error::custom(
-            "expected a canonical preset tag natural key",
-        ))
-    }
-}
 
 pub(crate) fn deserialize_agent_id<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
@@ -349,16 +292,6 @@ where
     AgentId::parse(value.clone())
         .map(|_| value)
         .map_err(E::custom)
-}
-
-fn is_natural_key(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 255
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'_' | b'-' | b'.' | b':')
-        })
 }
 
 /// Deserialize a canonical conversation-or-terminal entity ID.

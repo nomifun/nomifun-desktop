@@ -1,6 +1,4 @@
 .guidLayout {
-  --preset-surface-bg: color-mix(in srgb, var(--bg-2) 65%, transparent);
-  --preset-surface-bg-hover: color-mix(in srgb, var(--bg-2) 85%, transparent);
   width: clamp(var(--app-min-width, 360px), calc(100% - 32px), 800px);
   max-width: 100%;
   padding: 0 16px;
@@ -20,20 +18,6 @@
   display: inline-flex;
   align-items: center;
   gap: 3px;
-}
-
-.presetPromptChip {
-  background: var(--preset-surface-bg);
-}
-
-.presetPromptHint {
-  color: var(--color-text-3);
-  font-size: 13px;
-  line-height: 20px;
-}
-
-.presetPromptChip:hover {
-  background: var(--preset-surface-bg-hover);
 }
 
 .guidInputCardWrap {
@@ -1140,7 +1124,7 @@ button.guidResourceCard:focus-visible {
 }
 
 /* Skill rows stay as one compact, two-line unit at every drawer width. Keep
-   these overrides after the shared card rules so the preset layout cannot
+   these overrides after the shared card rules so the drawer layout cannot
    re-enable wrapping through the cascade. */
 .drawerSkillCard {
   box-sizing: border-box;
@@ -1862,112 +1846,8 @@ button.guidResourceCard:focus-visible {
 }
 
 /* 设定标签 */
-.presetAgentTag {
-  display: inline-flex;
-  align-items: center;
-  gap: 0;
-  background: var(--color-fill-2);
-  border: 1px solid var(--color-border-2);
-  padding: 0;
-  border-radius: 16px;
-  cursor: pointer;
-  user-select: none;
-  transition: background-color 0.2s;
-  max-width: 100%;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.presetAgentTag:hover {
-  background: color-mix(in srgb, var(--color-fill-3) 92%, transparent);
-}
-
-/* Left clickable area: agent logo + avatar + name */
-.presetAgentTagMain {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px 6px 12px;
-  min-width: 0;
-}
-
-.presetAgentTagMain:hover {
-  background: var(--color-fill-3);
-  border-radius: 16px 0 0 16px;
-}
-
-.presetAgentTagAgentLogo {
-  object-fit: contain;
-  flex-shrink: 0;
-}
-
-/* Inner divider between agent logo and preset avatar/name */
-.presetAgentTagInnerDivider {
-  width: 1px;
-  height: 14px;
-  background: var(--color-border-3);
-  flex-shrink: 0;
-}
-
-/* Vertical divider between main area and right chevron/close */
-.presetAgentTagDivider {
-  width: 1px;
-  height: 14px;
-  background: var(--color-border-3);
-  flex-shrink: 0;
-}
-
-.presetAgentTagName {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--color-text-1);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 200px;
-}
-
-/* Chevron (right side dropdown trigger) */
-.presetAgentTagChevron {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  margin-left: 2px;
-  margin-right: 6px;
-  transition: background-color 0.2s;
-  flex-shrink: 0;
-}
-
-.presetAgentTagChevron:hover {
-  background: var(--color-fill-4);
-}
-
-.presetAgentTagClose {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  margin-left: 2px;
-  margin-right: 8px;
-  transition: background-color 0.2s;
-  flex-shrink: 0;
-}
-
-.presetAgentTagClose:hover {
-  background: var(--color-fill-4);
-}
-
 /* 移动端设定标签优化 */
 @media (max-width: 768px) {
-  .presetAgentTagName {
-    max-width: 120px;
-  }
-
   .actionTools {
     gap: 6px;
     flex: 1 1 auto;
@@ -2000,7 +1880,4 @@ button.guidResourceCard:focus-visible {
     flex-shrink: 0;
   }
 
-  .presetAgentTagName {
-    max-width: 100px;
-  }
 }

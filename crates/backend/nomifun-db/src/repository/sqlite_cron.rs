@@ -4,6 +4,7 @@ use sqlx::SqlitePool;
 
 use crate::error::DbError;
 use crate::models::{CronJobRow, CronJobRunRow, CronRunReservationRow};
+use crate::repository::agent_preset_lineage::validate_and_lock_agent_preset_lineage;
 use crate::repository::bind::{BindValue, bind_value};
 use crate::repository::cron::{
     AdvanceCronOccurrenceParams, CRON_RUN_HISTORY_LIMIT, FinalizeCronRunOutcome,
@@ -41,7 +42,14 @@ impl SqliteCronRepository {
         validate_cron_agent_config_shape(&row.agent_type, row.agent_config.as_deref())?;
         let mut tx = self.pool.begin().await?;
         lock_nomi_provider(&mut tx, &row.agent_type, row.agent_config.as_deref()).await?;
-        lock_preset(&mut tx, row.preset_id.as_deref()).await?;
+        validate_and_lock_agent_preset_lineage(
+            &mut tx,
+            row.preset_id.as_deref(),
+            row.preset_revision,
+            row.agent_snapshot.as_deref(),
+            "Cron job",
+        )
+        .await?;
         validate_cron_authority(
             &mut tx,
             &row.user_id,
@@ -52,7 +60,7 @@ impl SqliteCronRepository {
             row.agent_config.as_deref(),
             row.preset_id.as_deref(),
             row.preset_revision,
-            row.preset_snapshot.as_deref(),
+            row.agent_snapshot.as_deref(),
             row.skill_content.as_deref(),
         )
         .await?;
@@ -60,7 +68,7 @@ impl SqliteCronRepository {
             "INSERT INTO cron_jobs (\
                 cron_job_id, user_id, name, enabled, schedule_revision, schedule_kind, schedule_value, schedule_tz, \
                 schedule_description, payload_message, execution_mode, agent_config, \
-                preset_id, preset_revision, preset_snapshot, \
+                preset_id, preset_revision, agent_snapshot, \
                 conversation_id, conversation_title, agent_type, created_by, \
                 skill_content, description, created_at, updated_at, next_run_at, last_run_at, \
                 last_status, last_error, run_count, retry_count, max_retries\
@@ -82,7 +90,7 @@ impl SqliteCronRepository {
         .bind(&row.agent_config)
         .bind(&row.preset_id)
         .bind(row.preset_revision)
-        .bind(&row.preset_snapshot)
+        .bind(&row.agent_snapshot)
         .bind(&row.conversation_id)
         .bind(&row.conversation_title)
         .bind(&row.agent_type)
@@ -151,7 +159,7 @@ fn validate_cron_agent_config_shape(
         "custom_agent_id",
         "preset_id",
         "preset_revision",
-        "preset_snapshot",
+        "agent_snapshot",
         "mode",
         "model",
         "provider_id",
@@ -234,7 +242,7 @@ async fn validate_cron_authority(
     agent_config: Option<&str>,
     preset_id: Option<&str>,
     preset_revision: Option<i64>,
-    preset_snapshot: Option<&str>,
+    agent_snapshot: Option<&str>,
     skill_content: Option<&str>,
 ) -> Result<(), DbError> {
     if let Some(conversation_id) = conversation_id {
@@ -269,7 +277,7 @@ async fn validate_cron_authority(
     if agent_type != "nomi"
         || preset_id.is_some()
         || preset_revision.is_some()
-        || preset_snapshot.is_some()
+        || agent_snapshot.is_some()
         || skill_content.is_some()
     {
         return Err(model_only_error());
@@ -383,27 +391,6 @@ async fn lock_nomi_provider(
     Ok(())
 }
 
-async fn lock_preset(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    preset_id: Option<&str>,
-) -> Result<(), DbError> {
-    let Some(preset_id) = preset_id else {
-        return Ok(());
-    };
-    let locked = sqlx::query(
-        "UPDATE presets SET updated_at = updated_at WHERE preset_id = ?",
-    )
-    .bind(preset_id)
-    .execute(&mut **tx)
-    .await?;
-    if locked.rows_affected() == 0 {
-        return Err(DbError::Conflict(format!(
-            "cron job preset '{preset_id}' does not exist"
-        )));
-    }
-    Ok(())
-}
-
 #[async_trait::async_trait]
 impl ICronRepository for SqliteCronRepository {
     async fn insert(&self, row: &CronJobRow) -> Result<(), DbError> {
@@ -499,7 +486,7 @@ impl ICronRepository for SqliteCronRepository {
         push_opt_str!(agent_config);
         push_opt_str!(preset_id);
         push_opt_i64!(preset_revision);
-        push_opt_str!(preset_snapshot);
+        push_opt_str!(agent_snapshot);
         push_opt_str!(conversation_id);
         push_opt_str!(conversation_title);
         push_str!(agent_type);
@@ -530,9 +517,9 @@ impl ICronRepository for SqliteCronRepository {
             Some(value) => value,
             None => existing.preset_revision,
         };
-        let final_preset_snapshot = match params.preset_snapshot.as_ref() {
+        let final_agent_snapshot = match params.agent_snapshot.as_ref() {
             Some(value) => value.as_deref(),
-            None => existing.preset_snapshot.as_deref(),
+            None => existing.agent_snapshot.as_deref(),
         };
         let final_skill_content = match params.skill_content.as_ref() {
             Some(value) => value.as_deref(),
@@ -559,12 +546,19 @@ impl ICronRepository for SqliteCronRepository {
             final_agent_config,
             final_preset_id,
             final_preset_revision,
-            final_preset_snapshot,
+            final_agent_snapshot,
             final_skill_content,
         )
         .await?;
         lock_nomi_provider(&mut tx, final_agent_type, final_agent_config).await?;
-        lock_preset(&mut tx, final_preset_id).await?;
+        validate_and_lock_agent_preset_lineage(
+            &mut tx,
+            final_preset_id,
+            final_preset_revision,
+            final_agent_snapshot,
+            "Cron job",
+        )
+        .await?;
 
         set_parts.push("updated_at = ?".to_string());
         binds.push(BindValue::I64(now_ms()));
@@ -1528,7 +1522,7 @@ mod tests {
             agent_config: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             conversation_id: Some(CONVERSATION_ID.into()),
             conversation_title: Some("Test Conv".into()),
             agent_type: "acp".into(),

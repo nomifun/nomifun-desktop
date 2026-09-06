@@ -1348,9 +1348,11 @@ pub struct ConversationRowUpdate {
     /// Set/clear the owning cron job. `Some(Some(id))` sets, `Some(None)` clears
     /// (used by the cron executor's post-create binding for `new_conversation`).
     pub cron_job_id: Option<Option<String>>,
+    /// Set/clear the immutable Agent launch snapshot. This is not a legacy
+    /// preset projection and is never resolved by the repository.
     pub preset_id: Option<Option<String>>,
     pub preset_revision: Option<Option<i64>>,
-    pub preset_snapshot: Option<Option<String>>,
+    pub agent_snapshot: Option<Option<String>>,
     pub updated_at: Option<TimestampMs>,
 }
 

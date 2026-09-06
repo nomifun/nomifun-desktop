@@ -6,7 +6,7 @@
 >
 > 状态来源：`GLOBAL-CLOSURE-TODO.zh.md` 是当前实施进度、阻塞项和关闭状态的唯一来源。本文只记录架构决策及理由，不声明代码、Gate、平台验证或发布已经完成。
 >
-> 历史处理：保留 D-001～D-033 的决策编号、仍有效的结论和形成理由。已被 05 否定的旧要求只保留极短撤销原因，不再作为正文中的候选方案、实施步骤或验收合同。
+> 历史处理：保留 D-001～D-037 的决策编号、仍有效的结论和形成理由。已被 05 否定的旧要求只保留极短撤销原因，不再作为正文中的候选方案、实施步骤或验收合同。
 
 ## 状态约定
 
@@ -54,6 +54,15 @@
 9. Nomi-core `/mcp` 复用公共 Streamable HTTP transport 的会话 admission、四工具
    schema 和 installation Bearer boundary；host 只注入四个 Nomi-core Remote
    operation，不伪造 Fresh-v4 `AgentPlatform` 或第二套 Session authority。
+10. 05 §15 的 AP-0～AP-7 是进入 06 代码实施的前置门禁。当前只确认了部分
+    contract/route/migration 写集；`GLOBAL-CLOSURE-TODO.zh.md` 中的 AP 状态才是
+    实时状态，不能由本决策记录推断 admission 已通过。
+11. Agent 的公开产品入口固定为 `/agent`，Session 使用
+    `/agent-sessions/:agentSessionId`；旧 `/presets`、`/settings/agent-presets`、
+    `/settings/agent` 只能作为限期迁移围栏，不能继续承载 authoring。
+12. 持久化执行投影统一使用 `agent_snapshot`。061 是四类旧列的物理重命名，
+    062 将生成的 `contribution_locks_json` 写入 AgentPreset Revision；历史 baseline
+    中的 `preset_snapshot` 只作为 migration source，不是运行时兼容别名。
 
 ## 决策总览
 
@@ -93,6 +102,9 @@
 | D-032 | 真实 Provider smoke 与凭据边界 | 已确认（2026-09-05） | 真实证据必须经过 Nomi-core AgentSession、Provider/Model route、代表性工具调用和关闭审计；Windows 凭据只经受控 Credential Manager/Bun runner 短暂持有，在构建完成后一次性 stdin 交接，不进入仓库、参数、日志或 Cargo/build/test/application 子进程环境；一次 smoke 只关闭其明确覆盖的 TODO |
 | D-033 | Nomi-core Remote MCP transport | 已确认（2026-09-05） | Streamable HTTP transport/session admission/tool schema 由 `nomifun-public` 统一持有；Nomi-core 通过 `CanonicalRemoteOperations` 注入既有 Remote handler，复用 owner、provenance、idempotency、cursor 和 runtime，不构造伪 `AgentPlatform` 或第二套状态机 |
 | D-034 | `SL-S3-10` host-boundary 收口 | 已确认（2026-09-05） | Cron/AutoWork/Requirement/AgentExecution/Channel/IDMM 均经同一个 `NomiCoreSessionOwner` 接收领域自有 typed contract；Conversation-backed bridge 仅保留在测试支持或 app composition，审计必须报告 `production_legacy_files=0`、`transitional_adapters_with_legacy_dependencies=0`、`candidate=none`，但不宣称 canonical Session 已具备所有未来 live event/receipt 能力 |
+| D-035 | Agent 工作台公共入口与迁移围栏 | 已修订（2026-09-05） | UI 只保留 `/agent` 一级入口，Session 使用 `/agent-sessions/:agentSessionId`；旧 preset 深层路由只允许一次性迁移跳转，最终必须删除 |
+| D-036 | `agent_snapshot` 物理命名与 Revision locks | 已确认（2026-09-05） | 061 物理重命名四类 snapshot 列且不做 alias；062 持久化 `contribution_locks_json`，`revision_digest` 覆盖 payload 与 lock 集合；`preset_id`/`preset_revision` 仅保留 provenance |
+| D-037 | AP-7 admission 证据边界 | 已确认（2026-09-05） | Gate 可报告历史 migration/删除合同与活动 residual 的区别，但只有 AP-0～AP-6、generated inventory、真实 Agent+非 Agent consumer、行为验证和签署证据全部满足时才放行 06；self-test 或单 crate 通过不能代替 admission |
 
 ## 全局有效约束
 
@@ -723,9 +735,72 @@ provider 请求误当成完整迁移或跨传输发布证明。
 降低 Fresh-v4/Nomi-core 的重复代码和后续替换成本；显式 operation trait 也让
 真实 Nomi-core 语义不会被一个“看起来能连通”的伪 Platform 掩盖。
 
+### D-035：Agent 工作台公共入口与旧路由迁移围栏
+
+- 状态：`已修订（2026-09-05）`
+- 用户可见的 Agent authoring、能力选择、保存、试用和继续使用只属于一个
+  **Agent 工作台**；公共 UI 路由是 `/agent`。
+- Agent Session 的公共 UI 路由是 `/agent-sessions/:agentSessionId`。它消费已经
+  创建的 Session，不是第二个 preset 编辑入口。
+- `/presets`、`/settings/agent-presets` 和 `/settings/agent` 不再是产品入口。迁移
+  期间可以保留一次性 redirect，以便旧书签可到达 `/agent`；redirect 不得加载旧
+  authoring 页面、复制旧 API 或形成长期兼容分支。
+- `/settings/execution-engines` 只负责 Runtime Manager、网络和系统级设置，不承载
+  AgentPreset 内容。
+
+理由：用户需要的是一个清晰的 Agent 产品入口，而不是同时理解“设定”“Agent 设定”
+和“运行时设定”。短期迁移围栏保护旧书签，但不把历史 URL 重新定义为系统合同。
+
+### D-036：`agent_snapshot` 物理命名与 Revision ContributionLock
+
+- 状态：`已确认（2026-09-05）`
+- Conversation、Cron、Agent Execution participant 和 Execution Template participant
+  的持久化执行投影统一命名为 `agent_snapshot`。该字段表示消费方无关的、不可变的
+  Agent 执行快照；它不是旧 Preset resolver 的别名。
+- `crates/backend/nomifun-db/migrations/061_agent_snapshot_naming.sql` 对四张表执行
+  物理 `RENAME COLUMN preset_snapshot TO agent_snapshot`。不增加 compatibility
+  view、双读写或按版本猜测。
+- `crates/backend/nomifun-db/migrations/062_agent_preset_contribution_locks.sql`
+  在 `nomi_agent_preset_revisions` 增加 `contribution_locks_json`，并要求合法 JSON
+  数组。Compiler 生成的 lock 集合必须参与 `revision_digest`；不能只保存 payload
+  digest。
+- `preset_id` 与 `preset_revision` 在当前过渡实现中只承担 AgentPreset provenance。
+  它们不能恢复旧 `PresetService`、旧 target/override 或旧 snapshot projection。
+- `001_v3_baseline.sql` 中旧列名是历史 schema bytes；只有 061 之后的物理 schema
+  才是当前 clean-cut 运行面。
+
+理由：snapshot 是执行事实，命名必须直接表达其消费语义；ContributionLock 是 Revision
+可复核性的依赖事实，若不进入 digest，重启或来源变化后就无法判断 Revision 是否仍是
+同一份用户设计。
+
+### D-037：AP-7 验证与 06 admission
+
+- 状态：`已确认（2026-09-05）`
+- `scripts/gate-agent-v2.mjs -- ap-7` 是 AP 阶段的 admission preflight；它不运行
+  provider smoke，也不因单 crate、单 UI 页面或 Gate self-test 通过而签署 AP-7。
+- Gate 必须分别记录：
+  1. 真实 Cargo dependency/import；
+  2. 活动 API、UI、DTO、override 和 snapshot residual；
+  3. 历史 baseline、删除合同和回归断言；
+  4. generated API/schema inventory 是否已同步；
+  5. 061/062 migration 是否存在且形状正确；
+  6. 真实 Agent 与非 Agent consumer 的行为证据；
+  7. 干净提交和签署 admission evidence。
+- 已删除的 `nomifun-preset` 不再作为通用“legacy/product dependency”规则扫描对象。
+  Gate 只在 Cargo dependency key、lockfile package entry 或活动 import 出现时阻断；
+  root `exclude` 删除 tombstone、历史 deletion contract 和注释引用单独分类，不得
+  被误报成生产依赖。
+- 当前 AP-7 必须保持 blocked：旧 generated inventory 仍含 `/api/presets`，活动代码/
+  测试仍有旧 preset 和 `preset_snapshot` residual，且没有签署 admission evidence。
+  06 只能继续设计审阅，不能进入 Plugin/MiniApp loader、Host 或 Release 代码实施。
+
+理由：AP-7 的职责是防止“有类型/有 fixture/有 self-test”被误报为产品合同已经闭合。
+把删除包的历史文字与真实依赖分开，既保留 clean-cut 的安全断言，也避免旧 Gate 因
+删除对象本身的历史记录失真。
+
 ## 当前阅读与实施规则
 
-1. 先完整读取 `05-system-capability-replacement-foundation.zh.md`，再用本文追溯 D-001～D-033 的决策理由。
+1. 先完整读取 `05-system-capability-replacement-foundation.zh.md`，再用本文追溯 D-001～D-037 的决策理由。
 2. 领取和关闭工作只看 `GLOBAL-CLOSURE-TODO.zh.md`；不得从本文推断某项已经实现或通过 Gate。
 3. Browser/Computer 实施必须先落 Role/Provider seam，再接具体 owner；不能在旧直连上叠加 adapter。
 4. Codex Sidecar 只按未来宿主研究维护；不能继续围绕不存在的私有 patch 扩大当前
@@ -734,3 +809,5 @@ provider 请求误当成完整迁移或跨传输发布证明。
 6. 任何需要恢复旧固定 ROM、在线 canary、五平台首发、全量 exact-zero/evidence 或复杂 handoff 的变化，都必须重新提出产品理由并获得明确决策。
 7. 读取 automation audit 时同时记录 production legacy、transitional adapter 和真实
    blocker；不得只看一个数字判断是否已经完成。
+8. AP-7 未通过前，不得以 06 文档、Plugin/MiniApp fixture 或旧 preset 迁移代码作为
+   一期完成证据；每次状态变更必须回写 GLOBAL TODO 的 AP marker 和验证命令。

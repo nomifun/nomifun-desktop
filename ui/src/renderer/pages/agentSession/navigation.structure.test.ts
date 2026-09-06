@@ -3,26 +3,44 @@ import { readFileSync } from 'node:fs';
 
 const read = (url: URL) => readFileSync(url, 'utf8');
 
-describe('C6 canonical UI navigation', () => {
-  test('main selects the canonical route host before the legacy router', () => {
-    const main = read(new URL('../../main.tsx', import.meta.url));
-    const routes = read(new URL('./CanonicalAgentRoutes.tsx', import.meta.url));
+describe('Agent navigation', () => {
+  test('the main router owns only the public Agent routes', () => {
+    const router = read(new URL('../../components/layout/Router.tsx', import.meta.url));
 
-    expect(main.includes('isCanonicalAgentHashRoute(window.location.hash)')).toBe(true);
-    expect(main.includes('<CanonicalAgentRoutes layout={layout} />')).toBe(true);
-    expect(routes.includes("path='/settings/agent-presets/*'")).toBe(true);
-    expect(routes.includes("path='/agent-sessions/:agentSessionId'")).toBe(true);
+    expect(
+      router.includes(
+        "const AgentSettingsPage = React.lazy(() => import('@renderer/pages/agentSettings'));"
+      )
+    ).toBe(true);
+    expect(
+      router.includes(
+        "const AgentSessionPage = React.lazy(() => import('@renderer/pages/agentSession/AgentSessionPage'));"
+      )
+    ).toBe(true);
+    expect(router.includes("path='/agent' element={withRouteFallback(AgentSettingsPage)}")).toBe(true);
+    expect(
+      router.includes(
+        "path='/agent-sessions/:agentSessionId' element={withRouteFallback(AgentSessionPage)}"
+      )
+    ).toBe(true);
+
+    expect(router.includes('LegacyAgentAuthoringRedirect')).toBe(false);
+    expect(router.includes("path='/presets'")).toBe(false);
+    expect(router.includes("path='/settings/agent-presets/*'")).toBe(false);
+    expect(router.includes("path='/settings/agent'")).toBe(false);
   });
 
-  test('the real settings surface links to Agent Settings', () => {
-    const settings = read(
-      new URL(
-        '../../components/settings/SettingsModal/contents/AgentModalContent.tsx',
-        import.meta.url
-      )
+  test('execution-engine settings no longer links to Agent authoring', () => {
+    const settingsPage = read(new URL('../settings/AgentSettings/index.tsx', import.meta.url));
+    const settingsContent = read(
+      new URL('../settings/AgentSettings/ExecutionEnginesSettingsContent.tsx', import.meta.url)
     );
-    expect(settings.includes("window.location.hash = '/settings/agent-presets'")).toBe(true);
-    expect(settings.includes('agentSettings.navigation.open')).toBe(true);
+
+    expect(settingsPage.includes('AgentModalContent')).toBe(false);
+    expect(settingsPage.includes('ExecutionEnginesSettingsContent')).toBe(true);
+    expect(settingsContent.includes('<LocalAgents />')).toBe(true);
+    expect(settingsContent.includes('SettingsModal')).toBe(false);
+    expect(settingsContent.includes('agentSettings.navigation')).toBe(false);
   });
 
   test('new AgentSession pages contain no legacy chat-container fallback', () => {

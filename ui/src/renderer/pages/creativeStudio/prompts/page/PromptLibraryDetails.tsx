@@ -45,13 +45,9 @@ function sourceLabel(item: PromptLibraryItem, t: TFunction): string {
       defaultValue: 'Public prompt catalog',
     });
   }
-  return item.source === 'preset'
-    ? t('creativeStudio.prompts.sourcePreset', {
-        defaultValue: 'NomiFun preset',
-      })
-    : t('creativeStudio.prompts.sourceAsset', {
-        defaultValue: 'My text assets',
-      });
+  return t('creativeStudio.prompts.sourceAsset', {
+    defaultValue: 'My text assets',
+  });
 }
 
 function updatedAtLabel(value: number | null, locale: string): string | null {

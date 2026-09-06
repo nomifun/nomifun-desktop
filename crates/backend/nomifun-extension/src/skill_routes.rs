@@ -10,16 +10,14 @@ use axum::routing::{delete, get, post, put};
 use nomifun_api_types::{
     AddExternalPathRequest, ApiResponse, BuiltinAutoSkillResponse, ExportSkillRequest, ExternalSkillSourceResponse,
     ImportSkillRequest, ImportSkillResponse, MaterializeSkillsRequest, MaterializeSkillsResponse, MaterializedSkillRef,
-    NamedPathResponse, ReadPresetRuleRequest, ReadBuiltinResourceRequest, ReadSkillInfoRequest,
-    ReadSkillInfoResponse, RemoveExternalPathRequest, ScanForSkillsRequest, ScanForSkillsResponse,
+    NamedPathResponse, ReadBuiltinResourceRequest, ReadSkillInfoRequest, ReadSkillInfoResponse, RemoveExternalPathRequest,
+    ScanForSkillsRequest, ScanForSkillsResponse,
     ScannedSkillResponse, SetSkillTagsRequest, SkillListItemResponse, SkillMarketMcpConfigRequest,
-    SkillMarketMcpConfigResponse, SkillMarketSyncRequest, SkillMarketSyncResponse,
-    SkillPathsResponse, SkillSourceResponse, WritePresetRuleRequest,
+    SkillMarketMcpConfigResponse, SkillMarketSyncRequest, SkillMarketSyncResponse, SkillPathsResponse, SkillSourceResponse,
 };
 use nomifun_common::AppError;
 use nomifun_db::ISkillTagRepository;
 
-use crate::classifier::PresetRuleDispatcher;
 use crate::external_paths::ExternalPathsManager;
 use crate::skill_service::{self, SkillPaths, SkillSource};
 
@@ -40,12 +38,6 @@ fn to_source_response(source: SkillSource) -> SkillSourceResponse {
 pub struct SkillRouterState {
     pub skill_paths: SkillPaths,
     pub external_paths_manager: Arc<ExternalPathsManager>,
-    /// Dispatcher that routes preset-rule / preset-skill read/write/delete
-    /// by source (builtin / extension / user). The production composition
-    /// root always wires it; handlers reject with an internal error when it
-    /// is absent (test-only construction).
-    #[allow(clippy::type_complexity)]
-    pub preset_dispatcher: Option<Arc<dyn PresetRuleDispatcher>>,
     /// Per-skill tag assignment repo (user assignments/overrides).
     pub skill_tag_repo: Arc<dyn ISkillTagRepository>,
     /// Built-in skill tag seed: skill name → (audience_tags, scenario_tags).
@@ -81,14 +73,6 @@ pub fn skill_routes(state: SkillRouterState) -> Router {
         .route("/api/skills/builtin-skill", post(read_builtin_skill))
         // Per-agent skill resolution (for agent CLI symlink layout).
         .route("/api/skills/materialize-for-agent", post(materialize_for_agent))
-        // Preset rules CRUD
-        .route("/api/skills/preset-rule/read", post(read_preset_rule))
-        .route("/api/skills/preset-rule/write", post(write_preset_rule))
-        .route("/api/skills/preset-rule/{id}", delete(delete_preset_rule))
-        // Preset skills CRUD
-        .route("/api/skills/preset-skill/read", post(read_preset_skill))
-        .route("/api/skills/preset-skill/write", post(write_preset_skill))
-        .route("/api/skills/preset-skill/{id}", delete(delete_preset_skill))
         // External path management
         .route(
             "/api/skills/external-paths",
@@ -158,10 +142,9 @@ async fn list_skills(
     Ok(Json(ApiResponse::ok(resp)))
 }
 
-/// Decode a JSON-array TEXT column into a `Vec<String>`. Fail-soft on purpose
-/// (intentionally unlike `nomifun-preset`'s `decode_str_list`, which 500s on
-/// bad JSON): this is the read path for the skill list, so one corrupted sidecar
-/// row must not break the whole listing — it degrades to no tags for that skill.
+/// Decode a JSON-array TEXT column into a `Vec<String>`. This read path is
+/// intentionally fail-soft so one corrupted sidecar row degrades to no tags
+/// instead of breaking the whole skill listing.
 fn decode_tags(raw: Option<&str>) -> Vec<String> {
     match raw {
         Some(s) if !s.is_empty() => serde_json::from_str(s).unwrap_or_default(),
@@ -391,102 +374,6 @@ async fn materialize_for_agent(
 }
 
 // ---------------------------------------------------------------------------
-// Preset rules CRUD
-// ---------------------------------------------------------------------------
-
-/// Preset rule/skill content lives in the DB (`preset.instructions`); the
-/// dispatcher is always wired by the production composition root. There is
-/// no file-system fallback.
-fn require_preset_dispatcher(
-    state: &SkillRouterState,
-) -> Result<&Arc<dyn PresetRuleDispatcher>, AppError> {
-    state
-        .preset_dispatcher
-        .as_ref()
-        .ok_or_else(|| AppError::Internal("Preset dispatcher is not configured".into()))
-}
-
-/// `POST /api/skills/preset-rule/read` — read an preset rule.
-///
-/// Dispatches by source via [`PresetRuleDispatcher`].
-async fn read_preset_rule(
-    State(state): State<SkillRouterState>,
-    body: Result<Json<ReadPresetRuleRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<String>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let dispatcher = require_preset_dispatcher(&state)?;
-    let content = dispatcher.read_rule(&req.preset_id, req.locale.as_deref()).await?;
-    Ok(Json(ApiResponse::ok(content)))
-}
-
-/// `POST /api/skills/preset-rule/write` — write an preset rule.
-///
-/// Dispatches by source: builtin / extension ids reject with 400.
-async fn write_preset_rule(
-    State(state): State<SkillRouterState>,
-    body: Result<Json<WritePresetRuleRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<bool>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let dispatcher = require_preset_dispatcher(&state)?;
-    dispatcher
-        .write_rule(&req.preset_id, req.locale.as_deref(), &req.content)
-        .await?;
-    Ok(Json(ApiResponse::ok(true)))
-}
-
-/// `DELETE /api/skills/preset-rule/:id` — delete all locale versions.
-async fn delete_preset_rule(
-    State(state): State<SkillRouterState>,
-    AxumPath(id): AxumPath<String>,
-) -> Result<Json<ApiResponse<bool>>, AppError> {
-    let dispatcher = require_preset_dispatcher(&state)?;
-    let ok = dispatcher.delete_rule(&id).await?;
-    Ok(Json(ApiResponse::ok(ok)))
-}
-
-// ---------------------------------------------------------------------------
-// Preset skills CRUD
-// ---------------------------------------------------------------------------
-
-/// `POST /api/skills/preset-skill/read` — read an preset skill.
-///
-/// Dispatches by source via [`PresetRuleDispatcher`].
-async fn read_preset_skill(
-    State(state): State<SkillRouterState>,
-    body: Result<Json<ReadPresetRuleRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<String>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let dispatcher = require_preset_dispatcher(&state)?;
-    let content = dispatcher.read_skill(&req.preset_id, req.locale.as_deref()).await?;
-    Ok(Json(ApiResponse::ok(content)))
-}
-
-/// `POST /api/skills/preset-skill/write` — write an preset skill.
-///
-/// Dispatches by source: builtin / extension ids reject with 400.
-async fn write_preset_skill(
-    State(state): State<SkillRouterState>,
-    body: Result<Json<WritePresetRuleRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<bool>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let dispatcher = require_preset_dispatcher(&state)?;
-    dispatcher
-        .write_skill(&req.preset_id, req.locale.as_deref(), &req.content)
-        .await?;
-    Ok(Json(ApiResponse::ok(true)))
-}
-
-/// `DELETE /api/skills/preset-skill/:id` — delete all locale versions.
-async fn delete_preset_skill(
-    State(state): State<SkillRouterState>,
-    AxumPath(id): AxumPath<String>,
-) -> Result<Json<ApiResponse<bool>>, AppError> {
-    let dispatcher = require_preset_dispatcher(&state)?;
-    let ok = dispatcher.delete_skill(&id).await?;
-    Ok(Json(ApiResponse::ok(ok)))
-}
-
-// ---------------------------------------------------------------------------
 // External path management
 // ---------------------------------------------------------------------------
 
@@ -573,6 +460,9 @@ async fn resolve_skill_market_mcp_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
 
     #[derive(Default)]
     struct InMemorySkillTagRepo {
@@ -615,15 +505,12 @@ mod tests {
             cron_skills_dir: tmp.path().join("cron").join("skills"),
             builtin_skills_dir: tmp.path().join("builtin-skills"),
             builtin_rules_dir: tmp.path().join("builtin-rules"),
-            preset_rules_dir: tmp.path().join("preset-rules"),
-            preset_skills_dir: tmp.path().join("preset-skills"),
         };
         let ext_mgr = Arc::new(ExternalPathsManager::with_file(tmp.path().join("paths.json")).await);
         std::mem::forget(tmp);
         SkillRouterState {
             skill_paths: paths,
             external_paths_manager: ext_mgr,
-            preset_dispatcher: None,
             skill_tag_repo: std::sync::Arc::new(InMemorySkillTagRepo::default()),
             builtin_skill_tags: std::sync::Arc::new(std::collections::HashMap::new()),
         }
@@ -633,5 +520,31 @@ mod tests {
     async fn skill_routes_builds_router() {
         let state = make_state().await;
         let _router = skill_routes(state);
+    }
+
+    #[tokio::test]
+    async fn removed_preset_content_routes_return_not_found() {
+        let routes = [
+            ("POST", "/api/skills/preset-rule/read"),
+            ("POST", "/api/skills/preset-rule/write"),
+            ("DELETE", "/api/skills/preset-rule/0190f5fe-7c00-7a00-8000-000000000001"),
+            ("POST", "/api/skills/preset-skill/read"),
+            ("POST", "/api/skills/preset-skill/write"),
+            ("DELETE", "/api/skills/preset-skill/0190f5fe-7c00-7a00-0000-000000000001"),
+        ];
+
+        for (method, uri) in routes {
+            let response = skill_routes(make_state().await)
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+        }
     }
 }

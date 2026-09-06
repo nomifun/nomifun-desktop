@@ -6,23 +6,28 @@
 >
 > 权威来源：`05-system-capability-replacement-foundation.zh.md`
 >
-> 当前结论：S0-S2 的止损、P0 与基础收缩已按定向 evidence 收口；MCP canonical owner
-> 已在 S3 收口，Agent Settings 产品表面已在 S4 收口。当前产品执行内核是 NomiCore/Nomi
-> engine，Web、Desktop 和 `nomicore` 默认入口均已选择 `NomiCoreApplication`。
-> 2026-09-05 本机受控 StepFun live provider smoke 已通过，`SL-S3-07`、`SL-S3-10`、
-> `SL-S3-11` 已关闭；`SL-S3-10` 的 host-owned typed boundary、生产依赖审计和
-> 定向回归已收口。未来 canonical Session 的直接 live event、完整 Channel receipt
-> 和更宽的 IDMM continuation/failover surface 仍保留为独立后续合同，不在本项伪装完成，
-> `SL-S4-02` 等待人工验收。
-> Windows 候选和 macOS/Linux 原生验证尚未完成。Codex Sidecar、C9/Nomi-free RC 已明确
-> 延后，不再阻塞当前 Nomi-core 交付。
+> 当前结论：S0-S2 的止损、P0 与基础收缩，以及既有 S3/S4 基础切片仍按历史定向
+> evidence 保留；本工作树正在执行 05 §15 的 AgentPreset AP-0～AP-7 clean-cut，
+> 不能把旧 S4 的局部 UI evidence 直接当作 AP-3/AP-7 完成。
+> 产品执行内核仍是 NomiCore/Nomi engine，Web、Desktop 和 `nomicore` 默认入口均使用
+> `NomiCoreApplication`。
+> 当前 UI 源码已经有唯一公共 Agent 工作台 `/agent` 和会话路由
+> `/agent-sessions/:agentSessionId`，但 `/presets`、`/settings/agent-presets` 和
+> `/settings/agent` 仍保留一次性迁移跳转，旧消费者和生成 API inventory 仍有 residual。
+> `061_agent_snapshot_naming.sql` 已物理重命名四类持久化快照列，`062_agent_preset_contribution_locks.sql`
+> 已加入 Revision 的 `contribution_locks_json`；两项目前都只存在于未提交工作树，尚未完成
+> 全仓合流验证。
+> 2026-09-05 的受控 StepFun smoke、Cron/Remote 定向 lane evidence 不能替代 AP-4
+> 的真实非 Agent consumer 证据，也不能签署 AP-7 admission。AP-7 当前明确阻断，06
+> 只能继续设计审阅，不能进入 Plugin/MiniApp 代码实施。
 
 本文是 05 发布后的唯一一期执行台账。旧版 84 个 `INF/W/LEG/SCN/TST/REL`
 ID 从现在起只作为历史审计索引，不再是一期必须逐项关闭的阻断清单，也不得继续用
 “81 个 action-bearing Capability 是否全部有 owner”、旧 residual 数量或五平台笛卡尔积
 衡量一期完成度。
 
-一期执行台账追踪 05 经 2026-09-03 修订后的 S0-S5：先停止错误扩张和审计普通 revert，
+一期执行台账追踪 05 经 2026-09-03 修订后的 S0-S5，并在其上增加 AP-0～AP-7 前置
+收口层：先停止错误扩张和审计普通 revert，
 再关闭三个 P0、单 Compiler、小 Snapshot 和三类 Effect；Codex upstream spike 只作为
 历史研究保留。当前继续完成 Browser/Computer Role seam、Nomi-core 真实 owner、automation、
 Remote、四条 UI 用户流程以及 Windows、macOS arm64、Linux Desktop 的 Nomi-core RC。
@@ -56,6 +61,69 @@ C9/Nomi 删除和 Nomi-free RC 已延后，不新增当前阶段阻断。
    不得在一期实现、提交或引用为已冻结合同。
 8. Codex app-server 只作为未来 host boundary 研究；其 fixture、adapter、Broker smoke
    和 live binary 缺口不阻塞当前 Nomi-core 工作。
+
+## 2026-09-05 AgentPreset AP-0～AP-7 收口检查点
+
+> 本节是当前实现工作树的增量台账，优先级高于下方旧 S0-S5 快照中对 Agent Settings
+> 的局部“已关闭”描述。它不修改 05 §15 的合同，只记录当前代码能证明到哪一步。
+>
+> `open` 表示仍可在本机实施；`pending-validation` 表示已有实现切片但尚缺合流/
+> 行为证据；`blocked` 表示门禁前置条件未满足。任何 AP 项都没有因为文档更新而自动
+> 变成 `closed`。
+
+<!-- AP_STATUS AP-0: pending-validation -->
+<!-- AP_STATUS AP-1: pending-validation -->
+<!-- AP_STATUS AP-2: pending-validation -->
+<!-- AP_STATUS AP-3: open -->
+<!-- AP_STATUS AP-4: open -->
+<!-- AP_STATUS AP-5: open -->
+<!-- AP_STATUS AP-6: open -->
+<!-- AP_STATUS AP-7: blocked -->
+
+| AP | 状态 | 当前可证明的事实 | 尚未满足的条件 |
+| --- | --- | --- | --- |
+| AP-0 | `pending-validation` | 05 §15 已冻结“Agent 工作台”唯一产品入口、owner 边界和 Plugin/MiniApp 平台供给层定位；当前 UI 已出现 `/agent`。 | 相关架构/API 文档和全仓 owner/术语扫描仍在收口；当前工作树未形成 AP 级干净提交。 |
+| AP-1 | `pending-validation` | `nomifun-agent-contracts/src/catalog.rs`、平台 Catalog entry fixture、consumer filtering 和 availability/admission 类型已出现。 | generated schema/API inventory 尚未同步；尚无一个可复查的真实 Agent + 非 Agent 端到端共享 materialization 证据。 |
+| AP-2 | `pending-validation` | `ContributionLock`、`AgentPresetRevision` digest input、Compiler lock 生成，以及 `agent_snapshot` DTO/row 投影已在并行写集中实现。 | API types、DB、App 和消费者仍未完成一次全仓编译合流；Preview/Save/Test/Session Open 同结果的集成证据未形成。 |
+| AP-3 | `open` | UI Router 已声明 `/agent` 和 `/agent-sessions/:agentSessionId`，侧栏已使用 Agent 入口；四种模式在新页面中作为创建 seed。 | `/presets`、`/settings/agent-presets`、`/settings/agent` 仍是迁移跳转；旧 UI consumer/import 和当前工作树 UI build residual 尚未清零；四条真实流程尚无人验收。 |
+| AP-4 | `open` | Agent Execution/Cron lane 已改为接收调用方冻结的 `agent_snapshot`，不再由执行层解析旧 preset id；Catalog contract 具备 Agent/non-Agent surface 过滤。 | App composition 和 API contract 尚未合流；非 Agent 真实消费者共享同一 materialization 的行为证据缺失。 |
+| AP-5 | `open` | Revision digest 纳入 `contribution_locks`；部分来源锁、失效和 no-fallback 校验已存在。 | Compatible/Breaking Replace、Disable/Uninstall、impact diff 以及工作台 Retry/Switch/Restore/Fork 的完整产品行为尚未验证。 |
+| AP-6 | `open` | `nomifun-preset` crate、旧 DB preset repository 和 Extension preset contribution 已在工作树删除；未发现 Cargo 依赖声明或 Rust `nomifun_preset` import。 | 旧 `/api/presets`、旧 DTO/override、`preset_snapshot` 生产/测试引用、旧 UI consumer 和 generated inventory 仍有 residual；根 `Cargo.toml` 的 `exclude` 只是删除期间的空目录 tombstone，不是生产依赖。 |
+| AP-7 | `blocked` | `node --check scripts/gate-agent-v2.mjs`、`bun scripts/gate-agent-v2.mjs --self-test` 可通过；AP gate 已能区分历史 migration/删除合同与活动 residual。 | 当前 `bun run gate:agent-v2 -- ap-7` 仍失败；AP-0～AP-6 未全部关闭、generated inventory 仍含 `/api/presets`、无真实非 Agent consumer 证据、无签署 admission evidence，不能放行 06。 |
+
+### AP-6 clean-cut 事实与允许的历史残留
+
+- `nomifun-preset` 已不再是 workspace member 或 Cargo dependency。Gate 只检查真正的
+  dependency key、`Cargo.lock` package entry 和 Rust import；删除期间根
+  `Cargo.toml` 的 `exclude = ["crates/backend/nomifun-preset"]` 可以作为空目录 tombstone
+  记录，不能被当成 production dependency。
+- `crates/backend/nomifun-db/migrations/001_v3_baseline.sql` 中的
+  `preset_snapshot` 是历史 baseline bytes；它不是当前 schema alias。`061_agent_snapshot_naming.sql`
+  对 `conversations`、`agent_execution_participants`、
+  `agent_execution_template_participants` 和 `cron_jobs` 做物理列重命名，不做双读写或
+  compatibility view。
+- `062_agent_preset_contribution_locks.sql` 在
+  `nomi_agent_preset_revisions` 增加 `contribution_locks_json`，要求合法 JSON array；
+  Revision digest 必须覆盖该 lock 集合。`preset_id`/`preset_revision` 在当前切片仍可作为
+  AgentPreset provenance，不能与已删除的旧 preset 快照模型混为一谈。
+- 删除合同 JSON、历史 migration 和回归测试中出现旧名称时，Gate 将其单独标为
+  historical/test；这不等于允许活动路由、应用服务、DTO、UI consumer 或 generated
+  inventory 保留旧主链。当前活动 residual 仍然阻断 AP-6。
+
+### AP-7 验证命令与当前结果
+
+| 命令 | 当前结果 | 说明 |
+| --- | --- | --- |
+| `node --check scripts/gate-agent-v2.mjs` | `pass` | 仅验证 Gate 脚本语法。 |
+| `bun scripts/gate-agent-v2.mjs --self-test` | `pass` | 验证 Gate 内部分类/边界逻辑；不是 AP admission。 |
+| `bun run gate:agent-v2 -- ap-7` | `fail`（预期） | 当前工作树的 admission preflight；报告写入 `build.noindex/agent-capability-v2/<HEAD>/ap-7/summary.json`。 |
+| `git diff --check -- scripts/gate-agent-v2.mjs docs/specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md docs/specs/2026-08-28-agent-capability-platform-v2/DECISIONS.zh.md` | `pass` | 文档/Gate 写集检查；不覆盖并行 lane 的 Rust/UI 编译。 |
+| `cargo check/test`、`bun run build:ui`、真实 Provider smoke | 本轮未运行 | 本 lane 只负责文档/Gate；当前并行工作树尚未完成全仓合流，不能用未运行命令宣称 AP-2/AP-3/AP-4/AP-7 完成。 |
+
+AP-7 的 admission 必须同时满足：AP-0～AP-6 全部 `closed`、旧活动主链 residual 为 0、
+generated inventory 已同步、真实 Agent 与非 Agent consumer 证据可复查、ContributionLock/
+impact/no-fallback 行为测试通过，并在干净提交上形成签署记录。在这些条件满足前，06 仅
+允许设计审阅和文档修订。
 
 ## 历史进度保留
 

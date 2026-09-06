@@ -11,8 +11,6 @@ import { ipcBridge } from '@/common';
 import NomiModal from '@renderer/components/base/NomiModal';
 import type { ICreateCronJobParams, ICronAgentConfig, ICronJob } from '@/common/adapter/ipcBridge';
 import { useConversationAgents } from '@renderer/pages/conversation/hooks/useConversationAgents';
-import { presetSupportsTarget } from '@/common/types/agent/presetTypes';
-import { resolvePresetCatalogName } from '@renderer/utils/model/presetPresentation';
 import dayjs from 'dayjs';
 import type { TProviderWithModel } from '@/common/config/storage';
 import type { ConversationId, ProviderId } from '@/common/types/ids';
@@ -138,7 +136,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   const { t, i18n } = useTranslation();
   const [form] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
-  const { cliAgents, presets: presetPresets, isLoading: identitiesLoading } = useConversationAgents();
+  const { cliAgents, agentPresets, isLoading: identitiesLoading } = useConversationAgents();
   // Provider/model groups with an exact enabled Chat capability.
   const { groups: chatGroups } = useModelsForTask('chat');
   const [frequency, setFrequency] = useState<FrequencyType>('manual');
@@ -201,12 +199,12 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
     if (
       !presetId ||
       identitiesLoading ||
-      presetPresets.some((preset) => preset.preset_id === presetId)
+      agentPresets.some((preset) => preset.preset_id === presetId)
     ) {
       return undefined;
     }
     return presetId;
-  }, [editJob?.metadata.agent_config?.preset_id, identitiesLoading, presetPresets]);
+  }, [editJob?.metadata.agent_config?.preset_id, identitiesLoading, agentPresets]);
 
   const removedAgentId = useMemo(() => {
     const config = editJob?.metadata.agent_config;
@@ -272,15 +270,14 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   const selectedRuntimeAgent = useMemo<AgentMetadata | undefined>(() => {
     if (!selectedAgent) return undefined;
     const selection = parseCronAgentSelection(selectedAgent);
-    if (selection?.kind === 'preset') {
-      const preset = presetPresets.find((item) => item.preset_id === selection.id);
-      const preferredAgentId = preset?.preferred_agent_id || preset?.agent_preferences[0]?.agent_id;
-      return cliAgents.find((agent) => agent.agent_id === preferredAgentId);
-    }
+    if (selection?.kind === 'preset') return undefined;
     return findCronSelectedAgent(selectedAgent, cliAgents);
-  }, [selectedAgent, presetPresets, cliAgents]);
+  }, [selectedAgent, cliAgents]);
 
-  const resolvedBackend = selectedRuntimeAgent?.backend || selectedRuntimeAgent?.agent_type;
+  const resolvedBackend =
+    parseCronAgentSelection(selectedAgent)?.kind === 'preset'
+      ? 'nomi'
+      : selectedRuntimeAgent?.backend || selectedRuntimeAgent?.agent_type;
   const isPresetSelection = parseCronAgentSelection(selectedAgent)?.kind === 'preset';
 
   const isProviderModelMode = resolvedBackend === 'nomi';
@@ -447,26 +444,13 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
         };
       }
     } else if (selection.kind === 'preset') {
-      const preset = presetPresets.find((item) => item.preset_id === selection.id);
+      const preset = agentPresets.find((item) => item.preset_id === selection.id);
       if (!preset) {
         throw new Error(t('cron.page.form.removedPresetRequired'));
       }
-      if (!presetSupportsTarget(preset, 'cron')) {
-        throw new Error(
-          t('cron.page.form.presetCronRequired', {
-            name: resolvePresetCatalogName(preset, i18n.language),
-          })
-        );
-      }
-      const preferredAgentId = preset.preferred_agent_id || preset.agent_preferences[0]?.agent_id;
-      const preferredAgent = cliAgents.find((agent) => agent.agent_id === preferredAgentId);
-      const presetBackend = preferredAgent?.backend || preferredAgent?.agent_type || 'nomi';
-      resolvedAgentType = preferredAgent?.agent_type || presetBackend;
+      resolvedAgentType = 'nomi';
       agent_config = {
-        ...(presetBackend === 'nomi' ? {} : { backend: presetBackend }),
-        // The backend freezes canonical preset.name in the resolved snapshot.
-        // Localization is presentation-only and must not leak into persisted identity.
-        name: preset.name,
+        name: preset.display_name,
         preset_id: preset.preset_id,
         workspace,
         clear_context_each_run: shouldClearContextEachRun,
@@ -589,19 +573,13 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
     !findCronSelectedAgent(selectedAgent, cliAgents)
       ? selectedAgent
       : undefined;
-  const selectedPreset =
-    selectedIdentity?.kind === 'preset'
-      ? presetPresets.find((preset) => preset.preset_id === selectedIdentity.id)
-      : undefined;
   const selectedIdentityStatus =
     selectedIdentity?.kind === 'agent' && removedAgentId === selectedIdentity.id
       ? t('cron.page.form.removedAgentUnavailable')
       : unavailableLegacyAgentValue && !identitiesLoading
         ? t('cron.page.form.legacyAgentUnavailable')
-        : selectedIdentity?.kind === 'preset' && removedPresetId === selectedIdentity.id
-          ? t('cron.page.form.removedPresetUnavailable')
-          : selectedPreset && !presetSupportsTarget(selectedPreset, 'cron')
-            ? t('cron.page.form.presetCronUnavailable')
+          : selectedIdentity?.kind === 'preset' && removedPresetId === selectedIdentity.id
+            ? t('cron.page.form.removedPresetUnavailable')
             : undefined;
 
   // The agent selector is reused in two layouts (alone, or sharing a row with
@@ -650,9 +628,8 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
               );
             }
           } else if (selection?.kind === 'preset') {
-            const preset = presetPresets.find((item) => item.preset_id === selection.id);
+            const preset = agentPresets.find((item) => item.preset_id === selection.id);
             if (preset) {
-              const supportsCron = presetSupportsTarget(preset, 'cron');
               const frozenName =
                 editJob?.metadata.agent_config?.preset_id === preset.preset_id
                   ? editJob.metadata.agent_config.name
@@ -660,9 +637,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
               return (
                 <CronPresetOptionIdentity
                   preset={preset}
-                  language={i18n.language}
                   nameOverride={frozenName}
-                  statusLabel={supportsCron ? undefined : t('cron.page.form.presetCronUnavailable')}
                   compact
                 />
               );
@@ -723,7 +698,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
             })}
           </OptGroup>
         )}
-        {(presetPresets.length > 0 || removedPresetId) && (
+        {(agentPresets.length > 0 || removedPresetId) && (
           <OptGroup label={t('conversation.dropdown.presetPresets')}>
             {removedPresetId && (
               <Option
@@ -738,20 +713,15 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
                 />
               </Option>
             )}
-            {presetPresets.map((preset) => {
-              const supportsCron = presetSupportsTarget(preset, 'cron');
+            {agentPresets.map((preset) => {
               const optionValue = getCronPresetOptionValue(preset.preset_id);
               return (
                 <Option
                   key={optionValue}
                   value={optionValue}
-                  disabled={!supportsCron}
-                  aria-disabled={!supportsCron || undefined}
                 >
                   <CronPresetOptionIdentity
                     preset={preset}
-                    language={i18n.language}
-                    statusLabel={supportsCron ? undefined : t('cron.page.form.presetCronUnavailable')}
                   />
                 </Option>
               );

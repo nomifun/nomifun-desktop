@@ -165,33 +165,6 @@ pub struct SkillPathsResponse {
     pub builtin_skills_dir: String,
 }
 
-// ---------------------------------------------------------------------------
-// D. Preset rules & skills
-// ---------------------------------------------------------------------------
-
-/// Request body for `POST /api/skills/preset-rule/read` and
-/// `POST /api/skills/preset-skill/read`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReadPresetRuleRequest {
-    #[serde(deserialize_with = "crate::serde_util::deserialize_preset_reference")]
-    pub preset_id: String,
-    #[serde(default)]
-    pub locale: Option<String>,
-}
-
-/// Request body for `POST /api/skills/preset-rule/write` and
-/// `POST /api/skills/preset-skill/write`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WritePresetRuleRequest {
-    #[serde(deserialize_with = "crate::serde_util::deserialize_preset_reference")]
-    pub preset_id: String,
-    pub content: String,
-    #[serde(default)]
-    pub locale: Option<String>,
-}
-
 /// Request body for `POST /api/skills/builtin-rule` and
 /// `POST /api/skills/builtin-skill`.
 #[derive(Debug, Clone, Deserialize)]
@@ -662,56 +635,6 @@ mod tests {
         assert_eq!(json["builtin_skills_dir"], "/app/resources/skills");
         assert!(json.get("userSkillsDir").is_none());
         assert!(json.get("builtinSkillsDir").is_none());
-    }
-
-    // -- Preset rules --
-
-    const PRESET_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
-
-    #[test]
-    fn test_read_preset_rule_request_with_locale() {
-        let raw = json!({"preset_id": PRESET_ID, "locale": "zh-CN"});
-        let req: ReadPresetRuleRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.preset_id, PRESET_ID);
-        assert_eq!(req.locale.as_deref(), Some("zh-CN"));
-    }
-
-    #[test]
-    fn test_read_preset_rule_request_without_locale() {
-        let raw = json!({"preset_id": PRESET_ID});
-        let req: ReadPresetRuleRequest = serde_json::from_value(raw).unwrap();
-        assert!(req.locale.is_none());
-    }
-
-    #[test]
-    fn test_write_preset_rule_request() {
-        let raw = json!({
-            "preset_id": PRESET_ID,
-            "content": "# Rules\nBe helpful.",
-            "locale": "en-US"
-        });
-        let req: WritePresetRuleRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.preset_id, PRESET_ID);
-        assert_eq!(req.content, "# Rules\nBe helpful.");
-        assert_eq!(req.locale.as_deref(), Some("en-US"));
-    }
-
-    #[test]
-    fn preset_rule_request_rejects_prefixed_uuidv7_entity_value() {
-        let raw = json!({
-            "preset_id": "preset_0190f5fe-7c00-7a00-8abc-012345678901"
-        });
-        assert!(serde_json::from_value::<ReadPresetRuleRequest>(raw).is_err());
-    }
-
-    #[test]
-    fn preset_rule_request_rejects_catalog_natural_key() {
-        assert!(
-            serde_json::from_value::<ReadPresetRuleRequest>(json!({
-                "preset_id": "builtin-office"
-            }))
-            .is_err()
-        );
     }
 
     #[test]

@@ -178,7 +178,7 @@ mod tests {
             cron_job_id: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             created_at: now_ms(),
             updated_at: now_ms(),
         }

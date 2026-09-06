@@ -2,9 +2,10 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use nomifun_api_types::{
-    CronAgentConfigDto, CronJobMetadataDto, CronJobResponse, CronJobStateDto, CronScheduleDto,
+    AgentResolvedSnapshot, CronAgentConfigDto, CronJobMetadataDto, CronJobResponse,
+    CronJobStateDto, CronScheduleDto,
 };
-use nomifun_common::{ConversationId, CronJobId, PresetId, ProviderId, TimestampMs, UserId};
+use nomifun_common::{ConversationId, CronJobId, ProviderId, TimestampMs, UserId};
 use nomifun_db::models::CronJobRow;
 use serde::{Deserialize, Serialize};
 
@@ -125,9 +126,9 @@ impl FromStr for JobStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CronAgentConfig {
-    /// Removed host-runtime selector, still read off persisted rows so an old
-    /// job round-trips. Validation rejects it: a Nomi job must leave it unset
-    /// and select its model with `provider_id`.
+    /// Host-runtime selector. Nomi jobs leave this unset and select their
+    /// model through `provider_id`; other runtime selectors require an
+    /// accompanying frozen Agent snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     pub name: String,
@@ -135,12 +136,16 @@ pub struct CronAgentConfig {
     pub cli_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_agent_id: Option<String>,
+    /// Canonical AgentPreset lineage derived from `agent_snapshot`. These
+    /// fields are metadata only; Cron never resolves them independently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_revision: Option<i64>,
+    /// Immutable Agent configuration supplied by the canonical Agent
+    /// application service. Cron never resolves a preset id at runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preset_snapshot: Option<nomifun_api_types::ResolvedPresetSnapshot>,
+    pub agent_snapshot: Option<AgentResolvedSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Logical provider reference used by Nomi jobs.
@@ -232,14 +237,62 @@ pub fn cron_job_from_row(row: CronJobRow) -> Result<CronJob, CronError> {
         .map(serde_json::from_str::<CronAgentConfig>)
         .transpose()?;
     if let Some(config) = agent_config.as_mut() {
-        config.preset_id = row.preset_id.clone();
-        config.preset_revision = row.preset_revision;
-        config.preset_snapshot = row
-            .preset_snapshot
+        let inline_snapshot = config.agent_snapshot.take();
+        let persisted_snapshot = row
+            .agent_snapshot
             .as_deref()
             .map(serde_json::from_str)
             .transpose()?;
+        if inline_snapshot.is_some() && persisted_snapshot.is_none() {
+            return Err(CronError::Scheduler(format!(
+                "cron job {} stores an Agent snapshot only inside agent_config",
+                row.cron_job_id
+            )));
+        }
+        if let (Some(inline), Some(persisted)) =
+            (inline_snapshot.as_ref(), persisted_snapshot.as_ref())
+            && inline != persisted
+        {
+            return Err(CronError::Scheduler(format!(
+                "cron job {} has inconsistent inline and persisted Agent snapshots",
+                row.cron_job_id
+            )));
+        }
+        config.agent_snapshot = persisted_snapshot;
+        if let Some(snapshot) = config.agent_snapshot.as_ref() {
+            if row
+                .preset_id
+                .as_deref()
+                .is_some_and(|value| value != snapshot.preset_id)
+                || row
+                    .preset_revision
+                    .is_some_and(|value| value != snapshot.preset_revision)
+            {
+                return Err(CronError::Scheduler(format!(
+                    "cron job {} has inconsistent Agent snapshot lineage",
+                    row.cron_job_id
+                )));
+            }
+            config.preset_id = Some(snapshot.preset_id.clone());
+            config.preset_revision = Some(snapshot.preset_revision);
+        } else if row.preset_id.is_some()
+            || row.preset_revision.is_some()
+            || row.agent_snapshot.is_some()
+        {
+            return Err(CronError::Scheduler(format!(
+                "cron job {} has preset lineage without a frozen Agent snapshot",
+                row.cron_job_id
+            )));
+        }
         validate_agent_config_ids(&row.cron_job_id, &row.agent_type, config)?;
+    } else if row.preset_id.is_some()
+        || row.preset_revision.is_some()
+        || row.agent_snapshot.is_some()
+    {
+        return Err(CronError::Scheduler(format!(
+            "cron job {} has Agent snapshot lineage without agent_config",
+            row.cron_job_id
+        )));
     }
 
     let last_status = row
@@ -343,6 +396,23 @@ pub fn cron_job_to_row(job: &CronJob) -> Result<CronJobRow, CronError> {
         .map(serde_json::to_string)
         .transpose()?;
 
+    let (preset_id, preset_revision) = job
+        .agent_config
+        .as_ref()
+        .map(|config| {
+            (
+                config
+                    .agent_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.preset_id.clone()),
+                config
+                    .agent_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.preset_revision),
+            )
+        })
+        .unwrap_or((None, None));
+
     Ok(CronJobRow {
         id: 0,
         cron_job_id: job.cron_job_id.clone(),
@@ -357,12 +427,12 @@ pub fn cron_job_to_row(job: &CronJob) -> Result<CronJobRow, CronError> {
         payload_message: job.message.clone(),
         execution_mode: job.execution_mode.as_str().to_owned(),
         agent_config: agent_config_json,
-        preset_id: job.agent_config.as_ref().and_then(|config| config.preset_id.clone()),
-        preset_revision: job.agent_config.as_ref().and_then(|config| config.preset_revision),
-        preset_snapshot: job
+        preset_id,
+        preset_revision,
+        agent_snapshot: job
             .agent_config
             .as_ref()
-            .and_then(|config| config.preset_snapshot.as_ref())
+            .and_then(|config| config.agent_snapshot.as_ref())
             .map(serde_json::to_string)
             .transpose()?,
         conversation_id: job.conversation_id.clone(),
@@ -388,12 +458,16 @@ fn validate_agent_config_ids(
     agent_type: &str,
     config: &CronAgentConfig,
 ) -> Result<(), CronError> {
-    if let Some(preset_id) = config.preset_id.as_deref() {
-        PresetId::try_from(preset_id).map_err(|error| {
-            CronError::Scheduler(format!(
-                "cron job {job_id} has invalid preset_id: {error}"
-            ))
-        })?;
+    if let Some(snapshot) = config.agent_snapshot.as_ref() {
+        if snapshot.preset_revision <= 0 {
+            return Err(CronError::Scheduler(format!(
+                "cron job {job_id} has invalid Agent snapshot revision"
+            )));
+        }
+    } else if config.preset_id.is_some() || config.preset_revision.is_some() {
+        return Err(CronError::Scheduler(format!(
+            "cron job {job_id} has preset lineage without a frozen Agent snapshot"
+        )));
     }
     if agent_type == "nomi" {
         if config.backend.is_some() {
@@ -493,9 +567,15 @@ pub fn cron_job_to_response(job: &CronJob) -> CronJobResponse {
         name: c.name.clone(),
         cli_path: c.cli_path.clone(),
         custom_agent_id: c.custom_agent_id.clone(),
-        preset_id: c.preset_id.clone(),
-        preset_revision: c.preset_revision,
-        preset_snapshot: c.preset_snapshot.clone(),
+        preset_id: c
+            .agent_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.preset_id.clone()),
+        preset_revision: c
+            .agent_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.preset_revision),
+        agent_snapshot: c.agent_snapshot.clone(),
         model: c.model.clone(),
         provider_id: c.provider_id.clone(),
         config_options: c.config_options.clone(),
@@ -746,7 +826,7 @@ mod tests {
             ),
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             conversation_id: Some("0190f5fe-7c00-7a00-8abc-012345678901".into()),
             conversation_title: Some("Test Conv".into()),
             agent_type: "nomi".into(),
@@ -785,7 +865,7 @@ mod tests {
                 custom_agent_id: None,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 model: Some("gpt-5".into()),
                 provider_id: Some(PROVIDER_ID.into()),
                 config_options: None,
@@ -1010,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn row_to_domain_rejects_non_uuidv7_preset_id() {
+    fn row_to_domain_rejects_preset_lineage_without_agent_snapshot() {
         for preset_id in [
             "word-creator",
             "7",
@@ -1023,12 +1103,95 @@ mod tests {
                 ..sample_row()
             };
             let error = cron_job_from_row(row)
-                .expect_err("cron preset_id must be a canonical bare lowercase UUIDv7");
+                .expect_err("preset lineage without an Agent snapshot must fail closed");
             assert!(
-                error.to_string().contains("invalid preset_id"),
+                error
+                    .to_string()
+                    .contains("without a frozen Agent snapshot"),
                 "unexpected error for {preset_id:?}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn row_to_domain_rejects_mismatched_agent_snapshot_lineage() {
+        let snapshot = serde_json::json!({
+            "preset_id": "0190f5fe-7c00-7a00-8abc-012345678902",
+            "preset_revision": 2,
+            "preset_name": "Coding",
+            "resolved_agent_type": "nomi",
+            "resolved_model": {
+                "provider_id": PROVIDER_ID,
+                "model": "gpt-5"
+            },
+            "instructions": "",
+            "included_skills": [],
+            "excluded_auto_skills": [],
+            "knowledge_policy": {
+                "enabled": false,
+                "writeback": false,
+                "grounded": false
+            },
+            "knowledge_base_ids": [],
+            "warnings": []
+        });
+        let row = CronJobRow {
+            preset_id: Some("0190f5fe-7c00-7a00-8abc-012345678903".into()),
+            preset_revision: Some(2),
+            agent_snapshot: Some(snapshot.to_string()),
+            ..sample_row()
+        };
+        let error = cron_job_from_row(row).unwrap_err();
+        assert!(error.to_string().contains("inconsistent Agent snapshot lineage"));
+    }
+
+    #[test]
+    fn row_to_domain_materializes_agent_snapshot_and_lineage() {
+        let snapshot = serde_json::json!({
+            "preset_id": "0190f5fe-7c00-7a00-8abc-012345678902",
+            "preset_revision": 2,
+            "preset_name": "Coding",
+            "resolved_agent_type": "nomi",
+            "resolved_model": {
+                "provider_id": PROVIDER_ID,
+                "model": "gpt-5"
+            },
+            "instructions": "",
+            "included_skills": [],
+            "excluded_auto_skills": [],
+            "knowledge_policy": {
+                "enabled": false,
+                "writeback": false,
+                "grounded": false
+            },
+            "knowledge_base_ids": [],
+            "warnings": []
+        });
+        let row = CronJobRow {
+            preset_id: Some("0190f5fe-7c00-7a00-8abc-012345678902".into()),
+            preset_revision: Some(2),
+            agent_snapshot: Some(snapshot.to_string()),
+            agent_config: Some(
+                serde_json::json!({
+                    "name": "Coding",
+                    "model": "gpt-5",
+                    "provider_id": PROVIDER_ID
+                })
+                .to_string(),
+            ),
+            ..sample_row()
+        };
+        let job = cron_job_from_row(row).expect("valid frozen Agent snapshot");
+        let config = job.agent_config.expect("Agent config");
+        assert_eq!(
+            config.agent_snapshot.as_ref().map(|value| value.preset_revision),
+            Some(2)
+        );
+        assert_eq!(
+            config.preset_id.as_deref(),
+            Some("0190f5fe-7c00-7a00-8abc-012345678902")
+        );
+        assert_eq!(config.preset_revision, Some(2));
     }
 
     // -- Domain ↔ DTO ---------------------------------------------------------

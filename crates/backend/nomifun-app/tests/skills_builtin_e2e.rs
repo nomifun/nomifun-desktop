@@ -78,14 +78,11 @@ async fn fixture_embedded() -> Fixture {
         cron_skills_dir: data_dir.join("cron").join("skills"),
         builtin_skills_dir: data_dir.join("builtin-skills"),
         builtin_rules_dir: data_dir.join("builtin-rules"),
-        preset_rules_dir: data_dir.join("preset-rules"),
-        preset_skills_dir: data_dir.join("preset-skills"),
     };
     let ext_paths_mgr = Arc::new(ExternalPathsManager::with_file(data_dir.join("paths.json")).await);
     states.skill = SkillRouterState {
         skill_paths,
         external_paths_manager: ext_paths_mgr,
-        preset_dispatcher: states.skill.preset_dispatcher.clone(),
         skill_tag_repo: std::sync::Arc::new(nomifun_db::SqliteSkillTagRepository::new(
             services.database.pool().clone(),
         )),

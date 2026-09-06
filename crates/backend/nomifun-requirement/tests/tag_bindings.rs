@@ -62,7 +62,7 @@ fn conv(name: &str, autowork_json: &str) -> ConversationRow {
         cron_job_id: None,
         preset_id: None,
         preset_revision: None,
-        preset_snapshot: None,
+        agent_snapshot: None,
         created_at: 0,
         updated_at: 0,
     }

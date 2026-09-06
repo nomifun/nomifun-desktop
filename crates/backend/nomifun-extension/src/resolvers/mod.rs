@@ -6,7 +6,6 @@
 //! enabled extensions.
 
 pub mod agent;
-pub mod preset;
 pub mod channel_plugin;
 pub mod i18n;
 pub mod mcp_server;
@@ -72,7 +71,6 @@ pub fn resolve_extension_contributions(ext: &LoadedExtension) -> ResolvedContrib
 
     ResolvedContributions {
         mcp_servers: mcp_server::resolve_mcp_servers(&contributes.mcp_servers, ext_name),
-        presets: preset::resolve_presets(&contributes.presets, ext_name, ext_dir),
         agents: agent::resolve_agents(&contributes.agents, ext_name, ext_dir),
         skills: skill::resolve_skills(&contributes.skills, ext_name, ext_dir),
         themes: theme::resolve_themes(&contributes.themes, ext_name, ext_dir),
@@ -112,7 +110,6 @@ pub fn resolve_all_contributions(extensions: &[LoadedExtension]) -> ResolvedCont
 /// Merge `source` contributions into `target`.
 fn merge_contributions(target: &mut ResolvedContributions, source: ResolvedContributions) {
     target.mcp_servers.extend(source.mcp_servers);
-    target.presets.extend(source.presets);
     target.agents.extend(source.agents);
     target.skills.extend(source.skills);
     target.themes.extend(source.themes);
@@ -196,7 +193,6 @@ mod tests {
         let ext = make_extension("empty-ext", true, None);
         let result = resolve_extension_contributions(&ext);
         assert!(result.mcp_servers.is_empty());
-        assert!(result.presets.is_empty());
     }
 
     #[test]

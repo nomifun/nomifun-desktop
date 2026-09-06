@@ -54,7 +54,7 @@ fn participant(participant_id: impl Into<String>) -> NewAgentExecutionParticipan
         source_agent_id: SOURCE_AGENT_ID.to_owned(),
         preset_id: None,
         preset_revision: None,
-        preset_snapshot: None,
+        agent_snapshot: None,
         provider_id: Some(PROVIDER_ID.to_owned()),
         model: Some("model_test".to_owned()),
         role: Some("builder".to_owned()),
@@ -133,7 +133,7 @@ fn conversation_row() -> ConversationRow {
         cron_job_id: None,
         preset_id: None,
         preset_revision: None,
-        preset_snapshot: None,
+        agent_snapshot: None,
         created_at: now,
         updated_at: now,
     }

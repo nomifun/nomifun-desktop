@@ -106,7 +106,6 @@ fn parse_source(value: &str) -> Result<AgentPresetSource, ControlPlaneError> {
     match value {
         "user" => Ok(AgentPresetSource::User),
         "official" => Ok(AgentPresetSource::Official),
-        "package" => Ok(AgentPresetSource::Package),
         other => Err(ControlPlaneError::Wire(format!(
             "unsupported persisted AgentPreset source {other:?}"
         ))),
@@ -196,10 +195,10 @@ async fn load_revision(
     preset_id: &AgentPresetId,
     revision_no: u64,
 ) -> Result<Option<AgentPresetRevision>, ControlPlaneError> {
-    let row: Option<(String, i64, String, String, String, i64, String, String)> =
+    let row: Option<(String, i64, String, String, String, i64, String, String, String)> =
         sqlx::query_as(
             "SELECT revision_id, revision_no, editor_document_json, revision_digest, \
-                    created_by, created_at, reason, snapshot_json \
+                    created_by, created_at, reason, snapshot_json, contribution_locks_json \
              FROM nomi_agent_preset_revisions \
              WHERE preset_id = ? AND revision_no = ?",
         )
@@ -208,7 +207,17 @@ async fn load_revision(
         .fetch_optional(pool)
         .await
         .map_err(sql)?;
-    let Some((_revision_id, persisted_no, document, digest, created_by, created_at, reason, _snapshot)) =
+    let Some((
+        _revision_id,
+        persisted_no,
+        document,
+        digest,
+        created_by,
+        created_at,
+        reason,
+        _snapshot,
+        contribution_locks_json,
+    )) =
         row
     else {
         return Ok(None);
@@ -220,6 +229,10 @@ async fn load_revision(
             revision_digest: digest.into(),
         },
         payload: decode(&document, "AgentPreset revision document")?,
+        contribution_locks: decode(
+            &contribution_locks_json,
+            "AgentPreset contribution locks",
+        )?,
         created_by: parse_owner(&created_by)?,
         created_at_ms: created_at,
         reason: (!reason.is_empty()).then_some(reason),
@@ -344,8 +357,8 @@ async fn insert_revision_tx(
     sqlx::query(
         "INSERT INTO nomi_agent_preset_revisions \
          (revision_id, preset_id, revision_no, schema_version, editor_document_json, \
-          revision_digest, created_by, created_at, reason, snapshot_json) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          revision_digest, created_by, created_at, reason, snapshot_json, contribution_locks_json) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(revision_id)
     .bind(revision.reference.preset_id.as_ref())
@@ -357,6 +370,7 @@ async fn insert_revision_tx(
     .bind(revision.created_at_ms)
     .bind(revision.reason.as_deref().unwrap_or_default())
     .bind(wire(snapshot)?)
+    .bind(wire(&revision.contribution_locks)?)
     .execute(&mut **tx)
     .await
     .map_err(sql)?;

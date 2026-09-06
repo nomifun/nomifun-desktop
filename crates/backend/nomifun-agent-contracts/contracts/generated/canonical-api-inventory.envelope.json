@@ -60,17 +60,9 @@
         "canonical_errors": []
       },
       {
-        "operation_id": "skills.list",
+        "operation_id": "agent_catalog.skills.list",
         "method": "GET",
-        "path": "/api/skills",
-        "request_schema": null,
-        "response_schema": null,
-        "canonical_errors": []
-      },
-      {
-        "operation_id": "skills.get",
-        "method": "GET",
-        "path": "/api/skills/{skill_id}",
+        "path": "/api/agent-catalog/skills",
         "request_schema": null,
         "response_schema": null,
         "canonical_errors": []
@@ -433,5 +425,5 @@
       "/v1/tools?profile"
     ]
   },
-  "payload_digest": "ec516189fa29064e7cba25cd219de9d88389a15a29d8aefc2587016cdf148a55"
+  "payload_digest": "440d1e5fbd0997f5e04ade5fa4a51e9689f17c216bfe298d066833076e281666"
 }

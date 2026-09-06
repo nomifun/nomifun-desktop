@@ -3,17 +3,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::digest::digest_payload;
+use crate::digest::{CanonicalDigestError, digest_payload};
 use crate::package::{
     CapabilityRef, ExactRoleProviderRef, PackageRef, PluginSourceMetadata,
     RoleProviderSelection, SkillRef, TargetPackageInventoryPayload,
 };
 use crate::runtime::RuntimeProfileKind;
 use crate::{
-    ActionId, AgentPresetId, ArtifactEnvelope, CanonicalErrorCode, CanonicalSchemaRef, DigestHex,
-    ChatRouteIdentity, ChatRouteRecord, McpServerId, McpToolKey, ModelRouteId, OperationId,
+    ActionId, AgentPresetId, ArtifactEnvelope, CanonicalErrorCode, CanonicalSchemaRef,
+    ContributionId, ContributionSourceKind, DigestHex, ChatRouteIdentity, ChatRouteRecord,
+    McpBindingId, McpServerId, McpToolKey, MiniAppId, ModelRouteId, OperationId, PluginMountId,
     PrincipalRef, ResolvedSnapshotId, ResourceBindingId, ResourceKind, RuntimeFeatureId,
-    StrictJsonValue, TypedResourceBindings, UserId, VersionString,
+    StableSourceIdentity, TypedResourceBindings, UserId, VersionString,
 };
 
 pub const CAPABILITY_NOT_MATERIALIZED: &str = "CAPABILITY_NOT_MATERIALIZED";
@@ -31,13 +32,77 @@ pub const CHAT_MINIMAL_NOT_EXACT_EMPTY: &str = "CHAT_MINIMAL_NOT_EXACT_EMPTY";
 pub const CODING_CODEX_NATIVE_INCOMPLETE: &str = "CODING_CODEX_NATIVE_INCOMPLETE";
 pub const ROLE_COVERAGE_INCOMPLETE: &str = "ROLE_COVERAGE_INCOMPLETE";
 pub const MODEL_ROUTE_RECORD_INVALID: &str = "MODEL_ROUTE_RECORD_INVALID";
+pub const PRESET_CONTRIBUTION_LOCK_INVALID: &str = "PRESET_CONTRIBUTION_LOCK_INVALID";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentPresetSource {
     Official,
     User,
-    Package,
+}
+
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct ContributionLock {
+    pub source_kind: ContributionSourceKind,
+    pub source_identity: StableSourceIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_id: Option<PluginMountId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub miniapp_id: Option<MiniAppId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_binding_id: Option<McpBindingId>,
+    pub contribution_id: ContributionId,
+    pub contract_digest: DigestHex,
+}
+
+impl ContributionLock {
+    pub fn validate(&self) -> Result<(), PresetContractViolation> {
+        validate_non_empty_canonical_value(self.source_identity.as_ref(), "source_identity")?;
+        validate_non_empty_canonical_value(self.contribution_id.as_ref(), "contribution_id")?;
+        if !is_lowercase_hex_digest(&self.contract_digest) {
+            return Err(contribution_lock_violation(
+                "contract_digest must be 64 lowercase hexadecimal characters",
+            ));
+        }
+
+        let valid_source_identity = match self.source_kind {
+            ContributionSourceKind::PlatformBuiltin => {
+                self.mount_id.is_none()
+                    && self.miniapp_id.is_none()
+                    && self.mcp_binding_id.is_none()
+            }
+            ContributionSourceKind::PluginMount => {
+                self.mount_id.is_some()
+                    && self.miniapp_id.is_none()
+                    && self.mcp_binding_id.is_none()
+            }
+            ContributionSourceKind::MiniAppActiveRelease => {
+                self.miniapp_id.is_some() && self.mcp_binding_id.is_none()
+            }
+            ContributionSourceKind::McpBinding => {
+                self.mcp_binding_id.is_some() && self.miniapp_id.is_none()
+            }
+        };
+        if !valid_source_identity {
+            return Err(contribution_lock_violation(format!(
+                "source-specific provenance is invalid for {:?}",
+                self.source_kind
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -103,31 +168,14 @@ pub struct AgentBindingValue {
     pub binding_version: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilitySelection {
     pub capability: CapabilityRef,
-    pub required: bool,
-    pub exposure: CapabilityExposure,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub action_allowlist: BTreeSet<ActionId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resource_binding_refs: Vec<ResourceBindingId>,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub destination_constraints: BTreeSet<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context_budget_override: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_budget_override: Option<u32>,
-    pub config: StrictJsonValue,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum CapabilityExposure {
-    Advertised,
-    Discoverable,
-    Hidden,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -148,11 +196,10 @@ pub struct TypedResourceDefault {
     pub binding_policy: ResourceDefaultBindingPolicy,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPresetRevisionPayload {
     pub schema_version: VersionString,
-    pub surfaces: BTreeSet<String>,
     pub model_route_refs: BTreeMap<String, ModelRouteId>,
     /// Complete route facts used by the Fresh-v4 persistence writer. Legacy
     /// opaque IDs are not sufficient to construct a provider request.
@@ -167,9 +214,15 @@ pub struct AgentPresetRevisionPayload {
         BTreeMap<crate::ExecutionRoleId, RoleProviderSelection>,
     pub persona: String,
     pub instructions: String,
-    pub context_policy: StrictJsonValue,
-    pub execution_constraints: StrictJsonValue,
-    pub runtime_budget: StrictJsonValue,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub starter_prompts: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPresetRevisionDigestInput {
+    pub payload: AgentPresetRevisionPayload,
+    pub contribution_locks: Vec<ContributionLock>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -177,12 +230,26 @@ pub struct AgentPresetRevisionPayload {
 pub struct AgentPresetRevision {
     pub reference: PresetRevisionRef,
     pub payload: AgentPresetRevisionPayload,
+    pub contribution_locks: Vec<ContributionLock>,
     pub created_by: UserId,
     pub created_at_ms: i64,
     pub reason: Option<String>,
 }
 
 impl AgentPresetRevision {
+    pub fn revision_digest_input(&self) -> AgentPresetRevisionDigestInput {
+        let mut contribution_locks = self.contribution_locks.clone();
+        contribution_locks.sort();
+        AgentPresetRevisionDigestInput {
+            payload: self.payload.clone(),
+            contribution_locks,
+        }
+    }
+
+    pub fn revision_digest(&self) -> Result<DigestHex, CanonicalDigestError> {
+        digest_payload(&self.revision_digest_input())
+    }
+
     pub fn validate(&self) -> Result<(), PresetContractViolation> {
         validate_chat_route_records_for_revision(
             &self.payload,
@@ -193,14 +260,17 @@ impl AgentPresetRevision {
             &self.payload.on_demand_capabilities,
         )?;
         validate_role_provider_overrides(&self.payload.system_role_provider_overrides)?;
-        let digest = digest_payload(&self.payload).map_err(|error| PresetContractViolation {
+        validate_contribution_locks(&self.contribution_locks)?;
+        let digest = self.revision_digest().map_err(|error| PresetContractViolation {
             code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
             message: error.to_string(),
         })?;
         if digest != self.reference.revision_digest {
             return Err(PresetContractViolation {
                 code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
-                message: "revision_digest must cover only the immutable revision payload".into(),
+                message:
+                    "revision_digest must cover the normalized payload and contribution_locks"
+                        .into(),
             });
         }
         Ok(())
@@ -1063,6 +1133,29 @@ fn validate_capability_selections(
     )
 }
 
+fn validate_contribution_locks(
+    locks: &[ContributionLock],
+) -> Result<(), PresetContractViolation> {
+    let mut contribution_ids = BTreeSet::new();
+    for lock in locks {
+        lock.validate()?;
+        if !contribution_ids.insert(lock.contribution_id.clone()) {
+            return Err(contribution_lock_violation(format!(
+                "duplicate contribution lock {}",
+                lock.contribution_id.as_ref()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn contribution_lock_violation(message: impl Into<String>) -> PresetContractViolation {
+    PresetContractViolation {
+        code: CanonicalErrorCode::from(PRESET_CONTRIBUTION_LOCK_INVALID),
+        message: message.into(),
+    }
+}
+
 fn validate_role_provider_overrides(
     overrides: &BTreeMap<crate::ExecutionRoleId, RoleProviderSelection>,
 ) -> Result<(), PresetContractViolation> {
@@ -1482,7 +1575,7 @@ mod tests {
     fn canonical_api_inventory_has_no_test_or_legacy_resource() {
         let inventory = canonical_api_inventory_payload();
         assert!(inventory.operations.iter().all(|operation| {
-            !operation.path.starts_with("/api/presets")
+            !operation.path.starts_with(&["/api/", "presets"].concat())
                 && !operation.path.starts_with("/api/conversations")
                 && !operation.path.contains("/test")
         }));

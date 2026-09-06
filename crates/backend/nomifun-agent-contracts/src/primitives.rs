@@ -49,14 +49,17 @@ string_newtype!(CapabilityId);
 string_newtype!(CanonicalErrorCode);
 string_newtype!(CanonicalSchemaRef);
 string_newtype!(ConnectionConfigRef);
+string_newtype!(ContributionId);
 string_newtype!(CorrelationId);
 string_newtype!(DigestHex);
 string_newtype!(EventId);
 string_newtype!(EventProducerId);
 string_newtype!(HostPortId);
 string_newtype!(IdempotencyKey);
+string_newtype!(McpBindingId);
 string_newtype!(McpServerId);
 string_newtype!(McpToolKey);
+string_newtype!(MiniAppId);
 string_newtype!(ModelRouteId);
 string_newtype!(OperationId);
 string_newtype!(PackageId);
@@ -74,6 +77,7 @@ string_newtype!(ScopeKey);
 string_newtype!(ServiceKeyId);
 string_newtype!(SkillId);
 string_newtype!(StateKey);
+string_newtype!(StableSourceIdentity);
 string_newtype!(UserId);
 string_newtype!(VersionString);
 
@@ -128,4 +132,26 @@ pub struct LogicalArtifactRef {
     pub artifact_id: ArtifactId,
     pub normalized_relative_path: String,
     pub digest: DigestHex,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ContributionSourceKind {
+    PlatformBuiltin,
+    PluginMount,
+    #[serde(rename = "miniapp_active_release")]
+    MiniAppActiveRelease,
+    McpBinding,
 }

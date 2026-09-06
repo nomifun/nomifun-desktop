@@ -155,7 +155,7 @@ fn make_conversation(suffix: &str) -> ConversationRow {
         cron_job_id: None,
         preset_id: None,
         preset_revision: None,
-        preset_snapshot: None,
+        agent_snapshot: None,
         created_at: now,
         updated_at: now,
     }

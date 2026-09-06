@@ -32,9 +32,9 @@ import {
 } from '@renderer/pages/creativeStudio/app/resumeLocation';
 import {
   SiderAssetLibraryEntry,
+  SiderAgentEntry,
   SiderBrowserEntry,
   SiderCreativeStudioEntry,
-  SiderPresetEntry,
   SiderSkillsEntry,
   SiderConversationEntry,
   SiderCustomerServiceEntry,
@@ -203,7 +203,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   };
   const handleMiniAppsClick = () => navTo('/mini-apps');
   const handleCustomerServiceClick = () => navTo('/customer-service');
-  const handlePresetClick = () => navTo('/presets');
+  const handleAgentClick = () => navTo('/agent');
   const handleSkillsClick = () => navTo('/skills');
   const handleMcpClick = () => navTo('/mcp');
   const handleOpenCapabilitiesClick = () => navTo('/open-capabilities');
@@ -335,6 +335,14 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleConversationClick}
             />
+            {/* Agent authoring workbench */}
+            <SiderAgentEntry
+              isMobile={isMobile}
+              isActive={pathname === '/agent' || pathname.startsWith('/agent-sessions/')}
+              collapsed={collapsed}
+              siderTooltipProps={siderTooltipProps}
+              onClick={handleAgentClick}
+            />
             {/* Work partner (桌面伙伴) */}
             <SiderNomiEntry
               isMobile={isMobile}
@@ -409,14 +417,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
             />
             {/* 增强工具 — extension capabilities */}
             <SiderSectionHeader label={t('common.siderSection.tools')} collapsed={collapsed} />
-            {/* Presets and skills are separate concepts and destinations. */}
-            <SiderPresetEntry
-              isMobile={isMobile}
-              isActive={pathname.startsWith('/presets')}
-              collapsed={collapsed}
-              siderTooltipProps={siderTooltipProps}
-              onClick={handlePresetClick}
-            />
+            {/* Skills and MCP remain platform capability destinations. */}
             <SiderSkillsEntry
               isMobile={isMobile}
               isActive={pathname.startsWith('/skills')}

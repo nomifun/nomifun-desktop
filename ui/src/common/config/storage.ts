@@ -5,7 +5,10 @@
  */
 
 import type { ProviderModelResponse } from '@/common/types/provider/providerModel';
-import type { PresetReference, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
+import type {
+  AgentPresetId,
+  AgentResolvedSnapshot,
+} from '@/common/types/agentPlatform';
 import type {
   TDecisionPolicy,
   TDelegationPolicy,
@@ -69,10 +72,10 @@ interface IChatConversation<T, Extra> {
   channel_chat_id?: string;
   /** Cron job that spawned this conversation. */
   cron_job_id?: CronJobId;
-  /** Immutable preset lineage resolved and persisted by the backend. */
-  preset_id?: PresetReference;
+  /** Immutable AgentPreset lineage resolved and persisted by the backend. */
+  preset_id?: AgentPresetId;
   preset_revision?: number;
-  preset_snapshot?: ResolvedPresetSnapshot;
+  agent_snapshot?: AgentResolvedSnapshot;
   /** Nomi-only collaboration policy persisted as first-class conversation fields. */
   delegation_policy?: TDelegationPolicy;
   execution_model_pool?: TExecutionModelPool;

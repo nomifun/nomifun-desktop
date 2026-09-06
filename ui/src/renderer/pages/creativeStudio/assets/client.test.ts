@@ -265,7 +265,7 @@ describe('CreativeAssetClient', () => {
     );
   });
 
-  test('serializes preset provenance without catalog-only attribution fields', async () => {
+  test('serializes catalog provenance with auditable attribution fields', async () => {
     let request: unknown;
     const client = new CreativeAssetClient(
       apiStub({
@@ -283,20 +283,24 @@ describe('CreativeAssetClient', () => {
     );
 
     await client.createText({
-      title: 'Preset prompt',
+      title: 'Catalog prompt',
       textContent: 'Prompt body',
       origin: {
-        promptLibrarySource: 'preset',
-        promptLibraryId: 'preset-1',
+        promptLibrarySource: 'catalog',
+        promptLibraryId: 'catalog-1',
+        promptCatalogId: 'catalog-1',
+        sourceUrl: 'https://example.test/source',
       },
     });
     expect(request).toMatchObject({
       origin: {
-        prompt_library_source: 'preset',
-        prompt_library_id: 'preset-1',
+        prompt_library_source: 'catalog',
+        prompt_library_id: 'catalog-1',
+        prompt_catalog_id: 'catalog-1',
+        source_url: 'https://example.test/source',
       },
     });
-    expect(JSON.stringify(request).includes('prompt_catalog_id')).toBe(false);
+    expect(JSON.stringify(request).includes('prompt_catalog_id')).toBe(true);
   });
 
   test('rejects an invalid prompt-removal match count', async () => {
@@ -305,7 +309,7 @@ describe('CreativeAssetClient', () => {
     );
     let error: unknown;
     try {
-      await client.removePromptAsset('preset', 'preset-1');
+      await client.removePromptAsset('catalog', 'catalog-1');
     } catch (reason) {
       error = reason;
     }

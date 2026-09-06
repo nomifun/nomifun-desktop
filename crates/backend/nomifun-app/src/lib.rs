@@ -50,7 +50,7 @@ pub use router::create_agent_platform_router;
 pub mod compatibility {
     pub use crate::router::{
         ChannelMessageLoopComponents, ModuleStates, build_conversation_state,
-        build_extension_states, build_module_states, build_preset_state, build_ws_state,
+        build_extension_states, build_module_states, build_ws_state,
         create_router, create_router_with_all_state, create_router_with_states,
         try_create_router,
     };

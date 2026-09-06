@@ -83,8 +83,6 @@ const UNCONDITIONAL_UUIDV7_BUSINESS_IDS: &[(&str, &str)] = &[
     ("conversation_artifacts", "conversation_artifact_id"),
     ("idmm_action_reservations", "reservation_id"),
     ("idmm_interventions", "intervention_id"),
-    ("preset_tags", "preset_tag_id"),
-    ("presets", "preset_id"),
     ("remote_bindings", "remote_binding_id"),
 ];
 
@@ -134,6 +132,25 @@ async fn initialized_database_satisfies_the_v3_id_schema_contract() {
     validate_id_schema_contract(database.pool())
         .await
         .expect("clean v3 baseline uses integer row keys and named business IDs");
+}
+
+#[tokio::test]
+async fn legacy_preset_tables_are_absent_from_the_current_schema() {
+    let database = init_database_memory().await.expect("database");
+    let legacy_tables = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM sqlite_schema \
+         WHERE type = 'table' AND name IN (\
+             'presets', 'preset_agent_preferences', 'preset_examples', \
+             'preset_knowledge_bases', 'preset_knowledge_policy', \
+             'preset_localizations', 'preset_model_preferences', \
+             'preset_skill_bindings', 'preset_tag_bindings', 'preset_tags', \
+             'preset_targets', 'preset_user_state'\
+         ) ORDER BY name",
+    )
+    .fetch_all(database.pool())
+    .await
+    .expect("legacy table inventory");
+    assert!(legacy_tables.is_empty(), "retired tables remain: {legacy_tables:?}");
 }
 
 /// Every product table, in `sqlite_schema` name order.
@@ -217,18 +234,6 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "nomi_remote_events",
     "nomi_remote_sessions",
     "oauth_tokens",
-    "preset_agent_preferences",
-    "preset_examples",
-    "preset_knowledge_bases",
-    "preset_knowledge_policy",
-    "preset_localizations",
-    "preset_model_preferences",
-    "preset_skill_bindings",
-    "preset_tag_bindings",
-    "preset_tags",
-    "preset_targets",
-    "preset_user_state",
-    "presets",
     "provider_connections",
     "provider_model_capabilities",
     "provider_models",
@@ -382,7 +387,7 @@ async fn named_business_ids_are_text_and_logical_links_have_no_sqlite_foreign_ke
         "agent_execution_events",
         "channel_sessions",
         "requirements",
-        "preset_agent_preferences",
+        "agent_execution_participants",
     ] {
         let foreign_keys = sqlx::query(&format!("PRAGMA foreign_key_list(\"{table}\")"))
             .fetch_all(pool)
@@ -638,25 +643,6 @@ async fn complete_business_id_registry_enforces_unconditional_uuidv7() {
         "execution participant source_agent_id must be UUIDv7"
     );
 
-    let preset_id = nomifun_common::PresetId::new();
-    sqlx::query(
-        "INSERT INTO presets \
-         (preset_id, source_kind, name, instructions, created_at, updated_at) \
-         VALUES (?, 'user', 'contract user preset', '', 1, 1)",
-    )
-    .bind(preset_id.as_str())
-    .execute(pool)
-    .await
-    .expect("user preset UUIDv7");
-    let invalid_preset = sqlx::query(
-        "INSERT INTO presets \
-         (preset_id, source_kind, name, instructions, created_at, updated_at) \
-         VALUES ('preset_user_invalid', 'user', 'invalid user preset', '', 1, 1)",
-    )
-    .execute(pool)
-    .await;
-    assert!(invalid_preset.is_err(), "user preset IDs must be UUIDv7");
-
     let builtin_agent_id = nomifun_common::AgentId::new();
     sqlx::query(
         "INSERT INTO agent_metadata \
@@ -668,27 +654,6 @@ async fn complete_business_id_registry_enforces_unconditional_uuidv7() {
     .await
     .expect("builtin catalog row uses a UUID business ID and source_key");
 
-    let builtin_preset_id = nomifun_common::PresetId::new();
-    sqlx::query(
-        "INSERT INTO presets \
-         (preset_id, source_kind, source_key, name, instructions, created_at, updated_at) \
-         VALUES (?, 'builtin', 'preset_builtin_fixture', 'builtin fixture', '', 1, 1)",
-    )
-    .bind(builtin_preset_id.as_str())
-    .execute(pool)
-    .await
-    .expect("builtin preset uses a UUID business ID and source_key");
-    let stored: String = sqlx::query_scalar(
-        "SELECT source_key FROM presets WHERE source_kind = 'builtin' AND preset_id = ?",
-    )
-    .bind(builtin_preset_id.as_str())
-    .fetch_one(pool)
-    .await
-    .expect("builtin preset source key");
-    assert_eq!(
-        stored, "preset_builtin_fixture",
-        "presets.preset_id must remain a UUID while catalog identity uses source_key"
-    );
 }
 
 #[tokio::test]
@@ -887,103 +852,6 @@ async fn remaining_product_business_ids_reject_duplicates_and_non_uuid_values() 
         .execute(pool)
         .await
         .is_err()
-    );
-}
-
-#[tokio::test]
-async fn preset_catalog_source_identity_is_unique_only_for_non_user_rows() {
-    let database = init_database_memory().await.expect("database");
-    let pool = database.pool();
-
-    async fn insert_preset(
-        pool: &sqlx::SqlitePool,
-        source_kind: &str,
-        source_key: Option<&str>,
-        name: &str,
-    ) -> Result<(), sqlx::Error> {
-        let preset_id = nomifun_common::PresetId::new();
-        sqlx::query(
-            "INSERT INTO presets \
-             (preset_id, source_kind, source_key, name, instructions, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, '', 1, 1)",
-        )
-        .bind(preset_id.as_str())
-        .bind(source_kind)
-        .bind(source_key)
-        .bind(name)
-        .execute(pool)
-        .await?;
-        Ok(())
-    }
-
-    insert_preset(pool, "builtin", Some("same-key"), "builtin one")
-        .await
-        .expect("first builtin");
-    assert!(
-        insert_preset(pool, "builtin", Some("same-key"), "builtin duplicate")
-            .await
-            .is_err()
-    );
-    insert_preset(pool, "extension", Some("same-key"), "extension one")
-        .await
-        .expect("source_kind participates in catalog identity");
-    assert!(
-        insert_preset(pool, "extension", Some("same-key"), "extension duplicate")
-            .await
-            .is_err()
-    );
-    insert_preset(pool, "user", Some("same-key"), "user one")
-        .await
-        .expect("user rows are outside catalog uniqueness");
-    insert_preset(pool, "user", Some("same-key"), "user two")
-        .await
-        .expect("duplicate user source keys are allowed");
-    assert!(
-        insert_preset(pool, "builtin", None, "missing catalog key")
-            .await
-            .is_err()
-    );
-    assert!(
-        insert_preset(pool, "extension", Some(""), "blank catalog key")
-            .await
-            .is_err()
-    );
-}
-
-#[tokio::test]
-async fn preset_catalog_partial_unique_index_has_exact_shape() {
-    let database = init_database_memory().await.expect("database");
-    let pool = database.pool();
-    let row = sqlx::query(
-        "SELECT il.\"unique\", il.partial \
-         FROM pragma_index_list('presets') il \
-         WHERE il.name = 'uq_presets_catalog_source_key'",
-    )
-    .fetch_one(pool)
-    .await
-    .expect("catalog partial unique index");
-    assert_eq!(row.get::<i64, _>("unique"), 1);
-    assert_eq!(row.get::<i64, _>("partial"), 1);
-
-    let columns: Vec<String> = sqlx::query_scalar(
-        "SELECT name FROM pragma_index_info('uq_presets_catalog_source_key') ORDER BY seqno",
-    )
-    .fetch_all(pool)
-    .await
-    .expect("catalog index columns");
-    assert_eq!(columns, ["source_kind", "source_key"]);
-
-    let sql: String = sqlx::query_scalar(
-        "SELECT sql FROM sqlite_schema \
-         WHERE type = 'index' AND name = 'uq_presets_catalog_source_key'",
-    )
-    .fetch_one(pool)
-    .await
-    .expect("catalog index SQL");
-    assert_eq!(
-        sql.split_whitespace().collect::<Vec<_>>().join(" "),
-        "CREATE UNIQUE INDEX uq_presets_catalog_source_key ON presets(source_kind, source_key) \
-         WHERE source_kind IN ('builtin', 'extension')"
     );
 }
 
@@ -1295,7 +1163,6 @@ async fn remaining_uuid_logical_links_and_json_registry_enforce_text_values() {
 async fn contract_rejects_missing_unconditional_uuidv7_checks() {
     for (table, column) in [
         ("agent_metadata", "agent_id"),
-        ("presets", "preset_id"),
     ] {
         let database = init_database_memory().await.expect("database");
         let pool = database.pool();
@@ -1569,56 +1436,6 @@ async fn installation_owner_uses_named_user_id_and_auto_allocated_id() {
     assert!(row.get::<i64, _>("id") > 0);
     assert_eq!(row.get::<String, _>("user_id"), owner);
     assert_eq!(row.get::<String, _>("username"), "admin");
-}
-
-#[tokio::test]
-async fn preset_tags_separate_local_ids_business_ids_and_catalog_keys() {
-    let database = init_database_memory().await.expect("database");
-    let pool = database.pool();
-    let columns = sqlx::query("PRAGMA table_info(\"preset_tags\")")
-        .fetch_all(pool)
-        .await
-        .expect("preset_tags columns");
-    let id = columns
-        .iter()
-        .find(|row| row.get::<String, _>("name") == "id")
-        .expect("preset_tags.id");
-    assert_eq!(id.get::<String, _>("type").to_ascii_uppercase(), "INTEGER");
-    assert_eq!(id.get::<i64, _>("pk"), 1);
-
-    let preset_tag_id = columns
-        .iter()
-        .find(|row| row.get::<String, _>("name") == "preset_tag_id")
-        .expect("preset_tags.preset_tag_id");
-    assert_eq!(
-        preset_tag_id.get::<String, _>("type").to_ascii_uppercase(),
-        "TEXT"
-    );
-    assert_eq!(preset_tag_id.get::<i64, _>("notnull"), 1);
-
-    let preset_tag_indexes = sqlx::query("PRAGMA index_list(\"preset_tags\")")
-        .fetch_all(pool)
-        .await
-        .expect("preset_tags indexes");
-    assert!(
-        preset_tag_indexes
-            .iter()
-            .filter(|row| row.get::<i64, _>("unique") == 1)
-            .count()
-            >= 2,
-        "preset_tags.preset_tag_id and preset_tags.key must both be unique"
-    );
-
-    let binding_columns = sqlx::query("PRAGMA table_info(\"preset_tag_bindings\")")
-        .fetch_all(pool)
-        .await
-        .expect("preset_tag_bindings columns");
-    assert!(binding_columns
-        .iter()
-        .any(|row| row.get::<String, _>("name") == "preset_tag_id"));
-    assert!(!binding_columns
-        .iter()
-        .any(|row| row.get::<String, _>("name") == "tag_key"));
 }
 
 #[tokio::test]

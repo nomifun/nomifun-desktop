@@ -96,6 +96,15 @@ CREATE TABLE capability_definitions (
         ON UPDATE RESTRICT ON DELETE RESTRICT
 ) STRICT;
 
+CREATE TABLE capability_catalog_entries (
+    capability_id TEXT NOT NULL CHECK (trim(capability_id) <> ''),
+    capability_version TEXT NOT NULL CHECK (trim(capability_version) <> ''),
+    contribution_id TEXT NOT NULL CHECK (trim(contribution_id) <> ''),
+    entry_json TEXT NOT NULL CHECK (json_valid(entry_json)),
+    entry_digest TEXT NOT NULL CHECK (length(entry_digest) = 64),
+    PRIMARY KEY (capability_id, capability_version, contribution_id)
+) STRICT;
+
 CREATE TABLE skill_instructions (
     skill_id TEXT NOT NULL,
     skill_version TEXT NOT NULL,
@@ -138,14 +147,9 @@ CREATE TABLE mcp_tool_materializations (
 
 CREATE TABLE agent_preset_templates (
     template_key TEXT PRIMARY KEY,
-    source_package_id TEXT NOT NULL,
-    source_package_version TEXT NOT NULL,
-    source_kind TEXT NOT NULL CHECK (source_kind IN ('official', 'package')),
+    source_kind TEXT NOT NULL CHECK (source_kind = 'official'),
     template_json TEXT NOT NULL CHECK (json_valid(template_json)),
-    template_digest TEXT NOT NULL CHECK (length(template_digest) = 64),
-    FOREIGN KEY (source_package_id, source_package_version)
-        REFERENCES plugin_packages (package_id, package_version)
-        ON UPDATE RESTRICT ON DELETE RESTRICT
+    template_digest TEXT NOT NULL CHECK (length(template_digest) = 64)
 ) STRICT;
 
 CREATE TABLE agent_presets (
@@ -163,80 +167,22 @@ CREATE TABLE agent_preset_revisions (
     preset_id TEXT NOT NULL,
     revision_no INTEGER NOT NULL CHECK (revision_no >= 1),
     schema_version TEXT NOT NULL,
-    editor_document_json TEXT NOT NULL CHECK (json_valid(editor_document_json)),
+    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
     revision_digest TEXT NOT NULL CHECK (length(revision_digest) = 64),
     created_by TEXT NOT NULL,
     created_at INTEGER NOT NULL,
-    reason TEXT NOT NULL,
+    reason TEXT,
     UNIQUE (preset_id, revision_no),
     UNIQUE (preset_id, revision_digest),
     FOREIGN KEY (preset_id) REFERENCES agent_presets (preset_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
 ) STRICT;
 
-CREATE TABLE agent_preset_model_routes (
+CREATE TABLE agent_preset_contribution_locks (
     revision_id TEXT NOT NULL,
-    model_task TEXT NOT NULL,
-    route_json TEXT NOT NULL CHECK (json_valid(route_json)),
-    PRIMARY KEY (revision_id, model_task),
-    FOREIGN KEY (revision_id) REFERENCES agent_preset_revisions (revision_id)
-        ON UPDATE RESTRICT ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE preset_initial_capabilities (
-    revision_id TEXT NOT NULL,
-    capability_id TEXT NOT NULL,
-    capability_version TEXT NOT NULL,
-    selection_json TEXT NOT NULL CHECK (json_valid(selection_json)),
-    PRIMARY KEY (revision_id, capability_id),
-    FOREIGN KEY (revision_id) REFERENCES agent_preset_revisions (revision_id)
-        ON UPDATE RESTRICT ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE preset_on_demand_capabilities (
-    revision_id TEXT NOT NULL,
-    capability_id TEXT NOT NULL,
-    capability_version TEXT NOT NULL,
-    selection_json TEXT NOT NULL CHECK (json_valid(selection_json)),
-    PRIMARY KEY (revision_id, capability_id),
-    FOREIGN KEY (revision_id) REFERENCES agent_preset_revisions (revision_id)
-        ON UPDATE RESTRICT ON DELETE CASCADE
-) STRICT;
-
-CREATE TRIGGER preset_initial_capability_disjoint_insert
-BEFORE INSERT ON preset_initial_capabilities
-WHEN EXISTS (
-    SELECT 1 FROM preset_on_demand_capabilities
-    WHERE revision_id = NEW.revision_id AND capability_id = NEW.capability_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'capability already belongs to on-demand set');
-END;
-
-CREATE TRIGGER preset_on_demand_capability_disjoint_insert
-BEFORE INSERT ON preset_on_demand_capabilities
-WHEN EXISTS (
-    SELECT 1 FROM preset_initial_capabilities
-    WHERE revision_id = NEW.revision_id AND capability_id = NEW.capability_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'capability already belongs to initial set');
-END;
-
-CREATE TABLE preset_skill_bindings (
-    revision_id TEXT NOT NULL,
-    skill_id TEXT NOT NULL,
-    skill_version TEXT NOT NULL,
-    PRIMARY KEY (revision_id, skill_id),
-    FOREIGN KEY (revision_id) REFERENCES agent_preset_revisions (revision_id)
-        ON UPDATE RESTRICT ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE preset_resource_bindings (
-    revision_id TEXT NOT NULL,
-    resource_binding_id TEXT NOT NULL,
-    binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
-    PRIMARY KEY (revision_id, resource_binding_id),
+    contribution_id TEXT NOT NULL CHECK (trim(contribution_id) <> ''),
+    lock_json TEXT NOT NULL CHECK (json_valid(lock_json)),
+    PRIMARY KEY (revision_id, contribution_id),
     FOREIGN KEY (revision_id) REFERENCES agent_preset_revisions (revision_id)
         ON UPDATE RESTRICT ON DELETE CASCADE
 ) STRICT;

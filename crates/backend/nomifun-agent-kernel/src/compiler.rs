@@ -124,12 +124,6 @@ impl AgentPresetCompiler {
             .map_err(|error| KernelError::InvalidPresetRevision {
                 reason: error.message,
             })?;
-        if !request.revision.payload.surfaces.contains(&request.surface) {
-            return Err(KernelError::SurfaceNotDeclared {
-                surface: request.surface,
-            });
-        }
-
         let bindings = validate_resource_bindings(
             &request.revision.payload.resource_bindings,
             &request.principal,

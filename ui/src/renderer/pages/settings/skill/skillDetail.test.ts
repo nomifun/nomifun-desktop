@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SkillInfo } from '@/renderer/pages/settings/PresetSettings/types';
+import type { SkillInfo } from '@/common/types/skill';
 import { describe, expect, test } from 'bun:test';
 import { readSkillContent, stripSkillFrontmatter } from './skillDetail';
 

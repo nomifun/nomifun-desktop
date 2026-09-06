@@ -6,19 +6,16 @@
 
 import type { ICreateConversationParams } from '@/common/adapter/ipcBridge';
 import type { TProviderWithModel } from '@/common/config/storage';
-import type { PresetReference } from '@/common/types/agent/presetTypes';
 
 export type BuildAgentConversationInput = {
   backend: string;
   name: string;
   agent_id?: string;
   agent_name?: string;
-  preset_id?: PresetReference;
   workspace: string;
   model: TProviderWithModel;
   cli_path?: string;
   custom_workspace?: boolean;
-  is_preset?: boolean;
   current_model_id?: string;
   extra?: Partial<ICreateConversationParams['extra']>;
 };
@@ -29,12 +26,10 @@ export function buildAgentConversationParams(input: BuildAgentConversationInput)
     name,
     agent_id,
     agent_name,
-    preset_id,
     workspace,
     model,
     cli_path,
     custom_workspace = true,
-    is_preset = false,
     current_model_id,
     extra: extraOverrides,
   } = input;
@@ -48,14 +43,10 @@ export function buildAgentConversationParams(input: BuildAgentConversationInput)
     ...extraOverrides,
   };
 
-  // Bare Agent launches carry their runtime identity in `extra`; a preset
-  // launch resolves everything server-side from `preset_id` instead.
-  if (!is_preset) {
-    extra.backend = backend;
-    extra.agent_name = agent_name || name;
-    if (agent_id) extra.agent_id = agent_id;
-    if (cli_path) extra.cli_path = cli_path;
-  }
+  extra.backend = backend;
+  extra.agent_name = agent_name || name;
+  if (agent_id) extra.agent_id = agent_id;
+  if (cli_path) extra.cli_path = cli_path;
 
   if (current_model_id) extra.current_model_id = current_model_id;
 
@@ -63,7 +54,6 @@ export function buildAgentConversationParams(input: BuildAgentConversationInput)
     type,
     model,
     name,
-    preset_id: is_preset ? preset_id : undefined,
     extra,
   };
 }

@@ -7,7 +7,7 @@
 import { getAgentLogo } from '@/renderer/utils/model/agentLogo';
 import { CapabilityIconCluster } from '@/renderer/components/capability/CapabilityIcon';
 import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
-import { usePresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
+import { useAgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
 import ConversationHoverCard from '@/renderer/pages/conversation/components/ConversationHoverCard';
 import { cleanupSiderTooltips, getSiderTooltipProps } from '@/renderer/utils/ui/siderTooltip';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
@@ -53,7 +53,7 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
     idmmState,
   } = props;
   const { t } = useTranslation();
-  const { info: presetInfo } = usePresetInfo(conversation);
+  const { info: presetInfo } = useAgentInfo(conversation);
   const isPinned = isConversationPinned(conversation);
   const cronStatus = getJobStatus(conversation.id);
   const siderTooltipProps = getSiderTooltipProps(tooltipEnabled);

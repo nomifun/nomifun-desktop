@@ -1,7 +1,6 @@
 //! Extension registry: manifest parsing, hub installer, skill scanning, and lifecycle hooks.
 
 mod asset_paths;
-pub mod classifier;
 pub mod constants;
 pub mod dependency;
 pub mod error;
@@ -25,7 +24,6 @@ pub mod template;
 pub mod types;
 mod zip_safe;
 
-pub use classifier::{PresetClassifier, PresetRuleDispatcher};
 pub use constants::*;
 pub use dependency::{DependencyIssue, DependencyValidationResult, validate_dependencies};
 pub use error::ExtensionError;

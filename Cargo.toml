@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/agent/*", "crates/backend/*", "crates/shared/*", "apps/web", "apps/desktop"]
+exclude = ["crates/backend/nomifun-preset"]
 
 [workspace.package]
 version = "0.7.4"
@@ -37,7 +38,6 @@ nomifun-public = { path = "crates/backend/nomifun-public" }
 nomifun-webhook = { path = "crates/backend/nomifun-webhook" }
 nomifun-agent-execution = { path = "crates/backend/nomifun-agent-execution" }
 nomifun-terminal = { path = "crates/backend/nomifun-terminal" }
-nomifun-preset = { path = "crates/backend/nomifun-preset" }
 nomifun-customer-service = { path = "crates/backend/nomifun-customer-service" }
 nomifun-workshop = { path = "crates/backend/nomifun-workshop" }
 nomifun-miniapp = { path = "crates/backend/nomifun-miniapp" }

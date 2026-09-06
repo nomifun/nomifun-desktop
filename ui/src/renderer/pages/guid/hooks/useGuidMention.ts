@@ -7,8 +7,8 @@
 import { resolveAgentLogo } from '@/renderer/utils/model/agentLogo';
 import {
   isEmoji,
-  resolvePresetAvatarImageSrc,
-} from '@/renderer/utils/model/presetPresentation';
+  resolveAgentAvatarImageSrc,
+} from '@/renderer/utils/model/agentPresentation';
 import { CUSTOM_AVATAR_IMAGE_MAP } from '../constants';
 import type { AvailableAgent, MentionOption } from '../types';
 import { getAgentKey } from './agentSelectionUtils';
@@ -82,7 +82,7 @@ export const useGuidMention = ({
       if (agentIdentity) {
         tokens.add(agentIdentity.toLowerCase());
       }
-      const avatarImage = resolvePresetAvatarImageSrc(avatar, CUSTOM_AVATAR_IMAGE_MAP);
+      const avatarImage = resolveAgentAvatarImageSrc(avatar, CUSTOM_AVATAR_IMAGE_MAP);
       const avatarEmoji = avatar && !avatarImage && isEmoji(avatar) ? avatar : undefined;
       return {
         key,

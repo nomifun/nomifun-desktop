@@ -6,6 +6,7 @@ mod catalog;
 mod compiler;
 mod continuation;
 mod error;
+mod impact;
 mod routes;
 mod service;
 mod store;
@@ -23,6 +24,10 @@ pub use continuation::{
     rotated_installation_token,
 };
 pub use error::ControlPlaneError;
+pub use impact::{
+    ControlPlaneRevisionImpactCatalogProvider, RevisionImpactCatalogProvider,
+    StaticRevisionImpactCatalogProvider,
+};
 pub use routes::{
     AuthenticatedOwner, control_plane_router, control_plane_router_without_legacy_skills,
 };

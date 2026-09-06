@@ -2,7 +2,7 @@ import type { ConversationId } from '@/common/types/ids';
 import { AgentLogoIcon } from '@/renderer/components/agent/AgentBadge';
 import { conversationTarget } from '@/common/types/ids';
 import { browserStorageKey } from '@/common/utils/browserStorageKey';
-import type { PresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
+import type { AgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
 import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
@@ -53,7 +53,7 @@ export interface ChatLayoutProps {
   siderTitle?: React.ReactNode;
   backend?: string;
   /** Preset info — when provided, the badge shows the preset identity instead of the backend. */
-  preset?: PresetInfo;
+  preset?: AgentInfo;
   /** Fallback agent name (used when no preset, e.g. from conversation.extra.agent_name) */
   agent_name?: string;
   headerExtra?: React.ReactNode;

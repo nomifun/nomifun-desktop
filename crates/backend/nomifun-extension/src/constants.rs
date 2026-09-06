@@ -65,12 +65,6 @@ pub const BUILTIN_RULES_DIR_NAME: &str = "builtin-rules";
 /// `include_dir!`).
 pub const BUILTIN_AUTO_SKILLS_SUBDIR: &str = "auto-inject";
 
-/// Default subdirectory name for preset-level rules.
-pub const PRESET_RULES_DIR_NAME: &str = "preset-rules";
-
-/// Default subdirectory name for preset-level skills.
-pub const PRESET_SKILLS_DIR_NAME: &str = "preset-skills";
-
 /// Filename that identifies a skill directory.
 pub const SKILL_MANIFEST_FILE: &str = "SKILL.md";
 

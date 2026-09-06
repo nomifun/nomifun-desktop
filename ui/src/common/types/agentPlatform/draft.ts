@@ -34,7 +34,6 @@ export const isDraftDirty = (
 
 export const createEmptyAgentPresetDocument = (): AgentPresetDocument => ({
   schema_version: '1.0.0',
-  surfaces: ['desktop', 'remote', 'web'],
   model_route_refs: {},
   chat_route_records: {},
   initial_capabilities: [],
@@ -44,33 +43,13 @@ export const createEmptyAgentPresetDocument = (): AgentPresetDocument => ({
   system_role_provider_overrides: {},
   persona: '',
   instructions: '',
-  context_policy: {
-    max_system_tokens: 12_000,
-    max_dynamic_context_tokens: 16_000,
-    max_catalog_tokens: 3_000,
-  },
-  execution_constraints: {
-    max_active_capabilities: 64,
-    max_advertised_tools: 48,
-    max_runtime_rebuilds: 4,
-  },
-  runtime_budget: {
-    max_context_tokens: 32_000,
-    max_tool_calls_per_turn: 64,
-  },
+  starter_prompts: [],
 });
 
-const selection = (
-  capability: ExactCatalogRef<'capability'>,
-  exposure: CapabilitySelection['exposure']
-): CapabilitySelection => ({
+const selection = (capability: ExactCatalogRef<'capability'>): CapabilitySelection => ({
   capability,
-  required: true,
-  exposure,
   action_allowlist: [],
   resource_binding_refs: [],
-  destination_constraints: [],
-  config: {},
 });
 
 export const draftFromOfficialTemplate = (
@@ -83,12 +62,8 @@ export const draftFromOfficialTemplate = (
   source_template_key: template.template_key,
   document: {
     ...createEmptyAgentPresetDocument(),
-    initial_capabilities: template.seed.initial_capabilities.map((item) =>
-      selection(item, 'advertised')
-    ),
-    on_demand_capabilities: template.seed.on_demand_capabilities.map((item) =>
-      selection(item, 'discoverable')
-    ),
+    initial_capabilities: template.seed.initial_capabilities.map(selection),
+    on_demand_capabilities: template.seed.on_demand_capabilities.map(selection),
     skill_bindings: template.seed.skill_bindings,
   },
 });
@@ -96,6 +71,7 @@ export const draftFromOfficialTemplate = (
 export const cloneDraft = (draft: AgentPresetDraft): AgentPresetDraft => {
   const cloned = structuredClone(draft);
   cloned.document.chat_route_records ??= {};
+  cloned.document.starter_prompts ??= [];
   return cloned;
 };
 
@@ -123,8 +99,8 @@ export function placeCapability(
     items.filter((item) => item.capability.id !== capability.id);
   const initial = without(document.initial_capabilities);
   const onDemand = without(document.on_demand_capabilities);
-  if (placement === 'initial') initial.push(selection(capability, 'advertised'));
-  if (placement === 'on_demand') onDemand.push(selection(capability, 'discoverable'));
+  if (placement === 'initial') initial.push(selection(capability));
+  if (placement === 'on_demand') onDemand.push(selection(capability));
   return {
     ...document,
     initial_capabilities: initial.sort((left, right) =>

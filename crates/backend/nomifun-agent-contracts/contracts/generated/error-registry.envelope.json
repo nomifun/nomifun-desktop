@@ -92,6 +92,22 @@
         "http_status": 409
       },
       {
+        "code": "PRESET_CONTRIBUTION_LOCK_INVALID",
+        "version": 1,
+        "class": "contract",
+        "retry": "never",
+        "terminal_scope": "open",
+        "http_status": 500
+      },
+      {
+        "code": "MODEL_ROUTE_RECORD_INVALID",
+        "version": 1,
+        "class": "contract",
+        "retry": "new_session_required",
+        "terminal_scope": "open",
+        "http_status": 422
+      },
+      {
         "code": "OFFICIAL_PRESET_KEY_SET_MISMATCH",
         "version": 1,
         "class": "contract",
@@ -285,5 +301,5 @@
       }
     ]
   },
-  "payload_digest": "6a3856947bb9e861bd4d6f7a1d88f9dc5c04b5b8b18b2b320446385025eec3b5"
+  "payload_digest": "407818c56712956e541a4e1a4d07ee3d308d98524abf04f47edc612a9b1b26d8"
 }

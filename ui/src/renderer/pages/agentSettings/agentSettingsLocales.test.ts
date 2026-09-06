@@ -20,4 +20,15 @@ describe('Agent Settings locale contract', () => {
     expect(en.test.realEffectWarning.includes('real resources')).toBe(true);
     expect(zh.test.realEffectWarning.includes('真实资源')).toBe(true);
   });
+
+  test('uses Agent Workbench as the sole public authoring label', () => {
+    expect(en.title).toBe('Agent Workbench');
+    expect(zh.title).toBe('Agent 工作台');
+    expect(en.navigation.railTitle).toBe('Agent');
+    expect(zh.navigation.railTitle).toBe('Agent');
+    expect(Object.hasOwn(en.navigation, 'entryDescription')).toBe(false);
+    expect(Object.hasOwn(en.navigation, 'open')).toBe(false);
+    expect(Object.hasOwn(zh.navigation, 'entryDescription')).toBe(false);
+    expect(Object.hasOwn(zh.navigation, 'open')).toBe(false);
+  });
 });

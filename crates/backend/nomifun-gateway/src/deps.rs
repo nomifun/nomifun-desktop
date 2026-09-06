@@ -2,6 +2,10 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use nomifun_agent_contracts::{
+    CapabilityConsumer, CapabilityOperationLock, CapabilityRef,
+};
 use nomifun_ai_agent::AgentService;
 use nomifun_common::{CompanionId, ConversationId, UserId};
 use nomifun_companion::CompanionService;
@@ -17,6 +21,30 @@ use nomifun_terminal::TerminalService;
 
 use crate::conversation_port::ConversationCapabilityPort;
 
+#[async_trait]
+pub trait CapabilityAdmissionPort: Send + Sync {
+    async fn admit(
+        &self,
+        capability: CapabilityRef,
+        consumer: CapabilityConsumer,
+    ) -> Result<CapabilityOperationLock, CapabilityAdmissionError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct CapabilityAdmissionError {
+    pub code: String,
+    pub message: String,
+}
+
+impl CapabilityAdmissionError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
 /// Compatibility-only composition input for the legacy Gateway transport.
 ///
 /// Fresh-v4 production entry points dispatch through `AgentPlatform` and never
@@ -30,6 +58,10 @@ pub struct CompatibilityCapabilityHost {
     /// Canonical installation owner. Every installation-scoped capability is
     /// gated against this same immutable identity before its handler runs.
     pub authoritative_user_id: Arc<str>,
+    /// Shared platform Catalog/resolver admission. Gateway only knows the
+    /// consumer port and the canonical capability identity, never a concrete
+    /// Plugin/MiniApp implementation.
+    pub capability_admission: Arc<dyn CapabilityAdmissionPort>,
     pub conversation: Arc<dyn ConversationCapabilityPort>,
     pub cron_service: Arc<CronService>,
     /// MUST be the router-state instance with its session-owner and

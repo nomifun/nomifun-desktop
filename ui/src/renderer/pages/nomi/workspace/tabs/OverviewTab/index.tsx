@@ -75,7 +75,7 @@ const OverviewTab: React.FC<WorkspaceTabProps> = ({ companionId, companion, onAt
           figurePaneOpen={figurePaneOpen}
           onEditFigure={() => setFigurePaneOpen((open) => !open)}
         />
-        <PersonaSection profile={profile} patchCompanion={patchCompanion} refresh={refresh} />
+        <PersonaSection profile={profile} patchCompanion={patchCompanion} />
         <ModelsSection companion={companion} status={status} companionName={profile.name} />
       </div>
     );

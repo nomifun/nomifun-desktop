@@ -7,8 +7,8 @@ use std::sync::{
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
     ActionId, AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, AgentSessionId,
-    ArtifactEnvelope, CapabilityActionDescriptor, CapabilityContributions, CapabilityExposure,
-    CapabilityId, CapabilityKind, CapabilityManifest, CapabilityRef, CancellationDescriptor,
+    ArtifactEnvelope, CapabilityActionDescriptor, CapabilityContributions, CapabilityId,
+    CapabilityKind, CapabilityManifest, CapabilityRef, CancellationDescriptor,
     CanonicalSchemaRef, CorrelationId, DeclaredServiceViewDescriptor, DigestHex, EffectClass,
     ExactRoleContractRef, HostPortId, HostPortRef, IdempotencyKey,
     InProcessEntrypointMetadata, LocalizedMetadata, LogicalArtifactRef, ManagedTaskRegistrationDescriptor,
@@ -798,7 +798,6 @@ fn role_operation_request(
 fn sample_revision(owner_id: &str) -> AgentPresetRevision {
     let payload = AgentPresetRevisionPayload {
         schema_version: VersionString::from(VERSION),
-        surfaces: BTreeSet::from(["test".to_owned()]),
         model_route_refs: BTreeMap::new(),
         chat_route_records: BTreeMap::new(),
         initial_capabilities: Vec::new(),
@@ -807,16 +806,10 @@ fn sample_revision(owner_id: &str) -> AgentPresetRevision {
                 id: CapabilityId::from(SAMPLE_CAPABILITY),
                 version: VersionString::from(VERSION),
             },
-            required: true,
-            exposure: CapabilityExposure::Discoverable,
             action_allowlist: BTreeSet::from([ActionId::from(SAMPLE_ACTION)]),
             resource_binding_refs: vec![ResourceBindingId::from(
                 "sample-echo-target",
             )],
-            destination_constraints: BTreeSet::new(),
-            context_budget_override: None,
-            tool_budget_override: None,
-            config: StrictJsonValue(json!({})),
         }],
         skill_bindings: vec![SkillRef {
             id: SkillId::from(SAMPLE_SKILL),
@@ -826,22 +819,23 @@ fn sample_revision(owner_id: &str) -> AgentPresetRevision {
         system_role_provider_overrides: BTreeMap::new(),
         persona: "Echo fixture".to_owned(),
         instructions: "Use the selected echo capability.".to_owned(),
-        context_policy: StrictJsonValue(json!({})),
-        execution_constraints: StrictJsonValue(json!({})),
-        runtime_budget: StrictJsonValue(json!({})),
+        starter_prompts: Vec::new(),
     };
-    let revision_digest = digest_payload(&payload).unwrap();
-    AgentPresetRevision {
+    let contribution_locks = Vec::new();
+    let mut revision = AgentPresetRevision {
         reference: PresetRevisionRef {
             preset_id: AgentPresetId::from("sample.echo.preset"),
             revision: 1,
-            revision_digest,
+            revision_digest: DigestHex::from(""),
         },
         payload,
+        contribution_locks,
         created_by: UserId::from(owner_id),
         created_at_ms: 1,
         reason: Some("sample fixture".to_owned()),
-    }
+    };
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    revision
 }
 
 fn compiler_environment(target_digest: DigestHex) -> CompilerEnvironment {
@@ -1478,7 +1472,7 @@ fn dependency_skill_and_service_faults_fail_closed() {
     let mut skill_without_capability = sample_revision("owner");
     skill_without_capability.payload.on_demand_capabilities.clear();
     skill_without_capability.reference.revision_digest =
-        digest_payload(&skill_without_capability.payload).unwrap();
+        skill_without_capability.revision_digest().unwrap();
     let materialized = registry
         .replace_all(vec![sample_registration("")])
         .unwrap();

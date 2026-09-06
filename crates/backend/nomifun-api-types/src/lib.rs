@@ -23,7 +23,6 @@ mod model_capability;
 pub mod model_protocol;
 pub mod model_task;
 mod office;
-mod preset;
 mod provider;
 mod provider_connection;
 mod provider_model;
@@ -178,13 +177,6 @@ pub use office::{
     SaveSnapshotRequest, SnapshotContentResponse, StartPreviewRequest,
     StopPreviewRequest, is_preview_capability,
 };
-pub use preset::{
-    AgentPreference, CreatePresetRequest, CreatePresetTagRequest, ImportPresetsRequest,
-    ImportPresetsResult, KnowledgeBaseBinding, ModelPreference, PresetImportError,
-    PresetKnowledgePolicy, PresetOverrides, PresetResponse, PresetSource, PresetTagDimension,
-    PresetTagResponse, PresetTarget, ResolvePresetRequest, ResolvedPresetSnapshot,
-    SetPresetStateRequest, SkillBinding, UpdatePresetRequest, UpdatePresetTagRequest,
-};
 pub use provider::{
     BedrockAuthMethod, BedrockConfig, CloneProviderRequest, CreateProviderRequest,
     FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, HealthStatus, ModelInfo,
@@ -217,11 +209,11 @@ pub use skill::{
     AddExternalPathRequest, BuiltinAutoSkillResponse, ExportSkillRequest,
     ExternalSkillSourceResponse, ImportSkillRequest, ImportSkillResponse, MaterializeSkillsRequest,
     MaterializeSkillsResponse, MaterializedSkillRef, NamedPathResponse, ReadBuiltinResourceRequest,
-    ReadPresetRuleRequest, ReadSkillInfoRequest, ReadSkillInfoResponse, RemoveExternalPathRequest,
+    ReadSkillInfoRequest, ReadSkillInfoResponse, RemoveExternalPathRequest,
     ScanForSkillsRequest, ScanForSkillsResponse, ScannedSkillResponse, SetSkillTagsRequest,
     SkillListItemResponse, SkillMarketItemResponse, SkillMarketMcpConfigRequest,
     SkillMarketMcpConfigResponse, SkillMarketSyncRequest, SkillMarketSyncResponse,
-    SkillPathsResponse, SkillSourceResponse, WritePresetRuleRequest,
+    SkillPathsResponse, SkillSourceResponse,
 };
 pub use system::{
     ClientPreferencesResponse, SystemSettingsResponse, UpdateClientPreferencesRequest,

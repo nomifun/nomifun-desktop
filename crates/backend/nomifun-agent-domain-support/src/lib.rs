@@ -14,7 +14,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
     ActionId, ArtifactEnvelope, CapabilityActionDescriptor, CapabilityContributions,
-    CapabilityId, CapabilityKind, CapabilityManifest, CancellationDescriptor,
+    CapabilityConsumer, CapabilityId, CapabilityKind, CapabilityManifest,
+    CancellationDescriptor,
     CanonicalSchemaRef, DigestHex, EffectClass, HostPortId, HostPortRef,
     InProcessEntrypointMetadata, LocalizedMetadata, ManagedTaskRegistrationDescriptor,
     PackageContributions, PackageId, PackageManifest, PackageRef, PlatformConstraint,
@@ -23,7 +24,8 @@ use nomifun_agent_contracts::{
     PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind,
     PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod, ResourceKind, ScopeKey,
     RuntimeTarget, SkillDefinition, StrictJsonValue, ToolPresentationKind,
-    TypedResourceBindings, ValidatedPluginConfig, VersionString, digest_payload,
+    TypedResourceBindings, ValidatedPluginConfig, VersionString,
+    capability_surface_declarations, digest_payload,
 };
 use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, KernelError, PluginRegistration,
@@ -307,7 +309,7 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
             }
         };
 
-        let supported_surfaces = if capability.host_surfaces.is_empty() {
+        let supported_surfaces: Vec<String> = if capability.host_surfaces.is_empty() {
             spec.supported_surfaces
                 .iter()
                 .map(|surface| (*surface).to_owned())
@@ -348,7 +350,10 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
             display: localized(capability.id, capability.id),
             requires: Vec::new(),
             conflicts: Vec::new(),
-            supported_surfaces,
+            supported_surfaces: capability_surface_declarations(
+                supported_surfaces,
+                supported_consumers(capability.id),
+            ),
             requires_runtime_features: Vec::new(),
             supported_platforms,
             config_schema: StrictJsonValue(json!({
@@ -458,6 +463,19 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
         )?;
     }
     Ok(registration)
+}
+
+fn supported_consumers(capability_id: &str) -> BTreeSet<CapabilityConsumer> {
+    match capability_id {
+        "knowledge.search" => BTreeSet::from([
+            CapabilityConsumer::Agent,
+            CapabilityConsumer::Gateway,
+        ]),
+        "browser.render_content" => {
+            BTreeSet::from([CapabilityConsumer::Knowledge])
+        }
+        _ => BTreeSet::from([CapabilityConsumer::Agent]),
+    }
 }
 
 pub fn registrations(
@@ -1442,8 +1460,40 @@ mod tests {
                 } else {
                     assert!(capability.contributions.actions.is_empty());
                     assert!(!registration.handler_ids().contains(&capability.id));
-                }
-            }
+        }
+    }
+
+    #[test]
+    fn capability_manifest_separates_host_surfaces_from_consumer_support() {
+        let registrations = registrations(c7_package_specs()).unwrap();
+        let capabilities = registrations
+            .iter()
+            .flat_map(|registration| {
+                registration
+                    .metadata
+                    .manifest
+                    .payload
+                    .contributions
+                    .capabilities
+                    .iter()
+            })
+            .collect::<Vec<_>>();
+        let knowledge_search = capabilities
+            .iter()
+            .find(|capability| capability.id.as_ref() == "knowledge.search")
+            .expect("knowledge.search manifest");
+        assert!(knowledge_search.host_surfaces().contains("desktop"));
+        assert!(knowledge_search.supports_consumer(CapabilityConsumer::Agent));
+        assert!(knowledge_search.supports_consumer(CapabilityConsumer::Gateway));
+
+        let browser_render = capabilities
+            .iter()
+            .find(|capability| capability.id.as_ref() == "browser.render_content")
+            .expect("browser.render_content manifest");
+        assert!(browser_render.host_surfaces().contains("desktop"));
+        assert!(!browser_render.supports_consumer(CapabilityConsumer::Agent));
+        assert!(browser_render.supports_consumer(CapabilityConsumer::Knowledge));
+    }
         }
         assert_eq!(
             registrations

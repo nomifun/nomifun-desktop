@@ -32,7 +32,7 @@ use nomifun_api_types::{
     ConversationMcpStatus, ConversationMcpStatusKind,
     ConversationResponse, ConversationRuntimeSummary, CreateConversationRequest, KnowledgeMountInfo, ListConversationsQuery,
     ListMessagesQuery, McpServerId, MessageListResponse, MessageResponse, MessageSearchResponse, SearchMessagesQuery,
-    ExecutionModelPool, ExecutionModelRef, ResolvedPresetSnapshot, SendMessageRequest, SessionMcpServer, SessionMcpTransport, UpdateConversationArtifactRequest,
+    AgentResolvedSnapshot, ExecutionModelPool, ExecutionModelRef, SendMessageRequest, SessionMcpServer, SessionMcpTransport, UpdateConversationArtifactRequest,
     UpdateConversationRequest, WebSocketMessage,
 };
 use nomifun_common::{
@@ -1037,10 +1037,6 @@ pub struct ConversationService {
     /// mounted into the workspace when its Agent runtime is created and surfaced to the agent
     /// via `extra.knowledge_mounts` / `extra.knowledge_writeback`.
     knowledge_service: Arc<RwLock<Option<Arc<nomifun_knowledge::KnowledgeService>>>>,
-    /// Unified preset resolver. When a create request carries `preset_id`, the
-    /// server resolves and freezes the preset before any model/skill/knowledge
-    /// shaping runs; clients cannot inject a forged snapshot.
-    preset_service: Arc<RwLock<Option<Arc<nomifun_preset::PresetService>>>>,
     runtime_state: Arc<ConversationRuntimeStateService>,
     /// Per-conversation timestamp (ms) of the most recent USER-initiated
     /// cancel (`POST /api/conversations/{id}/cancel`). The AutoWork runner
@@ -2238,7 +2234,6 @@ impl ConversationService {
             cron_service: Arc::new(RwLock::new(None)),
             mcp_server_repo: Arc::new(RwLock::new(None)),
             knowledge_service: Arc::new(RwLock::new(None)),
-            preset_service: Arc::new(RwLock::new(None)),
             runtime_state: Arc::new(ConversationRuntimeStateService::default()),
             user_cancel_stamps: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             durable_operations_in_flight: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -2283,12 +2278,6 @@ impl ConversationService {
 
     pub fn with_knowledge_service(&self, service: Arc<nomifun_knowledge::KnowledgeService>) {
         if let Ok(mut guard) = self.knowledge_service.write() {
-            *guard = Some(service);
-        }
-    }
-
-    pub fn with_preset_service(&self, service: Arc<nomifun_preset::PresetService>) {
-        if let Ok(mut guard) = self.preset_service.write() {
             *guard = Some(service);
         }
     }
@@ -4083,10 +4072,9 @@ impl ConversationService {
             None,
             None,
             None,
-            TrustedSnapshotOrigin::LegacyPreset,
         )
-            .await
-            .map(|(response, _)| response)
+        .await
+        .map(|(response, _)| response)
     }
 
     /// Trusted in-process create with a durable operation identity.  This is
@@ -4104,84 +4092,47 @@ impl ConversationService {
             None,
             Some(creation_key),
             None,
-            TrustedSnapshotOrigin::LegacyPreset,
-        )
-            .await
-            .map(|(response, _)| response)
-    }
-
-    /// Trusted in-process creation path for long-lived consumers that already
-    /// hold a frozen snapshot (cron, delegated Agent attempts, companions). This
-    /// never re-resolves the catalog, so an existing target cannot drift to a
-    /// newer preset revision. It is intentionally not exposed by HTTP DTOs.
-    pub async fn create_from_preset_snapshot(
-        &self,
-        user_id: &str,
-        mut req: CreateConversationRequest,
-        snapshot: nomifun_api_types::ResolvedPresetSnapshot,
-    ) -> Result<ConversationResponse, AppError> {
-        req.preset_id = None;
-        req.preset_overrides = None;
-        self.create_inner(
-            user_id,
-            req,
-            Some(snapshot),
-            None,
-            None,
-            TrustedSnapshotOrigin::LegacyPreset,
-        )
-            .await
-            .map(|(response, _)| response)
-    }
-
-    /// Snapshot-preserving counterpart of [`Self::create_idempotent`].
-    pub async fn create_from_preset_snapshot_idempotent(
-        &self,
-        user_id: &str,
-        mut req: CreateConversationRequest,
-        snapshot: nomifun_api_types::ResolvedPresetSnapshot,
-        creation_key: &str,
-    ) -> Result<ConversationResponse, AppError> {
-        req.preset_id = None;
-        req.preset_overrides = None;
-        self.create_inner(
-            user_id,
-            req,
-            Some(snapshot),
-            Some(creation_key),
-            None,
-            TrustedSnapshotOrigin::LegacyPreset,
         )
         .await
         .map(|(response, _)| response)
     }
 
-    /// Trusted Nomi-core creation path for a binding/snapshot owned by the
-    /// app-local Agent control plane.
-    ///
-    /// Nomi-core Preset IDs live in its own control-plane tables, not in the
-    /// legacy v3 `presets` catalog.  The immutable binding is carried in the
-    /// server-owned `extra.nomi_core_session` metadata, while the projected
-    /// model/instructions/resources still flow through the normal Nomi
-    /// creation owner.  Do not persist the v3 preset foreign-key lineage for
-    /// this path: doing so would make the conversation repository reject a
-    /// valid Nomi-core Preset as a missing legacy Preset.
-    pub async fn create_from_nomi_core_snapshot_idempotent(
+    /// Trusted in-process creation path for consumers that already hold a
+    /// canonical, frozen Agent snapshot. This path never resolves an
+    /// authoring aggregate and is intentionally not exposed by HTTP DTOs.
+    pub async fn create_from_agent_snapshot(
         &self,
         user_id: &str,
         mut req: CreateConversationRequest,
-        snapshot: nomifun_api_types::ResolvedPresetSnapshot,
+        snapshot: AgentResolvedSnapshot,
+    ) -> Result<ConversationResponse, AppError> {
+        req.preset_id = None;
+        self.create_inner(
+            user_id,
+            req,
+            Some(snapshot),
+            None,
+            None,
+        )
+        .await
+        .map(|(response, _)| response)
+    }
+
+    /// Idempotent counterpart of [`Self::create_from_agent_snapshot`].
+    pub async fn create_from_agent_snapshot_idempotent(
+        &self,
+        user_id: &str,
+        mut req: CreateConversationRequest,
+        snapshot: AgentResolvedSnapshot,
         creation_key: &str,
     ) -> Result<ConversationResponse, AppError> {
         req.preset_id = None;
-        req.preset_overrides = None;
         self.create_inner(
             user_id,
             req,
             Some(snapshot),
             Some(creation_key),
             None,
-            TrustedSnapshotOrigin::NomiCore,
         )
         .await
         .map(|(response, _)| response)
@@ -4211,10 +4162,9 @@ impl ConversationService {
         &self,
         user_id: &str,
         mut req: CreateConversationRequest,
-        trusted_snapshot: Option<nomifun_api_types::ResolvedPresetSnapshot>,
+        trusted_snapshot: Option<AgentResolvedSnapshot>,
         creation_key: Option<&str>,
         creative_studio_target: Option<CreativeStudioAgentCreationTarget>,
-        trusted_snapshot_origin: TrustedSnapshotOrigin,
     ) -> Result<(ConversationResponse, bool), AppError> {
         if creation_key.is_some() && creative_studio_target.is_some() {
             return Err(AppError::Internal(
@@ -4238,7 +4188,6 @@ impl ConversationService {
             // collaboration or custom-path authority regardless of payload.
             req.extra = serde_json::json!({});
             req.preset_id = None;
-            req.preset_overrides = None;
             req.delegation_policy = DelegationPolicy::Disabled;
             req.execution_model_pool = None;
             req.decision_policy = DecisionPolicy::default();
@@ -4269,9 +4218,12 @@ impl ConversationService {
         let mut extra = req.extra;
         reject_execution_policy_extra_keys(&extra)?;
         reject_retired_skill_extra_keys(&extra)?;
-        let preset_id = req.preset_id.take().map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
-        let preset_overrides = req.preset_overrides.take().unwrap_or_default();
-        let mut resolved_preset_snapshot = authority
+        let requested_agent_preset_id = req
+            .preset_id
+            .take()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let mut resolved_agent_snapshot = authority
             .controls_host()
             .then_some(trusted_snapshot)
             .flatten();
@@ -4279,32 +4231,18 @@ impl ConversationService {
         // similarly named value hidden in the open-ended `extra` bag.
         if let Some(object) = extra.as_object_mut() {
             object.remove("preset_id");
-            object.remove("preset_overrides");
-            object.remove("preset_snapshot");
+            object.remove("agent_snapshot");
             object.remove("preset_revision");
         }
 
-        // A preset id is the only client-supplied reference. Resolution is
-        // backend-authoritative and produces an immutable execution snapshot;
-        // any incoming `preset_snapshot` is discarded before resolving.
-        if resolved_preset_snapshot.is_none() && let Some(preset_id) = preset_id {
-            let service = self
-                .preset_service
-                .read()
-                .ok()
-                .and_then(|guard| guard.as_ref().cloned())
-                .ok_or_else(|| AppError::Internal("preset service is not wired".into()))?;
-            resolved_preset_snapshot = Some(service
-                .resolve(
-                    &preset_id,
-                    nomifun_api_types::PresetTarget::Conversation,
-                    None,
-                    preset_overrides,
-                )
-                .await?);
+        if requested_agent_preset_id.is_some() && resolved_agent_snapshot.is_none() {
+            return Err(AppError::BadRequest(
+                "an AgentPreset must be compiled by the Agent workbench before opening a Conversation"
+                    .to_owned(),
+            ));
         }
 
-        if let Some(snapshot) = resolved_preset_snapshot.as_ref() {
+        if let Some(snapshot) = resolved_agent_snapshot.as_ref() {
             if let Some(agent_id) = snapshot.resolved_agent_id.as_ref() {
                 let agent = self
                     .agent_metadata_repo
@@ -4330,14 +4268,8 @@ impl ConversationService {
             }
             if let Some(model) = snapshot.resolved_model.as_ref() {
                 if req.r#type == AgentType::Nomi {
-                    let provider_id = model.provider_id.as_ref().ok_or_else(|| {
-                        AppError::BadRequest(format!(
-                            "preset model '{}' has no resolved provider",
-                            model.model
-                        ))
-                    })?;
                     let resolved_lead = ExecutionModelRef {
-                        provider_id: provider_id.clone(),
+                        provider_id: model.provider_id.clone(),
                         model: model.model.clone(),
                     };
                     req.execution_model_pool = reconcile_preset_conversation_model_pool(
@@ -4346,7 +4278,7 @@ impl ConversationService {
                         &resolved_lead,
                     )?;
                     req.model = Some(nomifun_common::ProviderWithModel {
-                        provider_id: provider_id.clone(),
+                        provider_id: model.provider_id.clone(),
                         model: model.model.clone(),
                         use_model: Some(model.model.clone()),
                     });
@@ -4361,16 +4293,16 @@ impl ConversationService {
                 }
             }
             if let Some(obj) = extra.as_object_mut() {
-                // The immutable first-class `preset_snapshot` column is the
+                // The immutable first-class `agent_snapshot` column is the
                 // only authority for runtime instructions.  Do not persist a
                 // second copy in this open JSON bag: build_runtime_options
                 // projects the snapshot into the adapter-specific prompt
                 // field on every fresh runtime build.
                 obj.remove("preset_rules");
                 obj.remove("preset_context");
-                obj.insert("preset_enabled_skills".into(), serde_json::to_value(&snapshot.included_skills).unwrap_or_default());
+                obj.insert("agent_enabled_skills".into(), serde_json::to_value(&snapshot.included_skills).unwrap_or_default());
                 obj.insert("exclude_auto_inject_skills".into(), serde_json::to_value(&snapshot.excluded_auto_skills).unwrap_or_default());
-                obj.insert("preset_knowledge_binding".into(), serde_json::Value::Bool(true));
+                obj.insert("agent_knowledge_binding".into(), serde_json::Value::Bool(true));
             }
         }
 
@@ -4439,7 +4371,7 @@ impl ConversationService {
         // are accepted or normalized in the v3 contract.
         let (preset_enabled, exclude_auto_inject) = match extra.as_object_mut() {
             Some(obj) => {
-                let preset = take_string_array(obj, "preset_enabled_skills")?;
+                let preset = take_string_array(obj, "agent_enabled_skills")?;
                 let exclude = take_string_array(obj, "exclude_auto_inject_skills")?;
                 (preset, exclude)
             }
@@ -4610,36 +4542,31 @@ impl ConversationService {
             }
             None => None,
         };
-        let persist_legacy_preset_lineage =
-            matches!(trusted_snapshot_origin, TrustedSnapshotOrigin::LegacyPreset);
-        let preset_snapshot_value = persist_legacy_preset_lineage
-            .then(|| resolved_preset_snapshot.as_ref())
-            .flatten()
+        let agent_snapshot_value = resolved_agent_snapshot
+            .as_ref()
             .map(serde_json::to_value)
             .transpose()
-            .map_err(|e| AppError::Internal(format!("Failed to serialize preset snapshot: {e}")))?;
-        let preset_snapshot = preset_snapshot_value
+            .map_err(|e| AppError::Internal(format!("Failed to serialize Agent snapshot: {e}")))?;
+        let agent_snapshot = agent_snapshot_value
             .as_ref()
             .map(serde_json::to_string)
             .transpose()
-            .map_err(|e| AppError::BadRequest(format!("Invalid preset_snapshot: {e}")))?;
-        let preset_id = if persist_legacy_preset_lineage {
-            preset_snapshot_value
+            .map_err(|e| AppError::BadRequest(format!("Invalid Agent snapshot: {e}")))?;
+        let preset_id = if agent_snapshot_value.is_some() {
+            agent_snapshot_value
                 .as_ref()
                 .and_then(|value| value.get("preset_id"))
                 .and_then(serde_json::Value::as_str)
-                .or_else(|| extra.get("preset_id").and_then(serde_json::Value::as_str))
                 .filter(|value| !value.trim().is_empty())
                 .map(ToOwned::to_owned)
         } else {
             None
         };
-        let preset_revision = if persist_legacy_preset_lineage {
-            preset_snapshot_value
+        let preset_revision = if agent_snapshot_value.is_some() {
+            agent_snapshot_value
                 .as_ref()
                 .and_then(|value| value.get("preset_revision"))
                 .and_then(serde_json::Value::as_i64)
-                .or_else(|| extra.get("preset_revision").and_then(serde_json::Value::as_i64))
         } else {
             None
         };
@@ -4684,7 +4611,7 @@ impl ConversationService {
             cron_job_id,
             preset_id,
             preset_revision,
-            preset_snapshot,
+            agent_snapshot,
             created_at: now,
             updated_at: now,
         };
@@ -4808,7 +4735,7 @@ impl ConversationService {
             // deliberately bypasses workpath inheritance at runtime:
             // selecting a preset must reproduce its KB scope without silently
             // sharing the user's general workspace binding.
-            if let Some(snapshot) = resolved_preset_snapshot.as_ref()
+            if let Some(snapshot) = resolved_agent_snapshot.as_ref()
                 && let Some(service) = self
                     .knowledge_service
                     .read()
@@ -4854,26 +4781,6 @@ impl ConversationService {
                 );
             }
         };
-
-        if persist_legacy_preset_lineage
-            && let Some(snapshot) = resolved_preset_snapshot.as_ref()
-            && let Some(service) = self
-                .preset_service
-                .read()
-                .ok()
-                .and_then(|guard| guard.as_ref().cloned())
-            && let Err(error) = service.mark_used(&snapshot.preset_id, now).await
-        {
-            // Usage ordering is secondary catalog metadata. The conversation
-            // and its immutable snapshot are already fully materialized, so a
-            // transient state-write failure must not invalidate the aggregate.
-            warn!(
-                conversation_id = %new_id,
-                preset_id = %snapshot.preset_id,
-                error = %ErrorChain(&error),
-                "failed to update preset last_used_at"
-            );
-        }
 
         self.broadcast_list_changed(user_id, &new_id, "created", response.source.as_ref());
 
@@ -5104,8 +5011,8 @@ impl ConversationService {
             && (incoming.get("skills").is_some()
                 || incoming.get("preset_id").is_some()
                 || incoming.get("preset_revision").is_some()
-                || incoming.get("preset_snapshot").is_some()
-                || incoming.get("preset_enabled_skills").is_some()
+                || incoming.get("agent_snapshot").is_some()
+                || incoming.get("agent_enabled_skills").is_some()
                 || incoming.get("exclude_auto_inject_skills").is_some()
                 || incoming.get("preset_rules").is_some()
                 || incoming.get("preset_context").is_some()
@@ -5293,7 +5200,7 @@ impl ConversationService {
             // different preset means creating/cloning a new conversation.
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             updated_at: Some(now),
         };
 
@@ -8440,7 +8347,7 @@ impl ConversationService {
         // Re-project the frozen first-class snapshot here so every actual send
         // crosses the same authority boundary and stale/tampered adapter JSON
         // can never suppress the active preset.
-        project_preset_runtime_context(&row, &runtime_options.agent_type, &mut runtime_options.extra)?;
+        project_agent_snapshot_runtime_context(&row, &runtime_options.agent_type, &mut runtime_options.extra)?;
         let required_injected_skills = if creative_studio_turn {
             req.inject_skills.as_slice()
         } else {
@@ -12120,12 +12027,6 @@ enum CancelOrigin {
     AgentExecution,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TrustedSnapshotOrigin {
-    LegacyPreset,
-    NomiCore,
-}
-
 // ── Internal Helpers ────────────────────────────────────────────────
 
 /// Render the immutable preset snapshot as explicit runtime context.
@@ -12135,7 +12036,7 @@ enum TrustedSnapshotOrigin {
 /// "preset" because it was never told the preset's identity.  The envelope
 /// makes activation observable to the model without asking adapters to reload
 /// the mutable catalog.
-fn render_preset_runtime_context(snapshot: &ResolvedPresetSnapshot) -> String {
+fn render_agent_snapshot_runtime_context(snapshot: &AgentResolvedSnapshot) -> String {
     let mut prompt = format!(
         "[NomiFun active preset]\n\
          Name: {}\n\
@@ -12160,10 +12061,10 @@ fn render_preset_runtime_context(snapshot: &ResolvedPresetSnapshot) -> String {
 /// Validate the first-class preset lineage and project it into the prompt key
 /// consumed by the concrete runtime adapter.
 ///
-/// `conversations.preset_snapshot` is authoritative.  `extra.preset_rules`
+/// `conversations.agent_snapshot` is authoritative.  `extra.preset_rules`
 /// and `extra.preset_context` are merely ephemeral adapter projections and
 /// must never be allowed to drift from the frozen snapshot.
-fn project_preset_runtime_context(
+fn project_agent_snapshot_runtime_context(
     row: &ConversationRow,
     agent_type: &AgentType,
     extra: &mut serde_json::Value,
@@ -12176,7 +12077,7 @@ fn project_preset_runtime_context(
     };
 
     let lineage_present =
-        row.preset_id.is_some() || row.preset_revision.is_some() || row.preset_snapshot.is_some();
+        row.preset_id.is_some() || row.preset_revision.is_some() || row.agent_snapshot.is_some();
     if !lineage_present {
         return Ok(());
     }
@@ -12193,16 +12094,16 @@ fn project_preset_runtime_context(
             row.conversation_id
         ))
     })?;
-    let raw_snapshot = row.preset_snapshot.as_deref().ok_or_else(|| {
+    let raw_snapshot = row.agent_snapshot.as_deref().ok_or_else(|| {
         AppError::Internal(format!(
-            "Conversation {} preset lineage is missing preset_snapshot",
+            "Conversation {} Agent snapshot lineage is missing agent_snapshot",
             row.conversation_id
         ))
     })?;
-    let snapshot: ResolvedPresetSnapshot =
+    let snapshot: AgentResolvedSnapshot =
         serde_json::from_str(raw_snapshot).map_err(|error| {
             AppError::Internal(format!(
-                "Conversation {} has invalid preset_snapshot: {error}",
+                "Conversation {} has invalid agent_snapshot: {error}",
                 row.conversation_id
             ))
         })?;
@@ -12226,7 +12127,7 @@ fn project_preset_runtime_context(
         return Ok(());
     }
 
-    let context = serde_json::Value::String(render_preset_runtime_context(&snapshot));
+    let context = serde_json::Value::String(render_agent_snapshot_runtime_context(&snapshot));
     match agent_type {
         AgentType::Nomi => {
             object.insert("preset_rules".to_owned(), context);
@@ -12309,7 +12210,7 @@ impl ConversationService {
         let mut extra: serde_json::Value =
             serde_json::from_str(&row.extra).map_err(|e| AppError::Internal(format!("Invalid extra JSON: {e}")))?;
 
-        project_preset_runtime_context(row, &agent_type, &mut extra)?;
+        project_agent_snapshot_runtime_context(row, &agent_type, &mut extra)?;
 
         if !self.execution_authority(&row.user_id).controls_host() {
             // Even a row written outside the service cannot smuggle a custom
@@ -13699,12 +13600,11 @@ mod tests {
     const PROVIDER_ID_2: &str = "0190f5fe-7c00-7a00-8000-000000000002";
     const RUNTIME_PRESET_ID: &str = "0190f5fe-7c00-7a00-8000-000000000003";
 
-    fn runtime_preset_snapshot() -> ResolvedPresetSnapshot {
-        ResolvedPresetSnapshot {
+    fn runtime_agent_snapshot() -> AgentResolvedSnapshot {
+        AgentResolvedSnapshot {
             preset_id: RUNTIME_PRESET_ID.to_owned(),
             preset_revision: 4,
             preset_name: "文案版".to_owned(),
-            target: nomifun_api_types::PresetTarget::Conversation,
             routing_description: None,
             instructions: "直接输出走心治愈的短视频文案。".to_owned(),
             resolved_agent_id: None,
@@ -13720,7 +13620,7 @@ mod tests {
     }
 
     fn row_with_runtime_preset(extra: serde_json::Value) -> ConversationRow {
-        let snapshot = runtime_preset_snapshot();
+        let snapshot = runtime_agent_snapshot();
         ConversationRow {
             id: 1,
             conversation_id: "0190f5fe-7c00-7a00-8000-000000000004".to_owned(),
@@ -13741,7 +13641,7 @@ mod tests {
             cron_job_id: None,
             preset_id: Some(snapshot.preset_id.clone()),
             preset_revision: Some(snapshot.preset_revision),
-            preset_snapshot: Some(serde_json::to_string(&snapshot).unwrap()),
+            agent_snapshot: Some(serde_json::to_string(&snapshot).unwrap()),
             created_at: 1,
             updated_at: 1,
         }
@@ -13756,7 +13656,7 @@ mod tests {
         }));
         let mut extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap();
 
-        project_preset_runtime_context(&row, &AgentType::Nomi, &mut extra).unwrap();
+        project_agent_snapshot_runtime_context(&row, &AgentType::Nomi, &mut extra).unwrap();
 
         let prompt = extra["preset_rules"].as_str().unwrap();
         assert!(prompt.contains("Name: 文案版"));
@@ -13770,13 +13670,13 @@ mod tests {
     #[test]
     fn incomplete_or_mismatched_preset_lineage_fails_closed() {
         let mut incomplete = row_with_runtime_preset(json!({}));
-        incomplete.preset_snapshot = None;
+        incomplete.agent_snapshot = None;
         let mut extra = json!({});
-        assert!(project_preset_runtime_context(&incomplete, &AgentType::Nomi, &mut extra).is_err());
+        assert!(project_agent_snapshot_runtime_context(&incomplete, &AgentType::Nomi, &mut extra).is_err());
 
         let mut mismatch = row_with_runtime_preset(json!({}));
         mismatch.preset_revision = Some(5);
-        assert!(project_preset_runtime_context(&mismatch, &AgentType::Nomi, &mut extra).is_err());
+        assert!(project_agent_snapshot_runtime_context(&mismatch, &AgentType::Nomi, &mut extra).is_err());
     }
 
     #[test]
@@ -13784,10 +13684,10 @@ mod tests {
         let mut row = row_with_runtime_preset(json!({"preset_rules": "execution persona"}));
         row.preset_id = None;
         row.preset_revision = None;
-        row.preset_snapshot = None;
+        row.agent_snapshot = None;
         let mut extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap();
 
-        project_preset_runtime_context(&row, &AgentType::Nomi, &mut extra).unwrap();
+        project_agent_snapshot_runtime_context(&row, &AgentType::Nomi, &mut extra).unwrap();
 
         assert_eq!(extra["preset_rules"], "execution persona");
     }
@@ -14268,7 +14168,7 @@ mod tests {
             channel_chat_id: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             delegation_policy: Default::default(),
             execution_model_pool: None,
             decision_policy: Default::default(),

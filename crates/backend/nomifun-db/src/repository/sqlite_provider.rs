@@ -764,8 +764,8 @@ impl IProviderRepository for SqliteProviderRepository {
             }
         }
 
-        // Cascade the provider delete to the catalog tables in the same
-        // transaction.
+        // Cascade the provider delete to its current catalog tables in the
+        // same transaction.
         sqlx::query("DELETE FROM provider_model_capabilities WHERE provider_id = ?")
             .bind(id)
             .execute(&mut *transaction)
@@ -778,11 +778,6 @@ impl IProviderRepository for SqliteProviderRepository {
             .bind(id)
             .execute(&mut *transaction)
             .await?;
-        sqlx::query("UPDATE preset_model_preferences SET provider_id = NULL WHERE provider_id = ?")
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-
         transaction.commit().await?;
         Ok(())
     }

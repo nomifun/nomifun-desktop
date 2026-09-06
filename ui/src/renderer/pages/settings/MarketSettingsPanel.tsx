@@ -1,20 +1,15 @@
 /**
  * MarketSettingsPanel — shared ranking-market surface for the skill, MCP,
- * plugin, and preset-package markets. Renders an outlined, transparent library
+ * plugin, and package markets. Renders an outlined, transparent library
  * surface with the source switcher, sync / search controls, card grid, and
- * (optionally) the shared audience / scenario tag filter bar. Consumers own
- * what "Add" means via `onAdd`.
+ * search controls and a card grid. Consumers own what "Add" means via `onAdd`.
  */
 import { ipcBridge } from '@/common';
 import type { ISkillMarketItem, SkillMarketSource } from '@/common/adapter/ipcBridge';
 import { resolveLocaleKey } from '@/common/utils';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
-import { usePresetTags } from '@/renderer/hooks/preset';
 import { openExternalUrl } from '@/renderer/utils/platform';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import PresetTagFilterBar from './PresetSettings/PresetTagFilterBar';
-import type { TagFilterState } from './PresetSettings/presetUtils';
-import type { SkillTagFilterState } from './skill/skillFilter';
 import SkillMarketCard from './skill/SkillMarketCard';
 import {
   ENHANCED_TOOLS_EMPTY_STATE_CLASS,
@@ -38,7 +33,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next';
 
 const CARD_GRID_COLS = 'repeat(auto-fill, minmax(min(232px, 100%), 1fr))';
-const EMPTY_TAG_FILTER: SkillTagFilterState = { audience: [], scenario: [] };
 
 /** Per-market wording overrides; every field falls back to the generic `settings.market.*` copy. */
 type MarketPanelTextOverrides = {
@@ -69,8 +63,6 @@ type MarketSettingsPanelProps = {
   isAdded?: (item: ISkillMarketItem) => boolean;
   /** Prevent a false enabled flash while the installed catalog is loading. */
   addedStateLoading?: boolean;
-  /** Render the shared audience/scenario tag filter bar (used by the skill market). */
-  enableTagFilter?: boolean;
   /**
    * Stable id fragment for e2e hooks, e.g. `skill-market` keeps the legacy
    * `btn-sync-skill-market` ids. Omit to render without test ids.
@@ -91,7 +83,6 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
   onAdd,
   isAdded,
   addedStateLoading = false,
-  enableTagFilter = false,
   testIdPrefix,
   text,
 }) => {
@@ -99,7 +90,6 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
   const localeKey = resolveLocaleKey(i18n.language);
   const layout = useLayoutContext();
   const isMobile = layout?.isMobile ?? false;
-  const tags = usePresetTags();
   const [message, messageContext] = useArcoMessage({ maxCount: 10 });
   const autoSyncStartedRef = useRef(false);
   const itemsRef = useRef<ISkillMarketItem[]>([]);
@@ -111,7 +101,6 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchExpanded, setSearchExpanded] = useState(false);
-  const [tagFilter, setTagFilter] = useState<TagFilterState>({ audience: [], scenario: [] });
   const pendingAddIdsRef = useRef<Set<string>>(new Set());
   const [pendingAddIds, setPendingAddIds] = useState<Set<string>>(new Set());
 
@@ -135,19 +124,6 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
       localStorage.removeItem(cacheKey);
     }
   }, [cacheKey, sources]);
-
-  // Drop filter selections whose tags were deleted from the shared vocabulary.
-  useEffect(() => {
-    if (!enableTagFilter) return;
-    const audienceIds = new Set(tags.audienceTags.map((tag) => tag.preset_tag_id));
-    const scenarioIds = new Set(tags.scenarioTags.map((tag) => tag.preset_tag_id));
-    setTagFilter((prev) => {
-      const audience = prev.audience.filter((presetTagId) => audienceIds.has(presetTagId));
-      const scenario = prev.scenario.filter((presetTagId) => scenarioIds.has(presetTagId));
-      if (audience.length === prev.audience.length && scenario.length === prev.scenario.length) return prev;
-      return { audience, scenario };
-    });
-  }, [enableTagFilter, tags.audienceTags, tags.scenarioTags]);
 
   const syncMarket = useCallback(
     async (options?: { showToast?: boolean }) => {
@@ -207,26 +183,9 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
     void syncMarket({ showToast: false });
   }, [autoSyncKey, syncMarket]);
 
-  const skillTagFilter = useMemo<SkillTagFilterState>(() => {
-    if (!enableTagFilter) return EMPTY_TAG_FILTER;
-    const keyById = new Map(
-      [...tags.audienceTags, ...tags.scenarioTags].map((tag) => [tag.preset_tag_id, tag.key] as const)
-    );
-    return {
-      audience: tagFilter.audience.flatMap((presetTagId) => {
-        const key = keyById.get(presetTagId);
-        return key ? [key] : [];
-      }),
-      scenario: tagFilter.scenario.flatMap((presetTagId) => {
-        const key = keyById.get(presetTagId);
-        return key ? [key] : [];
-      }),
-    };
-  }, [enableTagFilter, tagFilter, tags.audienceTags, tags.scenarioTags]);
-
   const filteredItems = useMemo(
-    () => filterSkillMarketItems(items, activeSource, searchQuery, skillTagFilter),
-    [items, activeSource, searchQuery, skillTagFilter]
+    () => filterSkillMarketItems(items, activeSource, searchQuery),
+    [items, activeSource, searchQuery]
   );
 
   const sourceCounts = useMemo(() => {
@@ -370,7 +329,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
               {description}
             </p>
           </div>
-          {enableTagFilter ? marketIconActions : marketActions}
+          {marketActions}
         </div>
 
         {isSearchVisible && (
@@ -386,18 +345,6 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
           />
         )}
 
-        {enableTagFilter && (
-          <PresetTagFilterBar
-            audienceTags={tags.audienceTags}
-            scenarioTags={tags.scenarioTags}
-            value={tagFilter}
-            onChange={setTagFilter}
-            localeKey={localeKey}
-            onManageTags={() => undefined}
-            hideManageTags
-            actions={marketSourceSwitcher}
-          />
-        )}
       </div>
 
       {errors.length > 0 && (
@@ -414,7 +361,6 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
               <SkillMarketCard
                 key={item.id}
                 item={item}
-                tagByKey={tags.tagByKey}
                 localeKey={localeKey}
                 adding={pendingAddIds.has(item.id)}
                 added={added}

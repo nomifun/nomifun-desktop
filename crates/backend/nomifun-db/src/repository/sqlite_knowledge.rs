@@ -191,23 +191,6 @@ impl IKnowledgeRepository for SqliteKnowledgeRepository {
             return Err(DbError::NotFound(format!("knowledge base {id}")));
         }
 
-        // RESTRICT: presets are durable configuration and must be
-        // explicitly edited before a referenced knowledge base can disappear.
-        let preset_reference_exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(\
-                SELECT 1 FROM preset_knowledge_bases \
-                WHERE knowledge_base_id = ?\
-             )",
-        )
-        .bind(id)
-        .fetch_one(&mut *transaction)
-        .await?;
-        if preset_reference_exists {
-            return Err(DbError::Conflict(format!(
-                "knowledge base {id} is still referenced by a preset"
-            )));
-        }
-
         // CASCADE: remove this base from every session/workpath binding. The
         // binding row itself remains and may still contain other ordered bases.
         sqlx::query(
@@ -636,7 +619,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_base_cascades_binding_membership_but_restricts_preset_usage() {
+    async fn delete_base_cascades_binding_membership() {
         let db = init_database_memory().await.unwrap();
         let repo = SqliteKnowledgeRepository::new(db.pool().clone());
         repo.insert_base(&make_base(KB_A)).await.unwrap();
@@ -661,38 +644,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(remaining, vec![KB_B.to_owned()]);
-
-        let preset_id = nomifun_common::PresetId::new();
-        assert!(nomifun_common::validate_uuidv7(preset_id.as_str()).is_ok());
-        sqlx::query(
-            "INSERT INTO presets \
-             (preset_id, source_kind, source_key, revision, name, fallback_allowed, created_at, updated_at) \
-             VALUES (?, 'builtin', 'fixture-preset', 1, 'Preset', 1, 1, 1)",
-        )
-        .bind(preset_id.as_str())
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO preset_knowledge_bases \
-             (preset_id, knowledge_base_id, sort_order, required) \
-             VALUES (?, ?, 0, 1)",
-        )
-        .bind(preset_id.as_str())
-        .bind(KB_B)
-        .execute(db.pool())
-        .await
-        .unwrap();
-
-        let error = repo.delete_base(KB_B).await.unwrap_err();
-        assert!(matches!(error, DbError::Conflict(_)));
-        assert!(repo.get_base(KB_B).await.unwrap().is_some());
-        let (_, still_bound) = repo
+        repo.delete_base(KB_B).await.unwrap();
+        let (_, remaining) = repo
             .get_binding("workpath", "/project")
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(still_bound, vec![KB_B.to_owned()]);
+        assert!(remaining.is_empty());
     }
 
     /// Insert a conversation so the conversation-kind binding has a valid

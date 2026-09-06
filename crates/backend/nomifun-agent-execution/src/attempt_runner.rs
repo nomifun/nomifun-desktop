@@ -19,7 +19,7 @@ use nomifun_ai_agent::artifact_store::{ArtifactStore, PersistedArtifact};
 use nomifun_api_types::{
     ConversationResponse, CreateConversationRequest, ExecutionModelPool, ExecutionModelRef,
     ExecutionParticipant, ListMessagesQuery, MessageListResponse, MessageResponse,
-    ResolvedPresetSnapshot, SendMessageRequest,
+    AgentResolvedSnapshot, SendMessageRequest,
 };
 use nomifun_common::{
     AgentToolPolicy, AgentType, AppError, DecisionPolicy, DelegationPolicy,
@@ -151,11 +151,11 @@ pub trait AgentExecutionSessionPort: Send + Sync {
         creation_key: &str,
     ) -> Result<ConversationResponse, AppError>;
 
-    async fn create_from_preset_snapshot_idempotent(
+    async fn create_from_agent_snapshot_idempotent(
         &self,
         owner_id: &str,
         request: CreateConversationRequest,
-        snapshot: ResolvedPresetSnapshot,
+        snapshot: AgentResolvedSnapshot,
         creation_key: &str,
     ) -> Result<ConversationResponse, AppError>;
 
@@ -528,10 +528,10 @@ impl AttemptRunner for AgentSessionAttemptRunner {
             tool_policy,
             delegation_depth >= MAX_AGENT_DELEGATION_DEPTH,
         );
-        if let Some(snapshot) = participant.preset_snapshot.as_ref() {
+        if let Some(snapshot) = participant.agent_snapshot.as_ref() {
             extra["preset_id"] = Value::String(snapshot.preset_id.clone());
             extra["preset_revision"] = Value::Number(snapshot.preset_revision.into());
-            extra["preset_snapshot"] = serde_json::to_value(snapshot)
+            extra["agent_snapshot"] = serde_json::to_value(snapshot)
                 .map_err(|error| AppError::Internal(format!("encode preset snapshot: {error}")))?;
         }
 
@@ -542,8 +542,7 @@ impl AttemptRunner for AgentSessionAttemptRunner {
             source: None,
             channel_chat_id: None,
             preset_id: None,
-            preset_overrides: None,
-            delegation_policy: if delegation_depth >= MAX_AGENT_DELEGATION_DEPTH {
+                        delegation_policy: if delegation_depth >= MAX_AGENT_DELEGATION_DEPTH {
                 DelegationPolicy::Disabled
             } else {
                 delegation_policy
@@ -555,9 +554,9 @@ impl AttemptRunner for AgentSessionAttemptRunner {
             execution_template_id: None,
             extra,
         };
-        let created = if let Some(snapshot) = participant.preset_snapshot.clone() {
+        let created = if let Some(snapshot) = participant.agent_snapshot.clone() {
             self.session
-                .create_from_preset_snapshot_idempotent(
+                .create_from_agent_snapshot_idempotent(
                     owner_id,
                     request,
                     snapshot,

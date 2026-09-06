@@ -10,8 +10,6 @@ use nomifun_db::models::ConversationRow;
 const USER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
 const LIVE_OVERRIDE_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000007";
 const NOMI_AGENT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000114";
-const PRESET_ONE_ID: &str = "0190f5fe-7c00-7a00-8000-000000000121";
-const PRESET_AUDIT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000122";
 
 async fn init_database_memory() -> Result<nomifun_db::Database, nomifun_db::DbError> {
     nomifun_db::init_database_memory_with_owner(
@@ -40,23 +38,6 @@ async fn test_database() -> nomifun_db::Database {
         .await
         .unwrap();
     }
-    for (preset_id, source_key) in [
-        (PRESET_ONE_ID, "test_preset_one"),
-        (PRESET_AUDIT_ID, "test_preset_audit"),
-    ] {
-        nomifun_db::sqlx::query(
-            "INSERT INTO presets \
-             (preset_id, source_kind, source_key, name, instructions, created_at, updated_at) \
-             VALUES (?, 'builtin', ?, ?, '', 1, 1)",
-        )
-        .bind(preset_id)
-        .bind(source_key)
-        .bind(source_key)
-        .execute(database.pool())
-        .await
-        .unwrap();
-        assert!(nomifun_common::validate_uuidv7(preset_id).is_ok());
-    }
     database
 }
 
@@ -66,7 +47,7 @@ fn participant(index: usize) -> NewAgentExecutionTemplateParticipant {
         source_agent_id: NOMI_AGENT_ID.to_owned(),
         preset_id: None,
         preset_revision: None,
-        preset_snapshot: None,
+        agent_snapshot: None,
         provider_id: Some("0190f5fe-7c00-7a00-8000-000000000006".to_owned()),
         model: Some(format!("model_{index}")),
         role: Some(format!("role {index}")),
@@ -294,11 +275,12 @@ async fn template_repository_rejects_runtime_ceiling_and_unresolved_model_debt()
     let mut preset_resolved = participant(0);
     preset_resolved.provider_id = None;
     preset_resolved.model = None;
-    preset_resolved.preset_id = Some(PRESET_ONE_ID.to_owned());
+    preset_resolved.preset_id =
+        Some("0190f5fe-7c00-7a00-8000-000000000121".to_owned());
     preset_resolved.preset_revision = Some(1);
-    preset_resolved.preset_snapshot = Some(
+    preset_resolved.agent_snapshot = Some(
         format!(
-            r#"{{"preset_id":"{PRESET_ONE_ID}","preset_revision":1,"target":"execution_step","resolved_model":{{"provider_id":"0190f5fe-7c00-7a00-8000-000000000004","model":"model_from_preset"}}}}"#
+            r#"{{"preset_id":"0190f5fe-7c00-7a00-8000-000000000121","preset_revision":1,"preset_name":"Test Agent","resolved_model":{{"provider_id":"0190f5fe-7c00-7a00-8000-000000000004","model":"model_from_preset"}}}}"#
         ),
     );
     let created = repository
@@ -317,11 +299,12 @@ async fn template_repository_rejects_runtime_ceiling_and_unresolved_model_debt()
     let mut explicit_override = participant(1);
     explicit_override.provider_id = Some(LIVE_OVERRIDE_PROVIDER_ID.to_owned());
     explicit_override.model = Some("model_live_override".to_owned());
-    explicit_override.preset_id = Some(PRESET_AUDIT_ID.to_owned());
+    explicit_override.preset_id =
+        Some("0190f5fe-7c00-7a00-8000-000000000122".to_owned());
     explicit_override.preset_revision = Some(3);
-    explicit_override.preset_snapshot = Some(
+    explicit_override.agent_snapshot = Some(
         format!(
-            r#"{{"preset_id":"{PRESET_AUDIT_ID}","preset_revision":3,"target":"execution_step","resolved_model":{{"provider_id":"0190f5fe-7c00-7a00-8000-000000000005","model":"model_snapshot_only"}}}}"#
+            r#"{{"preset_id":"0190f5fe-7c00-7a00-8000-000000000122","preset_revision":3,"preset_name":"Audit Agent","resolved_model":{{"provider_id":"0190f5fe-7c00-7a00-8000-000000000005","model":"model_snapshot_only"}}}}"#
         ),
     );
     let overridden = repository
@@ -344,7 +327,7 @@ async fn template_repository_rejects_runtime_ceiling_and_unresolved_model_debt()
             .await
             .unwrap()
             .is_empty(),
-        "preset_snapshot is frozen audit data; provider usage follows the materialized concrete row only"
+        "agent_snapshot is frozen audit data; provider usage follows the materialized concrete row only"
     );
 }
 
@@ -391,7 +374,7 @@ async fn conversation_template_selection_is_typed_owner_scoped_and_cleared_on_de
         cron_job_id: None,
         preset_id: None,
         preset_revision: None,
-        preset_snapshot: None,
+        agent_snapshot: None,
         created_at: now,
         updated_at: now,
     };
@@ -580,11 +563,12 @@ async fn template_repository_rejects_lossy_or_legacy_participant_shapes() {
     );
 
     let mut invalid_snapshot = participant(2);
-    invalid_snapshot.preset_id = Some(PRESET_ONE_ID.to_owned());
+    invalid_snapshot.preset_id =
+        Some("0190f5fe-7c00-7a00-8000-000000000121".to_owned());
     invalid_snapshot.preset_revision = Some(1);
-    invalid_snapshot.preset_snapshot = Some(
+    invalid_snapshot.agent_snapshot = Some(
         format!(
-            r#"{{"preset_id":"{PRESET_ONE_ID}","preset_revision":1,"target":"cluster_member"}}"#
+            r#"{{"preset_id":"0190f5fe-7c00-7a00-8000-000000000121","preset_revision":1,"target":"cluster_member"}}"#
         ),
     );
     assert!(
@@ -603,4 +587,31 @@ async fn template_repository_rejects_lossy_or_legacy_participant_shapes() {
             .await
             .is_err()
     );
+
+    for legacy_field in [format!("preset_{}", "overrides"), "source".to_owned()] {
+        let mut invalid_snapshot = participant(3);
+        invalid_snapshot.preset_id =
+            Some("0190f5fe-7c00-7a00-8000-000000000121".to_owned());
+        invalid_snapshot.preset_revision = Some(1);
+        invalid_snapshot.agent_snapshot = Some(format!(
+            r#"{{"preset_id":"0190f5fe-7c00-7a00-8000-000000000121","preset_revision":1,"{legacy_field}":"legacy"}}"#
+        ));
+        assert!(
+            repository
+                .create_template(
+                    USER_ID,
+                    &CreateAgentExecutionTemplateParams {
+                        name: format!("legacy snapshot field {legacy_field}"),
+                        description: None,
+                        max_parallel: None,
+                        work_dir: None,
+                        context: None,
+                        participants: vec![invalid_snapshot],
+                    },
+                )
+                .await
+                .is_err(),
+            "removed snapshot field {legacy_field} must fail closed"
+        );
+    }
 }

@@ -8,7 +8,7 @@ import type { SshHostId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import type { IConversationMcpStatus, IProvider, TChatConversation, TProviderWithModel } from '@/common/config/storage';
 import { CronJobManager } from '@/renderer/pages/cron';
-import { usePresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
+import { useAgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
 import { Message } from '@arco-design/web-react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -361,7 +361,7 @@ const NomiConversationPanel: React.FC<{
   ]);
 
   const workspaceEnabled = Boolean(conversation.extra?.workspace);
-  const { info: presetPresetInfo } = usePresetInfo(conversation);
+  const { info: presetPresetInfo } = useAgentInfo(conversation);
   const sshHostId = sshHostIdOf(conversation);
 
   const chatLayoutProps = {

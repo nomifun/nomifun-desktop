@@ -90,6 +90,22 @@
       "http_status": 409
     },
     {
+      "code": "PRESET_CONTRIBUTION_LOCK_INVALID",
+      "version": 1,
+      "class": "contract",
+      "retry": "never",
+      "terminal_scope": "open",
+      "http_status": 500
+    },
+    {
+      "code": "MODEL_ROUTE_RECORD_INVALID",
+      "version": 1,
+      "class": "contract",
+      "retry": "new_session_required",
+      "terminal_scope": "open",
+      "http_status": 422
+    },
+    {
       "code": "OFFICIAL_PRESET_KEY_SET_MISMATCH",
       "version": 1,
       "class": "contract",

@@ -1,7 +1,7 @@
 export { default as ConversationSiderActions } from './ConversationSiderActions';
 export { default as SiderAssetLibraryEntry } from './SiderAssetLibraryEntry';
+export { default as SiderAgentEntry } from './SiderAgentEntry';
 export { default as SiderBrowserEntry } from './SiderBrowserEntry';
-export { default as SiderPresetEntry } from './SiderPresetEntry';
 export { default as SiderSkillsEntry } from './SiderSkillsEntry';
 export { default as SiderConversationEntry } from './SiderConversationEntry';
 export { default as SiderMcpEntry } from './SiderMcpEntry';

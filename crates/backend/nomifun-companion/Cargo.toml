@@ -15,7 +15,6 @@ nomifun-model-invoke.workspace = true
 nomifun-extension.workspace = true
 nomifun-auth.workspace = true
 nomifun-conversation.workspace = true
-nomifun-preset.workspace = true
 nomifun-knowledge.workspace = true
 axum.workspace = true
 tokio.workspace = true

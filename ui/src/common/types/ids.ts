@@ -30,6 +30,10 @@ export type EntityKind =
   | 'knowledge-binding'
   | 'provider'
   | 'agent'
+  | 'agent-preset'
+  | 'agent-session'
+  | 'remote-binding'
+  | 'resolved-snapshot'
   | 'preset'
   | 'preset-tag'
   | 'message'
@@ -86,8 +90,10 @@ export type KnowledgeSourceItemId = EntityId<'knowledge-source-item'>;
 export type KnowledgeBindingId = EntityId<'knowledge-binding'>;
 export type ProviderId = EntityId<'provider'>;
 export type AgentId = EntityId<'agent'>;
-export type PresetId = EntityId<'preset'>;
-export type PresetTagId = EntityId<'preset-tag'>;
+export type AgentPresetId = EntityId<'agent-preset'>;
+export type AgentSessionId = EntityId<'agent-session'>;
+export type RemoteBindingId = EntityId<'remote-binding'>;
+export type ResolvedSnapshotId = EntityId<'resolved-snapshot'>;
 export type MessageId = EntityId<'message'>;
 export type CronJobId = EntityId<'cron-job'>;
 export type CronJobRunId = EntityId<'cron-job-run'>;
@@ -197,9 +203,14 @@ export const parseKnowledgeBindingId = (value: unknown): KnowledgeBindingId =>
   parseEntityId('knowledge-binding', value);
 export const parseProviderId = (value: unknown): ProviderId => parseEntityId('provider', value);
 export const parseAgentId = (value: unknown): AgentId => parseEntityId('agent', value);
-export const parsePresetId = (value: unknown): PresetId => parseEntityId('preset', value);
-export const parsePresetTagId = (value: unknown): PresetTagId =>
-  parseEntityId('preset-tag', value);
+export const parseAgentPresetId = (value: unknown): AgentPresetId =>
+  parseEntityId('agent-preset', value);
+export const parseAgentSessionId = (value: unknown): AgentSessionId =>
+  parseEntityId('agent-session', value);
+export const parseRemoteBindingId = (value: unknown): RemoteBindingId =>
+  parseEntityId('remote-binding', value);
+export const parseResolvedSnapshotId = (value: unknown): ResolvedSnapshotId =>
+  parseEntityId('resolved-snapshot', value);
 export const parseMessageId = (value: unknown): MessageId => parseEntityId('message', value);
 export const parseCronJobId = (value: unknown): CronJobId => parseEntityId('cron-job', value);
 export const parseCronJobRunId = (value: unknown): CronJobRunId =>

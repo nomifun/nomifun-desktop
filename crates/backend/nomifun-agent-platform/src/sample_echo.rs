@@ -10,7 +10,8 @@ use futures::{StreamExt, stream};
 use nomifun_agent_contracts::{
     ActionId, AgentBindingValue, AgentPresetId, AgentSessionId, AgentSessionLiveRecord,
     AgentSessionMetadata, ArtifactEnvelope, ArtifactId, CapabilityActionDescriptor,
-    CapabilityContributions, CapabilityId, CapabilityKind, CapabilityManifest, CapabilityRef,
+    CapabilityConsumer, CapabilityContributions, CapabilityId, CapabilityKind,
+    CapabilityManifest, CapabilityRef,
     CancellationDescriptor, CanonicalErrorCode, CanonicalSchemaRef, ConnectionConfigRef,
     ChatRouteIdentity, CorrelationId, DeclaredServiceViewDescriptor, DeleteAgentSessionCommand,
     DigestHex,
@@ -30,8 +31,8 @@ use nomifun_agent_contracts::{
     RuntimeSessionDisposeParams, RuntimeStartTurnParams,
     RuntimeTarget, ScopeKey, SemanticSessionEventDraft, SessionEventAppend, SessionEventKind,
     SessionEventPayloadRef, SkillDefinition, SkillId, StateKey, StrictJsonValue,
-    ToolPresentationKind, UserId, ValidatedPluginConfig, VersionString, digest_bytes,
-    digest_payload,
+    ToolPresentationKind, UserId, ValidatedPluginConfig, VersionString,
+    capability_surface_declarations, digest_bytes, digest_payload,
 };
 use nomifun_agent_control_plane::{
     AgentControlPlane, CatalogSnapshot, CompilerReleaseInputs, ControlPlaneError,
@@ -50,10 +51,9 @@ use nomifun_agent_session::{
     RuntimeAppendContext, SessionStoreError,
 };
 use nomifun_api_types::{
-    AgentPresetDocumentDto, AgentPresetDraftDto, CapabilityExposureDto,
-    CapabilitySelectionDto, CreateAgentPresetRequest, EditorDraftStateDto,
-    EditorRevisionActionDto, ExactCatalogRefDto, ResolveAgentPresetPreviewRequest,
-    TypedResourceBindingDto,
+    AgentPresetDocumentDto, AgentPresetDraftDto, CapabilitySelectionDto,
+    CreateAgentPresetRequest, EditorDraftStateDto, EditorRevisionActionDto,
+    ExactCatalogRefDto, ResolveAgentPresetPreviewRequest, TypedResourceBindingDto,
 };
 use nomifun_chat_model_broker::{
     AnthropicAdapter, BedrockAdapter, BrokerRetryPolicy, ChatCausality, ChatCausalityGate,
@@ -447,7 +447,10 @@ fn sample_registration(
         ),
         requires: Vec::new(),
         conflicts: Vec::new(),
-        supported_surfaces: BTreeSet::from(["desktop".to_owned()]),
+        supported_surfaces: capability_surface_declarations(
+            ["desktop"],
+            [CapabilityConsumer::Agent],
+        ),
         requires_runtime_features: Vec::new(),
         supported_platforms: vec![PlatformConstraint::Any],
         config_schema: StrictJsonValue(json!({
@@ -658,7 +661,6 @@ fn resource_binding_dto(owner_id: &str) -> TypedResourceBindingDto {
 fn sample_document(owner_id: &str, instructions: &str) -> AgentPresetDocumentDto {
     AgentPresetDocumentDto {
         schema_version: VERSION.to_owned(),
-        surfaces: BTreeSet::from(["desktop".to_owned()]),
         model_route_refs: BTreeMap::from([(
             "agent_chat".to_owned(),
             SAMPLE_MODEL_ROUTE.to_owned(),
@@ -699,14 +701,8 @@ fn sample_document(owner_id: &str, instructions: &str) -> AgentPresetDocumentDto
                 id: SAMPLE_CAPABILITY.to_owned(),
                 version: VERSION.to_owned(),
             },
-            required: true,
-            exposure: CapabilityExposureDto::Advertised,
             action_allowlist: BTreeSet::from([SAMPLE_ACTION.to_owned()]),
             resource_binding_refs: vec![SAMPLE_RESOURCE_BINDING.to_owned()],
-            destination_constraints: BTreeSet::new(),
-            context_budget_override: None,
-            tool_budget_override: None,
-            config: json!({}),
         }],
         on_demand_capabilities: Vec::new(),
         skill_bindings: vec![ExactCatalogRefDto {
@@ -717,9 +713,7 @@ fn sample_document(owner_id: &str, instructions: &str) -> AgentPresetDocumentDto
         system_role_provider_overrides: BTreeMap::new(),
         persona: "Echo fixture".to_owned(),
         instructions: instructions.to_owned(),
-        context_policy: json!({}),
-        execution_constraints: json!({}),
-        runtime_budget: json!({}),
+        starter_prompts: Vec::new(),
     }
 }
 
@@ -864,6 +858,7 @@ async fn build_revisions(
     let initial_revision = nomifun_agent_contracts::AgentPresetRevision {
         reference: initial_compilation.candidate_revision_ref,
         payload: initial_compilation.payload,
+        contribution_locks: initial_compilation.contribution_locks,
         created_by: owner_id.clone(),
         created_at_ms: initial_snapshot.created_at_ms,
         reason: Some("C6 initial sample.echo Revision".to_owned()),
@@ -938,6 +933,7 @@ async fn build_revisions(
     let dirty_revision = nomifun_agent_contracts::AgentPresetRevision {
         reference: dirty_compilation.candidate_revision_ref,
         payload: dirty_compilation.payload,
+        contribution_locks: dirty_compilation.contribution_locks,
         created_by: owner_id.clone(),
         created_at_ms: dirty_snapshot.created_at_ms,
         reason: valid_save.reason,
