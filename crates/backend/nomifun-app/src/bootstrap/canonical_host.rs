@@ -1644,6 +1644,7 @@ mod tests {
             .delete_remote_binding(&owner, &remote_binding.remote_binding_id)
             .await
             .unwrap();
+        application.remote_runtime.shutdown().await;
         let observe_after_delete = router
             .clone()
             .oneshot(
