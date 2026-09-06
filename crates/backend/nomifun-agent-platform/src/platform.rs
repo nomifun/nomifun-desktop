@@ -42,10 +42,11 @@ use nomifun_agent_control_plane::{
 };
 use nomifun_agent_kernel::{
     ActivationOutcome, ActiveCapabilitySetSnapshot, AgentPresetCompiler,
-    CapabilityInvocationRequest, CompileRequest, CompiledSnapshot, CompilerEnvironment,
-    CompletedTurnBoundary, KernelError, KernelRegistry, MaterializationPolicy, PluginRegistration,
-    PluginStateError, PluginStatePersistence, PluginStateSnapshot, SessionCapabilityState,
-    RoleMemberAdmission, RoleMemberInvocationRequest, RoleToolOperationRequest,
+    CapabilityAccessRequest, CapabilityInvocationRequest, CompileRequest,
+    CompiledSnapshot, CompilerEnvironment, CompletedTurnBoundary, KernelError,
+    KernelRegistry, MaterializationPolicy, PluginRegistration, PluginStateError,
+    PluginStatePersistence, PluginStateSnapshot, RoleMemberAdmission,
+    RoleMemberInvocationRequest, RoleToolOperationRequest, SessionCapabilityState,
     StateIdentity, ThinAuthority, resolve_exact_role_provider_lock,
 };
 use nomifun_agent_session::{
@@ -73,7 +74,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
-const ROLE_CONTEXT_CONTRIBUTION_TIMEOUT: std::time::Duration =
+const CONTEXT_CONTRIBUTION_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(15);
 const MCP_CONNECTORS_PACKAGE_ID: &str = "nomifun.mcp-connectors";
 
@@ -2314,7 +2315,7 @@ impl AgentPlatform {
             self.closed.store(false, Ordering::Release);
             return Err(error.into());
         }
-        if let Err(error) = self.kernel.release_all_role_resources().await {
+        if let Err(error) = self.kernel.release_all_resources().await {
             self.closed.store(false, Ordering::Release);
             return Err(error.into());
         }
@@ -2847,7 +2848,7 @@ impl AgentPlatform {
             .await;
         let cleanup = self
             .kernel
-            .release_role_resources(&state_scope_key)
+            .release_resources(&state_scope_key)
             .await;
         match (result, cleanup) {
             (Ok(output), Ok(())) => Ok(output),
@@ -3290,7 +3291,7 @@ impl AgentPlatform {
             .clone())
     }
 
-    async fn assemble_role_context(
+    async fn assemble_capability_context(
         &self,
         principal: &PrincipalRef,
         agent_session_id: &AgentSessionId,
@@ -3323,13 +3324,14 @@ impl AgentPlatform {
                     ))
                 })?;
             let result = tokio::time::timeout(
-                ROLE_CONTEXT_CONTRIBUTION_TIMEOUT,
-                self.kernel.contribute_role_context(
+                CONTEXT_CONTRIBUTION_TIMEOUT,
+                self.kernel.contribute_context(
                     compiled,
                     active,
-                    RoleMemberInvocationRequest {
+                    CapabilityAccessRequest {
                         principal: principal.clone(),
                         session_owner: principal.clone(),
+                        agent_session_id: agent_session_id.clone(),
                         operation_id: operation_id.clone(),
                         correlation_id: CorrelationId::from(format!(
                             "context:{}:{}",
@@ -3342,11 +3344,8 @@ impl AgentPlatform {
                             "session:{}",
                             agent_session_id.as_ref()
                         )),
-                        admission: RoleMemberAdmission::Agent {
-                            agent_session_id: agent_session_id.clone(),
-                            resolved_snapshot_ref: compiled.snapshot_ref().clone(),
-                            active_set_generation: active.generation,
-                        },
+                        resolved_snapshot_ref: compiled.snapshot_ref().clone(),
+                        active_set_generation: active.generation,
                     },
                 ),
             )
@@ -3355,7 +3354,7 @@ impl AgentPlatform {
                 AgentPlatformError::Contract(format!(
                     "ContextContributor {} exceeded its {} second deadline",
                     capability_id.as_ref(),
-                    ROLE_CONTEXT_CONTRIBUTION_TIMEOUT.as_secs()
+                    CONTEXT_CONTRIBUTION_TIMEOUT.as_secs()
                 ))
             })??;
             if let Some(value) = result.value {
@@ -3516,7 +3515,7 @@ impl AgentSessionCommandPort for AgentPlatform {
         );
         let active = execution.capabilities.snapshot()?;
         let context_contributions = self
-            .assemble_role_context(
+            .assemble_capability_context(
                 &request.principal,
                 &request.agent_session_id,
                 &operation_id,
@@ -4101,7 +4100,7 @@ impl AgentSessionDeletePort for AgentPlatform {
             }
         }
         self.kernel
-            .release_role_resources(&ScopeKey::from(format!(
+            .release_resources(&ScopeKey::from(format!(
                 "session:{}",
                 command.agent_session_id.as_ref()
             )))

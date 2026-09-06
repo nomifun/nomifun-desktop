@@ -7,14 +7,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 use nomi_process_runtime::{ChildProcessBuilder, ManagedChildProcess};
 use nomifun_agent_contracts::{
-    ActionId, CanonicalErrorCode, CorrelationId, DigestHex,
+    ActionId, CanonicalErrorCode, CanonicalSchemaRef, CorrelationId, DigestHex,
     JAVASCRIPT_HOST_PROTOCOL_VERSION, JavaScriptHostHello, JavaScriptHostKind,
     JavaScriptHostMessageDirection, JavaScriptHostMethod, NodeRuntimeFingerprint,
     PluginHostCommitFence, PluginHostContributionRef, PluginHostRequest,
     PluginHostRequestEnvelope, PluginHostResponseBody, PluginHostResponseEnvelope,
     PluginHostSuccess, PluginHostTargetLock, PluginHostWireError,
     PluginMountId, PluginMountRuntimeContext, PluginN1ContractManifest,
-    StrictJsonValue, VersionString, digest_payload,
+    ResourceBindingId, ResourceKind, StrictJsonValue, VersionString, digest_payload,
 };
 use nomifun_js_runtime::{NodeProbeCandidate, NodeRuntimeResolver};
 use serde::{Deserialize, Serialize};
@@ -241,6 +241,12 @@ impl HostRequestHandle {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JavaScriptResourceHandle {
+    pub host_generation: u64,
+    pub handle_id: String,
+}
+
 pub struct ExtensionHostSupervisor {
     config: JavaScriptHostConfig,
     contract: PluginN1ContractManifest,
@@ -368,20 +374,9 @@ impl ExtensionHostSupervisor {
         action_id: ActionId,
         input: StrictJsonValue,
     ) -> Result<HostRequestHandle, JavaScriptHostError> {
-        contribution
-            .validate()
-            .map_err(|error| JavaScriptHostError::Contract(error.to_string()))?;
-        let handle = self.ensure_generation().await?;
-        let resident = handle.mounts.read().await;
-        let Some(mount) = resident.get(&contribution.target.mount_id) else {
-            return Err(JavaScriptHostError::MountNotResident(
-                contribution.target.mount_id.as_ref().to_owned(),
-            ));
-        };
-        if mount.target != contribution.target {
-            return Err(JavaScriptHostError::TargetMismatch);
-        }
-        drop(resident);
+        let handle = self
+            .resident_generation_for(&contribution)
+            .await?;
         handle
             .request(
                 &self.contract,
@@ -427,6 +422,142 @@ impl ExtensionHostSupervisor {
         }
         self.load_mount(mount).await?;
         self.invoke(contribution, action_id, input).await
+    }
+
+    pub async fn contribute_context(
+        &self,
+        contribution: PluginHostContributionRef,
+        schema_ref: CanonicalSchemaRef,
+    ) -> Result<StrictJsonValue, JavaScriptHostError> {
+        let handle = self
+            .resident_generation_for(&contribution)
+            .await?;
+        match handle
+            .request(
+                &self.contract,
+                PluginHostRequest::ContextContribute {
+                    contribution,
+                    schema_ref,
+                },
+                None,
+                self.config.limits.request_timeout,
+            )
+            .await?
+            .wait()
+            .await?
+        {
+            PluginHostSuccess::Value(value) => Ok(value),
+            _ => Err(JavaScriptHostError::Contract(
+                "ContextContribute returned a non-value success".into(),
+            )),
+        }
+    }
+
+    pub async fn contribute_context_demand(
+        &self,
+        mount: MountLoadDemand,
+        contribution: PluginHostContributionRef,
+        schema_ref: CanonicalSchemaRef,
+    ) -> Result<StrictJsonValue, JavaScriptHostError> {
+        if mount.context.target != contribution.target {
+            return Err(JavaScriptHostError::TargetMismatch);
+        }
+        self.load_mount(mount).await?;
+        self.contribute_context(contribution, schema_ref).await
+    }
+
+    pub async fn acquire_resource(
+        &self,
+        contribution: PluginHostContributionRef,
+        binding_id: ResourceBindingId,
+        resource_kind: ResourceKind,
+        parameters: StrictJsonValue,
+    ) -> Result<JavaScriptResourceHandle, JavaScriptHostError> {
+        let handle = self
+            .resident_generation_for(&contribution)
+            .await?;
+        let host_generation = handle.generation;
+        match handle
+            .request(
+                &self.contract,
+                PluginHostRequest::ResourceAcquire {
+                    contribution,
+                    binding_id,
+                    resource_kind,
+                    parameters,
+                },
+                None,
+                self.config.limits.request_timeout,
+            )
+            .await?
+            .wait()
+            .await?
+        {
+            PluginHostSuccess::ResourceAcquired { handle_id } => {
+                Ok(JavaScriptResourceHandle {
+                    host_generation,
+                    handle_id,
+                })
+            }
+            _ => Err(JavaScriptHostError::Contract(
+                "ResourceAcquire returned a non-resource success".into(),
+            )),
+        }
+    }
+
+    pub async fn acquire_resource_demand(
+        &self,
+        mount: MountLoadDemand,
+        contribution: PluginHostContributionRef,
+        binding_id: ResourceBindingId,
+        resource_kind: ResourceKind,
+        parameters: StrictJsonValue,
+    ) -> Result<JavaScriptResourceHandle, JavaScriptHostError> {
+        if mount.context.target != contribution.target {
+            return Err(JavaScriptHostError::TargetMismatch);
+        }
+        self.load_mount(mount).await?;
+        self.acquire_resource(
+            contribution,
+            binding_id,
+            resource_kind,
+            parameters,
+        )
+        .await
+    }
+
+    pub async fn release_resource(
+        &self,
+        resource: &JavaScriptResourceHandle,
+    ) -> Result<(), JavaScriptHostError> {
+        let handle = {
+            let state = self.state.lock().await;
+            let Some(current) = &state.current else {
+                return Ok(());
+            };
+            if current.generation != resource.host_generation
+                || !matches!(
+                    current.state.borrow().clone(),
+                    JavaScriptHostState::Running { .. }
+                )
+            {
+                return Ok(());
+            }
+            current.clone()
+        };
+        let response = handle
+            .request(
+                &self.contract,
+                PluginHostRequest::ResourceRelease {
+                    handle_id: resource.handle_id.clone(),
+                },
+                None,
+                self.config.limits.request_timeout,
+            )
+            .await?
+            .wait()
+            .await?;
+        require_ack(response)
     }
 
     pub async fn cancel(
@@ -511,6 +642,27 @@ impl ExtensionHostSupervisor {
         response
             .await
             .unwrap_or(Err(JavaScriptHostError::RequestChannelClosed))
+    }
+
+    async fn resident_generation_for(
+        &self,
+        contribution: &PluginHostContributionRef,
+    ) -> Result<GenerationHandle, JavaScriptHostError> {
+        contribution
+            .validate()
+            .map_err(|error| JavaScriptHostError::Contract(error.to_string()))?;
+        let handle = self.ensure_generation().await?;
+        let resident = handle.mounts.read().await;
+        let Some(mount) = resident.get(&contribution.target.mount_id) else {
+            return Err(JavaScriptHostError::MountNotResident(
+                contribution.target.mount_id.as_ref().to_owned(),
+            ));
+        };
+        if mount.target != contribution.target {
+            return Err(JavaScriptHostError::TargetMismatch);
+        }
+        drop(resident);
+        Ok(handle)
     }
 
     async fn running_generation(

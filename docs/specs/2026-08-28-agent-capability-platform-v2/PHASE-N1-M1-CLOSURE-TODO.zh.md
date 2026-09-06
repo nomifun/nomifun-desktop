@@ -41,10 +41,10 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 11 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-01`、`N1-1-02`、`N1-2-00`、`N1-2-01`、`N1-X-01` |
-| 正在实施 | 0 | 无 |
-| 已解锁待领取 | 2 | `N1-1-03`、`N1-2-02` |
-| 依赖阻塞 | 19 | 其余 N1/M1 Windows 项与最终合流 |
+| 已关闭 | 13 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-01`～`N1-1-03`、`N1-2-00`～`N1-2-02`、`N1-X-01` |
+| 正在实施 | 1 | `N1-2-03` |
+| 已解锁待领取 | 1 | `N1-4-01` |
+| 依赖阻塞 | 17 | 其余 N1/M1 Windows 项与最终合流 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
 | 明确延后 | 2 | Marketplace/远程分发、第二 Runtime |
 
@@ -85,8 +85,10 @@
      exact validation 前不得提交；
    - 本机真实 PATH Node probe 已通过。
 8. 当前验证：`nomifun-agent-contracts` 79 tests、`nomifun-agent-kernel` 23 tests、
-   Control Plane 16 tests、Agent Platform 2 tests、JavaScript Runtime 12 tests、
-   App tests compile、generator `write/check`、Gate self-test 均通过。
+   Control Plane 16 tests、Agent Platform 16 lib tests、JavaScript Runtime 12 tests、
+   JavaScript Host 12 tests、JS Kernel Adapter 4 tests、Plugin Service 16 tests、
+   MiniApp Platform 5 in-memory contract tests、App check、generator `write/check`
+   均通过。
    `cargo fmt --all --check` 在 Windows 命中文件名过长限制，改用受影响 crate 的定向
    `cargo fmt --check`；该平台限制不阻断已通过的编译与定向格式验证。
 9. clean detached worktree 上的正式 `contract/combined` Gate 已 PASS：
@@ -96,7 +98,7 @@
 10. `N1-1-02` 已交付 lazy shared Extension Host：stdio NDJSON 私有 IPC、exact Hello、
     demand-load、Mount handle 唯一、普通 rejection 隔离、request cancel、原子
     quiescent admission fence、watchdog、整进程树回收、late response generation fence 与
-    next-demand restart，10 项真实 Node 测试通过。
+    next-demand restart，12 项真实 Node 测试通过。
 11. `N1-2-00` 已交付 immutable Artifact Store：directory/zip containment、严格 JSON、
     Windows case/NFC collision、symlink/special file、流式大小/digest、cancellation cleanup、
     staging/atomic CAS publish 与 published inventory/tamper 校验，9 项测试通过。
@@ -107,6 +109,31 @@
 13. Plugin/MiniApp 产品 DTO 已冻结 Runtime、Library、Workshop、Candidate/Release、
     Config/Credential reference、Operation 与生命周期动作；不暴露 secret、Host
     generation、Bridge、localhost、旧 Extension 或 Conversation/Guid MiniApp 字段。
+14. `N1-2-02` 已由提交 `a275ddd97`、`a16cfbeff` 关闭：owner mutation coordinator、
+    migration 069、Config/Credential/KV exact CAS、stable `dataDir` 和 Runtime state
+    查询均已进入真实 SQLite repository。Plugin repository 12、ID/schema 20、lifecycle
+    31 项定向测试通过。
+15. `N1-1-03` 已完成普通 Plugin Capability 的唯一 Kernel 执行主链：
+    - `PluginRegistration` 按 Capability kind 登记 Tool、Context、Resource typed export；
+    - Shared Host 公开 Context contribute、Resource acquire/release，资源句柄绑定 Host
+      generation，旧 generation 的延迟 release 不会误伤新进程；
+    - Agent Context 组装可按 materialized capability 在普通 Mount 与 canonical Role
+      Provider 路径间精确分发；
+    - Snapshot 的完整 `ResolvedCapability` 与 Artifact digest 进入 Adapter 校验和资源
+      handle cache key，Compatible Replace 不复用旧 Artifact 资源；
+    - `plugin-package-v1` 明确拒绝 Role Provider 和 Package-authored Plugin Service，
+      不建立 JS 专用 Role schema 或第二 Registry。
+16. `N1-2-03` 已进入 application-service 实施：`nomifun-plugin-service` 已接真实
+    `SqlitePluginN1Repository`、Artifact Store、owner mutation、Host commit fence、
+    Candidate/Apply/Restore/Uninstall/Delete-data 与 Operation CAS；application service
+    不提供绕过 Kernel 的直接 invoke。10 项 application tests 和 6 项真实 SQLite
+    adapter tests 已通过；App composition、Kernel publication/invalidation、
+    Build/Test cancellation 与完整 E2E 尚未完成，因此不关闭。
+17. `nomifun-miniapp-platform` 已形成不读取旧 `miniapps` 的 M1 domain/application
+    foundation，并以 5 项内存合同测试固定 Product/Project、Ready/Active/Previous、
+    Catalog 原子语义、生命周期、auto-publish authorization 和 resumable delete。
+    该预研不含 migration 070+、SQLite adapter、Service Host、Bridge、UI 或旧链删除，
+    不改变 `M1-0-01` 的 blocked 状态，也不计入 M1 完成度。
 
 ## W0：一期交接
 
@@ -128,9 +155,9 @@
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `N1-1-01` | closed | Runtime lane；新 `nomifun-js-runtime/**` | Node PATH/手工/managed LTS probe、下载确认、fingerprint 与全局试切换 | `N1-0-02` | 10 tests；真实 PATH Node；official index/SHASUMS/zip containment；candidate validation |
-| `N1-1-02` | closed | Runtime lane；新 `nomifun-js-host/**` | lazy shared Extension Host、private IPC/Hello、watchdog、whole-tree cleanup、late-result fence | `N1-1-01` | 10 real-Node tests；demand=0、crash/restart、child cleanup、quiescent fence |
-| `N1-1-03` | open | Kernel+Runtime 边界 | Tool/Context/Resource/Role Provider 的 Node proxy exports | `N1-0-03`,`N1-1-02` | exact lock invoke；无 Rust/Node 双 Registry |
+| `N1-1-01` | closed | Runtime lane；新 `nomifun-js-runtime/**` | Node PATH/手工/managed LTS probe、下载确认、fingerprint 与全局试切换 | `N1-0-02` | 12 tests；真实 PATH Node；official index/SHASUMS/zip containment；candidate validation |
+| `N1-1-02` | closed | Runtime lane；新 `nomifun-js-host/**` | lazy shared Extension Host、private IPC/Hello、watchdog、whole-tree cleanup、late-result fence | `N1-1-01` | 12 real-Node tests；demand=0、crash/restart、child cleanup、quiescent fence |
+| `N1-1-03` | closed | Kernel+Runtime 边界；`nomifun-js-kernel-adapter/**`、Kernel typed exports、Shared Host API | 普通 Plugin Tool/Context/Resource 的 Node proxy；N1 明确拒绝 Role Provider/Plugin Service | `N1-0-03`,`N1-1-02` | Host 12、Adapter 4、Kernel 23、Agent Platform 16；exact Artifact handle fence；无 Rust/Node 双 Registry |
 
 ## N1-2：Package 与数据生命周期
 
@@ -138,8 +165,8 @@
 | --- | --- | --- | --- | --- | --- |
 | `N1-2-00` | closed | Artifact lane；`nomifun-plugin-platform/**` | directory/zip containment、canonical digest、immutable CAS staging/publish | `N1-0-02` | 9 tests；tamper/traversal/collision/cancel/idempotency |
 | `N1-2-01` | closed | DB lane；migration 067/068、新 repository | Artifact/Project/Candidate/current/previous/Mount/Operation/retained data 与 Runtime selection schema | `N1-0-02` | `6debcb628`；11+2+20+31 tests；fresh/restart/direct-SQL guards |
-| `N1-2-02` | open | Plugin platform lane | Config、Credential slot binding、KV/CAS、stable `dataDir`、owner mutation lock | `N1-2-01`,`N1-1-02` | namespace/CAS/secret rotation tests |
-| `N1-2-03` | blocked | Plugin platform lane | staging/containment/digest/install/replace/restore/uninstall/delete-data | `N1-2-01`,`N1-2-02` | failed replace keeps current；delete resumable |
+| `N1-2-02` | closed | Plugin platform lane；migration 069、DB repository、owner mutation coordinator | Config、Credential slot binding、KV/CAS、stable `dataDir`、owner mutation lock | `N1-2-01`,`N1-1-02` | `a275ddd97`,`a16cfbeff`；repository 12 + ID/schema 20 + lifecycle 31 |
+| `N1-2-03` | in-progress | Plugin application-service lane；`nomifun-plugin-service/**` | staging/containment/digest/install/replace/restore/uninstall/delete-data 与真实 App/Kernel 组合 | `N1-2-01`,`N1-2-02` | service 10 + SQLite adapter 6；仍需 App→DB→Kernel→Host E2E、publication/invalidation、resumable fault |
 
 ## N1-3：Catalog 与消费者
 
@@ -153,7 +180,7 @@
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `N1-4-01` | blocked | Authoring lane；新 JS authoring/SDK | Source Store、JS/TS scaffold、pure-JS dependency exact lock、fixed packer/Build Host | `N1-0-02`,`N1-1-02`,`N1-2-01` | reproducible artifact；cancel cleanup |
+| `N1-4-01` | open | Authoring lane；新 JS authoring/SDK | Source Store、JS/TS scaffold、pure-JS dependency exact lock、fixed packer/Build Host | `N1-0-02`,`N1-1-02`,`N1-2-01` | reproducible artifact；cancel cleanup |
 | `N1-4-02` | blocked | Plugin project lane | single Ready、Candidate Test、impact、manual/compatible-idle Apply、Retry/Restore | `N1-2-03`,`N1-3-01`,`N1-4-01` | stale base/busy/breaking/no auto rollback |
 | `N1-4-03` | blocked | SDK/CLI lane | Plugin SDK、Share Bundle/prebuilt import/export、本地 CLI | `N1-4-02` | same application service；secret-free bundle |
 
@@ -177,6 +204,10 @@
 | `M1-2-01` | blocked | Lifecycle lane | Enable/Disable/Trash/Restore/Permanent Delete、Share/Backup Import-as-new | `M1-1-02` | resumable delete；no plaintext credential |
 | `M1-U-01` | blocked | UI lane；整体重写 `pages/miniApps/**` | Library/Workshop/Surface，删除 Guid/Conversation 旧 MiniApp 模式 | `M1-0-02`,`M1-1-01` | real Desktop workflow/build/a11y |
 | `M1-V-01` | blocked | 集成 Owner | Windows M1 contract/integration/fault/product/NSIS candidate | 所有 M1 项 | UI-only + Service representative lifecycle |
+
+`nomifun-miniapp-platform` 当前只作为上述 M1 工作的提前 domain foundation 保存；在
+`N1-V-01` 关闭并交付 migration/SQLite/Host/Bridge 前，不领取任何 M1 `in-progress`
+状态，不接生产路由，也不替代旧 MiniApp 主链。
 
 ## 最终候选与外部验证
 

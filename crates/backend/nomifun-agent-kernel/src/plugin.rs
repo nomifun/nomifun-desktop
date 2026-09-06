@@ -7,8 +7,8 @@ use nomifun_agent_contracts::{
     ExecutionRoleId, HostPortId, IdempotencyKey, OperationId, PackageRef,
     PluginContextDescriptor, PluginIdentityDescriptor, PluginRegistrarDescriptor,
     PluginRegistrarOperation, PluginRegistrationMetadata, PrincipalRef,
-    ResolvedMcpToolLock, ResolvedRoleProviderLock, ResolvedSnapshotRef, ResourceBindingId,
-    ResourceId, ResourceKind,
+    ResolvedCapability, ResolvedMcpToolLock, ResolvedRoleProviderLock,
+    ResolvedSnapshotRef, ResourceBindingId, ResourceId, ResourceKind,
     ScopeKey, ServiceKeyId, ServiceKeyRef, SkillId, StrictJsonValue, TypedResourceBindings,
     ValidatedPluginConfig,
 };
@@ -32,6 +32,20 @@ pub struct CapabilityInvocationRequest {
     pub input: StrictJsonValue,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct CapabilityAccessRequest {
+    pub principal: PrincipalRef,
+    pub session_owner: PrincipalRef,
+    pub agent_session_id: AgentSessionId,
+    pub operation_id: OperationId,
+    pub correlation_id: CorrelationId,
+    pub resolved_snapshot_ref: ResolvedSnapshotRef,
+    pub active_set_generation: u64,
+    pub capability_id: CapabilityId,
+    pub resource_binding_ids: BTreeSet<ResourceBindingId>,
+    pub state_scope_key: ScopeKey,
+}
+
 #[derive(Clone)]
 pub struct CapabilityInvocationContext {
     pub principal: PrincipalRef,
@@ -42,6 +56,7 @@ pub struct CapabilityInvocationContext {
     pub resolved_snapshot_ref: ResolvedSnapshotRef,
     pub registry_generation: u64,
     pub capability_id: CapabilityId,
+    pub resolved_capability: ResolvedCapability,
     pub action_id: ActionId,
     pub resource_bindings: TypedResourceBindings,
     pub role_provider: Option<ResolvedRoleProviderLock>,
@@ -111,6 +126,26 @@ pub struct ProviderMountContext {
     pub services: DeclaredServiceView,
 }
 
+/// Ordinary Capability context resolved from an Agent Snapshot.
+///
+/// Role-backed façade members use [`ResolvedRoleMemberContext`] because their
+/// runtime owner is a separately selected Provider Mount. Direct Plugin
+/// capabilities use this context and retain the exact materialized Mount.
+#[derive(Clone)]
+pub struct ResolvedCapabilityContext {
+    pub resolved_capability: ResolvedCapability,
+    pub principal: PrincipalRef,
+    pub agent_session_id: AgentSessionId,
+    pub operation_id: OperationId,
+    pub correlation_id: CorrelationId,
+    pub resolved_snapshot_ref: ResolvedSnapshotRef,
+    pub registry_generation: u64,
+    pub registry_digest: DigestHex,
+    pub resource_bindings: TypedResourceBindings,
+    pub state_scope_key: ScopeKey,
+    pub mount: ProviderMountContext,
+}
+
 /// Provider-Mount context projected by the Kernel after exact role dispatch.
 #[derive(Clone)]
 pub struct ResolvedRoleMemberContext {
@@ -122,6 +157,7 @@ pub struct ResolvedRoleMemberContext {
     pub operation_id: OperationId,
     pub correlation_id: CorrelationId,
     pub resolved_snapshot_ref: Option<ResolvedSnapshotRef>,
+    pub resolved_capability: Option<ResolvedCapability>,
     pub registry_generation: u64,
     pub registry_digest: DigestHex,
     pub resource_bindings: TypedResourceBindings,
@@ -136,6 +172,33 @@ pub trait CapabilityHandler: Send + Sync {
         context: CapabilityInvocationContext,
         input: StrictJsonValue,
     ) -> Result<StrictJsonValue, KernelError>;
+}
+
+#[derive(Clone)]
+pub struct CapabilityContextContributionRequest {
+    pub context: ResolvedCapabilityContext,
+    pub schema_ref: CanonicalSchemaRef,
+}
+
+#[async_trait]
+pub trait CapabilityContextContributionFactory: Send + Sync {
+    async fn contribute(
+        &self,
+        request: CapabilityContextContributionRequest,
+    ) -> Result<ContextContributionResult, KernelError>;
+}
+
+#[derive(Clone)]
+pub struct CapabilityResourceProviderRequest {
+    pub context: ResolvedCapabilityContext,
+}
+
+#[async_trait]
+pub trait CapabilityResourceProviderFactory: Send + Sync {
+    async fn acquire(
+        &self,
+        request: CapabilityResourceProviderRequest,
+    ) -> Result<ResourceProviderResult, KernelError>;
 }
 
 /// Operation-capable Tool export.
@@ -217,6 +280,10 @@ pub trait ResourceProviderFactory: Send + Sync {
 pub struct PluginRegistration {
     pub metadata: PluginRegistrationMetadata,
     handlers: BTreeMap<CapabilityId, Arc<dyn CapabilityHandler>>,
+    context_factories:
+        BTreeMap<CapabilityId, Arc<dyn CapabilityContextContributionFactory>>,
+    resource_factories:
+        BTreeMap<CapabilityId, Arc<dyn CapabilityResourceProviderFactory>>,
     role_action_handlers:
         BTreeMap<(ExecutionRoleId, CapabilityId), Arc<dyn CapabilityHandler>>,
     role_tool_handlers:
@@ -233,6 +300,8 @@ impl PluginRegistration {
         Self {
             metadata,
             handlers: BTreeMap::new(),
+            context_factories: BTreeMap::new(),
+            resource_factories: BTreeMap::new(),
             role_action_handlers: BTreeMap::new(),
             role_tool_handlers: BTreeMap::new(),
             role_context_factories: BTreeMap::new(),
@@ -249,6 +318,36 @@ impl PluginRegistration {
         if self
             .handlers
             .insert(capability_id.clone(), handler)
+            .is_some()
+        {
+            return Err(KernelError::DuplicateCapability { capability_id });
+        }
+        Ok(())
+    }
+
+    pub fn add_capability_context_factory(
+        &mut self,
+        capability_id: CapabilityId,
+        factory: Arc<dyn CapabilityContextContributionFactory>,
+    ) -> Result<(), KernelError> {
+        if self
+            .context_factories
+            .insert(capability_id.clone(), factory)
+            .is_some()
+        {
+            return Err(KernelError::DuplicateCapability { capability_id });
+        }
+        Ok(())
+    }
+
+    pub fn add_capability_resource_factory(
+        &mut self,
+        capability_id: CapabilityId,
+        factory: Arc<dyn CapabilityResourceProviderFactory>,
+    ) -> Result<(), KernelError> {
+        if self
+            .resource_factories
+            .insert(capability_id.clone(), factory)
             .is_some()
         {
             return Err(KernelError::DuplicateCapability { capability_id });
@@ -353,6 +452,14 @@ impl PluginRegistration {
         self.handlers.keys().cloned().collect()
     }
 
+    pub fn context_factory_ids(&self) -> BTreeSet<CapabilityId> {
+        self.context_factories.keys().cloned().collect()
+    }
+
+    pub fn resource_factory_ids(&self) -> BTreeSet<CapabilityId> {
+        self.resource_factories.keys().cloned().collect()
+    }
+
     pub fn service_refs(&self) -> BTreeSet<nomifun_agent_contracts::ServiceKeyRef> {
         self.services.provided_refs()
     }
@@ -385,6 +492,28 @@ impl PluginRegistration {
         &self,
     ) -> impl Iterator<Item = (&CapabilityId, &Arc<dyn CapabilityHandler>)> {
         self.handlers.iter()
+    }
+
+    pub(crate) fn context_factories(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &CapabilityId,
+            &Arc<dyn CapabilityContextContributionFactory>,
+        ),
+    > {
+        self.context_factories.iter()
+    }
+
+    pub(crate) fn resource_factories(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &CapabilityId,
+            &Arc<dyn CapabilityResourceProviderFactory>,
+        ),
+    > {
+        self.resource_factories.iter()
     }
 
     pub(crate) fn services(&self) -> &ServiceExports {
@@ -468,19 +597,74 @@ impl PluginRegistration {
                     .map(|member| member.capability.id.clone())
             })
             .collect::<BTreeSet<_>>();
-        let expected_handlers = manifest
+        let direct_capabilities = manifest
             .contributions
             .capabilities
             .iter()
+            .filter(|capability| !role_backed_capabilities.contains(&capability.id));
+        let expected_handlers = direct_capabilities
+            .clone()
             .filter(|capability| {
-                !capability.contributions.actions.is_empty()
-                    && !role_backed_capabilities.contains(&capability.id)
+                capability.kind == nomifun_agent_contracts::CapabilityKind::Tool
             })
             .map(|capability| capability.id.clone())
             .collect::<BTreeSet<_>>();
         let actual_handlers = self.handler_ids();
         if let Some(capability_id) = expected_handlers.difference(&actual_handlers).next() {
             return Err(KernelError::MissingCapabilityHandler {
+                mount_id: metadata.mount_id.clone(),
+                capability_id: capability_id.clone(),
+            });
+        }
+        let expected_context_factories = direct_capabilities
+            .clone()
+            .filter(|capability| {
+                capability.kind
+                    == nomifun_agent_contracts::CapabilityKind::ContextContributor
+            })
+            .map(|capability| capability.id.clone())
+            .collect::<BTreeSet<_>>();
+        let actual_context_factories = self.context_factory_ids();
+        if let Some(capability_id) = expected_context_factories
+            .difference(&actual_context_factories)
+            .next()
+        {
+            return Err(KernelError::MissingCapabilityContextFactory {
+                mount_id: metadata.mount_id.clone(),
+                capability_id: capability_id.clone(),
+            });
+        }
+        if let Some(capability_id) = actual_context_factories
+            .difference(&expected_context_factories)
+            .next()
+        {
+            return Err(KernelError::UndeclaredCapabilityContextFactory {
+                mount_id: metadata.mount_id.clone(),
+                capability_id: capability_id.clone(),
+            });
+        }
+        let expected_resource_factories = direct_capabilities
+            .filter(|capability| {
+                capability.kind
+                    == nomifun_agent_contracts::CapabilityKind::ResourceProvider
+            })
+            .map(|capability| capability.id.clone())
+            .collect::<BTreeSet<_>>();
+        let actual_resource_factories = self.resource_factory_ids();
+        if let Some(capability_id) = expected_resource_factories
+            .difference(&actual_resource_factories)
+            .next()
+        {
+            return Err(KernelError::MissingCapabilityResourceFactory {
+                mount_id: metadata.mount_id.clone(),
+                capability_id: capability_id.clone(),
+            });
+        }
+        if let Some(capability_id) = actual_resource_factories
+            .difference(&expected_resource_factories)
+            .next()
+        {
+            return Err(KernelError::UndeclaredCapabilityResourceFactory {
                 mount_id: metadata.mount_id.clone(),
                 capability_id: capability_id.clone(),
             });

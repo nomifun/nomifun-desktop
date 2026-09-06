@@ -9,12 +9,15 @@ use nomifun_agent_contracts::{
 
 use crate::service::build_service_bindings;
 use crate::{
-    ActiveCapabilitySetSnapshot, CapabilityHandler, CapabilityInvocationContext,
-    CapabilityInvocationRequest, CompiledSnapshot, ContextContributionFactory,
-    ContextContributionRequest, ContextContributionResult, DeclaredServiceView, KernelError,
-    MaterializationPolicy, MaterializedRegistry, Materializer, PluginRegistration,
-    PluginStateError, PluginStateHandle, PluginStatePersistence, PluginStateStore,
-    ProviderMountContext, ResolvedRoleMemberContext, ResourceHandle,
+    ActiveCapabilitySetSnapshot, CapabilityAccessRequest,
+    CapabilityContextContributionFactory, CapabilityContextContributionRequest,
+    CapabilityHandler, CapabilityInvocationContext, CapabilityInvocationRequest,
+    CapabilityResourceProviderFactory, CapabilityResourceProviderRequest,
+    CompiledSnapshot, ContextContributionFactory, ContextContributionRequest,
+    ContextContributionResult, DeclaredServiceView, KernelError, MaterializationPolicy,
+    MaterializedRegistry, Materializer, PluginRegistration, PluginStateError,
+    PluginStateHandle, PluginStatePersistence, PluginStateStore, ProviderMountContext,
+    ResolvedCapabilityContext, ResolvedRoleMemberContext, ResourceHandle,
     ResourceProviderFactory, ResourceProviderRequest, ResourceProviderResult,
     RoleMemberAdmission, RoleMemberInvocationRequest, RoleToolHandler,
     RoleToolInvocationContext, RoleToolOperationRequest, ThinAuthority,
@@ -27,9 +30,23 @@ struct HandlerBinding {
 }
 
 #[derive(Clone)]
+struct ContextFactoryBinding {
+    mount_id: PluginMountId,
+    factory: Arc<dyn CapabilityContextContributionFactory>,
+}
+
+#[derive(Clone)]
+struct ResourceFactoryBinding {
+    mount_id: PluginMountId,
+    factory: Arc<dyn CapabilityResourceProviderFactory>,
+}
+
+#[derive(Clone)]
 struct PublishedRegistry {
     materialized: Arc<MaterializedRegistry>,
     handlers: BTreeMap<CapabilityId, HandlerBinding>,
+    context_factories: BTreeMap<CapabilityId, ContextFactoryBinding>,
+    resource_factories: BTreeMap<CapabilityId, ResourceFactoryBinding>,
     role_handlers:
         BTreeMap<(ExecutionRoleId, PluginMountId, CapabilityId), HandlerBinding>,
     role_tool_handlers:
@@ -45,9 +62,9 @@ struct PublishedRegistry {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ResourceHandleKey {
     scope_key: ScopeKey,
-    role_id: ExecutionRoleId,
+    role_id: Option<ExecutionRoleId>,
     mount_id: PluginMountId,
-    contribution_digest: DigestHex,
+    target_digest: DigestHex,
     binding_id: ResourceBindingId,
 }
 
@@ -56,6 +73,8 @@ impl PublishedRegistry {
         Self {
             materialized: Arc::new(MaterializedRegistry::empty()),
             handlers: BTreeMap::new(),
+            context_factories: BTreeMap::new(),
+            resource_factories: BTreeMap::new(),
             role_handlers: BTreeMap::new(),
             role_tool_handlers: BTreeMap::new(),
             role_context_factories: BTreeMap::new(),
@@ -156,6 +175,8 @@ impl KernelRegistry {
         )?;
 
         let mut handlers = BTreeMap::new();
+        let mut context_factories = BTreeMap::new();
+        let mut resource_factories = BTreeMap::new();
         let mut role_handlers = BTreeMap::new();
         let mut role_tool_handlers = BTreeMap::new();
         let mut role_context_factories = BTreeMap::new();
@@ -171,6 +192,38 @@ impl KernelRegistry {
                         HandlerBinding {
                             mount_id: registration.metadata.mount_id.clone(),
                             handler: Arc::clone(handler),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(KernelError::DuplicateCapability {
+                        capability_id: capability_id.clone(),
+                    });
+                }
+            }
+            for (capability_id, factory) in registration.context_factories() {
+                if context_factories
+                    .insert(
+                        capability_id.clone(),
+                        ContextFactoryBinding {
+                            mount_id: registration.metadata.mount_id.clone(),
+                            factory: Arc::clone(factory),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(KernelError::DuplicateCapability {
+                        capability_id: capability_id.clone(),
+                    });
+                }
+            }
+            for (capability_id, factory) in registration.resource_factories() {
+                if resource_factories
+                    .insert(
+                        capability_id.clone(),
+                        ResourceFactoryBinding {
+                            mount_id: registration.metadata.mount_id.clone(),
+                            factory: Arc::clone(factory),
                         },
                     )
                     .is_some()
@@ -304,6 +357,8 @@ impl KernelRegistry {
         let next = Arc::new(PublishedRegistry {
             materialized: Arc::clone(&materialized),
             handlers,
+            context_factories,
+            resource_factories,
             role_handlers,
             role_tool_handlers,
             role_context_factories,
@@ -455,6 +510,7 @@ impl KernelRegistry {
                     resolved_snapshot_ref: request.resolved_snapshot_ref,
                     registry_generation: published.materialized.generation,
                     capability_id: request.capability_id,
+                    resolved_capability: frozen.clone(),
                     action_id: request.action_id,
                     resource_bindings,
                     role_provider: None,
@@ -466,6 +522,186 @@ impl KernelRegistry {
             )
         };
         handler.invoke(context, request.input).await
+    }
+
+    /// Assemble a ContextContributor selected by an Agent Snapshot.
+    ///
+    /// Ordinary Plugin capabilities dispatch directly to their owning Mount.
+    /// Canonical façade members continue through the exact Role Provider lock.
+    pub async fn contribute_context(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: CapabilityAccessRequest,
+    ) -> Result<ContextContributionResult, KernelError> {
+        ThinAuthority::enforce_access(snapshot, active, &request)?;
+        let role_backed = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            validate_exact_capability_target(
+                &published,
+                snapshot,
+                &request.capability_id,
+            )?;
+            let capability = published
+                .materialized
+                .capability(&request.capability_id)
+                .ok_or_else(|| KernelError::CapabilityNotInPreset {
+                    capability_id: request.capability_id.clone(),
+                })?;
+            if capability.manifest.kind != CapabilityKind::ContextContributor {
+                return Err(KernelError::CapabilityExecution {
+                    reason: format!(
+                        "capability {} is not a ContextContributor",
+                        request.capability_id.as_ref()
+                    ),
+                });
+            }
+            published
+                .materialized
+                .role_for_capability(&request.capability_id)
+                .is_some()
+        };
+        if role_backed {
+            return self
+                .contribute_role_context(
+                    snapshot,
+                    active,
+                    role_request_from_access(request),
+                )
+                .await;
+        }
+
+        let (factory, context, schema_ref) = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            let binding = published
+                .context_factories
+                .get(&request.capability_id)
+                .ok_or_else(|| KernelError::MissingCapabilityContextFactory {
+                    mount_id: published.materialized.capabilities
+                        [&request.capability_id]
+                        .mount_id
+                        .clone(),
+                    capability_id: request.capability_id.clone(),
+                })?;
+            let capability = &published.materialized.capabilities
+                [&request.capability_id];
+            let [schema_ref] =
+                capability.manifest.contributions.context_schema_refs.as_slice()
+            else {
+                return Err(KernelError::CapabilityExecution {
+                    reason: format!(
+                        "ContextContributor {} must declare exactly one context schema",
+                        request.capability_id.as_ref()
+                    ),
+                });
+            };
+            (
+                Arc::clone(&binding.factory),
+                resolve_direct_capability_context(
+                    &published,
+                    snapshot,
+                    &request,
+                    &binding.mount_id,
+                )?,
+                schema_ref.clone(),
+            )
+        };
+        factory
+            .contribute(CapabilityContextContributionRequest {
+                context,
+                schema_ref,
+            })
+            .await
+    }
+
+    /// Acquire a ResourceProvider selected by an Agent Snapshot.
+    pub async fn acquire_resource(
+        &self,
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        request: CapabilityAccessRequest,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        ThinAuthority::enforce_access(snapshot, active, &request)?;
+        let role_backed = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            validate_exact_capability_target(
+                &published,
+                snapshot,
+                &request.capability_id,
+            )?;
+            let capability = published
+                .materialized
+                .capability(&request.capability_id)
+                .ok_or_else(|| KernelError::CapabilityNotInPreset {
+                    capability_id: request.capability_id.clone(),
+                })?;
+            if capability.manifest.kind != CapabilityKind::ResourceProvider {
+                return Err(KernelError::CapabilityExecution {
+                    reason: format!(
+                        "capability {} is not a ResourceProvider",
+                        request.capability_id.as_ref()
+                    ),
+                });
+            }
+            published
+                .materialized
+                .role_for_capability(&request.capability_id)
+                .is_some()
+        };
+        if role_backed {
+            return self
+                .acquire_role_resource(
+                    snapshot,
+                    active,
+                    role_request_from_access(request),
+                )
+                .await;
+        }
+
+        let (factory, context) = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            let binding = published
+                .resource_factories
+                .get(&request.capability_id)
+                .ok_or_else(|| KernelError::MissingCapabilityResourceFactory {
+                    mount_id: published.materialized.capabilities
+                        [&request.capability_id]
+                        .mount_id
+                        .clone(),
+                    capability_id: request.capability_id.clone(),
+                })?;
+            (
+                Arc::clone(&binding.factory),
+                resolve_direct_capability_context(
+                    &published,
+                    snapshot,
+                    &request,
+                    &binding.mount_id,
+                )?,
+            )
+        };
+        let key = direct_resource_handle_key(&context)?;
+        if let Some(handle) = self.resource_handles.lock().await.get(&key).cloned() {
+            return Ok(ResourceProviderResult { handle });
+        }
+        let result = factory
+            .acquire(CapabilityResourceProviderRequest {
+                context: context.clone(),
+            })
+            .await?;
+        self.retain_direct_resource_handle(&context, result).await
     }
 
     /// Invoke a role-backed Tool from a non-Agent operation admission.
@@ -718,6 +954,43 @@ impl KernelRegistry {
         Ok(result)
     }
 
+    async fn retain_direct_resource_handle(
+        &self,
+        context: &ResolvedCapabilityContext,
+        result: ResourceProviderResult,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        let identity = result.handle.identity();
+        let Some(binding) = context
+            .resource_bindings
+            .iter()
+            .find(|binding| binding.binding_id == identity.binding_id)
+        else {
+            return Err(KernelError::CapabilityExecution {
+                reason: "resource provider returned a handle for an unbound resource"
+                    .to_owned(),
+            });
+        };
+        if binding.resource_kind != identity.resource_kind
+            || binding.resource_id != identity.resource_id
+        {
+            return Err(KernelError::CapabilityExecution {
+                reason: "resource provider returned a handle with mismatched resource identity"
+                    .to_owned(),
+            });
+        }
+        let key = direct_resource_handle_key(context)?;
+        let mut handles = self.resource_handles.lock().await;
+        if let Some(existing) = handles.get(&key).cloned() {
+            drop(handles);
+            if !Arc::ptr_eq(&existing, &result.handle) {
+                result.handle.release().await?;
+            }
+            return Ok(ResourceProviderResult { handle: existing });
+        }
+        handles.insert(key, Arc::clone(&result.handle));
+        Ok(result)
+    }
+
     async fn ensure_role_resources_for_member(
         &self,
         evidence: RoleAdmissionEvidence<'_>,
@@ -827,10 +1100,10 @@ impl KernelRegistry {
         Ok(())
     }
 
-    /// Release all lazily acquired handles for one session scope. Providers
-    /// remain responsible for their concrete cleanup; the Kernel only owns
-    /// exact-handle identity and de-duplication.
-    pub async fn release_role_resources(
+    /// Release all lazily acquired direct or Role-backed handles for one
+    /// session scope. Providers remain responsible for concrete cleanup; the
+    /// Kernel only owns exact-handle identity and de-duplication.
+    pub async fn release_resources(
         &self,
         scope_key: &ScopeKey,
     ) -> Result<(), KernelError> {
@@ -851,7 +1124,7 @@ impl KernelRegistry {
         Ok(())
     }
 
-    pub async fn release_all_role_resources(&self) -> Result<(), KernelError> {
+    pub async fn release_all_resources(&self) -> Result<(), KernelError> {
         let handles = {
             let mut guard = self.resource_handles.lock().await;
             std::mem::take(&mut *guard)
@@ -908,6 +1181,84 @@ fn validate_exact_capability_target(
     Ok(())
 }
 
+fn role_request_from_access(
+    request: CapabilityAccessRequest,
+) -> RoleMemberInvocationRequest {
+    RoleMemberInvocationRequest {
+        principal: request.principal,
+        session_owner: request.session_owner,
+        operation_id: request.operation_id,
+        correlation_id: request.correlation_id,
+        capability_id: request.capability_id,
+        resource_binding_ids: request.resource_binding_ids,
+        state_scope_key: request.state_scope_key,
+        admission: RoleMemberAdmission::Agent {
+            agent_session_id: request.agent_session_id,
+            resolved_snapshot_ref: request.resolved_snapshot_ref,
+            active_set_generation: request.active_set_generation,
+        },
+    }
+}
+
+fn resolve_direct_capability_context(
+    published: &PublishedRegistry,
+    snapshot: &CompiledSnapshot,
+    request: &CapabilityAccessRequest,
+    mount_id: &PluginMountId,
+) -> Result<ResolvedCapabilityContext, KernelError> {
+    let frozen = snapshot
+        .resolved_capability(&request.capability_id)
+        .ok_or_else(|| KernelError::CapabilityNotInPreset {
+            capability_id: request.capability_id.clone(),
+        })?;
+    if &frozen.resolved_mount_id != mount_id {
+        return capability_provenance_drift(
+            &request.capability_id,
+            "typed export binding does not match the frozen mount",
+        );
+    }
+    let state = published
+        .state_handles
+        .get(mount_id)
+        .cloned()
+        .ok_or(KernelError::RegistryPoisoned)?;
+    let services = published
+        .service_views
+        .get(mount_id)
+        .cloned()
+        .unwrap_or_default();
+    let metadata = published
+        .materialized
+        .plugins
+        .get(mount_id)
+        .ok_or(KernelError::RegistryPoisoned)?;
+    let mut resource_bindings = request
+        .resource_binding_ids
+        .iter()
+        .filter_map(|binding_id| snapshot.binding(binding_id).cloned())
+        .collect::<Vec<_>>();
+    resource_bindings
+        .sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+    Ok(ResolvedCapabilityContext {
+        resolved_capability: frozen.clone(),
+        principal: request.principal.clone(),
+        agent_session_id: request.agent_session_id.clone(),
+        operation_id: request.operation_id.clone(),
+        correlation_id: request.correlation_id.clone(),
+        resolved_snapshot_ref: request.resolved_snapshot_ref.clone(),
+        registry_generation: published.materialized.generation,
+        registry_digest: published.materialized.registry_digest.clone(),
+        resource_bindings,
+        state_scope_key: request.state_scope_key.clone(),
+        mount: ProviderMountContext {
+            identity: metadata.context.identity.clone(),
+            config: metadata.context.validated_config.clone(),
+            state,
+            services,
+        },
+    })
+}
+
 fn capability_provenance_drift<T>(
     capability_id: &CapabilityId,
     reason: impl Into<String>,
@@ -937,6 +1288,12 @@ async fn dispatch_resolved_role_tool(
                     reason: "Agent Tool dispatch resolved without a Snapshot".to_owned(),
                 }
             })?;
+            let resolved_capability = context.resolved_capability.ok_or_else(|| {
+                KernelError::CapabilityExecution {
+                    reason: "Agent Tool dispatch resolved without an exact Capability lock"
+                        .to_owned(),
+                }
+            })?;
             handler
                 .invoke(
                     CapabilityInvocationContext {
@@ -948,6 +1305,7 @@ async fn dispatch_resolved_role_tool(
                         resolved_snapshot_ref,
                         registry_generation: context.registry_generation,
                         capability_id: context.member_id,
+                        resolved_capability,
                         action_id,
                         resource_bindings: context.resource_bindings,
                         role_provider: Some(context.provider_lock),
@@ -992,9 +1350,43 @@ fn resource_handle_key(
     };
     Ok(ResourceHandleKey {
         scope_key: context.state_scope_key.clone(),
-        role_id: context.role_id.clone(),
+        role_id: Some(context.role_id.clone()),
         mount_id: context.provider_lock.provider.mount_id.clone(),
-        contribution_digest: context.provider_lock.provider.contribution_digest.clone(),
+        target_digest: context
+            .provider_lock
+            .source
+            .source_digest
+            .clone()
+            .unwrap_or_else(|| {
+                context
+                    .provider_lock
+                    .provider
+                    .contribution_digest
+                    .clone()
+            }),
+        binding_id: binding.binding_id.clone(),
+    })
+}
+
+fn direct_resource_handle_key(
+    context: &ResolvedCapabilityContext,
+) -> Result<ResourceHandleKey, KernelError> {
+    let [binding] = context.resource_bindings.as_slice() else {
+        return Err(KernelError::InvalidPresetRevision {
+            reason: format!(
+                "resource provider {} requires exactly one frozen resource binding",
+                context.resolved_capability.capability.id.as_ref()
+            ),
+        });
+    };
+    Ok(ResourceHandleKey {
+        scope_key: context.state_scope_key.clone(),
+        role_id: None,
+        mount_id: context.mount.identity.mount_id.clone(),
+        target_digest: context
+            .resolved_capability
+            .target_artifact_digest
+            .clone(),
         binding_id: binding.binding_id.clone(),
     })
 }
@@ -1372,6 +1764,12 @@ fn resolve_role_member(
             &request.capability_id,
         )?;
     }
+    let resolved_capability = agent_snapshot
+        .and_then(|snapshot| {
+            snapshot
+                .resolved_capability(&request.capability_id)
+                .cloned()
+        });
     let capability = published
         .materialized
         .capability(&request.capability_id)
@@ -1618,6 +2016,7 @@ fn resolve_role_member(
             operation_id: request.operation_id.clone(),
             correlation_id: request.correlation_id.clone(),
             resolved_snapshot_ref,
+            resolved_capability,
             registry_generation: published.materialized.generation,
             registry_digest: published.materialized.registry_digest.clone(),
             resource_bindings,

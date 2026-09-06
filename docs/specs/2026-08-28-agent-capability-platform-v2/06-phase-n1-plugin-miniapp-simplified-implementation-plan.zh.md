@@ -56,6 +56,17 @@
     Credential reference、Candidate/Release、Operation 与明确命令。Managed Node 下载
     只接受服务端 official-LTS offer digest 的确认，客户端不能自报版本、target 或 release
     digest；Bridge、process、generation、ledger 和 secret 不进入 HTTP wire。
+13. 普通 Plugin 的 Kernel↔Node Adapter 已按 canonical `CapabilityKind` 接通 Tool、
+    Context Contributor 和 Resource Provider；完整 `ResolvedCapability`、Mount 与 Artifact
+    digest 参与每次执行和资源句柄缓存。`plugin-package-v1` 不发布 Role Contract、
+    Role Provider 或 Package-authored Plugin Service，也不以 synthetic Role 包装普通能力。
+14. Config/Credential/KV exact CAS、stable `dataDir` 与 owner mutation 已进入 migration
+    069 和真实 SQLite repository；`nomifun-plugin-service` 正在接通 Artifact、Candidate、
+    Apply/Restore/Uninstall/Delete-data、Host fence 与 Operation application service。
+    该 service 不暴露直接 Host invoke，正式能力调用只允许进入 Kernel consumer 主链。
+15. `nomifun-miniapp-platform` 当前只冻结新的 M1 domain/application port 与内存合同测试；
+    在 migration 070+、SQLite adapter、dedicated Service Host、Bridge 和产品入口完成前，
+    不计作 M1 实施完成，也不读取或迁移旧 MiniApp 数据。
 
 ## 0. 怎样阅读这份文档
 
@@ -239,6 +250,10 @@ Plugin current / MiniApp Active Release
 - hot reload、运行中 Plugin 自改 managed target、`replaceSelf()` 和 Plugin 自行开启部署授权。
 
 后置意味着首版 Schema、IPC、UI 和测试中均不为这些能力预埋不可达状态。
+
+本节中的 **Plugin Service** 专指“由 Plugin Package 自带并长期运行的服务能力”，不指
+NomiFun Rust 侧负责 Library/Workshop/生命周期编排的
+`nomifun-plugin-service` application service。后者属于 N1 产品主链，前者保持后置。
 
 ## 3. 最小共享架构
 

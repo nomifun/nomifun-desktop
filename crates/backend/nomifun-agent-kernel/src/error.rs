@@ -165,6 +165,34 @@ pub enum KernelError {
         mount_id: PluginMountId,
         capability_id: CapabilityId,
     },
+    #[error(
+        "registration for mount {mount_id:?} has no Context factory for capability {capability_id:?}"
+    )]
+    MissingCapabilityContextFactory {
+        mount_id: PluginMountId,
+        capability_id: CapabilityId,
+    },
+    #[error(
+        "registration for mount {mount_id:?} exported an undeclared Context factory for {capability_id:?}"
+    )]
+    UndeclaredCapabilityContextFactory {
+        mount_id: PluginMountId,
+        capability_id: CapabilityId,
+    },
+    #[error(
+        "registration for mount {mount_id:?} has no Resource factory for capability {capability_id:?}"
+    )]
+    MissingCapabilityResourceFactory {
+        mount_id: PluginMountId,
+        capability_id: CapabilityId,
+    },
+    #[error(
+        "registration for mount {mount_id:?} exported an undeclared Resource factory for {capability_id:?}"
+    )]
+    UndeclaredCapabilityResourceFactory {
+        mount_id: PluginMountId,
+        capability_id: CapabilityId,
+    },
     #[error("preset revision is invalid: {reason}")]
     InvalidPresetRevision { reason: String },
     #[error("preset surface {surface} is not declared")]
