@@ -1,4 +1,5 @@
 {
+  "defaultAgent": "Nomi Agent",
   "noAgentAvailable": "没有可用的 Main Agent。请登录 Google 或安装 Claude/Codex CLI。是否前往设置？",
   "noAgentAvailableShort": "没有可用的 Main Agent。点击配置。",
   "agentTabAutoSwitch": "模型不兼容 Gemini，已自动切换到 {{fallback}}",

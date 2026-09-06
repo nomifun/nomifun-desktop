@@ -3,6 +3,10 @@ import type { ICssTheme } from '@/common/config/storage';
 import type { AgentPresetId, CompanionId, ProviderId } from '@/common/types/ids';
 import type { LanguageMode } from './i18n';
 
+export type GuidAgentSelectionPreference =
+  | { kind: 'default' }
+  | { kind: 'preset'; presetId: AgentPresetId };
+
 // `auto` (default), `headless` and `external` are the three supported user
 // policies; `embedded` remains in the read type only so installations can
 // migrate the removed viewer's persisted value. New product code persists only
@@ -44,7 +48,7 @@ export type ConfigKeyMap = {
   'tools.textToSpeech': TextToSpeechConfig | undefined;
   'workspace.pasteConfirm': boolean | undefined;
   'upload.saveToWorkspace': boolean | undefined;
-  'guid.lastSelectedAgentPreset': AgentPresetId | undefined;
+  'guid.agentSelection': GuidAgentSelectionPreference | undefined;
   'system.notificationEnabled': boolean | undefined;
   'system.cronNotificationEnabled': boolean | undefined;
   'system.keepAwake': boolean | undefined;

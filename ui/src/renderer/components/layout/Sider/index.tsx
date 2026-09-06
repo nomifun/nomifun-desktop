@@ -163,10 +163,10 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   }, [isCreativeStudio]);
 
   const navTo = useCallback(
-    (target: string, replace = false) => {
+    (target: string, replace = false, state?: unknown) => {
       cleanupSiderTooltips();
       blurActiveElement();
-      Promise.resolve(navigate(target, { replace })).catch((error) => {
+      Promise.resolve(navigate(target, { replace, state })).catch((error) => {
         console.error('Navigation failed:', error);
       });
       if (onSessionClick) {
@@ -176,7 +176,8 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
     [navigate, onSessionClick]
   );
 
-  const handleConversationClick = () => navTo('/guid');
+  const handleConversationClick = () =>
+    navTo('/guid', false, { resetAgentSelection: true });
   const handleBrowserClick = () => {
     if (browserOverviewTransient) {
       void retryBrowserOverview();

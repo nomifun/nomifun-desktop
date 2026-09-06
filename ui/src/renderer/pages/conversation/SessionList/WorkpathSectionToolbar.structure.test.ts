@@ -66,7 +66,8 @@ describe('workpath section toolbar structure', () => {
     expect(source.includes("data-testid='workpath-batch-select-btn'")).toBe(false);
   });
 
-  test('routes project creation through the session shell instead of a hidden header icon', () => {
+  test('routes project creation through the session shell and resets to default Nomi', () => {
+    const sessionListSource = readLocalSource('index.tsx');
     const shellSource = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), '../components/ConversationShell/index.tsx'),
       'utf8'
@@ -77,10 +78,24 @@ describe('workpath section toolbar structure', () => {
     );
 
     expect(shellSource.includes('onCreateProject={handleCreateProject}')).toBe(true);
-    expect(shellSource.includes("navigate('/guid', { state: { workspace: projectPath } })")).toBe(true);
+    expect(
+      shellSource.includes(
+        "void navigate('/guid', {\n        state: { workspace: projectPath, resetAgentSelection: true },\n      });"
+      )
+    ).toBe(true);
     expect(createBarSource.includes('onCreateProject')).toBe(true);
     expect(createBarSource.includes('onToggleBatchMode')).toBe(true);
     expect(createBarSource.includes('ConversationSiderActions')).toBe(false);
+    expect(
+      sessionListSource.includes(
+        "void navigate('/guid', { state: { resetAgentSelection: true } });"
+      )
+    ).toBe(true);
+    expect(
+      /workspace:\s*node\.key,\s*resetAgentSelection:\s*true/.test(
+        sessionListSource
+      )
+    ).toBe(true);
   });
 
   test('does not backfill the project registry from existing session workpaths', () => {

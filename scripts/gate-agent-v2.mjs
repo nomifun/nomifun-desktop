@@ -5614,7 +5614,12 @@ function ap7AgentPresetLaunchContract() {
   const paths = {
     page: 'ui/src/renderer/pages/guid/GuidPage.tsx',
     pill: 'ui/src/renderer/pages/guid/components/AgentPillBar.tsx',
+    actionRow:
+      'ui/src/renderer/pages/guid/components/GuidActionRow.tsx',
     send: 'ui/src/renderer/pages/guid/hooks/useGuidSend.ts',
+    selection:
+      'ui/src/renderer/pages/guid/hooks/useGuidAgentSelection.ts',
+    config: 'ui/src/common/config/configKeys.ts',
     types: 'ui/src/common/types/agentPlatform/contracts.ts',
     dto: 'crates/backend/nomifun-api-types/src/agent_platform.rs',
     service: 'crates/backend/nomifun-agent-control-plane/src/service.rs',
@@ -5646,28 +5651,51 @@ function ap7AgentPresetLaunchContract() {
 
   require(
     source.page.includes('presets={agentSelection.presets}') &&
-      source.page.includes(
-        'selectedPresetId={agentSelection.selectedPresetId}'
-      ) &&
+      source.page.includes('selection={agentSelection.selection}') &&
       source.page.includes('selectedAgentPresetId'),
-    'Guid must render and preselect the executable AgentPreset list'
+    'Guid must render the default-or-preset selector and honor Workbench preselection'
+  );
+  require(
+    source.pill.includes("data-testid='agent-pill-default'") &&
+      source.pill.includes("defaultValue: 'Nomi Agent'") &&
+      source.selection.includes(
+        "const DEFAULT_AGENT_SELECTION: GuidAgentSelection = { kind: 'default' };"
+      ) &&
+      source.config.includes(
+        "| { kind: 'preset'; presetId: AgentPresetId };"
+      ),
+    'Guid must keep plain Nomi as a first-class option instead of a synthetic AgentPreset'
+  );
+  require(
+    source.page.includes('const modelSelectorNode = isDefaultAgent ? (') &&
+      source.page.includes('<GuidModelSelector') &&
+      source.page.includes('modelSelectorNode={modelSelectorNode}') &&
+      source.actionRow.includes('modelSelectorNode?: React.ReactNode') &&
+      source.actionRow.includes('{modelSelectorNode && ('),
+    'plain Nomi must expose the model selector and AgentPreset mode must hide it'
   );
   require(
     ![
-      'GuidModelSelector',
       'GuidSkillsDrawer',
       'KnowledgeControl',
       'GuidCollaboratorSelector',
       'CollaborationPolicyControl',
       'ensureBackendMcpCatalog',
     ].some((marker) => source.page.includes(marker)),
-    'ordinary Guid must not expose preset-owned model/resource overrides'
+    'Guid must not restore preset-owned resource or collaboration overrides'
   );
   require(
     source.pill.includes('{preset.display_name}') &&
       source.pill.includes('onSelectPreset(presetId)') &&
       source.pill.includes("navigate('/agent')"),
     'the home pill bar must visibly list presets and link + to /agent'
+  );
+  require(
+    source.send.includes("if (selection.kind === 'default')") &&
+      source.send.includes('ipcBridge.conversation.create.invoke({') &&
+      source.send.includes("type: 'nomi'") &&
+      source.send.includes('model: current_model'),
+    'plain Nomi must retain the ordinary conversation create path with an explicit model'
   );
   require(
     requestPayload.includes('preset_id: selectedPreset.preset_id') &&
@@ -6297,7 +6325,7 @@ function runAp7SelfTest() {
   );
   c8SelfTestAssert(
     ap7AgentPresetLaunchContract().valid,
-    'AP-7 must reject a missing or model-based Guid AgentPreset selector'
+    'AP-7 must reject a missing default Nomi path or an impure AgentPreset selector'
   );
   c8SelfTestAssert(
     ap7RevisionStorageContract().valid,

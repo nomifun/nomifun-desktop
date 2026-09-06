@@ -27,9 +27,13 @@ export const useAgentPresets = (): {
   library: AgentPresetLibraryResponse | undefined;
   presets: AgentPresetSummary[];
   isLoading: boolean;
+  error: Error | undefined;
   refresh: () => Promise<void>;
 } => {
-  const { data, isLoading, mutate } = useSWR<AgentPresetLibraryResponse>(
+  const { data, error, isLoading, mutate } = useSWR<
+    AgentPresetLibraryResponse,
+    Error
+  >(
     AGENT_PRESET_LIBRARY_SWR_KEY,
     fetchAgentPresetLibrary,
   );
@@ -38,6 +42,7 @@ export const useAgentPresets = (): {
     library: data,
     presets: data?.user_presets ?? [],
     isLoading,
+    error,
     refresh: async () => {
       await mutate();
     },

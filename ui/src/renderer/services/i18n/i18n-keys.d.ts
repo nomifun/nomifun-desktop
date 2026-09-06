@@ -3252,6 +3252,7 @@ export type I18nKey =
   | 'guid.collaboration.models.placeholder'
   | 'guid.collaboration.models.selectedHint'
   | 'guid.collaboration.models.title'
+  | 'guid.defaultAgent'
   | 'guid.modelRequired'
   | 'guid.noAgentAvailable'
   | 'guid.noAgentAvailableShort'

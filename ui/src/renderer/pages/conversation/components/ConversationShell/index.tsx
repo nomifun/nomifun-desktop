@@ -124,7 +124,9 @@ const ConversationShell: React.FC = () => {
       if (!projectPath) return;
       addProjectWorkpath(projectPath);
       addRecentWorkspace(projectPath);
-      void navigate('/guid', { state: { workspace: projectPath } });
+      void navigate('/guid', {
+        state: { workspace: projectPath, resetAgentSelection: true },
+      });
       if (isMobile) setMobileOpen(false);
       Message.success(t('sessionList.createProjectSuccess'));
     } catch (error) {

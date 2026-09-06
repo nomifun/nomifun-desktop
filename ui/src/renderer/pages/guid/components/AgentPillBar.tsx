@@ -5,7 +5,11 @@
  */
 
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
-import type { ExecutableAgentPreset } from '../types';
+import type { AgentPresetId } from '@/common/types/ids';
+import type {
+  ExecutableAgentPreset,
+  GuidAgentSelection,
+} from '../types';
 import { Plus, Robot } from '@icon-park/react';
 import { Tooltip } from '@arco-design/web-react';
 import React from 'react';
@@ -15,14 +19,16 @@ import styles from '../index.module.css';
 
 type AgentPillBarProps = {
   presets: ExecutableAgentPreset[];
-  selectedPresetId: string;
-  onSelectPreset: (presetId: string) => void;
+  selection: GuidAgentSelection;
+  onSelectDefault: () => void;
+  onSelectPreset: (presetId: AgentPresetId) => void;
   suppressSelectionAnimation?: boolean;
 };
 
 const AgentPillBar: React.FC<AgentPillBarProps> = ({
   presets,
-  selectedPresetId,
+  selection,
+  onSelectDefault,
   onSelectPreset,
   suppressSelectionAnimation = false,
 }) => {
@@ -30,6 +36,10 @@ const AgentPillBar: React.FC<AgentPillBarProps> = ({
   const isMobile = layout?.isMobile ?? false;
   const navigate = useNavigate();
   const { t } = useTranslation();
+  const defaultAgentLabel = t('guid.defaultAgent', {
+    defaultValue: 'Nomi Agent',
+  });
+  const defaultAgentSelected = selection.kind === 'default';
 
   return (
     <div className='w-full flex justify-center'>
@@ -51,9 +61,42 @@ const AgentPillBar: React.FC<AgentPillBarProps> = ({
           color: 'var(--text-primary)',
         }}
       >
+        <button
+          type='button'
+          data-testid='agent-pill-default'
+          data-agent-pill='true'
+          data-agent-kind='default'
+          data-agent-selected={defaultAgentSelected ? 'true' : 'false'}
+          aria-pressed={defaultAgentSelected}
+          title={defaultAgentLabel}
+          className={`relative flex max-w-180px items-center overflow-hidden whitespace-nowrap border-0 px-10px py-7px rd-20px cursor-pointer ${defaultAgentSelected ? `opacity-100 ${styles.agentItemSelected}` : 'opacity-70 hover:opacity-100'}`}
+          style={{
+            color: 'var(--text-primary)',
+            background: defaultAgentSelected ? undefined : 'transparent',
+            transition: 'opacity 0.2s ease, background-color 0.2s ease',
+            ...(isMobile || suppressSelectionAnimation
+              ? { animation: 'none' }
+              : undefined),
+          }}
+          onClick={onSelectDefault}
+        >
+          <Robot
+            theme='outline'
+            size={18}
+            fill='currentColor'
+            style={{ flexShrink: 0 }}
+          />
+          <span
+            className={`ml-5px min-w-0 truncate text-14px ${defaultAgentSelected ? 'font-semibold' : 'font-medium'}`}
+          >
+            {defaultAgentLabel}
+          </span>
+        </button>
         {presets.map((preset) => {
           const presetId = preset.preset_id;
-          const isSelected = selectedPresetId === presetId;
+          const isSelected =
+            selection.kind === 'preset' &&
+            selection.presetId === presetId;
 
           return (
             <button
@@ -61,6 +104,7 @@ const AgentPillBar: React.FC<AgentPillBarProps> = ({
               key={presetId}
               data-testid={`agent-pill-${presetId}`}
               data-agent-pill='true'
+              data-agent-kind='preset'
               data-agent-preset-id={presetId}
               data-agent-selected={isSelected ? 'true' : 'false'}
               aria-pressed={isSelected}

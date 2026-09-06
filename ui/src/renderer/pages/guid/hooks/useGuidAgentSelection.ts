@@ -5,18 +5,22 @@
  */
 
 import { configService } from '@/common/config/configService';
-import type { AgentPresetId } from '@/common/types/ids';
 import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { isExecutableAgentPreset } from './agentSelectionUtils';
-import type { ExecutableAgentPreset } from '../types';
+import type {
+  ExecutableAgentPreset,
+  GuidAgentSelection,
+} from '../types';
 
 export type GuidAgentSelectionResult = {
-  selectedPresetId: string;
+  selection: GuidAgentSelection;
   selectedPreset: ExecutableAgentPreset | undefined;
   presets: ExecutableAgentPreset[];
   isLoading: boolean;
-  setSelectedPresetId: (presetId: string) => void;
+  loadError: Error | undefined;
+  setSelection: (selection: GuidAgentSelection) => void;
+  selectDefaultAgent: () => void;
   refreshPresets: () => Promise<void>;
 };
 
@@ -26,34 +30,52 @@ type UseGuidAgentSelectionOptions = {
   locationKey?: string;
 };
 
-const readSavedPresetId = (): string =>
-  configService.get('guid.lastSelectedAgentPreset') || '';
+const DEFAULT_AGENT_SELECTION: GuidAgentSelection = { kind: 'default' };
 
-const saveSelectedPresetId = (presetId: string): void => {
+const isGuidAgentSelection = (
+  value: unknown
+): value is GuidAgentSelection => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  return (
+    candidate.kind === 'default' ||
+    (candidate.kind === 'preset' && typeof candidate.presetId === 'string')
+  );
+};
+
+const readSavedSelection = (): GuidAgentSelection => {
+  const saved: unknown = configService.get('guid.agentSelection');
+  return isGuidAgentSelection(saved) ? saved : DEFAULT_AGENT_SELECTION;
+};
+
+const saveSelection = (selection: GuidAgentSelection): void => {
   void configService
-    .set('guid.lastSelectedAgentPreset', presetId as AgentPresetId)
+    .set('guid.agentSelection', selection)
     .catch((error) => {
-      console.error('Failed to save selected AgentPreset:', error);
+      console.error('Failed to save Guid Agent selection:', error);
     });
 };
 
-/** Selects executable user AgentPresets saved by the Agent Workbench. */
+/** Selects plain Nomi or an executable user AgentPreset from the Workbench. */
 export const useGuidAgentSelection = ({
   resetAgentSelection = false,
   selectedAgentPresetId,
   locationKey,
 }: UseGuidAgentSelectionOptions): GuidAgentSelectionResult => {
-  const [selectedPresetId, setSelectedPresetIdState] = useState<string>(() => {
+  const [selection, setSelectionState] = useState<GuidAgentSelection>(() => {
     try {
-      return readSavedPresetId();
+      return readSavedSelection();
     } catch {
-      return '';
+      return DEFAULT_AGENT_SELECTION;
     }
   });
 
   const {
     presets: savedPresets,
     isLoading,
+    error: loadError,
     refresh: refreshPresets,
   } = useAgentPresets();
   const presets = useMemo(
@@ -61,80 +83,99 @@ export const useGuidAgentSelection = ({
     [savedPresets]
   );
 
-  const setSelectedPresetId = useCallback((presetId: string) => {
-    setSelectedPresetIdState(presetId);
-    saveSelectedPresetId(presetId);
+  const setSelection = useCallback((nextSelection: GuidAgentSelection) => {
+    setSelectionState(nextSelection);
+    saveSelection(nextSelection);
   }, []);
 
+  const selectDefaultAgent = useCallback(() => {
+    setSelection(DEFAULT_AGENT_SELECTION);
+  }, [setSelection]);
+
+  const selectedPresetId =
+    selection.kind === 'preset' ? selection.presetId : undefined;
   const selectedPreset = useMemo(
-    () => presets.find((preset) => preset.preset_id === selectedPresetId),
+    () =>
+      selectedPresetId
+        ? presets.find((preset) => preset.preset_id === selectedPresetId)
+        : undefined,
     [presets, selectedPresetId]
   );
+  const effectiveSelection =
+    selection.kind === 'preset' && !selectedPreset && loadError
+      ? DEFAULT_AGENT_SELECTION
+      : selection;
 
-  const resetHandledRef = useRef(false);
+  const navigationRequestHandledRef = useRef(false);
   const previousLocationKeyRef = useRef(locationKey);
   if (locationKey !== previousLocationKeyRef.current) {
     previousLocationKeyRef.current = locationKey;
-    resetHandledRef.current = false;
+    navigationRequestHandledRef.current = false;
   }
 
   useLayoutEffect(() => {
-    if (isLoading || presets.length === 0 || resetHandledRef.current) return;
-
-    if (
-      selectedAgentPresetId &&
-      presets.some((preset) => preset.preset_id === selectedAgentPresetId)
-    ) {
-      resetHandledRef.current = true;
-      setSelectedPresetIdState(selectedAgentPresetId);
-      saveSelectedPresetId(selectedAgentPresetId);
-      return;
-    }
+    if (navigationRequestHandledRef.current) return;
 
     if (resetAgentSelection) {
-      resetHandledRef.current = true;
-      const firstPresetId = presets[0].preset_id;
-      setSelectedPresetIdState(firstPresetId);
-      saveSelectedPresetId(firstPresetId);
+      navigationRequestHandledRef.current = true;
+      selectDefaultAgent();
+      return;
     }
-  }, [isLoading, presets, resetAgentSelection, selectedAgentPresetId]);
+
+    if (!selectedAgentPresetId || isLoading) return;
+
+    const preset = presets.find(
+      (candidate) => candidate.preset_id === selectedAgentPresetId
+    );
+    if (!preset && loadError) return;
+
+    navigationRequestHandledRef.current = true;
+    if (preset) {
+      setSelection({ kind: 'preset', presetId: preset.preset_id });
+      return;
+    }
+
+    selectDefaultAgent();
+  }, [
+    isLoading,
+    loadError,
+    presets,
+    resetAgentSelection,
+    selectDefaultAgent,
+    selectedAgentPresetId,
+    setSelection,
+  ]);
 
   useEffect(() => {
-    if (isLoading) return;
-    if (presets.length === 0) {
-      setSelectedPresetIdState('');
-      return;
-    }
-    if (resetAgentSelection) return;
     if (
-      selectedAgentPresetId &&
-      presets.some((preset) => preset.preset_id === selectedAgentPresetId)
+      isLoading ||
+      loadError ||
+      resetAgentSelection ||
+      selectedAgentPresetId ||
+      selection.kind === 'default' ||
+      selectedPreset
     ) {
       return;
     }
-
-    const savedPresetId = readSavedPresetId();
-    if (
-      savedPresetId &&
-      presets.some((preset) => preset.preset_id === savedPresetId)
-    ) {
-      setSelectedPresetIdState(savedPresetId);
-      return;
-    }
-
-    const firstPresetId = presets[0].preset_id;
-    setSelectedPresetIdState(firstPresetId);
-    if (savedPresetId !== firstPresetId) {
-      saveSelectedPresetId(firstPresetId);
-    }
-  }, [isLoading, presets, resetAgentSelection, selectedAgentPresetId]);
+    selectDefaultAgent();
+  }, [
+    isLoading,
+    loadError,
+    resetAgentSelection,
+    selectedAgentPresetId,
+    selectedPreset,
+    selectDefaultAgent,
+    selection.kind,
+  ]);
 
   return {
-    selectedPresetId,
+    selection: effectiveSelection,
     selectedPreset,
     presets,
     isLoading,
-    setSelectedPresetId,
+    loadError,
+    setSelection,
+    selectDefaultAgent,
     refreshPresets,
   };
 };
