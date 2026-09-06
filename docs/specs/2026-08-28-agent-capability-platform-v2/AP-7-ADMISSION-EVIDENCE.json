@@ -1,13 +1,13 @@
 {
   "schema_version": "1.0.0",
   "gate": "ap-7",
-  "admission": "pending-validation",
-  "signed": false,
-  "signed_at": null,
+  "admission": "admitted",
+  "signed": true,
+  "signed_at": "2026-09-06",
   "signing": {
     "kind": "local-commit-attestation",
     "owner": "main-host",
-    "implementation_commit": null
+    "implementation_commit": "ef5f5380915e0d5c06004f03b66cbd1302b3fe03"
   },
   "previous_admission": {
     "status": "revoked",
@@ -27,7 +27,7 @@
     "AP-4": "closed",
     "AP-5": "closed",
     "AP-6": "closed",
-    "AP-7": "pending-validation"
+    "AP-7": "closed"
   },
   "real_agent_consumer": {
     "status": "pass",
@@ -181,21 +181,21 @@
     },
     {
       "name": "admission_gate",
-      "status": "pending-validation",
+      "status": "pass",
       "command": "node --check scripts/gate-agent-v2.mjs; bun scripts/gate-agent-v2.mjs --self-test; bun run gate:agent-v2 -- ap-7",
-      "result": "syntax and self-test passed; formal admission waits for the clean implementation commit and signed evidence"
+      "result": "gate syntax, self-test, implementation-commit ancestry and signed clean-checkpoint admission passed"
     }
   ],
   "legacy_production_reachability": 0,
   "generated_inventory_clean": true,
-  "plugin_phase": "blocked_until_explicit_06_kickoff",
+  "plugin_phase": "requires_explicit_06_kickoff",
   "notes": [
     "The previously signed AP-7 evidence is superseded and revoked.",
     "The current implementation uses capability tri-state authoring, a frozen AgentPreset model, Snapshot-owned required_resource_kinds, and target-scoped resource selection.",
     "Historical migration and deletion-contract strings remain only as audit material.",
     "No provider credential is part of this evidence or repository.",
     "SL-S4-02 passed in the real Tauri Desktop host; phone mode is outside the nomifun-desktop validation scope.",
-    "AP-7 remains unsigned only until the implementation is committed and the clean signed gate is rerun.",
+    "AP-7 is signed against implementation commit ef5f5380915e0d5c06004f03b66cbd1302b3fe03.",
     "06 Plugin/MiniApp implementation is intentionally not included in this admission."
   ]
 }

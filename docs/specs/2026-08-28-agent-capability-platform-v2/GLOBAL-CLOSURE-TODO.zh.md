@@ -9,9 +9,9 @@
 > 当前结论：S0-S2 的止损、P0 与基础收缩，以及既有 S3 基础切片仍按历史定向
 > evidence 保留。2026-09-06 两轮人工走查先后发现首页缺少真实 AgentPreset
 > 选择器，以及 Agent 工作台把具体资源错误冻结进 Preset、缺少删除入口和能力
-> 明细。旧 AP-7 evidence 已再次撤销；当前工作树已完成设计纠正，并通过真实
-> Tauri Desktop 产品走查。AP-3 与 `SL-S4-02` 已关闭，当前只等待干净实现提交、
-> AP-7 重新签署和最终 Gate。
+> 明细。旧 AP-7 evidence 已再次撤销；设计纠正随后通过真实 Tauri Desktop 产品走查，
+> 并以实现提交 `ef5f5380915e0d5c06004f03b66cbd1302b3fe03` 重新签署 AP-7。
+> AP-0～AP-7 与 `SL-S4-02` 均已关闭。
 > 产品执行内核仍是 NomiCore/Nomi engine，Web、Desktop 和 `nomicore` 默认入口均使用
 > `NomiCoreApplication`。
 > 当前实现让首页 Guid pill bar 显示 Agent 工作台中可执行的用户
@@ -87,7 +87,7 @@ C9/Nomi 删除和 Nomi-free RC 已延后，不新增当前阶段阻断。
 <!-- AP_STATUS AP-4: closed -->
 <!-- AP_STATUS AP-5: closed -->
 <!-- AP_STATUS AP-6: closed -->
-<!-- AP_STATUS AP-7: pending-validation -->
+<!-- AP_STATUS AP-7: closed -->
 
 | AP | 状态 | 当前可证明的事实 | 尚未满足的条件 |
 | --- | --- | --- | --- |
@@ -98,7 +98,7 @@ C9/Nomi 删除和 Nomi-free RC 已延后，不新增当前阶段阻断。
 | AP-4 | `closed` | 标准 `/api/agent-sessions` 请求只含 `preset_id` 与可选 `title`；服务端按 owner 从 `current_stable_revision` 和持久化 Revision/Snapshot 构造初始资源中立 Binding。Snapshot 冻结模型与 `required_resource_kinds`，Preset 会话拒绝公开 PATCH 改写顶层模型；目标资源不进入 Preset/Snapshot；旧 `agent_binding` 请求字段 fail-closed；删除 Preset 后已有 Session 继续读取冻结能力和历史，新 Session 被拒绝。 | 无；control-plane、Conversation、AgentPlatform E2E 与 Nomi-core route 已覆盖。 |
 | AP-5 | `closed` | ContributionLock impact diff 已覆盖 Compatible/Breaking、Disabled/Unavailable/Uninstalled、MiniApp release change、Retry/Switch/Restore/Fork，并提供 owner-scoped impact API。 | 无。 |
 | AP-6 | `closed` | 旧 `nomifun-preset`、旧 DTO、Extension preset contribution、旧 DB repository/表和旧 UI authoring surface 保持删除；Fresh-v4 bootstrap 只 seed `agent_preset_templates`，Revision 使用 `payload_json` 与 canonical ContributionLock；065 增加用户 Preset retirement tombstone；066 退役旧资源绑定 Preset 并清理活动 Binding，保留 Revision/Snapshot/Session 历史；旧 capability/skill/resource projection 表不再写入。 | 无；generated contract、DB migration head 66 和 workspace 编译已通过。 |
-| AP-7 | `pending-validation` | 旧签署均保留为 revoked 历史；当前工作树已经覆盖能力三态/明细、用户删除、资源中立 Preset/Snapshot、冻结模型与资源种类、target-scoped resource binding、Cron host Snapshot、Nomi on-demand ToolSearch、deny-all 和删除后历史 Session 保留；Desktop、broad checks 与真实 StepFun smoke 均已通过。 | 只剩干净实现提交、写入 `implementation_commit`、签署 evidence 并在签署提交上执行最终 `ap-7` Gate；06 仍不得启动代码实施。 |
+| AP-7 | `closed` | 旧签署均保留为 revoked 历史；实现提交 `ef5f5380915e0d5c06004f03b66cbd1302b3fe03` 覆盖能力三态/明细、用户删除、资源中立 Preset/Snapshot、冻结模型与资源种类、target-scoped resource binding、Cron host Snapshot、Nomi on-demand ToolSearch、deny-all 和删除后历史 Session 保留；Desktop、broad checks 与真实 StepFun smoke 均通过，signed evidence 已形成。 | 无；06 已满足 AP 前置条件，但仍需用户显式单独启动，不在本次提交实施。 |
 
 ### AP-6 clean-cut 事实、Fresh-v4 漂移纠正与允许的历史残留
 
@@ -153,7 +153,7 @@ C9/Nomi 删除和 Nomi-free RC 已延后，不新增当前阶段阻断。
 | `cargo check --workspace`；generated contract check | `pass` | workspace 编译和 canonical generated artifact check 通过。 |
 | 真实 Tauri Desktop 产品走查 | `pass` | 桌面窗口验证默认 Nomi 模型选择、AgentPreset pill/工作台预选、能力三态与明细、删除、Preset 会话无模型选择器、桌面 Header 的目标级 Knowledge/Workspace；无横向溢出或控件重叠。手机模式不在本期范围。 |
 | Credential Manager runner 的真实 StepFun smoke | `pass` | 2026-09-06 按当前资源中立 Session、冻结模型/资源种类与目标绑定语义重跑，输出 `live_smoke_status=pass code=OK status=200`。 |
-| `node --check scripts/gate-agent-v2.mjs`；Gate self-test；`bun run gate:agent-v2 -- ap-7` | `pending-validation` | syntax 与 self-test 已通过；最终 `ap-7` 必须等干净实现提交和签署 evidence 后执行。 |
+| `node --check scripts/gate-agent-v2.mjs`；Gate self-test；`bun run gate:agent-v2 -- ap-7` | `pass` | 签署提交上验证 evidence、实现提交祖先关系、clean worktree、migration 061/062/064/065/066、UI/模型冻结和 residual，admission=`admitted`。 |
 
 AP-7 的 admission 必须同时满足：AP-0～AP-6 全部 `closed`、旧活动主链 residual 为 0、
 generated inventory 已同步、真实 Agent 与非 Agent consumer 证据可复查、ContributionLock/
@@ -200,7 +200,7 @@ impact/no-fallback 行为测试通过，并在干净提交上形成签署记录�
 | `SL-S2-10` official app-server spike | `a7ac1d124`；`bun scripts/validation/codex-app-server-spike.mjs --self-test`；`bun test scripts/validation/codex-app-server-spike.test.mjs` | 已确认 pinned upstream 协议；不等同于 exact binary 或 live model 验证 |
 | `SL-S3-09` SSH owner primitive | `77bd45279`；`cargo check --locked -p nomi-ssh -p nomifun-ssh`；`cargo test --locked -p nomifun-ssh --lib` | 已实现有界输入、超时、取消回收和 no-retry；live sshd/sudo 未运行时不构造 PASS |
 | `SL-S3-08` MCP owner/source | `cargo test --locked -p nomifun-mcp --lib`；`cargo test --locked -p nomifun-app --lib router::agent_wave2_mcp::tests -- --test-threads=1`；`cargo test --locked -p nomifun-app --lib router::agent_wave2_host::tests -- --test-threads=1` | v4 source、exact lock、Streamable HTTP owner、typed failure、no-redirect 和 bounded cleanup 已通过；OAuth/stdio 不在本项隐式扩张 |
-| `SL-S3-07` Nomi-core 真实 owner | `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\validation\run-nomi-core-live-provider-from-windows-credential-manager.ps1`；`cargo test --locked -p nomifun-app --test nomi_core_route_gap -- --test-threads=1`；`cargo test --locked -p nomi-tools vcs::tests --lib`；`cargo test --locked -p nomifun-knowledge --lib` | 真实 StepFun Plan provider、Nomi-core Session、Chat/Coding、Workspace/File、Process、VCS、Knowledge search/read、Cron 同 Session run/replay、Remote open/turn/observe/cancel、凭据持久化审计和关闭清理均通过；输出 `live_smoke_status=pass code=OK status=200`。不替代 `SL-S3-10`/`SL-S3-11` 的独立合同或 `SL-S4-02` 人工验收 |
+| `SL-S3-07` Nomi-core 真实 owner | `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\validation\run-nomi-core-live-provider-from-windows-credential-manager.ps1`；`cargo test --locked -p nomifun-app --test nomi_core_route_gap -- --test-threads=1`；`cargo test --locked -p nomi-tools vcs::tests --lib`；`cargo test --locked -p nomifun-knowledge --lib` | 真实 StepFun Plan provider、Nomi-core Session、Chat/Coding、Workspace/File、Process、VCS、Knowledge search/read、Cron 同 Session run/replay、Remote open/turn/observe/cancel、凭据持久化审计和关闭清理均通过；输出 `live_smoke_status=pass code=OK status=200`。该 smoke 不代替其他合同，但 `SL-S3-10`、`SL-S3-11`、`SL-S4-02` 后续均已由独立证据关闭 |
 | `SL-S3-11` Nomi-core Remote REST/MCP | `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\validation\run-nomi-core-live-provider-from-windows-credential-manager.ps1`；`cargo test --locked -p nomifun-app --test nomi_core_route_gap -- --test-threads=1`；`cargo test --locked -p nomifun-public --lib` | 同一真实 StepFun smoke 已通过 REST 与 Streamable HTTP MCP 的 `initialize/tools.list/open/turn/observe/cancel`；route-gap 覆盖 installation Bearer、owner JWT/local-trust、旧 selector query、revoke、delete 后不可复活；公共 transport 保留四工具精确集合和 transport-session admission |
 
 ## 汇总
@@ -219,8 +219,8 @@ impact/no-fallback 行为测试通过，并在干净提交上形成签署记录�
 才能修改状态。
 
 上表只统计 S0-S5。AP-0～AP-7 是额外的 AgentPreset 门禁层；截至
-2026-09-06，AP-0～AP-6 已有本机证据并关闭；AP-7 只等待干净提交、重新签署和
-最终 Gate，不得从 S0-S5 汇总行推断 admission 已经签署。
+2026-09-06，AP-0～AP-7 已有本机证据并关闭。06 已满足 AP 前置条件，但仍必须由用户
+显式单独启动，不得从一期签署自动推断二期代码已授权实施。
 
 ## 当前剩余 TODO 快照
 
@@ -236,7 +236,7 @@ Windows 候选与外部环境验证边界：
 
 主机关键路径已完成 `SL-S3-01 -> SL-S3-02 -> SL-S3-03 -> SL-S3-07 -> SL-S3-10`，Browser/Computer
 first-party dogfood 和具体实现旁路清理也已完成。当前主线是
-`AP-7 clean admission -> SL-S5-01`；Codex Sidecar
+`SL-S5-01`；Codex Sidecar
 和 C9 不在当前关键路径。
 上述主机项全部由当前主机执行。主机可以按互斥写集启用多个本机 lane；中央合同、
 组合根、Gate、锁文件和 GLOBAL TODO 由集成 Owner 串行合流。外部 macOS/Linux 只验证
@@ -311,7 +311,7 @@ first-party dogfood 和具体实现旁路清理也已完成。当前主线是
 
 | ID | 状态 | Owner | 目标 | 依赖 | 完成定义 | 最小测试 | 人工 / 外部输入 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `SL-S5-01` | open | 主机 | Windows Desktop x64 完成 Nomi-core 核心候选 | S0-S4 除原生外部项 | package/install/fresh/launch；Nomi-core Chat/Coding/File/Process/VCS/MCP/Browser/Computer/Knowledge/automation/Remote；cancel/crash/process-tree cleanup；无 P0、数据损坏或 secret 泄漏 | 收缩后的 `bun run gate:agent-v2 -- c8-win-pre`，每个 E2E 有独立 deadline | Windows SDK/VS Build Tools 已由 `bun run dev` launcher 自动加载并完成链接；S4 已关闭，待 AP-7 clean admission 后冻结候选 |
+| `SL-S5-01` | open | 主机 | Windows Desktop x64 完成 Nomi-core 核心候选 | S0-S4 除原生外部项 | package/install/fresh/launch；Nomi-core Chat/Coding/File/Process/VCS/MCP/Browser/Computer/Knowledge/automation/Remote；cancel/crash/process-tree cleanup；无 P0、数据损坏或 secret 泄漏 | 收缩后的 `bun run gate:agent-v2 -- c8-win-pre`，每个 E2E 有独立 deadline | Windows SDK/VS Build Tools 已由 `bun run dev` launcher 自动加载并完成链接；S4 与 AP-7 已关闭，可以冻结候选 |
 | `SL-S5-02` | external | 外部 | macOS Desktop arm64 Nomi-core 候选 smoke | `SL-S5-01` | 真 Apple Silicon 上对当前 Nomi-core 候选完成 package/install/launch、critical capability、anchored FS 和 dispose；非 Rosetta；只验证冻结候选真实 bytes | macOS arm64 native gate/critical suite | 需要 Apple Silicon、签名/打包环境和对应 Nomi-core 候选；不要求 arm64 Codex Sidecar |
 | `SL-S5-03` | external | 外部 | Linux Desktop x64 Nomi-core 候选 smoke | `SL-S5-01` | 真 Linux Desktop x64 上对当前 Nomi-core 候选完成 package/install/launch、Coding、MCP、Browser availability、dispose；Computer 按一期声明明确 available 或 unavailable | Linux Desktop native gate/critical suite | 需要真实 Linux Desktop x64 和 Nomi-core 候选；不要求 Linux Codex Sidecar |
 | `SL-S5-04` | deferred | 后续阶段 | 未来 Codex 切换后的 C9 shutdown 与 Nomi 物理删除 | 未来 Codex 立项、source/build、替代 Runtime 证据 | 只有未来 Runtime 正式接替且用户确认后，才停止 Nomi admission、清理进程树、标记 uncertain、删除 Nomi runtime/factory/route/artifact 并运行 residual scan | 未来 `c9-hard-delete` 及对应 dependency scan | 当前不执行；Nomi 是本阶段产品内核，不得把此项作为当前阻塞 |
@@ -509,21 +509,20 @@ handoff 或跨机 attestation。
 
 ## 推荐顺序
 
-1. 先把当前 AgentPreset 能力边界、模型冻结、Snapshot 资源种类、Cron resolver 和
-   Desktop 产品流程作为一个干净实现提交归档。
+1. 保留 AgentPreset 能力边界、模型冻结、Snapshot 资源种类、Cron resolver 和
+   Desktop 产品流程的干净实现提交
+   `ef5f5380915e0d5c06004f03b66cbd1302b3fe03` 与 AP-7 signed evidence。
    `SL-S3-07`、`SL-S3-10`、`SL-S3-11`、`SL-S4-02` 已关闭；
    `NomiCoreSessionOwner` 的 Cron/AutoWork/Companion archive/Channel/IDMM typed
    边界进入维护状态，除确定性合同缺口外不扩大兼容层。
-2. 在该实现提交上写入 `implementation_commit`，签署 AP-7 evidence，并在干净签署
-   提交上运行最终 `bun run gate:agent-v2 -- ap-7`。
-3. AP-7 admission 通过后，运行 `SL-S5-01` 的 Windows x64 Nomi-core
+2. 运行 `SL-S5-01` 的 Windows x64 Nomi-core
    候选检查并冻结同一候选 bytes。
-4. 将冻结候选交给 macOS arm64 与 Linux Desktop x64 只做原生 Nomi-core 验证；
+3. 将冻结候选交给 macOS arm64 与 Linux Desktop x64 只做原生 Nomi-core 验证；
    发现问题返回当前主机修复，不建立跨机开发分支、Prompt、交接包或 attestation。
-5. 若外部验证要求继续本机重构，优先补 Channel 的 typed event cursor/receipt/
+4. 若外部验证要求继续本机重构，优先补 Channel 的 typed event cursor/receipt/
    exact cancel contract，再补 IDMM 的 active-turn supervision query；不要先做
    Codex Sidecar、C9/Nomi-free RC 或通用 coordinator。
-6. 三平台 Nomi-core RC 通过后再评估当前阶段 Stable；Codex Sidecar、C9/Nomi-free RC
+5. 三平台 Nomi-core RC 通过后再评估当前阶段 Stable；Codex Sidecar、C9/Nomi-free RC
    保留为后续阶段，不进入本次关键路径。
 
 ## 阶段退出条件
