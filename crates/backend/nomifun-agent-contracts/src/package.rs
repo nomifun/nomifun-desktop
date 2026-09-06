@@ -299,6 +299,80 @@ pub struct InProcessEntrypointMetadata {
     pub contract_version: VersionString,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JavaScriptEntrypointMetadata {
+    pub normalized_relative_path: String,
+    pub module_digest: DigestHex,
+    pub host_protocol_version: VersionString,
+    pub sdk_contract_version: VersionString,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PackageEntrypointMetadata {
+    InProcess(InProcessEntrypointMetadata),
+    #[serde(rename = "javascript")]
+    JavaScript(JavaScriptEntrypointMetadata),
+}
+
+impl PackageEntrypointMetadata {
+    pub fn in_process(metadata: InProcessEntrypointMetadata) -> Self {
+        Self::InProcess(metadata)
+    }
+
+    pub fn javascript(metadata: JavaScriptEntrypointMetadata) -> Self {
+        Self::JavaScript(metadata)
+    }
+
+    pub fn as_in_process(&self) -> Option<&InProcessEntrypointMetadata> {
+        match self {
+            Self::InProcess(metadata) => Some(metadata),
+            Self::JavaScript(_) => None,
+        }
+    }
+
+    pub fn as_in_process_mut(&mut self) -> Option<&mut InProcessEntrypointMetadata> {
+        match self {
+            Self::InProcess(metadata) => Some(metadata),
+            Self::JavaScript(_) => None,
+        }
+    }
+
+    pub fn as_javascript(&self) -> Option<&JavaScriptEntrypointMetadata> {
+        match self {
+            Self::InProcess(_) => None,
+            Self::JavaScript(metadata) => Some(metadata),
+        }
+    }
+
+    pub fn as_javascript_mut(&mut self) -> Option<&mut JavaScriptEntrypointMetadata> {
+        match self {
+            Self::InProcess(_) => None,
+            Self::JavaScript(metadata) => Some(metadata),
+        }
+    }
+
+    pub fn host_contract_version(&self) -> &VersionString {
+        match self {
+            Self::InProcess(metadata) => &metadata.contract_version,
+            Self::JavaScript(metadata) => &metadata.host_protocol_version,
+        }
+    }
+}
+
+impl From<InProcessEntrypointMetadata> for PackageEntrypointMetadata {
+    fn from(value: InProcessEntrypointMetadata) -> Self {
+        Self::InProcess(value)
+    }
+}
+
+impl From<JavaScriptEntrypointMetadata> for PackageEntrypointMetadata {
+    fn from(value: JavaScriptEntrypointMetadata) -> Self {
+        Self::JavaScript(value)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PackageManifest {
@@ -312,7 +386,7 @@ pub struct PackageManifest {
     pub config_schema: StrictJsonValue,
     pub provides_services: Vec<ServiceProvision>,
     pub requires_services: Vec<ServiceRequirement>,
-    pub entrypoint: InProcessEntrypointMetadata,
+    pub entrypoint: PackageEntrypointMetadata,
     pub contributions: PackageContributions,
 }
 
@@ -527,6 +601,7 @@ pub struct CapabilityContributions {
 #[serde(deny_unknown_fields)]
 pub struct CapabilityManifest {
     pub id: CapabilityId,
+    pub contribution_id: crate::ContributionId,
     pub version: VersionString,
     pub kind: CapabilityKind,
     pub package: PackageRef,
@@ -961,4 +1036,63 @@ pub struct TargetPackageInventoryPayload {
     pub inventory_version: VersionString,
     pub version_policy: TargetVersionPolicy,
     pub packages: Vec<TargetPackageContribution>,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        InProcessEntrypointMetadata, JavaScriptEntrypointMetadata, PackageEntrypointMetadata,
+    };
+    use crate::{DigestHex, VersionString};
+
+    #[test]
+    fn package_entrypoint_preserves_first_party_in_process_metadata() {
+        let entrypoint: PackageEntrypointMetadata = InProcessEntrypointMetadata {
+            entrypoint_profile: "trusted-in-process".to_owned(),
+            entrypoint_id: "platform.example.entrypoint".to_owned(),
+            contract_version: VersionString::from("1.0.0"),
+        }
+        .into();
+
+        assert_eq!(
+            entrypoint
+                .as_in_process()
+                .expect("in-process metadata")
+                .entrypoint_id,
+            "platform.example.entrypoint"
+        );
+        assert!(entrypoint.as_javascript().is_none());
+        assert_eq!(entrypoint.host_contract_version().as_ref(), "1.0.0");
+    }
+
+    #[test]
+    fn package_entrypoint_serializes_javascript_as_a_tagged_variant() {
+        let entrypoint = PackageEntrypointMetadata::javascript(JavaScriptEntrypointMetadata {
+            normalized_relative_path: "main.mjs".to_owned(),
+            module_digest: DigestHex::from("a".repeat(64)),
+            host_protocol_version: VersionString::from("1.0.0"),
+            sdk_contract_version: VersionString::from("1.0.0"),
+        });
+
+        assert_eq!(
+            serde_json::to_value(&entrypoint).expect("serialize entrypoint"),
+            json!({
+                "kind": "javascript",
+                "normalized_relative_path": "main.mjs",
+                "module_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "host_protocol_version": "1.0.0",
+                "sdk_contract_version": "1.0.0"
+            })
+        );
+        assert_eq!(
+            entrypoint
+                .as_javascript()
+                .expect("JavaScript metadata")
+                .normalized_relative_path,
+            "main.mjs"
+        );
+        assert!(entrypoint.as_in_process().is_none());
+    }
 }

@@ -1,0 +1,71 @@
+{
+  "digest_algorithm": "sorted-json-sha256-v1",
+  "payload": {
+    "schema_version": "1.0.0",
+    "plugin_package_profile_version": "1.0.0",
+    "javascript_host_protocol_version": "1.0.0",
+    "javascript_sdk_contract_version": "1.0.0",
+    "candidate_test_contract_version": "1.0.0",
+    "minimum_node_major": 22,
+    "recommended_node_lts_major": 24,
+    "host_method_sets": {
+      "shared_extension": [
+        "mount_load",
+        "mount_unload",
+        "capability_invoke",
+        "context_contribute",
+        "resource_acquire",
+        "resource_release",
+        "credential_resolve",
+        "state_get",
+        "state_set",
+        "state_delete",
+        "state_compare_and_swap",
+        "request_cancel",
+        "host_shutdown"
+      ],
+      "candidate_test": [
+        "mount_load",
+        "mount_unload",
+        "capability_invoke",
+        "context_contribute",
+        "resource_acquire",
+        "resource_release",
+        "credential_resolve",
+        "state_get",
+        "state_set",
+        "state_delete",
+        "state_compare_and_swap",
+        "request_cancel",
+        "host_shutdown"
+      ],
+      "build": [
+        "build_execute",
+        "request_cancel",
+        "host_shutdown"
+      ]
+    },
+    "durable_operation_kinds": [
+      "build",
+      "import",
+      "export",
+      "miniapp_permanent_delete"
+    ],
+    "durable_operation_states": [
+      "running",
+      "succeeded",
+      "failed",
+      "canceled"
+    ],
+    "required_cells": [
+      "windows_desktop_x64",
+      "macos_desktop_arm64",
+      "linux_desktop_x64"
+    ],
+    "optional_cells": [
+      "macos_desktop_x64",
+      "linux_headless_x64"
+    ]
+  },
+  "payload_digest": "96a1f080717010b8feeea91f38a68b1949f5aa3ef6860f82673744ceb17da36a"
+}

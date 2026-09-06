@@ -189,6 +189,9 @@ mod tests {
         let package = package();
         let capability = CapabilityManifest {
             id: CapabilityId::from("example.run"),
+            contribution_id: nomifun_agent_contracts::ContributionId::from(
+                "capability:example.run",
+            ),
             version: VersionString::from("1.0.0"),
             kind: CapabilityKind::Tool,
             package: package.clone(),

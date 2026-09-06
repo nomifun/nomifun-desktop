@@ -1494,7 +1494,8 @@ fn build_registration(
             entrypoint_profile: "trusted-in-process".to_owned(),
             entrypoint_id: format!("{}.entrypoint", package.id),
             contract_version: VersionString::from(CONTRACT_VERSION),
-        },
+        }
+        .into(),
         contributions: PackageContributions {
             capabilities: capability_manifests,
             skills: Vec::new(),
@@ -1740,6 +1741,10 @@ fn build_capability(
 
     Ok(CapabilityManifest {
         id: CapabilityId::from(definition.id),
+        contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
+            "capability:{}",
+            definition.id
+        )),
         version: VersionString::from(CONTRACT_VERSION),
         kind: definition.kind,
         package: package.clone(),
@@ -2622,7 +2627,8 @@ mod tests {
                 entrypoint_profile: "trusted-in-process".to_owned(),
                 entrypoint_id: "fixture.browser-provider.entrypoint".to_owned(),
                 contract_version: VersionString::from(CONTRACT_VERSION),
-            },
+            }
+            .into(),
             contributions: PackageContributions {
                 capabilities: Vec::new(),
                 skills: Vec::new(),

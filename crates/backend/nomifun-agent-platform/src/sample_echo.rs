@@ -438,6 +438,10 @@ fn sample_registration(
     let output_digest = digest_payload(&output_schema).map_err(digest_error)?;
     let capability_manifest = CapabilityManifest {
         id: capability.id.clone(),
+        contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
+            "capability:{}",
+            capability.id.as_ref()
+        )),
         version: capability.version.clone(),
         kind: CapabilityKind::Tool,
         package: package.clone(),
@@ -517,7 +521,8 @@ fn sample_registration(
             entrypoint_profile: "trusted-in-process".to_owned(),
             entrypoint_id: "sample.echo.entrypoint".to_owned(),
             contract_version: VersionString::from(VERSION),
-        },
+        }
+        .into(),
         contributions: PackageContributions {
             capabilities: vec![capability_manifest],
             skills: vec![skill],

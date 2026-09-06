@@ -3,14 +3,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentPresetId, AgentSessionDeletedState, AgentSessionId,
     AgentSessionLiveRecord, AgentSessionMetadata, CapabilityRef,
-    CheckpointDiscardReason, CheckpointRehydrateSource, CorrelationId, DigestHex, EventId,
-    EventProducerId, IdempotencyKey, NativeActionStartAckExchange, OperationId, PackageId,
-    PackageRef, PrecomputedActivationPlan, PresetRevisionRef, PrincipalRef, ResolvedCapability,
-    ResolvedSnapshotContent, ResolvedSnapshotId, ResolvedSnapshotRef, ResourceBindingId,
-    ResourceId, ResourceKind, RuntimeCheckpointValidationResult,
-    RuntimeProfileKind, SessionEventKind, SessionEventPayloadRef, SessionEventRecord,
-    SnapshotCompatibilityAdmissionResult, StrictJsonValue, TypedResourceBinding,
-    VersionString,
+    CheckpointDiscardReason, CheckpointRehydrateSource, ContributionLock,
+    ContributionSourceKind, CorrelationId, DigestHex, EventId, EventProducerId,
+    IdempotencyKey, NativeActionStartAckExchange, OperationId, PackageId, PackageRef,
+    PluginMountId, PluginSourceKind, PluginSourceMetadata, PrecomputedActivationPlan,
+    PresetRevisionRef, PrincipalRef, ResolvedCapability, ResolvedSnapshotContent,
+    ResolvedSnapshotId, ResolvedSnapshotRef, ResourceBindingId, ResourceId, ResourceKind,
+    RuntimeCheckpointValidationResult, RuntimeProfileKind, SessionEventKind,
+    SessionEventPayloadRef, SessionEventRecord, SnapshotCompatibilityAdmissionResult,
+    StableSourceIdentity, StrictJsonValue, TypedResourceBinding, VersionString,
 };
 use nomifun_agent_platform::{
     CodingCodexContract, CodingReviewEvidence, CodingSurface, CodingWorkspaceEvidence,
@@ -56,19 +57,45 @@ fn workspace_binding() -> TypedResourceBinding {
 }
 
 fn resolved_capability(reference: &CapabilityRef) -> ResolvedCapability {
+    let source_package = PackageRef {
+        id: PackageId::from(format!(
+            "fixture.{}",
+            reference.id.as_ref().replace('.', "-")
+        )),
+        version: reference.version.clone(),
+    };
+    let contribution_id = nomifun_agent_contracts::ContributionId::from(format!(
+        "capability:{}",
+        reference.id.as_ref()
+    ));
+    let schema_digest = DigestHex::from("a".repeat(64));
+    let artifact_digest = DigestHex::from("b".repeat(64));
     ResolvedCapability {
         capability: reference.clone(),
-        source_package: PackageRef {
-            id: PackageId::from(format!(
-                "fixture.{}",
-                reference.id.as_ref().replace('.', "-")
-            )),
-            version: reference.version.clone(),
+        source_package: source_package.clone(),
+        contribution_id: contribution_id.clone(),
+        contribution_lock: ContributionLock {
+            source_kind: ContributionSourceKind::PlatformBuiltin,
+            source_identity: StableSourceIdentity::from(
+                source_package.id.as_ref().to_owned(),
+            ),
+            mount_id: None,
+            miniapp_id: None,
+            mcp_binding_id: None,
+            contribution_id,
+            contract_digest: schema_digest.clone(),
         },
-        schema_digest: DigestHex::from(format!(
-            "{}-schema",
+        resolved_mount_id: PluginMountId::from(format!(
+            "fixture.{}",
             reference.id.as_ref()
         )),
+        resolved_source: PluginSourceMetadata {
+            source_kind: PluginSourceKind::Bundled,
+            source_identity: source_package.id.as_ref().to_owned(),
+            source_digest: Some(artifact_digest.clone()),
+        },
+        target_artifact_digest: artifact_digest,
+        schema_digest,
         dependency_path: vec![reference.id.clone()],
         required_runtime_features: BTreeSet::new(),
     }

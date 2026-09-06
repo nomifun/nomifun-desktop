@@ -1454,6 +1454,9 @@ mod tests {
         };
         CapabilityManifest {
             id: CapabilityId::from(id),
+            contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
+                "capability:{id}"
+            )),
             version: VersionString::from("1.0.0"),
             kind: CapabilityKind::Tool,
             package,

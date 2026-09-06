@@ -19,7 +19,7 @@ use nomifun_agent_contracts::{
     CapabilityConsumer, CapabilityId, CapabilityKind, CapabilityOwner,
     CapabilityProvenance, CapabilityReleaseState, CatalogAvailability,
     ChatRouteIdentity, ChatRouteLookupError, ChatRouteLookupKey, ChatRouteRecord,
-    ChatRouteRecordRow, CompactOnDemandCapabilityEntry, ContributionId, ContributionLock,
+    ChatRouteRecordRow, CompactOnDemandCapabilityEntry, ContributionLock,
     ContributionSourceKind, CorrelationId, DeleteAgentSessionCommand, DigestHex,
     EventId, EventProducerId,
     ExactRoleContractRef, ExecutionRoleId, FullAutoExecutionWire, IdempotencyKey,
@@ -2126,10 +2126,6 @@ pub fn materialize_capability_catalog_entries(
         match CapabilityCatalogMaterializer::materialize(
             CapabilityCatalogMaterialization {
                 manifest: manifest.clone(),
-                contribution_id: ContributionId::from(format!(
-                    "capability:{}",
-                    manifest.id.as_ref()
-                )),
                 provenance,
                 release_state,
                 availability,

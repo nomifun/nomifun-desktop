@@ -526,9 +526,11 @@ mod tests {
     use nomifun_agent_contracts::{
         AgentPresetId, AgentPresetRevisionPayload, CapabilitySelection,
         CapabilityRef, ChatRouteCandidate, ChatRouteFeature, ChatRouteProtocol,
-        ChatRouteRecordSchema, ChatRouteTask, ConnectionConfigRef, DigestHex, ModelRouteId,
-        OperationId, PresetRevisionRef, PrincipalRef, ResolvedCapability, ResolvedSnapshotContent,
-        ResolvedSnapshotId, ResolvedSnapshotRef, RuntimeFeatureId, RuntimeProfileKind, SkillRef,
+        ChatRouteRecordSchema, ChatRouteTask, ConnectionConfigRef, ContributionLock,
+        ContributionSourceKind, DigestHex, ModelRouteId, OperationId, PluginMountId,
+        PluginSourceKind, PluginSourceMetadata, PresetRevisionRef, PrincipalRef,
+        ResolvedCapability, ResolvedSnapshotContent, ResolvedSnapshotId, ResolvedSnapshotRef,
+        RuntimeFeatureId, RuntimeProfileKind, SkillRef, StableSourceIdentity,
         TypedResourceBinding,
     };
     use std::collections::{BTreeMap, BTreeSet};
@@ -683,17 +685,38 @@ mod tests {
     }
 
     fn resolved_capability(id: &str) -> ResolvedCapability {
+        let capability_id = nomifun_agent_contracts::CapabilityId::from(id);
+        let contribution_id = nomifun_agent_contracts::ContributionId::from(format!(
+            "capability:{id}"
+        ));
         ResolvedCapability {
             capability: CapabilityRef {
-                id: id.into(),
+                id: capability_id.clone(),
                 version: "1.0.0".into(),
             },
             source_package: nomifun_agent_contracts::PackageRef {
                 id: "test.package".into(),
                 version: "1.0.0".into(),
             },
+            contribution_id: contribution_id.clone(),
+            contribution_lock: ContributionLock {
+                source_kind: ContributionSourceKind::PlatformBuiltin,
+                source_identity: StableSourceIdentity::from("test.package"),
+                mount_id: None,
+                miniapp_id: None,
+                mcp_binding_id: None,
+                contribution_id,
+                contract_digest: DIGEST.into(),
+            },
+            resolved_mount_id: PluginMountId::from("test.mount"),
+            resolved_source: PluginSourceMetadata {
+                source_kind: PluginSourceKind::Bundled,
+                source_identity: "test.package".into(),
+                source_digest: Some(DIGEST.into()),
+            },
+            target_artifact_digest: DIGEST.into(),
             schema_digest: DIGEST.into(),
-            dependency_path: Vec::new(),
+            dependency_path: vec![capability_id],
             required_runtime_features: BTreeSet::new(),
         }
     }

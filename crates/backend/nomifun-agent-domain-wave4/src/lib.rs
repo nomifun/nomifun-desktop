@@ -1124,7 +1124,8 @@ fn registration_for(
             entrypoint_profile: "trusted-in-process".to_owned(),
             entrypoint_id: format!("{}.entrypoint", spec.id),
             contract_version: VersionString::from(CONTRACT_VERSION),
-        },
+        }
+        .into(),
         contributions: PackageContributions {
             capabilities,
             skills: Vec::new(),
@@ -1298,6 +1299,10 @@ fn capability_manifest(
 
     Ok(CapabilityManifest {
         id: CapabilityId::from(spec.id),
+        contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
+            "capability:{}",
+            spec.id
+        )),
         version: VersionString::from(CONTRACT_VERSION),
         kind: spec.kind,
         package: package.clone(),
@@ -1892,7 +1897,11 @@ mod tests {
                 manifest.package_id.as_ref()
             );
             assert_eq!(
-                manifest.entrypoint.entrypoint_profile,
+                manifest
+                    .entrypoint
+                    .as_in_process()
+                    .expect("first-party entrypoint must be in-process")
+                    .entrypoint_profile,
                 "trusted-in-process"
             );
             let ids = manifest

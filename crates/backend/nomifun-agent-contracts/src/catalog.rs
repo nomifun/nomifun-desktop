@@ -366,7 +366,6 @@ impl CapabilityCatalogEntry {
 #[serde(deny_unknown_fields)]
 pub struct CapabilityCatalogMaterialization {
     pub manifest: CapabilityManifest,
-    pub contribution_id: ContributionId,
     pub provenance: CapabilityProvenance,
     pub release_state: CapabilityReleaseState,
     pub availability: BTreeMap<CapabilityConsumer, CatalogAvailability>,
@@ -403,7 +402,7 @@ impl CapabilityCatalogMaterializer {
                     reason: error.to_string(),
                 }
             })?,
-            contribution_id: input.contribution_id,
+            contribution_id: input.manifest.contribution_id.clone(),
             provenance: input.provenance,
             host_surfaces: input
                 .manifest
@@ -438,6 +437,23 @@ pub struct CapabilityOperationLock {
     pub target_artifact_digest: Option<DigestHex>,
 }
 
+impl CapabilityOperationLock {
+    pub fn validate(&self) -> Result<(), CapabilityCatalogContractError> {
+        validate_non_empty(self.capability.id.as_ref(), "capability.id")?;
+        validate_non_empty(self.capability.version.as_ref(), "capability.version")?;
+        self.contribution.validate().map_err(|violation| {
+            CapabilityCatalogContractError::InvalidField {
+                field: "contribution",
+                reason: violation.message,
+            }
+        })?;
+        if let Some(digest) = &self.target_artifact_digest {
+            validate_digest(digest, "target_artifact_digest")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CapabilityCatalogResolver {
     entries: Arc<[CapabilityCatalogEntry]>,
@@ -449,11 +465,17 @@ impl CapabilityCatalogResolver {
     ) -> Result<Self, CapabilityCatalogContractError> {
         entries.sort_by(|left, right| left.capability.cmp(&right.capability));
         let mut previous: Option<&CapabilityRef> = None;
+        let mut contribution_ids = BTreeSet::new();
         for entry in &entries {
             entry.validate()?;
             if previous == Some(&entry.capability) {
                 return Err(CapabilityCatalogContractError::DuplicateCapability {
                     capability: entry.capability.clone(),
+                });
+            }
+            if !contribution_ids.insert(entry.contribution_id.clone()) {
+                return Err(CapabilityCatalogContractError::DuplicateContribution {
+                    contribution_id: entry.contribution_id.clone(),
                 });
             }
             previous = Some(&entry.capability);
@@ -622,6 +644,8 @@ pub enum CapabilityCatalogContractError {
     CandidateRejected { release_state: CapabilityReleaseState },
     #[error("capability {capability:?} is duplicated in the formal Capability Catalog")]
     DuplicateCapability { capability: CapabilityRef },
+    #[error("contribution {contribution_id:?} is duplicated in the formal Capability Catalog")]
+    DuplicateContribution { contribution_id: ContributionId },
 }
 
 #[cfg(test)]
@@ -757,5 +781,18 @@ mod tests {
             lock.contribution.contribution_id,
             entry.contribution_id
         );
+        lock.validate().expect("resolved operation lock");
     }
+
+    #[test]
+    fn catalog_rejects_duplicate_contribution_identity() {
+        let first = fixture();
+        let mut second = fixture();
+        second.capability.id = crate::CapabilityId::from("example.second");
+        assert!(matches!(
+            CapabilityCatalogResolver::new(vec![first, second]),
+            Err(CapabilityCatalogContractError::DuplicateContribution { .. })
+        ));
+    }
+
 }

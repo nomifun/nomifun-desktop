@@ -1,15 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nomifun_agent_contracts::{
-    ActionId, AgentPresetRevision, CapabilityId, CapabilityRef, CapabilitySelection,
-    CanonicalSchemaRef, CompactOnDemandCapabilityEntry, DigestHex, ExecutionRoleId,
-    InstallationRoleBinding, ModelRouteId, OperationId, PlatformConstraint,
-    PrecomputedActivationPlan, PrincipalRef, ResolvedCapability, ResolvedMcpToolLock,
-    ResolvedRoleProviderLock, ResolvedSkillLock, ResolvedSnapshotContent,
-    ResolvedSnapshotEnvelope, ResolvedSnapshotId, ResolvedSnapshotRef, ResourceBindingId,
-    ResourceKind, RoleProviderSelection, RuntimeFeatureId,
-    RuntimeProfileKind, RuntimeTarget, SkillId, TypedResourceBinding, VersionString,
-    digest_payload,
+    ActionId, AgentPresetRevision, CapabilityConsumer, CapabilityId,
+    CapabilityOperationLock, CapabilityRef, CapabilitySelection, CanonicalSchemaRef,
+    CompactOnDemandCapabilityEntry, DigestHex, ExecutionRoleId, InstallationRoleBinding,
+    ModelRouteId, OperationId, PlatformConstraint, PrecomputedActivationPlan,
+    PrincipalRef, ResolvedCapability, ResolvedMcpToolLock, ResolvedRoleProviderLock,
+    ResolvedSkillLock, ResolvedSnapshotContent, ResolvedSnapshotEnvelope,
+    ResolvedSnapshotId, ResolvedSnapshotRef, ResourceBindingId, ResourceKind,
+    RoleProviderSelection, RuntimeFeatureId, RuntimeProfileKind, RuntimeTarget, SkillId,
+    TypedResourceBinding, VersionString, digest_payload,
 };
 use serde::Serialize;
 
@@ -91,6 +91,18 @@ impl CompiledSnapshot {
         &self.target_resource_bindings
     }
 
+    pub fn resolved_capability(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Option<&ResolvedCapability> {
+        self.envelope
+            .content
+            .initial_capabilities
+            .iter()
+            .chain(&self.envelope.content.on_demand_capabilities)
+            .find(|capability| &capability.capability.id == capability_id)
+    }
+
     /// Attach one target's concrete resources without changing the immutable
     /// Preset Snapshot identity. Capabilities continue to own the required
     /// resource kinds; this step only resolves those slots for a Session,
@@ -158,7 +170,7 @@ impl CompiledSnapshot {
 struct CompiledRuntimeProfileDigestInput {
     profile_kind: RuntimeProfileKind,
     required_runtime_features: BTreeSet<RuntimeFeatureId>,
-    registry_digest: DigestHex,
+    capability_operation_locks: Vec<CapabilityOperationLock>,
     initial_capabilities: Vec<CapabilityId>,
     on_demand_capabilities: Vec<CapabilityId>,
     on_demand_activation_plans: BTreeMap<CapabilityId, PrecomputedActivationPlan>,
@@ -196,6 +208,7 @@ impl AgentPresetCompiler {
 
         validate_direct_selections(registry, &initial_direct)?;
         validate_direct_selections(registry, &on_demand_direct)?;
+        validate_revision_capability_locks(registry, &request.revision)?;
 
         let mut paths = BTreeMap::<CapabilityId, Vec<CapabilityId>>::new();
         let mut initial_ids = BTreeSet::new();
@@ -288,7 +301,11 @@ impl AgentPresetCompiler {
             digest_payload(&CompiledRuntimeProfileDigestInput {
                 profile_kind: environment.required_runtime_profile,
                 required_runtime_features: required_runtime_features.clone(),
-                registry_digest: registry.registry_digest.clone(),
+                capability_operation_locks: initial_capabilities
+                    .iter()
+                    .chain(&on_demand_capabilities)
+                    .map(resolved_capability_operation_lock)
+                    .collect(),
                 initial_capabilities: initial_ids.iter().cloned().collect(),
                 on_demand_capabilities: on_demand_ids.iter().cloned().collect(),
                 on_demand_activation_plans: activation_plans.clone(),
@@ -424,6 +441,49 @@ fn validate_direct_selections(
             return Err(KernelError::ActionNotDeclared {
                 capability_id: capability.manifest.id.clone(),
                 action_id: action_id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_revision_capability_locks(
+    registry: &MaterializedRegistry,
+    revision: &AgentPresetRevision,
+) -> Result<(), KernelError> {
+    for selection in revision
+        .payload
+        .initial_capabilities
+        .iter()
+        .chain(&revision.payload.on_demand_capabilities)
+    {
+        let capability = registry
+            .capability(&selection.capability.id)
+            .ok_or_else(|| KernelError::CapabilityNotMaterialized {
+                capability_id: selection.capability.id.clone(),
+                version: selection.capability.version.clone(),
+            })?;
+        if capability.source.source_kind
+            == nomifun_agent_contracts::PluginSourceKind::TestFixture
+        {
+            continue;
+        }
+        let frozen = revision
+            .contribution_locks
+            .iter()
+            .find(|lock| lock.contribution_id == capability.contribution_id)
+            .ok_or_else(|| KernelError::CapabilityProvenanceDrift {
+                capability_id: selection.capability.id.clone(),
+                reason: format!(
+                    "Revision is missing contribution lock {}",
+                    capability.contribution_id.as_ref()
+                ),
+            })?;
+        if frozen != &capability.contribution_lock {
+            return Err(KernelError::CapabilityProvenanceDrift {
+                capability_id: selection.capability.id.clone(),
+                reason: "Revision contribution lock does not match the materialized target"
+                    .to_owned(),
             });
         }
     }
@@ -663,6 +723,11 @@ fn resolved_capabilities(
                     version: capability.manifest.version.clone(),
                 },
                 source_package: capability.manifest.package.clone(),
+                contribution_id: capability.contribution_id.clone(),
+                contribution_lock: capability.contribution_lock.clone(),
+                resolved_mount_id: capability.mount_id.clone(),
+                resolved_source: capability.source.clone(),
+                target_artifact_digest: capability.target_artifact_digest.clone(),
                 schema_digest: capability.schema_digest.clone(),
                 dependency_path: paths
                     .get(capability_id)
@@ -677,6 +742,17 @@ fn resolved_capabilities(
             })
         })
         .collect()
+}
+
+fn resolved_capability_operation_lock(
+    capability: &ResolvedCapability,
+) -> CapabilityOperationLock {
+    CapabilityOperationLock {
+        capability: capability.capability.clone(),
+        consumer: CapabilityConsumer::Agent,
+        contribution: capability.contribution_lock.clone(),
+        target_artifact_digest: Some(capability.target_artifact_digest.clone()),
+    }
 }
 
 fn compile_activation_plans(

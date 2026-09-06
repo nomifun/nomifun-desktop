@@ -11,12 +11,13 @@ use nomifun_agent_contracts::{
     CapabilityKind, CapabilityManifest, CapabilityRef, CancellationDescriptor,
     CanonicalSchemaRef, CorrelationId, DeclaredServiceViewDescriptor, DigestHex, EffectClass,
     ExactRoleContractRef, HostPortId, HostPortRef, IdempotencyKey,
-    InProcessEntrypointMetadata, LocalizedMetadata, LogicalArtifactRef, ManagedTaskRegistrationDescriptor,
-    McpServerId, McpToolCapabilityMapping, McpToolKey, OperationId, PackageContributions,
-    PackageId, PackageManifest, PackageRef, PlatformConstraint, PluginBootCriticality,
-    PluginBootState, PluginContextDescriptor, PluginDesiredState, PluginEffectiveState,
-    PluginIdentityDescriptor, PluginMountId, PluginRegistrarDescriptor, PluginRegistrarOperation,
-    PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
+    InProcessEntrypointMetadata, JavaScriptEntrypointMetadata, LocalizedMetadata,
+    LogicalArtifactRef, ManagedTaskRegistrationDescriptor, McpServerId,
+    McpToolCapabilityMapping, McpToolKey, OperationId, PackageContributions,
+    PackageEntrypointMetadata, PackageId, PackageManifest, PackageRef, PlatformConstraint,
+    PluginBootCriticality, PluginBootState, PluginContextDescriptor, PluginDesiredState,
+    PluginEffectiveState, PluginIdentityDescriptor, PluginMountId, PluginRegistrarDescriptor,
+    PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
     PluginStateCompareAndSwapOutcome, PluginStateHandleDescriptor, PluginStateMethod,
     PresetRevisionRef, PrincipalRef, ResolvedRoleProviderLock, ResourceBindingId, ResourceId,
     ResourceKind, RoleContractKey, RoleContractManifest, RoleMemberContract,
@@ -34,7 +35,7 @@ use crate::{
     CapabilityInvocationRequest, CompileRequest, CompilerEnvironment, CompletedTurnBoundary,
     ContextContributionFactory, ContextContributionRequest, ContextContributionResult,
     HostPluginStateApi, InMemoryPluginStatePersistence, KernelError, KernelRegistry,
-    MaterializationPolicy, PluginRegistration, PluginStatePersistence, ServiceKey,
+    MaterializationPolicy, Materializer, PluginRegistration, PluginStatePersistence, ServiceKey,
     ResourceHandle, ResourceHandleIdentity, ResourceProviderFactory, ResourceProviderRequest,
     ResourceProviderResult, RoleMemberAdmission, RoleMemberInvocationRequest, RoleToolHandler,
     RoleToolInvocationContext, RoleToolOperationRequest, SessionCapabilityState,
@@ -122,6 +123,10 @@ fn registration_for(
     let action_output_schema_digest = digest_payload(&action_output_schema).unwrap();
     let capability = CapabilityManifest {
         id: capability_ref.id.clone(),
+        contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
+            "capability:{}",
+            capability_ref.id.as_ref()
+        )),
         version: capability_ref.version.clone(),
         kind: CapabilityKind::Tool,
         package: package.clone(),
@@ -199,7 +204,8 @@ fn registration_for(
             entrypoint_profile: "trusted-in-process".to_owned(),
             entrypoint_id: format!("{package_id}.entrypoint"),
             contract_version: VersionString::from(VERSION),
-        },
+        }
+        .into(),
         contributions: PackageContributions {
             capabilities: vec![capability],
             skills: vec![skill],
@@ -470,6 +476,9 @@ fn role_capability(
         .collect();
     CapabilityManifest {
         id: CapabilityId::from(capability_id),
+        contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
+            "capability:{capability_id}"
+        )),
         version: VersionString::from(VERSION),
         kind,
         package: package.clone(),
@@ -984,6 +993,25 @@ async fn sample_echo_uses_materialize_compile_activate_authorize_invoke_and_rest
     assert!(materialized
         .mcp_for_capability(&CapabilityId::from(SAMPLE_CAPABILITY))
         .is_some());
+    let exact_capability = materialized
+        .capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+        .expect("materialized sample capability");
+    assert_eq!(
+        exact_capability.contribution_id,
+        exact_capability.manifest.contribution_id
+    );
+    assert_eq!(
+        exact_capability.contribution_lock.contract_digest,
+        exact_capability.schema_digest
+    );
+    assert_eq!(
+        exact_capability.target_artifact_digest,
+        materialized
+            .mcp_for_capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+            .unwrap()
+            .mapping
+            .schema_digest
+    );
 
     let owner = principal("user-a");
     let revision = sample_revision(&owner.principal_id);
@@ -1090,6 +1118,249 @@ async fn sample_echo_uses_materialize_compile_activate_authorize_invoke_and_rest
         .await
         .unwrap();
     assert_eq!(second.0, json!({"echo": "prefix:again", "count": 2}));
+}
+
+#[tokio::test]
+async fn frozen_snapshot_survives_unrelated_registry_publication() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let first = registry
+        .replace_all(vec![sample_registration("stable:")])
+        .unwrap();
+    let owner = principal("unrelated-publication-owner");
+    let compiled = AgentPresetCompiler::compile(
+        &first,
+        &compiler_environment(first.registry_digest.clone()),
+        compile_request(
+            sample_revision(&owner.principal_id),
+            owner.clone(),
+        ),
+    )
+    .unwrap()
+    .with_target_resource_bindings(
+        &owner,
+        vec![resource_binding(&owner.principal_id)],
+    )
+    .unwrap();
+    let active = SessionCapabilityState::new(&compiled);
+    active
+        .activate_at_boundary(
+            0,
+            &CapabilityId::from(SAMPLE_CAPABILITY),
+            CompletedTurnBoundary::committed(OperationId::from(
+                "unrelated-publication-turn",
+            )),
+        )
+        .unwrap();
+
+    registry
+        .replace_all(vec![
+            sample_registration("stable:"),
+            registration_for(
+                "sample.unrelated",
+                "sample-unrelated",
+                "sample.unrelated.run",
+                "sample.unrelated-guidance",
+                "sample.unrelated.server",
+                "unrelated:",
+            ),
+        ])
+        .unwrap();
+
+    let result = registry
+        .invoke(
+            &compiled,
+            &active.snapshot().unwrap(),
+            invocation(&compiled, owner, 1, "still-valid"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.0,
+        json!({"echo": "stable:still-valid", "count": 1})
+    );
+}
+
+#[tokio::test]
+async fn invoke_rejects_exact_mount_and_artifact_drift_without_fallback() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let first = registry
+        .replace_all(vec![sample_registration("stable:")])
+        .unwrap();
+    let owner = principal("target-drift-owner");
+    let compiled = AgentPresetCompiler::compile(
+        &first,
+        &compiler_environment(first.registry_digest.clone()),
+        compile_request(
+            sample_revision(&owner.principal_id),
+            owner.clone(),
+        ),
+    )
+    .unwrap()
+    .with_target_resource_bindings(
+        &owner,
+        vec![resource_binding(&owner.principal_id)],
+    )
+    .unwrap();
+    let active = SessionCapabilityState::new(&compiled);
+    active
+        .activate_at_boundary(
+            0,
+            &CapabilityId::from(SAMPLE_CAPABILITY),
+            CompletedTurnBoundary::committed(OperationId::from("target-drift-turn")),
+        )
+        .unwrap();
+    let active = active.snapshot().unwrap();
+
+    registry
+        .replace_all(vec![registration_for(
+            SAMPLE_PACKAGE,
+            "sample-echo-remounted",
+            SAMPLE_CAPABILITY,
+            SAMPLE_SKILL,
+            "sample.echo.server",
+            "remounted:",
+        )])
+        .unwrap();
+    assert!(matches!(
+        registry
+            .invoke(
+                &compiled,
+                &active,
+                invocation(&compiled, owner.clone(), 1, "mount-drift"),
+            )
+            .await,
+        Err(KernelError::CapabilityProvenanceDrift { .. })
+    ));
+
+    let mut changed_artifact = sample_registration("changed:");
+    changed_artifact
+        .metadata
+        .manifest
+        .payload
+        .contributions
+        .mcp_tools[0]
+        .schema_digest = DigestHex::from("c".repeat(64));
+    refresh_manifest(&mut changed_artifact);
+    registry.replace_all(vec![changed_artifact]).unwrap();
+    assert!(matches!(
+        registry
+            .invoke(
+                &compiled,
+                &active,
+                invocation(&compiled, owner, 1, "artifact-drift"),
+            )
+            .await,
+        Err(KernelError::CapabilityProvenanceDrift { .. })
+    ));
+}
+
+#[tokio::test]
+async fn invoke_rejects_frozen_contribution_identity_drift() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry
+        .replace_all(vec![sample_registration("stable:")])
+        .unwrap();
+    let owner = principal("contribution-drift-owner");
+    let mut compiled = AgentPresetCompiler::compile(
+        &materialized,
+        &compiler_environment(materialized.registry_digest.clone()),
+        compile_request(
+            sample_revision(&owner.principal_id),
+            owner.clone(),
+        ),
+    )
+    .unwrap()
+    .with_target_resource_bindings(
+        &owner,
+        vec![resource_binding(&owner.principal_id)],
+    )
+    .unwrap();
+    let resolved = compiled
+        .envelope
+        .content
+        .on_demand_capabilities
+        .first_mut()
+        .expect("sample on-demand capability");
+    resolved.contribution_id =
+        nomifun_agent_contracts::ContributionId::from("capability:drifted");
+    resolved.contribution_lock.contribution_id =
+        resolved.contribution_id.clone();
+    compiled.envelope.snapshot_ref.snapshot_digest =
+        digest_payload(&compiled.envelope.content).unwrap();
+    let active = SessionCapabilityState::new(&compiled);
+    active
+        .activate_at_boundary(
+            0,
+            &CapabilityId::from(SAMPLE_CAPABILITY),
+            CompletedTurnBoundary::committed(OperationId::from(
+                "contribution-drift-turn",
+            )),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        registry
+            .invoke(
+                &compiled,
+                &active.snapshot().unwrap(),
+                invocation(&compiled, owner, 1, "contribution-drift"),
+            )
+            .await,
+        Err(KernelError::CapabilityProvenanceDrift { .. })
+    ));
+}
+
+#[test]
+fn compiler_rejects_revision_contribution_lock_drift() {
+    let mut registration = sample_registration("");
+    registration.metadata.source.source_kind = PluginSourceKind::Bundled;
+    registration.metadata.context.source.source_kind = PluginSourceKind::Bundled;
+    let materialized = Materializer::materialize(
+        &MaterializationPolicy::stable(VERSION),
+        &[registration],
+        1,
+    )
+    .unwrap();
+    let owner = principal("revision-lock-owner");
+    let mut revision = sample_revision(&owner.principal_id);
+    revision.contribution_locks = vec![
+        materialized
+            .capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+            .unwrap()
+            .contribution_lock
+            .clone(),
+    ];
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    AgentPresetCompiler::compile(
+        &materialized,
+        &compiler_environment(materialized.registry_digest.clone()),
+        compile_request(revision.clone(), owner.clone()),
+    )
+    .expect("matching exact lock must compile");
+
+    revision.contribution_locks[0].source_identity =
+        nomifun_agent_contracts::StableSourceIdentity::from("drifted-source");
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    assert!(matches!(
+        AgentPresetCompiler::compile(
+            &materialized,
+            &compiler_environment(materialized.registry_digest.clone()),
+            compile_request(revision, owner),
+        ),
+        Err(KernelError::CapabilityProvenanceDrift { .. })
+    ));
 }
 
 #[tokio::test]
@@ -1445,6 +1716,38 @@ fn invalid_config_and_duplicate_capability_do_not_publish_partial_generation() {
         Err(KernelError::DuplicateCapability { .. })
     ));
     assert_eq!(registry.snapshot().unwrap().generation, first.generation);
+
+    let mut duplicate_contribution = registration_for(
+        "sample.echo.contribution-other",
+        "sample-echo-contribution-other",
+        "sample.echo.contribution-other",
+        "sample.echo-contribution-guidance",
+        "sample.echo.contribution-other.server",
+        "other:",
+    );
+    duplicate_contribution
+        .metadata
+        .manifest
+        .payload
+        .contributions
+        .capabilities[0]
+        .contribution_id = sample_registration("ok:")
+        .metadata
+        .manifest
+        .payload
+        .contributions
+        .capabilities[0]
+        .contribution_id
+        .clone();
+    refresh_manifest(&mut duplicate_contribution);
+    assert!(matches!(
+        registry.replace_all(vec![
+            sample_registration("ok:"),
+            duplicate_contribution
+        ]),
+        Err(KernelError::DuplicateContribution { .. })
+    ));
+    assert_eq!(registry.snapshot().unwrap().generation, first.generation);
 }
 
 #[test]
@@ -1634,6 +1937,81 @@ fn materialization_is_order_independent_and_stable_policy_excludes_test_fixture(
     assert!(matches!(
         production.replace_all(vec![sample_registration("")]),
         Err(KernelError::SourceNotAllowed { .. })
+    ));
+}
+
+#[test]
+fn materializer_validates_entrypoint_contract_versions_by_kind() {
+    let policy = MaterializationPolicy::stable_with_test_fixtures(VERSION);
+    let mut javascript = sample_registration("");
+    javascript.metadata.manifest.payload.entrypoint = JavaScriptEntrypointMetadata {
+        normalized_relative_path: "main.mjs".to_owned(),
+        module_digest: digest_bytes(b"export default {};"),
+        host_protocol_version: VersionString::from(VERSION),
+        sdk_contract_version: VersionString::from(VERSION),
+    }
+    .into();
+    let serialized =
+        serde_json::to_value(&javascript.metadata.manifest.payload.entrypoint).unwrap();
+    assert_eq!(serialized["kind"], "javascript");
+    let round_trip: PackageEntrypointMetadata = serde_json::from_value(serialized).unwrap();
+    assert_eq!(
+        round_trip
+            .as_javascript()
+            .expect("round-trip JavaScript entrypoint")
+            .normalized_relative_path,
+        "main.mjs"
+    );
+    refresh_manifest(&mut javascript);
+
+    let registry = KernelRegistry::new(
+        policy.clone(),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    registry.replace_all(vec![javascript.clone()]).unwrap();
+
+    javascript
+        .metadata
+        .manifest
+        .payload
+        .entrypoint
+        .as_javascript_mut()
+        .expect("JavaScript entrypoint")
+        .sdk_contract_version = VersionString::from("not-semver");
+    refresh_manifest(&mut javascript);
+    let registry = KernelRegistry::new(
+        policy.clone(),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    assert!(matches!(
+        registry.replace_all(vec![javascript]),
+        Err(KernelError::InvalidVersion {
+            field: "entrypoint.javascript.sdk_contract_version",
+            ..
+        })
+    ));
+
+    let mut mismatched = sample_registration("");
+    mismatched.metadata.manifest.payload.entrypoint =
+        JavaScriptEntrypointMetadata {
+            normalized_relative_path: "main.mjs".to_owned(),
+            module_digest: digest_bytes(b"export default {};"),
+            host_protocol_version: VersionString::from("2.0.0"),
+            sdk_contract_version: VersionString::from(VERSION),
+        }
+        .into();
+    refresh_manifest(&mut mismatched);
+    let registry = KernelRegistry::new(
+        policy,
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    assert!(matches!(
+        registry.replace_all(vec![mismatched]),
+        Err(KernelError::InvalidRegistration { reason, .. })
+            if reason.contains("entrypoint host contract version")
     ));
 }
 
