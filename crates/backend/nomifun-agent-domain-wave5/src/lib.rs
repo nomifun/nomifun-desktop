@@ -1543,7 +1543,8 @@ fn registration_for(
             entrypoint_profile: "trusted-in-process".to_owned(),
             entrypoint_id: format!("{package_id}.entrypoint"),
             contract_version: VersionString::from(VERSION),
-        },
+        }
+        .into(),
         contributions: PackageContributions {
             capabilities: capability_manifests,
             skills: Vec::new(),
@@ -1712,6 +1713,10 @@ fn capability_manifest(
     };
     CapabilityManifest {
         id: capability_id,
+        contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
+            "capability:{}",
+            spec.id
+        )),
         version: VersionString::from(VERSION),
         kind: spec.kind,
         package: package.clone(),
@@ -2157,7 +2162,8 @@ mod tests {
                 entrypoint_profile: "trusted-in-process".to_owned(),
                 entrypoint_id: "platform.agent-core.test".to_owned(),
                 contract_version: VersionString::from(VERSION),
-            },
+            }
+            .into(),
             contributions: PackageContributions::default(),
         };
         let metadata = PluginRegistrationMetadata {

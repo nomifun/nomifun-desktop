@@ -342,8 +342,13 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
             .iter()
             .map(|kind| ResourceKind::from(*kind))
             .collect::<BTreeSet<_>>();
+        let contribution_id = nomifun_agent_contracts::ContributionId::from(format!(
+            "capability:{}",
+            capability_id.as_ref()
+        ));
         capability_manifests.push(CapabilityManifest {
             id: capability_id,
+            contribution_id,
             version: VersionString::from(CONTRACT_VERSION),
             kind: capability.kind,
             package: package_ref.clone(),
@@ -385,7 +390,8 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
             entrypoint_profile: "trusted-in-process".to_owned(),
             entrypoint_id: format!("{}.entrypoint", spec.id),
             contract_version: VersionString::from(CONTRACT_VERSION),
-        },
+        }
+        .into(),
         contributions: PackageContributions {
             capabilities: capability_manifests,
             skills: Vec::<SkillDefinition>::new(),

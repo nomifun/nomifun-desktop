@@ -1,0 +1,24 @@
+{
+  "digest_algorithm": "sorted-json-sha256-v1",
+  "payload": {
+    "schema_version": "1.0.0",
+    "release_profile_version": "1.0.0",
+    "service_host_protocol_version": "1.0.0",
+    "service_sdk_contract_version": "1.0.0",
+    "bridge_contract_version": "1.0.0",
+    "service_test_contract_version": "1.0.0",
+    "share_bundle_version": "1.0.0",
+    "whole_app_backup_version": "1.0.0",
+    "service_lifecycles": [
+      "on_demand",
+      "continuous"
+    ],
+    "bridge_transports": [
+      "message_channel_v1"
+    ],
+    "max_services_per_miniapp": 1,
+    "ui_only_starts_node": false,
+    "exposes_localhost_bridge": false
+  },
+  "payload_digest": "b3a78693734bf6893181deeebf5fdf0eaaa2ea50858e6edecd3491fdca6f3503"
+}

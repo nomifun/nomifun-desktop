@@ -6,7 +6,7 @@ use nomifun_agent_contracts::{
     CapabilityCatalogMaterializer, CapabilityConsumer, CapabilityId,
     CapabilityManifest, CapabilityOwner, CapabilityProvenance, CapabilityRef,
     CapabilityReleaseState, CanonicalErrorCode, CatalogAvailability,
-    ContributionId, ContributionSourceKind, McpBindingId,
+    ContributionSourceKind, McpBindingId,
     McpToolCapabilityMapping, OfficialPresetKey,
     OfficialPresetSeedManifestPayload, PackageRef, PluginSourceKind,
     SkillDefinition, SkillRef, StableSourceIdentity,
@@ -291,10 +291,6 @@ impl CatalogSnapshot {
         CapabilityCatalogMaterializer::materialize(
             CapabilityCatalogMaterialization {
                 manifest: manifest.clone(),
-                contribution_id: ContributionId::from(format!(
-                    "capability:{}",
-                    manifest.id.as_ref()
-                )),
                 provenance,
                 release_state,
                 availability,

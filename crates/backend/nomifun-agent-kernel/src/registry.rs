@@ -322,6 +322,17 @@ impl KernelRegistry {
         request: CapabilityInvocationRequest,
     ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
         ThinAuthority::enforce(snapshot, active, &request)?;
+        {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            validate_exact_capability_target(
+                &published,
+                snapshot,
+                &request.capability_id,
+            )?;
+        }
         let role_request = RoleMemberInvocationRequest {
             principal: request.principal.clone(),
             session_owner: request.session_owner.clone(),
@@ -392,16 +403,6 @@ impl KernelRegistry {
                 .published
                 .read()
                 .map_err(|_| KernelError::RegistryPoisoned)?;
-            if snapshot.registry_generation != published.materialized.generation
-                || snapshot.registry_digest != published.materialized.registry_digest
-            {
-                return Err(KernelError::RegistryGenerationMismatch {
-                    expected_generation: snapshot.registry_generation,
-                    expected_digest: snapshot.registry_digest.clone(),
-                    actual_generation: published.materialized.generation,
-                    actual_digest: published.materialized.registry_digest.clone(),
-                });
-            }
             let binding = published.handlers.get(&request.capability_id).ok_or_else(|| {
                 KernelError::MissingCapabilityHandler {
                     mount_id: published.materialized.capabilities[&request.capability_id]
@@ -410,6 +411,17 @@ impl KernelRegistry {
                     capability_id: request.capability_id.clone(),
                 }
             })?;
+            let frozen = snapshot
+                .resolved_capability(&request.capability_id)
+                .ok_or_else(|| KernelError::CapabilityNotInPreset {
+                    capability_id: request.capability_id.clone(),
+                })?;
+            if binding.mount_id != frozen.resolved_mount_id {
+                return capability_provenance_drift(
+                    &request.capability_id,
+                    "handler binding does not match the frozen mount",
+                );
+            }
             let state = published
                 .state_handles
                 .get(&binding.mount_id)
@@ -853,6 +865,59 @@ impl KernelRegistry {
     }
 }
 
+fn validate_exact_capability_target(
+    published: &PublishedRegistry,
+    snapshot: &CompiledSnapshot,
+    capability_id: &CapabilityId,
+) -> Result<(), KernelError> {
+    let frozen = snapshot
+        .resolved_capability(capability_id)
+        .ok_or_else(|| KernelError::CapabilityNotInPreset {
+            capability_id: capability_id.clone(),
+        })?;
+    let current = published
+        .materialized
+        .capability(capability_id)
+        .ok_or_else(|| KernelError::CapabilityProvenanceDrift {
+            capability_id: capability_id.clone(),
+            reason: "the frozen target is no longer materialized".to_owned(),
+        })?;
+    if frozen.capability.version != current.manifest.version {
+        return capability_provenance_drift(capability_id, "capability version changed");
+    }
+    if frozen.source_package != current.manifest.package {
+        return capability_provenance_drift(capability_id, "source package changed");
+    }
+    if frozen.contribution_id != current.contribution_id
+        || frozen.contribution_lock != current.contribution_lock
+    {
+        return capability_provenance_drift(capability_id, "contribution lock changed");
+    }
+    if frozen.resolved_mount_id != current.mount_id {
+        return capability_provenance_drift(capability_id, "resolved mount changed");
+    }
+    if frozen.resolved_source != current.source {
+        return capability_provenance_drift(capability_id, "resolved source changed");
+    }
+    if frozen.target_artifact_digest != current.target_artifact_digest {
+        return capability_provenance_drift(capability_id, "target artifact changed");
+    }
+    if frozen.schema_digest != current.schema_digest {
+        return capability_provenance_drift(capability_id, "capability contract changed");
+    }
+    Ok(())
+}
+
+fn capability_provenance_drift<T>(
+    capability_id: &CapabilityId,
+    reason: impl Into<String>,
+) -> Result<T, KernelError> {
+    Err(KernelError::CapabilityProvenanceDrift {
+        capability_id: capability_id.clone(),
+        reason: reason.into(),
+    })
+}
+
 async fn dispatch_resolved_role_tool(
     target: RoleMemberDispatchTarget,
     context: ResolvedRoleMemberContext,
@@ -1289,8 +1354,9 @@ fn resolve_role_member(
             });
         }
     };
-    if expected_registry_generation != published.materialized.generation
-        || expected_registry_digest != published.materialized.registry_digest
+    if agent_snapshot.is_none()
+        && (expected_registry_generation != published.materialized.generation
+            || expected_registry_digest != published.materialized.registry_digest)
     {
         return Err(KernelError::RegistryGenerationMismatch {
             expected_generation: expected_registry_generation,
@@ -1298,6 +1364,13 @@ fn resolve_role_member(
             actual_generation: published.materialized.generation,
             actual_digest: published.materialized.registry_digest.clone(),
         });
+    }
+    if let Some(snapshot) = agent_snapshot {
+        validate_exact_capability_target(
+            published,
+            snapshot,
+            &request.capability_id,
+        )?;
     }
     let capability = published
         .materialized

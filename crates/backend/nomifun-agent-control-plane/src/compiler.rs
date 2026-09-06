@@ -4,10 +4,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use nomifun_agent_contracts::{
     AgentPresetRevision, AgentPresetRevisionPayload, CanonicalErrorCode,
-    CapabilityConsumer, ContributionLock, ContributionSourceKind, DigestHex,
+    CapabilityConsumer, ContributionId, ContributionLock, ContributionSourceKind, DigestHex,
     McpToolCapabilityMapping, OfficialPresetKey, OperationId, PluginMountId,
     PresetRevisionRef, PrincipalRef, ResolvedCapability, ResolvedSnapshotEnvelope,
-    SkillRef, StableSourceIdentity, UserId, VersionString, digest_payload,
+    PluginSourceKind, PluginSourceMetadata, SkillRef,
+    StableSourceIdentity, UserId, VersionString, digest_payload,
 };
 use nomifun_agent_kernel::{
     AgentPresetCompiler as KernelAgentPresetCompiler, CompileRequest, CompilerEnvironment,
@@ -138,12 +139,25 @@ impl PresetPreviewCompiler {
         let draft_digest = digest_payload(&payload)
             .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
         let clean = current_revision.is_some_and(|current| current.payload == payload);
+        let canonical_inputs = if clean {
+            None
+        } else {
+            Some(self.canonical_inputs()?)
+        };
         let contribution_locks = if clean {
             current_revision
                 .map(|revision| revision.contribution_locks.clone())
                 .unwrap_or_default()
         } else {
-            contribution_locks_for_payload(&payload, catalog)?
+            contribution_locks_for_payload(
+                &payload,
+                catalog,
+                canonical_inputs
+                    .as_ref()
+                    .expect("dirty compilation has canonical inputs")
+                    .0
+                    .as_ref(),
+            )?
         };
         let revision_digest = digest_payload(&nomifun_agent_contracts::AgentPresetRevisionDigestInput {
             payload: payload.clone(),
@@ -204,7 +218,8 @@ impl PresetPreviewCompiler {
         let compiled = if clean || has_errors(&diagnostics) {
             None
         } else {
-            let (registry, mut environment) = self.canonical_inputs()?;
+            let (registry, mut environment) = canonical_inputs
+                .expect("dirty compilation has canonical inputs");
             let selected_capabilities = payload
                 .initial_capabilities
                 .iter()
@@ -391,6 +406,7 @@ fn validate_direct_catalog_availability(
 fn contribution_locks_for_payload(
     payload: &AgentPresetRevisionPayload,
     catalog: &CatalogSnapshot,
+    registry: &MaterializedRegistry,
 ) -> Result<Vec<ContributionLock>, ControlPlaneError> {
     let mut locks = Vec::new();
     let mut seen = BTreeSet::new();
@@ -410,28 +426,31 @@ fn contribution_locks_for_payload(
             // but never mint formal Catalog provenance or Revision locks.
             continue;
         }
-        let entry = catalog
-            .capability_catalog_entry(&selection.capability)?
+        let materialized = registry
+            .capability(&selection.capability.id)
+            .filter(|materialized| {
+                materialized.manifest.version == selection.capability.version
+            })
             .ok_or_else(|| {
                 ControlPlaneError::canonical(
                     "CAPABILITY_NOT_MATERIALIZED",
                     axum::http::StatusCode::UNPROCESSABLE_ENTITY,
                     format!(
-                        "capability {}@{} is not materialized",
+                        "capability {}@{} is not present in the canonical Kernel registry",
                         selection.capability.id.as_ref(),
                         selection.capability.version.as_ref()
                     ),
                 )
             })?;
-        let operation_lock = entry
-            .operation_lock(CapabilityConsumer::Agent)
-            .map_err(|error| {
-                ControlPlaneError::canonical(
-                    error.code(),
-                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                    error.to_string(),
-                )
-            })?;
+        let operation_lock =
+            materialized.operation_lock(CapabilityConsumer::Agent);
+        operation_lock.validate().map_err(|error| {
+            ControlPlaneError::canonical(
+                "CAPABILITY_CATALOG_INVALID",
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                error.to_string(),
+            )
+        })?;
         let contribution_id = operation_lock.contribution.contribution_id.clone();
         if seen.insert(contribution_id.as_ref().to_owned()) {
             locks.push(operation_lock.contribution);
@@ -615,6 +634,51 @@ fn preview_summary(
     }
 }
 
+fn preview_resolved_capability(
+    selection: &nomifun_agent_contracts::CapabilitySelection,
+    catalog: &CatalogSnapshot,
+) -> ResolvedCapability {
+    let manifest = catalog.find_capability(&selection.capability);
+    let source_package = manifest
+        .map(|capability| capability.package.clone())
+        .unwrap_or_else(|| nomifun_agent_contracts::PackageRef {
+            id: "unmaterialized".into(),
+            version: "0.0.0".into(),
+        });
+    let contribution_id = manifest
+        .map(|capability| capability.contribution_id.clone())
+        .unwrap_or_else(|| {
+            ContributionId::from(format!(
+                "unmaterialized:{}",
+                selection.capability.id.as_ref()
+            ))
+        });
+    ResolvedCapability {
+        capability: selection.capability.clone(),
+        source_package,
+        contribution_id: contribution_id.clone(),
+        contribution_lock: ContributionLock {
+            source_kind: ContributionSourceKind::PlatformBuiltin,
+            source_identity: StableSourceIdentity::from("unmaterialized"),
+            mount_id: None,
+            miniapp_id: None,
+            mcp_binding_id: None,
+            contribution_id,
+            contract_digest: DigestHex::from("0".repeat(64)),
+        },
+        resolved_mount_id: PluginMountId::from("unmaterialized"),
+        resolved_source: PluginSourceMetadata {
+            source_kind: PluginSourceKind::Bundled,
+            source_identity: "unmaterialized".to_owned(),
+            source_digest: None,
+        },
+        target_artifact_digest: DigestHex::from("0".repeat(64)),
+        schema_digest: DigestHex::from("0".repeat(64)),
+        dependency_path: vec![selection.capability.id.clone()],
+        required_runtime_features: BTreeSet::new(),
+    }
+}
+
 fn preview_inspector(
     release: &CompilerReleaseInputs,
     candidate_revision_ref: &PresetRevisionRef,
@@ -628,21 +692,7 @@ fn preview_inspector(
             payload
                 .initial_capabilities
                 .iter()
-                .map(|selection| ResolvedCapability {
-                    capability: selection.capability.clone(),
-                    source_package: catalog
-                        .find_capability(&selection.capability)
-                        .map(|capability| capability.package.clone())
-                        .unwrap_or_else(|| {
-                            nomifun_agent_contracts::PackageRef {
-                                id: "unmaterialized".into(),
-                                version: "0.0.0".into(),
-                            }
-                        }),
-                    schema_digest: DigestHex::from("unmaterialized"),
-                    dependency_path: vec![selection.capability.id.clone()],
-                    required_runtime_features: BTreeSet::new(),
-                })
+                .map(|selection| preview_resolved_capability(selection, catalog))
                 .collect()
         });
     let on_demand_refs = snapshot
@@ -651,21 +701,7 @@ fn preview_inspector(
             payload
                 .on_demand_capabilities
                 .iter()
-                .map(|selection| ResolvedCapability {
-                    capability: selection.capability.clone(),
-                    source_package: catalog
-                        .find_capability(&selection.capability)
-                        .map(|capability| capability.package.clone())
-                        .unwrap_or_else(|| {
-                            nomifun_agent_contracts::PackageRef {
-                                id: "unmaterialized".into(),
-                                version: "0.0.0".into(),
-                            }
-                        }),
-                    schema_digest: DigestHex::from("unmaterialized"),
-                    dependency_path: vec![selection.capability.id.clone()],
-                    required_runtime_features: BTreeSet::new(),
-                })
+                .map(|selection| preview_resolved_capability(selection, catalog))
                 .collect()
         });
     let selected_ids = snapshot

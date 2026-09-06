@@ -385,7 +385,8 @@ pub(crate) fn agent_session_service_registration(
             entrypoint_profile: "trusted-in-process".to_owned(),
             entrypoint_id: "platform.agent-core.entrypoint".to_owned(),
             contract_version: VersionString::from(AGENT_SESSION_SERVICE_VERSION),
-        },
+        }
+        .into(),
         contributions: PackageContributions::default(),
     };
     let identity = PluginIdentityDescriptor {

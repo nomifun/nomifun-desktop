@@ -6750,6 +6750,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "nomifun-js-runtime"
+version = "0.7.4"
+dependencies = [
+ "async-trait",
+ "dunce",
+ "hex",
+ "nomifun-agent-contracts",
+ "nomifun-net",
+ "reqwest 0.12.28",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "which 7.0.3",
+ "zip 2.4.2",
+]
+
+[[package]]
 name = "nomifun-knowledge"
 version = "0.7.4"
 dependencies = [

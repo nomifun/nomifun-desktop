@@ -28,6 +28,22 @@
 5. Windows 验收只覆盖真实 Desktop x64、NSIS 安装版、键鼠桌面布局和 accessibility，
    不运行手机视口。模型相关 Chat Dev/E2E 固定使用 Credential Manager 中的 StepFun
    Coding Plan `step-3.7-flash`，凭据不进入源码、日志、argv 或 Git。
+6. 2026-09-06 的 N1-0 实现已把 `contribution_id` 收归唯一 `CapabilityManifest`，
+   `plugin-package-v1` 直接嵌入 canonical `PackageManifest`，entrypoint 只有
+   `in_process | javascript` 一套联合类型。Kernel/Control Plane 不再从 capability ID
+   建立第二个 contribution identity，也不再要求无关全局 Registry generation 完全相等；
+   Snapshot 与 invoke 改为比较 exact contribution/Mount/Source/Artifact。
+7. Plugin Host wire 已按 Shared Extension、Candidate Test、Build 三种 role 分开，
+   Hello 不是普通 RPC；请求和响应绑定 role、direction、generation、request ID 与
+   exact target。MiniApp M1 使用独立 Service/Bridge 合同，不把 Service 方法塞回
+   Plugin Host method set。
+8. 独立 `MiniAppM1ContractManifest` 与 `miniapp-release-v1` 已进入同一个 contract
+   generator。Bridge 的 Web 内容只发送 call ID、method/payload 或 KV 操作，MiniApp、
+   Active Release、epoch、owner 与 Surface Session 均由 Host-owned MessageChannel
+   port 绑定；不存在 localhost port/token wire。
+9. Windows Node foundation 已实现手工/PATH/managed 三类 probe 与全局试切换。
+   Managed 下载只接受用户确认后的 Node 官方 LTS，校验官方 SHASUMS 后发布；
+   macOS/Linux archive 实现和原生验证仍按本文总顺序延后，不影响 Windows 主线继续。
 
 ## 0. 怎样阅读这份文档
 

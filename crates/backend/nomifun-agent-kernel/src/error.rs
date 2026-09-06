@@ -1,6 +1,7 @@
 use nomifun_agent_contracts::{
-    ActionId, CapabilityId, CanonicalErrorCode, DigestHex, ExecutionRoleId, McpServerId,
-    McpToolKey, PackageId, PluginMountId, ResourceBindingId, ServiceKeyId, SkillId, VersionString,
+    ActionId, CapabilityId, CanonicalErrorCode, ContributionId, DigestHex, ExecutionRoleId,
+    McpServerId, McpToolKey, PackageId, PluginMountId, ResourceBindingId, ServiceKeyId, SkillId,
+    VersionString,
 };
 use thiserror::Error;
 
@@ -41,6 +42,8 @@ pub enum KernelError {
     DuplicateMount { mount_id: PluginMountId },
     #[error("duplicate capability id {capability_id:?}")]
     DuplicateCapability { capability_id: CapabilityId },
+    #[error("duplicate contribution id {contribution_id:?}")]
+    DuplicateContribution { contribution_id: ContributionId },
     #[error("duplicate skill id {skill_id:?}")]
     DuplicateSkill { skill_id: SkillId },
     #[error("duplicate MCP tool mapping {server_id:?}/{tool_key:?}")]
@@ -234,6 +237,11 @@ pub enum KernelError {
     SnapshotValidation { reason: String },
     #[error("capability {capability_id:?} is not in the frozen snapshot ceiling")]
     CapabilityNotInPreset { capability_id: CapabilityId },
+    #[error("capability {capability_id:?} exact provenance drifted: {reason}")]
+    CapabilityProvenanceDrift {
+        capability_id: CapabilityId,
+        reason: String,
+    },
     #[error("capability {capability_id:?} is not active")]
     CapabilityNotActive { capability_id: CapabilityId },
     #[error("active generation conflict: expected {expected}, current {current}")]
@@ -265,6 +273,7 @@ impl KernelError {
 
         let code = match self {
             Self::CapabilityNotInPreset { .. } => CAPABILITY_NOT_IN_PRESET,
+            Self::CapabilityProvenanceDrift { .. } => CAPABILITY_NOT_MATERIALIZED,
             Self::CapabilityNotActive { .. } | Self::ActivationGenerationConflict { .. } => {
                 CAPABILITY_NOT_ACTIVE
             }

@@ -41,11 +41,56 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 1 | `W0-01` |
-| 当前可实施 | 2 | `N1-0-01`、`N1-X-01` |
-| 依赖阻塞 | 27 | 其余 N1/M1 Windows 项与最终合流 |
+| 已关闭 | 8 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-01`、`N1-X-01` |
+| 正在实施 | 1 | `N1-2-01` |
+| 已解锁待领取 | 1 | `N1-1-02` |
+| 依赖阻塞 | 21 | 其余 N1/M1 Windows 项与最终合流 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
 | 明确延后 | 2 | Marketplace/远程分发、第二 Runtime |
+
+## 2026-09-06 实施记录
+
+1. `N1-0-01` 已完成全仓依赖与产品残留扫描：
+   - 旧 `/api/presets` 生产可达性仍为 `0`；
+   - 旧 Extension 非 Skill 主链仍有 App、Channel、Gateway、UI 等真实消费者，必须等新
+     Plugin 主链可用后按 UI → Gateway/Channel → App composition → crate 的顺序删除；
+   - 旧 MiniApp REST/UI/DB/Conversation 路径仍完整生产可达，且当前
+     `miniapp.read/edit/publish/serve` 没有真实 M1 owner，不能计入二期完成度。
+2. `N1-X-01` 已由提交 `610b59007` 物理抽离：
+   `nomifun-skill-library` 独立拥有 Skill service/routes/assets/market，所有直接消费者已
+   切换，`nomifun-extension` 不保留 Skill re-export、alias 或 fallback。
+3. `N1-0-02` 已冻结 Plugin N1 合同：
+   - `plugin-package-v1` 直接嵌入唯一 canonical `PackageManifest`；
+   - Package entrypoint 是 `in_process | javascript` 联合类型，Rust/Node 共用一个
+     Materializer/Registry；
+   - Host role-specific Hello/wire direction/request/response/generation fence、Node
+     probe/switch、Credential/KV/dataDir、Project/Ready/TestReceipt、manual/authorized
+     auto Apply、Restore、Share、Operation 与 cohort 合同已进入 generator。
+4. `N1-0-03` 已让 `CapabilityManifest` 直接拥有稳定 `contribution_id`，并使
+   Revision/Snapshot/Invoke 精确锁定 contribution、Mount、Source 与 Artifact。
+   无关 Registry publication 不再误杀旧 Snapshot，任一 exact provenance 漂移均
+   fail closed 且不 fallback。
+5. `N1-0-04` 已建立 `gate:plugin-n1`：Plugin/MiniApp 合同 digest、stage/scope、
+   required/optional cells、clean HEAD、result/cohort 与 Windows host 防冒充均有一套
+   fail-closed Gate；Candidate/RC 未实现 check 只会返回 blocked，不会伪造 PASS。
+6. `N1-0-05` 已冻结独立 `miniapp-release-v1`、UI-only/Service、MessageChannel、
+   可选 Files/Private DB、additive Migration、Ready/Active/Previous、
+   Publish/Rollback、Share/Backup/Delete 合同。Bridge wire 只含 call 与 payload，
+   MiniApp/Release/epoch 由 Host 绑定，不接受 UI 自报身份。
+7. `N1-1-01` 已新增 `nomifun-js-runtime`：
+   - 仅发现用户路径、已保存路径、当前 PATH 与 managed root；
+   - Windows x64 managed Node 必须由用户确认，版本来自 Node 官方 LTS index，
+     archive 按官方 `SHASUMS256.txt` 校验后 staging/原子发布；
+   - probe 校验 Node identity/version/target/execPath/SHA-256，global candidate 未完成
+     exact validation 前不得提交；
+   - 本机真实 PATH Node probe 已通过。
+8. 当前验证：`nomifun-agent-contracts` 79 tests、`nomifun-agent-kernel` 23 tests、
+   Control Plane 16 tests、Agent Platform 2 tests、JavaScript Runtime 10 tests、
+   App tests compile、generator `write/check`、Gate self-test 均通过。
+   `cargo fmt --all --check` 在 Windows 命中文件名过长限制，改用受影响 crate 的定向
+   `cargo fmt --check`；该平台限制不阻断已通过的编译与定向格式验证。
+9. 当前并行 lane：`N1-2-01` migration 067+ Plugin 数据根正在按审查修正 Artifact、
+   Operation 与 retained data 语义；下一可并行领取项是 `N1-1-02`。
 
 ## W0：一期交接
 
@@ -57,24 +102,25 @@
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `N1-0-01` | open | 集成 Owner；全仓只读扫描、06/本文 | repo dependency/product residual scan，冻结删除顺序和真实消费者 | `W0-01` | dependency report；旧 `/api/presets` 仍为 0 |
-| `N1-0-02` | blocked | Contract lane；`nomifun-agent-contracts/src/plugin_*`、`contracts/plugin-n1/**`、`nomifun-api-types/src/plugin*` | 冻结 `plugin-package-v1`、Host IPC、Runtime fingerprint、Credential slot、Project/Candidate/TestReceipt/Apply/Share 合同 | `N1-0-01` | canonical serialization/schema tests |
-| `N1-0-03` | blocked | Kernel lane；`nomifun-agent-kernel/src/{materialize,registry,compiler,plugin,error}.rs` | Snapshot/operation 精确锁定 mount/contribution/artifact，不依赖无关全局 generation | `N1-0-02` | unrelated catalog change 不破坏旧 Snapshot |
-| `N1-0-04` | blocked | 集成 Owner；validation contract/Gate | 建立 Windows N1/M1 stage、required/optional cell 和最终 cohort 合同 | `N1-0-02` | Gate self-test；无 candidate SHA 自引用 |
+| `N1-0-01` | closed | 集成 Owner；全仓只读扫描、06/本文 | repo dependency/product residual scan，冻结删除顺序和真实消费者 | `W0-01` | 生产 `/api/presets`=0；Extension/MiniApp 消费者与删除顺序已登记 |
+| `N1-0-02` | closed | Contract lane；`nomifun-agent-contracts/src/plugin_*`、`contracts/plugin-n1/**`、`nomifun-api-types/src/plugin*` | 冻结 `plugin-package-v1`、Host IPC、Runtime fingerprint、Credential slot、Project/Candidate/TestReceipt/Apply/Share 合同 | `N1-0-01` | 62 contract tests；generator write/check；workspace check |
+| `N1-0-03` | closed | Kernel lane；`nomifun-agent-kernel/src/{materialize,registry,compiler,plugin,error}.rs` | Snapshot/operation 精确锁定 mount/contribution/artifact，不依赖无关全局 generation | `N1-0-02` | Kernel 23、Control Plane 16、Agent Platform 2；unrelated publication 与 drift tests |
+| `N1-0-04` | closed | Gate lane；`scripts/gate-plugin-n1.mjs`、validation result | 建立 Windows N1/M1 stage、required/optional cell 和最终 cohort 合同 | `N1-0-02` | Gate self-test/dry-run；无 source SHA pre-run input；pending check fail-closed |
+| `N1-0-05` | closed | M1 Contract lane；`nomifun-agent-contracts/src/miniapp_m1.rs` | 冻结独立 `miniapp-release-v1`、Service/Bridge/Storage、Ready/Publish/Rollback/Share/Delete 合同 | `N1-0-02` | canonical manifest/envelope/schema；17 M1 contract tests；无 Plugin 顶层 Manifest复用 |
 
 ## N1-1：Node Foundation
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `N1-1-01` | blocked | Runtime lane；新 `nomifun-js-runtime/**` | Node PATH/手工/managed LTS probe、下载确认、fingerprint 与全局试切换 | `N1-0-02` | probe/selection/fail-closed tests |
-| `N1-1-02` | blocked | Runtime lane；新 JS Host package/crate | lazy shared Extension Host、private IPC/Hello、watchdog、whole-tree cleanup、late-result fence | `N1-1-01` | demand=0 process=0；crash/restart/cleanup |
+| `N1-1-01` | closed | Runtime lane；新 `nomifun-js-runtime/**` | Node PATH/手工/managed LTS probe、下载确认、fingerprint 与全局试切换 | `N1-0-02` | 10 tests；真实 PATH Node；official index/SHASUMS/zip containment；candidate validation |
+| `N1-1-02` | open | Runtime lane；新 JS Host package/crate | lazy shared Extension Host、private IPC/Hello、watchdog、whole-tree cleanup、late-result fence | `N1-1-01` | demand=0 process=0；crash/restart/cleanup |
 | `N1-1-03` | blocked | Kernel+Runtime 边界 | Tool/Context/Resource/Role Provider 的 Node proxy exports | `N1-0-03`,`N1-1-02` | exact lock invoke；无 Rust/Node 双 Registry |
 
 ## N1-2：Package 与数据生命周期
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `N1-2-01` | blocked | DB lane；migration 067+、新 repository | Artifact/Project/Candidate/current/previous/Mount/Operation/retained data schema | `N1-0-02` | fresh DB、migration lineage、restart |
+| `N1-2-01` | in-progress | DB lane；migration 067+、新 repository | Artifact/Project/Candidate/current/previous/Mount/Operation/retained data schema | `N1-0-02` | fresh DB、migration lineage、restart |
 | `N1-2-02` | blocked | Plugin platform lane | Config、Credential slot binding、KV/CAS、stable `dataDir`、owner mutation lock | `N1-2-01`,`N1-1-02` | namespace/CAS/secret rotation tests |
 | `N1-2-03` | blocked | Plugin platform lane | staging/containment/digest/install/replace/restore/uninstall/delete-data | `N1-2-01`,`N1-2-02` | failed replace keeps current；delete resumable |
 
@@ -98,7 +144,7 @@
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `N1-X-01` | open | Skill lane；新 `nomifun-skill-library/**` | 把 `skill_service`、builtin skills、Skill market 从 `nomifun-extension` 抽为独立 owner | `W0-01` | 现有 Skill 用户流程/测试不回退 |
+| `N1-X-01` | closed | Skill lane；新 `nomifun-skill-library/**` | 把 `skill_service`、builtin skills、Skill market 从 `nomifun-extension` 抽为独立 owner | `W0-01` | `610b59007`；Skill Library 150 passed/2 ignored；Extension/消费者 checks passed |
 | `N1-X-02` | blocked | demolition lane；`nomifun-extension/**` 及消费者 | 删除旧 Extension loader/registry/hub/hot reload/permissions/settings/webui/agent/theme 路径 | `N1-X-01`,`N1-3-03`,`N1-4-03` | `/api/extensions/*`、Hub、`nomi-extension.json` 生产可达性为 0 |
 | `N1-U-01` | blocked | UI lane；新 `pages/plugins/**`、Runtime Manager | Plugin Library/Workshop/配置/诊断、Node Runtime Manager；MCP 页面只保留 MCP | `N1-2-03`,`N1-4-02` | Desktop product tests/build/a11y |
 | `N1-V-01` | blocked | 集成 Owner | Windows N1 contract/integration/fault/product/NSIS candidate | 所有 N1 项 | authored JS/TS → Test → Apply → invoke → Restore |

@@ -2,13 +2,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use jsonschema::Validator;
 use nomifun_agent_contracts::{
-    CapabilityId, CapabilityManifest, DigestHex, ExactRoleProviderRef, ExecutionRoleId,
-    McpServerId, McpToolCapabilityMapping, McpToolKey, PackageId, PackageManifest, PackageRef,
-    PluginBootCriticality, PluginDesiredState, PluginEffectiveState, PluginMountId,
-    PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
-    PluginStateMethod, RoleContractManifest, RoleMemberRequirement, RoleProviderContribution,
-    ServiceHandleDescriptor, ServiceKeyDagEdge, ServiceKeyDagNode, ServiceKeyDagPayload,
-    ServiceKeyId, ServiceKeyRef, SkillDefinition, SkillId, VersionString, digest_payload,
+    CapabilityConsumer, CapabilityId, CapabilityManifest, CapabilityOperationLock,
+    CapabilityRef, ContributionId, ContributionLock, ContributionSourceKind, DigestHex,
+    ExactRoleProviderRef, ExecutionRoleId, McpBindingId, McpServerId,
+    McpToolCapabilityMapping, McpToolKey, PackageId, PackageManifest, PackageRef,
+    PackageEntrypointMetadata, PluginBootCriticality, PluginDesiredState,
+    PluginEffectiveState, PluginMountId, PluginRegistrarOperation,
+    PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
+    PluginStateMethod, RoleContractManifest, RoleMemberRequirement,
+    RoleProviderContribution, ServiceHandleDescriptor, ServiceKeyDagEdge,
+    ServiceKeyDagNode, ServiceKeyDagPayload, ServiceKeyId, ServiceKeyRef,
+    SkillDefinition, SkillId, StableSourceIdentity, VersionString, digest_payload,
 };
 use semver::Version;
 use serde::Serialize;
@@ -55,8 +59,25 @@ pub struct MaterializedPackage {
 pub struct MaterializedCapability {
     pub manifest: CapabilityManifest,
     pub schema_digest: DigestHex,
+    pub contribution_id: ContributionId,
+    pub contribution_lock: ContributionLock,
+    pub target_artifact_digest: DigestHex,
     pub mount_id: PluginMountId,
     pub source: PluginSourceMetadata,
+}
+
+impl MaterializedCapability {
+    pub fn operation_lock(&self, consumer: CapabilityConsumer) -> CapabilityOperationLock {
+        CapabilityOperationLock {
+            capability: CapabilityRef {
+                id: self.manifest.id.clone(),
+                version: self.manifest.version.clone(),
+            },
+            consumer,
+            contribution: self.contribution_lock.clone(),
+            target_artifact_digest: Some(self.target_artifact_digest.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -267,50 +288,27 @@ impl Materializer {
                 KernelError::PackageDependencyCycle,
             )?;
 
-        let mut capabilities = BTreeMap::new();
-        let mut skills = BTreeMap::new();
-        let mut mcp_tools = BTreeMap::new();
-        let mut mcp_by_capability = BTreeMap::new();
+        let mut capability_ids = BTreeSet::new();
+        let mut contribution_ids = BTreeSet::new();
         for registration in &ordered {
-            let manifest = &registration.manifest.payload;
-            for capability in &manifest.contributions.capabilities {
-                if capabilities
-                    .insert(
-                        capability.id.clone(),
-                        MaterializedCapability {
-                            manifest: capability.clone(),
-                            schema_digest: digest_payload(capability)
-                                .map_err(|error| KernelError::Digest {
-                                    reason: error.to_string(),
-                                })?,
-                            mount_id: registration.mount_id.clone(),
-                            source: registration.source.clone(),
-                        },
-                    )
-                    .is_some()
-                {
+            for capability in &registration.manifest.payload.contributions.capabilities {
+                if !capability_ids.insert(capability.id.clone()) {
                     return Err(KernelError::DuplicateCapability {
                         capability_id: capability.id.clone(),
                     });
                 }
-            }
-            for skill in &manifest.contributions.skills {
-                if skills
-                    .insert(
-                        skill.id.clone(),
-                        MaterializedSkill {
-                            definition: skill.clone(),
-                            mount_id: registration.mount_id.clone(),
-                            source: registration.source.clone(),
-                        },
-                    )
-                    .is_some()
-                {
-                    return Err(KernelError::DuplicateSkill {
-                        skill_id: skill.id.clone(),
+                if !contribution_ids.insert(capability.contribution_id.clone()) {
+                    return Err(KernelError::DuplicateContribution {
+                        contribution_id: capability.contribution_id.clone(),
                     });
                 }
             }
+        }
+
+        let mut mcp_tools = BTreeMap::new();
+        let mut mcp_by_capability = BTreeMap::new();
+        for registration in &ordered {
+            let manifest = &registration.manifest.payload;
             for mapping in &manifest.contributions.mcp_tools {
                 let key = (
                     mapping.server_id.clone(),
@@ -338,6 +336,64 @@ impl Materializer {
                 {
                     return Err(KernelError::DuplicateMcpCapability {
                         capability_id: mapping.capability.id.clone(),
+                    });
+                }
+            }
+        }
+
+        let mut capabilities = BTreeMap::new();
+        let mut skills = BTreeMap::new();
+        for registration in &ordered {
+            let manifest = &registration.manifest.payload;
+            for capability in &manifest.contributions.capabilities {
+                let schema_digest =
+                    digest_payload(capability).map_err(|error| KernelError::Digest {
+                        reason: error.to_string(),
+                    })?;
+                let contribution_id = capability.contribution_id.clone();
+                let (contribution_lock, target_artifact_digest) =
+                    capability_provenance(
+                        registration,
+                        &contribution_id,
+                        &schema_digest,
+                        mcp_by_capability
+                            .get(&capability.id)
+                            .and_then(|key| mcp_tools.get(key)),
+                    );
+                if capabilities
+                    .insert(
+                        capability.id.clone(),
+                        MaterializedCapability {
+                            manifest: capability.clone(),
+                            schema_digest,
+                            contribution_id,
+                            contribution_lock,
+                            target_artifact_digest,
+                            mount_id: registration.mount_id.clone(),
+                            source: registration.source.clone(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(KernelError::DuplicateCapability {
+                        capability_id: capability.id.clone(),
+                    });
+                }
+            }
+            for skill in &manifest.contributions.skills {
+                if skills
+                    .insert(
+                        skill.id.clone(),
+                        MaterializedSkill {
+                            definition: skill.clone(),
+                            mount_id: registration.mount_id.clone(),
+                            source: registration.source.clone(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(KernelError::DuplicateSkill {
+                        skill_id: skill.id.clone(),
                     });
                 }
             }
@@ -380,6 +436,65 @@ impl Materializer {
     }
 }
 
+fn capability_provenance(
+    registration: &PluginRegistrationMetadata,
+    contribution_id: &ContributionId,
+    schema_digest: &DigestHex,
+    mcp: Option<&MaterializedMcpTool>,
+) -> (ContributionLock, DigestHex) {
+    if let Some(mcp) = mcp {
+        let target_artifact_digest = mcp.mapping.schema_digest.clone();
+        return (
+            ContributionLock {
+                source_kind: ContributionSourceKind::McpBinding,
+                source_identity: StableSourceIdentity::from(format!(
+                    "mcp:{}",
+                    mcp.mapping.server_id.as_ref()
+                )),
+                mount_id: None,
+                miniapp_id: None,
+                mcp_binding_id: Some(McpBindingId::from(format!(
+                    "{}:{}",
+                    mcp.mapping.server_id.as_ref(),
+                    mcp.mapping.canonical_tool_key.as_ref()
+                ))),
+                contribution_id: contribution_id.clone(),
+                contract_digest: schema_digest.clone(),
+            },
+            target_artifact_digest,
+        );
+    }
+
+    let target_artifact_digest = registration
+        .source
+        .source_digest
+        .clone()
+        .unwrap_or_else(|| registration.manifest.payload_digest.clone());
+    let (source_kind, mount_id) = match registration.source.source_kind {
+        PluginSourceKind::Bundled | PluginSourceKind::TestFixture => {
+            (ContributionSourceKind::PlatformBuiltin, None)
+        }
+        PluginSourceKind::ManagedLocal => (
+            ContributionSourceKind::PluginMount,
+            Some(registration.mount_id.clone()),
+        ),
+    };
+    (
+        ContributionLock {
+            source_kind,
+            source_identity: StableSourceIdentity::from(
+                registration.source.source_identity.clone(),
+            ),
+            mount_id,
+            miniapp_id: None,
+            mcp_binding_id: None,
+            contribution_id: contribution_id.clone(),
+            contract_digest: schema_digest.clone(),
+        },
+        target_artifact_digest,
+    )
+}
+
 fn registration_sort_key(
     registration: &PluginRegistrationMetadata,
 ) -> (&str, &str, &str) {
@@ -414,10 +529,30 @@ fn validate_registration(
     validate_version("schema_version", &manifest.schema_version)?;
     validate_version("host_contract_version", &manifest.host_contract_version)?;
     validate_version("package_version", &manifest.package_version)?;
-    validate_version(
-        "entrypoint.contract_version",
-        &manifest.entrypoint.contract_version,
-    )?;
+    match &manifest.entrypoint {
+        PackageEntrypointMetadata::InProcess(entrypoint) => {
+            validate_version(
+                "entrypoint.in_process.contract_version",
+                &entrypoint.contract_version,
+            )?;
+        }
+        PackageEntrypointMetadata::JavaScript(entrypoint) => {
+            validate_version(
+                "entrypoint.javascript.host_protocol_version",
+                &entrypoint.host_protocol_version,
+            )?;
+            validate_version(
+                "entrypoint.javascript.sdk_contract_version",
+                &entrypoint.sdk_contract_version,
+            )?;
+        }
+    }
+    if manifest.entrypoint.host_contract_version() != &manifest.host_contract_version {
+        return invalid_registration(
+            registration,
+            "entrypoint host contract version does not match package host contract version",
+        );
+    }
     if manifest.host_contract_version != policy.host_contract_version {
         return Err(KernelError::HostContractVersionMismatch {
             package_id: manifest.package_id.clone(),
@@ -490,6 +625,12 @@ fn validate_registration(
         .iter()
         .map(|capability| capability.id.clone())
         .collect::<BTreeSet<_>>();
+    let contribution_ids = manifest
+        .contributions
+        .capabilities
+        .iter()
+        .map(|capability| capability.contribution_id.clone())
+        .collect::<BTreeSet<_>>();
     let skill_ids = manifest
         .contributions
         .skills
@@ -518,6 +659,7 @@ fn validate_registration(
         .map(|service| service.id.clone())
         .collect::<BTreeSet<_>>();
     if capability_ids.len() != manifest.contributions.capabilities.len()
+        || contribution_ids.len() != manifest.contributions.capabilities.len()
         || skill_ids.len() != manifest.contributions.skills.len()
         || mcp_keys.len() != manifest.contributions.mcp_tools.len()
         || role_ids.len() != manifest.contributions.role_providers.len()

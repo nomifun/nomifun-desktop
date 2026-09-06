@@ -362,9 +362,96 @@ fn validate_chat_route_records_for_revision(
 pub struct ResolvedCapability {
     pub capability: CapabilityRef,
     pub source_package: PackageRef,
+    pub contribution_id: ContributionId,
+    pub contribution_lock: ContributionLock,
+    pub resolved_mount_id: PluginMountId,
+    pub resolved_source: PluginSourceMetadata,
+    pub target_artifact_digest: DigestHex,
     pub schema_digest: DigestHex,
     pub dependency_path: Vec<crate::CapabilityId>,
     pub required_runtime_features: BTreeSet<RuntimeFeatureId>,
+}
+
+impl ResolvedCapability {
+    pub fn validate(&self) -> Result<(), PresetContractViolation> {
+        validate_non_empty_canonical_value(
+            self.capability.id.as_ref(),
+            "capability.id",
+        )?;
+        validate_non_empty_canonical_value(
+            self.capability.version.as_ref(),
+            "capability.version",
+        )?;
+        validate_non_empty_canonical_value(
+            self.source_package.id.as_ref(),
+            "source_package.id",
+        )?;
+        validate_non_empty_canonical_value(
+            self.source_package.version.as_ref(),
+            "source_package.version",
+        )?;
+        validate_non_empty_canonical_value(
+            self.contribution_id.as_ref(),
+            "contribution_id",
+        )?;
+        validate_non_empty_canonical_value(
+            self.resolved_mount_id.as_ref(),
+            "resolved_mount_id",
+        )?;
+        validate_non_empty_canonical_value(
+            &self.resolved_source.source_identity,
+            "resolved_source.source_identity",
+        )?;
+        self.contribution_lock.validate()?;
+        if self.contribution_id != self.contribution_lock.contribution_id {
+            return Err(snapshot_capability_violation(
+                &self.capability.id,
+                "contribution_id does not match contribution_lock",
+            ));
+        }
+        if self.schema_digest != self.contribution_lock.contract_digest {
+            return Err(snapshot_capability_violation(
+                &self.capability.id,
+                "schema_digest does not match contribution_lock.contract_digest",
+            ));
+        }
+        if let Some(mount_id) = &self.contribution_lock.mount_id {
+            if mount_id != &self.resolved_mount_id {
+                return Err(snapshot_capability_violation(
+                    &self.capability.id,
+                    "contribution_lock.mount_id does not match resolved_mount_id",
+                ));
+            }
+        }
+        for (field, digest) in [
+            ("schema_digest", &self.schema_digest),
+            ("target_artifact_digest", &self.target_artifact_digest),
+        ] {
+            if !is_lowercase_hex_digest(digest) {
+                return Err(snapshot_capability_violation(
+                    &self.capability.id,
+                    format!("{field} must be 64 lowercase hexadecimal characters"),
+                ));
+            }
+        }
+        if let Some(source_digest) = &self.resolved_source.source_digest {
+            if !is_lowercase_hex_digest(source_digest) {
+                return Err(snapshot_capability_violation(
+                    &self.capability.id,
+                    "resolved_source.source_digest must be 64 lowercase hexadecimal characters",
+                ));
+            }
+        }
+        if self.dependency_path.is_empty()
+            || self.dependency_path.last() != Some(&self.capability.id)
+        {
+            return Err(snapshot_capability_violation(
+                &self.capability.id,
+                "dependency_path must terminate at the resolved capability",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1170,12 +1257,29 @@ fn validate_resolved_capability_sets(
     initial: &[ResolvedCapability],
     on_demand: &[ResolvedCapability],
 ) -> Result<(), PresetContractViolation> {
+    for capability in initial.iter().chain(on_demand) {
+        capability.validate()?;
+    }
     validate_capability_ids(
         initial.iter().map(|selection| &selection.capability.id),
         on_demand
             .iter()
             .map(|selection| &selection.capability.id),
     )
+}
+
+fn snapshot_capability_violation(
+    capability_id: &crate::CapabilityId,
+    reason: impl AsRef<str>,
+) -> PresetContractViolation {
+    PresetContractViolation {
+        code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
+        message: format!(
+            "resolved capability {} has invalid exact provenance: {}",
+            capability_id.as_ref(),
+            reason.as_ref()
+        ),
+    }
 }
 
 fn validate_exact_capability_refs(
@@ -1236,14 +1340,38 @@ mod tests {
     }
 
     fn resolved_capability(id: &str, schema_digest: &str) -> ResolvedCapability {
+        let capability_id = crate::CapabilityId::from(id);
+        let contribution_id =
+            crate::ContributionId::from(format!("capability:{id}"));
+        let source_package = PackageRef {
+            id: crate::PackageId::from("fixture.package"),
+            version: VersionString::from("1.0.0"),
+        };
         ResolvedCapability {
-            capability: capability(id),
-            source_package: PackageRef {
-                id: crate::PackageId::from("fixture.package"),
+            capability: CapabilityRef {
+                id: capability_id.clone(),
                 version: VersionString::from("1.0.0"),
             },
+            source_package,
+            contribution_id: contribution_id.clone(),
+            contribution_lock: ContributionLock {
+                source_kind: ContributionSourceKind::PlatformBuiltin,
+                source_identity: StableSourceIdentity::from("fixture.package"),
+                mount_id: None,
+                miniapp_id: None,
+                mcp_binding_id: None,
+                contribution_id,
+                contract_digest: DigestHex::from(schema_digest),
+            },
+            resolved_mount_id: PluginMountId::from("fixture.mount"),
+            resolved_source: PluginSourceMetadata {
+                source_kind: crate::PluginSourceKind::Bundled,
+                source_identity: "fixture.package".to_owned(),
+                source_digest: Some(DigestHex::from("b".repeat(64))),
+            },
+            target_artifact_digest: DigestHex::from("b".repeat(64)),
             schema_digest: DigestHex::from(schema_digest),
-            dependency_path: vec![crate::CapabilityId::from(id)],
+            dependency_path: vec![capability_id],
             required_runtime_features: BTreeSet::new(),
         }
     }
