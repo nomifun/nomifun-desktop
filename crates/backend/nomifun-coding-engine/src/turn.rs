@@ -71,12 +71,12 @@ impl CodingTurnRequest {
                 "coding turn principal must be complete".to_owned(),
             ));
         }
-        if self.model_request.causality.agent_session_id != binding.agent_session_id {
+        if &self.model_request.causality.agent_session_id != binding.agent_session_id() {
             return Err(CodingEngineError::TurnBindingMismatch {
                 field: "agent_session_id",
             });
         }
-        if self.model_request.causality.resolved_snapshot_ref != binding.resolved_snapshot_ref {
+        if &self.model_request.causality.resolved_snapshot_ref != binding.resolved_snapshot_ref() {
             return Err(CodingEngineError::TurnBindingMismatch {
                 field: "resolved_snapshot_ref",
             });
@@ -956,7 +956,7 @@ mod tests {
                 agent_session_id: AgentSessionId::from("session"),
                 turn_operation_id: OperationId::from("turn"),
                 causation_event_id: EventId::from("input"),
-                resolved_snapshot_ref: binding().resolved_snapshot_ref.clone(),
+                resolved_snapshot_ref: binding().resolved_snapshot_ref().clone(),
                 route_identity: ChatRouteIdentity::new(
                     "preset@1",
                     "agent_chat",
