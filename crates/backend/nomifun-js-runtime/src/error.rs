@@ -16,6 +16,8 @@ pub enum JavaScriptRuntimeError {
     ExecutableIdentityMismatch { requested: String, observed: String },
     #[error("Node Runtime selection has no pending candidate")]
     NoPendingCandidate,
+    #[error("Node Runtime switch already has a pending candidate")]
+    SwitchAlreadyPending,
     #[error("Node Runtime validation does not match the pending candidate")]
     CandidateMismatch,
     #[error("Node Runtime candidate has not completed validation")]

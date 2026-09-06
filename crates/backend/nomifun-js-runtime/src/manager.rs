@@ -53,6 +53,9 @@ impl NodeRuntimeManager {
             .map_err(|error| JavaScriptRuntimeError::Contract(error.to_string()))?;
         let _gate = self.switch_gate.lock().await;
         let mut selection = self.selection.write().await;
+        if selection.pending_candidate.is_some() {
+            return Err(JavaScriptRuntimeError::SwitchAlreadyPending);
+        }
         selection.pending_candidate = Some(candidate);
         selection.validation_result = None;
         selection.last_error = None;
@@ -174,6 +177,25 @@ mod tests {
             Err(JavaScriptRuntimeError::ValidationRequired)
         ));
         assert!(manager.snapshot().await.selected_runtime.is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_candidate_cannot_be_silently_replaced() {
+        let manager = NodeRuntimeManager::empty();
+        manager.begin_switch(runtime('a')).await.unwrap();
+        assert!(matches!(
+            manager.begin_switch(runtime('b')).await,
+            Err(JavaScriptRuntimeError::SwitchAlreadyPending)
+        ));
+        assert_eq!(
+            manager
+                .snapshot()
+                .await
+                .pending_candidate
+                .unwrap()
+                .executable_digest,
+            DigestHex::from("a".repeat(64))
+        );
     }
 
     #[tokio::test]

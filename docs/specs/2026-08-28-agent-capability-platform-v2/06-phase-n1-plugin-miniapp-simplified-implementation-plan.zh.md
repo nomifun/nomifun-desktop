@@ -44,6 +44,18 @@
 9. Windows Node foundation 已实现手工/PATH/managed 三类 probe 与全局试切换。
    Managed 下载只接受用户确认后的 Node 官方 LTS，校验官方 SHASUMS 后发布；
    macOS/Linux archive 实现和原生验证仍按本文总顺序延后，不影响 Windows 主线继续。
+10. Windows Shared Extension Host 已使用 stdio NDJSON 私有 IPC 实现 lazy demand、exact
+    Hello、Mount 按需加载、request cancel、generation fence、watchdog 与整进程树回收。
+    quiescent stop 通过 Host admission 读写锁与请求入队原子互斥，不使用“先观察空闲再停止”
+    的竞态实现。
+11. Plugin Artifact Store 已实现 directory/zip 两种同源 admission，严格拒绝 traversal、
+    symlink、特殊文件、Windows case collision、非 NFC 路径、额外 published root 内容和
+    digest tamper；同 `package_id + version` 的不同 digest 可并存，是否 Replace 只在后续
+    Candidate/Apply 用户动作中裁决。
+12. 产品 API DTO 只暴露 Runtime、Plugin/MiniApp Library/Workshop、Config、
+    Credential reference、Candidate/Release、Operation 与明确命令。Managed Node 下载
+    只接受服务端 official-LTS offer digest 的确认，客户端不能自报版本、target 或 release
+    digest；Bridge、process、generation、ledger 和 secret 不进入 HTTP wire。
 
 ## 0. 怎样阅读这份文档
 

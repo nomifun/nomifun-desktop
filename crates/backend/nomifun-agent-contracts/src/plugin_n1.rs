@@ -1626,18 +1626,35 @@ struct PluginReadyCandidateDigestInput<'a> {
     contract_diff: &'a PluginContractDiff,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PluginReadyCandidateInput {
+    pub project_id: PluginProjectId,
+    pub project_build_generation: u64,
+    pub origin_operation_id: OperationId,
+    pub origin: PluginCandidateOrigin,
+    pub target: PluginTargetRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_target_digest: Option<DigestHex>,
+    pub source_lineage: PluginSourceLineage,
+    pub contract_diff: PluginContractDiff,
+}
+
 impl PluginReadyCandidate {
     pub fn new(
         candidate_id: PluginCandidateId,
-        project_id: PluginProjectId,
-        project_build_generation: u64,
-        origin_operation_id: OperationId,
-        origin: PluginCandidateOrigin,
-        target: PluginTargetRef,
-        base_target_digest: Option<DigestHex>,
-        source_lineage: PluginSourceLineage,
-        contract_diff: PluginContractDiff,
+        input: PluginReadyCandidateInput,
     ) -> Result<Self, PluginN1ContractError> {
+        let PluginReadyCandidateInput {
+            project_id,
+            project_build_generation,
+            origin_operation_id,
+            origin,
+            target,
+            base_target_digest,
+            source_lineage,
+            contract_diff,
+        } = input;
         let candidate_digest = digest_payload(&PluginReadyCandidateDigestInput {
             project_id: &project_id,
             project_build_generation,
@@ -2183,17 +2200,24 @@ impl PluginApplyRequest {
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PluginApplyResult {
     Applied {
-        mount_id: PluginMountId,
-        mount_revision: u64,
-        current_target: PluginTargetRef,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        previous_target: Option<PluginTargetRef>,
-        invalidated_host_generation: Option<u64>,
+        result: Box<PluginAppliedState>,
     },
     PreconditionsChanged {
         code: CanonicalErrorCode,
     },
     HostBusy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PluginAppliedState {
+    pub mount_id: PluginMountId,
+    pub mount_revision: u64,
+    pub current_target: PluginTargetRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_target: Option<PluginTargetRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalidated_host_generation: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2232,14 +2256,21 @@ impl PluginRestorePreviousRequest {
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PluginRestorePreviousResult {
     Restored {
-        mount_revision: u64,
-        current_target: PluginTargetRef,
-        previous_target: PluginTargetRef,
-        invalidated_host_generation: Option<u64>,
+        result: Box<PluginRestoredState>,
     },
     PreconditionsChanged {
         code: CanonicalErrorCode,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PluginRestoredState {
+    pub mount_revision: u64,
+    pub current_target: PluginTargetRef,
+    pub previous_target: PluginTargetRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalidated_host_generation: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -3355,26 +3386,28 @@ mod tests {
     fn candidate() -> PluginReadyCandidate {
         PluginReadyCandidate::new(
             PluginCandidateId::from("candidate-1"),
-            PluginProjectId::from("project-1"),
-            1,
-            OperationId::from("build-1"),
-            PluginCandidateOrigin::Build,
-            PluginTargetRef {
-                package: manifest().package_ref(),
-                artifact_id: ArtifactId::from("artifact-1"),
-                artifact_digest: digest('d'),
-                manifest_digest: digest('e'),
-            },
-            Some(digest('f')),
-            PluginSourceLineage::Managed {
-                source_snapshot_digest: digest('1'),
-                dependency_lock_digest: digest('2'),
-                build_profile_version: PLUGIN_PACKAGE_PROFILE_VERSION.into(),
-            },
-            PluginContractDiff {
-                compatibility: PluginCompatibility::Compatible,
-                changes: BTreeSet::from([PluginContractChangeKind::ArtifactBytes]),
-                affected_consumer_locks: Vec::new(),
+            PluginReadyCandidateInput {
+                project_id: PluginProjectId::from("project-1"),
+                project_build_generation: 1,
+                origin_operation_id: OperationId::from("build-1"),
+                origin: PluginCandidateOrigin::Build,
+                target: PluginTargetRef {
+                    package: manifest().package_ref(),
+                    artifact_id: ArtifactId::from("artifact-1"),
+                    artifact_digest: digest('d'),
+                    manifest_digest: digest('e'),
+                },
+                base_target_digest: Some(digest('f')),
+                source_lineage: PluginSourceLineage::Managed {
+                    source_snapshot_digest: digest('1'),
+                    dependency_lock_digest: digest('2'),
+                    build_profile_version: PLUGIN_PACKAGE_PROFILE_VERSION.into(),
+                },
+                contract_diff: PluginContractDiff {
+                    compatibility: PluginCompatibility::Compatible,
+                    changes: BTreeSet::from([PluginContractChangeKind::ArtifactBytes]),
+                    affected_consumer_locks: Vec::new(),
+                },
             },
         )
         .unwrap()

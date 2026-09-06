@@ -22,7 +22,9 @@ mod mcp_bridge;
 mod model_capability;
 pub mod model_protocol;
 pub mod model_task;
+mod miniapp_platform;
 mod office;
+mod plugin_platform;
 mod provider;
 mod provider_connection;
 mod provider_model;
@@ -170,6 +172,7 @@ pub use model_protocol::{
     ProtocolRecommendation, ProtocolScope, ProtocolTaskDescriptor, ProtocolTransportKind,
 };
 pub use model_task::{ModelTask, ModelTrait, infer_catalog_tasks_and_traits};
+pub use miniapp_platform::*;
 pub use office::{
     GetSnapshotContentRequest, ListSnapshotsRequest,
     PREVIEW_CAPABILITY_BYTES, PREVIEW_CAPABILITY_HEX_LEN, PreviewHistoryTargetDto,
@@ -177,6 +180,7 @@ pub use office::{
     SaveSnapshotRequest, SnapshotContentResponse, StartPreviewRequest,
     StopPreviewRequest, is_preview_capability,
 };
+pub use plugin_platform::*;
 pub use provider::{
     BedrockAuthMethod, BedrockConfig, CloneProviderRequest, CreateProviderRequest,
     FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, HealthStatus, ModelInfo,

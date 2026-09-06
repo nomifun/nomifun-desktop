@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nomifun_agent_contracts::{
@@ -18,6 +19,8 @@ use crate::{
 const NODE_RELEASE_INDEX_URL: &str = "https://nodejs.org/dist/index.json";
 const NODE_RELEASE_ROOT_URL: &str = "https://nodejs.org/dist";
 const MAX_MANAGED_NODE_ARCHIVE_BYTES: u64 = 192 * 1024 * 1024;
+const MAX_MANAGED_NODE_EXTRACTED_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_MANAGED_NODE_FILES: usize = 4096;
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -382,10 +385,18 @@ fn extract_windows_zip(
     }
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|error| JavaScriptRuntimeError::InvalidArchive(error.to_string()))?;
+    if archive.len() > MAX_MANAGED_NODE_FILES {
+        return Err(JavaScriptRuntimeError::InvalidArchive(format!(
+            "archive has {} entries; maximum is {MAX_MANAGED_NODE_FILES}",
+            archive.len()
+        )));
+    }
     let extraction_root = staging.join("extract");
     std::fs::create_dir(&extraction_root)
         .map_err(|error| fs_error(&extraction_root, error))?;
     let mut top_level: Option<String> = None;
+    let mut extracted_bytes = 0u64;
+    let mut normalized_paths = BTreeSet::new();
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
@@ -396,6 +407,36 @@ fn extract_windows_zip(
                 entry.name()
             ))
         })?;
+        let normalized = relative
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
+        if !normalized_paths.insert(normalized) {
+            return Err(JavaScriptRuntimeError::InvalidArchive(
+                "archive contains duplicate or case-colliding paths".into(),
+            ));
+        }
+        if entry
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000)
+        {
+            return Err(JavaScriptRuntimeError::InvalidArchive(format!(
+                "archive entry {} is a symbolic link",
+                entry.name()
+            )));
+        }
+        extracted_bytes = extracted_bytes
+            .checked_add(entry.size())
+            .ok_or_else(|| {
+                JavaScriptRuntimeError::InvalidArchive(
+                    "archive extracted size overflow".into(),
+                )
+            })?;
+        if extracted_bytes > MAX_MANAGED_NODE_EXTRACTED_BYTES {
+            return Err(JavaScriptRuntimeError::InvalidArchive(format!(
+                "archive extracts beyond {MAX_MANAGED_NODE_EXTRACTED_BYTES} bytes"
+            )));
+        }
         let first = relative.components().next().ok_or_else(|| {
             JavaScriptRuntimeError::InvalidArchive("empty archive entry".into())
         })?;
@@ -581,5 +622,30 @@ mod tests {
         )
         .unwrap();
         assert!(root.join("node.exe").is_file());
+    }
+
+    #[test]
+    fn zip_extraction_rejects_windows_case_collisions() {
+        let mut output = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut output);
+            for path in [
+                "node-v24.2.0-win-x64/node.exe",
+                "node-v24.2.0-win-x64/NODE.EXE",
+            ] {
+                writer
+                    .start_file(path, SimpleFileOptions::default())
+                    .unwrap();
+                writer.write_all(b"node").unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let directory = tempfile::tempdir().unwrap();
+        assert!(extract_windows_zip(
+            output.get_ref(),
+            "node-v24.2.0-win-x64.zip",
+            directory.path(),
+        )
+        .is_err());
     }
 }
