@@ -1,0 +1,18 @@
+[package]
+name = "nomifun-coding-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Isolated in-process Coding Agent execution engine for NomiFun"
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+nomifun-agent-contracts.workspace = true
+nomifun-chat-model-broker.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
