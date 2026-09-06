@@ -27,8 +27,11 @@
 > Fresh-v4 的开发期漂移也已修正为“只 seed 官方模板、Revision 使用 `payload_json`
 > 与 ContributionLock、没有旧 preset 子表/投影”；workspace、UI、DB、Fresh/Nomi-core
 > E2E、全量 app lib、generated contract、真实 Tauri Desktop 和真实 StepFun smoke
-> 均已通过。06 仍不在
-> 本次提交范围，待单独立项后实施。
+> 均已通过。Windows x64 Nomi-core 候选随后在提交
+> `0bac72da4ebb62f6a0f183a1285065c88aa684a4` 上完成 package/install/fresh/launch、
+> 真实 StepFun、Browser/Computer、Remote、进程树清理和卸载验证，`SL-S5-01` 已关闭。
+> 用户已明确授权继续实施 06；Plugin/MiniApp 使用独立的
+> `PHASE-N1-M1-CLOSURE-TODO.zh.md` 跟踪，不回填到本期 S0-S5 数量中。
 
 本文是 05 发布后的唯一一期执行台账。旧版 84 个 `INF/W/LEG/SCN/TST/REL`
 ID 从现在起只作为历史审计索引，不再是一期必须逐项关闭的阻断清单，也不得继续用
@@ -66,8 +69,9 @@ C9/Nomi 删除和 Nomi-free RC 已延后，不新增当前阶段阻断。
 5. API key、token、私钥、主机地址和签名 secret 不进入源码、文档、fixture、日志、命令行
    参数或报告。
 6. 测试遇到环境或 harness 障碍时记录首个完整失败、停止盲目重试，并提供人工替代步骤。
-7. 二期 `06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md` 不属于本台账，
-   不得在一期实现、提交或引用为已冻结合同。
+7. 二期 `06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md` 不属于本台账；
+   AP-0～AP-7 和 Windows C8 已完成，用户已单独授权其实施，实时状态由独立 N1/M1
+   台账维护。
 8. Codex app-server 只作为未来 host boundary 研究；其 fixture、adapter、Broker smoke
    和 live binary 缺口不阻塞当前 Nomi-core 工作。
 
@@ -91,14 +95,14 @@ C9/Nomi 删除和 Nomi-free RC 已延后，不新增当前阶段阻断。
 
 | AP | 状态 | 当前可证明的事实 | 尚未满足的条件 |
 | --- | --- | --- | --- |
-| AP-0 | `closed` | Agent 工作台唯一入口、owner 矩阵、平台供给层边界和 06 依赖已写入实现与架构文档；`/agent` 是公共入口。 | 无；06 仍需单独立项，不在本提交实施。 |
+| AP-0 | `closed` | Agent 工作台唯一入口、owner 矩阵、平台供给层边界和 06 依赖已写入实现与架构文档；`/agent` 是公共入口。 | 无；06 已由用户单独授权并转入独立台账。 |
 | AP-1 | `closed` | 共享 Catalog materializer/resolver 已区分 host surface 与 consumer；Agent catalog 过滤 `consumer=agent`；Gateway 与 Agent 对 `knowledge.search` 共享同一 resolver；Knowledge-only `browser.render_content` 被 Agent 过滤。 | 无。 |
 | AP-2 | `closed` | Revision payload、ContributionLock、digest、Snapshot、Preview/Save/Session boundary 已统一；`resource_bindings/resource_binding_refs` 已从 Preset Revision/Snapshot 删除，模板只声明 `required_resource_kinds`；未知字段和客户端内部 lock 均 fail-closed。 | 无。 |
 | AP-3 | `closed` | Agent 工作台显示每项能力的名称、说明、来源、可用性、action/context 数和资源种类，并提供关闭/启动即用/可按需申请三态；用户 Agent 有删除入口；首页 pill selector、`+` 与工作台预选已接通；Guid 只在消费目标选择 Workspace/Knowledge。真实 Tauri Desktop 已验证创建、三态保存、删除、预选、默认 Nomi 和 Preset 会话。 | 无；手机模式不属于 `nomifun-desktop` 本期服务与验收范围。 |
 | AP-4 | `closed` | 标准 `/api/agent-sessions` 请求只含 `preset_id` 与可选 `title`；服务端按 owner 从 `current_stable_revision` 和持久化 Revision/Snapshot 构造初始资源中立 Binding。Snapshot 冻结模型与 `required_resource_kinds`，Preset 会话拒绝公开 PATCH 改写顶层模型；目标资源不进入 Preset/Snapshot；旧 `agent_binding` 请求字段 fail-closed；删除 Preset 后已有 Session 继续读取冻结能力和历史，新 Session 被拒绝。 | 无；control-plane、Conversation、AgentPlatform E2E 与 Nomi-core route 已覆盖。 |
 | AP-5 | `closed` | ContributionLock impact diff 已覆盖 Compatible/Breaking、Disabled/Unavailable/Uninstalled、MiniApp release change、Retry/Switch/Restore/Fork，并提供 owner-scoped impact API。 | 无。 |
 | AP-6 | `closed` | 旧 `nomifun-preset`、旧 DTO、Extension preset contribution、旧 DB repository/表和旧 UI authoring surface 保持删除；Fresh-v4 bootstrap 只 seed `agent_preset_templates`，Revision 使用 `payload_json` 与 canonical ContributionLock；065 增加用户 Preset retirement tombstone；066 退役旧资源绑定 Preset 并清理活动 Binding，保留 Revision/Snapshot/Session 历史；旧 capability/skill/resource projection 表不再写入。 | 无；generated contract、DB migration head 66 和 workspace 编译已通过。 |
-| AP-7 | `closed` | 旧签署均保留为 revoked 历史；实现提交 `ef5f5380915e0d5c06004f03b66cbd1302b3fe03` 覆盖能力三态/明细、用户删除、资源中立 Preset/Snapshot、冻结模型与资源种类、target-scoped resource binding、Cron host Snapshot、Nomi on-demand ToolSearch、deny-all 和删除后历史 Session 保留；Desktop、broad checks 与真实 StepFun smoke 均通过，signed evidence 已形成。 | 无；06 已满足 AP 前置条件，但仍需用户显式单独启动，不在本次提交实施。 |
+| AP-7 | `closed` | 旧签署均保留为 revoked 历史；实现提交 `ef5f5380915e0d5c06004f03b66cbd1302b3fe03` 覆盖能力三态/明细、用户删除、资源中立 Preset/Snapshot、冻结模型与资源种类、target-scoped resource binding、Cron host Snapshot、Nomi on-demand ToolSearch、deny-all 和删除后历史 Session 保留；Desktop、broad checks 与真实 StepFun smoke 均通过，signed evidence 已形成。 | 无；06 已满足 AP 前置并由用户显式启动。 |
 
 ### AP-6 clean-cut 事实、Fresh-v4 漂移纠正与允许的历史残留
 
@@ -160,6 +164,29 @@ generated inventory 已同步、真实 Agent 与非 Agent consumer 证据可复�
 impact/no-fallback 行为测试通过，并在干净提交上形成签署记录。在这些条件满足前，06 仅
 允许设计审阅和文档修订。
 
+## 2026-09-06 Windows C8 候选闭合
+
+- 候选源码：`0bac72da4ebb62f6a0f183a1285065c88aa684a4`。
+- Gate：`bun run gate:agent-v2 -- c8-win-pre`，最终 `pass`，29 个记录检查、10 条
+  产品流程全部通过。
+- Host SHA-256：
+  `555a45607272939d9cc89c9f2ef10f850f570cac81e32979afd3fce04770a80c`。
+- NSIS Package SHA-256：
+  `d0f22840934ddbc69dcd365e9e14899ea17f8c739ed251e572c059f652ec64cf`。
+- release lock SHA-256：
+  `54e39e87404d43946de6a9c143816fa53367303a4b3928ab6b5966672f6ab266`；
+  `sidecars={}`，当前 Nomi-core 候选不要求 Codex Sidecar。
+- 安装版 smoke：静默安装返回 0；安装后的 `nomifun-desktop.exe` 写出真实
+  `port.json`，`/health` 返回 200/`ok`，WebView2 CDP 页面为
+  `http://tauri.localhost/#/guid`、标题 `NomiFun`；进程树退出、静默卸载和
+  主程序/注册表清理均通过。
+- 真实 StepFun Coding Plan `step-3.7-flash` 再次输出
+  `live_smoke_status=pass code=OK status=200`；凭据只从 Windows Credential Manager
+  注入测试进程，不进入 Git 或 evidence。
+- Fresh-v4 Remote `observe` 已收敛为历史只读查询，不再因 Runtime admission、
+  Sidecar 不可用或 RemoteBinding 删除返回时序相关的 503。
+- 手机模式不属于 `nomifun-desktop` 服务与验收范围，C8 未运行手机视口。
+
 ## 历史进度保留
 
 以下是真实已完成或可复用的功能，不因止损而删除，但也不自动关闭后续集成任务：
@@ -212,32 +239,31 @@ impact/no-fallback 行为测试通过，并在干净提交上形成签署记录�
 | S2 P0 与基础收缩 | 10 | 0 | 0 | 0 | 0 | 0 | 10 |
 | S3 Role seam 与 Nomi-core owner | 11 | 0 | 0 | 0 | 0 | 1 | 12 |
 | S4 产品 UI | 2 | 0 | 0 | 0 | 0 | 0 | 2 |
-| S5 三平台与 Nomi-core RC | 0 | 1 | 1 | 2 | 0 | 1 | 5 |
-| **总计** | **28** | **1** | **1** | **2** | **0** | **2** | **34** |
+| S5 三平台与 Nomi-core RC | 1 | 0 | 1 | 2 | 0 | 1 | 5 |
+| **总计** | **29** | **0** | **1** | **2** | **0** | **2** | **34** |
 
 旧台账 84 项现已收敛为 34 项。任务数量不是质量指标；只有完成定义和最小验证满足后
 才能修改状态。
 
 上表只统计 S0-S5。AP-0～AP-7 是额外的 AgentPreset 门禁层；截至
-2026-09-06，AP-0～AP-7 已有本机证据并关闭。06 已满足 AP 前置条件，但仍必须由用户
-显式单独启动，不得从一期签署自动推断二期代码已授权实施。
+2026-09-06，AP-0～AP-7 已有本机证据并关闭；用户随后已明确授权 06 代码实施。
+N1/M1 的状态不计入上表，统一由独立台账维护。
 
 ## 当前剩余 TODO 快照
 
-S0-S5 当前还剩 6 项未关闭，其中 2 项已明确延后。当前实现已完成产品验收，进入
-Windows 候选与外部环境验证边界：
+S0-S5 当前还剩 5 项未关闭，其中 2 项已明确延后。Windows 候选已经关闭；用户要求
+先完成 06 的 Windows Plugin/MiniApp 开发，再统一交接外部原生环境：
 
 | 分类 | 数量 | TODO |
 | --- | ---: | --- |
-| 主机当前实施 | 1 | `SL-S5-01` Windows Desktop x64 Nomi-core 候选 |
+| 主机当前实施 | 0 | 无；本期 Windows 候选已关闭，主机转入独立 N1/M1 台账 |
 | 依赖阻塞 | 1 | `SL-S5-05` 等待同一候选的三平台结果 |
 | 外部原生环境 | 2 | `SL-S5-02` macOS arm64、`SL-S5-03` Linux Desktop x64 |
 | 后续阶段 | 2 | `SL-S3-12` Codex app-server、`SL-S5-04` C9/Nomi 删除 |
 
 主机关键路径已完成 `SL-S3-01 -> SL-S3-02 -> SL-S3-03 -> SL-S3-07 -> SL-S3-10`，Browser/Computer
-first-party dogfood 和具体实现旁路清理也已完成。当前主线是
-`SL-S5-01`；Codex Sidecar
-和 C9 不在当前关键路径。
+first-party dogfood、具体实现旁路清理和 `SL-S5-01` 也已完成。当前主线转为 06 的
+Windows Plugin/MiniApp；Codex Sidecar 和 C9 不在当前关键路径。
 上述主机项全部由当前主机执行。主机可以按互斥写集启用多个本机 lane；中央合同、
 组合根、Gate、锁文件和 GLOBAL TODO 由集成 Owner 串行合流。外部 macOS/Linux 只验证
 冻结候选，不领取开发任务，也不维护 Prompt、交接包、远端 SHA 或跨机 attestation。
@@ -311,7 +337,7 @@ first-party dogfood 和具体实现旁路清理也已完成。当前主线是
 
 | ID | 状态 | Owner | 目标 | 依赖 | 完成定义 | 最小测试 | 人工 / 外部输入 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `SL-S5-01` | open | 主机 | Windows Desktop x64 完成 Nomi-core 核心候选 | S0-S4 除原生外部项 | package/install/fresh/launch；Nomi-core Chat/Coding/File/Process/VCS/MCP/Browser/Computer/Knowledge/automation/Remote；cancel/crash/process-tree cleanup；无 P0、数据损坏或 secret 泄漏 | 收缩后的 `bun run gate:agent-v2 -- c8-win-pre`，每个 E2E 有独立 deadline | Windows SDK/VS Build Tools 已由 `bun run dev` launcher 自动加载并完成链接；S4 与 AP-7 已关闭，可以冻结候选 |
+| `SL-S5-01` | closed | 主机 | Windows Desktop x64 完成 Nomi-core 核心候选 | S0-S4 除原生外部项 | package/install/fresh/launch；Nomi-core Chat/Coding/File/Process/VCS/MCP/Browser/Computer/Knowledge/automation/Remote；cancel/crash/process-tree cleanup；无 P0、数据损坏或 secret 泄漏 | `bun run gate:agent-v2 -- c8-win-pre` | 候选 `0bac72da4ebb62f6a0f183a1285065c88aa684a4` 已通过；Host/NSIS/release-lock digest 与安装 smoke 见上方闭合记录 |
 | `SL-S5-02` | external | 外部 | macOS Desktop arm64 Nomi-core 候选 smoke | `SL-S5-01` | 真 Apple Silicon 上对当前 Nomi-core 候选完成 package/install/launch、critical capability、anchored FS 和 dispose；非 Rosetta；只验证冻结候选真实 bytes | macOS arm64 native gate/critical suite | 需要 Apple Silicon、签名/打包环境和对应 Nomi-core 候选；不要求 arm64 Codex Sidecar |
 | `SL-S5-03` | external | 外部 | Linux Desktop x64 Nomi-core 候选 smoke | `SL-S5-01` | 真 Linux Desktop x64 上对当前 Nomi-core 候选完成 package/install/launch、Coding、MCP、Browser availability、dispose；Computer 按一期声明明确 available 或 unavailable | Linux Desktop native gate/critical suite | 需要真实 Linux Desktop x64 和 Nomi-core 候选；不要求 Linux Codex Sidecar |
 | `SL-S5-04` | deferred | 后续阶段 | 未来 Codex 切换后的 C9 shutdown 与 Nomi 物理删除 | 未来 Codex 立项、source/build、替代 Runtime 证据 | 只有未来 Runtime 正式接替且用户确认后，才停止 Nomi admission、清理进程树、标记 uncertain、删除 Nomi runtime/factory/route/artifact 并运行 residual scan | 未来 `c9-hard-delete` 及对应 dependency scan | 当前不执行；Nomi 是本阶段产品内核，不得把此项作为当前阻塞 |
@@ -496,10 +522,10 @@ Codex app-server 或其他 Runtime。当前没有运行中 Runtime selector、pe
   默认 `/mcp` 已接入公共 Streamable HTTP transport。真实 smoke 覆盖 REST 与 MCP
   的 `initialize/tools/list/open/turn/observe/cancel`，并验证 revoke、cursor、
   idempotency 和 delete 后不可复活。
-- 截至本 checkpoint，真实 Provider 的主机 smoke 和 `SL-S3-10` automation
-  boundary 已完成；`SL-S4-02` 也已由真实 Tauri Desktop 产品走查关闭。当前剩余边界是
-  Windows candidate 以及 macOS arm64/Linux Desktop x64 原生环境验证。不得用 mock、
-  fixture、静态 adapter 或 synthetic PASS 关闭这些项目。
+- 截至本 checkpoint，真实 Provider、`SL-S3-10` automation、`SL-S4-02` Desktop
+  走查与 `SL-S5-01` Windows candidate 均已关闭。macOS arm64/Linux Desktop x64
+  原生验证保留，但按用户要求延后到 06 的 Windows Plugin/MiniApp 开发全部完成后
+  统一交接。不得用 mock、fixture、静态 adapter 或 synthetic PASS 关闭这些项目。
 
 所有 lane 都在当前主机使用互斥路径写集；不得同时编辑同一文件或争用共享数据库、固定
 端口、Cargo 构建目录和进程树。`Cargo.lock`、中央 Compiler/Snapshot、Fresh-v4 schema、
@@ -515,15 +541,13 @@ handoff 或跨机 attestation。
    `SL-S3-07`、`SL-S3-10`、`SL-S3-11`、`SL-S4-02` 已关闭；
    `NomiCoreSessionOwner` 的 Cron/AutoWork/Companion archive/Channel/IDMM typed
    边界进入维护状态，除确定性合同缺口外不扩大兼容层。
-2. 运行 `SL-S5-01` 的 Windows x64 Nomi-core
-   候选检查并冻结同一候选 bytes。
-3. 将冻结候选交给 macOS arm64 与 Linux Desktop x64 只做原生 Nomi-core 验证；
-   发现问题返回当前主机修复，不建立跨机开发分支、Prompt、交接包或 attestation。
-4. 若外部验证要求继续本机重构，优先补 Channel 的 typed event cursor/receipt/
-   exact cancel contract，再补 IDMM 的 active-turn supervision query；不要先做
-   Codex Sidecar、C9/Nomi-free RC 或通用 coordinator。
-5. 三平台 Nomi-core RC 通过后再评估当前阶段 Stable；Codex Sidecar、C9/Nomi-free RC
-   保留为后续阶段，不进入本次关键路径。
+2. 保留 `0bac72da4ebb62f6a0f183a1285065c88aa684a4` 的 Windows C8 结果作为一期
+   工程闭合证据，不在其上混入 06 代码。
+3. 按 `06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md` 和独立
+   N1/M1 台账，先完成 Plugin Windows，再完成 MiniApp Windows。
+4. 06 的全部 Windows 开发和候选验证完成后，冻结新的最终 source cohort，再统一交给
+   macOS arm64 与 Linux Desktop x64 做原生验证；发现问题返回当前主机修复。
+5. Codex Sidecar、C9/Nomi-free RC 保留为后续阶段，不进入 N1/M1 当前关键路径。
 
 ## 阶段退出条件
 

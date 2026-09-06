@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "boundary": "C8-WIN-PRE",
-  "status": "active",
+  "status": "closed",
   "branch": "rf/agent-capability-platform-v2",
   "candidate_source_policy": "resolve_clean_git_head_at_run",
   "candidate_inputs": {
