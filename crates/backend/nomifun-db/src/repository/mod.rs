@@ -13,6 +13,7 @@ pub mod customer_service;
 pub mod customer_service_search;
 pub mod idmm_intervention;
 pub mod instance_token;
+pub mod javascript_runtime_selection;
 pub mod knowledge;
 pub mod knowledge_entry;
 pub mod knowledge_source;
@@ -20,6 +21,7 @@ pub mod knowledge_tree_operation;
 pub mod mcp_server;
 pub mod miniapp;
 pub mod oauth_token;
+pub mod plugin_n1;
 pub mod provider;
 pub mod provider_connection;
 pub mod provider_model;
@@ -41,12 +43,14 @@ mod sqlite_cron;
 mod sqlite_customer_service;
 mod sqlite_idmm_intervention;
 mod sqlite_instance_token;
+mod sqlite_javascript_runtime_selection;
 mod sqlite_knowledge;
 mod sqlite_knowledge_entry;
 mod sqlite_knowledge_source;
 mod sqlite_knowledge_tree_operation;
 mod sqlite_mcp_server;
 mod sqlite_oauth_token;
+mod sqlite_plugin_n1;
 mod sqlite_provider;
 mod sqlite_provider_connection;
 mod sqlite_provider_model;
@@ -98,6 +102,9 @@ pub use idmm_intervention::{
     ReserveIdmmActionParams, TTL_MS,
 };
 pub use instance_token::IInstanceTokenRepository;
+pub use javascript_runtime_selection::{
+    IJavaScriptRuntimeSelectionRepository, SaveJavaScriptRuntimeSelectionParams,
+};
 pub use knowledge::IKnowledgeRepository;
 pub use knowledge_entry::{
     IKnowledgeEntryRepository, KnowledgeEntryMutation, KnowledgeProjectionReplacement,
@@ -117,6 +124,14 @@ pub use knowledge_tree_operation::{
 };
 pub use mcp_server::IMcpServerRepository;
 pub use oauth_token::IOAuthTokenRepository;
+pub use plugin_n1::{
+    ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
+    FinishProductOperationParams, IPluginN1Repository, PutPluginKvParams,
+    RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
+    RestorePluginMountParams, StartProductOperationParams, UninstallPluginMountParams,
+    UpdatePluginProjectSourceParams, MAX_PRODUCT_OPERATION_LOG_LINES,
+    MAX_PRODUCT_OPERATION_LOG_LINE_CHARS,
+};
 pub use provider::IProviderRepository;
 pub use provider_connection::IProviderConnectionRepository;
 pub use provider_model::{
@@ -147,10 +162,12 @@ pub use sqlite_cron::SqliteCronRepository;
 pub use sqlite_customer_service::SqliteCustomerServiceRepository;
 pub use sqlite_idmm_intervention::SqliteIdmmInterventionRepository;
 pub use sqlite_instance_token::SqliteInstanceTokenRepository;
+pub use sqlite_javascript_runtime_selection::SqliteJavaScriptRuntimeSelectionRepository;
 pub use sqlite_knowledge::SqliteKnowledgeRepository;
 pub use sqlite_knowledge_tree_operation::SqliteKnowledgeTreeOperationRepository;
 pub use sqlite_mcp_server::SqliteMcpServerRepository;
 pub use sqlite_oauth_token::SqliteOAuthTokenRepository;
+pub use sqlite_plugin_n1::SqlitePluginN1Repository;
 pub use sqlite_provider::SqliteProviderRepository;
 pub use sqlite_provider_connection::SqliteProviderConnectionRepository;
 pub use sqlite_provider_model::SqliteProviderModelRepository;
