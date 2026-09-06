@@ -126,10 +126,12 @@ pub use mcp_server::IMcpServerRepository;
 pub use oauth_token::IOAuthTokenRepository;
 pub use plugin_n1::{
     ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
-    FinishProductOperationParams, IPluginN1Repository, PutPluginKvParams,
+    DeletePluginKvParams, FinishProductOperationParams, GetPluginKvParams,
+    IPluginN1Repository, ListPluginCredentialBindingsParams, PutPluginKvParams,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
-    RestorePluginMountParams, StartProductOperationParams, UninstallPluginMountParams,
-    UpdatePluginProjectSourceParams, MAX_PRODUCT_OPERATION_LOG_LINES,
+    ReplacePluginCredentialBindingsParams, RestorePluginMountParams, StartProductOperationParams,
+    UninstallPluginMountParams, UpdatePluginMountConfigParams, UpdatePluginProjectSourceParams,
+    MAX_PRODUCT_OPERATION_LOG_LINES,
     MAX_PRODUCT_OPERATION_LOG_LINE_CHARS,
 };
 pub use provider::IProviderRepository;

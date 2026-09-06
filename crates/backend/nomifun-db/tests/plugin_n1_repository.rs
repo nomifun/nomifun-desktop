@@ -2,13 +2,14 @@ use std::path::Path;
 
 use nomifun_db::{
     ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams, DbError,
-    FinishProductOperationParams, IPluginN1Repository, PluginCandidateOrigin,
-    ProductOperationKind, ProductOperationState, PutPluginKvParams,
+    DeletePluginKvParams, FinishProductOperationParams, GetPluginKvParams,
+    IPluginN1Repository, ListPluginCredentialBindingsParams, PluginCandidateOrigin,
+    PluginCredentialBindingInput, ProductOperationKind, ProductOperationState, PutPluginKvParams,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
-    RestorePluginMountParams, SqlitePluginN1Repository, StartProductOperationParams,
-    UninstallPluginMountParams, UpdatePluginProjectSourceParams, init_database,
-    init_database_memory, installation_owner_id, MAX_PRODUCT_OPERATION_LOG_LINE_CHARS,
-    MAX_PRODUCT_OPERATION_LOG_LINES,
+    ReplacePluginCredentialBindingsParams, RestorePluginMountParams, SqlitePluginN1Repository,
+    StartProductOperationParams, UninstallPluginMountParams, UpdatePluginMountConfigParams,
+    UpdatePluginProjectSourceParams, init_database, init_database_memory, installation_owner_id,
+    MAX_PRODUCT_OPERATION_LOG_LINE_CHARS, MAX_PRODUCT_OPERATION_LOG_LINES,
 };
 use serde_json::json;
 use sqlx::migrate::{Migrate, Migrator};
@@ -228,7 +229,7 @@ async fn add_managed_candidate(
 }
 
 #[tokio::test]
-async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_through_068() {
+async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_through_069() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("plugin-n1.db");
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -306,7 +307,7 @@ async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_through
         .fetch_one(restarted.pool())
         .await
         .unwrap();
-    assert_eq!(version, 68);
+    assert_eq!(version, 69);
 }
 
 #[tokio::test]
@@ -604,6 +605,8 @@ async fn replace_rotates_current_previous_rejects_stale_base_and_restore_uses_ex
             expected_current_artifact_digest: None,
             new_mount_id: Some(mount_id.clone()),
             new_data_dir_path: Some(format!("plugin-data/{mount_id}")),
+            config_schema_digest: digest('f'),
+            initial_config: json!({}),
             applied_at: 6,
         })
         .await
@@ -644,6 +647,8 @@ async fn replace_rotates_current_previous_rejects_stale_base_and_restore_uses_ex
             expected_current_artifact_digest: Some(fixture.artifact_digest.clone()),
             new_mount_id: None,
             new_data_dir_path: None,
+            config_schema_digest: digest('f'),
+            initial_config: json!({}),
             applied_at: 11,
         })
         .await
@@ -691,6 +696,8 @@ async fn replace_rotates_current_previous_rejects_stale_base_and_restore_uses_ex
             expected_current_artifact_digest: Some(second_artifact.clone()),
             new_mount_id: None,
             new_data_dir_path: None,
+            config_schema_digest: digest('f'),
+            initial_config: json!({}),
             applied_at: 16,
         })
         .await
@@ -740,6 +747,8 @@ async fn direct_current_pointer_sql_bypass_is_rejected() {
             expected_current_artifact_digest: None,
             new_mount_id: Some(mount_id.clone()),
             new_data_dir_path: Some(format!("plugin-data/{mount_id}")),
+            config_schema_digest: digest('f'),
+            initial_config: json!({}),
             applied_at: 6,
         })
         .await
@@ -816,10 +825,13 @@ async fn mount_data_delete_preserves_project_ready_candidate_and_test_receipt_as
             expected_current_artifact_digest: None,
             new_mount_id: Some(mount_id.clone()),
             new_data_dir_path: Some(format!("plugin-data/{mount_id}")),
+            config_schema_digest: digest('f'),
+            initial_config: json!({}),
             applied_at: 6,
         })
         .await
         .unwrap();
+    let installed_digest = installed.current_artifact_digest.clone().unwrap();
     let next_source = digest('5');
     let next_lock = digest('6');
     fixture
@@ -862,13 +874,25 @@ async fn mount_data_delete_preserves_project_ready_candidate_and_test_receipt_as
         .unwrap();
     fixture
         .repo
-        .bind_credential(&mount_id, "api_token", "credential-store:item-1", 11)
+        .replace_credential_bindings(&ReplacePluginCredentialBindingsParams {
+            mount_id: mount_id.clone(),
+            expected_mount_revision: installed.revision,
+            expected_current_artifact_digest: Some(installed_digest.clone()),
+            expected_bindings_revision: 0,
+            bindings: vec![PluginCredentialBindingInput {
+                slot: "api_token".into(),
+                credential_id: "credential-store:item-1".into(),
+            }],
+            updated_at: 11,
+        })
         .await
         .unwrap();
     fixture
         .repo
         .put_kv_cas(&PutPluginKvParams {
             mount_id: mount_id.clone(),
+            expected_mount_revision: installed.revision,
+            expected_current_artifact_digest: Some(installed_digest.clone()),
             namespace: "runtime".into(),
             key: "counter".into(),
             value: json!(1),
@@ -882,7 +906,7 @@ async fn mount_data_delete_preserves_project_ready_candidate_and_test_receipt_as
         .uninstall_retain_data(&UninstallPluginMountParams {
             mount_id: mount_id.clone(),
             expected_revision: installed.revision,
-            expected_current_artifact_digest: installed.current_artifact_digest.unwrap(),
+            expected_current_artifact_digest: installed_digest,
             uninstalled_at: 12,
         })
         .await
@@ -973,6 +997,8 @@ async fn kv_is_mount_namespaced_and_uses_revision_cas() {
             expected_current_artifact_digest: None,
             new_mount_id: Some(mount_id.clone()),
             new_data_dir_path: Some(format!("plugin-data/{mount_id}")),
+            config_schema_digest: digest('f'),
+            initial_config: json!({}),
             applied_at: 6,
         })
         .await
@@ -981,6 +1007,8 @@ async fn kv_is_mount_namespaced_and_uses_revision_cas() {
         .repo
         .put_kv_cas(&PutPluginKvParams {
             mount_id: mount_id.clone(),
+            expected_mount_revision: 1,
+            expected_current_artifact_digest: Some(fixture.artifact_digest.clone()),
             namespace: "runtime".into(),
             key: "state".into(),
             value: json!({"value": 1}),
@@ -994,6 +1022,8 @@ async fn kv_is_mount_namespaced_and_uses_revision_cas() {
         .repo
         .put_kv_cas(&PutPluginKvParams {
             mount_id: mount_id.clone(),
+            expected_mount_revision: 1,
+            expected_current_artifact_digest: Some(fixture.artifact_digest.clone()),
             namespace: "preview".into(),
             key: "state".into(),
             value: json!({"value": 99}),
@@ -1006,6 +1036,8 @@ async fn kv_is_mount_namespaced_and_uses_revision_cas() {
         .repo
         .put_kv_cas(&PutPluginKvParams {
             mount_id: mount_id.clone(),
+            expected_mount_revision: 1,
+            expected_current_artifact_digest: Some(fixture.artifact_digest.clone()),
             namespace: "runtime".into(),
             key: "state".into(),
             value: json!({"value": 2}),
@@ -1015,10 +1047,25 @@ async fn kv_is_mount_namespaced_and_uses_revision_cas() {
         .await
         .unwrap();
     assert_eq!(second.revision, 2);
+    let fetched = fixture
+        .repo
+        .get_kv(&GetPluginKvParams {
+            mount_id: mount_id.clone(),
+            expected_mount_revision: 1,
+            expected_current_artifact_digest: Some(fixture.artifact_digest.clone()),
+            namespace: "runtime".into(),
+            key: "state".into(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.value_json, r#"{"value":2}"#);
     assert!(fixture
         .repo
         .put_kv_cas(&PutPluginKvParams {
-            mount_id,
+            mount_id: mount_id.clone(),
+            expected_mount_revision: 1,
+            expected_current_artifact_digest: Some(fixture.artifact_digest.clone()),
             namespace: "runtime".into(),
             key: "state".into(),
             value: json!({"value": 3}),
@@ -1027,6 +1074,204 @@ async fn kv_is_mount_namespaced_and_uses_revision_cas() {
         })
         .await
         .is_err());
+    assert!(fixture
+        .repo
+        .delete_kv_cas(&DeletePluginKvParams {
+            mount_id: mount_id.clone(),
+            expected_mount_revision: 1,
+            expected_current_artifact_digest: Some(fixture.artifact_digest.clone()),
+            namespace: "runtime".into(),
+            key: "state".into(),
+            expected_revision: 1,
+            updated_at: 10,
+        })
+        .await
+        .is_err());
+    assert!(fixture
+        .repo
+        .delete_kv_cas(&DeletePluginKvParams {
+            mount_id: mount_id.clone(),
+            expected_mount_revision: 1,
+            expected_current_artifact_digest: Some(fixture.artifact_digest.clone()),
+            namespace: "runtime".into(),
+            key: "state".into(),
+            expected_revision: 2,
+            updated_at: 10,
+        })
+        .await
+        .unwrap());
+    assert!(!fixture
+        .repo
+        .delete_kv_cas(&DeletePluginKvParams {
+            mount_id,
+            expected_mount_revision: 1,
+            expected_current_artifact_digest: Some(fixture.artifact_digest),
+            namespace: "runtime".into(),
+            key: "state".into(),
+            expected_revision: 2,
+            updated_at: 11,
+        })
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn config_credentials_and_runtime_state_use_exact_mount_cas() {
+    let fixture = managed_fixture().await;
+    let mount_id = id();
+    let installed = fixture
+        .repo
+        .apply_candidate(&ApplyPluginCandidateParams {
+            project_id: fixture.project_id,
+            candidate_id: fixture.candidate_id,
+            expected_project_generation: 1,
+            expected_mount_revision: Some(0),
+            expected_current_artifact_digest: None,
+            new_mount_id: Some(mount_id.clone()),
+            new_data_dir_path: Some(format!("plugin-data/{mount_id}")),
+            config_schema_digest: digest('f'),
+            initial_config: json!({"mode": "initial"}),
+            applied_at: 6,
+        })
+        .await
+        .unwrap();
+    let artifact_digest = installed.current_artifact_digest.clone().unwrap();
+    assert_eq!(installed.config_revision, 1);
+    assert_eq!(installed.config_schema_digest.as_deref(), Some(digest('f').as_str()));
+    assert_eq!(installed.config_json, r#"{"mode":"initial"}"#);
+
+    let configured = fixture
+        .repo
+        .update_mount_config_cas(&UpdatePluginMountConfigParams {
+            mount_id: mount_id.clone(),
+            expected_mount_revision: installed.revision,
+            expected_current_artifact_digest: Some(artifact_digest.clone()),
+            expected_config_revision: 1,
+            expected_config_schema_digest: Some(digest('f')),
+            config_schema_digest: digest('f'),
+            config: json!({"mode": "updated"}),
+            updated_at: 7,
+        })
+        .await
+        .unwrap();
+    assert_eq!(configured.config_revision, 2);
+    assert_eq!(configured.config_json, r#"{"mode":"updated"}"#);
+    assert!(fixture
+        .repo
+        .update_mount_config_cas(&UpdatePluginMountConfigParams {
+            mount_id: mount_id.clone(),
+            expected_mount_revision: installed.revision,
+            expected_current_artifact_digest: Some(artifact_digest.clone()),
+            expected_config_revision: 1,
+            expected_config_schema_digest: Some(digest('f')),
+            config_schema_digest: digest('f'),
+            config: json!({"mode": "stale"}),
+            updated_at: 8,
+        })
+        .await
+        .is_err());
+
+    let first_bindings = fixture
+        .repo
+        .replace_credential_bindings(&ReplacePluginCredentialBindingsParams {
+            mount_id: mount_id.clone(),
+            expected_mount_revision: installed.revision,
+            expected_current_artifact_digest: Some(artifact_digest.clone()),
+            expected_bindings_revision: 0,
+            bindings: vec![PluginCredentialBindingInput {
+                slot: "api_key".into(),
+                credential_id: "credential:first".into(),
+            }],
+            updated_at: 8,
+        })
+        .await
+        .unwrap();
+    assert_eq!(first_bindings.bindings_revision, 1);
+    assert_eq!(first_bindings.bindings[0].credential_id, "credential:first");
+
+    let rotated = fixture
+        .repo
+        .replace_credential_bindings(&ReplacePluginCredentialBindingsParams {
+            mount_id: mount_id.clone(),
+            expected_mount_revision: installed.revision,
+            expected_current_artifact_digest: Some(artifact_digest.clone()),
+            expected_bindings_revision: 1,
+            bindings: vec![PluginCredentialBindingInput {
+                slot: "api_key".into(),
+                credential_id: "credential:second".into(),
+            }],
+            updated_at: 9,
+        })
+        .await
+        .unwrap();
+    assert_eq!(rotated.bindings_revision, 2);
+    assert_eq!(rotated.bindings[0].credential_id, "credential:second");
+    assert!(fixture
+        .repo
+        .replace_credential_bindings(&ReplacePluginCredentialBindingsParams {
+            expected_bindings_revision: 1,
+            updated_at: 10,
+            ..ReplacePluginCredentialBindingsParams {
+                mount_id: mount_id.clone(),
+                expected_mount_revision: installed.revision,
+                expected_current_artifact_digest: Some(artifact_digest.clone()),
+                expected_bindings_revision: 2,
+                bindings: Vec::new(),
+                updated_at: 10,
+            }
+        })
+        .await
+        .is_err());
+
+    let unbound = fixture
+        .repo
+        .replace_credential_bindings(&ReplacePluginCredentialBindingsParams {
+            mount_id: mount_id.clone(),
+            expected_mount_revision: installed.revision,
+            expected_current_artifact_digest: Some(artifact_digest.clone()),
+            expected_bindings_revision: 2,
+            bindings: Vec::new(),
+            updated_at: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(unbound.bindings_revision, 3);
+    assert!(unbound.bindings.is_empty());
+
+    let listed = fixture
+        .repo
+        .list_credential_bindings(&ListPluginCredentialBindingsParams {
+            mount_id: mount_id.clone(),
+            expected_mount_revision: installed.revision,
+            expected_current_artifact_digest: Some(artifact_digest.clone()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(listed.bindings_revision, 3);
+    assert!(listed.bindings.is_empty());
+    let runtime = fixture
+        .repo
+        .get_mount_runtime_state(&ListPluginCredentialBindingsParams {
+            mount_id: mount_id.clone(),
+            expected_mount_revision: installed.revision,
+            expected_current_artifact_digest: Some(artifact_digest),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(runtime.mount.config_revision, 2);
+    assert_eq!(runtime.mount.credential_bindings_revision, 3);
+    assert!(runtime.credential_bindings.is_empty());
+
+    let direct_binding = sqlx::query(
+        "INSERT INTO plugin_credential_bindings (
+            mount_id, slot, credential_id, created_at, updated_at
+         ) VALUES (?, 'forged', 'credential:forged', 11, 11)",
+    )
+    .bind(&mount_id)
+    .execute(&fixture.pool)
+    .await;
+    assert!(direct_binding.is_err());
 }
 
 #[tokio::test]
@@ -1043,6 +1288,8 @@ async fn product_operation_owner_state_progress_error_and_log_contract_is_strict
             expected_current_artifact_digest: None,
             new_mount_id: Some(mount_id.clone()),
             new_data_dir_path: Some(format!("plugin-data/{mount_id}")),
+            config_schema_digest: digest('f'),
+            initial_config: json!({}),
             applied_at: 6,
         })
         .await

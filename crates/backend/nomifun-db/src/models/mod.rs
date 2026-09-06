@@ -93,8 +93,10 @@ pub use message::MessageRow;
 pub use miniapp::{MiniAppDocumentRow, MiniAppRow};
 pub use oauth_token::OAuthTokenRow;
 pub use plugin_n1::{
-    PluginArtifactRow, PluginCandidateTestReceiptRow, PluginCredentialBindingRow, PluginKvRow,
-    PluginMountRevisionRow, PluginMountRow, PluginProjectRow, PluginReadyCandidateRow,
+    PluginArtifactRow, PluginCandidateTestReceiptRow, PluginCredentialBindingInput,
+    PluginCredentialBindingRow, PluginCredentialBindingSnapshot, PluginKvRow,
+    PluginMountRevisionRow, PluginMountRow, PluginMountRuntimeState, PluginProjectRow,
+    PluginReadyCandidateRow,
     PluginCandidateOrigin, ProductOperationKind, ProductOperationRow, ProductOperationState,
 };
 pub use provider::Provider;
