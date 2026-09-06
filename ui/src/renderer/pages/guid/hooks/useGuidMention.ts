@@ -4,8 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AgentPresetSummary } from '@/common/types/agentPlatform';
-import type { ExecutableAgentPreset, MentionOption } from '../types';
+import type {
+  ExecutableAgentPreset,
+  GuidAgentSelection,
+  MentionOption,
+} from '../types';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 export type GuidMentionResult = {
@@ -30,18 +33,25 @@ export type GuidMentionResult = {
 
 type UseGuidMentionOptions = {
   presets: ExecutableAgentPreset[];
-  selectedPresetId: string;
-  setSelectedPresetId: (presetId: string) => void;
-  selectedPreset: AgentPresetSummary | undefined;
+  selection: GuidAgentSelection;
+  setSelection: (selection: GuidAgentSelection) => void;
+  selectedPreset: ExecutableAgentPreset | undefined;
+  defaultAgentLabel: string;
   setInput: React.Dispatch<React.SetStateAction<string>>;
 };
 
-/** Manages AgentPreset selection through the Guid @ mention UI. */
+const selectionKey = (selection: GuidAgentSelection): string =>
+  selection.kind === 'default'
+    ? 'guid-agent-default'
+    : `guid-agent-preset:${selection.presetId}`;
+
+/** Manages plain Nomi and AgentPreset selection through the Guid @ mention UI. */
 export const useGuidMention = ({
   presets,
-  selectedPresetId,
-  setSelectedPresetId,
+  selection,
+  setSelection,
   selectedPreset,
+  defaultAgentLabel,
   setInput,
 }: UseGuidMentionOptions): GuidMentionResult => {
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -53,12 +63,29 @@ export const useGuidMention = ({
   const mentionMatchRegex = useMemo(() => /(?:^|\s)@([^\s@]*)$/, []);
 
   const mentionOptions = useMemo(
-    () =>
-      presets.map((preset) => {
+    () => [
+      {
+        key: selectionKey({ kind: 'default' }),
+        label: defaultAgentLabel,
+        tokens: new Set([
+          defaultAgentLabel.toLowerCase(),
+          'nomi',
+          'default',
+        ]),
+        selection: { kind: 'default' } as const,
+        avatarEmoji: undefined,
+        avatarImage: undefined,
+        logo: undefined,
+      },
+      ...presets.map((preset) => {
         const label = preset.display_name;
         const normalizedLabel = label.toLowerCase();
+        const presetSelection: GuidAgentSelection = {
+          kind: 'preset',
+          presetId: preset.preset_id,
+        };
         return {
-          key: preset.preset_id,
+          key: selectionKey(presetSelection),
           label,
           tokens: new Set([
             normalizedLabel,
@@ -66,12 +93,14 @@ export const useGuidMention = ({
             normalizedLabel.replace(/\s+/g, ''),
             preset.preset_id.toLowerCase(),
           ]),
+          selection: presetSelection,
           avatarEmoji: undefined,
           avatarImage: undefined,
           logo: undefined,
         };
       }),
-    [presets]
+    ],
+    [defaultAgentLabel, presets]
   );
 
   const filteredMentionOptions = useMemo(() => {
@@ -92,7 +121,9 @@ export const useGuidMention = ({
 
   const selectMentionAgent = useCallback(
     (key: string) => {
-      setSelectedPresetId(key);
+      const option = mentionOptions.find((candidate) => candidate.key === key);
+      if (!option) return;
+      setSelection(option.selection);
       setInput((previous) => stripMentionToken(previous));
       setMentionOpen(false);
       setMentionSelectorOpen(false);
@@ -100,16 +131,20 @@ export const useGuidMention = ({
       setMentionQuery(null);
       setMentionActiveIndex(0);
     },
-    [setInput, setSelectedPresetId, stripMentionToken]
+    [mentionOptions, setInput, setSelection, stripMentionToken]
   );
 
-  const selectedAgentLabel = selectedPreset?.display_name || selectedPresetId;
+  const selectedAgentLabel =
+    selection.kind === 'default'
+      ? defaultAgentLabel
+      : selectedPreset?.display_name ?? defaultAgentLabel;
+  const selectedKey = selectionKey(selection);
   const mentionMenuActiveOption =
     filteredMentionOptions[mentionActiveIndex] || filteredMentionOptions[0];
   const mentionMenuSelectedKey =
     mentionOpen || mentionSelectorOpen
-      ? mentionMenuActiveOption?.key || selectedPresetId
-      : selectedPresetId;
+      ? mentionMenuActiveOption?.key || selectedKey
+      : selectedKey;
 
   useEffect(() => {
     if (mentionOpen) {
@@ -118,7 +153,7 @@ export const useGuidMention = ({
     }
     if (mentionSelectorOpen) {
       const selectedIndex = filteredMentionOptions.findIndex(
-        (option) => option.key === selectedPresetId
+        (option) => option.key === selectedKey
       );
       setMentionActiveIndex(selectedIndex >= 0 ? selectedIndex : 0);
     }
@@ -127,7 +162,7 @@ export const useGuidMention = ({
     mentionOpen,
     mentionQuery,
     mentionSelectorOpen,
-    selectedPresetId,
+    selectedKey,
   ]);
 
   useEffect(() => {

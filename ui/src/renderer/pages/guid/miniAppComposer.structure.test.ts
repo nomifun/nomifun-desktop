@@ -7,7 +7,8 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
-const readSource = (url: URL) => readFileSync(url, 'utf8');
+const readSource = (url: URL) =>
+  readFileSync(url, 'utf8').replace(/\r\n/g, '\n');
 const guidPage = readSource(new URL('./GuidPage.tsx', import.meta.url));
 const entryStrip = readSource(new URL('./components/ComposerEntryStrip.tsx', import.meta.url));
 const quickStart = readSource(new URL('../../hooks/agent/useMiniAppQuickStart.ts', import.meta.url));
@@ -73,19 +74,19 @@ describe('mini-app composer entry wiring', () => {
     expect(guidPage.includes('miniAppSendingRef.current = true')).toBe(true);
     expect(guidPage.includes('miniAppSendingRef.current = false')).toBe(true);
 
-    // MiniApp uses the quick-start hook's own persisted Nomi default model.
-    // Guid has no second model picker or duplicate model-selection hook.
+    // MiniApp must not create a second model-selection state of its own. The
+    // ordinary Guid Nomi mode owns the visible model selector.
     expect(guidPage.includes('miniAppModelSelection')).toBe(false);
-    expect(guidPage.includes('useGuidModelSelection')).toBe(false);
-    expect(guidPage.includes('<GuidModelSelector')).toBe(false);
+    expect(guidPage.match(/useGuidModelSelection\('nomi'\)/g)).toHaveLength(1);
     expect(guidPage.includes('files: guidInput.files')).toBe(true);
+    expect(guidPage.includes('        prompt,')).toBe(true);
     expect(
-      guidPage.includes(
-        '        prompt,\n        dir: guidInput.dir,\n        files: guidInput.files,\n      })'
-      )
+      guidPage.includes('        model: modelSelection.current_model,')
     ).toBe(true);
+    expect(guidPage.includes('        dir: guidInput.dir,')).toBe(true);
+    expect(guidPage.includes('        files: guidInput.files,')).toBe(true);
     expect(quickStart.includes('dir?: string')).toBe(true);
-    expect(guidPage.includes('!miniAppQuickStart.canStart')).toBe(true);
+    expect(guidPage.includes('!modelSelection.current_model')).toBe(true);
     expect(
       /isButtonDisabled=\{\s*miniAppMode\s*\?\s*miniAppButtonDisabled/.test(
         guidPage
@@ -105,20 +106,25 @@ describe('mini-app composer entry wiring', () => {
   test('mini-app mode and an armed AutoWork entry are mutually exclusive', () => {
     expect(guidPage.includes('if (isAutoWorkMode) setMiniAppMode(false);')).toBe(true);
     expect(
-      /onCreateMiniApp=\{\s*isAutoWorkMode\s*\?\s*undefined\s*:\s*\(\)\s*=>\s*setMiniAppMode\(true\)\s*\}/.test(
-        guidPage
+      guidPage.includes(
+        'const activateMiniAppMode = useCallback(() => {\n    agentSelection.selectDefaultAgent();\n    setMiniAppMode(true);'
+      )
+    ).toBe(true);
+    expect(
+      guidPage.includes(
+        'onCreateMiniApp={\n                    isAutoWorkMode ? undefined : activateMiniAppMode\n                  }'
       )
     ).toBe(true);
   });
 
-  test('GuidPage activates from the ?miniapp=1 query and strips it', () => {
+  test('GuidPage activates default Nomi mode from the ?miniapp=1 query and strips it', () => {
     expect(guidPage.includes("new URLSearchParams(location.search).get('miniapp') === '1'")).toBe(true);
     const activationStart = guidPage.indexOf('if (!miniAppQueryRequested) return;');
     const activationEnd = guidPage.indexOf('  ]);', activationStart);
     const activationEffect = guidPage.slice(activationStart, activationEnd);
     expect(activationStart).toBeGreaterThan(-1);
     expect(activationEnd).toBeGreaterThan(activationStart);
-    expect(activationEffect.includes('setMiniAppMode(true)')).toBe(true);
+    expect(activationEffect.includes('activateMiniAppMode();')).toBe(true);
     expect(activationEffect.includes('${location.pathname}${location.hash}')).toBe(true);
     expect(activationEffect.includes('replace: true')).toBe(true);
     expect(activationEffect.includes('state: null')).toBe(true);

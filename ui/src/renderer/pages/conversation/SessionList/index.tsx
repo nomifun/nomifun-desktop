@@ -313,9 +313,14 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
     (node: WorkpathNode) => {
       // default 节点不带 state —— 走普通「新建对话」流程
       if (node.key === DEFAULT_WORKPATH_KEY) {
-        void navigate('/guid');
+        void navigate('/guid', { state: { resetAgentSelection: true } });
       } else {
-        void navigate('/guid', { state: { workspace: node.key } });
+        void navigate('/guid', {
+          state: {
+            workspace: node.key,
+            resetAgentSelection: true,
+          },
+        });
       }
       onSessionClick?.();
     },

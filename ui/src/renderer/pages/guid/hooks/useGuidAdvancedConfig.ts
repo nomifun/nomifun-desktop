@@ -26,8 +26,8 @@ export type GuidAdvancedConfig = {
 };
 
 /**
- * Session-specific drafts for the Guid page. Reusable model, Skill, MCP and
- * Knowledge configuration is frozen by the selected AgentPreset.
+ * Session-specific drafts for the Guid page. A selected AgentPreset freezes
+ * reusable capabilities; plain Nomi keeps its own explicit model selection.
  */
 export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
   const { t } = useTranslation();

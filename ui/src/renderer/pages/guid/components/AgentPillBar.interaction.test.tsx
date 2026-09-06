@@ -11,7 +11,10 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter, useLocation } from 'react-router-dom';
-import type { ExecutableAgentPreset } from '../types';
+import type {
+  ExecutableAgentPreset,
+  GuidAgentSelection,
+} from '../types';
 import AgentPillBar from './AgentPillBar';
 
 const testI18n = createInstance();
@@ -21,10 +24,13 @@ await testI18n.use(initReactI18next).init({
   resources: {
     'en-US': {
       translation: {
-        settings: {
-          agentManagement: {
-            title: 'Agent Workbench',
+        agentSettings: {
+          navigation: {
+            railTitle: 'Agent Workbench',
           },
+        },
+        guid: {
+          defaultAgent: 'Nomi Agent',
         },
       },
     },
@@ -55,25 +61,33 @@ const LocationProbe = () => {
 
 const renderBar = (
   presets: ExecutableAgentPreset[],
-  onSelectPreset: (presetId: string) => void = () => undefined
-) =>
-  render(
+  selection: GuidAgentSelection = { kind: 'default' }
+) => {
+  const selections: GuidAgentSelection[] = [];
+
+  const page = render(
     <I18nextProvider i18n={testI18n}>
       <MemoryRouter initialEntries={['/guid']}>
         <AgentPillBar
           presets={presets}
-          selectedPresetId={presets[0]?.preset_id ?? ''}
-          onSelectPreset={onSelectPreset}
+          selection={selection}
+          onSelectPreset={(presetId) =>
+            selections.push({ kind: 'preset', presetId })
+          }
+          onSelectDefault={() => selections.push({ kind: 'default' })}
         />
         <LocationProbe />
       </MemoryRouter>
     </I18nextProvider>
   );
 
+  return { page, selections };
+};
+
 afterEach(() => cleanup());
 
-describe('AgentPillBar preset behavior', () => {
-  test('selects a rendered preset by preset_id', () => {
+describe('AgentPillBar launch modes', () => {
+  test('renders default Nomi together with saved executable presets', () => {
     const first = preset(
       '0190f5fe-7c00-7a00-8000-000000000101',
       'Release reviewer'
@@ -82,35 +96,81 @@ describe('AgentPillBar preset behavior', () => {
       '0190f5fe-7c00-7a00-8000-000000000102',
       'Research assistant'
     );
-    const selected: string[] = [];
-    const page = renderBar([first, second], (presetId) => selected.push(presetId));
+    const { page } = renderBar([first, second]);
 
-    expect(page.getByText('Release reviewer').textContent).toBe(
-      'Release reviewer'
-    );
-    expect(page.getByText('Research assistant').textContent).toBe(
-      'Research assistant'
-    );
     expect(
-      page
-        .getByTestId(`agent-pill-${second.preset_id}`)
-        .className.includes('max-w-0')
-    ).toBe(false);
+      page.getByRole('button', { name: 'Nomi Agent' })
+    ).not.toBeNull();
     expect(
-      page.getByText('Research assistant').className.includes('opacity-0')
-    ).toBe(false);
-    fireEvent.click(page.getByTestId(`agent-pill-${second.preset_id}`));
-
-    expect(selected).toEqual([second.preset_id]);
+      page.getByRole('button', { name: 'Release reviewer' })
+    ).not.toBeNull();
+    expect(
+      page.getByRole('button', { name: 'Research assistant' })
+    ).not.toBeNull();
   });
 
-  test('keeps the workbench plus CTA when no executable presets exist', () => {
-    const page = renderBar([]);
+  test('switches between default Nomi and a preset selection', () => {
+    const savedPreset = preset(
+      '0190f5fe-7c00-7a00-8000-000000000102',
+      'Research assistant'
+    );
+    const { page, selections } = renderBar([savedPreset]);
+    expect(
+      page
+        .getByRole('button', { name: 'Nomi Agent' })
+        .getAttribute('aria-pressed')
+    ).toBe('true');
 
-    expect(page.container.querySelector('[data-agent-pill]')).toBeNull();
-    const plusIcon = page.container.querySelector('.i-icon-plus');
-    expect(plusIcon).not.toBeNull();
-    fireEvent.click(plusIcon as Element);
+    fireEvent.click(
+      page.getByRole('button', { name: 'Research assistant' })
+    );
+    expect(
+      selections.some(
+        (selection) =>
+          selection.kind === 'preset' &&
+          selection.presetId === savedPreset.preset_id
+      )
+    ).toBe(true);
+
+    fireEvent.click(page.getByRole('button', { name: 'Nomi Agent' }));
+    expect(
+      selections.some((selection) => selection.kind === 'default')
+    ).toBe(true);
+  });
+
+  test('marks a workbench-preselected preset as the active mode', () => {
+    const savedPreset = preset(
+      '0190f5fe-7c00-7a00-8000-000000000103',
+      'Code reviewer'
+    );
+    const { page } = renderBar([savedPreset], {
+      kind: 'preset',
+      presetId: savedPreset.preset_id,
+    });
+
+    expect(
+      page
+        .getByRole('button', { name: 'Code reviewer' })
+        .getAttribute('aria-pressed')
+    ).toBe('true');
+    expect(
+      page
+        .getByRole('button', { name: 'Nomi Agent' })
+        .getAttribute('aria-pressed')
+    ).toBe('false');
+  });
+
+  test('keeps default Nomi and the workbench CTA when no presets exist', () => {
+    const { page } = renderBar([]);
+
+    expect(
+      page.getByRole('button', { name: 'Nomi Agent' })
+    ).not.toBeNull();
+    expect(page.container.querySelector('[data-agent-preset-id]')).toBeNull();
+
+    fireEvent.click(
+      page.getByRole('button', { name: 'Agent Workbench' })
+    );
     expect(page.getByTestId('location').textContent).toBe('/agent');
   });
 });

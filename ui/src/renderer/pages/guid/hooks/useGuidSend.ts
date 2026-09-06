@@ -6,6 +6,7 @@
  */
 
 import { ipcBridge } from '@/common';
+import type { TProviderWithModel } from '@/common/config/storage';
 import {
   conversationTarget,
   parseConversationId,
@@ -22,7 +23,10 @@ import { Message } from '@arco-design/web-react';
 import type { TFunction } from 'i18next';
 import { useCallback, useRef } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
-import type { ExecutableAgentPreset } from '../types';
+import type {
+  ExecutableAgentPreset,
+  GuidAgentSelection,
+} from '../types';
 import { isAutoWorkEntry, planGuidEntry } from './autoWorkEntry';
 
 export type GuidSendDeps = {
@@ -30,10 +34,13 @@ export type GuidSendDeps = {
   setInput: React.Dispatch<React.SetStateAction<string>>;
   files: string[];
   setFiles: React.Dispatch<React.SetStateAction<string[]>>;
+  dir: string;
   setDir: React.Dispatch<React.SetStateAction<string>>;
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;
   loading: boolean;
+  selection: GuidAgentSelection;
   selectedPreset: ExecutableAgentPreset | undefined;
+  current_model: TProviderWithModel | undefined;
   applyAdvancedConfig?: (conversationId: ConversationId) => Promise<void>;
   autoWork: AutoWorkDraftValue;
   setMentionOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -52,17 +59,20 @@ export type GuidSendResult = {
   isButtonDisabled: boolean;
 };
 
-/** Creates a Session from one saved AgentPreset and stages its first message. */
+/** Creates either a plain Nomi conversation or a frozen AgentPreset Session. */
 export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const {
     input,
     setInput,
     files,
     setFiles,
+    dir,
     setDir,
     setLoading,
     loading,
+    selection,
     selectedPreset,
+    current_model,
     applyAdvancedConfig,
     autoWork,
     setMentionOpen,
@@ -77,21 +87,46 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const sendingRef = useRef(false);
 
   const handleSend = useCallback(async () => {
-    if (!selectedPreset) throw new Error('AGENT_PRESET_REQUIRED');
-
     const entryPlan = planGuidEntry(input, autoWork);
-    const session = await ipcBridge.agentPlatform.sessions.create.invoke({
-      preset_id: selectedPreset.preset_id,
-      title: entryPlan.conversationName,
-    });
-    const conversationId = parseConversationId(session.agent_session_id);
-    const conversation = await ipcBridge.conversation.get.invoke({
-      conversation_id: conversationId,
-    });
-    if (!conversation?.id) {
-      throw new Error(
-        'AgentSession was created without a Conversation projection'
-      );
+    let conversationId: ConversationId;
+    let conversation;
+
+    if (selection.kind === 'default') {
+      if (!current_model) throw new Error('MODEL_REQUIRED');
+      conversation = await ipcBridge.conversation.create.invoke({
+        type: 'nomi',
+        name: entryPlan.conversationName,
+        model: current_model,
+        extra: {
+          default_files: files,
+          workspace: dir,
+          custom_workspace: Boolean(dir),
+        },
+      });
+      if (!conversation?.id) {
+        throw new Error('Nomi conversation was not created');
+      }
+      conversationId = conversation.id;
+    } else {
+      if (
+        !selectedPreset?.current_stable_revision ||
+        selectedPreset.preset_id !== selection.presetId
+      ) {
+        throw new Error('AGENT_PRESET_REQUIRED');
+      }
+      const session = await ipcBridge.agentPlatform.sessions.create.invoke({
+        preset_id: selectedPreset.preset_id,
+        title: entryPlan.conversationName,
+      });
+      conversationId = parseConversationId(session.agent_session_id);
+      conversation = await ipcBridge.conversation.get.invoke({
+        conversation_id: conversationId,
+      });
+      if (!conversation?.id) {
+        throw new Error(
+          'AgentSession was created without a Conversation projection'
+        );
+      }
     }
 
     await applyAdvancedConfig?.(conversationId);
@@ -118,15 +153,26 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   }, [
     applyAdvancedConfig,
     autoWork,
+    current_model,
+    dir,
     files,
     input,
     navigate,
+    selection,
     selectedPreset,
   ]);
 
   const sendMessageHandler = useCallback(() => {
     if (loading || sendingRef.current) return;
-    if (!selectedPreset?.current_stable_revision) {
+    if (selection.kind === 'default' && !current_model) {
+      Message.warning(t('conversation.noModelConfigured'));
+      return;
+    }
+    if (
+      selection.kind === 'preset' &&
+      (!selectedPreset?.current_stable_revision ||
+        selectedPreset.preset_id !== selection.presetId)
+    ) {
       Message.warning(
         t('guid.agentPresetRequired', {
           defaultValue: 'Select a saved Agent from Agent Workbench first',
@@ -154,7 +200,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         setDir('');
       })
       .catch((error) => {
-        console.error('Failed to create AgentPreset conversation:', error);
+        console.error('Failed to create Guid conversation:', error);
         Message.error(getConversationCreateErrorMessage(error, t));
       })
       .finally(() => {
@@ -170,6 +216,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     handleSend,
     input,
     loading,
+    current_model,
+    selection,
     selectedPreset,
     setDir,
     setFiles,
@@ -182,8 +230,14 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     t,
   ]);
 
-  const isButtonDisabled =
-    loading || !input.trim() || !selectedPreset?.current_stable_revision;
+  const hasLaunchTarget =
+    selection.kind === 'default'
+      ? Boolean(current_model)
+      : Boolean(
+          selectedPreset?.current_stable_revision &&
+            selectedPreset.preset_id === selection.presetId
+        );
+  const isButtonDisabled = loading || !input.trim() || !hasLaunchTarget;
 
   return {
     handleSend,

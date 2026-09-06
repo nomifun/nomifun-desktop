@@ -31,10 +31,10 @@ import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import AgentPillBar from './components/AgentPillBar';
 import ComposerEntryStrip from './components/ComposerEntryStrip';
-import { AgentPillBarSkeleton } from './components/GuidSkeleton';
 import GuidActionRow from './components/GuidActionRow';
 import GuidCompanionPosterPreview from './components/GuidCompanionPosterPreview';
 import GuidInputCard from './components/GuidInputCard';
+import GuidModelSelector from './components/GuidModelSelector';
 import GuidResourceCards from './components/GuidResourceCards';
 import MentionDropdown, {
   MentionSelectorBadge,
@@ -48,8 +48,10 @@ import { useGuidAdvancedConfig } from './hooks/useGuidAdvancedConfig';
 import { useGuidAgentSelection } from './hooks/useGuidAgentSelection';
 import { useGuidInput } from './hooks/useGuidInput';
 import { useGuidMention } from './hooks/useGuidMention';
+import { useGuidModelSelection } from './hooks/useGuidModelSelection';
 import { useGuidSend } from './hooks/useGuidSend';
 import { useTypewriterPlaceholder } from './hooks/useTypewriterPlaceholder';
+import type { GuidAgentSelection } from './types';
 import styles from './index.module.css';
 
 type GuidNavigationState = {
@@ -82,6 +84,7 @@ const GuidPage: React.FC = () => {
     selectedAgentPresetId: preselectedPresetId,
     locationKey: location.key,
   });
+  const modelSelection = useGuidModelSelection('nomi');
   const guidInput = useGuidInput({
     locationState: navigationState,
   });
@@ -92,13 +95,18 @@ const GuidPage: React.FC = () => {
   const miniAppSendingRef = useRef(false);
 
   const isAutoWorkMode = isAutoWorkEntry(advancedConfig.autoWork);
-  const hasExecutablePreset = Boolean(
-    agentSelection.selectedPreset?.current_stable_revision
-  );
+  const isDefaultAgent = agentSelection.selection.kind === 'default';
+  const hasLaunchTarget = isDefaultAgent
+    ? Boolean(modelSelection.current_model)
+    : Boolean(agentSelection.selectedPreset?.current_stable_revision);
 
   useEffect(() => {
     if (isAutoWorkMode) setMiniAppMode(false);
   }, [isAutoWorkMode]);
+
+  useEffect(() => {
+    if (!isDefaultAgent) setMiniAppMode(false);
+  }, [isDefaultAgent]);
 
   const [summonDrawerOpen, setSummonDrawerOpen] = useState(false);
   const companionRoster = useCompanionRoster();
@@ -111,9 +119,12 @@ const GuidPage: React.FC = () => {
 
   const mention = useGuidMention({
     presets: agentSelection.presets,
-    selectedPresetId: agentSelection.selectedPresetId,
-    setSelectedPresetId: agentSelection.setSelectedPresetId,
+    selection: agentSelection.selection,
+    setSelection: agentSelection.setSelection,
     selectedPreset: agentSelection.selectedPreset,
+    defaultAgentLabel: t('guid.defaultAgent', {
+      defaultValue: 'Nomi Agent',
+    }),
     setInput: guidInput.setInput,
   });
 
@@ -122,10 +133,13 @@ const GuidPage: React.FC = () => {
     setInput: guidInput.setInput,
     files: guidInput.files,
     setFiles: guidInput.setFiles,
+    dir: guidInput.dir,
     setDir: guidInput.setDir,
     setLoading: guidInput.setLoading,
     loading: guidInput.loading,
+    selection: agentSelection.selection,
     selectedPreset: agentSelection.selectedPreset,
+    current_model: modelSelection.current_model,
     applyAdvancedConfig: advancedConfig.applyToConversation,
     autoWork: advancedConfig.autoWork,
     setMentionOpen: mention.setMentionOpen,
@@ -158,6 +172,7 @@ const GuidPage: React.FC = () => {
     void miniAppQuickStart
       .start({
         prompt,
+        model: modelSelection.current_model,
         dir: guidInput.dir,
         files: guidInput.files,
       })
@@ -193,6 +208,7 @@ const GuidPage: React.FC = () => {
     mention.setMentionSelectorOpen,
     miniAppMode,
     miniAppQuickStart.start,
+    modelSelection.current_model,
     pendingConversation,
     send.sendMessageHandler,
   ]);
@@ -324,16 +340,16 @@ const GuidPage: React.FC = () => {
     ]
   );
 
-  const handleSelectPresetFromPillBar = useCallback(
-    (presetId: string) => {
-      agentSelection.setSelectedPresetId(presetId);
+  const handleSelectAgentFromPillBar = useCallback(
+    (selection: GuidAgentSelection) => {
+      agentSelection.setSelection(selection);
       mention.setMentionOpen(false);
       mention.setMentionQuery(null);
       mention.setMentionSelectorOpen(false);
       mention.setMentionActiveIndex(0);
     },
     [
-      agentSelection.setSelectedPresetId,
+      agentSelection.setSelection,
       mention.setMentionActiveIndex,
       mention.setMentionOpen,
       mention.setMentionQuery,
@@ -341,16 +357,17 @@ const GuidPage: React.FC = () => {
     ]
   );
 
+  const activateMiniAppMode = useCallback(() => {
+    agentSelection.selectDefaultAgent();
+    setMiniAppMode(true);
+  }, [agentSelection.selectDefaultAgent]);
+
   const typewriterPlaceholder = useTypewriterPlaceholder(
     t('conversation.welcome.placeholder')
   );
-  const normalPlaceholder = mention.selectedAgentLabel
-    ? `${mention.selectedAgentLabel}, ${
-        typewriterPlaceholder || t('conversation.welcome.placeholder')
-      }`
-    : t('guid.agentPresetRequired', {
-        defaultValue: 'Select an Agent from Agent Workbench to start',
-      });
+  const normalPlaceholder = `${mention.selectedAgentLabel}, ${
+    typewriterPlaceholder || t('conversation.welcome.placeholder')
+  }`;
 
   useLayoutEffect(() => {
     guidInput.setInput('');
@@ -372,25 +389,16 @@ const GuidPage: React.FC = () => {
 
   useEffect(() => {
     if (!resetAgentRequested && !preselectedPresetId) return;
-    const preselectedPresetUnavailable =
-      Boolean(preselectedPresetId) &&
-      !agentSelection.isLoading &&
+    if (preselectedPresetId && agentSelection.isLoading) return;
+    if (preselectedPresetId && agentSelection.loadError) return;
+    const preselectionResolved =
+      !preselectedPresetId ||
+      (agentSelection.selection.kind === 'preset' &&
+        agentSelection.selection.presetId === preselectedPresetId) ||
       !agentSelection.presets.some(
         (preset) => preset.preset_id === preselectedPresetId
       );
-    if (
-      preselectedPresetId &&
-      agentSelection.selectedPresetId !== preselectedPresetId &&
-      !preselectedPresetUnavailable
-    ) {
-      return;
-    }
-    if (
-      resetAgentRequested &&
-      agentSelection.isLoading
-    ) {
-      return;
-    }
+    if (!preselectionResolved) return;
     navigate(
       `${location.pathname}${location.search}${location.hash}`,
       { replace: true, state: null }
@@ -401,8 +409,9 @@ const GuidPage: React.FC = () => {
     location.search,
     navigate,
     agentSelection.isLoading,
+    agentSelection.loadError,
     agentSelection.presets,
-    agentSelection.selectedPresetId,
+    agentSelection.selection,
     preselectedPresetId,
     resetAgentRequested,
   ]);
@@ -413,12 +422,13 @@ const GuidPage: React.FC = () => {
   );
   useEffect(() => {
     if (!miniAppQueryRequested) return;
-    setMiniAppMode(true);
+    activateMiniAppMode();
     navigate(`${location.pathname}${location.hash}`, {
       replace: true,
       state: null,
     });
   }, [
+    activateMiniAppMode,
     location.hash,
     location.pathname,
     miniAppQueryRequested,
@@ -455,17 +465,27 @@ const GuidPage: React.FC = () => {
     </>
   );
 
+  const modelSelectorNode = isDefaultAgent ? (
+    <GuidModelSelector
+      isProviderModelMode
+      modelList={modelSelection.modelList}
+      current_model={modelSelection.current_model}
+      setCurrentModel={modelSelection.setCurrentModel}
+    />
+  ) : undefined;
+
   const autoWorkButtonDisabled =
-    !hasExecutablePreset ||
+    !hasLaunchTarget ||
     autoWorkStartDisabled(guidInput.loading, advancedConfig.autoWork);
   const miniAppButtonDisabled =
     guidInput.loading ||
     !guidInput.input.trim() ||
-    !miniAppQuickStart.canStart;
+    !modelSelection.current_model;
   const actionRowNode = (
     <GuidActionRow
       files={guidInput.files}
       onFilesUploaded={guidInput.handleFilesUploaded}
+      modelSelectorNode={modelSelectorNode}
       loading={guidInput.loading}
       speechInputNode={
         <SpeechInputButton
@@ -506,16 +526,24 @@ const GuidPage: React.FC = () => {
               </p>
             </div>
 
-            {agentSelection.isLoading ? (
-              <AgentPillBarSkeleton />
-            ) : (
-              <AgentPillBar
-                presets={agentSelection.presets}
-                selectedPresetId={agentSelection.selectedPresetId}
-                onSelectPreset={handleSelectPresetFromPillBar}
-                suppressSelectionAnimation={resetAgentRequested}
-              />
-            )}
+            <AgentPillBar
+              presets={agentSelection.presets}
+              selection={agentSelection.selection}
+              onSelectDefault={() =>
+                handleSelectAgentFromPillBar({ kind: 'default' })
+              }
+              onSelectPreset={(presetId) => {
+                const preset = agentSelection.presets.find(
+                  (candidate) => candidate.preset_id === presetId
+                );
+                if (!preset) return;
+                handleSelectAgentFromPillBar({
+                  kind: 'preset',
+                  presetId: preset.preset_id,
+                });
+              }}
+              suppressSelectionAnimation={resetAgentRequested}
+            />
 
             <GuidInputCard
               input={guidInput.input}
@@ -550,7 +578,7 @@ const GuidPage: React.FC = () => {
               files={guidInput.files}
               onRemoveFile={guidInput.handleRemoveFile}
               actionRow={actionRowNode}
-              showWorkspace={miniAppMode}
+              showWorkspace={isDefaultAgent}
               workspaceDir={guidInput.dir}
               onSelectWorkspace={guidInput.setDir}
               onClearWorkspace={() => guidInput.setDir('')}
@@ -559,7 +587,7 @@ const GuidPage: React.FC = () => {
                   onSummonCompanion={() => setSummonDrawerOpen(true)}
                   summonedCompanionName={summonedCompanionName}
                   onCreateMiniApp={
-                    isAutoWorkMode ? undefined : () => setMiniAppMode(true)
+                    isAutoWorkMode ? undefined : activateMiniAppMode
                   }
                   miniAppActive={miniAppMode}
                   onDismissMiniApp={() => setMiniAppMode(false)}

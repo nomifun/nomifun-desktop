@@ -68,7 +68,7 @@ export const useConversationShortcuts = ({ navigate }: UseConversationShortcutsP
 
       if (isNewConversationShortcut(event)) {
         event.preventDefault();
-        void navigate('/guid');
+        void navigate('/guid', { state: { resetAgentSelection: true } });
       }
     };
 

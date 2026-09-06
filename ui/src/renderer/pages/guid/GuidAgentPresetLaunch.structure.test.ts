@@ -7,150 +7,204 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
-const readSource = (url: URL): string => readFileSync(url, 'utf8');
+const readSource = (url: URL): string =>
+  readFileSync(url, 'utf8').replace(/\r\n/g, '\n');
 
-const extractSessionCreatePayload = (source: string): string => {
-  const marker = 'agentPlatform.sessions.create.invoke({';
-  const start = source.indexOf(marker);
-  expect(start).toBeGreaterThan(-1);
-  const payloadStart = start + marker.length;
-  const payloadEnd = source.indexOf('});', payloadStart);
-  expect(payloadEnd).toBeGreaterThan(payloadStart);
-  return source.slice(payloadStart, payloadEnd);
+const extractObjectArgument = (source: string, call: string): string => {
+  const callStart = source.indexOf(call);
+  expect(callStart).toBeGreaterThan(-1);
+  const objectStart = source.indexOf('{', callStart + call.length);
+  expect(objectStart).toBeGreaterThan(callStart);
+
+  let depth = 0;
+  for (let index = objectStart; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] !== '}') continue;
+    depth -= 1;
+    if (depth === 0) return source.slice(objectStart + 1, index);
+  }
+
+  throw new Error(`Unclosed object argument for ${call}`);
 };
 
-describe('Guid AgentPreset-only launch wiring', () => {
-  test('wires navigation, mentions, pills, and send through preset_id', () => {
-    const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
+const topLevelKeys = (objectBody: string): string[] => {
+  const keys: string[] = [];
+  let depth = 0;
 
-    expect(page.includes('selectedAgentPresetId?: string')).toBe(true);
-    expect(/\w+\?\.selectedAgentPresetId/.test(page)).toBe(true);
+  for (const line of objectBody.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (depth === 0) {
+      const match = trimmed.match(/^([a-z_][a-zA-Z0-9_]*)\s*:/);
+      if (match) keys.push(match[1]);
+    }
+    depth += [...line].filter((character) => character === '{').length;
+    depth -= [...line].filter((character) => character === '}').length;
+  }
+
+  return keys;
+};
+
+describe('Guid default Nomi and AgentPreset launch behavior', () => {
+  test('uses the exact default-or-preset selection contract', () => {
+    const configKeys = readSource(
+      new URL('../../../common/config/configKeys.ts', import.meta.url)
+    );
+    const types = readSource(new URL('./types.ts', import.meta.url));
+    const selection = readSource(
+      new URL('./hooks/useGuidAgentSelection.ts', import.meta.url)
+    );
+
+    expect(configKeys.includes("| { kind: 'default' }")).toBe(true);
     expect(
-      /useGuidAgentSelection\(\{[\s\S]*?selectedAgentPresetId:\s*\w+/.test(page)
+      configKeys.includes("| { kind: 'preset'; presetId: AgentPresetId };")
     ).toBe(true);
     expect(
-      /<AgentPillBar[\s\S]*?presets=\{[^}]+\.presets\}[\s\S]*?selectedPresetId=\{[^}]+\.selectedPresetId\}[\s\S]*?onSelectPreset=\{[^}]+\}/.test(
-        page
+      configKeys.includes(
+        "'guid.agentSelection': GuidAgentSelectionPreference | undefined;"
       )
     ).toBe(true);
-    expect(/\.setSelectedPresetId\(\w+\)/.test(page)).toBe(true);
     expect(
-      /useGuidSend\(\{[\s\S]*?selectedPreset:\s*\w+\.selectedPreset/.test(page)
-    ).toBe(true);
-    expect(
-      /useGuidMention\(\{[\s\S]*?presets:\s*\w+\.presets[\s\S]*?selectedPresetId:\s*\w+\.selectedPresetId[\s\S]*?setSelectedPresetId:\s*\w+\.setSelectedPresetId/.test(
-        page
+      types.includes(
+        'export type GuidAgentSelection = GuidAgentSelectionPreference;'
       )
     ).toBe(true);
-
-    expect(page.includes('selectedAgentKey')).toBe(false);
-    expect(page.includes('availableAgents')).toBe(false);
-    expect(page.includes('selectedAgentInfo')).toBe(false);
-    expect(page.includes('findAgentByKey')).toBe(false);
-    expect(page.includes('getEffectiveAgentType')).toBe(false);
+    expect(
+      selection.includes(
+        "const DEFAULT_AGENT_SELECTION: GuidAgentSelection = { kind: 'default' };"
+      )
+    ).toBe(true);
+    expect(selection.includes('presets[0]')).toBe(false);
   });
 
-  test('does not expose preset-owned capability overrides', () => {
+  test('always renders the exact AgentPillBar API with default Nomi plus executable presets', () => {
+    const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
+    const selection = readSource(
+      new URL('./hooks/useGuidAgentSelection.ts', import.meta.url)
+    );
+    const pillBar = readSource(
+      new URL('./components/AgentPillBar.tsx', import.meta.url)
+    );
+
+    expect(selection.includes('useAgentPresets()')).toBe(true);
+    expect(
+      selection.includes('savedPresets.filter(isExecutableAgentPreset)')
+    ).toBe(true);
+    expect(pillBar.includes('selection: GuidAgentSelection;')).toBe(true);
+    expect(pillBar.includes('onSelectDefault: () => void;')).toBe(true);
+    expect(
+      pillBar.includes('onSelectPreset: (presetId: AgentPresetId) => void;')
+    ).toBe(true);
+    expect(pillBar.includes("data-testid='agent-pill-default'")).toBe(true);
+    expect(pillBar.includes("defaultValue: 'Nomi Agent'")).toBe(true);
+    expect(pillBar.includes('{presets.map((preset) => {')).toBe(true);
+
+    expect(page.includes('<AgentPillBarSkeleton')).toBe(false);
+    expect(page.match(/<AgentPillBar\b/g)).toHaveLength(1);
+    expect(page.includes('presets={agentSelection.presets}')).toBe(true);
+    expect(page.includes('selection={agentSelection.selection}')).toBe(true);
+    expect(page.includes('onSelectDefault={() =>')).toBe(true);
+    expect(page.includes('onSelectPreset={(presetId) =>')).toBe(true);
+  });
+
+  test('exposes the model selector only in default Nomi mode', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
     const actionRow = readSource(
       new URL('./components/GuidActionRow.tsx', import.meta.url)
     );
-    const entryStrip = readSource(
-      new URL('./components/ComposerEntryStrip.tsx', import.meta.url)
-    );
-
-    for (const forbidden of [
-      'GuidModelSelector',
-      'GuidSkillsDrawer',
-      'KnowledgeControl',
-      'GuidCollaboratorSelector',
-      'CollaborationPolicyControl',
-      'ensureBackendMcpCatalog',
-      'modelSelectorNode',
-      'collaboratorSelectorNode',
-      'selectedMcpServerIds',
-      'executionModelPool',
-      'selectedCollaborationTemplate',
-    ]) {
-      expect(page.includes(forbidden)).toBe(false);
-    }
-
-    for (const forbidden of [
-      'modelSelectorNode',
-      'collaboratorSelectorNode',
-      'mcpServers',
-      'onToggleMcpServer',
-    ]) {
-      expect(actionRow.includes(forbidden)).toBe(false);
-    }
-
-    expect(entryStrip.includes('activeSkills')).toBe(false);
-    expect(entryStrip.includes('onAdjustSkills')).toBe(false);
-    expect(entryStrip.includes('collaborationPolicyNode')).toBe(false);
-  });
-
-  test('uses the loading state for the skeleton so an empty library still renders the workbench CTA', () => {
-    const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
 
     expect(
-      /\{\w+\.isLoading\s*\?\s*\(\s*<AgentPillBarSkeleton/.test(page)
+      page.includes(
+        "const isDefaultAgent = agentSelection.selection.kind === 'default';"
+      )
     ).toBe(true);
-    expect(/\.presets\.length\s*===\s*0/.test(page)).toBe(false);
-    expect(page.includes('availableAgents.length === 0')).toBe(false);
+    expect(
+      page.includes('const modelSelectorNode = isDefaultAgent ? (')
+    ).toBe(true);
+    expect(page.includes('<GuidModelSelector')).toBe(true);
+    expect(page.includes('modelSelectorNode={modelSelectorNode}')).toBe(true);
+    expect(actionRow.includes('modelSelectorNode?: React.ReactNode;')).toBe(
+      true
+    );
+    expect(actionRow.includes('{modelSelectorNode && (')).toBe(true);
   });
 
-  test('submits only preset_id and title to the high-level session API', () => {
+  test('default mode creates a Nomi conversation with the selected model and no preset dependency', () => {
     const send = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
-    const payload = extractSessionCreatePayload(send);
-    const keys = [...payload.matchAll(/^\s+([a-z_][a-zA-Z0-9_]*)\s*:/gm)].map(
-      (match) => match[1]
+    const defaultBranchStart = send.indexOf(
+      "if (selection.kind === 'default')"
+    );
+    const presetBranchStart = send.indexOf('    } else {', defaultBranchStart);
+    expect(defaultBranchStart).toBeGreaterThan(-1);
+    expect(presetBranchStart).toBeGreaterThan(defaultBranchStart);
+    const defaultBranch = send.slice(defaultBranchStart, presetBranchStart);
+    const payload = extractObjectArgument(
+      defaultBranch,
+      'ipcBridge.conversation.create.invoke'
     );
 
-    expect(keys).toEqual(['preset_id', 'title']);
-    expect(payload.includes('selectedPreset.preset_id')).toBe(true);
-    expect(payload.includes('entryPlan.conversationName')).toBe(true);
+    expect(defaultBranch.includes('selectedPreset')).toBe(false);
+    expect(defaultBranch.includes('agentPlatform.sessions.create')).toBe(false);
+    expect(payload.includes("type: 'nomi'")).toBe(true);
+    expect(payload.includes('model: current_model')).toBe(true);
+    expect(payload.includes('preset_id')).toBe(false);
+    expect(
+      send.includes(
+        "selection.kind === 'default'\n      ? Boolean(current_model)"
+      )
+    ).toBe(true);
+  });
+
+  test('preset mode submits only preset_id and title to the high-level session API', () => {
+    const send = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
+    const payload = extractObjectArgument(
+      send,
+      'ipcBridge.agentPlatform.sessions.create.invoke'
+    );
+
+    expect(topLevelKeys(payload)).toEqual(['preset_id', 'title']);
+    expect(payload.includes('preset_id: selectedPreset.preset_id')).toBe(true);
+    expect(payload.includes('title: entryPlan.conversationName')).toBe(true);
 
     for (const forbidden of [
       'agent_binding',
       'AgentBindingValue',
-      'resolved_snapshot',
-      'snapshot_digest',
-      'revision_digest',
+      'snapshot',
+      'revision',
       'current_model',
-      'model_id',
-      'provider_id',
-      'skill_bindings',
+      'model',
+      'provider',
+      'skill',
       'mcp',
     ]) {
-      expect(send.includes(forbidden)).toBe(false);
+      expect(payload.includes(forbidden)).toBe(false);
     }
   });
 
-  test('requires an executable selected preset for both send paths', () => {
-    const send = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
+  test('workbench preselection switches selection to the requested preset mode', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
+    const selection = readSource(
+      new URL('./hooks/useGuidAgentSelection.ts', import.meta.url)
+    );
 
-    expect(send.match(/!selectedPreset\?\.current_stable_revision/g)).toHaveLength(
-      2
-    );
+    expect(page.includes('selectedAgentPresetId?: string;')).toBe(true);
     expect(
-      /Boolean\(\s*\w+\.selectedPreset\?\.current_stable_revision\s*\)/.test(
-        page
+      page.includes(
+        'const preselectedPresetId = navigationState?.selectedAgentPresetId;'
       )
     ).toBe(true);
-    expect(/!\w+\s*\|\|\s*autoWorkStartDisabled\(/.test(page)).toBe(true);
+    expect(page.includes('selectedAgentPresetId: preselectedPresetId')).toBe(
+      true
+    );
     expect(
-      /isButtonDisabled=\{[\s\S]*?isAutoWorkMode\s*\?\s*autoWorkButtonDisabled\s*:\s*send\.isButtonDisabled/.test(
-        page
+      selection.includes(
+        '(candidate) => candidate.preset_id === selectedAgentPresetId'
       )
     ).toBe(true);
-    const handlerStart = send.indexOf('const sendMessageHandler');
-    const presetGuard = send.indexOf(
-      'if (!selectedPreset?.current_stable_revision)',
-      handlerStart
-    );
-    const loadingStart = send.indexOf('setLoading(true)', handlerStart);
-    expect(presetGuard).toBeGreaterThan(handlerStart);
-    expect(loadingStart).toBeGreaterThan(presetGuard);
+    expect(
+      selection.includes(
+        "setSelection({ kind: 'preset', presetId: preset.preset_id });"
+      )
+    ).toBe(true);
+    expect(selection.includes('selectDefaultAgent();')).toBe(true);
   });
 });
