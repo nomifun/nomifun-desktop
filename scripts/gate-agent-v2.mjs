@@ -6303,11 +6303,11 @@ function runAp7Gate() {
   const implementationCommitExists = implementationCommitShape
     ? ap7RunCommand('git', [
         'cat-file',
-        '-e',
-        `${implementationCommit}^{commit}`,
+        '-t',
+        implementationCommit,
       ])
     : {
-        command: 'git cat-file -e <implementation_commit>^{commit}',
+        command: 'git cat-file -t <implementation_commit>',
         started_at: new Date().toISOString(),
         exit_code: 1,
         stdout: '',
@@ -6333,6 +6333,7 @@ function runAp7Gate() {
   const implementationAttestationValid =
     implementationCommitShape &&
     implementationCommitExists.exit_code === 0 &&
+    String(implementationCommitExists.stdout).trim() === 'commit' &&
     implementationCommitAncestor.exit_code === 0;
   ap7AddCheck(
     checks,

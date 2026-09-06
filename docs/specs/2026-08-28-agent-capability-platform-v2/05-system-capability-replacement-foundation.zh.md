@@ -1,6 +1,6 @@
 # NomiFun 一期止损修订：简化重构与可替换系统能力基础
 
-> 状态：**USER-CONFIRMED PHASE 1 STOP-LOSS DIRECTIVE / AgentPreset AP-0～AP-6 与 Desktop 产品验收已完成 / AP-7 待干净提交重新签署**
+> 状态：**USER-CONFIRMED PHASE 1 STOP-LOSS DIRECTIVE / AgentPreset AP-0～AP-7 已完成并签署 / Desktop 产品验收已完成**
 >
 > 发布日期：2026-09-03
 >
@@ -138,8 +138,9 @@
   验证了默认 Nomi、AgentPreset 选择/删除/能力三态、冻结模型和目标级资源；真实
   StepFun Coding Plan `step-3.7-flash` smoke 输出
   `live_smoke_status=pass code=OK status=200`。
-- 手机模式不属于 `nomifun-desktop` 本期服务与验收范围。AP-7 当前只剩把实现形成干净
-  提交、写入 `implementation_commit`、签署 evidence，并在签署提交上运行最终 Gate。
+- 手机模式不属于 `nomifun-desktop` 本期服务与验收范围。AP-7 已针对实现提交
+  `ef5f5380915e0d5c06004f03b66cbd1302b3fe03` 签署；06 已满足 AP 前置条件，但仍需
+  用户显式单独启动。
 
 ## 0. 本文的权威与执行方式
 

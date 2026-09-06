@@ -68,8 +68,9 @@
 13. 2026-09-06 人工走查确认首页 Guid 未真正提供 AgentPreset 选择，旧 AP-7
     admission 因而撤销。后续纠偏已经通过真实 Tauri Desktop 产品走查：默认 Nomi
     保留模型选择，AgentPreset 会话锁定 Snapshot 模型，能力三态/明细、删除、首页
-    预选和目标级 Workspace/Knowledge 已闭环。`SL-S4-02` 已关闭；AP-7 只等待干净
-    实现提交、重新签署和最终 Gate。手机模式不属于 `nomifun-desktop` 本期服务范围。
+    预选和目标级 Workspace/Knowledge 已闭环。`SL-S4-02` 已关闭；AP-7 已针对实现
+    提交 `ef5f5380915e0d5c06004f03b66cbd1302b3fe03` 重新签署。手机模式不属于
+    `nomifun-desktop` 本期服务范围。
 
 ## 决策总览
 
@@ -111,7 +112,7 @@
 | D-034 | `SL-S3-10` host-boundary 收口 | 已确认（2026-09-05） | Cron/AutoWork/Requirement/AgentExecution/Channel/IDMM 均经同一个 `NomiCoreSessionOwner` 接收领域自有 typed contract；Conversation-backed bridge 仅保留在测试支持或 app composition，审计必须报告 `production_legacy_files=0`、`transitional_adapters_with_legacy_dependencies=0`、`candidate=none`，但不宣称 canonical Session 已具备所有未来 live event/receipt 能力 |
 | D-035 | Agent 工作台公共入口与迁移围栏 | 已修订（2026-09-06） | 侧边栏明确显示“Agent 工作台”并进入 `/agent`；首页 Guid 是选择已保存 AgentPreset 并启动会话的入口，不是第二个 authoring surface；旧 preset 深层路由必须删除 |
 | D-036 | `agent_snapshot`、Revision payload/locks 与 Fresh-v4 clean cut | 已修订（2026-09-06） | 061/062/064 使用物理命名且不做 alias；065/066 完成 retirement 与旧资源绑定 Preset 退役；Fresh-v4 只 seed 官方模板，Revision 使用 `payload_json` 与 ContributionLock，不保留 Package template source 或旧 preset projection 表 |
-| D-037 | AP-7 admission 证据边界 | 已修订（2026-09-06） | 旧签署因缺失真实 AgentPreset 启动选择器而撤销；纠偏实现和真实 Tauri Desktop 产品走查已完成，当前只在干净实现提交后重新签署；06 仍保持独立边界 |
+| D-037 | AP-7 admission 证据边界 | 已修订（2026-09-06） | 旧签署因缺失真实 AgentPreset 启动选择器而撤销；纠偏实现、真实 Tauri Desktop 产品走查和 clean gate 均完成，AP-7 已针对 `ef5f53809` 重新签署；06 仍保持独立边界 |
 | D-038 | 首页 AgentPreset 选择与高层 Session 创建 | 已修订（2026-09-06） | Guid pill bar 只列可执行用户 AgentPreset，`+` 打开 `/agent`，工作台启动会话会预选；客户端只提交 `preset_id/title`，服务端解析稳定 Revision/Snapshot/Binding；普通 Nomi 保留模型选择，Preset 会话锁定 Snapshot 模型；具体 Workspace/Knowledge/Connector 只在消费目标选择；执行引擎只属基础设施 |
 | D-039 | Preset Session 模型与资源种类冻结 | 已确认（2026-09-06） | Snapshot digest 冻结精确模型和 `required_resource_kinds`；Preset Session 不允许 UI 或公开 PATCH 改模型，桌面资源入口只读冻结资源种类；当前 Catalog 升级不得改写历史 Session |
 
@@ -841,9 +842,9 @@ provider 请求误当成完整迁移或跨传输发布证明。
   AgentPreset selector 后被撤销。旧测试结果只保留历史审计，不能继续表示当前
   admission。
 - 纠偏实现已经完成真实 Tauri Desktop 产品走查、broad checks 和当前 StepFun smoke；
-  `SL-S4-02` 已关闭。新 evidence 仍必须在干净实现提交形成后填写
-  `implementation_commit`、使用 `admission=admitted` 与 `signed=true`，并在干净签署
-  提交上重跑 Gate 后关闭 AP-7。
+  `SL-S4-02` 已关闭。新 evidence 的 `implementation_commit` 固定为
+  `ef5f5380915e0d5c06004f03b66cbd1302b3fe03`，使用 `admission=admitted` 与
+  `signed=true`，并在干净签署提交上通过 Gate 后关闭 AP-7。
 - 手机模式不属于 `nomifun-desktop` 本期服务范围；06 仍保持独立二期边界。
 
 理由：AP-7 的职责是防止“有类型/有 fixture/有 self-test”被误报为产品合同已经闭合。
