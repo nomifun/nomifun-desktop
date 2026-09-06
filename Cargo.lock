@@ -6943,6 +6943,7 @@ dependencies = [
 name = "nomifun-plugin-platform"
 version = "0.7.4"
 dependencies = [
+ "async-trait",
  "hex",
  "nomifun-agent-contracts",
  "nomifun-common",
@@ -6951,6 +6952,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.19",
+ "tokio",
  "unicode-normalization",
  "uuid",
  "walkdir",

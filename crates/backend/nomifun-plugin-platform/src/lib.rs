@@ -5,7 +5,9 @@
 //! state, or read the legacy Extension manifest format.
 
 mod store;
+mod runtime_data;
 
+pub use runtime_data::*;
 pub use store::{
     ArtifactImportResult, ArtifactStoreLimits, CancellationFlag, ImportCancellation,
     NeverCancel, PluginArtifactStore, PluginArtifactStoreError, StoredPluginArtifact,
