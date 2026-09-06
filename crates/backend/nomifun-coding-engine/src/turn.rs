@@ -896,6 +896,8 @@ struct PendingToolCall {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use super::*;
     use crate::engine::{
@@ -989,29 +991,65 @@ mod tests {
     }
 
     fn tool_plan() -> CodingToolPlan {
+        CodingToolPlan::new([tool_binding(
+            "read_file",
+            "fs.read",
+            "read",
+            CodingEffectClass::ReadOnly,
+            true,
+        )])
+        .unwrap()
+    }
+
+    fn tool_binding(
+        model_name: &str,
+        capability_id: &str,
+        action_id: &str,
+        effect_class: CodingEffectClass,
+        parallel_safe: bool,
+    ) -> CodingToolBinding {
         let definition = ChatToolDefinition {
-                name: "read_file".to_owned(),
-                description: "read a file".to_owned(),
-                input_schema: nomifun_agent_contracts::StrictJsonValue(json!({
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}}
-                })),
-                deferred: false,
-            };
-        CodingToolPlan::new([CodingToolBinding {
-            model_name: "read_file".to_owned(),
+            name: model_name.to_owned(),
+            description: "coding tool".to_owned(),
+            input_schema: nomifun_agent_contracts::StrictJsonValue(json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}}
+            })),
+            deferred: false,
+        };
+        CodingToolBinding {
+            model_name: model_name.to_owned(),
             schema_digest: crate::tool::input_schema_digest(&definition.input_schema).unwrap(),
             canonical_input_schema_ref: nomifun_agent_contracts::CanonicalSchemaRef::from(
-                "schema://fs.read/input",
+                format!("schema://{capability_id}/input"),
             ),
             capability_contract_digest: DigestHex::from("c".repeat(64)),
             definition,
-            capability_id: nomifun_agent_contracts::CapabilityId::from("fs.read"),
-            action_id: ActionId::from("read"),
+            capability_id: nomifun_agent_contracts::CapabilityId::from(capability_id),
+            action_id: ActionId::from(action_id),
             resource_binding_ids: BTreeSet::new(),
-            effect_class: CodingEffectClass::ReadOnly,
-            parallel_safe: true,
-        }])
+            effect_class,
+            parallel_safe,
+        }
+    }
+
+    fn two_tool_plan(effect_class: CodingEffectClass, parallel_safe: bool) -> CodingToolPlan {
+        CodingToolPlan::new([
+            tool_binding(
+                "read_file",
+                "fs.read",
+                "read",
+                effect_class,
+                parallel_safe,
+            ),
+            tool_binding(
+                "search_files",
+                "fs.search",
+                "query",
+                effect_class,
+                parallel_safe,
+            ),
+        ])
         .unwrap()
     }
 
@@ -1026,6 +1064,24 @@ mod tests {
             _request: ChatModelRequest,
             _cancellation: CancellationToken,
         ) -> Result<CodingModelStream, ChatModelError> {
+            let events = self.steps.lock().unwrap().remove(0);
+            Ok(Box::pin(stream::iter(events)))
+        }
+    }
+
+    struct ObservingModel {
+        steps: std::sync::Mutex<Vec<Vec<Result<ChatModelEvent, ChatModelError>>>>,
+        requests: std::sync::Mutex<Vec<ChatModelRequest>>,
+    }
+
+    #[async_trait]
+    impl CodingModelPort for ObservingModel {
+        async fn open_stream(
+            &self,
+            request: ChatModelRequest,
+            _cancellation: CancellationToken,
+        ) -> Result<CodingModelStream, ChatModelError> {
+            self.requests.lock().unwrap().push(request);
             let events = self.steps.lock().unwrap().remove(0);
             Ok(Box::pin(stream::iter(events)))
         }
@@ -1050,6 +1106,36 @@ mod tests {
 
     struct BlockingTool {
         started: Arc<Notify>,
+    }
+
+    struct ConcurrencyTool {
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+        order: std::sync::Mutex<Vec<String>>,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl CodingToolInvoker for ConcurrencyTool {
+        async fn invoke(
+            &self,
+            invocation: CodingToolInvocation,
+            _cancellation: CancellationToken,
+        ) -> Result<CodingToolResult, CodingEngineError> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            self.order
+                .lock()
+                .unwrap()
+                .push(invocation.call.call_id.as_ref().to_owned());
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(CodingToolResult::text(
+                invocation.call.call_id,
+                "ok",
+                false,
+            ))
+        }
     }
 
     #[async_trait]
@@ -1092,6 +1178,22 @@ mod tests {
             principal_kind: "user".to_owned(),
             principal_id: "user-1".to_owned(),
         }
+    }
+
+    #[test]
+    fn reasoning_signature_can_arrive_before_reasoning_text() {
+        let mut step = StepState::default();
+        step.set_reasoning_signature("signature".to_owned()).unwrap();
+        step.append_reasoning("thinking");
+        assert!(matches!(
+            step.assistant_content.as_slice(),
+            [ChatContentPart::Reasoning {
+                text,
+                signature: Some(signature),
+                ..
+            }] if text == "thinking" && signature == "signature"
+        ));
+        assert!(step.finalize().is_ok());
     }
 
     #[tokio::test]
@@ -1149,6 +1251,137 @@ mod tests {
                 finish_reason: ChatFinishReason::Completed
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn read_only_tools_run_in_parallel_but_results_keep_call_order() {
+        let first = ToolCallId::from("call-1");
+        let second = ToolCallId::from("call-2");
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                vec![
+                    Ok(ChatModelEvent::ToolCallCompleted {
+                        call: ChatToolCall {
+                            call_id: first.clone(),
+                            name: "read_file".to_owned(),
+                            arguments: nomifun_agent_contracts::StrictJsonValue(json!({
+                                "path": "a"
+                            })),
+                            provider_metadata: None,
+                        },
+                    }),
+                    Ok(ChatModelEvent::ToolCallCompleted {
+                        call: ChatToolCall {
+                            call_id: second.clone(),
+                            name: "search_files".to_owned(),
+                            arguments: nomifun_agent_contracts::StrictJsonValue(json!({
+                                "path": "b"
+                            })),
+                            provider_metadata: None,
+                        },
+                    }),
+                    Ok(ChatModelEvent::Completed {
+                        finish_reason: ChatFinishReason::ToolCalls,
+                    }),
+                ],
+                vec![
+                    Ok(ChatModelEvent::OutputTextDelta {
+                        text: "done".to_owned(),
+                    }),
+                    Ok(ChatModelEvent::Completed {
+                        finish_reason: ChatFinishReason::Completed,
+                    }),
+                ],
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(ConcurrencyTool {
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            order: std::sync::Mutex::new(Vec::new()),
+            delay: Duration::from_millis(20),
+        });
+        let session = open_session(Arc::clone(&model) as Arc<dyn CodingModelPort>, tools.clone());
+        let result = session
+            .run_turn(CodingTurnRequest::new(
+                request(),
+                two_tool_plan(CodingEffectClass::ReadOnly, true),
+                principal(),
+                1,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result.tool_call_count, 2);
+        assert!(tools.max_active.load(Ordering::SeqCst) >= 2);
+        let requests = model.requests.lock().unwrap();
+        let tool_call_ids = requests[1]
+            .input
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|part| match part {
+                ChatContentPart::ToolResult { call_id, .. } => Some(call_id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_call_ids, vec![first, second]);
+    }
+
+    #[tokio::test]
+    async fn effectful_tools_run_serially() {
+        let model = Arc::new(ScriptedModel {
+            steps: std::sync::Mutex::new(vec![
+                vec![
+                    Ok(ChatModelEvent::ToolCallCompleted {
+                        call: ChatToolCall {
+                            call_id: ToolCallId::from("call-1"),
+                            name: "read_file".to_owned(),
+                            arguments: nomifun_agent_contracts::StrictJsonValue(json!({
+                                "path": "a"
+                            })),
+                            provider_metadata: None,
+                        },
+                    }),
+                    Ok(ChatModelEvent::ToolCallCompleted {
+                        call: ChatToolCall {
+                            call_id: ToolCallId::from("call-2"),
+                            name: "search_files".to_owned(),
+                            arguments: nomifun_agent_contracts::StrictJsonValue(json!({
+                                "path": "b"
+                            })),
+                            provider_metadata: None,
+                        },
+                    }),
+                    Ok(ChatModelEvent::Completed {
+                        finish_reason: ChatFinishReason::ToolCalls,
+                    }),
+                ],
+                vec![Ok(ChatModelEvent::Completed {
+                    finish_reason: ChatFinishReason::Completed,
+                })],
+            ]),
+        });
+        let tools = Arc::new(ConcurrencyTool {
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            order: std::sync::Mutex::new(Vec::new()),
+            delay: Duration::from_millis(10),
+        });
+        let session = open_session(Arc::clone(&model) as Arc<dyn CodingModelPort>, tools.clone());
+        session
+            .run_turn(CodingTurnRequest::new(
+                request(),
+                two_tool_plan(CodingEffectClass::ManagedEffect, false),
+                principal(),
+                1,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(tools.max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *tools.order.lock().unwrap(),
+            vec!["call-1".to_owned(), "call-2".to_owned()]
+        );
     }
 
     #[tokio::test]
