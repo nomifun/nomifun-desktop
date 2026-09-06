@@ -161,7 +161,6 @@ async fn create_owner_binding(
             CreateAgentPresetFromTemplateRequest {
                 display_name: "Remote REST integration preset".to_owned(),
                 description: None,
-                resource_bindings: Vec::new(),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),
             },

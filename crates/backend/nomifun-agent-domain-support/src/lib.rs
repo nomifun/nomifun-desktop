@@ -1460,7 +1460,16 @@ mod tests {
                 } else {
                     assert!(capability.contributions.actions.is_empty());
                     assert!(!registration.handler_ids().contains(&capability.id));
+                }
+            }
         }
+        assert_eq!(
+            registrations
+                .iter()
+                .flat_map(|registration| registration.handler_ids())
+                .count(),
+            tool_count
+        );
     }
 
     #[test]
@@ -1493,15 +1502,6 @@ mod tests {
         assert!(browser_render.host_surfaces().contains("desktop"));
         assert!(!browser_render.supports_consumer(CapabilityConsumer::Agent));
         assert!(browser_render.supports_consumer(CapabilityConsumer::Knowledge));
-    }
-        }
-        assert_eq!(
-            registrations
-                .iter()
-                .flat_map(|registration| registration.handler_ids())
-                .count(),
-            tool_count
-        );
     }
 
     #[test]

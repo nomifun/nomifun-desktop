@@ -25,6 +25,11 @@
     "package_format": "nsis",
     "native_evidence_required": true
   },
+  "validation_scope": {
+    "product": "nomifun-desktop",
+    "included_surface": "windows_desktop_x64",
+    "phone_mode": "out_of_scope"
+  },
   "immutable_inputs": {
     "decision_contract": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/contract-closure.envelope.json",
@@ -32,15 +37,15 @@
     },
     "canonical_schema_manifest": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/canonical-v4-schema-manifest.envelope.json",
-      "digest": "f8eb056bfd49e5330603ad36b284ed3269c34e1301db74ba33a0bec861e9573a"
+      "digest": "a4181ff4aff2ba7ce57ee77626edd36d53e502e4a84cb0d3f492c9c30922c161"
     },
     "target_first_party_inventory": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/target-first-party-contributions.envelope.json",
-      "digest": "f8b5460165689bb463bd286573b5b2731a20803107e2b27ca3d86420dad62d1b"
+      "digest": "0f4605524f780eb8584862aa93f7dee34a246c537f1983baca7a5f4a03dbe58f"
     },
     "official_seed": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/official-preset-seed-manifest.envelope.json",
-      "digest": "d15da58409cb096d0a1a5cc8c60534bf378500ecfc697789a5d0ecec85e56582"
+      "digest": "81500aa2e90aff90399f37e1edb77c48e13e2b0f6f7cc1f7ab715a0219ed0457"
     },
     "platform_validation_contract": {
       "path": "crates/backend/nomifun-agent-contracts/contracts/generated/canonical-v4-schema-manifest.envelope.json",
@@ -49,14 +54,14 @@
     },
     "cargo_lock": {
       "path": "Cargo.lock",
-      "digest": "51629196c5d1c2940e9ac748e095bbdbd621ba5788a0afa3af5181f0714db22d"
+      "digest": "6fe3472b35671ec10800d2596f1b10a6452eab96c6cf12222d51d840b9b9ae60"
     }
   },
   "required_checks": [
     {
-      "check_id": "c7_domain_waves",
-      "command": "bun run gate:agent-v2 -- c7-domain-waves",
-      "execution_kind": "informational"
+      "check_id": "ap7_admission",
+      "command": "bun run gate:agent-v2 -- ap-7",
+      "execution_kind": "native"
     },
     {
       "check_id": "contract_validation",
@@ -64,34 +69,54 @@
       "execution_kind": "native"
     },
     {
-      "check_id": "domain_registration_tests",
-      "command": "cargo test --locked -p nomifun-agent-domain-support -p nomifun-agent-domain-wave1 -p nomifun-agent-domain-wave2 -p nomifun-agent-domain-wave3 -p nomifun-agent-domain-wave4 -p nomifun-agent-domain-wave5",
-      "execution_kind": "native"
-    },
-    {
-      "check_id": "fresh_v4_root_tests",
-      "command": "cargo test --locked -p nomifun-v4-root -- --test-threads=1",
-      "execution_kind": "native"
-    },
-    {
-      "check_id": "production_host_tests",
-      "command": "cargo test --locked -p nomifun-app --lib router::agent_platform_host -- --test-threads=1",
-      "execution_kind": "native"
-    },
-    {
-      "check_id": "production_broker_functional_tests",
-      "command": "cargo test --locked -p nomifun-chat-model-broker production:: --lib",
-      "execution_kind": "native"
-    },
-    {
-      "check_id": "workspace_cargo_test",
-      "command": "cargo test --locked --jobs 1 -- --test-threads=1",
+      "check_id": "workspace_test_compile",
+      "command": "cargo test --locked --workspace --no-run --jobs 1",
       "execution_kind": "native",
-      "deduplication_key": "c8-win-pre-workspace-cargo"
+      "deduplication_key": "c8-win-pre-workspace-test-compile"
     },
     {
-      "check_id": "ui_check",
-      "command": "bun run check",
+      "check_id": "agent_platform_core_tests",
+      "command": "cargo test --locked -p nomifun-agent-domain-support -p nomifun-agent-control-plane -p nomifun-agent-kernel -p nomifun-agent-platform -- --test-threads=1",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "nomi_core_application_tests",
+      "command": "cargo test --locked -p nomifun-app --lib -- --test-threads=1",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "nomi_core_route_gap",
+      "command": "cargo test --locked -p nomifun-app --test nomi_core_route_gap -- --test-threads=1",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "cron_e2e",
+      "command": "cargo test --locked -p nomifun-app --test cron_e2e -- --test-threads=1",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "conversation_crud",
+      "command": "cargo test --locked -p nomifun-conversation --test conversation_crud -- --test-threads=1",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "knowledge_tests",
+      "command": "cargo test --locked -p nomifun-knowledge --lib -- --test-threads=1",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "process_mcp_cleanup_tests",
+      "command": "cargo test --locked -p nomi-process-runtime -p nomi-mcp -- --test-threads=1",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "desktop_role_native_tests",
+      "command": "cargo test --locked -p nomifun-app --features browser-use,computer-use role_owner_runs_the_canonical -- --ignored --test-threads=1",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "ui_tests",
+      "command": "bun test --cwd ui",
       "execution_kind": "native"
     },
     {
@@ -100,17 +125,52 @@
       "execution_kind": "native"
     },
     {
-      "check_id": "windows_startup_smoke",
-      "command": "target/debug/nomicore.exe --data-dir <temporary-root> --port <free-port> --local",
+      "check_id": "ui_i18n",
+      "command": "bun run check:i18n",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "ui_icons",
+      "command": "bun run check:icons",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "ui_dead_css",
+      "command": "bun run check:dead-css",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "agent_vocabulary",
+      "command": "bun run check:agent-vocabulary",
       "execution_kind": "native"
     },
     {
       "check_id": "windows_package_contract",
       "command": "bun run check:windows-installer",
       "execution_kind": "native"
+    },
+    {
+      "check_id": "release_validation_harness_tests",
+      "command": "bun test scripts/release/release-lock.test.mjs scripts/validation/run-windows-desktop-candidate-smoke.test.mjs scripts/validation/check-macos-arm64-native.test.mjs",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "stepfun_live_provider",
+      "command": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "windows_package_build",
+      "command": "bun scripts/run-win-build.mjs x64 -- --bundles nsis",
+      "execution_kind": "native"
+    },
+    {
+      "check_id": "windows_desktop_candidate_smoke",
+      "command": "bun scripts/validation/run-windows-desktop-candidate-smoke.mjs --installer <nsis> --source-commit <clean-head> --work-root <evidence-dir>",
+      "execution_kind": "native"
     }
   ],
-  "all_scene_coverage": {
+  "product_coverage": {
     "required_official_template_keys": [
       "chat.minimal",
       "assistant.general",
@@ -120,58 +180,92 @@
       "customer-service.default",
       "creative-studio.default"
     ],
-    "required_domains": [
-      "research",
-      "attachments",
-      "knowledge",
-      "project-memory",
-      "workspace",
-      "process",
-      "terminal",
-      "vcs",
-      "mcp",
-      "browser",
-      "computer",
-      "companion",
-      "channel",
-      "customer-service",
-      "robot",
-      "creative",
-      "office",
-      "miniapp",
-      "requirements",
-      "autowork",
-      "cron",
-      "idmm",
-      "remote"
+    "required_capability_ids": [
+      "agent.execution.plan",
+      "browser.act",
+      "browser.navigate",
+      "browser.observe",
+      "browser.render_content",
+      "computer.input",
+      "computer.observe",
+      "fs.patch",
+      "fs.read",
+      "fs.write",
+      "knowledge.read",
+      "knowledge.search",
+      "mcp.connect",
+      "mcp.tool_proxy",
+      "process.exec",
+      "remote.mcp",
+      "remote.rest",
+      "schedule.agent_trigger",
+      "schedule.timer",
+      "vcs.commit",
+      "vcs.diff",
+      "vcs.stage",
+      "vcs.status",
+      "workspace.bind"
     ],
-    "required_session_operations": [
-      "create",
-      "resume",
-      "fork",
-      "start_turn",
-      "steer",
-      "follow_up",
-      "cancel",
-      "compaction",
-      "delete"
-    ],
-    "required_fault_classes": [
-      "clean_root",
-      "precreated_empty_root",
-      "cutover_recovery",
-      "provider_unavailable",
-      "resource_unavailable",
-      "remote_revoke_admission",
-      "runtime_dispose",
-      "descendant_process_cleanup",
-      "late_callback_after_delete"
+    "required_flows": [
+      {
+        "flow_id": "agent_preset_platform",
+        "check_ids": ["agent_platform_core_tests"]
+      },
+      {
+        "flow_id": "nomi_core_application",
+        "check_ids": ["nomi_core_application_tests"]
+      },
+      {
+        "flow_id": "chat_coding_file_process_vcs",
+        "check_ids": ["stepfun_live_provider"]
+      },
+      {
+        "flow_id": "knowledge",
+        "check_ids": ["knowledge_tests"]
+      },
+      {
+        "flow_id": "automation",
+        "check_ids": ["cron_e2e", "stepfun_live_provider"]
+      },
+      {
+        "flow_id": "remote_rest_mcp",
+        "check_ids": ["nomi_core_route_gap", "stepfun_live_provider"]
+      },
+      {
+        "flow_id": "browser_computer_desktop",
+        "check_ids": ["desktop_role_native_tests"]
+      },
+      {
+        "flow_id": "process_tree_cleanup",
+        "check_ids": ["process_mcp_cleanup_tests"]
+      },
+      {
+        "flow_id": "desktop_ui",
+        "check_ids": [
+          "ui_tests",
+          "ui_build",
+          "ui_i18n",
+          "ui_icons",
+          "ui_dead_css",
+          "agent_vocabulary"
+        ]
+      },
+      {
+        "flow_id": "windows_package_install_launch",
+        "check_ids": [
+          "windows_package_build",
+          "windows_desktop_candidate_smoke"
+        ]
+      }
     ]
   },
   "closure_requirements": {
     "status_transition": "active -> closed",
     "windows_status": "pass",
-    "workspace_cargo_test_must_be_serialized": true,
-    "global_legacy_residual_must_be_zero": true
+    "workspace_test_compile_must_be_serialized": true,
+    "signed_ap7_required": true,
+    "stepfun_live_smoke_required": true,
+    "host_and_package_release_lock_required": true,
+    "phone_mode": "out_of_scope_for_nomifun_desktop"
   }
 }
