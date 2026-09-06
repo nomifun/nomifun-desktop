@@ -7,17 +7,20 @@
 > 权威来源：`05-system-capability-replacement-foundation.zh.md`
 >
 > 当前结论：S0-S2 的止损、P0 与基础收缩，以及既有 S3/S4 基础切片仍按历史定向
-> evidence 保留；05 §15 的 AgentPreset AP-0～AP-7 clean-cut 已在本机实现并形成
-> admission evidence，不能把旧 S4 的局部 UI evidence 代替新的 AP 证据。
+> evidence 保留。2026-09-06 人工走查发现首页 Guid 没有真正选择 AgentPreset，旧
+> AP-7 evidence 已撤销；纠偏现已在实现提交 `582932377` 完成并重新签署。
 > 产品执行内核仍是 NomiCore/Nomi engine，Web、Desktop 和 `nomicore` 默认入口均使用
 > `NomiCoreApplication`。
-> 当前 UI 源码只保留唯一公共 Agent 工作台 `/agent` 和会话路由
-> `/agent-sessions/:agentSessionId`；旧 `/presets`、`/settings/agent-presets` 和
-> `/settings/agent` authoring 路由已删除。
-> `061_agent_snapshot_naming.sql`、`062_agent_preset_contribution_locks.sql` 和
-> `063_drop_legacy_presets.sql` 已提交；workspace、UI build、Catalog/Impact/DB
-> 定向测试和 Agent/Gateway 共享 consumer 证据均已归档。06 仍不在本次提交范围，
-> 待单独立项后实施。
+> 当前实现让首页 Guid pill bar 显示 Agent 工作台中可执行的用户
+> AgentPreset，`+` 打开 `/agent`，工作台“使用 Agent”会预选对应 Preset；普通 Guid
+> 不再提供模型、Skills、MCP、Knowledge 或 Workspace 的第二套覆盖入口。
+> 标准 Session 创建请求只提交 `preset_id` 与可选 `title`，服务端按 owner 解析当前稳定
+> Revision、持久化 Snapshot、typed resources 和 Binding。执行引擎只属于基础设施，
+> 不再伪装成产品 Agent。
+> Fresh-v4 的开发期漂移也已修正为“只 seed 官方模板、Revision 使用 `payload_json`
+> 与 ContributionLock、没有旧 preset 子表/投影”；workspace、UI、DB、Fresh/Nomi-core
+> E2E、全量 app lib、generated contract 和真实 StepFun smoke 均已通过。06 仍不在
+> 本次提交范围，待单独立项后实施。
 
 本文是 05 发布后的唯一一期执行台账。旧版 84 个 `INF/W/LEG/SCN/TST/REL`
 ID 从现在起只作为历史审计索引，不再是一期必须逐项关闭的阻断清单，也不得继续用
@@ -62,7 +65,7 @@ C9/Nomi 删除和 Nomi-free RC 已延后，不新增当前阶段阻断。
 
 ## 2026-09-06 AgentPreset AP-0～AP-7 收口检查点
 
-> 本节是当前实现工作树的增量台账，优先级高于下方旧 S0-S5 快照中对 Agent Settings
+> 本节是当前实现提交的增量台账，优先级高于下方旧 S0-S5 快照中对 Agent Settings
 > 的局部“已关闭”描述。它不修改 05 §15 的合同，只记录当前代码能证明到哪一步。
 >
 > `open` 表示仍可在本机实施；`pending-validation` 表示已有实现切片但尚缺合流/
@@ -83,13 +86,13 @@ C9/Nomi 删除和 Nomi-free RC 已延后，不新增当前阶段阻断。
 | AP-0 | `closed` | Agent 工作台唯一入口、owner 矩阵、平台供给层边界和 06 依赖已写入实现与架构文档；`/agent` 是公共入口。 | 无；06 仍需单独立项，不在本提交实施。 |
 | AP-1 | `closed` | 共享 Catalog materializer/resolver 已区分 host surface 与 consumer；Agent catalog 过滤 `consumer=agent`；Gateway 与 Agent 对 `knowledge.search` 共享同一 resolver；Knowledge-only `browser.render_content` 被 Agent 过滤。 | 无。 |
 | AP-2 | `closed` | Revision payload、ContributionLock、digest、Snapshot、Preview/Save/Session boundary 已统一；未知字段和客户端内部 lock 均 fail-closed。 | 无。 |
-| AP-3 | `closed` | `/agent` 与 `/agent-sessions/:agentSessionId` 已成为唯一产品链路；四种模式是 seed；旧 Settings/Guid authoring surface 已物理删除；UI build 通过。 | 无。 |
-| AP-4 | `closed` | Agent、Gateway 两个真实消费者通过同一 Catalog admission；Agent Execution/Cron 使用冻结 `agent_snapshot`；Gateway 通过窄 admission port，不依赖具体 Plugin/MiniApp 实现。 | 无。 |
+| AP-3 | `closed` | 首页 Guid pill bar 可见列出 Agent 工作台中的可执行用户 AgentPreset；选择 pill 切换 `preset_id`，空列表仍显示打开 `/agent` 的 `+`；工作台“使用 Agent”会预选对应 Preset。普通 Guid 已删除模型、Skills、MCP、Knowledge、Workspace 和协作策略的重复覆盖入口。 | 无；实现提交 `582932377`，UI 定向测试 76 passed，production build 通过，本次 UI 写集 typecheck 诊断为 0。 |
+| AP-4 | `closed` | 标准 `/api/agent-sessions` 请求只含 `preset_id` 与可选 `title`；服务端按 owner 从 `current_stable_revision`、持久化 Revision/Snapshot 和 typed resources 构造冻结 Binding。旧 `agent_binding` 请求字段 fail-closed，既有 Session 不随新 Revision 漂移。 | 无；control-plane、Fresh AgentPlatform E2E、Nomi-core route、全量 app lib 与真实 StepFun 产品链均通过。 |
 | AP-5 | `closed` | ContributionLock impact diff 已覆盖 Compatible/Breaking、Disabled/Unavailable/Uninstalled、MiniApp release change、Retry/Switch/Restore/Fork，并提供 owner-scoped impact API。 | 无。 |
-| AP-6 | `closed` | 旧 `nomifun-preset`、旧 DTO、Extension preset contribution、旧 DB repository/表、旧技能 preset-rule/preset-skill 路由和 UI authoring surface 已删除；063 物理 DROP 旧表；canonical inventory 已重生成。 | 仅历史 migration/deletion contract/test 中保留必要历史字符串。 |
-| AP-7 | `closed` | 代码、合同、生成物、UI build、workspace check、Catalog/Impact/DB 定向测试和 Agent/Gateway 共享消费者证据均已归档；本地 admission evidence 已签署。 | 06 代码仍未实施，待后续单独启动。 |
+| AP-6 | `closed` | 旧 `nomifun-preset`、旧 DTO、Extension preset contribution、旧 DB repository/表和旧 UI authoring surface 保持删除；Fresh-v4 bootstrap 只 seed `agent_preset_templates`，Revision 使用 `payload_json` 与 canonical ContributionLock，不再写入官方 Preset/Revision 或旧 capability/skill/resource projection 表。Browser/Computer Role digests 已与当前 runtime manifests 对齐，Fresh host 可重启。 | 无；Fresh-v4 root 11 passed、DB 064/ID schema、AgentPlatform E2E、generated contract 与全量 app lib 均通过。 |
+| AP-7 | `closed` | 旧 `8e3f1eee8`/`c7f67eefb` admission 保留为 revoked 历史；实现提交 `582932377` 已完成父级集成验证，新 evidence 已签署，AP-7 gate 覆盖真实 Guid AgentPreset selector、`preset_id` Session 合同和 064/single-payload 存储。 | 06 仍需显式单独启动；`SL-S4-02` 仍独立等待人工 Desktop UI 走查。 |
 
-### AP-6 clean-cut 事实与允许的历史残留
+### AP-6 clean-cut 事实、Fresh-v4 漂移纠正与允许的历史残留
 
 - `nomifun-preset` 已不再是 workspace member 或 Cargo dependency。Gate 只检查真正的
   dependency key、`Cargo.lock` package entry 和 Rust import；删除期间根
@@ -100,29 +103,38 @@ C9/Nomi 删除和 Nomi-free RC 已延后，不新增当前阶段阻断。
   对 `conversations`、`agent_execution_participants`、
   `agent_execution_template_participants` 和 `cron_jobs` 做物理列重命名，不做双读写或
   compatibility view。
-- `062_agent_preset_contribution_locks.sql` 在
-  `nomi_agent_preset_revisions` 增加 `contribution_locks_json`，要求合法 JSON array；
-  Revision digest 必须覆盖该 lock 集合。`preset_id`/`preset_revision` 在当前切片仍可作为
-  AgentPreset provenance，不能与已删除的旧 preset 快照模型混为一谈。
+- `062_agent_preset_contribution_locks.sql` 持久化 Revision ContributionLock；
+  `064_agent_preset_revision_payload.sql` 把 Nomi 数据线的
+  `editor_document_json` 物理重命名为 `payload_json`，不保留 alias 或双读写。
+  Revision digest 必须覆盖 payload 与 lock 集合。`preset_id`/`preset_revision`
+  只作为 AgentPreset provenance，不能与已删除的旧 preset 快照模型混为一谈。
+- Fresh-v4 canonical baseline 的 `agent_preset_templates` 只允许
+  `source_kind=official`，没有 Package source foreign key；bootstrap 只写模板 seed，
+  不自动创建系统 AgentPreset/Revision。`agent_preset_revisions` 使用 `payload_json`，
+  ContributionLock 使用 canonical lock 表；旧 capability/skill/resource projection
+  表不属于当前 schema，也不得由 bootstrap 继续访问。
+- 本轮 Fresh AgentPlatform E2E 在进入路由前暴露了旧 bootstrap 仍读取
+  `source_package_id` 并写旧投影表的漂移。该生产代码已删除，Fresh host restart、
+  Fresh-v4/DB/E2E 和 generated contract 已重跑通过。
 - 删除合同 JSON、历史 migration 和回归测试中出现旧名称时，Gate 将其单独标为
   historical/test；这不等于允许活动路由、应用服务、DTO、UI consumer 或 generated
-  inventory 保留旧主链。当前活动 residual 仍然阻断 AP-6。
+  inventory 保留旧主链。
 
-### AP-7 验证命令与当前结果
+### AP-7 纠偏验证结果
 
 | 命令 | 当前结果 | 说明 |
 | --- | --- | --- |
-| `node --check scripts/gate-agent-v2.mjs` | `pass` | 仅验证 Gate 脚本语法。 |
-| `bun scripts/gate-agent-v2.mjs --self-test` | `pass` | 验证 Gate 内部分类/边界逻辑；不是 AP admission。 |
-| `bun run gate:agent-v2 -- ap-7` | `pass` | 代码、合同、残留、消费者证据和 clean checkpoint 的本机 admission preflight。 |
-| `git diff --check -- scripts/gate-agent-v2.mjs docs/specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md docs/specs/2026-08-28-agent-capability-platform-v2/DECISIONS.zh.md` | `pass` | 文档/Gate 写集检查；不覆盖并行 lane 的 Rust/UI 编译。 |
-| `cargo check --offline --workspace` | `pass` | 生产 workspace 编译通过。 |
-| `cargo test --offline -p nomifun-agent-contracts --lib` | `pass` | 44 tests passed。 |
-| `cargo test --offline -p nomifun-agent-control-plane --lib` | `pass` | control-plane tests plus shared Agent/Gateway catalog test passed。 |
-| `cargo test --offline -p nomifun-db --no-run` | `pass` | DB tests compile; migration/id-schema targeted lanes passed。 |
-| `bun run build:ui` | `pass` | UI production build passed; only existing chunk-size warnings remain。 |
-| `cargo run --offline -p nomifun-agent-contracts --bin agent-v2-contract -- check` | `pass` | Generated contracts and API inventory match sources。 |
-| `bun run gate:agent-v2 -- ap-7` | `pass` | Final local admission preflight recorded in AP-7 evidence。 |
+| 旧提交上的 `bun run gate:agent-v2 -- ap-7`、workspace/UI/contract checks | `superseded` | 这些结果发生在真实 AgentPreset selector 缺口暴露前，只保留历史审计，不能签署当前工作树。 |
+| `bun test --cwd ui ...` | `pass` | Guid、Agent 工作台、执行引擎设置和 TypeScript contract 共 76 tests passed；pill 名称始终可见，空列表 `+` 和工作台预选有真实交互测试。 |
+| `bun run build:ui`；i18n/icons/dead-css/vocabulary | `pass` | production build 与四类 UI 专项门禁通过；全量 typecheck 仍有仓库既有 React 19/Arco 基线，本次 UI 写集诊断为 0。 |
+| `cargo test --offline -p nomifun-agent-control-plane --lib`；`cargo test --offline -p nomifun-api-types --lib` | `pass` | 12 与 530 tests passed，覆盖 owner、stable Revision/Snapshot、旧 Binding 输入拒绝。 |
+| `cargo test --offline -p nomifun-v4-root -- --test-threads=1`；`cargo test --offline -p nomifun-agent-platform --lib`；`cargo test --offline -p nomifun-agent-platform --test chat_minimal` | `pass` | 分别 11、13、2 tests passed；Browser/Computer Role digest 与 runtime manifest 对齐，Fresh host restart 通过。 |
+| `cargo test --offline -p nomifun-app --test agent_platform_e2e`；`cargo test --offline -p nomifun-app --test nomi_core_route_gap -- --test-threads=1` | `pass` | Fresh E2E 1 passed；Nomi-core route 12 passed，均使用 `preset_id` 高层创建。 |
+| `cargo test --offline -p nomifun-app --lib -- --test-threads=1` | `pass` | 399 passed、1 个真实凭据测试按设计 ignored、0 failed。 |
+| DB 064 migration、ID schema、migration lineage | `pass` | 064 物理 rename、20 个 ID schema tests、版本唯一性和 v55 升级到 64 均通过。 |
+| `cargo check --offline --workspace`；generated contract check | `pass` | workspace 编译通过，canonical source 与所有 generated artifacts 一致。 |
+| Credential Manager runner 的真实 StepFun smoke | `pass` | 输出 `live_smoke_status=pass code=OK status=200`；覆盖 AgentPreset/Session、Chat/Coding、Workspace/File/Process/VCS/Knowledge、Cron、Remote REST/MCP 和 secret audit。 |
+| `node --check scripts/gate-agent-v2.mjs`；Gate self-test；`bun run gate:agent-v2 -- ap-7` | `pass` | Gate 已增加真实 Guid AgentPreset selector、`preset_id` 请求、064 与 single-payload storage 检查，并在签署提交上通过。 |
 
 AP-7 的 admission 必须同时满足：AP-0～AP-6 全部 `closed`、旧活动主链 residual 为 0、
 generated inventory 已同步、真实 Agent 与非 Agent consumer 证据可复查、ContributionLock/
@@ -155,7 +167,7 @@ impact/no-fallback 行为测试通过，并在干净提交上形成签署记录�
 
 ## 已完成基础切片与定向 evidence
 
-下列项目已经在当前工作树中实现，并有可复查的定向 evidence。这里的 `closed` 只表示
+下列项目已经在当前分支中实现，并有可复查的定向 evidence。这里的 `closed` 只表示
 对应基础切片满足完成定义，不表示 Windows 候选、C8 或原生平台发布
 已经通过：
 
@@ -187,9 +199,12 @@ impact/no-fallback 行为测试通过，并在干净提交上形成签署记录�
 旧台账 84 项现已收敛为 34 项。任务数量不是质量指标；只有完成定义和最小验证满足后
 才能修改状态。
 
+上表只统计 S0-S5。AP-0～AP-7 已全部关闭，不额外增加当前实施任务。
+
 ## 当前剩余 TODO 快照
 
-当前还剩 7 项未关闭，其中 2 项已明确延后，不属于本阶段阻断；当前阶段实际待处理 5 项：
+S0-S5 当前还剩 7 项未关闭，其中 2 项已明确延后。当前实现已到人工产品验收与候选/
+外部环境验证边界：
 
 | 分类 | 数量 | TODO |
 | --- | ---: | --- |
@@ -270,7 +285,7 @@ first-party dogfood 和具体实现旁路清理也已完成。当前主线是
 | ID | 状态 | Owner | 目标 | 依赖 | 完成定义 | 最小测试 | 人工 / 外部输入 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `SL-S4-01` | closed | 主机 lane | 把 Agent 编辑器收缩为产品语言 | `SL-S2-07`、`SL-S2-08` | canonical Agent Settings 已满足名称/用途、模型、能力开关、Workspace/Knowledge/Connector picker、保存和试用；内部 ID/digest/JSON 默认折叠；Save/Test 自动 Preview | Agent Settings 定向测试 `10 passed`；AgentSession/Settings focused suite `20 passed`；`bun run build:ui` 通过；全量 `tsc` 中 `pages/agentSettings/**` 为 0 条诊断；仓库级 React 19/Arco 类型基线另行记录且未用 `any` 绕过 | 无 |
-| `SL-S4-02` | blocked | 主机 | 关闭四条真实 Nomi-core 用户流程 | `SL-S3-04`～`SL-S3-11`、`SL-S4-01` | 从模板创建；修改并保存；选择资源并试用；Snapshot 不兼容时在新会话继续；全程使用 NomiCoreApplication/Nomi engine；Desktop 不崩溃，不要求用户填写 UUID/operation/raw JSON | `bun run dev` 后执行四流程；保留截图、console 和 backend 日志 | Windows `bun run dev` 已完成真实 Tauri WebView smoke（页面 `/guid`、console/pageerror 均为空）；四条业务流程仍需用户人工验收，外部 Chrome 直连 backend 因缺少壳内 trust 属于错误 harness，不作为产品失败 |
+| `SL-S4-02` | blocked | 主机 | 关闭四条真实 Nomi-core 用户流程 | `SL-S3-04`～`SL-S3-11`、`SL-S4-01`、纠偏后的 AP-3/AP-4 | 从模板创建；修改并保存；从 Agent 工作台“使用 Agent”进入首页 Guid 并预选；在 Guid pill bar 切换可执行 AgentPreset 后创建会话；选择资源并试用；Snapshot 不兼容时在新会话继续；全程使用 NomiCoreApplication/Nomi engine；Desktop 不崩溃，不要求用户填写 UUID/operation/raw JSON | 在实现提交 `582932377` 后运行 `bun run dev`，执行四流程并额外确认 `+` 打开 `/agent`、普通 Guid 无模型/Skills/MCP/Knowledge/Workspace 覆盖；保留截图、console 和 backend 日志 | Windows Tauri WebView 基础 smoke 已通过，但 AgentPreset selector/session 纠偏尚未完成人工走查；因此本项继续 `blocked`。外部 Chrome 直连 backend 因缺少壳内 trust 属于错误 harness，不作为产品失败 |
 
 ## S5：三平台 Nomi-core RC（未来 C9 已延后）
 
@@ -474,12 +489,14 @@ handoff 或跨机 attestation。
 
 ## 推荐顺序
 
-1. 冻结当前主机提交和真实 Provider smoke 结果。`SL-S3-07`、`SL-S3-10`、
-   `SL-S3-11` 已关闭；`NomiCoreSessionOwner` 的 Cron/AutoWork/Companion
-   archive/Channel/IDMM typed 边界进入维护状态，除确定性合同缺口外不扩大兼容层。
-2. 完成 `SL-S4-02` 的四条真实 Desktop UI 流程人工验收，保留截图、console 和
+1. 保留实现提交 `582932377`、新的 AP-7 签署和真实 Provider smoke 结果。
+   `SL-S3-07`、`SL-S3-10`、`SL-S3-11` 已关闭；
+   `NomiCoreSessionOwner` 的 Cron/AutoWork/Companion archive/Channel/IDMM typed
+   边界进入维护状态，除确定性合同缺口外不扩大兼容层。
+2. 完成 `SL-S4-02` 的四条真实 Desktop UI 流程人工验收，重点确认首页 pill 与
+   Agent 工作台联动，保留截图、console 和
    backend 日志引用；外部 Chrome 直连等缺少壳内 trust 的 harness 不当作产品证据。
-3. 真实 Provider 与人工流程通过后，运行 `SL-S5-01` 的 Windows x64 Nomi-core
+3. 人工流程通过后，运行 `SL-S5-01` 的 Windows x64 Nomi-core
    候选检查并冻结同一候选 bytes。
 4. 将冻结候选交给 macOS arm64 与 Linux Desktop x64 只做原生 Nomi-core 验证；
    发现问题返回当前主机修复，不建立跨机开发分支、Prompt、交接包或 attestation。

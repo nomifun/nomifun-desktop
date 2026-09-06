@@ -1,10 +1,10 @@
 # NomiFun 一期止损修订：简化重构与可替换系统能力基础
 
-> 状态：**USER-CONFIRMED PHASE 1 STOP-LOSS DIRECTIVE / AgentPreset AP-0～AP-7 前置 TODO / 尚未完成代码实施**
+> 状态：**USER-CONFIRMED PHASE 1 STOP-LOSS DIRECTIVE / AgentPreset AP-0～AP-7 已完成并重新签署 / Desktop 人工验收待执行**
 >
 > 发布日期：2026-09-03
 >
-> 最近执行修订：2026-09-05
+> 最近执行修订：2026-09-06
 >
 > 审计基线：`f6e05d617e09eb71ebb11fababde46bb65039651`
 >
@@ -1476,7 +1476,7 @@ AP-0～AP-7。
 
 ### 15.1 产品名称与领域边界
 
-产品层只保留一个一级入口：**Agent 工作台**（导航和按钮可简称为“Agent”）。用户在这里完成 Agent 的能力设计、保存、试用和继续使用；不再保留“旧设定”“Agent 设定”“启动方案”或“运行时 Agent 设定”等并列概念。
+产品层只保留一个一级入口：**Agent 工作台**。侧边栏导航和页面标题都使用该名称；动作按钮可以按语义使用“使用 Agent”。用户在这里完成 Agent 的能力设计、保存、试用和继续使用；不再保留“旧设定”“Agent 设定”“启动方案”或“运行时 Agent 设定”等并列概念。
 
 `AgentPreset` 只保留为后端的 canonical authoring aggregate。普通用户不需要理解 `Preset` 这个内部名称，也不直接编辑 Revision、Snapshot、Digest、Mount 或 Contribution ID。
 
@@ -1712,16 +1712,21 @@ Runtime、Plugin Config、Credential、KV、Files、MiniApp DB 和发布授权�
 Agent 工作台的最短用户路径应为：
 
 ```text
-首页侧边栏 Agent（公共路由 `/agent`）
+首页侧边栏 Agent 工作台（公共路由 `/agent`）
   → 新建 Agent
   → 选择轻量 / 通用 / 全面 / 自定义
   → 编辑身份、指令、模型、能力、技能和资源
   → 查看能力来源与可用性
-  → 保存并试用
-  → 在新会话中继续使用
+  → 保存
+  → “使用 Agent”进入首页 Guid 并预选该 AgentPreset
+  → 创建新会话
 ```
 
-首页侧边栏不再用“设定”作为 Agent 入口；通用系统设置（例如 Runtime、网络或外观）仍可由全局设置入口提供，但不与 Agent 工作台共用名称、页面或数据模型。
+首页侧边栏明确显示“Agent 工作台”，不再只显示“Agent”或使用“设定”作为入口；通用系统设置（例如 Runtime、网络或外观）仍可由全局设置入口提供，但不与 Agent 工作台共用名称、页面或数据模型。
+
+首页 Guid composer 上方的 pill bar 是标准 AgentPreset 启动选择器：它只列出当前用户已保存且具有稳定 Revision 的可执行 AgentPreset；选择 pill 会改变后续 Session 的 `preset_id`，`+` 打开 `/agent`。工作台“使用 Agent”进入 Guid 时必须预选对应 Preset。execution engine、Runtime 或模型不能作为产品 Agent 出现在该列表中。
+
+普通 Guid 不是第二个 Agent 编辑器。模型、Skills、MCP、Knowledge、Workspace 与其他 typed resources 由选中 AgentPreset 的稳定 Revision 决定；普通 Guid 不再提供覆盖这些内容的第二套控件。会话级附件、消息以及明确属于会话的 AutoWork/IDMM/summon 状态可以继续保留。
 
 页面只需要展示：
 
@@ -1793,7 +1798,7 @@ Agent 相关公共 API 统一收敛为：
 /api/agent-bindings/*
 ```
 
-API 保留 `agent-presets` 作为稳定机器资源名，不代表 UI 必须显示“Agent 设定”；用户界面统一使用 Agent/Agent 工作台。
+API 保留 `agent-presets` 作为稳定机器资源名，不代表 UI 必须显示“Agent 设定”；用户界面统一使用“Agent 工作台”。
 
 平台 Capability Catalog 使用自己的通用资源 API；Plugin、MiniApp、Runtime 和 Credential 继续使用各自 owner API。前端和外部调用方应通过 application service 完成高层动作：
 
@@ -1806,6 +1811,17 @@ API 保留 `agent-presets` 作为稳定机器资源名，不代表 UI 必须显�
 `from-template` 只允许引用官方 seed catalog；它创建的是 AgentPreset Draft，不直接创建可执行 Snapshot，也不从 Package/Plugin 自动继承能力或授权。
 
 客户端不得提交 Snapshot digest、内部 Revision ID、Mount ID、完整 Binding、内部 owner ID 或 canonical JSON 来驱动执行。需要展示时由服务端返回面向产品的 DTO，技术详情只读。
+
+标准 Session 创建请求固定为：
+
+```json
+{
+  "preset_id": "019...",
+  "title": "optional"
+}
+```
+
+服务端按 authenticated owner 读取该 Preset 的 `current_stable_revision`、对应的持久化 Revision/Snapshot 与 typed resources，构造冻结 AgentBinding 后创建 Session。客户端提交 `agent_binding`、model、Skills、MCP、Knowledge、Workspace、Revision 或 Snapshot 必须被拒绝；缺少稳定 Revision、Snapshot 不一致或 owner 不匹配必须 typed fail，不允许 fallback。
 
 在 AP-6 中必须删除而不是保留兼容别名的旧形态：
 
@@ -1823,6 +1839,9 @@ Fresh-v4 采用 clean cut：
 - 旧 v3 数据根按归档/清理规则处理，不进入新 Agent 主链；
 - 代码、路由、数据库、生成 schema 和文档中的生产可达旧路径必须达到 0；
 - 真实用户数据若需要保留，必须由 owning domain 提供显式、一次性的导出/归档流程，不把兼容负担塞回 AgentPreset。
+- `agent_preset_templates` 只保存 `source_kind=official` 的模板 seed，不带 Package source foreign key，bootstrap 不创建官方 AgentPreset/Revision；
+- AgentPreset Revision 使用 `payload_json`，ContributionLock 由 canonical lock 存储持有并参与 digest；
+- 不保留旧 capability/model/skill/resource preset projection 表，也不允许 bootstrap 继续访问这些已删除表。
 
 #### 15.8.1 当前仓库的实施切片基线
 
@@ -1888,7 +1907,7 @@ Fresh-v4 采用 clean cut：
 
 - 轻量、通用、全面、自定义四个创建模板；
 - 模式只是 seed，不产生四种持久化类型；
-- 首页一级入口（公共路由 `/agent`；Session 使用 `/agent-sessions/:id`）、能力/技能/资源 picker、来源状态、保存和试用流程；
+- 侧边栏“Agent 工作台”一级入口 `/agent`、首页 Guid AgentPreset pill selector、`+` 返回工作台、工作台“使用 Agent”预选 Guid，以及能力/技能/资源 picker、来源状态、保存和试用流程；
 - 从 `settings/AgentSettings`、`SettingsModal` 和 `/settings/agent-presets` 中移除 Agent authoring surface；旧深层链接最多保留一次性迁移跳转，不形成长期第二入口；
 - 模式转换的显式 diff/确认和模板更新不漂移既有 Revision；
 - 技术 Inspector 与产品编辑表单分离。
@@ -1902,6 +1921,7 @@ Fresh-v4 采用 clean cut：
 - AgentSession、AgentBinding、Remote、Automation、Gateway、Knowledge/MiniApp 等实际消费者的统一 application service；
 - 有 Session 与无 Session 的 exact lock 两条清晰调用路径；
 - 前端不提交内部执行锁，后端负责生成 Revision/Snapshot/OperationLock；
+- 标准 Session 创建只接受 `preset_id` 与可选 `title`，服务端从当前稳定 Revision 和持久化 Snapshot 构造冻结 Binding；
 - 真实消费者的高层 API 和 typed failure。
 
 通过条件：至少一个真实 Agent 流程和一个真实非 Agent 流程通过同一 Capability materialization；消费者代码不认识具体 Plugin/MiniApp implementation。
@@ -1923,7 +1943,7 @@ Fresh-v4 采用 clean cut：
 
 - 旧 `/api/presets`、`PresetService`、旧 DTO/resolver、旧表/迁移/fixture（若仍存在）和旧 Extension Preset contribution 的生产可达性清单；
 - 删除旧路由、双写、兼容 alias、旧 fallback 和旧 projection；
-- Fresh-v4 schema、generated inventory、主导航和代码引用同步更新；
+- Fresh-v4 schema、generated inventory、主导航和代码引用同步更新；bootstrap 只 seed 官方模板，Revision 使用 `payload_json` 与 ContributionLock，不访问旧 preset projection 表；
 - 删除设置页中的 Agent authoring 入口和 `SettingsModal` 内的 Agent 入口；`/presets`、`/settings/agent-presets`、`/settings/agent` 只允许有明确期限的一次性迁移跳转，完成迁移后必须移除；`/settings/execution-engines` 只保留 Runtime Manager，不再承载 Agent authoring；
 - 保留官方 `agent_preset_templates` 只读 seed catalog，移除 Package-owned template/source 分支；删除 `AgentPresetSource::Package` 和重复的 preset capability/model/skill/resource projection；
 - v3 数据归档/清理说明和必要的显式导出入口。
@@ -1988,10 +2008,10 @@ AP-0 术语/owner/入口冻结
 6. 旧 `/api/presets`、旧服务和旧贡献模型 clean cut，不做双读写和静默迁移；
 7. 缺失、合同变化和来源失效都 typed fail，不使用隐式 fallback。
 
-在 AP-0 评审时仍可以明确拍板、但不应阻塞总体方向的三个产品细节是：
+本版对以下三个产品细节采用明确默认，其中公开名称已经锁定：
 
-- **公开名称：**建议导航显示“Agent”，页面标题显示“Agent 工作台”；
+- **公开名称：**导航和页面标题统一显示“Agent 工作台”；
 - **实现来源选择：**建议只在能力详情中提供高级显式动作，不建设独立 Provider/Runtime 设定页；
 - **Plugin 模板：**建议 N1 首版先不开放 `agent_template` contribution，后续只作为不授予能力的创建种子。
 
-除非 AP-0 评审明确否决上述默认值，否则实施者应按本节合同继续，不得重新引入“旧设定 + Agent 设定”双轨。
+后两项若未来出现真实产品需求可以另行修订；公开名称和单一 Agent 工作台入口不再作为待拍板项。实施者不得重新引入“旧设定 + Agent 设定”双轨。
