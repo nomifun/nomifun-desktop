@@ -120,8 +120,8 @@ function reportPath(path) {
     : normalizedPath(absolute);
 }
 
-function isoTimestampForPath(date = new Date()) {
-  return date.toISOString().replaceAll(/[-:.TZ]/g, '');
+function compactRunId(now = Date.now(), pid = process.pid) {
+  return `${now.toString(36)}-${pid.toString(36)}`;
 }
 
 export function parseArgs(argv) {
@@ -1090,8 +1090,7 @@ export async function runCandidateSmoke(options) {
         work = prepareWorkRoot(resolve(REPO_ROOT, options.workRoot));
         runRoot = join(
           work.path,
-          'windows-desktop-candidate-smoke',
-          `${sourceCommit.slice(0, 12)}-${isoTimestampForPath()}-${process.pid}`,
+          compactRunId(),
         );
         installDirectory = join(runRoot, 'install');
         dataRoot = join(runRoot, 'data');
