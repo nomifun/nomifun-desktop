@@ -65,8 +65,6 @@ const REMOTE_TURN_ADMISSION_TIMEOUT: Duration = Duration::from_secs(20);
 const REMOTE_TURN_DISPATCH_TIMEOUT: Duration = Duration::from_secs(150);
 const REMOTE_TURN_HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_OBSERVE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
-const REMOTE_OBSERVE_ADMISSION_TIMEOUT: Duration = Duration::from_secs(20);
-const REMOTE_OBSERVE_HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_OBSERVE_PAGE_TIMEOUT: Duration = Duration::from_secs(15);
 const REMOTE_CANCEL_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 const REMOTE_CANCEL_HEAD_TIMEOUT: Duration = Duration::from_secs(5);
@@ -622,42 +620,6 @@ async fn observe(
     )
     .await?;
     let principal = user_principal(&owner);
-    let current_head = read_session_head(
-        state.session_query.as_ref(),
-        &principal,
-        &session_id,
-        "observe.session_head",
-        REMOTE_OBSERVE_HEAD_TIMEOUT,
-    )
-    .await?;
-    if current_head.status == "opening" {
-        let admission = detached_runtime_admission(
-            &state.runtime,
-            state.detached_mutations.clone(),
-            session_id.clone(),
-            REMOTE_OBSERVE_ADMISSION_TIMEOUT,
-            None,
-        )
-        .await;
-        if let Err(error) = admission {
-            let latest_head = read_session_head(
-                state.session_query.as_ref(),
-                &principal,
-                &session_id,
-                "observe.opening_recheck",
-                REMOTE_OBSERVE_HEAD_TIMEOUT,
-            )
-            .await?;
-            if latest_head.status == "opening" {
-                return Err(runtime_admission_error(
-                    &state.runtime,
-                    &session_id,
-                    &latest_head,
-                    error,
-                ));
-            }
-        }
-    }
     let after = SessionEventCursor {
         agent_session_id: session_id.clone(),
         seq: request.after_seq,
