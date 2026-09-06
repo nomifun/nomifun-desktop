@@ -8,7 +8,7 @@ import { ipcBridge } from '@/common';
 import type { IMessageSearchItem } from '@/common/types/conversationSearch';
 import type { ConversationId, MessageId } from '@/common/types/ids';
 import NomiModal from '@/renderer/components/base/NomiModal';
-import { usePresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
+import { useAgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
 import { getAgentLogo } from '@/renderer/utils/model/agentLogo';
 import { blockMobileInputFocus, blurActiveElement } from '@/renderer/utils/ui/focus';
 import { isDesktopShell } from '@/renderer/utils/platform';
@@ -101,7 +101,7 @@ interface ConversationSearchPopoverProps {
 }
 
 const ConversationAgentMark: React.FC<{ conversation: IMessageSearchItem['conversation'] }> = ({ conversation }) => {
-  const { info: presetInfo } = usePresetInfo(conversation);
+  const { info: presetInfo } = useAgentInfo(conversation);
 
   if (presetInfo) {
     if (presetInfo.isEmoji) {

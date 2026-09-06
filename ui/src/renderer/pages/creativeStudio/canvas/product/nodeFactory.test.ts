@@ -303,7 +303,7 @@ describe('real library insertion helpers', () => {
   test('copies a validated prompt verbatim into a text node and no unsupported metadata', () => {
     const prompt: PromptLibrarySelection = {
       id: 'prompt-real-1',
-      source: 'preset',
+      source: 'catalog',
       title: '电影感雨夜',
       prompt: '保留真实材质。\n使用柔和侧光。',
       category: '摄影',

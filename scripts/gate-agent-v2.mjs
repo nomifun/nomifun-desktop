@@ -13,6 +13,7 @@ if (
   !args.includes('--self-test') &&
   ![
     'contract-closure',
+    'ap-7',
     'c1-fullauto',
     'c2-c5-foundations',
     'c6-triad',
@@ -26,7 +27,7 @@ if (
   ].includes(gateName)
 ) {
   console.error(
-    'usage: bun run gate:agent-v2 -- <contract-closure|c1-fullauto|c2-c5-foundations|c6-triad|c7-domain-waves|c8-win-pre|c8-native|c8-ma|c8-ld|c8-merge|c9-hard-delete> [--evidence <platform-result.json>] [--cell <cell_id>] [--self-test]'
+    'usage: bun run gate:agent-v2 -- <contract-closure|ap-7|c1-fullauto|c2-c5-foundations|c6-triad|c7-domain-waves|c8-win-pre|c8-native|c8-ma|c8-ld|c8-merge|c9-hard-delete> [--evidence <platform-result.json>] [--cell <cell_id>] [--self-test]'
   );
   process.exit(2);
 }
@@ -207,9 +208,74 @@ const C8_NATIVE_GATE_DISPATCH = Object.freeze({
 const C8_NATIVE_GATE_NAMES = Object.keys(C8_NATIVE_GATE_DISPATCH);
 let c8ConfirmationPolicyCache = null;
 
+const AP7_STATUS_MARKER_PATTERN =
+  /<!--\s*AP_STATUS\s+(AP-[0-7]):\s*([a-z-]+)\s*-->/g;
+const AP7_ALLOWED_STATUS_VALUES = new Set([
+  'open',
+  'pending-validation',
+  'blocked',
+  'external',
+  'deferred',
+  'closed',
+]);
+const AP7_DOC_PATHS = Object.freeze([
+  'docs/specs/2026-08-28-agent-capability-platform-v2/05-system-capability-replacement-foundation.zh.md',
+  'docs/specs/2026-08-28-agent-capability-platform-v2/06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md',
+  'docs/specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md',
+  'docs/specs/2026-08-28-agent-capability-platform-v2/DECISIONS.zh.md',
+]);
+const AP7_CURRENT_ARCHITECTURE_DOC_PATHS = Object.freeze([
+  'docs/architecture/agent-engine.zh.md',
+  'docs/architecture/backend-crates.zh.md',
+  'docs/architecture/data-and-storage.zh.md',
+  'docs/architecture/overview.zh.md',
+  'docs/guides/mcp-and-skills.zh.md',
+  'docs/guides/presets.zh.md',
+  'docs/reference/api-overview.zh.md',
+]);
+const AP7_SOURCE_ROOTS = Object.freeze([
+  'crates/backend',
+  'crates/agent',
+  'apps',
+  'ui/src',
+]);
+const AP7_RESIDUAL_RULES = Object.freeze([
+  {
+    id: 'legacy_preset_service',
+    category: 'legacy_service',
+    pattern: /\bPresetService\b/g,
+  },
+  {
+    id: 'legacy_preset_route',
+    category: 'legacy_route',
+    pattern: /\/api\/presets\b/g,
+  },
+  {
+    id: 'legacy_extension_preset_contribution',
+    category: 'legacy_extension_contribution',
+    pattern: /contributes\.presets|\bExtPreset\b|\bResolvedPreset(?:Snapshot)?\b/g,
+  },
+  {
+    id: 'legacy_preset_dto',
+    category: 'legacy_dto',
+    pattern: /\b(?:PresetSource|PresetResponse|CreatePresetRequest|UpdatePresetRequest|SetPresetStateRequest|ResolvePresetRequest|PresetTarget|PresetOverrides)\b/g,
+  },
+  {
+    id: 'legacy_preset_override',
+    category: 'legacy_input',
+    pattern: /\bpreset_overrides\b/g,
+  },
+  {
+    id: 'legacy_snapshot_column',
+    category: 'legacy_snapshot_column',
+    pattern: /\bpreset_snapshot\b/g,
+  },
+]);
+
 if (args.includes('--self-test')) {
   runC8SelfTest();
-  console.log('C8 gate self-test passed');
+  runAp7SelfTest();
+  console.log('agent-v2 gate self-test passed');
   process.exit(0);
 }
 
@@ -310,6 +376,12 @@ if (gateName === 'c9-hard-delete') {
   const report = runC9HardDeleteGate();
   writeC9HardDeleteReport(report);
   finishGate('c9-hard-delete');
+}
+
+if (gateName === 'ap-7') {
+  const report = runAp7Gate();
+  writeAp7Report(report);
+  finishGate('ap-7');
 }
 
 for (const file of requiredFiles) {
@@ -646,7 +718,6 @@ function runC2C5Gate() {
         'nomifun-app',
         'nomifun-conversation',
         'nomifun-ai-agent',
-        'nomifun-preset',
       ],
     ],
     [
@@ -668,7 +739,6 @@ function runC2C5Gate() {
         'nomifun-ai-agent',
         'nomifun-gateway',
         'nomifun-extension',
-        'nomifun-preset',
       ],
     ],
     [
@@ -698,7 +768,6 @@ function runC2C5Gate() {
         'nomifun-ai-agent',
         'nomifun-gateway',
         'nomifun-extension',
-        'nomifun-preset',
       ],
     ],
   ]);
@@ -860,7 +929,6 @@ function runC6TriadGate() {
     'nomifun-ai-agent',
     'nomifun-conversation',
     'nomifun-gateway',
-    'nomifun-preset',
     'nomifun-extension',
   ]) {
     if (platformManifest.includes(dependency)) {
@@ -5339,6 +5407,672 @@ function runC8SelfTest() {
   );
 }
 
+function ap7PathClass(path) {
+  const normalized = String(path || '').replaceAll('\\', '/');
+  if (
+    normalized.startsWith('docs/') ||
+    normalized.includes('/contracts/deletion/') ||
+    normalized.includes('/contracts/closure/')
+  ) {
+    return 'historical';
+  }
+  if (normalized.includes('/migrations/')) {
+    return 'historical_schema';
+  }
+  if (
+    /(^|\/)(?:test|tests|fixture|fixtures)(?:\/|$)/i.test(normalized) ||
+    /\.(?:test|spec)\.[^.]+$/i.test(normalized) ||
+    /_test\.[^.]+$/i.test(normalized)
+  ) {
+    return 'test';
+  }
+  return 'production';
+}
+
+function ap7LineNumber(source, index) {
+  return String(source).slice(0, index).split('\n').length;
+}
+
+function ap7SourceFiles() {
+  const files = new Set();
+  for (const root of AP7_SOURCE_ROOTS) {
+    const absoluteRoot = join(repoRoot, root);
+    if (!statSafe(absoluteRoot)?.isDirectory()) continue;
+    for (const file of collectFiles(absoluteRoot, '')) {
+      if (/\.(?:rs|ts|tsx|toml|json|sql)$/i.test(file)) {
+        files.add(file);
+      }
+    }
+  }
+  return [...files].sort();
+}
+
+function ap7FindResiduals(files) {
+  const findings = [];
+  let totalCount = 0;
+  for (const file of files) {
+    const source = readFileSafe(file);
+    if (source === null) continue;
+    const normalized = relative(repoRoot, file).replaceAll('\\', '/');
+    const scope = ap7PathClass(normalized);
+    for (const rule of AP7_RESIDUAL_RULES) {
+      const allowedInventoryForbiddenPath =
+        rule.id === 'legacy_preset_route' &&
+        (normalized.endsWith(
+          'crates/backend/nomifun-agent-contracts/contracts/presets/canonical-api-inventory.payload.json'
+        ) ||
+          normalized.endsWith(
+            'crates/backend/nomifun-agent-contracts/contracts/generated/canonical-api-inventory.envelope.json'
+          ));
+      if (allowedInventoryForbiddenPath) continue;
+      rule.pattern.lastIndex = 0;
+      for (const match of source.matchAll(rule.pattern)) {
+        totalCount += 1;
+        const isHistoricalReference =
+          scope === 'historical' || scope === 'historical_schema';
+        const blocking =
+          !isHistoricalReference && scope !== 'test';
+        if (findings.length < 300) {
+          findings.push({
+            id: rule.id,
+            category: rule.category,
+            path: normalized,
+            line: ap7LineNumber(source, match.index ?? 0),
+            match: match[0],
+            scope,
+            blocking,
+            reason: blocking
+              ? 'must be removed from the active clean-cut surface'
+              : 'historical design/contract/schema source; not an active runtime path',
+          });
+        }
+      }
+    }
+  }
+  return {
+    total_count: totalCount,
+    truncated_count: Math.max(0, totalCount - findings.length),
+    findings,
+  };
+}
+
+function ap7ParseStatusMarkers(source) {
+  const statuses = {};
+  const duplicates = [];
+  AP7_STATUS_MARKER_PATTERN.lastIndex = 0;
+  for (const match of String(source || '').matchAll(AP7_STATUS_MARKER_PATTERN)) {
+    const id = match[1];
+    const status = match[2];
+    if (Object.hasOwn(statuses, id)) duplicates.push(id);
+    statuses[id] = status;
+  }
+  return { statuses, duplicates };
+}
+
+function ap7ManifestDependencyFindings() {
+  const manifestFiles = [
+    join(repoRoot, 'Cargo.toml'),
+    ...collectFiles(join(repoRoot, 'crates'), 'Cargo.toml'),
+    ...collectFiles(join(repoRoot, 'apps'), 'Cargo.toml'),
+  ].filter((file) => statSafe(file)?.isFile());
+  const findings = [];
+  for (const file of manifestFiles) {
+    const source = readFileSafe(file);
+    if (source === null) continue;
+    const normalized = relative(repoRoot, file).replaceAll('\\', '/');
+    const lines = source.split(/\r?\n/);
+    lines.forEach((line, index) => {
+      if (
+        /^\s*nomifun-preset\s*(?:\.workspace)?\s*=/.test(line) ||
+        /^\s*nomifun_preset\s*(?:\.workspace)?\s*=/.test(line) ||
+        (/^\s*[^#].*\bpath\s*=\s*["'][^"']*nomifun-preset/.test(line) &&
+          !/^\s*exclude\s*=/.test(line))
+      ) {
+        findings.push({
+          path: normalized,
+          line: index + 1,
+          match: line.trim(),
+          reason: 'a deleted package must not remain a Cargo dependency',
+        });
+      }
+    });
+  }
+  const lockPath = join(repoRoot, 'Cargo.lock');
+  const lockSource = readFileSafe(lockPath);
+  if (lockSource && /name\s*=\s*"nomifun-preset"/.test(lockSource)) {
+    findings.push({
+      path: 'Cargo.lock',
+      line: ap7LineNumber(lockSource, lockSource.indexOf('name = "nomifun-preset"')),
+      match: 'name = "nomifun-preset"',
+      reason: 'a deleted package must not remain in the lockfile',
+    });
+  }
+  return {
+    manifest_files: manifestFiles.map((file) =>
+      relative(repoRoot, file).replaceAll('\\', '/')
+    ),
+    findings,
+    workspace_exclude_tombstone:
+      /\bexclude\s*=\s*\[[^\]]*nomifun-preset/.test(
+        readFileSafe(join(repoRoot, 'Cargo.toml')) || ''
+      ),
+  };
+}
+
+function ap7LegacyPackageImportFindings(files) {
+  const findings = [];
+  const importPattern =
+    /\b(?:use|pub\s+use|extern\s+crate)\s+nomifun_preset\b|\bnomifun_preset::/g;
+  for (const file of files) {
+    if (!/\.(?:rs|ts|tsx)$/i.test(file)) continue;
+    const source = readFileSafe(file);
+    if (source === null) continue;
+    importPattern.lastIndex = 0;
+    const normalized = relative(repoRoot, file).replaceAll('\\', '/');
+    for (const match of source.matchAll(importPattern)) {
+      findings.push({
+        path: normalized,
+        line: ap7LineNumber(source, match.index ?? 0),
+        match: match[0],
+        reason: 'active source must not import the deleted package',
+      });
+    }
+  }
+  return findings;
+}
+
+function ap7AddCheck(checks, localFailures, id, passed, evidence, details = {}) {
+  const check = {
+    id,
+    status: passed ? 'pass' : 'fail',
+    evidence,
+    ...details,
+  };
+  checks.push(check);
+  if (!passed) localFailures.push(`${id}: ${evidence}`);
+  return check;
+}
+
+function ap7RunCommand(command, commandArgs) {
+  const startedAt = new Date().toISOString();
+  const result = spawnSync(command, commandArgs, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+    stdio: 'pipe',
+  });
+  return {
+    command: [command, ...commandArgs].join(' '),
+    started_at: startedAt,
+    exit_code: result.status ?? 1,
+    stdout: result.stdout || '',
+    stderr: result.stderr || '',
+  };
+}
+
+function runAp7Gate() {
+  const sourceSha = c8ReadGitHeadForReport();
+  const checks = [];
+  const localFailures = [];
+  const localCommands = [];
+
+  const todoPath =
+    'docs/specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md';
+  const decisionsPath =
+    'docs/specs/2026-08-28-agent-capability-platform-v2/DECISIONS.zh.md';
+  const todoSource = readFileSafe(join(repoRoot, todoPath)) || '';
+  const decisionsSource = readFileSafe(join(repoRoot, decisionsPath)) || '';
+  const markerResult = ap7ParseStatusMarkers(todoSource);
+  const expectedStatusIds = Array.from({ length: 8 }, (_, index) => `AP-${index}`);
+  const markersComplete =
+    expectedStatusIds.every((id) =>
+      AP7_ALLOWED_STATUS_VALUES.has(markerResult.statuses[id])
+    ) && markerResult.duplicates.length === 0;
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'docs.ap_status_markers',
+    markersComplete,
+    'TODO must contain exactly one valid AP-0..AP-7 status marker',
+    {
+      observed: markerResult.statuses,
+      duplicates: markerResult.duplicates,
+    }
+  );
+
+  const requiredDocMarkers = [
+    ['/agent', 'the public Agent workbench route', AP7_DOC_PATHS],
+    [
+      'agent_snapshot',
+      'the canonical persisted snapshot name',
+      AP7_DOC_PATHS.slice(2),
+    ],
+    [
+      '061_agent_snapshot_naming.sql',
+      'the physical snapshot rename migration',
+      AP7_DOC_PATHS.slice(2),
+    ],
+    [
+      '062_agent_preset_contribution_locks.sql',
+      'the ContributionLock migration',
+      AP7_DOC_PATHS.slice(2),
+    ],
+  ];
+  for (const [marker, label, paths] of requiredDocMarkers) {
+    const present = paths.every((path) => {
+      const source = readFileSafe(join(repoRoot, path));
+      return source !== null && source.includes(marker);
+    });
+    ap7AddCheck(
+      checks,
+      localFailures,
+      `docs.marker.${marker.replaceAll('/', '_').replaceAll('.', '_')}`,
+      present,
+      `${label} must be recorded in all current AP ledger documents`
+    );
+  }
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'docs.06.remains_blocked',
+    /AP-0.*AP-7|AP-7.*阻断|不得进入.*代码实施/s.test(
+      readFileSafe(
+        join(
+          repoRoot,
+          'docs/specs/2026-08-28-agent-capability-platform-v2/06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md'
+        )
+      ) || ''
+    ),
+    '06 must explicitly remain design-only until the AP gate passes'
+  );
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'docs.ap7.not_claimed_closed',
+    markerResult.statuses['AP-7'] !== 'closed',
+    'AP-7 cannot be marked closed without admission evidence'
+  );
+
+  const manifestCheck = ap7ManifestDependencyFindings();
+  const sourceFiles = ap7SourceFiles();
+  const importFindings = ap7LegacyPackageImportFindings(sourceFiles);
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'legacy_package.no_live_cargo_dependency',
+    manifestCheck.findings.length === 0,
+    'nomifun-preset must be absent from Cargo dependency declarations and Cargo.lock',
+    {
+      findings: manifestCheck.findings,
+      workspace_exclude_tombstone: manifestCheck.workspace_exclude_tombstone,
+    }
+  );
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'legacy_package.no_active_import',
+    importFindings.length === 0,
+    'active Rust/TypeScript source must not import nomifun_preset',
+    { findings: importFindings }
+  );
+  const packagePath = join(repoRoot, 'crates/backend/nomifun-preset');
+  const packageFiles = statSafe(packagePath)?.isDirectory()
+    ? collectFiles(packagePath, '')
+    : [];
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'legacy_package.files_removed',
+    packageFiles.length === 0,
+    'the deleted package directory may remain only as an empty working-tree tombstone',
+    {
+      path: 'crates/backend/nomifun-preset',
+      remaining_files: packageFiles.map((file) =>
+        relative(repoRoot, file).replaceAll('\\', '/')
+      ),
+    }
+  );
+
+  const routerPath = join(repoRoot, 'ui/src/renderer/components/layout/Router.tsx');
+  const routerSource = readFileSafe(routerPath) || '';
+  const canonicalRoutesPresent =
+    /path=['"]\/agent['"]/.test(routerSource) &&
+    /path=['"]\/agent-sessions\/:agentSessionId['"]/.test(routerSource);
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'ui.canonical_agent_routes',
+    canonicalRoutesPresent,
+    'UI must expose /agent and /agent-sessions/:agentSessionId'
+  );
+  const legacyRouteMatches = [
+    /path=['"]\/presets['"][^>\n]*LegacyAgentAuthoringRedirect/,
+    /path=['"]\/settings\/agent-presets\/\*['"][^>\n]*LegacyAgentAuthoringRedirect/,
+    /path=['"]\/settings\/agent['"][^>\n]*LegacyAgentAuthoringRedirect/,
+  ].filter((pattern) => pattern.test(routerSource)).length;
+  const legacyAuthoringRoutePresent =
+    /path=['"]\/(?:presets(?:['"]|\/)|settings\/agent-presets(?:['"]|\/)|settings\/agent['"])/.test(
+      routerSource
+    );
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'ui.legacy_authoring_routes_final_clean_cut',
+    !legacyAuthoringRoutePresent,
+    'old Agent authoring routes must be removed after the one-time migration window',
+    { transitional_redirect_count: legacyRouteMatches }
+  );
+
+  const migration061Path =
+    'crates/backend/nomifun-db/migrations/061_agent_snapshot_naming.sql';
+  const migration062Path =
+    'crates/backend/nomifun-db/migrations/062_agent_preset_contribution_locks.sql';
+  const migration061 = readFileSafe(join(repoRoot, migration061Path)) || '';
+  const migration062 = readFileSafe(join(repoRoot, migration062Path)) || '';
+  const migration061Valid =
+    migration061.includes('RENAME COLUMN preset_snapshot TO agent_snapshot') &&
+    (migration061.match(/RENAME COLUMN preset_snapshot TO agent_snapshot/g) || [])
+      .length === 4 &&
+    migration061.includes('no compatibility alias');
+  const migration062Valid =
+    migration062.includes('contribution_locks_json') &&
+    migration062.includes('nomi_agent_preset_revisions') &&
+    migration062.includes('json_type(contribution_locks_json) = \'array\'');
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'db.migration.061_agent_snapshot',
+    migration061Valid,
+    'migration 061 must physically rename all four persisted snapshot columns without dual read/write',
+    { path: migration061Path }
+  );
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'db.migration.062_contribution_locks',
+    migration062Valid,
+    'migration 062 must persist the generated ContributionLock array on AgentPreset revisions',
+    { path: migration062Path }
+  );
+
+  const residualScan = ap7FindResiduals(sourceFiles);
+  const blockingResiduals = residualScan.findings.filter(
+    (finding) => finding.blocking
+  );
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'legacy_preset.production_reachability_zero',
+    blockingResiduals.length === 0,
+    'active old Preset routes, services, DTOs, overrides, and snapshot aliases must have zero residuals',
+    {
+      total_count: residualScan.total_count,
+      blocking_count: blockingResiduals.length + residualScan.truncated_count,
+      findings: residualScan.findings,
+    }
+  );
+
+  const catalogPath =
+    'crates/backend/nomifun-agent-contracts/contracts/catalog/platform-capability-catalog-entry.v1.json';
+  const catalogSource = readFileSafe(join(repoRoot, catalogPath));
+  let catalogPayload = null;
+  let catalogJsonValid = false;
+  if (catalogSource !== null) {
+    try {
+      catalogPayload = JSON.parse(catalogSource);
+      catalogJsonValid = true;
+    } catch {
+      catalogJsonValid = false;
+    }
+  }
+  const catalogContractPresent =
+    catalogJsonValid &&
+    Array.isArray(catalogPayload?.host_surfaces) &&
+    Array.isArray(catalogPayload?.supported_consumers) &&
+    catalogPayload.supported_consumers.includes('agent') &&
+    catalogPayload.supported_consumers.includes('gateway') &&
+    catalogPayload?.admission?.admitted === true;
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'catalog.contract_and_consumer_filter',
+    catalogContractPresent &&
+      sourceFiles.some((file) =>
+        file.replaceAll('\\', '/').endsWith('nomifun-agent-contracts/src/catalog.rs')
+      ),
+    'Capability Catalog must express consumer surfaces, availability, and published admission',
+    { path: catalogPath }
+  );
+
+  const apiInventoryPaths = [
+    'crates/backend/nomifun-agent-contracts/contracts/presets/canonical-api-inventory.payload.json',
+    'crates/backend/nomifun-agent-contracts/contracts/generated/canonical-api-inventory.envelope.json',
+  ];
+  const staleInventory = apiInventoryPaths.filter((path) => {
+    const source = readFileSafe(join(repoRoot, path)) || '';
+    try {
+      const value = JSON.parse(source);
+      const payload = value.payload || value;
+      return (payload.operations || []).some((operation) =>
+        String(operation.path || '').startsWith('/api/presets')
+      );
+    } catch {
+      return source.includes('"path":"/api/presets');
+    }
+  });
+  const generatedInventoryHasCanonicalRoutes = apiInventoryPaths.every((path) => {
+    const source = readFileSafe(join(repoRoot, path)) || '';
+    return (
+      source.includes('/api/agent-presets') &&
+      source.includes('/api/agent-sessions') &&
+      source.includes('/api/capabilities') &&
+      source.includes('/api/agent-catalog/skills')
+    );
+  });
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'schema.generated_inventory_clean_cut',
+    staleInventory.length === 0 && generatedInventoryHasCanonicalRoutes,
+    'canonical API inventory must remove /api/presets and include the Agent control-plane routes',
+    { stale_inventory: staleInventory }
+  );
+
+  const compilerSource =
+    readFileSafe(
+      join(repoRoot, 'crates/backend/nomifun-agent-control-plane/src/compiler.rs')
+    ) || '';
+  const contractSource =
+    readFileSafe(
+      join(repoRoot, 'crates/backend/nomifun-agent-contracts/src/preset.rs')
+    ) || '';
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'compiler.contribution_lock_digest',
+    compilerSource.includes('contribution_locks') &&
+      contractSource.includes('revision_digest_input') &&
+      contractSource.includes('contribution_locks'),
+    'Compiler and AgentPreset contract must bind ContributionLock into the revision digest'
+  );
+
+  const behaviorEvidencePaths = [
+    'build.noindex/agent-capability-v2/ap-7-admission-evidence.json',
+    'docs/specs/2026-08-28-agent-capability-platform-v2/AP-7-ADMISSION-EVIDENCE.json',
+  ];
+  const behaviorEvidencePresent = behaviorEvidencePaths.some((path) =>
+    statSafe(join(repoRoot, path))?.isFile()
+  );
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'evidence.real_agent_and_non_agent_consumer',
+    behaviorEvidencePresent,
+    'a repository-local, reviewable evidence record must prove one real Agent and one real non-Agent consumer',
+    { accepted_paths: behaviorEvidencePaths }
+  );
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'evidence.signed_admission',
+    false,
+    'AP-7 admission evidence is intentionally absent until AP-0..AP-6 and the integrated behavior checks pass'
+  );
+
+  const statusResult = ap7RunCommand('git', [
+    'status',
+    '--porcelain',
+    '--untracked-files=all',
+  ]);
+  localCommands.push(statusResult);
+  const cleanWorktree =
+    statusResult.exit_code === 0 && !String(statusResult.stdout).trim();
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'source.clean_worktree_for_admission',
+    cleanWorktree,
+    'formal AP admission requires a clean source checkpoint',
+    { observed_status: String(statusResult.stdout || '').trim() || null }
+  );
+  const syntaxResult = ap7RunCommand('node', ['--check', 'scripts/gate-agent-v2.mjs']);
+  localCommands.push(syntaxResult);
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'script.syntax',
+    syntaxResult.exit_code === 0,
+    'gate-agent-v2.mjs must pass node --check'
+  );
+  const diffCheckResult = ap7RunCommand('git', [
+    'diff',
+    '--check',
+    '--',
+    'scripts/gate-agent-v2.mjs',
+    ...AP7_DOC_PATHS,
+    ...AP7_CURRENT_ARCHITECTURE_DOC_PATHS,
+  ]);
+  localCommands.push(diffCheckResult);
+  ap7AddCheck(
+    checks,
+    localFailures,
+    'docs_and_script.diff_check',
+    diffCheckResult.exit_code === 0,
+    'documentation and gate edits must pass git diff --check'
+  );
+
+  const apStatuses = markerResult.statuses;
+  const allPreviousApClosed = expectedStatusIds
+    .slice(0, 7)
+    .every((id) => apStatuses[id] === 'closed');
+  const admissionReady =
+    allPreviousApClosed &&
+    apStatuses['AP-7'] === 'closed' &&
+    blockingResiduals.length === 0 &&
+    staleInventory.length === 0 &&
+    behaviorEvidencePresent &&
+    cleanWorktree;
+  if (admissionReady) {
+    localFailures.push(
+      'AP-7 admission invariant unexpectedly evaluated true without a signed evidence check'
+    );
+  }
+
+  const report = {
+    schema_version: '1.0.0',
+    gate_name: 'ap-7',
+    evidence_kind: 'agent_preset_admission_preflight',
+    source_sha: sourceSha,
+    status: localFailures.length === 0 ? 'pass' : 'fail',
+    admission: admissionReady ? 'admitted' : 'blocked',
+    ap_statuses: apStatuses,
+    checks,
+    residuals: {
+      total_count: residualScan.total_count,
+      blocking_count: blockingResiduals.length + residualScan.truncated_count,
+      findings: residualScan.findings,
+    },
+    legacy_package: {
+      cargo_dependency_findings: manifestCheck.findings,
+      active_import_findings: importFindings,
+      workspace_exclude_tombstone: manifestCheck.workspace_exclude_tombstone,
+      remaining_files: packageFiles.map((file) =>
+        relative(repoRoot, file).replaceAll('\\', '/')
+      ),
+    },
+    generated_inventory: {
+      stale_paths: staleInventory,
+      canonical_routes_present: generatedInventoryHasCanonicalRoutes,
+    },
+    migrations: {
+      '061_agent_snapshot_naming': migration061Valid,
+      '062_agent_preset_contribution_locks': migration062Valid,
+    },
+    commands: localCommands,
+    failures: localFailures,
+    notes: [
+      'This gate intentionally does not run Cargo, UI build, or provider smoke.',
+      'Historical baseline migration text and deletion-contract references are classified separately from active production reachability.',
+      'A passing script self-test is not AP-7 admission evidence.',
+    ],
+  };
+  failures.push(...localFailures.map((failure) => `AP-7 ${failure}`));
+  return report;
+}
+
+function writeAp7Report(report) {
+  const reportDir = join(
+    repoRoot,
+    'build.noindex/agent-capability-v2',
+    report.source_sha,
+    'ap-7'
+  );
+  mkdirSync(reportDir, { recursive: true });
+  writeFileSync(
+    join(reportDir, 'summary.json'),
+    `${JSON.stringify(report, null, 2)}\n`
+  );
+}
+
+function runAp7SelfTest() {
+  const parsed = ap7ParseStatusMarkers(
+    '<!-- AP_STATUS AP-0: open -->\n<!-- AP_STATUS AP-7: blocked -->'
+  );
+  c8SelfTestAssert(
+    parsed.statuses['AP-0'] === 'open' &&
+      parsed.statuses['AP-7'] === 'blocked' &&
+      parsed.duplicates.length === 0,
+    'AP status markers must parse deterministically'
+  );
+  c8SelfTestAssert(
+    ap7PathClass('crates/backend/nomifun-db/migrations/001_v3_baseline.sql') ===
+      'historical_schema' &&
+      ap7PathClass('ui/src/renderer/pages/agentSettings/foo.test.tsx') ===
+        'test' &&
+      ap7PathClass('crates/backend/nomifun-agent-control-plane/src/compiler.rs') ===
+        'production',
+    'AP residual scope classification must distinguish historical schema, tests, and production'
+  );
+  const dependencySource = [
+    '[dependencies]',
+    '# nomifun-preset.workspace = true',
+    'some-other = { path = "crates/backend/other" }',
+  ].join('\n');
+  const tempManifest = join(repoRoot, 'build.noindex', 'ap7-self-test-Cargo.toml');
+  mkdirSync(dirname(tempManifest), { recursive: true });
+  writeFileSync(tempManifest, dependencySource);
+  const originalRoot = join(repoRoot, 'Cargo.toml');
+  c8SelfTestAssert(
+    !/^\s*nomifun-preset\s*(?:\.workspace)?\s*=/m.test(dependencySource),
+    'commented deleted-package dependency must not be treated as live'
+  );
+  // The self-test file is ignored build output; no source or credential is touched.
+  c8SelfTestAssert(
+    statSafe(originalRoot)?.isFile() === true,
+    'AP self-test must run from a repository root'
+  );
+}
+
 function c8ValidateProductionBrokerFunctionalEvidence(report) {
   const fault = report.all_scene_coverage?.fault_classes?.provider_unavailable;
   if (!fault) {
@@ -6312,7 +7046,6 @@ function c7ForbiddenEdgeRules() {
       'nomifun-conversation',
       'nomifun-gateway',
       'nomifun-app',
-      'nomifun-preset',
       'nomifun-extension',
       'nomifun-db',
     ].map((dependency) => ({

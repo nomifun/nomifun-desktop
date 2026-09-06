@@ -461,15 +461,9 @@ export function templateDraftForInspection(template: OfficialPresetTemplate): Ag
       ...document,
       initial_capabilities: template.seed.initial_capabilities.map((capability) => ({
         capability,
-        required: true,
-        exposure: 'advertised',
-        config: {},
       })),
       on_demand_capabilities: template.seed.on_demand_capabilities.map((capability) => ({
         capability,
-        required: true,
-        exposure: 'discoverable',
-        config: {},
       })),
       skill_bindings: template.seed.skill_bindings,
     },
@@ -631,7 +625,7 @@ export function agentUiErrorMessage(
     case 'session-deleted':
       return 'This Session was deleted and can no longer be continued.';
     case 'session-not-found':
-      return 'This Session is no longer available. Return to Agent Settings and choose another setup.';
+      return 'This Session is no longer available. Return to the Agent Workbench and choose another setup.';
     case 'snapshot-unavailable':
       return 'This saved setup cannot run on the current runtime. Its history is read-only; create a new Session from the current setup.';
     case 'resource':

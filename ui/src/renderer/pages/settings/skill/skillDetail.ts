@@ -1,4 +1,4 @@
-import type { SkillInfo } from '@/renderer/pages/settings/PresetSettings/types';
+import type { SkillInfo } from '@/common/types/skill';
 
 export type SkillContentReaders = {
   readBuiltinSkill: (relativeLocation: string) => Promise<string>;

@@ -648,8 +648,6 @@ mod tests {
             cron_skills_dir: dir.join("cron/skills"),
             builtin_skills_dir: dir.join("builtin-skills"),
             builtin_rules_dir: dir.join("rules"),
-            preset_rules_dir: dir.join("preset-rules"),
-            preset_skills_dir: dir.join("preset-skills"),
         })
     }
 

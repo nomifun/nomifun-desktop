@@ -5,9 +5,11 @@
 //! runtime crates.
 
 pub mod closure;
+pub mod catalog;
 pub mod deletion;
 pub mod digest;
 pub mod event;
+pub mod impact;
 pub mod manifest;
 pub mod model_route;
 pub mod package;
@@ -21,11 +23,13 @@ pub mod session;
 pub mod validation;
 
 pub use closure::*;
+pub use catalog::*;
 pub use deletion::*;
 pub use digest::{
     ArtifactEnvelope, CanonicalDigestError, canonical_json_bytes, digest_bytes, digest_payload,
 };
 pub use event::*;
+pub use impact::*;
 pub use manifest::*;
 pub use model_route::*;
 pub use package::*;

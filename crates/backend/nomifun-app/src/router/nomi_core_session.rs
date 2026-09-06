@@ -40,7 +40,7 @@ use nomifun_api_types::{
     RemoteCancelRequestDto, RemoteMutationResponseDto, RemoteObserveRequestDto,
     RemoteObserveResponseDto, RemoteOpenRequestDto, RemoteOpenResponseDto,
     RemoteOpenStateViewDto, RemoteTurnRequestDto,
-    ResolveSavedRevisionPreviewRequest, ResolvedPresetSnapshot, SessionCursorDto,
+    ResolveSavedRevisionPreviewRequest, AgentResolvedSnapshot, SessionCursorDto,
     SendMessageRequest, UpdateConversationRequest,
 };
 use nomifun_common::{AppError, MessagePosition, MessageType};
@@ -111,13 +111,13 @@ impl NomiCoreSessionOwner {
         &self,
         owner_id: &str,
         request: CreateConversationRequest,
-        snapshot: Option<ResolvedPresetSnapshot>,
+        snapshot: Option<AgentResolvedSnapshot>,
         creation_key: &str,
     ) -> Result<ConversationResponse, AppError> {
         match snapshot {
             Some(snapshot) => {
                 self.service
-                    .create_from_nomi_core_snapshot_idempotent(
+                    .create_from_agent_snapshot_idempotent(
                         owner_id,
                         request,
                         snapshot,
@@ -335,13 +335,13 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
         &self,
         user_id: &str,
         request: CreateConversationRequest,
-        snapshot: Option<ResolvedPresetSnapshot>,
+        snapshot: Option<AgentResolvedSnapshot>,
         creation_key: &str,
     ) -> Result<nomifun_cron::CronSessionHandle, AppError> {
         let response = match snapshot {
             Some(snapshot) => {
                 self.service
-                    .create_from_preset_snapshot_idempotent(
+                    .create_from_agent_snapshot_idempotent(
                         user_id,
                         request,
                         snapshot,
@@ -958,16 +958,8 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
         &self,
         owner_id: &str,
         request: CreateConversationRequest,
-        snapshot: Option<ResolvedPresetSnapshot>,
     ) -> Result<ConversationResponse, AppError> {
-        match snapshot {
-            Some(snapshot) => {
-                self.service
-                    .create_from_preset_snapshot(owner_id, request, snapshot)
-                    .await
-            }
-            None => self.service.create(owner_id, request).await,
-        }
+        self.service.create(owner_id, request).await
     }
 
     async fn delete(&self, owner_id: &str, session_id: &str) -> Result<(), AppError> {
@@ -1144,15 +1136,15 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
             .await
     }
 
-    async fn create_from_preset_snapshot_idempotent(
+    async fn create_from_agent_snapshot_idempotent(
         &self,
         owner_id: &str,
         request: CreateConversationRequest,
-        snapshot: ResolvedPresetSnapshot,
+        snapshot: AgentResolvedSnapshot,
         creation_key: &str,
     ) -> Result<ConversationResponse, AppError> {
         self.service
-            .create_from_preset_snapshot_idempotent(owner_id, request, snapshot, creation_key)
+            .create_from_agent_snapshot_idempotent(owner_id, request, snapshot, creation_key)
             .await
     }
 
@@ -1470,7 +1462,7 @@ fn cron_session_projection_from_response(
         custom_agent_id,
         preset_id: response.preset_id,
         preset_revision: response.preset_revision,
-        preset_snapshot: response.preset_snapshot,
+        agent_snapshot: response.agent_snapshot,
     })
 }
 
@@ -1749,7 +1741,7 @@ fn session_projection_revision(session: &ConversationResponse) -> Result<String,
         "execution_template_id": session.execution_template_id,
         "preset_id": session.preset_id,
         "preset_revision": session.preset_revision,
-        "preset_snapshot": session.preset_snapshot,
+        "agent_snapshot": session.agent_snapshot,
         "source": session.source,
         "channel_chat_id": session.channel_chat_id,
         "created_at": session.created_at,
@@ -1895,7 +1887,7 @@ mod session_boundary_tests {
             channel_chat_id: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             delegation_policy: DelegationPolicy::Automatic,
             execution_model_pool: None,
             decision_policy: DecisionPolicy::Automatic,

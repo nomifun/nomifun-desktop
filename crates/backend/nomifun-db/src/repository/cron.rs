@@ -24,9 +24,11 @@ pub struct UpdateCronJobParams {
     pub payload_message: Option<String>,
     pub execution_mode: Option<String>,
     pub agent_config: Option<Option<String>>,
+    /// Set/clear the immutable Agent launch snapshot. Cron only persists the
+    /// already materialized value supplied by its application service.
     pub preset_id: Option<Option<String>>,
     pub preset_revision: Option<Option<i64>>,
-    pub preset_snapshot: Option<Option<String>>,
+    pub agent_snapshot: Option<Option<String>>,
     /// Target conversation. `Some(Some(id))` binds a conversation, `Some(None)`
     /// clears it to NULL, `None` leaves it unchanged.
     pub conversation_id: Option<Option<String>>,

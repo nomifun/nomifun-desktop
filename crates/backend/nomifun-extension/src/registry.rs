@@ -18,7 +18,7 @@ use crate::registry_helpers::{
 use crate::resolvers::{resolve_all_contributions, resolve_i18n_for_all};
 use crate::state::ExtensionStateStore;
 use crate::types::{
-    ExtensionLifecyclePayload, ExtensionState, ExtensionSystemEvent, LoadedExtension, ResolvedAgent, ResolvedPreset,
+    ExtensionLifecyclePayload, ExtensionState, ExtensionSystemEvent, LoadedExtension, ResolvedAgent,
     ResolvedChannelPlugin, ResolvedContributions, ResolvedModelProvider, ResolvedSettingsTab, ResolvedSkill,
     ResolvedTheme, WebuiContribution,
 };
@@ -303,32 +303,6 @@ impl ExtensionRegistry {
     pub async fn get_themes(&self) -> Vec<ResolvedTheme> {
         let guard = self.inner.read().await;
         guard.contributions.themes.clone()
-    }
-
-    pub async fn get_presets(&self) -> Vec<ResolvedPreset> {
-        let guard = self.inner.read().await;
-        guard.contributions.presets.clone()
-    }
-
-    /// Return `true` if any extension contributes a preset with this source key.
-    pub async fn has_preset(&self, source_key: &str) -> bool {
-        let guard = self.inner.read().await;
-        guard
-            .contributions
-            .presets
-            .iter()
-            .any(|preset| preset.source_key == source_key)
-    }
-
-    /// Lookup a single extension-contributed preset by global source key.
-    pub async fn get_preset_by_source_key(&self, source_key: &str) -> Option<ResolvedPreset> {
-        let guard = self.inner.read().await;
-        guard
-            .contributions
-            .presets
-            .iter()
-            .find(|preset| preset.source_key == source_key)
-            .cloned()
     }
 
     pub async fn get_agents(&self) -> Vec<ResolvedAgent> {

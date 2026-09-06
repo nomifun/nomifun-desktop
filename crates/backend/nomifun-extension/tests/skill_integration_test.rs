@@ -27,8 +27,6 @@ fn make_paths(base: &Path) -> SkillPaths {
         cron_skills_dir: base.join("cron").join("skills"),
         builtin_skills_dir: base.join("builtin-skills"),
         builtin_rules_dir: base.join("builtin-rules"),
-        preset_rules_dir: base.join("preset-rules"),
-        preset_skills_dir: base.join("preset-skills"),
     }
 }
 
@@ -294,10 +292,6 @@ async fn rm1_read_builtin_skill() {
     let content = read_builtin_skill(&paths, "tdd.md").await.unwrap();
     assert_eq!(content, "# TDD Workflow");
 }
-
-// RM-2..RM-6 (file-based preset rule/skill CRUD) were removed together with
-// the skill_service preset file fallback: preset rule/skill content lives in
-// the DB (`preset.instructions`) behind `PresetRuleDispatcher`.
 
 // ===========================================================================
 // CP — Custom External Paths

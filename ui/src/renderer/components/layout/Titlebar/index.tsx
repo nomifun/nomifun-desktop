@@ -374,7 +374,7 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
               tooltip: t('terminal.newConversation'),
               className: 'app-titlebar__button app-titlebar__button--nav',
               onClick: () =>
-                navigateAfterCreativeStudioFlush(() => navigate('/guid', { state: { resetPreset: true } })),
+                navigateAfterCreativeStudioFlush(() => navigate('/guid', { state: { resetAgentSelection: true } })),
               children: <Plus theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />,
             })}
             {renderIconButton({

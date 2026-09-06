@@ -4,17 +4,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use nomifun_agent_contracts::{
-    AgentBindingValue, AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
+    AgentBindingValue, AgentPresetRevision, AgentPresetRevisionDigestInput,
+    AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
     CanonicalApiInventoryPayload, CanonicalErrorRegistryPayload, CanonicalV4SchemaManifestPayload,
-    CodexRuntimeReleaseManifestPayload, CodingRuntimeFeatureInventoryPayload,
-    ContractClosurePayload, ContractDigestLedgerPayload, D025FixtureContractReferencePayload,
-    D025FixtureEnvelopeReference, D026OrderingOutcomeMatrix, D027TerminalSequenceMatrix,
-    D028PlatformMatrix, DeletionManifest, DigestHex, FRESH_V4_BASELINE_SQL, OfficialPresetKey,
-    OfficialPresetSeedManifestPayload, PackageManifest, PlatformValidationManifestPayload,
-    PluginRegistrationMetadata, RemoteBinding, ResolvedSnapshotContent, RuntimeCommand,
-    RuntimeHelloPayload, SessionEventRegistryPayload, TargetPackageInventoryPayload, VersionString,
-    FreshV4ParentOperationMarker, FreshV4ReadyMarker, FreshV4SchemaMetadata, digest_bytes,
-    digest_payload,
+    CapabilityCatalogEntry, CodexRuntimeReleaseManifestPayload, CodingRuntimeFeatureInventoryPayload,
+    ContractClosurePayload, ContractDigestLedgerPayload, ContributionLock,
+    D025FixtureContractReferencePayload, D025FixtureEnvelopeReference, D026OrderingOutcomeMatrix,
+    D027TerminalSequenceMatrix, D028PlatformMatrix, DeletionManifest, DigestHex,
+    FRESH_V4_BASELINE_SQL, FreshV4ParentOperationMarker, FreshV4ReadyMarker,
+    FreshV4SchemaMetadata, OfficialPresetKey, OfficialPresetSeedManifestPayload, PackageManifest,
+    PlatformValidationManifestPayload, PluginRegistrationMetadata, RemoteBinding,
+    ResolvedSnapshotEnvelope, RuntimeCommand, RuntimeHelloPayload, SessionEventRegistryPayload,
+    TargetPackageInventoryPayload, VersionString, digest_bytes, digest_payload,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
@@ -46,6 +47,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let seed_path =
         contracts.join("presets/official-preset-seed-manifest.payload.json");
     let api_path = contracts.join("presets/canonical-api-inventory.payload.json");
+    let catalog_entry_path =
+        contracts.join("catalog/platform-capability-catalog-entry.v1.json");
     let event_path = contracts.join("events/session-event-registry.json");
     let error_path = contracts.join("events/error-registry.json");
     let runtime_release_path =
@@ -90,8 +93,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     .map_err(|error| error.message)?;
     let seed_digest = digest_payload(&seed)?;
 
-    let api_inventory: CanonicalApiInventoryPayload = read_json(&api_path)?;
+    let mut api_inventory: CanonicalApiInventoryPayload = read_json(&api_path)?;
+    normalize_api_inventory(&mut api_inventory);
+    validate_api_inventory(&api_inventory)?;
     let api_digest = digest_payload(&api_inventory)?;
+
+    let catalog_entry: CapabilityCatalogEntry = read_json(&catalog_entry_path)?;
+    catalog_entry.validate()?;
+    let catalog_entry_digest = digest_payload(&catalog_entry)?;
 
     let event_registry: SessionEventRegistryPayload = read_json(&event_path)?;
     event_registry.validate()?;
@@ -133,6 +142,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let d027_digest = digest_payload(&d027)?;
 
     let schemas = generated_schemas()?;
+    validate_generated_schemas(&schemas)?;
     let rust_contract_schema_digest = digest_payload(&schemas)?;
     let package_schema_digest = digest_payload(&schema_subset(
         &schemas,
@@ -225,6 +235,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut digest_map = BTreeMap::new();
     digest_map.insert("canonical_api_inventory".to_owned(), api_digest);
     digest_map.insert(
+        "capability_catalog_entry".to_owned(),
+        catalog_entry_digest,
+    );
+    digest_map.insert(
         "canonical_schema_manifest".to_owned(),
         canonical_manifest_digest,
     );
@@ -294,6 +308,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         (
             "canonical-api-inventory.envelope.json".to_owned(),
             pretty_json(&ArtifactEnvelope::new(api_inventory)?)?,
+        ),
+        (
+            "capability-catalog-entry.envelope.json".to_owned(),
+            pretty_json(&ArtifactEnvelope::new(catalog_entry)?)?,
         ),
         (
             "session-event-registry.envelope.json".to_owned(),
@@ -396,6 +414,95 @@ fn normalize_runtime_fixture_digests(
             }
         }
     }
+}
+
+fn normalize_api_inventory(api_inventory: &mut CanonicalApiInventoryPayload) {
+    api_inventory
+        .operations
+        .retain(|operation| operation.operation_id != "skills.get");
+    for operation in &mut api_inventory.operations {
+        match operation.operation_id.as_str() {
+            "skills.list" => {
+                operation.operation_id = "agent_catalog.skills.list".to_owned();
+                operation.path = "/api/agent-catalog/skills".to_owned();
+            }
+            _ => {}
+        }
+    }
+}
+
+fn validate_api_inventory(
+    api_inventory: &CanonicalApiInventoryPayload,
+) -> Result<(), Box<dyn Error>> {
+    let mut operation_ids = BTreeSet::new();
+    let mut method_paths = BTreeSet::new();
+    for operation in &api_inventory.operations {
+        if !operation_ids.insert(operation.operation_id.as_str()) {
+            return Err(format!("duplicate canonical API operation {}", operation.operation_id).into());
+        }
+        let method_path = (format!("{:?}", operation.method), operation.path.as_str());
+        if !method_paths.insert(method_path) {
+            return Err(format!("duplicate canonical API method/path {}", operation.path).into());
+        }
+        let legacy_presets_path = ["/api/", "presets"].concat();
+        if operation.path == legacy_presets_path {
+            return Err(format!(
+                "legacy preset operation remains active: {}",
+                operation.operation_id
+            )
+            .into());
+        }
+        if !operation
+            .canonical_errors
+            .is_subset(&api_inventory.canonical_error_codes)
+        {
+            return Err(format!(
+                "{} references an error outside canonical_error_codes",
+                operation.operation_id
+            )
+            .into());
+        }
+    }
+
+    let required_operations = [
+        ("capabilities.list", "/api/capabilities"),
+        ("agent_catalog.skills.list", "/api/agent-catalog/skills"),
+        ("mcp_tool_mappings.list", "/api/mcp-tool-mappings"),
+        (
+            "agent_preset_templates.list_official",
+            "/api/agent-preset-templates?source=official",
+        ),
+        ("agent_presets.create", "/api/agent-presets"),
+        (
+            "agent_preset_revisions.create",
+            "/api/agent-presets/{preset_id}/revisions",
+        ),
+        ("agent_sessions.create", "/api/agent-sessions"),
+        (
+            "agent_bindings.get",
+            "/api/agent-bindings/{target_kind}/{target_id}",
+        ),
+        (
+            "agent_bindings.put",
+            "/api/agent-bindings/{target_kind}/{target_id}",
+        ),
+    ];
+    for (operation_id, path) in required_operations {
+        if !api_inventory
+            .operations
+            .iter()
+            .any(|operation| operation.operation_id == operation_id && operation.path == path)
+        {
+            return Err(format!("missing canonical Agent API operation {operation_id} {path}").into());
+        }
+    }
+    if !api_inventory
+        .forbidden_paths
+        .contains(&["/api/", "presets"].concat())
+    {
+        return Err("legacy preset route must remain explicitly forbidden".into());
+    }
+    Ok(())
 }
 
 fn fixture_digest(label: &str) -> DigestHex {
@@ -510,9 +617,16 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
     add_schema::<PackageManifest>(&mut schemas, "package_manifest")?;
     add_schema::<PluginRegistrationMetadata>(&mut schemas, "plugin_registration")?;
     add_schema::<TargetPackageInventoryPayload>(&mut schemas, "target_package_inventory")?;
-    add_schema::<AgentPresetRevisionPayload>(&mut schemas, "agent_preset_revision")?;
+    add_schema::<ContributionLock>(&mut schemas, "contribution_lock")?;
+    add_schema::<AgentPresetRevisionPayload>(&mut schemas, "agent_preset_revision_payload")?;
+    add_schema::<AgentPresetRevisionDigestInput>(
+        &mut schemas,
+        "agent_preset_revision_digest_input",
+    )?;
+    add_schema::<AgentPresetRevision>(&mut schemas, "agent_preset_revision")?;
     add_schema::<OfficialPresetSeedManifestPayload>(&mut schemas, "official_preset_seed")?;
-    add_schema::<ResolvedSnapshotContent>(&mut schemas, "resolved_snapshot")?;
+    add_schema::<CapabilityCatalogEntry>(&mut schemas, "capability_catalog_entry")?;
+    add_schema::<ResolvedSnapshotEnvelope>(&mut schemas, "agent_snapshot")?;
     add_schema::<AgentBindingValue>(&mut schemas, "agent_binding")?;
     add_schema::<RemoteBinding>(&mut schemas, "remote_binding")?;
     add_schema::<AgentSessionAggregate>(&mut schemas, "agent_session")?;
@@ -533,6 +647,63 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
         "platform_validation_manifest",
     )?;
     Ok(schemas)
+}
+
+fn validate_generated_schemas(
+    schemas: &BTreeMap<String, Value>,
+) -> Result<(), Box<dyn Error>> {
+    let required = [
+        "contribution_lock",
+        "agent_preset_revision_payload",
+        "agent_preset_revision_digest_input",
+        "agent_preset_revision",
+        "capability_catalog_entry",
+        "agent_snapshot",
+    ];
+    for name in required {
+        if !schemas.contains_key(name) {
+            return Err(format!("missing generated schema {name}").into());
+        }
+    }
+    if schemas.contains_key("resolved_snapshot") {
+        return Err("resolved_snapshot compatibility schema must not be generated".into());
+    }
+
+    let revision = serde_json::to_string(
+        schemas
+            .get("agent_preset_revision")
+            .expect("required schema checked above"),
+    )?;
+    if !revision.contains("\"contribution_locks\"") {
+        return Err("agent_preset_revision schema does not include ContributionLock".into());
+    }
+    let catalog = serde_json::to_string(
+        schemas
+            .get("capability_catalog_entry")
+            .expect("required schema checked above"),
+    )?;
+    for field in [
+        "host_surfaces",
+        "supported_consumers",
+        "availability",
+        "admission",
+    ] {
+        if !catalog.contains(&format!("\"{field}\"")) {
+            return Err(format!("capability_catalog_entry schema is missing {field}").into());
+        }
+    }
+    let snapshot = serde_json::to_string(
+        schemas
+            .get("agent_snapshot")
+            .expect("required schema checked above"),
+    )?;
+    if !snapshot.contains("\"snapshot_ref\"") || !snapshot.contains("\"content\"") {
+        return Err("agent_snapshot schema is not the immutable Snapshot envelope".into());
+    }
+    if snapshot.contains(&["preset_", "snapshot"].concat()) {
+        return Err("agent_snapshot schema contains a legacy snapshot alias".into());
+    }
+    Ok(())
 }
 
 fn add_schema<T: JsonSchema>(

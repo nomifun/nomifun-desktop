@@ -7,7 +7,7 @@ import type { ConversationId } from '@/common/types/ids';
 
 import { ipcBridge } from '@/common';
 import { AgentLogoIcon } from '@/renderer/components/agent/AgentBadge';
-import { usePresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
+import { useAgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
 import React from 'react';
 import useSWR from 'swr';
 
@@ -21,7 +21,7 @@ const MobileConversationBrand: React.FC<MobileConversationBrandProps> = ({ conve
     conversation_id ? `mobile-titlebar.conversation.${conversation_id}` : null,
     () => ipcBridge.conversation.get.invoke({ conversation_id: conversation_id })
   );
-  const { info: preset } = usePresetInfo(conversation || undefined);
+  const { info: preset } = useAgentInfo(conversation || undefined);
 
   const backend = conversation?.type === 'nomi' ? 'nomi' : undefined;
 

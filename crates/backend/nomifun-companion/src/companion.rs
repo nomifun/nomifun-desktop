@@ -161,15 +161,6 @@ pub async fn build_companion_system_prompt(
     if !profile.persona.custom.trim().is_empty() {
         system.push_str(&format!("\n主人对你的额外设定：{}", profile.persona.custom.trim()));
     }
-    if let Some(snapshot) = profile.applied_preset.as_ref()
-        && !snapshot.instructions.trim().is_empty()
-    {
-        system.push_str(&format!(
-            "\n\n## 当前设定：{}\n{}",
-            snapshot.preset_name,
-            snapshot.instructions.trim()
-        ));
-    }
     system.push_str(
         "\n\n## 知识沉淀技巧\n\
          除了轻量的全局记忆，你还能把成体系的资料沉淀为知识库，让会话/终端长期受益：\n\
@@ -822,7 +813,6 @@ impl CompanionThreads {
             source: None,
             channel_chat_id: None,
             preset_id: None,
-            preset_overrides: None,
             delegation_policy: Default::default(),
             execution_model_pool: None,
             decision_policy: Default::default(),
@@ -832,15 +822,11 @@ impl CompanionThreads {
                 "companion_session": true,
                 "companion_id": companion_id,
                 "system_prompt": system_prompt,
-                // `build_companion_system_prompt` already includes the frozen
-                // preset instructions. Prevent the generic conversation path
-                // from appending the same block a second time.
-                "preset_instructions_embedded": true,
                 // The conversation service freezes this into `extra.skills`.
-                // Supplying the resolved set also filters configured names that
+                // Supplying the configured set also filters configured names that
                 // are not installed; the follow-up reconciliation repairs the
                 // snapshot against the authoritative resolver.
-                "preset_enabled_skills": effective_skill_names,
+                "companion_skills": effective_skill_names,
                 "exclude_auto_inject_skills": auto_skill_names,
                 // Fixed private work folder (locked, browsable in the chat tab's file
                 // sidebar). Marks the conversation as a custom (non-temp) workspace, so
@@ -855,7 +841,6 @@ impl CompanionThreads {
             .create(
                 self.authoritative_user_id.as_ref(),
                 req,
-                profile.applied_preset.clone(),
             )
             .await?;
         let created_id = created.conversation_id;
@@ -982,44 +967,6 @@ impl CompanionThreads {
             .map(|_| ())
     }
 
-    /// Replace only the reusable preset-derived portion of an existing
-    /// companion thread. The companion id, memory, history, workspace and
-    /// process-issued platform capability stays untouched.
-    pub async fn set_preset(
-        &self,
-        companion_id: &str,
-        conversation_id: &str,
-        system_prompt: String,
-        snapshot: &nomifun_api_types::ResolvedPresetSnapshot,
-    ) -> Result<(), AppError> {
-        self.assert_owned(companion_id, conversation_id).await?;
-        self.sessions
-            .update(
-                self.authoritative_user_id.as_ref(),
-                conversation_id,
-                nomifun_api_types::UpdateConversationRequest {
-                    name: None,
-                    pinned: None,
-                    model: None,
-                    delegation_policy: None,
-                    execution_model_pool: None,
-                    decision_policy: None,
-                    execution_template_id: None,
-                    extra: Some(serde_json::json!({
-                        "system_prompt": system_prompt,
-                        "preset_instructions_embedded": true,
-                        "preset_id": snapshot.preset_id.clone(),
-                        "preset_revision": snapshot.preset_revision,
-                        "preset_snapshot": snapshot,
-                        "skills": snapshot.included_skills.clone(),
-                        "exclude_auto_inject_skills": snapshot.excluded_auto_skills.clone(),
-                        "preset_knowledge_binding": true,
-                    })),
-                },
-            )
-            .await
-            .map(|_| ())
-    }
 }
 
 /// `CompanionMemorySink` implementation over the shared companion store — the
@@ -1202,8 +1149,6 @@ mod skill_resolution_tests {
             cron_skills_dir: root.join("cron/skills"),
             builtin_skills_dir: root.join("builtin-skills"),
             builtin_rules_dir: root.join("builtin-rules"),
-            preset_rules_dir: root.join("preset-rules"),
-            preset_skills_dir: root.join("preset-skills"),
         }
     }
 

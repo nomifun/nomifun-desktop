@@ -101,18 +101,6 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "nomi_agent_preset_revisions",
     "nomi_agent_presets",
     "oauth_tokens",
-    "preset_agent_preferences",
-    "preset_examples",
-    "preset_knowledge_bases",
-    "preset_knowledge_policy",
-    "preset_localizations",
-    "preset_model_preferences",
-    "preset_skill_bindings",
-    "preset_tag_bindings",
-    "preset_tags",
-    "preset_targets",
-    "preset_user_state",
-    "presets",
     "provider_connections",
     "provider_model_capabilities",
     "provider_models",
@@ -180,8 +168,6 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("nomi_remote_sessions", "agent_session_id"),
     ("nomi_agent_presets", "preset_id"),
     ("remote_bindings", "remote_binding_id"),
-    ("preset_tags", "preset_tag_id"),
-    ("presets", "preset_id"),
     ("provider_connections", "connection_id"),
     ("providers", "provider_id"),
     ("requirements", "requirement_id"),
@@ -271,8 +257,6 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("nomi_agent_preset_revisions", "revision_id"),
     ("nomi_agent_presets", "preset_id"),
     ("remote_bindings", "remote_binding_id"),
-    ("preset_tags", "preset_tag_id"),
-    ("presets", "preset_id"),
     ("provider_connections", "connection_id"),
     ("providers", "provider_id"),
     ("requirements", "requirement_id"),
@@ -357,12 +341,6 @@ const PARTIAL_UNIQUE_INDEXES: &[PartialUniqueIndexContract] = &[
         columns: &["target_companion_id"],
         predicate: "target_kind = 'companion' AND target_companion_id IS NOT NULL",
     },
-    PartialUniqueIndexContract {
-        index_name: "uq_presets_catalog_source_key",
-        table: "presets",
-        columns: &["source_kind", "source_key"],
-        predicate: "source_kind IN ('builtin', 'extension')",
-    },
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -431,6 +409,9 @@ pub(crate) struct LogicalReference {
     pub orphan_audit_policy: OrphanAuditPolicy,
     /// Optional child predicate for polymorphic columns.
     pub child_predicate: Option<&'static str>,
+    /// Optional sibling-row predicate that makes an immutable projection
+    /// authoritative when the relational parent no longer exists.
+    pub frozen_projection_authority: Option<&'static str>,
     /// Optional parent predicate for references to live rows in a soft-delete
     /// table. Expressions use the `parent` SQL alias.
     pub parent_predicate: Option<&'static str>,
@@ -447,6 +428,11 @@ impl LogicalReference {
 
     const fn with_child_predicate(mut self, predicate: &'static str) -> Self {
         self.child_predicate = Some(predicate);
+        self
+    }
+
+    const fn with_frozen_projection_authority(mut self, predicate: &'static str) -> Self {
+        self.frozen_projection_authority = Some(predicate);
         self
     }
 
@@ -546,6 +532,7 @@ macro_rules! text_ref {
             rebuild_policy: RebuildPolicy::PreserveBusinessId,
             orphan_audit_policy: default_orphan_audit_policy(DeletePolicy::$delete),
             child_predicate: None,
+            frozen_projection_authority: None,
             parent_predicate: None,
             aggregate_scope_predicate: None,
         }
@@ -568,6 +555,7 @@ macro_rules! opaque_text_ref {
             rebuild_policy: RebuildPolicy::PreserveBusinessId,
             orphan_audit_policy: default_orphan_audit_policy(DeletePolicy::$delete),
             child_predicate: None,
+            frozen_projection_authority: None,
             parent_predicate: None,
             aggregate_scope_predicate: None,
         }
@@ -590,6 +578,7 @@ macro_rules! external_ref {
             rebuild_policy: RebuildPolicy::ExternalOwner,
             orphan_audit_policy: OrphanAuditPolicy::ExternalOwner,
             child_predicate: None,
+            frozen_projection_authority: None,
             parent_predicate: None,
             aggregate_scope_predicate: None,
         }
@@ -611,6 +600,7 @@ macro_rules! protocol_uuidv7_ref {
             rebuild_policy: RebuildPolicy::PreserveProtocolToken,
             orphan_audit_policy: OrphanAuditPolicy::ValidateValueOnly,
             child_predicate: None,
+            frozen_projection_authority: None,
             parent_predicate: None,
             aggregate_scope_predicate: None,
         }
@@ -629,7 +619,8 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
             "parent.conversation_id = child.conversation_id AND parent.user_id = child.user_id",
         ),
     text_ref!("conversations", "cron_job_id" => "cron_jobs", "cron_job_id", true, "idx_conversations_cron_job_id", SetNull),
-    text_ref!("conversations", "preset_id" => "presets", "preset_id", true, "idx_conversations_preset_id", SetNull),
+    text_ref!("conversations", "preset_id" => "nomi_agent_presets", "preset_id", true, "idx_conversations_preset_id", SetNull)
+        .with_frozen_projection_authority("child.agent_snapshot IS NOT NULL"),
     text_ref!("conversations", "execution_template_id" => "agent_execution_templates", "execution_template_id", true, "idx_conversations_execution_template_id", SetNull),
     text_ref!("messages", "conversation_id" => "conversations", "conversation_id", false, "idx_messages_conversation_id", Cascade),
     text_ref!("messages", "msg_id" => "messages", "message_id", true, "idx_messages_msg_id", KeepHistory)
@@ -673,7 +664,9 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("channel_sessions", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", true, "idx_channel_sessions_channel_plugin_id", SetNull),
     text_ref!("agent_execution_participants", "execution_id" => "agent_executions", "execution_id", false, "idx_execution_participants_execution_id", Cascade),
     text_ref!("agent_execution_participants", "source_agent_id" => "agent_metadata", "agent_id", false, "idx_execution_participants_source_agent_id", KeepHistory),
-    text_ref!("agent_execution_participants", "preset_id" => "presets", "preset_id", true, "idx_execution_participants_preset_id", KeepHistory),
+    text_ref!("agent_execution_participants", "preset_id" => "nomi_agent_presets", "preset_id", true, "idx_execution_participants_preset_id", KeepHistory)
+        .with_orphan_audit_policy(OrphanAuditPolicy::RequireParent)
+        .with_frozen_projection_authority("child.agent_snapshot IS NOT NULL"),
     text_ref!("agent_execution_participants", "provider_id" => "providers", "provider_id", true, "idx_execution_participants_provider_id", KeepHistory)
         .with_orphan_audit_policy(OrphanAuditPolicy::RequireParent)
         .with_child_predicate(
@@ -727,7 +720,8 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("agent_execution_events", "on_behalf_of_user_id" => "users", "user_id", false, "idx_execution_events_on_behalf_of_user_id", KeepHistory),
     text_ref!("agent_execution_template_participants", "template_id" => "agent_execution_templates", "execution_template_id", false, "idx_template_participants_template_id", Cascade),
     text_ref!("agent_execution_template_participants", "source_agent_id" => "agent_metadata", "agent_id", false, "idx_template_participants_source_agent_id", Restrict),
-    text_ref!("agent_execution_template_participants", "preset_id" => "presets", "preset_id", true, "idx_template_participants_preset_id", SetNull),
+    text_ref!("agent_execution_template_participants", "preset_id" => "nomi_agent_presets", "preset_id", true, "idx_template_participants_preset_id", SetNull)
+        .with_frozen_projection_authority("child.agent_snapshot IS NOT NULL"),
     text_ref!("agent_execution_template_participants", "provider_id" => "providers", "provider_id", true, "idx_template_participants_provider_id", Restrict),
     text_ref!("conversation_artifacts", "conversation_id" => "conversations", "conversation_id", false, "idx_conversation_artifacts_conversation_id", Cascade),
     text_ref!("conversation_artifacts", "cron_job_id" => "cron_jobs", "cron_job_id", true, "idx_conversation_artifacts_cron_job_id", SetNull),
@@ -740,7 +734,8 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
             "parent.execution_id = child.execution_id AND parent.step_id = child.step_id",
         ),
     text_ref!("cron_jobs", "user_id" => "users", "user_id", false, "idx_cron_jobs_user_id", Cascade),
-    text_ref!("cron_jobs", "preset_id" => "presets", "preset_id", true, "idx_cron_jobs_preset_id", SetNull),
+    text_ref!("cron_jobs", "preset_id" => "nomi_agent_presets", "preset_id", true, "idx_cron_jobs_preset_id", SetNull)
+        .with_frozen_projection_authority("child.agent_snapshot IS NOT NULL"),
     text_ref!("cron_jobs", "conversation_id" => "conversations", "conversation_id", true, "idx_cron_jobs_conversation_id", Cascade),
     text_ref!("cron_job_runs", "cron_job_id" => "cron_jobs", "cron_job_id", false, "idx_cron_job_runs_cron_job_id", Cascade),
     text_ref!("cron_run_reservations", "cron_job_id" => "cron_jobs", "cron_job_id", false, "idx_cron_run_reservations_cron_job_id", Cascade),
@@ -861,25 +856,9 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("provider_connections", "provider_id" => "providers", "provider_id", false, "idx_provider_connections_provider_id", Cascade),
     text_ref!("provider_model_capabilities", "provider_id" => "providers", "provider_id", false, "idx_provider_model_capabilities_provider_model", Cascade),
     text_ref!("provider_models", "provider_id" => "providers", "provider_id", false, "idx_provider_models_provider_id", Cascade),
-    text_ref!("preset_agent_preferences", "preset_id" => "presets", "preset_id", false, "idx_preset_agent_preferences_preset_id", Cascade),
-    text_ref!("preset_agent_preferences", "agent_id" => "agent_metadata", "agent_id", false, "idx_preset_agent_preferences_agent_id", Restrict),
-    text_ref!("preset_examples", "preset_id" => "presets", "preset_id", false, "idx_preset_examples_preset_id", Cascade),
-    text_ref!("preset_knowledge_bases", "preset_id" => "presets", "preset_id", false, "idx_preset_knowledge_bases_preset_id", Cascade),
-    text_ref!("preset_knowledge_bases", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, "idx_preset_knowledge_bases_knowledge_base_id", Restrict),
-    text_ref!("preset_localizations", "preset_id" => "presets", "preset_id", false, "idx_preset_localizations_preset_id", Cascade),
-    text_ref!("preset_model_preferences", "preset_id" => "presets", "preset_id", false, "idx_preset_model_preferences_preset_id", Cascade),
-    text_ref!("preset_model_preferences", "provider_id" => "providers", "provider_id", true, "idx_preset_model_preferences_provider_id", SetNull),
-    text_ref!("preset_skill_bindings", "preset_id" => "presets", "preset_id", false, "idx_preset_skill_bindings_preset_id", Cascade),
-    text_ref!("preset_tag_bindings", "preset_id" => "presets", "preset_id", false, "idx_preset_tag_bindings_preset_id", Cascade),
-    text_ref!("preset_tag_bindings", "preset_tag_id" => "preset_tags", "preset_tag_id", false, "idx_preset_tag_bindings_preset_tag_id", Cascade)
-        .with_aggregate_scope("parent.dimension = child.dimension"),
-    text_ref!("preset_targets", "preset_id" => "presets", "preset_id", false, "idx_preset_targets_preset_id", Cascade),
     text_ref!("requirement_tags", "paused_requirement_id" => "requirements", "requirement_id", true, "idx_requirement_tags_paused_requirement_id", SetNull),
     text_ref!("tag_settings", "webhook_id" => "webhooks", "webhook_id", true, "idx_tag_settings_webhook_id", SetNull),
     text_ref!("installation_identity", "owner_user_id" => "users", "user_id", false, "idx_installation_identity_owner_user_id", Restrict),
-    text_ref!("preset_knowledge_policy", "preset_id" => "presets", "preset_id", false, "idx_preset_knowledge_policy_preset_id", Cascade),
-    text_ref!("preset_user_state", "preset_id" => "presets", "preset_id", false, "idx_preset_user_state_preset_id", Cascade),
-    text_ref!("preset_user_state", "preferred_agent_id" => "agent_metadata", "agent_id", true, "idx_preset_user_state_preferred_agent_id", SetNull),
     text_ref!("terminal_scrollback", "terminal_id" => "terminal_sessions", "terminal_id", false, "idx_terminal_scrollback_terminal_id", Cascade),
     text_ref!("remote_bindings", "owner_user_id" => "users", "user_id", false, "idx_remote_bindings_owner_user_id", Cascade),
     text_ref!("nomi_remote_sessions", "owner_user_id" => "users", "user_id", false, "idx_nomi_remote_sessions_owner_user_id", Cascade),
@@ -1142,11 +1121,6 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
             "v3 schema conversations.admission_epoch must default to 0".to_owned(),
         ));
     }
-    require_column(pool, "preset_tags", "preset_tag_id", "TEXT", true).await?;
-    require_single_column_unique_index(pool, "preset_tags", "preset_tag_id").await?;
-    require_column(pool, "preset_tags", "key", "TEXT", true).await?;
-    require_single_column_unique_index(pool, "preset_tags", "key").await?;
-    require_column(pool, "preset_tag_bindings", "preset_tag_id", "TEXT", true).await?;
     // Channel bot ownership domain (migration 020): every row names its owning
     // domain and defaults to the legacy companion pool.
     require_column(pool, "channel_plugins", "owner_domain", "TEXT", true).await?;
@@ -1289,6 +1263,10 @@ pub(crate) async fn audit_logical_reference_orphans(
             .aggregate_scope_predicate
             .map(|value| format!(" AND ({value})"))
             .unwrap_or_default();
+        let frozen_projection_authority = reference
+            .frozen_projection_authority
+            .map(|value| format!(" AND NOT ({value})"))
+            .unwrap_or_default();
         let parent_exists = format!(
             "EXISTS (SELECT 1 FROM {parent_table} parent \
                      WHERE parent.{parent_column} = child.{child_column})",
@@ -1316,7 +1294,7 @@ pub(crate) async fn audit_logical_reference_orphans(
         let sql = format!(
             "SELECT COUNT(*) FROM {child_table} child \
              WHERE child.{child_column} IS NOT NULL{child_predicate} \
-               AND ({invalid_parent_predicate})",
+               AND ({invalid_parent_predicate}){frozen_projection_authority}",
             child_table = quote_sqlite_identifier(reference.child_table),
             child_column = quote_sqlite_identifier(reference.child_column),
         );
@@ -1994,6 +1972,7 @@ async fn validate_logical_reference_registry(pool: &SqlitePool) -> Result<(), Db
             reference.parent_table,
             reference.parent_column,
             reference.child_predicate,
+            reference.frozen_projection_authority,
         );
         if !seen_columns.insert(key) {
             return Err(DbError::Init(format!(

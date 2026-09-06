@@ -2141,7 +2141,7 @@ mod tests {
     use nomifun_agent_contracts::ActionId;
     use nomifun_agent_contracts::{
         AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, AgentSessionId,
-        CapabilityExposure, CapabilityId, CapabilityRef, CapabilitySelection, CorrelationId,
+        CapabilityId, CapabilityRef, CapabilitySelection, CorrelationId,
         ChatRouteCandidate, ChatRouteFeature, ChatRouteIdentity, ChatRouteProtocol,
         ChatRouteRecord, ChatRouteRecordSchema, ChatRouteTask, IdempotencyKey,
         OperationId, PluginStateEntry, PresetRevisionRef, ResourceBindingId, ResourceId,
@@ -2349,22 +2349,15 @@ mod tests {
                     id: capability_id.into(),
                     version: VersionString::from(CONTRACT_VERSION),
                 },
-                required: true,
-                exposure: CapabilityExposure::Advertised,
                 action_allowlist: BTreeSet::from([
                     nomifun_agent_domain_wave1::action_id(capability_id)
                         .expect("Wave 1 capability has an action"),
                 ]),
                 resource_binding_refs: vec![binding.binding_id.clone()],
-                destination_constraints: BTreeSet::new(),
-                context_budget_override: None,
-                tool_budget_override: None,
-                config: StrictJsonValue(serde_json::json!({})),
             })
             .collect();
         let payload = AgentPresetRevisionPayload {
             schema_version: VersionString::from(CONTRACT_VERSION),
-            surfaces: BTreeSet::from(["desktop".to_owned()]),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
             initial_capabilities,
@@ -2374,22 +2367,23 @@ mod tests {
             system_role_provider_overrides: BTreeMap::new(),
             persona: format!("Wave 1 {fixture_name} test"),
             instructions: format!("Exercise the Wave 1 {fixture_name} owner."),
-            context_policy: StrictJsonValue(serde_json::json!({})),
-            execution_constraints: StrictJsonValue(serde_json::json!({})),
-            runtime_budget: StrictJsonValue(serde_json::json!({})),
+            starter_prompts: Vec::new(),
         };
-        let revision = AgentPresetRevision {
+        let contribution_locks = Vec::new();
+        let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef {
                 preset_id: AgentPresetId::from(format!("wave1-{fixture_name}")),
                 revision: 1,
-                revision_digest: digest_payload(&payload)
-                    .expect("revision digest"),
+                revision_digest: DigestHex::from(""),
             },
             payload,
+            contribution_locks,
             created_by: UserId::from(owner.principal_id.clone()),
             created_at_ms: 1,
             reason: None,
         };
+        revision.reference.revision_digest =
+            revision.revision_digest().expect("revision digest");
         let snapshot = AgentPresetCompiler::compile(
             &registry.snapshot().expect("registry snapshot"),
             &CompilerEnvironment {
@@ -2758,7 +2752,7 @@ mod tests {
                 host_surface: "desktop".to_owned(),
                 availability_evidence_revision: "browser-role-live-2026-09-03".to_owned(),
             };
-            let capability = |id: &str, required: bool, exposure: CapabilityExposure| {
+            let capability = |id: &str| {
                 let action_allowlist = matches!(
                     id,
                     "browser.navigate" | "browser.act" | "browser.render_content"
@@ -2770,27 +2764,20 @@ mod tests {
                         id: CapabilityId::from(id),
                         version: VersionString::from(CONTRACT_VERSION),
                     },
-                    required,
-                    exposure,
                     action_allowlist,
                     resource_binding_refs: vec![binding.binding_id.clone()],
-                    destination_constraints: BTreeSet::new(),
-                    context_budget_override: None,
-                    tool_budget_override: None,
-                    config: StrictJsonValue(serde_json::json!({})),
                 }
             };
             let payload = AgentPresetRevisionPayload {
                 schema_version: VersionString::from(CONTRACT_VERSION),
-                surfaces: BTreeSet::from(["desktop".to_owned()]),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),
                 initial_capabilities: vec![
-                    capability("browser.identity", false, CapabilityExposure::Hidden),
-                    capability("browser.observe", true, CapabilityExposure::Hidden),
-                    capability("browser.navigate", true, CapabilityExposure::Advertised),
-                    capability("browser.act", true, CapabilityExposure::Advertised),
-                    capability("browser.render_content", false, CapabilityExposure::Hidden),
+                    capability("browser.identity"),
+                    capability("browser.observe"),
+                    capability("browser.navigate"),
+                    capability("browser.act"),
+                    capability("browser.render_content"),
                 ],
                 on_demand_capabilities: Vec::new(),
                 skill_bindings: Vec::new(),
@@ -2798,21 +2785,23 @@ mod tests {
                 system_role_provider_overrides: BTreeMap::new(),
                 persona: "Browser role live test".to_owned(),
                 instructions: "Exercise the canonical Browser role owner.".to_owned(),
-                context_policy: StrictJsonValue(serde_json::json!({})),
-                execution_constraints: StrictJsonValue(serde_json::json!({})),
-                runtime_budget: StrictJsonValue(serde_json::json!({})),
+                starter_prompts: Vec::new(),
             };
-            let revision = AgentPresetRevision {
+            let contribution_locks = Vec::new();
+            let mut revision = AgentPresetRevision {
                 reference: PresetRevisionRef {
                     preset_id: AgentPresetId::from("browser-role-live-test"),
                     revision: 1,
-                    revision_digest: digest_payload(&payload).expect("browser role revision digest"),
+                    revision_digest: DigestHex::from(""),
                 },
                 payload,
+                contribution_locks,
                 created_by: UserId::from(owner.principal_id.clone()),
                 created_at_ms: 1,
                 reason: None,
             };
+            revision.reference.revision_digest =
+                revision.revision_digest().expect("browser role revision digest");
             let snapshot = AgentPresetCompiler::compile(
                 &materialized,
                 &environment,
@@ -3057,7 +3046,7 @@ mod tests {
                 host_surface: "desktop".to_owned(),
                 availability_evidence_revision: "computer-role-live-2026-09-03".to_owned(),
             };
-            let capability = |id: &str, required: bool, exposure: CapabilityExposure| {
+            let capability = |id: &str| {
                 let action_allowlist = (id == "computer.input")
                     .then(|| BTreeSet::from([ActionId::from("computer.input.invoke")]))
                     .unwrap_or_default();
@@ -3066,24 +3055,17 @@ mod tests {
                         id: CapabilityId::from(id),
                         version: VersionString::from(CONTRACT_VERSION),
                     },
-                    required,
-                    exposure,
                     action_allowlist,
                     resource_binding_refs: vec![binding.binding_id.clone()],
-                    destination_constraints: BTreeSet::new(),
-                    context_budget_override: None,
-                    tool_budget_override: None,
-                    config: StrictJsonValue(serde_json::json!({})),
                 }
             };
             let payload = AgentPresetRevisionPayload {
                 schema_version: VersionString::from(CONTRACT_VERSION),
-                surfaces: BTreeSet::from(["desktop".to_owned()]),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),
                 initial_capabilities: vec![
-                    capability("computer.observe", true, CapabilityExposure::Hidden),
-                    capability("computer.input", true, CapabilityExposure::Advertised),
+                    capability("computer.observe"),
+                    capability("computer.input"),
                 ],
                 on_demand_capabilities: Vec::new(),
                 skill_bindings: Vec::new(),
@@ -3091,22 +3073,23 @@ mod tests {
                 system_role_provider_overrides: BTreeMap::new(),
                 persona: "Computer role live test".to_owned(),
                 instructions: "Exercise the canonical Computer role owner.".to_owned(),
-                context_policy: StrictJsonValue(serde_json::json!({})),
-                execution_constraints: StrictJsonValue(serde_json::json!({})),
-                runtime_budget: StrictJsonValue(serde_json::json!({})),
+                starter_prompts: Vec::new(),
             };
-            let revision = AgentPresetRevision {
+            let contribution_locks = Vec::new();
+            let mut revision = AgentPresetRevision {
                 reference: PresetRevisionRef {
                     preset_id: AgentPresetId::from("computer-role-live-test"),
                     revision: 1,
-                    revision_digest: digest_payload(&payload)
-                        .expect("computer role revision digest"),
+                    revision_digest: DigestHex::from(""),
                 },
                 payload,
+                contribution_locks,
                 created_by: UserId::from(owner.principal_id.clone()),
                 created_at_ms: 1,
                 reason: None,
             };
+            revision.reference.revision_digest =
+                revision.revision_digest().expect("computer role revision digest");
             let snapshot = AgentPresetCompiler::compile(
                 &materialized,
                 &environment,

@@ -1,7 +1,7 @@
 {
-  "title": "Agent Settings",
-  "subtitle": "Build immutable AgentPreset revisions from capabilities, Skills, MCP materializations, model routes, and typed resources.",
-  "loading": "Loading Agent Settings…",
+  "title": "Agent Workbench",
+  "subtitle": "Design an Agent's identity, capabilities, model, and resources, then test it before saving.",
+  "loading": "Loading Agent Workbench…",
   "loadingEditor": "Loading the selected AgentPreset…",
   "freshStart": {
     "title": "Fresh v4 workspace",
@@ -212,17 +212,16 @@
     "unavailable": "Unavailable"
   },
   "errors": {
-    "title": "Agent Settings could not complete the operation"
+    "title": "Agent Workbench could not complete the operation"
   },
   "navigation": {
-    "entryDescription": "Open the canonical AgentPreset editor, Preview, Revision, Test, and Inspector surface.",
-    "open": "Open Agent Settings"
+    "railTitle": "Agent"
   },
   "session": {
     "title": "Agent Session",
     "open": "Open Session",
     "loading": "Loading canonical Session projections…",
-    "backToSettings": "Agent Settings",
+    "backToSettings": "Agent Workbench",
     "fork": "Fork Session",
     "delete": "Delete Session",
     "deleteConfirm": "Delete this Session permanently? Its transcript, projections, Runtime binding, checkpoint, and Session-owned resources will be removed.",

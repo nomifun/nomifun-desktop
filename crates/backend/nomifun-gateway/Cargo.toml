@@ -24,6 +24,7 @@ nomifun-workshop.workspace = true
 nomifun-creation.workspace = true
 # Persistent Agent Execution aggregate and Engine backing collaboration tools.
 nomifun-agent-execution.workspace = true
+nomifun-agent-contracts.workspace = true
 # System domain capabilities (settings / client preferences / providers / model fetch).
 nomifun-system.workspace = true
 # Channel domain capabilities (IM bot plugins / pairing / users / companion binding).

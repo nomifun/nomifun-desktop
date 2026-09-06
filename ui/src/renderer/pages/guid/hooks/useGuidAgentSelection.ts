@@ -6,20 +6,11 @@
 
 import type { IProvider } from '@/common/config/storage';
 import { configService } from '@/common/config/configService';
-import type { Preset, PresetReference } from '@/common/types/agent/presetTypes';
-import type { AvailableAgent, EffectiveAgentInfo } from '../types';
-import {
-  DETECTED_AGENTS_SWR_KEY,
-  fetchDetectedAgents,
-  type AgentMetadata,
-  type AgentSource,
-} from '@/renderer/utils/model/agentTypes';
+import type { AgentSource, AgentMetadata } from '@/renderer/utils/model/agentTypes';
+import { useAgents } from '@/renderer/hooks/agent/useAgents';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import useSWR from 'swr';
 import { getAgentKey as getAgentKeyUtil } from './agentSelectionUtils';
-import { usePresetResolver } from './usePresetResolver';
-import { useAgentAvailability } from './useAgentAvailability';
-import { usePresetCatalogLoader } from './usePresetCatalogLoader';
+import type { AvailableAgent, EffectiveAgentInfo } from '../types';
 
 export type GuidAgentSelectionResult = {
   selectedAgentKey: string;
@@ -27,22 +18,18 @@ export type GuidAgentSelectionResult = {
   defaultAgentKey: string;
   selectedAgent: string;
   selectedAgentInfo: AvailableAgent | undefined;
-  is_presetAgent: boolean;
-  availableAgents: AvailableAgent[] | undefined;
-  /** Backend-merged preset catalog: builtin + user + extension. */
-  presets: Preset[];
-  /** User-defined engine rows (agent_source === 'custom') from the backend. */
-  customAgents: AgentMetadata[];
+  availableAgents: AvailableAgent[];
   currentEffectiveAgentInfo: EffectiveAgentInfo;
   getAgentKey: (agent: {
     agent_type: string;
     agent_source?: AgentSource;
     backend?: string;
     id?: string;
+    agent_id?: string;
   }) => string;
   findAgentByKey: (key: string) => AvailableAgent | undefined;
-  resolvePresetAgentType: (
-    agentInfo: { agent_type: string; backend?: string; preset_id?: PresetReference } | undefined
+  resolveAgentType: (
+    agentInfo: { agent_type: string; backend?: string } | undefined
   ) => string;
   isMainAgentAvailable: (agent_type: string) => boolean;
   getEffectiveAgentType: (
@@ -55,20 +42,25 @@ export type GuidAgentSelectionResult = {
 type UseGuidAgentSelectionOptions = {
   modelList: IProvider[];
   localeKey: string;
-  resetPreset?: boolean;
-  /** Pre-select a specific agent by key (e.g. from "Go to Chat" deep-links). */
+  resetAgentSelection?: boolean;
   preselectAgentKey?: string;
-  /** React Router location.key — changes on every navigation, used to detect new resets. */
   locationKey?: string;
 };
 
+const normalizeDetectedAgent = (agent: AgentMetadata): AvailableAgent => ({
+  ...agent,
+  id: agent.agent_id,
+  avatar: agent.agent_source === 'custom' ? agent.icon : undefined,
+});
+
 /**
- * Hook that manages agent selection, availability, and preset preset logic.
+ * Guid is the quick-start surface for ordinary Agents only. Agent authoring
+ * and template creation live in the Agent Workbench; no saved-Agent catalog
+ * is mixed into this selector.
  */
 export const useGuidAgentSelection = ({
   modelList,
-  localeKey: _localeKey,
-  resetPreset,
+  resetAgentSelection,
   preselectAgentKey,
   locationKey,
 }: UseGuidAgentSelectionOptions): GuidAgentSelectionResult => {
@@ -79,235 +71,159 @@ export const useGuidAgentSelection = ({
       return 'nomi';
     }
   });
-  const [availableAgents, setAvailableAgents] = useState<AvailableAgent[]>();
-  // Wrap setSelectedAgentKey to also save to storage
+
+  const {
+    agents: detectedAgents,
+    isLoading: agentsLoading,
+    revalidate,
+    refreshCustomAgents,
+  } = useAgents();
+
   const setSelectedAgentKey = useCallback((key: string) => {
     _setSelectedAgentKey(key);
-    configService.set('guid.lastSelectedAgent', key).catch((error) => {
-      console.error('Failed to save selected agent:', error);
+    void configService.set('guid.lastSelectedAgent', key).catch((error) => {
+      console.error('Failed to save selected Agent:', error);
     });
   }, []);
 
-  const availableCustomAgentIds = useMemo(() => {
-    const ids = new Set<string>();
-    (availableAgents || []).forEach((agent) => {
-      if (agent.agent_source === 'custom' && agent.id) {
-        ids.add(agent.id);
-      }
-    });
-    return ids;
-  }, [availableAgents]);
+  const availableAgents = useMemo(
+    () => detectedAgents.map(normalizeDetectedAgent),
+    [detectedAgents]
+  );
 
-  const getAgentKey = getAgentKeyUtil;
+  const customAgents = useMemo(
+    () =>
+      detectedAgents.filter(
+        (agent) => agent.agent_source === 'custom' && agent.available && agent.enabled
+      ),
+    [detectedAgents]
+  );
 
-  // --- Sub-hooks ---
-  const { presets, presetsLoaded, customAgents, customAgentAvatarMap, refreshCustomAgents } =
-    usePresetCatalogLoader({ availableCustomAgentIds });
+  const customAgentAvatarMap = useMemo(
+    () => new Map(customAgents.map((agent) => [agent.agent_id, agent.icon])),
+    [customAgents]
+  );
 
-  const { resolvePresetAgentType } = usePresetResolver({ presets });
+  const getAgentKey = useCallback(
+    (agent: {
+      agent_type: string;
+      agent_source?: AgentSource;
+      backend?: string;
+      id?: string;
+      agent_id?: string;
+    }) => getAgentKeyUtil(agent),
+    []
+  );
 
-  const { isMainAgentAvailable, getEffectiveAgentType } = useAgentAvailability({
-    modelList,
-    availableAgents,
-    resolvePresetAgentType,
-  });
+  const findAgentByKey = useCallback(
+    (key: string): AvailableAgent | undefined =>
+      availableAgents.find((agent) => getAgentKey(agent) === key),
+    [availableAgents, getAgentKey]
+  );
 
-  /**
-   * Find agent by key.
-   *
-   * Key formats:
-   *   - Plain id (custom rows) → resolved by `AvailableAgent.id`.
-   *   - Plain backend or agent_type (builtin rows) → resolved by `backend` or
-   *     `agent_type` fallback.
-   *   - `preset:<presetId>` → preset preset from the preset catalog
-   *     (kept as the only surviving prefix path; preset presets are a
-   *     different selection surface from AgentRegistry rows).
-   */
-  const findAgentByKey = (key: string): AvailableAgent | undefined => {
-    if (key.startsWith('preset:')) {
-      const presetId = key.slice(7);
-      const preset = presets.find((item) => item.preset_id === presetId);
-      if (preset) {
-        const preferenceIds = [
-          ...(preset.preferred_agent_id ? [preset.preferred_agent_id] : []),
-          ...preset.agent_preferences.map((preference) => preference.agent_id),
-        ];
-        const preferredAgent = preferenceIds
-          .map((agentId) => availableAgents?.find((agent) => agent.id === agentId))
-          .find(Boolean);
-        return {
-          agent_type: preferredAgent?.agent_type || 'nomi',
-          backend: preferredAgent?.backend,
-          name: preset.name,
-          id: preset.preset_id,
-          preset_id: preset.preset_id,
-          is_preset: true,
-          avatar: preset.avatar,
-        };
-      }
-      return undefined;
-    }
-    // Opaque AgentRegistry identity (or a remote-agent business ID) takes
-    // precedence, so two entries sharing the same backend do not collide.
-    const byId = availableAgents?.find((a) => a.id === key);
-    if (byId) return byId;
-    return availableAgents?.find((a) => a.backend === key || a.agent_type === key);
-  };
+  const selectedAgentInfo = useMemo(
+    () => findAgentByKey(selectedAgentKey),
+    [findAgentByKey, selectedAgentKey]
+  );
 
-  // Derived state: collapse row-scoped rows to a stable slot key so shared
-  // mode-preference namespaces are not fragmented per row.
-  const selectedAgent: string = ((): string => {
-    if (selectedAgentKey.startsWith('preset:')) return 'preset';
-    const info = availableAgents?.find((a) => a.id === selectedAgentKey);
-    if (info?.agent_source === 'custom') return 'custom';
-    return selectedAgentKey;
-  })();
-  const selectedAgentInfo = useMemo(() => {
-    return findAgentByKey(selectedAgentKey);
-  }, [selectedAgentKey, availableAgents, presets]);
-  // The key is the durable user intent. Catalog metadata may revalidate, but
-  // that must never silently downgrade a selected preset to a bare Agent.
-  const is_presetAgent = selectedAgentKey.startsWith('preset:');
+  const selectedAgent =
+    selectedAgentInfo?.agent_source === 'custom' ? 'custom' : selectedAgentKey;
 
-  // --- SWR: Fetch detected execution engines (shared cache) ---
-  const { data: availableAgentsData } = useSWR<AvailableAgent[]>(DETECTED_AGENTS_SWR_KEY, fetchDetectedAgents);
+  const isMainAgentAvailable = useCallback(
+    (agentType: string): boolean =>
+      agentType === 'nomi'
+        ? modelList.length > 0
+        : availableAgents.some(
+            (agent) => agent.agent_type === agentType || agent.backend === agentType
+          ),
+    [availableAgents, modelList]
+  );
 
-  useEffect(() => {
-    if (!availableAgentsData) return;
-    // Map the named AgentMetadata wire identity into the local mixed display
-    // aggregate. The aggregate's `id` slot also hosts preset identities.
-    const normalisedDetected: AvailableAgent[] = availableAgentsData.map((a) => {
-      const asAgent = a as AgentMetadata;
-      const { agent_id, ...displayFields } = asAgent;
-      const isCustomRow = asAgent.agent_source === 'custom';
+  const resolveAgentType = useCallback(
+    (agentInfo: { agent_type: string; backend?: string } | undefined): string =>
+      agentInfo?.backend || agentInfo?.agent_type || 'nomi',
+    []
+  );
+
+  const getEffectiveAgentType = useCallback(
+    (agentInfo: { agent_type: string; backend?: string } | undefined): EffectiveAgentInfo => {
+      const agentType = resolveAgentType(agentInfo);
       return {
-        ...displayFields,
-        id: agent_id,
-        avatar: isCustomRow ? asAgent.icon : (a as AvailableAgent).avatar,
+        agent_type: agentType,
+        isFallback: false,
+        originalType: agentType,
+        isAvailable: isMainAgentAvailable(agentType),
       };
-    });
-    setAvailableAgents(normalisedDetected);
-  }, [availableAgentsData]);
+    },
+    [isMainAgentAvailable, resolveAgentType]
+  );
 
-  // Track whether the resetPreset flag has been consumed so it only fires once
-  // per navigation. Use locationKey (changes on every navigate()) to reset the guard,
-  // because window.history.replaceState does NOT update React Router's location.state.
   const resetHandledRef = useRef(false);
-  const prevLocationKeyRef = useRef(locationKey);
-  if (locationKey !== prevLocationKeyRef.current) {
-    prevLocationKeyRef.current = locationKey;
+  const previousLocationKeyRef = useRef(locationKey);
+  if (locationKey !== previousLocationKeyRef.current) {
+    previousLocationKeyRef.current = locationKey;
     resetHandledRef.current = false;
   }
 
-  // Apply sidebar "new chat" resets and explicit "Go to Chat" pre-selections
-  // before paint so the previous preset selection does not flash for a
-  // frame when navigating to /guid again.
   useLayoutEffect(() => {
-    if (!availableAgents || availableAgents.length === 0) return;
-    if (resetHandledRef.current) return;
+    if (availableAgents.length === 0 || resetHandledRef.current) return;
 
-    // Explicit pre-selection (e.g. from Settings → Agent "Go to Chat") wins
-    // over reset and saved-selection when the agent is actually present.
-    if (preselectAgentKey) {
-      const matched = availableAgents.find((a) => getAgentKey(a) === preselectAgentKey);
-      if (matched) {
-        resetHandledRef.current = true;
-        const key = getAgentKey(matched);
-        _setSelectedAgentKey(key);
-        configService.set('guid.lastSelectedAgent', key).catch((error) => {
-          console.error('Failed to save preselected agent key:', error);
-        });
-        return;
-      }
-    }
-
-    if (resetPreset) {
+    if (
+      preselectAgentKey &&
+      availableAgents.some((agent) => getAgentKey(agent) === preselectAgentKey)
+    ) {
       resetHandledRef.current = true;
-      // Only reset when the current selection is a preset preset.
-      // CLI agent selections (Claude Code, Gemini CLI, etc.) are preserved so
-      // New Chat keeps the last-used CLI agent.
-      const currentIsPreset = selectedAgentKey.startsWith('preset:');
-      if (currentIsPreset) {
-        const firstCliAgent = availableAgents.find((a) => !a.is_preset);
-        const fallbackKey = firstCliAgent ? getAgentKey(firstCliAgent) : 'nomi';
-        _setSelectedAgentKey(fallbackKey);
-        configService.set('guid.lastSelectedAgent', fallbackKey).catch((error) => {
-          console.error('Failed to save reset agent key:', error);
-        });
-      }
+      _setSelectedAgentKey(preselectAgentKey);
+      void configService.set('guid.lastSelectedAgent', preselectAgentKey);
+      return;
     }
-  }, [availableAgents, resetPreset, preselectAgentKey, locationKey]);
 
-  // Load last selected agent when no explicit reset was requested.
+    if (resetAgentSelection) {
+      resetHandledRef.current = true;
+      const first = availableAgents[0];
+      const fallbackKey = first ? getAgentKey(first) : 'nomi';
+      _setSelectedAgentKey(fallbackKey);
+      void configService.set('guid.lastSelectedAgent', fallbackKey);
+    }
+  }, [availableAgents, getAgentKey, preselectAgentKey, resetAgentSelection]);
+
   useEffect(() => {
-    if (!availableAgents || availableAgents.length === 0) return;
-    if (resetPreset) return;
-    // An explicit pre-selection from navigation state wins over the
-    // persisted last-selected key — skip the saved-restore path so
-    // useLayoutEffect's preselect remains the authoritative pick.
-    if (preselectAgentKey && availableAgents.some((a) => getAgentKey(a) === preselectAgentKey)) return;
-
-    let cancelled = false;
-    const restoreSavedSelection = async () => {
-      try {
-        const savedKey = configService.get('guid.lastSelectedAgent');
-        if (cancelled) return;
-
-        if (savedKey) {
-          if (savedKey.startsWith('preset:')) {
-            if (!presetsLoaded) return;
-            const presetId = savedKey.slice('preset:'.length);
-            if (presets.some((preset) => preset.preset_id === presetId)) {
-              _setSelectedAgentKey(savedKey);
-              return;
-            }
-          }
-          // Plain row key — verify it still exists in detected engines
-          if (availableAgents.some((agent) => getAgentKey(agent) === savedKey)) {
-            _setSelectedAgentKey(savedKey);
-            return;
-          }
-        }
-
-        // No saved preference or stale key — default to first detected engine
-        const firstAgent = availableAgents[0];
-        if (firstAgent) {
-          const fallbackKey = getAgentKey(firstAgent);
-          _setSelectedAgentKey(fallbackKey);
-          if (savedKey && savedKey !== fallbackKey) {
-            void configService.set('guid.lastSelectedAgent', fallbackKey);
-          }
-        }
-      } catch (error) {
-        console.error('Failed to load last selected agent:', error);
-      }
-    };
-
-    void restoreSavedSelection();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [availableAgents, presets, presetsLoaded, resetPreset, preselectAgentKey, locationKey]);
-
-  const currentEffectiveAgentInfo = useMemo(() => {
-    if (!is_presetAgent) {
-      const isAvailable = isMainAgentAvailable(selectedAgent as string);
-      return {
-        agent_type: selectedAgent as string,
-        isFallback: false,
-        originalType: selectedAgent as string,
-        isAvailable,
-      };
+    if (agentsLoading || availableAgents.length === 0 || resetAgentSelection) return;
+    if (
+      preselectAgentKey &&
+      availableAgents.some((agent) => getAgentKey(agent) === preselectAgentKey)
+    ) {
+      return;
     }
-    return getEffectiveAgentType(selectedAgentInfo);
-  }, [is_presetAgent, selectedAgent, selectedAgentInfo, getEffectiveAgentType, isMainAgentAvailable]);
 
-  // Key of the first non-preset CLI agent (used as fallback when leaving preset mode)
+    const savedKey = configService.get('guid.lastSelectedAgent');
+    if (savedKey && availableAgents.some((agent) => getAgentKey(agent) === savedKey)) {
+      _setSelectedAgentKey(savedKey);
+      return;
+    }
+
+    const first = availableAgents[0];
+    if (!first) return;
+    const fallbackKey = getAgentKey(first);
+    _setSelectedAgentKey(fallbackKey);
+    if (savedKey !== fallbackKey) {
+      void configService.set('guid.lastSelectedAgent', fallbackKey);
+    }
+  }, [agentsLoading, availableAgents, getAgentKey, preselectAgentKey, resetAgentSelection]);
+
   const defaultAgentKey = useMemo(() => {
-    const firstCliAgent = availableAgents?.find((a) => !a.is_preset);
-    return firstCliAgent ? getAgentKey(firstCliAgent) : 'nomi';
-  }, [availableAgents]);
+    const first = availableAgents[0];
+    return first ? getAgentKey(first) : 'nomi';
+  }, [availableAgents, getAgentKey]);
+
+  const currentEffectiveAgentInfo = useMemo(
+    () => getEffectiveAgentType(selectedAgentInfo),
+    [getEffectiveAgentType, selectedAgentInfo]
+  );
+
+  const refresh = useCallback(async () => {
+    await Promise.all([refreshCustomAgents(), revalidate()]);
+  }, [refreshCustomAgents, revalidate]);
 
   return {
     selectedAgentKey,
@@ -315,17 +231,14 @@ export const useGuidAgentSelection = ({
     defaultAgentKey,
     selectedAgent,
     selectedAgentInfo,
-    is_presetAgent,
     availableAgents,
-    presets,
-    customAgents,
     currentEffectiveAgentInfo,
     getAgentKey,
     findAgentByKey,
-    resolvePresetAgentType,
+    resolveAgentType,
     isMainAgentAvailable,
     getEffectiveAgentType,
-    refreshCustomAgents,
+    refreshCustomAgents: refresh,
     customAgentAvatarMap,
   };
 };

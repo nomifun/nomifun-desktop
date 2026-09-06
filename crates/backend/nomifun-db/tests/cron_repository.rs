@@ -71,7 +71,7 @@ fn make_job() -> CronJobRow {
         agent_config: None,
         preset_id: None,
         preset_revision: None,
-        preset_snapshot: None,
+        agent_snapshot: None,
         conversation_id: Some(CONV_1.to_owned()),
         conversation_title: Some("Conv 1".into()),
         agent_type: "acp".into(),

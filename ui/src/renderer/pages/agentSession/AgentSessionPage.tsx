@@ -152,7 +152,7 @@ const AgentSessionPage: React.FC = () => {
           <Delete theme='outline' size='28' />
           <h2>{t('agentSettings.session.deletedTitle')}</h2>
           <p>{t('agentSettings.session.deletedBody')}</p>
-          <Button type='primary' onClick={() => void navigate('/settings/agent-presets')}>
+          <Button type='primary' onClick={() => void navigate('/agent')}>
             {t('agentSettings.session.backToSettings')}
           </Button>
         </div>
@@ -168,11 +168,11 @@ const AgentSessionPage: React.FC = () => {
           <h2>{t('agentSettings.session.notFound', { defaultValue: 'Session unavailable' })}</h2>
           <p>
             {t('agentSettings.session.notFoundBody', {
-              defaultValue: 'This Session is no longer available. Return to Agent Settings and choose another setup.',
+              defaultValue: 'This Session is no longer available. Return to the Agent Workbench and choose another setup.',
             })}
           </p>
           <div className={styles.toolbar}>
-            <Button onClick={() => void navigate('/settings/agent-presets')}>
+            <Button onClick={() => void navigate('/agent')}>
               {t('agentSettings.session.backToSettings')}
             </Button>
             <Button type='primary' onClick={() => {
@@ -194,7 +194,7 @@ const AgentSessionPage: React.FC = () => {
       maxWidthClass='md:max-w-1400px'
       toolbar={
         <div className={styles.toolbar}>
-          <Button type='text' icon={<ArrowLeft size='15' />} onClick={() => void navigate('/settings/agent-presets')}>
+          <Button type='text' icon={<ArrowLeft size='15' />} onClick={() => void navigate('/agent')}>
             {t('agentSettings.session.backToSettings')}
           </Button>
           <Button icon={<Refresh size='14' />} onClick={() => void load()}>{t('agentSettings.actions.retry')}</Button>

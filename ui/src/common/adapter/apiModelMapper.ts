@@ -5,12 +5,9 @@
  */
 
 import type { TChatConversation, TProviderWithModel } from '../config/storage';
+import type { AgentResolvedSnapshot } from '../types/agentPlatform';
 import {
-  parsePresetReference,
-  parsePresetSnapshotReference,
-  type ResolvedPresetSnapshot,
-} from '../types/agent/presetTypes';
-import {
+  parseAgentPresetId,
   parseAgentId,
   parseConversationId,
   parseCronJobId,
@@ -99,7 +96,7 @@ type ApiConversationResponse = Record<string, unknown> &
     execution_attempt_id?: string | null;
     preset_id?: unknown;
     preset_revision?: unknown;
-    preset_snapshot?: Record<string, unknown> | null;
+    agent_snapshot?: Record<string, unknown> | null;
   };
 
 const parsePresetRevision = (value: unknown, label: string): number => {
@@ -109,23 +106,23 @@ const parsePresetRevision = (value: unknown, label: string): number => {
   return value as number;
 };
 
-/** Canonical wire parser shared by preset resolve responses and conversation snapshots. */
-export function fromApiResolvedPresetSnapshot(raw: unknown): ResolvedPresetSnapshot {
+/** Canonical wire parser shared by Agent snapshots and Conversation projections. */
+export function fromApiAgentSnapshot(raw: unknown): AgentResolvedSnapshot {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new TypeError('resolved preset snapshot must be an object');
+    throw new TypeError('agent snapshot must be an object');
   }
   const snapshot = raw as Record<string, unknown>;
   if (Object.prototype.hasOwnProperty.call(snapshot, 'id')) {
-    throw new TypeError('resolved preset snapshot legacy field "id" is not accepted; use "preset_id"');
+    throw new TypeError('agent snapshot legacy field "id" is not accepted; use "preset_id"');
   }
   if (!Array.isArray(snapshot.knowledge_base_ids)) {
-    throw new TypeError('resolved preset snapshot.knowledge_base_ids must be an array');
+    throw new TypeError('agent snapshot.knowledge_base_ids must be an array');
   }
 
   let resolvedModel = snapshot.resolved_model;
   if (resolvedModel != null) {
     if (typeof resolvedModel !== 'object' || Array.isArray(resolvedModel)) {
-      throw new TypeError('resolved preset snapshot.resolved_model must be an object');
+      throw new TypeError('agent snapshot.resolved_model must be an object');
     }
     const model = resolvedModel as Record<string, unknown>;
     resolvedModel = model.provider_id == null
@@ -135,17 +132,17 @@ export function fromApiResolvedPresetSnapshot(raw: unknown): ResolvedPresetSnaps
 
   return {
     ...snapshot,
-    preset_id: parsePresetSnapshotReference(snapshot.preset_id),
+    preset_id: parseAgentPresetId(snapshot.preset_id),
     preset_revision: parsePresetRevision(
       snapshot.preset_revision,
-      'resolved preset snapshot.preset_revision',
+      'agent snapshot.preset_revision',
     ),
     ...(snapshot.resolved_agent_id == null
       ? {}
       : { resolved_agent_id: parseAgentId(snapshot.resolved_agent_id) }),
     ...(resolvedModel == null ? {} : { resolved_model: resolvedModel }),
     knowledge_base_ids: snapshot.knowledge_base_ids.map(parseKnowledgeBaseId),
-  } as unknown as ResolvedPresetSnapshot;
+  } as unknown as AgentResolvedSnapshot;
 }
 
 export function fromApiConversation(raw: unknown): TChatConversation {
@@ -266,37 +263,37 @@ export function fromApiConversation(raw: unknown): TChatConversation {
 
   const hasPresetId = r.preset_id != null;
   const hasPresetRevision = r.preset_revision != null;
-  const hasPresetSnapshot = r.preset_snapshot != null;
+  const hasAgentSnapshot = r.agent_snapshot != null;
   const presetLineageFieldCount =
-    Number(hasPresetId) + Number(hasPresetRevision) + Number(hasPresetSnapshot);
+    Number(hasPresetId) + Number(hasPresetRevision) + Number(hasAgentSnapshot);
   if (presetLineageFieldCount !== 0 && presetLineageFieldCount !== 3) {
     throw new TypeError(
-      'conversation preset lineage must include preset_id, preset_revision, and preset_snapshot together',
+      'conversation Agent lineage must include preset_id, preset_revision, and agent_snapshot together',
     );
   }
 
   if (presetLineageFieldCount === 3) {
-    const presetId = parsePresetReference(r.preset_id);
+    const presetId = parseAgentPresetId(r.preset_id);
     const presetRevision = parsePresetRevision(
       r.preset_revision,
       'conversation preset_revision',
     );
-    const presetSnapshot = fromApiResolvedPresetSnapshot(r.preset_snapshot);
-    if (presetSnapshot.preset_id !== presetId) {
-      throw new TypeError('conversation preset_id must match preset_snapshot.preset_id');
+    const agentSnapshot = fromApiAgentSnapshot(r.agent_snapshot);
+    if (agentSnapshot.preset_id !== presetId) {
+      throw new TypeError('conversation preset_id must match agent_snapshot.preset_id');
     }
-    if (presetSnapshot.preset_revision !== presetRevision) {
+    if (agentSnapshot.preset_revision !== presetRevision) {
       throw new TypeError(
-        'conversation preset_revision must match preset_snapshot.preset_revision',
+        'conversation preset_revision must match agent_snapshot.preset_revision',
       );
     }
     next.preset_id = presetId;
     next.preset_revision = presetRevision;
-    next.preset_snapshot = presetSnapshot;
+    next.agent_snapshot = agentSnapshot;
   } else {
     delete next.preset_id;
     delete next.preset_revision;
-    delete next.preset_snapshot;
+    delete next.agent_snapshot;
   }
 
   return next as unknown as TChatConversation;

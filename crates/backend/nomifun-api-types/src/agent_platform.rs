@@ -9,12 +9,78 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use nomifun_common::KnowledgeBaseId;
+
+use crate::ExecutionModelRef;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentKnowledgePolicy {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub writeback: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eagerness: Option<String>,
+    #[serde(default)]
+    pub grounded: bool,
+}
+
+impl Default for AgentKnowledgePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            writeback: false,
+            eagerness: None,
+            grounded: false,
+        }
+    }
+}
+
+/// Immutable execution-time materialization of an AgentPreset.
+///
+/// Conversation, Cron, and Agent Execution persist this same consumer-neutral
+/// projection. Consumer selection is not encoded as a legacy target enum.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentResolvedSnapshot {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_preset_id")]
+    pub preset_id: String,
+    pub preset_revision: i64,
+    pub preset_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_description: Option<String>,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_agent_id"
+    )]
+    pub resolved_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_agent_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<ExecutionModelRef>,
+    #[serde(default)]
+    pub included_skills: Vec<String>,
+    #[serde(default)]
+    pub excluded_auto_skills: Vec<String>,
+    #[serde(default)]
+    pub knowledge_policy: AgentKnowledgePolicy,
+    #[serde(default)]
+    pub knowledge_base_ids: Vec<KnowledgeBaseId>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentPresetSourceDto {
     Official,
     User,
-    Package,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -81,31 +147,14 @@ pub struct AgentBindingValueDto {
     pub binding_version: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CapabilityExposureDto {
-    Advertised,
-    Discoverable,
-    Hidden,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilitySelectionDto {
     pub capability: ExactCatalogRefDto,
-    pub required: bool,
-    pub exposure: CapabilityExposureDto,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub action_allowlist: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resource_binding_refs: Vec<String>,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub destination_constraints: BTreeSet<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_budget_override: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_budget_override: Option<u32>,
-    pub config: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,7 +182,6 @@ pub struct RoleProviderSelectionDto {
 #[serde(deny_unknown_fields)]
 pub struct AgentPresetDocumentDto {
     pub schema_version: String,
-    pub surfaces: BTreeSet<String>,
     pub model_route_refs: BTreeMap<String, String>,
     /// Canonical provider/model route objects. Legacy route IDs remain a
     /// separate opaque reference and are rejected at persistence time unless
@@ -148,9 +196,8 @@ pub struct AgentPresetDocumentDto {
     pub system_role_provider_overrides: BTreeMap<String, RoleProviderSelectionDto>,
     pub persona: String,
     pub instructions: String,
-    pub context_policy: Value,
-    pub execution_constraints: Value,
-    pub runtime_budget: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub starter_prompts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -491,10 +538,178 @@ pub struct AgentPresetEditorResponse {
 pub struct AgentPresetRevisionDto {
     pub reference: PresetRevisionRefDto,
     pub document: AgentPresetDocumentDto,
+    #[serde(default)]
+    pub contribution_locks: Vec<ContributionLockDto>,
     pub created_by: String,
     pub created_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContributionLockDto {
+    pub source_kind: String,
+    pub source_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub miniapp_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_binding_id: Option<String>,
+    pub contribution_id: String,
+    pub contract_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CurrentContributionLifecycleDto {
+    Active,
+    Replaced {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_digest: Option<String>,
+    },
+    Disabled {
+        reason: String,
+    },
+    Unavailable {
+        code: String,
+        reason: String,
+    },
+    MiniAppActiveReleaseChanged {
+        release_id: String,
+        release_digest: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CurrentContributionDto {
+    pub source_kind: String,
+    pub source_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub miniapp_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_binding_id: Option<String>,
+    pub contribution_id: String,
+    pub contract_digest: String,
+    pub lifecycle: CurrentContributionLifecycleDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ContributionLifecycleImpactDto {
+    Active,
+    Replaced {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_digest: Option<String>,
+    },
+    Disabled {
+        reason: String,
+    },
+    Unavailable {
+        code: String,
+        reason: String,
+    },
+    Uninstalled,
+    MiniAppActiveReleaseChanged {
+        release_id: String,
+        release_digest: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ContributionContractImpactDto {
+    Exact,
+    Compatible,
+    Breaking {
+        expected_contract_digest: String,
+        actual_contract_digest: String,
+    },
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevisionUseReadinessDto {
+    Ready,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImpactRecoveryActionDto {
+    Retry,
+    SwitchSource,
+    RestoreSource,
+    ForkRevision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContributionImpactDto {
+    pub lock: ContributionLockDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<CurrentContributionDto>,
+    pub lifecycle: ContributionLifecycleImpactDto,
+    pub contract: ContributionContractImpactDto,
+    pub new_use: RevisionUseReadinessDto,
+    pub recovery_actions: BTreeSet<ImpactRecoveryActionDto>,
+    pub ignored_alternate_source_count: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevisionImpactSummaryDto {
+    pub total: u32,
+    pub ready: u32,
+    pub blocked: u32,
+    pub active_exact: u32,
+    pub compatible_replace: u32,
+    pub breaking_replace: u32,
+    pub disabled: u32,
+    pub uninstalled: u32,
+    pub unavailable: u32,
+    pub active_release_change_compatible: u32,
+    pub active_release_change_breaking: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevisionImpactStatusDto {
+    Ready,
+    ActionRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevisionImpactConsumerKindDto {
+    AgentBinding,
+    RemoteBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevisionImpactConsumerDto {
+    pub kind: RevisionImpactConsumerKindDto,
+    pub consumer_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_kind: Option<String>,
+    pub binding_version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPresetRevisionImpactResponse {
+    pub preset_revision_ref: PresetRevisionRefDto,
+    pub catalog_digest: String,
+    pub status: RevisionImpactStatusDto,
+    pub summary: RevisionImpactSummaryDto,
+    pub contributions: Vec<ContributionImpactDto>,
+    pub affected_consumers: Vec<RevisionImpactConsumerDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -803,4 +1018,119 @@ pub struct RevokeInstallationTokenResponseDto {
     pub existing_sessions_unchanged: bool,
     pub admitted_operations_continue_to_finite_boundary: bool,
     pub continuation: RemoteCredentialContinuationDto,
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use serde_json::json;
+
+    const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+    const PRESET_ID: &str = "0190f5fe-7c00-7a00-8000-000000000002";
+
+    fn valid_snapshot() -> serde_json::Value {
+        json!({
+            "preset_id": PRESET_ID,
+            "preset_revision": 1,
+            "preset_name": "Coding",
+            "resolved_model": {
+                "provider_id": PROVIDER_ID,
+                "model": "model-a"
+            },
+            "knowledge_policy": {
+                "enabled": false,
+                "writeback": false,
+                "grounded": false
+            },
+            "knowledge_base_ids": [],
+            "included_skills": [],
+            "excluded_auto_skills": [],
+            "warnings": []
+        })
+    }
+
+    #[test]
+    fn snapshot_round_trips_without_a_consumer_target() {
+        let snapshot: AgentResolvedSnapshot =
+            serde_json::from_value(valid_snapshot()).expect("valid Agent snapshot");
+        let encoded = serde_json::to_value(&snapshot).expect("serialize Agent snapshot");
+        assert_eq!(encoded["preset_id"], PRESET_ID);
+        assert_eq!(encoded["resolved_model"]["provider_id"], PROVIDER_ID);
+        assert!(encoded.get("target").is_none());
+    }
+
+    #[test]
+    fn snapshot_rejects_removed_target_and_legacy_projection_fields() {
+        let legacy_override_field = ["preset_", "overrides"].concat();
+        for field in ["target", "source"] {
+            let mut value = valid_snapshot();
+            value
+                .as_object_mut()
+                .expect("snapshot object")
+                .insert(field.to_owned(), json!("legacy"));
+            assert!(
+                serde_json::from_value::<AgentResolvedSnapshot>(value).is_err(),
+                "removed field {field} must fail closed"
+            );
+        }
+        let mut value = valid_snapshot();
+        value
+            .as_object_mut()
+            .expect("snapshot object")
+            .insert(legacy_override_field, json!("legacy"));
+        assert!(
+            serde_json::from_value::<AgentResolvedSnapshot>(value).is_err(),
+            "removed legacy override field must fail closed"
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_noncanonical_provider_and_agent_ids() {
+        let mut invalid_provider = valid_snapshot();
+        invalid_provider["resolved_model"]["provider_id"] = json!("openai");
+        assert!(serde_json::from_value::<AgentResolvedSnapshot>(invalid_provider).is_err());
+
+        let mut invalid_agent = valid_snapshot();
+        invalid_agent["resolved_agent_id"] = json!("nomi");
+        assert!(serde_json::from_value::<AgentResolvedSnapshot>(invalid_agent).is_err());
+    }
+
+    #[test]
+    fn agent_preset_source_has_no_package_variant() {
+        assert_eq!(
+            serde_json::to_string(&AgentPresetSourceDto::Official).unwrap(),
+            "\"official\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AgentPresetSourceDto::User).unwrap(),
+            "\"user\""
+        );
+        assert!(serde_json::from_str::<AgentPresetSourceDto>("\"package\"").is_err());
+    }
+
+    #[test]
+    fn revision_save_request_rejects_client_submitted_internal_locks() {
+        let request = json!({
+            "preview_digest": "preview",
+            "draft": {
+                "preset_id": PRESET_ID,
+                "display_name": "Agent",
+                "document": {
+                    "schema_version": "1.0.0",
+                    "model_route_refs": {},
+                    "initial_capabilities": [],
+                    "on_demand_capabilities": [],
+                    "skill_bindings": [],
+                    "resource_bindings": [],
+                    "persona": "",
+                    "instructions": ""
+                }
+            },
+            "contribution_locks": []
+        });
+        assert!(
+            serde_json::from_value::<SaveAgentPresetRevisionRequest>(request).is_err(),
+            "internal ContributionLock values are server-generated and read-only"
+        );
+    }
 }

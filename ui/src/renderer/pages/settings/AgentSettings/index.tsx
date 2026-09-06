@@ -6,8 +6,8 @@
 
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import AgentModalContent from '@/renderer/components/settings/SettingsModal/contents/AgentModalContent';
 import SettingsPageWrapper from '../components/SettingsPageWrapper';
+import ExecutionEnginesSettingsContent from './ExecutionEnginesSettingsContent';
 
 const AgentSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -22,7 +22,7 @@ const AgentSettings: React.FC = () => {
           {t('settings.executionEngineHub.subtitle')}
         </p>
       </header>
-      <AgentModalContent />
+      <ExecutionEnginesSettingsContent />
     </SettingsPageWrapper>
   );
 };

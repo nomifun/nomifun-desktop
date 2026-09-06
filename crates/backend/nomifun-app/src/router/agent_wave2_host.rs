@@ -2696,7 +2696,7 @@ mod tests {
     use axum::{Json, Router};
     use nomifun_agent_contracts::{
         ActionId, AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, AgentSessionId,
-        CapabilityExposure, CapabilityId, CapabilityRef, CapabilitySelection, ConnectionConfigRef,
+        CapabilityId, CapabilityRef, CapabilitySelection, ConnectionConfigRef,
         CorrelationId, DigestHex, IdempotencyKey, McpServerId, OperationId, PresetRevisionRef,
         PrincipalRef, ResolvedMcpToolLock, ResolvedSnapshotRef, ResourceBindingId, ResourceId,
         ResourceKind, RuntimeProfileKind, RuntimeTarget, ScopeKey, StrictJsonValue,
@@ -2779,7 +2779,6 @@ mod tests {
         let action = ActionId::from("fs.read.invoke");
         let payload = AgentPresetRevisionPayload {
             schema_version: VersionString::from(nomifun_agent_domain_wave2::CONTRACT_VERSION),
-            surfaces: BTreeSet::from(["desktop".to_owned()]),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
             initial_capabilities: vec![CapabilitySelection {
@@ -2787,14 +2786,8 @@ mod tests {
                     id: CapabilityId::from("fs.read"),
                     version: VersionString::from(nomifun_agent_domain_wave2::CONTRACT_VERSION),
                 },
-                required: true,
-                exposure: CapabilityExposure::Advertised,
                 action_allowlist: BTreeSet::from([action.clone()]),
                 resource_binding_refs: vec![binding.binding_id.clone()],
-                destination_constraints: BTreeSet::new(),
-                context_budget_override: None,
-                tool_budget_override: None,
-                config: StrictJsonValue(json!({})),
             }],
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
@@ -2802,22 +2795,23 @@ mod tests {
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Wave 2 host test".to_owned(),
             instructions: "Invoke the selected capability.".to_owned(),
-            context_policy: StrictJsonValue(json!({})),
-            execution_constraints: StrictJsonValue(json!({})),
-            runtime_budget: StrictJsonValue(json!({})),
+            starter_prompts: Vec::new(),
         };
-        let revision = AgentPresetRevision {
+        let contribution_locks = Vec::new();
+        let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef {
                 preset_id: AgentPresetId::from("wave2-host-test"),
                 revision: 1,
-                revision_digest: nomifun_agent_contracts::digest_payload(&payload)
-                    .expect("revision digest"),
+                revision_digest: DigestHex::from(""),
             },
             payload,
+            contribution_locks,
             created_by: UserId::from(principal.principal_id.clone()),
             created_at_ms: 1,
             reason: None,
         };
+        revision.reference.revision_digest =
+            revision.revision_digest().expect("revision digest");
         let snapshot = AgentPresetCompiler::compile(
             &materialized,
             &CompilerEnvironment {

@@ -6,6 +6,9 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use nomifun_agent_contracts::{
+    CapabilityConsumer, CapabilityId, CapabilityRef, VersionString,
+};
 use nomifun_common::KnowledgeBaseId;
 use nomifun_knowledge::KnowledgeService;
 use schemars::JsonSchema;
@@ -129,6 +132,7 @@ struct DeleteTagParams {
 #[derive(Clone)]
 struct KnowledgeCapabilityDeps {
     service: Arc<KnowledgeService>,
+    admission: Arc<dyn crate::deps::CapabilityAdmissionPort>,
 }
 
 fn adapt<P, F, Fut>(
@@ -143,6 +147,7 @@ where
         handler(
             Arc::new(KnowledgeCapabilityDeps {
                 service: deps.knowledge_service.clone(),
+                admission: deps.capability_admission.clone(),
             }),
             params,
         )
@@ -232,6 +237,21 @@ async fn delete_file(deps: Arc<KnowledgeCapabilityDeps>, p: DeleteFileParams) ->
 }
 
 async fn search(deps: Arc<KnowledgeCapabilityDeps>, p: SearchParams) -> Value {
+    let capability = CapabilityRef {
+        id: CapabilityId::from("knowledge.search"),
+        version: VersionString::from("1.0.0"),
+    };
+    if let Err(error) = deps
+        .admission
+        .admit(capability, CapabilityConsumer::Gateway)
+        .await
+    {
+        return json!({
+            "error": "capability_admission_failed",
+            "code": error.code,
+            "message": error.message,
+        });
+    }
     if p.kb_ids.is_empty() {
         return json!({"error": "kb_ids must not be empty"});
     }

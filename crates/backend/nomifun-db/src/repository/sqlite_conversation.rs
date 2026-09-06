@@ -13,6 +13,7 @@ use crate::models::{
     ConversationArtifactRow, ConversationDeliveryReceiptRow, ConversationRow,
     CreativeStudioAgentSessionBindingRow, MessageRow,
 };
+use crate::repository::agent_preset_lineage::validate_and_lock_agent_preset_lineage;
 use crate::repository::bind::{BindValue, bind_value, bind_value_as};
 use crate::repository::conversation::{
     ConversationDeliveryReceiptClaim, ConversationFilters, ConversationMessageProjection,
@@ -228,17 +229,14 @@ async fn validate_conversation_parents(
             )));
         }
     }
-    if let Some(preset_id) = row.preset_id.as_deref() {
-        lock_required_parent(
-            tx,
-            "presets",
-            "preset_id",
-            "updated_at",
-            preset_id,
-            "Preset",
-        )
-        .await?;
-    }
+    validate_and_lock_agent_preset_lineage(
+        tx,
+        row.preset_id.as_deref(),
+        row.preset_revision,
+        row.agent_snapshot.as_deref(),
+        "Conversation",
+    )
+    .await?;
     Ok(())
 }
 
@@ -876,7 +874,7 @@ impl IConversationRepository for SqliteConversationRepository {
                 (conversation_id, user_id, name, type, extra, delegation_policy, execution_model_pool, \
                  decision_policy, execution_template_id, model, status, source, \
                  channel_chat_id, pinned, pinned_at, cron_job_id, preset_id, preset_revision, \
-                 preset_snapshot, created_at, updated_at) \
+                 agent_snapshot, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.conversation_id)
@@ -897,7 +895,7 @@ impl IConversationRepository for SqliteConversationRepository {
         .bind(&row.cron_job_id)
         .bind(&row.preset_id)
         .bind(row.preset_revision)
-        .bind(&row.preset_snapshot)
+        .bind(&row.agent_snapshot)
         .bind(row.created_at)
         .bind(row.updated_at)
         .execute(&mut *tx)
@@ -958,7 +956,7 @@ impl IConversationRepository for SqliteConversationRepository {
                 (conversation_id, user_id, name, type, extra, delegation_policy, execution_model_pool, \
                  decision_policy, execution_template_id, model, status, source, \
                  channel_chat_id, pinned, pinned_at, cron_job_id, preset_id, preset_revision, \
-                 preset_snapshot, created_at, updated_at) \
+                 agent_snapshot, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.conversation_id)
@@ -979,7 +977,7 @@ impl IConversationRepository for SqliteConversationRepository {
         .bind(&row.cron_job_id)
         .bind(&row.preset_id)
         .bind(row.preset_revision)
-        .bind(&row.preset_snapshot)
+        .bind(&row.agent_snapshot)
         .bind(row.created_at)
         .bind(row.updated_at)
         .execute(&mut *tx)
@@ -1220,7 +1218,7 @@ impl IConversationRepository for SqliteConversationRepository {
                 "INSERT INTO conversations \
                     (conversation_id, user_id, name, type, extra, delegation_policy, execution_model_pool, \
                      decision_policy, execution_template_id, model, status, source, channel_chat_id, pinned, \
-                     pinned_at, cron_job_id, preset_id, preset_revision, preset_snapshot, created_at, updated_at) \
+                     pinned_at, cron_job_id, preset_id, preset_revision, agent_snapshot, created_at, updated_at) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&params.conversation.conversation_id)
@@ -1241,7 +1239,7 @@ impl IConversationRepository for SqliteConversationRepository {
             .bind(&params.conversation.cron_job_id)
             .bind(&params.conversation.preset_id)
             .bind(params.conversation.preset_revision)
-            .bind(&params.conversation.preset_snapshot)
+            .bind(&params.conversation.agent_snapshot)
             .bind(params.conversation.created_at)
             .bind(params.conversation.updated_at)
             .execute(&mut *tx)
@@ -4413,7 +4411,9 @@ impl IConversationRepository for SqliteConversationRepository {
             || updates.model.is_some()
             || updates.execution_model_pool.is_some()
             || updates.cron_job_id.is_some()
-            || updates.preset_id.is_some();
+            || updates.preset_id.is_some()
+            || updates.preset_revision.is_some()
+            || updates.agent_snapshot.is_some();
         if touches_logical_references {
             let current: Option<(
                 String,
@@ -4422,9 +4422,11 @@ impl IConversationRepository for SqliteConversationRepository {
                 Option<String>,
                 Option<String>,
                 Option<String>,
+                Option<i64>,
+                Option<String>,
             )> = sqlx::query_as(
                 "SELECT user_id, execution_template_id, model, execution_model_pool, \
-                        cron_job_id, preset_id \
+                        cron_job_id, preset_id, preset_revision, agent_snapshot \
                  FROM conversations WHERE conversation_id = ?",
             )
             .bind(conversation_id)
@@ -4437,6 +4439,8 @@ impl IConversationRepository for SqliteConversationRepository {
                 current_execution_model_pool,
                 current_cron_job_id,
                 current_preset_id,
+                current_preset_revision,
+                current_agent_snapshot,
             )) = current
             {
                 let template_id = updates
@@ -4460,6 +4464,14 @@ impl IConversationRepository for SqliteConversationRepository {
                     .as_ref()
                     .cloned()
                     .unwrap_or(current_preset_id);
+                let preset_revision = updates
+                    .preset_revision
+                    .unwrap_or(current_preset_revision);
+                let agent_snapshot = updates
+                    .agent_snapshot
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or(current_agent_snapshot);
 
                 lock_provider_bindings(
                     &mut tx,
@@ -4482,17 +4494,14 @@ impl IConversationRepository for SqliteConversationRepository {
                         )));
                     }
                 }
-                if let Some(preset_id) = preset_id.as_deref() {
-                    lock_required_parent(
-                        &mut tx,
-                        "presets",
-                        "preset_id",
-                        "updated_at",
-                        preset_id,
-                        "Preset",
-                    )
-                    .await?;
-                }
+                validate_and_lock_agent_preset_lineage(
+                    &mut tx,
+                    preset_id.as_deref(),
+                    preset_revision,
+                    agent_snapshot.as_deref(),
+                    "Conversation",
+                )
+                .await?;
                 if let Some(template_id) = template_id.as_deref() {
                     validate_execution_template_selection(
                         &mut tx,
@@ -4571,9 +4580,9 @@ impl IConversationRepository for SqliteConversationRepository {
             set_parts.push("preset_revision = ?".to_string());
             binds.push(BindValue::OptI64(*preset_revision));
         }
-        if let Some(ref preset_snapshot) = updates.preset_snapshot {
-            set_parts.push("preset_snapshot = ?".to_string());
-            binds.push(BindValue::OptStr(preset_snapshot.clone()));
+        if let Some(ref agent_snapshot) = updates.agent_snapshot {
+            set_parts.push("agent_snapshot = ?".to_string());
+            binds.push(BindValue::OptStr(agent_snapshot.clone()));
         }
         if let Some(updated_at) = updates.updated_at {
             set_parts.push("updated_at = ?".to_string());
@@ -6507,7 +6516,7 @@ mod tests {
             cron_job_id: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             created_at: now,
             updated_at: now,
         }

@@ -1,4 +1,7 @@
-# MCP 与技能
+# MCP、技能与 Agent 工作台
+
+> MCP 与 Skill 是平台能力供给/说明层；Agent 工作台（`/agent`）是唯一的 Agent
+> authoring 入口。本文不再把 MCP、Skill 或旧 Preset 当作同一个产品配置对象。
 
 NomiFun 有两种容易混淆的扩展机制：
 
@@ -9,9 +12,9 @@ NomiFun 有两种容易混淆的扩展机制：
 
 | 能力 | 页面 |
 | --- | --- |
-| MCP server | `/mcp` |
-| 技能 | `/skills` |
-| 设定 | `/presets` |
+| MCP server 管理 | `/mcp` |
+| 技能管理 | `/skills` |
+| Agent 能力设计与试用 | `/agent` |
 | 对外能力暴露 | `/open-capabilities` |
 
 旧 Settings URL 会重定向到这些页面。
@@ -36,7 +39,7 @@ NomiFun 有两种容易混淆的扩展机制：
 
 需要 OAuth 的 HTTP/SSE server 走 `/api/mcp/oauth/*` 流程。
 
-## 导入和同步 Agent 配置
+## 导入和同步外部 Agent 配置
 
 `GET /api/mcp/agent-configs` 会探测已支持本地 agent CLI 的 MCP 配置。UI 可把探测到
 的 server 导入 NomiFun，也可在 adapter 支持写入时把 NomiFun 的 MCP 列表同步回选中的
@@ -52,7 +55,8 @@ agent 配置。
 - 该会话选择的 server；
 - 当前能力集需要的 builtin bridge server。
 
-最终列表会进入 agent session start payload。
+最终列表会进入 Agent 工作台生成的 Revision/Snapshot 主链，或进入明确的非 Agent
+consumer resolver；MCP 管理页不会直接改写既有 Session 的 Snapshot。
 
 ## MCP API
 
@@ -94,12 +98,11 @@ materialize。
 | 导入 / 导出 / 删除 | `POST /api/skills/import`, `POST /api/skills/import-symlink`, `POST /api/skills/export-symlink`, `DELETE /api/skills/{name}` |
 | 扫描 / 探测路径 | `POST /api/skills/scan`, `GET /api/skills/detect-paths`, `GET /api/skills/detect-external` |
 | 为 agent materialize | `POST /api/skills/materialize-for-agent` |
-| 设定指令 | `/api/skills/preset-rule/*` |
 | 外部路径 | `GET`, `POST`, `DELETE /api/skills/external-paths` |
 | 技能市场 | `POST /api/skills/market/enable`, `POST /api/skills/market/disable` |
 
 ## 相关
 
-- [设定](./presets.zh.md)
+- [Agent 工作台](./presets.zh.md)
 - [远程能力 API](./remote-capability-api.zh.md)
 - [终端](./terminal.zh.md)

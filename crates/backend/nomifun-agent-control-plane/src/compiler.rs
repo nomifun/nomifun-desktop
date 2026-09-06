@@ -3,17 +3,18 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nomifun_agent_contracts::{
-    AgentPresetRevision, AgentPresetRevisionPayload, CanonicalErrorCode, DigestHex,
-    McpToolCapabilityMapping, OfficialPresetKey, OperationId, PresetRevisionRef, PrincipalRef,
-    ResolvedCapability, ResolvedSnapshotEnvelope, SkillRef, UserId, VersionString,
-    digest_payload,
+    AgentPresetRevision, AgentPresetRevisionPayload, CanonicalErrorCode,
+    CapabilityConsumer, ContributionLock, ContributionSourceKind, DigestHex,
+    McpToolCapabilityMapping, OfficialPresetKey, OperationId, PluginMountId,
+    PresetRevisionRef, PrincipalRef, ResolvedCapability, ResolvedSnapshotEnvelope,
+    SkillRef, StableSourceIdentity, UserId, VersionString, digest_payload,
 };
 use nomifun_agent_kernel::{
     AgentPresetCompiler as KernelAgentPresetCompiler, CompileRequest, CompilerEnvironment,
     KernelError, KernelRegistry, MaterializedRegistry,
 };
 use nomifun_api_types::{
-    AgentPresetRevisionDto, McpToolCatalogItemDto, PreviewCapabilityDto, PreviewDiagnosticDto,
+    AgentPresetRevisionDto, ContributionLockDto, McpToolCatalogItemDto, PreviewCapabilityDto, PreviewDiagnosticDto,
     PreviewDiagnosticSeverityDto, PreviewStatusDto, PreviewSummaryDto,
     ResolveAgentPresetPreviewRequest, ResolveAgentPresetPreviewResponse, RevisionDiffDto,
     SnapshotInspectorDto,
@@ -72,6 +73,7 @@ pub struct CompilerReleaseInputs {
 pub struct PreviewCompilation {
     pub response: ResolveAgentPresetPreviewResponse,
     pub payload: AgentPresetRevisionPayload,
+    pub contribution_locks: Vec<ContributionLock>,
     pub candidate_revision_ref: PresetRevisionRef,
     pub snapshot: Option<ResolvedSnapshotEnvelope>,
 }
@@ -147,6 +149,22 @@ impl PresetPreviewCompiler {
         let draft_digest = digest_payload(&payload)
             .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
         let clean = current_revision.is_some_and(|current| current.payload == payload);
+        let contribution_locks = if clean {
+            current_revision
+                .map(|revision| revision.contribution_locks.clone())
+                .unwrap_or_default()
+        } else {
+            contribution_locks_for_payload(&payload, catalog)?
+        };
+        let revision_digest = digest_payload(&nomifun_agent_contracts::AgentPresetRevisionDigestInput {
+            payload: payload.clone(),
+            contribution_locks: {
+                let mut locks = contribution_locks.clone();
+                locks.sort();
+                locks
+            },
+        })
+        .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
         let candidate_revision_ref = if clean {
             current_revision
                 .expect("clean draft has a current revision")
@@ -158,13 +176,14 @@ impl PresetPreviewCompiler {
                 revision: current_revision
                     .map(|revision| revision.reference.revision + 1)
                     .unwrap_or(1),
-                revision_digest: draft_digest.clone(),
+                revision_digest,
             }
         };
 
         let candidate_revision = AgentPresetRevision {
             reference: candidate_revision_ref.clone(),
             payload: payload.clone(),
+            contribution_locks: contribution_locks.clone(),
             created_by: owner.clone(),
             created_at_ms: now_ms(),
             reason: None,
@@ -300,6 +319,7 @@ impl PresetPreviewCompiler {
         Ok(PreviewCompilation {
             response,
             payload,
+            contribution_locks,
             candidate_revision_ref,
             snapshot,
         })
@@ -393,6 +413,104 @@ fn validate_direct_catalog_availability(
                 Some(reference.id.as_ref().to_owned()),
             ));
         }
+    }
+}
+
+fn contribution_locks_for_payload(
+    payload: &AgentPresetRevisionPayload,
+    catalog: &CatalogSnapshot,
+) -> Result<Vec<ContributionLock>, ControlPlaneError> {
+    let mut locks = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for selection in payload
+        .initial_capabilities
+        .iter()
+        .chain(payload.on_demand_capabilities.iter())
+    {
+        let Some(capability) = catalog.find_capability(&selection.capability) else {
+            continue;
+        };
+        if catalog.source_kind(&capability.package)
+            == nomifun_agent_contracts::PluginSourceKind::TestFixture
+        {
+            // TestHost registrations may drive deterministic Kernel fixtures,
+            // but never mint formal Catalog provenance or Revision locks.
+            continue;
+        }
+        let entry = catalog
+            .capability_catalog_entry(&selection.capability)?
+            .ok_or_else(|| {
+                ControlPlaneError::canonical(
+                    "CAPABILITY_NOT_MATERIALIZED",
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    format!(
+                        "capability {}@{} is not materialized",
+                        selection.capability.id.as_ref(),
+                        selection.capability.version.as_ref()
+                    ),
+                )
+            })?;
+        let operation_lock = entry
+            .operation_lock(CapabilityConsumer::Agent)
+            .map_err(|error| {
+                ControlPlaneError::canonical(
+                    error.code(),
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    error.to_string(),
+                )
+            })?;
+        let contribution_id = operation_lock.contribution.contribution_id.clone();
+        if seen.insert(contribution_id.as_ref().to_owned()) {
+            locks.push(operation_lock.contribution);
+        }
+    }
+
+    for skill in &payload.skill_bindings {
+        let Some(definition) = catalog.find_skill(skill) else {
+            continue;
+        };
+        let contribution_id = format!("skill:{}", definition.id.as_ref());
+        if !seen.insert(contribution_id.clone()) {
+            continue;
+        }
+        let (source_kind, source_identity, mount_id) =
+            contribution_source_for_package(catalog, &definition.package);
+        locks.push(ContributionLock {
+            source_kind,
+            source_identity,
+            mount_id,
+            miniapp_id: None,
+            mcp_binding_id: None,
+            contribution_id: contribution_id.into(),
+            contract_digest: definition.body_ref.digest.clone(),
+        });
+    }
+
+    locks.sort();
+    Ok(locks)
+}
+
+fn contribution_source_for_package(
+    catalog: &CatalogSnapshot,
+    package: &nomifun_agent_contracts::PackageRef,
+) -> (ContributionSourceKind, StableSourceIdentity, Option<PluginMountId>) {
+    let source_identity = StableSourceIdentity::from(format!(
+        "{}@{}",
+        package.id.as_ref(),
+        package.version.as_ref()
+    ));
+    match catalog.source_kind(package) {
+        nomifun_agent_contracts::PluginSourceKind::ManagedLocal => (
+            ContributionSourceKind::PluginMount,
+            source_identity,
+            Some(PluginMountId::from(format!(
+                "package:{}@{}",
+                package.id.as_ref(),
+                package.version.as_ref()
+            ))),
+        ),
+        _ => (ContributionSourceKind::PlatformBuiltin, source_identity, None),
     }
 }
 
@@ -858,6 +976,27 @@ pub fn revision_api(
     Ok(AgentPresetRevisionDto {
         reference: wire_cast(&revision.reference)?,
         document: wire_cast(&revision.payload)?,
+        contribution_locks: revision
+            .contribution_locks
+            .iter()
+            .map(|lock| {
+                Ok(ContributionLockDto {
+                    source_kind: wire_name(&lock.source_kind)?,
+                    source_identity: lock.source_identity.as_ref().to_owned(),
+                    mount_id: lock.mount_id.as_ref().map(|value| value.as_ref().to_owned()),
+                    miniapp_id: lock
+                        .miniapp_id
+                        .as_ref()
+                        .map(|value| value.as_ref().to_owned()),
+                    mcp_binding_id: lock
+                        .mcp_binding_id
+                        .as_ref()
+                        .map(|value| value.as_ref().to_owned()),
+                    contribution_id: lock.contribution_id.as_ref().to_owned(),
+                    contract_digest: lock.contract_digest.as_ref().to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>, ControlPlaneError>>()?,
         created_by: revision.created_by.as_ref().to_owned(),
         created_at_ms: revision.created_at_ms,
         reason: revision.reason.clone(),

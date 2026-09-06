@@ -3766,7 +3766,7 @@ mod tests {
                 cron_job_id: None,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 created_at: now,
                 updated_at: now,
             };
@@ -3866,7 +3866,7 @@ mod tests {
             source_agent_id: HARNESS_SOURCE_AGENT_ID.to_owned(),
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             provider_id: Some(HARNESS_PROVIDER_ID.to_owned()),
             model: Some("harness-model".to_owned()),
             role: Some("builder".to_owned()),

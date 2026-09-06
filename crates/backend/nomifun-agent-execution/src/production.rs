@@ -14,7 +14,6 @@ use nomifun_common::AppError;
 use nomifun_db::{
     IAgentExecutionRepository, IAgentExecutionTemplateRepository, IProviderRepository,
 };
-use nomifun_preset::PresetService;
 use nomifun_realtime::UserEventSink;
 use nomifun_model_invoke::ModelInvokeService;
 
@@ -37,7 +36,6 @@ pub struct AgentExecutionEngineConfig {
     pub provider_model_repository: Arc<dyn nomifun_db::IProviderModelRepository>,
     pub provider_model_capability_repository:
         Arc<dyn nomifun_db::IProviderModelCapabilityRepository>,
-    pub preset_service: Arc<PresetService>,
     pub realtime: Arc<dyn UserEventSink>,
     pub session: Arc<dyn AgentExecutionSessionPort>,
     pub model_invoke: Arc<ModelInvokeService>,
@@ -142,7 +140,6 @@ impl AgentExecutionEngine {
             config.provider_repository,
             config.provider_model_repository,
             config.provider_model_capability_repository,
-            config.preset_service,
             planner,
             attempt_runner,
             conversation_effects,

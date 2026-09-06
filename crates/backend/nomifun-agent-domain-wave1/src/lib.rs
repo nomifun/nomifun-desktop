@@ -13,7 +13,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, ArtifactEnvelope, CapabilityActionDescriptor,
-    CapabilityContributions, CapabilityId, CapabilityKind, CapabilityManifest,
+    CapabilityConsumer, CapabilityContributions, CapabilityId, CapabilityKind,
+    CapabilityManifest,
     CancellationDescriptor, CanonicalErrorCode, CanonicalSchemaRef, CorrelationId,
     DeclaredServiceViewDescriptor, EffectClass, HostPortBindingDescriptor,
     IdempotencyKey, InProcessEntrypointMetadata, LocalizedMetadata,
@@ -26,7 +27,8 @@ use nomifun_agent_contracts::{
     ResourceBindingId, ResourceId, ResourceKind, ScopeKey, SkillDefinition, StateKey,
     StrictJsonValue, ToolPresentationKind, TypedResourceBinding, TypedResourceBindings,
     ValidatedPluginConfig, VersionString, PluginStateCompareAndSwapOutcome, PluginStateEntry,
-    CAPABILITY_UNAVAILABLE_ON_PLATFORM, digest_payload,
+    CAPABILITY_UNAVAILABLE_ON_PLATFORM, capability_surface_declarations,
+    digest_payload,
 };
 use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, HostPluginStateApi, KernelError,
@@ -1411,12 +1413,25 @@ fn capability_manifest(
         display: capability_display(spec.id),
         requires: Vec::new(),
         conflicts: Vec::new(),
-        supported_surfaces: SURFACES.iter().map(|surface| (*surface).to_owned()).collect(),
+        supported_surfaces: capability_surface_declarations(
+            SURFACES.iter().copied(),
+            supported_consumers(spec.id),
+        ),
         requires_runtime_features: Vec::new(),
         supported_platforms: vec![PlatformConstraint::Any],
         config_schema: StrictJsonValue(object_schema(false)),
         contributions,
     })
+}
+
+pub fn supported_consumers(capability_id: &str) -> BTreeSet<CapabilityConsumer> {
+    match capability_id {
+        KNOWLEDGE_SEARCH => BTreeSet::from([
+            CapabilityConsumer::Agent,
+            CapabilityConsumer::Gateway,
+        ]),
+        _ => BTreeSet::from([CapabilityConsumer::Agent]),
+    }
 }
 
 struct Wave1CapabilityHandler {
@@ -2151,9 +2166,9 @@ mod tests {
 
     use super::*;
     use nomifun_agent_contracts::{
-        AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, CapabilityExposure,
-        CapabilityRef, CapabilitySelection, DigestHex, OperationId, PresetRevisionRef,
-        PrincipalRef, ResourceBindingId, RuntimeProfileKind, RuntimeTarget, ScopeKey, StateKey,
+        AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, CapabilityRef,
+        CapabilitySelection, DigestHex, OperationId, PresetRevisionRef, PrincipalRef,
+        ResourceBindingId, RuntimeProfileKind, RuntimeTarget, ScopeKey, StateKey,
         TypedResourceBinding, UserId,
     };
     use nomifun_agent_kernel::{
@@ -2316,7 +2331,6 @@ mod tests {
             action_id("knowledge.search").expect("knowledge.search has an action identity");
         let payload = AgentPresetRevisionPayload {
             schema_version: VersionString::from(CONTRACT_VERSION),
-            surfaces: BTreeSet::from(["desktop".to_owned()]),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
             initial_capabilities: vec![CapabilitySelection {
@@ -2324,14 +2338,8 @@ mod tests {
                     id: CapabilityId::from("knowledge.search"),
                     version: VersionString::from(CONTRACT_VERSION),
                 },
-                required: true,
-                exposure: CapabilityExposure::Advertised,
                 action_allowlist: BTreeSet::from([test_action_id.clone()]),
                 resource_binding_refs: vec![binding.binding_id.clone()],
-                destination_constraints: BTreeSet::new(),
-                context_budget_override: None,
-                tool_budget_override: None,
-                config: StrictJsonValue(json!({})),
             }],
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
@@ -2339,21 +2347,23 @@ mod tests {
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Wave 1 test".to_owned(),
             instructions: "Invoke the selected capability.".to_owned(),
-            context_policy: StrictJsonValue(json!({})),
-            execution_constraints: StrictJsonValue(json!({})),
-            runtime_budget: StrictJsonValue(json!({})),
+            starter_prompts: Vec::new(),
         };
-        let revision = AgentPresetRevision {
+        let contribution_locks = Vec::new();
+        let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef {
                 preset_id: AgentPresetId::from("wave1-test"),
                 revision: 1,
-                revision_digest: digest_payload(&payload).expect("revision digest"),
+                revision_digest: DigestHex::from(""),
             },
             payload,
+            contribution_locks,
             created_by: UserId::from(test_principal.principal_id.clone()),
             created_at_ms: 1,
             reason: None,
         };
+        revision.reference.revision_digest =
+            revision.revision_digest().expect("revision digest");
         let snapshot = AgentPresetCompiler::compile(
             &materialized,
             &CompilerEnvironment {

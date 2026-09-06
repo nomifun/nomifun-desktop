@@ -108,54 +108,6 @@ fn cr2_mcp_server_resolved_as_opaque_config() {
 }
 
 // ---------------------------------------------------------------------------
-// CR-3: Preset resolution with @file: reference
-// ---------------------------------------------------------------------------
-
-#[test]
-fn cr3_preset_file_reference_resolved() {
-    let dir = std::env::temp_dir().join("cr3_preset_resolve");
-    let prompts = dir.join("prompts");
-    std::fs::create_dir_all(&prompts).unwrap();
-    std::fs::write(prompts.join("system.md"), "You are a helpful coding preset.").unwrap();
-
-    let contributes = ExtContributes {
-        presets: vec![ExtPreset {
-            source_key: "code-helper".into(),
-            name: "Code Helper".into(),
-            description: Some("AI coding preset".into()),
-            system_prompt: Some("@file:prompts/system.md".into()),
-            icon: Some("icons/code.png".into()),
-            context: None,
-            preferred_agent_id: Some("0190f5fe-7c00-7a00-8000-000000000001".into()),
-            enabled_skills: vec!["code-review".into()],
-            prompts: vec!["Review this patch".into()],
-            models: vec!["gemini-2.0-flash".into()],
-        }],
-        ..Default::default()
-    };
-
-    let ext = make_loaded_extension("helper-ext", &dir.to_string_lossy(), contributes);
-    let result = resolve_extension_contributions(&ext);
-
-    assert_eq!(result.presets.len(), 1);
-    let preset = &result.presets[0];
-    assert_eq!(preset.extension_name, "helper-ext");
-    assert_eq!(
-        preset.system_prompt.as_deref(),
-        Some("You are a helpful coding preset.")
-    );
-    assert_eq!(
-        preset.preferred_agent_id.as_deref(),
-        Some("0190f5fe-7c00-7a00-8000-000000000001")
-    );
-    assert_eq!(preset.enabled_skills, vec!["code-review"]);
-    assert_eq!(preset.prompts, vec!["Review this patch"]);
-    assert_eq!(preset.models, vec!["gemini-2.0-flash"]);
-
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-// ---------------------------------------------------------------------------
 // CR-4: Agent resolution with @file: reference
 // ---------------------------------------------------------------------------
 

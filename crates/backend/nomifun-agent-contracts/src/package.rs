@@ -355,6 +355,89 @@ pub enum CapabilityKind {
     UiContribution,
 }
 
+/// A platform consumer that can understand and resolve a published
+/// Capability contribution.
+///
+/// These identities are deliberately different from host execution surfaces
+/// such as `desktop` and `headless`.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityConsumer {
+    Agent,
+    Gateway,
+    Knowledge,
+    Remote,
+    Automation,
+    Ui,
+    #[serde(rename = "miniapp_service")]
+    MiniAppService,
+}
+
+impl CapabilityConsumer {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Gateway => "gateway",
+            Self::Knowledge => "knowledge",
+            Self::Remote => "remote",
+            Self::Automation => "automation",
+            Self::Ui => "ui",
+            Self::MiniAppService => "miniapp_service",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "agent" => Some(Self::Agent),
+            "gateway" => Some(Self::Gateway),
+            "knowledge" => Some(Self::Knowledge),
+            "remote" => Some(Self::Remote),
+            "automation" => Some(Self::Automation),
+            "ui" => Some(Self::Ui),
+            "miniapp_service" => Some(Self::MiniAppService),
+            _ => None,
+        }
+    }
+}
+
+/// Consumer declarations are carried in the existing surface declaration set
+/// with an explicit namespace so older host compilers can continue matching
+/// plain host surfaces without confusing them with Catalog consumers.
+pub const CAPABILITY_CONSUMER_SURFACE_PREFIX: &str = "consumer:";
+
+pub fn capability_surface_declarations<H, I, J>(
+    host_surfaces: I,
+    supported_consumers: J,
+) -> BTreeSet<String>
+where
+    H: AsRef<str>,
+    I: IntoIterator<Item = H>,
+    J: IntoIterator<Item = CapabilityConsumer>,
+{
+    host_surfaces
+        .into_iter()
+        .map(|surface| surface.as_ref().to_owned())
+        .chain(supported_consumers.into_iter().map(|consumer| {
+            format!(
+                "{CAPABILITY_CONSUMER_SURFACE_PREFIX}{}",
+                consumer.as_str()
+            )
+        }))
+        .collect()
+}
+
 #[derive(
     Clone,
     Copy,
@@ -450,11 +533,48 @@ pub struct CapabilityManifest {
     pub display: LocalizedMetadata,
     pub requires: Vec<CapabilityRef>,
     pub conflicts: Vec<CapabilityConflict>,
+    /// Surface declarations contain plain host execution surfaces plus
+    /// namespaced `consumer:<id>` Catalog consumer declarations. Callers must
+    /// use [`CapabilityManifest::host_surfaces`] or
+    /// [`CapabilityManifest::supported_consumers`] instead of treating the two
+    /// namespaces as interchangeable.
     pub supported_surfaces: BTreeSet<String>,
     pub requires_runtime_features: Vec<RuntimeFeatureRef>,
     pub supported_platforms: Vec<PlatformConstraint>,
     pub config_schema: StrictJsonValue,
     pub contributions: CapabilityContributions,
+}
+
+impl CapabilityManifest {
+    pub fn host_surfaces(&self) -> BTreeSet<&str> {
+        self.supported_surfaces
+            .iter()
+            .map(String::as_str)
+            .filter(|surface| !surface.starts_with(CAPABILITY_CONSUMER_SURFACE_PREFIX))
+            .collect()
+    }
+
+    pub fn supported_consumers(&self) -> Result<BTreeSet<CapabilityConsumer>, String> {
+        let mut consumers = BTreeSet::new();
+        for declaration in &self.supported_surfaces {
+            let Some(value) = declaration.strip_prefix(CAPABILITY_CONSUMER_SURFACE_PREFIX) else {
+                continue;
+            };
+            let consumer = CapabilityConsumer::from_str(value).ok_or_else(|| {
+                format!(
+                    "capability {} declares unknown consumer surface {declaration}",
+                    self.id.as_ref()
+                )
+            })?;
+            consumers.insert(consumer);
+        }
+        Ok(consumers)
+    }
+
+    pub fn supports_consumer(&self, consumer: CapabilityConsumer) -> bool {
+        self.supported_consumers()
+            .is_ok_and(|consumers| consumers.contains(&consumer))
+    }
 }
 
 #[derive(

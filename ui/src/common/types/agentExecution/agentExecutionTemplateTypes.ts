@@ -1,4 +1,7 @@
-import type { PresetOverrides, PresetReference, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
+import type {
+  AgentPresetId,
+  AgentResolvedSnapshot,
+} from '@/common/types/agentPlatform';
 import type {
   AgentId,
   ExecutionTemplateId,
@@ -32,9 +35,9 @@ export type TAgentExecutionTemplate = {
 export type TAgentExecutionTemplateParticipant = {
   template_participant_id: ExecutionTemplateParticipantId;
   source_agent_id: AgentId;
-  preset_id: PresetReference | null;
+  preset_id: AgentPresetId | null;
   preset_revision: number | null;
-  preset_snapshot: ResolvedPresetSnapshot | null;
+  agent_snapshot: AgentResolvedSnapshot | null;
   provider_id: ProviderId | null;
   model: string | null;
   role: string | null;
@@ -55,9 +58,8 @@ export type TAgentExecutionTemplateDetail = TAgentExecutionTemplate & {
 
 export type TAgentExecutionTemplateParticipantInput = {
   source_agent_id?: AgentId;
-  preset_id?: PresetReference;
-  preset_snapshot?: ResolvedPresetSnapshot;
-  preset_overrides?: PresetOverrides;
+  preset_id?: AgentPresetId;
+  agent_snapshot?: AgentResolvedSnapshot;
   provider_id?: ProviderId;
   model?: string;
   role?: string;

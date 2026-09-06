@@ -188,7 +188,7 @@ mod tests {
             source_agent_id: "0190f5fe-7c00-7a00-8000-000000000114".to_owned(),
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             provider_id: None,
             model: None,
             role: None,

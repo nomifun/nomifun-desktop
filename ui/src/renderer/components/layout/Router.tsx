@@ -12,7 +12,8 @@ import {
 } from '@renderer/pages/creativeStudio/app/routes';
 const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
 const Guid = React.lazy(() => import('@renderer/pages/guid'));
-const PresetSettings = React.lazy(() => import('@renderer/pages/settings/PresetSettings'));
+const AgentSettingsPage = React.lazy(() => import('@renderer/pages/agentSettings'));
+const AgentSessionPage = React.lazy(() => import('@renderer/pages/agentSession/AgentSessionPage'));
 const SkillsSettingsPage = React.lazy(() => import('@renderer/pages/settings/SkillsSettingsPage'));
 const ModelHubPage = React.lazy(() => import('@renderer/pages/modelHub'));
 const McpPage = React.lazy(() => import('@renderer/pages/mcp'));
@@ -156,12 +157,6 @@ const withSearch = (path: string, searchParams: URLSearchParams) => {
   return search ? `${path}?${search}` : path;
 };
 
-/** Preserve local/remote tab deep links from the former settings route. */
-const LegacyExecutionEngineRedirect: React.FC = () => {
-  const { search } = useLocation();
-  return <Navigate to={`/settings/execution-engines${search}`} replace />;
-};
-
 const LegacyExtensionsRedirect: React.FC = () => {
   const { search } = useLocation();
   const searchParams = new URLSearchParams(search);
@@ -238,13 +233,14 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
               <Route path='assets' element={withRouteFallback(CreativeStudioAssetsRoute)} />
               <Route path='templates' element={withRouteFallback(CreativeStudioTemplateRoute)} />
             </Route>
-            {/* Models, presets, skills, and MCP are independent top-level capabilities. */}
+            {/* Agent authoring is public; platform capabilities remain separate destinations. */}
+            <Route path='/agent' element={withRouteFallback(AgentSettingsPage)} />
+            <Route path='/agent-sessions/:agentSessionId' element={withRouteFallback(AgentSessionPage)} />
             <Route path='/models' element={withRouteFallback(ModelHubPage)} />
             <Route path='/extensions' element={<LegacyExtensionsRedirect />} />
             <Route path='/mcp' element={withRouteFallback(McpPage)} />
             <Route path='/open-capabilities' element={withRouteFallback(OpenCapabilitiesPage)} />
             <Route path='/browser' element={withRouteFallback(BrowserPage)} />
-            <Route path='/presets' element={withRouteFallback(PresetSettings)} />
             <Route path='/skills' element={withRouteFallback(SkillsSettingsPage)} />
             {/* Session section — the secondary sidebar (ContentSider) persists across these routes */}
             <Route element={<SessionShellRoute />}>
@@ -255,7 +251,6 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             </Route>
             {/* Relocated to the capability rail. */}
             <Route path='/settings/model' element={<Navigate to='/models?section=models' replace />} />
-            <Route path='/settings/agent' element={<LegacyExecutionEngineRedirect />} />
             <Route path='/settings/capabilities' element={<Navigate to='/skills' replace />} />
             <Route path='/settings/skills-hub' element={<Navigate to='/skills' replace />} />
             <Route path='/settings/tools' element={<Navigate to='/open-capabilities' replace />} />

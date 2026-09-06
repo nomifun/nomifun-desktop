@@ -67,6 +67,11 @@ const TABLES: &[(&str, &str, &str)] = &[
         "platform.capability-registry",
         "fact",
     ),
+    (
+        "capability_catalog_entries",
+        "platform.capability-registry",
+        "fact",
+    ),
     ("skill_instructions", "platform.skill-catalog", "fact"),
     ("mcp_servers", "plugin.mcp-connectors", "fact"),
     (
@@ -86,27 +91,7 @@ const TABLES: &[(&str, &str, &str)] = &[
         "fact",
     ),
     (
-        "agent_preset_model_routes",
-        "platform.agent-preset",
-        "fact",
-    ),
-    (
-        "preset_initial_capabilities",
-        "platform.agent-preset",
-        "fact",
-    ),
-    (
-        "preset_on_demand_capabilities",
-        "platform.agent-preset",
-        "fact",
-    ),
-    (
-        "preset_skill_bindings",
-        "platform.agent-preset",
-        "fact",
-    ),
-    (
-        "preset_resource_bindings",
+        "agent_preset_contribution_locks",
         "platform.agent-preset",
         "fact",
     ),
@@ -160,6 +145,11 @@ const FORBIDDEN_TABLE_NAMES: &[&str] = &[
     "migration_reports",
     "capability_packs",
     "capability_pack_items",
+    "agent_preset_model_routes",
+    "preset_initial_capabilities",
+    "preset_on_demand_capabilities",
+    "preset_skill_bindings",
+    "preset_resource_bindings",
     "agent_runtime_snapshot_capabilities",
     "agent_runtime_profiles",
     "agent_preset_audit_events",

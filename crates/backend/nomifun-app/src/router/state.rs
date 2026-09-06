@@ -23,7 +23,6 @@ use nomifun_agent_kernel::{
 };
 use nomifun_agent_platform::KernelCatalogProvider;
 use nomifun_api_types::TerminalExitEvent;
-use nomifun_preset::{BuiltinPresetRegistry, PresetRouterState, PresetService};
 use nomifun_auth::extract_token_from_ws_headers;
 use nomifun_channel::ChannelRouterState;
 use nomifun_common::{AppError, OnConversationDelete, OnTerminalDelete};
@@ -35,17 +34,16 @@ use nomifun_cron::{CronEventEmitter, CronRouterState};
 use nomifun_db::{
     IAgentExecutionRepository, IAgentExecutionTemplateRepository,
     IAgentMetadataRepository,
-    IIdmmInterventionRepository, IPresetRepository, IPresetStateRepository, IPresetTagRepository,
+    IIdmmInterventionRepository,
     IProviderRepository, IRemoteBindingRepository, SqliteAgentExecutionRepository,
     SqliteAgentExecutionTemplateRepository,
-    SqliteAgentMetadataRepository, SqlitePresetRepository, SqlitePresetStateRepository,
-    SqlitePresetTagRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
+    SqliteAgentMetadataRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
     SqliteIdmmInterventionRepository, SqliteProviderRepository, SqliteRemoteBindingRepository,
     SqliteSettingsRepository,
     MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
 };
 use nomifun_extension::{
-    PresetRuleDispatcher, ExtensionRegistry, ExtensionRouterState, ExtensionStateStore, ExternalPathsManager,
+    ExtensionRegistry, ExtensionRouterState, ExtensionStateStore, ExternalPathsManager,
     HubIndexManager, HubInstaller, HubRouterState, SkillRouterState, resolve_install_target_dir_for_data_dir,
     resolve_scan_paths_for_data_dir, resolve_state_file_path,
 };
@@ -121,7 +119,6 @@ pub struct ModuleStates {
     pub terminal: TerminalRouterState,
     pub office: OfficeRouterState,
     pub shell: ShellRouterState,
-    pub preset: PresetRouterState,
     /// Canonical Agent Settings/AgentSession/Remote adapter for the current
     /// Nomi-core product.  It shares the Session owner above and persists its
     /// control-plane facts in the Nomi-core database tables.
@@ -513,9 +510,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         "startup: extension registry initialized"
     );
 
-    let preset = build_preset_state(services, ext_state.registry.clone());
     let conversation_service = build_nomi_core_conversation_owner(services);
-    conversation_service.with_preset_service(preset.service.clone());
     let conversation_owner = Arc::new(NomiCoreSessionOwner::new(
         conversation_service,
         services.agent_runtime_registry.clone(),
@@ -525,7 +520,6 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         conversation_owner.clone(),
     );
     let cron = build_cron_state(services, conversation_owner.clone());
-    cron.cron_service.with_preset_service(preset.service.clone());
 
     // Construct the route ConversationService before any producer starts, then
     // synchronously classify every unsettled generation while the exact
@@ -557,9 +551,6 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
     // Extension-contributed rows will land in `agent_metadata` in a
     // later step; for now we rely on the builtin + internal seed rows.
 
-    let dispatcher: Arc<dyn PresetRuleDispatcher> = preset.service.clone();
-    skill_state.preset_dispatcher = Some(dispatcher);
-
     let (channel_state, channel_components) =
         build_channel_state(services, ext_state.registry.clone(), conversation_owner.clone())
             .await;
@@ -581,10 +572,8 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
     let companion_state = build_companion_state(
         services,
         channel_components.manager.clone(),
-        preset.service.clone(),
         conversation_owner.clone(),
     )
-        .with_preset_service(preset.service.clone())
         .with_knowledge_service(services.knowledge_service.clone());
     // Arm the shared service before execution recovery can start. Every clone
     // shares this hook slot, so normal chat and Agent attempts observe the same
@@ -633,12 +622,10 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         agent_execution: build_agent_execution_engine(
             services,
             conversation_owner.clone(),
-            preset.service.clone(),
         ),
         terminal: build_terminal_state(services),
         office: build_office_state(services),
         shell: build_shell_state(services),
-        preset,
         nomi_core_agent_api,
     };
 
@@ -772,35 +759,6 @@ fn nomi_core_runtime_target() -> RuntimeTarget {
         "unsupported-local-target"
     };
     RuntimeTarget::from(target)
-}
-
-/// Build the process-wide preset catalog and resolver singleton.
-pub fn build_preset_state(services: &AppServices, extension_registry: ExtensionRegistry) -> PresetRouterState {
-    let pool = services.database.pool().clone();
-    let repo: Arc<dyn IPresetRepository> = Arc::new(SqlitePresetRepository::new(pool.clone()));
-    let state_repo: Arc<dyn IPresetStateRepository> = Arc::new(SqlitePresetStateRepository::new(pool.clone()));
-    let tag_repo: Arc<dyn IPresetTagRepository> = Arc::new(SqlitePresetTagRepository::new(pool.clone()));
-    let agent_repo: Arc<dyn IAgentMetadataRepository> = Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
-    let provider_repo: Arc<dyn IProviderRepository> =
-        Arc::new(SqliteProviderRepository::new(pool.clone()));
-    let provider_model_repo: Arc<dyn nomifun_db::IProviderModelRepository> =
-        Arc::new(nomifun_db::SqliteProviderModelRepository::new(pool.clone()));
-    let provider_model_capability_repo: Arc<dyn nomifun_db::IProviderModelCapabilityRepository> =
-        Arc::new(nomifun_db::SqliteProviderModelCapabilityRepository::new(pool));
-    let builtin = Arc::new(BuiltinPresetRegistry::load());
-    let service = Arc::new(PresetService::new(
-        repo,
-        state_repo,
-        tag_repo,
-        agent_repo,
-        provider_repo,
-        provider_model_repo,
-        provider_model_capability_repo,
-        builtin,
-        extension_registry,
-        services.data_dir.clone(),
-    ));
-    PresetRouterState { service }
 }
 
 /// Build the default `SystemRouterState` from application services.
@@ -1617,7 +1575,6 @@ pub fn build_creation_state(services: &AppServices) -> CreationRouterState {
 pub fn build_agent_execution_engine(
     services: &AppServices,
     conversation_owner: Arc<NomiCoreSessionOwner>,
-    preset_service: Arc<nomifun_preset::PresetService>,
 ) -> Arc<AgentExecutionEngine> {
     let repository: Arc<dyn IAgentExecutionRepository> = Arc::new(
         SqliteAgentExecutionRepository::new(services.database.pool().clone()),
@@ -1644,7 +1601,6 @@ pub fn build_agent_execution_engine(
         provider_repository,
         provider_model_repository,
         provider_model_capability_repository: services.provider_model_capability_repo.clone(),
-        preset_service,
         realtime: services.ws_manager.clone(),
         session,
         model_invoke: services.model_invoke_service.clone(),
@@ -1781,11 +1737,9 @@ fn spawn_idmm_record_janitor(
 pub fn build_companion_state(
     services: &AppServices,
     channel_manager: Arc<nomifun_channel::manager::ChannelManager>,
-    preset_service: Arc<nomifun_preset::PresetService>,
     conversation_owner: Arc<NomiCoreSessionOwner>,
 ) -> CompanionRouterState {
     let conv_service = conversation_owner.service().clone();
-    conv_service.with_preset_service(preset_service);
 
     let conv_service = Arc::new(conv_service);
     let robot_model_sync = Arc::new(CompanionRobotModelSync {
@@ -2394,7 +2348,6 @@ pub async fn build_extension_states(
     let skill_state = SkillRouterState {
         skill_paths,
         external_paths_manager: ext_paths_mgr,
-        preset_dispatcher: None,
         skill_tag_repo,
         builtin_skill_tags,
     };

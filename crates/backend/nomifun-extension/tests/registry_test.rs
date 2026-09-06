@@ -352,7 +352,6 @@ async fn query_empty_contributions_on_no_extensions() {
     let (registry, _, _tmp) = seeded_registry(vec![]).await;
 
     assert!(registry.get_themes().await.is_empty());
-    assert!(registry.get_presets().await.is_empty());
     assert!(registry.get_agents().await.is_empty());
     assert!(registry.get_mcp_servers().await.is_empty());
     assert!(registry.get_skills().await.is_empty());

@@ -19,7 +19,7 @@ use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 use nomifun_agent_contracts::AgentSessionId;
 use nomifun_api_types::{
     ConversationResponse, CreateConversationRequest, CreateCronJobRequest, CronAgentConfigDto,
-    CronScheduleDto, ListCronJobsQuery, ResolvedPresetSnapshot, SaveCronSkillRequest,
+    CronScheduleDto, ListCronJobsQuery, AgentResolvedSnapshot, SaveCronSkillRequest,
     SendMessageRequest, UpdateCronJobRequest, WebSocketMessage,
 };
 use nomifun_common::{PaginatedResult, TimestampMs, now_ms};
@@ -264,9 +264,9 @@ fn test_session_projection_from_response(
         name,
         r#type: agent_type,
         model,
-        preset_id,
-        preset_revision,
-        preset_snapshot,
+        preset_id: response_preset_id,
+        preset_revision: response_preset_revision,
+        agent_snapshot,
         extra,
         ..
     } = response;
@@ -286,12 +286,35 @@ fn test_session_projection_from_response(
             ))
         })?
         .to_owned();
-    let agent_session_id = AgentSessionId::from(conversation_id);
+    let agent_session_id = AgentSessionId::from(conversation_id.clone());
     nomifun_common::validate_uuidv7(agent_session_id.as_ref()).map_err(|error| {
         nomifun_common::AppError::Conflict(format!(
             "AgentSession identity is not canonical UUIDv7: {error}"
         ))
     })?;
+
+    let (preset_id, preset_revision) = match agent_snapshot.as_ref() {
+        Some(snapshot) => {
+            if response_preset_id
+                .as_deref()
+                .is_some_and(|value| value != snapshot.preset_id)
+                || response_preset_revision
+                    .is_some_and(|value| value != snapshot.preset_revision)
+            {
+                return Err(nomifun_common::AppError::Conflict(format!(
+                    "AgentSession {conversation_id} has inconsistent Agent snapshot lineage"
+                )));
+            }
+            (Some(snapshot.preset_id.clone()), Some(snapshot.preset_revision))
+        }
+        None if response_preset_id.is_some() || response_preset_revision.is_some() => {
+            return Err(nomifun_common::AppError::Conflict(format!(
+                "AgentSession {conversation_id} has preset lineage without a frozen agent_snapshot"
+            )));
+        }
+        None => (None, None),
+    };
+
     Ok(CronSessionProjection {
         agent_session_id,
         owner_id: owner_id.to_owned(),
@@ -334,7 +357,7 @@ fn test_session_projection_from_response(
             .map(str::to_owned),
         preset_id,
         preset_revision,
-        preset_snapshot,
+        agent_snapshot,
     })
 }
 
@@ -514,13 +537,13 @@ impl CronSessionPort for TestCronSessionPort {
         &self,
         user_id: &str,
         request: CreateConversationRequest,
-        snapshot: Option<ResolvedPresetSnapshot>,
+        snapshot: Option<AgentResolvedSnapshot>,
         creation_key: &str,
     ) -> Result<nomifun_cron::CronSessionHandle, nomifun_common::AppError> {
         let response = match snapshot {
             Some(snapshot) => {
                 self.service
-                    .create_from_preset_snapshot_idempotent(
+                    .create_from_agent_snapshot_idempotent(
                         user_id,
                         request,
                         snapshot,
@@ -819,7 +842,7 @@ impl IConversationRepository for StubConvRepo {
                 cron_job_id: None,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 created_at: 1000,
                 updated_at: 1000,
             }
@@ -858,7 +881,7 @@ impl IConversationRepository for StubConvRepo {
                 cron_job_id: None,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 created_at: 1000,
                 updated_at: 1000,
             }
@@ -897,7 +920,7 @@ impl IConversationRepository for StubConvRepo {
                 cron_job_id: None,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 created_at: 1000,
                 updated_at: 1000,
             }
@@ -936,7 +959,7 @@ impl IConversationRepository for StubConvRepo {
                 cron_job_id: None,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 created_at: 1000,
                 updated_at: 1000,
             }
@@ -975,7 +998,7 @@ impl IConversationRepository for StubConvRepo {
                 cron_job_id: None,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 created_at: 1000,
                 updated_at: 1000,
             }
@@ -1007,7 +1030,7 @@ impl IConversationRepository for StubConvRepo {
                 cron_job_id: None,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 created_at: 1000,
                 updated_at: 1000,
             }
@@ -1101,7 +1124,7 @@ impl IConversationRepository for StubConvRepo {
                 cron_job_id: None,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 created_at: 1000,
                 updated_at: 1000,
             });
@@ -1428,7 +1451,7 @@ async fn setup_with_conv_repo() -> (
                     cron_job_id: None,
                     preset_id: None,
                     preset_revision: None,
-                    preset_snapshot: None,
+                    agent_snapshot: None,
                     created_at: now_ms(),
                     updated_at: now_ms(),
                 })
@@ -1535,7 +1558,7 @@ fn make_create_req(name: &str, schedule: CronScheduleDto) -> CreateCronJobReques
             custom_agent_id: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             model: Some("gemini-2.5-pro".into()),
             provider_id: Some(GEMINI_PROVIDER_ID.into()),
             config_options: None,
@@ -1565,7 +1588,7 @@ async fn create_boot_recovery_job(
         custom_agent_id: None,
         preset_id: None,
         preset_revision: None,
-        preset_snapshot: None,
+        agent_snapshot: None,
         model: Some("model-safe".into()),
         provider_id: Some(SAFE_PROVIDER_ID.into()),
         config_options: None,
@@ -1662,7 +1685,7 @@ async fn secondary_cron_keeps_model_selection_but_cannot_gain_host_configuration
                     custom_agent_id: Some("custom-host-agent".into()),
                     preset_id: Some("owner-preset".into()),
                     preset_revision: Some(7),
-                    preset_snapshot: None,
+                    agent_snapshot: None,
                     model: Some("model-safe".into()),
                     provider_id: Some(SAFE_PROVIDER_ID.into()),
                     config_options: Some(HashMap::from([("host".into(), "true".into())])),
@@ -1682,7 +1705,7 @@ async fn secondary_cron_keeps_model_selection_but_cannot_gain_host_configuration
     assert!(config.cli_path.is_none());
     assert!(config.custom_agent_id.is_none());
     assert!(config.preset_id.is_none());
-    assert!(config.preset_snapshot.is_none());
+    assert!(config.agent_snapshot.is_none());
     assert!(config.config_options.is_none());
     assert!(config.workspace.is_none());
 
@@ -1998,7 +2021,7 @@ async fn run_now_restart_replay_of_reserved_run_never_redrives_executor() {
         custom_agent_id: None,
         preset_id: None,
         preset_revision: None,
-        preset_snapshot: None,
+        agent_snapshot: None,
         model: Some("model-safe".into()),
         provider_id: Some(SAFE_PROVIDER_ID.into()),
         config_options: None,
@@ -2093,7 +2116,7 @@ async fn boot_settles_interrupted_reserved_occurrence_once_without_redrive() {
         custom_agent_id: None,
         preset_id: None,
         preset_revision: None,
-        preset_snapshot: None,
+        agent_snapshot: None,
         model: Some("model-safe".into()),
         provider_id: Some(SAFE_PROVIDER_ID.into()),
         config_options: None,

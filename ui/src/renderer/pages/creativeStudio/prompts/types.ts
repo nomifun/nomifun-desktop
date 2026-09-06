@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type PromptLibrarySource = 'catalog' | 'preset' | 'asset';
+export type PromptLibrarySource = 'catalog' | 'asset';
 
 /** Validated product data. Remote media is restricted to absolute HTTPS URLs and rendered as data. */
 export interface PromptLibraryItem {
@@ -23,7 +23,7 @@ export interface PromptLibraryItem {
   licenseUrl: string | null;
   createdAt: number | null;
   updatedAt: number | null;
-  /** True when this catalog/preset prompt already has a provenance-linked asset. */
+  /** True when this catalog prompt already has a provenance-linked asset. */
   savedToAssets: boolean;
 }
 /** Immutable payload handed to a canvas/editor integration. */

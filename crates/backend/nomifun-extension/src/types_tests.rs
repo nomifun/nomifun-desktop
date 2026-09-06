@@ -107,14 +107,7 @@ fn test_ext_contributes_empty() {
 }
 
 #[test]
-fn preset_and_agent_catalog_entries_require_source_key_and_reject_generic_id() {
-    assert!(
-        serde_json::from_value::<ExtPreset>(json!({
-            "id": "legacy-preset",
-            "name": "Legacy Preset"
-        }))
-        .is_err()
-    );
+fn agent_catalog_entries_require_source_key_and_reject_generic_id() {
     assert!(
         serde_json::from_value::<ExtAgent>(json!({
             "id": "legacy-agent",
@@ -123,18 +116,22 @@ fn preset_and_agent_catalog_entries_require_source_key_and_reject_generic_id() {
         .is_err()
     );
 
-    let preset: ExtPreset = serde_json::from_value(json!({
-        "source_key": "review",
-        "name": "Review"
-    }))
-    .unwrap();
     let agent: ExtAgent = serde_json::from_value(json!({
         "source_key": "coder",
         "name": "Coder"
     }))
     .unwrap();
-    assert_eq!(preset.source_key, "review");
     assert_eq!(agent.source_key, "coder");
+}
+
+#[test]
+fn removed_preset_contribution_is_rejected() {
+    assert!(
+        serde_json::from_value::<ExtContributes>(json!({
+            "presets": []
+        }))
+        .is_err()
+    );
 }
 
 #[test]

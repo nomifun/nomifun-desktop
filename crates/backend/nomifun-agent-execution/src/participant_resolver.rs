@@ -1,25 +1,23 @@
-//! Resolves a model pool and reusable presets into immutable, execution-scoped
-//! Agent participant snapshots.
+//! Resolves provider model capability catalog entries into immutable,
+//! execution-scoped Agent participant snapshots.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use nomifun_api_types::{
     ExecutionModelPool, ExecutionModelRef, ModelTask, ModelTrait, ParticipantCapability,
-    PresetOverrides, PresetTarget, ResolvedPresetSnapshot,
+    AgentResolvedSnapshot,
 };
 use nomifun_common::{
-    AppError, MAX_AGENT_EXECUTION_MODELS, MAX_AGENT_EXECUTION_PARTICIPANTS, ProviderId,
-    NOMI_AGENT_ID,
+    AppError, MAX_AGENT_EXECUTION_MODELS, ProviderId, NOMI_AGENT_ID,
 };
 #[cfg(test)]
-use nomifun_common::generate_id;
+use nomifun_common::{generate_id, MAX_AGENT_EXECUTION_PARTICIPANTS};
 use nomifun_db::models::Provider;
 use nomifun_db::{
     IProviderModelCapabilityRepository, IProviderModelRepository, IProviderRepository,
     NewAgentExecutionParticipant, ProviderModelCapabilityRow, ProviderModelRow,
 };
-use nomifun_preset::PresetService;
 
 #[derive(Debug, Clone)]
 struct ChatCatalogEntry {
@@ -186,7 +184,6 @@ pub(crate) struct ParticipantResolver {
     provider_repo: Arc<dyn IProviderRepository>,
     provider_model_repo: Arc<dyn IProviderModelRepository>,
     provider_model_capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
-    preset_service: Arc<PresetService>,
 }
 
 impl ParticipantResolver {
@@ -194,13 +191,11 @@ impl ParticipantResolver {
         provider_repo: Arc<dyn IProviderRepository>,
         provider_model_repo: Arc<dyn IProviderModelRepository>,
         provider_model_capability_repo: Arc<dyn IProviderModelCapabilityRepository>,
-        preset_service: Arc<PresetService>,
     ) -> Self {
         Self {
             provider_repo,
             provider_model_repo,
             provider_model_capability_repo,
-            preset_service,
         }
     }
 
@@ -308,7 +303,7 @@ impl ParticipantResolver {
                 source_agent_id: NOMI_AGENT_ID.to_owned(),
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 provider_id: Some(model.provider_id.clone()),
                 model: Some(model.model.clone()),
                 role: None,
@@ -325,111 +320,14 @@ impl ParticipantResolver {
             });
         }
 
-        // Presets enrich routing but never widen the caller's model pool.
-        let mut presets = match self.preset_service.list().await {
-            Ok(presets) => presets,
-            Err(error) => {
-                tracing::warn!(%error, "participant resolution continuing without presets");
-                return Ok(snapshots);
-            }
-        };
-        presets.sort_by(|left, right| left.preset_id.cmp(&right.preset_id));
-        for preset in presets
-            .into_iter()
-            .filter(|preset| preset.enabled && preset.auto_selectable)
-        {
-            if snapshots.len() >= MAX_AGENT_EXECUTION_PARTICIPANTS {
-                tracing::warn!(
-                    limit = MAX_AGENT_EXECUTION_PARTICIPANTS,
-                    "execution participant budget reached; remaining automatic presets were not materialized"
-                );
-                break;
-            }
-            let resolved = match self
-                .preset_service
-                .resolve(
-                    &preset.preset_id,
-                    PresetTarget::ExecutionStep,
-                    None,
-                    PresetOverrides::default(),
-                )
-                .await
-            {
-                Ok(resolved) => resolved,
-                Err(error) => {
-                    tracing::warn!(preset_id = %preset.preset_id, %error, "skipping unresolved execution preset");
-                    continue;
-                }
-            };
-            let Some(resolved_model) = resolved.resolved_model.as_ref() else {
-                continue;
-            };
-            let pair = models.iter().find(|candidate| {
-                candidate.model == resolved_model.model
-                    && resolved_model
-                        .provider_id
-                        .as_ref()
-                        .is_none_or(|expected| expected == &candidate.provider_id)
-            });
-            let Some(pair) = pair else {
-                continue;
-            };
-            let provider_id = pair.provider_id.clone();
-            let model = pair.model.clone();
-            let description = resolved
-                .routing_description
-                .clone()
-                .or(preset.description.clone());
-            let mut capability = derive_capability(
-                &preset.audience_tags,
-                &preset.scenario_tags,
-                description.as_deref(),
-            );
-            catalog
-                .get(&(provider_id.clone(), model.clone()))
-                .expect("preset model must remain in the immutable Chat catalog")
-                .traits
-                .apply_to(&mut capability);
-            snapshots.push(NewAgentExecutionParticipant {
-                participant_id:
-                    nomifun_common::AgentExecutionParticipantId::new().into_string(),
-                source_agent_id: resolved
-                    .resolved_agent_id
-                    .clone()
-                    .unwrap_or_else(|| NOMI_AGENT_ID.to_owned()),
-                preset_id: Some(preset.preset_id),
-                preset_revision: Some(resolved.preset_revision),
-                preset_snapshot: Some(serde_json::to_string(&resolved).map_err(|error| {
-                    AppError::Internal(format!("encode preset snapshot: {error}"))
-                })?),
-                provider_id: Some(provider_id),
-                model: Some(model),
-                role: Some(preset.name),
-                capability: Some(serde_json::to_string(&capability).map_err(|error| {
-                    AppError::Internal(format!("encode participant capability: {error}"))
-                })?),
-                constraints: None,
-                description,
-                system_prompt: (!resolved.instructions.trim().is_empty())
-                    .then_some(resolved.instructions.clone()),
-                enabled_skills: serde_json::to_string(&resolved.included_skills).map_err(
-                    |error| AppError::Internal(format!("encode participant skills: {error}")),
-                )?,
-                disabled_builtin_skills: serde_json::to_string(&resolved.excluded_auto_skills)
-                    .map_err(|error| {
-                        AppError::Internal(format!("encode participant exclusions: {error}"))
-                    })?,
-                sort_order: snapshots.len() as i64,
-            });
-        }
         Ok(snapshots)
     }
 
-    /// Preserve the authenticated caller's frozen preset as the first Agent
+    /// Copy the authenticated caller's frozen Agent snapshot into the first
     /// participant without widening the already-resolved model authority.
-    pub(crate) fn prepend_frozen_lead(
+    pub(crate) fn prepend_frozen_snapshot(
         participants: &mut Vec<NewAgentExecutionParticipant>,
-        snapshot: &ResolvedPresetSnapshot,
+        snapshot: &AgentResolvedSnapshot,
         lead_model: Option<&ExecutionModelRef>,
     ) -> Result<(), AppError> {
         if let Some(index) = participants.iter().position(|participant| {
@@ -452,7 +350,7 @@ impl ParticipantResolver {
             .or_else(|| {
                 let resolved = snapshot.resolved_model.as_ref()?;
                 Some(ExecutionModelRef {
-                    provider_id: resolved.provider_id.clone()?,
+                    provider_id: resolved.provider_id.clone(),
                     model: resolved.model.clone(),
                 })
             })
@@ -466,7 +364,7 @@ impl ParticipantResolver {
             })
             .ok_or_else(|| {
                 AppError::BadRequest(
-                    "the calling Agent preset has no model inside the execution authority"
+                    "the calling Agent snapshot has no model inside the execution authority"
                         .to_owned(),
                 )
             })?;
@@ -486,18 +384,18 @@ impl ParticipantResolver {
             )));
         };
 
-        // The authenticated frozen Agent is the concrete lead identity for
+        // The authenticated frozen Agent snapshot is the concrete lead identity for
         // this model. Replace the first matching template/base participant at
         // every size so participant count and model authority never widen.
         let inherited_model_capability = participants[matching_model_index]
             .capability
             .as_deref()
             .map(|raw| {
-                serde_json::from_str::<ParticipantCapability>(raw).map_err(|error| {
-                    AppError::Internal(format!(
-                        "decode matching participant capability for frozen preset: {error}"
-                    ))
-                })
+                    serde_json::from_str::<ParticipantCapability>(raw).map_err(|error| {
+                        AppError::Internal(format!(
+                        "decode matching participant capability for frozen Agent snapshot: {error}"
+                        ))
+                    })
             })
             .transpose()?;
         participants.remove(matching_model_index);
@@ -525,8 +423,8 @@ impl ParticipantResolver {
                     .unwrap_or_else(|| NOMI_AGENT_ID.to_owned()),
                 preset_id: Some(snapshot.preset_id.clone()),
                 preset_revision: Some(snapshot.preset_revision),
-                preset_snapshot: Some(serde_json::to_string(snapshot).map_err(|error| {
-                    AppError::Internal(format!("encode calling Agent preset snapshot: {error}"))
+                agent_snapshot: Some(serde_json::to_string(snapshot).map_err(|error| {
+                    AppError::Internal(format!("encode calling Agent snapshot: {error}"))
                 })?),
                 provider_id: Some(model.provider_id),
                 model: Some(model.model),
@@ -663,7 +561,7 @@ fn copy_model_trait_capability(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_api_types::{PresetKnowledgePolicy, PresetTarget};
+    use nomifun_api_types::AgentKnowledgePolicy;
 
     const PROVIDER_1: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const PROVIDER_2: &str = "0190f5fe-7c00-7a00-8000-000000000002";
@@ -683,7 +581,7 @@ mod tests {
             source_agent_id: NOMI_AGENT_ID.to_owned(),
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             provider_id: Some(provider_id.to_owned()),
             model: Some(model.to_owned()),
             role: None,
@@ -697,12 +595,11 @@ mod tests {
         }
     }
 
-    fn snapshot() -> ResolvedPresetSnapshot {
-        ResolvedPresetSnapshot {
+    fn snapshot() -> AgentResolvedSnapshot {
+        AgentResolvedSnapshot {
             preset_id: LEAD_PRESET_ID.to_owned(),
             preset_revision: 7,
             preset_name: "Lead".to_owned(),
-            target: PresetTarget::ExecutionStep,
             routing_description: None,
             instructions: "lead instructions".to_owned(),
             resolved_agent_id: Some(NOMI_AGENT_ID.to_owned()),
@@ -711,7 +608,7 @@ mod tests {
             resolved_model: None,
             included_skills: vec![],
             excluded_auto_skills: vec![],
-            knowledge_policy: PresetKnowledgePolicy::default(),
+            knowledge_policy: AgentKnowledgePolicy::default(),
             knowledge_base_ids: vec![],
             warnings: vec![],
         }
@@ -971,7 +868,7 @@ mod tests {
                 ));
             }
 
-            ParticipantResolver::prepend_frozen_lead(
+            ParticipantResolver::prepend_frozen_snapshot(
                 &mut participants,
                 &snapshot(),
                 Some(&ExecutionModelRef {
@@ -1021,7 +918,7 @@ mod tests {
                 2,
             ),
         ];
-        ParticipantResolver::prepend_frozen_lead(
+        ParticipantResolver::prepend_frozen_snapshot(
             &mut participants,
             &snapshot(),
             Some(&ExecutionModelRef {

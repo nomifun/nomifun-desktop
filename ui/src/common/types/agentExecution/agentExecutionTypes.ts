@@ -1,4 +1,7 @@
-import type { PresetReference, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
+import type {
+  AgentPresetId,
+  AgentResolvedSnapshot,
+} from '@/common/types/agentPlatform';
 import type { AgentExecutionEventKind } from '@/common/protocolBindings/AgentExecutionEventKind';
 import type {
   AgentId,
@@ -63,9 +66,9 @@ export type TExecutionParticipant = {
   participant_id: ExecutionParticipantId;
   execution_id: ExecutionId;
   source_agent_id: AgentId;
-  preset_id: PresetReference | null;
+  preset_id: AgentPresetId | null;
   preset_revision: number | null;
-  preset_snapshot: ResolvedPresetSnapshot | null;
+  agent_snapshot: AgentResolvedSnapshot | null;
   provider_id: ProviderId | null;
   model: string | null;
   role: string | null;

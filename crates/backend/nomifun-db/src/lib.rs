@@ -41,13 +41,6 @@ pub use models::{
     NomiRemoteEventPage, NomiRemoteEventRow, NomiRemoteSessionRow, RemoteBindingRow,
 };
 pub use models::{
-    CreatePresetTagParams, PresetAgentPreferenceRow, PresetExampleRow,
-    PresetKnowledgeBaseRow, PresetKnowledgePolicyRow, PresetLocalizationRow,
-    PresetModelPreferenceRow, PresetRecord, PresetRow, PresetSkillBindingRow,
-    PresetTagBindingRow, PresetTagRow, PresetUserStateRow, PresetWriteParams,
-    UpdatePresetTagParams, UpsertPresetStateParams,
-};
-pub use models::{
     CsAgentRow, CsAuditEventRow, CsChannelBindingRow, CsDialogueRow, CsMessageRow, CsNoteRow,
     NewCsAgentRow,
 };
@@ -158,10 +151,6 @@ pub use repository::{
     CommitKnowledgeTreeOperationParams, KnowledgeTreeOperationPageCursor,
     MAX_KNOWLEDGE_TREE_OPERATION_PAGE_SIZE, PrepareKnowledgeTreeOperationParams,
     PreparedKnowledgeTreeOperation,
-};
-pub use repository::{
-    IPresetRepository, IPresetStateRepository, IPresetTagRepository,
-    SqlitePresetRepository, SqlitePresetStateRepository, SqlitePresetTagRepository,
 };
 // 创意工坊 (Creative Workshop) + 生成引擎 (creation) repository traits + sqlite impls + params.
 pub use repository::{

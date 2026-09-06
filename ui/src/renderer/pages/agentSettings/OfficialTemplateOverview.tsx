@@ -144,8 +144,10 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
     ]
   );
   const selectedResourceSlots = new Set(resources.map((resource) => resource.slot_key));
+  const isResourceRequired = (resource: (typeof template.seed.typed_resource_defaults)[number]): boolean =>
+    resource.binding_policy !== 'leave_unbound';
   const missingRequired = template.seed.typed_resource_defaults.some(
-    (resource) => resource.required && !selectedResourceSlots.has(resource.slot_key)
+    (resource) => isResourceRequired(resource) && !selectedResourceSlots.has(resource.slot_key)
   );
   const resourceLabelFor = (resourceKind: string): string => {
     switch (resourceKind) {
@@ -252,7 +254,7 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
                 <div>
                   <strong>{resourceLabelFor(resource.resource_kind)}</strong>
                   <span>
-                    {resource.required
+                    {isResourceRequired(resource)
                       ? t('agentSettings.resources.required')
                       : t('agentSettings.resources.optional')}
                   </span>
@@ -315,7 +317,7 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
                           : t('agentSettings.common.none')}
                       </Tag>
                       <span>
-                        {resource.required
+                        {isResourceRequired(resource)
                           ? t('agentSettings.resources.required')
                           : t('agentSettings.resources.optional')}
                       </span>
@@ -325,15 +327,15 @@ const OfficialTemplateOverview: React.FC<OfficialTemplateOverviewProps> = ({
                     resource.resource_kind
                   ) && (
                     <Tag size='small' color='orange'>
-                      {resource.required
+                      {isResourceRequired(resource)
                         ? t('agentSettings.common.unavailable')
                         : t('agentSettings.common.none')}
                     </Tag>
                   )}
                 </div>
                 <div className={styles.tagRow}>
-                  <Tag size='small' color={resource.required ? 'red' : 'gray'}>
-                    {resource.required
+                  <Tag size='small' color={isResourceRequired(resource) ? 'red' : 'gray'}>
+                    {isResourceRequired(resource)
                       ? t('agentSettings.resources.required')
                       : t('agentSettings.resources.optional')}
                   </Tag>

@@ -1,86 +1,138 @@
-# 设定
+# Agent 工作台
 
-**设定（Preset）**是一份可复用的启动配置。它固化 Agent、Execution Step、伙伴
-或定时任务应该如何启动，但不会把这份配置变成另一个身份或执行器。
+> 本页按 05 §15 的当前合同更新。用户可见的产品名称是 **Agent 工作台**，
+> 公共 UI 路由是 `/agent`；`AgentPreset` 只是后端 authoring aggregate 的内部名称。
+> AP-0～AP-7 尚未全部通过，因此本页描述的是 canonical 目标和当前实现边界，
+> 不是“旧设定”兼容说明。
 
-设定库入口是 **`/presets`**。技能是独立领域能力，入口是 **`/skills`**。
+## 入口与最短路径
 
-## 设定与其他概念的边界
+从首页侧边栏进入 **Agent**（`/agent`），然后：
 
-| 概念 | 负责什么 | 不负责什么 |
+1. 新建 Agent；
+2. 选择轻量、通用、全面或自定义创建种子；
+3. 编辑身份、指令、模型路由、能力、技能和 typed resources；
+4. 查看来源、可用性与影响提示；
+5. 保存并试用；
+6. 在 `/agent-sessions/:agentSessionId` 中继续使用生成的 Session。
+
+Runtime、网络、系统和提供商管理仍属于全局设置，尤其是
+`/settings/execution-engines`；它们不是 Agent 工作台的编辑内容。
+
+## 领域边界
+
+| 对象 | 所属方 | Agent 工作台能做什么 |
 | --- | --- | --- |
-| 设定 | 指令、适用目标、偏好 Agent/模型、技能范围、知识范围、示例和选择元数据 | 运行进程、会话历史或伙伴身份 |
-| Agent | 可执行后端 —— 内置 Nomi 引擎 | 用户可复用配置 |
-| 伙伴 | 持久身份、人格、形象、记忆和关系状态 | 可复用启动模板本身 |
-| Skill | 可发现、可加载的一项聚焦能力 | agent/模型选择或完整画像 |
+| Package / Plugin | 平台扩展域 | 只读取已正式物化的来源和 provenance |
+| MiniApp Active Release | MiniApp 产品域 | 只读取已发布、可供消费者使用的贡献 |
+| Capability Catalog | 平台能力目录域 | 查询能力、来源、合同、支持的消费者和 availability |
+| Skill Catalog | 平台技能目录域 | 选择 instruction/workflow；Skill 本身不是执行器 |
+| AgentPreset | Agent authoring 域 | 保存用户意图和当前 Revision 引用 |
+| AgentPresetRevision | Agent authoring 域 | 保存不可变 payload、ContributionLock 和 revision digest |
+| Agent Session | Agent 运行域 | 消费冻结的 Snapshot，不反向改写 Revision |
 
-可复用的操作流程、工具用法和领域知识应写成 Skill，而不是伪装成设定指令。
-设定可以选择这些 Skill，但只负责保存启动组合与稳定偏好。
+Plugin/MiniApp 是平台能力供给层，不是 Agent 子系统。安装、启停、配置、Credential、
+KV、`dataDir`、发布和 Service 生命周期由所属平台域负责；Agent 只能绑定正式的
+typed resource 或已物化 Capability。
 
-因此，同一份设定可以启动普通会话、物化为 AgentExecution Step、配置伙伴，也可以
-作为定时任务模板。伙伴画像或一次成功的协作角色也可以复刻为设定，而不会与
-来源身份混为一谈。
+## 四种创建种子
 
-## 一份设定可以固化什么
+四种模式是创建时的 seed，不是四种持久化类型：
 
-设定模型支持：
-
-- 名称、头像、用户描述，以及供 Agent 路由使用的能力描述；
-- 多语言名称、描述、指令和示例提示词；
-- 适用目标：会话、Execution Step、伙伴、公开伙伴、定时任务；
-- 有序的偏好 Agent，以及每位用户单独选择的首选 Agent；
-- 带 provider 标识的偏好模型；
-- 明确包含的技能，以及禁止自动注入的 builtin 技能；
-- 绑定知识库和继承/追加/替换知识范围策略；
-- fallback 与是否允许 Agent 协作自动选择；
-- 受众/场景标签、启用状态、排序和最近使用状态。
-
-## 来源与编辑规则
-
-设定目录合并三类来源：
-
-| 来源 | 来自哪里 | 编辑规则 |
+| 种子 | 初始内容 | 不会自动做什么 |
 | --- | --- | --- |
-| Builtin | `crates/backend/nomifun-app/assets/builtin-presets/` 内嵌目录；当前版本未预装内置设定 | 内容只读，需要定制时先复制；启用、排序、首选 agent 等用户状态单独存储。 |
-| User | SQLite 中的关系化设定记录 | 可完整编辑和删除。 |
-| Extension | 已安装扩展的 `presets` contribution | 在设定库只读；生命周期由所属扩展管理。 |
+| 轻量 | 身份、指令和模型路由 | 不加入工具、Workspace、MCP、Plugin 或 MiniApp |
+| 通用 | 官方常用 Capability/Skill | 不吸收用户安装的全部扩展 |
+| 全面 | 官方 Coding 基线 | 不安装或纳入全部 Plugin/MiniApp |
+| 自定义 | 空白或可选种子 | 不允许填写内部 ID、Digest 或 Runtime 参数 |
 
-用户指令和头像资源位于 NomiFun 数据目录的 `preset-instructions/` 与
-`preset-avatars/`。删除用户设定时会一并清理关联资源。
+所有创建结果都进入同一条主链：
 
-## 解析与不可变快照
+```text
+创建种子
+  → AgentPreset Draft
+  → canonical Compiler
+  → AgentPresetRevision + ContributionLock[]
+  → ResolvedSnapshot
+  → AgentSession / AgentBinding
+```
 
-选择设定不只是前端筛选。真正执行前，后端会针对目标调用设定解析器，并按以下
-优先级确定配置：
+模板更新只影响以后创建的 Draft；已有 Revision 不会静默漂移。
 
-1. 本次启动显式传入的 override；
-2. 用户首选 agent，再按设定中的有序偏好尝试；
-3. 只有设定允许 fallback 时，才选择可用的兜底项。
+## 能力、技能与来源
 
-解析器会校验 agent/模型可用性，选取本地化指令，合并技能 override，并物化知识
-范围，最终生成 `ResolvedPresetSnapshot`。快照同时记录设定 id/revision，以及本次
-确定的 agent、模型、指令、技能和知识策略。
+工作台从平台 Capability Catalog 查询能力。Catalog 条目至少包含稳定能力 ID、合同
+版本/digest、owner、来源 provenance、支持的消费者、typed contribution、所需资源和
+按消费者区分的 availability。
 
-会话、定时任务与 AgentExecution Step 都会持久化这份快照。因此目录中的设定后来发生
-修改，也不会静默改变已创建的目标。允许自动选择的设定可被 Agent 协作复用；
-对支持的目标，用户也始终可以显式选择。
+- 只有已发布、已启用并完成 materialization 的贡献可以进入正式 Catalog；
+- Ready Candidate、未发布 Release、Project Source、测试 Host 和 Plugin 私有
+  `dataDir` 不会进入 Agent Snapshot；
+- 标记为 non-Agent-only 的能力不会出现在 Agent picker；
+- 能力不可用、合同不匹配或资源缺失时显示可解释状态，并 fail closed；
+- Skill 只提供 instruction/workflow 和资源说明，不自动扩张 Snapshot。
 
-## API
+如果同一 canonical 能力存在多个合法实现，用户只能在能力详情中显式选择来源。
+选择结果由服务端生成 ContributionLock；前端不提交 Mount、Artifact 或内部 digest
+来驱动执行。
 
-| 操作 | Endpoint |
+## Revision 与 Snapshot
+
+用户编辑内容先存在于不可执行 Draft。Save 成功后，服务端原子创建不可变
+`AgentPresetRevision`，并推进当前 Revision 指针。Preview、Save 和 Test 使用同一个
+canonical Compiler；Test 创建普通 AgentSession，不创建 test-only Session。
+
+Revision digest 覆盖规范化的：
+
+```text
+payload + contribution_locks
+```
+
+Snapshot 进一步冻结本次实际执行所需的 Capability、Provider/Model route、Tool schema、
+typed resource binding、Runtime feature、initial/on-demand 分组和 Snapshot digest。
+Session Open 读取已保存 Snapshot，不在每个 Turn 中重新选择 latest 来源，也不静默
+切换 Provider 或 fallback。
+
+数据库迁移记录如下：
+
+- `061_agent_snapshot_naming.sql` 将 `conversations`、
+  `agent_execution_participants`、`agent_execution_template_participants` 和
+  `cron_jobs` 的物理列统一改名为 `agent_snapshot`，不保留 alias 或双写；
+- `062_agent_preset_contribution_locks.sql` 为
+  `nomi_agent_preset_revisions` 增加 `contribution_locks_json`，并要求其为合法 JSON
+  数组；
+- 旧 baseline 中的 `preset_snapshot` 只是 migration source，不是当前运行时字段；
+- `preset_id`/`preset_revision` 若仍出现，只表示 AgentPreset provenance，不恢复旧
+  resolver 或旧兼容模型。
+
+## Canonical API（机器资源名）
+
+工作台使用以下 canonical API；API 的稳定机器名称不代表 UI 必须显示“Preset”：
+
+| 用途 | Endpoint |
 | --- | --- |
-| 列表 / 创建 | `GET`, `POST /api/presets` |
-| 读取 / 更新 / 删除 | `GET`, `PUT`, `DELETE /api/presets/{id}` |
-| 用户状态 | `PATCH /api/presets/{id}/state` |
-| 针对目标解析 | `POST /api/presets/{id}/resolve` |
-| 头像 | `GET /api/presets/{id}/avatar` |
-| 批量导入 | `POST /api/presets/import` |
-| 标签 | `GET`, `POST /api/preset-tags`; `PUT`, `DELETE /api/preset-tags/{key}` |
+| 官方创建种子 | `GET /api/agent-preset-templates?source=official` |
+| 创建 AgentPreset | `POST /api/agent-presets` |
+| 从官方种子创建 Draft | `POST /api/agent-presets/from-template/{template_id}` |
+| 读取编辑器 | `GET /api/agent-presets/{preset_id}/editor` |
+| Preview / Save / Revision | `/api/agent-presets/{preset_id}/...` |
+| 平台能力 Catalog | `GET /api/capabilities` |
+| Agent Session | `/api/agent-sessions/*` |
+| Agent Binding | `/api/agent-bindings/*` |
 
-Builtin 与 Extension 设定的目录内容不能直接修改，需要先复制为用户设定。
-CLI 型 Agent 仍要求宿主机安装对应 CLI；把它选为偏好不会自动安装工具。
+客户端不得提交 Snapshot digest、Mount ID、内部 Revision ID、完整 Binding 或裸
+canonical JSON。服务端负责 owner 检查、Catalog resolve、ContributionLock、Revision/
+Snapshot digest 和 typed failure。
 
-## 相关
+## 旧路径处理
 
-- [MCP 与技能](./mcp-and-skills.zh.md)
-- [模型故障转移队列](./model-routing.zh.md)
+旧 `/presets`、`/settings/agent-presets`、`/settings/agent` 和旧 `/api/presets` 不再
+是产品 API。迁移窗口内的 UI 深层链接只能一次性跳转到 `/agent`；它们不能继续加载
+旧编辑器、旧服务或双读写链。当前工作树仍有部分迁移 redirect、旧 consumer 和
+generated inventory residual，详见：
+
+- [`GLOBAL-CLOSURE-TODO.zh.md`](../specs/2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md)
+- [`DECISIONS.zh.md`](../specs/2026-08-28-agent-capability-platform-v2/DECISIONS.zh.md)
+- [`05-system-capability-replacement-foundation.zh.md`](../specs/2026-08-28-agent-capability-platform-v2/05-system-capability-replacement-foundation.zh.md)
+
+在 AP-7 admission 通过前，不得开始 06 的 Plugin/MiniApp 代码实施。

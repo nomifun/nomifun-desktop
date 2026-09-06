@@ -11,9 +11,6 @@ import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { getCleanFileNames, FileService } from '@/renderer/services/FileService';
 import { iconColors } from '@/renderer/styles/colors';
 import { isDesktopShell } from '@/renderer/utils/platform';
-import type { AvailableAgent } from '../types';
-import type { Preset } from '@/common/types/agent/presetTypes';
-import PresetAgentTag, { type AgentSwitcherItem } from './PresetAgentTag';
 import { Button, Checkbox, Dropdown, Menu, Message, Tooltip } from '@arco-design/web-react';
 import { ArrowUp, Plus, Robot, Shield, UploadOne } from '@icon-park/react';
 import React, { useCallback, useRef, useState } from 'react';
@@ -28,21 +25,6 @@ type GuidActionRowProps = {
   // Model selector node (rendered by parent)
   modelSelectorNode: React.ReactNode;
   collaboratorSelectorNode?: React.ReactNode;
-
-  // Preset agent tag
-  is_presetAgent: boolean;
-  selectedAgentInfo: AvailableAgent | undefined;
-  /**
-   * Backend-merged preset catalog — drives the preset tag label lookup. Not
-   * the engine-config list (custom agents from the AgentRegistry).
-   */
-  presets: Preset[];
-  localeKey: string;
-  onClosePresetTag: () => void;
-  agentLogo?: string | null;
-  agentSwitcherItems?: AgentSwitcherItem[];
-  onAgentSwitch?: (key: string) => void;
-  hidePresetTag?: boolean;
 
   // MCP management
   mcpServers: IMcpServer[];
@@ -65,18 +47,9 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   onFilesUploaded,
   modelSelectorNode,
   collaboratorSelectorNode,
-  is_presetAgent,
-  selectedAgentInfo,
-  presets,
-  localeKey,
-  onClosePresetTag,
-  agentLogo,
-  agentSwitcherItems,
-  onAgentSwitch,
   mcpServers,
   selectedMcpServerIds,
   onToggleMcpServer,
-  hidePresetTag = false,
   loading,
   isButtonDisabled,
   speechInputNode,
@@ -250,20 +223,6 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
           >
             {modelSelectorNode}
             {collaboratorSelectorNode}
-          </div>
-        )}
-
-        {!hidePresetTag && is_presetAgent && selectedAgentInfo && (
-          <div className={styles.actionPresetAgent}>
-            <PresetAgentTag
-              agentInfo={selectedAgentInfo}
-              presets={presets}
-              localeKey={localeKey}
-              onClose={onClosePresetTag}
-              agentLogo={agentLogo}
-              agentSwitcherItems={agentSwitcherItems}
-              onAgentSwitch={onAgentSwitch}
-            />
           </div>
         )}
 

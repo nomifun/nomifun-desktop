@@ -24,7 +24,7 @@ await testI18n.use(initReactI18next).init({
 
 const ITEM: PromptLibraryItem = {
   id: 'prompt-copy',
-  source: 'preset',
+  source: 'catalog',
   title: '复制测试',
   description: '测试复制完整提示词',
   prompt: '保留完整的提示词内容，不使用卡片预览文本。',

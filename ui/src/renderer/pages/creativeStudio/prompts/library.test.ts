@@ -17,7 +17,7 @@ import type { PromptLibraryItem } from './types';
 
 const FIRST: PromptLibraryItem = {
   id: 'prompt-one',
-  source: 'preset',
+  source: 'catalog',
   title: '分镜构思',
   description: '整理镜头节奏',
   prompt: '请根据故事目标整理分镜结构。',
@@ -73,8 +73,8 @@ describe('prompt library validation and filtering', () => {
   });
 
   test('keeps equal raw IDs from different source namespaces', () => {
-    const catalog = { ...FIRST, source: 'catalog' as const };
-    expect(normalizePromptLibrary([FIRST, catalog]).items).toEqual([FIRST, catalog]);
+    const asset = { ...FIRST, source: 'asset' as const };
+    expect(normalizePromptLibrary([FIRST, asset]).items).toEqual([FIRST, asset]);
   });
 
   test('filters by text, exact category and intersected tags', () => {

@@ -21,7 +21,6 @@ mod oauth_token;
 mod provider;
 mod provider_connection;
 mod provider_model;
-mod preset;
 mod requirement;
 mod skill_tag;
 mod ssh_host;
@@ -93,7 +92,6 @@ pub use provider_connection::{ProviderConnectionRow, UpsertProviderConnectionPar
 pub use provider_model::{
     NewProviderModel, NewProviderModelCapability, ProviderModelCapabilityRow, ProviderModelRow,
 };
-pub use preset::*;
 pub use requirement::{NewRequirementRow, RequirementRow, RequirementRowUpdate, RequirementTagRow};
 pub use skill_tag::{SkillTagRow, UpsertSkillTagParams};
 pub use ssh_host::SshHostRow;

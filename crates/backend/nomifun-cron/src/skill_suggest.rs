@@ -250,7 +250,7 @@ mod tests {
             cron_job_id: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             created_at: now_ms(),
             updated_at: now_ms(),
         }
@@ -276,7 +276,7 @@ mod tests {
             agent_config: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             conversation_id: None,
             conversation_title: None,
             agent_type: "nomi".into(),

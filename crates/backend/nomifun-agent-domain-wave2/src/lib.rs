@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, ArtifactEnvelope, CapabilityActionDescriptor,
-    CapabilityContributions, CapabilityId, CapabilityKind, CapabilityManifest, CapabilityRef,
+    CapabilityConsumer, CapabilityContributions, CapabilityId, CapabilityKind,
+    CapabilityManifest, CapabilityRef,
     CanonicalErrorCode, CanonicalSchemaRef, CancellationDescriptor,
     CorrelationId, DeclaredServiceViewDescriptor, EffectClass, ExactRoleContractRef,
     ExecutionRoleId, HostPortBindingDescriptor, HostPortId, HostPortRef, IdempotencyKey,
@@ -33,7 +34,7 @@ use nomifun_agent_contracts::{
     StrictJsonValue,
     ToolPresentationKind, TypedResourceBindings, ValidatedPluginConfig, VersionString,
     CAPABILITY_UNAVAILABLE_ON_PLATFORM, PRESET_RESOURCE_NOT_BOUND, RESOURCE_OWNER_MISMATCH,
-    digest_payload,
+    capability_surface_declarations, digest_payload,
 };
 use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, ContextContributionFactory,
@@ -1748,10 +1749,10 @@ fn build_capability(
         ),
         requires: Vec::new(),
         conflicts: Vec::new(),
-        supported_surfaces: supported_surfaces
-            .iter()
-            .map(|surface| (*surface).to_owned())
-            .collect(),
+        supported_surfaces: capability_surface_declarations(
+            supported_surfaces.iter().copied(),
+            supported_consumers(definition.id),
+        ),
         requires_runtime_features: Vec::new(),
         supported_platforms,
         config_schema: object_schema(),
@@ -1771,6 +1772,15 @@ fn build_capability(
                 .collect(),
         },
     })
+}
+
+pub fn supported_consumers(capability_id: &str) -> BTreeSet<CapabilityConsumer> {
+    match capability_id {
+        "browser.render_content" => {
+            BTreeSet::from([CapabilityConsumer::Knowledge])
+        }
+        _ => BTreeSet::from([CapabilityConsumer::Agent]),
+    }
 }
 
 struct Wave2CapabilityHandler {
@@ -2446,9 +2456,9 @@ mod tests {
         SessionCapabilityState,
     };
     use nomifun_agent_contracts::{
-        AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, CapabilityExposure,
-        CapabilityRef, CapabilitySelection, DigestHex, PresetRevisionRef, ResourceBindingId,
-        RoleProviderSelection, RuntimeProfileKind, UserId, TypedResourceBinding,
+        AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, CapabilityRef,
+        CapabilitySelection, DigestHex, PresetRevisionRef, ResourceBindingId, RoleProviderSelection,
+        RuntimeProfileKind, UserId, TypedResourceBinding,
     };
 
     struct StateCaptureHostPort {
@@ -2753,7 +2763,6 @@ mod tests {
         let action = action_id("fs.read").expect("fs.read action");
         let payload = AgentPresetRevisionPayload {
             schema_version: VersionString::from(CONTRACT_VERSION),
-            surfaces: BTreeSet::from(["desktop".to_owned()]),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
             initial_capabilities: vec![CapabilitySelection {
@@ -2761,14 +2770,8 @@ mod tests {
                     id: CapabilityId::from("fs.read"),
                     version: VersionString::from(CONTRACT_VERSION),
                 },
-                required: true,
-                exposure: CapabilityExposure::Advertised,
                 action_allowlist: BTreeSet::from([action.clone()]),
                 resource_binding_refs: vec![binding.binding_id.clone()],
-                destination_constraints: BTreeSet::new(),
-                context_budget_override: None,
-                tool_budget_override: None,
-                config: empty_object(),
             }],
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
@@ -2776,21 +2779,23 @@ mod tests {
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Wave 2 state test".to_owned(),
             instructions: "Invoke the selected capability.".to_owned(),
-            context_policy: empty_object(),
-            execution_constraints: empty_object(),
-            runtime_budget: empty_object(),
+            starter_prompts: Vec::new(),
         };
-        let revision = AgentPresetRevision {
+        let contribution_locks = Vec::new();
+        let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef {
                 preset_id: AgentPresetId::from("wave2-state-test"),
                 revision: 1,
-                revision_digest: digest_payload(&payload).expect("revision digest"),
+                revision_digest: DigestHex::from(""),
             },
             payload,
+            contribution_locks,
             created_by: UserId::from(principal.principal_id.clone()),
             created_at_ms: 1,
             reason: None,
         };
+        revision.reference.revision_digest =
+            revision.revision_digest().expect("revision digest");
         let snapshot = AgentPresetCompiler::compile(
             &materialized,
             &CompilerEnvironment {
@@ -3069,7 +3074,6 @@ mod tests {
         let revision = |overrides: BTreeMap<ExecutionRoleId, RoleProviderSelection>| {
             let payload = AgentPresetRevisionPayload {
                 schema_version: VersionString::from(CONTRACT_VERSION),
-                surfaces: BTreeSet::from(["desktop".to_owned()]),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),
                 initial_capabilities: vec![
@@ -3078,44 +3082,26 @@ mod tests {
                             id: CapabilityId::from("browser.navigate"),
                             version: VersionString::from(CONTRACT_VERSION),
                         },
-                        required: true,
-                        exposure: CapabilityExposure::Advertised,
                         action_allowlist: BTreeSet::from([ActionId::from(
                             "browser.navigate.invoke",
                         )]),
                         resource_binding_refs: vec![binding.binding_id.clone()],
-                        destination_constraints: BTreeSet::new(),
-                        context_budget_override: None,
-                        tool_budget_override: None,
-                        config: empty_object(),
                     },
                     CapabilitySelection {
                         capability: CapabilityRef {
                             id: CapabilityId::from("browser.observe"),
                             version: VersionString::from(CONTRACT_VERSION),
                         },
-                        required: true,
-                        exposure: CapabilityExposure::Hidden,
                         action_allowlist: BTreeSet::new(),
                         resource_binding_refs: vec![binding.binding_id.clone()],
-                        destination_constraints: BTreeSet::new(),
-                        context_budget_override: None,
-                        tool_budget_override: None,
-                        config: empty_object(),
                     },
                     CapabilitySelection {
                         capability: CapabilityRef {
                             id: CapabilityId::from("browser.identity"),
                             version: VersionString::from(CONTRACT_VERSION),
                         },
-                        required: true,
-                        exposure: CapabilityExposure::Hidden,
                         action_allowlist: BTreeSet::new(),
                         resource_binding_refs: vec![binding.binding_id.clone()],
-                        destination_constraints: BTreeSet::new(),
-                        context_budget_override: None,
-                        tool_budget_override: None,
-                        config: empty_object(),
                     },
                 ],
                 on_demand_capabilities: Vec::new(),
@@ -3124,21 +3110,24 @@ mod tests {
                 system_role_provider_overrides: overrides,
                 persona: "Browser provider fixture".to_owned(),
                 instructions: "Navigate with the selected Browser provider.".to_owned(),
-                context_policy: empty_object(),
-                execution_constraints: empty_object(),
-                runtime_budget: empty_object(),
+                starter_prompts: Vec::new(),
             };
-            AgentPresetRevision {
+            let contribution_locks = Vec::new();
+            let mut revision = AgentPresetRevision {
                 reference: PresetRevisionRef {
                     preset_id: AgentPresetId::from("browser-provider-fixture"),
                     revision: 1,
-                    revision_digest: digest_payload(&payload).expect("revision digest"),
+                    revision_digest: DigestHex::from(""),
                 },
                 payload,
+                contribution_locks,
                 created_by: UserId::from(principal.principal_id.clone()),
                 created_at_ms: 1,
                 reason: None,
-            }
+            };
+            revision.reference.revision_digest =
+                revision.revision_digest().expect("revision digest");
+            revision
         };
         let environment = CompilerEnvironment {
             resolver_version: VersionString::from(CONTRACT_VERSION),

@@ -289,7 +289,7 @@ mod tests {
             source_agent_id: NOMI_AGENT_ID.to_owned(),
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             provider_id: Some(PROVIDER_ID.to_owned()),
             model: Some("model".to_owned()),
             role: None,

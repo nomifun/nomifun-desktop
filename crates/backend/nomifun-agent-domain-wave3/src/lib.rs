@@ -15,9 +15,10 @@ use std::sync::Arc;
 
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, ArtifactEnvelope, CancellationDescriptor, CanonicalSchemaRef,
-    CapabilityActionDescriptor, CapabilityContributions, CapabilityId, CapabilityKind,
-    CapabilityManifest, CorrelationId, EffectClass, HostPortBindingDescriptor, HostPortId,
-    HostPortRef, IdempotencyKey, InProcessEntrypointMetadata, LocalizedMetadata,
+    CapabilityActionDescriptor, CapabilityConsumer, CapabilityContributions, CapabilityId,
+    CapabilityKind, CapabilityManifest, CorrelationId, EffectClass,
+    HostPortBindingDescriptor, HostPortId, HostPortRef, IdempotencyKey,
+    InProcessEntrypointMetadata, LocalizedMetadata,
     OperationId, PackageContributions, PackageId, PackageManifest, PackageRef,
     PlatformConstraint, PluginBootCriticality, PluginBootState, PluginContextDescriptor,
     PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor, PluginMountId,
@@ -25,7 +26,8 @@ use nomifun_agent_contracts::{
     PluginSourceKind, PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod,
     PrincipalRef, ResolvedSnapshotRef, ResourceBindingId, ResourceId, ResourceKind, ScopeKey,
     SkillId, StrictJsonValue, ToolPresentationKind, TypedResourceBinding, TypedResourceBindings,
-    ValidatedPluginConfig, VersionString, digest_payload,
+    ValidatedPluginConfig, VersionString, capability_surface_declarations,
+    digest_payload,
 };
 use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, KernelError, PluginRegistration,
@@ -1177,10 +1179,10 @@ fn capability_manifest(
         display: capability_display(spec),
         requires: Vec::new(),
         conflicts: Vec::new(),
-        supported_surfaces: AGENT_SURFACES
-            .iter()
-            .map(|surface| (*surface).to_owned())
-            .collect(),
+        supported_surfaces: capability_surface_declarations(
+            AGENT_SURFACES.iter().copied(),
+            [CapabilityConsumer::Agent],
+        ),
         requires_runtime_features: Vec::new(),
         supported_platforms: vec![PlatformConstraint::Any],
         config_schema: capability_config_schema(),

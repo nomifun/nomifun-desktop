@@ -1,12 +1,23 @@
-import type { EntityId } from '@/common/types/ids';
+import type {
+  AgentId,
+  AgentPresetId,
+  AgentSessionId,
+  KnowledgeBaseId,
+  ProviderId,
+  RemoteBindingId,
+  ResolvedSnapshotId,
+} from '@/common/types/ids';
+
+export type {
+  AgentPresetId,
+  AgentSessionId,
+  RemoteBindingId,
+  ResolvedSnapshotId,
+} from '@/common/types/ids';
 
 declare const digestBrand: unique symbol;
 declare const catalogIdBrand: unique symbol;
 
-export type AgentPresetId = EntityId<'agent-preset'>;
-export type AgentSessionId = EntityId<'agent-session'>;
-export type RemoteBindingId = EntityId<'remote-binding'>;
-export type ResolvedSnapshotId = EntityId<'resolved-snapshot'>;
 export type DigestHex = string & { readonly [digestBrand]: 'sha256' };
 export type CatalogId<Kind extends string> = string & { readonly [catalogIdBrand]: Kind };
 export type CapabilityId = CatalogId<'capability'>;
@@ -24,8 +35,7 @@ export const OFFICIAL_PRESET_KEYS = [
 ] as const;
 
 export type OfficialPresetKey = (typeof OFFICIAL_PRESET_KEYS)[number];
-export type AgentPresetSource = 'official' | 'user' | 'package';
-export type CapabilityExposure = 'advertised' | 'discoverable' | 'hidden';
+export type AgentPresetSource = 'official' | 'user';
 export type CatalogMaterializationState = 'materialized' | 'unavailable';
 export const AGENT_CHAT_MODEL_TASK = 'agent_chat' as const;
 export const CHAT_ROUTE_RECORD_SCHEMA = 'nomifun.chat-route-record.v1' as const;
@@ -102,16 +112,43 @@ export interface AgentBindingValue {
   binding_version: number;
 }
 
+/**
+ * Consumer-neutral frozen Agent configuration returned with a Conversation,
+ * Cron job, or execution projection.
+ *
+ * The renderer only uses this for historical identity presentation. It never
+ * resolves a live AgentPreset from this object and never treats it as an
+ * editable catalog record.
+ */
+export interface AgentResolvedSnapshot {
+  preset_id: AgentPresetId;
+  preset_revision: number;
+  preset_name: string;
+  routing_description?: string;
+  instructions: string;
+  resolved_agent_id?: AgentId;
+  resolved_agent_type?: string;
+  resolved_agent_backend?: string;
+  resolved_model?: {
+    provider_id: ProviderId;
+    model: string;
+  };
+  included_skills: string[];
+  excluded_auto_skills: string[];
+  knowledge_policy: {
+    enabled: boolean;
+    writeback: boolean;
+    eagerness?: 'manual' | 'auto';
+    grounded: boolean;
+  };
+  knowledge_base_ids: KnowledgeBaseId[];
+  warnings: string[];
+}
+
 export interface CapabilitySelection {
   capability: ExactCatalogRef<'capability'>;
-  required: boolean;
-  exposure: CapabilityExposure;
   action_allowlist?: string[];
   resource_binding_refs?: string[];
-  destination_constraints?: string[];
-  context_budget_override?: number;
-  tool_budget_override?: number;
-  config: unknown;
 }
 
 export interface ExactRoleContractRef {
@@ -129,7 +166,6 @@ export interface RoleProviderSelection {
 
 export interface AgentPresetDocument {
   schema_version: string;
-  surfaces: string[];
   model_route_refs: Record<string, string>;
   chat_route_records: Partial<Record<typeof AGENT_CHAT_MODEL_TASK, ChatRouteRecord>>;
   initial_capabilities: CapabilitySelection[];
@@ -139,9 +175,7 @@ export interface AgentPresetDocument {
   system_role_provider_overrides: Record<string, RoleProviderSelection>;
   persona: string;
   instructions: string;
-  context_policy: Record<string, unknown>;
-  execution_constraints: Record<string, unknown>;
-  runtime_budget: Record<string, unknown>;
+  starter_prompts: string[];
 }
 
 export interface AgentPresetDraft {
@@ -167,7 +201,6 @@ export interface AgentPresetSummary {
 export interface TypedResourceDefault {
   slot_key: string;
   resource_kind: string;
-  required: boolean;
   operations: string[];
   binding_policy: 'require_explicit_selection' | 'select_only_owned_resource' | 'leave_unbound';
 }

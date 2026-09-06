@@ -61,9 +61,7 @@ const AgentPillBar: React.FC<AgentPillBarProps> = ({
           color: 'var(--text-primary)',
         }}
       >
-        {availableAgents
-          .filter((agent) => !agent.is_preset)
-          .map((agent, index) => {
+        {availableAgents.map((agent, index) => {
             const isSelected = selectedAgentKey === getAgentKey(agent);
             const extensionAvatar = resolveExtensionAssetUrl(agent.isExtension ? agent.avatar : undefined);
             // Remote and user-defined custom agents store emoji strings in

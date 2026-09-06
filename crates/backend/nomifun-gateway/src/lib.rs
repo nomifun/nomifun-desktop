@@ -63,6 +63,8 @@ pub use conversation_port::{
     ConversationCapabilityPort, ConversationCreateSpec, ConversationDeliveryReceipt,
     DeliveryNotifyRegistration,
 };
-pub use deps::{CallerCtx, CompatibilityCapabilityHost};
+pub use deps::{
+    CapabilityAdmissionError, CapabilityAdmissionPort, CallerCtx, CompatibilityCapabilityHost,
+};
 pub use registry::{Registry, Surface, ToolSpec};
 pub use server::GatewayMcpServer;

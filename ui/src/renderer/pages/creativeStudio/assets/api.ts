@@ -59,19 +59,14 @@ export interface WorkshopTextAssetInput {
   collection?: string;
   tags?: string[];
   in_library?: boolean;
-  origin?:
-    | {
-        prompt_library_source: 'catalog';
-        prompt_library_id: string;
-        prompt_catalog_id: string;
-        source_url?: string;
-        license?: string;
-        license_url?: string;
-      }
-    | {
-        prompt_library_source: 'preset';
-        prompt_library_id: string;
-      };
+  origin?: {
+    prompt_library_source: 'catalog';
+    prompt_library_id: string;
+    prompt_catalog_id: string;
+    source_url?: string;
+    license?: string;
+    license_url?: string;
+  };
 }
 
 export interface WorkshopAssetPatch {
@@ -83,7 +78,7 @@ export interface WorkshopAssetPatch {
 }
 
 export interface WorkshopPromptAssetIdentity {
-  prompt_library_source: 'catalog' | 'preset';
+  prompt_library_source: 'catalog';
   prompt_library_id: string;
 }
 

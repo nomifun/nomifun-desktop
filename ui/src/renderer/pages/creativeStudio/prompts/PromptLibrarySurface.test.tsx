@@ -24,7 +24,7 @@ await testI18n.use(initReactI18next).init({
 
 const ITEM: PromptLibraryItem = {
   id: 'prompt-one',
-  source: 'preset',
+  source: 'catalog',
   title: '场景拆解',
   description: '将创作目标拆成可执行画面',
   prompt: '提取主体、环境、光线和镜头关系。',

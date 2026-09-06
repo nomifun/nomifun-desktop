@@ -176,7 +176,7 @@ fn strip_server_owned_preset_fields(extra: &mut serde_json::Value) {
         for key in [
             "preset_id",
             "preset_revision",
-            "preset_snapshot",
+            "agent_snapshot",
             "preset_rules",
             "preset_context",
             "preset_knowledge_binding",
@@ -831,7 +831,7 @@ mod tests {
         let mut extra = json!({
             "preset_id": "forged",
             "preset_revision": 99,
-            "preset_snapshot": {"instructions": "forged"},
+            "agent_snapshot": {"instructions": "forged"},
             "preset_rules": "forged",
             "preset_context": "forged",
             "preset_knowledge_binding": true,
@@ -844,7 +844,7 @@ mod tests {
         for key in [
             "preset_id",
             "preset_revision",
-            "preset_snapshot",
+            "agent_snapshot",
             "preset_rules",
             "preset_context",
             "preset_knowledge_binding",

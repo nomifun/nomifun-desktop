@@ -698,7 +698,6 @@ async fn seed_companion_session(
         source: None,
         channel_chat_id: None,
         preset_id: None,
-        preset_overrides: None,
         delegation_policy: Default::default(),
         execution_model_pool: None,
         decision_policy: Default::default(),

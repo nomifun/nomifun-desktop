@@ -7,16 +7,14 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
 use crate::constants::{
-    PRESET_RULES_DIR_NAME, PRESET_SKILLS_DIR_NAME, BUILTIN_AUTO_SKILLS_SUBDIR,
-    BUILTIN_RULES_DIR_NAME, COMMON_SKILL_DIRS, CRON_SKILLS_DIR_NAME, SKILL_MANIFEST_FILE,
+    BUILTIN_AUTO_SKILLS_SUBDIR, BUILTIN_RULES_DIR_NAME, COMMON_SKILL_DIRS, CRON_SKILLS_DIR_NAME, SKILL_MANIFEST_FILE,
     SKILLS_DIR_NAME,
 };
 use crate::error::ExtensionError;
 
 /// Built-in skill corpus embedded into the binary at compile time.
 ///
-/// Mirrors the strategy used by `nomifun-preset::builtin`: the corpus is
-/// authoritative at build time; an optional on-disk override
+/// The corpus is authoritative at build time; an optional on-disk override
 /// (`NOMIFUN_BUILTIN_SKILLS_PATH`) is consulted at runtime for rapid
 /// iteration and E2E fixtures.
 static BUILTIN_SKILLS: Dir<'static> =
@@ -93,10 +91,6 @@ pub struct SkillPaths {
     pub builtin_skills_dir: PathBuf,
     /// Built-in rules directory (app bundle resource).
     pub builtin_rules_dir: PathBuf,
-    /// Preset-level rules directory (~/.nomifun/preset-rules/).
-    pub preset_rules_dir: PathBuf,
-    /// Preset-level skills directory (~/.nomifun/preset-skills/).
-    pub preset_skills_dir: PathBuf,
 }
 
 /// Resolve standard skill paths.
@@ -108,8 +102,8 @@ pub struct SkillPaths {
 /// unless redirected via [`BUILTIN_SKILLS_ENV_VAR`].
 ///
 /// `data_dir` is the user-level data root (e.g. `~/.nomifun/`) and
-/// determines where user skills, preset resources, and the built-in
-/// skills tree (`{data_dir}/builtin-skills/`) live. Per-conversation
+/// determines where user skills and the built-in skills tree
+/// (`{data_dir}/builtin-skills/`) live. Per-conversation
 /// agent skills are no longer materialized on disk — see
 /// [`materialize_skills_for_agent`] for the symlink contract.
 pub fn resolve_skill_paths(app_resource_dir: &Path, data_dir: &Path) -> SkillPaths {
@@ -125,8 +119,6 @@ pub fn resolve_skill_paths(app_resource_dir: &Path, data_dir: &Path) -> SkillPat
         cron_skills_dir: data_dir.join(CRON_SKILLS_DIR_NAME),
         builtin_skills_dir,
         builtin_rules_dir: app_resource_dir.join(BUILTIN_RULES_DIR_NAME),
-        preset_rules_dir: data_dir.join(PRESET_RULES_DIR_NAME),
-        preset_skills_dir: data_dir.join(PRESET_SKILLS_DIR_NAME),
     }
 }
 
@@ -1703,8 +1695,6 @@ mod tests {
             cron_skills_dir: tmp.path().join(CRON_SKILLS_DIR_NAME),
             builtin_skills_dir: tmp.path().join("builtin-skills"),
             builtin_rules_dir: tmp.path().join("rules"),
-            preset_rules_dir: tmp.path().join("preset-rules"),
-            preset_skills_dir: tmp.path().join("preset-skills"),
         }
     }
 
@@ -2010,8 +2000,6 @@ mod tests {
             cron_skills_dir: tmp.path().join(CRON_SKILLS_DIR_NAME),
             builtin_skills_dir: tmp.path().join(crate::constants::BUILTIN_SKILLS_DIR_NAME),
             builtin_rules_dir: rules_dir,
-            preset_rules_dir: tmp.path().join(PRESET_RULES_DIR_NAME),
-            preset_skills_dir: tmp.path().join(PRESET_SKILLS_DIR_NAME),
         };
 
         let content = read_builtin_rule(&paths, "code-review.md").await.unwrap();
@@ -2656,8 +2644,6 @@ mod tests {
             cron_skills_dir: base.join(CRON_SKILLS_DIR_NAME),
             builtin_skills_dir: base.join(crate::constants::BUILTIN_SKILLS_DIR_NAME),
             builtin_rules_dir: base.join(BUILTIN_RULES_DIR_NAME),
-            preset_rules_dir: base.join(PRESET_RULES_DIR_NAME),
-            preset_skills_dir: base.join(PRESET_SKILLS_DIR_NAME),
         }
     }
 

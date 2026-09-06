@@ -1,6 +1,7 @@
 pub mod agent_metadata;
 pub mod agent_execution;
 pub mod agent_execution_template;
+mod agent_preset_lineage;
 mod bind;
 pub mod attachment;
 pub mod channel;
@@ -23,7 +24,6 @@ pub mod provider;
 pub mod provider_connection;
 pub mod provider_model;
 pub mod provider_model_capability;
-pub mod preset;
 pub mod requirement;
 pub mod remote_binding;
 mod settings;
@@ -52,7 +52,6 @@ mod sqlite_provider_connection;
 mod sqlite_provider_model;
 mod sqlite_provider_model_capability;
 mod sqlite_miniapp;
-mod sqlite_preset;
 mod sqlite_requirement;
 mod sqlite_remote_binding;
 mod sqlite_settings;
@@ -125,7 +124,6 @@ pub use provider_model::{
     ProviderModelProjectCleanup, ProviderModelTemplateCleanup,
 };
 pub use provider_model_capability::IProviderModelCapabilityRepository;
-pub use preset::{IPresetRepository, IPresetStateRepository, IPresetTagRepository};
 pub use requirement::{
     IRequirementRepository, ListRequirementsParams, RequirementClaim,
     RequirementClaimResolution,
@@ -158,7 +156,6 @@ pub use sqlite_provider_connection::SqliteProviderConnectionRepository;
 pub use sqlite_provider_model::SqliteProviderModelRepository;
 pub use sqlite_provider_model_capability::SqliteProviderModelCapabilityRepository;
 pub use sqlite_miniapp::SqliteMiniAppRepository;
-pub use sqlite_preset::{SqlitePresetRepository, SqlitePresetStateRepository, SqlitePresetTagRepository};
 pub use sqlite_requirement::SqliteRequirementRepository;
 pub use sqlite_remote_binding::SqliteRemoteBindingRepository;
 pub use sqlite_settings::SqliteSettingsRepository;

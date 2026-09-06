@@ -33,10 +33,6 @@ import type {
   TDelegationPolicy,
   TExecutionModelPool,
 } from '@/common/types/agentExecution/agentExecutionTypes';
-import {
-  assertCreatedConversationPreset,
-  presetIdFromSelectionKey,
-} from './presetConversationContract';
 
 export type GuidSendDeps = {
   // Input state
@@ -51,7 +47,6 @@ export type GuidSendDeps = {
 
   // Agent state
   selectedAgent: string;
-  selectedAgentKey: string;
   selectedAgentInfo: AvailableAgent | undefined;
 
   current_model: TProviderWithModel | undefined;
@@ -121,7 +116,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     setLoading,
     loading,
     selectedAgent,
-    selectedAgentKey,
     selectedAgentInfo,
     current_model,
     findAgentByKey,
@@ -158,20 +152,11 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     const entryPlan = planGuidEntry(input, autoWork);
 
     const agentInfo = selectedAgentInfo;
-    const preset_id = presetIdFromSelectionKey(selectedAgentKey);
-    const is_preset = preset_id !== undefined;
-    if (is_preset && (!agentInfo || agentInfo.preset_id !== preset_id)) {
-      throw new TypeError(
-        'The selected preset is no longer available. Refresh the preset catalog or choose another preset.',
-      );
-    }
 
     const { agent_type: effectiveAgentType } = getEffectiveAgentType(agentInfo);
 
-    // Presets are resolved exclusively by the backend from `preset_id`.
-    // Guid-local skill controls remain valid only for bare Agent launches.
-    const enabled_skills_to_send = !is_preset && guidEnabledSkills?.length ? guidEnabledSkills : undefined;
-    const excludeBuiltinSkills = !is_preset ? guidDisabledBuiltinSkills : undefined;
+    const enabledSkills = guidEnabledSkills?.length ? guidEnabledSkills : undefined;
+    const excludeBuiltinSkills = guidDisabledBuiltinSkills;
     const selectedMcpServerIdSet = new Set(selectedMcpServerIds ?? []);
     const selectedUserMcpServerIds = availableMcpServers
       .filter((server) => selectedMcpServerIdSet.has(server.mcp_server_id) && server.builtin !== true)
@@ -185,8 +170,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
 
     const finalEffectiveAgentType = effectiveAgentType;
 
-    // Nomi path (direct selection or preset preset with nomi as main agent)
-    if (selectedAgent === 'nomi' || (is_preset && finalEffectiveAgentType === 'nomi')) {
+    // Nomi is the only provider-backed Agent in the quick-start surface.
+    if (selectedAgent === 'nomi') {
       if (!current_model) {
         Message.warning(t('conversation.noModelConfigured'));
         return;
@@ -197,7 +182,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           type: 'nomi',
           name: entryPlan.conversationName,
           model: current_model,
-          preset_id,
           delegation_policy: delegationPolicy,
           execution_model_pool: executionModelPool,
           decision_policy: decisionPolicy,
@@ -206,7 +190,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
             default_files: files,
             workspace: finalWorkspace,
             custom_workspace: isCustomWorkspace,
-            preset_enabled_skills: enabled_skills_to_send,
+            agent_enabled_skills: enabledSkills,
             exclude_auto_inject_skills: excludeBuiltinSkills,
             selected_mcp_server_ids: selectedUserMcpServerIds,
             // Nomi consumes the authoritative session snapshot instead of
@@ -219,8 +203,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           Message.error(t('conversation.createFailed'));
           return;
         }
-        assertCreatedConversationPreset(conversation, preset_id);
-
         // Push the Guid page's advanced drafts (knowledge/AutoWork/IDMM) onto
         // the new conversation before navigating, so they are live when the
         // conversation page consumes the initial message.
@@ -251,19 +233,12 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       return;
     }
 
-    // Remaining agent path (custom rows, including preset fallbacks)
+    // Remaining Agent path (custom AgentRegistry rows).
     {
-      // Agent-type fallback only applies to presets whose primary agent was
-      // unavailable and got switched. For non-preset agents we must keep the
-      // original selectedAgent so the correct backend/cli_path is used.
-      const agent_typeChanged = is_preset && selectedAgent !== finalEffectiveAgentType;
-      const resolvedBackend: string | undefined = is_preset ? finalEffectiveAgentType : selectedAgent;
+      const resolvedBackend: string | undefined = selectedAgent || finalEffectiveAgentType;
+      const resolvedAgentInfo = agentInfo || findAgentByKey(resolvedBackend);
 
-      const resolvedAgentInfo = agent_typeChanged
-        ? findAgentByKey(resolvedBackend as string)
-        : agentInfo || findAgentByKey(selectedAgentKey);
-
-      if (!resolvedAgentInfo && !is_preset) {
+      if (!resolvedAgentInfo) {
         console.warn(`${resolvedBackend} agent not found, but proceeding to let conversation panel handle it.`);
       }
       const agentBackend = resolvedBackend || selectedAgent;
@@ -275,19 +250,16 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         // discriminate between rows on its own.
         agent_id: resolvedAgentInfo?.id,
         agent_name: resolvedAgentInfo?.name,
-        preset_id,
         workspace: finalWorkspace,
         model: current_model!,
         cli_path: resolvedAgentInfo?.cli_path,
         custom_workspace: isCustomWorkspace,
-        is_preset,
         extra: {
           default_files: files,
           exclude_auto_inject_skills: excludeBuiltinSkills,
           selected_mcp_server_ids: selectedUserMcpServerIds,
           selected_session_mcp_servers: selectedSessionMcpServers,
-          // Bare Agents may still carry a one-off skill selection.
-          ...(is_preset ? {} : guidEnabledSkills?.length ? { preset_enabled_skills: guidEnabledSkills } : {}),
+          ...(enabledSkills ? { agent_enabled_skills: enabledSkills } : {}),
         },
       });
 
@@ -297,8 +269,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           console.error('Failed to create agent conversation - conversation object is null or missing id');
           return;
         }
-        assertCreatedConversationPreset(conversation, preset_id);
-
         await applyAdvancedConfig?.(conversation.id);
 
         emitter.emit('chat.history.refresh');
@@ -328,7 +298,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     files,
     dir,
     selectedAgent,
-    selectedAgentKey,
     selectedAgentInfo,
     current_model,
     findAgentByKey,

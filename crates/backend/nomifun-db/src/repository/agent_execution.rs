@@ -162,9 +162,11 @@ pub struct CreateAgentExecutionParams {
 pub struct NewAgentExecutionParticipant {
     pub participant_id: String,
     pub source_agent_id: String,
+    /// Serialized canonical AgentResolvedSnapshot. It is immutable after the
+    /// participant is materialized; provider/model are the concrete binding.
     pub preset_id: Option<String>,
     pub preset_revision: Option<i64>,
-    pub preset_snapshot: Option<String>,
+    pub agent_snapshot: Option<String>,
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub role: Option<String>,

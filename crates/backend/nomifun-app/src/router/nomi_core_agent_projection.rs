@@ -13,9 +13,9 @@ use nomifun_agent_contracts::{
     ChatRouteRecord, PresetRevisionRef, ResolvedSnapshotEnvelope, TypedResourceBinding,
 };
 use nomifun_api_types::{
-    AgentBindingValueDto, AgentPresetEditorResponse, CreateConversationRequest, KnowledgeMountInfo,
-    ModelPreference, PresetKnowledgePolicy, PresetTarget, PreviewStatusDto,
-    ResolveAgentPresetPreviewResponse, ResolvedPresetSnapshot,
+    AgentBindingValueDto, AgentKnowledgePolicy, AgentPresetEditorResponse, AgentResolvedSnapshot,
+    CreateConversationRequest, ExecutionModelRef, KnowledgeMountInfo, PreviewStatusDto,
+    ResolveAgentPresetPreviewResponse,
 };
 use nomifun_common::{AgentType, AppError, ProviderWithModel, UserId, validate_uuidv7};
 use serde::de::DeserializeOwned;
@@ -45,7 +45,7 @@ pub struct ProjectionInput<'a> {
 #[derive(Debug)]
 #[allow(dead_code)] // Kept as the source-neutral projection seam, not a second authority.
 pub struct NomiCoreAgentProjection {
-    pub snapshot: ResolvedPresetSnapshot,
+    pub snapshot: AgentResolvedSnapshot,
     pub request: CreateConversationRequest,
 }
 
@@ -157,8 +157,6 @@ pub fn project(input: ProjectionInput<'_>) -> Result<NomiCoreAgentProjection, Ap
     let route = exact_chat_route(input.revision, input.snapshot)?;
     let resources = project_resources(input.owner, input.binding, input.revision)?;
     let allowed_tools = project_capabilities(input.revision)?;
-    validate_unsupported_document_fields(input.revision)?;
-
     project_revision_parts(
         input.revision,
         input.title,
@@ -185,7 +183,6 @@ fn project_revision(
     let resources = project_resources(owner, binding, revision)?;
     validate_on_demand_projection(revision)?;
     let allowed_tools = project_capabilities(revision)?;
-    validate_unsupported_document_fields(revision)?;
     project_revision_parts(
         revision,
         title,
@@ -248,22 +245,20 @@ fn project_revision_parts(
         .iter()
         .map(|mount| mount.knowledge_base_id.clone())
         .collect::<Vec<_>>();
-    let knowledge_policy = PresetKnowledgePolicy {
+    let knowledge_policy = AgentKnowledgePolicy {
         enabled: !knowledge_base_ids.is_empty(),
         writeback: allowed_tools.iter().any(|tool| tool == "knowledge_write"),
         eagerness: None,
         grounded: !knowledge_base_ids.is_empty(),
     };
-    let resolved_model = ModelPreference {
-        provider_id: Some(route.primary.provider_id.clone()),
+    let resolved_model = ExecutionModelRef {
+        provider_id: route.primary.provider_id.clone(),
         model: route.primary.model.clone(),
-        required: true,
     };
-    let projected_snapshot = ResolvedPresetSnapshot {
+    let projected_snapshot = AgentResolvedSnapshot {
         preset_id: revision_document.reference.preset_id.as_ref().to_owned(),
         preset_revision: revision,
         preset_name: title.clone(),
-        target: PresetTarget::Conversation,
         routing_description: None,
         instructions: instructions.clone(),
         resolved_agent_id: None,
@@ -323,7 +318,6 @@ fn project_revision_parts(
             source: None,
             channel_chat_id: None,
             preset_id: None,
-            preset_overrides: None,
             delegation_policy: Default::default(),
             execution_model_pool: None,
             decision_policy: Default::default(),
@@ -368,11 +362,13 @@ fn revision_from_dto(
 ) -> Result<AgentPresetRevision, AppError> {
     let payload: AgentPresetRevisionPayload = wire_cast(&revision.document)?;
     let reference: PresetRevisionRef = wire_cast(&revision.reference)?;
+    let contribution_locks = wire_cast(&revision.contribution_locks)?;
     let created_by = UserId::parse(revision.created_by.clone())
         .map_err(|error| AppError::UnprocessableEntity(format!("invalid revision owner: {error}")))?;
     let revision = AgentPresetRevision {
         reference,
         payload,
+        contribution_locks,
         created_by: nomifun_agent_contracts::UserId::from(created_by.as_ref().to_owned()),
         created_at_ms: revision.created_at_ms,
         reason: revision.reason.clone(),
@@ -677,65 +673,6 @@ fn project_capabilities(revision: &AgentPresetRevision) -> Result<Vec<String>, A
     Ok(tools.into_iter().collect())
 }
 
-fn validate_unsupported_document_fields(
-    revision: &AgentPresetRevision,
-) -> Result<(), AppError> {
-    if !revision.payload.system_role_provider_overrides.is_empty() {
-        return Err(unsupported(
-            "role provider override",
-            "system role provider overrides are runtime-only and not projected",
-        ));
-    }
-    let defaults = [
-        (
-            "context_policy",
-            json!({
-                "max_system_tokens": 12000,
-                "max_dynamic_context_tokens": 16000,
-                "max_catalog_tokens": 3000,
-            }),
-        ),
-        (
-            "execution_constraints",
-            json!({
-                "max_active_capabilities": 64,
-                "max_advertised_tools": 48,
-                "max_runtime_rebuilds": 4,
-            }),
-        ),
-        (
-            "runtime_budget",
-            json!({
-                "max_context_tokens": 32000,
-                "max_tool_calls_per_turn": 64,
-            }),
-        ),
-    ];
-    for (name, value, default_value) in [
-        (
-            "context_policy",
-            &revision.payload.context_policy.0,
-            &defaults[0].1,
-        ),
-        (
-            "execution_constraints",
-            &revision.payload.execution_constraints.0,
-            &defaults[1].1,
-        ),
-        ("runtime_budget", &revision.payload.runtime_budget.0, &defaults[2].1),
-    ] {
-        if value != default_value && !value.is_null() && !value.as_object().is_some_and(|object| object.is_empty()) {
-            return Err(unsupported(
-                "runtime-only document field",
-                format!(
-                    "{name} differs from the Nomi-core default and is not representable by the current Nomi request"
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn merge_instructions(persona: &str, instructions: &str) -> String {
     match (persona.trim(), instructions.trim()) {
         ("", right) => right.to_owned(),
@@ -752,12 +689,12 @@ fn unsupported(subject: &str, detail: impl Into<String>) -> AppError {
 mod tests {
     use super::*;
     use nomifun_agent_contracts::{
-        AgentPresetId, AgentPresetRevisionPayload, CapabilitySelection, CapabilityExposure,
+        AgentPresetId, AgentPresetRevisionPayload, CapabilitySelection,
         CapabilityRef, ChatRouteCandidate, ChatRouteFeature, ChatRouteProtocol,
         ChatRouteRecordSchema, ChatRouteTask, ConnectionConfigRef, DigestHex, ModelRouteId,
         OperationId, PresetRevisionRef, PrincipalRef, ResolvedCapability, ResolvedSnapshotContent,
         ResolvedSnapshotId, ResolvedSnapshotRef, RuntimeFeatureId, RuntimeProfileKind,
-        SkillRef, StrictJsonValue,
+        SkillRef,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -828,7 +765,6 @@ mod tests {
         let resources = vec![workspace, knowledge, mcp];
         let payload = AgentPresetRevisionPayload {
             schema_version: "1.0.0".into(),
-            surfaces: BTreeSet::from(["desktop".into()]),
             model_route_refs: BTreeMap::from([(CHAT_TASK.into(), "route-1".into())]),
             chat_route_records: BTreeMap::from([(CHAT_TASK.into(), route())]),
             initial_capabilities: vec![
@@ -846,18 +782,24 @@ mod tests {
             system_role_provider_overrides: BTreeMap::new(),
             persona: "You are Nomi.".into(),
             instructions: "Be precise.".into(),
-            context_policy: StrictJsonValue(json!({})),
-            execution_constraints: StrictJsonValue(json!({})),
-            runtime_budget: StrictJsonValue(json!({})),
+            starter_prompts: Vec::new(),
         };
+        let contribution_locks = Vec::new();
         let reference = PresetRevisionRef {
             preset_id: AgentPresetId::from("assistant.general"),
             revision: 1,
-            revision_digest: nomifun_agent_contracts::digest_payload(&payload).unwrap(),
+            revision_digest: nomifun_agent_contracts::digest_payload(
+                &nomifun_agent_contracts::AgentPresetRevisionDigestInput {
+                    payload: payload.clone(),
+                    contribution_locks: contribution_locks.clone(),
+                },
+            )
+            .unwrap(),
         };
         let revision = AgentPresetRevision {
             reference: reference.clone(),
             payload,
+            contribution_locks,
             created_by: OWNER.into(),
             created_at_ms: 1,
             reason: None,
@@ -932,20 +874,14 @@ mod tests {
         )
     }
 
-    fn capability(id: &str, required: bool) -> CapabilitySelection {
+    fn capability(id: &str, _required: bool) -> CapabilitySelection {
         CapabilitySelection {
             capability: CapabilityRef {
                 id: id.into(),
                 version: "1.0.0".into(),
             },
-            required,
-            exposure: CapabilityExposure::Advertised,
             action_allowlist: BTreeSet::new(),
             resource_binding_refs: Vec::new(),
-            destination_constraints: BTreeSet::new(),
-            context_budget_override: None,
-            tool_budget_override: None,
-            config: StrictJsonValue(json!({})),
         }
     }
 
@@ -990,8 +926,7 @@ mod tests {
             ResolvedSnapshotEnvelope,
         ),
     ) {
-        fixture.2.reference.revision_digest =
-            nomifun_agent_contracts::digest_payload(&fixture.2.payload).unwrap();
+        fixture.2.reference.revision_digest = fixture.2.revision_digest().unwrap();
         fixture.3.content.preset_revision_ref = fixture.2.reference.clone();
         fixture.3.snapshot_ref.snapshot_digest =
             nomifun_agent_contracts::digest_payload(&fixture.3.content).unwrap();
@@ -1003,7 +938,6 @@ mod tests {
     fn exact_binding_projects_chat_route_and_resources() {
         let fixture = fixture();
         let result = project(input(&fixture)).unwrap();
-        assert_eq!(result.snapshot.target, PresetTarget::Conversation);
         assert_eq!(
             result.snapshot.resolved_model.as_ref().unwrap().model,
             "step-3.7-flash"

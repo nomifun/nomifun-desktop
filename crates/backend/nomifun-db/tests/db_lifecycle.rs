@@ -27,7 +27,7 @@ const KNOWLEDGE_SOURCE_IDENTITY: &str =
     include_str!("../migrations/055_knowledge_source_identity.sql");
 const PUBLISHED_KNOWLEDGE_SOURCE_IDENTITY_CHECKSUM: &str =
     "08567374a7c524c9550ac3cb4dbd4043ca485481457c23cc84484389a86867b00637db9182061029743f4e9f8530f8a1";
-const CURRENT_PUBLISHED_MIGRATION_VERSION: i64 = 60;
+const CURRENT_PUBLISHED_MIGRATION_VERSION: i64 = 63;
 const CONVERSATION_TURN_AUTHORITY: &str =
     include_str!("../migrations/008_conversation_turn_authority.sql");
 const REQUIREMENT_CLAIM_CAPABILITIES: &str =

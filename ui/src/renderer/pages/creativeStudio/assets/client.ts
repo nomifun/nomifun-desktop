@@ -78,10 +78,7 @@ function mapOrigin(value: unknown): CreativeAssetOrigin | null {
   ) {
     throw new TypeError('Invalid creative asset Canvas origin');
   }
-  const promptLibrarySource =
-    origin.prompt_library_source === 'catalog' || origin.prompt_library_source === 'preset'
-      ? origin.prompt_library_source
-      : undefined;
+  const promptLibrarySource = origin.prompt_library_source === 'catalog' ? 'catalog' : undefined;
   const promptLibraryId = optionalString(origin.prompt_library_id);
   if (
     (origin.prompt_library_source !== undefined || origin.prompt_library_id !== undefined) &&
@@ -247,28 +244,20 @@ export class CreativeAssetClient implements CreativeAssetLibraryPort, CreativePr
         tags: input.tags,
         in_library: input.inLibrary,
         origin: input.origin
-          ? input.origin.promptLibrarySource === 'catalog'
-            ? {
-                prompt_library_source: input.origin.promptLibrarySource,
-                prompt_library_id: input.origin.promptLibraryId,
-                prompt_catalog_id: input.origin.promptCatalogId,
-                source_url: input.origin.sourceUrl,
-                license: input.origin.license,
-                license_url: input.origin.licenseUrl,
-              }
-            : {
-                prompt_library_source: 'preset',
-                prompt_library_id: input.origin.promptLibraryId,
-              }
+          ? {
+              prompt_library_source: input.origin.promptLibrarySource,
+              prompt_library_id: input.origin.promptLibraryId,
+              prompt_catalog_id: input.origin.promptCatalogId,
+              source_url: input.origin.sourceUrl,
+              license: input.origin.license,
+              license_url: input.origin.licenseUrl,
+            }
           : undefined,
       })
     );
   }
 
-  async removePromptAsset(
-    source: 'catalog' | 'preset',
-    promptId: string
-  ): Promise<number> {
+  async removePromptAsset(source: 'catalog', promptId: string): Promise<number> {
     const response = await this.api.removePromptAsset({
       prompt_library_source: source,
       prompt_library_id: promptId,

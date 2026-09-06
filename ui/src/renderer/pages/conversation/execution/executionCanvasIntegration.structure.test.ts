@@ -18,7 +18,6 @@ describe('conversation execution canvas integration', () => {
     const edgeSource = readSource(new URL('./executionDagEdges.ts', import.meta.url));
     const nodeSource = readSource(new URL('./nodes/StepNode.tsx', import.meta.url));
     const canvasCss = readSource(new URL('./dag-canvas.css', import.meta.url));
-    const profileSource = readSource(new URL('./ParticipantProfilePanel.tsx', import.meta.url));
 
     expect(chatSource.includes('<ExecutionProvider')).toBe(true);
     expect(chatSource.includes('<ExecutionConversationLayout')).toBe(true);
@@ -33,8 +32,6 @@ describe('conversation execution canvas integration', () => {
     expect(panelSource.includes('agentExecution.status.execution.')).toBe(false);
     expect(panelSource.includes('(showControls || leadThinking.active) &&')).toBe(true);
     expect(panelSource.includes('styles.chips')).toBe(false);
-    expect(panelSource.includes('<ParticipantProfilePanel')).toBe(true);
-    expect(canvasSource.includes('<ParticipantProfilePanel')).toBe(false);
     expect(canvasSource.includes('overviewOpen && (')).toBe(true);
     expect(canvasSource.includes('buildExecutionDagEdges')).toBe(true);
     expect(canvasSource.includes('<NodeInternalsRefresher')).toBe(true);
@@ -53,8 +50,6 @@ describe('conversation execution canvas integration', () => {
     expect(canvasCss.includes('.react-flow__node-step')).toBe(true);
     expect(canvasCss.includes('vector-effect: non-scaling-stroke')).toBe(true);
     expect(canvasCss.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
-    expect(profileSource.includes("targets: ['conversation', 'execution_step']")).toBe(true);
-    expect(profileSource.includes('<Drawer')).toBe(true);
   });
 
   test('renders only the current plan revision while retaining history in the detail model', () => {

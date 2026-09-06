@@ -2,16 +2,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use nomifun_agent_contracts::{
+    CapabilityConsumer, CapabilityOperationLock, CapabilityRef,
     AgentBindingValue, AgentPreset, AgentPresetId, AgentPresetRevision, AgentPresetSource,
-    CapabilityExposure, CapabilitySelection, ExactVersionRef, OfficialPresetKey, PresetRevisionRef,
-    RemoteBinding, RemoteBindingId, StrictJsonValue, UserId,
+    CapabilitySelection, ExactVersionRef, OfficialPresetKey, PresetRevisionRef, RemoteBinding,
+    RemoteBindingId, UserId, compare_revision_contribution_locks,
 };
 use nomifun_api_types::{
     AgentBindingRecordDto, AgentBindingSummaryDto, AgentBindingTargetDto, AgentCatalogResponse,
     AgentPresetDraftDto, AgentPresetEditorResponse, AgentPresetLibraryResponse,
-    AgentPresetSummaryDto, CreateAgentPresetFromTemplateRequest, CreateAgentPresetRequest,
-    CreateRemoteBindingRequest, EditorDraftStateDto, ExactCatalogRefDto,
-    FreshStartPresentationDto, PutAgentBindingRequest, RemoteBindingDto,
+    AgentPresetRevisionImpactResponse, AgentPresetSummaryDto,
+    CreateAgentPresetFromTemplateRequest, CreateAgentPresetRequest, CreateRemoteBindingRequest,
+    EditorDraftStateDto, ExactCatalogRefDto, FreshStartPresentationDto, PutAgentBindingRequest,
+    RemoteBindingDto, RevisionImpactConsumerDto, RevisionImpactConsumerKindDto,
     ResolveAgentPresetPreviewRequest, ResolveAgentPresetPreviewResponse,
     ResolveSavedRevisionPreviewRequest, SaveAgentPresetRevisionRequest,
     SaveAgentPresetRevisionResponse, TemplateResourceSelectionDto, TypedResourceBindingDto,
@@ -24,6 +26,9 @@ use crate::catalog::{CatalogProvider, OfficialTemplateCatalog};
 use crate::compiler::{PresetPreviewCompiler, revision_api};
 use crate::continuation::editor_test_plan;
 use crate::error::ControlPlaneError;
+use crate::impact::{
+    ControlPlaneRevisionImpactCatalogProvider, RevisionImpactCatalogProvider,
+};
 use crate::store::{
     AgentBindingTarget, ControlPlaneStore, StoredAgentBinding, StoredPreset,
 };
@@ -53,6 +58,7 @@ pub trait DefaultChatRouteResolver: Send + Sync {
 pub struct AgentControlPlane {
     store: Arc<dyn ControlPlaneStore>,
     catalog: Arc<dyn CatalogProvider>,
+    impact_catalog: Arc<dyn RevisionImpactCatalogProvider>,
     templates: OfficialTemplateCatalog,
     compiler: PresetPreviewCompiler,
     default_chat_route_resolver: Option<Arc<dyn DefaultChatRouteResolver>>,
@@ -65,9 +71,13 @@ impl AgentControlPlane {
         templates: OfficialTemplateCatalog,
         compiler: PresetPreviewCompiler,
     ) -> Self {
+        let impact_catalog = Arc::new(ControlPlaneRevisionImpactCatalogProvider::new(
+            Arc::clone(&catalog),
+        ));
         Self {
             store,
             catalog,
+            impact_catalog,
             templates,
             compiler,
             default_chat_route_resolver: None,
@@ -83,6 +93,17 @@ impl AgentControlPlane {
         resolver: Arc<dyn DefaultChatRouteResolver>,
     ) -> Self {
         self.default_chat_route_resolver = Some(resolver);
+        self
+    }
+
+    /// Replace only the read-side lifecycle catalog used by AP-5 impact
+    /// inspection. This cannot mutate a Revision and does not affect Compiler
+    /// source resolution.
+    pub fn with_revision_impact_catalog_provider(
+        mut self,
+        provider: Arc<dyn RevisionImpactCatalogProvider>,
+    ) -> Self {
+        self.impact_catalog = provider;
         self
     }
 
@@ -144,6 +165,35 @@ impl AgentControlPlane {
     pub fn catalog(&self) -> Result<AgentCatalogResponse, ControlPlaneError> {
         self.catalog.snapshot()?.as_api()
     }
+
+    pub fn resolve_capability(
+        &self,
+        reference: &CapabilityRef,
+        consumer: CapabilityConsumer,
+    ) -> Result<CapabilityOperationLock, ControlPlaneError> {
+        let snapshot = self.catalog.snapshot()?;
+        let entry = snapshot
+            .capability_catalog_entry(reference)?
+            .ok_or_else(|| {
+                ControlPlaneError::canonical(
+                    "CAPABILITY_NOT_MATERIALIZED",
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!(
+                        "capability {}@{} is not materialized",
+                        reference.id.as_ref(),
+                        reference.version.as_ref()
+                    ),
+                )
+            })?;
+        entry.operation_lock(consumer).map_err(|error| {
+            ControlPlaneError::canonical(
+                error.code(),
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                error.to_string(),
+            )
+        })
+    }
+
 
     pub async fn create_preset(
         &self,
@@ -246,22 +296,17 @@ impl AgentControlPlane {
         }
         let document = nomifun_api_types::AgentPresetDocumentDto {
             schema_version: "1.0.0".into(),
-            surfaces: BTreeSet::from([
-                "desktop".into(),
-                "remote".into(),
-                "web".into(),
-            ]),
             model_route_refs,
             chat_route_records,
             initial_capabilities: seed
                 .initial_capabilities
                 .iter()
-                .map(|capability| selection_api(capability, CapabilityExposure::Advertised))
+                .map(selection_api)
                 .collect::<Result<Vec<_>, _>>()?,
             on_demand_capabilities: seed
                 .on_demand_capabilities
                 .iter()
-                .map(|capability| selection_api(capability, CapabilityExposure::Discoverable))
+                .map(selection_api)
                 .collect::<Result<Vec<_>, _>>()?,
             skill_bindings: seed
                 .skill_bindings
@@ -272,20 +317,7 @@ impl AgentControlPlane {
             system_role_provider_overrides: BTreeMap::new(),
             persona: String::new(),
             instructions: String::new(),
-            context_policy: json!({
-                "max_system_tokens": 12000,
-                "max_dynamic_context_tokens": 16000,
-                "max_catalog_tokens": 3000,
-            }),
-            execution_constraints: json!({
-                "max_active_capabilities": 64,
-                "max_advertised_tools": 48,
-                "max_runtime_rebuilds": 4,
-            }),
-            runtime_budget: json!({
-                "max_context_tokens": 32000,
-                "max_tool_calls_per_turn": 64,
-            }),
+            starter_prompts: Vec::new(),
         };
         self.create_with_initial_revision(
             owner,
@@ -474,6 +506,7 @@ impl AgentControlPlane {
         let revision = AgentPresetRevision {
             reference: compilation.candidate_revision_ref,
             payload: compilation.payload,
+            contribution_locks: compilation.contribution_locks,
             created_by: owner.clone(),
             created_at_ms: snapshot.created_at_ms,
             reason: request.reason,
@@ -516,6 +549,81 @@ impl AgentControlPlane {
             .await?
             .ok_or_else(|| not_found("AgentPresetRevision"))?;
         revision_api(&revision)
+    }
+
+    /// Compare one immutable, owner-scoped Revision's server-generated
+    /// ContributionLock set with the current formal Catalog and list current
+    /// owner-scoped bindings that still reference that Revision.
+    pub async fn revision_impact(
+        &self,
+        owner: &UserId,
+        preset_id: &str,
+        revision_number: u64,
+    ) -> Result<AgentPresetRevisionImpactResponse, ControlPlaneError> {
+        let stored = self.owned_preset(owner, preset_id).await?;
+        let revision = self
+            .store
+            .get_revision_number(&stored.preset.preset_id, revision_number)
+            .await?
+            .ok_or_else(|| not_found("AgentPresetRevision"))?;
+        let current_catalog = self.impact_catalog.current_contributions()?;
+        let diff = compare_revision_contribution_locks(
+            &revision.contribution_locks,
+            &current_catalog,
+        )
+        .map_err(|error| {
+            ControlPlaneError::canonical(
+                "PRESET_CONTRIBUTION_LOCK_INVALID",
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("revision impact comparison failed closed: {error}"),
+            )
+        })?;
+
+        let mut affected_consumers = Vec::new();
+        for binding in self.store.list_agent_bindings(owner).await? {
+            if binding.value.preset_revision_ref == revision.reference {
+                affected_consumers.push(RevisionImpactConsumerDto {
+                    kind: RevisionImpactConsumerKindDto::AgentBinding,
+                    consumer_id: format!(
+                        "{}:{}",
+                        binding.target.target_kind, binding.target.target_id
+                    ),
+                    target_kind: Some(binding.target.target_kind),
+                    binding_version: binding.value.binding_version,
+                });
+            }
+        }
+        for binding in self.store.list_remote_bindings(owner).await? {
+            if binding.agent_binding.preset_revision_ref == revision.reference {
+                affected_consumers.push(RevisionImpactConsumerDto {
+                    kind: RevisionImpactConsumerKindDto::RemoteBinding,
+                    consumer_id: binding.remote_binding_id.as_ref().to_owned(),
+                    target_kind: None,
+                    binding_version: binding.agent_binding.binding_version,
+                });
+            }
+        }
+        affected_consumers.sort_by(|left, right| {
+            let left_kind = match left.kind {
+                RevisionImpactConsumerKindDto::AgentBinding => 0,
+                RevisionImpactConsumerKindDto::RemoteBinding => 1,
+            };
+            let right_kind = match right.kind {
+                RevisionImpactConsumerKindDto::AgentBinding => 0,
+                RevisionImpactConsumerKindDto::RemoteBinding => 1,
+            };
+            (left_kind, left.consumer_id.as_str())
+                .cmp(&(right_kind, right.consumer_id.as_str()))
+        });
+
+        Ok(AgentPresetRevisionImpactResponse {
+            preset_revision_ref: wire_cast(&revision.reference)?,
+            catalog_digest: diff.catalog_digest.as_ref().to_owned(),
+            status: wire_cast(&diff.status)?,
+            summary: wire_cast(&diff.summary)?,
+            contributions: wire_cast(&diff.contributions)?,
+            affected_consumers,
+        })
     }
 
     /// Load the immutable Snapshot attached to one owner-scoped Preset
@@ -794,6 +902,7 @@ impl AgentControlPlane {
         let revision = AgentPresetRevision {
             reference: compilation.candidate_revision_ref,
             payload: compilation.payload,
+            contribution_locks: compilation.contribution_locks,
             created_by: owner.clone(),
             created_at_ms: snapshot.created_at_ms,
             reason: Some("Initial Revision".into()),
@@ -940,7 +1049,6 @@ impl AgentControlPlane {
 fn empty_document() -> nomifun_api_types::AgentPresetDocumentDto {
     nomifun_api_types::AgentPresetDocumentDto {
         schema_version: "1.0.0".into(),
-        surfaces: BTreeSet::from(["desktop".into(), "remote".into(), "web".into()]),
         model_route_refs: BTreeMap::new(),
         chat_route_records: BTreeMap::new(),
         initial_capabilities: Vec::new(),
@@ -950,20 +1058,7 @@ fn empty_document() -> nomifun_api_types::AgentPresetDocumentDto {
         system_role_provider_overrides: BTreeMap::new(),
         persona: String::new(),
         instructions: String::new(),
-        context_policy: json!({
-            "max_system_tokens": 12000,
-            "max_dynamic_context_tokens": 16000,
-            "max_catalog_tokens": 3000,
-        }),
-        execution_constraints: json!({
-            "max_active_capabilities": 64,
-            "max_advertised_tools": 48,
-            "max_runtime_rebuilds": 4,
-        }),
-        runtime_budget: json!({
-            "max_context_tokens": 32000,
-            "max_tool_calls_per_turn": 64,
-        }),
+        starter_prompts: Vec::new(),
     }
 }
 
@@ -1115,18 +1210,11 @@ fn binding_record_api(
 
 fn selection_api(
     reference: &nomifun_agent_contracts::CapabilityRef,
-    exposure: CapabilityExposure,
 ) -> Result<nomifun_api_types::CapabilitySelectionDto, ControlPlaneError> {
     wire_cast(&CapabilitySelection {
         capability: reference.clone(),
-        required: true,
-        exposure,
         action_allowlist: BTreeSet::new(),
         resource_binding_refs: Vec::new(),
-        destination_constraints: BTreeSet::new(),
-        context_budget_override: None,
-        tool_budget_override: None,
-        config: StrictJsonValue(json!({})),
     })
 }
 
@@ -1195,11 +1283,18 @@ fn not_found(subject: &str) -> ControlPlaneError {
 mod tests {
     use super::*;
     use crate::{
-        CompilerReleaseInputs, InMemoryControlPlaneStore, OfficialTemplateCatalog,
-        PresetPreviewCompiler, StaticCatalogProvider,
+        CatalogSnapshot, CompilerReleaseInputs, InMemoryControlPlaneStore,
+        OfficialTemplateCatalog, PresetPreviewCompiler, StaticCatalogProvider,
+        StaticRevisionImpactCatalogProvider,
     };
-    use nomifun_agent_contracts::{DigestHex, RuntimeProfileKind, RuntimeTarget, VersionString};
+    use nomifun_agent_contracts::{
+        CapabilityContributions, CapabilityConsumer, CapabilityId, CapabilityKind,
+        CapabilityManifest, CapabilityRef, DigestHex, LocalizedMetadata, PackageId, PackageRef,
+        PlatformConstraint, RuntimeProfileKind, RuntimeTarget, StrictJsonValue, VersionString,
+        capability_surface_declarations,
+    };
     use nomifun_agent_kernel::{CompilerEnvironment, MaterializedRegistry};
+    use serde_json::json;
 
     fn test_compiler(templates: &OfficialTemplateCatalog) -> PresetPreviewCompiler {
         let release = CompilerReleaseInputs {
@@ -1234,6 +1329,38 @@ mod tests {
         )
     }
 
+    fn catalog_manifest(
+        id: &str,
+        consumers: impl IntoIterator<Item = CapabilityConsumer>,
+    ) -> CapabilityManifest {
+        let package = PackageRef {
+            id: PackageId::from(format!("test.{id}")),
+            version: VersionString::from("1.0.0"),
+        };
+        CapabilityManifest {
+            id: CapabilityId::from(id),
+            version: VersionString::from("1.0.0"),
+            kind: CapabilityKind::Tool,
+            package,
+            display: LocalizedMetadata {
+                name: id.to_owned(),
+                description: format!("test {id}"),
+                localized_names: BTreeMap::new(),
+                localized_descriptions: BTreeMap::new(),
+            },
+            requires: Vec::new(),
+            conflicts: Vec::new(),
+            supported_surfaces: capability_surface_declarations(["desktop"], consumers),
+            requires_runtime_features: Vec::new(),
+            supported_platforms: vec![PlatformConstraint::Any],
+            config_schema: StrictJsonValue(json!({
+                "type": "object",
+                "additionalProperties": false
+            })),
+            contributions: CapabilityContributions::default(),
+        }
+    }
+
     #[test]
     fn official_key_parser_is_exactly_the_frozen_seven() {
         assert_eq!(
@@ -1242,6 +1369,64 @@ mod tests {
         );
         assert!(parse_official_key("research").is_none());
         assert!(parse_official_key("autowork.executor").is_none());
+    }
+
+    #[test]
+    fn shared_catalog_resolves_agent_and_gateway_and_filters_agent_only_view() {
+        let shared = catalog_manifest(
+            "knowledge.search",
+            [CapabilityConsumer::Agent, CapabilityConsumer::Gateway],
+        );
+        let knowledge_only =
+            catalog_manifest("browser.render_content", [CapabilityConsumer::Knowledge]);
+        let snapshot = CatalogSnapshot {
+            capabilities: vec![shared, knowledge_only],
+            package_sources: BTreeMap::new(),
+            ..CatalogSnapshot::default()
+        };
+        let catalog = Arc::new(StaticCatalogProvider::new(snapshot));
+        let templates = OfficialTemplateCatalog::load().expect("official templates");
+        let control_plane = AgentControlPlane::new(
+            Arc::new(InMemoryControlPlaneStore::new()),
+            catalog,
+            templates.clone(),
+            test_compiler(&templates),
+        );
+        let shared_ref = CapabilityRef {
+            id: CapabilityId::from("knowledge.search"),
+            version: VersionString::from("1.0.0"),
+        };
+        let knowledge_only_ref = CapabilityRef {
+            id: CapabilityId::from("browser.render_content"),
+            version: VersionString::from("1.0.0"),
+        };
+
+        let agent_lock = control_plane
+            .resolve_capability(&shared_ref, CapabilityConsumer::Agent)
+            .expect("Agent must resolve shared capability");
+        let gateway_lock = control_plane
+            .resolve_capability(&shared_ref, CapabilityConsumer::Gateway)
+            .expect("Gateway must resolve the same shared capability");
+        assert_eq!(agent_lock.contribution, gateway_lock.contribution);
+        assert!(
+            control_plane
+                .resolve_capability(&knowledge_only_ref, CapabilityConsumer::Agent)
+                .is_err(),
+            "Knowledge-only capability must not enter the Agent consumer view"
+        );
+        assert_eq!(
+            control_plane
+                .catalog()
+                .expect("Agent catalog")
+                .capabilities
+                .iter()
+                .map(|item| {
+                    let id: &str = item.capability.id.as_ref();
+                    id.to_owned()
+                })
+                .collect::<Vec<String>>(),
+            vec!["knowledge.search"]
+        );
     }
 
     #[tokio::test]
@@ -1376,5 +1561,114 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn revision_impact_is_owner_scoped_read_only_and_lists_bound_consumers() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let catalog = Arc::new(StaticCatalogProvider::new(Default::default()));
+        let templates = OfficialTemplateCatalog::load().unwrap();
+        let compiler = test_compiler(&templates);
+        let control_plane = AgentControlPlane::new(
+            store.clone(),
+            catalog,
+            templates,
+            compiler,
+        )
+        .with_revision_impact_catalog_provider(Arc::new(
+            StaticRevisionImpactCatalogProvider::new(Vec::new()),
+        ));
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let other_owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        let created = control_plane
+            .create_from_template(
+                &owner,
+                "chat.minimal",
+                CreateAgentPresetFromTemplateRequest {
+                    display_name: "Minimal".into(),
+                    description: None,
+                    resource_bindings: Vec::new(),
+                    model_route_refs: BTreeMap::new(),
+                    chat_route_records: BTreeMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let revision = created.revision.as_ref().expect("initial Revision");
+        let revision_ref: PresetRevisionRef = wire_cast(&revision.reference).unwrap();
+        let snapshot = store
+            .get_snapshot(&revision_ref)
+            .await
+            .unwrap()
+            .expect("persisted Snapshot");
+        let binding_value = AgentBindingValue {
+            preset_revision_ref: revision_ref.clone(),
+            resolved_snapshot_ref: snapshot.snapshot_ref.clone(),
+            typed_resource_bindings: Vec::new(),
+            binding_version: 1,
+        };
+        store
+            .put_agent_binding(
+                StoredAgentBinding {
+                    target: AgentBindingTarget {
+                        target_kind: "automation".into(),
+                        target_id: "job-1".into(),
+                    },
+                    owner_user_id: owner.clone(),
+                    value: binding_value.clone(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .insert_remote_binding(RemoteBinding {
+                remote_binding_id: RemoteBindingId::from("remote-impact-1"),
+                owner_user_id: owner.clone(),
+                name: "Remote impact".into(),
+                agent_binding: binding_value,
+            })
+            .await
+            .unwrap();
+
+        let impact = control_plane
+            .revision_impact(
+                &owner,
+                &created.preset.preset_id,
+                revision.reference.revision,
+            )
+            .await
+            .unwrap();
+        assert_eq!(impact.preset_revision_ref, revision.reference);
+        assert_eq!(impact.affected_consumers.len(), 2);
+        assert_eq!(
+            impact.affected_consumers[0].kind,
+            RevisionImpactConsumerKindDto::AgentBinding
+        );
+        assert_eq!(
+            impact.affected_consumers[1].kind,
+            RevisionImpactConsumerKindDto::RemoteBinding
+        );
+
+        assert!(
+            control_plane
+                .revision_impact(
+                    &other_owner,
+                    &created.preset.preset_id,
+                    revision.reference.revision,
+                )
+                .await
+                .is_err(),
+            "another owner must not inspect Revision provenance or impact"
+        );
+        let unchanged = control_plane
+            .get_revision(
+                &owner,
+                &created.preset.preset_id,
+                revision.reference.revision,
+            )
+            .await
+            .unwrap();
+        assert_eq!(unchanged, *revision, "impact reads must not rewrite Revision");
     }
 }

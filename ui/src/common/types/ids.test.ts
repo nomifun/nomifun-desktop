@@ -26,7 +26,6 @@ import {
   parseMcpServerId,
   parseMessageId,
   parseOptionalEntityId,
-  parsePresetId,
   parseProviderId,
   parseCsAgentId,
   parseRemoteAgentId,
@@ -257,15 +256,4 @@ describe('entity ids', () => {
     }
   });
 
-  test('preset_id accepts only a bare canonical lowercase UUIDv7', () => {
-    const presetId = '0190f5fe-7c00-7a00-8000-000000000017';
-    expect(parsePresetId(presetId)).toBe(presetId);
-    for (const value of [
-      ...invalidBusinessIdValues(presetId, 'preset'),
-      'office',
-      'builtin:office',
-    ]) {
-      expectInvalidEntityId(() => parsePresetId(value));
-    }
-  });
 });

@@ -42,7 +42,6 @@ pub fn extension_routes(state: ExtensionRouterState) -> Router {
         // Query routes
         .route("/api/extensions", get(get_loaded_extensions))
         .route("/api/extensions/themes", get(get_themes))
-        .route("/api/extensions/presets", get(get_presets))
         .route("/api/extensions/agents", get(get_agents))
         .route("/api/extensions/mcp-servers", get(get_mcp_servers))
         .route("/api/extensions/skills", get(get_skills))
@@ -111,38 +110,6 @@ async fn get_themes(
                     "is_preset": true,
                     "created_at": timestamp,
                     "updated_at": timestamp,
-                })
-            })
-            .collect(),
-    );
-    Ok(Json(ApiResponse::ok(value)))
-}
-
-/// `GET /api/extensions/presets` — get all resolved presets.
-async fn get_presets(
-    State(state): State<ExtensionRouterState>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    let presets = state.registry.get_presets().await;
-    let value = serde_json::Value::Array(
-        presets
-            .into_iter()
-            .map(|preset| {
-                serde_json::json!({
-                    "source_key": preset.source_key,
-                    "name": preset.name,
-                    "description": preset.description,
-                    "icon": preset.icon,
-                    "preferred_agent_id": preset.preferred_agent_id,
-                    "context": preset.context.unwrap_or_default(),
-                    "models": preset.models,
-                    "enabled_skills": preset.enabled_skills,
-                    "prompts": preset.prompts,
-                    "is_preset": true,
-                    "is_builtin": false,
-                    "enabled": true,
-                    "_source": "extension",
-                    "extension_name": preset.extension_name,
-                    "_kind": "preset",
                 })
             })
             .collect(),
@@ -493,6 +460,22 @@ mod tests {
     fn extension_routes_builds_router() {
         let state = make_state();
         let _router = extension_routes(state);
+    }
+
+    #[tokio::test]
+    async fn removed_preset_route_returns_not_found() {
+        let (router, _tmp, _ext_dir) = make_router_with_extension().await;
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/extensions/presets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     async fn make_router_with_extension() -> (Router, tempfile::TempDir, PathBuf) {

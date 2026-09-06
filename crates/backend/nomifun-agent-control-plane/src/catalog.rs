@@ -2,9 +2,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use nomifun_agent_contracts::{
-    CapabilityId, CapabilityManifest, CapabilityRef, CanonicalErrorCode,
-    McpToolCapabilityMapping, OfficialPresetKey, OfficialPresetSeedManifestPayload, PackageRef,
-    PluginSourceKind, SkillDefinition, SkillRef, official_preset_seed_manifest_payload,
+    CapabilityCatalogEntry, CapabilityCatalogMaterialization,
+    CapabilityCatalogMaterializer, CapabilityConsumer, CapabilityId,
+    CapabilityManifest, CapabilityOwner, CapabilityProvenance, CapabilityRef,
+    CapabilityReleaseState, CanonicalErrorCode, CatalogAvailability,
+    ContributionId, ContributionSourceKind, McpBindingId,
+    McpToolCapabilityMapping, OfficialPresetKey,
+    OfficialPresetSeedManifestPayload, PackageRef, PluginSourceKind,
+    SkillDefinition, SkillRef, StableSourceIdentity,
+    official_preset_seed_manifest_payload,
 };
 use nomifun_api_types::{
     AgentCatalogResponse, CapabilityCatalogItemDto, CatalogMaterializationStateDto,
@@ -29,7 +35,20 @@ impl CatalogSnapshot {
     pub fn find_capability(&self, reference: &CapabilityRef) -> Option<&CapabilityManifest> {
         self.capabilities.iter().find(|capability| {
             capability.id == reference.id && capability.version == reference.version
+                && capability.supports_consumer(CapabilityConsumer::Agent)
         })
+    }
+
+    pub fn capability_catalog_entry(
+        &self,
+        reference: &CapabilityRef,
+    ) -> Result<Option<CapabilityCatalogEntry>, ControlPlaneError> {
+        let Some(manifest) = self.capabilities.iter().find(|capability| {
+            capability.id == reference.id && capability.version == reference.version
+        }) else {
+            return Ok(None);
+        };
+        self.materialize_capability_entry(manifest).map(Some)
     }
 
     pub fn find_skill(&self, reference: &SkillRef) -> Option<&SkillDefinition> {
@@ -49,11 +68,29 @@ impl CatalogSnapshot {
         let capabilities = self
             .capabilities
             .iter()
+            .filter(|capability| {
+                capability.supports_consumer(CapabilityConsumer::Agent)
+                    && self.source_kind(&capability.package)
+                        != PluginSourceKind::TestFixture
+            })
             .map(|capability| {
-                let unavailable_code = self
-                    .unavailable_capabilities
-                    .get(&capability.id)
-                    .map(|code| code.as_ref().to_owned());
+                let entry = self.materialize_capability_entry(capability)?;
+                let unavailable_code = match entry
+                    .availability_for(CapabilityConsumer::Agent)
+                {
+                    Some(CatalogAvailability::Active) => None,
+                    Some(CatalogAvailability::Unavailable { reason })
+                    | Some(CatalogAvailability::Disabled { reason }) => {
+                        Some(reason.clone())
+                    }
+                    Some(CatalogAvailability::NeedsRuntime { .. }) => {
+                        Some("CAPABILITY_NEEDS_RUNTIME".to_owned())
+                    }
+                    Some(CatalogAvailability::ContractMismatch { .. }) => {
+                        Some("CAPABILITY_CONTRACT_MISMATCH".to_owned())
+                    }
+                    None => Some("CAPABILITY_CONSUMER_UNSUPPORTED".to_owned()),
+                };
                 Ok(CapabilityCatalogItemDto {
                     capability: ExactCatalogRefDto {
                         id: capability.id.as_ref().to_owned(),
@@ -73,7 +110,7 @@ impl CatalogSnapshot {
                         CatalogMaterializationStateDto::Materialized
                     },
                     unavailable_code,
-                    supported_surfaces: capability.supported_surfaces.clone(),
+                    supported_surfaces: entry.host_surfaces.clone(),
                     required_runtime_features: capability
                         .requires_runtime_features
                         .iter()
@@ -162,6 +199,113 @@ impl CatalogSnapshot {
             capabilities,
             skills,
             mcp_tools,
+        })
+    }
+
+    fn materialize_capability_entry(
+        &self,
+        manifest: &CapabilityManifest,
+    ) -> Result<CapabilityCatalogEntry, ControlPlaneError> {
+        let source_kind = self.source_kind(&manifest.package);
+        let release_state = match source_kind {
+            PluginSourceKind::TestFixture => CapabilityReleaseState::TestHost,
+            PluginSourceKind::Bundled | PluginSourceKind::ManagedLocal => {
+                CapabilityReleaseState::PublishedActive
+            }
+        };
+        let mcp_mapping = self.mcp_tools.iter().find(|mapping| {
+            mapping.capability.id == manifest.id
+                && mapping.capability.version == manifest.version
+        });
+        let provenance = if let Some(mapping) = mcp_mapping {
+            CapabilityProvenance {
+                owner: CapabilityOwner::Package {
+                    package: manifest.package.clone(),
+                },
+                source_kind: ContributionSourceKind::McpBinding,
+                source_identity: StableSourceIdentity::from(format!(
+                    "mcp:{}",
+                    mapping.server_id.as_ref()
+                )),
+                mount_id: None,
+                miniapp_id: None,
+                mcp_binding_id: Some(McpBindingId::from(format!(
+                    "{}:{}",
+                    mapping.server_id.as_ref(),
+                    mapping.canonical_tool_key.as_ref()
+                ))),
+                artifact_digest: Some(mapping.schema_digest.clone()),
+            }
+        } else {
+            match source_kind {
+                PluginSourceKind::Bundled | PluginSourceKind::TestFixture => {
+                    CapabilityProvenance {
+                        owner: CapabilityOwner::Package {
+                            package: manifest.package.clone(),
+                        },
+                        source_kind: ContributionSourceKind::PlatformBuiltin,
+                        source_identity: StableSourceIdentity::from(
+                            manifest.package.id.as_ref().to_owned(),
+                        ),
+                        mount_id: None,
+                        miniapp_id: None,
+                        mcp_binding_id: None,
+                        artifact_digest: None,
+                    }
+                }
+                PluginSourceKind::ManagedLocal => {
+                    return Err(ControlPlaneError::canonical(
+                        "CAPABILITY_PROVENANCE_UNAVAILABLE",
+                        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                        format!(
+                            "managed capability {}@{} is missing its formal mount provenance",
+                            manifest.id.as_ref(),
+                            manifest.version.as_ref()
+                        ),
+                    ));
+                }
+            }
+        };
+        let consumers = manifest.supported_consumers().map_err(|reason| {
+            ControlPlaneError::canonical(
+                "CAPABILITY_CATALOG_INVALID",
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                reason,
+            )
+        })?;
+        let mut availability = consumers
+            .iter()
+            .copied()
+            .map(|consumer| (consumer, CatalogAvailability::Active))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(code) = self.unavailable_capabilities.get(&manifest.id) {
+            if consumers.contains(&CapabilityConsumer::Agent) {
+                availability.insert(
+                    CapabilityConsumer::Agent,
+                    CatalogAvailability::Unavailable {
+                        reason: code.as_ref().to_owned(),
+                    },
+                );
+            }
+        }
+        CapabilityCatalogMaterializer::materialize(
+            CapabilityCatalogMaterialization {
+                manifest: manifest.clone(),
+                contribution_id: ContributionId::from(format!(
+                    "capability:{}",
+                    manifest.id.as_ref()
+                )),
+                provenance,
+                release_state,
+                availability,
+            },
+        )
+        .map_err(|error| {
+            ControlPlaneError::canonical(
+                "CAPABILITY_CATALOG_INVALID",
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                error.to_string(),
+            )
         })
     }
 }

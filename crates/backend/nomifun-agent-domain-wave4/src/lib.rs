@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, ArtifactEnvelope, CapabilityActionDescriptor,
-    CapabilityContributions, CapabilityId, CapabilityKind, CapabilityManifest,
+    CapabilityConsumer, CapabilityContributions, CapabilityId, CapabilityKind,
+    CapabilityManifest,
     CanonicalSchemaRef, CancellationDescriptor, CorrelationId,
     DeclaredServiceViewDescriptor, DomainOutboxPortDescriptor, EffectClass,
     HostPortBindingDescriptor, IdempotencyKey,
@@ -27,7 +28,8 @@ use nomifun_agent_contracts::{
     PluginSourceKind, PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod,
     PrincipalRef, ResolvedSnapshotRef, ResourceBindingId, ResourceId, ResourceKind, ScopeKey,
     StrictJsonValue, ToolPresentationKind, TypedCommandPortDescriptor, TypedResourceBinding,
-    TypedResourceBindings, ValidatedPluginConfig, VersionString, digest_payload,
+    TypedResourceBindings, ValidatedPluginConfig, VersionString,
+    capability_surface_declarations, digest_payload,
 };
 use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, KernelError, PluginRegistration,
@@ -1302,10 +1304,10 @@ fn capability_manifest(
         display: localized(spec.display_name, spec.description),
         requires: Vec::new(),
         conflicts: Vec::new(),
-        supported_surfaces: AGENT_SURFACES
-            .iter()
-            .map(|surface| (*surface).to_owned())
-            .collect(),
+        supported_surfaces: capability_surface_declarations(
+            AGENT_SURFACES.iter().copied(),
+            [CapabilityConsumer::Agent],
+        ),
         requires_runtime_features: Vec::new(),
         supported_platforms: vec![PlatformConstraint::Any],
         config_schema: object_schema(false),

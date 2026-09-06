@@ -8,6 +8,12 @@ HTTP 上的 JSON 用于命令/查询，WebSocket 用于流式事件。
 `crates/backend/` 下的各路由模块；源码即权威参考。下方列出了各分组的
 基础路径与对应的路由 owner——请从那里开始查阅。
 
+> **Agent API 当前合同：**用户通过 `/agent` 工作台完成 Agent 设计和试用；机器资源
+> 使用 `/api/agent-presets/*`、`/api/agent-preset-templates/*`、
+> `/api/agent-sessions/*`、`/api/agent-bindings/*` 和 `/api/capabilities`。
+> 旧 `/api/presets` 不再是 canonical API；当前重构工作树仍有 residual 时，以
+> `GLOBAL-CLOSURE-TODO.zh.md` 的 AP-6/AP-7 状态为准，不把历史兼容路径当作可用合同。
+
 ## Base URL
 
 | 宿主 | 默认 base URL | 备注 |
@@ -73,10 +79,10 @@ NomiFun 启动时进入三种鉴权策略之一：
 | 鉴权 —— 登录 / 设置 / 状态 / 刷新 | `/login`、`/logout`、`/api/auth/*`、`/api/ws-token`、`/qr-login` | 混合（登录/设置/qr-login：公共；其余：已鉴权） | [`nomifun-auth/src/routes.rs`](../../crates/backend/nomifun-auth/src/routes.rs) |
 | 鉴权 —— 仅本地 admin/internal | `/api/webui/*` | 仅本地模式 | 同上 |
 | 会话 | `/api/conversations/*`、`/api/messages/search` | 已鉴权 | [`nomifun-conversation/src/routes.rs`](../../crates/backend/nomifun-conversation/src/routes.rs)、[`routes_aux.rs`](../../crates/backend/nomifun-conversation/src/routes_aux.rs) |
-| 智能体 | `/api/agents/*` | 已鉴权 | [`nomifun-ai-agent/src/routes/agent.rs`](../../crates/backend/nomifun-ai-agent/src/routes/agent.rs) |
+| Agent 工作台控制平面 | `/api/agent-presets/*`、`/api/agent-preset-templates/*`、`/api/capabilities`、`/api/mcp-tool-mappings`、`/api/agent-bindings/*` | 已鉴权 / owner-scoped | [`nomifun-agent-control-plane/src/routes.rs`](../../crates/backend/nomifun-agent-control-plane/src/routes.rs)、[`nomifun-app/src/router/agent_platform.rs`](../../crates/backend/nomifun-app/src/router/agent_platform.rs) |
+| Agent Session | `/api/agent-sessions/*` | 已鉴权 / owner-scoped | [`nomifun-agent-platform/src/platform.rs`](../../crates/backend/nomifun-agent-platform/src/platform.rs)、[`nomifun-app/src/router/agent_platform.rs`](../../crates/backend/nomifun-app/src/router/agent_platform.rs) |
+| 旧 Agent/模型信息查询 | `/api/agents/*` | 已鉴权 | [`nomifun-ai-agent/src/routes/agent.rs`](../../crates/backend/nomifun-ai-agent/src/routes/agent.rs)；不承担 AgentPreset authoring |
 | SSH 主机 | `/api/ssh-hosts/*` | 仅实例主人 | [`nomifun-ssh/src/routes.rs`](../../crates/backend/nomifun-ssh/src/routes.rs) |
-| 设定 | `/api/presets/*` | 已鉴权 | [`nomifun-preset/src/routes.rs`](../../crates/backend/nomifun-preset/src/routes.rs) |
-| 设定标签 | `/api/preset-tags/*` | 已鉴权 | 同上 |
 | MCP 服务 | `/api/mcp/*` | 已鉴权 | [`nomifun-mcp/src/routes.rs`](../../crates/backend/nomifun-mcp/src/routes.rs) |
 | 技能 | `/api/skills/*` | 已鉴权 | [`nomifun-extension/src/skill_routes.rs`](../../crates/backend/nomifun-extension/src/skill_routes.rs) |
 | 扩展 | `/api/extensions/*` | 已鉴权 | [`nomifun-extension/src/routes.rs`](../../crates/backend/nomifun-extension/src/routes.rs) |
@@ -110,6 +116,24 @@ NomiFun 启动时进入三种鉴权策略之一：
 
 如需各路由具体支持的方法，请阅读对应的 `routes.rs` 文件——每个 router
 都在源文件内联声明自身的路由。
+
+### Agent 工作台控制平面
+
+Agent 工作台的请求顺序由服务端控制，而不是由客户端拼接 Snapshot：
+
+```text
+官方 seed / 用户 Draft
+  → /api/agent-presets/... Preview
+  → canonical Compiler
+  → immutable Revision + ContributionLock[]
+  → ResolvedSnapshot
+  → /api/agent-sessions
+```
+
+客户端不得提交 Snapshot digest、Mount ID、内部 Revision ID、完整 Binding 或裸
+canonical JSON 来驱动执行。`agent_snapshot` 是 Conversation、Cron、Agent
+Execution participant 和 Template participant 的统一持久化执行投影名称；061/062
+migration 的当前状态和尚未清零的旧引用见 AP ledger。
 
 ### 选取的鉴权端点
 

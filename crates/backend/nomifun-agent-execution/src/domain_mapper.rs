@@ -137,7 +137,7 @@ pub(crate) fn participant(
         source_agent_id: row.source_agent_id,
         preset_id: row.preset_id,
         preset_revision: row.preset_revision,
-        preset_snapshot: parse_optional_json("participant.preset_snapshot", row.preset_snapshot)?,
+        agent_snapshot: parse_optional_json("participant.agent_snapshot", row.agent_snapshot)?,
         provider_id: row.provider_id,
         model: row.model,
         role: row.role,

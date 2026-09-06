@@ -116,13 +116,79 @@
   },
   "agent_preset_revision": {
     "$defs": {
-      "CapabilityExposure": {
-        "enum": [
-          "advertised",
-          "discoverable",
-          "hidden"
+      "AgentPresetRevisionPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "chat_route_records": {
+            "additionalProperties": {
+              "$ref": "#/$defs/ChatRouteRecord"
+            },
+            "description": "Complete route facts used by the Fresh-v4 persistence writer. Legacy\nopaque IDs are not sufficient to construct a provider request.",
+            "type": "object"
+          },
+          "initial_capabilities": {
+            "items": {
+              "$ref": "#/$defs/CapabilitySelection"
+            },
+            "type": "array"
+          },
+          "instructions": {
+            "type": "string"
+          },
+          "model_route_refs": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "on_demand_capabilities": {
+            "items": {
+              "$ref": "#/$defs/CapabilitySelection"
+            },
+            "type": "array"
+          },
+          "persona": {
+            "type": "string"
+          },
+          "resource_bindings": {
+            "items": {
+              "$ref": "#/$defs/TypedResourceBinding"
+            },
+            "type": "array"
+          },
+          "schema_version": {
+            "type": "string"
+          },
+          "skill_bindings": {
+            "items": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "type": "array"
+          },
+          "starter_prompts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "system_role_provider_overrides": {
+            "additionalProperties": {
+              "$ref": "#/$defs/RoleProviderSelection"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "schema_version",
+          "model_route_refs",
+          "initial_capabilities",
+          "on_demand_capabilities",
+          "skill_bindings",
+          "resource_bindings",
+          "persona",
+          "instructions"
         ],
-        "type": "string"
+        "type": "object"
       },
       "CapabilitySelection": {
         "additionalProperties": false,
@@ -137,48 +203,778 @@
           "capability": {
             "$ref": "#/$defs/ExactVersionRef"
           },
-          "config": true,
-          "context_budget_override": {
-            "format": "uint32",
+          "resource_binding_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "capability"
+        ],
+        "type": "object"
+      },
+      "ChatRouteCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "config_revision_digest": {
+            "type": "string"
+          },
+          "connection_config_ref": {
+            "type": "string"
+          },
+          "credential_ref": {
+            "type": "string"
+          },
+          "features": {
+            "items": {
+              "$ref": "#/$defs/ChatRouteFeature"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "model": {
+            "type": "string"
+          },
+          "model_route_id": {
+            "type": "string"
+          },
+          "model_route_revision": {
+            "format": "uint64",
             "minimum": 0,
+            "type": "integer"
+          },
+          "protocol": {
+            "$ref": "#/$defs/ChatRouteProtocol"
+          },
+          "provider_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_route_id",
+          "model_route_revision",
+          "provider_id",
+          "model",
+          "protocol",
+          "connection_config_ref",
+          "config_revision_digest",
+          "credential_ref",
+          "features"
+        ],
+        "type": "object"
+      },
+      "ChatRouteFeature": {
+        "enum": [
+          "text_input",
+          "image_input",
+          "audio_input",
+          "text_output",
+          "audio_output",
+          "tool_calls",
+          "reasoning",
+          "reasoning_signature",
+          "prompt_cache",
+          "structured_output",
+          "provider_round_state",
+          "native_responses_items"
+        ],
+        "type": "string"
+      },
+      "ChatRouteProtocol": {
+        "enum": [
+          "anthropic",
+          "openai_chat",
+          "openai_responses",
+          "gemini",
+          "bedrock",
+          "vertex"
+        ],
+        "type": "string"
+      },
+      "ChatRouteRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "failovers": {
+            "items": {
+              "$ref": "#/$defs/ChatRouteCandidate"
+            },
+            "type": "array"
+          },
+          "primary": {
+            "$ref": "#/$defs/ChatRouteCandidate"
+          },
+          "schema": {
+            "$ref": "#/$defs/ChatRouteRecordSchema"
+          },
+          "task": {
+            "$ref": "#/$defs/ChatRouteTask"
+          }
+        },
+        "required": [
+          "schema",
+          "task",
+          "primary",
+          "failovers"
+        ],
+        "type": "object"
+      },
+      "ChatRouteRecordSchema": {
+        "enum": [
+          "nomifun.chat-route-record.v1"
+        ],
+        "type": "string"
+      },
+      "ChatRouteTask": {
+        "enum": [
+          "agent_chat"
+        ],
+        "type": "string"
+      },
+      "ContributionLock": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_digest": {
+            "type": "string"
+          },
+          "contribution_id": {
+            "type": "string"
+          },
+          "mcp_binding_id": {
             "type": [
-              "integer",
+              "string",
               "null"
             ]
           },
-          "destination_constraints": {
+          "miniapp_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mount_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_identity": {
+            "type": "string"
+          },
+          "source_kind": {
+            "$ref": "#/$defs/ContributionSourceKind"
+          }
+        },
+        "required": [
+          "source_kind",
+          "source_identity",
+          "contribution_id",
+          "contract_digest"
+        ],
+        "type": "object"
+      },
+      "ContributionSourceKind": {
+        "enum": [
+          "platform_builtin",
+          "plugin_mount",
+          "miniapp_active_release",
+          "mcp_binding"
+        ],
+        "type": "string"
+      },
+      "ExactRoleContractRef": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_digest": {
+            "type": "string"
+          },
+          "key": {
+            "$ref": "#/$defs/RoleContractKey"
+          }
+        },
+        "required": [
+          "key",
+          "contract_digest"
+        ],
+        "type": "object"
+      },
+      "ExactVersionRef": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "version"
+        ],
+        "type": "object"
+      },
+      "PresetRevisionRef": {
+        "additionalProperties": false,
+        "properties": {
+          "preset_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision_digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "preset_id",
+          "revision",
+          "revision_digest"
+        ],
+        "type": "object"
+      },
+      "RoleContractKey": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "type": "string"
+          },
+          "role_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role_id",
+          "contract_version"
+        ],
+        "type": "object"
+      },
+      "RoleProviderSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "provider_mount_id": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/$defs/ExactRoleContractRef"
+          }
+        },
+        "required": [
+          "role",
+          "provider_mount_id"
+        ],
+        "type": "object"
+      },
+      "TypedResourceBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "connection_config_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operations": {
             "items": {
               "type": "string"
             },
             "type": "array",
             "uniqueItems": true
           },
-          "exposure": {
-            "$ref": "#/$defs/CapabilityExposure"
+          "owner_id": {
+            "type": "string"
           },
-          "required": {
-            "type": "boolean"
+          "resource_id": {
+            "type": "string"
+          },
+          "resource_kind": {
+            "type": "string"
+          },
+          "typed_parameters": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "binding_id",
+          "resource_kind",
+          "resource_id",
+          "owner_id",
+          "operations"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "contribution_locks": {
+        "items": {
+          "$ref": "#/$defs/ContributionLock"
+        },
+        "type": "array"
+      },
+      "created_at_ms": {
+        "format": "int64",
+        "type": "integer"
+      },
+      "created_by": {
+        "type": "string"
+      },
+      "payload": {
+        "$ref": "#/$defs/AgentPresetRevisionPayload"
+      },
+      "reason": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "reference": {
+        "$ref": "#/$defs/PresetRevisionRef"
+      }
+    },
+    "required": [
+      "reference",
+      "payload",
+      "contribution_locks",
+      "created_by",
+      "created_at_ms"
+    ],
+    "title": "AgentPresetRevision",
+    "type": "object"
+  },
+  "agent_preset_revision_digest_input": {
+    "$defs": {
+      "AgentPresetRevisionPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "chat_route_records": {
+            "additionalProperties": {
+              "$ref": "#/$defs/ChatRouteRecord"
+            },
+            "description": "Complete route facts used by the Fresh-v4 persistence writer. Legacy\nopaque IDs are not sufficient to construct a provider request.",
+            "type": "object"
+          },
+          "initial_capabilities": {
+            "items": {
+              "$ref": "#/$defs/CapabilitySelection"
+            },
+            "type": "array"
+          },
+          "instructions": {
+            "type": "string"
+          },
+          "model_route_refs": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "on_demand_capabilities": {
+            "items": {
+              "$ref": "#/$defs/CapabilitySelection"
+            },
+            "type": "array"
+          },
+          "persona": {
+            "type": "string"
+          },
+          "resource_bindings": {
+            "items": {
+              "$ref": "#/$defs/TypedResourceBinding"
+            },
+            "type": "array"
+          },
+          "schema_version": {
+            "type": "string"
+          },
+          "skill_bindings": {
+            "items": {
+              "$ref": "#/$defs/ExactVersionRef"
+            },
+            "type": "array"
+          },
+          "starter_prompts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "system_role_provider_overrides": {
+            "additionalProperties": {
+              "$ref": "#/$defs/RoleProviderSelection"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "schema_version",
+          "model_route_refs",
+          "initial_capabilities",
+          "on_demand_capabilities",
+          "skill_bindings",
+          "resource_bindings",
+          "persona",
+          "instructions"
+        ],
+        "type": "object"
+      },
+      "CapabilitySelection": {
+        "additionalProperties": false,
+        "properties": {
+          "action_allowlist": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "capability": {
+            "$ref": "#/$defs/ExactVersionRef"
           },
           "resource_binding_refs": {
             "items": {
               "type": "string"
             },
             "type": "array"
-          },
-          "tool_budget_override": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
           }
         },
         "required": [
-          "capability",
-          "required",
-          "exposure",
-          "config"
+          "capability"
+        ],
+        "type": "object"
+      },
+      "ChatRouteCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "config_revision_digest": {
+            "type": "string"
+          },
+          "connection_config_ref": {
+            "type": "string"
+          },
+          "credential_ref": {
+            "type": "string"
+          },
+          "features": {
+            "items": {
+              "$ref": "#/$defs/ChatRouteFeature"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "model": {
+            "type": "string"
+          },
+          "model_route_id": {
+            "type": "string"
+          },
+          "model_route_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocol": {
+            "$ref": "#/$defs/ChatRouteProtocol"
+          },
+          "provider_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_route_id",
+          "model_route_revision",
+          "provider_id",
+          "model",
+          "protocol",
+          "connection_config_ref",
+          "config_revision_digest",
+          "credential_ref",
+          "features"
+        ],
+        "type": "object"
+      },
+      "ChatRouteFeature": {
+        "enum": [
+          "text_input",
+          "image_input",
+          "audio_input",
+          "text_output",
+          "audio_output",
+          "tool_calls",
+          "reasoning",
+          "reasoning_signature",
+          "prompt_cache",
+          "structured_output",
+          "provider_round_state",
+          "native_responses_items"
+        ],
+        "type": "string"
+      },
+      "ChatRouteProtocol": {
+        "enum": [
+          "anthropic",
+          "openai_chat",
+          "openai_responses",
+          "gemini",
+          "bedrock",
+          "vertex"
+        ],
+        "type": "string"
+      },
+      "ChatRouteRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "failovers": {
+            "items": {
+              "$ref": "#/$defs/ChatRouteCandidate"
+            },
+            "type": "array"
+          },
+          "primary": {
+            "$ref": "#/$defs/ChatRouteCandidate"
+          },
+          "schema": {
+            "$ref": "#/$defs/ChatRouteRecordSchema"
+          },
+          "task": {
+            "$ref": "#/$defs/ChatRouteTask"
+          }
+        },
+        "required": [
+          "schema",
+          "task",
+          "primary",
+          "failovers"
+        ],
+        "type": "object"
+      },
+      "ChatRouteRecordSchema": {
+        "enum": [
+          "nomifun.chat-route-record.v1"
+        ],
+        "type": "string"
+      },
+      "ChatRouteTask": {
+        "enum": [
+          "agent_chat"
+        ],
+        "type": "string"
+      },
+      "ContributionLock": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_digest": {
+            "type": "string"
+          },
+          "contribution_id": {
+            "type": "string"
+          },
+          "mcp_binding_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "miniapp_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mount_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_identity": {
+            "type": "string"
+          },
+          "source_kind": {
+            "$ref": "#/$defs/ContributionSourceKind"
+          }
+        },
+        "required": [
+          "source_kind",
+          "source_identity",
+          "contribution_id",
+          "contract_digest"
+        ],
+        "type": "object"
+      },
+      "ContributionSourceKind": {
+        "enum": [
+          "platform_builtin",
+          "plugin_mount",
+          "miniapp_active_release",
+          "mcp_binding"
+        ],
+        "type": "string"
+      },
+      "ExactRoleContractRef": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_digest": {
+            "type": "string"
+          },
+          "key": {
+            "$ref": "#/$defs/RoleContractKey"
+          }
+        },
+        "required": [
+          "key",
+          "contract_digest"
+        ],
+        "type": "object"
+      },
+      "ExactVersionRef": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "version"
+        ],
+        "type": "object"
+      },
+      "RoleContractKey": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "type": "string"
+          },
+          "role_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role_id",
+          "contract_version"
+        ],
+        "type": "object"
+      },
+      "RoleProviderSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "provider_mount_id": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/$defs/ExactRoleContractRef"
+          }
+        },
+        "required": [
+          "role",
+          "provider_mount_id"
+        ],
+        "type": "object"
+      },
+      "TypedResourceBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "connection_config_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "owner_id": {
+            "type": "string"
+          },
+          "resource_id": {
+            "type": "string"
+          },
+          "resource_kind": {
+            "type": "string"
+          },
+          "typed_parameters": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "binding_id",
+          "resource_kind",
+          "resource_id",
+          "owner_id",
+          "operations"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "contribution_locks": {
+        "items": {
+          "$ref": "#/$defs/ContributionLock"
+        },
+        "type": "array"
+      },
+      "payload": {
+        "$ref": "#/$defs/AgentPresetRevisionPayload"
+      }
+    },
+    "required": [
+      "payload",
+      "contribution_locks"
+    ],
+    "title": "AgentPresetRevisionDigestInput",
+    "type": "object"
+  },
+  "agent_preset_revision_payload": {
+    "$defs": {
+      "CapabilitySelection": {
+        "additionalProperties": false,
+        "properties": {
+          "action_allowlist": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "capability": {
+            "$ref": "#/$defs/ExactVersionRef"
+          },
+          "resource_binding_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "capability"
         ],
         "type": "object"
       },
@@ -418,8 +1214,6 @@
         "description": "Complete route facts used by the Fresh-v4 persistence writer. Legacy\nopaque IDs are not sufficient to construct a provider request.",
         "type": "object"
       },
-      "context_policy": true,
-      "execution_constraints": true,
       "initial_capabilities": {
         "items": {
           "$ref": "#/$defs/CapabilitySelection"
@@ -450,7 +1244,6 @@
         },
         "type": "array"
       },
-      "runtime_budget": true,
       "schema_version": {
         "type": "string"
       },
@@ -460,12 +1253,11 @@
         },
         "type": "array"
       },
-      "surfaces": {
+      "starter_prompts": {
         "items": {
           "type": "string"
         },
-        "type": "array",
-        "uniqueItems": true
+        "type": "array"
       },
       "system_role_provider_overrides": {
         "additionalProperties": {
@@ -476,17 +1268,13 @@
     },
     "required": [
       "schema_version",
-      "surfaces",
       "model_route_refs",
       "initial_capabilities",
       "on_demand_capabilities",
       "skill_bindings",
       "resource_bindings",
       "persona",
-      "instructions",
-      "context_policy",
-      "execution_constraints",
-      "runtime_budget"
+      "instructions"
     ],
     "title": "AgentPresetRevisionPayload",
     "type": "object"
@@ -818,6 +1606,619 @@
     ],
     "title": "AgentSessionAggregate"
   },
+  "agent_snapshot": {
+    "$defs": {
+      "ChatRouteIdentity": {
+        "additionalProperties": false,
+        "description": "The immutable identity of one model route as selected by one Preset\nRevision.\n\nThis is deliberately a value object rather than four independently-carried\nfields.  Every layer that resolves or admits a Chat route must carry this\nexact identity unchanged.",
+        "properties": {
+          "model_task": {
+            "type": "string"
+          },
+          "preset_revision_id": {
+            "type": "string"
+          },
+          "route_id": {
+            "type": "string"
+          },
+          "route_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "preset_revision_id",
+          "model_task",
+          "route_id",
+          "route_revision"
+        ],
+        "type": "object"
+      },
+      "CompactOnDemandCapabilityEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "activation_plan_digest": {
+            "type": "string"
+          },
+          "capability_id": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "search_terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "short_description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "capability_id",
+          "display_name",
+          "short_description",
+          "search_terms",
+          "activation_plan_digest"
+        ],
+        "type": "object"
+      },
+      "ExactRoleContractRef": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_digest": {
+            "type": "string"
+          },
+          "key": {
+            "$ref": "#/$defs/RoleContractKey"
+          }
+        },
+        "required": [
+          "key",
+          "contract_digest"
+        ],
+        "type": "object"
+      },
+      "ExactRoleProviderRef": {
+        "additionalProperties": false,
+        "properties": {
+          "contribution_digest": {
+            "type": "string"
+          },
+          "mount_id": {
+            "type": "string"
+          },
+          "package": {
+            "$ref": "#/$defs/ExactVersionRef"
+          },
+          "role": {
+            "$ref": "#/$defs/ExactRoleContractRef"
+          }
+        },
+        "required": [
+          "role",
+          "package",
+          "mount_id",
+          "contribution_digest"
+        ],
+        "type": "object"
+      },
+      "ExactVersionRef": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "version"
+        ],
+        "type": "object"
+      },
+      "PluginSourceKind": {
+        "enum": [
+          "bundled",
+          "test_fixture",
+          "managed_local"
+        ],
+        "type": "string"
+      },
+      "PluginSourceMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "source_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_identity": {
+            "type": "string"
+          },
+          "source_kind": {
+            "$ref": "#/$defs/PluginSourceKind"
+          }
+        },
+        "required": [
+          "source_kind",
+          "source_identity"
+        ],
+        "type": "object"
+      },
+      "PrecomputedActivationPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "capability_bundle": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "context_schema_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "model_route_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "resource_binding_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "root_capability_id": {
+            "type": "string"
+          },
+          "tool_schema_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "root_capability_id",
+          "capability_bundle",
+          "tool_schema_refs",
+          "context_schema_refs",
+          "resource_binding_refs",
+          "model_route_refs"
+        ],
+        "type": "object"
+      },
+      "PresetRevisionRef": {
+        "additionalProperties": false,
+        "properties": {
+          "preset_id": {
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revision_digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "preset_id",
+          "revision",
+          "revision_digest"
+        ],
+        "type": "object"
+      },
+      "PrincipalRef": {
+        "additionalProperties": false,
+        "properties": {
+          "principal_id": {
+            "type": "string"
+          },
+          "principal_kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal_kind",
+          "principal_id"
+        ],
+        "type": "object"
+      },
+      "ResolvedCapability": {
+        "additionalProperties": false,
+        "properties": {
+          "capability": {
+            "$ref": "#/$defs/ExactVersionRef"
+          },
+          "dependency_path": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required_runtime_features": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "schema_digest": {
+            "type": "string"
+          },
+          "source_package": {
+            "$ref": "#/$defs/ExactVersionRef"
+          }
+        },
+        "required": [
+          "capability",
+          "source_package",
+          "schema_digest",
+          "dependency_path",
+          "required_runtime_features"
+        ],
+        "type": "object"
+      },
+      "ResolvedMcpToolLock": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_tool_key": {
+            "type": "string"
+          },
+          "capability_id": {
+            "type": "string"
+          },
+          "materialization_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "schema_digest": {
+            "type": "string"
+          },
+          "server_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_id",
+          "canonical_tool_key",
+          "capability_id",
+          "schema_digest",
+          "materialization_revision"
+        ],
+        "type": "object"
+      },
+      "ResolvedRoleProviderLock": {
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "$ref": "#/$defs/ExactRoleProviderRef"
+          },
+          "resource_binding_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "source": {
+            "$ref": "#/$defs/PluginSourceMetadata"
+          },
+          "supported_members": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "provider",
+          "source",
+          "supported_members",
+          "resource_binding_refs"
+        ],
+        "type": "object"
+      },
+      "ResolvedSkillLock": {
+        "additionalProperties": false,
+        "properties": {
+          "body_digest": {
+            "type": "string"
+          },
+          "required_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "skill": {
+            "$ref": "#/$defs/ExactVersionRef"
+          }
+        },
+        "required": [
+          "skill",
+          "body_digest",
+          "required_capabilities"
+        ],
+        "type": "object"
+      },
+      "ResolvedSnapshotContent": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_schema_manifest_digest": {
+            "type": "string"
+          },
+          "capability_allowlist": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "chat_route_identity": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ChatRouteIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "compact_on_demand_index": {
+            "items": {
+              "$ref": "#/$defs/CompactOnDemandCapabilityEntry"
+            },
+            "type": "array"
+          },
+          "compiled_runtime_profile_digest": {
+            "type": "string"
+          },
+          "initial_capabilities": {
+            "items": {
+              "$ref": "#/$defs/ResolvedCapability"
+            },
+            "type": "array"
+          },
+          "mcp_tool_locks": {
+            "items": {
+              "$ref": "#/$defs/ResolvedMcpToolLock"
+            },
+            "type": "array"
+          },
+          "model_route_refs": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "on_demand_activation_plans": {
+            "additionalProperties": {
+              "$ref": "#/$defs/PrecomputedActivationPlan"
+            },
+            "type": "object"
+          },
+          "on_demand_capabilities": {
+            "items": {
+              "$ref": "#/$defs/ResolvedCapability"
+            },
+            "type": "array"
+          },
+          "preset_revision_ref": {
+            "$ref": "#/$defs/PresetRevisionRef"
+          },
+          "required_runtime_features": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "required_runtime_profile": {
+            "$ref": "#/$defs/RuntimeProfileKind"
+          },
+          "required_runtime_protocol_version": {
+            "type": "string"
+          },
+          "resolved_role_providers": {
+            "additionalProperties": {
+              "$ref": "#/$defs/ResolvedRoleProviderLock"
+            },
+            "type": "object"
+          },
+          "resolver_version": {
+            "type": "string"
+          },
+          "runtime_feature_inventory_digest": {
+            "type": "string"
+          },
+          "schema_version": {
+            "type": "string"
+          },
+          "skill_locks": {
+            "items": {
+              "$ref": "#/$defs/ResolvedSkillLock"
+            },
+            "type": "array"
+          },
+          "target_contribution_manifest_digest": {
+            "type": "string"
+          },
+          "typed_resource_bindings": {
+            "items": {
+              "$ref": "#/$defs/TypedResourceBinding"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "resolver_version",
+          "preset_revision_ref",
+          "required_runtime_protocol_version",
+          "required_runtime_profile",
+          "runtime_feature_inventory_digest",
+          "required_runtime_features",
+          "compiled_runtime_profile_digest",
+          "model_route_refs",
+          "initial_capabilities",
+          "on_demand_capabilities",
+          "on_demand_activation_plans",
+          "compact_on_demand_index",
+          "capability_allowlist",
+          "skill_locks",
+          "mcp_tool_locks",
+          "typed_resource_bindings",
+          "canonical_schema_manifest_digest",
+          "target_contribution_manifest_digest"
+        ],
+        "type": "object"
+      },
+      "ResolvedSnapshotRef": {
+        "additionalProperties": false,
+        "properties": {
+          "snapshot_digest": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "snapshot_digest"
+        ],
+        "type": "object"
+      },
+      "RoleContractKey": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "type": "string"
+          },
+          "role_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role_id",
+          "contract_version"
+        ],
+        "type": "object"
+      },
+      "RuntimeProfileKind": {
+        "enum": [
+          "coding_native",
+          "managed_minimal"
+        ],
+        "type": "string"
+      },
+      "TypedResourceBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "connection_config_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "owner_id": {
+            "type": "string"
+          },
+          "resource_id": {
+            "type": "string"
+          },
+          "resource_kind": {
+            "type": "string"
+          },
+          "typed_parameters": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "binding_id",
+          "resource_kind",
+          "resource_id",
+          "owner_id",
+          "operations"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "actor": {
+        "$ref": "#/$defs/PrincipalRef"
+      },
+      "audience": {
+        "type": "string"
+      },
+      "availability_evidence_revision": {
+        "type": "string"
+      },
+      "content": {
+        "$ref": "#/$defs/ResolvedSnapshotContent"
+      },
+      "created_at_ms": {
+        "format": "int64",
+        "type": "integer"
+      },
+      "resolver_run_id": {
+        "type": "string"
+      },
+      "scene": {
+        "type": "string"
+      },
+      "snapshot_ref": {
+        "$ref": "#/$defs/ResolvedSnapshotRef"
+      },
+      "surface": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "snapshot_ref",
+      "content",
+      "actor",
+      "scene",
+      "surface",
+      "audience",
+      "created_at_ms",
+      "resolver_run_id",
+      "availability_evidence_revision"
+    ],
+    "title": "ResolvedSnapshotEnvelope",
+    "type": "object"
+  },
   "canonical_error_registry": {
     "$defs": {
       "CanonicalErrorClass": {
@@ -910,6 +2311,432 @@
       "entries"
     ],
     "title": "CanonicalErrorRegistryPayload",
+    "type": "object"
+  },
+  "capability_catalog_entry": {
+    "$defs": {
+      "CapabilityAdmissionRejection": {
+        "enum": [
+          "ready_candidate",
+          "unpublished_release",
+          "unstarted_service",
+          "project_source",
+          "test_host"
+        ],
+        "type": "string"
+      },
+      "CapabilityCatalogAdmission": {
+        "additionalProperties": false,
+        "properties": {
+          "admitted": {
+            "type": "boolean"
+          },
+          "rejection": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CapabilityAdmissionRejection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "release_state": {
+            "$ref": "#/$defs/CapabilityReleaseState"
+          }
+        },
+        "required": [
+          "release_state",
+          "admitted"
+        ],
+        "type": "object"
+      },
+      "CapabilityConsumer": {
+        "description": "A platform consumer that can understand and resolve a published\nCapability contribution.\n\nThese identities are deliberately different from host execution surfaces\nsuch as `desktop` and `headless`.",
+        "enum": [
+          "agent",
+          "gateway",
+          "knowledge",
+          "remote",
+          "automation",
+          "ui",
+          "miniapp_service"
+        ],
+        "type": "string"
+      },
+      "CapabilityKind": {
+        "enum": [
+          "tool",
+          "context_contributor",
+          "resource_provider",
+          "event_source",
+          "event_consumer",
+          "turn_middleware",
+          "transport",
+          "scheduler",
+          "background_service",
+          "ui_contribution"
+        ],
+        "type": "string"
+      },
+      "CapabilityOwner": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "owner_kind": {
+                "const": "package",
+                "type": "string"
+              },
+              "package": {
+                "$ref": "#/$defs/ExactVersionRef"
+              }
+            },
+            "required": [
+              "owner_kind",
+              "package"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "domain_id": {
+                "type": "string"
+              },
+              "owner_kind": {
+                "const": "business_domain",
+                "type": "string"
+              }
+            },
+            "required": [
+              "owner_kind",
+              "domain_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "CapabilityProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mcp_binding_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "miniapp_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mount_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owner": {
+            "$ref": "#/$defs/CapabilityOwner"
+          },
+          "source_identity": {
+            "type": "string"
+          },
+          "source_kind": {
+            "$ref": "#/$defs/ContributionSourceKind"
+          }
+        },
+        "required": [
+          "owner",
+          "source_kind",
+          "source_identity"
+        ],
+        "type": "object"
+      },
+      "CapabilityReleaseState": {
+        "enum": [
+          "published_active",
+          "ready_candidate",
+          "unpublished_release",
+          "unstarted_service",
+          "project_source",
+          "test_host"
+        ],
+        "type": "string"
+      },
+      "CatalogAvailability": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "const": "active",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "status": {
+                "const": "unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "status": {
+                "const": "disabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "missing_runtime_features": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "uniqueItems": true
+              },
+              "status": {
+                "const": "needs_runtime",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "missing_runtime_features"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actual_contract_digest": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "expected_contract_digest": {
+                "type": "string"
+              },
+              "status": {
+                "const": "contract_mismatch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "expected_contract_digest"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ContributionSourceKind": {
+        "enum": [
+          "platform_builtin",
+          "plugin_mount",
+          "miniapp_active_release",
+          "mcp_binding"
+        ],
+        "type": "string"
+      },
+      "ExactVersionRef": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "version"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "admission": {
+        "$ref": "#/$defs/CapabilityCatalogAdmission"
+      },
+      "availability": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "$ref": "#/$defs/CatalogAvailability"
+          },
+          "automation": {
+            "$ref": "#/$defs/CatalogAvailability"
+          },
+          "gateway": {
+            "$ref": "#/$defs/CatalogAvailability"
+          },
+          "knowledge": {
+            "$ref": "#/$defs/CatalogAvailability"
+          },
+          "miniapp_service": {
+            "$ref": "#/$defs/CatalogAvailability"
+          },
+          "remote": {
+            "$ref": "#/$defs/CatalogAvailability"
+          },
+          "ui": {
+            "$ref": "#/$defs/CatalogAvailability"
+          }
+        },
+        "type": "object"
+      },
+      "capability": {
+        "$ref": "#/$defs/ExactVersionRef"
+      },
+      "contract_digest": {
+        "type": "string"
+      },
+      "contribution_id": {
+        "type": "string"
+      },
+      "contribution_kind": {
+        "$ref": "#/$defs/CapabilityKind"
+      },
+      "host_surfaces": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "provenance": {
+        "$ref": "#/$defs/CapabilityProvenance"
+      },
+      "required_runtime_features": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "supported_consumers": {
+        "items": {
+          "$ref": "#/$defs/CapabilityConsumer"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "typed_resource_kinds": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array",
+        "uniqueItems": true
+      }
+    },
+    "required": [
+      "capability",
+      "contract_digest",
+      "contribution_id",
+      "provenance",
+      "host_surfaces",
+      "supported_consumers",
+      "contribution_kind",
+      "availability",
+      "admission"
+    ],
+    "title": "CapabilityCatalogEntry",
+    "type": "object"
+  },
+  "contribution_lock": {
+    "$defs": {
+      "ContributionSourceKind": {
+        "enum": [
+          "platform_builtin",
+          "plugin_mount",
+          "miniapp_active_release",
+          "mcp_binding"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "contract_digest": {
+        "type": "string"
+      },
+      "contribution_id": {
+        "type": "string"
+      },
+      "mcp_binding_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "miniapp_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "mount_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "source_identity": {
+        "type": "string"
+      },
+      "source_kind": {
+        "$ref": "#/$defs/ContributionSourceKind"
+      }
+    },
+    "required": [
+      "source_kind",
+      "source_identity",
+      "contribution_id",
+      "contract_digest"
+    ],
+    "title": "ContributionLock",
     "type": "object"
   },
   "deletion_manifest": {
@@ -2074,6 +3901,7 @@
             "type": "array"
           },
           "supported_surfaces": {
+            "description": "Surface declarations contain plain host execution surfaces plus\nnamespaced `consumer:<id>` Catalog consumer declarations. Callers must\nuse [`CapabilityManifest::host_surfaces`] or\n[`CapabilityManifest::supported_consumers`] instead of treating the two\nnamespaces as interchangeable.",
             "items": {
               "type": "string"
             },
@@ -3198,6 +5026,7 @@
             "type": "array"
           },
           "supported_surfaces": {
+            "description": "Surface declarations contain plain host execution surfaces plus\nnamespaced `consumer:<id>` Catalog consumer declarations. Callers must\nuse [`CapabilityManifest::host_surfaces`] or\n[`CapabilityManifest::supported_consumers`] instead of treating the two\nnamespaces as interchangeable.",
             "items": {
               "type": "string"
             },
@@ -4319,542 +6148,6 @@
       "agent_binding"
     ],
     "title": "RemoteBinding",
-    "type": "object"
-  },
-  "resolved_snapshot": {
-    "$defs": {
-      "ChatRouteIdentity": {
-        "additionalProperties": false,
-        "description": "The immutable identity of one model route as selected by one Preset\nRevision.\n\nThis is deliberately a value object rather than four independently-carried\nfields.  Every layer that resolves or admits a Chat route must carry this\nexact identity unchanged.",
-        "properties": {
-          "model_task": {
-            "type": "string"
-          },
-          "preset_revision_id": {
-            "type": "string"
-          },
-          "route_id": {
-            "type": "string"
-          },
-          "route_revision": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "preset_revision_id",
-          "model_task",
-          "route_id",
-          "route_revision"
-        ],
-        "type": "object"
-      },
-      "CompactOnDemandCapabilityEntry": {
-        "additionalProperties": false,
-        "properties": {
-          "activation_plan_digest": {
-            "type": "string"
-          },
-          "capability_id": {
-            "type": "string"
-          },
-          "display_name": {
-            "type": "string"
-          },
-          "search_terms": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "short_description": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "capability_id",
-          "display_name",
-          "short_description",
-          "search_terms",
-          "activation_plan_digest"
-        ],
-        "type": "object"
-      },
-      "ExactRoleContractRef": {
-        "additionalProperties": false,
-        "properties": {
-          "contract_digest": {
-            "type": "string"
-          },
-          "key": {
-            "$ref": "#/$defs/RoleContractKey"
-          }
-        },
-        "required": [
-          "key",
-          "contract_digest"
-        ],
-        "type": "object"
-      },
-      "ExactRoleProviderRef": {
-        "additionalProperties": false,
-        "properties": {
-          "contribution_digest": {
-            "type": "string"
-          },
-          "mount_id": {
-            "type": "string"
-          },
-          "package": {
-            "$ref": "#/$defs/ExactVersionRef"
-          },
-          "role": {
-            "$ref": "#/$defs/ExactRoleContractRef"
-          }
-        },
-        "required": [
-          "role",
-          "package",
-          "mount_id",
-          "contribution_digest"
-        ],
-        "type": "object"
-      },
-      "ExactVersionRef": {
-        "additionalProperties": false,
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "version": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "version"
-        ],
-        "type": "object"
-      },
-      "PluginSourceKind": {
-        "enum": [
-          "bundled",
-          "test_fixture",
-          "managed_local"
-        ],
-        "type": "string"
-      },
-      "PluginSourceMetadata": {
-        "additionalProperties": false,
-        "properties": {
-          "source_digest": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "source_identity": {
-            "type": "string"
-          },
-          "source_kind": {
-            "$ref": "#/$defs/PluginSourceKind"
-          }
-        },
-        "required": [
-          "source_kind",
-          "source_identity"
-        ],
-        "type": "object"
-      },
-      "PrecomputedActivationPlan": {
-        "additionalProperties": false,
-        "properties": {
-          "capability_bundle": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "context_schema_refs": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "model_route_refs": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "resource_binding_refs": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "root_capability_id": {
-            "type": "string"
-          },
-          "tool_schema_refs": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "root_capability_id",
-          "capability_bundle",
-          "tool_schema_refs",
-          "context_schema_refs",
-          "resource_binding_refs",
-          "model_route_refs"
-        ],
-        "type": "object"
-      },
-      "PresetRevisionRef": {
-        "additionalProperties": false,
-        "properties": {
-          "preset_id": {
-            "type": "string"
-          },
-          "revision": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "revision_digest": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "preset_id",
-          "revision",
-          "revision_digest"
-        ],
-        "type": "object"
-      },
-      "ResolvedCapability": {
-        "additionalProperties": false,
-        "properties": {
-          "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
-          },
-          "dependency_path": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "required_runtime_features": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "schema_digest": {
-            "type": "string"
-          },
-          "source_package": {
-            "$ref": "#/$defs/ExactVersionRef"
-          }
-        },
-        "required": [
-          "capability",
-          "source_package",
-          "schema_digest",
-          "dependency_path",
-          "required_runtime_features"
-        ],
-        "type": "object"
-      },
-      "ResolvedMcpToolLock": {
-        "additionalProperties": false,
-        "properties": {
-          "canonical_tool_key": {
-            "type": "string"
-          },
-          "capability_id": {
-            "type": "string"
-          },
-          "materialization_revision": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "schema_digest": {
-            "type": "string"
-          },
-          "server_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "server_id",
-          "canonical_tool_key",
-          "capability_id",
-          "schema_digest",
-          "materialization_revision"
-        ],
-        "type": "object"
-      },
-      "ResolvedRoleProviderLock": {
-        "additionalProperties": false,
-        "properties": {
-          "provider": {
-            "$ref": "#/$defs/ExactRoleProviderRef"
-          },
-          "resource_binding_refs": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "source": {
-            "$ref": "#/$defs/PluginSourceMetadata"
-          },
-          "supported_members": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          }
-        },
-        "required": [
-          "provider",
-          "source",
-          "supported_members",
-          "resource_binding_refs"
-        ],
-        "type": "object"
-      },
-      "ResolvedSkillLock": {
-        "additionalProperties": false,
-        "properties": {
-          "body_digest": {
-            "type": "string"
-          },
-          "required_capabilities": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "skill": {
-            "$ref": "#/$defs/ExactVersionRef"
-          }
-        },
-        "required": [
-          "skill",
-          "body_digest",
-          "required_capabilities"
-        ],
-        "type": "object"
-      },
-      "RoleContractKey": {
-        "additionalProperties": false,
-        "properties": {
-          "contract_version": {
-            "type": "string"
-          },
-          "role_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "role_id",
-          "contract_version"
-        ],
-        "type": "object"
-      },
-      "RuntimeProfileKind": {
-        "enum": [
-          "coding_native",
-          "managed_minimal"
-        ],
-        "type": "string"
-      },
-      "TypedResourceBinding": {
-        "additionalProperties": false,
-        "properties": {
-          "binding_id": {
-            "type": "string"
-          },
-          "connection_config_ref": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "operations": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "owner_id": {
-            "type": "string"
-          },
-          "resource_id": {
-            "type": "string"
-          },
-          "resource_kind": {
-            "type": "string"
-          },
-          "typed_parameters": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          }
-        },
-        "required": [
-          "binding_id",
-          "resource_kind",
-          "resource_id",
-          "owner_id",
-          "operations"
-        ],
-        "type": "object"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "additionalProperties": false,
-    "properties": {
-      "canonical_schema_manifest_digest": {
-        "type": "string"
-      },
-      "capability_allowlist": {
-        "items": {
-          "type": "string"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
-      "chat_route_identity": {
-        "anyOf": [
-          {
-            "$ref": "#/$defs/ChatRouteIdentity"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
-      "compact_on_demand_index": {
-        "items": {
-          "$ref": "#/$defs/CompactOnDemandCapabilityEntry"
-        },
-        "type": "array"
-      },
-      "compiled_runtime_profile_digest": {
-        "type": "string"
-      },
-      "initial_capabilities": {
-        "items": {
-          "$ref": "#/$defs/ResolvedCapability"
-        },
-        "type": "array"
-      },
-      "mcp_tool_locks": {
-        "items": {
-          "$ref": "#/$defs/ResolvedMcpToolLock"
-        },
-        "type": "array"
-      },
-      "model_route_refs": {
-        "additionalProperties": {
-          "type": "string"
-        },
-        "type": "object"
-      },
-      "on_demand_activation_plans": {
-        "additionalProperties": {
-          "$ref": "#/$defs/PrecomputedActivationPlan"
-        },
-        "type": "object"
-      },
-      "on_demand_capabilities": {
-        "items": {
-          "$ref": "#/$defs/ResolvedCapability"
-        },
-        "type": "array"
-      },
-      "preset_revision_ref": {
-        "$ref": "#/$defs/PresetRevisionRef"
-      },
-      "required_runtime_features": {
-        "items": {
-          "type": "string"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
-      "required_runtime_profile": {
-        "$ref": "#/$defs/RuntimeProfileKind"
-      },
-      "required_runtime_protocol_version": {
-        "type": "string"
-      },
-      "resolved_role_providers": {
-        "additionalProperties": {
-          "$ref": "#/$defs/ResolvedRoleProviderLock"
-        },
-        "type": "object"
-      },
-      "resolver_version": {
-        "type": "string"
-      },
-      "runtime_feature_inventory_digest": {
-        "type": "string"
-      },
-      "schema_version": {
-        "type": "string"
-      },
-      "skill_locks": {
-        "items": {
-          "$ref": "#/$defs/ResolvedSkillLock"
-        },
-        "type": "array"
-      },
-      "target_contribution_manifest_digest": {
-        "type": "string"
-      },
-      "typed_resource_bindings": {
-        "items": {
-          "$ref": "#/$defs/TypedResourceBinding"
-        },
-        "type": "array"
-      }
-    },
-    "required": [
-      "schema_version",
-      "resolver_version",
-      "preset_revision_ref",
-      "required_runtime_protocol_version",
-      "required_runtime_profile",
-      "runtime_feature_inventory_digest",
-      "required_runtime_features",
-      "compiled_runtime_profile_digest",
-      "model_route_refs",
-      "initial_capabilities",
-      "on_demand_capabilities",
-      "on_demand_activation_plans",
-      "compact_on_demand_index",
-      "capability_allowlist",
-      "skill_locks",
-      "mcp_tool_locks",
-      "typed_resource_bindings",
-      "canonical_schema_manifest_digest",
-      "target_contribution_manifest_digest"
-    ],
-    "title": "ResolvedSnapshotContent",
     "type": "object"
   },
   "runtime_command": {

@@ -29,9 +29,12 @@ pub struct AgentExecutionParticipantRow {
     pub participant_id: String,
     pub execution_id: String,
     pub source_agent_id: String,
+    /// Immutable Agent launch snapshot. The snapshot is the only persisted
+    /// runtime projection; provider/model columns remain the materialized
+    /// execution binding.
     pub preset_id: Option<String>,
     pub preset_revision: Option<i64>,
-    pub preset_snapshot: Option<String>,
+    pub agent_snapshot: Option<String>,
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub role: Option<String>,

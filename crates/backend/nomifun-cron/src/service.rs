@@ -6,8 +6,9 @@ use std::sync::{Arc, RwLock, Weak};
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use nomifun_api_types::{
-    CreateCronJobRequest, CronJobResponse, CronJobRunResponse, CronScheduleDto, HasSkillResponse,
-    ListCronJobsQuery, RunNowResponse, SaveCronSkillRequest, UpdateCronJobRequest,
+    AgentResolvedSnapshot, CreateCronJobRequest, CronAgentConfigDto, CronJobResponse,
+    CronJobRunResponse, CronScheduleDto, HasSkillResponse, ListCronJobsQuery, RunNowResponse,
+    SaveCronSkillRequest, UpdateCronJobRequest,
 };
 use nomifun_common::{
     AgentType, AppError, ConversationId, CronJobId, CronJobRunId, ExecutionAuthority, ProviderId,
@@ -159,7 +160,6 @@ pub struct CronService {
     executor: Arc<JobExecutor>,
     emitter: CronEventEmitter,
     data_dir: PathBuf,
-    preset_service: Arc<RwLock<Option<Arc<nomifun_preset::PresetService>>>>,
     job_gates: Arc<DashMap<String, Weak<AsyncMutex<()>>>>,
     active_runs: Arc<DashMap<String, String>>,
     embedded_mutations: Arc<DashMap<String, Arc<EmbeddedMutationEntry>>>,
@@ -203,7 +203,6 @@ impl CronService {
             executor,
             emitter,
             data_dir,
-            preset_service: Arc::new(RwLock::new(None)),
             job_gates: Arc::new(DashMap::new()),
             active_runs: Arc::new(DashMap::new()),
             embedded_mutations: Arc::new(DashMap::new()),
@@ -352,12 +351,6 @@ impl CronService {
         }
     }
 
-    pub fn with_preset_service(&self, service: Arc<nomifun_preset::PresetService>) {
-        if let Ok(mut guard) = self.preset_service.write() {
-            *guard = Some(service);
-        }
-    }
-
     async fn emit_job_created_for(&self, job: &CronJob) {
         self.emitter
             .emit_job_created(&job.user_id, &cron_job_to_response(job));
@@ -403,52 +396,6 @@ impl CronService {
             .emit_job_executed(&job.user_id, &job.cron_job_id, status, error);
     }
 
-    async fn resolve_preset_config(
-        &self,
-        config: &mut nomifun_api_types::CronAgentConfigDto,
-    ) -> Result<(), CronError> {
-        let Some(preset_id) = config.preset_id.clone() else { return Ok(()) };
-        let service = self
-            .preset_service
-            .read()
-            .ok()
-            .and_then(|guard| guard.as_ref().cloned())
-            .ok_or_else(|| CronError::Scheduler("preset service is not wired".into()))?;
-        let snapshot = service
-            .resolve(
-                &preset_id,
-                nomifun_api_types::PresetTarget::Cron,
-                None,
-                nomifun_api_types::PresetOverrides::default(),
-            )
-            .await?;
-        config.name = snapshot.preset_name.clone();
-        config.custom_agent_id = snapshot.resolved_agent_id.clone();
-        let is_nomi = snapshot
-            .resolved_agent_type
-            .as_deref()
-            .is_some_and(|value| value.eq_ignore_ascii_case("nomi"));
-        if is_nomi {
-            config.backend = None;
-        } else if let Some(backend) = snapshot
-                .resolved_agent_backend
-                .clone()
-                .or(snapshot.resolved_agent_type.clone())
-        {
-            config.backend = Some(backend);
-            config.provider_id = None;
-        }
-        if let Some(model) = snapshot.resolved_model.as_ref() {
-            if is_nomi && let Some(provider_id) = model.provider_id.as_ref() {
-                config.provider_id = Some(provider_id.clone());
-            };
-            config.model = Some(model.model.clone());
-        }
-        config.preset_revision = Some(snapshot.preset_revision);
-        config.preset_snapshot = Some(snapshot);
-        Ok(())
-    }
-
     // -----------------------------------------------------------------------
     // CRUD
     // -----------------------------------------------------------------------
@@ -477,11 +424,12 @@ impl CronService {
             }
         }
         if controls_host && let Some(config) = req.agent_config.as_mut() {
-            // Only `preset_id` is trusted from the client; always replace an
-            // incoming snapshot with a fresh server-side resolution.
-            config.preset_snapshot = None;
-            config.preset_revision = None;
-            self.resolve_preset_config(config).await?;
+            enforce_agent_snapshot_boundary(
+                config,
+                &req.agent_type,
+                execution_mode,
+                req.conversation_id.as_deref(),
+            )?;
         }
         validate_agent_config_shape(&req.agent_type, req.agent_config.as_ref())?;
         let schedule = schedule_from_dto(&req.schedule);
@@ -549,7 +497,7 @@ impl CronService {
             custom_agent_id: c.custom_agent_id,
             preset_id: c.preset_id,
             preset_revision: c.preset_revision,
-            preset_snapshot: c.preset_snapshot,
+            agent_snapshot: c.agent_snapshot,
             model: c.model,
             provider_id: c.provider_id,
             config_options: c.config_options,
@@ -651,9 +599,12 @@ impl CronService {
             }
         }
         if controls_host && let Some(config) = req.agent_config.as_mut() {
-            config.preset_snapshot = None;
-            config.preset_revision = None;
-            self.resolve_preset_config(config).await?;
+            enforce_agent_snapshot_boundary(
+                config,
+                &job.agent_type,
+                job.execution_mode,
+                job.conversation_id.as_deref(),
+            )?;
         }
         if let Some(config) = req.agent_config.as_ref() {
             validate_agent_config_shape(&job.agent_type, Some(config))?;
@@ -684,7 +635,7 @@ impl CronService {
                 custom_agent_id: config_dto.custom_agent_id.clone(),
                 preset_id: config_dto.preset_id.clone(),
                 preset_revision: config_dto.preset_revision,
-                preset_snapshot: config_dto.preset_snapshot.clone(),
+                agent_snapshot: config_dto.agent_snapshot.clone(),
                 model: config_dto.model.clone(),
                 provider_id: config_dto.provider_id.clone(),
                 config_options: config_dto.config_options.clone(),
@@ -3215,8 +3166,18 @@ fn build_agent_config_from_session(
             "the bound Nomi AgentSession has no canonical provider/model selection".into(),
         )
     })?;
+    if session.agent_snapshot.is_none()
+        && (session.preset_id.is_some() || session.preset_revision.is_some())
+    {
+        return Err(AppError::Conflict(
+            "the bound AgentSession has preset lineage without a frozen agent_snapshot".into(),
+        ));
+    }
     Ok(nomifun_api_types::CronAgentConfigDto {
         backend: None,
+        // This is the explicit existing-Session path. The Session projection
+        // remains authoritative at execution time; these fields are copied
+        // only so the Cron job can render the selected Agent in its metadata.
         name: session
             .agent_name
             .clone()
@@ -3225,7 +3186,7 @@ fn build_agent_config_from_session(
         custom_agent_id: session.custom_agent_id.clone(),
         preset_id: session.preset_id.clone(),
         preset_revision: session.preset_revision,
-        preset_snapshot: session.preset_snapshot.clone(),
+        agent_snapshot: session.agent_snapshot.clone(),
         model: Some(
             model
                 .use_model
@@ -3243,12 +3204,148 @@ fn build_agent_config_from_session(
 // Free functions
 // ---------------------------------------------------------------------------
 
-/// Nomi cron jobs require `agent_config.provider_id` to be set —
-/// the executor uses it to look up the provider row and build the agent.
-/// Reject add/update requests that would produce an invalid nomi job.
+/// Enforce the Cron/Agent application-service boundary.
 ///
-/// The literal `"nomi"` is also rejected because it is an agent type, never a
-/// provider business ID.
+/// Cron receives either a fully materialized `AgentResolvedSnapshot` or a
+/// deliberately model-only configuration. It never turns a preset id into a
+/// snapshot and it never asks a legacy resolver to fill missing fields.
+fn enforce_agent_snapshot_boundary(
+    config: &mut CronAgentConfigDto,
+    agent_type: &str,
+    execution_mode: ExecutionMode,
+    conversation_id: Option<&str>,
+) -> Result<(), CronError> {
+    let Some(snapshot) = config.agent_snapshot.clone() else {
+        if config.preset_id.is_some() || config.preset_revision.is_some() {
+            return Err(CronError::InvalidAgentConfig(
+                "agent_config.preset_id/preset_revision require a frozen agent_snapshot; Cron does not resolve preset ids"
+                    .into(),
+            ));
+        }
+
+        // A bound existing Session is already the Agent authority. Its
+        // projection may carry descriptive fields such as name/workspace
+        // without creating a second Agent selector. New/lazy sessions,
+        // however, may only use the explicit provider/model path without a
+        // frozen snapshot.
+        let existing_session_path =
+            matches!(execution_mode, ExecutionMode::Existing) && conversation_id.is_some();
+        if !existing_session_path && !is_model_only_config(config) {
+            return Err(CronError::InvalidAgentConfig(
+                "Cron Agent configuration requires a frozen agent_snapshot from the canonical Agent application service"
+                    .into(),
+            ));
+        }
+        return Ok(());
+    };
+
+    apply_agent_snapshot(config, agent_type, snapshot)?;
+    Ok(())
+}
+
+fn apply_agent_snapshot(
+    config: &mut CronAgentConfigDto,
+    agent_type: &str,
+    snapshot: AgentResolvedSnapshot,
+) -> Result<(), CronError> {
+    if snapshot.preset_id.trim().is_empty() || snapshot.preset_revision <= 0 {
+        return Err(CronError::InvalidAgentConfig(
+            "agent_snapshot must contain a valid preset_id and positive preset_revision".into(),
+        ));
+    }
+
+    if let Some(value) = config.preset_id.as_deref()
+        && value != snapshot.preset_id
+    {
+        return Err(CronError::InvalidAgentConfig(
+            "agent_config.preset_id does not match agent_snapshot".into(),
+        ));
+    }
+    if let Some(value) = config.preset_revision
+        && value != snapshot.preset_revision
+    {
+        return Err(CronError::InvalidAgentConfig(
+            "agent_config.preset_revision does not match agent_snapshot".into(),
+        ));
+    }
+    if let Some(resolved_type) = snapshot.resolved_agent_type.as_deref()
+        && !resolved_type.trim().is_empty()
+        && !resolved_type.eq_ignore_ascii_case(agent_type)
+    {
+        return Err(CronError::InvalidAgentConfig(format!(
+            "agent_snapshot resolves agent type '{resolved_type}', but Cron job selects '{agent_type}'"
+        )));
+    }
+    if let Some(resolved_agent_id) = snapshot.resolved_agent_id.as_deref()
+        && let Some(value) = config.custom_agent_id.as_deref()
+        && value != resolved_agent_id
+    {
+        return Err(CronError::InvalidAgentConfig(
+            "agent_config.custom_agent_id does not match agent_snapshot".into(),
+        ));
+    }
+    if let Some(resolved_model) = snapshot.resolved_model.as_ref() {
+        if let Some(value) = config.provider_id.as_deref()
+            && value != resolved_model.provider_id
+        {
+            return Err(CronError::InvalidAgentConfig(
+                "agent_config.provider_id does not match agent_snapshot".into(),
+            ));
+        }
+        if let Some(value) = config.model.as_deref()
+            && value != resolved_model.model
+        {
+            return Err(CronError::InvalidAgentConfig(
+                "agent_config.model does not match agent_snapshot".into(),
+            ));
+        }
+    }
+
+    config.preset_id = Some(snapshot.preset_id.clone());
+    config.preset_revision = Some(snapshot.preset_revision);
+    if !snapshot.preset_name.trim().is_empty() {
+        config.name = snapshot.preset_name.clone();
+    }
+    config.custom_agent_id = snapshot.resolved_agent_id.clone();
+
+    let is_nomi = snapshot
+        .resolved_agent_type
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("nomi"))
+        || agent_type.eq_ignore_ascii_case("nomi");
+    if is_nomi {
+        config.backend = None;
+    } else if let Some(backend) = snapshot
+        .resolved_agent_backend
+        .clone()
+        .or(snapshot.resolved_agent_type.clone())
+    {
+        config.backend = Some(backend);
+        config.provider_id = None;
+    }
+    if let Some(model) = snapshot.resolved_model.as_ref() {
+        config.model = Some(model.model.clone());
+        if is_nomi {
+            config.provider_id = Some(model.provider_id.clone());
+        }
+    }
+    config.agent_snapshot = Some(snapshot);
+    Ok(())
+}
+
+fn is_model_only_config(config: &CronAgentConfigDto) -> bool {
+    config.backend.is_none()
+        && config.cli_path.is_none()
+        && config.custom_agent_id.is_none()
+        && config.config_options.is_none()
+        && config.workspace.is_none()
+        && config.preset_id.is_none()
+        && config.preset_revision.is_none()
+        && config.agent_snapshot.is_none()
+        && config.provider_id.is_some()
+        && config.model.is_some()
+}
+
 #[cfg(test)]
 fn validate_nomi_agent_config(
     agent_type: &str,
@@ -3373,7 +3470,7 @@ fn clamp_model_only_cron_config(config: &mut nomifun_api_types::CronAgentConfigD
     config.custom_agent_id = None;
     config.preset_id = None;
     config.preset_revision = None;
-    config.preset_snapshot = None;
+    config.agent_snapshot = None;
     config.config_options = None;
     config.workspace = None;
 }
@@ -3462,7 +3559,7 @@ fn build_update_params(
                 custom_agent_id: c.custom_agent_id.clone(),
                 preset_id: c.preset_id.clone(),
                 preset_revision: c.preset_revision,
-                preset_snapshot: c.preset_snapshot.clone(),
+                agent_snapshot: c.agent_snapshot.clone(),
                 model: c.model.clone(),
                 provider_id: c.provider_id.clone(),
                 config_options: c.config_options.clone(),
@@ -3496,12 +3593,12 @@ fn build_update_params(
             .agent_config
             .as_ref()
             .map(|config| config.preset_revision),
-        preset_snapshot: req
-            .agent_config
+            agent_snapshot: req
+                .agent_config
             .as_ref()
             .map(|config| {
                 config
-                    .preset_snapshot
+                    .agent_snapshot
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()
@@ -3545,7 +3642,7 @@ fn restore_update_params(
         agent_config: Some(row.agent_config.clone()),
         preset_id: Some(row.preset_id.clone()),
         preset_revision: Some(row.preset_revision),
-        preset_snapshot: Some(row.preset_snapshot.clone()),
+        agent_snapshot: Some(row.agent_snapshot.clone()),
         conversation_id: Some(row.conversation_id.clone()),
         conversation_title: Some(row.conversation_title.clone()),
         agent_type: Some(row.agent_type.clone()),
@@ -3736,13 +3833,105 @@ mod tests {
             custom_agent_id: None,
             preset_id: None,
             preset_revision: None,
-            preset_snapshot: None,
+            agent_snapshot: None,
             model: Some("gpt-4o".into()),
             provider_id: provider_id.map(ToOwned::to_owned),
             config_options: None,
             workspace: None,
             clear_context_each_run: false,
         }
+    }
+
+    fn frozen_agent_snapshot() -> AgentResolvedSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "preset_id": "0190f5fe-7c00-7a00-8abc-012345678902",
+            "preset_revision": 4,
+            "preset_name": "Coding Agent",
+            "resolved_agent_id": "0190f5fe-7c00-7a00-8abc-012345678903",
+            "resolved_agent_type": "nomi",
+            "resolved_model": {
+                "provider_id": PROVIDER_ID,
+                "model": "frozen-model"
+            },
+            "instructions": "Use the frozen Agent contract.",
+            "included_skills": [],
+            "excluded_auto_skills": [],
+            "knowledge_policy": {
+                "enabled": false,
+                "writeback": false,
+                "grounded": false
+            },
+            "knowledge_base_ids": [],
+            "warnings": []
+        }))
+        .expect("valid frozen Agent snapshot")
+    }
+
+    #[test]
+    fn model_only_config_does_not_require_agent_snapshot() {
+        let mut config = agent_cfg_dto(Some(PROVIDER_ID));
+        assert!(
+            enforce_agent_snapshot_boundary(&mut config, "nomi", ExecutionMode::NewConversation, None)
+                .is_ok()
+        );
+        assert!(config.agent_snapshot.is_none());
+    }
+
+    #[test]
+    fn preset_lineage_without_agent_snapshot_is_rejected() {
+        let mut config = agent_cfg_dto(Some(PROVIDER_ID));
+        config.preset_id = Some("0190f5fe-7c00-7a00-8abc-012345678902".into());
+        let error = enforce_agent_snapshot_boundary(
+            &mut config,
+            "nomi",
+            ExecutionMode::NewConversation,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("frozen agent_snapshot"));
+    }
+
+    #[test]
+    fn frozen_agent_snapshot_is_the_authority_for_runtime_fields() {
+        let snapshot = frozen_agent_snapshot();
+        let mut config = agent_cfg_dto(Some(PROVIDER_ID));
+        config.model = Some("frozen-model".into());
+        config.agent_snapshot = Some(snapshot.clone());
+
+        enforce_agent_snapshot_boundary(
+            &mut config,
+            "nomi",
+            ExecutionMode::NewConversation,
+            None,
+        )
+        .expect("snapshot is valid");
+
+        assert_eq!(config.preset_id.as_deref(), Some(snapshot.preset_id.as_str()));
+        assert_eq!(config.preset_revision, Some(snapshot.preset_revision));
+        assert_eq!(config.name, snapshot.preset_name);
+        assert_eq!(
+            config.custom_agent_id.as_deref(),
+            snapshot.resolved_agent_id.as_deref()
+        );
+        assert_eq!(config.model.as_deref(), Some("frozen-model"));
+        assert_eq!(config.provider_id.as_deref(), Some(PROVIDER_ID));
+        assert!(config.backend.is_none());
+    }
+
+    #[test]
+    fn mismatched_agent_snapshot_fields_fail_closed() {
+        let mut config = agent_cfg_dto(Some(PROVIDER_ID));
+        config.model = Some("caller-selected-model".into());
+        config.agent_snapshot = Some(frozen_agent_snapshot());
+
+        let error = enforce_agent_snapshot_boundary(
+            &mut config,
+            "nomi",
+            ExecutionMode::NewConversation,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not match agent_snapshot"));
     }
 
     #[test]

@@ -62,7 +62,7 @@ fn conversation_row(user_id: &str) -> ConversationRow {
         cron_job_id: None,
         preset_id: None,
         preset_revision: None,
-        preset_snapshot: None,
+        agent_snapshot: None,
         created_at: 1000,
         updated_at: 2000,
     }

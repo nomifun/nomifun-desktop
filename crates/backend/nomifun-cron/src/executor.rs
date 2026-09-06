@@ -489,8 +489,10 @@ impl JobExecutor {
             model,
             source: None,
             channel_chat_id: None,
-            preset_id: job.agent_config.as_ref().and_then(|config| config.preset_id.clone()),
-            preset_overrides: None,
+            // The Agent snapshot is passed through the typed Session port
+            // below. Cron must not forward a preset id for a second
+            // resolution pass.
+            preset_id: None,
             delegation_policy: Default::default(),
             execution_model_pool: None,
             decision_policy: Default::default(),
@@ -502,7 +504,7 @@ impl JobExecutor {
         let snapshot = job
             .agent_config
             .as_ref()
-            .and_then(|config| config.preset_snapshot.clone());
+            .and_then(|config| config.agent_snapshot.clone());
         let session = self
             .sessions
             .create_idempotent(&job.user_id, req, snapshot, &creation_key)
@@ -1381,17 +1383,6 @@ fn build_conversation_extra(
                 serde_json::Value::String(custom_agent_id.clone()),
             );
         }
-        if let Some(preset_id) = &config.preset_id {
-            extra.insert("preset_id".to_owned(), serde_json::Value::String(preset_id.clone()));
-        }
-        if let Some(revision) = config.preset_revision {
-            extra.insert("preset_revision".to_owned(), serde_json::Value::Number(revision.into()));
-        }
-        if let Some(snapshot) = &config.preset_snapshot {
-            if let Ok(value) = serde_json::to_value(snapshot) {
-                extra.insert("preset_snapshot".to_owned(), value);
-            }
-        }
         if let Some(workspace) = &config.workspace
             && !workspace.trim().is_empty()
         {
@@ -1471,7 +1462,7 @@ mod tests {
                 custom_agent_id: Some(TEST_AGENT_ID.into()),
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 model: Some("claude-sonnet-4".into()),
                 provider_id: None,
                 config_options: None,
@@ -1826,7 +1817,7 @@ mod tests {
                 custom_agent_id: None,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 model: Some("gpt-5".into()),
                 provider_id: Some(PROVIDER_ID.into()),
                 config_options: None,
@@ -1851,7 +1842,7 @@ mod tests {
                 custom_agent_id: None,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 model: None,
                 provider_id: Some(PROVIDER_ID.into()),
                 config_options: None,
@@ -1886,7 +1877,7 @@ mod tests {
                 custom_agent_id: None,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 model: Some("gpt-5".into()),
                 provider_id: None,
                 config_options: None,
@@ -1929,7 +1920,7 @@ mod tests {
                     custom_agent_id: None,
                     preset_id: None,
                     preset_revision: None,
-                    preset_snapshot: None,
+                    agent_snapshot: None,
                 },
                 Some(&saved_skill),
             ),
@@ -2007,7 +1998,7 @@ mod tests {
                 custom_agent_id: None,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 model: Some("gpt-5".into()),
                 provider_id: Some(PROVIDER_ID.into()),
                 config_options: None,
@@ -3848,7 +3839,7 @@ mod tests {
                 cron_job_id: None,
                 preset_id: None,
                 preset_revision: None,
-                preset_snapshot: None,
+                agent_snapshot: None,
                 created_at: 0,
                 updated_at: 0,
             }))
@@ -4134,7 +4125,7 @@ mod tests {
                     cron_job_id: None,
                     preset_id: None,
                     preset_revision: None,
-                    preset_snapshot: None,
+                    agent_snapshot: None,
                     created_at: 0,
                     updated_at: 0,
                 },
