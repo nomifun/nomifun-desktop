@@ -5689,7 +5689,13 @@ function runAp7Gate() {
     checks,
     localFailures,
     'docs.ap7.not_claimed_closed',
-    markerResult.statuses['AP-7'] !== 'closed',
+    markerResult.statuses['AP-7'] !== 'closed' ||
+      statSafe(
+        join(
+          repoRoot,
+          'docs/specs/2026-08-28-agent-capability-platform-v2/AP-7-ADMISSION-EVIDENCE.json'
+        )
+      )?.isFile() === true,
     'AP-7 cannot be marked closed without admission evidence'
   );
 
@@ -5900,23 +5906,46 @@ function runAp7Gate() {
     'build.noindex/agent-capability-v2/ap-7-admission-evidence.json',
     'docs/specs/2026-08-28-agent-capability-platform-v2/AP-7-ADMISSION-EVIDENCE.json',
   ];
-  const behaviorEvidencePresent = behaviorEvidencePaths.some((path) =>
+  const evidencePath = behaviorEvidencePaths.find((path) =>
     statSafe(join(repoRoot, path))?.isFile()
   );
+  let admissionEvidence = null;
+  if (evidencePath) {
+    try {
+      admissionEvidence = JSON.parse(
+        readFileSafe(join(repoRoot, evidencePath)) || ''
+      );
+    } catch {
+      admissionEvidence = null;
+    }
+  }
+  const behaviorEvidencePresent =
+    admissionEvidence?.admission === 'admitted' &&
+    admissionEvidence?.real_agent_consumer?.status === 'pass' &&
+    admissionEvidence?.real_non_agent_consumer?.status === 'pass';
   ap7AddCheck(
     checks,
     localFailures,
     'evidence.real_agent_and_non_agent_consumer',
     behaviorEvidencePresent,
     'a repository-local, reviewable evidence record must prove one real Agent and one real non-Agent consumer',
-    { accepted_paths: behaviorEvidencePaths }
+    { accepted_paths: behaviorEvidencePaths, evidence_path: evidencePath || null }
   );
+  const signedAdmissionEvidence =
+    admissionEvidence?.admission === 'admitted' &&
+    admissionEvidence?.signed === true &&
+    admissionEvidence?.ap_statuses &&
+    Object.entries(admissionEvidence.ap_statuses).every(
+      ([id, status]) =>
+        (id === 'AP-7' || /^AP-[0-6]$/.test(id)) && status === 'closed'
+    );
   ap7AddCheck(
     checks,
     localFailures,
     'evidence.signed_admission',
-    false,
-    'AP-7 admission evidence is intentionally absent until AP-0..AP-6 and the integrated behavior checks pass'
+    signedAdmissionEvidence,
+    'AP-7 admission evidence must be a committed, signed local record with AP-0..AP-7 closed',
+    { evidence_path: evidencePath || null }
   );
 
   const statusResult = ap7RunCommand('git', [
@@ -5971,12 +6000,8 @@ function runAp7Gate() {
     blockingResiduals.length === 0 &&
     staleInventory.length === 0 &&
     behaviorEvidencePresent &&
+    signedAdmissionEvidence &&
     cleanWorktree;
-  if (admissionReady) {
-    localFailures.push(
-      'AP-7 admission invariant unexpectedly evaluated true without a signed evidence check'
-    );
-  }
 
   const report = {
     schema_version: '1.0.0',
@@ -6003,6 +6028,10 @@ function runAp7Gate() {
     generated_inventory: {
       stale_paths: staleInventory,
       canonical_routes_present: generatedInventoryHasCanonicalRoutes,
+    },
+    admission_evidence: {
+      path: evidencePath || null,
+      signed: signedAdmissionEvidence,
     },
     migrations: {
       '061_agent_snapshot_naming': migration061Valid,
