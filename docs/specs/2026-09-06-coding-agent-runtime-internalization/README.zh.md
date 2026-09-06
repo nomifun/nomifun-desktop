@@ -14,7 +14,8 @@
 内化为 NomiFun 自己的可选进程内 Coding 执行引擎；模型、认证、Session、Capability、
 File、Process、VCS、MCP、Plugin 和 MiniApp 继续使用 NomiFun 自己的所有权和主链。
 当前先以独立 `nomifun-coding-engine` crate 开发和验证，暂不接入一期主应用；远程主
-工作进程只负责后续合并、统一 Registry 接线、联调和验收。
+工作进程只负责后续合并、统一 Registry/AgentSession 接线、Broker 原生取消、
+SessionEvent 投影、联调和验收。
 
 ## 最重要的执行规则
 
@@ -114,12 +115,16 @@ crates/backend/nomifun-coding-engine/
   bounded Tool Call continuation
   read-only parallel / effectful serial dispatch
   cancellation / dispose / one-active-turn admission
+  Kernel Snapshot/active-set Tool adapter
+  standard Inspect/Edit/Execute/Full Coding Tool surface
+  nomi-process-runtime owner adapter
+  AGENTS.md/context/compaction/checkpoint contracts
 ```
 
 这不是一期主应用的路由切换，也不是第二套产品 Session 或权限事实。它只为远程
 主工作进程提供可合并、可测试的 Coding Engine 实现切片；Broker 的原生取消传播、
-Capability Kernel、Process/File/VCS owner 和 AgentSession 主链仍需在远程联调阶段
-按 `CAR-02`～`CAR-07` 完成。
+SessionEvent/AgentSession 主链和异构 Registry 仍需在远程联调阶段按 `CAR-02`～`CAR-07`
+完成，Kernel/Process adapter 不应被重复实现。
 
 ## 本阶段完成后的用户结果
 

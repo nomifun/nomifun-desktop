@@ -72,6 +72,11 @@ resolved_snapshot_ref
 输出为当前 model step 的 `ChatModelInput`。ContextAssembler 不读取 root SQLite、
 Plugin/MiniApp private dataDir、Credential store、全局未选 Catalog 或 Codex rollout。
 
+当前隔离实现已提供 bounded `CodingContextAssembler`、AGENTS.md reader、
+`CodingCompactionSummary` 和 `CodingCheckpoint`。它们只处理内存中的 bounded
+projection；SessionEvent history reader、durable compaction event 和 resume application
+service 仍由远程 `CAR-06`/`CAR-07` 接入。
+
 ## 4. Workspace 与 AGENTS.md
 
 可以借鉴 Codex 的层级发现算法，但规则归 NomiFun 冻结：

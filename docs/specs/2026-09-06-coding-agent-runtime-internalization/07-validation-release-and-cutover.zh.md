@@ -59,6 +59,7 @@
 - Tool Call delta 有界拼接；
 - model-facing mapping；
 - Snapshot/active-set/schema/resource admission；
+- Kernel registry generation and compiled schema digest admission；
 - Tool result continuation；
 - read-only parallel；
 - effectful serial；
@@ -70,6 +71,7 @@
 
 - File/Patch；
 - Process/PTY/stdin；
+- `ManagedCodingProcessOwner` start/poll/cancel/cleanup；
 - VCS；
 - Workspace/AGENTS；
 - timeout/cancel/process-tree；
@@ -141,11 +143,13 @@ sidecar_artifact / runtime_sidecar production fields
 |---|---|
 | Model | text → tool call → tool result → continuation |
 | Tool | Snapshot 内成功、Snapshot 外失败、schema mismatch |
+| Kernel | compiled Snapshot、active generation、owner/result projection |
 | Process | 长输出、stdin、timeout、tree cleanup |
 | Patch | invalid/context mismatch/atomic failure |
 | VCS | status/diff/stage/commit |
 | Context | AGENTS precedence、bounded loading、history rebuild |
 | Compaction | summary replacement、retained facts、resume |
+| Checkpoint | exact EngineBinding match、cursor ahead discard |
 | Lifecycle | cancel、crash、dispose、late event |
 | Ecosystem | MCP/Plugin/MiniApp contribution + non-Agent consumer |
 | Release | 三平台同一 RC bytes |
