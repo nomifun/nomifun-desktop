@@ -71,10 +71,19 @@ operation / idempotency identity
 任一字段缺失、不匹配或无法比较时，返回 typed failure，不能尝试“最接近”的
 Capability，也不能从全局 Catalog 临时补能力。
 
-当前隔离 `CodingToolBinding` 已将 `schema_digest` 作为显式 admission 字段，并以
-canonical JSON digest 校验模型 tool definition。远程 Kernel adapter 仍需把该
-digest 与 Snapshot 中的 `RuntimeCapabilityExecutionContract.schema_digest` 对齐；
-不能只相信模型收到的 JSON schema。
+当前隔离 `CodingToolBinding` 已明确区分：
+
+- `schema_digest`：模型实际收到的 JSON Tool schema digest；
+- `canonical_input_schema_ref`：Capability action 声明的 canonical schema ref；
+- `capability_contract_digest`：Compiled Snapshot 锁定的 Capability manifest digest。
+
+`KernelCodingToolInvoker` 会在执行前同时校验三层身份，不能只相信模型收到的
+JSON schema。
+
+当前本地 `KernelCodingToolInvoker` 已执行 Snapshot/active-set/registry generation、
+principal/session owner、canonical capability digest、action schema ref、resource
+policy 和 idempotency/correlation identity 对齐；它不负责把 Registry 挂入产品
+AgentSession 主链。
 
 ## 5. 三类 Effect
 
