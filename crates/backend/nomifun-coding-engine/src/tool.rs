@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    digest_payload, ActionId, AgentSessionId, CapabilityId, CorrelationId, DigestHex,
-    IdempotencyKey, OperationId, PrincipalRef, ResolvedSnapshotRef, ResourceBindingId,
+    digest_payload, ActionId, AgentSessionId, CanonicalSchemaRef, CapabilityId, CorrelationId,
+    DigestHex, IdempotencyKey, OperationId, PrincipalRef, ResolvedSnapshotRef, ResourceBindingId,
     StrictJsonValue,
 };
 use nomifun_chat_model_broker::{
@@ -32,6 +32,8 @@ pub struct CodingToolBinding {
     pub model_name: String,
     pub definition: ChatToolDefinition,
     pub schema_digest: DigestHex,
+    pub canonical_input_schema_ref: CanonicalSchemaRef,
+    pub capability_contract_digest: DigestHex,
     pub capability_id: CapabilityId,
     pub action_id: ActionId,
     pub resource_binding_ids: BTreeSet<ResourceBindingId>,
@@ -63,6 +65,14 @@ impl CodingToolBinding {
                 expected: expected_schema_digest.0,
                 actual: self.schema_digest.0.clone(),
             });
+        }
+        if self.canonical_input_schema_ref.as_ref().trim().is_empty()
+            || !is_digest(&self.capability_contract_digest)
+        {
+            return Err(CodingEngineError::InvalidContract(format!(
+                "tool {} has an invalid canonical schema or capability digest",
+                self.model_name
+            )));
         }
         if self.capability_id.as_ref().trim().is_empty()
             || self.action_id.as_ref().trim().is_empty()
@@ -345,6 +355,10 @@ fn serialized_text_size(text: &str) -> usize {
     .unwrap_or(usize::MAX)
 }
 
+fn is_digest(value: &DigestHex) -> bool {
+    value.as_ref().len() == 64 && value.as_ref().bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +385,8 @@ mod tests {
             model_name: "read_file".to_owned(),
             definition: definition(),
             schema_digest,
+            canonical_input_schema_ref: CanonicalSchemaRef::from("schema://fs.read/input"),
+            capability_contract_digest: DigestHex::from("b".repeat(64)),
             capability_id: CapabilityId::from("fs.read"),
             action_id: ActionId::from("read"),
             resource_binding_ids: BTreeSet::new(),

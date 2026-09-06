@@ -64,6 +64,30 @@ pub enum CodingEngineError {
         actual: String,
     },
 
+    #[error("coding ToolPlan could not be compiled: {0}")]
+    ToolPlan(String),
+
+    #[error("Capability Kernel rejected Coding Tool ({code}): {message}")]
+    CapabilityKernel { code: String, message: String },
+
+    #[error("Coding workspace context failed: {0}")]
+    WorkspaceContext(String),
+
+    #[error("Coding context assembly failed: {0}")]
+    ContextAssembly(String),
+
+    #[error("Coding context is {actual} bytes, above the {limit} byte limit")]
+    ContextTooLarge { limit: usize, actual: usize },
+
+    #[error("Coding checkpoint is invalid: {0}")]
+    Checkpoint(String),
+
+    #[error("Coding compaction failed: {0}")]
+    Compaction(String),
+
+    #[error("Coding process owner failed: {0}")]
+    Process(String),
+
     #[error("coding tool invocation failed: {0}")]
     ToolInvocation(String),
 

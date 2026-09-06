@@ -1001,6 +1001,10 @@ mod tests {
         CodingToolPlan::new([CodingToolBinding {
             model_name: "read_file".to_owned(),
             schema_digest: crate::tool::input_schema_digest(&definition.input_schema).unwrap(),
+            canonical_input_schema_ref: nomifun_agent_contracts::CanonicalSchemaRef::from(
+                "schema://fs.read/input",
+            ),
+            capability_contract_digest: DigestHex::from("c".repeat(64)),
             definition,
             capability_id: nomifun_agent_contracts::CapabilityId::from("fs.read"),
             action_id: ActionId::from("read"),
