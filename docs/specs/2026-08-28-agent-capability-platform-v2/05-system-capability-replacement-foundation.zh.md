@@ -1,6 +1,6 @@
 # NomiFun 一期止损修订：简化重构与可替换系统能力基础
 
-> 状态：**USER-CONFIRMED PHASE 1 STOP-LOSS DIRECTIVE / AgentPreset AP-0～AP-7 已完成并签署 / Desktop 产品验收已完成**
+> 状态：**PHASE 1 WINDOWS CLOSED / AgentPreset AP-0～AP-7 已完成并签署 / 06 已获用户授权**
 >
 > 发布日期：2026-09-03
 >
@@ -11,7 +11,9 @@
 > 适用范围：正在进行的 Agent Capability Platform v2 一期重构，包括当前主机的互斥写集
 > 多并发集成主线、后续 Browser/Computer、Sidecar 与外部原生平台验证。
 >
-> 阶段门禁：二期 `06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md` 可以继续作为设计文档修订，但在本文新增的 AgentPreset 前置 TODO（AP-0～AP-7）完成并通过门禁前，不得进入 Plugin/MiniApp 代码实施；本文不把 06 的设计状态视为一期代码合同。
+> 阶段门禁：AgentPreset AP-0～AP-7 与 Windows C8 已通过。用户已单独授权实施
+> `06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md`；二期状态由独立
+> `PHASE-N1-M1-CLOSURE-TODO.zh.md` 跟踪，不改变本文一期合同。
 
 ## 2026-09-03 当前执行修订（用户确认）
 
@@ -34,15 +36,15 @@
   的 client、supervisor、adapter、fixture、synthetic contract 和 Host Broker smoke
   可以保留为研究或边界验证，但都不能作为 Codex-native 已移植、已成为核心或已完成
   Coding 的证据。
-- **当前交付状态只由 `GLOBAL-CLOSURE-TODO.zh.md` 维护。** 本文和
-  `DECISIONS.zh.md` 负责约束设计与理由；没有把历史章节中的未来条件提前改写成
-  当前完成状态。
+- **一期状态由 `GLOBAL-CLOSURE-TODO.zh.md` 维护，二期状态由
+  `PHASE-N1-M1-CLOSURE-TODO.zh.md` 维护。** 本文和 `DECISIONS.zh.md` 负责约束
+  一期设计与理由；06 负责二期设计，不用历史章节中的未来条件覆盖当前台账。
 
 ## 2026-09-05 当前执行补充
 
 > 本节只补充当前主机 checkpoint 的执行事实，不替换本文合同，也不把定向测试
 > 解释成一期 Stable 或三平台发布证据。实时状态仍以
-> `GLOBAL-CLOSURE-TODO.zh.md` 为唯一来源。
+> 一期仍以 `GLOBAL-CLOSURE-TODO.zh.md` 为唯一来源；二期状态由独立 N1/M1 台账维护。
 
 - 当前 Web、Desktop 和 `nomicore` 仍统一由 `NomiCoreApplication` 组合原有 Nomi
   engine。App 内只有一个 `NomiCoreSessionOwner` 作为 Nomi-core Session facade，
@@ -139,8 +141,16 @@
   StepFun Coding Plan `step-3.7-flash` smoke 输出
   `live_smoke_status=pass code=OK status=200`。
 - 手机模式不属于 `nomifun-desktop` 本期服务与验收范围。AP-7 已针对实现提交
-  `ef5f5380915e0d5c06004f03b66cbd1302b3fe03` 签署；06 已满足 AP 前置条件，但仍需
+  `ef5f5380915e0d5c06004f03b66cbd1302b3fe03` 签署；06 已满足 AP 前置条件并由
   用户显式单独启动。
+- 2026-09-06，Windows C8 在候选
+  `0bac72da4ebb62f6a0f183a1285065c88aa684a4` 上通过。Host digest 为
+  `555a45607272939d9cc89c9f2ef10f850f570cac81e32979afd3fce04770a80c`，
+  NSIS digest 为
+  `d0f22840934ddbc69dcd365e9e14899ea17f8c739ed251e572c059f652ec64cf`；
+  安装版 `port.json`、`/health`、WebView2 CDP、进程树清理、卸载和注册表清理均通过。
+  macOS/Linux 原生验证按用户要求延后到 06 的 Windows Plugin/MiniApp 开发全部完成后
+  统一交接。
 
 ## 0. 本文的权威与执行方式
 
@@ -625,7 +635,8 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 - 不 reset、force-push 或改写远程历史；
 - 不回滚包含真实用户功能的整批提交，只因其中部分设计复杂；
 - 不通过兼容 alias 保留被删除合同；
-- 不把尚未通过 §15 门禁的 06 代码加入任何一期 commit；06 的设计修订可以继续，但不能被误当成已授权实施；
+- 不把 06 代码混入已经冻结的一期候选或一期 evidence；AP 门禁通过后，06 使用后续
+  独立提交和独立台账实施；
 - 不在未审查的本机临时 lane/worktree 之间盲目 merge，也不在机器 2 分支盲目 merge 主分支；主机按写集审查后再普通合流，并由任务 owner 明确通知机器 2 更新基线或重新领取精简 lane。
 
 ## 11. Release-required 产品闭环
@@ -665,7 +676,8 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 ### S0：发布与暂停
 
 - 提交并推送本文、经本文修订的 01～04/`DECISIONS`、README 和 GLOBAL TODO；
-- 二期 06 继续保持“设计中、未授权实施”的状态，不得随一期核心代码发布；是否提交 06 设计不改变其实施门禁；
+- S0 执行当时，二期 06 保持 design-only 且不随一期核心代码发布；AP 门禁后来已经
+  关闭，当前授权状态以本文顶部和 N1/M1 台账为准；
 - 所有本机 lane 在新 checkpoint 后重新读取本文与 GLOBAL TODO；主机和机器 2 在新 commit 后停止执行冲突的旧材料；
 - 旧跨机 Prompt、manifest、result template、远端 SHA 和历史分配只作已废弃记录，不再形成执行入口。
 
@@ -715,7 +727,7 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 - 两个 revert 候选已有明确 keep/revert 结果；
 - 84 项旧 TODO 已缩减为 release-required 清单；
 - 旧跨机执行材料和机器 Prompt 不再驱动新复杂度；
-- 06 没有进入一期代码发布，且其实现仍被 §15 AP 门禁阻断。
+- 06 没有进入一期候选；§15 AP 门禁随后已关闭，06 已由用户单独授权实施。
 
 ### 13.2 一期 Nomi-core 功能完成
 
@@ -755,7 +767,8 @@ Docs、tests、fixtures 和历史字符串不进入复杂 allowed/deferred/uncla
 6. SSH、Session/Effect、automation、Remote 和 Nomi-core lane 按 §6.2 及
    GLOBAL TODO 的本机互斥写集推进；Codex Sidecar 只保留研究，不进入当前交付关键路径；
 7. 不等待五格两轮 Gate，不为未交付平台生成 synthetic evidence；
-8. 可以阅读和修订本地 06 设计，但不读取其作为已冻结代码合同，也不实现未通过 §15 门禁的 06；
+8. AP 门禁已通过；实施 06 时以 06 和独立 N1/M1 台账为代码合同，不复活已删除的
+   Preset/Extension/MiniApp 兼容主链；
 9. 每个提交说明它删除了什么旧复杂度，不能只增加新 abstraction；
 10. 遇到“继续兼容更快”与“普通 revert 后重做更干净”的选择时，优先后者，但必须先保护真实用户数据和已完成用户功能；不得为了 Codex 未来接入提前改变当前 Nomi-core 执行主链。
 
@@ -1484,9 +1497,10 @@ result；未来候选若包含 Codex Sidecar，再单独记录其真实 digest�
 - 应先完成本文验收；
 - 再把 05 作为独立 Phase 1 amendment 提交；
 - 当前主机一次完成 P1-R0～P1-R3，并重新生成受影响合同和必要 Gate 输入；
-- 完成 clean Windows checkpoint 后，冻结候选供 macOS arm64 与 Linux Desktop x64
-  外部原生验证；
-- 不把未提交的二期 06 带入一期实施分支或提交。
+- clean Windows checkpoint 已完成；该结果作为一期工程闭合证据保留。用户随后授权
+  继续 06，macOS arm64 与 Linux Desktop x64 外部原生验证统一延后到 06 的 Windows
+  Plugin/MiniApp 开发完成并冻结新候选之后；
+- 不改写一期候选/evidence；06 使用后续普通提交和独立台账推进。
 
 外部原生环境只验证冻结候选，不领取开发任务、不编辑代码或 merge 分支。发现问题时返回
 实际命令、原始日志和结果，由当前主机修复并生成新候选；不建立机器专用 Prompt、
@@ -1501,7 +1515,7 @@ AP-0～AP-7。
 
 - 用户已经确认本文方案和一期/二期边界；
 - 05 单独进入版本控制；
-- 不把未通过 §15 门禁的 06 代码视为一期交付；06 设计可以单独修订，但实现必须等待 AP-0～AP-7；
+- 06 不属于一期交付；其实现已等待并通过 AP-0～AP-7，现按独立台账推进；
 - 当前主机所有 lane 只从 05 与 GLOBAL TODO 领取合同和状态，不使用机器专用执行材料；远程实施也必须从 05 开始，不从聊天摘要猜测合同。
 
 #### 12.2 一期功能完成
@@ -1527,7 +1541,7 @@ AP-0～AP-7。
 
 ## 15. AgentPreset 平台级能力建设（Phase N1 前置 TODO）
 
-> 状态：**DESIGN FOLLOW-UP / 06 IMPLEMENTATION BLOCKED**
+> 状态：**AP-0～AP-7 CLOSED / 06 IMPLEMENTATION AUTHORIZED**
 >
 > 本节是用户确认“只保留一个 Agent 工作台”之后，对 AgentPreset 的最终实施合同。它不是在旧“设定”旁边再增加一个新设置页，也不是把 Plugin/MiniApp 改造成 Agent 专属子系统。
 
@@ -2077,7 +2091,9 @@ AP-0 术语/owner/入口冻结
   → 06 N1-1 及后续实现
 ```
 
-06 可以在 AP 阶段继续做设计审阅、交叉引用和合同修订，但不能提前实现 Node Host、Plugin Loader、MiniApp Release 或任何以旧 Preset 为入口的代码。若 AP-1 或 AP-2 尚未完成，06 中的 Catalog/Agent integration 章节只能视为未授权的设计草案。
+上述规则已执行：AP 阶段只完成设计审阅，Node Host、Plugin Loader 与 MiniApp Release
+没有提前进入一期。AP-0～AP-7 现已关闭，06 可以实施，但仍不得以旧 Preset 为入口或
+复制 Agent-only Catalog。
 
 建议的消费者迁移顺序是：先完成 Agent 工作台与 AgentSession 的 canonical application service，再迁移普通 Conversation/Guid/Chat；随后迁移 Cron/Automation/Remote，最后迁移 Companion、Creative Studio、Extension 和其他低频入口。每迁移一类消费者都要删除其旧 `PresetService` 注入，直到 AP-6 的生产可达性为 0；不能用“新旧同时调用一段时间”的长期双主链替代迁移完成。
 

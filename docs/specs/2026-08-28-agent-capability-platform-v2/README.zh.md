@@ -1,10 +1,10 @@
 # Agent Capability Platform v2 文档入口
 
-> 更新日期：2026-09-02
+> 更新日期：2026-09-06
 >
 > 适用分支：`rf/agent-capability-platform-v2`
 
-本目录保留经当前修订仍有效的核心设计、唯一执行台账，以及仍被 Gate/Generator 使用的
+本目录保留经当前修订仍有效的核心设计、分阶段执行台账，以及仍被 Gate/Generator 使用的
 机器文件。设计文档不能因为形成时间较早而整体删除；发生方向修订时，应在原设计中删除
 或改写错误条款，并保留仍有效的目标、边界、理由和演进依据。本轮所有实现、修复、测试
 编排和 merge 均由当前主机负责，以互斥写集的本机并发 lane 推进。跨机开发分配、第二台
@@ -17,28 +17,33 @@
 1. `05-system-capability-replacement-foundation.zh.md`
    - 2026-09-02 一期止损修订、Role/Provider 基础和完成定义，优先于更早的设计条款。
 2. `GLOBAL-CLOSURE-TODO.zh.md`
-   - 当前唯一执行状态源，记录 owner、依赖、测试、阻塞和剩余工作。
-3. `01-current-state-and-harness-findings.zh.md`
+   - 一期 S0-S5 的执行状态源；Windows C8 已关闭，外部原生项保留。
+3. `06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md`
+   - 已获用户授权的 Plugin N1 / MiniApp M1 产品与架构合同。
+4. `PHASE-N1-M1-CLOSURE-TODO.zh.md`
+   - 二期 Windows 实施、最终候选与 macOS/Linux 统一交接的实时状态源。
+5. `01-current-state-and-harness-findings.zh.md`
    - 经修订的现状审计、问题来源和可复用接缝；其中数字仅代表对应审计时点。
-4. `02-capability-catalog-and-agent-presets.zh.md`
+6. `02-capability-catalog-and-agent-presets.zh.md`
    - 经修订的产品术语、领域模型、Capability/Preset 边界和候选目录。
-5. `03-target-architecture.zh.md`
+7. `03-target-architecture.zh.md`
    - 经修订的目标架构、Thin Kernel、AgentSession、Runtime 与数据边界。
-6. `04-migration-and-validation-plan.zh.md`
+8. `04-migration-and-validation-plan.zh.md`
    - 经修订的迁移纪律、依赖顺序和验证方法；不记录实时完成状态。
-7. `DECISIONS.zh.md`
+9. `DECISIONS.zh.md`
    - 经修订的决策及理由；被 05 撤销的旧要求不再作为可执行设计保留。
 发生冲突时：
 
 ```text
 canonical Rust / SQL / generated schema / behavior tests
 > 05-system-capability-replacement-foundation.zh.md
+> 06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md（仅 N1/M1）
 > 01～04 与 DECISIONS 中经修订的设计
-> GLOBAL-CLOSURE-TODO.zh.md 中的当前主机任务分配
+> 对应阶段的 GLOBAL 或 PHASE-N1-M1 执行台账
 ```
 
-`GLOBAL-CLOSURE-TODO.zh.md` 只决定任务状态，不反向改写架构合同；当前主机的并发 lane
-只按其中声明的依赖和写集推进，不能覆盖 05 或核心设计。
+两个台账只决定各自阶段任务状态，不反向改写架构合同；当前主机的并发 lane 只按对应
+台账声明的依赖和写集推进，不能覆盖 05、06 或核心设计。
 
 ## 单机多并发规则
 
@@ -76,5 +81,5 @@ canonical Rust / SQL / generated schema / behavior tests
 
 1. 核心设计发生修订时，直接删除或改写错误条款，并保留仍有效的设计依据。
 2. 不用笼统的“历史文档”免责声明掩盖正文冲突，也不因局部错误整体删除核心设计。
-3. 实施状态只更新 GLOBAL TODO；设计文档不复制 closed/open 数量和临时 commit 进度。
+3. 实施状态只更新对应阶段台账；设计文档不复制 closed/open 数量和临时 commit 进度。
 4. 一次性执行说明和临时测试记录在失效后删除，长期设计理由回写核心文档。

@@ -1,12 +1,33 @@
 # NomiFun 二期：Plugin 与 Full-stack MiniApp 简化实施计划
 
-> 状态：**DESIGN FOLLOW-UP / Plugin 与 MiniApp 七组产品合同已形成 / 受 05 §15 AP-0～AP-7 前置门禁阻断 / 尚未实施代码**
+> 状态：**IMPLEMENTATION AUTHORIZED / AP-0～AP-7 与一期 Windows C8 已通过 / Windows N1→M1 执行中**
 >
 > 文档日期：2026-09-02
 >
 > 文档地位：本文是 Phase N1 Plugin 与后续 MiniApp 的设计与实施入口；AgentPreset 的产品和数据合同以 05 §15 为唯一前置来源，本文不得重新定义第二套 Agent 设定或旧 Preset 模型。
 >
-> 生效边界：本文只规划 Agent Capability Platform v2 Stable 之后的 Phase N1 Plugin 与后续 MiniApp M1，不改变正在执行的一期 C8～C11 合同；在 05 §15 的 AP-0～AP-7 全部通过前，本文只允许设计审阅和修订，不授权 Plugin/MiniApp 代码开发。
+> 生效边界：05 §15 的 AP-0～AP-7 已通过，用户已授权 Plugin/MiniApp 代码开发。
+> 当前先在 Windows x64 完成 N1 Plugin 与 M1 MiniApp，再冻结新的最终候选；macOS arm64
+> 与 Linux Desktop x64 统一在全部 Windows 开发完成后交接原生验证。手机模式不属于
+> `nomifun-desktop` 范围。
+
+## 2026-09-06 实施启动修订
+
+本节覆盖本文中仍写成“AP 阻断”或“Plugin 三平台先完成再开发 MiniApp”的旧进度口径，
+但不改变已经确认的产品合同：
+
+1. AP-0～AP-7 已关闭；一期 Windows C8 候选
+   `0bac72da4ebb62f6a0f183a1285065c88aa684a4` 已通过，N1-0 可以进入代码实施。
+2. 代码依赖仍保持 **N1 Plugin 先于 M1 MiniApp**；但验证顺序改为
+   **N1 Windows 完成 → M1 Windows 完成 → 冻结最终 Windows 候选 →
+   macOS arm64 与 Linux Desktop x64 统一交接**。
+3. N1/M1 实时状态只由 `PHASE-N1-M1-CLOSURE-TODO.zh.md` 维护。本文继续作为设计合同，
+   不在章节叙述中重复维护百分比。
+4. 当前 `nomifun-extension` 与旧 MiniApp 是待删除的旧产品主链，不是 N1/M1 半成品；
+   必须先迁出真实 Skill owner，再完成新主链并物理删除旧 Extension/MiniApp 兼容路径。
+5. Windows 验收只覆盖真实 Desktop x64、NSIS 安装版、键鼠桌面布局和 accessibility，
+   不运行手机视口。模型相关 Chat Dev/E2E 固定使用 Credential Manager 中的 StepFun
+   Coding Plan `step-3.7-flash`，凭据不进入源码、日志、argv 或 Git。
 
 ## 0. 怎样阅读这份文档
 
@@ -40,9 +61,12 @@ Agent 工作台不计为第三个 Plugin/MiniApp 产品；它是由 05 §15 定�
 
 交付顺序固定为：
 
-1. 先完成 Phase N1 Plugin；
-2. Plugin 的 Node、Host、Package、SDK 和首发三平台 Gate 稳定后，再进入 MiniApp M1；
-3. Marketplace、第二 Runtime、远程分发等后续能力不反向阻塞首版。
+1. 先完成 Phase N1 Plugin 的 Windows 功能与候选 Gate；
+2. 复用已冻结的 Node、Host、Package、SDK 和 Authoring Foundation 完成 MiniApp M1
+   的 Windows 功能与候选 Gate；
+3. Windows Plugin/MiniApp 全部完成后冻结同一最终 cohort，再统一执行 macOS arm64
+   与 Linux Desktop x64 required 原生验证；
+4. Marketplace、第二 Runtime、远程分发等后续能力不反向阻塞首版。
 
 默认的一站式零环境开发入口只有 Chat Dev：用户下载安装 NomiFun 后选择“创建 Plugin”或“创建 MiniApp”，由 Agent 作为 Project-scoped authoring client 使用受限工具完成编辑、依赖解析、Build、Test、上线和导出；接收方把带 Source 的 NomiFun Share Bundle 导入即可使用或继续开发。外部 IDE/AI/工具链按公开合同生成并导入 prebuilt Artifact 是另一条正式支持的开发交付路径，但 NomiFun 不负责复现其外部构建环境。首次缺少 Node 时，Runtime Manager 按既有决策显示一次官方 LTS 下载确认并自动完成获取、校验和配置；Chat Dev 用户不需要自行准备命令行开发环境。
 
@@ -948,17 +972,18 @@ M1 MiniApp
 
 退出条件：用户只安装 NomiFun 即可在 Chat Dev Mode 创建/修改 JS 与 TS Plugin Project、解析依赖、修复 Build、用临时受管状态 Test并生成一个 immutable Candidate；手动 Apply 与授权 compatible idle Apply 都复用同一 validator/Replace/current/previous，busy 不强杀调用，activation failure 不自动回滚。NomiFun Share Bundle 与符合 Artifact合同的外部 prebuilt 包都能导入同一 Test/Apply 主链；remote updater、第二 Runtime/安装路径、hot reload residual 为 0；Agent authoring 不获得 Package owner 或部署授权。
 
-### N1-5：首发三平台 Candidate 与 signed RC
+### N1-5：Windows Plugin Candidate
 
 交付：
 
 - Windows whole-candidate 完整合同、集成、故障、产品和 accessibility；
-- macOS arm64 完整核心 runtime/product；
-- Linux x64 Desktop 完成原生 Desktop 闭环，并承接完整本地 CLI 生命周期、进程清理和 JSON errors；
-- required signed RC 三格做真实制品安装、启动、调用、Host-loss、卸载和 digest smoke；
-- macOS x64、Linux x64 Headless 仅登记为最低优先 optional backlog，不阻塞本阶段退出。
+- Windows NSIS 安装版完成 authored Plugin、Candidate Test、manual/idle Apply、调用、
+  Restore、Host-loss、卸载和 digest smoke；
+- 记录 N1 Windows 结果，但此时不冻结跨平台最终 cohort；
+- macOS x64、Linux x64 Headless 仅登记为最低优先 optional backlog。
 
-退出条件：按 Windows x64 → macOS arm64 → Linux x64 Desktop 顺序取得同一 cohort 的三个 required cell 证据；首发 RC 提升 Stable 不改变 bytes，支持矩阵不宣称 optional cells。
+退出条件：Windows N1 功能与候选 Gate 通过，M1 可以复用同一机器合同与 Authoring
+Foundation 开始实施；macOS/Linux 尚未执行，不冒充 Stable。
 
 ### M1-0：Clean-start、UI-only MiniApp 与 Release
 
@@ -994,9 +1019,23 @@ M1 MiniApp
 - 默认无用户数据的 Share Bundle/外部 prebuilt Artifact Import，以及与其分离的 disabled Whole-App Backup export/import-as-new；
 - durable Build/Import/Export/Delete Operation；
 - Catalog 原子发布；
-- MiniApp 首发 required 三平台 Candidate 和 signed RC 证据；optional cells 后续独立关闭。
+- MiniApp Windows Candidate 证据；optional cells 后续独立关闭。
 
 退出条件：删除可重扫，Export 不含明文 Credential，Import 生成新 ID；Release pointer 与 Catalog 不出现半状态，已经提交的 backward-compatible additive schema 不伪装成可回滚。
+
+### M1-3：最终 Windows cohort 与 required 原生平台交接
+
+交付：
+
+- 在 N1/M1 Windows 全部通过后构建一次最终 Windows NSIS，完成安装、启动、代表性
+  Plugin/MiniApp、Host-loss、卸载、release lock 和 digest smoke；
+- 冻结同一 source cohort 与平台输入；
+- 将该 cohort 统一交给 macOS arm64 与 Linux Desktop x64，分别完成自身原生职责；
+- required 三平台通过后原样提升 RC/Stable，不重建 bytes；
+- macOS x64、Linux x64 Headless 保持 optional/not-delivered。
+
+退出条件：Windows x64、macOS arm64、Linux Desktop x64 对同一最终 cohort 形成真实
+制品证据；支持矩阵不宣称未交付 optional cells。
 
 ## 7. 验证矩阵
 
@@ -1105,7 +1144,7 @@ Plugin Self-Evolution 新增 N1 的 Chat Dev、Project Source、Build、Candidat
 
 | 顺序 | 决策组 | 确认结果 | 当前状态 |
 |---:|---|---|---|
-| 0 | AgentPreset 前置边界 | **以 05 §15 为准：**单一 Agent 工作台、四种创建模板、平台级 Capability Catalog、多消费者、ContributionLock、旧 `/api/presets` clean cut | 前置阻断；必须完成 AP-0～AP-7，本文不得另造合同 |
+| 0 | AgentPreset 前置边界 | **以 05 §15 为准：**单一 Agent 工作台、四种创建模板、平台级 Capability Catalog、多消费者、ContributionLock、旧 `/api/presets` clean cut | 已通过并签署；N1-0 已获准实施 |
 | 1 | Plugin 数据与 Credential | **全部确认：**受管 KV + stable dataDir + raw Node data；Credential 下一次 resolve 生效 | 已闭合，无剩余产品裁决 |
 | 2 | Package/Replace/Uninstall | **全部确认：**本地显式 Replace、用户 Retry/Restore、显式 retained-data Restore、stable contract binding、显式 breaking Replace | 已闭合，无剩余产品裁决 |
 | 3 | Runtime/Host | **全部确认：**薄发现、无 Node 可静态安装、全局 Runtime 用户裁决、Host/Mount demand-load、故障后 demand-restart | 已闭合，无剩余产品裁决 |
@@ -1114,4 +1153,8 @@ Plugin Self-Evolution 新增 N1 的 Chat Dev、Project Source、Build、Candidat
 | 6 | Operation/Gate | **全部确认：**四类 Operation、单 deleting intent、精简完整产品入口、required 三平台分层 Gate、两个最低优先 optional cells | 已闭合，无剩余产品裁决 |
 | 7 | Plugin Self-Evolution | **全部确认：**Chat Dev 为默认一站式开发、外部 prebuilt Artifact 正式导入、Managed Plugin Project、共享 Build Foundation、single Ready/Test Candidate、默认人工 Apply、用户授权 compatible-when-idle、Breaking/unknown 转人工 | 已闭合，无剩余产品裁决 |
 
-七组 Plugin/MiniApp 产品与架构合同已经形成设计基线，但 N1-0 仍被 05 §15 的 AP-0～AP-7 阻断。只有 AgentPreset API/Revision/Snapshot/Binding 已冻结、至少一个 Agent 与一个非 Agent 消费者走通同一 Capability 主链、旧 `/api/presets` 生产可达性为 0 后，才可以进入 N1-0 执行 repo-level dependency scan，冻结字段名、Schema、IPC、默认常量、Gate 脚本和三平台首发 manifest；这些实现填充不得重新扩大已删除的产品范围。macOS x64 与 Linux x64 Headless 只保留 optional backlog，不进入首发关键路径。
+七组 Plugin/MiniApp 产品与架构合同已经形成设计基线，AP-0～AP-7 与一期 Windows C8
+已经通过，N1-0 现已进入实施。下一步执行 repo-level dependency scan，冻结字段名、
+Schema、IPC、默认常量和 Windows Gate；macOS/Linux required 原生验证统一延后到
+Windows N1/M1 全部完成并冻结最终 cohort 之后。macOS x64 与 Linux x64 Headless
+只保留 optional backlog，不进入首发关键路径。
