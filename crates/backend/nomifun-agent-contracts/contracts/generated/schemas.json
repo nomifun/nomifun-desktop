@@ -10362,6 +10362,46 @@
         ],
         "type": "object"
       },
+      "PluginAppliedState": {
+        "additionalProperties": false,
+        "properties": {
+          "current_target": {
+            "$ref": "#/$defs/PluginTargetRef"
+          },
+          "invalidated_host_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mount_id": {
+            "type": "string"
+          },
+          "mount_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "previous_target": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PluginTargetRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "mount_id",
+          "mount_revision",
+          "current_target"
+        ],
+        "type": "object"
+      },
       "PluginTargetRef": {
         "additionalProperties": false,
         "properties": {
@@ -10392,45 +10432,17 @@
       {
         "additionalProperties": false,
         "properties": {
-          "current_target": {
-            "$ref": "#/$defs/PluginTargetRef"
-          },
-          "invalidated_host_generation": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "mount_id": {
-            "type": "string"
-          },
-          "mount_revision": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "outcome": {
             "const": "applied",
             "type": "string"
           },
-          "previous_target": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/PluginTargetRef"
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "result": {
+            "$ref": "#/$defs/PluginAppliedState"
           }
         },
         "required": [
           "outcome",
-          "mount_id",
-          "mount_revision",
-          "current_target"
+          "result"
         ],
         "type": "object"
       },
@@ -15350,6 +15362,36 @@
         ],
         "type": "object"
       },
+      "PluginRestoredState": {
+        "additionalProperties": false,
+        "properties": {
+          "current_target": {
+            "$ref": "#/$defs/PluginTargetRef"
+          },
+          "invalidated_host_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mount_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "previous_target": {
+            "$ref": "#/$defs/PluginTargetRef"
+          }
+        },
+        "required": [
+          "mount_revision",
+          "current_target",
+          "previous_target"
+        ],
+        "type": "object"
+      },
       "PluginTargetRef": {
         "additionalProperties": false,
         "properties": {
@@ -15380,35 +15422,17 @@
       {
         "additionalProperties": false,
         "properties": {
-          "current_target": {
-            "$ref": "#/$defs/PluginTargetRef"
-          },
-          "invalidated_host_generation": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "mount_revision": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": "integer"
-          },
           "outcome": {
             "const": "restored",
             "type": "string"
           },
-          "previous_target": {
-            "$ref": "#/$defs/PluginTargetRef"
+          "result": {
+            "$ref": "#/$defs/PluginRestoredState"
           }
         },
         "required": [
           "outcome",
-          "mount_revision",
-          "current_target",
-          "previous_target"
+          "result"
         ],
         "type": "object"
       },

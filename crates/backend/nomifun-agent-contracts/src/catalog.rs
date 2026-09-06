@@ -292,20 +292,20 @@ impl CapabilityCatalogEntry {
             .is_some_and(CatalogAvailability::is_active)
     }
 
-    pub fn filter_for_consumer<'a>(
-        entries: &'a [Self],
+    pub fn filter_for_consumer(
+        entries: &[Self],
         consumer: CapabilityConsumer,
-    ) -> Vec<&'a Self> {
+    ) -> Vec<&Self> {
         entries
             .iter()
             .filter(|entry| entry.supports_consumer(consumer))
             .collect()
     }
 
-    pub fn filter_available_for_consumer<'a>(
-        entries: &'a [Self],
+    pub fn filter_available_for_consumer(
+        entries: &[Self],
         consumer: CapabilityConsumer,
-    ) -> Vec<&'a Self> {
+    ) -> Vec<&Self> {
         entries
             .iter()
             .filter(|entry| entry.is_available_for(consumer))

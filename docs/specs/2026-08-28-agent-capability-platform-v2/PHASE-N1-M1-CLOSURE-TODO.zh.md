@@ -41,10 +41,10 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 8 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-01`、`N1-X-01` |
-| 正在实施 | 1 | `N1-2-01` |
-| 已解锁待领取 | 1 | `N1-1-02` |
-| 依赖阻塞 | 21 | 其余 N1/M1 Windows 项与最终合流 |
+| 已关闭 | 11 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-01`、`N1-1-02`、`N1-2-00`、`N1-2-01`、`N1-X-01` |
+| 正在实施 | 0 | 无 |
+| 已解锁待领取 | 2 | `N1-1-03`、`N1-2-02` |
+| 依赖阻塞 | 19 | 其余 N1/M1 Windows 项与最终合流 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
 | 明确延后 | 2 | Marketplace/远程分发、第二 Runtime |
 
@@ -85,12 +85,28 @@
      exact validation 前不得提交；
    - 本机真实 PATH Node probe 已通过。
 8. 当前验证：`nomifun-agent-contracts` 79 tests、`nomifun-agent-kernel` 23 tests、
-   Control Plane 16 tests、Agent Platform 2 tests、JavaScript Runtime 10 tests、
+   Control Plane 16 tests、Agent Platform 2 tests、JavaScript Runtime 12 tests、
    App tests compile、generator `write/check`、Gate self-test 均通过。
    `cargo fmt --all --check` 在 Windows 命中文件名过长限制，改用受影响 crate 的定向
    `cargo fmt --check`；该平台限制不阻断已通过的编译与定向格式验证。
-9. 当前并行 lane：`N1-2-01` migration 067+ Plugin 数据根正在按审查修正 Artifact、
-   Operation 与 retained data 语义；下一可并行领取项是 `N1-1-02`。
+9. clean detached worktree 上的正式 `contract/combined` Gate 已 PASS：
+   source `6a6ff176974a861da064de3d95a8c953a55ff655`，cohort digest
+   `546f5fa2acfed95d58006bc27314decf4d6df1deb34dd22495f3046335161539`，
+   evidence 位于 `build.noindex/agent-capability-v2/6a6ff1769/n1-contract/`。
+10. `N1-1-02` 已交付 lazy shared Extension Host：stdio NDJSON 私有 IPC、exact Hello、
+    demand-load、Mount handle 唯一、普通 rejection 隔离、request cancel、原子
+    quiescent admission fence、watchdog、整进程树回收、late response generation fence 与
+    next-demand restart，10 项真实 Node 测试通过。
+11. `N1-2-00` 已交付 immutable Artifact Store：directory/zip containment、严格 JSON、
+    Windows case/NFC collision、symlink/special file、流式大小/digest、cancellation cleanup、
+    staging/atomic CAS publish 与 published inventory/tamper 校验，9 项测试通过。
+12. `N1-2-01` 已由提交 `6debcb628` 交付 migration 067/068：Plugin Artifact/Project/
+    Candidate/TestReceipt/Mount/current/previous/KV/Credential/Operation 及全局 Runtime
+    selection。Repository、schema、migration/restart 合计 64 项定向测试通过；同
+    package version 的不同 digest 可并存，delete-data 保留 Project/Ready/Test 资产。
+13. Plugin/MiniApp 产品 DTO 已冻结 Runtime、Library、Workshop、Candidate/Release、
+    Config/Credential reference、Operation 与生命周期动作；不暴露 secret、Host
+    generation、Bridge、localhost、旧 Extension 或 Conversation/Guid MiniApp 字段。
 
 ## W0：一期交接
 
@@ -113,15 +129,16 @@
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
 | `N1-1-01` | closed | Runtime lane；新 `nomifun-js-runtime/**` | Node PATH/手工/managed LTS probe、下载确认、fingerprint 与全局试切换 | `N1-0-02` | 10 tests；真实 PATH Node；official index/SHASUMS/zip containment；candidate validation |
-| `N1-1-02` | open | Runtime lane；新 JS Host package/crate | lazy shared Extension Host、private IPC/Hello、watchdog、whole-tree cleanup、late-result fence | `N1-1-01` | demand=0 process=0；crash/restart/cleanup |
-| `N1-1-03` | blocked | Kernel+Runtime 边界 | Tool/Context/Resource/Role Provider 的 Node proxy exports | `N1-0-03`,`N1-1-02` | exact lock invoke；无 Rust/Node 双 Registry |
+| `N1-1-02` | closed | Runtime lane；新 `nomifun-js-host/**` | lazy shared Extension Host、private IPC/Hello、watchdog、whole-tree cleanup、late-result fence | `N1-1-01` | 10 real-Node tests；demand=0、crash/restart、child cleanup、quiescent fence |
+| `N1-1-03` | open | Kernel+Runtime 边界 | Tool/Context/Resource/Role Provider 的 Node proxy exports | `N1-0-03`,`N1-1-02` | exact lock invoke；无 Rust/Node 双 Registry |
 
 ## N1-2：Package 与数据生命周期
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `N1-2-01` | in-progress | DB lane；migration 067+、新 repository | Artifact/Project/Candidate/current/previous/Mount/Operation/retained data schema | `N1-0-02` | fresh DB、migration lineage、restart |
-| `N1-2-02` | blocked | Plugin platform lane | Config、Credential slot binding、KV/CAS、stable `dataDir`、owner mutation lock | `N1-2-01`,`N1-1-02` | namespace/CAS/secret rotation tests |
+| `N1-2-00` | closed | Artifact lane；`nomifun-plugin-platform/**` | directory/zip containment、canonical digest、immutable CAS staging/publish | `N1-0-02` | 9 tests；tamper/traversal/collision/cancel/idempotency |
+| `N1-2-01` | closed | DB lane；migration 067/068、新 repository | Artifact/Project/Candidate/current/previous/Mount/Operation/retained data 与 Runtime selection schema | `N1-0-02` | `6debcb628`；11+2+20+31 tests；fresh/restart/direct-SQL guards |
+| `N1-2-02` | open | Plugin platform lane | Config、Credential slot binding、KV/CAS、stable `dataDir`、owner mutation lock | `N1-2-01`,`N1-1-02` | namespace/CAS/secret rotation tests |
 | `N1-2-03` | blocked | Plugin platform lane | staging/containment/digest/install/replace/restore/uninstall/delete-data | `N1-2-01`,`N1-2-02` | failed replace keeps current；delete resumable |
 
 ## N1-3：Catalog 与消费者

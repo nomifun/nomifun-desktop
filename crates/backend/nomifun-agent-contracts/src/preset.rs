@@ -415,13 +415,13 @@ impl ResolvedCapability {
                 "schema_digest does not match contribution_lock.contract_digest",
             ));
         }
-        if let Some(mount_id) = &self.contribution_lock.mount_id {
-            if mount_id != &self.resolved_mount_id {
-                return Err(snapshot_capability_violation(
-                    &self.capability.id,
-                    "contribution_lock.mount_id does not match resolved_mount_id",
-                ));
-            }
+        if let Some(mount_id) = &self.contribution_lock.mount_id
+            && mount_id != &self.resolved_mount_id
+        {
+            return Err(snapshot_capability_violation(
+                &self.capability.id,
+                "contribution_lock.mount_id does not match resolved_mount_id",
+            ));
         }
         for (field, digest) in [
             ("schema_digest", &self.schema_digest),
@@ -434,13 +434,13 @@ impl ResolvedCapability {
                 ));
             }
         }
-        if let Some(source_digest) = &self.resolved_source.source_digest {
-            if !is_lowercase_hex_digest(source_digest) {
-                return Err(snapshot_capability_violation(
-                    &self.capability.id,
-                    "resolved_source.source_digest must be 64 lowercase hexadecimal characters",
-                ));
-            }
+        if let Some(source_digest) = &self.resolved_source.source_digest
+            && !is_lowercase_hex_digest(source_digest)
+        {
+            return Err(snapshot_capability_violation(
+                &self.capability.id,
+                "resolved_source.source_digest must be 64 lowercase hexadecimal characters",
+            ));
         }
         if self.dependency_path.is_empty()
             || self.dependency_path.last() != Some(&self.capability.id)
