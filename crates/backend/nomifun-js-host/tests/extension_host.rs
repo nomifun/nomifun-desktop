@@ -3,11 +3,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use nomifun_agent_contracts::{
-    ActionId, CapabilityId, CapabilityRef, ContributionId, CredentialSlotBinding,
-    DigestHex, PackageId, PackageRef, PluginHostCommitFence,
+    ActionId, CanonicalSchemaRef, CapabilityId, CapabilityRef, ContributionId,
+    CredentialSlotBinding, DigestHex, PackageId, PackageRef, PluginHostCommitFence,
     PluginHostContributionRef, PluginHostTargetLock, PluginMountId,
     PluginMountRuntimeContext, PluginStateHandleDescriptor, PluginStateMethod,
-    StrictJsonValue, ValidatedPluginConfig, VersionString,
+    ResourceBindingId, ResourceKind, StrictJsonValue, ValidatedPluginConfig,
+    VersionString,
 };
 use nomifun_js_host::{
     ExtensionHostSupervisor, ImmutablePluginModule, JavaScriptHostConfig,
@@ -325,6 +326,80 @@ async fn ordinary_rejection_isolated_to_one_invocation() {
         .unwrap();
     assert_eq!(value.0["input"]["still"], "running");
     supervisor.stop_generation(generation).await.unwrap();
+}
+
+#[tokio::test]
+async fn context_and_resource_requests_use_the_exact_resident_mount() {
+    let supervisor = supervisor(Duration::from_secs(2)).await;
+    let temp = TempDir::new().unwrap();
+    let generation = load(&supervisor, &temp, "mount-a", 'a').await;
+    let contribution = contribution(target("mount-a", 'a'));
+
+    let context = supervisor
+        .contribute_context(
+            contribution.clone(),
+            CanonicalSchemaRef::from("schema://fixture/context"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(context.0["schema_ref"], "schema://fixture/context");
+    assert_eq!(context.0["mount_id"], "mount-a");
+
+    let resource = supervisor
+        .acquire_resource(
+            contribution.clone(),
+            ResourceBindingId::from("binding-a"),
+            ResourceKind::from("fixture.resource"),
+            StrictJsonValue(json!({"path": "fixture"})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resource.host_generation, generation);
+    assert_eq!(resource.handle_id, "mount-a:binding-a");
+    supervisor.release_resource(&resource).await.unwrap();
+
+    let release_count = supervisor
+        .invoke(
+            contribution,
+            ActionId::from("resource_release_count"),
+            StrictJsonValue(json!({})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(release_count.0["count"], 1);
+    supervisor.stop_generation(generation).await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_resource_release_does_not_start_or_touch_a_new_generation() {
+    let supervisor = supervisor(Duration::from_secs(2)).await;
+    let temp = TempDir::new().unwrap();
+    let first_generation = load(&supervisor, &temp, "mount-a", 'a').await;
+    let resource = supervisor
+        .acquire_resource(
+            contribution(target("mount-a", 'a')),
+            ResourceBindingId::from("binding-a"),
+            ResourceKind::from("fixture.resource"),
+            StrictJsonValue(json!({})),
+        )
+        .await
+        .unwrap();
+    supervisor.stop_generation(first_generation).await.unwrap();
+
+    let second_generation = load(&supervisor, &temp, "mount-b", 'b').await;
+    assert_ne!(first_generation, second_generation);
+    supervisor.release_resource(&resource).await.unwrap();
+    assert_eq!(
+        supervisor.state(),
+        JavaScriptHostState::Running {
+            generation: second_generation,
+            process_id: match supervisor.state() {
+                JavaScriptHostState::Running { process_id, .. } => process_id,
+                _ => unreachable!(),
+            },
+        }
+    );
+    supervisor.stop_generation(second_generation).await.unwrap();
 }
 
 #[tokio::test]

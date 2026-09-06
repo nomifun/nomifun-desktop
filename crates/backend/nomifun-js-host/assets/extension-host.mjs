@@ -268,6 +268,9 @@ async function dispatch(frame) {
       ) {
         throw new Error("resource acquisition must return handleId");
       }
+      if (resourceHandles.has(acquired.handleId)) {
+        throw new Error("resource handle ID is already active");
+      }
       resourceHandles.set(acquired.handleId, {
         mountId: params.contribution.target.mount_id,
         release: acquired.release,

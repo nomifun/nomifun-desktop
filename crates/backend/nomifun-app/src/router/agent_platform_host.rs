@@ -2947,7 +2947,7 @@ mod tests {
 
             platform
                 .kernel_registry()
-                .release_role_resources(&scope_key)
+                .release_resources(&scope_key)
                 .await
                 .expect("Browser role resource release");
             browser_hub.close_all().await.expect("Browser Hub close");
@@ -3195,7 +3195,7 @@ mod tests {
 
             platform
                 .kernel_registry()
-                .release_role_resources(&scope_key)
+                .release_resources(&scope_key)
                 .await
                 .expect("Computer role resource release");
             platform

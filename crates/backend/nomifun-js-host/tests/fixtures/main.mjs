@@ -1,6 +1,8 @@
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 
+let resourceReleaseCount = 0;
+
 export async function activate({ mount }) {
   const contributionId = `contribution.${mount.target.mount_id}`;
   return {
@@ -52,9 +54,27 @@ export async function activate({ mount }) {
               await new Promise(() => {});
               return null;
             }
+            case "resource_release_count":
+              return { count: resourceReleaseCount };
             default:
               throw new Error(`unknown fixture action ${actionId}`);
           }
+        },
+        async contributeContext({ schemaRef, contribution }) {
+          return {
+            schema_ref: schemaRef,
+            mount_id: contribution.target.mount_id,
+          };
+        },
+        async acquireResource({ bindingId, resourceKind, parameters }) {
+          return {
+            handleId: `${mount.target.mount_id}:${bindingId}`,
+            release() {
+              resourceReleaseCount += 1;
+            },
+            resourceKind,
+            parameters,
+          };
         },
       },
     },

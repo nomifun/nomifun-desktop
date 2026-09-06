@@ -1458,7 +1458,7 @@ async fn non_agent_role_operation_dispatches_exact_tool_context_and_resource() {
     assert!(Arc::ptr_eq(&first_handle.handle, &replay_handle.handle));
     assert_eq!(releases.load(Ordering::Acquire), 0);
     registry
-        .release_role_resources(&ScopeKey::from("operation:sample-role"))
+        .release_resources(&ScopeKey::from("operation:sample-role"))
         .await
         .unwrap();
     assert_eq!(releases.load(Ordering::Acquire), 1);

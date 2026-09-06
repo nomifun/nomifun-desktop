@@ -1085,7 +1085,11 @@ struct RoleProviderMemberContribution {
 
 资源和平台约束按 member 声明，Compiler 只合并当前 Agent ceiling 或 non-Agent operation 实际使用的 member；不能因为 Provider 支持 `takeover` 或 `launch`，就强迫只使用 observe/navigate 的调用方绑定可选资源。
 
-同一可序列化 `role_providers[]` shape 必须在一期进入 `PackageContributions`、target first-party inventory 和 generated schema。Phase 1 的 bundled Rust registration 使用它；二期 Node Plugin loader 与 MCP Adapter 只能 materialize 同一 shape，不能新增第二套 JS/MCP Provider schema。
+同一可序列化 `role_providers[]` shape 必须在一期进入 `PackageContributions`、target
+first-party inventory 和 generated schema。Phase 1 的 bundled Rust registration 使用它；
+未来若开放 Node/MCP Role Provider，只能 materialize 同一 shape，不能新增第二套
+JS/MCP Provider schema。06 的 N1 `plugin-package-v1` 明确不开放 Role Contract/
+Role Provider，这一后置能力不得被当作 N1/M1 完成条件。
 
 执行对象不以 `Plugin | MCP | CLI | Skill` 枚举进入 Kernel。`PluginRegistration` 在内存中同时登记 metadata 与按现有 `CapabilityKind` 区分的窄 typed exports：
 
@@ -1350,7 +1354,9 @@ standalone `mcp-computer-stdio` 已按本节删除边界物理移除；这一处
 
 - Browser/Computer 两个 versioned Role Contract；
 - canonical façade 与 Provider implementation identity 分离；
-- source-neutral `RoleProviderContribution` canonical Rust contract，并把同一可序列化 shape 加入 `PackageContributions`、target inventory 和 generated schema；二期只能由 Node loader 复用，不能另造 JS 专用 shape；
+- source-neutral `RoleProviderContribution` canonical Rust contract，并把同一可序列化
+  shape 加入 `PackageContributions`、target inventory 和 generated schema；未来公开
+  Node/MCP Provider 时只能复用，不能另造 JS 专用 shape；
 - 现有 Materialized Registry 内部的 flat `role_provider_index`；
 - Fresh-v4 installation binding 表、Agent Revision override 字段、first-party seed 和固定解析顺序；
 - `ResolvedRoleProviderLock` 进入 Snapshot digest；
@@ -1378,10 +1384,18 @@ standalone `mcp-computer-stdio` 已按本节删除边界物理移除；这一处
 
 #### 7.3 二期 06 的前置条件与后续边界
 
-05 的 Role/Provider 合同落地后，仍必须先完成本文 §15 的 AgentPreset 平台级能力建设；只有 AP-0～AP-7 全部通过，06 才能进入机器合同冻结和代码实施。06 的产品决策可以在本轮同步修订，但不能绕过该前置条件：
+05 的 Role/Provider 合同落地后，仍必须先完成本文 §15 的 AgentPreset 平台级能力建设；
+只有 AP-0～AP-7 全部通过，06 才能进入机器合同冻结和代码实施。06 的产品决策可以在
+本轮同步修订，但不能绕过该前置条件。
 
-1. 在 Node Plugin SDK/loader 中公开并复用一期已冻结的 Browser/Computer Provider contribution shape；
-2. Extension Host 把 JS Provider 适配到一期统一的 typed Provider exports；
+06 的 N1/M1 当前只接普通 Plugin Tool/Context/Resource 与 MiniApp contribution；
+`plugin-package-v1` 不发布 Role Contract/Role Provider。以下扩展继续后置，不属于
+N1/M1 完成定义：
+
+1. 在后续 provider-capable Package/Adapter 合同中公开并复用一期已冻结的
+   Browser/Computer Provider contribution shape；
+2. Extension Host 或 MCP Adapter 把外部 Provider 适配到一期统一的 typed Provider
+   exports；
 3. 标准 MCP Toolset 直接映射；Schema 不一致时由 Chat Dev 生成薄 JS Adapter Plugin；
 4. 为一期已冻结的 installation binding 和 Agent Revision override 增加统一 application service；如需暴露精确实现选择，只能作为 Agent 工作台能力详情中的高级动作，不得再建一个“运行时 Agent 设定”产品；
 5. 在同一个 Agent 工作台中提供来源/provenance、Test、影响清单、切换和 Restore Built-in；Runtime Manager 仍是系统基础设施设置，不属于 AgentPreset 内容；
