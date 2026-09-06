@@ -12,7 +12,8 @@ base_sha: 6a2a94bd192ef67eda5dd67331f6c047b1c1b315
 isolated_code_commits:
   - b652fa29ce02c91f600d54abaecd98dfb967f9c4
   - c8b0193892ad7f1b73586b7570b7a2f0172c8d1b
-isolated_code_tip: c8b0193892ad7f1b73586b7570b7a2f0172c8d1b
+  - 0e33dbed53e248ef5c926b548bfde378120bb400
+isolated_code_tip: 0e33dbed53e248ef5c926b548bfde378120bb400
 ```
 
 代码提交只包含：
@@ -44,14 +45,21 @@ crates/backend/nomifun-coding-engine/
 - read-only parallel、effectful serial 调度；
 - cancel、dispose、panic cleanup；
 - Native Responses Item 和音频输出的显式 unsupported。
+- `KernelCodingToolInvoker`：Snapshot/active-set/registry generation、principal、
+  action/resource/schema admission；
+- Inspect/Edit/Execute/Full 标准 Coding Tool exposure；
+- `ManagedCodingProcessOwner`：复用 `nomi-process-runtime` 的 start/poll/stdin/
+  PTY/timeout/cancel/tree cleanup；
+- bounded AGENTS.md、ContextAssembler、CompactionSummary、Checkpoint/Resume contract。
 
 当前实现没有接入：
 
 - `nomifun-app`；
 - `nomifun-agent-platform`；
 - `nomifun-agent-session` durable event 主链；
-- `nomifun-agent-kernel`；
-- Process/File/VCS/Workspace owner；
+- Kernel adapter 尚未由 AgentSession application service 注入生产 registry；
+- Process adapter 尚未由生产 Wave2 host/AgentSession 路由调用；
+- File/Patch/VCS/Workspace owner 尚未接入 Coding Engine 主链；
 - UI、Remote 或 Automation 路由；
 - 旧 `nomifun-codex-runtime` 替换或删除。
 
@@ -69,7 +77,7 @@ git diff --check
 最后一次单测结果：
 
 ```text
-13 passed
+31 passed
 0 failed
 ```
 
@@ -88,12 +96,16 @@ git diff --check
 - active Tool 取消；
 - one-active-turn；
 - dispose 幂等并拒绝新 turn。
+- Kernel Snapshot/active-set Tool invocation；
+- 标准 Tool surface 单调筛选和 canonical action mapping；
+- Windows 受管进程 start/wait/stdin/cancel/tree cleanup；
+- AGENTS.md 层级、上下文预算、compaction、checkpoint exact Binding。
 
 未运行：
 
 - Clippy：当前 stable toolchain 未安装 `cargo-clippy`；
 - 全仓测试：隔离 crate 未接生产主链，按仓库规则只跑定向检查；
-- live Provider/Kernel/Process/File/VCS/Session E2E：当前没有中央 owner 接线；
+- live Provider/AgentSession/SessionEvent E2E：当前没有中央主链接线；
 - macOS/Linux：当前电脑只完成 Windows 开发切片。
 
 ## 4. 远程合并顺序
@@ -104,8 +116,9 @@ git diff --check
 4. 只按当前远程 HEAD 重新生成/解决 `Cargo.lock`；不要覆盖远程其他依赖更新。
 5. 运行 `cargo check/test -p nomifun-coding-engine`。
 6. 建立平台级异构 Engine Registry/Factory，再接 AgentSession create/fork。
-7. 依次完成 `CAR-02`～`CAR-07`；旧 Wrapper 在灰度验收前继续保留，但不能成为新
-   Coding Engine 的隐式 fallback。
+7. 只补当前尚未完成的 `CAR-02` 原生取消和 `CAR-07` 主链接线；Kernel/Process/
+   Context adapter 已在本地切片中完成，不要重写。旧 Wrapper 在灰度验收前继续保留，
+   但不能成为新 Coding Engine 的隐式 fallback。
 8. Stable 验收通过后再执行 `CAR-08` clean cut。
 
 ## 5. 远程中央接线责任
@@ -147,7 +160,8 @@ exact Session `EngineBinding`。
 
 ### 5.4 Capability Kernel
 
-远程 `CAR-03` 必须将 `CodingToolBinding` 对齐到 Snapshot 编译结果：
+远程 `CAR-03` 应直接注入本地 `KernelCodingToolInvoker`，并将其绑定到 Snapshot
+编译结果：
 
 ```text
 agent_session_id
@@ -166,12 +180,14 @@ Engine 直接调用具体 Browser、Computer、MCP、Plugin 或文件 handler。
 
 ### 5.5 Process/File/VCS/Context
 
-- Process/PTY/stdin/tree cleanup 接 `nomi-process-runtime`；
+- Process/PTY/stdin/tree cleanup 直接复用本地 `ManagedCodingProcessOwner` 和
+  `nomi-process-runtime`；
 - Patch/File 接 `nomifun-file` owner；
 - VCS 进入 NomiFun canonical owner；
 - Workspace 必须是 typed resource，不使用宿主进程 cwd fallback；
-- Context 从 SessionEvent 重建；
-- AGENTS.md、compaction、checkpoint 和 resume 按 `CAR-06` 接入。
+- Context 从 SessionEvent 重建，并复用本地 `CodingContextAssembler`；
+- AGENTS.md、compaction、checkpoint 和 resume 复用本地 contracts，补 SessionEvent
+  durable projection。
 
 ### 5.6 SessionEvent 与 UI
 

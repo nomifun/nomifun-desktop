@@ -24,6 +24,8 @@
 | CAR-D-014 | 本地施工形态 | 当前电脑先交付未接生产组合根的 `nomifun-coding-engine`；远程主工作进程负责统一 Registry、联调和验收 |
 | CAR-D-015 | 隔离 Catalog 范围 | `CodingEngineCatalog` 只管理 Coding family Build；最终异构 Registry 属于 Agent Platform |
 | CAR-D-016 | Codex 源基线 | CAR 独立固定 `../codex` commit `6af345407d9c2a568da9d01b6c4b81a9e61495c0`；一期旧 Sidecar 合同中的其他 frozen SHA 不得复用为新 Engine provenance |
+| CAR-D-017 | 标准 Tool 层级 | Inspect/Edit/Execute/Full 只是工作台/ToolPlan 筛选；Compiled Snapshot 仍是能力上限 |
+| CAR-D-018 | Process 复用 | Coding Engine 提供 `ManagedCodingProcessOwner` 适配 `nomi-process-runtime`，但模型调用仍必须经过 Kernel/Wave2 owner |
 
 ## 默认建议、实施前可拍板
 

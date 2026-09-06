@@ -30,7 +30,8 @@ base_sha: 6a2a94bd192ef67eda5dd67331f6c047b1c1b315
 isolated_code_commits:
   - b652fa29ce02c91f600d54abaecd98dfb967f9c4
   - c8b0193892ad7f1b73586b7570b7a2f0172c8d1b
-isolated_code_tip: c8b0193892ad7f1b73586b7570b7a2f0172c8d1b
+  - 0e33dbed53e248ef5c926b548bfde378120bb400
+isolated_code_tip: 0e33dbed53e248ef5c926b548bfde378120bb400
 
 开始前：
 1. 检查远程当前分支、HEAD、git status、未提交和已暂存变更；
@@ -58,13 +59,15 @@ isolated_code_tip: c8b0193892ad7f1b73586b7570b7a2f0172c8d1b
 
 按顺序实施：
 1. CAR-02：补 ChatBrokerPort 原生 cancellation，保留现有模型 DTO 和 retry owner。
-2. CAR-03：CodingToolBinding 对齐 Snapshot/active set/schema/resource/principal/effect，
-   补 Kernel cancellation。
-3. CAR-04～CAR-06：按不相交写集接 Process、File/VCS、Context/AGENTS/Compaction。
-4. CAR-07：建立平台异构 Engine Registry，将新建/Fork Session 接到 exact Binding，
+2. CAR-03：直接复用本地 `KernelCodingToolInvoker`、标准 Tool surface 和 admission；
+   只补 AgentSession 注入与 Kernel cancellation。
+3. CAR-04：直接复用本地 `ManagedCodingProcessOwner`，补 Wave2/Session 路由和跨平台验证。
+4. CAR-05～CAR-06：复用本地 owner/context contracts，接 File/VCS、SessionEvent、
+   compaction/resume。
+5. CAR-07：建立平台异构 Engine Registry，将新建/Fork Session 接到 exact Binding，
    补 SessionEvent、UI、Remote、Automation E2E。
-5. 灰度期间保留 Legacy Engine；不要把它作为 Coding Engine 的故障 fallback。
-6. Stable 验收后才开始 CAR-08 删除旧 Wrapper/Sidecar。
+6. 灰度期间保留 Legacy Engine；不要把它作为 Coding Engine 的故障 fallback。
+7. Stable 验收后才开始 CAR-08 删除旧 Wrapper/Sidecar。
 
 绝对禁止：
 1. 运行、打包或调用 codex-app-server。

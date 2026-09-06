@@ -165,6 +165,11 @@ crates/backend/nomifun-coding-engine/**
 未来是否物理拆分通用 `nomifun-agent-runtime`，由远程集成者根据真实复用边界决定；
 不得为了目录命名复制第二份 actor、turn loop 或 Port。
 
+当前本地同一交付还包含 `CAR-03` 的 Kernel Tool admission seam、`CAR-04` 的
+`nomi-process-runtime` adapter，以及 `CAR-06` 的 bounded Context/AGENTS/
+Compaction/Checkpoint contracts；这些切片仍需远程主工作进程接入 AgentSession
+和 SessionEvent 后才算产品完成。
+
 ### CAR-02：ChatModelBroker Coding 适配
 
 目标：让 Coding Engine 通过 NomiFun Broker 获取完整规范化模型事件。

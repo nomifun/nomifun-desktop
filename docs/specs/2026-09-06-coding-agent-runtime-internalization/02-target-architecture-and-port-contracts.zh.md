@@ -53,6 +53,12 @@ Engine Catalog 只描述执行引擎，不管理 Model Route、Plugin Runtime �
 - `CodingToolPlan`/`CodingToolInvoker`：携带 schema digest、canonical
   capability/action/resource/effect；
 - Coding turn loop：text/reasoning/Tool Call/Tool Result continuation。
+- `KernelCodingToolInvoker`：将 Tool Call 投影到已编译 Snapshot、active set 和
+  `KernelRegistry`，不拥有 handler；
+- 标准 Coding Tool exposure：Inspect/Edit/Execute/Full 只是显式 ToolPlan 筛选；
+- `ManagedCodingProcessOwner`：复用 `nomi-process-runtime` 的 bounded output、
+  stdin、PTY、timeout 和 process-tree cleanup；
+- AGENTS.md、Context、Compaction、Checkpoint/Resume 的 bounded 合同。
 
 这个 Catalog 只是 Coding Engine family 的隔离 Build Catalog，不承担最终平台级
 异构 Engine Registry。远程主工作进程在 `CAR-07` 增加统一 Registry/Factory，
@@ -208,7 +214,9 @@ Runtime private event ID 不得成为产品操作 ID。
 - 现有 Capability handler 调用合同没有 cancellation 参数；Process/SSH/MCP 等 owner
   需要在 `CAR-03`/`CAR-04` 明确取消传播和清理报告。
 
-在这些合同补齐前，不能把“停止消费”宣称为端到端取消完成。
+在这些合同补齐前，不能把“停止消费”宣称为端到端取消完成；当前 Kernel adapter
+的取消是 invocation future 的 fail-fast，owner handler 的真实停止仍由中央
+Capability cancellation 合同保证。
 
 ## 4. 依赖图约束
 
