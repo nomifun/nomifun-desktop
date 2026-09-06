@@ -214,6 +214,7 @@ nomifun-ssh.workspace = true
 nomifun-mcp.workspace = true
 nomifun-conversation.workspace = true
 nomifun-extension.workspace = true
+nomifun-skill-library.workspace = true
 nomifun-channel.workspace = true
 nomifun-cron.workspace = true
 nomifun-requirement.workspace = true

@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_ai_agent::{CompanionSkillSink, SkillListing};
-use nomifun_extension::constants::SKILL_MANIFEST_FILE;
-use nomifun_extension::skill_service::{self, SkillPaths, SkillScope};
+use nomifun_skill_library::constants::SKILL_MANIFEST_FILE;
+use nomifun_skill_library::skill_service::{self, SkillPaths, SkillScope};
 
 use crate::collector::SharedConfig;
 use crate::registry::CompanionRegistry;

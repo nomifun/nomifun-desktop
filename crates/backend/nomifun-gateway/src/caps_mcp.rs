@@ -23,7 +23,7 @@
 //!
 //! - `skill_paths: SkillPaths`
 //!    Clone of `states.skill.skill_paths` (from `SkillRouterState`).
-//!    Crate: `nomifun-extension`, type: `nomifun_extension::skill_service::SkillPaths`.
+//!    Crate: `nomifun-skill-library`, type: `nomifun_skill_library::SkillPaths`.
 //!
 //! ## SKIPPED tools (listed at the bottom of this file):
 //!
@@ -206,7 +206,7 @@ struct McpCapabilityDeps {
     extensions: nomifun_extension::ExtensionRegistry,
     hub_index: nomifun_extension::HubIndexManager,
     hub_installer: nomifun_extension::HubInstaller,
-    skill_paths: nomifun_extension::SkillPaths,
+    skill_paths: nomifun_skill_library::SkillPaths,
 }
 
 fn adapt<P, F, Fut>(
@@ -380,7 +380,7 @@ async fn skill_list(
     _ctx: CallerCtx,
     _p: SkillListParams,
 ) -> Value {
-    match nomifun_extension::skill_service::list_available_skills(&deps.skill_paths).await {
+    match nomifun_skill_library::skill_service::list_available_skills(&deps.skill_paths).await {
         Ok(items) => {
             let resp: Vec<Value> = items
                 .into_iter()
@@ -404,7 +404,7 @@ async fn skill_import(
     p: SkillImportParams,
 ) -> Value {
     let path = std::path::Path::new(&p.skill_path);
-    match nomifun_extension::skill_service::import_skill(&deps.skill_paths, path).await {
+    match nomifun_skill_library::skill_service::import_skill(&deps.skill_paths, path).await {
         Ok(name) => ok(json!({ "imported": true, "skill_name": name })),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -415,7 +415,7 @@ async fn skill_delete(
     _ctx: CallerCtx,
     p: SkillDeleteParams,
 ) -> Value {
-    match nomifun_extension::skill_service::delete_skill(&deps.skill_paths, &p.name).await {
+    match nomifun_skill_library::skill_service::delete_skill(&deps.skill_paths, &p.name).await {
         Ok(()) => ok(json!({ "deleted": true, "name": p.name })),
         Err(e) => json!({ "error": e.to_string() }),
     }

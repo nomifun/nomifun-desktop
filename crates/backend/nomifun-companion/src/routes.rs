@@ -1006,7 +1006,7 @@ mod tests {
             Arc::new(BroadcastEventBus::new(16)),
             "owner-a",
             Arc::new(NoopCompleter),
-            Arc::new(nomifun_extension::skill_service::resolve_skill_paths(data_dir, data_dir)),
+            Arc::new(nomifun_skill_library::skill_service::resolve_skill_paths(data_dir, data_dir)),
         )
         .await
         .unwrap();
@@ -1392,12 +1392,12 @@ mod tests {
 
         // The list route fails closed without a real SKILL.md, so seed both halves:
         // the file under the owner's scope and the registry row that points at it.
-        let paths = nomifun_extension::skill_service::resolve_skill_paths(dir.path(), dir.path());
-        nomifun_extension::skill_service::create_skill(
+        let paths = nomifun_skill_library::skill_service::resolve_skill_paths(dir.path(), dir.path());
+        nomifun_skill_library::skill_service::create_skill(
             &paths,
-            &nomifun_extension::skill_service::SkillScope::Companion(owner.clone()),
+            &nomifun_skill_library::skill_service::SkillScope::Companion(owner.clone()),
             true,
-            &nomifun_extension::skill_service::SkillDraftInput {
+            &nomifun_skill_library::skill_service::SkillDraftInput {
                 name: "research".into(),
                 description: "一个可复用的调研流程".into(),
                 when_to_use: None,

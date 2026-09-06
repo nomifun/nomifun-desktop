@@ -31,12 +31,13 @@ use nomifun_conversation::{
     conversation_ops_routes, conversation_routes, creative_studio_agent_session_routes,
 };
 use nomifun_cron::cron_routes;
-use nomifun_extension::{extension_routes, hub_routes, skill_routes};
+use nomifun_extension::{extension_routes, hub_routes};
 use nomifun_file::file_routes;
 use nomifun_idmm::idmm_routes;
 use nomifun_knowledge::knowledge_routes;
 use nomifun_mcp::mcp_routes;
 use nomifun_office::{office_proxy_routes, office_routes};
+use nomifun_skill_library::skill_routes;
 use nomifun_agent_execution::{agent_execution_routes, agent_execution_template_routes};
 use nomifun_realtime::{UserEventEnvelope, WebSocketManager, WsHandlerState, ws_upgrade_handler};
 use nomifun_requirement::requirement_routes;

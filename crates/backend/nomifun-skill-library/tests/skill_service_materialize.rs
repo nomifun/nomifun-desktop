@@ -1,4 +1,4 @@
-use nomifun_extension::{resolve_skill_paths, skill_service};
+use nomifun_skill_library::{resolve_skill_paths, skill_service};
 use tempfile::TempDir;
 
 /// `BUILTIN_SKILLS_ENV_VAR` is process-global; this test mutates it, so
@@ -26,7 +26,7 @@ async fn materialize_returns_only_listed_skill_source_paths() {
 
     // SAFETY: single-threaded test harness.
     unsafe {
-        std::env::set_var(nomifun_extension::BUILTIN_SKILLS_ENV_VAR, &builtin_root);
+        std::env::set_var(nomifun_skill_library::BUILTIN_SKILLS_ENV_VAR, &builtin_root);
     }
     let paths = resolve_skill_paths(tmp.path(), tmp.path());
 
@@ -46,6 +46,6 @@ async fn materialize_returns_only_listed_skill_source_paths() {
     assert!(!tmp.path().join("conversations").exists());
 
     unsafe {
-        std::env::remove_var(nomifun_extension::BUILTIN_SKILLS_ENV_VAR);
+        std::env::remove_var(nomifun_skill_library::BUILTIN_SKILLS_ENV_VAR);
     }
 }

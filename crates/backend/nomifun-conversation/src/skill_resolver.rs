@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-pub use nomifun_extension::ResolvedAgentSkill;
+pub use nomifun_skill_library::ResolvedAgentSkill;
 
 #[async_trait]
 pub trait SkillResolver: Send + Sync {
@@ -25,13 +25,13 @@ pub trait SkillResolver: Send + Sync {
     async fn link_workspace_skills(&self, workspace: &Path, rel_dirs: &[&str], skills: &[ResolvedAgentSkill]) -> usize;
 }
 
-/// Production adapter backed by `nomifun_extension::skill_service`.
+/// Production adapter backed by `nomifun_skill_library::skill_service`.
 pub struct ExtensionSkillResolver {
-    paths: Arc<nomifun_extension::SkillPaths>,
+    paths: Arc<nomifun_skill_library::SkillPaths>,
 }
 
 impl ExtensionSkillResolver {
-    pub fn new(paths: Arc<nomifun_extension::SkillPaths>) -> Self {
+    pub fn new(paths: Arc<nomifun_skill_library::SkillPaths>) -> Self {
         Self { paths }
     }
 }
@@ -39,7 +39,7 @@ impl ExtensionSkillResolver {
 #[async_trait]
 impl SkillResolver for ExtensionSkillResolver {
     async fn auto_inject_names(&self) -> Vec<String> {
-        match nomifun_extension::list_builtin_auto_skills(&self.paths).await {
+        match nomifun_skill_library::list_builtin_auto_skills(&self.paths).await {
             Ok(items) => {
                 let mut names: Vec<String> = items.into_iter().map(|i| i.name).collect();
                 names.sort();
@@ -61,7 +61,7 @@ impl SkillResolver for ExtensionSkillResolver {
         }
         // Conversation_id is validated upstream; we don't use a real one here
         // because this resolver is purely a path-resolution helper.
-        match nomifun_extension::materialize_skills_for_agent(&self.paths, "workspace-link", names).await {
+        match nomifun_skill_library::materialize_skills_for_agent(&self.paths, "workspace-link", names).await {
             Ok(list) => list,
             Err(e) => {
                 tracing::warn!(
@@ -77,7 +77,7 @@ impl SkillResolver for ExtensionSkillResolver {
         if rel_dirs.is_empty() || skills.is_empty() {
             return 0;
         }
-        match nomifun_extension::link_workspace_skills(workspace, rel_dirs, skills).await {
+        match nomifun_skill_library::link_workspace_skills(workspace, rel_dirs, skills).await {
             Ok(n) => n,
             Err(e) => {
                 tracing::warn!(

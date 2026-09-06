@@ -6253,6 +6253,7 @@ dependencies = [
  "nomifun-robot",
  "nomifun-runtime",
  "nomifun-shell",
+ "nomifun-skill-library",
  "nomifun-ssh",
  "nomifun-system",
  "nomifun-terminal",
@@ -6453,10 +6454,10 @@ dependencies = [
  "nomifun-common",
  "nomifun-conversation",
  "nomifun-db",
- "nomifun-extension",
  "nomifun-knowledge",
  "nomifun-model-invoke",
  "nomifun-realtime",
+ "nomifun-skill-library",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -6482,12 +6483,12 @@ dependencies = [
  "nomifun-auth",
  "nomifun-common",
  "nomifun-db",
- "nomifun-extension",
  "nomifun-file",
  "nomifun-knowledge",
  "nomifun-mcp",
  "nomifun-realtime",
  "nomifun-runtime",
+ "nomifun-skill-library",
  "regex",
  "serde",
  "serde_json",
@@ -6635,32 +6636,22 @@ dependencies = [
 name = "nomifun-extension"
 version = "0.7.4"
 dependencies = [
- "async-trait",
  "axum",
  "dirs 6.0.0",
- "fs2",
  "http-body-util",
- "include_dir",
- "junction",
  "mime_guess",
  "nomi-process-runtime",
  "nomifun-api-types",
  "nomifun-common",
- "nomifun-db",
  "nomifun-realtime",
- "regex",
- "reqwest 0.12.28",
  "semver",
  "serde",
  "serde_json",
- "serial_test",
- "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tower",
  "tracing",
- "zip 2.4.2",
 ]
 
 [[package]]
@@ -6719,6 +6710,7 @@ dependencies = [
  "nomifun-mcp",
  "nomifun-requirement",
  "nomifun-shell",
+ "nomifun-skill-library",
  "nomifun-system",
  "nomifun-terminal",
  "nomifun-workshop",
@@ -7051,6 +7043,33 @@ dependencies = [
  "tracing",
  "which 7.0.3",
  "wiremock",
+]
+
+[[package]]
+name = "nomifun-skill-library"
+version = "0.7.4"
+dependencies = [
+ "async-trait",
+ "axum",
+ "dirs 6.0.0",
+ "fs2",
+ "include_dir",
+ "junction",
+ "nomifun-api-types",
+ "nomifun-common",
+ "nomifun-db",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tower",
+ "tracing",
+ "zip 2.4.2",
 ]
 
 [[package]]

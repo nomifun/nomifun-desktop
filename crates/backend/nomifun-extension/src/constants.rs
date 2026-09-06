@@ -42,60 +42,6 @@ pub const LIFECYCLE_ON_DEACTIVATE_TIMEOUT_SECS: u64 = 30;
 /// Route prefixes reserved for internal use — extensions cannot register these.
 pub const RESERVED_ROUTE_PREFIXES: &[&str] = &["/api/", "/auth/", "/ws/"];
 
-// ---------------------------------------------------------------------------
-// Skill & rule management
-// ---------------------------------------------------------------------------
-
-/// Default subdirectory name for user-created skills.
-pub const SKILLS_DIR_NAME: &str = "skills";
-
-/// Default subdirectory name for per-job cron skills under the data dir.
-pub const CRON_SKILLS_DIR_NAME: &str = "cron/skills";
-
-/// Default subdirectory name for built-in skills.
-pub const BUILTIN_SKILLS_DIR_NAME: &str = "builtin-skills";
-
-/// Default subdirectory name for built-in rules.
-pub const BUILTIN_RULES_DIR_NAME: &str = "builtin-rules";
-
-/// Subdirectory inside the built-in skills corpus whose children are
-/// auto-injected into every preset. Historical name was `_builtin`;
-/// renamed to `auto-inject` as part of the 2026-04-23 built-in skill
-/// migration (skills are now embedded in the backend binary via
-/// `include_dir!`).
-pub const BUILTIN_AUTO_SKILLS_SUBDIR: &str = "auto-inject";
-
-/// Filename that identifies a skill directory.
-pub const SKILL_MANIFEST_FILE: &str = "SKILL.md";
-
-/// Persistence file for custom external skill paths.
-pub const CUSTOM_SKILL_PATHS_FILE: &str = "custom-skill-paths.json";
-
-/// Well-known skill source name for the nomifun skills market.
-pub const SKILLS_MARKET_NAME: &str = "nomifun-skills";
-
-/// Well-known skill source path for the nomifun skills market.
-///
-/// NOTE: This is a URL placeholder, not a filesystem path. When used in
-/// `ExternalPathsManager`, it serves as an identifier for the skills market
-/// source. Filesystem scanning functions like `detect_and_count_external_skills`
-/// will silently skip it since the path does not exist on disk.
-pub const SKILLS_MARKET_PATH: &str = "https://github.com/nomifun/nomifun-skills";
-
-/// Common skill directory names to detect on the filesystem.
-///
-/// Each tuple is `(display_name, relative_path, source_slug)`:
-/// - `display_name` — user-facing label (e.g. the tab title).
-/// - `relative_path` — path under the user's home directory.
-/// - `source_slug` — stable machine-readable identifier mirrored to
-///   the renderer as `ExternalSkillSourceResponse.source`. Used as a
-///   React key and `data-testid` suffix in `SkillsHubSettings.tsx`.
-pub const COMMON_SKILL_DIRS: &[(&str, &str, &str)] = &[
-    ("Claude Skills", ".claude/skills", "claude"),
-    ("Gemini Skills", ".gemini/skills", "gemini"),
-    ("Codex / Agent Skills", ".agents/skills", "agents"),
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,19 +87,5 @@ mod tests {
         const {
             assert!(STATE_PERSIST_DEBOUNCE_MS > 0);
         }
-    }
-
-    #[test]
-    fn common_skill_dirs_include_codex_agent_skills_home() {
-        let codex = COMMON_SKILL_DIRS
-            .iter()
-            .find(|(_, _, slug)| *slug == "agents")
-            .expect("common Agent Skills source must exist");
-
-        assert_eq!(
-            *codex,
-            ("Codex / Agent Skills", ".agents/skills", "agents"),
-            "Codex reads user skills from ~/.agents/skills, not the broader ~/.agents folder"
-        );
     }
 }

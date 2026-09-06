@@ -27,6 +27,7 @@ nomifun-mcp = { path = "crates/backend/nomifun-mcp" }
 nomifun-model-invoke = { path = "crates/backend/nomifun-model-invoke" }
 nomifun-conversation = { path = "crates/backend/nomifun-conversation" }
 nomifun-extension = { path = "crates/backend/nomifun-extension" }
+nomifun-skill-library = { path = "crates/backend/nomifun-skill-library" }
 nomifun-channel = { path = "crates/backend/nomifun-channel" }
 nomifun-cron = { path = "crates/backend/nomifun-cron" }
 nomifun-requirement = { path = "crates/backend/nomifun-requirement" }

@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use include_dir::{Dir, include_dir};
-use nomifun_extension::startup_materialize::{materialize_embedded_builtin_skills, materialize_if_needed};
+use nomifun_skill_library::startup_materialize::{materialize_embedded_builtin_skills, materialize_if_needed};
 use tempfile::TempDir;
 
 static FIXTURE_CORPUS: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/tests/fixtures/builtin-skills-fixture");

@@ -46,9 +46,8 @@ use nomifun_db::{
     MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
 };
 use nomifun_extension::{
-    ExtensionRegistry, ExtensionRouterState, ExtensionStateStore, ExternalPathsManager,
-    HubIndexManager, HubInstaller, HubRouterState, SkillRouterState, resolve_install_target_dir_for_data_dir,
-    resolve_scan_paths_for_data_dir, resolve_state_file_path,
+    ExtensionRegistry, ExtensionRouterState, ExtensionStateStore, HubIndexManager, HubInstaller, HubRouterState,
+    resolve_install_target_dir_for_data_dir, resolve_scan_paths_for_data_dir, resolve_state_file_path,
 };
 use nomifun_file::{FileRouterState, FileService, FileWatchService, SnapshotService};
 use nomifun_idmm::{
@@ -64,6 +63,7 @@ use nomifun_office::{
     OfficeRouterState, OfficecliWatchManager, ProxyService,
     SnapshotService as OfficeSnapshotService,
 };
+use nomifun_skill_library::{ExternalPathsManager, SkillRouterState};
 use nomifun_agent_execution::{
     AgentExecutionEngine, AgentExecutionEngineConfig,
 };
@@ -2410,13 +2410,13 @@ pub async fn build_extension_states(
         .and_then(|p| p.canonicalize().ok())
         .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let skill_paths = nomifun_extension::resolve_skill_paths(&app_resource_dir, &skill_data_dir);
+    let skill_paths = nomifun_skill_library::resolve_skill_paths(&app_resource_dir, &skill_data_dir);
 
     let ext_paths_mgr = Arc::new(ExternalPathsManager::new(&skill_data_dir).await);
 
     let skill_tag_repo: Arc<dyn nomifun_db::ISkillTagRepository> =
         Arc::new(nomifun_db::SqliteSkillTagRepository::new(services.database.pool().clone()));
-    let builtin_skill_tags = Arc::new(nomifun_extension::skill_service::load_builtin_skill_tags());
+    let builtin_skill_tags = Arc::new(nomifun_skill_library::skill_service::load_builtin_skill_tags());
 
     let ext_state = ExtensionRouterState {
         registry: registry.clone(),

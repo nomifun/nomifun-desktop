@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nomifun_common::{AppError, TimestampMs, now_ms, validate_uuidv7, zip_safe};
-use nomifun_extension::skill_service::{SkillPaths, SkillScope};
+use nomifun_skill_library::skill_service::{SkillPaths, SkillScope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -1638,7 +1638,7 @@ mod tests {
     /// A real skill tree under the test root — the same layout the app resolves,
     /// so an imported `SKILL.md` lands exactly where the boot audit looks.
     fn skill_paths(root: &Path) -> SkillPaths {
-        nomifun_extension::skill_service::resolve_skill_paths(root, root)
+        nomifun_skill_library::skill_service::resolve_skill_paths(root, root)
     }
 
     /// The homes a companion EXPORT reads: `{root}/{companions}` for a
