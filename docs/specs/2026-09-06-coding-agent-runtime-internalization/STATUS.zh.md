@@ -34,7 +34,7 @@
 | `CAR-01` | completed | `CAR-00A` | 独立 `nomifun-coding-engine`，未接生产组合根 |
 | `CAR-02` | in_progress | `CAR-01` | Broker adapter 已存在；原生 Provider 取消和中央合同测试未完成 |
 | `CAR-03` | pending_validation | `CAR-02` | Kernel adapter、Snapshot/active-set admission、标准 Tool surface 本地完成；等待主链验证 |
-| `CAR-04` | pending_validation | `CAR-03` | `nomi-process-runtime` adapter 已完成；当前仅 Windows 真实主机验证 |
+| `CAR-04` | pending_validation | `CAR-03` | `nomi-process-runtime` adapter 已完成；Windows start/wait/stdin/timeout/cancel/output 已验证，跨平台待远程 |
 | `CAR-05` | planned | `CAR-03` | File/Patch/VCS/Workspace 通过 Wave2 owner 接线，未接 AgentSession 主链 |
 | `CAR-06` | pending_validation | `CAR-03` | AGENTS/context/compaction/checkpoint contracts 已完成；SessionEvent/resume 主链未接 |
 | `CAR-07` | planned | `CAR-04`～`CAR-06` | 远程主工作进程完成异构 Engine Registry 与 AgentSession 接线 |
@@ -53,7 +53,9 @@ code_commits:
   - b652fa29ce02c91f600d54abaecd98dfb967f9c4
   - c8b0193892ad7f1b73586b7570b7a2f0172c8d1b
   - 0e33dbed53e248ef5c926b548bfde378120bb400
-code_tip: 0e33dbed53e248ef5c926b548bfde378120bb400
+  - f3ff31b4b6168c2cc6b4b3de867b5f922a3eb8a4
+  - 449e06110c34902e070a1b7b506bdda2db9f147a4
+code_tip: 449e06110c34902e070a1b7b506bdda2db9f147a4
 ```
 
 已验证：
@@ -65,7 +67,7 @@ cargo test -p nomifun-coding-engine
 git diff --check
 ```
 
-最后一次定向测试结果：`31 passed; 0 failed`。
+最后一次定向测试结果：`36 passed; 0 failed`。
 
 未运行：
 
