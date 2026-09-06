@@ -6413,13 +6413,18 @@ version = "0.7.4"
 dependencies = [
  "async-trait",
  "futures",
+ "nomi-process-runtime",
  "nomifun-agent-contracts",
+ "nomifun-agent-domain-wave2",
+ "nomifun-agent-kernel",
  "nomifun-chat-model-broker",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]
