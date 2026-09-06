@@ -818,12 +818,23 @@ function processIsRunning(pid) {
   }
 }
 
-async function waitForProcessExit(pid, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (processIsRunning(pid) && Date.now() < deadline) {
-    await sleep(POLL_INTERVAL_MS);
+async function waitForChildExit(child, timeoutMs) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    return true;
   }
-  return !processIsRunning(pid);
+  return new Promise((resolvePromise) => {
+    let settled = false;
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off('close', onClose);
+      resolvePromise(exited);
+    };
+    const onClose = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once('close', onClose);
+  });
 }
 
 async function terminateApplicationTree(child, timeoutMs) {
@@ -831,7 +842,7 @@ async function terminateApplicationTree(child, timeoutMs) {
   const cleanup = runningBefore
     ? terminateProcessTreeSync(child.pid, Math.min(timeoutMs, 10_000))
     : { attempted: false, status: null, timed_out: false };
-  const exited = await waitForProcessExit(child?.pid, timeoutMs);
+  const exited = await waitForChildExit(child, timeoutMs);
   if (!exited) {
     fail('process_tree_cleanup_failed', 'desktop application process tree remained alive', {
       root_pid: child?.pid || null,

@@ -308,6 +308,10 @@ fn default_data_dir() -> PathBuf {
     nomifun_app::bootstrap::resolve_nomi_core_data_root(requested)
 }
 
+fn announce_desktop_backend(data_dir: &Path, loopback_port: u16) {
+    nomifun_app::bootstrap::announce_bound_port(data_dir, "127.0.0.1", loopback_port);
+}
+
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DownloadUpdateProgress {
@@ -2880,6 +2884,7 @@ fn main() -> std::process::ExitCode {
                                     &startup_cleanup_for_run,
                                     server.clone(),
                                 );
+                                announce_desktop_backend(&cli.data_dir, server.loopback_port());
                                 let mut status_rx = server.subscribe_status();
                                 let mut failure_rx = server.subscribe_failure();
                                 let mut shutdown_rx = server.subscribe_shutdown();
@@ -3106,6 +3111,23 @@ mod tests {
     use super::*;
     use std::fs;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn desktop_backend_announcement_records_the_current_process_and_port() {
+        let root = tempfile::tempdir().expect("desktop announcement root");
+
+        announce_desktop_backend(root.path(), 43123);
+
+        let announcement: nomifun_app::bootstrap::PortAnnouncement = serde_json::from_slice(
+            &fs::read(root.path().join(nomifun_app::bootstrap::PORT_FILE))
+                .expect("desktop port announcement"),
+        )
+        .expect("valid desktop port announcement");
+        assert_eq!(announcement.host, "127.0.0.1");
+        assert_eq!(announcement.port, 43123);
+        assert_eq!(announcement.pid, std::process::id());
+        assert!(!announcement.channel.is_empty());
+    }
 
     #[test]
     fn downloaded_update_cache_separates_download_from_install() {
