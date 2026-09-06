@@ -1,12 +1,12 @@
 # NomiFun Agent Capability Platform v2 决策记录
 
-> 文档状态：**CURRENT DECISION LEDGER / 2026-09-05**
+> 文档状态：**CURRENT DECISION LEDGER / 2026-09-06**
 >
 > 权威顺序：`05-system-capability-replacement-foundation.zh.md` 是一期当前修订合同；本文与 05 冲突时，以 05 为准。
 >
 > 状态来源：`GLOBAL-CLOSURE-TODO.zh.md` 是当前实施进度、阻塞项和关闭状态的唯一来源。本文只记录架构决策及理由，不声明代码、Gate、平台验证或发布已经完成。
 >
-> 历史处理：保留 D-001～D-037 的决策编号、仍有效的结论和形成理由。已被 05 否定的旧要求只保留极短撤销原因，不再作为正文中的候选方案、实施步骤或验收合同。
+> 历史处理：保留 D-001～D-038 的决策编号、仍有效的结论和形成理由。已被 05 否定的旧要求只保留极短撤销原因，不再作为正文中的候选方案、实施步骤或验收合同。
 
 ## 状态约定
 
@@ -60,9 +60,13 @@
 11. Agent 的公开产品入口固定为 `/agent`，Session 使用
     `/agent-sessions/:agentSessionId`；旧 `/presets`、`/settings/agent-presets`、
     `/settings/agent` 只能作为限期迁移围栏，不能继续承载 authoring。
-12. 持久化执行投影统一使用 `agent_snapshot`。061 是四类旧列的物理重命名，
-    062 将生成的 `contribution_locks_json` 写入 AgentPreset Revision；历史 baseline
-    中的 `preset_snapshot` 只作为 migration source，不是运行时兼容别名。
+12. 持久化执行投影统一使用 `agent_snapshot`。061/062/064 分别完成 snapshot 命名、
+    ContributionLock 和 `payload_json` 的物理收口；Fresh-v4 只 seed 官方模板且没有旧
+    preset projection 表。历史 baseline 中的旧列只作为 migration source，不是运行时
+    兼容别名。
+13. 2026-09-06 人工走查确认首页 Guid 未真正提供 AgentPreset 选择，旧 AP-7
+    admission 因而撤销。纠偏实现已在 `582932377` 完成父级验证并重新签署；
+    `SL-S4-02` 仍独立等待真实 Desktop UI 人工走查。
 
 ## 决策总览
 
@@ -102,9 +106,10 @@
 | D-032 | 真实 Provider smoke 与凭据边界 | 已确认（2026-09-05） | 真实证据必须经过 Nomi-core AgentSession、Provider/Model route、代表性工具调用和关闭审计；Windows 凭据只经受控 Credential Manager/Bun runner 短暂持有，在构建完成后一次性 stdin 交接，不进入仓库、参数、日志或 Cargo/build/test/application 子进程环境；一次 smoke 只关闭其明确覆盖的 TODO |
 | D-033 | Nomi-core Remote MCP transport | 已确认（2026-09-05） | Streamable HTTP transport/session admission/tool schema 由 `nomifun-public` 统一持有；Nomi-core 通过 `CanonicalRemoteOperations` 注入既有 Remote handler，复用 owner、provenance、idempotency、cursor 和 runtime，不构造伪 `AgentPlatform` 或第二套状态机 |
 | D-034 | `SL-S3-10` host-boundary 收口 | 已确认（2026-09-05） | Cron/AutoWork/Requirement/AgentExecution/Channel/IDMM 均经同一个 `NomiCoreSessionOwner` 接收领域自有 typed contract；Conversation-backed bridge 仅保留在测试支持或 app composition，审计必须报告 `production_legacy_files=0`、`transitional_adapters_with_legacy_dependencies=0`、`candidate=none`，但不宣称 canonical Session 已具备所有未来 live event/receipt 能力 |
-| D-035 | Agent 工作台公共入口与迁移围栏 | 已修订（2026-09-05） | UI 只保留 `/agent` 一级入口，Session 使用 `/agent-sessions/:agentSessionId`；旧 preset 深层路由只允许一次性迁移跳转，最终必须删除 |
-| D-036 | `agent_snapshot` 物理命名与 Revision locks | 已确认（2026-09-05） | 061 物理重命名四类 snapshot 列且不做 alias；062 持久化 `contribution_locks_json`，`revision_digest` 覆盖 payload 与 lock 集合；`preset_id`/`preset_revision` 仅保留 provenance |
-| D-037 | AP-7 admission 证据边界 | 已确认（2026-09-05） | Gate 可报告历史 migration/删除合同与活动 residual 的区别，但只有 AP-0～AP-6、generated inventory、真实 Agent+非 Agent consumer、行为验证和签署证据全部满足时才放行 06；self-test 或单 crate 通过不能代替 admission |
+| D-035 | Agent 工作台公共入口与迁移围栏 | 已修订（2026-09-06） | 侧边栏明确显示“Agent 工作台”并进入 `/agent`；首页 Guid 是选择已保存 AgentPreset 并启动会话的入口，不是第二个 authoring surface；旧 preset 深层路由必须删除 |
+| D-036 | `agent_snapshot`、Revision payload/locks 与 Fresh-v4 clean cut | 已修订（2026-09-06） | 061/062/064 使用物理命名且不做 alias；Fresh-v4 只 seed 官方模板，Revision 使用 `payload_json` 与 ContributionLock，不保留 Package template source 或旧 preset projection 表 |
+| D-037 | AP-7 admission 证据边界 | 已修订（2026-09-06） | 旧签署因缺失真实 AgentPreset 启动选择器而撤销；纠偏实现 `582932377` 已完成父级验证并重新签署，06 仍保持独立边界 |
+| D-038 | 首页 AgentPreset 选择与高层 Session 创建 | 已确认（2026-09-06） | Guid pill bar 只列可执行用户 AgentPreset，`+` 打开 `/agent`，工作台启动会话会预选；客户端只提交 `preset_id/title`，服务端解析稳定 Revision/Snapshot/Binding；普通 Guid 不提供模型或资源覆盖，执行引擎只属基础设施 |
 
 ## 全局有效约束
 
@@ -737,22 +742,24 @@ provider 请求误当成完整迁移或跨传输发布证明。
 
 ### D-035：Agent 工作台公共入口与旧路由迁移围栏
 
-- 状态：`已修订（2026-09-05）`
+- 状态：`已修订（2026-09-06）`
 - 用户可见的 Agent authoring、能力选择、保存、试用和继续使用只属于一个
   **Agent 工作台**；公共 UI 路由是 `/agent`。
-- Agent Session 的公共 UI 路由是 `/agent-sessions/:agentSessionId`。它消费已经
-  创建的 Session，不是第二个 preset 编辑入口。
+- 侧边栏名称必须显示“Agent 工作台”，不能只显示“Agent”。
+- 首页 Guid 是选择已保存 AgentPreset 并启动会话的产品入口，不承载 Agent authoring。
+  `/agent-sessions/:agentSessionId` 可以继续提供直接 Session projection；标准首页启动
+  完成后也可以使用既有 `/conversation/:id` 展示同一底层会话。
 - `/presets`、`/settings/agent-presets` 和 `/settings/agent` 不再是产品入口。
   本次实现已删除这些 authoring 路由；不保留长期 redirect、旧 API 或兼容分支。
 - `/settings/execution-engines` 只负责 Runtime Manager、网络和系统级设置，不承载
   AgentPreset 内容。
 
 理由：用户需要的是一个清晰的 Agent 产品入口，而不是同时理解“设定”“Agent 设定”
-和“运行时设定”。短期迁移围栏保护旧书签，但不把历史 URL 重新定义为系统合同。
+和“运行时设定”。旧书签不能成为长期保留第二套入口和数据合同的理由。
 
-### D-036：`agent_snapshot` 物理命名与 Revision ContributionLock
+### D-036：`agent_snapshot`、Revision payload/locks 与 Fresh-v4 clean cut
 
-- 状态：`已确认（2026-09-05）`
+- 状态：`已修订（2026-09-06）`
 - Conversation、Cron、Agent Execution participant 和 Execution Template participant
   的持久化执行投影统一命名为 `agent_snapshot`。该字段表示消费方无关的、不可变的
   Agent 执行快照；它不是旧 Preset resolver 的别名。
@@ -765,6 +772,15 @@ provider 请求误当成完整迁移或跨传输发布证明。
   digest。
 - `preset_id` 与 `preset_revision` 在当前过渡实现中只承担 AgentPreset provenance。
   它们不能恢复旧 `PresetService`、旧 target/override 或旧 snapshot projection。
+- Revision 的 canonical 内容列是 `payload_json`。Nomi 数据线通过
+  `064_agent_preset_revision_payload.sql` 做物理重命名，
+  Fresh-v4 baseline 直接使用该名称；不保留 `editor_document_json` alias 或双读写。
+- Fresh-v4 `agent_preset_templates` 只保存 `source_kind=official` 的创建 seed，不带
+  `source_package_id/source_package_version`，bootstrap 不自动创建官方 AgentPreset 或
+  Revision。ContributionLock 由 canonical lock 存储持有，旧 capability/skill/resource
+  preset projection 表不在当前 schema 中。
+- 2026-09-06 Fresh AgentPlatform E2E 暴露旧 bootstrap 仍访问 Package template source
+  与旧投影表；该漂移必须直接删除，不通过兼容列、临时旧表或 fallback 修补。
 - `001_v3_baseline.sql` 中旧列名是历史 schema bytes；只有 061 之后的物理 schema
   才是当前 clean-cut 运行面。
 
@@ -774,7 +790,7 @@ provider 请求误当成完整迁移或跨传输发布证明。
 
 ### D-037：AP-7 验证与 06 admission
 
-- 状态：`已确认（2026-09-05）`
+- 状态：`已修订（2026-09-06）`
 - `scripts/gate-agent-v2.mjs -- ap-7` 是 AP 阶段的 admission preflight；它不运行
   provider smoke，也不因单 crate、单 UI 页面或 Gate self-test 通过而签署 AP-7。
 - Gate 必须分别记录：
@@ -782,24 +798,53 @@ provider 请求误当成完整迁移或跨传输发布证明。
   2. 活动 API、UI、DTO、override 和 snapshot residual；
   3. 历史 baseline、删除合同和回归断言；
   4. generated API/schema inventory 是否已同步；
-  5. 061/062 migration 是否存在且形状正确；
+  5. 061/062/064 migration 与 Fresh-v4 canonical schema 是否存在且形状正确；
   6. 真实 Agent 与非 Agent consumer 的行为证据；
   7. 干净提交和签署 admission evidence。
 - 已删除的 `nomifun-preset` 不再作为通用“legacy/product dependency”规则扫描对象。
   Gate 只在 Cargo dependency key、lockfile package entry 或活动 import 出现时阻断；
   root `exclude` 删除 tombstone、历史 deletion contract 和注释引用单独分类，不得
   被误报成生产依赖。
-- 当前 AP-7 已由本机提交后的 admission evidence 关闭：旧活动 inventory、路由、
-  DTO、服务和 snapshot alias 已清零，Agent/Gateway 共享 Catalog 行为与 impact/no-fallback
-  测试已通过。06 仍保持独立的二期实施边界，不因本次 admission 自动实施代码。
+- 旧 `8e3f1eee8`/`c7f67eefb` evidence 在 2026-09-06 人工走查发现首页缺少真实
+  AgentPreset selector 后被撤销。旧测试结果只保留历史审计，不能继续表示当前
+  admission。
+- 纠偏实现已在 `582932377` 完成父级集成验证；新 evidence 使用
+  `admission=admitted`、`signed=true`，并在干净签署提交上重跑 Gate 后重新关闭 AP-7。
+- `SL-S4-02` 的真实 Desktop UI 人工走查保持独立 `blocked`；重新签署 AP-7 不得把
+  该人工验收暗写为已完成。06 仍保持独立二期边界。
 
 理由：AP-7 的职责是防止“有类型/有 fixture/有 self-test”被误报为产品合同已经闭合。
 把删除包的历史文字与真实依赖分开，既保留 clean-cut 的安全断言，也避免旧 Gate 因
 删除对象本身的历史记录失真。
 
+### D-038：首页 AgentPreset 选择与高层 Session 创建
+
+- 状态：`已确认（2026-09-06）`
+- 首页 Guid composer 上方的 pill bar 必须可见列出当前 owner 在 Agent 工作台中保存的、
+  具有 `current_stable_revision` 的可执行用户 AgentPreset；它选择的是 AgentPreset，
+  不是模型、Runtime 或 execution engine。
+- pill bar 的 `+` 只打开 `/agent`。Agent 工作台的“使用 Agent / Start conversation”
+  进入 `/guid` 并携带 `selectedAgentPresetId`，Guid 必须预选对应 Preset。
+- 普通 Guid 只负责会话级消息、附件和明确属于会话的 AutoWork/IDMM/summon 状态。
+  模型、Skills、MCP、Knowledge、Workspace 与其他 typed resources 由选中
+  AgentPreset 的稳定 Revision 拥有；Guid 不再提供第二套覆盖控件。
+- 标准 Session 创建请求只有 `preset_id` 与可选 `title`。客户端不得提交
+  `agent_binding`、Revision、Snapshot、digest、model route 或 typed resources。
+- 服务端在 owner scope 内读取 `current_stable_revision`、该 Revision 的持久化
+  Snapshot 和 typed resources，构造 `binding_version=1` 的 AgentBinding 后创建
+  Session。缺少稳定 Revision、Snapshot 不匹配或 owner 不匹配必须 typed fail，
+  不选择 latest、不 fallback。
+- Session 创建后冻结当时的 Revision/Snapshot；之后保存新 Revision 只影响新 Session。
+- execution engine 是 Runtime 基础设施，只能在对应系统设置中检测和管理，不得作为
+  Agent pill、AgentPreset ID 或“新建会话”产品入口。
+
+理由：用户选择的是一份完整、可复现的 Agent 设计。若 Guid 再允许选择模型或重新组合
+资源，或者把执行引擎伪装成 Agent，就会产生第二份配置事实，并使 Snapshot/Binding
+无法证明会话实际使用了工作台中保存的 Preset。
+
 ## 当前阅读与实施规则
 
-1. 先完整读取 `05-system-capability-replacement-foundation.zh.md`，再用本文追溯 D-001～D-037 的决策理由。
+1. 先完整读取 `05-system-capability-replacement-foundation.zh.md`，再用本文追溯 D-001～D-038 的决策理由。
 2. 领取和关闭工作只看 `GLOBAL-CLOSURE-TODO.zh.md`；不得从本文推断某项已经实现或通过 Gate。
 3. Browser/Computer 实施必须先落 Role/Provider seam，再接具体 owner；不能在旧直连上叠加 adapter。
 4. Codex Sidecar 只按未来宿主研究维护；不能继续围绕不存在的私有 patch 扩大当前

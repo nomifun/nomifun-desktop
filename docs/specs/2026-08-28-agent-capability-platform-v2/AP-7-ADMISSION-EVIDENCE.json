@@ -7,7 +7,17 @@
   "signing": {
     "kind": "local-commit-attestation",
     "owner": "main-host",
-    "implementation_commit": "8e3f1eee8"
+    "implementation_commit": "582932377"
+  },
+  "previous_admission": {
+    "status": "revoked",
+    "revoked_at": "2026-09-06",
+    "reason": "Manual product walkthrough found that the home Guid surface did not provide a real AgentPreset selector and therefore did not launch sessions from the Agent Workbench preset.",
+    "admission": "admitted",
+    "signed": true,
+    "signed_at": "2026-09-06",
+    "implementation_commit": "8e3f1eee8",
+    "documentation_commit": "c7f67eefb"
   },
   "ap_statuses": {
     "AP-0": "closed",
@@ -21,14 +31,31 @@
   },
   "real_agent_consumer": {
     "status": "pass",
-    "consumer": "Agent workbench / AgentPreset compiler",
-    "shared_capability": "knowledge.search",
+    "consumer": "Home Guid AgentPreset selector and standard AgentSession launch",
     "evidence": [
-      "crates/backend/nomifun-agent-control-plane/src/service.rs::shared_catalog_resolves_agent_and_gateway_and_filters_agent_only_view",
-      "crates/backend/nomifun-agent-contracts/src/catalog.rs consumer filtering and operation lock tests",
-      "crates/backend/nomifun-agent-platform/src/platform.rs formal Catalog materialization"
+      "ui/src/renderer/pages/guid/components/AgentPillBar.tsx",
+      "ui/src/renderer/pages/guid/hooks/useGuidAgentSelection.ts",
+      "ui/src/renderer/pages/guid/hooks/useGuidSend.ts",
+      "ui/src/renderer/pages/agentSettings/AgentPresetEditor.tsx",
+      "crates/backend/nomifun-agent-control-plane/src/service.rs::resolve_agent_session_binding",
+      "crates/backend/nomifun-app/tests/agent_platform_e2e.rs",
+      "crates/backend/nomifun-app/tests/nomi_core_route_gap.rs"
     ],
-    "command": "cargo test --offline -p nomifun-agent-control-plane shared_catalog_resolves_agent_and_gateway_and_filters_agent_only_view --lib"
+    "required_request_shape": {
+      "preset_id": "AgentPresetId",
+      "title": "optional string"
+    },
+    "forbidden_client_fields": [
+      "agent_binding",
+      "revision",
+      "snapshot",
+      "digest",
+      "model",
+      "skills",
+      "mcp",
+      "knowledge",
+      "workspace"
+    ]
   },
   "real_non_agent_consumer": {
     "status": "pass",
@@ -39,41 +66,105 @@
       "crates/backend/nomifun-app/src/router/routes.rs GatewayCatalogAdmission composition",
       "crates/backend/nomifun-agent-control-plane/src/service.rs shared Gateway resolver assertion"
     ],
-    "command": "cargo check --offline --workspace"
+    "command": "cargo test --offline -p nomifun-agent-control-plane --lib; cargo check --offline --workspace"
+  },
+  "fresh_v4_drift_correction": {
+    "status": "pass",
+    "discovered_at": "2026-09-06",
+    "discovery": "Fresh AgentPlatform E2E failed before route execution because stale bootstrap code expected agent_preset_templates.source_package_id and old preset projection tables.",
+    "verified_state": [
+      "agent_preset_templates is an official template seed catalog only",
+      "bootstrap does not create official AgentPreset or Revision rows",
+      "AgentPreset Revision content uses payload_json",
+      "ContributionLock is persisted canonically and participates in the revision digest",
+      "old capability, skill, model, and resource preset projection tables are absent",
+      "Browser and Computer Role member digests match the current runtime manifests",
+      "a composed Fresh-v4 host remains restartable"
+    ]
   },
   "behavior_checks": [
     {
-      "name": "canonical_contracts",
+      "name": "guid_and_workbench_agent_preset_selector",
       "status": "pass",
-      "command": "cargo test --offline -p nomifun-agent-contracts --lib"
+      "command": "bun test --cwd ui src/renderer/pages/guid src/renderer/pages/agentSettings src/renderer/pages/settings/AgentSettings/LocalAgents.refresh.test.ts src/renderer/pages/settings/skill/skillLocalizationIntegration.test.ts src/common/types/agentPlatform/contracts.test.ts src/common/types/agentPlatform/testOrchestration.test.ts",
+      "result": "76 passed"
     },
     {
-      "name": "control_plane_and_impact",
+      "name": "ui_build_and_quality",
       "status": "pass",
-      "command": "cargo test --offline -p nomifun-agent-control-plane --lib"
+      "command": "bun run build:ui; bun run check:i18n; bun run check:icons; bun run check:dead-css; bun run check:agent-vocabulary",
+      "result": "production build and all targeted quality gates passed"
+    },
+    {
+      "name": "changed_ui_typecheck_scope",
+      "status": "pass",
+      "command": "bun run typecheck, filtered to the corrective UI write set",
+      "result": "0 diagnostics in changed UI files",
+      "note": "Repository-wide typecheck remains blocked by the pre-existing React 19/Arco and implicit-any baseline outside this write set."
+    },
+    {
+      "name": "canonical_contracts",
+      "status": "pass",
+      "command": "cargo test --offline -p nomifun-agent-contracts --lib; cargo run --offline -p nomifun-agent-contracts --bin agent-v2-contract -- check",
+      "result": "46 tests passed and generated artifacts match canonical sources"
+    },
+    {
+      "name": "control_plane_and_api_types",
+      "status": "pass",
+      "command": "cargo test --offline -p nomifun-agent-control-plane --lib; cargo test --offline -p nomifun-api-types --lib",
+      "result": "12 control-plane tests and 530 API type tests passed"
+    },
+    {
+      "name": "fresh_v4_and_agent_platform",
+      "status": "pass",
+      "command": "cargo test --offline -p nomifun-v4-root -- --test-threads=1; cargo test --offline -p nomifun-agent-platform --lib; cargo test --offline -p nomifun-agent-platform --test chat_minimal",
+      "result": "11 Fresh-v4 root tests, 13 AgentPlatform lib tests and 2 formal stack tests passed"
+    },
+    {
+      "name": "fresh_and_nomi_core_routes",
+      "status": "pass",
+      "command": "cargo test --offline -p nomifun-app --test agent_platform_e2e; cargo test --offline -p nomifun-app --test nomi_core_route_gap -- --test-threads=1",
+      "result": "1 Fresh AgentPlatform E2E and 12 Nomi-core route tests passed"
+    },
+    {
+      "name": "application_regression",
+      "status": "pass",
+      "command": "cargo test --offline -p nomifun-app --lib -- --test-threads=1",
+      "result": "399 passed, 1 credential-only test ignored, 0 failed"
     },
     {
       "name": "database_migration_and_schema",
       "status": "pass",
-      "command": "cargo test --offline -p nomifun-db --no-run; cargo test --offline -p nomifun-db --test id_schema_contract -- --test-threads=1"
+      "command": "cargo test --offline -p nomifun-db --test agent_preset_payload_migration --test id_schema_contract -- --test-threads=1; cargo test --offline -p nomifun-db --test db_lifecycle migration_file_versions_are_unique -- --exact --test-threads=1; cargo test --offline -p nomifun-db --test db_lifecycle v55_prefix_is_read_only_supported_then_file_init_applies_latest_suffix -- --exact --test-threads=1",
+      "result": "064 physical rename, 20 ID schema tests, unique migration versions and upgrade to migration 64 passed"
     },
     {
-      "name": "ui_clean_cut",
+      "name": "workspace_integration",
       "status": "pass",
-      "command": "bun run build:ui"
+      "command": "cargo check --offline --workspace",
+      "result": "workspace compiled successfully"
     },
     {
-      "name": "generated_contracts",
+      "name": "live_stepfun_product_chain",
       "status": "pass",
-      "command": "cargo run --offline -p nomifun-agent-contracts --bin agent-v2-contract -- check"
+      "command": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\validation\\run-nomi-core-live-provider-from-windows-credential-manager.ps1",
+      "result": "live_smoke_status=pass code=OK status=200"
+    },
+    {
+      "name": "admission_gate",
+      "status": "pass",
+      "command": "node --check scripts/gate-agent-v2.mjs; bun scripts/gate-agent-v2.mjs --self-test; bun run gate:agent-v2 -- ap-7",
+      "result": "gate syntax, self-test and signed clean-checkpoint admission passed"
     }
   ],
   "legacy_production_reachability": 0,
   "generated_inventory_clean": true,
   "plugin_phase": "blocked_until_explicit_06_kickoff",
   "notes": [
+    "The previously signed AP-7 evidence is superseded and revoked.",
     "Historical migration and deletion-contract strings remain only as audit material.",
     "No provider credential is part of this evidence or repository.",
+    "SL-S4-02 remains blocked for a human Tauri Desktop UI walkthrough.",
     "06 Plugin/MiniApp implementation is intentionally not included in this admission."
   ]
 }
