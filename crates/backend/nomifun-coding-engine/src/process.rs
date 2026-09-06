@@ -267,6 +267,15 @@ impl ManagedCodingProcessOwner {
         })
     }
 
+    pub async fn execute(
+        &self,
+        request: CodingProcessRequest,
+        cancellation: CancellationToken,
+    ) -> Result<CodingProcessPoll, CodingEngineError> {
+        let mut session = self.start(request, cancellation.clone()).await?;
+        self.wait(&mut session, cancellation).await
+    }
+
     pub async fn poll(
         &self,
         session: &mut CodingProcessSession,
@@ -629,6 +638,36 @@ mod tests {
         }
     }
 
+    fn long_output_request() -> CodingProcessRequest {
+        #[cfg(windows)]
+        let (command, args) = (
+            std::env::var("ComSpec")
+                .unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".to_owned()),
+            vec![
+                "/d".to_owned(),
+                "/c".to_owned(),
+                "for /L %i in (1,1,200) do @echo 1234567890".to_owned(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (command, args) = (
+            "/bin/sh".to_owned(),
+            vec![
+                "-c".to_owned(),
+                "i=0; while [ $i -lt 200 ]; do echo 1234567890; i=$((i+1)); done".to_owned(),
+            ],
+        );
+        CodingProcessRequest {
+            command,
+            args,
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: 10_000,
+            output_limit_bytes: 256,
+            transport: CodingProcessTransport::Pipe,
+        }
+    }
+
     #[tokio::test]
     async fn managed_owner_runs_and_reaps_a_bounded_process() {
         let directory = tempfile::tempdir().unwrap();
@@ -707,5 +746,39 @@ mod tests {
             panic!("sleeping process should be cancelled");
         };
         assert!(cleanup.reaped);
+    }
+
+    #[tokio::test]
+    async fn deadline_returns_a_reaped_timeout_outcome() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner =
+            ManagedCodingProcessOwner::new(directory.path(), SupervisorConfig::default()).unwrap();
+        let mut request = sleeper_request();
+        request.timeout_ms = 100;
+        let outcome = owner
+            .execute(request, CancellationToken::new())
+            .await
+            .unwrap();
+        let CodingProcessPoll::TimedOut { cleanup, .. } = outcome else {
+            panic!("deadline should produce a TimedOut outcome");
+        };
+        assert!(cleanup.reaped);
+    }
+
+    #[tokio::test]
+    async fn long_output_is_bounded_and_reports_dropped_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner =
+            ManagedCodingProcessOwner::new(directory.path(), SupervisorConfig::default()).unwrap();
+        let outcome = owner
+            .execute(long_output_request(), CancellationToken::new())
+            .await
+            .unwrap();
+        let CodingProcessPoll::Exited { output, .. } = outcome else {
+            panic!("long-output fixture should exit normally");
+        };
+        assert!(output.retained_bytes <= 256);
+        assert!(output.dropped_bytes > 0);
+        assert!(output.text.len() <= 256);
     }
 }
