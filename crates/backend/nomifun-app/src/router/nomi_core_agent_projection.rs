@@ -1039,13 +1039,7 @@ mod tests {
             .payload
             .initial_capabilities
             .push(capability("browser.navigate", true));
-        fixture.2.reference.revision_digest =
-            nomifun_agent_contracts::digest_payload(&fixture.2.payload).unwrap();
-        fixture.3.content.preset_revision_ref = fixture.2.reference.clone();
-        fixture.3.snapshot_ref.snapshot_digest =
-            nomifun_agent_contracts::digest_payload(&fixture.3.content).unwrap();
-        fixture.1.preset_revision_ref = fixture.2.reference.clone();
-        fixture.1.resolved_snapshot_ref = fixture.3.snapshot_ref.clone();
+        refresh_fixture_identity(&mut fixture);
         assert!(matches!(
             project(input(&fixture)),
             Err(AppError::UnprocessableEntity(message)) if message.contains("browser.navigate")
@@ -1074,13 +1068,7 @@ mod tests {
             .payload
             .initial_capabilities
             .push(capability("vcs.status", true));
-        fixture.2.reference.revision_digest =
-            nomifun_agent_contracts::digest_payload(&fixture.2.payload).unwrap();
-        fixture.3.content.preset_revision_ref = fixture.2.reference.clone();
-        fixture.3.snapshot_ref.snapshot_digest =
-            nomifun_agent_contracts::digest_payload(&fixture.3.content).unwrap();
-        fixture.1.preset_revision_ref = fixture.2.reference.clone();
-        fixture.1.resolved_snapshot_ref = fixture.3.snapshot_ref.clone();
+        refresh_fixture_identity(&mut fixture);
 
         let result = project(input(&fixture)).expect("typed VCS projection");
         let tools = result.request.extra["allowed_tools"]

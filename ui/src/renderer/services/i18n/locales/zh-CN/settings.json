@@ -1274,7 +1274,6 @@
   },
   "agentManagement": {
     "localAgentsDescription": "Nomi 已随 NomiFun 内置；Claude Code、Codex 等执行引擎需要先安装对应命令行工具，NomiFun 会自动检测。",
-    "goToChat": "新建会话",
     "discoverMoreAgents": "发现更多执行引擎",
     "refreshDetection": "重新检测本机",
     "localAgentsEmpty": "未发现可用的本机执行引擎",

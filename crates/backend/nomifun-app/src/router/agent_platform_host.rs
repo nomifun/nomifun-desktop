@@ -3376,6 +3376,72 @@ mod tests {
         }
     }
 
+    async fn insert_chat_revision_fixture(
+        pool: &SqlitePool,
+        preset_id: &str,
+        created_by: &str,
+        route_record: ChatRouteRecord,
+    ) {
+        let model_route_id = route_record.primary.model_route_id.clone();
+        let payload = AgentPresetRevisionPayload {
+            schema_version: VersionString::from(CONTRACT_VERSION),
+            model_route_refs: BTreeMap::from([(
+                nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT.to_owned(),
+                model_route_id,
+            )]),
+            chat_route_records: BTreeMap::from([(
+                nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT.to_owned(),
+                route_record,
+            )]),
+            initial_capabilities: Vec::new(),
+            on_demand_capabilities: Vec::new(),
+            skill_bindings: Vec::new(),
+            resource_bindings: Vec::new(),
+            system_role_provider_overrides: BTreeMap::new(),
+            persona: "Agent platform host chat fixture".to_owned(),
+            instructions: "Exercise the exact persisted chat route.".to_owned(),
+            starter_prompts: Vec::new(),
+        };
+        let mut revision = AgentPresetRevision {
+            reference: PresetRevisionRef {
+                preset_id: AgentPresetId::from(preset_id),
+                revision: 1,
+                revision_digest: DigestHex::from(""),
+            },
+            payload,
+            contribution_locks: Vec::new(),
+            created_by: UserId::from(created_by),
+            created_at_ms: 0,
+            reason: None,
+        };
+        revision.reference.revision_digest = revision
+            .revision_digest()
+            .expect("chat fixture revision digest");
+        revision
+            .validate()
+            .expect("canonical chat fixture revision");
+        let payload_json = String::from_utf8(
+            canonical_json_bytes(&revision.payload).expect("chat fixture payload JSON"),
+        )
+        .expect("chat fixture payload UTF-8");
+
+        sqlx::query(
+            "INSERT INTO agent_preset_revisions \
+             (revision_id, preset_id, revision_no, schema_version, payload_json, \
+              revision_digest, created_by, created_at, reason) \
+             VALUES (?, ?, 1, ?, ?, ?, ?, 0, NULL)",
+        )
+        .bind(revision.reference.revision_id())
+        .bind(revision.reference.preset_id.as_ref())
+        .bind(revision.payload.schema_version.as_ref())
+        .bind(payload_json)
+        .bind(revision.reference.revision_digest.as_ref())
+        .bind(revision.created_by.as_ref())
+        .execute(pool)
+        .await
+        .expect("chat fixture revision row");
+    }
+
     async fn production_chat_fixture(
         status: u16,
     ) -> (
@@ -3473,18 +3539,6 @@ mod tests {
         .execute(&v4_pool)
         .await
         .expect("preset row");
-        sqlx::query(
-            "INSERT INTO agent_preset_revisions \
-             (revision_id, preset_id, revision_no, schema_version, \
-              editor_document_json, revision_digest, created_by, created_at, reason) \
-             VALUES (?, ?, 1, '1.0.0', '{}', ?, 'host-test-owner', 0, '')",
-        )
-        .bind("host-preset@1")
-        .bind("host-preset")
-        .bind("a".repeat(64))
-        .execute(&v4_pool)
-        .await
-        .expect("revision row");
         let route_record = ChatRouteRecord {
             schema: ChatRouteRecordSchema::V1,
             task: ChatRouteTask::AgentChat,
@@ -3509,16 +3563,13 @@ mod tests {
             },
             failovers: Vec::new(),
         };
-        sqlx::query(
-            "INSERT INTO agent_preset_model_routes \
-             (revision_id, model_task, route_json) VALUES (?, ?, ?)",
+        insert_chat_revision_fixture(
+            &v4_pool,
+            "host-preset",
+            "host-test-owner",
+            route_record,
         )
-        .bind("host-preset@1")
-        .bind("agent_chat")
-        .bind(route_record.to_canonical_json().expect("route JSON"))
-        .execute(&v4_pool)
-        .await
-        .expect("route row");
+        .await;
 
         let composition = ChatBrokerHostComposition::new(
             v4_pool.clone(),
@@ -3688,18 +3739,6 @@ mod tests {
         .execute(&pool)
         .await
         .expect("live Step Plan preset row");
-        sqlx::query(
-            "INSERT INTO agent_preset_revisions \
-             (revision_id, preset_id, revision_no, schema_version, \
-              editor_document_json, revision_digest, created_by, created_at, reason) \
-             VALUES (?, ?, 1, '1.0.0', '{}', ?, 'live-stepfun-owner', 0, '')",
-        )
-        .bind(preset_revision_id)
-        .bind("live-stepfun-plan")
-        .bind("a".repeat(64))
-        .execute(&pool)
-        .await
-        .expect("live Step Plan revision row");
         let route_record = ChatRouteRecord {
             schema: ChatRouteRecordSchema::V1,
             task: ChatRouteTask::AgentChat,
@@ -3721,16 +3760,13 @@ mod tests {
             },
             failovers: Vec::new(),
         };
-        sqlx::query(
-            "INSERT INTO agent_preset_model_routes \
-             (revision_id, model_task, route_json) VALUES (?, ?, ?)",
+        insert_chat_revision_fixture(
+            &pool,
+            "live-stepfun-plan",
+            "live-stepfun-owner",
+            route_record,
         )
-        .bind(preset_revision_id)
-        .bind("agent_chat")
-        .bind(route_record.to_canonical_json().expect("live route JSON"))
-        .execute(&pool)
-        .await
-        .expect("live Step Plan route row");
+        .await;
 
         let composition = ChatBrokerHostComposition::new(
             pool.clone(),

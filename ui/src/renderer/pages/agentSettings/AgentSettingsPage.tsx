@@ -1,8 +1,10 @@
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
+import type { AgentPresetSummary } from '@/common/types/agentPlatform';
 import { Alert, Button, Spin } from '@arco-design/web-react';
 import { Refresh } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { useKnowledgeBases } from '@/renderer/pages/knowledge/useKnowledge';
 import AgentPresetEditor from './AgentPresetEditor';
 import AgentPresetLibrary from './AgentPresetLibrary';
@@ -12,6 +14,7 @@ import styles from './AgentSettingsPage.module.css';
 
 const AgentSettingsPage: React.FC = () => {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const controller = useAgentSettingsController();
   const { bases: knowledgeBases, loading: knowledgeBasesLoading } = useKnowledgeBases();
   const sourceTemplate =
@@ -22,6 +25,13 @@ const AgentSettingsPage: React.FC = () => {
         );
   const selectedTemplate =
     controller.selection?.kind === 'template' ? controller.selection.template : null;
+  const startConversation = (preset: AgentPresetSummary) => {
+    void navigate('/guid', {
+      state: {
+        selectedAgentPresetId: preset.preset_id,
+      },
+    });
+  };
 
   return (
     <HubPageShell
@@ -100,10 +110,12 @@ const AgentSettingsPage: React.FC = () => {
               knowledgeBasesLoading={knowledgeBasesLoading}
               sourceTemplate={sourceTemplate}
               busyAction={controller.busyAction}
+              dirty={controller.dirty}
               onDraftChange={controller.setDraft}
               onPreview={() => void controller.runPreview()}
               onSave={() => void controller.saveRevision()}
               onTest={(input) => void controller.runTest(input)}
+              onStartConversation={startConversation}
             />
           ) : (
             <div className={styles.loading}>

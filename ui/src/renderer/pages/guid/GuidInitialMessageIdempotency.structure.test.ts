@@ -10,17 +10,18 @@ import { describe, expect, test } from 'bun:test';
 const readSource = (url: URL): string => readFileSync(url, 'utf8');
 
 describe('Guid initial-message idempotency', () => {
-  test('persists one UUIDv7 key in every initial-message payload before navigation', () => {
+  test('persists one UUIDv7 key for the single AgentPreset launch path', () => {
     const source = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
+    const initialMessagePayload =
+      source.match(/JSON\.stringify\(\{([\s\S]*?)\}\)\s*\)/)?.[1] ?? '';
 
     expect(source.includes("import { uuidv7 } from '@/common/utils';")).toBe(true);
-    expect(source.match(/idempotency_key: uuidv7\(\),/g)).toHaveLength(2);
-    expect(source.match(/conversation_id: conversation\.id,/g)).toHaveLength(2);
-    expect(source.match(/initial_admission_epoch: 0,/g)).toHaveLength(2);
-
-    // Both remaining creation paths (direct nomi and preset/custom-row) stage
-    // their initial message under the single nomi storage feature.
-    expect(source.match(/'initial-message-nomi'/g)).toHaveLength(2);
+    expect(source.match(/idempotency_key: uuidv7\(\),/g)).toHaveLength(1);
+    expect(initialMessagePayload).not.toBe('');
+    expect(initialMessagePayload.match(/conversation_id: conversationId,/g)).toHaveLength(1);
+    expect(initialMessagePayload.match(/initial_admission_epoch: 0,/g)).toHaveLength(1);
+    expect(initialMessagePayload.match(/idempotency_key: uuidv7\(\),/g)).toHaveLength(1);
+    expect(source.match(/'initial-message-nomi'/g)).toHaveLength(1);
 
     const writesBeforeNavigation =
       source.lastIndexOf('sessionStorage.setItem') < source.lastIndexOf('await navigate(');

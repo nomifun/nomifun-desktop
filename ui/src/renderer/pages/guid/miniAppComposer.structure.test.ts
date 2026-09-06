@@ -26,7 +26,9 @@ describe('mini-app composer entry wiring', () => {
     expect(entryStrip.includes('styles.entryDismiss')).toBe(true);
     // IconPark: plain named import, never aliased or namespaced.
     expect(
-      entryStrip.includes("import { ApplicationOne, EveryUser, Lightning, Robot } from '@icon-park/react'")
+      entryStrip.includes(
+        "import { ApplicationOne, EveryUser } from '@icon-park/react'"
+      )
     ).toBe(true);
   });
 
@@ -63,7 +65,7 @@ describe('mini-app composer entry wiring', () => {
     expect(guidPage.includes("import('@renderer/pages/miniApps/RunnerPage')")).toBe(false);
   });
 
-  test('the send is guarded, carries the staged inputs, and resets the composer', () => {
+  test('the MiniApp-only send is guarded, carries staged inputs, and resets the composer', () => {
     // A synchronous ref guard, not just the `loading` state: two gestures in one
     // tick would otherwise create two mini-apps.
     expect(guidPage.includes('const miniAppSendingRef = useRef(false)')).toBe(true);
@@ -71,17 +73,24 @@ describe('mini-app composer entry wiring', () => {
     expect(guidPage.includes('miniAppSendingRef.current = true')).toBe(true);
     expect(guidPage.includes('miniAppSendingRef.current = false')).toBe(true);
 
-    // Every staged composer input travels: the picker GuidPage owns, the workspace
-    // directory the user chose, and the attachments. Dropping any of them would
-    // look honoured and then be silently discarded.
-    expect(guidPage.includes('model: modelSelection.current_model')).toBe(true);
+    // MiniApp uses the quick-start hook's own persisted Nomi default model.
+    // Guid has no second model picker or duplicate model-selection hook.
+    expect(guidPage.includes('miniAppModelSelection')).toBe(false);
+    expect(guidPage.includes('useGuidModelSelection')).toBe(false);
+    expect(guidPage.includes('<GuidModelSelector')).toBe(false);
     expect(guidPage.includes('files: guidInput.files')).toBe(true);
     expect(
       guidPage.includes(
-        '        prompt,\n        model: modelSelection.current_model,\n        dir: guidInput.dir,\n        files: guidInput.files,\n      })'
+        '        prompt,\n        dir: guidInput.dir,\n        files: guidInput.files,\n      })'
       )
     ).toBe(true);
     expect(quickStart.includes('dir?: string')).toBe(true);
+    expect(guidPage.includes('!miniAppQuickStart.canStart')).toBe(true);
+    expect(
+      /isButtonDisabled=\{\s*miniAppMode\s*\?\s*miniAppButtonDisabled/.test(
+        guidPage
+      )
+    ).toBe(true);
 
     // Same teardown as the normal path.
     expect(guidPage.includes('guidInput.setFiles([]);')).toBe(true);
@@ -95,14 +104,24 @@ describe('mini-app composer entry wiring', () => {
 
   test('mini-app mode and an armed AutoWork entry are mutually exclusive', () => {
     expect(guidPage.includes('if (isAutoWorkMode) setMiniAppMode(false);')).toBe(true);
-    expect(guidPage.includes('onCreateMiniApp={isAutoWorkMode ? undefined : () => setMiniAppMode(true)}')).toBe(true);
+    expect(
+      /onCreateMiniApp=\{\s*isAutoWorkMode\s*\?\s*undefined\s*:\s*\(\)\s*=>\s*setMiniAppMode\(true\)\s*\}/.test(
+        guidPage
+      )
+    ).toBe(true);
   });
 
   test('GuidPage activates from the ?miniapp=1 query and strips it', () => {
     expect(guidPage.includes("new URLSearchParams(location.search).get('miniapp') === '1'")).toBe(true);
-    expect(guidPage.includes('navigate(`${location.pathname}${location.hash}`, { replace: true, state: null })')).toBe(
-      true
-    );
+    const activationStart = guidPage.indexOf('if (!miniAppQueryRequested) return;');
+    const activationEnd = guidPage.indexOf('  ]);', activationStart);
+    const activationEffect = guidPage.slice(activationStart, activationEnd);
+    expect(activationStart).toBeGreaterThan(-1);
+    expect(activationEnd).toBeGreaterThan(activationStart);
+    expect(activationEffect.includes('setMiniAppMode(true)')).toBe(true);
+    expect(activationEffect.includes('${location.pathname}${location.hash}')).toBe(true);
+    expect(activationEffect.includes('replace: true')).toBe(true);
+    expect(activationEffect.includes('state: null')).toBe(true);
     // No "already handled" ref: stripping the query is what prevents re-entry,
     // and a ref would also block a fresh same-route activation.
     expect(guidPage.includes('miniAppQueryHandledRef')).toBe(false);

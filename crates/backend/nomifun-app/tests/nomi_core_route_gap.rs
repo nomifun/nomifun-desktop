@@ -309,9 +309,8 @@ async fn nomi_core_rejects_on_demand_placement_without_hiding_the_capability() {
     let revision = created_value["data"]["revision"]["reference"].clone();
     created_value["data"]["draft"]["document"]["on_demand_capabilities"] = json!([{
         "capability": {"id": "vcs.stage", "version": "1.0.0"},
-        "required": true,
-        "exposure": "discoverable",
-        "config": {}
+        "action_allowlist": [],
+        "resource_binding_refs": []
     }]);
     let preview = router
         .clone()
@@ -381,15 +380,33 @@ async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
         )
         .await
         .expect("dispatch template request");
-    assert_eq!(response.status(), StatusCode::OK);
+    let response_status = response.status();
     let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
         .await
         .expect("read template response");
     let value: Value = serde_json::from_slice(&body).expect("template response JSON");
+    assert_eq!(
+        response_status,
+        StatusCode::OK,
+        "template request failed: {value}"
+    );
     let preset_id = value["data"]["preset"]["preset_id"]
         .as_str()
         .expect("template response preset id")
         .to_owned();
+    let persisted_payload: String = sqlx::query_scalar(
+        "SELECT payload_json FROM nomi_agent_preset_revisions \
+         WHERE preset_id = ? AND revision_no = 1",
+    )
+    .bind(&preset_id)
+    .fetch_one(services.database.pool())
+    .await
+    .expect("persisted AgentPreset revision payload");
+    assert_eq!(
+        serde_json::from_str::<Value>(&persisted_payload).expect("persisted payload JSON"),
+        value["data"]["revision"]["document"],
+        "Nomi-core must persist the canonical revision payload in payload_json"
+    );
     assert_eq!(
         value["data"]["revision"]["reference"]["revision"],
         1,
@@ -510,12 +527,37 @@ async fn nomi_core_agent_session_projects_saved_chat_binding_without_internal_in
         .expect("read session preview response");
     let preview: Value = serde_json::from_slice(&preview_body).expect("session preview JSON");
     assert_eq!(preview["data"]["status"], "ready");
-    let binding = serde_json::json!({
-        "preset_revision_ref": revision,
-        "resolved_snapshot_ref": preview["data"]["resolved_snapshot_ref"],
-        "typed_resource_bindings": [],
-        "binding_version": 1
-    });
+    let expected_snapshot = preview["data"]["resolved_snapshot_ref"].clone();
+
+    let rejected = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/agent-sessions")
+                .header("x-nomi-local-trust", "agent-session-local-trust")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "preset_id": preset_id,
+                        "agent_binding": {
+                            "preset_revision_ref": revision,
+                            "resolved_snapshot_ref": expected_snapshot,
+                            "typed_resource_bindings": [],
+                            "binding_version": 1
+                        }
+                    }))
+                    .expect("serialize rejected session request"),
+                ))
+                .expect("build rejected session request"),
+        )
+        .await
+        .expect("dispatch rejected session request");
+    assert_eq!(
+        rejected.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "deny_unknown_fields must reject the removed agent_binding input"
+    );
 
     let session_response = router
         .clone()
@@ -528,7 +570,7 @@ async fn nomi_core_agent_session_projects_saved_chat_binding_without_internal_in
                 .header("idempotency-key", "agent-session-create-smoke")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
-                        "agent_binding": binding,
+                        "preset_id": preset_id,
                         "title": "Session smoke"
                     }))
                     .expect("serialize session create request"),
@@ -575,7 +617,7 @@ async fn nomi_core_agent_session_projects_saved_chat_binding_without_internal_in
     );
     assert_eq!(
         observation["data"]["session"]["agent_binding"]["resolved_snapshot_ref"],
-        binding["resolved_snapshot_ref"]
+        expected_snapshot
     );
 
     services.shutdown_browser_platform().await.expect("browser cleanup");

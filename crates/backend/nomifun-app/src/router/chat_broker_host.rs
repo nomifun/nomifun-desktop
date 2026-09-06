@@ -13,9 +13,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use nomifun_agent_contracts::{
-    digest_payload, ChatRouteCandidate, ChatRouteFeature, ChatRouteProtocol,
-    ChatRouteRecord as CanonicalChatRouteRecord, ChatRouteRecordError,
-    ConnectionConfigRef, DigestHex,
+    AgentPresetRevisionPayload, ChatRouteCandidate, ChatRouteFeature, ChatRouteProtocol,
+    ChatRouteRecord as CanonicalChatRouteRecord, ConnectionConfigRef, DigestHex, digest_payload,
+    validate_chat_route_records,
 };
 use nomifun_agent_platform::ChatOperationClaimStore;
 use nomifun_agent_session::{
@@ -50,21 +50,22 @@ use std::fmt;
 
 const PROVIDER_CHAT_MODEL_TASK: &str = "chat";
 
-fn decode_chat_route_record(
+fn decode_agent_preset_revision_payload(
     json: &str,
-) -> Result<CanonicalChatRouteRecord, ChatBrokerHostError> {
-    CanonicalChatRouteRecord::from_json(json)
-        .map_err(|error| match error {
-            ChatRouteRecordError::UnsupportedSchema => {
-                ChatBrokerHostError::UnsupportedRouteSchema {
-                    actual: "unknown".to_owned(),
-                }
-            }
-            ChatRouteRecordError::UnsupportedTask => ChatBrokerHostError::UnsupportedRouteTask {
-                actual: "unknown".to_owned(),
-            },
-            other => ChatBrokerHostError::InvalidRouteRecord(other.to_string()),
-        })
+) -> Result<AgentPresetRevisionPayload, ChatBrokerHostError> {
+    let payload: AgentPresetRevisionPayload = serde_json::from_str(json).map_err(|error| {
+        ChatBrokerHostError::InvalidRouteRecord(format!(
+            "agent preset revision payload is invalid: {error}"
+        ))
+    })?;
+    validate_chat_route_records(&payload).map_err(|error| {
+        ChatBrokerHostError::InvalidRouteRecord(format!(
+            "{}: {}",
+            error.code.as_ref(),
+            error.message
+        ))
+    })?;
+    Ok(payload)
 }
 
 fn resolve_chat_route_record(
@@ -136,8 +137,6 @@ fn convert_chat_route_candidate(
 /// Detailed, safe errors returned by the app-side route and lease boundary.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ChatBrokerHostError {
-    UnsupportedRouteSchema { actual: String },
-    UnsupportedRouteTask { actual: String },
     InvalidRouteRecord(String),
     RouteRecordMissing {
         task: String,
@@ -156,12 +155,6 @@ pub enum ChatBrokerHostError {
 impl fmt::Display for ChatBrokerHostError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedRouteSchema { actual } => {
-                write!(formatter, "v4 chat route record schema is unsupported: {actual:?}")
-            }
-            Self::UnsupportedRouteTask { actual } => {
-                write!(formatter, "v4 chat route record task is unsupported: {actual:?}")
-            }
             Self::InvalidRouteRecord(error) => {
                 write!(formatter, "v4 chat route record is invalid: {error}")
             }
@@ -174,7 +167,7 @@ impl fmt::Display for ChatBrokerHostError {
                 "v4 chat route record is missing for task {task:?}, route {route_id:?}@{route_revision}"
             ),
             Self::RouteDatabaseUnavailable => {
-                formatter.write_str("the v4 route-record table is unavailable")
+                formatter.write_str("the v4 route-record storage is unavailable")
             }
             Self::ProviderDatabaseUnavailable => {
                 formatter.write_str("the provider database is unavailable")
@@ -205,9 +198,7 @@ impl From<ChatBrokerHostError> for ProductionRepositoryError {
             | ChatBrokerHostError::ProviderDatabaseUnavailable => {
                 ProductionRepositoryError::Unavailable
             }
-            ChatBrokerHostError::UnsupportedRouteSchema { .. }
-            | ChatBrokerHostError::UnsupportedRouteTask { .. }
-            | ChatBrokerHostError::InvalidRouteRecord(_)
+            ChatBrokerHostError::InvalidRouteRecord(_)
             | ChatBrokerHostError::RouteRecordMissing { .. }
             | ChatBrokerHostError::ModelBindingMissing
             | ChatBrokerHostError::ModelCapabilityMismatch
@@ -478,29 +469,18 @@ impl ProductionModelRepository {
         &self,
         selection: &ChatRouteSelection,
     ) -> Result<Option<CanonicalChatRouteRecord>, ChatBrokerHostError> {
-        let rows = sqlx::query(
-            "SELECT route_json FROM agent_preset_model_routes \
-             WHERE revision_id = ? AND model_task = ?",
+        let payload_json: Option<String> = sqlx::query_scalar(
+            "SELECT payload_json FROM agent_preset_revisions WHERE revision_id = ?",
         )
         .bind(&selection.preset_revision_id)
-        .bind(&selection.model_task)
-        .fetch_all(&self.v4_pool)
+        .fetch_optional(&self.v4_pool)
         .await
         .map_err(|_| ChatBrokerHostError::RouteDatabaseUnavailable)?;
-        if rows.len() > 1 {
-            return Err(ChatBrokerHostError::InvalidRouteRecord(
-                "exact chat route lookup returned multiple rows".to_owned(),
-            ));
-        }
-        let Some(row) = rows.into_iter().next() else {
+        let Some(payload_json) = payload_json else {
             return Ok(None);
         };
-        let raw: String = row
-            .try_get("route_json")
-            .map_err(|_| ChatBrokerHostError::InvalidRouteRecord(
-                "route_json column is not text".to_owned(),
-            ))?;
-        Ok(Some(decode_chat_route_record(&raw)?))
+        let payload = decode_agent_preset_revision_payload(&payload_json)?;
+        Ok(payload.chat_route_records.get(&selection.model_task).cloned())
     }
 
     #[cfg(test)]
@@ -1615,12 +1595,12 @@ pub(crate) fn build_unconfigured_broker(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use nomifun_agent_contracts::{
-        ChatRouteCandidate, ChatRouteFeature, ChatRouteIdentity, ChatRouteProtocol, ChatRouteRecord,
-        ChatRouteRecordSchema, ChatRouteTask,
+        AgentPresetRevisionPayload, ChatRouteCandidate, ChatRouteFeature, ChatRouteIdentity,
+        ChatRouteProtocol, ChatRouteRecord, ChatRouteRecordSchema, ChatRouteTask,
     };
     use serde_json::json;
 
@@ -1650,6 +1630,28 @@ mod tests {
         }
     }
 
+    fn revision_payload(record: ChatRouteRecord) -> AgentPresetRevisionPayload {
+        AgentPresetRevisionPayload {
+            schema_version: "1.0.0".into(),
+            model_route_refs: BTreeMap::from([(
+                nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT.to_owned(),
+                record.primary.model_route_id.clone(),
+            )]),
+            chat_route_records: BTreeMap::from([(
+                nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT.to_owned(),
+                record,
+            )]),
+            initial_capabilities: Vec::new(),
+            on_demand_capabilities: Vec::new(),
+            skill_bindings: Vec::new(),
+            resource_bindings: Vec::new(),
+            system_role_provider_overrides: BTreeMap::new(),
+            persona: "Route lookup test agent".to_owned(),
+            instructions: "Exercise the persisted canonical route.".to_owned(),
+            starter_prompts: Vec::new(),
+        }
+    }
+
     #[test]
     fn route_record_is_explicit_and_does_not_decode_route_id() {
         let record = ChatRouteRecord {
@@ -1667,8 +1669,17 @@ mod tests {
     }
 
     #[test]
-    fn legacy_string_route_json_fails_closed() {
-        let error = decode_chat_route_record("\"opaque-route\"").unwrap_err();
+    fn legacy_string_route_payload_fails_closed() {
+        let mut payload = serde_json::to_value(revision_payload(ChatRouteRecord {
+            schema: ChatRouteRecordSchema::V1,
+            task: ChatRouteTask::AgentChat,
+            primary: candidate(),
+            failovers: Vec::new(),
+        }))
+        .unwrap();
+        payload["chat_route_records"][nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT] =
+            json!("opaque-route");
+        let error = decode_agent_preset_revision_payload(&payload.to_string()).unwrap_err();
         assert!(matches!(
             error,
             ChatBrokerHostError::InvalidRouteRecord(_)
@@ -1677,15 +1688,16 @@ mod tests {
 
     #[test]
     fn unknown_route_record_fields_fail_closed() {
-        let mut value = serde_json::to_value(ChatRouteRecord {
+        let mut payload = serde_json::to_value(revision_payload(ChatRouteRecord {
             schema: ChatRouteRecordSchema::V1,
             task: ChatRouteTask::AgentChat,
             primary: candidate(),
             failovers: Vec::new(),
-        })
+        }))
         .unwrap();
-        value["derived_provider"] = json!("must-not-be-accepted");
-        let error = decode_chat_route_record(&value.to_string()).unwrap_err();
+        payload["chat_route_records"][nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT]
+            ["derived_provider"] = json!("must-not-be-accepted");
+        let error = decode_agent_preset_revision_payload(&payload.to_string()).unwrap_err();
         assert!(matches!(
             error,
             ChatBrokerHostError::InvalidRouteRecord(_)
@@ -1823,22 +1835,6 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-            sqlx::query(
-                "INSERT INTO agent_preset_revisions \
-                 (revision_id, preset_id, revision_no, schema_version, \
-                  editor_document_json, revision_digest, created_by, created_at, reason) \
-                 VALUES (?, ?, 1, '1.0.0', '{}', ?, 'owner', 0, '')",
-            )
-            .bind(revision)
-            .bind(preset)
-            .bind(if preset == "preset-a" {
-                "a".repeat(64)
-            } else {
-                "b".repeat(64)
-            })
-            .execute(&pool)
-            .await
-            .unwrap();
             let mut route = candidate();
             route.provider_id = provider.to_owned();
             route.model = model.to_owned();
@@ -1849,12 +1845,22 @@ mod tests {
                 failovers: Vec::new(),
             };
             sqlx::query(
-                "INSERT INTO agent_preset_model_routes \
-                 (revision_id, model_task, route_json) VALUES (?, ?, ?)",
+                "INSERT INTO agent_preset_revisions \
+                 (revision_id, preset_id, revision_no, schema_version, \
+                  payload_json, revision_digest, created_by, created_at, reason) \
+                 VALUES (?, ?, 1, '1.0.0', ?, ?, 'owner', 0, '')",
             )
             .bind(revision)
-            .bind(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT)
-            .bind(record.to_canonical_json().unwrap())
+            .bind(preset)
+            .bind(
+                serde_json::to_string(&revision_payload(record))
+                    .expect("serialize canonical preset revision payload"),
+            )
+            .bind(if preset == "preset-a" {
+                "a".repeat(64)
+            } else {
+                "b".repeat(64)
+            })
             .execute(&pool)
             .await
             .unwrap();
@@ -1872,6 +1878,28 @@ mod tests {
             .unwrap();
         assert_eq!(resolved.primary.provider_id.as_ref(), "provider-b");
         assert_eq!(resolved.primary.model, "model-b");
+
+        for invalid_identity in [
+            ChatRouteIdentity::new(
+                "preset-b@1",
+                nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+                "wrong-route".into(),
+                7,
+            ),
+            ChatRouteIdentity::new(
+                "preset-b@1",
+                nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT,
+                "opaque-route".into(),
+                8,
+            ),
+            ChatRouteIdentity::new("preset-b@1", "unsupported_task", "opaque-route".into(), 7),
+        ] {
+            let error = repository
+                .resolve_route_record(&invalid_identity)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, ChatBrokerHostError::InvalidRouteRecord(_)));
+        }
 
         let missing = repository
             .resolve_route_record(&ChatRouteIdentity::new(

@@ -9,8 +9,8 @@ use axum::http::{Request, StatusCode, header};
 use axum::Extension;
 use http_body_util::BodyExt;
 use nomifun_agent_contracts::{
-    AgentBindingValue, PresetRevisionRef, PrincipalRef, RuntimeProfileKind, RuntimeTarget,
-    VersionString, official_preset_seed_manifest_payload,
+    PresetRevisionRef, PrincipalRef, RuntimeProfileKind, RuntimeTarget, VersionString,
+    official_preset_seed_manifest_payload,
 };
 use nomifun_agent_control_plane::{
     CompilerReleaseInputs, ControlPlaneStore,
@@ -18,9 +18,9 @@ use nomifun_agent_control_plane::{
 use nomifun_agent_kernel::{CompilerEnvironment, MaterializationPolicy};
 use nomifun_agent_platform::{AgentPlatform, AgentPlatformConfig};
 use nomifun_api_types::{
-    AgentBindingValueDto, AgentPresetEditorResponse, ApiResponse,
-    CreateAgentSessionRequestDto, CreateAgentSessionResponseDto,
-    ForkAgentSessionRequestDto, ForkAgentSessionResponseDto,
+    AgentPresetEditorResponse, ApiResponse, CreateAgentSessionRequestDto,
+    CreateAgentSessionResponseDto, ForkAgentSessionRequestDto, ForkAgentSessionResponseDto,
+    ResolveAgentPresetPreviewResponse, SaveAgentPresetRevisionResponse,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_chat_model_broker::{
@@ -95,6 +95,7 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
         }),
     )
     .await;
+    let preset_id = editor_response.preset.preset_id.clone();
     let revision = editor_response
         .revision
         .expect("template creation must commit an ordinary Revision");
@@ -107,20 +108,52 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
         .await
         .unwrap()
         .expect("template Revision must persist a Snapshot");
-    let binding = AgentBindingValue {
-        preset_revision_ref: revision_ref,
-        resolved_snapshot_ref: snapshot.snapshot_ref,
-        typed_resource_bindings: Vec::new(),
-        binding_version: 1,
+
+    let rejected = post_response(
+        &router,
+        "/api/agent-sessions",
+        json!({
+            "preset_id": preset_id,
+            "agent_binding": {
+                "preset_revision_ref": revision.reference,
+                "resolved_snapshot_ref": snapshot.snapshot_ref,
+                "typed_resource_bindings": [],
+                "binding_version": 1
+            }
+        }),
+    )
+    .await;
+    assert_eq!(
+        rejected.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "deny_unknown_fields must reject the removed agent_binding input"
+    );
+
+    let other_owner = CurrentUser {
+        id: nomifun_common::UserId::parse(Uuid::now_v7().to_string()).unwrap(),
+        username: "other-owner".to_owned(),
     };
-    let binding_dto: AgentBindingValueDto =
-        serde_json::from_value(serde_json::to_value(binding).unwrap()).unwrap();
+    let other_router = nomifun_app::create_agent_platform_router(Arc::clone(&platform))
+        .layer(Extension(other_owner));
+    let forbidden = post_response(
+        &other_router,
+        "/api/agent-sessions",
+        json!({
+            "preset_id": preset_id,
+            "title": "Forbidden route session"
+        }),
+    )
+    .await;
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    let forbidden_error: nomifun_api_types::ErrorResponse =
+        response_json(forbidden).await;
+    assert_eq!(forbidden_error.code, "RESOURCE_OWNER_MISMATCH");
 
     let create = post_json::<CreateAgentSessionResponseDto>(
         &router,
         "/api/agent-sessions",
         serde_json::to_value(CreateAgentSessionRequestDto {
-            agent_binding: binding_dto.clone(),
+            preset_id: preset_id.clone(),
             title: Some("Route session".to_owned()),
         })
         .unwrap(),
@@ -128,6 +161,54 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
     .await;
     assert_eq!(create.state, "opening");
     assert_eq!(create.cursor.seq, 2);
+    assert_eq!(create.agent_binding.preset_revision_ref, revision.reference);
+    assert_eq!(
+        create.agent_binding.resolved_snapshot_ref.snapshot_id,
+        snapshot.snapshot_ref.snapshot_id.as_ref()
+    );
+    assert_eq!(
+        create.agent_binding.typed_resource_bindings,
+        revision.document.resource_bindings
+    );
+    assert_eq!(create.agent_binding.binding_version, 1);
+
+    let mut next_draft = editor_response.draft;
+    next_draft.document.instructions = "Revision two".to_owned();
+    let next_preview = post_json::<ResolveAgentPresetPreviewResponse>(
+        &router,
+        &format!("/api/agent-presets/{preset_id}/resolve-preview"),
+        json!({
+            "expected_current_revision": revision.reference,
+            "draft": next_draft,
+            "scene": "agent_settings",
+            "surface": "desktop",
+            "audience": "owner"
+        }),
+    )
+    .await;
+    let next_revision = post_json::<SaveAgentPresetRevisionResponse>(
+        &router,
+        &format!("/api/agent-presets/{preset_id}/revisions"),
+        json!({
+            "expected_current_revision": revision.reference,
+            "preview_digest": next_preview.preview_digest,
+            "draft": next_draft,
+            "reason": "prove Session binding revision freeze"
+        }),
+    )
+    .await;
+    assert_eq!(next_revision.revision.reference.revision, 2);
+    let persisted_session = platform
+        .session_store()
+        .get_live_session(&create.agent_session_id.clone().into())
+        .await
+        .unwrap();
+    assert_eq!(
+        persisted_session.agent_binding.preset_revision_ref.revision,
+        revision.reference.revision,
+        "advancing current_stable_revision must not rewrite an existing Session binding"
+    );
+
     platform
         .session_store()
         .append_event(&nomifun_agent_contracts::SessionEventAppend {
@@ -219,7 +300,7 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
             create.agent_session_id
         ),
         serde_json::to_value(ForkAgentSessionRequestDto {
-            target_agent_binding: binding_dto,
+            target_agent_binding: create.agent_binding.clone(),
             parent_through_seq: create.cursor.seq,
             title: Some("Forked route session".to_owned()),
         })
@@ -258,6 +339,75 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
     let error: nomifun_api_types::ErrorResponse =
         response_json(deleted).await;
     assert_eq!(error.code, "SESSION_DELETED");
+
+    let no_stable = post_json::<AgentPresetEditorResponse>(
+        &router,
+        "/api/agent-presets",
+        json!({
+            "display_name": "No stable revision",
+            "description": null,
+            "fork_from_revision": null
+        }),
+    )
+    .await;
+    assert!(no_stable.preset.current_stable_revision.is_none());
+    let no_stable_response = post_response(
+        &router,
+        "/api/agent-sessions",
+        json!({ "preset_id": no_stable.preset.preset_id }),
+    )
+    .await;
+    assert_eq!(
+        no_stable_response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let no_stable_error: nomifun_api_types::ErrorResponse =
+        response_json(no_stable_response).await;
+    assert_eq!(no_stable_error.code, "CAPABILITY_NOT_MATERIALIZED");
+
+    let missing_snapshot = post_json::<AgentPresetEditorResponse>(
+        &router,
+        "/api/agent-presets/from-template/chat.minimal",
+        json!({
+            "display_name": "Missing snapshot",
+            "description": null,
+            "resource_bindings": [],
+            "model_route_refs": {}
+        }),
+    )
+    .await;
+    let missing_snapshot_revision = missing_snapshot
+        .revision
+        .as_ref()
+        .expect("template creation must persist a revision");
+    let missing_snapshot_ref: PresetRevisionRef = serde_json::from_value(
+        serde_json::to_value(&missing_snapshot_revision.reference).unwrap(),
+    )
+    .unwrap();
+    let missing_snapshot_envelope = platform
+        .control_store()
+        .get_snapshot(&missing_snapshot_ref)
+        .await
+        .unwrap()
+        .expect("template creation must persist a Snapshot");
+    sqlx::query("DELETE FROM agent_runtime_snapshots WHERE snapshot_id = ?")
+        .bind(missing_snapshot_envelope.snapshot_ref.snapshot_id.as_ref())
+        .execute(platform.pool())
+        .await
+        .unwrap();
+    let missing_snapshot_response = post_response(
+        &router,
+        "/api/agent-sessions",
+        json!({ "preset_id": missing_snapshot.preset.preset_id }),
+    )
+    .await;
+    assert_eq!(
+        missing_snapshot_response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let missing_snapshot_error: nomifun_api_types::ErrorResponse =
+        response_json(missing_snapshot_response).await;
+    assert_eq!(missing_snapshot_error.code, "CAPABILITY_NOT_MATERIALIZED");
 }
 
 async fn build_platform(pool: SqlitePool) -> Arc<AgentPlatform> {
@@ -331,18 +481,7 @@ async fn post_json<T: DeserializeOwned>(
     path: &str,
     body: Value,
 ) -> T {
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(path)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = post_response(router, path, body).await;
     let status = response.status();
     let body = response
         .into_body()
@@ -359,6 +498,25 @@ async fn post_json<T: DeserializeOwned>(
     let envelope: ApiResponse<T> = serde_json::from_slice(&body).unwrap();
     assert!(envelope.success, "{path}");
     envelope.data.expect("success response data")
+}
+
+async fn post_response(
+    router: &axum::Router,
+    path: &str,
+    body: Value,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
 }
 
 async fn get(router: &axum::Router, path: &str) -> axum::response::Response {

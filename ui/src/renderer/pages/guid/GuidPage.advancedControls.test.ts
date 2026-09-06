@@ -10,19 +10,23 @@ import { describe, expect, test } from 'bun:test';
 const readSource = (url: URL) => readFileSync(url, 'utf8');
 
 describe('GuidPage advanced controls', () => {
-  test('keeps the supported per-conversation draft controls', () => {
+  test('keeps only the supported session-specific draft controls', () => {
     const source = readSource(new URL('./GuidPage.tsx', import.meta.url));
 
     expect(source.includes('<AutoWorkControl')).toBe(true);
     expect(source.includes('<IdmmControl')).toBe(true);
-    expect(source.includes('<KnowledgeControl')).toBe(true);
+    expect(source.includes('<SummonDrawer')).toBe(true);
+    expect(source.includes('<KnowledgeControl')).toBe(false);
+    expect(source.includes("from '@/renderer/pages/conversation/components/KnowledgeControl'")).toBe(
+      false
+    );
   });
 
-  test('keeps advanced drafts focused on knowledge, AutoWork, and IDMM', () => {
+  test('keeps the remaining draft API focused on session behavior', () => {
     const source = readSource(new URL('./hooks/useGuidAdvancedConfig.ts', import.meta.url));
 
-    expect(source.includes('knowledge: IKnowledgeBinding')).toBe(true);
     expect(source.includes('autoWork: AutoWorkDraftValue')).toBe(true);
     expect(source.includes('idmm: IIdmmConfig')).toBe(true);
+    expect(source.includes('summon: SummonDraft | null')).toBe(true);
   });
 });

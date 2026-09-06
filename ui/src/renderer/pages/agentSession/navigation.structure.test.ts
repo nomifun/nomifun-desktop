@@ -4,6 +4,23 @@ import { readFileSync } from 'node:fs';
 const read = (url: URL) => readFileSync(url, 'utf8');
 
 describe('Agent navigation', () => {
+  test('uses the localized workbench name for the expanded label and tooltip', () => {
+    const entry = read(
+      new URL(
+        '../../components/layout/Sider/SiderNav/SiderAgentEntry.tsx',
+        import.meta.url
+      )
+    );
+
+    expect(
+      entry.includes(
+        "t('agentSettings.navigation.railTitle', { defaultValue: 'Agent Workbench' })"
+      )
+    ).toBe(true);
+    expect(entry.match(/content=\{label\}/g)).toHaveLength(2);
+    expect(entry.includes('>{label}</span>')).toBe(true);
+  });
+
   test('the main router owns only the public Agent routes', () => {
     const router = read(new URL('../../components/layout/Router.tsx', import.meta.url));
 

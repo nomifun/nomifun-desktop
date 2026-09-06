@@ -75,6 +75,7 @@ const preview = {
 describe('D-022 Agent Settings Test orchestration', () => {
   test('dirty draft saves before creating one ordinary Session', async () => {
     const calls: string[] = [];
+    const sessionRequests: Parameters<AgentPresetTestPorts['createSession']>[0][] = [];
     const ports: AgentPresetTestPorts = {
       preview: async () => {
         calls.push('preview');
@@ -100,8 +101,9 @@ describe('D-022 Agent Settings Test orchestration', () => {
           preview_digest: preview.preview_digest,
         };
       },
-      createSession: async () => {
+      createSession: async (request) => {
         calls.push('session');
+        sessionRequests.push(request);
         return {
           agent_session_id: sessionId,
           agent_binding: {
@@ -134,6 +136,13 @@ describe('D-022 Agent Settings Test orchestration', () => {
     });
 
     expect(calls).toEqual(['preview', 'save', 'session', 'turn']);
+    expect(sessionRequests).toEqual([
+      {
+        preset_id: presetId,
+        title: 'Coding Test',
+      },
+    ]);
+    expect('agent_binding' in sessionRequests[0]!).toBe(false);
   });
 
   test('save failure creates no Session or Turn', async () => {

@@ -2,6 +2,7 @@ import type {
   AgentCatalogResponse,
   AgentPresetDraft,
   AgentPresetEditorResponse,
+  AgentPresetSummary,
   CapabilityCatalogItem,
   CapabilityPlacement,
   ChatRouteRecord,
@@ -31,7 +32,16 @@ import {
   Tag,
   Tooltip,
 } from '@arco-design/web-react';
-import { CloseSmall, Info, LinkCloud, PlayOne, PreviewOpen, Save, Search } from '@icon-park/react';
+import {
+  CloseSmall,
+  Info,
+  LinkCloud,
+  MessageOne,
+  PlayOne,
+  PreviewOpen,
+  Save,
+  Search,
+} from '@icon-park/react';
 import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { modelDisplayLabel } from '@/common/utils/modelPresentation';
@@ -72,10 +82,31 @@ type AgentPresetEditorProps = {
   knowledgeBasesLoading: boolean;
   sourceTemplate?: OfficialPresetTemplate;
   busyAction: 'preview' | 'save' | 'test' | 'fork' | 'create' | null;
+  dirty: boolean;
   onDraftChange: (draft: AgentPresetDraft) => void;
   onPreview: () => void;
   onSave: () => void;
   onTest: (input: string) => void;
+  onStartConversation: (preset: AgentPresetSummary) => void;
+};
+
+export const AgentConversationAction: React.FC<{
+  hasStableRevision: boolean;
+  dirty: boolean;
+  onClick: () => void;
+}> = ({ hasStableRevision, dirty, onClick }) => {
+  const { t } = useTranslation();
+
+  return (
+    <Button
+      type='primary'
+      icon={<MessageOne theme='outline' size='15' />}
+      disabled={!hasStableRevision || dirty}
+      onClick={onClick}
+    >
+      {t('agentSettings.actions.startConversation')}
+    </Button>
+  );
 };
 
 const AgentChatModelPicker: React.FC<{
@@ -184,10 +215,12 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   knowledgeBasesLoading,
   sourceTemplate,
   busyAction,
+  dirty,
   onDraftChange,
   onPreview,
   onSave,
   onTest,
+  onStartConversation,
 }) => {
   const { t } = useTranslation();
   const [capabilitySearch, setCapabilitySearch] = useState('');
@@ -862,6 +895,11 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       </section>
 
       <footer className={styles.actionBar}>
+        <AgentConversationAction
+          hasStableRevision={Boolean(editor.preset.current_stable_revision)}
+          dirty={dirty}
+          onClick={() => onStartConversation(editor.preset)}
+        />
         <div className={styles.actionButtons}>
           <Button
             icon={<PlayOne theme='outline' size='15' />}

@@ -3,11 +3,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use nomifun_agent_contracts::{
-    AgentPresetSource, CapabilityKind, CapabilityManifest, DigestHex,
-    FreshV4SchemaMetadata, LocalizedMetadata, OfficialPresetKey, OfficialPresetSeed,
-    PackageManifest, PrincipalRef, SkillDefinition, TargetPackageContribution,
-    TargetPackageInventoryPayload, canonical_json_bytes, digest_payload,
-    fresh_v4_schema_manifest_payload, FRESH_V4_BASELINE_SQL,
+    CapabilityKind, CapabilityManifest, DigestHex, FRESH_V4_BASELINE_SQL,
+    FreshV4SchemaMetadata, LocalizedMetadata, OfficialPresetKey, PackageManifest,
+    SkillDefinition, TargetPackageInventoryPayload, canonical_json_bytes, digest_payload,
+    fresh_v4_schema_manifest_payload,
 };
 use serde::Serialize;
 use sqlx::sqlite::{
@@ -20,8 +19,6 @@ use crate::{FreshV4AccessAudit, FreshV4AccessKind, FreshV4RootError};
 
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const BASELINE_MIGRATION_NAME: &str = "0001_fresh_v4";
-const OFFICIAL_SEED_ACTOR: &str = "system:official";
-const OFFICIAL_SEED_REASON: &str = "fresh-v4-official-seed";
 
 pub(crate) struct FreshV4Database {
     pool: SqlitePool,
@@ -216,101 +213,13 @@ impl FreshV4Database {
         for row in &expected.templates {
             sqlx::query(
                 "INSERT INTO agent_preset_templates \
-                 (template_key, source_package_id, source_package_version, source_kind, \
-                  template_json, template_digest) \
-                 VALUES (?, ?, ?, 'official', ?, ?) \
+                 (template_key, source_kind, template_json, template_digest) \
+                 VALUES (?, 'official', ?, ?) \
                  ON CONFLICT (template_key) DO NOTHING",
             )
             .bind(&row.template_key)
-            .bind(&row.source_package_id)
-            .bind(&row.source_package_version)
             .bind(&row.template_json)
             .bind(&row.template_digest)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        for row in &expected.presets {
-            sqlx::query(
-                "INSERT INTO agent_presets \
-                 (preset_id, owner_ref_json, source_json, display_json, \
-                  current_stable_revision, created_at) \
-                 VALUES (?, ?, ?, ?, 1, 0) \
-                 ON CONFLICT (preset_id) DO NOTHING",
-            )
-            .bind(&row.preset_id)
-            .bind(&row.owner_ref_json)
-            .bind(&row.source_json)
-            .bind(&row.display_json)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        for row in &expected.revisions {
-            sqlx::query(
-                "INSERT INTO agent_preset_revisions \
-                 (revision_id, preset_id, revision_no, schema_version, editor_document_json, \
-                  revision_digest, created_by, created_at, reason) \
-                 VALUES (?, ?, 1, ?, ?, ?, ?, 0, ?) \
-                 ON CONFLICT (revision_id) DO NOTHING",
-            )
-            .bind(&row.revision_id)
-            .bind(&row.preset_id)
-            .bind(&row.schema_version)
-            .bind(&row.editor_document_json)
-            .bind(&row.revision_digest)
-            .bind(OFFICIAL_SEED_ACTOR)
-            .bind(OFFICIAL_SEED_REASON)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        for row in &expected.initial_capabilities {
-            sqlx::query(
-                "INSERT INTO preset_initial_capabilities \
-                 (revision_id, capability_id, capability_version, selection_json) \
-                 VALUES (?, ?, ?, ?) \
-                 ON CONFLICT (revision_id, capability_id) DO NOTHING",
-            )
-            .bind(&row.revision_id)
-            .bind(&row.capability_id)
-            .bind(&row.capability_version)
-            .bind(&row.selection_json)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        for row in &expected.on_demand_capabilities {
-            sqlx::query(
-                "INSERT INTO preset_on_demand_capabilities \
-                 (revision_id, capability_id, capability_version, selection_json) \
-                 VALUES (?, ?, ?, ?) \
-                 ON CONFLICT (revision_id, capability_id) DO NOTHING",
-            )
-            .bind(&row.revision_id)
-            .bind(&row.capability_id)
-            .bind(&row.capability_version)
-            .bind(&row.selection_json)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        for row in &expected.skills {
-            sqlx::query(
-                "INSERT INTO preset_skill_bindings \
-                 (revision_id, skill_id, skill_version) VALUES (?, ?, ?) \
-                 ON CONFLICT (revision_id, skill_id) DO NOTHING",
-            )
-            .bind(&row.revision_id)
-            .bind(&row.skill_id)
-            .bind(&row.skill_version)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        for row in &expected.resources {
-            sqlx::query(
-                "INSERT INTO preset_resource_bindings \
-                 (revision_id, resource_binding_id, binding_json) VALUES (?, ?, ?) \
-                 ON CONFLICT (revision_id, resource_binding_id) DO NOTHING",
-            )
-            .bind(&row.revision_id)
-            .bind(&row.resource_binding_id)
-            .bind(&row.binding_json)
             .execute(&mut *transaction)
             .await?;
         }
@@ -744,14 +653,15 @@ async fn validate_materialization(
             row.manifest_digest.clone(),
             row.display_json.clone(),
         ));
-        if actual != wanted
-            && !actual
-                .as_ref()
-                .is_some_and(|value| runtime_package_matches(value, row))
-        {
+        let runtime_mismatch = actual
+            .as_ref()
+            .and_then(|value| runtime_package_mismatch(value, row));
+        if actual != wanted && runtime_mismatch.is_some() {
             return Err(FreshV4RootError::State(format!(
-                "bundled package materialization mismatch for {}@{}",
-                row.package_id, row.package_version
+                "bundled package materialization mismatch for {}@{}: {}",
+                row.package_id,
+                row.package_version,
+                runtime_mismatch.unwrap_or_else(|| "package row is missing".to_owned())
             )));
         }
     }
@@ -854,29 +764,29 @@ async fn validate_materialization(
 /// runtime manifests. Both representations must validate at this boundary;
 /// the runtime representation still proves its own digest and exact inventory
 /// identity instead of being accepted as arbitrary JSON.
-fn runtime_package_matches(
+fn runtime_package_mismatch(
     actual: &(String, String, String),
     expected: &ExpectedPackage,
-) -> bool {
+) -> Option<String> {
     let Ok(manifest) = serde_json::from_str::<PackageManifest>(&actual.0) else {
-        return false;
+        return Some("manifest_json is not a canonical PackageManifest".to_owned());
     };
     if manifest.package_id.as_ref() != expected.package_id
         || manifest.package_version.as_ref() != expected.package_version
     {
-        return false;
+        return Some("package identity differs".to_owned());
     }
     let Ok(digest) = digest_payload(&manifest) else {
-        return false;
+        return Some("runtime manifest digest cannot be calculated".to_owned());
     };
     if digest.as_ref() != actual.1 {
-        return false;
+        return Some("runtime manifest digest differs from the persisted digest".to_owned());
     }
     let Ok(display) = canonical_json_string(&manifest.display) else {
-        return false;
+        return Some("runtime display metadata cannot be canonicalized".to_owned());
     };
     if display != actual.2 {
-        return false;
+        return Some("runtime display metadata differs from display_json".to_owned());
     }
     let capabilities = manifest
         .contributions
@@ -893,7 +803,7 @@ fn runtime_package_matches(
         })
         .collect::<BTreeMap<_, _>>();
     if capabilities != expected.capabilities {
-        return false;
+        return Some("capability inventory differs".to_owned());
     }
     let skills = manifest
         .contributions
@@ -906,10 +816,19 @@ fn runtime_package_matches(
             )
         })
         .collect::<BTreeSet<_>>();
-    skills == expected.skills
-        && manifest.contributions.mcp_tools == expected.mcp_tools
-        && manifest.contributions.role_contracts == expected.role_contracts
-        && manifest.contributions.role_providers == expected.role_providers
+    if skills != expected.skills {
+        return Some("skill inventory differs".to_owned());
+    }
+    if manifest.contributions.mcp_tools != expected.mcp_tools {
+        return Some("MCP tool inventory differs".to_owned());
+    }
+    if manifest.contributions.role_contracts != expected.role_contracts {
+        return Some("execution Role contract inventory differs".to_owned());
+    }
+    if manifest.contributions.role_providers != expected.role_providers {
+        return Some("execution Role provider inventory differs".to_owned());
+    }
+    None
 }
 
 fn runtime_capability_matches(
@@ -954,76 +873,18 @@ fn runtime_skill_matches(
 #[derive(Debug, PartialEq, Eq)]
 struct ExpectedTemplate {
     template_key: String,
-    source_package_id: String,
-    source_package_version: String,
     template_json: String,
     template_digest: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct ExpectedPreset {
-    preset_id: String,
-    owner_ref_json: String,
-    source_json: String,
-    display_json: String,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct ExpectedRevision {
-    revision_id: String,
-    preset_id: String,
-    schema_version: String,
-    editor_document_json: String,
-    revision_digest: String,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct ExpectedCapabilitySelection {
-    revision_id: String,
-    capability_id: String,
-    capability_version: String,
-    selection_json: String,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct ExpectedSkillBinding {
-    revision_id: String,
-    skill_id: String,
-    skill_version: String,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct ExpectedResourceBinding {
-    revision_id: String,
-    resource_binding_id: String,
-    binding_json: String,
-}
-
 struct ExpectedOfficialSeed {
     templates: Vec<ExpectedTemplate>,
-    presets: Vec<ExpectedPreset>,
-    revisions: Vec<ExpectedRevision>,
-    initial_capabilities: Vec<ExpectedCapabilitySelection>,
-    on_demand_capabilities: Vec<ExpectedCapabilitySelection>,
-    skills: Vec<ExpectedSkillBinding>,
-    resources: Vec<ExpectedResourceBinding>,
 }
 
 fn expected_official_seed(
     inputs: &FrozenRootInputs,
 ) -> Result<ExpectedOfficialSeed, FreshV4RootError> {
-    let owner_ref_json = canonical_json_string(&PrincipalRef {
-        principal_kind: "system".into(),
-        principal_id: "official".into(),
-    })?;
-    let source_json = canonical_json_string(&AgentPresetSource::Official)?;
     let mut templates = Vec::new();
-    let mut presets = Vec::new();
-    let mut revisions = Vec::new();
-    let mut initial_capabilities = Vec::new();
-    let mut on_demand_capabilities = Vec::new();
-    let mut skills = Vec::new();
-    let mut resources = Vec::new();
 
     for key in OfficialPresetKey::ALL {
         let seed = inputs.seed_manifest.templates.get(&key).ok_or_else(|| {
@@ -1032,103 +893,18 @@ fn expected_official_seed(
                 key.as_str()
             ))
         })?;
-        let source = source_package_for_seed(seed, &inputs.target_inventory)?;
         let template_key = key.as_str().to_owned();
-        let revision_id = format!("{template_key}@1");
         let template_json = canonical_json_string(seed)?;
         let template_digest = digest_string(seed)?;
 
         templates.push(ExpectedTemplate {
-            template_key: template_key.clone(),
-            source_package_id: source.package.id.as_ref().to_owned(),
-            source_package_version: source.package.version.as_ref().to_owned(),
-            template_json: template_json.clone(),
-            template_digest: template_digest.clone(),
+            template_key,
+            template_json,
+            template_digest,
         });
-        presets.push(ExpectedPreset {
-            preset_id: template_key.clone(),
-            owner_ref_json: owner_ref_json.clone(),
-            source_json: source_json.clone(),
-            display_json: canonical_json_string(&LocalizedMetadata {
-                name: key.as_str().to_owned(),
-                description: format!("Official {} authoring seed", key.as_str()),
-                localized_names: BTreeMap::new(),
-                localized_descriptions: BTreeMap::new(),
-            })?,
-        });
-        revisions.push(ExpectedRevision {
-            revision_id: revision_id.clone(),
-            preset_id: key.as_str().to_owned(),
-            schema_version: inputs.seed_manifest.manifest_version.as_ref().to_owned(),
-            editor_document_json: template_json,
-            revision_digest: template_digest,
-        });
-        for capability in &seed.initial_capabilities {
-            initial_capabilities.push(ExpectedCapabilitySelection {
-                revision_id: revision_id.clone(),
-                capability_id: capability.id.as_ref().to_owned(),
-                capability_version: capability.version.as_ref().to_owned(),
-                selection_json: canonical_json_string(capability)?,
-            });
-        }
-        for capability in &seed.on_demand_capabilities {
-            on_demand_capabilities.push(ExpectedCapabilitySelection {
-                revision_id: revision_id.clone(),
-                capability_id: capability.id.as_ref().to_owned(),
-                capability_version: capability.version.as_ref().to_owned(),
-                selection_json: canonical_json_string(capability)?,
-            });
-        }
-        for skill in &seed.skill_bindings {
-            skills.push(ExpectedSkillBinding {
-                revision_id: revision_id.clone(),
-                skill_id: skill.id.as_ref().to_owned(),
-                skill_version: skill.version.as_ref().to_owned(),
-            });
-        }
-        for resource in &seed.typed_resource_defaults {
-            resources.push(ExpectedResourceBinding {
-                revision_id: revision_id.clone(),
-                resource_binding_id: resource.slot_key.clone(),
-                binding_json: canonical_json_string(resource)?,
-            });
-        }
     }
 
-    Ok(ExpectedOfficialSeed {
-        templates,
-        presets,
-        revisions,
-        initial_capabilities,
-        on_demand_capabilities,
-        skills,
-        resources,
-    })
-}
-
-fn source_package_for_seed<'a>(
-    seed: &OfficialPresetSeed,
-    inventory: &'a TargetPackageInventoryPayload,
-) -> Result<&'a TargetPackageContribution, FreshV4RootError> {
-    for selected in seed
-        .initial_capabilities
-        .iter()
-        .chain(&seed.on_demand_capabilities)
-    {
-        if let Some(package) = inventory.packages.iter().find(|package| {
-            package
-                .capabilities
-                .iter()
-                .any(|capability| &capability.capability == selected)
-        }) {
-            return Ok(package);
-        }
-    }
-    inventory.packages.iter().min_by(|left, right| {
-        (&left.package.id, &left.package.version)
-            .cmp(&(&right.package.id, &right.package.version))
-    })
-    .ok_or_else(|| FreshV4RootError::Contract("target package inventory is empty".into()))
+    Ok(ExpectedOfficialSeed { templates })
 }
 
 async fn validate_official_seed(
@@ -1153,17 +929,14 @@ async fn validate_official_seed(
     }
 
     for row in &expected.templates {
-        let actual: Option<(String, String, String, String, String)> = sqlx::query_as(
-            "SELECT source_package_id, source_package_version, source_kind, \
-                    template_json, template_digest \
+        let actual: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT source_kind, template_json, template_digest \
              FROM agent_preset_templates WHERE template_key = ?",
         )
         .bind(&row.template_key)
         .fetch_optional(pool)
         .await?;
         let wanted = Some((
-            row.source_package_id.clone(),
-            row.source_package_version.clone(),
             "official".to_owned(),
             row.template_json.clone(),
             row.template_digest.clone(),
@@ -1172,164 +945,6 @@ async fn validate_official_seed(
             return Err(FreshV4RootError::State(format!(
                 "official template seed mismatch for {}",
                 row.template_key
-            )));
-        }
-    }
-    for row in &expected.presets {
-        let actual: Option<(String, String, String, Option<i64>, i64)> = sqlx::query_as(
-            "SELECT owner_ref_json, source_json, display_json, current_stable_revision, \
-                    created_at \
-             FROM agent_presets WHERE preset_id = ?",
-        )
-        .bind(&row.preset_id)
-        .fetch_optional(pool)
-        .await?;
-        let wanted = Some((
-            row.owner_ref_json.clone(),
-            row.source_json.clone(),
-            row.display_json.clone(),
-            Some(1_i64),
-            0_i64,
-        ));
-        if actual != wanted {
-            return Err(FreshV4RootError::State(format!(
-                "official authoring preset mismatch for {}",
-                row.preset_id
-            )));
-        }
-    }
-    for row in &expected.revisions {
-        let actual: Option<(String, i64, String, String, String, String, i64, String)> =
-            sqlx::query_as(
-                "SELECT preset_id, revision_no, schema_version, editor_document_json, \
-                        revision_digest, created_by, created_at, reason \
-                 FROM agent_preset_revisions WHERE revision_id = ?",
-            )
-            .bind(&row.revision_id)
-            .fetch_optional(pool)
-            .await?;
-        let wanted = Some((
-            row.preset_id.clone(),
-            1_i64,
-            row.schema_version.clone(),
-            row.editor_document_json.clone(),
-            row.revision_digest.clone(),
-            OFFICIAL_SEED_ACTOR.to_owned(),
-            0_i64,
-            OFFICIAL_SEED_REASON.to_owned(),
-        ));
-        if actual != wanted {
-            return Err(FreshV4RootError::State(format!(
-                "official authoring revision mismatch for {}",
-                row.revision_id
-            )));
-        }
-    }
-
-    validate_capability_selection_set(
-        pool,
-        "preset_initial_capabilities",
-        &expected.initial_capabilities,
-        &expected.revisions,
-    )
-    .await?;
-    validate_capability_selection_set(
-        pool,
-        "preset_on_demand_capabilities",
-        &expected.on_demand_capabilities,
-        &expected.revisions,
-    )
-    .await?;
-    for revision in &expected.revisions {
-        let actual_skills: Vec<(String, String)> = sqlx::query_as(
-            "SELECT skill_id, skill_version FROM preset_skill_bindings \
-             WHERE revision_id = ? ORDER BY skill_id",
-        )
-        .bind(&revision.revision_id)
-        .fetch_all(pool)
-        .await?;
-        let mut wanted_skills = expected
-            .skills
-            .iter()
-            .filter(|row| row.revision_id == revision.revision_id)
-            .map(|row| (row.skill_id.clone(), row.skill_version.clone()))
-            .collect::<Vec<_>>();
-        wanted_skills.sort();
-        if actual_skills != wanted_skills {
-            return Err(FreshV4RootError::State(format!(
-                "official skill seed mismatch for {}",
-                revision.revision_id
-            )));
-        }
-
-        let actual_resources: Vec<(String, String)> = sqlx::query_as(
-            "SELECT resource_binding_id, binding_json FROM preset_resource_bindings \
-             WHERE revision_id = ? ORDER BY resource_binding_id",
-        )
-        .bind(&revision.revision_id)
-        .fetch_all(pool)
-        .await?;
-        let mut wanted_resources = expected
-            .resources
-            .iter()
-            .filter(|row| row.revision_id == revision.revision_id)
-            .map(|row| (row.resource_binding_id.clone(), row.binding_json.clone()))
-            .collect::<Vec<_>>();
-        wanted_resources.sort();
-        if actual_resources != wanted_resources {
-            return Err(FreshV4RootError::State(format!(
-                "official resource seed mismatch for {}",
-                revision.revision_id
-            )));
-        }
-    }
-    Ok(())
-}
-
-async fn validate_capability_selection_set(
-    pool: &SqlitePool,
-    table: &'static str,
-    expected: &[ExpectedCapabilitySelection],
-    revisions: &[ExpectedRevision],
-) -> Result<(), FreshV4RootError> {
-    for revision in revisions {
-        let sql = match table {
-            "preset_initial_capabilities" => {
-                "SELECT capability_id, capability_version, selection_json \
-                 FROM preset_initial_capabilities \
-                 WHERE revision_id = ? ORDER BY capability_id"
-            }
-            "preset_on_demand_capabilities" => {
-                "SELECT capability_id, capability_version, selection_json \
-                 FROM preset_on_demand_capabilities \
-                 WHERE revision_id = ? ORDER BY capability_id"
-            }
-            _ => {
-                return Err(FreshV4RootError::Contract(format!(
-                    "unsupported official seed table {table}"
-                )));
-            }
-        };
-        let actual: Vec<(String, String, String)> = sqlx::query_as(sql)
-            .bind(&revision.revision_id)
-            .fetch_all(pool)
-            .await?;
-        let mut wanted = expected
-            .iter()
-            .filter(|row| row.revision_id == revision.revision_id)
-            .map(|row| {
-                (
-                    row.capability_id.clone(),
-                    row.capability_version.clone(),
-                    row.selection_json.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        wanted.sort();
-        if actual != wanted {
-            return Err(FreshV4RootError::State(format!(
-                "official capability seed mismatch in {table} for {}",
-                revision.revision_id
             )));
         }
     }

@@ -475,19 +475,19 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
         .get_snapshot(&revision.reference)
         .await?
         .expect("persisted ResolvedSnapshot");
-    let route_json: String = sqlx::query_scalar(
-        "SELECT route_json FROM agent_preset_model_routes \
-         WHERE revision_id = ? AND model_task = ?",
+    let payload_json: String = sqlx::query_scalar(
+        "SELECT payload_json FROM agent_preset_revisions \
+         WHERE revision_id = ?",
     )
     .bind(format!(
         "{}@{}",
         revision.reference.preset_id.as_ref(),
         revision.reference.revision
     ))
-    .bind("agent_chat")
     .fetch_one(&pool)
     .await?;
-    let route_value: Value = serde_json::from_str(&route_json)?;
+    let payload_value: Value = serde_json::from_str(&payload_json)?;
+    let route_value = &payload_value["chat_route_records"]["agent_chat"];
     assert!(route_value.is_object());
     assert_eq!(
         route_value["primary"]["model_route_id"],

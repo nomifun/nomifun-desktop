@@ -22,10 +22,11 @@ describe('Guid summon draft integration', () => {
     expect(source.includes('ipcBridge.conversation.setSummon.invoke')).toBe(true);
   });
 
-  test('GuidPage wires the strip entry only for nomi-typed launches', () => {
+  test('GuidPage wires the session draft without inspecting an execution engine', () => {
     const page = readSource(new URL('../GuidPage.tsx', import.meta.url));
     expect(page.includes('onSummonCompanion')).toBe(true);
-    expect(page.includes("effectiveAgentType === 'nomi'")).toBe(true);
+    expect(page.includes('setSummonDrawerOpen(true)')).toBe(true);
+    expect(page.includes('effectiveAgentType')).toBe(false);
   });
 
   test('the reusable summon drawer is shared with the in-session control', () => {

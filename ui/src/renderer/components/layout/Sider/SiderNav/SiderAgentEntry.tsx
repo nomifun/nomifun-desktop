@@ -28,7 +28,7 @@ const SiderAgentEntry: React.FC<SiderAgentEntryProps> = ({
   onClick,
 }) => {
   const { t } = useTranslation();
-  const label = t('agentSettings.navigation.railTitle', { defaultValue: 'Agent' });
+  const label = t('agentSettings.navigation.railTitle', { defaultValue: 'Agent Workbench' });
 
   if (collapsed) {
     return (

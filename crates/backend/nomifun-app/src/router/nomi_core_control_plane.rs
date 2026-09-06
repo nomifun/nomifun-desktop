@@ -197,7 +197,7 @@ async fn load_revision(
 ) -> Result<Option<AgentPresetRevision>, ControlPlaneError> {
     let row: Option<(String, i64, String, String, String, i64, String, String, String)> =
         sqlx::query_as(
-            "SELECT revision_id, revision_no, editor_document_json, revision_digest, \
+            "SELECT revision_id, revision_no, payload_json, revision_digest, \
                     created_by, created_at, reason, snapshot_json, contribution_locks_json \
              FROM nomi_agent_preset_revisions \
              WHERE preset_id = ? AND revision_no = ?",
@@ -210,7 +210,7 @@ async fn load_revision(
     let Some((
         _revision_id,
         persisted_no,
-        document,
+        payload_json,
         digest,
         created_by,
         created_at,
@@ -228,7 +228,7 @@ async fn load_revision(
             revision: u64_from_i64(persisted_no, "revision_no")?,
             revision_digest: digest.into(),
         },
-        payload: decode(&document, "AgentPreset revision document")?,
+        payload: decode(&payload_json, "AgentPreset revision payload")?,
         contribution_locks: decode(
             &contribution_locks_json,
             "AgentPreset contribution locks",
@@ -356,7 +356,7 @@ async fn insert_revision_tx(
     let revision_id = revision.reference.revision_id();
     sqlx::query(
         "INSERT INTO nomi_agent_preset_revisions \
-         (revision_id, preset_id, revision_no, schema_version, editor_document_json, \
+         (revision_id, preset_id, revision_no, schema_version, payload_json, \
           revision_digest, created_by, created_at, reason, snapshot_json, contribution_locks_json) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )

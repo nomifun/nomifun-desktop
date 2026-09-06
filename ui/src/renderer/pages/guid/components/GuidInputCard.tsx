@@ -47,6 +47,7 @@ type GuidInputCardProps = {
   actionRow: React.ReactNode;
 
   // Workspace
+  showWorkspace?: boolean;
   workspaceDir: string;
   onSelectWorkspace: (dir: string) => void;
   onClearWorkspace: () => void;
@@ -73,6 +74,7 @@ const GuidInputCard: React.FC<GuidInputCardProps> = ({
   onRemoveFile,
   entryStrip,
   actionRow,
+  showWorkspace = false,
   workspaceDir,
   onSelectWorkspace,
   onClearWorkspace,
@@ -155,11 +157,13 @@ const GuidInputCard: React.FC<GuidInputCardProps> = ({
         <UploadProgressBar source='sendbox' />
         {actionRow}
       </div>
-      <GuidWorkspaceFootnote
-        workspaceDir={workspaceDir}
-        onSelectWorkspace={onSelectWorkspace}
-        onClearWorkspace={onClearWorkspace}
-      />
+      {showWorkspace && (
+        <GuidWorkspaceFootnote
+          workspaceDir={workspaceDir}
+          onSelectWorkspace={onSelectWorkspace}
+          onClearWorkspace={onClearWorkspace}
+        />
+      )}
     </div>
   );
 };

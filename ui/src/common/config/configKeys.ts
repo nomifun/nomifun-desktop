@@ -1,6 +1,6 @@
 import type { SpeechToTextConfig, TextToSpeechConfig } from '@/common/types/provider/speech';
 import type { ICssTheme } from '@/common/config/storage';
-import type { CompanionId, ProviderId } from '@/common/types/ids';
+import type { AgentPresetId, CompanionId, ProviderId } from '@/common/types/ids';
 import type { LanguageMode } from './i18n';
 
 // `auto` (default), `headless` and `external` are the three supported user
@@ -44,7 +44,7 @@ export type ConfigKeyMap = {
   'tools.textToSpeech': TextToSpeechConfig | undefined;
   'workspace.pasteConfirm': boolean | undefined;
   'upload.saveToWorkspace': boolean | undefined;
-  'guid.lastSelectedAgent': string | undefined;
+  'guid.lastSelectedAgentPreset': AgentPresetId | undefined;
   'system.notificationEnabled': boolean | undefined;
   'system.cronNotificationEnabled': boolean | undefined;
   'system.keepAwake': boolean | undefined;
