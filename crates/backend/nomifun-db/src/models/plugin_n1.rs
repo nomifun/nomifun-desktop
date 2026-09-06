@@ -78,10 +78,19 @@ pub struct PluginMountRow {
     pub delete_pending: bool,
     pub revision: i64,
     pub config_json: String,
+    pub config_schema_digest: Option<String>,
+    pub config_revision: i64,
+    pub credential_bindings_revision: i64,
     pub data_dir_path: String,
     pub last_error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginMountRuntimeState {
+    pub mount: PluginMountRow,
+    pub credential_bindings: Vec<PluginCredentialBindingRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
@@ -106,6 +115,21 @@ pub struct PluginCredentialBindingRow {
     pub credential_id: String,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginCredentialBindingInput {
+    pub slot: String,
+    pub credential_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginCredentialBindingSnapshot {
+    pub mount_id: String,
+    pub mount_revision: i64,
+    pub current_artifact_digest: Option<String>,
+    pub bindings_revision: i64,
+    pub bindings: Vec<PluginCredentialBindingRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]

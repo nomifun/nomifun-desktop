@@ -3,16 +3,19 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use crate::DbError;
 use crate::models::{
-    PluginArtifactRow, PluginCandidateTestReceiptRow, PluginKvRow, PluginMountRow,
-    PluginCandidateOrigin, PluginProjectRow, PluginReadyCandidateRow, ProductOperationKind,
-    ProductOperationRow, ProductOperationState,
+    PluginArtifactRow, PluginCandidateOrigin, PluginCandidateTestReceiptRow,
+    PluginCredentialBindingInput, PluginCredentialBindingRow, PluginCredentialBindingSnapshot,
+    PluginKvRow, PluginMountRow, PluginMountRuntimeState, PluginProjectRow,
+    PluginReadyCandidateRow, ProductOperationKind, ProductOperationRow, ProductOperationState,
 };
 use crate::repository::plugin_n1::{
     ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
-    FinishProductOperationParams, IPluginN1Repository, PutPluginKvParams,
+    DeletePluginKvParams, FinishProductOperationParams, GetPluginKvParams,
+    IPluginN1Repository, ListPluginCredentialBindingsParams, PutPluginKvParams,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
-    RestorePluginMountParams, StartProductOperationParams, UninstallPluginMountParams,
-    UpdatePluginProjectSourceParams, MAX_PRODUCT_OPERATION_LOG_LINES,
+    ReplacePluginCredentialBindingsParams, RestorePluginMountParams, StartProductOperationParams,
+    UninstallPluginMountParams, UpdatePluginMountConfigParams, UpdatePluginProjectSourceParams,
+    MAX_PRODUCT_OPERATION_LOG_LINES,
     MAX_PRODUCT_OPERATION_LOG_LINE_CHARS,
 };
 
@@ -209,6 +212,55 @@ fn require_mount_cas(
         )));
     }
     Ok(())
+}
+
+fn require_mount_runtime_cas(
+    mount: &PluginMountRow,
+    expected_revision: i64,
+    expected_current: Option<&str>,
+) -> Result<(), DbError> {
+    require_mount_cas(mount, expected_revision, expected_current)?;
+    if mount.delete_pending {
+        return Err(conflict("plugin mount data is pending deletion"));
+    }
+    Ok(())
+}
+
+fn validate_binding_input(
+    binding: &PluginCredentialBindingInput,
+) -> Result<(), DbError> {
+    if binding.slot.is_empty()
+        || binding.slot.len() > 128
+        || !binding.slot.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return Err(conflict("plugin credential binding slot must be visible ASCII"));
+    }
+    if binding.credential_id.is_empty()
+        || binding.credential_id.len() > 512
+        || !binding
+            .credential_id
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic())
+    {
+        return Err(conflict(
+            "plugin credential binding credential_id must be visible ASCII",
+        ));
+    }
+    Ok(())
+}
+
+async fn fetch_bindings(
+    executor: &mut sqlx::SqliteConnection,
+    mount_id: &str,
+) -> Result<Vec<PluginCredentialBindingRow>, DbError> {
+    sqlx::query_as(
+        "SELECT * FROM plugin_credential_bindings
+         WHERE mount_id = ? ORDER BY slot ASC",
+    )
+    .bind(mount_id)
+    .fetch_all(&mut *executor)
+    .await
+    .map_err(DbError::Query)
 }
 
 fn validate_operation_owner(kind: ProductOperationKind, owner_kind: &str) -> Result<(), DbError> {
@@ -703,6 +755,8 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
             params.expected_current_artifact_digest.as_deref(),
             "expected_current_artifact_digest",
         )?;
+        validate_digest(&params.config_schema_digest, "config_schema_digest")?;
+        let initial_config_json = json_object(&params.initial_config, "initial_config")?;
         let mut tx = self.pool.begin().await?;
         let project = lock_project(&mut tx, &params.project_id).await?;
         require_project_generation(&project, params.expected_project_generation)?;
@@ -783,6 +837,17 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
                 "candidate base target is stale relative to the mount current artifact",
             ));
         }
+        let config_changed = mount.config_json != initial_config_json
+            || mount.config_schema_digest.as_deref()
+                != Some(params.config_schema_digest.as_str());
+        let next_config_revision = if config_changed {
+            mount
+                .config_revision
+                .checked_add(1)
+                .ok_or_else(|| conflict("plugin config revision overflow"))?
+        } else {
+            mount.config_revision
+        };
         let mount_revision_id = nomifun_common::generate_id();
         let next_revision = mount.revision + 1;
         sqlx::query(
@@ -813,6 +878,9 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
                  retained = 0,
                  delete_pending = 0,
                  revision = ?,
+                 config_json = ?,
+                 config_schema_digest = ?,
+                 config_revision = ?,
                  last_error = NULL,
                  updated_at = ?
              WHERE mount_id = ? AND revision = ?
@@ -821,6 +889,9 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         .bind(&candidate.artifact_digest)
         .bind(&mount_revision_id)
         .bind(next_revision)
+        .bind(&initial_config_json)
+        .bind(&params.config_schema_digest)
+        .bind(next_config_revision)
         .bind(params.applied_at)
         .bind(&mount.mount_id)
         .bind(expected_revision)
@@ -1036,7 +1107,31 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         .execute(&mut *tx)
         .await
         .map_err(query_error)?;
+        let target_bindings_revision = mount
+            .credential_bindings_revision
+            .checked_add(1)
+            .ok_or_else(|| conflict("plugin credential bindings revision overflow"))?;
+        sqlx::query(
+            "INSERT INTO plugin_credential_binding_mutations (
+                mount_id, expected_mount_revision, expected_current_artifact_digest,
+                expected_bindings_revision, target_bindings_revision,
+                allow_delete_pending, updated_at
+             ) VALUES (?, ?, NULL, ?, ?, 1, ?)",
+        )
+        .bind(mount_id)
+        .bind(mount.revision)
+        .bind(mount.credential_bindings_revision)
+        .bind(target_bindings_revision)
+        .bind(mount.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
         sqlx::query("DELETE FROM plugin_credential_bindings WHERE mount_id = ?")
+            .bind(mount_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?;
+        sqlx::query("DELETE FROM plugin_credential_binding_mutations WHERE mount_id = ?")
             .bind(mount_id)
             .execute(&mut *tx)
             .await
@@ -1060,45 +1155,217 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         Ok(true)
     }
 
-    async fn bind_credential(
+    async fn update_mount_config_cas(
         &self,
-        mount_id: &str,
-        slot: &str,
-        credential_id: &str,
-        updated_at: i64,
-    ) -> Result<(), DbError> {
-        validate_uuid(mount_id, "mount_id")?;
-        validate_timestamp(updated_at, "updated_at")?;
-        let exists: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM plugin_mounts WHERE mount_id = ?)")
-                .bind(mount_id)
-                .fetch_one(&self.pool)
-                .await?;
-        if !exists {
-            return Err(DbError::NotFound(format!("plugin mount {mount_id}")));
+        params: &UpdatePluginMountConfigParams,
+    ) -> Result<PluginMountRow, DbError> {
+        validate_uuid(&params.mount_id, "mount_id")?;
+        validate_optional_digest(
+            params.expected_current_artifact_digest.as_deref(),
+            "expected_current_artifact_digest",
+        )?;
+        validate_optional_digest(
+            params.expected_config_schema_digest.as_deref(),
+            "expected_config_schema_digest",
+        )?;
+        validate_digest(&params.config_schema_digest, "config_schema_digest")?;
+        validate_timestamp(params.updated_at, "updated_at")?;
+        let config_json = json_object(&params.config, "plugin config")?;
+        let mut tx = self.pool.begin().await?;
+        let mount = lock_mount(&mut tx, &params.mount_id).await?;
+        require_mount_runtime_cas(
+            &mount,
+            params.expected_mount_revision,
+            params.expected_current_artifact_digest.as_deref(),
+        )?;
+        if mount.config_revision != params.expected_config_revision
+            || mount.config_schema_digest != params.expected_config_schema_digest
+        {
+            return Err(conflict("plugin config revision or schema digest changed"));
         }
+        if params.updated_at < mount.updated_at {
+            return Err(conflict("plugin config timestamp predates the Mount state"));
+        }
+        if mount.config_json == config_json
+            && mount.config_schema_digest.as_deref()
+                == Some(params.config_schema_digest.as_str())
+        {
+            tx.commit().await?;
+            return Ok(mount);
+        }
+        let next_revision = mount
+            .config_revision
+            .checked_add(1)
+            .ok_or_else(|| conflict("plugin config revision overflow"))?;
         let changed = sqlx::query(
-            "INSERT INTO plugin_credential_bindings (
-                mount_id, slot, credential_id, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT(mount_id, slot) DO UPDATE SET
-                credential_id = excluded.credential_id,
-                updated_at = excluded.updated_at
-             WHERE excluded.updated_at >= plugin_credential_bindings.updated_at",
+            "UPDATE plugin_mounts
+             SET config_json = ?, config_schema_digest = ?, config_revision = ?,
+                 updated_at = ?
+             WHERE mount_id = ? AND revision = ?
+               AND current_artifact_digest IS ?
+               AND config_revision = ?
+               AND config_schema_digest IS ?",
         )
-        .bind(mount_id)
-        .bind(slot)
-        .bind(credential_id)
-        .bind(updated_at)
-        .bind(updated_at)
-        .execute(&self.pool)
+        .bind(config_json)
+        .bind(&params.config_schema_digest)
+        .bind(next_revision)
+        .bind(params.updated_at)
+        .bind(&params.mount_id)
+        .bind(params.expected_mount_revision)
+        .bind(params.expected_current_artifact_digest.as_deref())
+        .bind(params.expected_config_revision)
+        .bind(params.expected_config_schema_digest.as_deref())
+        .execute(&mut *tx)
         .await
         .map_err(query_error)?
         .rows_affected();
         if changed != 1 {
-            return Err(conflict("plugin credential binding update timestamp is stale"));
+            return Err(conflict("plugin config exact CAS failed"));
         }
-        Ok(())
+        let updated = sqlx::query_as("SELECT * FROM plugin_mounts WHERE mount_id = ?")
+            .bind(&params.mount_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    async fn replace_credential_bindings(
+        &self,
+        params: &ReplacePluginCredentialBindingsParams,
+    ) -> Result<PluginCredentialBindingSnapshot, DbError> {
+        validate_uuid(&params.mount_id, "mount_id")?;
+        validate_optional_digest(
+            params.expected_current_artifact_digest.as_deref(),
+            "expected_current_artifact_digest",
+        )?;
+        validate_timestamp(params.updated_at, "updated_at")?;
+        let mut slots = std::collections::BTreeSet::new();
+        for binding in &params.bindings {
+            validate_binding_input(binding)?;
+            if !slots.insert(binding.slot.as_str()) {
+                return Err(conflict(format!(
+                    "duplicate plugin credential slot {}",
+                    binding.slot
+                )));
+            }
+        }
+        let mut tx = self.pool.begin().await?;
+        let mount = lock_mount(&mut tx, &params.mount_id).await?;
+        require_mount_runtime_cas(
+            &mount,
+            params.expected_mount_revision,
+            params.expected_current_artifact_digest.as_deref(),
+        )?;
+        if mount.credential_bindings_revision != params.expected_bindings_revision {
+            return Err(conflict("plugin credential bindings revision changed"));
+        }
+        if params.updated_at < mount.updated_at {
+            return Err(conflict(
+                "plugin credential binding timestamp predates the Mount state",
+            ));
+        }
+        let next_revision = mount
+            .credential_bindings_revision
+            .checked_add(1)
+            .ok_or_else(|| conflict("plugin credential bindings revision overflow"))?;
+        sqlx::query(
+            "INSERT INTO plugin_credential_binding_mutations (
+                mount_id, expected_mount_revision, expected_current_artifact_digest,
+                expected_bindings_revision, target_bindings_revision,
+                allow_delete_pending, updated_at
+             ) VALUES (?, ?, ?, ?, ?, 0, ?)",
+        )
+        .bind(&params.mount_id)
+        .bind(params.expected_mount_revision)
+        .bind(params.expected_current_artifact_digest.as_deref())
+        .bind(params.expected_bindings_revision)
+        .bind(next_revision)
+        .bind(params.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        sqlx::query("DELETE FROM plugin_credential_bindings WHERE mount_id = ?")
+            .bind(&params.mount_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?;
+        for binding in &params.bindings {
+            sqlx::query(
+                "INSERT INTO plugin_credential_bindings (
+                    mount_id, slot, credential_id, created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&params.mount_id)
+            .bind(&binding.slot)
+            .bind(&binding.credential_id)
+            .bind(params.updated_at)
+            .bind(params.updated_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?;
+        }
+        let changed = sqlx::query(
+            "UPDATE plugin_mounts
+             SET credential_bindings_revision = ?, updated_at = ?
+             WHERE mount_id = ? AND revision = ?
+               AND current_artifact_digest IS ?
+               AND credential_bindings_revision = ?",
+        )
+        .bind(next_revision)
+        .bind(params.updated_at)
+        .bind(&params.mount_id)
+        .bind(params.expected_mount_revision)
+        .bind(params.expected_current_artifact_digest.as_deref())
+        .bind(params.expected_bindings_revision)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?
+        .rows_affected();
+        if changed != 1 {
+            return Err(conflict("plugin credential bindings exact CAS failed"));
+        }
+        let bindings = fetch_bindings(&mut tx, &params.mount_id).await?;
+        tx.commit().await?;
+        Ok(PluginCredentialBindingSnapshot {
+            mount_id: mount.mount_id,
+            mount_revision: mount.revision,
+            current_artifact_digest: mount.current_artifact_digest,
+            bindings_revision: next_revision,
+            bindings,
+        })
+    }
+
+    async fn list_credential_bindings(
+        &self,
+        params: &ListPluginCredentialBindingsParams,
+    ) -> Result<PluginCredentialBindingSnapshot, DbError> {
+        validate_uuid(&params.mount_id, "mount_id")?;
+        validate_optional_digest(
+            params.expected_current_artifact_digest.as_deref(),
+            "expected_current_artifact_digest",
+        )?;
+        let mut tx = self.pool.begin().await?;
+        let mount: PluginMountRow =
+            sqlx::query_as("SELECT * FROM plugin_mounts WHERE mount_id = ?")
+                .bind(&params.mount_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| DbError::NotFound(format!("plugin mount {}", params.mount_id)))?;
+        require_mount_runtime_cas(
+            &mount,
+            params.expected_mount_revision,
+            params.expected_current_artifact_digest.as_deref(),
+        )?;
+        let bindings = fetch_bindings(&mut tx, &params.mount_id).await?;
+        tx.commit().await?;
+        Ok(PluginCredentialBindingSnapshot {
+            mount_id: mount.mount_id,
+            mount_revision: mount.revision,
+            current_artifact_digest: mount.current_artifact_digest,
+            bindings_revision: mount.credential_bindings_revision,
+            bindings,
+        })
     }
 
     async fn put_kv_cas(&self, params: &PutPluginKvParams) -> Result<PluginKvRow, DbError> {
@@ -1107,8 +1374,13 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         let value_json = json_value(&params.value, "plugin KV value")?;
         let mut tx = self.pool.begin().await?;
         let mount = lock_mount(&mut tx, &params.mount_id).await?;
-        if mount.delete_pending {
-            return Err(conflict("plugin mount data is pending deletion"));
+        require_mount_runtime_cas(
+            &mount,
+            params.expected_mount_revision,
+            params.expected_current_artifact_digest.as_deref(),
+        )?;
+        if params.updated_at < mount.updated_at {
+            return Err(conflict("plugin KV timestamp predates the Mount state"));
         }
         let changed = if let Some(expected_revision) = params.expected_revision {
             sqlx::query(
@@ -1161,22 +1433,84 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         Ok(row)
     }
 
-    async fn get_kv(
-        &self,
-        mount_id: &str,
-        namespace: &str,
-        key: &str,
-    ) -> Result<Option<PluginKvRow>, DbError> {
-        validate_uuid(mount_id, "mount_id")?;
-        sqlx::query_as(
+    async fn get_kv(&self, params: &GetPluginKvParams) -> Result<Option<PluginKvRow>, DbError> {
+        validate_uuid(&params.mount_id, "mount_id")?;
+        validate_optional_digest(
+            params.expected_current_artifact_digest.as_deref(),
+            "expected_current_artifact_digest",
+        )?;
+        let mut tx = self.pool.begin().await?;
+        let mount: PluginMountRow =
+            sqlx::query_as("SELECT * FROM plugin_mounts WHERE mount_id = ?")
+                .bind(&params.mount_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| DbError::NotFound(format!("plugin mount {}", params.mount_id)))?;
+        require_mount_runtime_cas(
+            &mount,
+            params.expected_mount_revision,
+            params.expected_current_artifact_digest.as_deref(),
+        )?;
+        let value = sqlx::query_as(
             "SELECT * FROM plugin_kv WHERE mount_id = ? AND namespace = ? AND key = ?",
         )
-        .bind(mount_id)
-        .bind(namespace)
-        .bind(key)
-        .fetch_optional(&self.pool)
+        .bind(&params.mount_id)
+        .bind(&params.namespace)
+        .bind(&params.key)
+        .fetch_optional(&mut *tx)
         .await
-        .map_err(DbError::Query)
+        .map_err(DbError::Query)?;
+        tx.commit().await?;
+        Ok(value)
+    }
+
+    async fn delete_kv_cas(&self, params: &DeletePluginKvParams) -> Result<bool, DbError> {
+        validate_uuid(&params.mount_id, "mount_id")?;
+        validate_optional_digest(
+            params.expected_current_artifact_digest.as_deref(),
+            "expected_current_artifact_digest",
+        )?;
+        validate_timestamp(params.updated_at, "updated_at")?;
+        let mut tx = self.pool.begin().await?;
+        let mount = lock_mount(&mut tx, &params.mount_id).await?;
+        require_mount_runtime_cas(
+            &mount,
+            params.expected_mount_revision,
+            params.expected_current_artifact_digest.as_deref(),
+        )?;
+        if params.updated_at < mount.updated_at {
+            return Err(conflict("plugin KV timestamp predates the Mount state"));
+        }
+        let deleted = sqlx::query(
+            "DELETE FROM plugin_kv
+             WHERE mount_id = ? AND namespace = ? AND key = ?
+               AND revision = ? AND updated_at <= ?",
+        )
+        .bind(&params.mount_id)
+        .bind(&params.namespace)
+        .bind(&params.key)
+        .bind(params.expected_revision)
+        .bind(params.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?
+        .rows_affected();
+        if deleted == 0 {
+            let current: Option<i64> = sqlx::query_scalar(
+                "SELECT revision FROM plugin_kv
+                 WHERE mount_id = ? AND namespace = ? AND key = ?",
+            )
+            .bind(&params.mount_id)
+            .bind(&params.namespace)
+            .bind(&params.key)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if current.is_some() {
+                return Err(conflict("plugin KV delete revision CAS failed"));
+            }
+        }
+        tx.commit().await?;
+        Ok(deleted == 1)
     }
 
     async fn get_project(&self, project_id: &str) -> Result<Option<PluginProjectRow>, DbError> {
@@ -1216,5 +1550,37 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
             .fetch_optional(&self.pool)
             .await
             .map_err(DbError::Query)
+    }
+
+    async fn get_mount_runtime_state(
+        &self,
+        params: &ListPluginCredentialBindingsParams,
+    ) -> Result<Option<PluginMountRuntimeState>, DbError> {
+        validate_uuid(&params.mount_id, "mount_id")?;
+        validate_optional_digest(
+            params.expected_current_artifact_digest.as_deref(),
+            "expected_current_artifact_digest",
+        )?;
+        let mut tx = self.pool.begin().await?;
+        let Some(mount) =
+            sqlx::query_as::<_, PluginMountRow>("SELECT * FROM plugin_mounts WHERE mount_id = ?")
+                .bind(&params.mount_id)
+                .fetch_optional(&mut *tx)
+                .await?
+        else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        require_mount_runtime_cas(
+            &mount,
+            params.expected_mount_revision,
+            params.expected_current_artifact_digest.as_deref(),
+        )?;
+        let credential_bindings = fetch_bindings(&mut tx, &params.mount_id).await?;
+        tx.commit().await?;
+        Ok(Some(PluginMountRuntimeState {
+            mount,
+            credential_bindings,
+        }))
     }
 }

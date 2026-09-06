@@ -104,6 +104,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "oauth_tokens",
     "plugin_artifacts",
     "plugin_candidate_test_receipts",
+    "plugin_credential_binding_mutations",
     "plugin_credential_bindings",
     "plugin_kv",
     "plugin_mount_revisions",
@@ -901,6 +902,7 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     opaque_text_ref!("plugin_mount_revisions", "artifact_digest" => "plugin_artifacts", "artifact_digest", false, "idx_plugin_mount_revisions_artifact_digest", KeepHistory),
     text_ref!("plugin_mounts", "current_revision_id" => "plugin_mount_revisions", "mount_revision_id", true, "idx_plugin_mounts_current_revision_id", Restrict),
     text_ref!("plugin_mounts", "previous_revision_id" => "plugin_mount_revisions", "mount_revision_id", true, "idx_plugin_mounts_previous_revision_id", Restrict),
+    text_ref!("plugin_credential_binding_mutations", "mount_id" => "plugin_mounts", "mount_id", false, "idx_plugin_credential_binding_mutations_mount_id", Cascade),
     text_ref!("plugin_credential_bindings", "mount_id" => "plugin_mounts", "mount_id", false, "idx_plugin_credential_bindings_mount_id", Cascade),
     external_ref!("plugin_credential_bindings", "credential_id", Text, false, Opaque, "idx_plugin_credential_bindings_credential_id", KeepHistory),
     text_ref!("plugin_kv", "mount_id" => "plugin_mounts", "mount_id", false, "idx_plugin_kv_mount_id", Cascade),
@@ -1723,6 +1725,90 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             ],
         ),
         (
+            "trg_plugin_credential_binding_delete_guard",
+            &[
+                "BEFORE DELETE ON PLUGIN_CREDENTIAL_BINDINGS",
+                "LEFT JOIN PLUGIN_CREDENTIAL_BINDING_MUTATIONS MUTATION",
+                "MUTATION.EXPECTED_CURRENT_ARTIFACT_DIGEST IS MOUNT.CURRENT_ARTIFACT_DIGEST",
+                "RAISE(ABORT, 'PLUGIN CREDENTIAL BINDING DELETE REQUIRES A WHOLE-GROUP CAS')",
+            ],
+        ),
+        (
+            "trg_plugin_credential_binding_insert_guard",
+            &[
+                "BEFORE INSERT ON PLUGIN_CREDENTIAL_BINDINGS",
+                "LEFT JOIN PLUGIN_CREDENTIAL_BINDING_MUTATIONS MUTATION",
+                "MUTATION.TARGET_BINDINGS_REVISION = MOUNT.CREDENTIAL_BINDINGS_REVISION + 1",
+                "RAISE(ABORT, 'PLUGIN CREDENTIAL BINDING INSERT REQUIRES A WHOLE-GROUP CAS')",
+            ],
+        ),
+        (
+            "trg_plugin_credential_binding_update_guard",
+            &[
+                "BEFORE UPDATE ON PLUGIN_CREDENTIAL_BINDINGS",
+                "LEFT JOIN PLUGIN_CREDENTIAL_BINDING_MUTATIONS MUTATION",
+                "MUTATION.EXPECTED_BINDINGS_REVISION = MOUNT.CREDENTIAL_BINDINGS_REVISION",
+                "RAISE(ABORT, 'PLUGIN CREDENTIAL BINDING UPDATE REQUIRES A WHOLE-GROUP CAS')",
+            ],
+        ),
+        (
+            "trg_plugin_credential_binding_updated_at_monotonic",
+            &[
+                "BEFORE UPDATE OF UPDATED_AT ON PLUGIN_CREDENTIAL_BINDINGS",
+                "NEW.UPDATED_AT < OLD.UPDATED_AT",
+                "RAISE(ABORT, 'PLUGIN CREDENTIAL BINDING UPDATED_AT CANNOT MOVE BACKWARDS')",
+            ],
+        ),
+        (
+            "trg_plugin_kv_updated_at_monotonic",
+            &[
+                "BEFORE UPDATE OF UPDATED_AT ON PLUGIN_KV",
+                "NEW.UPDATED_AT < OLD.UPDATED_AT",
+                "RAISE(ABORT, 'PLUGIN KV UPDATED_AT CANNOT MOVE BACKWARDS')",
+            ],
+        ),
+        (
+            "trg_plugin_mount_binding_revision_cleanup",
+            &[
+                "AFTER UPDATE OF CREDENTIAL_BINDINGS_REVISION ON PLUGIN_MOUNTS",
+                "DELETE FROM PLUGIN_CREDENTIAL_BINDING_MUTATIONS",
+                "WHERE MOUNT_ID = NEW.MOUNT_ID",
+            ],
+        ),
+        (
+            "trg_plugin_mount_binding_revision_guard",
+            &[
+                "BEFORE UPDATE OF CREDENTIAL_BINDINGS_REVISION ON PLUGIN_MOUNTS",
+                "MUTATION.TARGET_BINDINGS_REVISION = NEW.CREDENTIAL_BINDINGS_REVISION",
+                "MUTATION.UPDATED_AT = NEW.UPDATED_AT",
+                "RAISE(ABORT, 'PLUGIN MOUNT CREDENTIAL BINDINGS REVISION REQUIRES A WHOLE-GROUP CAS')",
+            ],
+        ),
+        (
+            "trg_plugin_mount_binding_revision_shape_guard",
+            &[
+                "BEFORE UPDATE OF CREDENTIAL_BINDINGS_REVISION ON PLUGIN_MOUNTS",
+                "NEW.CREDENTIAL_BINDINGS_REVISION <> OLD.CREDENTIAL_BINDINGS_REVISION + 1",
+                "RAISE(ABORT, 'PLUGIN MOUNT CREDENTIAL BINDINGS REVISION MUST ADVANCE BY ONE')",
+            ],
+        ),
+        (
+            "trg_plugin_mount_config_revision_guard",
+            &[
+                "BEFORE UPDATE OF CONFIG_JSON, CONFIG_SCHEMA_DIGEST, CONFIG_REVISION ON PLUGIN_MOUNTS",
+                "NEW.CONFIG_REVISION <= OLD.CONFIG_REVISION",
+                "RAISE(ABORT, 'PLUGIN MOUNT CONFIG CHANGES REQUIRE AN ADVANCING CONFIG REVISION')",
+            ],
+        ),
+        (
+            "trg_plugin_mount_config_revision_shape_guard",
+            &[
+                "BEFORE UPDATE OF CONFIG_SCHEMA_DIGEST, CONFIG_REVISION ON PLUGIN_MOUNTS",
+                "NEW.CONFIG_REVISION = 0 AND NEW.CONFIG_SCHEMA_DIGEST IS NOT NULL",
+                "RAISE(ABORT, 'PLUGIN MOUNT CONFIG SCHEMA REQUIRES A POSITIVE CONFIG REVISION')",
+            ],
+        ),
+        (
             "trg_plugin_mount_pointer_insert_guard",
             &[
                 "BEFORE INSERT ON PLUGIN_MOUNTS",
@@ -1769,6 +1855,14 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
                 "NEW.PREVIOUS_REVISION_ID IS OLD.CURRENT_REVISION_ID",
                 "REVISION.REVISION = NEW.REVISION",
                 "RAISE(ABORT, 'PLUGIN MOUNT TRANSITION MUST BE EXACT APPLY, RESTORE, OR UNINSTALL')",
+            ],
+        ),
+        (
+            "trg_plugin_mount_updated_at_monotonic",
+            &[
+                "BEFORE UPDATE OF UPDATED_AT ON PLUGIN_MOUNTS",
+                "NEW.UPDATED_AT < OLD.UPDATED_AT",
+                "RAISE(ABORT, 'PLUGIN MOUNT UPDATED_AT CANNOT MOVE BACKWARDS')",
             ],
         ),
         (

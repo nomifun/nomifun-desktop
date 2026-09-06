@@ -2,8 +2,9 @@ use serde_json::Value;
 
 use crate::DbError;
 use crate::models::{
-    PluginArtifactRow, PluginCandidateTestReceiptRow, PluginKvRow, PluginMountRow,
-    PluginCandidateOrigin, PluginProjectRow, PluginReadyCandidateRow, ProductOperationKind,
+    PluginArtifactRow, PluginCandidateOrigin, PluginCandidateTestReceiptRow,
+    PluginCredentialBindingInput, PluginCredentialBindingSnapshot, PluginKvRow, PluginMountRow,
+    PluginMountRuntimeState, PluginProjectRow, PluginReadyCandidateRow, ProductOperationKind,
     ProductOperationRow, ProductOperationState,
 };
 
@@ -102,6 +103,8 @@ pub struct ApplyPluginCandidateParams {
     pub expected_current_artifact_digest: Option<String>,
     pub new_mount_id: Option<String>,
     pub new_data_dir_path: Option<String>,
+    pub config_schema_digest: String,
+    pub initial_config: Value,
     pub applied_at: i64,
 }
 
@@ -125,10 +128,61 @@ pub struct UninstallPluginMountParams {
 #[derive(Debug, Clone)]
 pub struct PutPluginKvParams {
     pub mount_id: String,
+    pub expected_mount_revision: i64,
+    pub expected_current_artifact_digest: Option<String>,
     pub namespace: String,
     pub key: String,
     pub value: Value,
     pub expected_revision: Option<i64>,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GetPluginKvParams {
+    pub mount_id: String,
+    pub expected_mount_revision: i64,
+    pub expected_current_artifact_digest: Option<String>,
+    pub namespace: String,
+    pub key: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeletePluginKvParams {
+    pub mount_id: String,
+    pub expected_mount_revision: i64,
+    pub expected_current_artifact_digest: Option<String>,
+    pub namespace: String,
+    pub key: String,
+    pub expected_revision: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdatePluginMountConfigParams {
+    pub mount_id: String,
+    pub expected_mount_revision: i64,
+    pub expected_current_artifact_digest: Option<String>,
+    pub expected_config_revision: i64,
+    pub expected_config_schema_digest: Option<String>,
+    pub config_schema_digest: String,
+    pub config: Value,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListPluginCredentialBindingsParams {
+    pub mount_id: String,
+    pub expected_mount_revision: i64,
+    pub expected_current_artifact_digest: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplacePluginCredentialBindingsParams {
+    pub mount_id: String,
+    pub expected_mount_revision: i64,
+    pub expected_current_artifact_digest: Option<String>,
+    pub expected_bindings_revision: i64,
+    pub bindings: Vec<PluginCredentialBindingInput>,
     pub updated_at: i64,
 }
 
@@ -193,22 +247,27 @@ pub trait IPluginN1Repository: Send + Sync {
 
     async fn complete_mount_data_delete(&self, mount_id: &str) -> Result<bool, DbError>;
 
-    async fn bind_credential(
+    async fn update_mount_config_cas(
         &self,
-        mount_id: &str,
-        slot: &str,
-        credential_id: &str,
-        updated_at: i64,
-    ) -> Result<(), DbError>;
+        params: &UpdatePluginMountConfigParams,
+    ) -> Result<PluginMountRow, DbError>;
+
+    async fn replace_credential_bindings(
+        &self,
+        params: &ReplacePluginCredentialBindingsParams,
+    ) -> Result<PluginCredentialBindingSnapshot, DbError>;
+
+    async fn list_credential_bindings(
+        &self,
+        params: &ListPluginCredentialBindingsParams,
+    ) -> Result<PluginCredentialBindingSnapshot, DbError>;
 
     async fn put_kv_cas(&self, params: &PutPluginKvParams) -> Result<PluginKvRow, DbError>;
 
-    async fn get_kv(
-        &self,
-        mount_id: &str,
-        namespace: &str,
-        key: &str,
-    ) -> Result<Option<PluginKvRow>, DbError>;
+    async fn get_kv(&self, params: &GetPluginKvParams)
+        -> Result<Option<PluginKvRow>, DbError>;
+
+    async fn delete_kv_cas(&self, params: &DeletePluginKvParams) -> Result<bool, DbError>;
 
     async fn get_project(&self, project_id: &str) -> Result<Option<PluginProjectRow>, DbError>;
 
@@ -218,4 +277,9 @@ pub trait IPluginN1Repository: Send + Sync {
     ) -> Result<Option<PluginReadyCandidateRow>, DbError>;
 
     async fn get_mount(&self, mount_id: &str) -> Result<Option<PluginMountRow>, DbError>;
+
+    async fn get_mount_runtime_state(
+        &self,
+        params: &ListPluginCredentialBindingsParams,
+    ) -> Result<Option<PluginMountRuntimeState>, DbError>;
 }
