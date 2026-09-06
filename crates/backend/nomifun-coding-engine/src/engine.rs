@@ -155,16 +155,66 @@ pub enum CodingEngineSelector {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineBinding {
-    pub agent_session_id: AgentSessionId,
-    pub runtime_binding_id: RuntimeBindingId,
-    pub family_id: EngineFamilyId,
-    pub build_id: EngineBuildId,
-    pub build_digest: DigestHex,
-    pub profile: CodingRuntimeProfile,
-    pub resolved_snapshot_ref: ResolvedSnapshotRef,
+    agent_session_id: AgentSessionId,
+    runtime_binding_id: RuntimeBindingId,
+    family_id: EngineFamilyId,
+    build_id: EngineBuildId,
+    build_digest: DigestHex,
+    profile: CodingRuntimeProfile,
+    resolved_snapshot_ref: ResolvedSnapshotRef,
 }
 
 impl EngineBinding {
+    pub fn new(
+        agent_session_id: AgentSessionId,
+        runtime_binding_id: RuntimeBindingId,
+        family_id: EngineFamilyId,
+        build_id: EngineBuildId,
+        build_digest: DigestHex,
+        profile: CodingRuntimeProfile,
+        resolved_snapshot_ref: ResolvedSnapshotRef,
+    ) -> Result<Self, CodingEngineError> {
+        let binding = Self {
+            agent_session_id,
+            runtime_binding_id,
+            family_id,
+            build_id,
+            build_digest,
+            profile,
+            resolved_snapshot_ref,
+        };
+        binding.validate()?;
+        Ok(binding)
+    }
+
+    pub fn agent_session_id(&self) -> &AgentSessionId {
+        &self.agent_session_id
+    }
+
+    pub fn runtime_binding_id(&self) -> &RuntimeBindingId {
+        &self.runtime_binding_id
+    }
+
+    pub fn family_id(&self) -> &EngineFamilyId {
+        &self.family_id
+    }
+
+    pub fn build_id(&self) -> &EngineBuildId {
+        &self.build_id
+    }
+
+    pub fn build_digest(&self) -> &DigestHex {
+        &self.build_digest
+    }
+
+    pub fn profile(&self) -> CodingRuntimeProfile {
+        self.profile
+    }
+
+    pub fn resolved_snapshot_ref(&self) -> &ResolvedSnapshotRef {
+        &self.resolved_snapshot_ref
+    }
+
     pub fn validate(&self) -> Result<(), CodingEngineError> {
         if !is_trimmed_non_empty(self.agent_session_id.as_ref())
             || !is_trimmed_non_empty(self.runtime_binding_id.as_ref())
@@ -296,17 +346,15 @@ impl CodingEngine {
                 "{profile:?}"
             )));
         }
-        let binding = EngineBinding {
+        EngineBinding::new(
             agent_session_id,
             runtime_binding_id,
-            family_id: self.build.family_id.clone(),
-            build_id: self.build.build_id.clone(),
-            build_digest: self.build.build_digest.clone(),
+            self.build.family_id.clone(),
+            self.build.build_id.clone(),
+            self.build.build_digest.clone(),
             profile,
             resolved_snapshot_ref,
-        };
-        binding.validate()?;
-        Ok(binding)
+        )
     }
 
     pub fn open_session(
