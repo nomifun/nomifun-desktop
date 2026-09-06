@@ -45,6 +45,36 @@ function fixtureTree() {
 }
 
 describe('release lock', () => {
+  test('creates and verifies a host and package lock without sidecars', () => {
+    const { root, paths } = fixtureTree();
+    try {
+      const lock = createReleaseLock({
+        root,
+        sourceCommit: SOURCE_COMMIT,
+        platform: 'x86_64-pc-windows-msvc',
+        host: paths.host,
+        sidecars: {},
+        packagePath: paths.package,
+      });
+
+      expect(lock.sidecars).toEqual({});
+      expect(verifyReleaseLock(lock, { root })).toEqual(
+        expect.objectContaining({
+          status: 'pass',
+          checks: [
+            expect.objectContaining({ id: 'host', status: 'pass' }),
+            expect.objectContaining({ id: 'package', status: 'pass' }),
+          ],
+        }),
+      );
+
+      writeReleaseLock(paths.lock, lock);
+      expect(readAndVerifyReleaseLock(paths.lock, { root }).status).toBe('pass');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('hashes only real release artifacts and ignores schema fixtures', () => {
     const { root, paths } = fixtureTree();
     try {

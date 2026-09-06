@@ -132,7 +132,7 @@ fn resolved_content(contract: &CodingCodexContract) -> ResolvedSnapshotContent {
             .iter()
             .map(resolved_capability)
             .collect(),
-        required_resource_kinds: contract.required_resource_kinds.clone(),
+        required_resource_kinds: BTreeSet::from([ResourceKind::from("workspace")]),
         on_demand_activation_plans: activation_plans,
         compact_on_demand_index,
         capability_allowlist: contract.ceiling_ids(),

@@ -179,9 +179,6 @@ export function createReleaseLock({
   const sidecarEntries = Object.entries(sidecars).sort(([left], [right]) =>
     left.localeCompare(right),
   );
-  if (sidecarEntries.length === 0) {
-    throw new ReleaseLockError('blocked', 'at least one real sidecar artifact is required');
-  }
 
   const lockedSidecars = {};
   for (const [targetId, path] of sidecarEntries) {
@@ -245,10 +242,9 @@ export function validateReleaseLockShape(lock) {
   if (
     !lock.sidecars ||
     typeof lock.sidecars !== 'object' ||
-    Array.isArray(lock.sidecars) ||
-    Object.keys(lock.sidecars).length === 0
+    Array.isArray(lock.sidecars)
   ) {
-    throw new ReleaseLockError('fail', 'sidecars must contain at least one target');
+    throw new ReleaseLockError('fail', 'sidecars must be a target-id keyed object');
   }
   for (const [targetId, artifact] of Object.entries(lock.sidecars)) {
     if (!targetId) throw new ReleaseLockError('fail', 'sidecar target id must not be empty');

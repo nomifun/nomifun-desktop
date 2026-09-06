@@ -12,9 +12,12 @@
  *   bun scripts/validation/check-macos-arm64-native.mjs \
  *     --release-lock /abs/release-lock.json
  *
- * Optional live checks:
+ * Optional Nomi-core live checks:
  *   --host-binary /abs/nomicore --run-startup
  *   --endpoint http://127.0.0.1:25808 --binding-id <id> --run-lifecycle
+ *
+ * Optional legacy Sidecar checks, used only when the release lock contains
+ * sidecars.macos_desktop_arm64:
  *   --credential-file /abs/credential --run-sidecar-rpc
  */
 
@@ -62,7 +65,7 @@ export const EXPECTED_PROTOCOL_SCHEMA_DIGEST =
   'f1c0422f04c9de923e18c7df40d814d3c9f5b2db5f1c5fef2745e77e6d62590f';
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const options = {
     releaseLock: process.env.NOMIFUN_RELEASE_LOCK_PATH || null,
     artifactRoot: process.env.NOMIFUN_RELEASE_ARTIFACT_ROOT || REPO_ROOT,
@@ -135,9 +138,6 @@ function parseArgs(argv) {
   }
   if (options.runLifecycle && (!options.endpoint || !options.bindingId)) {
     throw new Error('--run-lifecycle requires --endpoint and --binding-id');
-  }
-  if (options.runSidecarRpc && !options.credentialFile) {
-    throw new Error('--run-sidecar-rpc requires --credential-file');
   }
   return options;
 }
@@ -281,6 +281,54 @@ export function compareCapabilityInventory(body, canonicalInventory) {
 function check(report, id, status, details = {}) {
   report.checks.push({ id, status, ...details });
   if (status === 'fail' || status === 'blocked') report.failures.push({ id, ...details });
+}
+
+const OPTIONAL_SIDECAR_CHECK_IDS = [
+  'sidecar:credential',
+  'sidecar:artifact-target-permissions',
+  'sidecar:release-lock-sha256',
+  'sidecar:native-arm64',
+  'sidecar:hello-profile-rpc-contract',
+  'sidecar:live-hello-rpc',
+  'sidecar:process-cleanup',
+];
+
+function suppliedOptionalSidecarInputs(options = {}) {
+  return [
+    options.sidecar ? '--sidecar' : null,
+    options.hello ? '--hello' : null,
+    options.sidecarDir ? '--sidecar-dir' : null,
+    options.credentialFile ? '--credential-file' : null,
+    options.runSidecarRpc ? '--run-sidecar-rpc' : null,
+  ].filter(Boolean);
+}
+
+export function applyMacosSidecarReleasePolicy(report, lock, options = {}) {
+  const sidecars =
+    lock?.sidecars && typeof lock.sidecars === 'object' && !Array.isArray(lock.sidecars)
+      ? lock.sidecars
+      : {};
+  const artifact = sidecars[TARGET_ID] || null;
+  if (artifact) {
+    check(report, 'release-lock:arm64-sidecar', 'pass', {
+      target: TARGET_ID,
+      path: artifact.path,
+      sha256: artifact.sha256,
+    });
+    return { status: 'required', artifact };
+  }
+
+  const details = {
+    reason: 'current Nomi-core release lock does not include a macOS arm64 Sidecar',
+    target: TARGET_ID,
+    available_targets: Object.keys(sidecars).sort(),
+    ignored_optional_inputs: suppliedOptionalSidecarInputs(options),
+  };
+  check(report, 'release-lock:arm64-sidecar', 'not_required', details);
+  for (const id of OPTIONAL_SIDECAR_CHECK_IDS) {
+    check(report, id, 'not_required', details);
+  }
+  return { status: 'not_required', artifact: null };
 }
 
 function finishReport(report, options) {
@@ -637,18 +685,18 @@ async function sidecarRpc(options, sidecar, report, hello) {
       JSON.stringify(payload.rpc_allowlist?.methods || []) === JSON.stringify(EXPECTED_RPC_METHODS) &&
       Array.isArray(payload.rpc_allowlist?.experimental_methods) &&
       payload.rpc_allowlist.experimental_methods.length === 0;
-    check(report, 'sidecar:live_hello_rpc', matches ? 'pass' : 'fail', {
+    check(report, 'sidecar:live-hello-rpc', matches ? 'pass' : 'fail', {
       observed_id: actual?.id ?? null,
       observed_hello: payload || null,
       stderr_tail: stderr.slice(-2_000),
     });
   } catch (error) {
-    check(report, 'sidecar:live_hello_rpc', 'fail', { reason: error.message, stderr_tail: stderr.slice(-2_000) });
+    check(report, 'sidecar:live-hello-rpc', 'fail', { reason: error.message, stderr_tail: stderr.slice(-2_000) });
   } finally {
     await stopChild(child);
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
     const remaining = descendantsOf(child.pid);
-    check(report, 'sidecar:process_cleanup', remaining.pids.length === 0 ? 'pass' : 'fail', {
+    check(report, 'sidecar:process-cleanup', remaining.pids.length === 0 ? 'pass' : 'fail', {
       root_pid: child.pid,
       remaining_pids: remaining.pids,
     });
@@ -694,7 +742,14 @@ export function validateHelloPayload(hello) {
   return { status: mismatches.length === 0 ? 'pass' : 'fail', mismatches };
 }
 
-export async function runValidation(options = parseArgs(process.argv.slice(2))) {
+export async function runValidation(
+  options = parseArgs(process.argv.slice(2)),
+  execution = {},
+) {
+  const hostPlatform = execution.platform || process.platform;
+  const hostArch = execution.arch || process.arch;
+  const runCommand = execution.command || command;
+  const inspectPath = execution.validatePathShape || validatePathShape;
   const report = {
     schema_version: '1.0.0',
     source_commit: null,
@@ -711,11 +766,11 @@ export async function runValidation(options = parseArgs(process.argv.slice(2))) 
     execution_kind: 'native',
     target_cell: TARGET_ID,
     execution_host: {
-      platform: process.platform,
-      arch: process.arch,
-      uname: command('uname', ['-s', '-m']),
-      translated: command('sysctl', ['-in', 'sysctl.proc_translated']),
-      rustc: command('rustc', ['-Vv']),
+      platform: hostPlatform,
+      arch: hostArch,
+      uname: runCommand('uname', ['-s', '-m']),
+      translated: runCommand('sysctl', ['-in', 'sysctl.proc_translated']),
+      rustc: runCommand('rustc', ['-Vv']),
     },
     checks: [],
     failures: [],
@@ -727,17 +782,17 @@ export async function runValidation(options = parseArgs(process.argv.slice(2))) 
     return finishReport(report, options);
   };
 
-  if (process.platform !== 'darwin' || process.arch !== 'arm64') {
+  if (hostPlatform !== 'darwin' || hostArch !== 'arm64') {
     check(report, 'native-host', 'fail', {
       reason: 'requires native macOS arm64',
-      observed: { platform: process.platform, arch: process.arch },
+      observed: { platform: hostPlatform, arch: hostArch },
     });
   } else {
     const translated = report.execution_host.translated.stdout.trim();
     const rustcHost = report.execution_host.rustc.stdout.match(/^host:\s*(.+)$/m)?.[1]?.trim();
     check(report, 'native-host', translated !== '1' && rustcHost === EXPECTED_TARGET ? 'pass' : 'fail', {
       expected: { platform: 'darwin', arch: 'arm64', translated: '0', rustc_host: EXPECTED_TARGET },
-      observed: { platform: process.platform, arch: process.arch, translated, rustc_host: rustcHost || null },
+      observed: { platform: hostPlatform, arch: hostArch, translated, rustc_host: rustcHost || null },
     });
   }
 
@@ -778,8 +833,8 @@ export async function runValidation(options = parseArgs(process.argv.slice(2))) 
     observed: lock.platform,
   });
 
-  const worktree = command('git', ['status', '--porcelain', '--untracked-files=no']);
-  const head = command('git', ['rev-parse', 'HEAD']);
+  const worktree = runCommand('git', ['status', '--porcelain', '--untracked-files=no']);
+  const head = runCommand('git', ['rev-parse', 'HEAD']);
   const trackedDirty = worktree.status === 0 && worktree.stdout.trim().length > 0;
   const observedHead = head.status === 0 ? head.stdout.trim() : null;
   check(
@@ -799,23 +854,18 @@ export async function runValidation(options = parseArgs(process.argv.slice(2))) 
     },
   );
 
-  const lockedSidecar = lock.sidecars[TARGET_ID];
-  if (!lockedSidecar) {
-    check(report, 'release-lock:arm64-sidecar', 'blocked', {
-      reason: `release lock has no ${TARGET_ID} sidecar`,
-      available_targets: Object.keys(lock.sidecars),
-    });
-    report.blockers.push(`release lock has no ${TARGET_ID} sidecar`);
-    return finish();
-  }
+  const sidecarPolicy = applyMacosSidecarReleasePolicy(report, lock, options);
+  const lockedSidecar = sidecarPolicy.artifact;
 
   let lockedHostPath;
   let lockedPackagePath;
-  let lockedSidecarPath;
+  let lockedSidecarPath = null;
   try {
     lockedHostPath = resolveReleaseArtifactPath(artifactRoot, lock.host.path);
     lockedPackagePath = resolveReleaseArtifactPath(artifactRoot, lock.package.path);
-    lockedSidecarPath = resolveReleaseArtifactPath(artifactRoot, lockedSidecar.path);
+    if (lockedSidecar) {
+      lockedSidecarPath = resolveReleaseArtifactPath(artifactRoot, lockedSidecar.path);
+    }
   } catch (error) {
     check(report, 'release-lock:artifact-paths', 'fail', { reason: error.message });
     return finish();
@@ -824,8 +874,10 @@ export async function runValidation(options = parseArgs(process.argv.slice(2))) 
   const lockedAppPath = appFromHostBinary(lockedHostPath);
   checkOptionalArtifactOverride(report, 'override:app', options.app, lockedAppPath);
   checkOptionalArtifactOverride(report, 'override:dmg', options.dmg, lockedPackagePath);
-  checkOptionalArtifactOverride(report, 'override:sidecar', options.sidecar, lockedSidecarPath);
-  if (options.sidecarDir) {
+  if (lockedSidecarPath) {
+    checkOptionalArtifactOverride(report, 'override:sidecar', options.sidecar, lockedSidecarPath);
+  }
+  if (lockedSidecarPath && options.sidecarDir) {
     checkOptionalArtifactOverride(
       report,
       'override:sidecar-dir',
@@ -837,10 +889,10 @@ export async function runValidation(options = parseArgs(process.argv.slice(2))) 
   const appPath = lockedAppPath;
   report.artifacts.app = appPath;
   if (appPath) {
-    const appShape = validatePathShape(appPath, { kind: 'directory' });
+    const appShape = inspectPath(appPath, { kind: 'directory' });
     check(report, 'macos-app:path-case-permissions', appShape.status === 'pass' ? 'pass' : 'fail', appShape);
     const executable = join(appPath, 'Contents/MacOS/nomifun-desktop');
-    const executableShape = validatePathShape(executable, { requireExecutable: true });
+    const executableShape = inspectPath(executable, { requireExecutable: true });
     check(
       report,
       'macos-app:locked-host',
@@ -851,7 +903,7 @@ export async function runValidation(options = parseArgs(process.argv.slice(2))) 
       },
     );
     if (executableShape.status === 'pass') {
-      const archs = command('lipo', ['-archs', executable]);
+      const archs = runCommand('lipo', ['-archs', executable]);
       const observedArchs = archs.stdout.trim().split(/\s+/).filter(Boolean).sort();
       const expectedArchs = lock.platform === 'universal-apple-darwin'
         ? ['arm64', 'x86_64']
@@ -863,7 +915,7 @@ export async function runValidation(options = parseArgs(process.argv.slice(2))) 
         observed: observedArchs,
         stderr: archs.stderr.trim(),
       });
-      const signature = command('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath], 120_000);
+      const signature = runCommand('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath], 120_000);
       check(report, 'macos-app:codesign', signature.status === 0 ? 'pass' : 'fail', {
         exit_code: signature.status,
         stdout_tail: signature.stdout.slice(-2_000),
@@ -880,10 +932,10 @@ export async function runValidation(options = parseArgs(process.argv.slice(2))) 
 
   const dmgPath = lockedPackagePath;
   report.artifacts.dmg = dmgPath;
-  const dmgShape = validatePathShape(dmgPath);
+  const dmgShape = inspectPath(dmgPath);
   check(report, 'macos-package:path-case-permissions', dmgShape.status, dmgShape);
   if (dmgShape.status === 'pass') {
-    const verify = command('hdiutil', ['verify', dmgPath], 120_000);
+    const verify = runCommand('hdiutil', ['verify', dmgPath], 120_000);
     check(report, 'macos-package:hdiutil-verify', verify.status === 0 ? 'pass' : 'fail', {
       command: verify.command,
       exit_code: verify.status,
@@ -892,46 +944,56 @@ export async function runValidation(options = parseArgs(process.argv.slice(2))) 
     });
   }
 
-  report.artifacts.sidecar = lockedSidecarPath;
-  const sidecarShape = validatePathShape(lockedSidecarPath, { requireExecutable: true });
-  check(report, 'sidecar:artifact-target-permissions', sidecarShape.status, sidecarShape);
-  if (sidecarShape.status === 'pass') {
-    const observedSha = sha256File(lockedSidecarPath);
-    check(report, 'sidecar:release-lock-sha256', observedSha === lockedSidecar.sha256 ? 'pass' : 'fail', {
-      expected: lockedSidecar.sha256,
-      observed: observedSha,
-      path: lockedSidecarPath,
-    });
-    const fileType = command('file', [lockedSidecarPath]);
-    const archs = command('lipo', ['-archs', lockedSidecarPath]);
-    check(report, 'sidecar:native-arm64', fileType.stdout.includes('arm64') && archs.stdout.trim() === 'arm64' ? 'pass' : 'fail', {
-      file: fileType.stdout.trim(),
-      lipo_archs: archs.stdout.trim(),
-    });
+  if (lockedSidecarPath) {
+    report.artifacts.sidecar = lockedSidecarPath;
+    const sidecarShape = inspectPath(lockedSidecarPath, { requireExecutable: true });
+    check(report, 'sidecar:artifact-target-permissions', sidecarShape.status, sidecarShape);
+    if (sidecarShape.status === 'pass') {
+      const observedSha = sha256File(lockedSidecarPath);
+      check(report, 'sidecar:release-lock-sha256', observedSha === lockedSidecar.sha256 ? 'pass' : 'fail', {
+        expected: lockedSidecar.sha256,
+        observed: observedSha,
+        path: lockedSidecarPath,
+      });
+      const fileType = runCommand('file', [lockedSidecarPath]);
+      const archs = runCommand('lipo', ['-archs', lockedSidecarPath]);
+      check(report, 'sidecar:native-arm64', fileType.stdout.includes('arm64') && archs.stdout.trim() === 'arm64' ? 'pass' : 'fail', {
+        file: fileType.stdout.trim(),
+        lipo_archs: archs.stdout.trim(),
+      });
 
-    const helloPath = options.hello || `${lockedSidecarPath}.hello.json`;
-    report.artifacts.hello = helloPath;
-    try {
-      const helloShape = validatePathShape(helloPath);
-      if (helloShape.status !== 'pass') {
-        throw new Error(`hello metadata path rejected: ${JSON.stringify(helloShape)}`);
+      const helloPath = options.hello || `${lockedSidecarPath}.hello.json`;
+      report.artifacts.hello = helloPath;
+      try {
+        const helloShape = inspectPath(helloPath);
+        if (helloShape.status !== 'pass') {
+          throw new Error(`hello metadata path rejected: ${JSON.stringify(helloShape)}`);
+        }
+        const hello = readJson(helloPath);
+        const helloResult = validateHelloPayload(hello);
+        check(report, 'sidecar:hello-profile-rpc-contract', helloResult.status, {
+          mismatches: helloResult.mismatches,
+          path: helloPath,
+        });
+        if (!options.runSidecarRpc) {
+          check(report, 'sidecar:live-hello-rpc', 'blocked', {
+            reason: 'live hello/RPC probe not run; rerun with --run-sidecar-rpc --credential-file <path>',
+          });
+        } else if (!options.credentialFile) {
+          check(report, 'sidecar:live-hello-rpc', 'blocked', {
+            reason: '--run-sidecar-rpc requires --credential-file when the release lock contains a macOS arm64 Sidecar',
+          });
+          report.blockers.push('missing credential file for required macOS arm64 Sidecar RPC probe');
+        } else {
+          await sidecarRpc(options, lockedSidecarPath, report, hello);
+        }
+      } catch (error) {
+        check(report, 'sidecar:hello-profile-rpc-contract', 'blocked', {
+          reason: `hello metadata unavailable or invalid: ${error.message}`,
+          path: helloPath,
+        });
+        report.blockers.push(`missing/invalid hello metadata: ${helloPath}`);
       }
-      const hello = readJson(helloPath);
-      const helloResult = validateHelloPayload(hello);
-      check(report, 'sidecar:hello-profile-rpc-contract', helloResult.status, {
-        mismatches: helloResult.mismatches,
-        path: helloPath,
-      });
-      if (options.runSidecarRpc) await sidecarRpc(options, lockedSidecarPath, report, hello);
-      else check(report, 'sidecar:live-hello-rpc', 'blocked', {
-        reason: 'live hello/RPC probe not run; rerun with --run-sidecar-rpc --credential-file <path>',
-      });
-    } catch (error) {
-      check(report, 'sidecar:hello-profile-rpc-contract', 'blocked', {
-        reason: `hello metadata unavailable or invalid: ${error.message}`,
-        path: helloPath,
-      });
-      report.blockers.push(`missing/invalid hello metadata: ${helloPath}`);
     }
   }
 
