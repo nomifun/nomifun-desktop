@@ -6721,8 +6721,9 @@ function c8RunWindowsCandidateSmoke(report, expected) {
   }
   const smokeRoot = join(
     repoRoot,
-    report.evidence_directory,
-    'windows-desktop-smoke'
+    'build.noindex',
+    'c8-win',
+    report.source_sha.slice(0, 12)
   );
   mkdirSync(smokeRoot, { recursive: true });
   const run = c8RunCommand(
