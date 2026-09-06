@@ -1,0 +1,567 @@
+{
+  "schema_version": "1.0.0",
+  "manifest_kind": "coding-agent-runtime-internalization-task-manifest",
+  "stage_id": "CAR",
+  "status": "implementation-in-progress",
+  "updated_on": "2026-09-06",
+  "legacy_reference_root": "docs/specs/2026-08-28-agent-capability-platform-v2/",
+  "legacy_reference_policy": "read_only",
+  "status_source": "docs/specs/2026-09-06-coding-agent-runtime-internalization/STATUS.zh.md",
+  "design_sources": [
+    "00-stage-charter-and-rules.zh.md",
+    "01-audit-and-source-baseline.zh.md",
+    "02-target-architecture-and-port-contracts.zh.md",
+    "03-model-provider-adaptation.zh.md",
+    "04-tool-loop-and-coding-capabilities.zh.md",
+    "05-session-context-and-lifecycle.zh.md",
+    "06-implementation-plan-and-atomic-tasks.zh.md",
+    "07-validation-release-and-cutover.zh.md",
+    "DECISIONS.zh.md",
+    "CODEX-SOURCE-MANIFEST.json",
+    "HANDOFF-REMOTE-INTEGRATION.zh.md"
+  ],
+  "local_implementation": {
+    "branch": "car/coding-engine",
+    "base_sha": "6a2a94bd192ef67eda5dd67331f6c047b1c1b315",
+    "code_commits": [
+      "b652fa29ce02c91f600d54abaecd98dfb967f9c4",
+      "c8b0193892ad7f1b73586b7570b7a2f0172c8d1b"
+    ],
+    "code_tip": "c8b0193892ad7f1b73586b7570b7a2f0172c8d1b",
+    "crate": "crates/backend/nomifun-coding-engine/",
+    "production_wired": false,
+    "targeted_test_result": "13 passed; 0 failed"
+  },
+  "global_forbidden": [
+    "codex-app-server production process",
+    "Codex Sidecar production route",
+    "../codex Cargo path dependency",
+    "voice/realtime/audio migration",
+    "Codex Auth/ModelProvider/rollout product layer",
+    "old phase design document modification",
+    "legacy /api/presets compatibility alias",
+    "second AgentSession or runtime-coordinator authority (multiple Engine implementations are allowed)",
+    "same-Session Engine switching or silent Engine fallback"
+  ],
+  "tasks": [
+    {
+      "task_id": "CAR-00",
+      "sequence": 0,
+      "parallel_group": "serial-foundation",
+      "owner": "stage-owner",
+      "status": "completed",
+      "depends_on": [],
+      "goal": "Freeze Codex source selection, license obligations, NomiFun owner replacement and task boundaries without changing production code.",
+      "write_paths": [
+        "docs/specs/2026-09-06-coding-agent-runtime-internalization/"
+      ],
+      "forbidden_paths": [
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "crates/",
+        "Cargo.toml",
+        "Cargo.lock",
+        "packaging/",
+        "scripts/"
+      ],
+      "deliverables": [
+        "CODEX-SOURCE-MANIFEST.json",
+        "license and NOTICE review record",
+        "verified selected source paths",
+        "verified excluded source paths",
+        "task boundary and dependency review"
+      ],
+      "checks": [
+        "strict JSON parse",
+        "selected source path existence at pinned commit",
+        "license/NOTICE presence",
+        "git diff --check"
+      ],
+      "stop_conditions": [
+        "source commit cannot be pinned",
+        "selected source has no license path",
+        "external Runtime process is required",
+        "task requires editing the legacy phase root"
+      ]
+    },
+    {
+      "task_id": "CAR-00A",
+      "sequence": 1,
+      "parallel_group": "serial-foundation",
+      "owner": "coding-engine-isolation",
+      "status": "completed",
+      "depends_on": [
+        "CAR-00"
+      ],
+      "goal": "Establish the minimal multi-Engine Build, channel alias, exact Binding and fail-closed selection contract without touching production routes.",
+      "write_paths": [
+        "crates/backend/nomifun-coding-engine/",
+        "Cargo.lock"
+      ],
+      "forbidden_paths": [
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "crates/backend/nomifun-codex-runtime/",
+        "crates/backend/nomifun-app/",
+        "crates/backend/nomifun-agent-platform/",
+        "codex-app-server",
+        "Cargo path dependency on ../codex"
+      ],
+      "deliverables": [
+        "EngineFamilyId/EngineBuildId",
+        "immutable CodingEngineBuild",
+        "Stable/Canary Catalog aliases",
+        "Exact and channel selectors",
+        "EngineBinding with Session/Snapshot identity",
+        "digest mismatch and duplicate registration rejection"
+      ],
+      "checks": [
+        "stable and canary builds coexist",
+        "same immutable build can be promoted between channels",
+        "exact digest mismatch fails closed",
+        "different sessions can bind different exact builds",
+        "cargo test -p nomifun-coding-engine"
+      ],
+      "stop_conditions": [
+        "existing Session Binding can be mutated",
+        "channel resolution silently changes an existing Session",
+        "Engine failure introduces automatic fallback",
+        "a second platform-level Engine authority is created"
+      ]
+    },
+    {
+      "task_id": "CAR-01",
+      "sequence": 2,
+      "parallel_group": "serial-foundation",
+      "owner": "coding-engine-isolation",
+      "status": "completed",
+      "depends_on": [
+        "CAR-00A"
+      ],
+      "goal": "Build the isolated provider-neutral Coding Engine actor, model/tool/event ports and bounded multi-step turn loop.",
+      "write_paths": [
+        "crates/backend/nomifun-coding-engine/"
+      ],
+      "forbidden_paths": [
+        "crates/backend/nomifun-codex-runtime/",
+        "crates/backend/nomifun-app/",
+        "crates/backend/nomifun-agent-platform/",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "codex-app-server",
+        "Cargo path dependency on ../codex"
+      ],
+      "deliverables": [
+        "CodingEngineSession",
+        "CodingModelPort",
+        "CodingToolInvoker",
+        "CodingEventSink",
+        "plain-text turn",
+        "Tool Call continuation",
+        "schema/argument/result bounds",
+        "cancel/dispose/one-active-turn admission"
+      ],
+      "checks": [
+        "crate unit tests",
+        "fake model plain-text turn",
+        "one-active-turn test",
+        "cancel/dispose idempotency",
+        "Tool Call to next model step",
+        "Session/Snapshot binding mismatch rejection",
+        "schema digest mismatch rejection"
+      ],
+      "stop_conditions": [
+        "Codex API/Auth/History dependency is needed",
+        "root DB or concrete owner injection is needed",
+        "a second AgentSession or runtime-coordinator authority is proposed",
+        "production route is modified before remote integration"
+      ]
+    },
+    {
+      "task_id": "CAR-02",
+      "sequence": 3,
+      "parallel_group": "serial-foundation",
+      "owner": "model-adapter",
+      "status": "in_progress",
+      "depends_on": [
+        "CAR-01"
+      ],
+      "goal": "Adapt the Runtime model port to NomiFun ChatModelBroker with complete Coding stream semantics.",
+      "write_paths": [
+        "crates/backend/nomifun-coding-engine/src/model.rs",
+        "crates/backend/nomifun-chat-model-broker/"
+      ],
+      "forbidden_paths": [
+        "crates/backend/nomifun-codex-runtime/",
+        "codex-rs/",
+        "CodexAuth",
+        "Codex ModelProvider",
+        "provider secret values"
+      ],
+      "deliverables": [
+        "ChatBrokerPort adapter",
+        "text/reasoning/tool-call/tool-result event flow",
+        "cancellation propagation",
+        "typed compaction request",
+        "route/causality/credential validation"
+      ],
+      "checks": [
+        "broker contract tests",
+        "tool-call continuation test",
+        "semantic-output retry boundary test",
+        "cancellation propagation test",
+        "secret redaction test"
+      ],
+      "stop_conditions": [
+        "provider-specific client enters Runtime",
+        "Runtime performs retry/failover",
+        "a duplicate long-lived model DTO is introduced"
+      ]
+    },
+    {
+      "task_id": "CAR-03",
+      "sequence": 4,
+      "parallel_group": "serial-foundation",
+      "owner": "tool-loop",
+      "status": "in_progress",
+      "depends_on": [
+        "CAR-02"
+      ],
+      "goal": "Implement bounded Tool Call assembly, canonical Capability mapping and continuation.",
+      "write_paths": [
+        "crates/backend/nomifun-coding-engine/src/tool.rs",
+        "crates/backend/nomifun-coding-engine/src/turn.rs",
+        "crates/backend/nomifun-coding-engine/src/events.rs"
+      ],
+      "forbidden_paths": [
+        "crates/backend/nomifun-codex-runtime/",
+        "crates/backend/nomifun-app/",
+        "concrete Browser/Computer handler access",
+        "global Catalog expansion"
+      ],
+      "deliverables": [
+        "bounded argument accumulator",
+        "model-facing ToolPlan",
+        "capability/action/resource mapping",
+        "Snapshot/active-set admission",
+        "Tool Result normalization",
+        "parallel policy"
+      ],
+      "checks": [
+        "Snapshot-outside-tool rejection",
+        "schema/resource mismatch test",
+        "multi-tool ordering test",
+        "tool-to-next-model-step test",
+        "read-only parallel test"
+      ],
+      "stop_conditions": [
+        "Tool calls directly invoke handlers",
+        "tool plan scans the global Catalog at runtime",
+        "effect coordination requires a new global coordinator"
+      ]
+    },
+    {
+      "task_id": "CAR-04",
+      "sequence": 5,
+      "parallel_group": "owner-slices",
+      "owner": "process-owner",
+      "status": "planned",
+      "depends_on": [
+        "CAR-03"
+      ],
+      "goal": "Bring process, PTY, stdin, timeout and descendant cleanup semantics behind the NomiFun Process owner.",
+      "write_paths": [
+        "crates/backend/nomifun-coding-engine/src/process.rs",
+        "crates/shared/nomi-process-runtime/",
+        "crates/backend/nomifun-agent-domain-wave2/"
+      ],
+      "forbidden_paths": [
+        "codex-rs/core/src/guardian/",
+        "Codex approval/network permission",
+        "crates/backend/nomifun-codex-runtime/"
+      ],
+      "deliverables": [
+        "ProcessPort adapter",
+        "bounded output",
+        "stdin/write/poll",
+        "PTY capability handling",
+        "timeout/cancel",
+        "process-tree cleanup report"
+      ],
+      "checks": [
+        "long-output truncation",
+        "stdin",
+        "timeout hard-kill",
+        "cancel idempotency",
+        "Windows/Unix process cleanup"
+      ],
+      "stop_conditions": [
+        "provider secret enters argv/env",
+        "process operation creates an external Agent Runtime",
+        "cleanup cannot produce a bounded result"
+      ]
+    },
+    {
+      "task_id": "CAR-05",
+      "sequence": 5,
+      "parallel_group": "owner-slices",
+      "owner": "file-vcs-owner",
+      "status": "planned",
+      "depends_on": [
+        "CAR-03"
+      ],
+      "goal": "Integrate strict patch parsing and Coding file/VCS operations with NomiFun owners.",
+      "write_paths": [
+        "crates/backend/nomifun-coding-engine/src/patch.rs",
+        "crates/backend/nomifun-coding-engine/src/workspace.rs",
+        "crates/backend/nomifun-coding-engine/src/vcs.rs",
+        "crates/backend/nomifun-file/",
+        "crates/backend/nomifun-agent-domain-wave2/src/lib.rs",
+        "crates/backend/nomifun-agent-domain-wave2/tests/"
+      ],
+      "forbidden_paths": [
+        "Codex file owner",
+        "crates/backend/nomifun-codex-runtime/",
+        "raw workspace cwd fallback",
+        "legacy ConversationService"
+      ],
+      "deliverables": [
+        "strict patch parser",
+        "workspace typed binding",
+        "atomic file mutation handoff",
+        "status/diff/stage/commit mapping",
+        "bounded error normalization"
+      ],
+      "checks": [
+        "invalid patch",
+        "context mismatch",
+        "duplicate hunk",
+        "workspace containment",
+        "patch atomic failure",
+        "VCS diff/commit owner test"
+      ],
+      "stop_conditions": [
+        "a second file owner is introduced",
+        "patch bypasses Snapshot or owner admission",
+        "partial write cannot be proven absent"
+      ]
+    },
+    {
+      "task_id": "CAR-06",
+      "sequence": 5,
+      "parallel_group": "owner-slices",
+      "owner": "context-owner",
+      "status": "planned",
+      "depends_on": [
+        "CAR-03"
+      ],
+      "goal": "Rebuild Coding context from SessionEvent and implement AGENTS.md, compaction and resume.",
+      "write_paths": [
+        "crates/backend/nomifun-coding-engine/src/context.rs",
+        "crates/backend/nomifun-coding-engine/src/compaction.rs",
+        "crates/backend/nomifun-coding-engine/src/checkpoint.rs",
+        "crates/backend/nomifun-coding-engine/src/agents_md.rs"
+      ],
+      "forbidden_paths": [
+        "Codex rollout/thread store",
+        "root SQLite",
+        "Codex realtime/audio context",
+        "crates/backend/nomifun-codex-runtime/"
+      ],
+      "deliverables": [
+        "SessionEvent history mapper",
+        "bounded Workspace/AGENTS context",
+        "NomiFun compaction task",
+        "retained facts",
+        "disposable checkpoint",
+        "resume/steer/follow-up"
+      ],
+      "checks": [
+        "history rebuild without Codex files",
+        "AGENTS precedence/containment",
+        "compaction identity preservation",
+        "checkpoint mismatch discard",
+        "steer/cancel lifecycle"
+      ],
+      "stop_conditions": [
+        "Codex history format becomes a persistence dependency",
+        "context reads unselected global Catalog",
+        "compaction deletes product SessionEvent"
+      ]
+    },
+    {
+      "task_id": "CAR-07",
+      "sequence": 6,
+      "parallel_group": "central-integration",
+      "owner": "central-integration-owner",
+      "status": "planned",
+      "depends_on": [
+        "CAR-04",
+        "CAR-05",
+        "CAR-06"
+      ],
+      "goal": "Switch AgentSession application services to the in-process Runtime actor.",
+      "write_paths": [
+        "crates/backend/nomifun-agent-platform/",
+        "crates/backend/nomifun-app/src/",
+        "Cargo.toml",
+        "Cargo.lock"
+      ],
+      "forbidden_paths": [
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "legacy /api/presets",
+        "same-Session dual Engine execution route"
+      ],
+      "deliverables": [
+        "AgentSession to Runtime actor wiring",
+        "Chat/Coding/Remote/Automation canonical path",
+        "platform integration tests",
+        "no-text-only bridge behavior"
+      ],
+      "checks": [
+        "open-turn-tool-continuation-complete",
+        "cancel/dispose",
+        "crash recovery",
+        "SessionEvent projection",
+        "no external Runtime process"
+      ],
+      "stop_conditions": [
+        "same Session can switch Engine or invoke two Engines",
+        "legacy service is required as a hidden fallback",
+        "central composition becomes a new God service"
+      ]
+    },
+    {
+      "task_id": "CAR-08",
+      "sequence": 7,
+      "parallel_group": "central-integration",
+      "owner": "cutover-owner",
+      "status": "planned",
+      "depends_on": [
+        "CAR-07"
+      ],
+      "goal": "Delete the old Codex Wrapper, Sidecar protocol, executable packaging and production reachability.",
+      "write_paths": [
+        "crates/backend/nomifun-codex-runtime/",
+        "crates/backend/nomifun-agent-contracts/contracts/runtime/",
+        "crates/backend/nomifun-agent-contracts/src/runtime.rs",
+        "crates/backend/nomifun-agent-contracts/src/event.rs",
+        "crates/backend/nomifun-app/src/bootstrap/runtime_artifact.rs",
+        "crates/backend/nomifun-app/src/router/remote_runtime.rs",
+        "scripts/desktop-build-*.sh",
+        "scripts/gate-agent-v2.mjs",
+        "scripts/release/",
+        "scripts/validation/"
+      ],
+      "forbidden_paths": [
+        "docs/specs/2026-08-28-agent-capability-platform-v2/",
+        "new Sidecar compatibility alias",
+        "new external Runtime process"
+      ],
+      "deliverables": [
+        "old crate removed from production graph",
+        "hello/native_action/session_dispose removed",
+        "sidecar artifact fields removed",
+        "old tests migrated or deleted",
+        "production reachability scan"
+      ],
+      "checks": [
+        "Cargo graph scan",
+        "Rust/Schema route scan",
+        "packaging scan",
+        "no app-server launch",
+        "no RuntimeStartTurnBrokerBridge",
+        "no runtime_sidecar/sidecar_artifact production field"
+      ],
+      "stop_conditions": [
+        "a user-facing flow still requires the old Wrapper",
+        "deletion would destroy user data",
+        "a compatibility alias is proposed instead of migration"
+      ]
+    },
+    {
+      "task_id": "CAR-09",
+      "sequence": 8,
+      "parallel_group": "post-core-ecosystem",
+      "owner": "ecosystem-owner",
+      "status": "planned",
+      "depends_on": [
+        "CAR-08"
+      ],
+      "goal": "Verify platform Capability contributions for Agent and non-Agent consumers.",
+      "write_paths": [
+        "crates/backend/nomifun-agent-kernel/src/",
+        "crates/backend/nomifun-mcp/src/",
+        "crates/backend/nomifun-mcp/tests/",
+        "crates/backend/nomifun-agent-platform/src/",
+        "crates/backend/nomifun-agent-platform/tests/"
+      ],
+      "forbidden_paths": [
+        "Agent-only Catalog",
+        "Plugin-owned AgentPreset",
+        "Plugin lifecycle takeover",
+        "docs/specs/2026-08-28-agent-capability-platform-v2/"
+      ],
+      "deliverables": [
+        "MCP materialization test",
+        "Skill no-expansion test",
+        "shared Agent/non-Agent contribution test",
+        "non-Agent-only picker filter test",
+        "ContributionLock provenance test"
+      ],
+      "checks": [
+        "Agent consumer path",
+        "non-Agent consumer path",
+        "contract mismatch",
+        "availability diagnostics",
+        "no direct implementation bypass"
+      ],
+      "stop_conditions": [
+        "Plugin/MiniApp becomes an Agent-only subsystem",
+        "Runtime starts managing Plugin/MiniApp lifecycle",
+        "a new duplicate Catalog is needed"
+      ]
+    },
+    {
+      "task_id": "CAR-10",
+      "sequence": 9,
+      "parallel_group": "release",
+      "owner": "release-owner",
+      "status": "planned",
+      "depends_on": [
+        "CAR-08",
+        "CAR-09"
+      ],
+      "goal": "Validate and release the in-process Runtime on the three first-party desktop platforms.",
+      "write_paths": [
+        "docs/specs/2026-09-06-coding-agent-runtime-internalization/",
+        "scripts/car/",
+        "packaging/car/"
+      ],
+      "forbidden_paths": [
+        "old phase documentation",
+        "Sidecar artifact packaging",
+        "Codex binary packaging"
+      ],
+      "deliverables": [
+        "Windows x64 result",
+        "macOS arm64 result",
+        "Linux Desktop x64 result",
+        "same RC bytes",
+        "secret/process cleanup evidence",
+        "Stable admission record"
+      ],
+      "checks": [
+        "build/package/install/launch",
+        "Coding read/search/patch/exec/diff",
+        "cancel/crash/dispose",
+        "Session resume",
+        "secret scan",
+        "same-artifact digest"
+      ],
+      "stop_conditions": [
+        "platform result requires a Sidecar",
+        "old Wrapper remains production reachable",
+        "a critical Coding path is metadata-only",
+        "release evidence is synthetic"
+      ]
+    }
+  ]
+}
