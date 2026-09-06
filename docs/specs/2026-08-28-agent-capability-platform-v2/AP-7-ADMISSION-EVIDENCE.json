@@ -1,0 +1,79 @@
+{
+  "schema_version": "1.0.0",
+  "gate": "ap-7",
+  "admission": "admitted",
+  "signed": true,
+  "signed_at": "2026-09-06",
+  "signing": {
+    "kind": "local-commit-attestation",
+    "owner": "main-host",
+    "implementation_commit": "8e3f1eee8"
+  },
+  "ap_statuses": {
+    "AP-0": "closed",
+    "AP-1": "closed",
+    "AP-2": "closed",
+    "AP-3": "closed",
+    "AP-4": "closed",
+    "AP-5": "closed",
+    "AP-6": "closed",
+    "AP-7": "closed"
+  },
+  "real_agent_consumer": {
+    "status": "pass",
+    "consumer": "Agent workbench / AgentPreset compiler",
+    "shared_capability": "knowledge.search",
+    "evidence": [
+      "crates/backend/nomifun-agent-control-plane/src/service.rs::shared_catalog_resolves_agent_and_gateway_and_filters_agent_only_view",
+      "crates/backend/nomifun-agent-contracts/src/catalog.rs consumer filtering and operation lock tests",
+      "crates/backend/nomifun-agent-platform/src/platform.rs formal Catalog materialization"
+    ],
+    "command": "cargo test --offline -p nomifun-agent-control-plane shared_catalog_resolves_agent_and_gateway_and_filters_agent_only_view --lib"
+  },
+  "real_non_agent_consumer": {
+    "status": "pass",
+    "consumer": "Platform Gateway knowledge capability",
+    "shared_capability": "knowledge.search",
+    "evidence": [
+      "crates/backend/nomifun-gateway/src/caps_knowledge_ext.rs admission through CapabilityAdmissionPort",
+      "crates/backend/nomifun-app/src/router/routes.rs GatewayCatalogAdmission composition",
+      "crates/backend/nomifun-agent-control-plane/src/service.rs shared Gateway resolver assertion"
+    ],
+    "command": "cargo check --offline --workspace"
+  },
+  "behavior_checks": [
+    {
+      "name": "canonical_contracts",
+      "status": "pass",
+      "command": "cargo test --offline -p nomifun-agent-contracts --lib"
+    },
+    {
+      "name": "control_plane_and_impact",
+      "status": "pass",
+      "command": "cargo test --offline -p nomifun-agent-control-plane --lib"
+    },
+    {
+      "name": "database_migration_and_schema",
+      "status": "pass",
+      "command": "cargo test --offline -p nomifun-db --no-run; cargo test --offline -p nomifun-db --test id_schema_contract -- --test-threads=1"
+    },
+    {
+      "name": "ui_clean_cut",
+      "status": "pass",
+      "command": "bun run build:ui"
+    },
+    {
+      "name": "generated_contracts",
+      "status": "pass",
+      "command": "cargo run --offline -p nomifun-agent-contracts --bin agent-v2-contract -- check"
+    }
+  ],
+  "legacy_production_reachability": 0,
+  "generated_inventory_clean": true,
+  "plugin_phase": "blocked_until_explicit_06_kickoff",
+  "notes": [
+    "Historical migration and deletion-contract strings remain only as audit material.",
+    "No provider credential is part of this evidence or repository.",
+    "06 Plugin/MiniApp implementation is intentionally not included in this admission."
+  ]
+}

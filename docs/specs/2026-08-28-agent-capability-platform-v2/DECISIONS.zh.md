@@ -742,9 +742,8 @@ provider 请求误当成完整迁移或跨传输发布证明。
   **Agent 工作台**；公共 UI 路由是 `/agent`。
 - Agent Session 的公共 UI 路由是 `/agent-sessions/:agentSessionId`。它消费已经
   创建的 Session，不是第二个 preset 编辑入口。
-- `/presets`、`/settings/agent-presets` 和 `/settings/agent` 不再是产品入口。迁移
-  期间可以保留一次性 redirect，以便旧书签可到达 `/agent`；redirect 不得加载旧
-  authoring 页面、复制旧 API 或形成长期兼容分支。
+- `/presets`、`/settings/agent-presets` 和 `/settings/agent` 不再是产品入口。
+  本次实现已删除这些 authoring 路由；不保留长期 redirect、旧 API 或兼容分支。
 - `/settings/execution-engines` 只负责 Runtime Manager、网络和系统级设置，不承载
   AgentPreset 内容。
 
@@ -790,9 +789,9 @@ provider 请求误当成完整迁移或跨传输发布证明。
   Gate 只在 Cargo dependency key、lockfile package entry 或活动 import 出现时阻断；
   root `exclude` 删除 tombstone、历史 deletion contract 和注释引用单独分类，不得
   被误报成生产依赖。
-- 当前 AP-7 必须保持 blocked：旧 generated inventory 仍含 `/api/presets`，活动代码/
-  测试仍有旧 preset 和 `preset_snapshot` residual，且没有签署 admission evidence。
-  06 只能继续设计审阅，不能进入 Plugin/MiniApp loader、Host 或 Release 代码实施。
+- 当前 AP-7 已由本机提交后的 admission evidence 关闭：旧活动 inventory、路由、
+  DTO、服务和 snapshot alias 已清零，Agent/Gateway 共享 Catalog 行为与 impact/no-fallback
+  测试已通过。06 仍保持独立的二期实施边界，不因本次 admission 自动实施代码。
 
 理由：AP-7 的职责是防止“有类型/有 fixture/有 self-test”被误报为产品合同已经闭合。
 把删除包的历史文字与真实依赖分开，既保留 clean-cut 的安全断言，也避免旧 Gate 因
@@ -809,5 +808,5 @@ provider 请求误当成完整迁移或跨传输发布证明。
 6. 任何需要恢复旧固定 ROM、在线 canary、五平台首发、全量 exact-zero/evidence 或复杂 handoff 的变化，都必须重新提出产品理由并获得明确决策。
 7. 读取 automation audit 时同时记录 production legacy、transitional adapter 和真实
    blocker；不得只看一个数字判断是否已经完成。
-8. AP-7 未通过前，不得以 06 文档、Plugin/MiniApp fixture 或旧 preset 迁移代码作为
-   一期完成证据；每次状态变更必须回写 GLOBAL TODO 的 AP marker 和验证命令。
+8. 06 的 Plugin/MiniApp 代码不属于本次提交；后续启动 06 时必须重新读取本 admission
+   evidence 和新的 N1 checklist，不得把 06 fixture 反向当作 05 的实现来源。
