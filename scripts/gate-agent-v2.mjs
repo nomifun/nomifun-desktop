@@ -8,6 +8,7 @@ import {
   readAndVerifyReleaseLock,
   writeReleaseLock,
 } from './release/release-lock.mjs';
+import { loadWindowsToolchainEnvironment } from './run-dev.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -67,6 +68,16 @@ const failures = [];
 const COMMAND_MAX_BUFFER = 64 * 1024 * 1024;
 const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
 const WORKSPACE_COMMAND_TIMEOUT_MS = 15 * 60 * 1000;
+let c8CommandEnvironmentCache = null;
+
+function c8CommandEnvironment() {
+  if (c8CommandEnvironmentCache) return c8CommandEnvironmentCache;
+  c8CommandEnvironmentCache = loadWindowsToolchainEnvironment(
+    process.env,
+    process.platform
+  );
+  return c8CommandEnvironmentCache;
+}
 
 function run(command, commandArgs) {
   const startedAt = new Date().toISOString();
@@ -2776,6 +2787,7 @@ function c8RunCommand(
     result = spawnSync(command, commandArgs, {
       cwd: repoRoot,
       encoding: 'utf8',
+      env: c8CommandEnvironment(),
       shell: false,
       stdio: 'pipe',
       maxBuffer: COMMAND_MAX_BUFFER,
@@ -5064,6 +5076,16 @@ function runC8SelfTest() {
       c8ManifestReport.failure_details.length === 0,
     'the checked-in C8-WIN-PRE manifest must match the current Desktop candidate contract'
   );
+  if (process.platform === 'win32') {
+    const toolchainEnvironment = c8CommandEnvironment();
+    c8SelfTestAssert(
+      typeof toolchainEnvironment.LIB === 'string' &&
+        toolchainEnvironment.LIB.length > 0 &&
+        typeof toolchainEnvironment.INCLUDE === 'string' &&
+        toolchainEnvironment.INCLUDE.length > 0,
+      'C8 must initialize the Windows SDK/Visual Studio link environment itself'
+    );
+  }
 
   const currentMergeSource = 'a'.repeat(40);
   const currentMergeCells = Object.fromEntries(
@@ -6895,16 +6917,30 @@ function c8WriteWindowsCandidateEvidence(report) {
 function c8RunDeclaredC8Checks(report, manifest) {
   void manifest;
   const expectedChecks = c8ExpectedChecks();
-  for (const expected of expectedChecks) {
+  const stopAfterFailure = (index, failedCheckId) => {
+    if (report.statuses[failedCheckId] === 'pass') return false;
+    for (const pending of expectedChecks.slice(index + 1)) {
+      if (report.statuses[pending.check_id]) continue;
+      c8Check(report, pending.check_id, 'skipped_dependency_failure', {
+        command: pending.command,
+        failed_check_id: failedCheckId,
+      });
+    }
+    return true;
+  };
+  for (let index = 0; index < expectedChecks.length; index += 1) {
+    const expected = expectedChecks[index];
     if (report.statuses[expected.check_id] === 'pass') {
       continue;
     }
     if (expected.runner === 'windows_package_build') {
       c8RunWindowsPackageBuild(report, expected);
+      if (stopAfterFailure(index, expected.check_id)) break;
       continue;
     }
     if (expected.runner === 'windows_candidate_smoke') {
       c8RunWindowsCandidateSmoke(report, expected);
+      if (stopAfterFailure(index, expected.check_id)) break;
       continue;
     }
     if (expected.runner === 'workspace_compile') {
@@ -6942,6 +6978,7 @@ function c8RunDeclaredC8Checks(report, manifest) {
           `${report.source_sha}\n`
         );
       }
+      if (stopAfterFailure(index, expected.check_id)) break;
       continue;
     }
 
@@ -6956,6 +6993,7 @@ function c8RunDeclaredC8Checks(report, manifest) {
       addFailure: true,
       timeout: expected.timeout || DEFAULT_COMMAND_TIMEOUT_MS,
     });
+    if (stopAfterFailure(index, expected.check_id)) break;
   }
 }
 
