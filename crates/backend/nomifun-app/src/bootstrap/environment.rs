@@ -1057,7 +1057,11 @@ mod tests {
                 .fetch_one(db.pool())
                 .await
                 .unwrap(),
-            74
+            TEST_MIGRATOR
+                .iter()
+                .last()
+                .expect("the database must have at least one migration")
+                .version
         );
         assert_eq!(
             sqlx::query_scalar::<_, Vec<u8>>(

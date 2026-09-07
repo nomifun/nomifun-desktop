@@ -233,7 +233,7 @@ async fn add_managed_candidate(
 }
 
 #[tokio::test]
-async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_through_070() {
+async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_at_schema_head() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("plugin-n1.db");
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -327,7 +327,14 @@ async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_through
         .fetch_one(restarted.pool())
         .await
         .unwrap();
-    assert_eq!(version, 70);
+    assert_eq!(
+        version,
+        MIGRATOR
+            .iter()
+            .last()
+            .expect("the database must have at least one migration")
+            .version
+    );
 }
 
 #[tokio::test]

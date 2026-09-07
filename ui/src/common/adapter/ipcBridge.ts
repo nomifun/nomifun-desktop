@@ -288,7 +288,6 @@ import {
   httpPost,
   httpPut,
   httpRequest,
-  isBackendHttpError,
   stubProvider,
   withResponseMap,
   wsEmitter,
@@ -326,11 +325,19 @@ import {
   fromBackendWorkspaceList,
   type RawWorkspaceFlatFile,
 } from './workspaceMapper';
+import type {
+  CreateMiniAppProjectRequest,
+  MiniAppLibraryResponse,
+  MiniAppOperationSummary,
+  MiniAppSummary,
+  MiniAppWorkshop,
+} from '../types/miniAppPlatform';
 
 export { plugins } from './pluginPlatformBridge';
 export type * from '../types/pluginPlatform';
 export { javascriptRuntime } from './javascriptRuntimeBridge';
 export type * from '../types/javascriptRuntime';
+export type * from '../types/miniAppPlatform';
 
 // ---------------------------------------------------------------------------
 // Shell — routed to POST /api/shell/*
@@ -2196,223 +2203,65 @@ export const ssh = {
 };
 
 // ---------------------------------------------------------------------------
-// Mini-apps — AI-generated self-contained single-file web tools, solidified
-// from a conversation and reopened instantly from the sidebar library.
+// MiniApp M1 - owner-scoped Product/Project/Release state.
 //
-// Wire shape is snake_case (preset-style). Responses never carry the HTML
-// body: the runtime loads it through the unauthenticated
-// `GET /api/miniapps/{miniapp_id}/serve` route as an iframe `src`.
-//
-// Two copies of the document exist and the distinction is the whole reason
-// `has_unpublished_changes` is on the wire: `/serve` returns the PUBLISHED
-// snapshot, while a conversation edits the working copy on disk. Only `publish`
-// promotes one into the other.
+// This is a clean cut from the retired single-HTML and conversation workspace
+// API. Build, Publish and Surface commands will be added only when their M1
+// backend contracts are available.
 // ---------------------------------------------------------------------------
 
-export interface IApiMiniApp {
-  miniapp_id: MiniAppId;
-  name: string;
-  description: string;
-  icon: string | null;
-  /**
-   * Provenance only — the conversation that first published this app. It is
-   * deliberately left unbranded because nothing may navigate to it: a mini-app
-   * outlives its source thread, so that jump is a link that rots. Its one reader
-   * is the default target of 「替换已有小程序」 in the preview panel.
-   */
-  source_conversation_id: string | null;
-  /** Size of the published snapshot in bytes; the body itself never rides list/detail responses. */
-  html_size: number;
-  /** Ms epoch of the last publish, or null when no document was ever promoted. */
-  published_at: number | null;
-  /** Derived per request: the on-disk working copy is newer than the snapshot. */
-  has_unpublished_changes: boolean;
-  created_at: number;
-  updated_at: number;
-}
-
-/**
- * Where a mini-app's source lives on disk, as answered by
- * `POST /api/miniapps/{miniapp_id}/workspace`.
- *
- * `source_path` is the absolute `{work_dir}/miniapps/{miniapp_id}/miniapp.html`.
- * It is never an input — the server derives it from the id and runs it through
- * its escape guard — and the client only reads it back to write it into the first
- * message of an ORDINARY conversation (spec D19). No conversation is created by
- * this call.
- */
-export interface IApiMiniAppWorkspace {
-  source_path: string;
-}
-
-export interface IApiCreateMiniApp {
-  name: string;
-  description?: string;
-  icon?: string;
-  html: string;
-  source_conversation_id?: string;
-}
-
-export interface IApiUpdateMiniApp {
-  name?: string;
-  description?: string;
-  icon?: string;
-  html?: string;
-}
-
-const fromApiMiniApp = (value: IApiMiniApp): IApiMiniApp => ({
+const fromApiMiniAppSummary = (value: MiniAppSummary): MiniAppSummary => ({
   ...value,
   miniapp_id: parseMiniAppId(value.miniapp_id),
 });
 
-/**
- * Import intake. Supply EXACTLY ONE of `html` / `path` — the backend rejects both
- * and neither with its own message rather than guessing.
- *
- * `path` must be absolute: either one `.html`/`.htm` document, or the folder that
- * holds its `index.html`. It only works where the picker and the backend share a
- * filesystem (the desktop shell), which is why the dialog also has an inline
- * `html` flow for a WebUI browser session.
- */
-export interface IApiMiniAppImportRequest {
-  /** Overrides the document's `<title>` when naming the app. */
-  name?: string;
-  description?: string;
-  icon?: string;
-  html?: string;
-  path?: string;
-}
-
-/**
- * How much a finding costs the user: `fatal` refuses the import, `autofix` is
- * repaired during import, `warning` only informs.
- */
-export type IApiMiniAppImportSeverity = 'fatal' | 'autofix' | 'warning';
-
-/**
- * One validation finding. `rule_id` is the join key to the UI's copy catalogue —
- * the backend deliberately sends no prose, and `detail` is structured data (the
- * offending reference, a byte count) the UI interpolates into its own sentence.
- */
-export interface IApiMiniAppImportFinding {
-  rule_id: string;
-  severity: IApiMiniAppImportSeverity;
-  detail?: string;
-}
-
-export interface IApiMiniAppImportReport {
-  findings: IApiMiniAppImportFinding[];
-  /** True when any finding is fatal. The import route refuses on this flag alone. */
-  blocked: boolean;
-}
-
-/**
- * Answer of BOTH import routes, so one mapper serves both and a client can never
- * mistake "reported" for "adopted": `app` is present only on a real import.
- */
-export interface IApiMiniAppImportResponse {
-  report: IApiMiniAppImportReport;
-  /** Rule ids actually repaired — never the ones the catalogue merely hoped to repair. */
-  applied_fixes: string[];
-  app?: IApiMiniApp;
-}
-
-const fromApiMiniAppImportResponse = (value: IApiMiniAppImportResponse): IApiMiniAppImportResponse => ({
+const fromApiMiniAppOperation = (
+  value: MiniAppOperationSummary
+): MiniAppOperationSummary => ({
   ...value,
-  ...(value.app ? { app: fromApiMiniApp(value.app) } : {}),
+  owner:
+    value.owner.owner === 'miniapp'
+      ? {
+          ...value.owner,
+          miniapp_id: parseMiniAppId(value.owner.miniapp_id),
+        }
+      : value.owner,
 });
 
-/**
- * Recover the report from a REJECTED import.
- *
- * `POST /api/miniapps/import` answers a blocked candidate with **400 whose body
- * is still the full success envelope** (`{ success, data: { report, … } }`), so
- * the findings survive the throw: `httpRequest` reads the error body and hands it
- * to `BackendHttpError.body`. Returns `null` for anything that is not that shape
- * — a real BadRequest (`{ success: false, error }`), a 500, a transport failure —
- * which callers must then treat as a plain error.
- *
- * This is a backstop, not the main path: the dialog validates first, so a 400
- * here means the source changed underneath the user between the two calls.
- */
-export function miniAppImportReportFromError(error: unknown): IApiMiniAppImportResponse | null {
-  if (!isBackendHttpError(error) || error.status !== 400) return null;
-  const body = error.body;
-  if (!body || typeof body !== 'object') return null;
-  const data = (body as { data?: unknown }).data;
-  if (!data || typeof data !== 'object') return null;
-  const report = (data as { report?: unknown }).report;
-  if (!report || typeof report !== 'object') return null;
-  if (!Array.isArray((report as { findings?: unknown }).findings)) return null;
-  return fromApiMiniAppImportResponse(data as IApiMiniAppImportResponse);
-}
+const fromApiMiniAppLibrary = (
+  value: MiniAppLibraryResponse
+): MiniAppLibraryResponse => ({
+  ...value,
+  miniapps: value.miniapps.map(fromApiMiniAppSummary),
+});
+
+const fromApiMiniAppWorkshop = (
+  value: MiniAppWorkshop
+): MiniAppWorkshop => ({
+  ...value,
+  miniapp: fromApiMiniAppSummary(value.miniapp),
+  active_operation: value.active_operation
+    ? fromApiMiniAppOperation(value.active_operation)
+    : undefined,
+});
 
 export const miniapps = {
-  list: withResponseMap(
-    httpGet<IApiMiniApp[], void>('/api/miniapps'),
-    (items) => items.map(fromApiMiniApp)
+  library: withResponseMap(
+    httpGet<MiniAppLibraryResponse, void>('/api/miniapps'),
+    fromApiMiniAppLibrary
   ),
-  get: withResponseMap(
-    httpGet<IApiMiniApp | null, { miniapp_id: MiniAppId }>(
-      (p) => `/api/miniapps/${p.miniapp_id}`
+  createProject: withResponseMap(
+    httpPost<MiniAppWorkshop, CreateMiniAppProjectRequest>(
+      '/api/miniapps/projects'
     ),
-    (item) => (item == null ? null : fromApiMiniApp(item))
+    fromApiMiniAppWorkshop
   ),
-  create: withResponseMap(
-    httpPost<IApiMiniApp, IApiCreateMiniApp>('/api/miniapps'),
-    fromApiMiniApp
-  ),
-  update: withResponseMap(
-    httpPut<IApiMiniApp, { miniapp_id: MiniAppId; updates: IApiUpdateMiniApp }>(
-      (p) => `/api/miniapps/${p.miniapp_id}`,
-      (p) => p.updates
+  getWorkshop: withResponseMap(
+    httpGet<MiniAppWorkshop, { miniapp_id: MiniAppId }>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/workshop`
     ),
-    fromApiMiniApp
-  ),
-  delete: httpDelete<boolean, { miniapp_id: MiniAppId }>(
-    (p) => `/api/miniapps/${p.miniapp_id}`
-  ),
-  /**
-   * Idempotently provision this app's directory and materialize its working copy,
-   * answering the ABSOLUTE source path (spec D19). Creates no conversation — the
-   * caller writes the path into the first message of an ordinary one.
-   *
-   * No request body: the server derives the directory from the id, and the client
-   * never names a path.
-   */
-  provisionWorkspace: httpPost<IApiMiniAppWorkspace, { miniapp_id: MiniAppId }>(
-    (p) => `/api/miniapps/${p.miniapp_id}/workspace`,
-    () => ({})
-  ),
-  /**
-   * Promote the on-disk working copy into the served snapshot. 400 when there is
-   * no working copy yet (nothing to publish) — iterate first.
-   */
-  publish: withResponseMap(
-    httpPost<IApiMiniApp, { miniapp_id: MiniAppId }>(
-      (p) => `/api/miniapps/${p.miniapp_id}/publish`,
-      () => ({})
-    ),
-    fromApiMiniApp
-  ),
-  /**
-   * Judge a candidate and write nothing. Always 200 for a readable candidate,
-   * even a blocked one — the verdict is `report.blocked`, not the status.
-   *
-   * Registered before the `{miniapp_id}` capture on the backend, so `validate`
-   * and `import` are never read as ids.
-   */
-  validateImport: withResponseMap(
-    httpPost<IApiMiniAppImportResponse, IApiMiniAppImportRequest>('/api/miniapps/validate'),
-    fromApiMiniAppImportResponse
-  ),
-  /**
-   * Adopt a candidate. 200 carries the new `app`; a blocked candidate is a 400
-   * whose body is still the report — see {@link miniAppImportReportFromError}.
-   */
-  importApp: withResponseMap(
-    httpPost<IApiMiniAppImportResponse, IApiMiniAppImportRequest>('/api/miniapps/import'),
-    fromApiMiniAppImportResponse
+    fromApiMiniAppWorkshop
   ),
 };
 

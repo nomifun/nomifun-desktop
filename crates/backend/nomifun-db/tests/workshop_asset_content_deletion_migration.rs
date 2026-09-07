@@ -28,12 +28,12 @@ fn published_asset_deletion_migrations_have_immutable_checksums() {
 }
 
 #[tokio::test]
-async fn migration_072_to_074_preserves_assets_and_enforces_tombstone_lifecycle() {
+async fn migration_072_to_schema_head_preserves_assets_and_enforces_tombstone_lifecycle() {
     verify_asset_deletion_upgrade(72).await;
 }
 
 #[tokio::test]
-async fn migration_073_to_074_preserves_assets_and_pending_deletions() {
+async fn migration_073_to_schema_head_preserves_assets_and_pending_deletions() {
     verify_asset_deletion_upgrade(73).await;
 }
 
@@ -122,7 +122,14 @@ async fn verify_asset_deletion_upgrade(from_version: i64) {
         &lineage_after[..lineage_before.len()],
         lineage_before.as_slice()
     );
-    assert_eq!(lineage_after.last().unwrap().0, 74);
+    assert_eq!(
+        lineage_after.last().unwrap().0,
+        MIGRATOR
+            .iter()
+            .last()
+            .expect("the database must have at least one migration")
+            .version
+    );
     nomifun_db::validate_id_schema_contract(&pool)
         .await
         .unwrap();

@@ -130,10 +130,8 @@ export const usePreviewHistory = ({ activeTab, updateContent }: UsePreviewHistor
   //
   // A target is built ONLY for content types the backend's preview-history store
   // accepts. `activeTab.content_type` is serialized straight onto
-  // `/api/preview-history/*`, and renderer-only types (`miniapp`) have no variant
-  // in the Rust `PreviewContentType` enum — sending one 400s the request on every
-  // tab activation. A null target also disables the toolbar's snapshot/history
-  // buttons, which read the same predicate.
+  // `/api/preview-history/*`. A null target also disables the toolbar's
+  // snapshot/history buttons, which read the same predicate.
   const historyTarget = useMemo<PreviewHistoryTarget | null>(() => {
     if (!activeTab) return null;
     if (!supportsPreviewHistory(activeTab.content_type)) return null;
