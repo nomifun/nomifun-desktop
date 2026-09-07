@@ -1,0 +1,262 @@
+{
+  "title": "Plugin 工作台",
+  "subtitle": "管理已安装 Plugin 的生命周期与能力，并检查作者项目、Ready Candidate 和构建状态。",
+  "navigation": {
+    "railTitle": "Plugin 工作台"
+  },
+  "tabs": {
+    "library": "Library",
+    "workshop": "Workshop"
+  },
+  "actions": {
+    "refresh": "刷新",
+    "retry": "重试",
+    "search": "搜索 Plugin 或项目",
+    "enable": "启用",
+    "disable": "停用",
+    "retryRuntime": "重试运行",
+    "restore": "回滚",
+    "uninstall": "卸载",
+    "deleteData": "删除运行数据",
+    "deleteProject": "删除项目",
+    "createProject": "创建项目",
+    "importArtifact": "导入运行包",
+    "build": "构建",
+    "testCandidate": "测试候选版本",
+    "applyCandidate": "应用候选版本",
+    "cancelOperation": "取消操作",
+    "openInstalled": "查看已安装 Plugin",
+    "confirm": "确认",
+    "cancel": "取消"
+  },
+  "common": {
+    "count": "{{count}} 个",
+    "none": "无",
+    "unknown": "未知"
+  },
+  "states": {
+    "loadingLibrary": "正在加载 Plugin Library…",
+    "loadingDetail": "正在加载详情…",
+    "loadingMount": "正在加载 Plugin Mount 详情…",
+    "loadingProject": "正在加载 Plugin Project 详情…",
+    "desktopOnlyTitle": "Plugin 工作台仅在桌面端可用",
+    "desktopOnlyBody": "该入口依赖当前电脑上的受管 Runtime、文件系统与本地 Plugin Host。",
+    "unavailableTitle": "Plugin 平台当前不可用",
+    "unavailableBody": "本地 Plugin 服务或所需 Runtime 尚未就绪。请检查桌面后端后重试。",
+    "errorTitle": "无法加载 Plugin 数据",
+    "errorBody": "请求未完成，请重试。",
+    "mutationErrorTitle": "操作未完成："
+  },
+  "lifecycle": {
+    "enabled": "已启用",
+    "disabled": "已停用",
+    "uninstalledDataRetained": "已卸载，保留数据",
+    "deletePending": "正在删除",
+    "error": "异常"
+  },
+  "sourceState": {
+    "empty": "空项目",
+    "editable": "可编辑源码",
+    "runtimeOnly": "仅运行包"
+  },
+  "compatibility": {
+    "compatible": "兼容",
+    "breaking": "破坏性变更",
+    "unknown": "未知"
+  },
+  "testStatus": {
+    "notRun": "未测试",
+    "passed": "已通过",
+    "failed": "失败",
+    "needsInput": "需要测试输入",
+    "stale": "测试已过期"
+  },
+  "operation": {
+    "running": "进行中",
+    "succeeded": "已完成",
+    "failed": "失败",
+    "canceled": "已取消"
+  },
+  "consumer": {
+    "agent": "Agent",
+    "gateway": "Gateway",
+    "knowledge": "知识库",
+    "remote": "Remote",
+    "automation": "自动化",
+    "ui": "UI",
+    "miniappService": "MiniApp Service"
+  },
+  "applyMode": {
+    "ask": "应用前确认",
+    "autoCompatible": "空闲时自动应用兼容版本"
+  },
+  "origin": {
+    "build": "本地构建",
+    "import": "导入"
+  },
+  "messages": {
+    "enabled": "Plugin 已启用",
+    "disabled": "Plugin 已停用",
+    "retried": "已提交 Plugin 重试",
+    "restored": "已回滚到上一版本",
+    "uninstalled": "Plugin 已卸载，运行数据已保留",
+    "dataDeleted": "Plugin 运行数据已删除",
+    "projectCreated": "Plugin Project 已创建",
+    "artifactImported": "运行包已导入并生成 Ready Candidate",
+    "buildCompleted": "构建已完成并生成 Ready Candidate",
+    "candidateTested": "Candidate Test 已完成",
+    "candidateApplied": "Ready Candidate 已应用",
+    "operationCanceled": "操作已取消",
+    "projectDeleted": "Plugin Project 已删除；已安装 Plugin 与运行数据未受影响"
+  },
+  "confirm": {
+    "uninstallTitle": "卸载这个 Plugin？",
+    "uninstallBody": "可执行版本会被撤下，但 Mount、配置、凭据绑定与运行数据会保留，便于之后显式恢复。",
+    "deleteDataTitle": "永久删除保留的运行数据？",
+    "deleteDataBody": "该操作会删除 Mount、配置、KV、凭据绑定与 dataDir。关联作者项目不会被删除。",
+    "deleteProjectTitle": "永久删除这个 Plugin Project？",
+    "deleteProjectBody": "该操作只删除 Project Source、dependency lock 和 Ready Candidate。已安装 Plugin、Mount、配置、凭据绑定和运行数据会保留。"
+  },
+  "library": {
+    "ariaLabel": "Plugin Library",
+    "title": "已安装 Plugin",
+    "contributionCount": "{{count}} 项能力",
+    "emptyTitle": "尚未安装 Plugin",
+    "emptyBody": "导入或应用 Ready Candidate 后，Plugin 会出现在这里。",
+    "selectTitle": "选择一个 Plugin",
+    "selectBody": "从左侧列表选择 Plugin，查看能力、版本和生命周期动作。",
+    "detailEyebrow": "Installed Mount",
+    "retainedDataNotice": "这个 Plugin 已卸载且不会执行。配置、KV、凭据绑定和 dataDir 仍保留；“删除运行数据”是独立且不可逆的动作。"
+  },
+  "workshop": {
+    "ariaLabel": "Plugin Workshop",
+    "title": "作者项目",
+    "generation": "Build {{generation}}",
+    "ready": "Ready",
+    "emptyTitle": "尚无 Plugin Project",
+    "emptyBody": "通过作者流程创建或导入项目后，可在这里检查 Source、Candidate 和 Operation。",
+    "selectTitle": "选择一个作者项目",
+    "selectBody": "从左侧列表选择项目，查看源码状态、Ready Candidate 与构建操作。",
+    "detailEyebrow": "Authoring Project",
+    "projectDescription": "Project Source、dependency lock、Ready Candidate 与已安装 Mount 分开管理。",
+    "runtimeOnlyBuild": "仅运行包项目没有可编辑 Source，不能执行本机构建。",
+    "buildUnavailable": "项目需要完整的 Source snapshot 和 dependency lock，且当前不能有进行中的操作。",
+    "runtimeOnlyNotice": "这是仅运行包项目。可以测试和应用现有 Candidate，但不能假装恢复原始 JavaScript/TypeScript Source。",
+    "noMatchesTitle": "没有匹配的项目",
+    "noMatchesBody": "尝试使用项目名称、描述或 Project ID 搜索。",
+    "linked": "已关联 Mount",
+    "unlinkedDraft": "未安装草稿",
+    "identityHint": "项目身份与构建世代使用精确 CAS。",
+    "readyCandidate": "Ready Candidate",
+    "readyCandidateHint": "Candidate 只有通过兼容性与测试约束后才可 Apply。",
+    "canApply": "可应用",
+    "blocked": "被阻止",
+    "noCandidate": "没有 Ready Candidate",
+    "noCandidateBody": "Build 或只读 Artifact Import 完成后，候选版本会显示在这里。",
+    "operation": "当前 Operation",
+    "operationHint": "Build 与 Import 是持久化、可观察的操作。",
+    "noOperation": "没有进行中的 Operation",
+    "noOperationBody": "当前项目处于稳定状态。"
+  },
+  "workflow": {
+    "ariaLabel": "Plugin Project 交付流程",
+    "source": "Source",
+    "candidate": "Build Candidate",
+    "test": "Candidate Test",
+    "apply": "Apply"
+  },
+  "dialogs": {
+    "create": {
+      "title": "创建 Plugin Project",
+      "body": "创建受管 JavaScript 或 TypeScript Source。Package ID 是稳定机器身份，显示名称用于产品界面。",
+      "displayName": "显示名称",
+      "displayNameRequired": "请输入显示名称",
+      "packageId": "Package ID",
+      "packageIdRequired": "请输入稳定 Package ID",
+      "packageVersion": "初始版本",
+      "packageVersionRequired": "请输入精确 SemVer",
+      "language": "Source 语言",
+      "typeScript": "TypeScript",
+      "javaScript": "JavaScript",
+      "description": "用途说明"
+    },
+    "import": {
+      "title": "导入预构建 Plugin",
+      "body": "选择符合 plugin-package-v1 的目录或 ZIP。导入只创建只读 Candidate，不会自动安装或启用。",
+      "sourceType": "来源类型",
+      "directory": "目录",
+      "archive": "ZIP",
+      "archiveFilter": "Plugin ZIP",
+      "sourcePath": "来源路径",
+      "sourcePlaceholder": "选择本机目录或 ZIP",
+      "chooseSource": "选择",
+      "sourceRequired": "请选择导入来源",
+      "digest": "已审核 Artifact digest",
+      "digestPlaceholder": "64 位 SHA-256",
+      "digestHint": "必须与实际导入内容完全一致；不接受自动确认未知 bytes。",
+      "digestInvalid": "请输入有效的 64 位 SHA-256 digest"
+    },
+    "test": {
+      "title": "运行 Candidate Test",
+      "body": "测试绑定当前 Candidate、Runtime、配置和凭据 revision。测试结果不会自动应用代码。",
+      "inputDigest": "测试输入 digest",
+      "inputDigestHint": "输入内容由受管测试流程持有；这里只提交其精确 SHA-256。",
+      "useEmptyInput": "使用空输入",
+      "sideEffectWarning": "Plugin 是可信本机代码；raw network、文件和子进程副作用无法完全隔离。",
+      "acknowledgeRisk": "我确认本次测试可能产生本机或外部副作用",
+      "acknowledgementRequired": "请先确认测试副作用边界",
+      "digestInvalid": "测试输入 digest 必须是 64 位 SHA-256"
+    },
+    "apply": {
+      "title": "应用 Ready Candidate",
+      "body": "Apply 会精确切换当前 Artifact；首次安装、破坏性变更或未通过测试的 Candidate 必须人工确认。",
+      "target": "目标",
+      "initialInstall": "首次安装为新的稳定 Mount",
+      "existingMount": "替换已关联 Mount",
+      "existingMountNamed": "替换 {{name}}",
+      "targetUnavailable": "已关联 Mount 当前没有可验证的 Current target。",
+      "noCandidate": "当前项目没有 Ready Candidate。",
+      "allowBreaking": "我确认这是破坏性变更，并接受受影响消费者变为合同不匹配",
+      "acknowledgeTestWarning": "我确认 Candidate 尚未通过当前本机测试，仍要手动应用",
+      "changedContracts": "变更的合同",
+      "affectedConsumers": "受影响消费者"
+    }
+  },
+  "detail": {
+    "identity": "身份与状态",
+    "identityHint": "产品界面只暴露稳定身份、版本和 revision，不暴露 Host process 或 generation。",
+    "mountId": "Mount ID",
+    "projectId": "Project ID",
+    "revision": "Revision",
+    "updatedAt": "更新时间",
+    "linkedProject": "关联 Project",
+    "linkedMount": "关联 Mount",
+    "config": "配置",
+    "configValid": "有效",
+    "configInvalid": "无效",
+    "credentials": "凭据槽位",
+    "credentialCount": "{{count}} 个",
+    "lastError": "最后错误：{{code}}",
+    "targets": "版本指针",
+    "targetsHint": "Current 与 Previous 精确锁定 Artifact digest。",
+    "currentTarget": "Current",
+    "previousTarget": "Previous",
+    "capabilities": "能力贡献",
+    "capabilityCount": "{{count}} 项 canonical capability",
+    "noCapabilities": "没有能力贡献",
+    "noCapabilitiesBody": "当前版本没有声明可供平台消费的 Capability。",
+    "buildGeneration": "Build generation",
+    "applyMode": "应用策略",
+    "sourceDigest": "Source digest",
+    "lockDigest": "Dependency lock",
+    "targetVersion": "候选版本",
+    "compatibility": "兼容性",
+    "test": "Candidate Test",
+    "origin": "来源",
+    "candidateId": "Candidate ID",
+    "applyEligibility": "Apply 状态",
+    "operationState": "状态",
+    "operationKind": "类型",
+    "progress": "进度"
+  }
+}

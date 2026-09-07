@@ -2,9 +2,14 @@ use std::path::{Component, Path};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nomifun_agent_contracts::{DigestHex, PluginMountId};
+use nomifun_agent_contracts::{DigestHex, PluginMountId, PluginProjectId, UserId};
+use nomifun_js_authoring::{
+    ExactDependencyLock, NeverCancel, NpmResolverIdentity, PluginLanguage,
+    PluginScaffoldRequest, SourceScope, SourceStore, SourceStoreLimits,
+};
 use nomifun_db::{
     ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
+    DeletePluginProjectParams,
     FinishProductOperationParams, IPluginN1Repository, ListPluginCredentialBindingsParams,
     PluginArtifactRow, PluginCandidateTestReceiptRow, PluginMountRow, PluginProjectRow,
     PluginReadyCandidateRow, ProductOperationRow, ProductOperationState,
@@ -19,8 +24,8 @@ use sha2::{Digest, Sha256};
 
 use crate::error::PluginServiceError;
 use crate::types::{
-    BuildOutput, CandidateTestOutput, ImportedPluginArtifact, LinkPluginProjectParams,
-    PluginInventory,
+    BuildOutput, CandidateTestOutput, CreatedPluginSource, ImportedPluginArtifact,
+    LinkPluginProjectParams, PluginInventory,
 };
 
 #[async_trait]
@@ -52,6 +57,10 @@ pub trait PluginRepository: Send + Sync {
         &self,
         params: &CreatePluginProjectParams,
     ) -> Result<PluginProjectRow, PluginServiceError>;
+    async fn delete_project_cas(
+        &self,
+        params: &DeletePluginProjectParams,
+    ) -> Result<bool, PluginServiceError>;
     async fn link_project(
         &self,
         params: &LinkPluginProjectParams,
@@ -166,12 +175,148 @@ pub trait PluginMountDataStore: Send + Sync {
     ) -> Result<(), PluginServiceError>;
 }
 
+#[async_trait]
+pub trait PluginSourceStorePort: Send + Sync {
+    async fn create_project(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+        request: &nomifun_api_types::CreatePluginProjectRequest,
+    ) -> Result<CreatedPluginSource, PluginServiceError>;
+
+    async fn delete_project(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+    ) -> Result<(), PluginServiceError>;
+}
+
 pub struct FsPluginArtifactStore {
     store: PluginArtifactStore,
 }
 
 pub struct FsPluginMountDataStore {
     root: std::path::PathBuf,
+}
+
+pub struct FsPluginSourceStore {
+    store: SourceStore,
+    resolver: NpmResolverIdentity,
+}
+
+impl FsPluginSourceStore {
+    pub fn new(
+        root: impl AsRef<Path>,
+        limits: SourceStoreLimits,
+    ) -> Result<Self, PluginServiceError> {
+        let store = SourceStore::new(root, limits).map_err(|error| {
+            PluginServiceError::integration(format!(
+                "cannot initialize Plugin Source Store: {error}"
+            ))
+        })?;
+        let resolver = NpmResolverIdentity::new("nomifun-npm", "1.0.0").map_err(|error| {
+            PluginServiceError::integration(format!(
+                "cannot initialize Plugin dependency resolver identity: {error}"
+            ))
+        })?;
+        Ok(Self { store, resolver })
+    }
+
+    pub fn store(&self) -> &SourceStore {
+        &self.store
+    }
+}
+
+#[async_trait]
+impl PluginSourceStorePort for FsPluginSourceStore {
+    async fn create_project(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+        request: &nomifun_api_types::CreatePluginProjectRequest,
+    ) -> Result<CreatedPluginSource, PluginServiceError> {
+        let language = match request.language {
+            nomifun_api_types::PluginProjectLanguageDto::JavaScript => {
+                PluginLanguage::JavaScript
+            }
+            nomifun_api_types::PluginProjectLanguageDto::TypeScript => {
+                PluginLanguage::TypeScript
+            }
+        };
+        let scope = SourceScope::new(
+            UserId::from(owner_user_id.to_owned()),
+            PluginProjectId::from(project_id.to_owned()),
+        )
+        .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+        let scaffold = self
+            .store
+            .create_plugin_project(
+                scope.clone(),
+                &PluginScaffoldRequest {
+                    package_id: request.package_id.clone(),
+                    package_version: request.package_version.clone(),
+                    display_name: request.display_name.clone(),
+                    description: request.description.clone(),
+                    language,
+                },
+                &NeverCancel,
+            )
+            .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+        let capture = scaffold.capture();
+        let prepared = (|| {
+            if !capture.dependency_requests().dependencies().is_empty() {
+                return Err(PluginServiceError::integration(
+                    "initial Plugin scaffold cannot contain dependencies before the N1 resolver is wired",
+                ));
+            }
+            let lock = ExactDependencyLock::empty(
+                capture.dependency_requests(),
+                self.resolver.clone(),
+            )
+            .map_err(|error| PluginServiceError::integration(error.to_string()))?;
+            let lock_digest = self
+                .store
+                .write_initial_dependency_lock(
+                    &scope,
+                    capture.snapshot(),
+                    &lock,
+                    &NeverCancel,
+                )
+                .map_err(|error| PluginServiceError::integration(error.to_string()))?;
+            Ok(lock_digest)
+        })();
+        let lock_digest = match prepared {
+            Ok(lock_digest) => lock_digest,
+            Err(error) => {
+                self.store.delete_project(&scope).map_err(|cleanup| {
+                    PluginServiceError::integration(format!(
+                        "Plugin Source preparation failed with {error}; cleanup failed with {cleanup}"
+                    ))
+                })?;
+                return Err(error);
+            }
+        };
+        Ok(CreatedPluginSource {
+            managed_relative_path: scaffold.project().managed_relative_path().to_owned(),
+            source_snapshot_digest: capture.snapshot().digest().as_ref().to_owned(),
+            dependency_lock_digest: lock_digest.as_ref().to_owned(),
+        })
+    }
+
+    async fn delete_project(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+    ) -> Result<(), PluginServiceError> {
+        let scope = SourceScope::new(
+            UserId::from(owner_user_id.to_owned()),
+            PluginProjectId::from(project_id.to_owned()),
+        )
+        .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+        self.store
+            .delete_project(&scope)
+            .map_err(|error| PluginServiceError::integration(error.to_string()))
+    }
 }
 
 impl FsPluginMountDataStore {
@@ -697,6 +842,13 @@ impl PluginRepository for DbPluginRepositoryAdapter {
         params: &CreatePluginProjectParams,
     ) -> Result<PluginProjectRow, PluginServiceError> {
         Ok(self.inner.create_project(params).await?)
+    }
+
+    async fn delete_project_cas(
+        &self,
+        params: &DeletePluginProjectParams,
+    ) -> Result<bool, PluginServiceError> {
+        Ok(self.inner.delete_project_cas(params).await?)
     }
 
     async fn link_project(

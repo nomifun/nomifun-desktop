@@ -19,6 +19,8 @@ pub struct PluginProjectRow {
     pub project_id: String,
     pub owner_user_id: String,
     pub package_id: String,
+    pub display_name: String,
+    pub description: String,
     pub managed_source_path: Option<String>,
     pub source_head_digest: Option<String>,
     pub dependency_lock_digest: Option<String>,

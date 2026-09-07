@@ -13,12 +13,11 @@ import { ToolsModalContentWithState } from '@/renderer/components/settings/Setti
 import { useMcpServers } from '@/renderer/hooks/mcp';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import McpMarketSettings from './McpMarketSettings';
-import PluginSettingsPanel from './PluginSettingsPanel';
 
-type McpTab = 'servers' | 'market' | 'plugins' | 'plugin-market';
+type McpTab = 'servers' | 'market';
 
 const isMcpTab = (value: string | null): value is McpTab =>
-  value === 'servers' || value === 'market' || value === 'plugins' || value === 'plugin-market';
+  value === 'servers' || value === 'market';
 
 const McpPage: React.FC = () => {
   const { t } = useTranslation();
@@ -74,12 +73,6 @@ const McpPage: React.FC = () => {
             mcpServers={mcpServers}
             addedStateLoading={isMcpServersLoading || mcpServersLoadFailed}
           />
-        </Tabs.TabPane>
-        <Tabs.TabPane key='plugins' title={t('settings.mcpPage.installedPluginsTab', { defaultValue: 'Installed Plugins' })}>
-          <PluginSettingsPanel section='installed' />
-        </Tabs.TabPane>
-        <Tabs.TabPane key='plugin-market' title={t('settings.mcpPage.pluginMarketTab', { defaultValue: 'Plugin Market' })}>
-          <PluginSettingsPanel section='market' />
         </Tabs.TabPane>
       </Tabs>
     </HubPageShell>

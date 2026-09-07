@@ -10,7 +10,8 @@ use crate::models::{
 };
 use crate::repository::plugin_n1::{
     ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
-    DeletePluginKvParams, FinishProductOperationParams, GetPluginKvParams,
+    DeletePluginKvParams, DeletePluginProjectParams, FinishProductOperationParams,
+    GetPluginKvParams,
     IPluginN1Repository, ListPluginCredentialBindingsParams, PutPluginKvParams,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
     ReplacePluginCredentialBindingsParams, RestorePluginMountParams, StartProductOperationParams,
@@ -20,6 +21,8 @@ use crate::repository::plugin_n1::{
 };
 
 const MAX_ERROR_CODE_CHARS: usize = 256;
+const MAX_PROJECT_DISPLAY_NAME_CHARS: usize = 255;
+const MAX_PROJECT_DESCRIPTION_CHARS: usize = 4_096;
 const READY_CANDIDATE_SELECT: &str = "\
     SELECT candidate.*, \
            artifact.package_id AS target_package_id, \
@@ -85,6 +88,25 @@ fn validate_optional_digest(value: Option<&str>, label: &str) -> Result<(), DbEr
 fn validate_timestamp(value: i64, label: &str) -> Result<(), DbError> {
     if value < 0 {
         return Err(conflict(format!("{label} must be non-negative")));
+    }
+    Ok(())
+}
+
+fn validate_project_metadata(display_name: &str, description: &str) -> Result<(), DbError> {
+    if display_name.trim().is_empty()
+        || display_name.chars().count() > MAX_PROJECT_DISPLAY_NAME_CHARS
+        || display_name.chars().any(char::is_control)
+    {
+        return Err(conflict(
+            "plugin project display_name must contain 1 to 255 non-control characters",
+        ));
+    }
+    if description.chars().count() > MAX_PROJECT_DESCRIPTION_CHARS
+        || description.chars().any(char::is_control)
+    {
+        return Err(conflict(
+            "plugin project description must contain at most 4096 non-control characters",
+        ));
     }
     Ok(())
 }
@@ -334,26 +356,49 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
     ) -> Result<PluginProjectRow, DbError> {
         validate_uuid(&params.project_id, "project_id")?;
         validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_project_metadata(&params.display_name, &params.description)?;
         validate_optional_digest(params.source_head_digest.as_deref(), "source_head_digest")?;
         validate_optional_digest(
             params.dependency_lock_digest.as_deref(),
             "dependency_lock_digest",
         )?;
+        let source_complete = params.managed_source_path.is_some()
+            && params.source_head_digest.is_some()
+            && params.dependency_lock_digest.is_some();
+        let empty_managed = params.managed_source_path.is_some()
+            && params.source_head_digest.is_none()
+            && params.dependency_lock_digest.is_none();
+        let runtime_only = params.managed_source_path.is_none()
+            && params.source_head_digest.is_none()
+            && params.dependency_lock_digest.is_none();
+        if !(source_complete && params.initial_build_generation == 1
+            || empty_managed && params.initial_build_generation == 0
+            || runtime_only && params.initial_build_generation == 0)
+        {
+            return Err(conflict(
+                "Plugin Project initial source and build generation are inconsistent",
+            ));
+        }
         validate_timestamp(params.created_at, "created_at")?;
         sqlx::query(
             "INSERT INTO plugin_projects (
-                project_id, owner_user_id, package_id, managed_source_path,
-                source_head_digest, dependency_lock_digest, created_at, updated_at
+                project_id, owner_user_id, package_id, display_name, description,
+                managed_source_path,
+                source_head_digest, dependency_lock_digest, build_generation,
+                created_at, updated_at
              )
-             SELECT ?, ?, ?, ?, ?, ?, ?, ?
+             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
              WHERE EXISTS (SELECT 1 FROM users WHERE user_id = ?)",
         )
         .bind(&params.project_id)
         .bind(&params.owner_user_id)
         .bind(&params.package_id)
+        .bind(&params.display_name)
+        .bind(&params.description)
         .bind(&params.managed_source_path)
         .bind(&params.source_head_digest)
         .bind(&params.dependency_lock_digest)
+        .bind(params.initial_build_generation)
         .bind(params.created_at)
         .bind(params.created_at)
         .bind(&params.owner_user_id)
@@ -402,6 +447,133 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         self.get_project(&params.project_id)
             .await?
             .ok_or_else(|| DbError::NotFound(format!("plugin project {}", params.project_id)))
+    }
+
+    async fn delete_project_cas(
+        &self,
+        params: &DeletePluginProjectParams,
+    ) -> Result<bool, DbError> {
+        validate_uuid(&params.project_id, "project_id")?;
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_timestamp(params.expected_updated_at, "expected_updated_at")?;
+        if params.expected_generation < 0 {
+            return Err(conflict("expected_generation must be non-negative"));
+        }
+        match (
+            params.expected_ready_candidate_id.as_deref(),
+            params.expected_ready_candidate_digest.as_deref(),
+        ) {
+            (Some(candidate_id), Some(candidate_digest)) => {
+                validate_uuid(candidate_id, "expected_ready_candidate_id")?;
+                validate_digest(candidate_digest, "expected_ready_candidate_digest")?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(conflict(
+                    "expected Ready Candidate identity and digest must be supplied together",
+                ));
+            }
+        }
+
+        let mut tx = self.pool.begin().await.map_err(DbError::Query)?;
+        let project = lock_project(&mut tx, &params.project_id).await?;
+        if project.owner_user_id != params.owner_user_id
+            || project.updated_at != params.expected_updated_at
+            || project.build_generation != params.expected_generation
+        {
+            return Err(conflict(
+                "plugin project owner, revision, or build generation changed",
+            ));
+        }
+        match (
+            project.ready_candidate_id.as_deref(),
+            params.expected_ready_candidate_id.as_deref(),
+            params.expected_ready_candidate_digest.as_deref(),
+        ) {
+            (None, None, None) => {}
+            (Some(actual_id), Some(expected_id), Some(expected_digest))
+                if actual_id == expected_id =>
+            {
+                let candidate = fetch_candidate_by_id(&mut tx, actual_id).await?;
+                if candidate.project_id != project.project_id
+                    || candidate.build_generation != project.build_generation
+                    || candidate.candidate_digest != expected_digest
+                {
+                    return Err(conflict(
+                        "plugin project Ready Candidate changed before deletion",
+                    ));
+                }
+            }
+            _ => {
+                return Err(conflict(
+                    "plugin project Ready Candidate changed before deletion",
+                ));
+            }
+        }
+        let running: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM product_operations
+                WHERE owner_kind = 'plugin_project'
+                  AND owner_id = ?
+                  AND state = 'running'
+            )",
+        )
+        .bind(&project.project_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+        if running {
+            return Err(conflict(
+                "plugin project has a running durable operation",
+            ));
+        }
+        if project.linked_mount_id.is_some() {
+            let installation_owner: Option<String> = sqlx::query_scalar(
+                "SELECT owner_user_id
+                 FROM installation_identity
+                 WHERE singleton_key = 'installation'",
+            )
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(DbError::Query)?;
+            if installation_owner.as_deref() != Some(project.owner_user_id.as_str()) {
+                return Err(conflict(
+                    "a linked Project can be deleted only by the installation owner",
+                ));
+            }
+        }
+        if let Some(candidate_id) = project.ready_candidate_id.as_deref() {
+            sqlx::query("DELETE FROM plugin_candidate_test_receipts WHERE candidate_id = ?")
+                .bind(candidate_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(query_error)?;
+            sqlx::query("DELETE FROM plugin_ready_candidates WHERE candidate_id = ?")
+                .bind(candidate_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(query_error)?;
+        }
+        let deleted = sqlx::query(
+            "DELETE FROM plugin_projects
+             WHERE project_id = ? AND owner_user_id = ?
+               AND updated_at = ? AND build_generation = ?
+               AND ready_candidate_id IS ?",
+        )
+        .bind(&project.project_id)
+        .bind(&project.owner_user_id)
+        .bind(project.updated_at)
+        .bind(project.build_generation)
+        .bind(project.ready_candidate_id.as_deref())
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?
+        .rows_affected();
+        if deleted != 1 {
+            return Err(conflict("plugin project deletion lost its exact CAS"));
+        }
+        tx.commit().await.map_err(DbError::Query)?;
+        Ok(true)
     }
 
     async fn start_operation(

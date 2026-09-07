@@ -126,20 +126,7 @@
   },
   "mcpPage": {
     "installedMcpTab": "Installed MCP",
-    "mcpMarketTab": "MCP Market",
-    "installedPluginsTab": "Installed Plugins",
-    "pluginMarketTab": "Plugin Market"
-  },
-  "plugins": {
-    "installedTitle": "Installed Plugins",
-    "installedDescription": "Loaded Nomi extensions and plugin packages currently available to the app.",
-    "emptyInstalled": "No installed plugins found.",
-    "stateEnabled": "Enabled",
-    "stateDisabled": "Disabled",
-    "marketTitle": "Plugin Market",
-    "marketDescription": "Browse ClawHub plugins and prepare an installation draft for review.",
-    "searchPlaceholder": "Search plugins...",
-    "emptyMarket": "Refresh to load plugin market entries."
+    "mcpMarketTab": "MCP Market"
   },
   "agentSkillImport": {
     "title": "Import from Agent",
@@ -1487,7 +1474,7 @@
   },
   "mcpHub": {
     "title": "MCP",
-    "subtitle": "Register MCP servers, browse MCP markets, and manage plugins.",
+    "subtitle": "Register MCP servers and browse MCP markets.",
     "railTitle": "MCP"
   },
   "openCapabilities": {

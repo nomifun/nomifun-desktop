@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nomifun_agent_contracts::{
-    AffectedConsumerKind, CapabilityConsumer, PluginAutoApplyEligibility,
+    AffectedConsumerKind, CandidateTestReceipt, CapabilityConsumer,
+    PluginAutoApplyEligibility,
     PluginCompatibility, PluginContractChangeKind, PluginContractDiff, PluginHostCommitFence,
     PluginMountId, PluginPackageV1Manifest, PluginProjectId, PluginReadyCandidate,
     PluginSourceLineage, PluginTargetRef,
@@ -14,7 +15,7 @@ use nomifun_api_types::{
     ApplyPluginCandidateRequest, ApplyPluginTargetDto, ConfigurePluginRequest,
     CredentialBindingStatusDto, CredentialSlotBindingDto, DurableOperationDetailDto,
     DurableOperationKindDto, DurableOperationOwnerDto, DurableOperationStateDto,
-    DurableOperationSummaryDto,
+    DurableOperationSummaryDto, JavascriptRuntimeRefDto,
     PluginAffectedConsumerDto, PluginApplyModeDto, PluginCandidateImpactDto,
     PluginCandidateOriginDto, PluginCandidateRefDto, PluginCandidateTestDto,
     PluginCandidateTestStatusDto, PluginCapabilityContributionDto, PluginCompatibilityDto,
@@ -26,9 +27,10 @@ use nomifun_api_types::{
 };
 use nomifun_db::{
     ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
+    DeletePluginProjectParams,
     FinishProductOperationParams, ListPluginCredentialBindingsParams, PluginArtifactRow,
-    PluginCandidateOrigin as DbCandidateOrigin, PluginCredentialBindingInput,
-    PluginCredentialBindingSnapshot, PluginMountRow,
+    PluginCandidateOrigin as DbCandidateOrigin, PluginCandidateTestReceiptRow,
+    PluginCredentialBindingInput, PluginCredentialBindingSnapshot, PluginMountRow,
     PluginProjectRow, PluginReadyCandidateRow, ProductOperationKind, ProductOperationRow,
     ProductOperationState, RecordPluginCandidateTestReceiptParams,
     RecordPluginReadyCandidateParams, ReplacePluginCredentialBindingsParams,
@@ -47,7 +49,7 @@ use crate::PluginServiceError;
 use crate::repository::{
     PluginArtifactStorePort, PluginBuildExecutor, PluginCandidateTestExecutor,
     PluginHostCoordinator, PluginMountDataStore, PluginOperationCancellation,
-    PluginRegistryPublisher, PluginRepository,
+    PluginRegistryPublisher, PluginRepository, PluginSourceStorePort,
 };
 use crate::types::{
     ApplyAuthorization, BuildRequest, ConfigureInput, CreateProjectInput, DeleteDataRequest,
@@ -64,6 +66,7 @@ pub struct PluginApplicationService {
     builder: Arc<dyn PluginBuildExecutor>,
     tester: Arc<dyn PluginCandidateTestExecutor>,
     operation_cancellation: Arc<dyn PluginOperationCancellation>,
+    source_store: Arc<dyn PluginSourceStorePort>,
     data_store: Arc<dyn PluginMountDataStore>,
     paths: PluginServicePaths,
 }
@@ -77,6 +80,7 @@ pub struct PluginServiceDependencies {
     pub builder: Arc<dyn PluginBuildExecutor>,
     pub tester: Arc<dyn PluginCandidateTestExecutor>,
     pub operation_cancellation: Arc<dyn PluginOperationCancellation>,
+    pub source_store: Arc<dyn PluginSourceStorePort>,
     pub data_store: Arc<dyn PluginMountDataStore>,
     pub paths: PluginServicePaths,
 }
@@ -92,6 +96,7 @@ impl PluginApplicationService {
             builder: dependencies.builder,
             tester: dependencies.tester,
             operation_cancellation: dependencies.operation_cancellation,
+            source_store: dependencies.source_store,
             data_store: dependencies.data_store,
             paths: dependencies.paths,
         }
@@ -216,7 +221,83 @@ impl PluginApplicationService {
     ) -> Result<PluginProjectDetailDto, PluginServiceError> {
         let project = self.owned_project(owner_user_id, project_id).await?;
         let candidate = self.repository.get_candidate(project_id).await?;
-        Ok(project_detail(&project, candidate.as_ref()))
+        let receipt = match candidate.as_ref() {
+            Some(candidate) => self
+                .repository
+                .get_test_receipt(&candidate.candidate_id)
+                .await?,
+            None => None,
+        };
+        let operation = self
+            .repository
+            .list_operations(owner_user_id)
+            .await?
+            .into_iter()
+            .find(|operation| {
+                operation.owner_kind == "plugin_project"
+                    && operation.owner_id == project.project_id
+                    && operation.state == "running"
+            });
+        project_detail_with_state(
+            &project,
+            candidate.as_ref(),
+            receipt.as_ref(),
+            operation.as_ref(),
+        )
+    }
+
+    pub async fn delete_project(
+        &self,
+        owner_user_id: &str,
+        request: nomifun_api_types::DeletePluginProjectRequest,
+    ) -> Result<bool, PluginServiceError> {
+        let _guard = self.project_guard(owner_user_id, &request.project_id).await?;
+        let project = self.owned_project(owner_user_id, &request.project_id).await?;
+        require_project_request_fresh(
+            &project,
+            request.expected_project_revision,
+            request.expected_build_generation,
+        )?;
+        let candidate = self.repository.get_candidate(&project.project_id).await?;
+        match (
+            candidate.as_ref(),
+            request.expected_ready_candidate_id.as_deref(),
+            request.expected_ready_candidate_digest.as_deref(),
+        ) {
+            (None, None, None) => {}
+            (Some(candidate), Some(expected_id), Some(expected_digest))
+                if candidate.candidate_id == expected_id
+                    && candidate.candidate_digest == expected_digest => {}
+            _ => {
+                return Err(PluginServiceError::stale(
+                    "Ready Candidate changed before Project deletion",
+                ));
+            }
+        }
+
+        let deleted = self
+            .repository
+            .delete_project_cas(&DeletePluginProjectParams {
+                project_id: project.project_id.clone(),
+                owner_user_id: owner_user_id.to_owned(),
+                expected_updated_at: project.updated_at,
+                expected_generation: project.build_generation,
+                expected_ready_candidate_id: request.expected_ready_candidate_id,
+                expected_ready_candidate_digest: request.expected_ready_candidate_digest,
+            })
+            .await?;
+        if deleted
+            && project.managed_source_path.is_some()
+            && let Err(error) = self
+                .source_store
+                .delete_project(owner_user_id, &project.project_id)
+                .await
+        {
+            return Err(PluginServiceError::reconcile_required(format!(
+                "Plugin Project deletion is committed; Source cleanup must be retried: {error}"
+            )));
+        }
+        Ok(deleted)
     }
 
     pub async fn get_mount(
@@ -268,12 +349,6 @@ impl PluginApplicationService {
         if inventory.library_revision != input.request.expected_library_revision {
             return Err(PluginServiceError::stale("library revision changed"));
         }
-        let display_name = input.request.display_name.trim();
-        if display_name.is_empty() {
-            return Err(PluginServiceError::invalid(
-                "project display name must not be empty",
-            ));
-        }
         let link = if let Some(mount_id) = input.request.linked_mount_id.as_deref() {
             let expected_mount_revision = input
                 .request
@@ -287,7 +362,7 @@ impl PluginApplicationService {
                     PluginServiceError::invalid("linked Mount target digest is required")
                 })?;
             let (mount, _) = self.owned_mount(&input.owner_user_id, mount_id).await?;
-            if mount.package_id != display_name {
+            if mount.package_id != input.request.package_id {
                 return Err(PluginServiceError::conflict(
                     "project and linked Mount package identities differ",
                 ));
@@ -301,21 +376,44 @@ impl PluginApplicationService {
         } else {
             None
         };
-        let mut project = self
+        let source = self
+            .source_store
+            .create_project(
+                &input.owner_user_id,
+                &project_id,
+                &input.request,
+            )
+            .await?;
+        let created = self
             .repository
             .create_project(&CreatePluginProjectParams {
                 project_id: project_id.clone(),
                 owner_user_id: input.owner_user_id.clone(),
-                package_id: display_name.to_owned(),
-                managed_source_path: Some(managed_relative_child(
-                    &self.paths.project_relative_root,
-                    &project_id,
-                )?),
-                source_head_digest: None,
-                dependency_lock_digest: None,
+                package_id: input.request.package_id.clone(),
+                display_name: input.request.display_name.clone(),
+                description: input.request.description.clone(),
+                managed_source_path: Some(source.managed_relative_path),
+                source_head_digest: Some(source.source_snapshot_digest),
+                dependency_lock_digest: Some(source.dependency_lock_digest),
+                initial_build_generation: 1,
                 created_at: now_ms(),
             })
-            .await?;
+            .await;
+        let mut project = match created {
+            Ok(project) => project,
+            Err(error) => {
+                if let Err(cleanup) = self
+                    .source_store
+                    .delete_project(&input.owner_user_id, &project_id)
+                    .await
+                {
+                    return Err(PluginServiceError::integration(format!(
+                        "Plugin Project database creation failed with {error}; Source cleanup failed with {cleanup}"
+                    )));
+                }
+                return Err(error);
+            }
+        };
         if let Some((mount_id, expected_mount_revision, expected_target_digest)) = link {
             project = self
                 .repository
@@ -330,7 +428,7 @@ impl PluginApplicationService {
                 })
                 .await?;
         }
-        Ok(project_detail(&project, None))
+        project_detail_with_state(&project, None, None, None)
     }
 
     pub async fn import_prebuilt(
@@ -412,9 +510,12 @@ impl PluginApplicationService {
                     project_id,
                     owner_user_id: owner_user_id.to_owned(),
                     package_id: package.package_id.as_ref().to_owned(),
+                    display_name: package.display.name.clone(),
+                    description: package.display.description.clone(),
                     managed_source_path: None,
                     source_head_digest: None,
                     dependency_lock_digest: None,
+                    initial_build_generation: 0,
                     created_at: now_ms(),
                 })
                 .await?
@@ -1390,34 +1491,37 @@ fn project_library(inventory: &PluginInventory) -> PluginLibraryResponseDto {
         .mounts
         .iter()
         .map(|mount| {
-            let current = mount
+            let current_artifact = mount
                 .current_artifact_digest
                 .as_deref()
                 .and_then(|digest| artifacts.get(digest).copied())
-                .map(target_dto);
+                ;
+            let current = current_artifact.map(target_dto);
             let previous = mount
                 .previous_artifact_digest
                 .as_deref()
                 .and_then(|digest| artifacts.get(digest).copied())
                 .map(target_dto);
+            let linked_project = inventory.projects.iter().find(|project| {
+                project.linked_mount_id.as_deref() == Some(mount.mount_id.as_str())
+            });
+            let package_display = current_artifact
+                .and_then(|artifact| artifact_manifest(artifact).ok())
+                .map(|manifest| manifest.package.display);
             PluginSummaryDto {
                 mount_id: mount.mount_id.clone(),
                 mount_revision: mount.revision as u64,
-                display_name: current
-                    .as_ref()
-                    .map(|target| target.package_id.clone())
+                display_name: linked_project
+                    .map(|project| project.display_name.clone())
+                    .or_else(|| package_display.as_ref().map(|display| display.name.clone()))
                     .unwrap_or_else(|| mount.package_id.clone()),
-                description: None,
+                description: linked_project
+                    .and_then(|project| (!project.description.is_empty()).then(|| project.description.clone()))
+                    .or_else(|| package_display.map(|display| display.description)),
                 lifecycle: lifecycle(mount),
                 current,
                 previous,
-                linked_project_id: inventory
-                    .projects
-                    .iter()
-                    .find(|project| {
-                        project.linked_mount_id.as_deref() == Some(mount.mount_id.as_str())
-                    })
-                    .map(|project| project.project_id.clone()),
+                linked_project_id: linked_project.map(|project| project.project_id.clone()),
                 contribution_count: 0,
                 updated_at_ms: mount.updated_at,
             }
@@ -1457,7 +1561,8 @@ fn project_summary(
     PluginProjectSummaryDto {
         project_id: project.project_id.clone(),
         project_revision: project.updated_at as u64,
-        display_name: project.package_id.clone(),
+        display_name: project.display_name.clone(),
+        description: (!project.description.is_empty()).then(|| project.description.clone()),
         linked_mount_id: project.linked_mount_id.clone(),
         source_state,
         build_generation: project.build_generation as u64,
@@ -1470,17 +1575,21 @@ fn project_summary(
     }
 }
 
-fn project_detail(
+fn project_detail_with_state(
     project: &PluginProjectRow,
     candidate: Option<&PluginReadyCandidateRow>,
-) -> PluginProjectDetailDto {
-    PluginProjectDetailDto {
+    receipt: Option<&PluginCandidateTestReceiptRow>,
+    operation: Option<&ProductOperationRow>,
+) -> Result<PluginProjectDetailDto, PluginServiceError> {
+    Ok(PluginProjectDetailDto {
         summary: project_summary(project, candidate),
         source_snapshot_digest: project.source_head_digest.clone(),
         dependency_lock_digest: project.dependency_lock_digest.clone(),
-        ready: candidate.map(candidate_dto),
-        active_operation: None,
-    }
+        ready: candidate
+            .map(|candidate| candidate_dto(candidate, receipt))
+            .transpose()?,
+        active_operation: operation.map(operation_summary),
+    })
 }
 
 fn target_dto(artifact: &PluginArtifactRow) -> PluginTargetRefDto {
@@ -1493,7 +1602,10 @@ fn target_dto(artifact: &PluginArtifactRow) -> PluginTargetRefDto {
     }
 }
 
-fn candidate_dto(candidate: &PluginReadyCandidateRow) -> PluginReadyCandidateDto {
+fn candidate_dto(
+    candidate: &PluginReadyCandidateRow,
+    receipt: Option<&PluginCandidateTestReceiptRow>,
+) -> Result<PluginReadyCandidateDto, PluginServiceError> {
     let diff = serde_json::from_str::<PluginContractDiff>(&candidate.contract_diff_json).ok();
     let compatibility = match diff.as_ref().map(|diff| &diff.compatibility) {
         Some(PluginCompatibility::Compatible) => PluginCompatibilityDto::Compatible,
@@ -1523,7 +1635,26 @@ fn candidate_dto(candidate: &PluginReadyCandidateRow) -> PluginReadyCandidateDto
                 .collect()
         })
         .unwrap_or_default();
-    PluginReadyCandidateDto {
+    let receipt = receipt
+        .map(|receipt| {
+            serde_json::from_str::<CandidateTestReceipt>(&receipt.receipt_json)
+                .map_err(|error| {
+                    PluginServiceError::integration(format!(
+                        "stored Candidate Test receipt is invalid: {error}"
+                    ))
+                })
+        })
+        .transpose()?;
+    if let Some(receipt) = &receipt {
+        receipt
+            .validate_for(&candidate_contract(candidate)?)
+            .map_err(|error| {
+                PluginServiceError::integration(format!(
+                    "stored Candidate Test receipt does not match its Candidate: {error}"
+                ))
+            })?;
+    }
+    Ok(PluginReadyCandidateDto {
         candidate: PluginCandidateRefDto {
             candidate_id: candidate.candidate_id.clone(),
             candidate_digest: candidate.candidate_digest.clone(),
@@ -1543,13 +1674,37 @@ fn candidate_dto(candidate: &PluginReadyCandidateRow) -> PluginReadyCandidateDto
         project_build_generation: candidate.build_generation as u64,
         base_target_digest: candidate.base_target_digest.clone(),
         test: PluginCandidateTestDto {
-            status: PluginCandidateTestStatusDto::NotRun,
-            receipt_id: None,
+            status: match receipt.as_ref().map(|receipt| receipt.outcome) {
+                Some(nomifun_agent_contracts::CandidateTestOutcome::Passed) => {
+                    PluginCandidateTestStatusDto::Passed
+                }
+                Some(nomifun_agent_contracts::CandidateTestOutcome::Failed) => {
+                    PluginCandidateTestStatusDto::Failed
+                }
+                Some(nomifun_agent_contracts::CandidateTestOutcome::NeedsTestInput) => {
+                    PluginCandidateTestStatusDto::NeedsTestInput
+                }
+                None => PluginCandidateTestStatusDto::NotRun,
+            },
+            receipt_id: receipt
+                .as_ref()
+                .map(|receipt| receipt.receipt_id.as_ref().to_owned()),
             candidate_id: candidate.candidate_id.clone(),
             candidate_digest: candidate.candidate_digest.clone(),
-            runtime: None,
-            resolved_test_input_digest: None,
-            issued_at_ms: None,
+            runtime: receipt.as_ref().map(|receipt| JavascriptRuntimeRefDto {
+                runtime_installation_id: receipt
+                    .runtime
+                    .runtime_installation_id
+                    .as_ref()
+                    .to_owned(),
+                node_version: receipt.runtime.node_version.as_ref().to_owned(),
+                runtime_target: receipt.runtime.runtime_target.as_ref().to_owned(),
+                executable_digest: receipt.runtime.executable_digest.as_ref().to_owned(),
+            }),
+            resolved_test_input_digest: receipt
+                .as_ref()
+                .map(|receipt| receipt.resolved_test_input_digest.as_ref().to_owned()),
+            issued_at_ms: receipt.as_ref().map(|receipt| receipt.issued_at_ms),
             error_code: None,
         },
         impact: PluginCandidateImpactDto {
@@ -1560,7 +1715,7 @@ fn candidate_dto(candidate: &PluginReadyCandidateRow) -> PluginReadyCandidateDto
             can_auto_apply: false,
             blocking_reasons: Vec::new(),
         },
-    }
+    })
 }
 
 fn affected_consumer_surface(kind: AffectedConsumerKind) -> PluginConsumerSurfaceDto {

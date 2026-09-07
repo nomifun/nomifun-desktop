@@ -34,8 +34,14 @@ pub struct ImportedPluginArtifact {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreatedPluginSource {
+    pub managed_relative_path: String,
+    pub source_snapshot_digest: String,
+    pub dependency_lock_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginServicePaths {
-    pub project_relative_root: String,
     pub mount_data_relative_root: String,
 }
 

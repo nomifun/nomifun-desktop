@@ -17,6 +17,7 @@ const AgentSessionPage = React.lazy(() => import('@renderer/pages/agentSession/A
 const SkillsSettingsPage = React.lazy(() => import('@renderer/pages/settings/SkillsSettingsPage'));
 const ModelHubPage = React.lazy(() => import('@renderer/pages/modelHub'));
 const McpPage = React.lazy(() => import('@renderer/pages/mcp'));
+const PluginWorkbenchPage = React.lazy(() => import('@renderer/pages/plugins'));
 const OpenCapabilitiesPage = React.lazy(() => import('@renderer/pages/openCapabilities'));
 const BrowserPage = React.lazy(() => import('@renderer/pages/browser'));
 const SystemSettings = React.lazy(() => import('@renderer/pages/settings/SystemSettings'));
@@ -239,6 +240,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/models' element={withRouteFallback(ModelHubPage)} />
             <Route path='/extensions' element={<LegacyExtensionsRedirect />} />
             <Route path='/mcp' element={withRouteFallback(McpPage)} />
+            <Route path='/plugins' element={withRouteFallback(PluginWorkbenchPage)} />
             <Route path='/open-capabilities' element={withRouteFallback(OpenCapabilitiesPage)} />
             <Route path='/browser' element={withRouteFallback(BrowserPage)} />
             <Route path='/skills' element={withRouteFallback(SkillsSettingsPage)} />

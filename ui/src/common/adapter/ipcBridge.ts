@@ -327,6 +327,9 @@ import {
   type RawWorkspaceFlatFile,
 } from './workspaceMapper';
 
+export { plugins } from './pluginPlatformBridge';
+export type * from '../types/pluginPlatform';
+
 // ---------------------------------------------------------------------------
 // Shell — routed to POST /api/shell/*
 // ---------------------------------------------------------------------------

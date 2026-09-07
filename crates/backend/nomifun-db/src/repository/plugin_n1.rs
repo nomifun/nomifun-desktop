@@ -28,9 +28,12 @@ pub struct CreatePluginProjectParams {
     pub project_id: String,
     pub owner_user_id: String,
     pub package_id: String,
+    pub display_name: String,
+    pub description: String,
     pub managed_source_path: Option<String>,
     pub source_head_digest: Option<String>,
     pub dependency_lock_digest: Option<String>,
+    pub initial_build_generation: i64,
     pub created_at: i64,
 }
 
@@ -41,6 +44,16 @@ pub struct UpdatePluginProjectSourceParams {
     pub source_head_digest: String,
     pub dependency_lock_digest: Option<String>,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeletePluginProjectParams {
+    pub project_id: String,
+    pub owner_user_id: String,
+    pub expected_updated_at: i64,
+    pub expected_generation: i64,
+    pub expected_ready_candidate_id: Option<String>,
+    pub expected_ready_candidate_digest: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +215,11 @@ pub trait IPluginN1Repository: Send + Sync {
         &self,
         params: &UpdatePluginProjectSourceParams,
     ) -> Result<PluginProjectRow, DbError>;
+
+    async fn delete_project_cas(
+        &self,
+        params: &DeletePluginProjectParams,
+    ) -> Result<bool, DbError>;
 
     async fn start_operation(
         &self,

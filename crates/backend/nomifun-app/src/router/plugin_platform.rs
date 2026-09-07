@@ -17,7 +17,7 @@ use nomifun_agent_platform::KernelCatalogProvider;
 use nomifun_api_types::{
     ApiResponse, ApplyPluginCandidateRequest, BuildPluginProjectRequest,
     ConfigurePluginRequest, CreatePluginProjectRequest,
-    DeletePluginDataRequest, DurableOperationDetailDto,
+    DeletePluginDataRequest, DeletePluginProjectRequest, DurableOperationDetailDto,
     DurableOperationSummaryDto, ErrorResponse, ImportPluginRequest,
     PluginDetailDto, PluginLibraryResponseDto, PluginProjectDetailDto,
     RestorePluginPreviousRequest, RetryPluginRequest,
@@ -32,6 +32,7 @@ use nomifun_js_host::{
     ExtensionHostSupervisor, JavaScriptHostConfig,
     materialize_bundled_extension_host,
 };
+use nomifun_js_authoring::SourceStoreLimits;
 use nomifun_js_kernel_adapter::{
     JsKernelPluginAdapter, PluginPackageInput,
 };
@@ -43,6 +44,7 @@ use nomifun_plugin_platform::{
 };
 use nomifun_plugin_service::{
     DbPluginRepositoryAdapter, FsPluginArtifactStore, FsPluginMountDataStore,
+    FsPluginSourceStore,
     PluginApplicationService, PluginArtifactStorePort, PluginHostCoordinator,
     PluginRegistryPublisher, PluginRepository, PluginRouterState,
     PluginServiceDependencies, PluginServiceError, PluginServicePaths,
@@ -55,7 +57,7 @@ use serde::Deserialize;
 
 const AGENT_EXECUTOR_UNAVAILABLE: &str = "CAPABILITY_UNAVAILABLE";
 const PLUGIN_PLATFORM_DIRECTORY: &str = "plugin-platform";
-const PLUGIN_PROJECT_DIRECTORY: &str = "plugin-projects";
+const PLUGIN_AUTHORING_DIRECTORY: &str = "authoring";
 const PLUGIN_MOUNT_DATA_DIRECTORY: &str = "plugin-mount-data";
 
 pub(crate) async fn build_nomi_core_plugin_state(
@@ -106,9 +108,12 @@ pub(crate) async fn build_nomi_core_plugin_state(
             operation_cancellation: Arc::new(
                 UnconfiguredPluginOperationCancellation,
             ),
+            source_store: Arc::new(FsPluginSourceStore::new(
+                platform_root.join(PLUGIN_AUTHORING_DIRECTORY),
+                SourceStoreLimits::default(),
+            )?),
             data_store: Arc::new(FsPluginMountDataStore::new(&data_root)?),
             paths: PluginServicePaths {
-                project_relative_root: PLUGIN_PROJECT_DIRECTORY.to_owned(),
                 mount_data_relative_root:
                     PLUGIN_MOUNT_DATA_DIRECTORY.to_owned(),
             },
@@ -123,7 +128,7 @@ pub(crate) fn plugin_routes(state: PluginRouterState) -> Router {
         .route("/api/plugin-projects", post(create_project))
         .route(
             "/api/plugin-projects/{project_id}",
-            get(get_project),
+            get(get_project).delete(delete_project),
         )
         .route("/api/plugin-imports", post(import_prebuilt))
         .route(
@@ -238,6 +243,21 @@ async fn get_project(
         state
             .service
             .get_project(user.id.as_str(), &project_id)
+            .await?,
+    )))
+}
+
+async fn delete_project(
+    State(state): State<PluginRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    AxumPath(project_id): AxumPath<String>,
+    Json(request): Json<DeletePluginProjectRequest>,
+) -> Result<Json<ApiResponse<bool>>, PluginHttpError> {
+    require_route_id("project_id", &project_id, &request.project_id)?;
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .delete_project(user.id.as_str(), request)
             .await?,
     )))
 }
@@ -876,8 +896,11 @@ mod tests {
     };
     use nomifun_api_types::{
         ApplyPluginCandidateRequest, ApplyPluginTargetDto,
-        ImportPluginRequest, PluginImportKindDto, UninstallPluginRequest,
+        CreatePluginProjectRequest, ImportPluginRequest,
+        PluginImportKindDto, PluginProjectLanguageDto,
+        PluginProjectSourceStateDto, UninstallPluginRequest,
     };
+    use nomifun_plugin_service::CreateProjectInput;
     use sha2::{Digest, Sha256};
     use tower::ServiceExt;
     use uuid::Uuid;
@@ -1060,6 +1083,51 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
+        let scaffolded = state
+            .service
+            .create_project(CreateProjectInput {
+                owner_user_id: owner_user_id.clone(),
+                request: CreatePluginProjectRequest {
+                    expected_library_revision: 0,
+                    package_id: "test.scaffold.plugin".into(),
+                    package_version: "0.1.0".into(),
+                    display_name: "Scaffold Plugin".into(),
+                    description: "TypeScript authoring fixture.".into(),
+                    language: PluginProjectLanguageDto::TypeScript,
+                    linked_mount_id: None,
+                    expected_linked_mount_revision: None,
+                    expected_linked_target_digest: None,
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            scaffolded.summary.source_state,
+            PluginProjectSourceStateDto::Editable
+        );
+        assert!(scaffolded.source_snapshot_digest.is_some());
+        assert!(scaffolded.dependency_lock_digest.is_some());
+        let managed_source_path: String = sqlx::query_scalar(
+            "SELECT managed_source_path FROM plugin_projects WHERE project_id = ?",
+        )
+        .bind(&scaffolded.summary.project_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        let source_root = data_root
+            .path()
+            .join(PLUGIN_PLATFORM_DIRECTORY)
+            .join(PLUGIN_AUTHORING_DIRECTORY)
+            .join(managed_source_path);
+        assert!(source_root.join("src/main.ts").is_file());
+        assert!(
+            source_root
+                .parent()
+                .unwrap()
+                .join("dependency-lock.json")
+                .is_file()
+        );
+
         let main = br#"
             export async function activate() {
               return {
@@ -1079,7 +1147,12 @@ mod tests {
             .import_prebuilt(
                 &owner_user_id,
                 ImportPluginRequest {
-                    expected_library_revision: 0,
+                    expected_library_revision: state
+                        .service
+                        .list_library(&owner_user_id)
+                        .await
+                        .unwrap()
+                        .library_revision,
                     import_kind:
                         PluginImportKindDto::PrebuiltArtifact,
                     source_path: source.display().to_string(),

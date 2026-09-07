@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::canonical::{canonical_json_bytes, strict_json_from_slice};
+use crate::dependency::ExactDependencyLock;
 use crate::error::{AuthoringError, io_error};
 use crate::model::{OperationCancellation, SourceScope, SourceStoreLimits, check_canceled};
 use crate::scaffold::{PluginScaffoldRequest, render_plugin_scaffold};
@@ -16,7 +17,9 @@ const PROJECTS_DIRECTORY: &str = "projects";
 const SOURCE_DIRECTORY: &str = "source";
 const STAGING_DIRECTORY: &str = ".staging";
 const SCOPE_RECORD_FILE: &str = "scope.json";
+const DEPENDENCY_LOCK_FILE: &str = "dependency-lock.json";
 const SCOPE_RECORD_VERSION: &str = "1.0.0";
+const MAX_DEPENDENCY_LOCK_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct SourceStore {
@@ -174,6 +177,86 @@ impl SourceStore {
     ) -> Result<CapturedSource, AuthoringError> {
         let project = self.load_project(scope)?;
         capture_source_tree(&project.source_root, self.limits, cancellation)
+    }
+
+    pub fn write_initial_dependency_lock(
+        &self,
+        scope: &SourceScope,
+        expected_source: &SourceSnapshot,
+        lock: &ExactDependencyLock,
+        cancellation: &dyn OperationCancellation,
+    ) -> Result<crate::DigestHex, AuthoringError> {
+        check_canceled(cancellation)?;
+        let project = self.load_project(scope)?;
+        let captured =
+            capture_source_tree(&project.source_root, self.limits, cancellation)?;
+        if captured.snapshot() != expected_source {
+            return Err(AuthoringError::SourceChanged {
+                expected: expected_source.digest().as_ref().to_owned(),
+                observed: captured.snapshot().digest().as_ref().to_owned(),
+            });
+        }
+        lock.validate_against(captured.dependency_requests())?;
+        let bytes = canonical_json_bytes(lock)?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+            > MAX_DEPENDENCY_LOCK_BYTES
+        {
+            return Err(AuthoringError::FileTooLarge {
+                path: DEPENDENCY_LOCK_FILE.to_owned(),
+                observed: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                limit: MAX_DEPENDENCY_LOCK_BYTES,
+            });
+        }
+        write_new_synced(
+            &project.project_root.join(DEPENDENCY_LOCK_FILE),
+            &bytes,
+        )?;
+        sync_directory_if_supported(&project.project_root)?;
+        lock.digest()
+    }
+
+    pub fn load_dependency_lock(
+        &self,
+        scope: &SourceScope,
+        cancellation: &dyn OperationCancellation,
+    ) -> Result<ExactDependencyLock, AuthoringError> {
+        check_canceled(cancellation)?;
+        let project = self.load_project(scope)?;
+        let bytes = read_regular_bounded(
+            &project.project_root.join(DEPENDENCY_LOCK_FILE),
+            MAX_DEPENDENCY_LOCK_BYTES,
+        )?;
+        let lock: ExactDependencyLock = strict_json_from_slice(&bytes)?;
+        if canonical_json_bytes(&lock)? != bytes {
+            return Err(AuthoringError::InvalidDependencyLock(
+                "dependency lock must use canonical JSON".into(),
+            ));
+        }
+        let captured =
+            capture_source_tree(&project.source_root, self.limits, cancellation)?;
+        lock.validate_against(captured.dependency_requests())?;
+        Ok(lock)
+    }
+
+    pub fn delete_project(
+        &self,
+        scope: &SourceScope,
+    ) -> Result<(), AuthoringError> {
+        let project = match self.load_project(scope) {
+            Ok(project) => project,
+            Err(AuthoringError::ProjectNotFound) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let parent = project
+            .project_root
+            .parent()
+            .ok_or_else(|| AuthoringError::UnsafeManagedPath {
+                path: project.project_root.clone(),
+            })?
+            .to_path_buf();
+        fs::remove_dir_all(&project.project_root)
+            .map_err(|error| io_error(&project.project_root, error))?;
+        sync_directory_if_supported(&parent)
     }
 
     pub fn stage_snapshot(
@@ -454,7 +537,7 @@ fn verify_project_inventory(project_root: &Path) -> Result<(), AuthoringError> {
         .map(|entry| entry.map_err(|error| io_error(project_root, error)))
         .collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(|entry| entry.file_name());
-    if entries.len() != 2 {
+    if !(entries.len() == 2 || entries.len() == 3) {
         return Err(AuthoringError::UnsafeManagedPath {
             path: project_root.to_path_buf(),
         });
@@ -462,7 +545,9 @@ fn verify_project_inventory(project_root: &Path) -> Result<(), AuthoringError> {
     for entry in entries {
         let metadata =
             fs::symlink_metadata(entry.path()).map_err(|error| io_error(entry.path(), error))?;
-        let valid = if entry.file_name() == SCOPE_RECORD_FILE {
+        let valid = if entry.file_name() == SCOPE_RECORD_FILE
+            || entry.file_name() == DEPENDENCY_LOCK_FILE
+        {
             metadata.is_file() && !metadata.file_type().is_symlink()
         } else if entry.file_name() == SOURCE_DIRECTORY {
             metadata.is_dir() && !metadata.file_type().is_symlink()

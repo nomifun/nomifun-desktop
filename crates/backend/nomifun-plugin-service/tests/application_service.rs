@@ -20,13 +20,15 @@ use nomifun_agent_contracts::{
 use nomifun_api_types::{
     ApplyPluginCandidateRequest, ApplyPluginTargetDto, BuildPluginProjectRequest,
     ConfigurePluginRequest, CreatePluginProjectRequest, DeletePluginDataRequest,
+    DeletePluginProjectRequest,
     ImportPluginRequest, PluginImportKindDto, PluginLifecycleDto, PluginProjectSourceStateDto,
     PluginCandidateOriginDto, RestorePluginPreviousRequest, TestPluginCandidateRequest,
     UninstallPluginRequest,
 };
 use nomifun_db::{
     ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
-    FinishProductOperationParams, ListPluginCredentialBindingsParams, PluginArtifactRow,
+    DeletePluginProjectParams, FinishProductOperationParams,
+    ListPluginCredentialBindingsParams, PluginArtifactRow,
     PluginCandidateTestReceiptRow, PluginCredentialBindingRow, PluginCredentialBindingSnapshot,
     PluginMountRow, PluginProjectRow, PluginReadyCandidateRow, ProductOperationRow,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
@@ -35,11 +37,13 @@ use nomifun_db::{
     UpdatePluginMountConfigParams,
 };
 use nomifun_plugin_service::{
-    BuildOutput, CandidateTestOutput, ConfigureInput, CreateProjectInput, ImportedPluginArtifact,
-    LinkPluginProjectParams, PluginApplicationService, PluginArtifactStorePort, PluginBuildExecutor,
-    PluginCandidateTestExecutor, PluginHostCoordinator, PluginInventory, PluginMountDataStore,
-    PluginOperationCancellation, PluginRegistryPublisher, PluginRepository,
-    PluginServiceDependencies, PluginServiceError, PluginServicePaths, ERR_STALE,
+    BuildOutput, CandidateTestOutput, ConfigureInput, CreateProjectInput,
+    CreatedPluginSource, ImportedPluginArtifact, LinkPluginProjectParams,
+    PluginApplicationService, PluginArtifactStorePort, PluginBuildExecutor,
+    PluginCandidateTestExecutor, PluginHostCoordinator, PluginInventory,
+    PluginMountDataStore, PluginOperationCancellation, PluginRegistryPublisher,
+    PluginRepository, PluginServiceDependencies, PluginServiceError,
+    PluginServicePaths, PluginSourceStorePort, ERR_RECONCILE_REQUIRED, ERR_STALE,
 };
 use nomifun_plugin_platform::{OwnerMutationCoordinator, PluginOwnerMutationScope};
 use serde_json::json;
@@ -252,10 +256,12 @@ impl PluginRepository for FakeRepository {
             project_id: params.project_id.clone(),
             owner_user_id: params.owner_user_id.clone(),
             package_id: params.package_id.clone(),
+            display_name: params.display_name.clone(),
+            description: params.description.clone(),
             managed_source_path: params.managed_source_path.clone(),
             source_head_digest: params.source_head_digest.clone(),
             dependency_lock_digest: params.dependency_lock_digest.clone(),
-            build_generation: if params.source_head_digest.is_some() { 1 } else { 0 },
+            build_generation: params.initial_build_generation,
             linked_mount_id: None,
             ready_candidate_id: None,
             created_at: params.created_at,
@@ -264,6 +270,40 @@ impl PluginRepository for FakeRepository {
         state.projects.push(row.clone());
         state.library_revision += 1;
         Ok(row)
+    }
+
+    async fn delete_project_cas(
+        &self,
+        params: &DeletePluginProjectParams,
+    ) -> Result<bool, PluginServiceError> {
+        let mut state = self.state.lock().await;
+        let Some(index) = state.projects.iter().position(|project| {
+            project.project_id == params.project_id
+                && project.owner_user_id == params.owner_user_id
+                && project.updated_at == params.expected_updated_at
+                && project.build_generation == params.expected_generation
+        }) else {
+            return Err(PluginServiceError::stale("project delete CAS"));
+        };
+        let candidate_id = state.projects[index].ready_candidate_id.clone();
+        if candidate_id != params.expected_ready_candidate_id {
+            return Err(PluginServiceError::stale("project candidate delete CAS"));
+        }
+        state.projects.remove(index);
+        let removed_candidate_ids = state
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.project_id == params.project_id)
+            .map(|candidate| candidate.candidate_id.clone())
+            .collect::<BTreeSet<_>>();
+        state.candidates.retain(|candidate| {
+            candidate.project_id != params.project_id
+        });
+        state
+            .receipts
+            .retain(|receipt| !removed_candidate_ids.contains(&receipt.candidate_id));
+        state.library_revision += 1;
+        Ok(true)
     }
 
     async fn link_project(
@@ -869,6 +909,44 @@ struct FakeDataStore {
 }
 
 #[derive(Default)]
+struct FakeSourceStore {
+    deleted: Mutex<Vec<String>>,
+    fail_delete: bool,
+}
+
+#[async_trait]
+impl PluginSourceStorePort for FakeSourceStore {
+    async fn create_project(
+        &self,
+        _owner_user_id: &str,
+        project_id: &str,
+        _request: &CreatePluginProjectRequest,
+    ) -> Result<CreatedPluginSource, PluginServiceError> {
+        Ok(CreatedPluginSource {
+            managed_relative_path: format!(
+                "sources/owner/projects/{project_id}/source"
+            ),
+            source_snapshot_digest: "a".repeat(64),
+            dependency_lock_digest: "b".repeat(64),
+        })
+    }
+
+    async fn delete_project(
+        &self,
+        _owner_user_id: &str,
+        project_id: &str,
+    ) -> Result<(), PluginServiceError> {
+        if self.fail_delete {
+            return Err(PluginServiceError::integration(
+                "injected Source cleanup failure",
+            ));
+        }
+        self.deleted.lock().await.push(project_id.to_owned());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
 struct FakeOperationCancellation;
 
 #[async_trait]
@@ -973,6 +1051,20 @@ fn service(
     builder: Arc<dyn PluginBuildExecutor>,
     _temp: &TempDir,
 ) -> PluginApplicationService {
+    service_with_source_store(
+        repo,
+        store,
+        builder,
+        Arc::new(FakeSourceStore::default()),
+    )
+}
+
+fn service_with_source_store(
+    repo: Arc<FakeRepository>,
+    store: Arc<QueueArtifactStore>,
+    builder: Arc<dyn PluginBuildExecutor>,
+    source_store: Arc<dyn PluginSourceStorePort>,
+) -> PluginApplicationService {
     PluginApplicationService::new(PluginServiceDependencies {
         repository: repo,
         artifacts: store,
@@ -982,9 +1074,9 @@ fn service(
         builder,
         tester: Arc::new(FakeTester),
         operation_cancellation: Arc::new(FakeOperationCancellation),
+        source_store,
         data_store: Arc::new(FakeDataStore::default()),
         paths: PluginServicePaths {
-            project_relative_root: "plugin-projects".into(),
             mount_data_relative_root: "plugin-mount-data".into(),
         },
     })
@@ -1126,6 +1218,8 @@ fn project_row(
         project_id: project_id.into(),
         owner_user_id: owner.into(),
         package_id: "example.csv".into(),
+        display_name: "CSV Tools".into(),
+        description: "Read CSV files.".into(),
         managed_source_path: source.map(str::to_owned),
         source_head_digest: source.map(|_| "c".repeat(64)),
         dependency_lock_digest: source.map(|_| "d".repeat(64)),
@@ -1239,7 +1333,7 @@ fn no_builder() -> Arc<dyn PluginBuildExecutor> {
 }
 
 #[tokio::test]
-async fn create_project_is_editable_and_source_less() {
+async fn create_project_persists_the_exact_scaffold_snapshot() {
     let temp = tempfile::tempdir().unwrap();
     let repo = Arc::new(FakeRepository::default());
     let service = service(
@@ -1253,7 +1347,11 @@ async fn create_project_is_editable_and_source_less() {
             owner_user_id: "user-1".into(),
             request: CreatePluginProjectRequest {
                 expected_library_revision: 0,
-                display_name: "example.csv".into(),
+                package_id: "example.csv".into(),
+                package_version: "0.1.0".into(),
+                display_name: "CSV Tools".into(),
+                description: "Read CSV files.".into(),
+                language: nomifun_api_types::PluginProjectLanguageDto::TypeScript,
                 linked_mount_id: None,
                 expected_linked_mount_revision: None,
                 expected_linked_target_digest: None,
@@ -1263,8 +1361,112 @@ async fn create_project_is_editable_and_source_less() {
         .unwrap();
     assert_eq!(
         detail.summary.source_state,
-        PluginProjectSourceStateDto::Empty
+        PluginProjectSourceStateDto::Editable
     );
+    assert_eq!(detail.summary.display_name, "CSV Tools");
+    assert_eq!(
+        detail.summary.description.as_deref(),
+        Some("Read CSV files.")
+    );
+    assert_eq!(detail.source_snapshot_digest.unwrap(), "a".repeat(64));
+    assert_eq!(detail.dependency_lock_digest.unwrap(), "b".repeat(64));
+}
+
+#[tokio::test]
+async fn project_delete_removes_source_and_project_but_not_through_delete_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Arc::new(FakeRepository::default());
+    let source_store = Arc::new(FakeSourceStore::default());
+    let service = service_with_source_store(
+        Arc::clone(&repo),
+        Arc::new(QueueArtifactStore::new(Vec::new())),
+        no_builder(),
+        source_store.clone(),
+    );
+    let detail = service
+        .create_project(CreateProjectInput {
+            owner_user_id: "user-1".into(),
+            request: CreatePluginProjectRequest {
+                expected_library_revision: 0,
+                package_id: "example.delete".into(),
+                package_version: "0.1.0".into(),
+                display_name: "Delete Me".into(),
+                description: "Project deletion fixture.".into(),
+                language: nomifun_api_types::PluginProjectLanguageDto::JavaScript,
+                linked_mount_id: None,
+                expected_linked_mount_revision: None,
+                expected_linked_target_digest: None,
+            },
+        })
+        .await
+        .unwrap();
+    let project_id = detail.summary.project_id.clone();
+    assert!(
+        service
+            .delete_project(
+                "user-1",
+                DeletePluginProjectRequest {
+                    project_id: project_id.clone(),
+                    expected_project_revision: detail.summary.project_revision,
+                    expected_build_generation: detail.summary.build_generation,
+                    expected_ready_candidate_id: None,
+                    expected_ready_candidate_digest: None,
+                },
+            )
+            .await
+            .unwrap()
+    );
+    assert!(repo.get_project(&project_id).await.unwrap().is_none());
+    assert_eq!(source_store.deleted.lock().await.as_slice(), &[project_id]);
+    drop(temp);
+}
+
+#[tokio::test]
+async fn project_delete_reports_reconcile_required_after_authoritative_db_commit() {
+    let repo = Arc::new(FakeRepository::default());
+    let source_store = Arc::new(FakeSourceStore {
+        deleted: Mutex::new(Vec::new()),
+        fail_delete: true,
+    });
+    let service = service_with_source_store(
+        Arc::clone(&repo),
+        Arc::new(QueueArtifactStore::new(Vec::new())),
+        no_builder(),
+        source_store,
+    );
+    let detail = service
+        .create_project(CreateProjectInput {
+            owner_user_id: "user-1".into(),
+            request: CreatePluginProjectRequest {
+                expected_library_revision: 0,
+                package_id: "example.reconcile".into(),
+                package_version: "0.1.0".into(),
+                display_name: "Reconcile".into(),
+                description: "Source cleanup failure fixture.".into(),
+                language: nomifun_api_types::PluginProjectLanguageDto::TypeScript,
+                linked_mount_id: None,
+                expected_linked_mount_revision: None,
+                expected_linked_target_digest: None,
+            },
+        })
+        .await
+        .unwrap();
+    let project_id = detail.summary.project_id.clone();
+    let error = service
+        .delete_project(
+            "user-1",
+            DeletePluginProjectRequest {
+                project_id: project_id.clone(),
+                expected_project_revision: detail.summary.project_revision,
+                expected_build_generation: detail.summary.build_generation,
+                expected_ready_candidate_id: None,
+                expected_ready_candidate_digest: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), ERR_RECONCILE_REQUIRED);
+    assert!(repo.get_project(&project_id).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -1615,7 +1817,23 @@ async fn build_and_candidate_test_bind_exact_generation_and_inputs() {
         )
         .await
         .unwrap();
-    assert!(tested.ready.is_some());
+    let tested_ready = tested.ready.unwrap();
+    assert_eq!(
+        tested_ready.test.status,
+        nomifun_api_types::PluginCandidateTestStatusDto::Passed
+    );
+    assert_eq!(
+        tested_ready
+            .test
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.node_version.as_str()),
+        Some("24.8.0")
+    );
+    assert_eq!(
+        tested_ready.test.resolved_test_input_digest.as_deref(),
+        Some("9".repeat(64).as_str())
+    );
     assert_eq!(repo.snapshot().await.receipts.len(), 1);
 }
 
@@ -1644,6 +1862,16 @@ async fn operation_cancel_uses_the_product_boundary() {
         &temp,
     );
     assert_eq!(service.list_operations("user-1").await.unwrap().len(), 1);
+    assert_eq!(
+        service
+            .get_project("user-1", "project-1")
+            .await
+            .unwrap()
+            .active_operation
+            .as_ref()
+            .map(|operation| operation.operation_id.as_str()),
+        Some("operation-1")
+    );
     assert_eq!(
         service
             .get_operation("user-1", &operation.operation_id)

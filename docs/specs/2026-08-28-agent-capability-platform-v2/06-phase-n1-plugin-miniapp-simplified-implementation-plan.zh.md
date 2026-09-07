@@ -78,6 +78,20 @@
     `CARGO_MANIFEST_DIR`。`nomifun-js-authoring` 已建立统一 ID/digest 的 Source Store、
     JS/TS scaffold、source snapshot、dependency exact-lock 与 staging cleanup；npm
     resolver/cache、fixed packer 和 Build Host 继续作为 N1-4 未完成项。
+6. Plugin Project 创建已进入真实 Source Store 与 SQLite：migration 070 独立持久化
+   用户可见的 `display_name/description`，既有行只做一次性回填；Source Store 持有
+   canonical `dependency-lock.json`，数据库记录真实 Source/lock digest 与初始 generation。
+   `plugin project delete` 已接 owner/revision/generation/Ready Candidate exact CAS，
+   只删除 Project/Source/lock/Ready，不级联已安装 Mount 或运行数据。
+7. `/plugins` 已成为 Desktop Plugin 工作台入口，Library/Workshop 分别承担已安装
+   Plugin 与作者 Project；创建、预构建导入、Build、Candidate Test、Apply、Operation
+   cancel、Project 删除和 Mount 生命周期动作均使用产品 DTO 与 HTTP bridge。MCP 页面
+   只保留 MCP。该 UI 仍以真实 Build/Test executor、Runtime Manager、Config/Credential
+   编辑和 Desktop accessibility/视觉验收为关闭条件，不能因 production build 通过而
+   提前签署 `N1-U-01`。
+8. Windows 执行顺序保持不变：先关闭 N1 Plugin，再完成 M1 MiniApp，之后冻结唯一
+   `RC-WIN-01` cohort；只有该 cohort 关闭后才交接 macOS arm64 与 Linux Desktop x64。
+   本阶段不领取跨平台开发结论，也不运行手机视口。
 
 ## 0. 怎样阅读这份文档
 

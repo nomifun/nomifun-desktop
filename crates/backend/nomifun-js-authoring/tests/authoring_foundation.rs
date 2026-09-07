@@ -396,6 +396,47 @@ impl OperationCancellation for CancelWhenStagingExists {
 }
 
 #[test]
+fn dependency_lock_is_host_owned_and_project_delete_is_explicit() {
+    let (_temp, store) = fixture();
+    let scope = scope();
+    let project = store
+        .create_plugin_project(
+            scope.clone(),
+            &scaffold(PluginLanguage::JavaScript),
+            &NeverCancel,
+        )
+        .unwrap();
+    let requests = project.capture().dependency_requests();
+    let lock = ExactDependencyLock::empty(
+        requests,
+        NpmResolverIdentity::new("nomifun-npm", "1.0.0").unwrap(),
+    )
+    .unwrap();
+    let lock_digest = store
+        .write_initial_dependency_lock(
+            &scope,
+            project.capture().snapshot(),
+            &lock,
+            &NeverCancel,
+        )
+        .unwrap();
+    assert_eq!(lock_digest, lock.digest().unwrap());
+    assert_eq!(
+        store
+            .load_dependency_lock(&scope, &NeverCancel)
+            .unwrap()
+            .digest()
+            .unwrap(),
+        lock_digest
+    );
+    store.delete_project(&scope).unwrap();
+    assert!(matches!(
+        store.load_project(&scope),
+        Err(AuthoringError::ProjectNotFound)
+    ));
+}
+
+#[test]
 fn cancellation_cleans_create_and_build_staging() {
     let (_temp, store) = fixture();
     let cancellation = CancelWhenStagingExists {

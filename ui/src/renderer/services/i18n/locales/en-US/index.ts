@@ -36,6 +36,7 @@ import browser from './browser.json';
 import ssh from './ssh.json';
 import miniApps from './miniApps.json';
 import agentSettings from './agentSettings.json';
+import pluginWorkbench from './pluginWorkbench.json';
 
 export default {
   common,
@@ -71,4 +72,5 @@ export default {
   ssh,
   miniApps,
   agentSettings,
+  pluginWorkbench,
 };

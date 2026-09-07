@@ -524,6 +524,8 @@ async fn runtime_v3_schema_has_no_physical_foreign_keys_or_cascades_and_only_gua
             "trg_plugin_mount_transition_shape_guard",
             "trg_plugin_mount_updated_at_monotonic",
             "trg_plugin_project_initial_pointer_guard",
+            "trg_plugin_project_metadata_insert_guard",
+            "trg_plugin_project_metadata_update_guard",
             "trg_plugin_project_ready_candidate_update_guard",
             "trg_plugin_ready_candidate_insert_guard",
             "trg_product_operation_log_insert_guard",

@@ -44,6 +44,7 @@ import {
   SiderModelHubEntry,
   SiderNomiEntry,
   SiderOpenCapabilitiesEntry,
+  SiderPluginEntry,
   SiderRequirementsEntry,
   SiderScheduledEntry,
   SiderSectionHeader,
@@ -206,6 +207,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleCustomerServiceClick = () => navTo('/customer-service');
   const handleAgentClick = () => navTo('/agent');
   const handleSkillsClick = () => navTo('/skills');
+  const handlePluginClick = () => navTo('/plugins');
   const handleMcpClick = () => navTo('/mcp');
   const handleOpenCapabilitiesClick = () => navTo('/open-capabilities');
   const handleModelHubClick = () => navTo('/models');
@@ -426,6 +428,15 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleSkillsClick}
             />
+            {isDesktopShell() && (
+              <SiderPluginEntry
+                isMobile={isMobile}
+                isActive={pathname.startsWith('/plugins')}
+                collapsed={collapsed}
+                siderTooltipProps={siderTooltipProps}
+                onClick={handlePluginClick}
+              />
+            )}
             {/* MCP — MCP tool server configuration */}
             <SiderMcpEntry
               isMobile={isMobile}

@@ -1875,6 +1875,22 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             ],
         ),
         (
+            "trg_plugin_project_metadata_insert_guard",
+            &[
+                "BEFORE INSERT ON PLUGIN_PROJECTS",
+                "NEW.DISPLAY_NAME = '__NOMIFUN_PLUGIN_PROJECT_MIGRATION__'",
+                "RAISE(ABORT, 'PLUGIN PROJECT DISPLAY METADATA MUST BE EXPLICIT')",
+            ],
+        ),
+        (
+            "trg_plugin_project_metadata_update_guard",
+            &[
+                "BEFORE UPDATE OF DISPLAY_NAME, DESCRIPTION ON PLUGIN_PROJECTS",
+                "NEW.DISPLAY_NAME = '__NOMIFUN_PLUGIN_PROJECT_MIGRATION__'",
+                "RAISE(ABORT, 'PLUGIN PROJECT DISPLAY METADATA MUST BE EXPLICIT')",
+            ],
+        ),
+        (
             "trg_plugin_project_ready_candidate_update_guard",
             &[
                 "BEFORE UPDATE OF READY_CANDIDATE_ID ON PLUGIN_PROJECTS",
