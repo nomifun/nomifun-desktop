@@ -859,7 +859,7 @@ provider 请求误当成完整迁移或跨传输发布证明。
   不是模型、Runtime 或 execution engine。
 - pill bar 的 `+` 只打开 `/agent`。Agent 工作台的“使用 Agent / Start conversation”
   进入 `/guid` 并携带 `selectedAgentPresetId`，Guid 必须预选对应 Preset。
-- 普通 Guid 只负责会话级消息、附件和明确属于会话的 AutoWork/IDMM/summon 状态。
+- 普通 Guid 只负责会话级消息、附件和明确属于会话的 AutoWork/IDMM 状态。
   模型、能力模式、Skills 和 MCP Capability 由选中 AgentPreset 的稳定 Revision
   拥有；Guid 不提供第二套能力覆盖控件。具体 Knowledge、Workspace、MCP/Connector
   实例属于消费目标，必须在当前会话中选择，并且不同会话互不继承。

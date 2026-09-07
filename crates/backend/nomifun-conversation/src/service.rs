@@ -56,10 +56,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-/// In-session companion summon lifecycle (child module so it can reach the
-/// service's private repos; file kept separate to protect service.rs size).
-#[path = "summon.rs"]
-pub mod summon;
 #[path = "creative_studio_agent_session.rs"]
 pub mod creative_studio_agent_session;
 

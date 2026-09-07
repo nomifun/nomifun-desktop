@@ -8,9 +8,6 @@ use nomi_agent::companion_tools::{
     CompanionMemorySink, CompanionSkillContributor, CompanionSkillSink, CompanionSkillTool, ListRecentEventsTool,
     RecallMemoriesTool, SaveMemoryTool,
 };
-use nomi_agent::summon_tools::{
-    SummonContextContributor, SummonContextSink,
-};
 use nomi_agent::engine::{AgentEngine, CompletionEvidenceContext};
 use nomi_agent::knowledge_tools::{KnowledgeReadTool, KnowledgeSearchTool, KnowledgeWriteTool};
 use nomi_agent::output::OutputSink;
@@ -901,16 +898,6 @@ impl Default for NomiHostWiring {
     }
 }
 
-/// Wiring for a summoned-companion work session (spec §设计 B2/B3):
-/// read-only recall over the summoned companion's memories plus the per-turn
-/// live memory-snapshot contributor. Every write path is deliberately absent:
-/// `save_memory` is never registered under summon, the memory sink refuses
-/// writes, and the retired `propose_companion_memory` tool remains absent.
-pub struct NomiSummonWiring {
-    pub memory_sink: Arc<dyn CompanionMemorySink>,
-    pub context_sink: Arc<dyn SummonContextSink>,
-}
-
 impl NomiAgentManager {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
@@ -944,7 +931,6 @@ impl NomiAgentManager {
             knowledge_writeback_sink,
             knowledge_write_bases,
             companion_skill_sink,
-            None,
             NomiHostWiring::default(),
         )
         .await
@@ -964,7 +950,6 @@ impl NomiAgentManager {
         knowledge_writeback_sink: Option<Arc<dyn nomi_agent::knowledge_tools::KnowledgeWritebackSink>>,
         knowledge_write_bases: Vec<(nomifun_common::KnowledgeBaseId, String)>,
         companion_skill_sink: Option<Arc<dyn CompanionSkillSink>>,
-        summon_wiring: Option<NomiSummonWiring>,
         host_wiring: NomiHostWiring,
     ) -> Result<Self, AppError> {
         let runtime = AgentRuntimeState::new(conversation_id.clone(), workspace.clone(), 128);
@@ -1118,11 +1103,6 @@ impl NomiAgentManager {
 
         // Companion memory tools only touch the companion's own memory.db and
         // are registered only when the host provides that scoped sink.
-        // Summoned-companion work session (spec §设计 B): the read-only recall
-        // touches only the companion's own memory.db. `save_memory` is not
-        // registered under summon. Companion self-evolved skill registration
-        // remains conditional on the scoped host sink.
-
         // The same sink/base truth controls read-only knowledge registration
         // and its advertised prompt so those surfaces cannot drift.
         let register_knowledge_search = should_register_knowledge_search(
@@ -1227,21 +1207,6 @@ impl NomiAgentManager {
                 .registry_mut()
                 .register(Box::new(ListRecentEventsTool::new(sink)));
             debug!(conversation_id = %conversation_id, "Registered companion memory tools");
-        }
-        // Summoned-companion session (spec §设计 B2/B3): read-only recall over
-        // the summoned companion's memories and the per-turn live
-        // memory-snapshot contributor. The factory gates this
-        // to owner-authority non-companion sessions, so it never collides with
-        // the companion registration above (duplicate names would be refused
-        // by the registry anyway).
-        if let Some(summon) = summon_wiring {
-            engine
-                .registry_mut()
-                .register(Box::new(RecallMemoriesTool::new(summon.memory_sink, conversation_id.clone())));
-            engine.register_context_contributor(Arc::new(SummonContextContributor::new(
-                summon.context_sink,
-            )));
-            debug!(conversation_id = %conversation_id, "Registered summoned-companion tools + snapshot contributor");
         }
         // Companion self-evolved skills (design §7): the native `companion_skill`
         // tool resolves a learned skill's body on demand, and the per-turn
@@ -7034,65 +6999,8 @@ mod tests {
         assert_eq!(agent.status(), Some(ConversationStatus::Pending));
     }
 
-    // -- summoned-companion sessions (spec §设计 B) ----------------------------
-
-    struct StubSummonContextSink;
-
-    #[async_trait::async_trait]
-    impl SummonContextSink for StubSummonContextSink {
-        async fn resolve_context(&self) -> Option<String> {
-            Some("## 召唤的伙伴记忆（只读参考）".into())
-        }
-    }
-
-    fn stub_summon_wiring() -> NomiSummonWiring {
-        NomiSummonWiring {
-            memory_sink: Arc::new(StubCompanionSink),
-            context_sink: Arc::new(StubSummonContextSink),
-        }
-    }
-
     #[tokio::test]
-    async fn summon_session_registers_readonly_tools_never_save_memory() {
-        // Read-only boundary (spec §B3): a summoned work session gets recall
-        // only, and must NEVER see the direct-write save_memory, the retired
-        // propose_companion_memory, or the companion-only list_recent_events.
-        let agent = NomiAgentManager::new_with_host_wiring(
-            "conv-summon".into(),
-            "/project".into(),
-            make_test_config(),
-            None,
-            None,
-            None,
-            None,
-            Vec::new(),
-            None,
-            None,
-            Vec::new(),
-            None,
-            Some(stub_summon_wiring()),
-            NomiHostWiring::default(),
-        )
-        .await
-        .unwrap();
-        let names = agent.engine.lock().await.tool_names();
-        assert!(names.iter().any(|n| n == "recall_memories"), "{names:?}");
-        assert!(
-            !names.iter().any(|n| n == "propose_companion_memory"),
-            "the retired propose tool must never come back: {names:?}"
-        );
-        assert!(
-            !names.iter().any(|n| n == "save_memory"),
-            "save_memory must never be registered under summon: {names:?}"
-        );
-        assert!(!names.iter().any(|n| n == "list_recent_events"), "{names:?}");
-        // Summoned work sessions are still ordinary work sessions: the
-        // companion no-distill red line does NOT apply to them.
-        assert!(agent.distill_dir_for_test().is_some());
-    }
-
-    #[tokio::test]
-    async fn plain_session_has_no_summon_tools() {
+    async fn plain_session_has_no_companion_memory_tools() {
         let agent = NomiAgentManager::new(
             "conv-plain".into(),
             "/project".into(),
@@ -7111,6 +7019,8 @@ mod tests {
         .unwrap();
         let names = agent.engine.lock().await.tool_names();
         assert!(!names.iter().any(|n| n == "recall_memories"), "{names:?}");
+        assert!(!names.iter().any(|n| n == "save_memory"), "{names:?}");
+        assert!(!names.iter().any(|n| n == "list_recent_events"), "{names:?}");
         assert!(!names.iter().any(|n| n == "propose_companion_memory"), "{names:?}");
     }
 

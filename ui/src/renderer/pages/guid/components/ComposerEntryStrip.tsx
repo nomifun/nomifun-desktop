@@ -4,15 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ApplicationOne, EveryUser } from '@icon-park/react';
+import { ApplicationOne } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import styles from '../index.module.css';
 
 export interface ComposerEntryStripProps {
-  /** Companion draft entry for the new Session. */
-  onSummonCompanion?: () => void;
-  summonedCompanionName?: string | null;
   /** Mini-app entry. Omit to hide this capability on a surface. */
   onCreateMiniApp?: () => void;
   miniAppActive?: boolean;
@@ -24,28 +21,11 @@ export interface ComposerEntryStripProps {
  * authoring is intentionally not embedded in the quick-start surface.
  */
 const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
-  onSummonCompanion,
-  summonedCompanionName,
   onCreateMiniApp,
   miniAppActive = false,
   onDismissMiniApp,
 }) => {
   const { t } = useTranslation();
-  const summonEntry = onSummonCompanion ? (
-    <button
-      type='button'
-      className={`${styles.entryButton} ${styles.entryButtonInteractive}`}
-      onClick={onSummonCompanion}
-      aria-label={t('conversation.summon.buttonTooltip')}
-      data-testid='guid-summon-entry'
-    >
-      <EveryUser theme='outline' size={15} fill='currentColor' />
-      <span className={styles.entryButtonText}>
-        {summonedCompanionName || t('conversation.summon.button')}
-      </span>
-    </button>
-  ) : null;
-
   const miniAppEntry = !onCreateMiniApp ? null : miniAppActive ? (
     <span
       className={`${styles.entryButton} ${styles.entryButtonActive} ${styles.entryPersonaButton}`}
@@ -77,9 +57,10 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
     </button>
   );
 
+  if (!miniAppEntry) return null;
+
   return (
     <div className={styles.entryStrip}>
-      {summonEntry}
       {miniAppEntry}
     </div>
   );

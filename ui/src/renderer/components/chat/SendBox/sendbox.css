@@ -436,7 +436,6 @@
   }
 
   .sendbox-responsive-config-group .nomi-sendbox-model-btn,
-  .sendbox-responsive-config-group .nomi-sendbox-summon-btn,
   .sendbox-responsive-config-group .nomi-sendbox-policy-btn {
     width: auto !important;
     min-width: 28px !important;
@@ -453,7 +452,6 @@
   }
 
   .sendbox-responsive-config-group .nomi-sendbox-model-btn .arco-btn-content,
-  .sendbox-responsive-config-group .nomi-sendbox-summon-btn .arco-btn-content,
   .sendbox-responsive-config-group .nomi-sendbox-policy-btn .arco-btn-content {
     display: inline-flex !important;
     align-items: center !important;
@@ -461,10 +459,6 @@
     width: 100% !important;
     min-width: 0 !important;
     overflow: visible !important;
-  }
-
-  .sendbox-responsive-config-group .nomi-sendbox-summon-btn .arco-btn-icon {
-    margin: 0 !important;
   }
 }
 
@@ -488,8 +482,6 @@
   @container sendbox-config (max-width: 560px) {
     .sendbox-responsive-config-group .nomi-sendbox-model-btn:hover,
     .sendbox-responsive-config-group .nomi-sendbox-model-btn:focus-visible,
-    .sendbox-responsive-config-group .nomi-sendbox-summon-btn:hover,
-    .sendbox-responsive-config-group .nomi-sendbox-summon-btn:focus-visible,
     .sendbox-responsive-config-group .nomi-sendbox-policy-btn:hover,
     .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible {
       width: auto !important;
@@ -505,8 +497,6 @@
     .sendbox-responsive-config-group .nomi-sendbox-model-btn:hover .sendbox-responsive-chevron,
     .sendbox-responsive-config-group .nomi-sendbox-model-btn:focus-visible .sendbox-responsive-label,
     .sendbox-responsive-config-group .nomi-sendbox-model-btn:focus-visible .sendbox-responsive-chevron,
-    .sendbox-responsive-config-group .nomi-sendbox-summon-btn:hover .sendbox-responsive-label,
-    .sendbox-responsive-config-group .nomi-sendbox-summon-btn:focus-visible .sendbox-responsive-label,
     .sendbox-responsive-config-group .nomi-sendbox-policy-btn:hover .sendbox-responsive-label,
     .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible .sendbox-responsive-label {
       display: inline-flex !important;

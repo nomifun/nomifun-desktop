@@ -28,7 +28,7 @@ describe('mini-app composer entry wiring', () => {
     // IconPark: plain named import, never aliased or namespaced.
     expect(
       entryStrip.includes(
-        "import { ApplicationOne, EveryUser } from '@icon-park/react'"
+        "import { ApplicationOne } from '@icon-park/react'"
       )
     ).toBe(true);
   });

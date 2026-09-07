@@ -9,7 +9,7 @@ import type { CapabilityIconItem } from '@/renderer/components/capability/Capabi
 import { CAPABILITY_COLORS } from '@/renderer/components/capability/CapabilityIcon';
 import { AUTOWORK_STATUS_COLOR, IDMM_STATUS_COLOR } from '@/renderer/components/capability/capabilityStatusColors';
 import { renderIdmmCapabilityIcon } from '@/renderer/components/capability/idmmCapabilityIcon';
-import { AlarmClock, EveryUser, Robot } from '@icon-park/react';
+import { AlarmClock, Robot } from '@icon-park/react';
 import type { TFunction } from 'i18next';
 
 /** Capability icon size inside the 34px session row (status dots beside it are 6px). */
@@ -24,30 +24,19 @@ export interface SessionCapabilityStates {
   autoworkState?: AutoWorkRunState;
   /** IDMM run state when enabled (undefined = not enabled / unknown). */
   idmmState?: IdmmRunState;
-  /** In-session companion summon marker (`extra.summon` present, 设计 B5). */
-  summoned?: boolean;
 }
 
 /**
  * Session-level capability markers for the trailing CapabilityIconCluster, in
- * fixed order: 召唤伙伴 → 定时任务 → 自动工作 → 智能决策. Shared by
+ * fixed order: 定时任务 → 自动工作 → 智能决策. Shared by
  * ConversationRow and TerminalRow so both rows keep identical icons, palette,
  * and tooltip wording. Cron 'unread' carries the red badge dot.
  */
 export const buildSessionCapabilityItems = (
   t: TFunction,
-  { cronStatus = 'none', autoworkState, idmmState, summoned }: SessionCapabilityStates
+  { cronStatus = 'none', autoworkState, idmmState }: SessionCapabilityStates
 ): CapabilityIconItem[] => {
   const items: CapabilityIconItem[] = [];
-
-  if (summoned) {
-    items.push({
-      key: 'summon',
-      icon: <EveryUser theme='outline' size={CAPABILITY_ICON_SIZE} fill='currentColor' />,
-      color: CAPABILITY_COLORS.primary,
-      title: t('conversation.summon.sidebarBadge'),
-    });
-  }
 
   if (cronStatus !== 'none') {
     items.push({
