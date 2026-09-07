@@ -12591,6 +12591,10 @@
           "schema_version": {
             "type": "string"
           },
+          "schemas": {
+            "additionalProperties": true,
+            "type": "object"
+          },
           "supported_targets": {
             "items": {
               "type": "string"
@@ -12604,6 +12608,7 @@
           "build_profile",
           "build_profile_version",
           "package",
+          "schemas",
           "supported_targets",
           "minimum_node_major",
           "dependency_lock_digest",
@@ -13670,6 +13675,10 @@
       "schema_version": {
         "type": "string"
       },
+      "schemas": {
+        "additionalProperties": true,
+        "type": "object"
+      },
       "supported_targets": {
         "items": {
           "type": "string"
@@ -13683,6 +13692,7 @@
       "build_profile",
       "build_profile_version",
       "package",
+      "schemas",
       "supported_targets",
       "minimum_node_major",
       "dependency_lock_digest",

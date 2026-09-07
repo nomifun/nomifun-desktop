@@ -21,10 +21,14 @@ use axum::{Extension, Json, Router};
 use dashmap::DashMap;
 use futures_util::FutureExt;
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
-use nomifun_ai_agent::{AgentRuntimeRegistry, AgentStreamEvent};
+use nomifun_ai_agent::{
+    AgentRuntimeRegistry, AgentStreamEvent, KernelNomiPluginToolSession,
+    NomiPluginToolSchemaResolver, NomiPluginToolSession,
+    NomiPluginToolSessionProvider, NomiPluginToolSessionRequest,
+};
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata,
-    OperationId, PrincipalRef, RemoteBindingProvenance,
+    OperationId, PrincipalRef, RemoteBindingProvenance, ScopeKey, UserId,
 };
 use nomifun_agent_control_plane::{
     AgentControlPlane, AuthenticatedOwner, ControlPlaneError,
@@ -58,6 +62,10 @@ use nomifun_db::{
 use nomifun_db::models::{MessageRow, NomiRemoteEventRow, NomiRemoteSessionRow};
 use nomifun_agent_session::{
     MessageProjection, SessionHeadProjection, SessionObservation,
+};
+use nomifun_agent_kernel::{
+    AgentPresetCompiler, CompileRequest, CompiledSnapshot,
+    CompilerEnvironment, KernelRegistry,
 };
 use nomifun_auth::{
     CurrentUser, InstanceTokenValidator, JwtService, extract_token_from_headers,
@@ -229,6 +237,200 @@ impl NomiCoreSessionOwner {
             )));
         }
         Ok((row.extra, extra))
+    }
+}
+
+/// App-owned bridge from a Conversation-backed Nomi session to one exact
+/// Kernel-backed Plugin Tool session.
+///
+/// It resolves every authority fact from the persisted owner/session/binding
+/// chain. The runtime registry supplies only the first-class owner and
+/// conversation IDs; no `extra` field is interpreted as Mount, Artifact,
+/// action, schema, or activation authority.
+pub(crate) struct NomiCorePluginToolSessionProvider {
+    session_owner: Arc<NomiCoreSessionOwner>,
+    control_plane: Arc<AgentControlPlane>,
+    kernel: Arc<KernelRegistry>,
+    compiler_environment: CompilerEnvironment,
+    schema_resolver: Arc<dyn NomiPluginToolSchemaResolver>,
+}
+
+impl NomiCorePluginToolSessionProvider {
+    pub(crate) fn new(
+        session_owner: Arc<NomiCoreSessionOwner>,
+        control_plane: Arc<AgentControlPlane>,
+        kernel: Arc<KernelRegistry>,
+        compiler_environment: CompilerEnvironment,
+        schema_resolver: Arc<dyn NomiPluginToolSchemaResolver>,
+    ) -> Self {
+        Self {
+            session_owner,
+            control_plane,
+            kernel,
+            compiler_environment,
+            schema_resolver,
+        }
+    }
+}
+
+#[async_trait]
+impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
+    async fn resolve(
+        &self,
+        request: NomiPluginToolSessionRequest,
+    ) -> Result<Option<NomiPluginToolSession>, AppError> {
+        let common_owner = nomifun_common::UserId::parse(
+            request.owner_id.clone(),
+        )
+        .map_err(|error| {
+            AppError::Forbidden(format!(
+                "invalid Nomi Plugin Tool session owner: {error}"
+            ))
+        })?;
+        let session_id = parse_agent_session_id(&request.conversation_id)
+            .map_err(|error| AppError::Conflict(error.message))?;
+        let response = self
+            .session_owner
+            .get_session(common_owner.as_ref(), session_id.as_ref())
+            .await?;
+        if response.extra.get(NOMI_CORE_SESSION_METADATA_KEY).is_none() {
+            return Ok(None);
+        }
+        let owner = AuthenticatedOwner(UserId::from(
+            common_owner.as_ref().to_owned(),
+        ));
+        let metadata =
+            session_metadata(&response, &owner).map_err(|error| {
+                AppError::Conflict(error.message)
+            })?;
+        let binding_dto =
+            agent_binding_dto(&metadata.binding).map_err(|error| {
+                AppError::Conflict(error.message)
+            })?;
+        let (binding, revision, snapshot) = self
+            .control_plane
+            .saved_binding_artifacts(&owner.0, &binding_dto)
+            .await
+            .map_err(control_plane_error_to_app)?;
+        if binding != metadata.binding {
+            return Err(AppError::Conflict(
+                "Nomi Plugin Tool Session binding differs from the persisted Conversation binding"
+                    .to_owned(),
+            ));
+        }
+        let principal = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: common_owner.as_ref().to_owned(),
+        };
+        let compiled = compile_nomi_plugin_snapshot(
+            &self.kernel,
+            &self.compiler_environment,
+            binding,
+            revision,
+            snapshot,
+            &principal,
+        )?;
+        KernelNomiPluginToolSession::materialize(
+            Arc::clone(&self.kernel),
+            Arc::new(compiled),
+            principal,
+            session_id,
+            ScopeKey::from(format!(
+                "session:{}",
+                request.conversation_id
+            )),
+            Arc::clone(&self.schema_resolver),
+        )
+        .await
+        .map(Some)
+        .map_err(|error| {
+            AppError::Conflict(format!(
+                "Nomi Plugin Tool session materialization failed: {error}"
+            ))
+        })
+    }
+}
+
+fn compile_nomi_plugin_snapshot(
+    kernel: &KernelRegistry,
+    compiler_environment: &CompilerEnvironment,
+    binding: AgentBindingValue,
+    revision: nomifun_agent_contracts::AgentPresetRevision,
+    persisted: nomifun_agent_contracts::ResolvedSnapshotEnvelope,
+    principal: &PrincipalRef,
+) -> Result<CompiledSnapshot, AppError> {
+    if binding.preset_revision_ref != revision.reference
+        || binding.resolved_snapshot_ref != persisted.snapshot_ref
+        || persisted.content.preset_revision_ref != revision.reference
+        || persisted.actor != *principal
+    {
+        return Err(AppError::Conflict(
+            "Nomi Plugin Tool Binding/Revision/Snapshot identity chain is inconsistent"
+                .to_owned(),
+        ));
+    }
+    let registry = kernel.snapshot().map_err(kernel_error_to_app)?;
+    let mut environment = compiler_environment.clone();
+    environment.required_runtime_protocol_version = persisted
+        .content
+        .required_runtime_protocol_version
+        .clone();
+    environment.required_runtime_profile =
+        persisted.content.required_runtime_profile;
+    environment.runtime_feature_inventory_digest =
+        persisted.content.runtime_feature_inventory_digest.clone();
+    environment.canonical_schema_manifest_digest =
+        persisted.content.canonical_schema_manifest_digest.clone();
+    environment.target_contribution_manifest_digest =
+        persisted.content.target_contribution_manifest_digest.clone();
+    environment.host_surface = persisted.surface.clone();
+    environment.availability_evidence_revision =
+        persisted.availability_evidence_revision.clone();
+    let compiled = AgentPresetCompiler::compile(
+        &registry,
+        &environment,
+        CompileRequest {
+            revision,
+            principal: principal.clone(),
+            scene: persisted.scene.clone(),
+            surface: persisted.surface.clone(),
+            audience: persisted.audience.clone(),
+            created_at_ms: persisted.created_at_ms,
+            resolver_run_id: persisted.resolver_run_id.clone(),
+        },
+    )
+    .map_err(kernel_error_to_app)?;
+    if compiled.envelope != persisted {
+        return Err(AppError::Conflict(
+            "current Kernel compilation differs from the persisted Nomi resolved Snapshot"
+                .to_owned(),
+        ));
+    }
+    CompiledSnapshot {
+        envelope: persisted,
+        ..compiled
+    }
+    .with_target_resource_bindings(principal, binding.typed_resource_bindings)
+    .map_err(kernel_error_to_app)
+}
+
+fn kernel_error_to_app(error: nomifun_agent_kernel::KernelError) -> AppError {
+    AppError::Conflict(format!("Nomi Plugin Tool Kernel admission failed: {error}"))
+}
+
+fn control_plane_error_to_app(
+    error: nomifun_agent_control_plane::ControlPlaneError,
+) -> AppError {
+    let message = format!("{}: {error}", error.code().as_ref());
+    match error.status() {
+        StatusCode::BAD_REQUEST => AppError::BadRequest(message),
+        StatusCode::FORBIDDEN => AppError::Forbidden(message),
+        StatusCode::NOT_FOUND => AppError::NotFound(message),
+        StatusCode::CONFLICT => AppError::Conflict(message),
+        StatusCode::UNPROCESSABLE_ENTITY => {
+            AppError::UnprocessableEntity(message)
+        }
+        _ => AppError::Internal(message),
     }
 }
 

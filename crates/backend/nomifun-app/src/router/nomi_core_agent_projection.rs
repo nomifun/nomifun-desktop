@@ -15,6 +15,7 @@ use nomifun_agent_contracts::{
 use nomifun_api_types::{
     AgentKnowledgePolicy, AgentResolvedSnapshot, CreateConversationRequest, ExecutionModelRef,
 };
+use nomifun_ai_agent::NomiPluginToolSession;
 use nomifun_common::{AgentType, AppError, ProviderWithModel, UserId};
 use serde_json::json;
 
@@ -73,6 +74,39 @@ pub fn project_saved_artifacts(
     })
 }
 
+/// Project one exact saved binding with a host-materialized Plugin Tool set.
+///
+/// The dynamic set is already bound to the same immutable Snapshot and shared
+/// Kernel. This function only merges its stable provider names into Nomi's
+/// presentation policy; it never resolves a Catalog or accepts action schema
+/// from a request.
+#[allow(dead_code)] // Activated when the app composition installs the session provider.
+pub fn project_saved_artifacts_with_plugin_tools(
+    owner: &UserId,
+    binding: AgentBindingValue,
+    revision: AgentPresetRevision,
+    snapshot: ResolvedSnapshotEnvelope,
+    title: Option<&str>,
+    plugin_tools: &NomiPluginToolSession,
+) -> Result<NomiCoreSavedBindingProjection, AppError> {
+    let projection = project_with_plugin_tools(
+        ProjectionInput {
+            owner,
+            binding: &binding,
+            revision: &revision,
+            snapshot: &snapshot,
+            title,
+        },
+        plugin_tools,
+    )?;
+    Ok(NomiCoreSavedBindingProjection {
+        binding,
+        revision,
+        snapshot,
+        projection,
+    })
+}
+
 /// Validate the canonical identity chain and project a saved Agent Preset to
 /// the current Nomi conversation request.
 ///
@@ -82,9 +116,39 @@ pub fn project_saved_artifacts(
 /// companion, workpath, or automation binding.
 #[allow(dead_code)] // The typed seam is retained for a future native Nomi adapter.
 pub fn project(input: ProjectionInput<'_>) -> Result<NomiCoreAgentProjection, AppError> {
+    project_internal(input, None)
+}
+
+#[allow(dead_code)] // Activated when the app composition installs the session provider.
+pub fn project_with_plugin_tools(
+    input: ProjectionInput<'_>,
+    plugin_tools: &NomiPluginToolSession,
+) -> Result<NomiCoreAgentProjection, AppError> {
+    if plugin_tools.resolved_snapshot_ref() != &input.snapshot.snapshot_ref {
+        return Err(AppError::Conflict(
+            "Nomi Plugin Tool set is bound to a different resolved Snapshot"
+                .to_owned(),
+        ));
+    }
+    project_internal(input, Some(plugin_tools))
+}
+
+fn project_internal(
+    input: ProjectionInput<'_>,
+    plugin_tools: Option<&NomiPluginToolSession>,
+) -> Result<NomiCoreAgentProjection, AppError> {
     validate_identity_chain(&input)?;
     let route = exact_chat_route(input.revision, input.snapshot)?;
-    let capability_tools = project_capabilities(input.revision)?;
+    let capability_tools = project_capabilities_with_dynamic(
+        input.revision,
+        |capability_id, deferred| {
+            plugin_tools
+                .map(|tools| {
+                    tools.provider_names_for(capability_id, deferred)
+                })
+                .unwrap_or_default()
+        },
+    )?;
     project_revision_parts(
         input.revision,
         input.title,
@@ -286,10 +350,11 @@ impl ProjectedCapabilityTools {
     }
 }
 
-/// The Nomi-core host projection is deliberately explicit. A capability may
-/// either map to one or more native Nomi tools, or be a host-only declaration
-/// consumed by the conversation/session boundary. Everything else is
-/// unavailable until a real Nomi owner is implemented.
+/// Built-in Nomi adapter projection.
+///
+/// This table owns only native/host projections. Ordinary Plugin Tool actions
+/// are supplied from an exact Snapshot-bound dynamic set and must not be added
+/// here as capability-specific compatibility entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NomiCapabilityProjection {
     Tools(&'static [&'static str]),
@@ -303,10 +368,9 @@ pub(crate) enum NomiCapabilityProjection {
 
 /// Return the Nomi-core projection for one canonical capability identity.
 ///
-/// This function is also the availability authority used by the app-local
-/// control-plane adapter. Keeping the table next to the actual request
-/// projection prevents a catalog entry from claiming support that the Nomi
-/// runtime cannot execute.
+/// The app-local control-plane currently uses this as its native fallback
+/// check. It is not an availability authority for dynamically materialized
+/// Plugin actions.
 pub(crate) fn nomi_capability_projection(
     capability_id: &str,
 ) -> Result<NomiCapabilityProjection, AppError> {
@@ -431,20 +495,85 @@ pub(crate) fn validate_nomi_capability_projection(
         .initial_capabilities
         .iter()
         .try_for_each(|selection| {
-            nomi_capability_projection(selection.capability.id.as_ref()).map(|_| ())
+            validate_native_capability_if_declared(
+                selection.capability.id.as_ref(),
+            )
         })?;
     revision
         .payload
         .on_demand_capabilities
         .iter()
         .try_for_each(|selection| {
-            nomi_capability_projection(selection.capability.id.as_ref()).map(|_| ())
+            validate_native_capability_if_declared(
+                selection.capability.id.as_ref(),
+            )
         })?;
     Ok(())
 }
 
-fn project_capabilities(
+fn validate_native_capability_if_declared(
+    capability_id: &str,
+) -> Result<(), AppError> {
+    if is_native_nomi_capability(capability_id) {
+        nomi_capability_projection(capability_id).map(|_| ())
+    } else {
+        // Dynamic Plugin capabilities are validated by the canonical Catalog,
+        // Compiler and exact session provider. Absence from the native table
+        // is no longer evidence that an Agent consumer is unavailable.
+        Ok(())
+    }
+}
+
+fn is_native_nomi_capability(capability_id: &str) -> bool {
+    matches!(
+        capability_id,
+        "fs.read"
+            | "fs.search"
+            | "fs.write"
+            | "fs.patch"
+            | "process.exec"
+            | "vcs.status"
+            | "vcs.diff"
+            | "vcs.stage"
+            | "vcs.commit"
+            | "agent.execution.plan"
+            | "knowledge.search"
+            | "knowledge.read"
+            | "knowledge.write"
+            | "skill.invoke"
+            | "chat.basic"
+            | "chat.minimal"
+            | "session.attachments.read"
+            | "memory.project.read"
+            | "memory.project.citation"
+            | "memory.session.scratch"
+            | "process.session"
+            | "terminal.pty"
+            | "workspace.bind"
+            | "workspace.artifacts"
+            | "skill.catalog"
+            | "skill.describe"
+            | "skill.hooks"
+            | "memory.project.write"
+            | "memory.project.distill"
+            | "browser.identity"
+            | "browser.observe"
+            | "browser.navigate"
+            | "browser.act"
+            | "browser.download"
+            | "browser.upload"
+            | "browser.evaluate"
+            | "browser.takeover"
+            | "a11y.observe"
+            | "computer.observe"
+            | "computer.input"
+            | "computer.launch"
+    )
+}
+
+fn project_capabilities_with_dynamic(
     revision: &AgentPresetRevision,
+    mut dynamic_provider_names: impl FnMut(&str, bool) -> Vec<String>,
 ) -> Result<ProjectedCapabilityTools, AppError> {
     let mut initial_tools = BTreeSet::new();
     let mut deferred_tools = BTreeSet::new();
@@ -454,8 +583,29 @@ fn project_capabilities(
     let mut project = |
         selection: &nomifun_agent_contracts::CapabilitySelection,
         target: &mut BTreeSet<String>,
+        deferred: bool,
     | -> Result<(), AppError> {
-        match nomi_capability_projection(selection.capability.id.as_ref())? {
+        let capability_id = selection.capability.id.as_ref();
+        let native = nomi_capability_projection(capability_id);
+        let projection = match native {
+            Ok(projection) => projection,
+            Err(native_error) => {
+                let dynamic =
+                    dynamic_provider_names(capability_id, deferred);
+                if dynamic.is_empty() {
+                    if is_native_nomi_capability(capability_id) {
+                        return Err(native_error);
+                    }
+                    // Ordinary Plugin tools are named and registered after the
+                    // Conversation ID exists. Context/Resource contributions
+                    // intentionally add no model tool route.
+                    return Ok(());
+                }
+                target.extend(dynamic);
+                return Ok(());
+            }
+        };
+        match projection {
             NomiCapabilityProjection::Tools(tools) => {
                 target.extend(tools.iter().map(|tool| (*tool).to_owned()));
             }
@@ -476,10 +626,10 @@ fn project_capabilities(
     };
 
     for selection in &revision.payload.initial_capabilities {
-        project(selection, &mut initial_tools)?;
+        project(selection, &mut initial_tools, false)?;
     }
     for selection in &revision.payload.on_demand_capabilities {
-        project(selection, &mut deferred_tools)?;
+        project(selection, &mut deferred_tools, true)?;
     }
 
     let mut allowed_tools = initial_tools.clone();
@@ -842,7 +992,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_required_capability_fails_closed() {
+    fn dynamic_capability_does_not_require_a_native_projection() {
         let mut fixture = fixture();
         fixture
             .2
@@ -850,10 +1000,36 @@ mod tests {
             .initial_capabilities
             .push(capability("vcs.push", true));
         refresh_fixture_identity(&mut fixture);
-        assert!(matches!(
-            project(input(&fixture)),
-            Err(AppError::UnprocessableEntity(message)) if message.contains("vcs.push")
-        ));
+        let projected = project(input(&fixture))
+            .expect("dynamic capability is registered by the session provider");
+        assert!(
+            !projected.request.extra["allowed_tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool == "vcs.push")
+        );
+        assert!(projected
+            .snapshot
+            .initial_capabilities
+            .iter()
+            .any(|capability| capability == "vcs.push"));
+    }
+
+    #[test]
+    fn dynamic_capability_is_not_rejected_by_the_native_adapter_table() {
+        let mut fixture = fixture();
+        fixture
+            .2
+            .payload
+            .initial_capabilities
+            .push(capability("plugin.example.tool", true));
+        refresh_fixture_identity(&mut fixture);
+
+        validate_nomi_capability_projection(&fixture.2)
+            .expect("canonical Catalog/provider owns dynamic availability");
+        project(input(&fixture))
+            .expect("dynamic capability does not require a native adapter row");
     }
 
     #[test]

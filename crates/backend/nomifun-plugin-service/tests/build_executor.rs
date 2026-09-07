@@ -56,6 +56,25 @@ fn declare_capability(source_root: &Path) {
         id: manifest.package_id().clone(),
         version: manifest.package_version().clone(),
     };
+    let input_schema = StrictJsonValue(json!({
+        "additionalProperties": false,
+        "properties": {"input": {}},
+        "required": ["input"],
+        "type": "object"
+    }));
+    let output_schema = StrictJsonValue(json!({}));
+    let input_ref = CanonicalSchemaRef::from(format!(
+        "schema://example.executor/input@1#{}",
+        nomifun_agent_contracts::digest_payload(&input_schema.0)
+            .unwrap()
+            .as_ref()
+    ));
+    let output_ref = CanonicalSchemaRef::from(format!(
+        "schema://example.executor/output@1#{}",
+        nomifun_agent_contracts::digest_payload(&output_schema.0)
+            .unwrap()
+            .as_ref()
+    ));
     let capability = CapabilityManifest {
         id: CapabilityId::from("example.executor.echo"),
         contribution_id: "capability:example.executor.echo".into(),
@@ -80,8 +99,8 @@ fn declare_capability(source_root: &Path) {
         contributions: CapabilityContributions {
             actions: vec![CapabilityActionDescriptor {
                 action_id: ActionId::from("example.executor.echo.invoke"),
-                input_schema: CanonicalSchemaRef::from("schema://example.executor/input@1"),
-                output_schema: CanonicalSchemaRef::from("schema://example.executor/output@1"),
+                input_schema: input_ref.clone(),
+                output_schema: output_ref.clone(),
                 effect_class: EffectClass::Pure,
                 presentation: ToolPresentationKind::FunctionTool,
             }],
@@ -89,10 +108,16 @@ fn declare_capability(source_root: &Path) {
         },
     };
     let manifest = manifest
-        .with_contributions(PackageContributions {
-            capabilities: vec![capability],
-            ..Default::default()
-        })
+        .with_contributions_and_schemas(
+            PackageContributions {
+                capabilities: vec![capability],
+                ..Default::default()
+            },
+            BTreeMap::from([
+                (input_ref, input_schema),
+                (output_ref, output_schema),
+            ]),
+        )
         .unwrap();
     fs::write(manifest_path, manifest.canonical_bytes().unwrap()).unwrap();
     fs::write(

@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use serde_json::Value;
 use sqlx::SqlitePool;
@@ -94,6 +95,29 @@ fn validate_pending_validation_pair(
     Ok(())
 }
 
+fn validate_runtime_path_pair(
+    runtime: Option<&Value>,
+    executable_path: Option<&str>,
+    label: &str,
+) -> Result<(), DbError> {
+    match (runtime, executable_path) {
+        (None, None) => Ok(()),
+        (Some(_), Some(path))
+            if !path.is_empty()
+                && !path.contains('\0')
+                && Path::new(path).is_absolute() =>
+        {
+            Ok(())
+        }
+        (Some(_), Some(_)) => Err(conflict(format!(
+            "{label} executable path must be an absolute non-empty path"
+        ))),
+        _ => Err(conflict(format!(
+            "{label} fingerprint and executable path must be written together"
+        ))),
+    }
+}
+
 fn decode_optional_object(value: Option<String>, label: &str) -> Result<Option<Value>, DbError> {
     value
         .map(|value| {
@@ -129,6 +153,18 @@ fn decode_row(row: JavaScriptRuntimeSelectionRow) -> Result<JavaScriptRuntimeSel
         validation_result.as_ref(),
     )
     .map_err(|error| DbError::Init(error.to_string()))?;
+    validate_runtime_path_pair(
+        selected_runtime.as_ref(),
+        row.selected_executable_path.as_deref(),
+        "selected Runtime",
+    )
+    .map_err(|error| DbError::Init(error.to_string()))?;
+    validate_runtime_path_pair(
+        pending_candidate.as_ref(),
+        row.pending_candidate_executable_path.as_deref(),
+        "pending Runtime",
+    )
+    .map_err(|error| DbError::Init(error.to_string()))?;
     let warnings: Vec<String> =
         serde_json::from_str(&row.non_recommended_warning_acknowledged_json).map_err(|error| {
             DbError::Init(format!(
@@ -146,7 +182,10 @@ fn decode_row(row: JavaScriptRuntimeSelectionRow) -> Result<JavaScriptRuntimeSel
         .map_err(|error| DbError::Init(error.to_string()))?;
     Ok(JavaScriptRuntimeSelectionRecord {
         selected_runtime,
+        selected_executable_path: row.selected_executable_path,
         pending_candidate,
+        pending_candidate_executable_path:
+            row.pending_candidate_executable_path,
         validation_result,
         last_error_code: row.last_error_code,
         non_recommended_warning_acknowledged: warnings,
@@ -190,6 +229,16 @@ impl IJavaScriptRuntimeSelectionRepository for SqliteJavaScriptRuntimeSelectionR
             params.pending_candidate.as_ref(),
             params.validation_result.as_ref(),
         )?;
+        validate_runtime_path_pair(
+            params.selected_runtime.as_ref(),
+            params.selected_executable_path.as_deref(),
+            "selected Runtime",
+        )?;
+        validate_runtime_path_pair(
+            params.pending_candidate.as_ref(),
+            params.pending_candidate_executable_path.as_deref(),
+            "pending Runtime",
+        )?;
         let selected_runtime_json =
             require_json_object(params.selected_runtime.as_ref(), "selected_runtime")?;
         let pending_candidate_json =
@@ -208,16 +257,20 @@ impl IJavaScriptRuntimeSelectionRepository for SqliteJavaScriptRuntimeSelectionR
         let changed = if params.expected_revision == 0 {
             sqlx::query(
                 "INSERT INTO javascript_runtime_selection (
-                    singleton_key, selected_runtime_json, pending_candidate_json,
+                    singleton_key, selected_runtime_json,
+                    selected_executable_path, pending_candidate_json,
+                    pending_candidate_executable_path,
                     validation_result_json, last_error_code,
                     non_recommended_warning_acknowledged_json, revision, updated_at
                  )
-                 SELECT ?, ?, ?, ?, ?, ?, ?, ?
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                  WHERE NOT EXISTS (SELECT 1 FROM javascript_runtime_selection)",
             )
             .bind(SINGLETON_KEY)
             .bind(&selected_runtime_json)
+            .bind(&params.selected_executable_path)
             .bind(&pending_candidate_json)
+            .bind(&params.pending_candidate_executable_path)
             .bind(&validation_result_json)
             .bind(&params.last_error_code)
             .bind(&warnings_json)
@@ -230,14 +283,18 @@ impl IJavaScriptRuntimeSelectionRepository for SqliteJavaScriptRuntimeSelectionR
         } else {
             sqlx::query(
                 "UPDATE javascript_runtime_selection
-                 SET selected_runtime_json = ?, pending_candidate_json = ?,
+                 SET selected_runtime_json = ?, selected_executable_path = ?,
+                     pending_candidate_json = ?,
+                     pending_candidate_executable_path = ?,
                      validation_result_json = ?, last_error_code = ?,
                      non_recommended_warning_acknowledged_json = ?,
                      revision = ?, updated_at = ?
                  WHERE singleton_key = ? AND revision = ? AND updated_at <= ?",
             )
             .bind(&selected_runtime_json)
+            .bind(&params.selected_executable_path)
             .bind(&pending_candidate_json)
+            .bind(&params.pending_candidate_executable_path)
             .bind(&validation_result_json)
             .bind(&params.last_error_code)
             .bind(&warnings_json)

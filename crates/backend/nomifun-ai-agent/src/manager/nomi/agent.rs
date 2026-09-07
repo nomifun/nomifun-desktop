@@ -877,6 +877,11 @@ pub(crate) struct NomiHostWiring {
     pub image_generation_discovery_failed: bool,
     /// The app's normalized UI language captured on this runtime build.
     pub image_generation_response_in_chinese: bool,
+    /// Exact ordinary Plugin Tool actions frozen for this Nomi Session.
+    ///
+    /// The app-owned provider resolves this from persisted Session/Binding
+    /// facts and the shared Kernel. Model/config JSON cannot construct it.
+    pub plugin_tool_session: Option<crate::NomiPluginToolSession>,
 }
 
 impl Default for NomiHostWiring {
@@ -891,6 +896,7 @@ impl Default for NomiHostWiring {
             image_generation_entitled: true,
             image_generation_discovery_failed: false,
             image_generation_response_in_chinese: false,
+            plugin_tool_session: None,
         }
     }
 }
@@ -979,6 +985,7 @@ impl NomiAgentManager {
         };
         let image_generation_response_in_chinese =
             host_wiring.image_generation_response_in_chinese;
+        let plugin_tool_session = host_wiring.plugin_tool_session;
         let image_read_root = config_extra
             .write_root
             .as_deref()
@@ -1075,6 +1082,12 @@ impl NomiAgentManager {
         config.tools.builtin_allowlist = config_extra.allowed_tools.clone();
         config.tools.enforce_builtin_allowlist = config_extra.enforce_tool_allowlist;
         config.tools.deferred_allowlist = config_extra.deferred_tools.clone();
+        if let Some(session) = plugin_tool_session.as_ref() {
+            session.extend_tool_policy(
+                &mut config.tools.builtin_allowlist,
+                &mut config.tools.deferred_allowlist,
+            );
+        }
         // 原生文件工具写根钳制（Write/Edit/ApplyPatch），按会话信任面由工厂解析：
         // 本地桌面 = None（不钳制，OS 用户全权，今日行为）；渠道/远程/对外 =
         // Some(workspace)（收窄到会话工作区）。仅在有非空值时覆盖，故桌面会话保留
@@ -1176,6 +1189,18 @@ impl NomiAgentManager {
             .map_err(|e| AppError::Internal(format!("Agent bootstrap failed: {e}")))?;
 
         let mut engine = result.engine;
+        if let Some(session) = plugin_tool_session {
+            session.register_into(engine.registry_mut()).map_err(|error| {
+                AppError::Internal(format!(
+                    "Nomi Plugin Tool registration failed: {error}"
+                ))
+            })?;
+            debug!(
+                conversation_id = %conversation_id,
+                tool_count = session.actions().len(),
+                "Registered exact Snapshot-bound Plugin Tools"
+            );
+        }
         if let Some(sink) = requirement_sink {
             engine
                 .registry_mut()

@@ -1,0 +1,5 @@
+ALTER TABLE javascript_runtime_selection
+ADD COLUMN selected_executable_path TEXT;
+
+ALTER TABLE javascript_runtime_selection
+ADD COLUMN pending_candidate_executable_path TEXT;

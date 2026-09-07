@@ -41,8 +41,8 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 15 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-01`～`N1-1-03`、`N1-2-00`～`N1-2-02`、`N1-3-01`、`N1-3-03`、`N1-X-01` |
-| 正在实施 | 4 | `N1-2-03`、`N1-3-02`、`N1-4-01`、`N1-U-01` |
+| 已关闭 | 16 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-01`～`N1-1-03`、`N1-2-00`～`N1-2-02`、`N1-3-01`～`N1-3-03`、`N1-X-01` |
+| 正在实施 | 3 | `N1-2-03`、`N1-4-01`、`N1-U-01` |
 | 已解锁待领取 | 0 | 无 |
 | 依赖阻塞 | 13 | 其余 N1/M1 Windows 项与最终合流 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
@@ -238,6 +238,31 @@
     生产 npm registry client、Project dependency lock 更新、Chat Dev Source 编辑、
     Share/CLI 和 installed-app Build→Test→Apply 仍未完成，因此 `N1-4-01`、
     `N1-2-03` 均保持 `in-progress`。
+15. `N1-3-02` 已关闭，普通 ManagedLocal Plugin Tool 不再依赖 Nomi 的硬编码
+    Capability→Tool 表：
+    - `plugin-package-v1` Artifact 正式携带 exact、content-addressed schema registry；
+      contribution 引用必须使用 `schema://...#<sha256>`，missing/extra/tamper 均在
+      admission 前 fail closed；
+    - Nomi Runtime 在 single-flight factory 内按持久化 Conversation→Binding→Revision→
+      Snapshot 链解析 exact Plugin Tool Session，动态 provider name、input schema、
+      effect category 与 deferred ToolSearch 均由冻结 Snapshot 派生；
+    - 每次调用携带 engine-owned operation/idempotency/correlation identity，并进入唯一
+      Kernel invoke；当前 Mount/Artifact/schema 与 Snapshot 不一致时在 Host dispatch 前
+      fail closed，不回退到 latest Catalog；
+    - App-owned schema resolver 只从冻结 Artifact digest 读取 schema，UI-only、non-Agent、
+      Hidden action 不进入 Nomi Tool Registry；native Nomi tools 保持原路径。
+      Agent Contracts 80、动态 Plugin Tool 4、Runtime provider single-flight 1、
+      JS Kernel Adapter 4 和 App publisher E2E 1 项验证通过。
+16. Runtime Manager 后端 foundation 已扩展，但尚未形成生产切换闭环：
+    - migration 071 与 SQLite adapter 持久化 selected/pending Runtime 的 absolute
+      executable path，并保留 revision CAS、validation 与一次性非推荐确认；
+    - `/api/javascript-runtime/status|probe|download|switch/*` 已进入 installation owner +
+      local-trust 路由，支持 PATH/手工/Managed probe、official offer digest、异步下载状态、
+      exact candidate reprobe 与 typed error；
+    - Candidate Foundation Host Hello/stop/process-tree-zero 已可验证。当前 Plugin Host、
+      Candidate Test、Build 与 MiniApp Service 尚未统一接入 committed Runtime authority，
+      production validator 因此明确返回 `JAVASCRIPT_RUNTIME_NOT_COVERED`，不会伪造切换成功。
+      JavaScript Runtime 16、Runtime SQLite 2、App Runtime route 3 项测试通过。
 
 ## W0：一期交接
 
@@ -268,7 +293,7 @@
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
 | `N1-2-00` | closed | Artifact lane；`nomifun-plugin-platform/**` | directory/zip containment、canonical digest、immutable CAS staging/publish | `N1-0-02` | 9 tests；tamper/traversal/collision/cancel/idempotency |
-| `N1-2-01` | closed | DB lane；migration 067/068/070、新 repository | Artifact/Project/Candidate/current/previous/Mount/Operation/retained data、Project display metadata 与 Runtime selection schema | `N1-0-02` | `6debcb628` + 当前 070；Plugin repository 13、ID schema 20；fresh/restart/direct-SQL guards |
+| `N1-2-01` | closed | DB lane；migration 067/068/070/071、新 repository | Artifact/Project/Candidate/current/previous/Mount/Operation/retained data、Project display metadata 与 Runtime selection schema/path CAS | `N1-0-02` | `6debcb628` + 070/071；Plugin repository 13、Runtime selection 2、ID schema 20；fresh/restart/direct-SQL guards |
 | `N1-2-02` | closed | Plugin platform lane；migration 069、DB repository、owner mutation coordinator | Config、Credential slot binding、KV/CAS、stable `dataDir`、owner mutation lock | `N1-2-01`,`N1-1-02` | `a275ddd97`,`a16cfbeff`；repository 12 + ID/schema 20 + lifecycle 31 |
 | `N1-2-03` | in-progress | Plugin application-service/App lane；`nomifun-plugin-service/**`、`nomifun-app/src/router/plugin_platform.rs` | staging/containment/digest/install/replace/restore/uninstall/delete-data/project-delete 与真实 App/Kernel 组合 | `N1-2-01`,`N1-2-02` | service 22 + App publisher E2E 1；真实 Build/cancel、metadata/TestReceipt/Operation、Candidate Test Host 已接；仍需 N1-3 Agent consumer、统一 Runtime switch 与安装版验证 |
 
@@ -277,7 +302,7 @@
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
 | `N1-3-01` | closed | Catalog lane | ManagedLocal Package/Mount materialization、五类 Contribution、provenance/availability | `N1-0-03`,`N1-1-03`,`N1-2-03` | 五类 exact materialization；ManagedLocal Skill/MCP binding+Mount+Artifact；duplicate/fault atomicity；Kernel 26、Control Plane 17、Platform 23、JS Adapter 4 |
-| `N1-3-02` | in-progress | Nomi consumer lane | 用动态 action schema/Kernel invoke 替换 Nomi 硬编码 Capability→Tool 表 | `N1-3-01` | AgentPreset compile/invoke/impact |
+| `N1-3-02` | closed | Nomi consumer lane | 用动态 action schema/Kernel invoke 替换 Nomi 硬编码 Capability→Tool 表 | `N1-3-01` | content-addressed schema registry；Snapshot-bound provider/session；deferred ToolSearch；Kernel invoke/stale Artifact fail-closed；4 consumer + 1 single-flight + App schema E2E |
 | `N1-3-03` | closed | 非 Agent consumer lane | 一个共享 Capability 与一个 non-Agent-only reference contribution | `N1-3-01` | source-neutral operation handler；Agent+Gateway shared Tool、UI-only Tool、exact lock/Artifact drift 与 Agent filtering 均通过 |
 
 ## N1-4：Authoring 与 Self-Evolution

@@ -8,7 +8,9 @@ use crate::{DbError, JavaScriptRuntimeSelectionRecord};
 pub struct SaveJavaScriptRuntimeSelectionParams {
     pub expected_revision: i64,
     pub selected_runtime: Option<Value>,
+    pub selected_executable_path: Option<String>,
     pub pending_candidate: Option<Value>,
+    pub pending_candidate_executable_path: Option<String>,
     pub validation_result: Option<Value>,
     pub last_error_code: Option<String>,
     pub non_recommended_warning_acknowledged: BTreeSet<String>,
