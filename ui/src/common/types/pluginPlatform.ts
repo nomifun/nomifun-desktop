@@ -128,10 +128,12 @@ export interface PluginConfigSchema {
   schema: unknown;
 }
 
+export type PluginConfigValues = Record<string, unknown>;
+
 export interface PluginConfigState {
   config_revision: number;
   schema_digest: string;
-  values: unknown;
+  values: PluginConfigValues;
   valid: boolean;
   validation_errors: string[];
 }
@@ -312,7 +314,7 @@ export interface ConfigurePluginRequest {
   expected_current_target_digest: string;
   expected_config_revision: number;
   expected_schema_digest: string;
-  values: unknown;
+  values: PluginConfigValues;
   credential_bindings: Record<string, string | null>;
   expected_credential_bindings_revision: number;
 }

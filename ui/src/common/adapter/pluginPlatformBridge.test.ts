@@ -13,6 +13,7 @@ import {
   parsePluginProjectId,
 } from '../types/ids';
 import type {
+  ConfigurePluginRequest,
   DeletePluginDataRequest,
   DeletePluginProjectRequest,
   PluginDetail,
@@ -182,6 +183,36 @@ describe('Plugin Platform bridge', () => {
       expected_current_target_digest: target.artifact_digest,
       enabled: false,
     });
+  });
+
+  test('sends the complete config, schema, and credential CAS body', async () => {
+    installFetchFixture();
+    const request: ConfigurePluginRequest = {
+      mount_id: MOUNT_ID,
+      expected_mount_revision: 7,
+      expected_current_target_digest: target.artifact_digest,
+      expected_config_revision: 2,
+      expected_schema_digest: 'e'.repeat(64),
+      values: {
+        endpoint: 'https://api.example.test',
+        retries: 3,
+      },
+      credential_bindings: {
+        api_key: 'credential://stepfun-coding-plan',
+        optional_token: null,
+      },
+      expected_credential_bindings_revision: 4,
+    };
+
+    await plugins.configure.invoke(request);
+
+    expect(calls).toEqual([
+      {
+        method: 'PUT',
+        path: `/api/plugin-mounts/${MOUNT_ID}/config`,
+        body: request,
+      },
+    ]);
   });
 
   test('keeps the delete-data CAS request in the DELETE body', async () => {

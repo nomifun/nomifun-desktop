@@ -202,7 +202,7 @@ export const plugins = {
     ),
     mapDetail
   ),
-  configureMount: withResponseMap(
+  configure: withResponseMap(
     httpPut<PluginDetail, ConfigurePluginRequest>(
       (request) => `/api/plugin-mounts/${encodeURIComponent(request.mount_id)}/config`
     ),

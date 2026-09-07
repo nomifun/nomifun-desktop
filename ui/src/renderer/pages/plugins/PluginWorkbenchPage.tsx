@@ -6,6 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type {
+  ConfigurePluginRequest,
   PluginDetail,
   PluginLibraryResponse,
   PluginMountId,
@@ -26,6 +27,7 @@ import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import PluginLibraryView, {
   type PluginMountBusyAction,
 } from './PluginLibraryView';
+import PluginConfigurationDialog from './PluginConfigurationDialog';
 import PluginWorkshopView, {
   type PluginProjectBusyAction,
 } from './PluginWorkshopView';
@@ -84,6 +86,7 @@ const PluginWorkbenchPage: React.FC = () => {
   const [importDialogVisible, setImportDialogVisible] = useState(false);
   const [testDialogVisible, setTestDialogVisible] = useState(false);
   const [applyDialogVisible, setApplyDialogVisible] = useState(false);
+  const [configureDialogVisible, setConfigureDialogVisible] = useState(false);
   const mountLoadSequence = useRef(0);
   const projectLoadSequence = useRef(0);
   const desktop = isDesktopShell();
@@ -347,6 +350,37 @@ const PluginWorkbenchPage: React.FC = () => {
       },
     });
   }, [mountDetail, message, refreshLibrary, t]);
+
+  const handleConfigure = useCallback(
+    async (request: ConfigurePluginRequest) => {
+      if (!mountDetail || busyAction) return;
+      setBusyAction('configure');
+      setMutationFailure(null);
+      try {
+        const next = await ipcBridge.plugins.configure.invoke(request);
+        setMountDetail(next);
+        setConfigureDialogVisible(false);
+        message.success(t('pluginWorkbench.messages.configured'));
+        await Promise.all([
+          refreshLibrary(),
+          loadMountDetail(next.summary.mount_id),
+        ]);
+      } catch (error) {
+        console.error('[plugins] configuring Mount failed', error);
+        setMutationFailure(pluginLoadFailure(error, 'resource'));
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [
+      busyAction,
+      loadMountDetail,
+      message,
+      mountDetail,
+      refreshLibrary,
+      t,
+    ]
+  );
 
   const linkedProjectMount = useMemo(() => {
     const mountId = projectDetail?.summary.linked_mount_id;
@@ -687,6 +721,10 @@ const PluginWorkbenchPage: React.FC = () => {
                 onRetryDetail={() => {
                   if (selectedMountId) void loadMountDetail(selectedMountId);
                 }}
+                onConfigure={() => {
+                  setMutationFailure(null);
+                  setConfigureDialogVisible(true);
+                }}
                 onEnable={() =>
                   void runMountMutation(
                     'enable',
@@ -766,6 +804,17 @@ const PluginWorkbenchPage: React.FC = () => {
         failure={createDialogVisible ? projectMutationFailure : null}
         onCancel={() => setCreateDialogVisible(false)}
         onSubmit={handleCreateProject}
+      />
+      <PluginConfigurationDialog
+        visible={configureDialogVisible}
+        detail={mountDetail}
+        loading={busyAction === 'configure'}
+        failure={configureDialogVisible ? mutationFailure : null}
+        onCancel={() => {
+          setConfigureDialogVisible(false);
+          setMutationFailure(null);
+        }}
+        onSubmit={handleConfigure}
       />
       <PluginPrebuiltImportModal
         visible={importDialogVisible}

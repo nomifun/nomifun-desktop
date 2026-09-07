@@ -91,9 +91,12 @@
 7. `/plugins` 已成为 Desktop Plugin 工作台入口，Library/Workshop 分别承担已安装
    Plugin 与作者 Project；创建、预构建导入、Build、Candidate Test、Apply、Operation
    cancel、Project 删除和 Mount 生命周期动作均使用产品 DTO 与 HTTP bridge。MCP 页面
-   只保留 MCP。该 UI 仍以真实 Build/Test executor、Runtime Manager、Config/Credential
-   编辑和 Desktop accessibility/视觉验收为关闭条件，不能因 production build 通过而
-   提前签署 `N1-U-01`。
+   只保留 MCP。Library 当前已按 exact JSON Schema 提供 primitive/enum Config 编辑，
+   unsupported schema fail closed；任何 password/writeOnly/secret 配置字段都不进入
+   draft、DOM 或请求，作者必须改用 Credential slot。Credential 只编辑
+   `slot_key -> credential_id` reference，不新增枚举或 secret 回显。该 UI 仍以真实
+   Build/Test executor、Runtime Manager 和 Desktop accessibility/视觉验收为关闭条件，
+   不能因 production build 通过而提前签署 `N1-U-01`。
 8. Windows 执行顺序保持不变：先关闭 N1 Plugin，再完成 M1 MiniApp，之后冻结唯一
    `RC-WIN-01` cohort；只有该 cohort 关闭后才交接 macOS arm64 与 Linux Desktop x64。
    本阶段不领取跨平台开发结论，也不运行手机视口。

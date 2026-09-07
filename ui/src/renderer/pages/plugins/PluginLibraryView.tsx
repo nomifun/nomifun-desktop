@@ -19,6 +19,7 @@ import {
   Plug,
   Redo,
   Refresh,
+  SettingTwo,
 } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
@@ -36,6 +37,7 @@ import {
 } from './PluginWorkbenchState';
 
 export type PluginMountBusyAction =
+  | 'configure'
   | 'enable'
   | 'disable'
   | 'retry'
@@ -55,6 +57,7 @@ interface PluginLibraryViewProps {
   locale: string;
   onSelect: (mountId: PluginMountId) => void;
   onRetryDetail: () => void;
+  onConfigure: () => void;
   onEnable: () => void;
   onDisable: () => void;
   onRetryMount: () => void;
@@ -112,6 +115,7 @@ const PluginMountDetail: React.FC<
   mutationFailure,
   busyAction,
   locale,
+  onConfigure,
   onEnable,
   onDisable,
   onRetryMount,
@@ -147,6 +151,24 @@ const PluginMountDetail: React.FC<
       )}
 
       <div className={styles.actionBar}>
+        <Button
+          type='primary'
+          icon={<SettingTwo theme='outline' size='14' />}
+          loading={busyAction === 'configure'}
+          disabled={
+            disabled ||
+            detail.summary.current === undefined ||
+            detail.summary.lifecycle === 'delete_pending'
+          }
+          title={
+            detail.summary.current
+              ? undefined
+              : t('pluginWorkbench.actions.configureUnavailable')
+          }
+          onClick={onConfigure}
+        >
+          {t('pluginWorkbench.actions.configure')}
+        </Button>
         {actions.canToggleEnabled && (
           <Button
             type={enabled ? 'secondary' : 'primary'}
