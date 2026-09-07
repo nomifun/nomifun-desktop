@@ -709,6 +709,13 @@ impl PluginApplicationService {
     ) -> Result<PluginDetailDto, PluginServiceError> {
         let _guard = self.mount_guard(owner_user_id, &request.mount_id).await?;
         self.owned_mount(owner_user_id, &request.mount_id).await?;
+        if request.enabled && !self.host.runtime_available().await? {
+            return Err(PluginServiceError::Coded {
+                code: crate::ERR_RUNTIME,
+                message: "a committed JavaScript Runtime is required before enabling this Plugin"
+                    .to_owned(),
+            });
+        }
         require_commit_fence(self.host.commit_fence(&request.mount_id).await?)?;
         let mount = self
             .repository

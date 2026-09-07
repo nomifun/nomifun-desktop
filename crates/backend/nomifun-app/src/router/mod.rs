@@ -19,6 +19,7 @@ pub(crate) mod nomi_core_control_plane;
 pub(crate) mod nomi_core_remote_mcp;
 pub(crate) mod nomi_core_session;
 pub(crate) mod plugin_platform;
+mod plugin_runtime_host;
 #[cfg(feature = "browser-use")]
 pub(crate) mod browser_management;
 #[cfg(feature = "browser-use")]

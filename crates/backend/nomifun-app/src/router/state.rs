@@ -525,10 +525,25 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         conversation_service,
         services.agent_runtime_registry.clone(),
     ));
-    let (nomi_core_agent_api, plugin_state) =
+    let javascript_runtime_foundation =
+        super::javascript_runtime::build_javascript_runtime_foundation(
+            services.database.pool().clone(),
+            services.data_dir.clone(),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("JavaScript Runtime foundation composition failed: {error:#}")
+        });
+    let runtime_authority = javascript_runtime_foundation.authority();
+    let (
+        nomi_core_agent_api,
+        plugin_state,
+        plugin_runtime_participant,
+    ) =
         build_nomi_core_agent_api_state(
             services,
             conversation_owner.clone(),
+            runtime_authority,
         )
         .await
         .unwrap_or_else(|error| {
@@ -536,9 +551,9 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         });
     let javascript_runtime =
         super::javascript_runtime::build_javascript_runtime_state(
-            services.database.pool().clone(),
-            services.data_dir.clone(),
+            javascript_runtime_foundation,
             plugin_state.clone(),
+            plugin_runtime_participant,
         )
         .await
         .unwrap_or_else(|error| {
@@ -679,9 +694,11 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
 async fn build_nomi_core_agent_api_state(
     services: &AppServices,
     conversation_owner: Arc<NomiCoreSessionOwner>,
+    runtime: Arc<dyn nomifun_js_runtime::CommittedRuntimeProvider>,
 ) -> anyhow::Result<(
     NomiCoreAgentApiState,
     nomifun_plugin_service::PluginRouterState,
+    Arc<super::plugin_platform::NomiCorePluginRuntimeParticipant>,
 )> {
     const CONTRACT_VERSION: &str = "1.0.0";
     const RUNTIME_FEATURE_INVENTORY_JSON: &str = include_str!(
@@ -743,9 +760,12 @@ async fn build_nomi_core_agent_api_state(
         Arc::clone(&kernel),
         Arc::clone(&catalog),
         registrations,
+        runtime,
     )
     .await?;
-    let plugin_state = plugin.router;
+    let plugin_state = plugin.router.clone();
+    let plugin_runtime_participant =
+        Arc::clone(&plugin.runtime_participant);
 
     let feature_inventory: CodingRuntimeFeatureInventoryPayload =
         serde_json::from_str(RUNTIME_FEATURE_INVENTORY_JSON)?;
@@ -820,6 +840,7 @@ async fn build_nomi_core_agent_api_state(
             services.nomi_core_remote_runtime.clone(),
         ),
         plugin_state,
+        plugin_runtime_participant,
     ))
 }
 

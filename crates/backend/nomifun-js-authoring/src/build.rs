@@ -15,6 +15,7 @@ use nomifun_agent_contracts::{
     digest_bytes,
 };
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::canonical::strict_json_from_slice;
 use crate::dependency::ExactDependencyLock;
@@ -64,6 +65,43 @@ impl NodeBuildHost {
         &self.node_executable
     }
 
+    pub fn validate_foundation(&self) -> Result<(), AuthoringError> {
+        let root = std::env::temp_dir()
+            .join("nomifun-build-foundation")
+            .join(Uuid::now_v7().to_string());
+        fs::create_dir_all(&root).map_err(|error| io_error(&root, error))?;
+        let cleanup = BuildFoundationCleanup(root.clone());
+        let source_path = root.join("foundation.js");
+        let output_path = root.join("main.mjs");
+        let map_path = root.join("main.mjs.map");
+        write_new(
+            &source_path,
+            b"export const nomifunBuildFoundation = true;\n",
+        )?;
+        let output = self.run_build_host(
+            &root,
+            &source_path,
+            &output_path,
+            &map_path,
+            PluginLanguage::JavaScript,
+            "nomifun-source:///runtime-foundation",
+            &crate::NeverCancel,
+        )?;
+        if output.source_map_path.is_some()
+            || fs::read(&output.main_path)
+                .map_err(|error| io_error(&output.main_path, error))?
+                != b"export const nomifunBuildFoundation = true;\n"
+        {
+            return Err(AuthoringError::BuildHostFailed {
+                code: None,
+                stderr: "Build Foundation output differs from the exact input"
+                    .to_owned(),
+            });
+        }
+        drop(cleanup);
+        Ok(())
+    }
+
     fn build_bundle(
         &self,
         staged: &StagedSource,
@@ -71,22 +109,43 @@ impl NodeBuildHost {
         language: PluginLanguage,
         cancellation: &dyn OperationCancellation,
     ) -> Result<BuildHostOutput, AuthoringError> {
-        check_canceled(cancellation)?;
-        let host_path = staged.operation_root().join("build-host.mjs");
-        let request_path = staged.operation_root().join("build-request.json");
-        let response_path = staged.operation_root().join("build-response.json");
-        let stderr_path = staged.operation_root().join("build-stderr.log");
-        write_new(&host_path, self.host_source.as_bytes())?;
-
         let output_path = staged.output_root().join("main.mjs");
         let map_path = staged.output_root().join("main.mjs.map");
+        self.run_build_host(
+            staged.operation_root(),
+            bundle_path,
+            &output_path,
+            &map_path,
+            language,
+            "nomifun-source:///bundle-entry",
+            cancellation,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_build_host(
+        &self,
+        operation_root: &Path,
+        source_path: &Path,
+        output_path: &Path,
+        map_path: &Path,
+        language: PluginLanguage,
+        source_url: &str,
+        cancellation: &dyn OperationCancellation,
+    ) -> Result<BuildHostOutput, AuthoringError> {
+        check_canceled(cancellation)?;
+        let host_path = operation_root.join("build-host.mjs");
+        let request_path = operation_root.join("build-request.json");
+        let response_path = operation_root.join("build-response.json");
+        let stderr_path = operation_root.join("build-stderr.log");
+        write_new(&host_path, self.host_source.as_bytes())?;
         let request = BuildHostRequest {
             format_version: BUILD_REQUEST_VERSION,
             language,
-            source_path: node_visible_path(bundle_path),
+            source_path: node_visible_path(source_path),
             output_path: node_visible_path(&output_path),
             map_path: node_visible_path(&map_path),
-            source_url: "nomifun-source:///bundle-entry".into(),
+            source_url: source_url.to_owned(),
         };
         write_new(
             &request_path,
@@ -106,7 +165,7 @@ impl NodeBuildHost {
             .arg(node_visible_path(&host_path))
             .arg(node_visible_path(&request_path))
             .arg(node_visible_path(&response_path))
-            .current_dir(node_visible_path(staged.operation_root()))
+            .current_dir(node_visible_path(operation_root))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr))
@@ -145,8 +204,9 @@ impl NodeBuildHost {
                 source_map_written,
                 ..
             }) if status.success() => Ok(BuildHostOutput {
-                main_path: output_path,
-                source_map_path: source_map_written.then_some(map_path),
+                main_path: output_path.to_path_buf(),
+                source_map_path: source_map_written
+                    .then(|| map_path.to_path_buf()),
             }),
             Some(BuildHostResponse::UnsupportedModule { specifier, .. }) => {
                 Err(AuthoringError::LocalModuleUnsupported {
@@ -168,7 +228,14 @@ impl NodeBuildHost {
             }),
         }
     }
+}
 
+struct BuildFoundationCleanup(PathBuf);
+
+impl Drop for BuildFoundationCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 #[derive(Clone, Debug)]

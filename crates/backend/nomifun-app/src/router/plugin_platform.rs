@@ -15,7 +15,9 @@ use nomifun_agent_contracts::{
     CanonicalSchemaRef, CredentialId, CredentialSlotBinding, DigestHex,
     JAVASCRIPT_HOST_PROTOCOL_VERSION, JAVASCRIPT_SDK_CONTRACT_VERSION,
     PLUGIN_PACKAGE_PROFILE_VERSION, PluginHostCommitFence, PluginMountId,
-    PluginSourceLineage, ResolvedCapability, StrictJsonValue, ValidatedPluginConfig,
+    PluginSourceLineage, ResolvedCapability,
+    RuntimeSwitchParticipantKind, RuntimeSwitchParticipantOutcome,
+    RuntimeSwitchParticipantResult, StrictJsonValue, ValidatedPluginConfig,
 };
 use nomifun_ai_agent::NomiPluginToolSchemaResolver;
 use nomifun_agent_kernel::{KernelRegistry, PluginRegistration};
@@ -36,8 +38,8 @@ use nomifun_db::{
     PluginReadyCandidateRow, SqlitePool,
 };
 use nomifun_js_host::{
-    ExtensionHostSupervisor, JavaScriptHostConfig,
-    materialize_bundled_extension_host,
+    ExtensionHostDemandPort, ExtensionHostSupervisor,
+    JavaScriptHostConfig, materialize_bundled_extension_host,
 };
 use nomifun_js_authoring::{
     ContentAddressedNpmCache, FixedPluginPacker, NodeBuildHost, SourceStoreLimits,
@@ -46,7 +48,8 @@ use nomifun_js_kernel_adapter::{
     JsKernelPluginAdapter, PluginPackageInput,
 };
 use nomifun_js_runtime::{
-    NodeDiscoveryRequest, NodeRuntimeResolver,
+    CommittedRuntimeProvider, JavaScriptRuntimeError, JavaScriptWorkKind,
+    ResolvedNodeRuntime, RuntimeUseLease,
 };
 use nomifun_plugin_platform::{
     ArtifactStoreLimits, OwnerMutationCoordinator,
@@ -59,8 +62,6 @@ use nomifun_plugin_service::{
     PluginHostCoordinator, PluginOperationCancellation, PluginRegistryPublisher,
     PluginRepository, PluginRouterState,
     PluginServiceDependencies, PluginServiceError, PluginServicePaths,
-    SharedJsHostCoordinator, UnconfiguredPluginBuildExecutor,
-    UnconfiguredPluginOperationCancellation,
 };
 use tokio::sync::{Mutex, RwLock};
 use serde::Deserialize;
@@ -73,14 +74,328 @@ const PLUGIN_NPM_CACHE_DIRECTORY: &str = "npm-cache";
 const PLUGIN_MOUNT_DATA_DIRECTORY: &str = "plugin-mount-data";
 const PLUGIN_CANDIDATE_TEST_DIRECTORY: &str = "candidate-tests";
 
-struct DiscoveredPluginHosts {
-    shared: Arc<ExtensionHostSupervisor>,
-    candidate_test_config: JavaScriptHostConfig,
-}
-
 pub(crate) struct NomiCorePluginComposition {
     pub router: PluginRouterState,
     pub schema_resolver: Arc<dyn NomiPluginToolSchemaResolver>,
+    pub runtime_participant: Arc<NomiCorePluginRuntimeParticipant>,
+}
+
+pub(crate) struct NomiCorePluginRuntimeParticipant {
+    shared_host:
+        Arc<super::plugin_runtime_host::RuntimeBoundExtensionHost>,
+    build: Arc<RuntimeBoundPluginBuildExecutor>,
+    repository: Arc<DbPluginRepositoryAdapter>,
+    artifacts: Arc<FsPluginArtifactStore>,
+    data_root: PathBuf,
+    host_module: PathBuf,
+    kernel: Arc<KernelRegistry>,
+    publisher: Arc<NomiCorePluginRegistryPublisher>,
+}
+
+impl NomiCorePluginRuntimeParticipant {
+    pub(crate) async fn stop_for_runtime_switch(
+        &self,
+    ) -> Result<(), JavaScriptRuntimeError> {
+        self.kernel
+            .release_all_resources()
+            .await
+            .map_err(|error| {
+                JavaScriptRuntimeError::SwitchNotCovered(format!(
+                    "Runtime-bound Kernel resource cleanup failed: {error}"
+                ))
+            })?;
+        self.shared_host
+            .stop_for_runtime_switch()
+            .await
+            .map_err(|error| {
+                JavaScriptRuntimeError::SwitchNotCovered(error.to_string())
+            })?;
+        self.build.stop_for_runtime_switch().await;
+        Ok(())
+    }
+
+    pub(crate) async fn prepare_runtime(
+        &self,
+        runtime: Option<&ResolvedNodeRuntime>,
+    ) -> Result<(), JavaScriptRuntimeError> {
+        self.build.prepare_runtime(runtime).await
+    }
+
+    pub(crate) async fn finalize_runtime(
+        &self,
+    ) -> Result<(), JavaScriptRuntimeError> {
+        self.publisher
+            .refresh_agent_availability()
+            .await
+            .map_err(|error| {
+                JavaScriptRuntimeError::SwitchNotCovered(format!(
+                    "Runtime availability reconciliation failed: {error}"
+                ))
+            })
+    }
+
+    pub(crate) async fn restore_runtime(
+        &self,
+        runtime: Option<&ResolvedNodeRuntime>,
+    ) -> Result<(), JavaScriptRuntimeError> {
+        self.prepare_runtime(runtime).await?;
+        self.finalize_runtime().await
+    }
+
+    pub(crate) async fn validate_candidate(
+        &self,
+        owner_user_id: &str,
+        candidate: &ResolvedNodeRuntime,
+    ) -> Result<Vec<RuntimeSwitchParticipantResult>, JavaScriptRuntimeError> {
+        let inventory = self
+            .repository
+            .inventory(owner_user_id)
+            .await
+            .map_err(|error| {
+                JavaScriptRuntimeError::SwitchNotCovered(format!(
+                    "Plugin Runtime inventory is unavailable: {error}"
+                ))
+            })?;
+        let enabled = inventory
+            .mounts
+            .into_iter()
+            .filter(mount_is_materializable)
+            .collect::<Vec<_>>();
+        if enabled.is_empty() {
+            return Ok(Vec::new());
+        }
+        let candidate_data = RuntimeCandidateDataGuard::allocate(
+            &self.data_root,
+        )
+        .map_err(|error| {
+            JavaScriptRuntimeError::FoundationValidationFailed(
+                error.to_string(),
+            )
+        })?;
+
+        let host = ExtensionHostSupervisor::new(
+            JavaScriptHostConfig::for_host_module(
+                candidate.executable_path.clone(),
+                candidate.fingerprint.clone(),
+                self.host_module.clone(),
+            ),
+        )
+        .map_err(|error| {
+            JavaScriptRuntimeError::FoundationValidationFailed(
+                error.to_string(),
+            )
+        })?;
+        let mut results = Vec::with_capacity(enabled.len());
+        for mount in enabled {
+            let outcome = match plugin_adapter_for_mount(
+                &self.repository,
+                &self.artifacts,
+                &self.data_root,
+                &mount,
+                Some(&candidate_data.path),
+                false,
+            )
+            .await
+            {
+                Ok(adapter) => match host.load_mount(adapter.mount_demand()).await
+                {
+                    Ok(_) => RuntimeSwitchParticipantResult {
+                        kind: RuntimeSwitchParticipantKind::PluginMount,
+                        owner_id: mount.mount_id.clone(),
+                        outcome: RuntimeSwitchParticipantOutcome::Passed,
+                        error_code: None,
+                    },
+                    Err(error) => RuntimeSwitchParticipantResult {
+                        kind: RuntimeSwitchParticipantKind::PluginMount,
+                        owner_id: mount.mount_id.clone(),
+                        outcome: RuntimeSwitchParticipantOutcome::Failed,
+                        error_code: Some(CanonicalErrorCode::from(
+                            runtime_participant_error_code(&error.to_string()),
+                        )),
+                    },
+                },
+                Err(error) => RuntimeSwitchParticipantResult {
+                    kind: RuntimeSwitchParticipantKind::PluginMount,
+                    owner_id: mount.mount_id.clone(),
+                    outcome: RuntimeSwitchParticipantOutcome::Failed,
+                    error_code: Some(CanonicalErrorCode::from(
+                        runtime_participant_error_code(error.code()),
+                    )),
+                },
+            };
+            results.push(outcome);
+        }
+        if let nomifun_js_host::JavaScriptHostState::Running {
+            generation,
+            ..
+        } = host.state()
+        {
+            host.stop_generation(generation).await.map_err(|error| {
+                JavaScriptRuntimeError::FoundationValidationFailed(format!(
+                    "candidate Plugin Host cleanup failed: {error}"
+                ))
+            })?;
+        }
+        if host.process_count() != 0 {
+            return Err(JavaScriptRuntimeError::FoundationValidationFailed(
+                "candidate Plugin Host process tree is not empty".to_owned(),
+            ));
+        }
+        Ok(results)
+    }
+}
+
+struct RuntimeCandidateDataGuard {
+    path: PathBuf,
+}
+
+impl RuntimeCandidateDataGuard {
+    fn allocate(root: &Path) -> Result<Self, std::io::Error> {
+        let root = root.join("javascript-runtime").join("switch-candidates");
+        std::fs::create_dir_all(&root)?;
+        let root = std::fs::canonicalize(&root)?;
+        let path = root.join(uuid::Uuid::now_v7().to_string());
+        std::fs::create_dir(&path)?;
+        let path = std::fs::canonicalize(&path)?;
+        if path.parent() != Some(root.as_path()) {
+            return Err(std::io::Error::other(
+                "Runtime candidate data directory escaped its managed root",
+            ));
+        }
+        Ok(Self { path })
+    }
+}
+
+impl Drop for RuntimeCandidateDataGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn runtime_participant_error_code(input: &str) -> &'static str {
+    if input.contains("ARTIFACT") {
+        "PLUGIN_RUNTIME_ARTIFACT_INVALID"
+    } else if input.contains("STALE") {
+        "PLUGIN_RUNTIME_TARGET_STALE"
+    } else {
+        "PLUGIN_RUNTIME_VALIDATION_FAILED"
+    }
+}
+
+async fn plugin_adapter_for_mount(
+    repository: &DbPluginRepositoryAdapter,
+    artifacts: &FsPluginArtifactStore,
+    data_root: &Path,
+    mount: &PluginMountRow,
+    data_dir_override: Option<&Path>,
+    include_credentials: bool,
+) -> Result<JsKernelPluginAdapter, PluginServiceError> {
+    let artifact_digest = mount
+        .current_artifact_digest
+        .as_deref()
+        .ok_or_else(|| {
+            PluginServiceError::stale(
+                "materialized Mount has no current Artifact",
+            )
+        })?;
+    let artifact_row = repository
+        .get_artifact(artifact_digest)
+        .await?
+        .ok_or_else(|| {
+            PluginServiceError::not_found("materialized Mount Artifact")
+        })?;
+    artifacts.verify(&artifact_row).await?;
+    let stored = artifacts
+        .store()
+        .load(&DigestHex::from(artifact_digest.to_owned()))?;
+    if stored.artifact.artifact_digest.as_ref() != artifact_digest
+        || stored
+            .artifact
+            .manifest
+            .payload
+            .package
+            .package_id
+            .as_ref()
+            != mount.package_id
+    {
+        return Err(PluginServiceError::stale(
+            "Mount target differs from the verified Artifact",
+        ));
+    }
+
+    let mount_id = PluginMountId::from(mount.mount_id.clone());
+    let bindings = repository
+        .list_credentials(&ListPluginCredentialBindingsParams {
+            mount_id: mount.mount_id.clone(),
+            expected_mount_revision: mount.revision,
+            expected_current_artifact_digest: mount
+                .current_artifact_digest
+                .clone(),
+        })
+        .await?;
+    let credential_bindings = if include_credentials {
+        bindings
+            .bindings
+            .into_iter()
+            .map(|binding| CredentialSlotBinding {
+                mount_id: mount_id.clone(),
+                slot_key: binding.slot.into(),
+                credential_id: CredentialId::from(binding.credential_id),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let config_revision = u64::try_from(mount.config_revision).map_err(|_| {
+        PluginServiceError::integration("Plugin config revision is negative")
+    })?;
+    let config_schema_digest =
+        mount.config_schema_digest.clone().ok_or_else(|| {
+            PluginServiceError::stale(
+                "materialized Mount has no config schema digest",
+            )
+        })?;
+    let config = serde_json::from_str(&mount.config_json).map_err(|error| {
+        PluginServiceError::integration(format!(
+            "persisted Plugin config is invalid JSON: {error}"
+        ))
+    })?;
+    let data_dir = match data_dir_override {
+        Some(root) => {
+            let path = root.join(&mount.mount_id);
+            tokio::fs::create_dir_all(&path).await.map_err(|error| {
+                PluginServiceError::integration(format!(
+                    "cannot create Runtime candidate data directory: {error}"
+                ))
+            })?;
+            std::fs::canonicalize(&path).map_err(|error| {
+                PluginServiceError::integration(format!(
+                    "cannot canonicalize Runtime candidate data directory: {error}"
+                ))
+            })?
+        }
+        None => {
+            resolve_mount_data_dir(data_root, &mount.data_dir_path, &mount.mount_id)
+                .await?
+        }
+    };
+    JsKernelPluginAdapter::new(PluginPackageInput {
+        artifact: stored.artifact,
+        mount_id,
+        package_root: stored.package_root,
+        config: ValidatedPluginConfig {
+            schema_digest: DigestHex::from(config_schema_digest),
+            config_revision,
+            value: StrictJsonValue(config),
+        },
+        credential_bindings,
+        data_dir,
+    })
+    .map_err(|error| {
+        PluginServiceError::integration(format!(
+            "JavaScript Plugin adapter rejected the Mount: {error}"
+        ))
+    })
 }
 
 pub(crate) async fn build_nomi_core_plugin_state(
@@ -90,6 +405,7 @@ pub(crate) async fn build_nomi_core_plugin_state(
     kernel: Arc<KernelRegistry>,
     catalog: Arc<KernelCatalogProvider>,
     base_registrations: Vec<PluginRegistration>,
+    runtime: Arc<dyn CommittedRuntimeProvider>,
 ) -> anyhow::Result<NomiCorePluginComposition> {
     let data_root = std::fs::canonicalize(&data_root)?;
     let platform_root = data_root.join(PLUGIN_PLATFORM_DIRECTORY);
@@ -105,69 +421,56 @@ pub(crate) async fn build_nomi_core_plugin_state(
         platform_root.join(PLUGIN_AUTHORING_DIRECTORY),
         SourceStoreLimits::default(),
     )?);
-    let hosts = discover_plugin_hosts(&platform_root).await;
-    let host = hosts.as_ref().map(|hosts| Arc::clone(&hosts.shared));
+    let host_module =
+        materialize_bundled_extension_host(platform_root.join("host"))?;
+    let shared_host = super::plugin_runtime_host::RuntimeBoundExtensionHost::new(
+        Arc::clone(&runtime),
+        host_module.clone(),
+    )?;
+    let host: Arc<dyn ExtensionHostDemandPort> = shared_host.clone();
+    let participant_kernel = Arc::clone(&kernel);
     let publisher = Arc::new(NomiCorePluginRegistryPublisher {
         kernel,
         catalog,
         base_registrations,
         dynamic_registrations: RwLock::new(BTreeMap::new()),
         publish_lock: Mutex::new(()),
-        repository: Arc::clone(&repository) as Arc<dyn PluginRepository>,
+        repository: Arc::clone(&repository),
         artifacts: Arc::clone(&artifacts),
-        host: host.clone(),
+        host: Arc::clone(&host),
+        runtime: Arc::clone(&runtime),
         data_root: data_root.clone(),
     });
     publisher.restore(owner_user_id).await?;
 
-    let host_coordinator: Arc<dyn PluginHostCoordinator> = match host {
-        Some(host) => Arc::new(SharedJsHostCoordinator::new(host)),
-        None => Arc::new(UnavailablePluginHostCoordinator),
-    };
-    let tester: Arc<dyn PluginCandidateTestExecutor> = match hosts.as_ref() {
-        Some(hosts) => Arc::new(NomiCorePluginCandidateTestExecutor {
+    let host_coordinator: Arc<dyn PluginHostCoordinator> =
+        Arc::new(RuntimeBoundPluginHostCoordinator {
+            host: Arc::clone(&shared_host),
+        });
+    let tester: Arc<dyn PluginCandidateTestExecutor> =
+        Arc::new(NomiCorePluginCandidateTestExecutor {
             repository: Arc::clone(&repository),
             artifacts: Arc::clone(&artifacts),
-            host_config: hosts.candidate_test_config.clone(),
-            candidate_test_root: platform_root.join(PLUGIN_CANDIDATE_TEST_DIRECTORY),
-        }),
-        None => Arc::new(
-            nomifun_plugin_service::UnconfiguredPluginCandidateTestExecutor,
-        ),
-    };
-    let (builder, operation_cancellation): (
-        Arc<dyn PluginBuildExecutor>,
-        Arc<dyn PluginOperationCancellation>,
-    ) = match hosts.as_ref() {
-        Some(hosts) => {
-            let build = Arc::new(FsPluginBuildExecutor::new(
-                &source_store,
-                &artifacts,
-                FixedPluginPacker::new(NodeBuildHost::new(
-                    &hosts.candidate_test_config.node_executable,
-                    Duration::from_secs(120),
-                )?)
-                .with_npm_cache(ContentAddressedNpmCache::new(
-                    platform_root.join(PLUGIN_NPM_CACHE_DIRECTORY),
-                )?),
-                hosts.candidate_test_config.runtime.runtime_target.clone(),
-            )?);
-            (
-                Arc::clone(&build) as Arc<dyn PluginBuildExecutor>,
-                build as Arc<dyn PluginOperationCancellation>,
-            )
-        }
-        None => (
-            Arc::new(UnconfiguredPluginBuildExecutor),
-            Arc::new(UnconfiguredPluginOperationCancellation),
-        ),
-    };
+            runtime: Arc::clone(&runtime),
+            host_module: host_module.clone(),
+            candidate_test_root: platform_root
+                .join(PLUGIN_CANDIDATE_TEST_DIRECTORY),
+        });
+    let build = Arc::new(RuntimeBoundPluginBuildExecutor::new(
+        Arc::clone(&runtime),
+        Arc::clone(&source_store),
+        Arc::clone(&artifacts),
+        platform_root.join(PLUGIN_NPM_CACHE_DIRECTORY),
+    )?);
+    let builder = Arc::clone(&build) as Arc<dyn PluginBuildExecutor>;
+    let operation_cancellation =
+        Arc::clone(&build) as Arc<dyn PluginOperationCancellation>;
     let service = Arc::new(PluginApplicationService::new(
         PluginServiceDependencies {
-            repository: repository as Arc<dyn PluginRepository>,
+            repository: Arc::clone(&repository) as Arc<dyn PluginRepository>,
             artifacts: Arc::clone(&artifacts) as Arc<dyn PluginArtifactStorePort>,
             host: host_coordinator,
-            registry: publisher as Arc<dyn PluginRegistryPublisher>,
+            registry: Arc::clone(&publisher) as Arc<dyn PluginRegistryPublisher>,
             mutation_coordinator: Arc::new(OwnerMutationCoordinator::new()),
             builder,
             tester,
@@ -180,10 +483,174 @@ pub(crate) async fn build_nomi_core_plugin_state(
             },
         },
     ));
+    let runtime_participant = Arc::new(NomiCorePluginRuntimeParticipant {
+        shared_host,
+        build,
+        repository: Arc::clone(&repository),
+        artifacts: Arc::clone(&artifacts),
+        data_root: data_root.clone(),
+        host_module: host_module.clone(),
+        kernel: participant_kernel,
+        publisher,
+    });
     Ok(NomiCorePluginComposition {
         router: PluginRouterState::new(service),
         schema_resolver: Arc::new(NomiCorePluginSchemaResolver { artifacts }),
+        runtime_participant,
     })
+}
+
+struct BoundPluginBuildExecutor {
+    runtime: ResolvedNodeRuntime,
+    executor: Arc<FsPluginBuildExecutor>,
+}
+
+struct RuntimeBoundPluginBuildExecutor {
+    runtime: Arc<dyn CommittedRuntimeProvider>,
+    source_store: Arc<FsPluginSourceStore>,
+    artifact_store: Arc<FsPluginArtifactStore>,
+    npm_cache_root: PathBuf,
+    current: RwLock<Option<BoundPluginBuildExecutor>>,
+}
+
+impl RuntimeBoundPluginBuildExecutor {
+    fn new(
+        runtime: Arc<dyn CommittedRuntimeProvider>,
+        source_store: Arc<FsPluginSourceStore>,
+        artifact_store: Arc<FsPluginArtifactStore>,
+        npm_cache_root: PathBuf,
+    ) -> Result<Self, PluginServiceError> {
+        if !npm_cache_root.is_absolute() {
+            return Err(PluginServiceError::integration(
+                "Plugin npm cache root must be absolute",
+            ));
+        }
+        Ok(Self {
+            runtime,
+            source_store,
+            artifact_store,
+            npm_cache_root,
+            current: RwLock::new(None),
+        })
+    }
+
+    fn executor(
+        &self,
+        runtime: &ResolvedNodeRuntime,
+    ) -> Result<Arc<FsPluginBuildExecutor>, PluginServiceError> {
+        Ok(Arc::new(FsPluginBuildExecutor::new(
+            &self.source_store,
+            &self.artifact_store,
+            FixedPluginPacker::new(NodeBuildHost::new(
+                &runtime.executable_path,
+                Duration::from_secs(120),
+            )
+            .map_err(|error| {
+                PluginServiceError::integration(format!(
+                    "cannot bind Plugin Build Host to committed Runtime: {error}"
+                ))
+            })?)
+            .with_npm_cache(ContentAddressedNpmCache::new(
+                &self.npm_cache_root,
+            )
+            .map_err(|error| {
+                PluginServiceError::integration(format!(
+                    "cannot initialize Plugin npm cache: {error}"
+                ))
+            })?),
+            runtime.fingerprint.runtime_target.clone(),
+        )?))
+    }
+
+    async fn executor_for_use(
+        &self,
+    ) -> Result<(RuntimeUseLease, Arc<FsPluginBuildExecutor>), PluginServiceError>
+    {
+        let lease = self
+            .runtime
+            .acquire_use(JavaScriptWorkKind::BuildHost)
+            .await
+            .map_err(|error| PluginServiceError::Coded {
+                code: nomifun_plugin_service::ERR_RUNTIME,
+                message: error.to_string(),
+            })?;
+        let resolved = lease.runtime().clone();
+        let mut current = self.current.write().await;
+        if let Some(current) = current.as_ref() {
+            if current.runtime == resolved {
+                return Ok((lease, Arc::clone(&current.executor)));
+            }
+            return Err(PluginServiceError::Coded {
+                code: nomifun_plugin_service::ERR_RUNTIME,
+                message:
+                    "committed Runtime changed before the Build executor was fenced"
+                        .to_owned(),
+            });
+        }
+        let executor = self.executor(&resolved)?;
+        *current = Some(BoundPluginBuildExecutor {
+            runtime: resolved,
+            executor: Arc::clone(&executor),
+        });
+        Ok((lease, executor))
+    }
+
+    async fn stop_for_runtime_switch(&self) {
+        *self.current.write().await = None;
+    }
+
+    async fn prepare_runtime(
+        &self,
+        runtime: Option<&ResolvedNodeRuntime>,
+    ) -> Result<(), JavaScriptRuntimeError> {
+        let next = match runtime {
+            Some(runtime) => Some(BoundPluginBuildExecutor {
+                runtime: runtime.clone(),
+                executor: self.executor(runtime).map_err(|error| {
+                    JavaScriptRuntimeError::FoundationValidationFailed(
+                        error.to_string(),
+                    )
+                })?,
+            }),
+            None => None,
+        };
+        *self.current.write().await = next;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl PluginBuildExecutor for RuntimeBoundPluginBuildExecutor {
+    async fn build(
+        &self,
+        operation_id: &str,
+        project: &PluginProjectRow,
+        request: &BuildPluginProjectRequest,
+    ) -> Result<nomifun_plugin_service::BuildOutput, PluginServiceError> {
+        let (_lease, executor) = self.executor_for_use().await?;
+        executor.build(operation_id, project, request).await
+    }
+}
+
+#[async_trait]
+impl PluginOperationCancellation for RuntimeBoundPluginBuildExecutor {
+    async fn cancel(
+        &self,
+        operation: &nomifun_db::ProductOperationRow,
+    ) -> Result<(), PluginServiceError> {
+        let executor = self
+            .current
+            .read()
+            .await
+            .as_ref()
+            .map(|current| Arc::clone(&current.executor))
+            .ok_or_else(|| {
+                PluginServiceError::conflict(
+                    "Plugin Build has no active Runtime-bound executor",
+                )
+            })?;
+        executor.cancel(operation).await
+    }
 }
 
 struct NomiCorePluginSchemaResolver {
@@ -625,70 +1092,24 @@ fn require_route_id(
     }
 }
 
-async fn discover_plugin_hosts(
-    platform_root: &Path,
-) -> Option<DiscoveredPluginHosts> {
-    let resolution = match NodeRuntimeResolver::default()
-        .resolve(NodeDiscoveryRequest::default())
-        .await
-    {
-        Ok(resolution) => resolution,
-        Err(error) => {
-            tracing::warn!(%error, "Plugin Node Runtime discovery failed");
-            return None;
-        }
-    };
-    let Some(runtime) = resolution.selected else {
-        tracing::info!(
-            "Plugin Node Runtime is not selected; static Plugin management remains available"
-        );
-        return None;
-    };
-    let Some(executable_path) = resolution.probes.iter().find_map(|probe| {
-        (probe.fingerprint.as_ref() == Some(&runtime))
-            .then(|| PathBuf::from(&probe.executable_path))
-    }) else {
-        tracing::warn!(
-            runtime_id = runtime.runtime_installation_id.as_ref(),
-            "selected Plugin Node Runtime has no executable-path evidence"
-        );
-        return None;
-    };
-    let host_module = match materialize_bundled_extension_host(
-        platform_root.join("host"),
-    ) {
-        Ok(path) => path,
-        Err(error) => {
-            tracing::warn!(%error, "Plugin JavaScript Host asset is unavailable");
-            return None;
-        }
-    };
-    let config = JavaScriptHostConfig::for_host_module(
-        executable_path,
-        runtime,
-        host_module,
-    );
-    match ExtensionHostSupervisor::new(config.clone()) {
-        Ok(host) => Some(DiscoveredPluginHosts {
-            shared: Arc::new(host),
-            candidate_test_config: config,
-        }),
-        Err(error) => {
-            tracing::warn!(%error, "Plugin shared JavaScript Host is unavailable");
-            None
-        }
-    }
+struct RuntimeBoundPluginHostCoordinator {
+    host: Arc<super::plugin_runtime_host::RuntimeBoundExtensionHost>,
 }
 
-struct UnavailablePluginHostCoordinator;
-
 #[async_trait]
-impl PluginHostCoordinator for UnavailablePluginHostCoordinator {
+impl PluginHostCoordinator for RuntimeBoundPluginHostCoordinator {
+    async fn runtime_available(&self) -> Result<bool, PluginServiceError> {
+        self.host.runtime_available().await
+    }
+
     async fn commit_fence(
         &self,
-        _mount_id: &str,
+        mount_id: &str,
     ) -> Result<PluginHostCommitFence, PluginServiceError> {
-        Ok(PluginHostCommitFence::NotResident)
+        self.host
+            .commit_fence_for_mount(&PluginMountId::from(mount_id.to_owned()))
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -741,7 +1162,8 @@ impl Drop for CandidateTestDataGuard {
 struct NomiCorePluginCandidateTestExecutor {
     repository: Arc<DbPluginRepositoryAdapter>,
     artifacts: Arc<FsPluginArtifactStore>,
-    host_config: JavaScriptHostConfig,
+    runtime: Arc<dyn CommittedRuntimeProvider>,
+    host_module: PathBuf,
     candidate_test_root: PathBuf,
 }
 
@@ -753,6 +1175,19 @@ impl PluginCandidateTestExecutor for NomiCorePluginCandidateTestExecutor {
         candidate: &PluginReadyCandidateRow,
         request: &TestPluginCandidateRequest,
     ) -> Result<CandidateTestOutput, PluginServiceError> {
+        let runtime_lease = self
+            .runtime
+            .acquire_use(JavaScriptWorkKind::CandidateTestHost)
+            .await
+            .map_err(|error| PluginServiceError::Coded {
+                code: nomifun_plugin_service::ERR_RUNTIME,
+                message: error.to_string(),
+            })?;
+        let host_config = JavaScriptHostConfig::for_host_module(
+            runtime_lease.executable_path().to_path_buf(),
+            runtime_lease.fingerprint().clone(),
+            self.host_module.clone(),
+        );
         let artifact_row = self
             .repository
             .get_artifact(&candidate.artifact_digest)
@@ -834,7 +1269,7 @@ impl PluginCandidateTestExecutor for NomiCorePluginCandidateTestExecutor {
                 "Candidate Test adapter rejected the Artifact: {error}"
             ))
         })?;
-        let host = ExtensionHostSupervisor::candidate_test(self.host_config.clone())
+        let host = ExtensionHostSupervisor::candidate_test(host_config.clone())
             .map_err(|error| {
                 PluginServiceError::integration(format!(
                     "Candidate Test Host configuration failed: {error}"
@@ -876,8 +1311,8 @@ impl PluginCandidateTestExecutor for NomiCorePluginCandidateTestExecutor {
                 } else {
                     CandidateTestOutcome::Passed
                 },
-                runtime: self.host_config.runtime.clone(),
-                host_target: self.host_config.runtime.runtime_target.clone(),
+                runtime: host_config.runtime.clone(),
+                host_target: host_config.runtime.runtime_target.clone(),
                 host_contract_version: JAVASCRIPT_HOST_PROTOCOL_VERSION.into(),
                 javascript_sdk_contract_version: JAVASCRIPT_SDK_CONTRACT_VERSION.into(),
                 test_contract_version: CANDIDATE_TEST_CONTRACT_VERSION.into(),
@@ -901,9 +1336,10 @@ struct NomiCorePluginRegistryPublisher {
     dynamic_registrations:
         RwLock<BTreeMap<PluginMountId, PluginRegistration>>,
     publish_lock: Mutex<()>,
-    repository: Arc<dyn PluginRepository>,
+    repository: Arc<DbPluginRepositoryAdapter>,
     artifacts: Arc<FsPluginArtifactStore>,
-    host: Option<Arc<ExtensionHostSupervisor>>,
+    host: Arc<dyn ExtensionHostDemandPort>,
+    runtime: Arc<dyn CommittedRuntimeProvider>,
     data_root: PathBuf,
 }
 
@@ -956,103 +1392,16 @@ impl NomiCorePluginRegistryPublisher {
         &self,
         mount: &PluginMountRow,
     ) -> Result<PluginRegistration, PluginServiceError> {
-        let host = self.host.clone().ok_or_else(|| {
-            PluginServiceError::Coded {
-                code: nomifun_plugin_service::ERR_RUNTIME,
-                message: "no compatible Node Runtime is selected".to_owned(),
-            }
-        })?;
-        let artifact_digest = mount
-            .current_artifact_digest
-            .as_deref()
-            .ok_or_else(|| {
-                PluginServiceError::stale(
-                    "materialized Mount has no current Artifact",
-                )
-            })?;
-        let artifact_row = self
-            .repository
-            .get_artifact(artifact_digest)
-            .await?
-            .ok_or_else(|| {
-                PluginServiceError::not_found(
-                    "materialized Mount Artifact",
-                )
-            })?;
-        self.artifacts.verify(&artifact_row).await?;
-        let stored = self
-            .artifacts
-            .store()
-            .load(&DigestHex::from(artifact_digest.to_owned()))?;
-        if stored.artifact.artifact_digest.as_ref() != artifact_digest
-            || stored.artifact.manifest.payload.package.package_id.as_ref()
-                != mount.package_id
-        {
-            return Err(PluginServiceError::stale(
-                "Mount target differs from the verified Artifact",
-            ));
-        }
-
-        let mount_id = PluginMountId::from(mount.mount_id.clone());
-        let bindings = self
-            .repository
-            .list_credentials(&ListPluginCredentialBindingsParams {
-                mount_id: mount.mount_id.clone(),
-                expected_mount_revision: mount.revision,
-                expected_current_artifact_digest:
-                    mount.current_artifact_digest.clone(),
-            })
-            .await?;
-        let credential_bindings = bindings
-            .bindings
-            .into_iter()
-            .map(|binding| CredentialSlotBinding {
-                mount_id: mount_id.clone(),
-                slot_key: binding.slot.into(),
-                credential_id: CredentialId::from(binding.credential_id),
-            })
-            .collect();
-        let config_revision = u64::try_from(mount.config_revision).map_err(|_| {
-            PluginServiceError::integration(
-                "Plugin config revision is negative",
-            )
-        })?;
-        let config_schema_digest = mount
-            .config_schema_digest
-            .clone()
-            .ok_or_else(|| {
-                PluginServiceError::stale(
-                    "materialized Mount has no config schema digest",
-                )
-            })?;
-        let config = serde_json::from_str(&mount.config_json).map_err(|error| {
-            PluginServiceError::integration(format!(
-                "persisted Plugin config is invalid JSON: {error}"
-            ))
-        })?;
-        let data_dir = resolve_mount_data_dir(
+        let host = Arc::clone(&self.host);
+        plugin_adapter_for_mount(
+            &self.repository,
+            &self.artifacts,
             &self.data_root,
-            &mount.data_dir_path,
-            &mount.mount_id,
+            mount,
+            None,
+            true,
         )
-        .await?;
-        JsKernelPluginAdapter::new(PluginPackageInput {
-            artifact: stored.artifact,
-            mount_id,
-            package_root: stored.package_root,
-            config: ValidatedPluginConfig {
-                schema_digest: DigestHex::from(config_schema_digest),
-                config_revision,
-                value: StrictJsonValue(config),
-            },
-            credential_bindings,
-            data_dir,
-        })
-        .map_err(|error| {
-            PluginServiceError::integration(format!(
-                "JavaScript Plugin adapter rejected the Mount: {error}"
-            ))
-        })?
+        .await?
         .registration(host)
         .map_err(|error| {
             PluginServiceError::integration(format!(
@@ -1073,10 +1422,21 @@ impl NomiCorePluginRegistryPublisher {
             ))
         })?;
         *self.dynamic_registrations.write().await = dynamic;
-        self.refresh_agent_availability()
+        self.refresh_agent_availability().await
     }
 
-    fn refresh_agent_availability(&self) -> Result<(), PluginServiceError> {
+    async fn refresh_agent_availability(
+        &self,
+    ) -> Result<(), PluginServiceError> {
+        let runtime_available = self
+            .runtime
+            .committed_runtime()
+            .await
+            .map_err(|error| PluginServiceError::Coded {
+                code: nomifun_plugin_service::ERR_RUNTIME,
+                message: error.to_string(),
+            })?
+            .is_some();
         let registry = self.kernel.snapshot().map_err(|error| {
             PluginServiceError::integration(format!(
                 "Kernel Plugin snapshot failed: {error}"
@@ -1111,7 +1471,7 @@ impl NomiCorePluginRegistryPublisher {
                             action.presentation
                                 == nomifun_agent_contracts::ToolPresentationKind::FunctionTool
                         });
-                (!native && !dynamic).then(|| {
+                (!native && (!dynamic || !runtime_available)).then(|| {
                     (
                         capability.manifest.id.clone(),
                         CanonicalErrorCode::from(AGENT_EXECUTOR_UNAVAILABLE),
@@ -1231,7 +1591,9 @@ async fn resolve_mount_data_dir(
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    use std::path::Path;
 
+    use async_trait::async_trait;
     use nomifun_agent_contracts::{
         ActionId, ArtifactEnvelope, ArtifactFileDigest, ArtifactId,
         CapabilityActionDescriptor, CapabilityContributions, CapabilityId,
@@ -1260,11 +1622,91 @@ mod tests {
         PluginProjectSourceStateDto, UninstallPluginRequest,
     };
     use nomifun_plugin_service::CreateProjectInput;
+    use nomifun_js_runtime::{
+        NodeDiscoveryRequest, NodeRuntimeManager, NodeRuntimeResolver,
+        RuntimeAuthority, RuntimeSelectionStore, RuntimeSelectionStoreError,
+        SystemNodeRuntimeProbePort, VersionedRuntimeSelection,
+    };
     use sha2::{Digest, Sha256};
+    use tokio::sync::Mutex;
     use tower::ServiceExt;
     use uuid::Uuid;
 
     use super::*;
+
+    struct TestRuntimeStore {
+        value: Mutex<VersionedRuntimeSelection>,
+    }
+
+    impl Default for TestRuntimeStore {
+        fn default() -> Self {
+            Self {
+                value: Mutex::new(VersionedRuntimeSelection::empty()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeSelectionStore for TestRuntimeStore {
+        async fn load(
+            &self,
+        ) -> Result<VersionedRuntimeSelection, RuntimeSelectionStoreError> {
+            Ok(self.value.lock().await.clone())
+        }
+
+        async fn save_cas(
+            &self,
+            expected_revision: u64,
+            selection: &nomifun_agent_contracts::RuntimeSelectionRecord,
+            selected_executable_path: Option<&Path>,
+            pending_candidate_executable_path: Option<&Path>,
+            updated_at_ms: i64,
+        ) -> Result<VersionedRuntimeSelection, RuntimeSelectionStoreError> {
+            let mut value = self.value.lock().await;
+            if value.revision != expected_revision {
+                return Err(RuntimeSelectionStoreError::Conflict(
+                    "test Runtime selection revision changed".to_owned(),
+                ));
+            }
+            *value = VersionedRuntimeSelection {
+                selection: selection.clone(),
+                selected_executable_path:
+                    selected_executable_path.map(Path::to_path_buf),
+                pending_candidate_executable_path:
+                    pending_candidate_executable_path.map(Path::to_path_buf),
+                revision: expected_revision + 1,
+                updated_at_ms,
+            };
+            Ok(value.clone())
+        }
+    }
+
+    async fn test_runtime_authority() -> Arc<RuntimeAuthority> {
+        let resolution = NodeRuntimeResolver::default()
+            .resolve(NodeDiscoveryRequest::default())
+            .await
+            .unwrap();
+        let fingerprint = resolution
+            .selected
+            .expect("Plugin E2E requires a compatible PATH Node");
+        let executable_path = resolution
+            .probes
+            .iter()
+            .find(|probe| probe.fingerprint.as_ref() == Some(&fingerprint))
+            .map(|probe| PathBuf::from(&probe.executable_path))
+            .expect("selected PATH Node must retain executable evidence");
+        let manager = Arc::new(NodeRuntimeManager::new(Arc::new(
+            TestRuntimeStore::default(),
+        )));
+        manager
+            .select_initial(0, fingerprint, executable_path)
+            .await
+            .unwrap();
+        RuntimeAuthority::new(
+            manager,
+            Arc::new(SystemNodeRuntimeProbePort::default()),
+        )
+    }
 
     fn sha256(bytes: &[u8]) -> DigestHex {
         DigestHex::from(format!("{:x}", Sha256::digest(bytes)))
@@ -1442,6 +1884,7 @@ mod tests {
             Arc::clone(&kernel),
             Arc::clone(&catalog),
             Vec::new(),
+            test_runtime_authority().await,
         )
         .await
         .unwrap();
@@ -1715,6 +2158,7 @@ mod tests {
             Arc::clone(&restarted_kernel),
             restarted_catalog,
             Vec::new(),
+            test_runtime_authority().await,
         )
         .await
         .unwrap()

@@ -24,9 +24,12 @@ use nomifun_api_types::{
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    JavaScriptRuntimeError, ManagedRuntimeOffer, ManagedRuntimeProvider,
-    NodeDiscoveryRequest, NodeProbeCandidate, NodeResolution,
-    NodeRuntimeManager, NodeRuntimeResolver, VersionedRuntimeSelection,
+    BeginRuntimeSwitchCommand, DecideRuntimeSwitchCommand,
+    JavaScriptRuntimeError,
+    ManagedRuntimeOffer, ManagedRuntimeProvider, NodeDiscoveryRequest,
+    NodeProbeCandidate, NodeResolution, NodeRuntimeManager,
+    NodeRuntimeResolver, ResolvedNodeRuntime, RuntimeAuthority,
+    RuntimeSwitchCoordinator, VersionedRuntimeSelection,
 };
 
 #[async_trait]
@@ -69,21 +72,6 @@ pub struct RuntimeCandidate {
     pub disposition: NodeProbeDisposition,
 }
 
-#[derive(Clone, Debug)]
-pub struct RuntimeSwitchValidationRequest {
-    pub owner_user_id: String,
-    pub selected_runtime: Option<NodeRuntimeFingerprint>,
-    pub candidate: RuntimeCandidate,
-}
-
-#[async_trait]
-pub trait RuntimeSwitchValidator: Send + Sync {
-    async fn validate(
-        &self,
-        request: RuntimeSwitchValidationRequest,
-    ) -> Result<RuntimeSwitchValidationResult, JavaScriptRuntimeError>;
-}
-
 #[derive(Debug)]
 struct RuntimeInventory {
     initialized: bool,
@@ -120,7 +108,7 @@ pub struct JavaScriptRuntimeService {
     manager: Arc<NodeRuntimeManager>,
     probe: Arc<dyn NodeRuntimeProbePort>,
     managed: Arc<dyn ManagedRuntimeProvider>,
-    validator: Arc<dyn RuntimeSwitchValidator>,
+    switch: Arc<dyn RuntimeSwitchCoordinator>,
     inventory: RwLock<RuntimeInventory>,
     operation_gate: Mutex<()>,
 }
@@ -135,16 +123,17 @@ impl std::fmt::Debug for JavaScriptRuntimeService {
 
 impl JavaScriptRuntimeService {
     pub fn new(
-        manager: Arc<NodeRuntimeManager>,
+        authority: Arc<RuntimeAuthority>,
         probe: Arc<dyn NodeRuntimeProbePort>,
         managed: Arc<dyn ManagedRuntimeProvider>,
-        validator: Arc<dyn RuntimeSwitchValidator>,
+        switch: Arc<dyn RuntimeSwitchCoordinator>,
     ) -> Self {
+        let manager = Arc::clone(authority.manager());
         Self {
             manager,
             probe,
             managed,
-            validator,
+            switch,
             inventory: RwLock::new(RuntimeInventory::default()),
             operation_gate: Mutex::new(()),
         }
@@ -153,6 +142,10 @@ impl JavaScriptRuntimeService {
     pub async fn status(
         &self,
     ) -> Result<JavascriptRuntimeStatusDto, JavaScriptRuntimeError> {
+        // A detached coordinator task survives HTTP request cancellation. If
+        // it panicked or the process restarted after persisting `pending`, the
+        // same call repairs the orphan before exposing status.
+        self.switch.recover_interrupted_switch().await?;
         if !self.inventory.read().await.initialized {
             self.refresh_inventory(None).await?;
         }
@@ -310,28 +303,30 @@ impl JavaScriptRuntimeService {
             );
         }
 
-        let validation = self
-            .validator
-            .validate(RuntimeSwitchValidationRequest {
-                owner_user_id: owner_user_id.to_owned(),
-                selected_runtime: current.selection.selected_runtime.clone(),
-                candidate: candidate.clone(),
-            })
-            .await?;
-        if validation.candidate != candidate.fingerprint {
-            return Err(JavaScriptRuntimeError::CandidateMismatch);
-        }
-        let saved = self
-            .manager
-            .commit_validated_switch(
-                request.expected_selection_revision,
-                candidate.fingerprint,
-                candidate.executable_path,
-                validation,
-                non_recommended
-                    && request.acknowledge_non_recommended_runtime,
+        let switch = Arc::clone(&self.switch);
+        let expected_revision = request.expected_selection_revision;
+        let owner_user_id = owner_user_id.to_owned();
+        let selected_runtime = resolved_selected(&current)?;
+        let acknowledge_non_recommended_runtime =
+            request.acknowledge_non_recommended_runtime;
+        let saved = tokio::spawn(async move {
+            switch
+                .begin_switch(BeginRuntimeSwitchCommand {
+                    expected_revision,
+                    owner_user_id,
+                    selected_runtime,
+                    candidate,
+                    acknowledge_non_recommended: non_recommended
+                        && acknowledge_non_recommended_runtime,
+                })
+                .await
+        })
+        .await
+        .map_err(|error| {
+            JavaScriptRuntimeError::CoordinatorTaskFailed(
+                error.to_string(),
             )
-            .await?;
+        })??;
         self.project_status(saved).await
     }
 
@@ -348,15 +343,48 @@ impl JavaScriptRuntimeService {
                 RuntimeSwitchDecision::AbortAndRestoreSelected
             }
         };
-        let saved = self
-            .manager
-            .decide(
-                request.expected_selection_revision,
-                &request.candidate_runtime_id,
-                &request.expected_candidate_executable_digest,
-                decision,
-            )
+        let pending = self.manager.snapshot().await?;
+        require_revision(&pending, request.expected_selection_revision)?;
+        let candidate = pending
+            .selection
+            .pending_candidate
+            .as_ref()
+            .ok_or(JavaScriptRuntimeError::NoPendingCandidate)?;
+        if candidate.runtime_installation_id.as_ref()
+            != request.candidate_runtime_id
+            || candidate.executable_digest.as_ref()
+                != request.expected_candidate_executable_digest
+        {
+            return Err(JavaScriptRuntimeError::CandidateMismatch);
+        }
+        let executable_path = pending
+            .pending_candidate_executable_path
+            .clone()
+            .ok_or(JavaScriptRuntimeError::CandidateStale)?;
+        let candidate = self
+            .reprobe_exact(&RuntimeCandidate {
+                fingerprint: candidate.clone(),
+                executable_path,
+                disposition: candidate_disposition(candidate),
+            })
             .await?;
+        let switch = Arc::clone(&self.switch);
+        let expected_revision = request.expected_selection_revision;
+        let saved = tokio::spawn(async move {
+            switch
+                .decide_switch(DecideRuntimeSwitchCommand {
+                    expected_revision,
+                    candidate,
+                    decision,
+                })
+                .await
+        })
+        .await
+        .map_err(|error| {
+            JavaScriptRuntimeError::CoordinatorTaskFailed(
+                error.to_string(),
+            )
+        })??;
         self.project_status(saved).await
     }
 
@@ -562,6 +590,38 @@ impl JavaScriptRuntimeService {
             download_offer: inventory.offer.as_ref().map(offer_dto),
             download: inventory.download.clone(),
         })
+    }
+}
+
+fn resolved_selected(
+    current: &VersionedRuntimeSelection,
+) -> Result<Option<ResolvedNodeRuntime>, JavaScriptRuntimeError> {
+    match (
+        current.selection.selected_runtime.clone(),
+        current.selected_executable_path.clone(),
+    ) {
+        (Some(fingerprint), Some(executable_path)) => {
+            Ok(Some(ResolvedNodeRuntime {
+                fingerprint,
+                executable_path,
+            }))
+        }
+        (None, None) => Ok(None),
+        _ => Err(JavaScriptRuntimeError::Contract(
+            "selected Runtime binding is incomplete".to_owned(),
+        )),
+    }
+}
+
+fn candidate_disposition(
+    candidate: &NodeRuntimeFingerprint,
+) -> NodeProbeDisposition {
+    if candidate.node_major
+        == nomifun_agent_contracts::RECOMMENDED_NODE_LTS_MAJOR
+    {
+        NodeProbeDisposition::CompatibleRecommended
+    } else {
+        NodeProbeDisposition::CompatibleNonRecommended
     }
 }
 
@@ -817,7 +877,11 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::*;
-    use crate::{RuntimeSelectionStore, RuntimeSelectionStoreError};
+    use crate::{
+        CoordinatedRuntimeSwitch, RuntimeParticipantValidation,
+        RuntimeQuiesceResult, RuntimeSelectionStore,
+        RuntimeSelectionStoreError, RuntimeSwitchParticipant,
+    };
 
     #[derive(Default)]
     struct MemoryStore {
@@ -915,30 +979,55 @@ mod tests {
         }
     }
 
-    struct FakeValidator {
+    struct FakeParticipant {
         outcome: RuntimeSwitchParticipantOutcome,
     }
 
     #[async_trait]
-    impl RuntimeSwitchValidator for FakeValidator {
-        async fn validate(
+    impl RuntimeSwitchParticipant for FakeParticipant {
+        async fn quiesce_and_stop(
             &self,
-            request: RuntimeSwitchValidationRequest,
-        ) -> Result<RuntimeSwitchValidationResult, JavaScriptRuntimeError> {
-            Ok(RuntimeSwitchValidationResult {
-                candidate: request.candidate.fingerprint,
-                foundation_hello_passed: true,
+            owner_user_id: &str,
+            _selected: Option<&ResolvedNodeRuntime>,
+        ) -> Result<RuntimeQuiesceResult, JavaScriptRuntimeError> {
+            assert_eq!(owner_user_id, "owner");
+            Ok(RuntimeQuiesceResult {
                 old_runtime_process_tree_zero: true,
+            })
+        }
+
+        async fn validate_candidate(
+            &self,
+            owner_user_id: &str,
+            _candidate: &ResolvedNodeRuntime,
+        ) -> Result<RuntimeParticipantValidation, JavaScriptRuntimeError>
+        {
+            assert_eq!(owner_user_id, "owner");
+            Ok(RuntimeParticipantValidation {
+                foundation_hello_passed: true,
                 participants: vec![RuntimeSwitchParticipantResult {
-                    kind: RuntimeSwitchParticipantKind::MiniappService,
-                    owner_id: "miniapp-production-host".into(),
+                    kind: RuntimeSwitchParticipantKind::BuildFoundation,
+                    owner_id: "javascript-build-foundation".into(),
                     outcome: self.outcome,
                     error_code: (self.outcome
                         == RuntimeSwitchParticipantOutcome::Failed)
-                        .then(|| CanonicalErrorCode::from("MINIAPP_FAILED")),
+                        .then(|| CanonicalErrorCode::from("BUILD_FAILED")),
                 }],
-                completed_at_ms: 1,
             })
+        }
+
+        async fn prepare_candidate(
+            &self,
+            _candidate: &ResolvedNodeRuntime,
+        ) -> Result<(), JavaScriptRuntimeError> {
+            Ok(())
+        }
+
+        async fn restore_selected(
+            &self,
+            _selected: Option<&ResolvedNodeRuntime>,
+        ) -> Result<(), JavaScriptRuntimeError> {
+            Ok(())
         }
     }
 
@@ -999,18 +1088,27 @@ mod tests {
         candidate: RuntimeCandidate,
         outcome: RuntimeSwitchParticipantOutcome,
     ) -> Arc<JavaScriptRuntimeService> {
+        let probe = Arc::new(FakeProbe {
+            candidate: candidate.clone(),
+        });
+        let manager = Arc::new(NodeRuntimeManager::new(Arc::new(
+            MemoryStore::default(),
+        )));
+        let authority =
+            RuntimeAuthority::new(manager, probe.clone());
+        let switch = CoordinatedRuntimeSwitch::new(
+            Arc::clone(&authority),
+            vec![Arc::new(FakeParticipant { outcome })],
+        )
+        .unwrap();
         Arc::new(JavaScriptRuntimeService::new(
-            Arc::new(NodeRuntimeManager::new(Arc::new(
-                MemoryStore::default(),
-            ))),
-            Arc::new(FakeProbe {
-                candidate: candidate.clone(),
-            }),
+            authority,
+            probe,
             Arc::new(FakeManaged {
                 offer: offer(&candidate),
                 candidate,
             }),
-            Arc::new(FakeValidator { outcome }),
+            switch,
         ))
     }
 
