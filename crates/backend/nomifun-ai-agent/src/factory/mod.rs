@@ -43,53 +43,6 @@ pub trait CompanionPromptProvider: Send + Sync {
     ) -> Option<String>;
 }
 
-/// In-session companion summon support (spec §设计 B) — implemented by
-/// `nomifun-companion::CompanionService` over its store; the factory only
-/// consumes trait objects so the dependency direction stays acyclic (mirrors
-/// [`CompanionPromptProvider`]). Consulted only for owner-authority,
-/// non-companion nomi sessions whose `extra.summon` is present.
-#[async_trait::async_trait]
-pub trait CompanionSummonProvider: Send + Sync {
-    /// Display name of the summoned companion, `None` when it no longer
-    /// exists (the summon degrades to a nameless notice; tools still scope
-    /// by id and simply see an empty memory set).
-    async fn companion_name(&self, companion_id: &str) -> Option<String>;
-
-    /// Read-only recall sink locked to the companion's visibility (shared +
-    /// its own private memories). Its write methods refuse by construction.
-    fn summon_memory_sink(
-        &self,
-        companion_id: &str,
-    ) -> Result<Arc<dyn nomi_agent::companion_tools::CompanionMemorySink>, AppError>;
-
-    /// Per-turn live resolver for the summon's selected memory ids.
-    fn summon_context_sink(
-        &self,
-        config: &nomifun_api_types::SummonConfig,
-    ) -> Result<Arc<dyn nomi_agent::summon_tools::SummonContextSink>, AppError>;
-
-    /// Materialize the companion's active skills minus `skill_exclusions` into
-    /// the workspace `.nomi/skills` under manifest ownership (stale managed
-    /// entries are pruned; user-created skills are never touched). Returns the
-    /// materialized skill names.
-    async fn sync_summon_workspace_skills(
-        &self,
-        conversation_id: &str,
-        workspace: &std::path::Path,
-        companion_id: &str,
-        skill_exclusions: &[String],
-    ) -> Result<Vec<String>, AppError>;
-
-    /// Remove every manifest-owned summon skill from the workspace. Called on
-    /// builds of non-summoned sessions so a cleared summon unloads its skills
-    /// on the next runtime build. No-op for workspaces without a manifest.
-    async fn clear_summon_workspace_skills(
-        &self,
-        conversation_id: &str,
-        workspace: &std::path::Path,
-    ) -> Result<(), AppError>;
-}
-
 /// Dependencies needed by the agent factory to construct agents.
 pub struct AgentFactoryDeps {
     /// Canonical owner for installation-scoped tools. Every factory backend
@@ -171,13 +124,6 @@ pub struct AgentFactoryDeps {
     /// Optional persona prompt provider for companion_session conversations that
     /// carry no `extra.system_prompt` (Channel Agent sessions).
     pub companion_prompt: Option<Arc<dyn CompanionPromptProvider>>,
-    /// Optional in-session companion summon provider (spec §设计 B). When `Some`
-    /// AND an owner-authority non-companion nomi session carries `extra.summon`,
-    /// the factory materializes the companion's skills, registers the read-only
-    /// read-only `recall_memories` tool and injects the
-    /// per-turn memory-snapshot contributor. `None` (standalone / tests) leaves
-    /// summon unwired — `extra.summon` is then inert.
-    pub companion_summon: Option<Arc<dyn CompanionSummonProvider>>,
     /// Optional SSH connection provider. When `Some` AND a nomi session carries
     /// `extra.ssh_host_id`, the factory connects the bound host and gives the
     /// runtime the remote tool family instead of the local one. `None` leaves

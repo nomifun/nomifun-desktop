@@ -522,7 +522,6 @@ middleware 产品场景重新定义。
 ```text
 companion.persona
 companion.roster
-companion.summon
 companion.learn
 companion.evolve
 

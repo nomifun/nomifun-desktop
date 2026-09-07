@@ -33,7 +33,6 @@ pub mod types;
 // become the single integration surface.
 pub use nomi_agent::companion_tools::CompanionMemorySink;
 pub use nomi_agent::companion_tools::{CompanionSkillSink, SkillListing};
-pub use nomi_agent::summon_tools::SummonContextSink;
 pub use nomi_agent::cron_tools::{CronJobSummary, CronSink};
 pub use nomi_agent::ssh_backend::{
     RemoteCommandOutput, RemoteFileStat, SshBackend, SshBackendProvider, SshLeaseRelease,
@@ -64,7 +63,7 @@ pub use plugin_tools::{
     NomiPluginToolSessionRequest,
 };
 pub use factory::{
-    AgentFactoryDeps, CompanionPromptProvider, CompanionSummonProvider,
+    AgentFactoryDeps, CompanionPromptProvider,
     build_agent_factory, build_agent_model_config_resolver,
 };
 #[cfg(feature = "browser-use")]

@@ -1822,7 +1822,7 @@ Agent 工作台的最短用户路径应为：
 Capability 由选中 AgentPreset 的稳定 Revision 决定；具体 Knowledge、Workspace、
 MCP/Connector 实例由当前会话或其他消费目标在自己的绑定交互中选择。普通 Guid
 不再提供第二套能力覆盖控件，但必须提供已声明资源的目标级选择入口。会话级附件、
-消息以及明确属于会话的 AutoWork/IDMM/summon 状态可以继续保留。
+消息以及明确属于会话的 AutoWork/IDMM 状态可以继续保留。
 
 页面只需要展示：
 

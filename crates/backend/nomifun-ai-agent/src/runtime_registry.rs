@@ -3503,7 +3503,7 @@ mod tests {
         let registry = make_registry();
         // No runtime was ever built: these terminations tear down nothing, so
         // they must not count as crashes. (Administrative teardown requests —
-        // summon/skill-snapshot recycles on an idle conversation — used to be
+        // skill-snapshot recycles on an idle conversation — used to be
         // recorded here as phantom crashes and paused the conversation.)
         for _ in 0..(RESTART_MAX_PER_WINDOW + 4) {
             registry.terminate("c", Some(AgentKillReason::AgentErrorRecovery)).unwrap();
@@ -3535,7 +3535,7 @@ mod tests {
         let registry = make_registry();
         for _ in 0..6 {
             registry.get_or_create_runtime("c", make_runtime_options("c")).await.unwrap();
-            // Config-driven rebuild (model/skills/summon change) is a
+            // Config-driven rebuild (model/skills change) is a
             // deliberate recycle, not a crash.
             registry.terminate("c", Some(AgentKillReason::ConfigurationChanged)).unwrap();
         }

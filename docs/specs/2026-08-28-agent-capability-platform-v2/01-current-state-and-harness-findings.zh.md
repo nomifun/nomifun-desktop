@@ -222,14 +222,14 @@ Context 和资源实例的构造。
 `allowed_tools` 做 retain；证据位于
 `crates/agent/nomi-agent/src/bootstrap.rs:660-685,966-974`。Context 又固定组装通用
 工具指南、AGENTS、Project Memory、Plan/Browser 规则、Skill 摘要、环境与工作目录，
-Factory 再追加 Preset、伙伴 Persona、召唤记忆、Knowledge、委派、生图和语言政策。
+Factory 再追加 Preset、伙伴 Persona、Knowledge、委派、生图和语言政策。
 
 当时 Windows 展开的通用 `tool_usage_guidance()` 约 5,199 字符，Memory index 可注入
 最多 25,000 bytes，Project AGENTS 上限 32 KiB。它们只是说明静态 Context 不会被消息
 compaction 自动消除的历史规模证据，不构成 token、时延或性能 Gate。
 
 前端也在补偿后端缺少完整 Snapshot：`ui/src/renderer/pages/guid/GuidPage.tsx` 同时加载
-Skill/MCP catalog，并维护 Knowledge、AutoWork、IDMM、Summon、模型、协作等草稿；
+Skill/MCP catalog，并维护 Knowledge、AutoWork、IDMM、模型、协作等草稿；
 普通会话、Terminal、Cron、伙伴、客服和创意工坊又各自实现装配入口。问题不是某个页面
 字段太多，而是产品层必须跨 API 猜测本应由唯一 Compiler 产生的执行闭包。
 

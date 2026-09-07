@@ -649,7 +649,7 @@ notes at a high level rather than a complete historical log.
   you need before upgrading. The UI/API contract version was bumped
   accordingly (`suggestions_new` is gone from the companion status shape and
   `suggestions_added` from the learn result).
-  The summoned-session `propose_companion_memory` capability went with it:
+  The `propose_companion_memory` capability went with it:
   suggestion cards were its only storage and its only review surface, so it has
   no confirm-before-write channel left. Restoring it needs a new design.
 

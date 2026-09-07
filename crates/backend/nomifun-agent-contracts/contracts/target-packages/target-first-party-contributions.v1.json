@@ -1329,13 +1329,6 @@
         },
         {
           "capability": {
-            "id": "companion.summon",
-            "version": "1.0.0"
-          },
-          "kind": "tool"
-        },
-        {
-          "capability": {
             "id": "companion.learn",
             "version": "1.0.0"
           },

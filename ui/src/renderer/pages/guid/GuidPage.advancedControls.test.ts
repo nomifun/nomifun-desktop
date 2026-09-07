@@ -15,7 +15,6 @@ describe('GuidPage advanced controls', () => {
 
     expect(source.includes('<AutoWorkControl')).toBe(true);
     expect(source.includes('<IdmmControl')).toBe(true);
-    expect(source.includes('<SummonDrawer')).toBe(true);
     expect(source.includes('<KnowledgeControl')).toBe(true);
     expect(source.includes('knowledgeEnabled && (')).toBe(true);
   });
@@ -25,7 +24,6 @@ describe('GuidPage advanced controls', () => {
 
     expect(source.includes('autoWork: AutoWorkDraftValue')).toBe(true);
     expect(source.includes('idmm: IIdmmConfig')).toBe(true);
-    expect(source.includes('summon: SummonDraft | null')).toBe(true);
     expect(source.includes('knowledge: IKnowledgeBinding')).toBe(true);
   });
 

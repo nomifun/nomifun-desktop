@@ -10,7 +10,6 @@ import ChatTitleEditor from '@/renderer/pages/conversation/components/ChatTitleE
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
 import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
-import { SummonHeaderBadge } from '@/renderer/pages/conversation/components/SummonPanel';
 import MobileWorkspaceOverlay from './MobileWorkspaceOverlay';
 import WorkspacePanelHeader from './WorkspacePanelHeader';
 import WorkspaceToolRail, {
@@ -332,8 +331,6 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
       <div className='flex items-center gap-12px shrink-0'>
         {!props.hideAdvancedControls && conversation_id != null && (
           <>
-            {/* 召唤伙伴徽标（设计 B5）：仅已召唤会话渲染，被动展示伙伴名。 */}
-            <SummonHeaderBadge conversationId={conversation_id} />
             <AutoWorkControl target={{ kind: 'conversation', id: conversation_id }} />
             <IdmmControl target={{ kind: 'conversation', id: conversation_id }} />
             {(props.knowledgeEnabled ?? true) && (
