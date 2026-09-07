@@ -26,7 +26,7 @@ import React, {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
-import AgentPillBar from './components/AgentPillBar';
+import GuidAgentSelector from './components/GuidAgentSelector';
 import ComposerEntryStrip from './components/ComposerEntryStrip';
 import GuidActionRow from './components/GuidActionRow';
 import GuidCompanionPosterPreview from './components/GuidCompanionPosterPreview';
@@ -352,7 +352,7 @@ const GuidPage: React.FC = () => {
     ]
   );
 
-  const handleSelectAgentFromPillBar = useCallback(
+  const handleSelectAgent = useCallback(
     (selection: GuidAgentSelection) => {
       agentSelection.setSelection(selection);
       mention.setMentionOpen(false);
@@ -564,25 +564,6 @@ const GuidPage: React.FC = () => {
               />
             )}
 
-            <AgentPillBar
-              presets={agentSelection.presets}
-              selection={agentSelection.selection}
-              onSelectDefault={() =>
-                handleSelectAgentFromPillBar({ kind: 'default' })
-              }
-              onSelectPreset={(presetId) => {
-                const preset = agentSelection.presets.find(
-                  (candidate) => candidate.preset_id === presetId
-                );
-                if (!preset) return;
-                handleSelectAgentFromPillBar({
-                  kind: 'preset',
-                  presetId: preset.preset_id,
-                });
-              }}
-              suppressSelectionAnimation={resetAgentRequested}
-            />
-
             <GuidInputCard
               input={guidInput.input}
               onInputChange={handleInputChange}
@@ -622,6 +603,19 @@ const GuidPage: React.FC = () => {
               onClearWorkspace={() => guidInput.setDir('')}
               entryStrip={
                 <ComposerEntryStrip
+                  agentSelector={
+                    <GuidAgentSelector
+                      presets={agentSelection.presets}
+                      draftPresets={agentSelection.draftPresets}
+                      officialTemplates={agentSelection.officialTemplates}
+                      selection={agentSelection.selection}
+                      isLoading={agentSelection.isLoading}
+                      loadError={agentSelection.loadError}
+                      onRetry={agentSelection.refreshPresets}
+                      onSelectDefault={() => handleSelectAgent({ kind: 'default' })}
+                      onSelectPreset={(presetId) => handleSelectAgent({ kind: 'preset', presetId })}
+                    />
+                  }
                   onCreateMiniApp={
                     isAutoWorkMode ? undefined : activateMiniAppMode
                   }
