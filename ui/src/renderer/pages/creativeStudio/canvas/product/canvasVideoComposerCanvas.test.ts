@@ -544,6 +544,6 @@ describe('canvas video composer product model', () => {
         [source, prepared.configNode],
         prepared.configNode
       )
-    ).toEqual({ x: 1020, y: 0 });
+    ).toEqual({ x: 500, y: 0 });
   });
 });

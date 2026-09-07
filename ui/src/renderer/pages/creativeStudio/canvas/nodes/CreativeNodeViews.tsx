@@ -6,20 +6,18 @@
 
 import {
   Camera,
-  Group,
-  MovieBoard,
   PanoramaHorizontal,
   Pic,
-  SettingConfig,
-  Text,
   VideoTwo,
   Voice,
 } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
-import type { CreativeCanvasNodeKind, CreativeGenerationStatus } from '../../domain/schema';
+import type { CreativeCanvasNodeKind } from '../../domain/schema';
+import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 import CreativeNodeFrame from './CreativeNodeFrame';
+import CreativeVideoNodeMedia from './CreativeVideoNodeMedia';
 import type {
   CreativeNodeAssetPresentation,
   CreativeNodeOfKind,
@@ -103,13 +101,7 @@ export const CreativeTextNode: React.FC<CreativeTextNodeProps> = ({
   return (
     <CreativeNodeFrame
       node={node}
-      icon={<Text theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={resolvedTitle}
-      subtitle={t(
-        node.data.format === 'markdown'
-          ? 'creativeStudio.canvas.nodes.text.formats.markdown'
-          : 'creativeStudio.canvas.nodes.text.formats.plainText'
-      )}
       {...sharedFrameProps(props)}
     >
       {editing && !node.locked ? (
@@ -193,23 +185,23 @@ export const CreativeImageNode: React.FC<CreativeImageNodeProps> = ({
   const resolved = Boolean(node.data.assetId && asset?.src);
   const resolvedTitle = title ?? t('creativeStudio.canvas.nodeKinds.image');
   const resolvedEmptyLabel =
-    emptyLabel ?? t('creativeStudio.canvas.nodes.image.empty');
+    asset?.deleted ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })
+      : emptyLabel ?? t('creativeStudio.canvas.nodes.image.empty');
   return (
     <CreativeNodeFrame
       node={node}
-      icon={<Pic theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={resolvedTitle}
-      subtitle={(asset?.label ?? node.data.caption) || undefined}
       footer={node.data.naturalSize ? `${node.data.naturalSize.width} × ${node.data.naturalSize.height}` : undefined}
       {...sharedFrameProps(props)}
     >
       {resolved ? (
-        <img
+        <CreativeMediaPreview
+          kind='image'
           className={styles.imageMedia}
-          src={asset?.src}
+          src={asset?.originalSrc ?? asset?.src}
+          posterSrc={asset?.src}
           alt={asset?.alt ?? node.data.alt}
-          draggable={false}
-          style={{ objectFit: node.data.fit }}
+          fit={node.data.fit}
         />
       ) : (
         <EmptyMedia
@@ -235,31 +227,22 @@ export const CreativeVideoNode: React.FC<CreativeVideoNodeProps> = ({
   const resolved = Boolean(node.data.assetId && asset?.src);
   const resolvedTitle = title ?? t('creativeStudio.canvas.nodeKinds.video');
   const resolvedEmptyLabel =
-    emptyLabel ?? t('creativeStudio.canvas.nodes.video.empty');
-  const trimLabel = `${formatMilliseconds(node.data.trimStartMs)} – ${
-    node.data.trimEndMs == null ? '∞' : formatMilliseconds(node.data.trimEndMs)
-  }`;
+    asset?.deleted ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })
+      : emptyLabel ?? t('creativeStudio.canvas.nodes.video.empty');
   return (
     <CreativeNodeFrame
       node={node}
-      icon={<VideoTwo theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={resolvedTitle}
-      subtitle={asset?.label}
-      footer={resolved ? trimLabel : undefined}
       {...sharedFrameProps(props)}
     >
-      {resolved ? (
-        <video
-          className={styles.videoMedia}
-          src={asset?.src}
-          poster={asset?.posterSrc}
-          controls
-          muted={node.data.muted}
-          loop={node.data.loop}
-          autoPlay={node.data.autoplay}
-          preload='metadata'
-          aria-label={asset?.alt ?? asset?.label ?? resolvedTitle}
-          onPointerDown={(event) => event.stopPropagation()}
+      {resolved && asset ? (
+        <CreativeVideoNodeMedia
+          key={`${node.id}:${asset.src}`}
+          node={node}
+          asset={asset}
+          title={resolvedTitle}
+          selected={props.selected}
+          onActivate={nodeCallbacks(node, props).onActivate}
         />
       ) : (
         <EmptyMedia
@@ -285,16 +268,15 @@ export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
   const resolved = Boolean(node.data.assetId && asset?.src);
   const resolvedTitle = title ?? t('creativeStudio.canvas.nodeKinds.audio');
   const resolvedEmptyLabel =
-    emptyLabel ?? t('creativeStudio.canvas.nodes.audio.empty');
+    asset?.deleted ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })
+      : emptyLabel ?? t('creativeStudio.canvas.nodes.audio.empty');
   const trimLabel = `${formatMilliseconds(node.data.trimStartMs)} – ${
     node.data.trimEndMs == null ? '∞' : formatMilliseconds(node.data.trimEndMs)
   } · ${Math.round(Math.min(1, Math.max(0, node.data.volume)) * 100)}%`;
   return (
     <CreativeNodeFrame
       node={node}
-      icon={<Voice theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={node.data.title || resolvedTitle}
-      subtitle={asset?.label}
       footer={resolved ? trimLabel : undefined}
       {...sharedFrameProps(props)}
     >
@@ -344,31 +326,29 @@ export const CreativePanoramaNode: React.FC<CreativePanoramaNodeProps> = ({
   const resolvedTitle =
     title ?? t('creativeStudio.canvas.nodeKinds.panorama');
   const resolvedEmptyLabel =
-    emptyLabel ?? t('creativeStudio.canvas.nodes.panorama.empty');
+    asset?.deleted ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })
+      : emptyLabel ?? t('creativeStudio.canvas.nodes.panorama.empty');
   return (
     <CreativeNodeFrame
       node={node}
-      icon={<PanoramaHorizontal theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={resolvedTitle}
-      subtitle={t('creativeStudio.canvas.nodes.panorama.fieldOfView', {
-        value: Math.round(node.data.fieldOfView),
-      })}
       footer={t('creativeStudio.canvas.nodes.panorama.orientation', {
         yaw: Math.round(node.data.yaw),
         pitch: Math.round(node.data.pitch),
       })}
       {...sharedFrameProps(props)}
     >
-      {preview ? (
+      {preview && !asset?.deleted ? (
         <div className={styles.previewSlot} data-node-preview='panorama'>
           {preview}
         </div>
       ) : resolved ? (
-        <img
+        <CreativeMediaPreview
+          kind='image'
           className={styles.imageMedia}
-          src={asset?.src}
+          src={asset?.originalSrc ?? asset?.src}
+          posterSrc={asset?.src}
           alt={asset?.alt ?? asset?.label ?? resolvedTitle}
-          draggable={false}
         />
       ) : (
         <EmptyMedia
@@ -377,60 +357,6 @@ export const CreativePanoramaNode: React.FC<CreativePanoramaNodeProps> = ({
           assetId={node.data.assetId}
         />
       )}
-    </CreativeNodeFrame>
-  );
-};
-
-export interface CreativeConfigNodeProps extends CreativeNodePresentationProps<'config'> {
-  title?: string;
-  providerFallback?: string;
-  modelFallback?: string;
-  promptFallback?: string;
-}
-
-export const CreativeConfigNode: React.FC<CreativeConfigNodeProps> = ({
-  title,
-  providerFallback,
-  modelFallback,
-  promptFallback,
-  ...props
-}) => {
-  const { t } = useTranslation();
-  const { node } = props;
-  const resolvedTitle = title ?? t('creativeStudio.canvas.nodeKinds.config');
-  const resolvedProviderFallback =
-    providerFallback ??
-    t('creativeStudio.canvas.nodes.config.providerFallback');
-  const resolvedModelFallback =
-    modelFallback ?? t('creativeStudio.canvas.nodes.config.modelFallback');
-  const resolvedPromptFallback =
-    promptFallback ?? t('creativeStudio.canvas.nodes.config.promptFallback');
-  const canonicalRuntime = {
-    status: node.data.status,
-    errorMessage: node.data.errorMessage,
-  } satisfies { status: CreativeGenerationStatus; errorMessage: string | null };
-  return (
-    <CreativeNodeFrame
-      node={node}
-      icon={<SettingConfig theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
-      title={resolvedTitle}
-      subtitle={`${node.data.task} · ${node.data.capability}`}
-      footer={t('creativeStudio.canvas.nodes.config.summary', {
-        parameters: Object.keys(node.data.parameters).length,
-        inputs: node.data.inputAssetIds.length,
-      })}
-      {...sharedFrameProps({ ...props, runtime: props.runtime ?? canonicalRuntime })}
-    >
-      <div className={styles.configContent}>
-        <div className={styles.modelRow}>
-          <span>{node.data.providerId ?? resolvedProviderFallback}</span>
-          <strong>{node.data.model ?? resolvedModelFallback}</strong>
-        </div>
-        <p className={styles.prompt}>
-          {node.data.prompt || resolvedPromptFallback}
-        </p>
-        {node.data.negativePrompt ? <p className={styles.negativePrompt}>{node.data.negativePrompt}</p> : null}
-      </div>
     </CreativeNodeFrame>
   );
 };
@@ -458,9 +384,7 @@ export const CreativeDirectorNode: React.FC<CreativeDirectorNodeProps> = ({
   return (
     <CreativeNodeFrame
       node={node}
-      icon={<MovieBoard theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={resolvedTitle}
-      subtitle={node.data.sceneId ?? resolvedEmptyLabel}
       footer={`${formatMilliseconds(timeline)} / ${formatMilliseconds(duration)}`}
       {...sharedFrameProps(props)}
     >
@@ -504,13 +428,7 @@ export const CreativeGroupNode: React.FC<CreativeGroupNodeProps> = ({
   return (
     <CreativeNodeFrame
       node={node}
-      icon={<Group theme='outline' size={15} fill='currentColor' strokeWidth={3} />}
       title={node.data.title || resolvedTitleFallback}
-      subtitle={
-        node.data.collapsed
-          ? t('creativeStudio.canvas.nodes.group.collapsed')
-          : undefined
-      }
       variant='group'
       {...sharedFrameProps({ ...props, style: groupStyle })}
     >
@@ -531,7 +449,7 @@ export type CreativeAnyNodeViewProps = CreativeNodePresentationProps<CreativeCan
   onTextEditingComplete?: () => void;
 };
 
-/** Canonical discriminated-union dispatcher for the eight persisted node kinds. */
+/** User-facing views for persisted canvas nodes; task-record configs stay headless. */
 export const CreativeNodeView: React.FC<CreativeAnyNodeViewProps> = (props) => {
   const { node } = props;
   switch (node.type) {
@@ -554,7 +472,7 @@ export const CreativeNodeView: React.FC<CreativeAnyNodeViewProps> = (props) => {
     case 'panorama':
       return <CreativePanoramaNode {...props} node={node} asset={props.asset} preview={props.panoramaPreview} />;
     case 'config':
-      return <CreativeConfigNode {...props} node={node} />;
+      return null;
     case 'director':
       return <CreativeDirectorNode {...props} node={node} preview={props.directorPreview} />;
     case 'group':
@@ -562,15 +480,12 @@ export const CreativeNodeView: React.FC<CreativeAnyNodeViewProps> = (props) => {
   }
 };
 
-// Ensure the canonical union cannot gain a new kind without making this module
-// visibly incomplete to consumers and tests.
 export const CREATIVE_NODE_VIEW_KINDS = [
   'image',
   'panorama',
   'text',
-  'config',
   'video',
   'audio',
   'director',
   'group',
-] as const satisfies readonly CreativeCanvasNodeKind[];
+] as const satisfies readonly Exclude<CreativeCanvasNodeKind, 'config'>[];

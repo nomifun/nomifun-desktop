@@ -7,8 +7,11 @@
 import {
   canvasCommands,
   clientToCanvas,
+  createCanvasId,
   findCanvasGraphNode,
   validateCanvasConnection,
+  type CanvasConnectionCandidate,
+  type CanvasConnectionErrorCode,
   type CanvasDocument,
   type CanvasIdFactory,
   type CanvasPoint,
@@ -27,6 +30,9 @@ export interface CanvasConnectionDragGesture {
   fixedNodeId: string;
   fixedHandle: CanvasConnectionHandleKind;
   fixedHandleId: string | null;
+  /** Snapshot of the selected output nodes when the drag began. */
+  fixedNodeIds?: readonly string[];
+  hoverNodeId?: string | null;
   clientPosition: CanvasPoint;
   worldPosition: CanvasPoint;
 }
@@ -62,6 +68,7 @@ export function startCanvasConnectionDrag(
     pointerId: number;
     clientPosition: CanvasPoint;
     viewport: CanvasViewport;
+    selectedNodeIds?: readonly string[];
   }
 ): StartCanvasConnectionDragResult {
   const node = findCanvasGraphNode(document, input.nodeId);
@@ -87,10 +94,43 @@ export function startCanvasConnectionDrag(
       fixedNodeId: input.nodeId,
       fixedHandle: input.handle,
       fixedHandleId: input.handleId ?? null,
+      fixedNodeIds:
+        input.handle === 'source' && input.selectedNodeIds?.includes(node.id)
+          ? document.nodes
+              .filter((candidate) =>
+                input.selectedNodeIds?.includes(candidate.id) &&
+                !candidate.locked &&
+                candidate.type !== 'group' &&
+                candidate.type !== 'director'
+              )
+              .map((candidate) => candidate.id)
+          : [node.id],
       clientPosition: { ...input.clientPosition },
       worldPosition: clientToCanvas(input.clientPosition, input.viewport),
     },
   };
+}
+
+/** Use the same validation for hover feedback and the eventual drop. */
+export function planCanvasConnectionDrop(
+  document: CanvasDocument,
+  gesture: Pick<
+    CanvasConnectionDragGesture,
+    'fixedNodeId' | 'fixedNodeIds' | 'fixedHandle'
+  >,
+  nodeId: string
+): { candidates: CanvasConnectionCandidate[]; rejected: CanvasConnectionErrorCode[] } {
+  const candidates: CanvasConnectionCandidate[] = [];
+  const rejected: CanvasConnectionErrorCode[] = [];
+  for (const fixedNodeId of new Set(gesture.fixedNodeIds ?? [gesture.fixedNodeId])) {
+    const candidate = gesture.fixedHandle === 'source'
+      ? { sourceNodeId: fixedNodeId, targetNodeId: nodeId }
+      : { sourceNodeId: nodeId, targetNodeId: fixedNodeId };
+    const validation = validateCanvasConnection(document, candidate);
+    if (validation.ok) candidates.push(candidate);
+    else rejected.push(validation.code);
+  }
+  return { candidates, rejected };
 }
 
 export function updateCanvasConnectionDrag(
@@ -117,7 +157,12 @@ export function finishCanvasConnectionDrag(
   gesture: CanvasConnectionDragGesture,
   pointerId: number,
   target: CanvasConnectionDropTarget,
-  options: { at?: number; edgeId?: string; idFactory?: CanvasIdFactory } = {}
+  options: {
+    at?: number;
+    edgeId?: string;
+    idFactory?: CanvasIdFactory;
+    mergeKey?: string;
+  } = {}
 ): CanvasInteractionResolution {
   if (gesture.pointerId !== pointerId) {
     return canvasInteractionResolution({ handled: false, preventDefault: false });
@@ -133,42 +178,45 @@ export function finishCanvasConnectionDrag(
               fixedNodeId: gesture.fixedNodeId,
               fixedHandle: gesture.fixedHandle,
               fixedHandleId: gesture.fixedHandleId,
+              fixedNodeIds: gesture.fixedNodeIds,
               worldPosition: { ...gesture.worldPosition },
             },
           ],
     });
   }
 
-  const sourceNodeId =
-    gesture.fixedHandle === 'source' ? gesture.fixedNodeId : target.nodeId;
-  const targetNodeId =
-    gesture.fixedHandle === 'source' ? target.nodeId : gesture.fixedNodeId;
-  const validation = validateCanvasConnection(document, {
-    sourceNodeId,
-    targetNodeId,
-  });
-  if (!validation.ok) {
+  const { candidates, rejected } = planCanvasConnectionDrop(document, gesture, target.nodeId);
+  if (candidates.length === 0) {
     return canvasInteractionResolution({
-      intents: [{ type: 'connection/rejected', code: validation.code }],
+      intents: [{ type: 'connection/rejected', code: rejected[0] ?? 'missing_source' }],
     });
   }
 
+  const at = options.at ?? Date.now();
+  const firstEdgeId = options.edgeId ?? (options.idFactory ?? createCanvasId)('edge');
+  const mergeKey = options.mergeKey ?? `connect:${firstEdgeId}`;
+  const batch = (gesture.fixedNodeIds?.length ?? 1) > 1;
+  const commands = candidates.map(({ sourceNodeId, targetNodeId }, index) =>
+    canvasCommands.connect(sourceNodeId, targetNodeId, {
+      at,
+      mergeKey,
+      edgeId: index === 0 ? firstEdgeId : undefined,
+      idFactory: options.idFactory,
+      sourceHandle: gesture.fixedHandle === 'source'
+        ? gesture.fixedHandleId
+        : (target.handleId ?? 'source'),
+      targetHandle: gesture.fixedHandle === 'target'
+        ? gesture.fixedHandleId
+        : (target.handleId ?? 'target'),
+    })
+  );
+  // Each canonical connect command selects its new edge. Restore the batch
+  // after all edges exist so the user can connect the same sources again.
+  if (batch) commands.push(canvasCommands.setSelection(gesture.fixedNodeIds ?? [gesture.fixedNodeId]));
   return canvasInteractionResolution({
-    commands: [
-      canvasCommands.connect(sourceNodeId, targetNodeId, {
-        at: options.at,
-        edgeId: options.edgeId,
-        idFactory: options.idFactory,
-        sourceHandle:
-          gesture.fixedHandle === 'source'
-            ? gesture.fixedHandleId
-            : (target.handleId ?? null),
-        targetHandle:
-          gesture.fixedHandle === 'target'
-            ? gesture.fixedHandleId
-            : (target.handleId ?? null),
-      }),
-    ],
-    intents: [{ type: 'connection/created', sourceNodeId, targetNodeId }],
+    commands,
+    intents: batch
+      ? [{ type: 'connection/batch-created', count: candidates.length, skippedCount: rejected.length }]
+      : [{ type: 'connection/created', ...candidates[0] }],
   });
 }

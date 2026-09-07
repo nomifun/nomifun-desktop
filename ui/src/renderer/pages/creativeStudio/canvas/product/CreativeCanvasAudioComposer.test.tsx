@@ -238,7 +238,7 @@ describe('CreativeCanvasAudioComposer', () => {
     );
     expect(shellCss.includes(":global([data-theme='light']) .positioner")).toBe(true);
     expect(shellCss.includes(":global([data-theme='dark']) .positioner")).toBe(true);
-    expect(shellCss.includes('height: 104px')).toBe(true);
+    expect(shellCss.includes('height: 92px')).toBe(true);
     expect(shellCss.includes('min-width: 48px')).toBe(true);
     expect(shellCss.includes('.retrySubmitButton')).toBe(true);
     expect(shellCss.includes('@media (max-width: 760px)')).toBe(true);

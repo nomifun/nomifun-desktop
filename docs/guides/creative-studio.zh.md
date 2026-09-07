@@ -201,14 +201,24 @@ Canvas 已提交工作拥有一个持久 `config` owner 和一个 canonical crea
 界面只会按这个 exact owner 与权威任务状态对账。终态结算是幂等的；响应不确定时不会
 虚构成功，也不会丢掉审计轨迹。权威 `404` 与暂时网络失败会被区别处理。
 
+在「我的素材」中删除素材会永久删除原件及缩略图。画布节点、已完成的生成任务和
+模板历史保留明确的「素材已删除」标记；重新载入、重放任务或复用旧素材 ID 都不会
+恢复原始内容。已删除素材不会出现在可复用列表中。若仍有运行中的生成任务或模板
+运行使用它，需要先等待任务结束或取消任务。
+
+永久删除支持幂等重试。所有文件清理完成前，数据库会保留待清理路径；请求失败可
+重试，中断的清理会在下次启动时继续。没有用户删除标记的意外文件缺失仍会触发
+完整性检查。已下载到外部的文件及既有备份不属于此次删除范围。
+
 ## Canvas 归档
 
-规范 Canvas 导出是版本 2 的 `*.nomifun-canvas.zip` 归档。manifest 使用 Canvas
+规范 Canvas 导出是版本 3 的 `*.nomifun-canvas.zip` 归档。manifest 使用 Canvas
 身份，包含已校验的 Canvas 文档与完整引用素材闭包，其中包括 Director sidecar 及
 其引用素材。导入会校验归档，并重映射 Canvas、节点、连接、素材、operation、session
-和 Director 引用，避免导入副本与源对象共用身份。
+和 Director 引用，避免导入副本与源对象共用身份。版本 3 以空内容项携带已删除素材的
+标记，导入不会重新生成已删除的媒体文件。
 
-reader 必须继续支持已发布的版本 1 `.nomifun-canvas.zip` 格式。v1 manifest 可能包含
+reader 继续支持版本 2 Canvas 归档和已发布的版本 1 `.nomifun-canvas.zip` 格式。v1 manifest 可能包含
 历史 `project/projectId` 字段；这些只是兼容 wire 数据，不会把 Project 重新引入产品。
 Conversation 消息与活跃 pending turn 位于归档之外，导入不会克隆 Conversation。
 

@@ -30,6 +30,8 @@ import { useNavigate, useParams } from 'react-router-dom';
 
 import {
   creativeAssetClient,
+  isCreativeAssetDeleted,
+  subscribeCreativeAssetDeletion,
   type CreativeAsset,
   type CreativeAssetKind,
   useCreativeAssetPickerDialog,
@@ -46,8 +48,9 @@ import {
 } from '../../app/routes';
 import {
   DEFAULT_CREATIVE_STUDIO_PANELS,
+  isCreativeCanvasUserNode,
   type CreativeCanvasNode,
-  type CreativeCanvasNodeKind,
+  type CreativeCanvasUserNodeKind,
   type CreativeChatSessionReference,
   type CreativeImagePromptMention,
   type CreativeSize,
@@ -106,12 +109,14 @@ import {
 } from '../editor';
 import { CanvasMiniMap, type CanvasMiniMapNavigationRequest } from '../graph';
 import {
+  finishCanvasConnectionDrag,
   resolveCanvasContextAction,
   type CanvasContextAction,
   type CanvasIntegrationIntent,
 } from '../interactions';
 import {
   CreativeCanvasImageToolbar,
+  CreativeImagePreviewDialog,
   CreativeImageCropDialog,
   CreativeImageMaskEditDialog,
   CreativeImageSplitDialog,
@@ -179,6 +184,7 @@ import {
   type CanvasImageGenerationBlocker,
   type CanvasImageReference,
   type CanvasImageReferenceResolution,
+  type CanvasTextReference,
 } from './canvasImageReferences';
 import CanvasImageTaskRuntimeBridge, {
   canvasImageTaskReferenceFromPlan,
@@ -422,6 +428,7 @@ const canvasImageComposerReferences = (
       base: reference.connection === null,
       label,
       thumbnailUrl: reference.asset.thumbnailUrl ?? reference.asset.originalUrl,
+      originalUrl: reference.asset.originalUrl,
       ordinal: reference.ordinal,
     };
   });
@@ -452,7 +459,7 @@ const invalidCanvasImageComposerReferences = (
     if (validConnectionIds.has(connection.id)) continue;
     const source = nodesById.get(connection.sourceNodeId);
     const issue = issueByConnectionId.get(connection.id);
-    if (!issue) continue;
+    if (!issue || source?.type === 'text') continue;
     const assetId =
       source && (source.type === 'image' || source.type === 'panorama')
         ? source.data.assetId
@@ -475,6 +482,7 @@ const invalidCanvasImageComposerReferences = (
       base: false,
       label,
       thumbnailUrl: asset?.thumbnailUrl ?? asset?.originalUrl ?? null,
+      originalUrl: asset?.originalUrl ?? null,
       ordinal: 1_000 + index,
       disabledReason:
         canvasImageGenerationBlockerMessage(
@@ -491,7 +499,7 @@ const invalidCanvasImageComposerReferences = (
       issue.code === 'target_asset_unresolved' ||
       issue.code === 'target_asset_kind_unsupported'
   );
-  if (targetIssue) {
+  if (targetIssue && 'assetId' in targetIssue) {
     const target = nodesById.get(targetNodeId);
     const asset = assetsById.get(targetIssue.assetId) ?? null;
     items.unshift({
@@ -504,6 +512,7 @@ const invalidCanvasImageComposerReferences = (
         1
       ),
       thumbnailUrl: asset?.thumbnailUrl ?? asset?.originalUrl ?? null,
+      originalUrl: asset?.originalUrl ?? null,
       ordinal: 0,
       disabledReason:
         canvasImageGenerationBlockerMessage(
@@ -514,6 +523,25 @@ const invalidCanvasImageComposerReferences = (
   }
   return items;
 };
+
+const canvasTextComposerReferences = (
+  references: readonly CanvasTextReference[],
+  t: TFunction
+): CreativeCanvasImageComposerReference[] => references.map((reference) => {
+  const mentionLabel = t('creativeStudio.canvas.image.textReferenceLabel', { index: reference.ordinal });
+  return {
+    nodeId: reference.sourceNodeId,
+    kind: 'text',
+    assetId: null,
+    connectionId: reference.connection.id,
+    base: false,
+    label: reference.text.replace(/\s+/gu, ' ').slice(0, 64) || mentionLabel,
+    textContent: reference.text,
+    mentionLabel,
+    ordinal: reference.ordinal,
+    disabledReason: reference.text ? undefined : t('creativeStudio.canvas.image.textReferenceEmpty'),
+  };
+});
 
 const canvasImageWorkbenchReferences = (
   resolution: CanvasImageReferenceResolution
@@ -561,6 +589,8 @@ const canvasImageGenerationBlockerMessage = (
         });
   }
   switch (blocker.issue.code) {
+    case 'source_text_empty':
+      return t('creativeStudio.canvas.image.textReferenceEmpty');
     case 'duplicate_asset':
       return t('creativeStudio.canvas.image.duplicateReferenceAsset', {
         defaultValue: '同一图片通过多个节点重复接入，请断开重复连线。',
@@ -574,6 +604,9 @@ const canvasImageGenerationBlockerMessage = (
       return t('creativeStudio.canvas.image.referenceAssetLoading', {
         defaultValue: '正在载入参考图片，请稍候。',
       });
+    case 'source_asset_deleted':
+    case 'target_asset_deleted':
+      return t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' });
     case 'source_asset_kind_unsupported':
     case 'target_asset_kind_unsupported':
       return t('creativeStudio.canvas.image.referenceKindUnsupported', {
@@ -593,7 +626,7 @@ const canvasImageGenerationBlockerMessage = (
 };
 
 const centeredNodePosition = (
-  kind: CreativeCanvasNodeKind,
+  kind: CreativeCanvasUserNodeKind,
   worldPosition: CanvasPoint
 ): CanvasPoint => {
   const size = CREATIVE_CANVAS_PRODUCT_NODE_SIZES[kind];
@@ -638,7 +671,7 @@ const connectionErrorMessage = (
       });
     case 'config_to_config':
       return t('creativeStudio.canvas.connection.errors.configToConfig', {
-        defaultValue: '两个配置节点不能直接连接',
+        defaultValue: '两个生成任务记录不能直接连接',
       });
     case 'director_output_not_supported':
       return t('creativeStudio.canvas.connection.errors.directorInputOnly', {
@@ -650,7 +683,7 @@ const connectionErrorMessage = (
       });
     case 'no_valid_drop_target':
       return t('creativeStudio.canvas.connection.errors.invalidDropTarget', {
-        defaultValue: '请将连接拖到对端节点的有效连接点',
+        defaultValue: '请将连接拖到目标节点卡片上',
       });
   }
 };
@@ -946,6 +979,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [pendingPanoramaChoice, setPendingPanoramaChoice] =
     useState<PendingPanoramaChoice | null>(null);
   const [assetImportBusy, setAssetImportBusy] = useState(false);
+  const [previewImageNode, setPreviewImageNode] =
+    useState<Extract<CreativeCanvasNode, { type: 'image' }> | null>(null);
   const [pendingImageCrop, setPendingImageCrop] =
     useState<PendingImageCrop | null>(null);
   const [imageCropBusy, setImageCropBusy] = useState(false);
@@ -1122,10 +1157,51 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, [canvasState]);
   const selectedCanvasImageReferenceAssetKey =
     selectedCanvasImageReferenceAssetIds.join('\u0000');
+  const canvasMediaAssetIds = useMemo(() => [...new Set([
+    ...selectedCanvasImageReferenceAssetIds,
+    ...(canvasState?.document.nodes.flatMap((node) => {
+      if (node.type === 'video') {
+        return [node.data.assetId, node.data.posterAssetId].filter(
+          (assetId): assetId is string => Boolean(assetId)
+        );
+      }
+      return (node.type === 'image' || node.type === 'panorama' || node.type === 'audio')
+        && node.data.assetId ? [node.data.assetId] : [];
+    }) ?? []),
+  ])], [canvasState?.document.nodes, selectedCanvasImageReferenceAssetKey]);
+  const canvasMediaAssetKey = canvasMediaAssetIds.join('\u0000');
 
   useEffect(() => {
-    if (!projectId || selectedCanvasImageReferenceAssetIds.length === 0) return;
-    const missing = selectedCanvasImageReferenceAssetIds.filter(
+    let active = true;
+    const resolve = (ids: readonly string[]) => {
+      void Promise.allSettled(ids.map((id) => creativeAssetClient.get(id))).then((results) => {
+        if (!active) return;
+        setCanvasReferenceAssets((current) => {
+          const next = new Map(current);
+          for (const result of results) {
+            if (result.status === 'fulfilled') next.set(result.value.id, result.value);
+          }
+          return next;
+        });
+      });
+    };
+    const unsubscribe = subscribeCreativeAssetDeletion(creativeAssetClient, (assetId) => {
+      const known = knownAssetsRef.current.get(assetId);
+      if (known) {
+        const deleted = { ...known, deletedAt: Date.now(), textContent: null, originalUrl: '', thumbnailUrl: null, inLibrary: false };
+        knownAssetsRef.current = new Map(knownAssetsRef.current).set(assetId, deleted);
+        setCanvasReferenceAssets((current) => new Map(current).set(assetId, deleted));
+      }
+      resolve([assetId]);
+    });
+    const refresh = () => resolve(canvasMediaAssetIds);
+    window.addEventListener('focus', refresh);
+    return () => { active = false; unsubscribe(); window.removeEventListener('focus', refresh); };
+  }, [projectId, canvasMediaAssetKey]);
+
+  useEffect(() => {
+    if (!projectId || canvasMediaAssetIds.length === 0) return;
+    const missing = canvasMediaAssetIds.filter(
       (assetId) => !knownAssetsById.has(assetId)
     );
     if (missing.length === 0) return;
@@ -1134,7 +1210,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
       (results) => {
         if (!active || activeProjectIdRef.current !== projectId) return;
         const resolved = results.flatMap((result) =>
-          result.status === 'fulfilled' && result.value.kind === 'image'
+          result.status === 'fulfilled'
             ? [result.value]
             : []
         );
@@ -1149,7 +1225,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [knownAssetsById, projectId, selectedCanvasImageReferenceAssetKey]);
+  }, [knownAssetsById, projectId, canvasMediaAssetKey]);
 
   useLayoutEffect(() => {
     const host = canvasHostRef.current;
@@ -1185,6 +1261,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setCreateNodeMenu(null);
     setPendingPanoramaChoice(null);
     setAssetImportBusy(false);
+    setPreviewImageNode(null);
     setPendingImageCrop(null);
     setImageCropBusy(false);
     setImageCropProgress(null);
@@ -1461,7 +1538,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, []);
 
   const addNode = useCallback(
-    (kind: CreativeCanvasNodeKind) => {
+    (kind: CreativeCanvasUserNodeKind) => {
       if (save.revision === null) return;
       const insertion = prepareCenteredInsertion();
       if (!insertion) return;
@@ -2058,7 +2135,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
 
   const resolveCanvasImageAsset = useCallback(
-    async (node: Extract<CreativeCanvasNode, { type: 'image' }>) => {
+    async (node: Extract<CreativeCanvasNode, { type: 'image' }>, allowDeleted = false) => {
       const assetId = node.data.assetId?.trim();
       if (!assetId) {
         throw new Error(
@@ -2067,8 +2144,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
           })
         );
       }
-      const cached = knownAssetsRef.current.get(assetId);
-      const asset = cached ?? (await creativeAssetClient.get(assetId));
+      const asset = await creativeAssetClient.get(assetId);
+      if (!allowDeleted && isCreativeAssetDeleted(asset)) {
+        throw new Error(t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' }));
+      }
       if (asset.kind !== 'image') {
         throw new Error(
           t('creativeStudio.canvas.errors.imageAssetKindMismatch', {
@@ -2082,7 +2161,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
       );
       return asset;
     },
-    []
+    [t]
+  );
+
+  const resolveCanvasImagePreviewAsset = useCallback(
+    (node: Extract<CreativeCanvasNode, { type: 'image' }>) => resolveCanvasImageAsset(node, true),
+    [resolveCanvasImageAsset]
   );
 
   const handleOpenImageCrop = useCallback(
@@ -2614,7 +2698,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setNotice(
           t('creativeStudio.canvas.notices.maskTaskSubmitted', {
             defaultValue:
-              '局部编辑任务已安全提交；配置节点会持续显示真实后端状态。',
+              '局部编辑任务已安全提交；对应输入节点会持续显示真实后端状态。',
           })
         );
         return;
@@ -2747,7 +2831,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
             mergeKey,
           })
         );
-        editor.dispatch(canvasCommands.setSelection([prepared.configNode.id]));
         canvasOwned = true;
 
         const result = await runtime.submit(prepared.plan);
@@ -2863,7 +2946,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
       setNotice(
         t('creativeStudio.canvas.notices.taskConfirmedMissing', {
           defaultValue:
-            '已确认服务器不存在该任务；配置节点记录为失败并清理恢复标记。',
+            '已确认服务器不存在该任务；任务状态已记录为失败并清理恢复标记。',
         })
       );
     } catch (error) {
@@ -2918,7 +3001,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setNotice(
           t('creativeStudio.canvas.notices.imageTaskSubmitted', {
             defaultValue:
-              '图片创作任务已安全提交；配置节点会持续显示真实后端状态。',
+              '图片创作任务已安全提交；对应输入节点会持续显示真实后端状态。',
           })
         );
         return;
@@ -3081,7 +3164,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
             end: mention.end,
             tokenText: `@${mention.fallbackLabel}`,
           })),
-          referenceResolution.references
+          referenceResolution.references,
+          referenceResolution.textReferences
         );
         const inputPolicy = imageReferenceInputPolicy(
           selectedModel.protocol,
@@ -3254,7 +3338,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setNotice(
           t('creativeStudio.canvas.notices.videoTaskSubmitted', {
             defaultValue:
-              '视频创作任务已安全提交；配置节点会持续显示真实后端状态。',
+              '视频创作任务已安全提交；对应输入节点会持续显示真实后端状态。',
           })
         );
         return;
@@ -3630,7 +3714,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setNotice(
           t('creativeStudio.canvas.notices.audioTaskSubmitted', {
             defaultValue:
-              '音频创作任务已安全提交；配置节点会持续显示真实后端状态。',
+              '音频创作任务已安全提交；对应输入节点会持续显示真实后端状态。',
           })
         );
         return;
@@ -4111,6 +4195,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
             target: intent.target,
             clientPosition: { ...intent.clientPosition },
             ...(node ? { nodeLocked: node.locked } : {}),
+            selectedEdgeCount: editorRef.current?.getState().selection.edgeIds.length ?? 0,
           });
           return;
         }
@@ -4127,6 +4212,12 @@ const CreativeCanvasProductRoute: React.FC = () => {
               defaultValue: '无法创建连接：{{reason}}。',
             })
           );
+          return;
+        case 'connection/batch-created':
+          setNotice(t('creativeStudio.canvas.notices.connectionsCreated', {
+            count: intent.count,
+            skipped: intent.skippedCount,
+          }));
           return;
         case 'connection/created':
           setNotice(
@@ -4267,7 +4358,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, [contextMenu, dismissInteractionOverlays, readSystemClipboard]);
 
   const handleSelectCreatedNode = useCallback(
-    (kind: CreativeCanvasNodeKind) => {
+    (kind: CreativeCanvasUserNodeKind) => {
       const editor = editorRef.current;
       const menu = createNodeMenu;
       if (!editor || !menu || save.revision === null) return;
@@ -4301,56 +4392,39 @@ const CreativeCanvasProductRoute: React.FC = () => {
         );
 
       if (menu.connection) {
-        const sourceNodeId =
-          menu.connection.fixedHandle === 'source'
-            ? menu.connection.fixedNodeId
-            : node.id;
-        const targetNodeId =
-          menu.connection.fixedHandle === 'source'
-            ? node.id
-            : menu.connection.fixedNodeId;
         const candidateDocument = {
           ...state.document,
           nodes: reusedDirector
             ? state.document.nodes
             : [...state.document.nodes, node],
         };
-        const validation = validateCanvasConnection(candidateDocument, {
-          sourceNodeId,
-          targetNodeId,
-        });
-        if (!validation.ok) {
+        const at = Date.now();
+        const mergeKey = `create-connected:${node.id}`;
+        const resolution = finishCanvasConnectionDrag(candidateDocument, {
+          ...menu.connection,
+          kind: 'connection',
+          pointerId: 0,
+          clientPosition: { x: 0, y: 0 },
+        }, 0, { nodeId: node.id }, { at, mergeKey });
+        const rejection = resolution.intents.find((intent) => intent.type === 'connection/rejected');
+        if (rejection) {
           setNotice(
             t('creativeStudio.canvas.connection.createFailed', {
-              reason: connectionErrorMessage(validation.code, t),
+              reason: connectionErrorMessage(rejection.code, t),
               defaultValue: '无法创建连接：{{reason}}。',
             })
           );
           return;
         }
 
-        const at = Date.now();
-        const mergeKey = `create-connected:${node.id}`;
         if (!reusedDirector) {
           editor.dispatch(canvasCommands.addNode(node, { at, mergeKey }));
         }
-        editor.dispatch(
-          canvasCommands.connect(sourceNodeId, targetNodeId, {
-            at,
-            mergeKey,
-            sourceHandle:
-              menu.connection.fixedHandle === 'source'
-                ? menu.connection.fixedHandleId
-                : 'source',
-            targetHandle:
-              menu.connection.fixedHandle === 'target'
-                ? menu.connection.fixedHandleId
-                : 'target',
-          })
-        );
+        for (const command of resolution.commands) editor.dispatch(command);
         editor.dispatch(canvasCommands.setSelection([node.id]));
+        const batch = resolution.intents.find((intent) => intent.type === 'connection/batch-created');
         setNotice(
-          reusedDirector
+          batch ? t('creativeStudio.canvas.notices.connectionsCreated', { count: batch.count, skipped: batch.skippedCount }) : reusedDirector
             ? t('creativeStudio.canvas.notices.directorReusedAndConnected', {
                 defaultValue: '已复用画布唯一的导演节点并完成连接。',
               })
@@ -4510,7 +4584,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
             asset,
             state,
             viewportSize,
-            { cascadeIndex: state.document.nodes.length }
+            {
+              cascadeIndex: state.document.nodes.filter(
+                isCreativeCanvasUserNode
+              ).length,
+            }
           );
           state = editor.dispatch(canvasCommands.addNode(node));
           inserted += 1;
@@ -4785,6 +4863,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 projectId={projectId}
                 tool={tool}
                 disabled={productDisabled}
+                isNodeVisible={isCreativeCanvasUserNode}
                 showSaveState={false}
                 isMiniMapOpen={miniMapOpen}
                 onToggleMiniMap={() => setMiniMapOpen((open) => !open)}
@@ -4795,7 +4874,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                   setNotice(
                     t('creativeStudio.canvas.errors.pendingTaskProtected', {
                       defaultValue:
-                        '运行中的生成任务必须保留配置节点；请等待任务结束后再删除或撤销。',
+                        '运行中的生成任务受保护；请等待任务结束后再删除或撤销。',
                     })
                   )
                 }
@@ -4904,6 +4983,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
                                       }),
                                     previewUrl:
                                       referenceAsset?.thumbnailUrl ??
+                                      referenceAsset?.originalUrl ??
+                                      creativeAssetClient.url(mode.assetId),
+                                    originalUrl:
                                       referenceAsset?.originalUrl ??
                                       creativeAssetClient.url(mode.assetId),
                                   }
@@ -5155,6 +5237,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                         targetNodeId: node.id,
                         inboundConnectionCount: 0,
                         references: [],
+                        textReferences: [],
                         issues: [],
                       };
                   const baseComposeModelOptions = hasReferenceIntent
@@ -5203,7 +5286,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       end: mention.end,
                       tokenText: `@${mention.fallbackLabel}`,
                     })),
-                    referenceResolution.references
+                    referenceResolution.references,
+                    referenceResolution.textReferences
                   );
                   const generationGate = evaluateCanvasImageGenerationGate({
                     resolution: referenceResolution,
@@ -5217,6 +5301,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                   );
                   const composerReferences = [
                     ...canvasImageComposerReferences(referenceResolution.references),
+                    ...canvasTextComposerReferences(referenceResolution.textReferences, t),
                     ...(canvasState
                       ? invalidCanvasImageComposerReferences(
                           canvasState,
@@ -5227,9 +5312,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
                         )
                       : []),
                   ].sort((left, right) => left.ordinal - right.ordinal);
-                  const referenceCapacityLabel = effectiveReferenceLimit !== null
-                    ? `${referenceResolution.references.length}/${effectiveReferenceLimit}`
-                    : `${referenceResolution.references.length}`;
                   const composeSizePolicy = imageWorkbenchSizePolicyForModel(resolvedModel);
                   const composeSizeOptions = imageWorkbenchSelectableSizeOptions(
                     composeSizePolicy.options
@@ -5278,6 +5360,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                         )
                       }
                       onUpload={() => openImageNodeUpload(node.id)}
+                      onPreview={() => setPreviewImageNode(node)}
                       onCrop={() => void handleOpenImageCrop(node)}
                       onDownload={() => void handleDownloadImage(node)}
                       onMaskEdit={() => void handleOpenImageMaskEdit(node)}
@@ -5291,7 +5374,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           initialPrompt={composeDraft.prompt}
                           initialMentions={composeMentions}
                           references={composerReferences}
-                          referenceCapacityLabel={referenceCapacityLabel}
                           settings={composeSettings}
                           aspectRatioOptions={composeSizeOptions}
                           maxCount={composeSizePolicy.maxCount}
@@ -5331,6 +5413,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           }
                           onReferenceDisconnect={(connectionId) =>
                             dispatch(canvasCommands.deleteEdges([connectionId]))
+                          }
+                          onReferencesDisconnect={(connectionIds) =>
+                            dispatch(canvasCommands.deleteEdges(connectionIds))
                           }
                           onOpenPromptLibrary={() =>
                             openPromptLibrary()
@@ -5439,7 +5524,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 }
                 miniMap={({ state }) => (
                   <CanvasMiniMap
-                    nodes={state.document.nodes}
+                    nodes={state.document.nodes.filter(isCreativeCanvasUserNode)}
                     viewport={state.viewport}
                     viewportSize={viewportSize}
                     selectedNodeIds={new Set(state.selection.nodeIds)}
@@ -5521,9 +5606,11 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 }}
               />
               <ProductToolbarButton
-                label={t('creativeStudio.canvas.toolbar.deleteSelection', {
-                  defaultValue: '删除所选节点或连接',
-                })}
+                label={canvasState?.selection.nodeIds.length === 0 && canvasState.selection.edgeIds.length > 0
+                  ? t('creativeStudio.canvas.connection.deleteSelected', { count: canvasState.selection.edgeIds.length })
+                  : t('creativeStudio.canvas.toolbar.deleteSelection', {
+                      defaultValue: '删除所选节点或连接',
+                    })}
                 icon={<Delete {...iconProps} />}
                 danger
                 disabled={productDisabled || !selection.hasSelection}
@@ -5702,6 +5789,14 @@ const CreativeCanvasProductRoute: React.FC = () => {
         }}
       />
       {templateAssetPicker.dialog}
+      {previewImageNode ? (
+        <CreativeImagePreviewDialog
+          key={`${projectId}:${previewImageNode.id}:${previewImageNode.data.assetId}`}
+          node={previewImageNode}
+          resolveAsset={resolveCanvasImagePreviewAsset}
+          onClose={() => setPreviewImageNode(null)}
+        />
+      ) : null}
       <CreativeImageCropDialog
         visible={pendingImageCrop !== null}
         asset={pendingImageCrop?.asset ?? null}

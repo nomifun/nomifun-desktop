@@ -150,6 +150,7 @@ body {
   /* Component Colors - 组件（用户气泡淡紫，提示淡青，与霓虹紫同族） */
   --message-user-bg: #f0e4ff;
   --message-tips-bg: #e2f5f8;
+  --feedback-bubble-bg: #ffffff;
   --workspace-btn-bg: #f1f1f6;
   --color-guid-agent-bar: #f3e8ff;
   --sider-section-title-color: #6a6a78;
@@ -290,6 +291,7 @@ body {
   /* Component Colors - 组件（深紫气泡 + 深青提示） */
   --message-user-bg: #2a1240;
   --message-tips-bg: #0c2a2f;
+  --feedback-bubble-bg: #14141c;
   --workspace-btn-bg: #14141c;
   --color-guid-agent-bar: #1e1030;
   --sider-section-title-color: #9090a2;

@@ -233,6 +233,31 @@ const expectRejected = async (promise: Promise<unknown>, message?: string): Prom
 };
 
 describe('canvas video composer runtime integration', () => {
+  test('recovers deleted first and extra video results as history and clears pending', async () => {
+    const config = configNode();
+    const harness = editorHarness(config);
+    const completed = task('succeeded', config, [RESULT_ASSET_ID, SECOND_RESULT_ASSET_ID]);
+    const input = {
+      editor: harness.editor, projectId: PROJECT_ID, task: completed,
+      assets: assetPort([RESULT_ASSET, SECOND_RESULT_ASSET].map((asset) => ({
+        ...asset, deletedAt: 10, inLibrary: false, originalUrl: '', thumbnailUrl: null,
+      }))),
+      viewportSize: { width: 1440, height: 900 },
+    };
+    await settleCanvasVideoComposeTask(input);
+    expect(harness.pending()).toEqual([]);
+    expect(harness.state().document.nodes.find((node) => node.id === config.id)).toMatchObject({
+      locked: false, data: { status: 'succeeded', resultAssetIds: completed.resultAssetIds },
+    });
+    for (const id of completed.resultAssetIds) {
+      expect(harness.state().document.nodes.filter((node) =>
+        node.type === 'video' && node.data.assetId === id)).toHaveLength(1);
+    }
+    const count = harness.state().document.nodes.length;
+    await settleCanvasVideoComposeTask(input);
+    expect(harness.state().document.nodes).toHaveLength(count);
+  });
+
   test('flushes the exact owner before POST and reconciles running without history', async () => {
     const config = configNode();
     const harness = editorHarness(config, sourceNode(), []);

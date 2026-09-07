@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CreativeAsset } from "../../assets";
+import type { CreativeAsset, CreativeAssetAvailability } from "../../assets";
 import type { TFunction } from "i18next";
 import type {
   DirectorAspectRatio,
@@ -98,6 +98,7 @@ function capturePresentation(
   state: DirectorState,
   assetUrl: DirectorAssetUrl,
   t: DirectorTranslate,
+  availability?: ReadonlyMap<string, CreativeAssetAvailability>,
 ): DirectorCapture[] {
   return state.capture.records
     .filter((record) => record.kind === "image")
@@ -110,6 +111,7 @@ function capturePresentation(
       }),
       thumbnailUrl: assetUrl(record.assetId),
       imageUrl: assetUrl(record.assetId),
+      ...(availability ? { availability: availability.get(record.assetId) ?? 'loading' } : {}),
       cameraId: record.cameraId,
     }));
 }
@@ -120,6 +122,7 @@ export function directorInspectorValue(
   assetUrl: DirectorAssetUrl,
   cameraTab: "properties" | "captures",
   t: DirectorTranslate,
+  availability?: ReadonlyMap<string, CreativeAssetAvailability>,
 ): DirectorInspectorValue {
   const entity = selectedEntity(state);
   if (!entity) {
@@ -135,6 +138,7 @@ export function directorInspectorValue(
             assetId: panoramaId,
             name: panorama?.title ?? panoramaId,
             thumbnailUrl: panorama?.thumbnailUrl ?? assetUrl(panoramaId),
+            ...(availability ? { availability: availability.get(panoramaId) ?? 'loading' } : {}),
           }
         : null,
       skyColor: state.scene.environment.skyColor,
@@ -157,7 +161,7 @@ export function directorInspectorValue(
       rotation: { ...entity.transform.rotation },
       fov: directorVerticalFovDegrees(entity),
       tab: cameraTab,
-      captures: capturePresentation(state, assetUrl, t).filter(
+      captures: capturePresentation(state, assetUrl, t, availability).filter(
         (capture) => capture.cameraId === entity.id,
       ),
     };

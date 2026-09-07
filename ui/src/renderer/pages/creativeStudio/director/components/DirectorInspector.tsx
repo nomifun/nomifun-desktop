@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { CreativeAssetUnavailable } from '../../assets/components/CreativeAssetUnavailable';
+import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 import {
   Camera,
   Delete,
@@ -249,14 +251,18 @@ const EnvironmentInspector: React.FC<
         </h3>
         {value.panorama ? (
           <article className={styles.panoramaCard}>
-            <img
-              src={value.panorama.thumbnailUrl}
-              alt={t('creativeStudio.director.inspector.a11y.panoramaThumbnail', {
-                defaultValue: '{{name}} 全景图缩略图',
-                name: value.panorama.name,
-              })}
-            />
-            <span>{value.panorama.name}</span>
+            <div className={styles.panoramaPreview}>
+              {value.panorama.availability && value.panorama.availability !== 'available'
+                ? <CreativeAssetUnavailable status={value.panorama.availability} /> : <CreativeMediaPreview
+                  kind='image'
+                  src={value.panorama.thumbnailUrl}
+                  alt={t('creativeStudio.director.inspector.a11y.panoramaThumbnail', {
+                    defaultValue: '{{name}} 全景图缩略图',
+                    name: value.panorama.name,
+                  })}
+                />}
+            </div>
+            <span className={styles.panoramaName}>{value.panorama.name}</span>
             <Button
               type='text'
               shape='circle'
@@ -507,13 +513,18 @@ const CameraInspector: React.FC<
             <div className={styles.captureGrid}>
               {value.captures.map((capture) => (
                 <article key={capture.id} className={styles.captureCard}>
-                  <img
-                    src={capture.thumbnailUrl}
-                    alt={t('creativeStudio.director.inspector.a11y.thumbnail', {
-                      defaultValue: '{{name}} 缩略图',
-                      name: capture.name,
-                    })}
-                  />
+                  <div className={styles.capturePreview}>
+                    {capture.availability && capture.availability !== 'available'
+                      ? <CreativeAssetUnavailable status={capture.availability} /> : <CreativeMediaPreview
+                        kind='image'
+                        src={capture.imageUrl}
+                        posterSrc={capture.thumbnailUrl}
+                        alt={t('creativeStudio.director.inspector.a11y.thumbnail', {
+                          defaultValue: '{{name}} 缩略图',
+                          name: capture.name,
+                        })}
+                      />}
+                  </div>
                   <strong title={capture.name}>{capture.name}</strong>
                   <div className={styles.captureActions}>
                     <Tooltip
@@ -536,7 +547,7 @@ const CameraInspector: React.FC<
                           }
                         )}
                         icon={<PreviewOpen />}
-                        disabled={disabled || !onCaptureView}
+                        disabled={disabled || !onCaptureView || Boolean(capture.availability && capture.availability !== 'available')}
                         onClick={() => onCaptureView?.(capture)}
                       />
                     </Tooltip>
@@ -560,7 +571,7 @@ const CameraInspector: React.FC<
                           }
                         )}
                         icon={<Send />}
-                        disabled={disabled || !onCaptureSendToCanvas}
+                        disabled={disabled || !onCaptureSendToCanvas || Boolean(capture.availability && capture.availability !== 'available')}
                         onClick={() => onCaptureSendToCanvas?.(capture)}
                       />
                     </Tooltip>

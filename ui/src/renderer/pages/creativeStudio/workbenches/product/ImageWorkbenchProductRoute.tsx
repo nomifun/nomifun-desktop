@@ -13,6 +13,7 @@ import {
   CreativeAssetPickerModal,
   creativeAssetClient,
   useCreativeAssets,
+  useCreativeAssetAvailability,
   type CreativeAsset,
 } from '../../assets';
 import {
@@ -148,9 +149,13 @@ const OwnedImageWorkbenchReady: React.FC<{
     onRecoveryFailure,
     onRuntimeError: (reason) => setError(formatError(reason)),
   });
+  const outputAvailability = useCreativeAssetAvailability([
+    ...durableTasks.flatMap((task) => [...task.resultAssetIds, ...(task.inputs?.map((input) => input.assetId) ?? [])]),
+    ...runtime.entries.flatMap((entry) => [...entry.task.resultAssetIds, ...(entry.task.inputs?.map((input) => input.assetId) ?? [])]),
+  ]);
   const presentationRuntime = useMemo(
-    () => standaloneHistoryRuntimeSnapshot(historyScope, durableTasks, runtime, creativeAssetClient),
-    [durableTasks, historyScope, runtime]
+    () => standaloneHistoryRuntimeSnapshot(historyScope, durableTasks, runtime, creativeAssetClient, outputAvailability),
+    [durableTasks, historyScope, runtime, outputAvailability]
   );
   const referenceById = useMemo(
     () => new Map([...assets.assets, ...hydratedReferences].map((asset) => [asset.id, asset])),

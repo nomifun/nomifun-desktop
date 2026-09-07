@@ -22,7 +22,7 @@ import {
   reconcileCanvasImageComposeConfig,
 } from './canvasImageComposerCanvas';
 import { creativeStudioProductText } from './i18n';
-import { creativeNodeFromAsset } from './nodeFactory';
+import { creativeNodeFromHistoricalAsset } from './nodeFactory';
 
 export type CanvasImageComposerEditorPort = Pick<
   CreativeCanvasEditorHandle,
@@ -219,11 +219,11 @@ export async function settleCanvasImageComposeTask(input: {
           throw new Error(
             creativeStudioProductText(
               'creativeStudio.canvas.errors.image.configRemoved',
-              '图片创作配置节点在结果写入前被移除。'
+              '图片创作任务记录在结果写入前丢失。'
             )
           );
         }
-        const created = creativeNodeFromAsset(asset, state, input.viewportSize, {
+        const created = creativeNodeFromHistoricalAsset(asset, state, input.viewportSize, {
           position: canvasImageComposeResultPosition(state.document.nodes, config),
         });
         if (created.type !== 'image') {

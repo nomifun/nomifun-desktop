@@ -26,6 +26,8 @@ export interface WorkshopAssetDto {
   thumb_url: string | null;
   created_at: number;
   updated_at: number;
+  /** Older backend versions omit this field. */
+  deleted_at?: number | null;
 }
 
 export interface WorkshopAssetListDto {

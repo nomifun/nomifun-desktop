@@ -14,7 +14,6 @@ import {
   Pic,
   Redo,
   Robot,
-  SettingConfig,
   Undo,
   VideoTwo,
   Voice,
@@ -25,7 +24,12 @@ import type { TFunction } from 'i18next';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
-import type { CreativeCanvasNode, CreativeCanvasNodeKind } from '../../domain';
+import {
+  isCreativeCanvasUserNode,
+  type CreativeCanvasNode,
+  type CreativeCanvasUserNode,
+  type CreativeCanvasUserNodeKind,
+} from '../../domain';
 import type { CanvasState } from '../core';
 
 import styles from './CreativeCanvasPanels.module.css';
@@ -37,24 +41,22 @@ const iconProps = {
   strokeWidth: 2.5,
 };
 
-const NODE_KIND_LABEL_KEYS: Record<CreativeCanvasNodeKind, string> = {
+const NODE_KIND_LABEL_KEYS: Record<CreativeCanvasUserNodeKind, string> = {
   text: 'creativeStudio.canvas.nodeKinds.text',
   image: 'creativeStudio.canvas.nodeKinds.image',
   panorama: 'creativeStudio.canvas.nodeKinds.panorama',
   video: 'creativeStudio.canvas.nodeKinds.video',
   audio: 'creativeStudio.canvas.nodeKinds.audio',
-  config: 'creativeStudio.canvas.nodeKinds.config',
   director: 'creativeStudio.canvas.nodeKinds.director',
   group: 'creativeStudio.canvas.nodeKinds.group',
 };
 
-const NODE_KIND_LABEL_FALLBACKS: Record<CreativeCanvasNodeKind, string> = {
+const NODE_KIND_LABEL_FALLBACKS: Record<CreativeCanvasUserNodeKind, string> = {
   text: '文本',
   image: '图片',
   panorama: '全景图',
   video: '视频',
   audio: '音频',
-  config: '生成配置',
   director: '导演台',
   group: '分组',
 };
@@ -65,14 +67,14 @@ const fallbackTranslate = (
 ): string => String(options?.defaultValue ?? key);
 
 const nodeKindLabel = (
-  kind: CreativeCanvasNodeKind,
+  kind: CreativeCanvasUserNodeKind,
   t: TFunction = fallbackTranslate as TFunction
 ): string =>
   t(NODE_KIND_LABEL_KEYS[kind], {
     defaultValue: NODE_KIND_LABEL_FALLBACKS[kind],
   });
 
-function nodeKindIcon(kind: CreativeCanvasNodeKind): React.ReactNode {
+function nodeKindIcon(kind: CreativeCanvasUserNodeKind): React.ReactNode {
   switch (kind) {
     case 'text':
       return <FileText {...iconProps} />;
@@ -84,8 +86,6 @@ function nodeKindIcon(kind: CreativeCanvasNodeKind): React.ReactNode {
       return <VideoTwo {...iconProps} />;
     case 'audio':
       return <Voice {...iconProps} />;
-    case 'config':
-      return <SettingConfig {...iconProps} />;
     case 'director':
       return <Magic {...iconProps} />;
     case 'group':
@@ -101,7 +101,7 @@ const compactText = (value: string, maxLength = 54): string => {
 
 /** A label projected only from persisted node data; it never invents generated content. */
 export function creativeCanvasNodeDisplayName(
-  node: CreativeCanvasNode,
+  node: CreativeCanvasUserNode,
   t: TFunction = fallbackTranslate as TFunction
 ): string {
   switch (node.type) {
@@ -128,8 +128,6 @@ export function creativeCanvasNodeDisplayName(
         : nodeKindLabel('video', t);
     case 'audio':
       return compactText(node.data.title) || nodeKindLabel('audio', t);
-    case 'config':
-      return compactText(node.data.prompt) || nodeKindLabel('config', t);
     case 'director':
       return compactText(node.data.sceneId ?? '') || nodeKindLabel('director', t);
     case 'group':
@@ -142,7 +140,9 @@ export function creativeCanvasNodeDisplayName(
   }
 }
 
-const sortOutlineNodes = (nodes: readonly CreativeCanvasNode[]): CreativeCanvasNode[] =>
+const sortOutlineNodes = (
+  nodes: readonly CreativeCanvasUserNode[]
+): CreativeCanvasUserNode[] =>
   [...nodes].sort(
     (left, right) =>
       left.zIndex - right.zIndex ||
@@ -165,8 +165,17 @@ export const CreativeCanvasOutlinePanel: React.FC<CreativeCanvasOutlinePanelProp
   className,
 }) => {
   const { t } = useTranslation();
-  const selected = new Set(state.selection.nodeIds);
-  const nodes = sortOutlineNodes(state.document.nodes);
+  const nodes = sortOutlineNodes(
+    state.document.nodes.filter(isCreativeCanvasUserNode)
+  );
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const selected = new Set(
+    state.selection.nodeIds.filter((nodeId) => nodeIds.has(nodeId))
+  );
+  const connectionCount = state.document.connections.filter(
+    (connection) =>
+      nodeIds.has(connection.sourceNodeId) && nodeIds.has(connection.targetNodeId)
+  ).length;
 
   return (
     <section
@@ -186,8 +195,8 @@ export const CreativeCanvasOutlinePanel: React.FC<CreativeCanvasOutlinePanelProp
           <p>
             {t('creativeStudio.canvas.outline.summary', {
               nodeCount: nodes.length,
-              connectionCount: state.document.connections.length,
-              defaultValue: `${nodes.length} 个节点 · ${state.document.connections.length} 条连接`,
+              connectionCount,
+              defaultValue: `${nodes.length} 个节点 · ${connectionCount} 条连接`,
             })}
           </p>
         </div>
@@ -333,15 +342,7 @@ const imageFitValue = (value: 'contain' | 'cover', t: TFunction): string =>
     : t('creativeStudio.canvas.editor.fitContain', {
         defaultValue: '完整显示',
       });
-const generationStatusValue = (
-  value: 'idle' | 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled',
-  t: TFunction
-): string =>
-  t(`creativeStudio.canvas.nodes.status.${value}`, {
-    defaultValue: value,
-  });
-
-const NodeDataProperties: React.FC<{ node: CreativeCanvasNode; memberCount: number }> = ({
+const NodeDataProperties: React.FC<{ node: CreativeCanvasUserNode; memberCount: number }> = ({
   node,
   memberCount,
 }) => {
@@ -539,77 +540,6 @@ const NodeDataProperties: React.FC<{ node: CreativeCanvasNode; memberCount: numb
           />
         </>
       );
-    case 'config':
-      return (
-        <>
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.task', {
-              defaultValue: '任务',
-            })}
-            value={node.data.task}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.capability', {
-              defaultValue: '能力',
-            })}
-            value={node.data.capability}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.provider', {
-              defaultValue: '提供商',
-            })}
-            value={optionalValue(node.data.providerId, t)}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.model', {
-              defaultValue: '模型',
-            })}
-            value={optionalValue(node.data.model, t)}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.status', {
-              defaultValue: '状态',
-            })}
-            value={generationStatusValue(node.data.status, t)}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.prompt', {
-              defaultValue: '提示词',
-            })}
-            value={optionalValue(node.data.prompt, t)}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.negativePrompt', {
-              defaultValue: '负面提示词',
-            })}
-            value={optionalValue(node.data.negativePrompt, t)}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.inputAssets', {
-              defaultValue: '输入素材',
-            })}
-            value={t('creativeStudio.canvas.values.itemCount', {
-              count: node.data.inputAssetIds.length,
-              defaultValue: '{{count}} 项',
-            })}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.resultAssets', {
-              defaultValue: '结果素材',
-            })}
-            value={t('creativeStudio.canvas.values.itemCount', {
-              count: node.data.resultAssetIds.length,
-              defaultValue: '{{count}} 项',
-            })}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.taskId', {
-              defaultValue: '任务 ID',
-            })}
-            value={optionalValue(node.data.taskId, t)}
-          />
-        </>
-      );
     case 'director':
       return (
         <>
@@ -687,8 +617,8 @@ const PropertyEditorField: React.FC<PropertyEditorFieldProps> = ({ label, childr
 );
 
 interface NodeDataEditorProps {
-  node: CreativeCanvasNode;
-  onUpdate(node: CreativeCanvasNode, field: string): void;
+  node: CreativeCanvasUserNode;
+  onUpdate(node: CreativeCanvasUserNode, field: string): void;
 }
 
 const finiteNumber = (
@@ -1050,46 +980,6 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
           </PropertyEditorField>
         </>
       );
-    case 'config':
-      return (
-        <>
-          <PropertyEditorField
-            label={t('creativeStudio.canvas.properties.prompt', {
-              defaultValue: '提示词',
-            })}
-          >
-            <textarea
-              value={node.data.prompt}
-              rows={5}
-              onChange={(event) =>
-                onUpdate(
-                  { ...node, data: { ...node.data, prompt: event.currentTarget.value } },
-                  'prompt'
-                )
-              }
-            />
-          </PropertyEditorField>
-          <PropertyEditorField
-            label={t('creativeStudio.canvas.properties.negativePrompt', {
-              defaultValue: '负面提示词',
-            })}
-          >
-            <textarea
-              value={node.data.negativePrompt}
-              rows={3}
-              onChange={(event) =>
-                onUpdate(
-                  {
-                    ...node,
-                    data: { ...node.data, negativePrompt: event.currentTarget.value },
-                  },
-                  'negativePrompt'
-                )
-              }
-            />
-          </PropertyEditorField>
-        </>
-      );
     case 'director':
       return (
         <>
@@ -1229,7 +1119,10 @@ export const CreativeCanvasPropertiesPanel: React.FC<CreativeCanvasPropertiesPan
 }) => {
   const { t } = useTranslation();
   const selectedIds = new Set(state.selection.nodeIds);
-  const selectedNodes = state.document.nodes.filter((node) => selectedIds.has(node.id));
+  const selectedNodes = state.document.nodes.filter(
+    (node): node is CreativeCanvasUserNode =>
+      selectedIds.has(node.id) && isCreativeCanvasUserNode(node)
+  );
 
   return (
     <section
@@ -1295,7 +1188,10 @@ export const CreativeCanvasPropertiesPanel: React.FC<CreativeCanvasPropertiesPan
       ) : (
         (() => {
           const node = selectedNodes[0];
-          const memberCount = state.document.nodes.filter((candidate) => candidate.groupId === node.id).length;
+          const memberCount = state.document.nodes.filter(
+            (candidate) =>
+              isCreativeCanvasUserNode(candidate) && candidate.groupId === node.id
+          ).length;
           return (
             <div className={styles.propertiesBody} data-properties-node-kind={node.type}>
               <div className={styles.inspectorIdentity}>

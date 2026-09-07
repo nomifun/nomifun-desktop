@@ -160,6 +160,7 @@ body {
   /* Component Colors - 组件（玫红气泡 + 青提示的双色对位） */
   --message-user-bg: #ffe3e9;
   --message-tips-bg: #e0f7f6;
+  --feedback-bubble-bg: #ffffff;
   --workspace-btn-bg: #f2f2f3;
   --color-guid-agent-bar: #ffe8ed;
   --sider-section-title-color: #6b6b73;
@@ -300,6 +301,7 @@ body {
   /* Component Colors - 组件（深玫红气泡 + 深青提示） */
   --message-user-bg: #3a0d18;
   --message-tips-bg: #0e2423;
+  --feedback-bubble-bg: #1f1f1f;
   --workspace-btn-bg: #1f1f1f;
   --color-guid-agent-bar: #2b0e17;
   --sider-section-title-color: #8f8f96;

@@ -23,7 +23,7 @@ import {
   reconcileCanvasVideoComposeConfig,
 } from './canvasVideoComposerCanvas';
 import { creativeStudioProductText } from './i18n';
-import { creativeNodeFromAsset } from './nodeFactory';
+import { creativeNodeFromHistoricalAsset } from './nodeFactory';
 
 export type CanvasVideoComposerEditorPort = Pick<
   CreativeCanvasEditorHandle,
@@ -233,11 +233,11 @@ export async function settleCanvasVideoComposeTask(input: {
             throw new Error(
               creativeStudioProductText(
                 'creativeStudio.canvas.errors.video.configRemoved',
-                '视频创作配置节点在结果写入前被移除。'
+                '视频创作任务记录在结果写入前丢失。'
               )
             );
           }
-          const created = creativeNodeFromAsset(asset, state, input.viewportSize, {
+          const created = creativeNodeFromHistoricalAsset(asset, state, input.viewportSize, {
             position: canvasVideoComposeResultPosition(state.document.nodes, config),
           });
           if (created.type !== 'video') {

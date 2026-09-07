@@ -64,7 +64,7 @@ const CreativeCanvasComposerShell: React.FC<
       const panelHeight = panelRect.height;
       const inset = 12;
       const gap = 16;
-      const compactWidth = Math.min(580, Math.max(0, window.innerWidth - 32));
+      const compactWidth = Math.min(540, Math.max(0, window.innerWidth - 32));
       const shouldOverlay = surfaceRect.width < compactWidth + inset * 2;
       const spaceBelow = surfaceRect.bottom - nodeRect.bottom - gap - inset;
       const spaceAbove = nodeRect.top - surfaceRect.top - gap - inset;
