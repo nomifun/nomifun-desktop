@@ -175,6 +175,13 @@ impl JsKernelPluginAdapter {
         &self.context
     }
 
+    pub fn mount_demand(&self) -> MountLoadDemand {
+        MountLoadDemand {
+            context: self.context.clone(),
+            module: self.module.clone(),
+        }
+    }
+
     pub fn target(&self) -> &PluginHostTargetLock {
         &self.context.target
     }
