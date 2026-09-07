@@ -63,7 +63,7 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
     const builtinMap: Record<string, SiderItem> = {
       'execution-engines': {
         id: 'execution-engines',
-        label: t('settings.executionEngineHub.railTitle'),
+        label: t('settings.runtimeManager.railTitle'),
         icon: <Cpu />,
         path: 'execution-engines',
       },

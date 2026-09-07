@@ -47,7 +47,8 @@ describe('settings navigation', () => {
     // timeout panel.
     expect(engineContentSource.includes('Tabs')).toBe(false);
     expect(engineContentSource.includes('AgentRuntimeSettingsContent')).toBe(false);
-    expect(engineContentSource.includes('<LocalAgents />')).toBe(true);
+    expect(engineContentSource.includes('<RuntimeManager />')).toBe(true);
+    expect(engineContentSource.includes('<LocalAgents />')).toBe(false);
     expect(engineContentSource.includes('agentSettings.navigation')).toBe(false);
     expect(
       routerSource.includes(

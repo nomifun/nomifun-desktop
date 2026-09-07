@@ -329,6 +329,8 @@ import {
 
 export { plugins } from './pluginPlatformBridge';
 export type * from '../types/pluginPlatform';
+export { javascriptRuntime } from './javascriptRuntimeBridge';
+export type * from '../types/javascriptRuntime';
 
 // ---------------------------------------------------------------------------
 // Shell — routed to POST /api/shell/*

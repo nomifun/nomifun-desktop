@@ -26,7 +26,7 @@ export function getBuiltinSettingsNavItems(t: TranslateFn): NavItem[] {
   const builtinMap: Record<string, NavItem> = {
     'execution-engines': {
       id: 'execution-engines',
-      label: t('settings.executionEngineHub.railTitle'),
+      label: t('settings.runtimeManager.railTitle'),
       icon: <Cpu theme='outline' size='16' />,
       path: 'execution-engines',
     },
