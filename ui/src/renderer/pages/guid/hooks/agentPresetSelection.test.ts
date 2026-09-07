@@ -123,23 +123,9 @@ describe('Guid Agent selection contract', () => {
     expect(selection.includes('presets[0]')).toBe(false);
   });
 
-  test('keeps default and preset identities exact in pill and mention selectors', () => {
-    const pillBar = readSource(
-      new URL('../components/AgentPillBar.tsx', import.meta.url)
-    );
+  test('keeps default and preset identities exact in the mention selector', () => {
     const mention = readSource(new URL('./useGuidMention.ts', import.meta.url));
 
-    expect(pillBar.includes('selection: GuidAgentSelection;')).toBe(true);
-    expect(pillBar.includes('onSelectDefault: () => void;')).toBe(true);
-    expect(
-      pillBar.includes('onSelectPreset: (presetId: AgentPresetId) => void;')
-    ).toBe(true);
-    expect(pillBar.includes("data-agent-kind='default'")).toBe(true);
-    expect(pillBar.includes("data-agent-kind='preset'")).toBe(true);
-    expect(pillBar.includes("navigate('/agent')")).toBe(true);
-    expect(
-      pillBar.includes("defaultValue: 'Nomi Agent'")
-    ).toBe(true);
     expect(
       mention.includes("selectionKey({ kind: 'default' })")
     ).toBe(true);

@@ -6,6 +6,7 @@
 
 import { configService } from '@/common/config/configService';
 import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
+import type { AgentPresetSummary, OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { isExecutableAgentPreset } from './agentSelectionUtils';
 import type {
@@ -17,6 +18,8 @@ export type GuidAgentSelectionResult = {
   selection: GuidAgentSelection;
   selectedPreset: ExecutableAgentPreset | undefined;
   presets: ExecutableAgentPreset[];
+  draftPresets: AgentPresetSummary[];
+  officialTemplates: OfficialPresetTemplate[];
   isLoading: boolean;
   isLoaded: boolean;
   loadError: Error | undefined;
@@ -83,6 +86,10 @@ export const useGuidAgentSelection = ({
   const isLoaded = library !== undefined;
   const presets = useMemo(
     () => savedPresets.filter(isExecutableAgentPreset),
+    [savedPresets]
+  );
+  const draftPresets = useMemo(
+    () => savedPresets.filter((preset) => !isExecutableAgentPreset(preset)),
     [savedPresets]
   );
 
@@ -178,6 +185,8 @@ export const useGuidAgentSelection = ({
     selection: effectiveSelection,
     selectedPreset,
     presets,
+    draftPresets,
+    officialTemplates: library?.official_templates ?? [],
     isLoading,
     isLoaded,
     loadError,

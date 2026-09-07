@@ -1,5 +1,18 @@
 {
   "defaultAgent": "Nomi Agent",
+  "agentEntries": {
+    "needsSetup": "Needs setup",
+    "choose": "Choose an Agent",
+    "search": "Search Agents",
+    "defaultDescription": "Everyday questions and tasks",
+    "fromTemplate": "Create from an official template",
+    "browseTemplates": "Browse all templates",
+    "fewerTemplates": "Show fewer templates",
+    "manage": "Manage Agents",
+    "empty": "No matching Agents or templates",
+    "loading": "Loading Agents…",
+    "loadFailed": "Couldn't load the Agent list"
+  },
   "noAgentAvailable": "No Main Agent is available. Please login to Google or install Claude/Codex CLI. Go to settings?",
   "noAgentAvailableShort": "No Main Agent available. Click to configure.",
   "agentTabAutoSwitch": "Model not compatible with Gemini, auto-switched to {{fallback}}",

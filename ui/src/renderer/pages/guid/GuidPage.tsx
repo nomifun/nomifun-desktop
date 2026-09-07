@@ -24,7 +24,7 @@ import React, {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
-import AgentPillBar from './components/AgentPillBar';
+import GuidAgentSelector from './components/GuidAgentSelector';
 import GuidActionRow from './components/GuidActionRow';
 import GuidCompanionPosterPreview from './components/GuidCompanionPosterPreview';
 import GuidInputCard from './components/GuidInputCard';
@@ -276,7 +276,7 @@ const GuidPage: React.FC = () => {
     ]
   );
 
-  const handleSelectAgentFromPillBar = useCallback(
+  const handleSelectAgent = useCallback(
     (selection: GuidAgentSelection) => {
       agentSelection.setSelection(selection);
       mention.setMentionOpen(false);
@@ -456,25 +456,6 @@ const GuidPage: React.FC = () => {
               />
             )}
 
-            <AgentPillBar
-              presets={agentSelection.presets}
-              selection={agentSelection.selection}
-              onSelectDefault={() =>
-                handleSelectAgentFromPillBar({ kind: 'default' })
-              }
-              onSelectPreset={(presetId) => {
-                const preset = agentSelection.presets.find(
-                  (candidate) => candidate.preset_id === presetId
-                );
-                if (!preset) return;
-                handleSelectAgentFromPillBar({
-                  kind: 'preset',
-                  presetId: preset.preset_id,
-                });
-              }}
-              suppressSelectionAnimation={resetAgentRequested}
-            />
-
             <GuidInputCard
               input={guidInput.input}
               onInputChange={handleInputChange}
@@ -508,6 +489,23 @@ const GuidPage: React.FC = () => {
               workspaceDir={guidInput.dir}
               onSelectWorkspace={guidInput.setDir}
               onClearWorkspace={() => guidInput.setDir('')}
+              agentSelector={
+                <GuidAgentSelector
+                  presets={agentSelection.presets}
+                  draftPresets={agentSelection.draftPresets}
+                  officialTemplates={agentSelection.officialTemplates}
+                  selection={agentSelection.selection}
+                  isLoading={agentSelection.isLoading}
+                  loadError={agentSelection.loadError}
+                  onRetry={agentSelection.refreshPresets}
+                  onSelectDefault={() =>
+                    handleSelectAgent({ kind: 'default' })
+                  }
+                  onSelectPreset={(presetId) =>
+                    handleSelectAgent({ kind: 'preset', presetId })
+                  }
+                />
+              }
             />
 
             <GuidResourceCards />

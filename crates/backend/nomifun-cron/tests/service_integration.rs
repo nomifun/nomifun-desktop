@@ -3477,6 +3477,29 @@ async fn icron_service_update_job_rejects_cross_conversation_scope() {
 // ── Embedded commands: delete ──────────────────────────────────────
 
 #[tokio::test]
+async fn builtin_schedule_sink_persists_own_jobs_and_rejects_other_conversation_deletion() {
+    let (service, _, _, _, _, _) = setup_with_conv_repo().await;
+    let service = Arc::new(service);
+    let own = nomifun_cron::sink::CronServiceSink::into_arc(
+        service.clone(), TEST_USER_ID.into(), CONV_1.into(),
+    );
+    let other = nomifun_cron::sink::CronServiceSink::into_arc(
+        service.clone(), TEST_USER_ID.into(), CONV_2.into(),
+    );
+    let id = own.create("Builtin schedule", "0 9 * * *", "Continue this session").await.unwrap();
+    let persisted = service.get_job(TEST_USER_ID, &id).await.unwrap();
+    assert_eq!(persisted.conversation_id.as_deref(), Some(CONV_1));
+    assert_eq!(own.list().await.unwrap().len(), 1);
+    assert!(other.list().await.unwrap().is_empty());
+    let error = other.delete(&id).await.unwrap_err();
+    assert!(error.contains("not bound to this conversation"));
+    assert!(service.get_job(TEST_USER_ID, &id).await.is_ok());
+    own.delete(&id).await.unwrap();
+    assert!(own.list().await.unwrap().is_empty());
+    assert!(service.get_job(TEST_USER_ID, &id).await.is_err());
+}
+
+#[tokio::test]
 async fn icron_service_delete_job() {
     let (svc, _, _) = setup().await;
 
