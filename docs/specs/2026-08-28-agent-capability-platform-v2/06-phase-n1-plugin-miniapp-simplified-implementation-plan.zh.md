@@ -66,9 +66,14 @@
     069 和真实 SQLite repository；`nomifun-plugin-service` 正在接通 Artifact、Candidate、
     Apply/Restore/Uninstall/Delete-data、Host fence 与 Operation application service。
     该 service 不暴露直接 Host invoke，正式能力调用只允许进入 Kernel consumer 主链。
-3. `nomifun-miniapp-platform` 当前只冻结新的 M1 domain/application port 与内存合同测试；
-    在 migration 070+、SQLite adapter、dedicated Service Host、Bridge 和产品入口完成前，
-    不计作 M1 实施完成，也不读取或迁移旧 MiniApp 数据。
+3. `nomifun-miniapp-platform` 当前已提前冻结新的 M1
+    domain/application/runtime/data port 与 15 项内存合同测试：Host-owned Bridge 保留
+    exact Active pointer 并拒绝 UI-only Files/Private DB；dedicated Service Host 已固定
+    on-demand/continuous、动态全局容量、有限 crash backoff、Retry、idle reap 和 generation
+    fence；Storage 已固定 owner-scoped KV checked revision/CAS、Files handle、Private DB
+    窄 SQL、additive ledger 与提交前取消边界。在 migration 071+、真实 SQLite/Node
+    process adapter、production composition/routes、产品入口和旧链删除完成前，这些
+    foundation 不计作 M1 实施完成，也不读取或迁移旧 MiniApp 数据。
 4. NomiCore 当前 Desktop 组合根已接入 Plugin application service、Artifact Store、
     Shared Host fence 与唯一 Kernel Registry publisher；enabled Mount 会在启动时按
     exact Artifact/Config/Credential/dataDir 恢复，卸载或停用会撤销 publication。
@@ -685,6 +690,16 @@ Migration 是 Release 的有序、不可变 SQL 列表和一张 ledger：
 #### 4.5G Preview/Test 数据边界（User confirmed）
 
 **已确认方案一：**UI Preview 不启动 Service，只使用一次性 Preview KV。Service Test 由用户显式触发，先短暂停止生产 Service，再复制 Host KV 和 Private SQLite 到一次性 test namespace、创建空临时 `filesDir`、在测试 DB 上执行 Ready Migration，并以唯一 transient Test Host 运行；结束后回收进程并删除测试状态，再恢复 Active Service。默认不注入生产 Credential或正式 Effect，用户只能为单次 Test 显式确认使用当前 Credential。产品明确说明 raw fs/network/child process 副作用无法隔离；M1 不提供直接修改生产 KV/Files/DB 的 Live Test，也不建设 Files overlay、DB snapshot restore、网络 sandbox 或持久 Test Deployment。
+
+**实现注记（2026-09-07，不改变阶段状态）：**内存 foundation 已用同一组 typed port
+验证 §4.5A～§4.5F 的关键 fence：Bridge 保存并校验调用方交入的 exact committed
+pointer，不合成 Catalog/pointer 事实；Release 或 Host generation 切换后的迟到结果优先
+返回 stale；starting/running Host 共用动态正整数容量，降低上限不驱逐现有进程；
+continuous 使用固定 `1s → 5s → error` 的有限重启策略，用户 Retry 清零；KV revision
+overflow fail closed；Private DB 的 query/execute/batch 只允许取消在提交前胜出。该实现
+仍是无生产路由的 deterministic foundation，后续必须由 migration 071+、SQLite
+authorizer/transaction adapter、真实 dedicated Node process 和 Surface MessageChannel
+adapter替换内存端口，不能直接声明 `M1-1-01` 或 `M1-1-02` 完成。
 
 ### 4.6 Operation、产品入口与交付 Gate
 
