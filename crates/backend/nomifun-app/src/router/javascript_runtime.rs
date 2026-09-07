@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::extract::State;
@@ -12,9 +13,8 @@ use nomifun_agent_contracts::{
     CanonicalErrorCode, DigestHex, NodeRuntimeFingerprint, PackageId,
     PackageRef, PluginHostCommitFence, PluginHostTargetLock, PluginMountId,
     PluginMountRuntimeContext, PluginStateHandleDescriptor, PluginStateMethod,
-    RuntimeInstallationId, RuntimeSelectionRecord,
-    RuntimeSwitchValidationResult, StrictJsonValue, ValidatedPluginConfig,
-    VersionString,
+    RuntimeInstallationId, RuntimeSelectionRecord, StrictJsonValue,
+    RuntimeSwitchValidationResult, ValidatedPluginConfig, VersionString,
 };
 use nomifun_api_types::{
     ApiResponse, BeginJavascriptRuntimeSwitchRequest,
@@ -32,12 +32,15 @@ use nomifun_js_host::{
     ExtensionHostSupervisor, ImmutablePluginModule, JavaScriptHostConfig,
     MountLoadDemand, materialize_bundled_extension_host,
 };
+use nomifun_js_authoring::NodeBuildHost;
 use nomifun_js_runtime::{
-    JavaScriptRuntimeError, JavaScriptRuntimeService,
-    ManagedNodeProvisioner, NodeRuntimeManager,
-    RuntimeSelectionStore, RuntimeSelectionStoreError,
-    RuntimeSwitchValidationRequest, RuntimeSwitchValidator,
-    SystemNodeRuntimeProbePort, VersionedRuntimeSelection,
+    CoordinatedRuntimeSwitch, JavaScriptRuntimeError,
+    JavaScriptRuntimeService, ManagedNodeProvisioner, NodeRuntimeManager,
+    ResolvedNodeRuntime, RuntimeAuthority, RuntimeSelectionStore,
+    RuntimeSelectionStoreError, RuntimeSwitchCoordinator,
+    RuntimeParticipantValidation, RuntimeQuiesceResult,
+    RuntimeSwitchParticipant, SystemNodeRuntimeProbePort,
+    VersionedRuntimeSelection,
 };
 use nomifun_plugin_service::PluginRouterState;
 use serde_json::json;
@@ -47,8 +50,6 @@ const RUNTIME_DIRECTORY: &str = "javascript-runtime";
 const MANAGED_DIRECTORY: &str = "managed";
 const FOUNDATION_DIRECTORY: &str = "foundation";
 const HOST_DIRECTORY: &str = "host";
-const FOUNDATION_NOT_COVERED: &str =
-    "Plugin Host admission/drain/stop and Candidate Test enumeration are not wired";
 
 #[derive(Clone)]
 pub(crate) struct JavaScriptRuntimeRouterState {
@@ -61,30 +62,67 @@ impl JavaScriptRuntimeRouterState {
     }
 }
 
-pub(crate) async fn build_javascript_runtime_state(
+pub(crate) struct JavaScriptRuntimeFoundation {
+    authority: Arc<RuntimeAuthority>,
+    probe: Arc<SystemNodeRuntimeProbePort>,
+    managed: Arc<ManagedNodeProvisioner>,
+    foundation_root: PathBuf,
+    host_root: PathBuf,
+}
+
+impl JavaScriptRuntimeFoundation {
+    pub(crate) fn authority(&self) -> Arc<RuntimeAuthority> {
+        Arc::clone(&self.authority)
+    }
+}
+
+pub(crate) async fn build_javascript_runtime_foundation(
     pool: SqlitePool,
     data_root: PathBuf,
-    plugin: PluginRouterState,
-) -> anyhow::Result<JavaScriptRuntimeRouterState> {
+) -> anyhow::Result<JavaScriptRuntimeFoundation> {
     let runtime_root = data_root.join(RUNTIME_DIRECTORY);
     tokio::fs::create_dir_all(&runtime_root).await?;
     let runtime_root = std::fs::canonicalize(runtime_root)?;
     let store = Arc::new(SqliteRuntimeSelectionStore::new(pool));
     let manager = Arc::new(NodeRuntimeManager::new(store));
+    let probe = Arc::new(SystemNodeRuntimeProbePort::default());
+    let authority = RuntimeAuthority::new(manager, probe.clone());
+    authority.initialize_if_empty().await?;
     let managed = Arc::new(ManagedNodeProvisioner::new(
         runtime_root.join(MANAGED_DIRECTORY),
     )?);
-    let validator = Arc::new(NomiCoreRuntimeSwitchValidator {
-        plugin,
+    Ok(JavaScriptRuntimeFoundation {
+        authority,
+        probe,
+        managed,
         foundation_root: runtime_root.join(FOUNDATION_DIRECTORY),
         host_root: runtime_root.join(HOST_DIRECTORY),
+    })
+}
+
+pub(crate) async fn build_javascript_runtime_state(
+    foundation: JavaScriptRuntimeFoundation,
+    plugin: PluginRouterState,
+    plugin_runtime:
+        Arc<super::plugin_platform::NomiCorePluginRuntimeParticipant>,
+) -> anyhow::Result<JavaScriptRuntimeRouterState> {
+    let participant = Arc::new(NomiCoreRuntimeSwitchParticipant {
+        plugin,
+        plugin_runtime,
+        foundation_root: foundation.foundation_root,
+        host_root: foundation.host_root,
     });
+    let switch = CoordinatedRuntimeSwitch::new(
+        Arc::clone(&foundation.authority),
+        vec![participant],
+    )?;
+    switch.recover_interrupted_switch().await?;
     Ok(JavaScriptRuntimeRouterState::new(Arc::new(
         JavaScriptRuntimeService::new(
-            manager,
-            Arc::new(SystemNodeRuntimeProbePort::default()),
-            managed,
-            validator,
+            foundation.authority,
+            foundation.probe,
+            foundation.managed,
+            switch,
         ),
     )))
 }
@@ -379,29 +417,25 @@ async fn decide_switch(
     )))
 }
 
-struct NomiCoreRuntimeSwitchValidator {
+struct NomiCoreRuntimeSwitchParticipant {
     plugin: PluginRouterState,
+    plugin_runtime:
+        Arc<super::plugin_platform::NomiCorePluginRuntimeParticipant>,
     foundation_root: PathBuf,
     host_root: PathBuf,
 }
 
 #[async_trait]
-impl RuntimeSwitchValidator for NomiCoreRuntimeSwitchValidator {
-    async fn validate(
+impl RuntimeSwitchParticipant for NomiCoreRuntimeSwitchParticipant {
+    async fn quiesce_and_stop(
         &self,
-        request: RuntimeSwitchValidationRequest,
-    ) -> Result<RuntimeSwitchValidationResult, JavaScriptRuntimeError> {
-        validate_foundation(
-            &self.foundation_root,
-            &self.host_root,
-            &request.candidate,
-        )
-        .await?;
-
+        owner_user_id: &str,
+        _selected: Option<&ResolvedNodeRuntime>,
+    ) -> Result<RuntimeQuiesceResult, JavaScriptRuntimeError> {
         let operations = self
             .plugin
             .service
-            .list_operations(&request.owner_user_id)
+            .list_operations(owner_user_id)
             .await
             .map_err(|error| {
                 JavaScriptRuntimeError::SwitchNotCovered(format!(
@@ -422,37 +456,100 @@ impl RuntimeSwitchValidator for NomiCoreRuntimeSwitchValidator {
                 running.join(", ")
             )));
         }
-
-        let library = self
-            .plugin
-            .service
-            .list_library(&request.owner_user_id)
+        self.plugin_runtime
+            .stop_for_runtime_switch()
             .await
-            .map_err(|error| {
-                JavaScriptRuntimeError::SwitchNotCovered(format!(
-                    "Plugin participant inventory is unavailable: {error}"
-                ))
-            })?;
-        let enabled = library
-            .plugins
-            .iter()
-            .filter(|plugin| {
-                plugin.lifecycle
-                    == nomifun_api_types::PluginLifecycleDto::Enabled
+            .map(|()| RuntimeQuiesceResult {
+                old_runtime_process_tree_zero: true,
             })
-            .map(|plugin| plugin.mount_id.as_str())
-            .collect::<Vec<_>>();
-        let enabled_detail = if enabled.is_empty() {
-            String::new()
-        } else {
-            format!("; enabled Mounts: {}", enabled.join(", "))
-        };
-        Err(JavaScriptRuntimeError::SwitchNotCovered(format!(
-            "{FOUNDATION_NOT_COVERED}{enabled_detail}; MiniApp production host is NotCovered"
-        )))
+    }
+
+    async fn validate_candidate(
+        &self,
+        owner_user_id: &str,
+        candidate: &ResolvedNodeRuntime,
+    ) -> Result<RuntimeParticipantValidation, JavaScriptRuntimeError> {
+        validate_foundation(
+            &self.foundation_root,
+            &self.host_root,
+            &nomifun_js_runtime::RuntimeCandidate {
+                fingerprint: candidate.fingerprint.clone(),
+                executable_path: candidate.executable_path.clone(),
+                disposition: if candidate.fingerprint.node_major
+                    == nomifun_agent_contracts::RECOMMENDED_NODE_LTS_MAJOR
+                {
+                    nomifun_agent_contracts::NodeProbeDisposition::CompatibleRecommended
+                } else {
+                    nomifun_agent_contracts::NodeProbeDisposition::CompatibleNonRecommended
+                },
+            },
+        )
+        .await?;
+
+        let build_validation = NodeBuildHost::new(
+            &candidate.executable_path,
+            Duration::from_secs(30),
+        )
+        .and_then(|host| host.validate_foundation());
+        let build_passed = build_validation.is_ok();
+        let mut results =
+            vec![nomifun_agent_contracts::RuntimeSwitchParticipantResult {
+                kind: nomifun_agent_contracts::RuntimeSwitchParticipantKind::BuildFoundation,
+                owner_id: "javascript-build-foundation".to_owned(),
+                outcome: if build_passed {
+                    nomifun_agent_contracts::RuntimeSwitchParticipantOutcome::Passed
+                } else {
+                    nomifun_agent_contracts::RuntimeSwitchParticipantOutcome::Failed
+                },
+                error_code: (!build_passed).then(|| {
+                    nomifun_agent_contracts::CanonicalErrorCode::from(
+                        "JAVASCRIPT_BUILD_FOUNDATION_FAILED",
+                    )
+                }),
+            }];
+        results.extend(
+            self.plugin_runtime
+                .validate_candidate(owner_user_id, candidate)
+                .await?,
+        );
+        // The M1 production Service Host is intentionally not claimed before
+        // its SQLite/Bridge production adapter exists. It remains a visible
+        // local decision rather than silently being treated as compatible.
+        results.push(nomifun_agent_contracts::RuntimeSwitchParticipantResult {
+            kind: nomifun_agent_contracts::RuntimeSwitchParticipantKind::MiniappService,
+            owner_id: "miniapp-production-host".to_owned(),
+            outcome: nomifun_agent_contracts::RuntimeSwitchParticipantOutcome::NotCovered,
+            error_code: None,
+        });
+        Ok(RuntimeParticipantValidation {
+            foundation_hello_passed: true,
+            participants: results,
+        })
+    }
+
+    async fn prepare_candidate(
+        &self,
+        candidate: &ResolvedNodeRuntime,
+    ) -> Result<(), JavaScriptRuntimeError> {
+        self.plugin_runtime.prepare_runtime(Some(candidate)).await
+    }
+
+    async fn finalize_candidate(
+        &self,
+        _candidate: &ResolvedNodeRuntime,
+    ) -> Result<(), JavaScriptRuntimeError> {
+        self.plugin_runtime.finalize_runtime().await
+    }
+
+    async fn restore_selected(
+        &self,
+        selected: Option<&ResolvedNodeRuntime>,
+    ) -> Result<(), JavaScriptRuntimeError> {
+        self.plugin_runtime.restore_runtime(selected).await
     }
 }
 
+#[allow(dead_code)]
 async fn validate_foundation(
     foundation_root: &Path,
     host_root: &Path,
@@ -611,7 +708,7 @@ mod tests {
 
         let uncovered = JavaScriptRuntimeHttpError(
             JavaScriptRuntimeError::SwitchNotCovered(
-                FOUNDATION_NOT_COVERED.into(),
+                "global Runtime switch coordination is not wired".into(),
             ),
         )
         .into_response();

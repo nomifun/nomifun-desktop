@@ -731,6 +731,12 @@ impl PluginArtifactStorePort for FsPluginArtifactStore {
 
 #[async_trait]
 pub trait PluginHostCoordinator: Send + Sync {
+    /// A package may be installed while no Runtime is available, but enabling
+    /// it must be rejected before the durable lifecycle mutation.
+    async fn runtime_available(&self) -> Result<bool, PluginServiceError> {
+        Ok(true)
+    }
+
     async fn commit_fence(
         &self,
         mount_id: &str,

@@ -6,12 +6,16 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod authority;
+mod coordinator;
 mod managed;
 mod manager;
 mod probe;
 mod service;
 
 pub use error::*;
+pub use authority::*;
+pub use coordinator::*;
 pub use managed::*;
 pub use manager::*;
 pub use probe::*;

@@ -22,8 +22,8 @@ use nomifun_api_types::{
     ConfigurePluginRequest, CreatePluginProjectRequest, DeletePluginDataRequest,
     DeletePluginProjectRequest,
     ImportPluginRequest, PluginImportKindDto, PluginLifecycleDto, PluginProjectSourceStateDto,
-    PluginCandidateOriginDto, RestorePluginPreviousRequest, TestPluginCandidateRequest,
-    UninstallPluginRequest,
+    PluginCandidateOriginDto, RestorePluginPreviousRequest,
+    SetPluginEnabledRequest, TestPluginCandidateRequest, UninstallPluginRequest,
 };
 use nomifun_db::{
     ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
@@ -43,7 +43,8 @@ use nomifun_plugin_service::{
     PluginCandidateTestExecutor, PluginHostCoordinator, PluginInventory,
     PluginMountDataStore, PluginOperationCancellation, PluginRegistryPublisher,
     PluginRepository, PluginServiceDependencies, PluginServiceError,
-    PluginServicePaths, PluginSourceStorePort, ERR_RECONCILE_REQUIRED, ERR_STALE,
+    PluginServicePaths, PluginSourceStorePort, ERR_RECONCILE_REQUIRED,
+    ERR_RUNTIME, ERR_STALE,
 };
 use nomifun_plugin_platform::{OwnerMutationCoordinator, PluginOwnerMutationScope};
 use serde_json::json;
@@ -903,6 +904,22 @@ impl PluginHostCoordinator for FakeHost {
 
 }
 
+struct UnavailableRuntimeHost;
+
+#[async_trait]
+impl PluginHostCoordinator for UnavailableRuntimeHost {
+    async fn runtime_available(&self) -> Result<bool, PluginServiceError> {
+        Ok(false)
+    }
+
+    async fn commit_fence(
+        &self,
+        _mount_id: &str,
+    ) -> Result<PluginHostCommitFence, PluginServiceError> {
+        panic!("Enable must reject before requesting a Host fence")
+    }
+}
+
 #[derive(Default)]
 struct FakeDataStore {
     deleted: Mutex<Vec<String>>,
@@ -1102,10 +1119,28 @@ fn service_with_operation_cancellation(
     source_store: Arc<dyn PluginSourceStorePort>,
     operation_cancellation: Arc<dyn PluginOperationCancellation>,
 ) -> PluginApplicationService {
+    service_with_host(
+        repo,
+        store,
+        builder,
+        source_store,
+        operation_cancellation,
+        Arc::new(FakeHost),
+    )
+}
+
+fn service_with_host(
+    repo: Arc<FakeRepository>,
+    store: Arc<QueueArtifactStore>,
+    builder: Arc<dyn PluginBuildExecutor>,
+    source_store: Arc<dyn PluginSourceStorePort>,
+    operation_cancellation: Arc<dyn PluginOperationCancellation>,
+    host: Arc<dyn PluginHostCoordinator>,
+) -> PluginApplicationService {
     PluginApplicationService::new(PluginServiceDependencies {
         repository: repo,
         artifacts: store,
-        host: Arc::new(FakeHost),
+        host,
         registry: Arc::new(FakeRegistryPublisher),
         mutation_coordinator: Arc::new(OwnerMutationCoordinator::new()),
         builder,
@@ -1117,6 +1152,51 @@ fn service_with_operation_cancellation(
             mount_data_relative_root: "plugin-mount-data".into(),
         },
     })
+}
+
+#[tokio::test]
+async fn enable_without_runtime_fails_before_mount_mutation() {
+    let repo = Arc::new(FakeRepository::default());
+    let package = artifact(b"export const plugin = 1;\n", "1.0.0");
+    let digest = package.artifact_digest.as_ref().to_owned();
+    repo.insert_artifact(artifact_row(&package, "artifact")).await;
+    let mut mount = mount_row(
+        "mount-runtime",
+        "example.csv",
+        Some(digest.clone()),
+        4,
+    );
+    mount.enabled = false;
+    repo.insert_mount(mount).await;
+    let service = service_with_host(
+        Arc::clone(&repo),
+        Arc::new(QueueArtifactStore::new(Vec::new())),
+        no_builder(),
+        Arc::new(FakeSourceStore::default()),
+        Arc::new(FakeOperationCancellation),
+        Arc::new(UnavailableRuntimeHost),
+    );
+
+    let error = service
+        .set_enabled(
+            "user-1",
+            SetPluginEnabledRequest {
+                mount_id: "mount-runtime".into(),
+                expected_mount_revision: 4,
+                expected_current_target_digest: digest,
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), ERR_RUNTIME);
+    let persisted = repo
+        .get_mount("mount-runtime")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!persisted.enabled);
+    assert_eq!(persisted.revision, 4);
 }
 
 fn sha256(bytes: &[u8]) -> DigestHex {

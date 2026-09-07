@@ -17,6 +17,8 @@ pub const ERR_RUNTIME_DOWNLOAD_RUNNING: &str =
     "JAVASCRIPT_RUNTIME_DOWNLOAD_RUNNING";
 pub const ERR_RUNTIME_UNAVAILABLE: &str = "JAVASCRIPT_RUNTIME_UNAVAILABLE";
 pub const ERR_RUNTIME_INTERNAL: &str = "JAVASCRIPT_RUNTIME_INTERNAL";
+pub const ERR_RUNTIME_SELECTED_STALE: &str =
+    "JAVASCRIPT_RUNTIME_SELECTED_STALE";
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum RuntimeSelectionStoreError {
@@ -74,6 +76,8 @@ pub enum JavaScriptRuntimeError {
     DownloadAlreadyRunning,
     #[error("Node Runtime selection persistence failed: {0}")]
     SelectionStore(#[from] RuntimeSelectionStoreError),
+    #[error("Node Runtime coordinator task failed: {0}")]
+    CoordinatorTaskFailed(String),
     #[error("Node Runtime contract is invalid: {0}")]
     Contract(String),
     #[error("managed Node download approval is invalid: {0}")]
@@ -141,6 +145,7 @@ impl JavaScriptRuntimeError {
             Self::SelectionStore(RuntimeSelectionStoreError::Corrupt(_)) => {
                 ERR_RUNTIME_INTERNAL
             }
+            Self::CoordinatorTaskFailed(_) => ERR_RUNTIME_INTERNAL,
         }
     }
 }

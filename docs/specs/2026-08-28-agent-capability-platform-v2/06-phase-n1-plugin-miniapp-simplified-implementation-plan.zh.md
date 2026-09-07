@@ -146,6 +146,26 @@
     协调，所以生产试切换明确返回 `JAVASCRIPT_RUNTIME_NOT_COVERED`。在统一
     drain/stop/validate/commit-or-restore coordinator 与 Desktop Runtime Manager UI
     完成前，不得把该 foundation 记作 Runtime 产品闭环。
+15. 2026-09-07 的 Runtime authority 收口已把 §4.3C 的关键边界落实到代码：
+    `RuntimeAuthority` 是 Plugin Shared/Candidate/Build Host 的唯一 committed binding；
+    所有 Runtime-backed demand 通过 read lease admission，切换通过全局 write fence。
+    Selection mutation 采用 `pending → validation → commit/abort` 三段 CAS，coordinator
+    作为 detached task 运行，HTTP 请求取消不会遗留一个已释放 fence 的 durable pending。
+    Candidate validation 返回真实 Foundation Hello/process-tree proof、固定 Build Host
+    最小编译结果与每个 enabled Plugin Mount 冷加载结果；Mount 使用一次性 dataDir 且
+    不注入生产 Credential。MiniApp production Service 尚未接入时明确返回 `NotCovered`，
+    交给用户裁决，不伪造全通过。旧 068 fingerprint 没有 executable path 证据时由
+    071 清空并要求重新 probe。
+16. Runtime-bound Plugin 组合已删除启动时独立 PATH Node 捕获：Shared Host、Candidate
+    Test、Build Host 在 exact committed Runtime 下懒创建；切换前释放 Kernel 全部
+    Runtime-bound resource handles，切换后按新 binding 重新 acquire。Plugin Enable 在
+    无 Runtime 时于 durable mutation 前拒绝，符合 §4.3B 的 disabled/needs-runtime
+    语义。`/settings/execution-engines` 已物理改为 Runtime Manager，旧本机 Agent
+    检测卡片与 Agent runtime alias 页面已删除。
+17. Runtime coordinator 的最终产品关闭条件仍未满足：MiniApp Service participant、
+    installed-app Build→Test→Apply/Restore、Windows fault injection、Desktop
+    accessibility/视觉验收和全量 UI typecheck 尚未完成。当前实现可以安全地继续开发，
+    但不能把 `N1-1-01`、`N1-2-03` 或 `N1-U-01` 标为 `closed`。
 
 ## 0. 怎样阅读这份文档
 

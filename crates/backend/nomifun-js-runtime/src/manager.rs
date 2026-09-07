@@ -3,12 +3,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    NodeRuntimeFingerprint, RuntimeInstallationId, RuntimeSelectionRecord,
-    RuntimeSwitchDecision, RuntimeSwitchValidationResult,
+    CanonicalErrorCode, NodeRuntimeFingerprint, RuntimeInstallationId,
+    RuntimeSelectionRecord, RuntimeSwitchValidationResult,
 };
 use tokio::sync::Mutex;
 
 use crate::{JavaScriptRuntimeError, RuntimeSelectionStoreError};
+use crate::ResolvedNodeRuntime;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VersionedRuntimeSelection {
@@ -98,12 +99,102 @@ impl NodeRuntimeManager {
         Ok(versioned)
     }
 
-    pub async fn commit_validated_switch(
+    pub async fn selected_runtime(
+        &self,
+    ) -> Result<Option<ResolvedNodeRuntime>, JavaScriptRuntimeError> {
+        let current = self.snapshot().await?;
+        match (
+            current.selection.selected_runtime,
+            current.selected_executable_path,
+        ) {
+            (Some(fingerprint), Some(executable_path)) => {
+                Ok(Some(ResolvedNodeRuntime {
+                    fingerprint,
+                    executable_path,
+                }))
+            }
+            (None, None) => Ok(None),
+            _ => Err(JavaScriptRuntimeError::Contract(
+                "selected Runtime fingerprint and executable path are incomplete"
+                    .to_owned(),
+            )),
+        }
+    }
+
+    pub async fn select_initial(
+        &self,
+        expected_revision: u64,
+        candidate: NodeRuntimeFingerprint,
+        executable_path: PathBuf,
+    ) -> Result<ResolvedNodeRuntime, JavaScriptRuntimeError> {
+        candidate
+            .validate()
+            .map_err(|error| JavaScriptRuntimeError::Contract(error.to_string()))?;
+        if !executable_path.is_absolute() {
+            return Err(JavaScriptRuntimeError::RelativePath(executable_path));
+        }
+        let _gate = self.mutation_gate.lock().await;
+        let current = self.snapshot().await?;
+        require_revision(&current, expected_revision)?;
+        if current.selection.selected_runtime.is_some()
+            || current.selection.pending_candidate.is_some()
+        {
+            return Err(JavaScriptRuntimeError::SelectedRuntimeMismatch);
+        }
+        let mut next = current.selection;
+        next.selected_runtime = Some(candidate.clone());
+        next.last_error = None;
+        let saved = save_next(
+            &*self.store,
+            expected_revision,
+            &next,
+            Some(&executable_path),
+            None,
+        )
+        .await?;
+        if saved.selection.selected_runtime.as_ref() != Some(&candidate)
+            || saved.selected_executable_path.as_ref() != Some(&executable_path)
+        {
+            return Err(JavaScriptRuntimeError::SelectionStore(
+                RuntimeSelectionStoreError::Corrupt(
+                    "initial Runtime selection returned a non-exact binding"
+                        .to_owned(),
+                ),
+            ));
+        }
+        Ok(ResolvedNodeRuntime {
+            fingerprint: candidate,
+            executable_path,
+        })
+    }
+
+    pub async fn clear_selected(
+        &self,
+        expected_revision: u64,
+        error: CanonicalErrorCode,
+    ) -> Result<VersionedRuntimeSelection, JavaScriptRuntimeError> {
+        let _gate = self.mutation_gate.lock().await;
+        let current = self.snapshot().await?;
+        require_revision(&current, expected_revision)?;
+        let mut next = current.selection;
+        next.selected_runtime = None;
+        next.validation_result = None;
+        next.last_error = Some(error);
+        save_next(
+            &*self.store,
+            expected_revision,
+            &next,
+            None,
+            current.pending_candidate_executable_path.as_deref(),
+        )
+        .await
+    }
+
+    pub async fn begin_pending(
         &self,
         expected_revision: u64,
         candidate: NodeRuntimeFingerprint,
         candidate_executable_path: PathBuf,
-        validation: RuntimeSwitchValidationResult,
         acknowledge_non_recommended: bool,
     ) -> Result<VersionedRuntimeSelection, JavaScriptRuntimeError> {
         candidate
@@ -114,13 +205,6 @@ impl NodeRuntimeManager {
                 candidate_executable_path,
             ));
         }
-        validation
-            .validate()
-            .map_err(|error| JavaScriptRuntimeError::Contract(error.to_string()))?;
-        if validation.candidate != candidate {
-            return Err(JavaScriptRuntimeError::CandidateMismatch);
-        }
-
         let _gate = self.mutation_gate.lock().await;
         let current = self.snapshot().await?;
         require_revision(&current, expected_revision)?;
@@ -134,55 +218,69 @@ impl NodeRuntimeManager {
                 .insert(candidate.runtime_installation_id.clone());
         }
         next.last_error = None;
-        if validation.requires_user_decision() {
-            next.pending_candidate = Some(candidate);
-            next.validation_result = Some(validation);
-            let selected_path = current.selected_executable_path;
-            save_next(
-                &*self.store,
-                expected_revision,
-                &next,
-                selected_path.as_deref(),
-                Some(&candidate_executable_path),
-            )
-            .await
-        } else {
-            next.selected_runtime = Some(candidate);
-            next.pending_candidate = None;
-            next.validation_result = None;
-            save_next(
-                &*self.store,
-                expected_revision,
-                &next,
-                Some(&candidate_executable_path),
-                None,
-            )
-            .await
-        }
+        next.pending_candidate = Some(candidate);
+        next.validation_result = None;
+        let selected_path = current.selected_executable_path;
+        save_next(
+            &*self.store,
+            expected_revision,
+            &next,
+            selected_path.as_deref(),
+            Some(&candidate_executable_path),
+        )
+        .await
     }
 
-    pub async fn decide(
+    pub async fn record_validation(
         &self,
         expected_revision: u64,
         candidate_runtime_id: &str,
         expected_candidate_executable_digest: &str,
-        decision: RuntimeSwitchDecision,
+        validation: RuntimeSwitchValidationResult,
+    ) -> Result<VersionedRuntimeSelection, JavaScriptRuntimeError> {
+        validation
+            .validate()
+            .map_err(|error| JavaScriptRuntimeError::Contract(error.to_string()))?;
+        let _gate = self.mutation_gate.lock().await;
+        let current = self.snapshot().await?;
+        require_revision(&current, expected_revision)?;
+        let candidate = exact_pending(
+            &current,
+            candidate_runtime_id,
+            expected_candidate_executable_digest,
+        )?;
+        if validation.candidate != *candidate {
+            return Err(JavaScriptRuntimeError::CandidateMismatch);
+        }
+
+        let mut next = current.selection;
+        next.validation_result = Some(validation);
+        next.last_error = None;
+        save_next(
+            &*self.store,
+            expected_revision,
+            &next,
+            current.selected_executable_path.as_deref(),
+            current.pending_candidate_executable_path.as_deref(),
+        )
+        .await
+    }
+
+    pub async fn commit_pending(
+        &self,
+        expected_revision: u64,
+        candidate_runtime_id: &str,
+        expected_candidate_executable_digest: &str,
     ) -> Result<VersionedRuntimeSelection, JavaScriptRuntimeError> {
         let _gate = self.mutation_gate.lock().await;
         let current = self.snapshot().await?;
         require_revision(&current, expected_revision)?;
-        let candidate = current
-            .selection
-            .pending_candidate
-            .as_ref()
-            .ok_or(JavaScriptRuntimeError::NoPendingCandidate)?
-            .clone();
-        if candidate.runtime_installation_id.as_ref() != candidate_runtime_id
-            || candidate.executable_digest.as_ref()
-                != expected_candidate_executable_digest
-        {
-            return Err(JavaScriptRuntimeError::CandidateMismatch);
-        }
+        let candidate = exact_pending(
+            &current,
+            candidate_runtime_id,
+            expected_candidate_executable_digest,
+        )?
+        .clone();
         let validation = current
             .selection
             .validation_result
@@ -191,13 +289,16 @@ impl NodeRuntimeManager {
         if validation.candidate != candidate {
             return Err(JavaScriptRuntimeError::CandidateMismatch);
         }
-
+        let candidate_path = current
+            .pending_candidate_executable_path
+            .clone()
+            .ok_or_else(|| {
+                JavaScriptRuntimeError::Contract(
+                    "pending Runtime has no executable path".to_owned(),
+                )
+            })?;
         let mut next = current.selection;
-        let mut selected_path = current.selected_executable_path;
-        if decision == RuntimeSwitchDecision::CommitCandidate {
-            next.selected_runtime = Some(candidate);
-            selected_path = current.pending_candidate_executable_path;
-        }
+        next.selected_runtime = Some(candidate);
         next.pending_candidate = None;
         next.validation_result = None;
         next.last_error = None;
@@ -205,8 +306,57 @@ impl NodeRuntimeManager {
             &*self.store,
             expected_revision,
             &next,
-            selected_path.as_deref(),
+            Some(&candidate_path),
             None,
+        )
+        .await
+    }
+
+    pub async fn abort_pending(
+        &self,
+        expected_revision: u64,
+        candidate_runtime_id: &str,
+        expected_candidate_executable_digest: &str,
+        last_error: Option<CanonicalErrorCode>,
+    ) -> Result<VersionedRuntimeSelection, JavaScriptRuntimeError> {
+        let _gate = self.mutation_gate.lock().await;
+        let current = self.snapshot().await?;
+        require_revision(&current, expected_revision)?;
+        exact_pending(
+            &current,
+            candidate_runtime_id,
+            expected_candidate_executable_digest,
+        )?;
+        let mut next = current.selection;
+        next.pending_candidate = None;
+        next.validation_result = None;
+        next.last_error = last_error;
+        save_next(
+            &*self.store,
+            expected_revision,
+            &next,
+            current.selected_executable_path.as_deref(),
+            None,
+        )
+        .await
+    }
+
+    pub async fn record_error(
+        &self,
+        expected_revision: u64,
+        error: CanonicalErrorCode,
+    ) -> Result<VersionedRuntimeSelection, JavaScriptRuntimeError> {
+        let _gate = self.mutation_gate.lock().await;
+        let current = self.snapshot().await?;
+        require_revision(&current, expected_revision)?;
+        let mut next = current.selection;
+        next.last_error = Some(error);
+        save_next(
+            &*self.store,
+            expected_revision,
+            &next,
+            current.selected_executable_path.as_deref(),
+            current.pending_candidate_executable_path.as_deref(),
         )
         .await
     }
@@ -222,6 +372,25 @@ impl NodeRuntimeManager {
             .non_recommended_warning_acknowledged
             .contains(runtime_id))
     }
+}
+
+fn exact_pending<'a>(
+    current: &'a VersionedRuntimeSelection,
+    candidate_runtime_id: &str,
+    expected_candidate_executable_digest: &str,
+) -> Result<&'a NodeRuntimeFingerprint, JavaScriptRuntimeError> {
+    let candidate = current
+        .selection
+        .pending_candidate
+        .as_ref()
+        .ok_or(JavaScriptRuntimeError::NoPendingCandidate)?;
+    if candidate.runtime_installation_id.as_ref() != candidate_runtime_id
+        || candidate.executable_digest.as_ref()
+            != expected_candidate_executable_digest
+    {
+        return Err(JavaScriptRuntimeError::CandidateMismatch);
+    }
+    Ok(candidate)
 }
 
 fn require_revision(
@@ -415,14 +584,10 @@ mod tests {
             NodeRuntimeManager::new(Arc::new(MemoryStore::default()));
         let candidate = runtime('a');
         let pending = manager
-            .commit_validated_switch(
+            .begin_pending(
                 0,
                 candidate.clone(),
                 PathBuf::from(r"C:\managed\node.exe"),
-                validation(
-                    candidate.clone(),
-                    RuntimeSwitchParticipantOutcome::NotCovered,
-                ),
                 false,
             )
             .await
@@ -432,13 +597,27 @@ mod tests {
             Some(candidate.clone())
         );
         assert!(pending.selection.selected_runtime.is_none());
+        assert!(pending.selection.validation_result.is_none());
 
-        let committed = manager
-            .decide(
+        let validated = manager
+            .record_validation(
                 1,
                 candidate.runtime_installation_id.as_ref(),
                 candidate.executable_digest.as_ref(),
-                RuntimeSwitchDecision::CommitCandidate,
+                validation(
+                    candidate.clone(),
+                    RuntimeSwitchParticipantOutcome::NotCovered,
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(validated.selection.validation_result.is_some());
+
+        let committed = manager
+            .commit_pending(
+                2,
+                candidate.runtime_installation_id.as_ref(),
+                candidate.executable_digest.as_ref(),
             )
             .await
             .unwrap();
@@ -447,25 +626,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fully_passed_validation_commits_without_pending_state() {
+    async fn abort_pending_restores_the_previous_selection() {
         let manager =
             NodeRuntimeManager::new(Arc::new(MemoryStore::default()));
-        let candidate = runtime('a');
-        let saved = manager
-            .commit_validated_switch(
+        let selected = runtime('a');
+        manager
+            .select_initial(
                 0,
+                selected.clone(),
+                PathBuf::from(r"C:\managed\selected\node.exe"),
+            )
+            .await
+            .unwrap();
+        let candidate = runtime('b');
+        manager
+            .begin_pending(
+                1,
                 candidate.clone(),
-                PathBuf::from(r"C:\managed\node.exe"),
-                validation(
-                    candidate.clone(),
-                    RuntimeSwitchParticipantOutcome::Passed,
-                ),
+                PathBuf::from(r"C:\managed\candidate\node.exe"),
                 false,
             )
             .await
             .unwrap();
-        assert_eq!(saved.selection.selected_runtime, Some(candidate));
-        assert!(saved.selection.pending_candidate.is_none());
+        manager
+            .record_validation(
+                2,
+                candidate.runtime_installation_id.as_ref(),
+                candidate.executable_digest.as_ref(),
+                validation(
+                    candidate.clone(),
+                    RuntimeSwitchParticipantOutcome::Failed,
+                ),
+            )
+            .await
+            .unwrap();
+        let aborted = manager
+            .abort_pending(
+                3,
+                candidate.runtime_installation_id.as_ref(),
+                candidate.executable_digest.as_ref(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(aborted.selection.selected_runtime, Some(selected));
+        assert!(aborted.selection.pending_candidate.is_none());
+        assert!(aborted.selection.validation_result.is_none());
     }
 
     #[tokio::test]
@@ -474,27 +680,19 @@ mod tests {
             NodeRuntimeManager::new(Arc::new(MemoryStore::default()));
         let candidate = runtime('a');
         manager
-            .commit_validated_switch(
+            .begin_pending(
                 0,
                 candidate.clone(),
                 PathBuf::from(r"C:\managed\node.exe"),
-                validation(
-                    candidate.clone(),
-                    RuntimeSwitchParticipantOutcome::Passed,
-                ),
                 false,
             )
             .await
             .unwrap();
         let error = manager
-            .commit_validated_switch(
+            .begin_pending(
                 0,
                 runtime('b'),
                 PathBuf::from(r"C:\managed\node-b.exe"),
-                validation(
-                    runtime('b'),
-                    RuntimeSwitchParticipantOutcome::Passed,
-                ),
                 false,
             )
             .await
@@ -509,7 +707,7 @@ mod tests {
                 .await
                 .unwrap()
                 .selection
-                .selected_runtime,
+                .pending_candidate,
             Some(candidate)
         );
     }

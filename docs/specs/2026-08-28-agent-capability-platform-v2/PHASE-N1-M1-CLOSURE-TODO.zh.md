@@ -41,8 +41,8 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 16 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-01`～`N1-1-03`、`N1-2-00`～`N1-2-02`、`N1-3-01`～`N1-3-03`、`N1-X-01` |
-| 正在实施 | 3 | `N1-2-03`、`N1-4-01`、`N1-U-01` |
+| 已关闭 | 15 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-02`～`N1-1-03`、`N1-2-00`～`N1-2-02`、`N1-3-01`～`N1-3-03`、`N1-X-01` |
+| 正在实施 | 4 | `N1-1-01`、`N1-2-03`、`N1-4-01`、`N1-U-01` |
 | 已解锁待领取 | 0 | 无 |
 | 依赖阻塞 | 13 | 其余 N1/M1 Windows 项与最终合流 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
@@ -263,6 +263,36 @@
       Candidate Test、Build 与 MiniApp Service 尚未统一接入 committed Runtime authority，
       production validator 因此明确返回 `JAVASCRIPT_RUNTIME_NOT_COVERED`，不会伪造切换成功。
       JavaScript Runtime 16、Runtime SQLite 2、App Runtime route 3 项测试通过。
+17. 2026-09-07 重新打开 `N1-1-01`：只完成 probe/download/CAS 不足以满足
+    §4.3C 的全局 Runtime authority。当前新增并已接入组合根：
+    - `RuntimeAuthority` 是唯一 committed Runtime 来源；Plugin Shared Host、Candidate
+      Test Host 和 Build Host 均按 exact fingerprint/path 获取 read lease，不再各自扫描
+      PATH 并永久捕获 Node；
+    - migration 071 对 068 旧 selection 做 fail-closed reselection；启动会 exact reprobe
+      已保存 executable，替换/删除时清空 selected 并记录 typed stale error；
+    - `CoordinatedRuntimeSwitch` 持有全局 write fence，先 durable pending、drain/stop、
+      Foundation/Plugin Mount validation，再 prepare、selection CAS、finalize；局部失败
+      保留 pending 供用户裁决，恢复失败不释放 fence；HTTP 请求取消不会取消 detached
+      coordinator task；
+    - Runtime-bound Kernel Resource 在切换前统一 release，Plugin enable 在无 committed
+      Runtime 时于 DB mutation 前拒绝。当前 MiniApp Service participant 明确返回
+      `NotCovered`，因此生产切换仍不会伪造全通过。
+      定向证据：Runtime 21、Runtime SQLite 3、App Runtime route 3、Plugin application
+      15、App Plugin E2E 1；受影响 crate `cargo check` 与 fmt 通过。
+18. `N1-2-03` 的组合根已改为 Runtime-bound：
+    - Shared Extension Host、Candidate Test Host、Build Host 都只消费同一个 committed
+      Runtime authority；Host port 以 instance+generation fence 拒绝旧 Resource release；
+    - Candidate Runtime 验证会加载全部 enabled ManagedLocal Mount 的 exact Artifact、
+      临时 dataDir（不注入生产 Credential）并证明候选 Host 停止；固定 Build Host 同时
+      执行最小 JS 编译验证，普通业务 Tool 不在验证阶段执行；
+    - 无 Runtime 时 Package 仍可安装/保留，但 Enable 在 owner mutation 前返回
+      `PLUGIN_RUNTIME_UNAVAILABLE`，不会出现 DB `enabled=true` 与实际不可执行的分裂。
+19. Runtime Manager Desktop UI 已替换旧本机 Agent 检测页面：
+    - `/settings/execution-engines` 现在只承载 Runtime Manager，提供 status/probe、
+      手工 Node 路径选择、官方 LTS 确认下载、非推荐版本确认和局部失败裁决；
+    - `28ee78526` 的 bridge/model/交互测试通过，四组定向 UI 测试共 11 项通过；
+      全量 UI typecheck 仍受仓库既有 Arco/React 类型错误阻断，尚未作为 N1-U-01
+      关闭证据；Desktop accessibility/视觉验收也未完成。
 
 ## W0：一期交接
 
@@ -284,7 +314,7 @@
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `N1-1-01` | closed | Runtime lane；新 `nomifun-js-runtime/**` | Node PATH/手工/managed LTS probe、下载确认、fingerprint 与全局试切换 | `N1-0-02` | 12 tests；真实 PATH Node；official index/SHASUMS/zip containment；candidate validation |
+| `N1-1-01` | in-progress | Runtime lane；`nomifun-js-runtime/**`、App composition、Plugin Runtime boundary | Node probe/download、唯一 committed Runtime authority、全局 admission fence、drain/stop/validation/commit-or-restore | `N1-0-02` | Runtime 21 + SQLite 3 + App route 3；authority/lease、071 reselection、pending recovery、Runtime-bound Host/Build/Test 与 fixed Build Foundation 已接；仍需真实 installed switch/fault/restart Gate |
 | `N1-1-02` | closed | Runtime lane；新 `nomifun-js-host/**` | lazy shared Extension Host、独立 Candidate Test Host、private IPC/Hello、watchdog、whole-tree cleanup、late-result fence | `N1-1-01` | Host 14；role-isolated process、demand=0、crash/restart、child cleanup、quiescent fence、installed-path materialization |
 | `N1-1-03` | closed | Kernel+Runtime 边界；`nomifun-js-kernel-adapter/**`、Kernel typed exports、Shared Host API | 普通 Plugin Tool/Context/Resource 的 Node proxy；N1 明确拒绝 Role Provider/Plugin Service | `N1-0-03`,`N1-1-02` | Host 13、Adapter 4、Kernel 23、Agent Platform 16；exact Artifact handle fence；无 Rust/Node 双 Registry |
 
@@ -295,7 +325,7 @@
 | `N1-2-00` | closed | Artifact lane；`nomifun-plugin-platform/**` | directory/zip containment、canonical digest、immutable CAS staging/publish | `N1-0-02` | 9 tests；tamper/traversal/collision/cancel/idempotency |
 | `N1-2-01` | closed | DB lane；migration 067/068/070/071、新 repository | Artifact/Project/Candidate/current/previous/Mount/Operation/retained data、Project display metadata 与 Runtime selection schema/path CAS | `N1-0-02` | `6debcb628` + 070/071；Plugin repository 13、Runtime selection 2、ID schema 20；fresh/restart/direct-SQL guards |
 | `N1-2-02` | closed | Plugin platform lane；migration 069、DB repository、owner mutation coordinator | Config、Credential slot binding、KV/CAS、stable `dataDir`、owner mutation lock | `N1-2-01`,`N1-1-02` | `a275ddd97`,`a16cfbeff`；repository 12 + ID/schema 20 + lifecycle 31 |
-| `N1-2-03` | in-progress | Plugin application-service/App lane；`nomifun-plugin-service/**`、`nomifun-app/src/router/plugin_platform.rs` | staging/containment/digest/install/replace/restore/uninstall/delete-data/project-delete 与真实 App/Kernel 组合 | `N1-2-01`,`N1-2-02` | service 22 + App publisher E2E 1；真实 Build/cancel、metadata/TestReceipt/Operation、Candidate Test Host 已接；仍需 N1-3 Agent consumer、统一 Runtime switch 与安装版验证 |
+| `N1-2-03` | in-progress | Plugin application-service/App lane；`nomifun-plugin-service/**`、`nomifun-app/src/router/plugin_platform.rs`、Runtime-bound Host | staging/containment/digest/install/replace/restore/uninstall/delete-data/project-delete 与真实 App/Kernel/Runtime 组合 | `N1-2-01`,`N1-2-02` | service 15 + App publisher E2E 1；Runtime-bound Shared/Candidate/Build Host、enable runtime gate、metadata/TestReceipt/Operation 已接；仍需安装版闭环、完整 Candidate/Apply/Restore 与 fault Gate |
 
 ## N1-3：Catalog 与消费者
 
@@ -319,7 +349,7 @@
 | --- | --- | --- | --- | --- | --- |
 | `N1-X-01` | closed | Skill lane；新 `nomifun-skill-library/**` | 把 `skill_service`、builtin skills、Skill market 从 `nomifun-extension` 抽为独立 owner | `W0-01` | `610b59007`；Skill Library 150 passed/2 ignored；Extension/消费者 checks passed |
 | `N1-X-02` | blocked | demolition lane；`nomifun-extension/**` 及消费者 | 删除旧 Extension loader/registry/hub/hot reload/permissions/settings/webui/agent/theme 路径 | `N1-X-01`,`N1-3-03`,`N1-4-03` | `/api/extensions/*`、Hub、`nomi-extension.json` 生产可达性为 0 |
-| `N1-U-01` | in-progress | UI lane；新 `pages/plugins/**`、Runtime Manager | Plugin Library/Workshop/配置/诊断、Node Runtime Manager；MCP 页面只保留 MCP | `N1-2-03`,`N1-4-02` | Library/Workshop/authoring/config/Credential reference、28 targeted tests、i18n/icons/production build 已通过；仍需 Runtime Manager 与 Desktop product/a11y/视觉走查 |
+| `N1-U-01` | in-progress | UI lane；新 `pages/plugins/**`、`pages/settings/RuntimeManager/**` | Plugin Library/Workshop/配置/诊断、Node Runtime Manager；MCP 页面只保留 MCP | `N1-2-03`,`N1-4-02` | Plugin/Runtime bridge+model/interaction 39 targeted tests、i18n/icons/production build 已通过；全量 typecheck 有既有基线错误，仍需 Desktop product/a11y/视觉走查 |
 | `N1-V-01` | blocked | 集成 Owner | Windows N1 contract/integration/fault/product/NSIS candidate | 所有 N1 项 | authored JS/TS → Test → Apply → invoke → Restore |
 
 ## M1：Full-stack MiniApp
