@@ -375,13 +375,6 @@ button.guidResourceCard:focus-visible {
     display: none !important;
   }
 
-  .entryStrip .entryPersonaButton {
-    max-width: 34px;
-  }
-
-  .entryStrip .entryPersonaButton .entryDismiss {
-    display: none;
-  }
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -417,10 +410,6 @@ button.guidResourceCard:focus-visible {
       display: inline-flex !important;
     }
 
-    .entryStrip .entryPersonaButton:hover .entryDismiss,
-    .entryStrip .entryPersonaButton:focus-within .entryDismiss {
-      display: inline-flex;
-    }
   }
 }
 
@@ -458,32 +447,6 @@ button.guidResourceCard:focus-visible {
   border-color: rgba(var(--primary-6), 0.13);
 }
 
-.entryButtonActive {
-  color: rgb(var(--primary-6));
-  background: rgba(var(--primary-6), 0.08);
-  border-color: rgba(var(--primary-6), 0.22);
-  box-shadow: inset 0 0 0 1px rgba(var(--primary-6), 0.06);
-}
-
-.entryPersonaButton {
-  max-width: min(260px, 42%);
-  padding-left: 6px;
-  padding-right: 7px;
-}
-
-.entryAvatar {
-  width: 24px;
-  height: 24px;
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border-radius: 9px;
-  background: var(--color-fill-2);
-  color: var(--color-text-2);
-  overflow: hidden;
-}
-
 .entryButtonText {
   min-width: 0;
   overflow: hidden;
@@ -491,32 +454,6 @@ button.guidResourceCard:focus-visible {
      the top/bottom of CJK glyphs, whose rendered box exceeds the em box. */
   line-height: 1.5;
   text-overflow: ellipsis;
-}
-
-.entryDismiss {
-  width: 20px;
-  height: 20px;
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  margin-left: -2px;
-  border: 0;
-  border-radius: 7px;
-  padding: 0;
-  color: var(--color-text-3);
-  background: transparent;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 12px;
-  line-height: 1;
-}
-
-.entryDismiss:hover,
-.entryDismiss:focus-visible {
-  color: var(--color-text-1);
-  background: var(--color-fill-2);
-  outline: none;
 }
 
 .entryBackButton {

@@ -4,17 +4,14 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use crate::error::DbError;
 use crate::models::{
-    MiniAppCredentialBindingRow, MiniAppLibraryStateRow,
-    MiniAppM1LibrarySnapshot, MiniAppM1Snapshot, MiniAppProductRow,
-    MiniAppProjectRow, MiniAppReleaseRow,
+    MiniAppCredentialBindingRow, MiniAppLibraryStateRow, MiniAppM1LibrarySnapshot,
+    MiniAppM1Snapshot, MiniAppProductRow, MiniAppProjectRow, MiniAppReleaseRow,
 };
 use crate::repository::miniapp_m1::{
-    CommitMiniAppM1PointerStateParams, CreateMiniAppM1Params,
-    IMiniAppM1Repository, RecordMiniAppM1ReadyReleaseParams,
-    UpdateMiniAppM1ProjectSourceParams, conflict, query_error,
-    validate_artifact, validate_digest, validate_json_object,
-    validate_project_source, validate_release, validate_uuid,
-    validate_pointer_state,
+    CommitMiniAppM1PointerStateParams, CreateMiniAppM1Params, IMiniAppM1Repository,
+    MiniAppKvRow, RecordMiniAppM1ReadyReleaseParams, UpdateMiniAppM1ProjectSourceParams, conflict,
+    query_error, validate_artifact, validate_digest, validate_json_object, validate_pointer_state,
+    validate_project_source, validate_release, validate_uuid, validate_visible_ascii_key,
 };
 
 #[derive(Clone, Debug)]
@@ -705,5 +702,395 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         fetch_snapshot(&self.pool, &params.owner_user_id, &params.miniapp_id)
             .await?
             .ok_or_else(|| DbError::Init("MiniApp pointer commit lost Product".into()))
+    }
+
+    async fn update_config_cas(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        expected_product_revision: i64,
+        expected_pointer_revision: i64,
+        expected_config_revision: i64,
+        expected_config_schema_json: &str,
+        config_json: &str,
+        updated_at: i64,
+    ) -> Result<MiniAppM1Snapshot, DbError> {
+        validate_uuid(owner_user_id, "owner_user_id")?;
+        validate_uuid(miniapp_id, "miniapp_id")?;
+        validate_json_object(expected_config_schema_json, "expected_config_schema_json")?;
+        validate_json_object(config_json, "config_json")?;
+        if expected_product_revision < 1
+            || expected_pointer_revision < 1
+            || expected_config_revision < 1
+            || updated_at < 0
+        {
+            return Err(conflict("MiniApp config CAS expectations are invalid"));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let product = lock_product(&mut tx, owner_user_id, miniapp_id).await?;
+        if product.product_revision != expected_product_revision
+            || product.pointer_revision != expected_pointer_revision
+            || product.config_revision != expected_config_revision
+            || product.config_schema_json != expected_config_schema_json
+        {
+            return Err(conflict(
+                "MiniApp config Product/pointer/revision/schema exact CAS failed",
+            ));
+        }
+        if updated_at < product.updated_at {
+            return Err(conflict(
+                "MiniApp config timestamp predates the Product state",
+            ));
+        }
+        if product.config_json == config_json {
+            tx.commit().await?;
+            return fetch_snapshot(&self.pool, owner_user_id, miniapp_id)
+                .await?
+                .ok_or_else(|| DbError::Init("MiniApp config read lost Product".into()));
+        }
+        let next_product_revision = product
+            .product_revision
+            .checked_add(1)
+            .ok_or_else(|| conflict("MiniApp Product revision overflow"))?;
+        let next_config_revision = product
+            .config_revision
+            .checked_add(1)
+            .ok_or_else(|| conflict("MiniApp config revision overflow"))?;
+        let changed = sqlx::query(
+            "UPDATE miniapp_products
+             SET product_revision = ?, config_json = ?, config_revision = ?,
+                 updated_at = ?
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND product_revision = ? AND pointer_revision = ?
+               AND config_revision = ? AND config_schema_json = ?
+               AND updated_at <= ?",
+        )
+        .bind(next_product_revision)
+        .bind(config_json)
+        .bind(next_config_revision)
+        .bind(updated_at)
+        .bind(owner_user_id)
+        .bind(miniapp_id)
+        .bind(expected_product_revision)
+        .bind(expected_pointer_revision)
+        .bind(expected_config_revision)
+        .bind(expected_config_schema_json)
+        .bind(updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(conflict("MiniApp config exact CAS failed"));
+        }
+        bump_library_revision(&mut tx, owner_user_id, updated_at).await?;
+        tx.commit().await?;
+        fetch_snapshot(&self.pool, owner_user_id, miniapp_id)
+            .await?
+            .ok_or_else(|| DbError::Init("MiniApp config commit lost Product".into()))
+    }
+
+    async fn replace_credential_bindings_cas(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        expected_product_revision: i64,
+        expected_pointer_revision: i64,
+        expected_bindings_revision: i64,
+        bindings: &BTreeMap<String, String>,
+        updated_at: i64,
+    ) -> Result<MiniAppM1Snapshot, DbError> {
+        validate_uuid(owner_user_id, "owner_user_id")?;
+        validate_uuid(miniapp_id, "miniapp_id")?;
+        if expected_product_revision < 1
+            || expected_pointer_revision < 1
+            || expected_bindings_revision < 1
+            || updated_at < 0
+        {
+            return Err(conflict(
+                "MiniApp Credential binding CAS expectations are invalid",
+            ));
+        }
+        for (slot_key, credential_id) in bindings {
+            validate_visible_ascii_key(slot_key, "credential slot_key", 128)?;
+            validate_visible_ascii_key(credential_id, "credential_id", 512)?;
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let product = lock_product(&mut tx, owner_user_id, miniapp_id).await?;
+        if product.product_revision != expected_product_revision
+            || product.pointer_revision != expected_pointer_revision
+            || product.credential_bindings_revision != expected_bindings_revision
+        {
+            return Err(conflict(
+                "MiniApp Credential binding Product/pointer/revision exact CAS failed",
+            ));
+        }
+        if updated_at < product.updated_at {
+            return Err(conflict(
+                "MiniApp Credential binding timestamp predates the Product state",
+            ));
+        }
+        let current_rows = sqlx::query_as::<_, MiniAppCredentialBindingRow>(
+            "SELECT * FROM miniapp_credential_bindings
+             WHERE owner_user_id = ? AND miniapp_id = ? ORDER BY slot_key",
+        )
+        .bind(owner_user_id)
+        .bind(miniapp_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let current = current_rows
+            .iter()
+            .map(|row| (row.slot_key.clone(), row.credential_id.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if &current == bindings {
+            tx.commit().await?;
+            return fetch_snapshot(&self.pool, owner_user_id, miniapp_id)
+                .await?
+                .ok_or_else(|| {
+                    DbError::Init("MiniApp Credential binding read lost Product".into())
+                });
+        }
+        let next_product_revision = product
+            .product_revision
+            .checked_add(1)
+            .ok_or_else(|| conflict("MiniApp Product revision overflow"))?;
+        let next_bindings_revision = product
+            .credential_bindings_revision
+            .checked_add(1)
+            .ok_or_else(|| conflict("MiniApp Credential binding revision overflow"))?;
+
+        sqlx::query(
+            "DELETE FROM miniapp_credential_bindings
+             WHERE owner_user_id = ? AND miniapp_id = ?",
+        )
+        .bind(owner_user_id)
+        .bind(miniapp_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        for (slot_key, credential_id) in bindings {
+            sqlx::query(
+                "INSERT INTO miniapp_credential_bindings
+                 (miniapp_id, owner_user_id, slot_key, credential_id,
+                  created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(miniapp_id)
+            .bind(owner_user_id)
+            .bind(slot_key)
+            .bind(credential_id)
+            .bind(updated_at)
+            .bind(updated_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?;
+        }
+        let changed = sqlx::query(
+            "UPDATE miniapp_products
+             SET product_revision = ?, credential_bindings_revision = ?,
+                 updated_at = ?
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND product_revision = ? AND pointer_revision = ?
+               AND credential_bindings_revision = ? AND updated_at <= ?",
+        )
+        .bind(next_product_revision)
+        .bind(next_bindings_revision)
+        .bind(updated_at)
+        .bind(owner_user_id)
+        .bind(miniapp_id)
+        .bind(expected_product_revision)
+        .bind(expected_pointer_revision)
+        .bind(expected_bindings_revision)
+        .bind(updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(conflict(
+                "MiniApp Credential binding exact CAS failed",
+            ));
+        }
+        bump_library_revision(&mut tx, owner_user_id, updated_at).await?;
+        tx.commit().await?;
+        fetch_snapshot(&self.pool, owner_user_id, miniapp_id)
+            .await?
+            .ok_or_else(|| {
+                DbError::Init("MiniApp Credential binding commit lost Product".into())
+            })
+    }
+
+    async fn get_kv(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<MiniAppKvRow>, DbError> {
+        validate_uuid(owner_user_id, "owner_user_id")?;
+        validate_uuid(miniapp_id, "miniapp_id")?;
+        validate_visible_ascii_key(namespace, "MiniApp KV namespace", 128)?;
+        validate_visible_ascii_key(key, "MiniApp KV key", 256)?;
+        let mut tx = self.pool.begin().await?;
+        lock_product(&mut tx, owner_user_id, miniapp_id).await?;
+        let row = sqlx::query_as(
+            "SELECT * FROM miniapp_kv
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND namespace = ? AND key = ?",
+        )
+        .bind(owner_user_id)
+        .bind(miniapp_id)
+        .bind(namespace)
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    async fn put_kv_cas(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        namespace: &str,
+        key: &str,
+        value: &serde_json::Value,
+        expected_revision: Option<i64>,
+        updated_at: i64,
+    ) -> Result<MiniAppKvRow, DbError> {
+        validate_uuid(owner_user_id, "owner_user_id")?;
+        validate_uuid(miniapp_id, "miniapp_id")?;
+        validate_visible_ascii_key(namespace, "MiniApp KV namespace", 128)?;
+        validate_visible_ascii_key(key, "MiniApp KV key", 256)?;
+        if expected_revision.is_some_and(|revision| revision < 1) || updated_at < 0 {
+            return Err(conflict("MiniApp KV CAS expectation/timestamp is invalid"));
+        }
+        let value_json = serde_json::to_string(value)
+            .map_err(|error| conflict(format!("MiniApp KV value is invalid: {error}")))?;
+        let mut tx = self.pool.begin().await?;
+        let product = lock_product(&mut tx, owner_user_id, miniapp_id).await?;
+        if updated_at < product.created_at {
+            return Err(conflict(
+                "MiniApp KV timestamp predates the Product creation",
+            ));
+        }
+        let changed = if let Some(expected_revision) = expected_revision {
+            sqlx::query(
+                "UPDATE miniapp_kv
+                 SET value_json = ?, revision = revision + 1, updated_at = ?
+                 WHERE owner_user_id = ? AND miniapp_id = ?
+                   AND namespace = ? AND key = ? AND revision = ?
+                   AND revision < 9223372036854775807 AND updated_at <= ?",
+            )
+            .bind(&value_json)
+            .bind(updated_at)
+            .bind(owner_user_id)
+            .bind(miniapp_id)
+            .bind(namespace)
+            .bind(key)
+            .bind(expected_revision)
+            .bind(updated_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?
+            .rows_affected()
+        } else {
+            sqlx::query(
+                "INSERT INTO miniapp_kv
+                 (miniapp_id, owner_user_id, namespace, key, value_json,
+                  revision, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                 ON CONFLICT(owner_user_id, miniapp_id, namespace, key)
+                 DO NOTHING",
+            )
+            .bind(miniapp_id)
+            .bind(owner_user_id)
+            .bind(namespace)
+            .bind(key)
+            .bind(&value_json)
+            .bind(updated_at)
+            .bind(updated_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?
+            .rows_affected()
+        };
+        if changed != 1 {
+            return Err(conflict("MiniApp KV revision CAS failed"));
+        }
+        let row = sqlx::query_as(
+            "SELECT * FROM miniapp_kv
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND namespace = ? AND key = ?",
+        )
+        .bind(owner_user_id)
+        .bind(miniapp_id)
+        .bind(namespace)
+        .bind(key)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    async fn delete_kv_cas(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        namespace: &str,
+        key: &str,
+        expected_revision: i64,
+        updated_at: i64,
+    ) -> Result<bool, DbError> {
+        validate_uuid(owner_user_id, "owner_user_id")?;
+        validate_uuid(miniapp_id, "miniapp_id")?;
+        validate_visible_ascii_key(namespace, "MiniApp KV namespace", 128)?;
+        validate_visible_ascii_key(key, "MiniApp KV key", 256)?;
+        if expected_revision < 1 || updated_at < 0 {
+            return Err(conflict(
+                "MiniApp KV delete CAS expectation/timestamp is invalid",
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        let product = lock_product(&mut tx, owner_user_id, miniapp_id).await?;
+        if updated_at < product.created_at {
+            return Err(conflict(
+                "MiniApp KV timestamp predates the Product creation",
+            ));
+        }
+        let deleted = sqlx::query(
+            "DELETE FROM miniapp_kv
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND namespace = ? AND key = ?
+               AND revision = ? AND updated_at <= ?",
+        )
+        .bind(owner_user_id)
+        .bind(miniapp_id)
+        .bind(namespace)
+        .bind(key)
+        .bind(expected_revision)
+        .bind(updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?
+        .rows_affected();
+        if deleted == 0 {
+            let current: Option<i64> = sqlx::query_scalar(
+                "SELECT revision FROM miniapp_kv
+                 WHERE owner_user_id = ? AND miniapp_id = ?
+                   AND namespace = ? AND key = ?",
+            )
+            .bind(owner_user_id)
+            .bind(miniapp_id)
+            .bind(namespace)
+            .bind(key)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if current.is_some() {
+                return Err(conflict("MiniApp KV delete revision CAS failed"));
+            }
+        }
+        tx.commit().await?;
+        Ok(deleted == 1)
     }
 }

@@ -97,6 +97,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "messages",
     "miniapp_credential_bindings",
     "miniapp_library_state",
+    "miniapp_kv",
     "miniapp_products",
     "miniapp_projects",
     "miniapp_release_artifacts",
@@ -691,6 +692,8 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("miniapp_credential_bindings", "owner_user_id" => "users", "user_id", false, "idx_miniapp_credential_bindings_owner_user_id", Cascade),
     text_ref!("miniapp_credential_bindings", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_credential_bindings_miniapp_id", Cascade),
     external_ref!("miniapp_credential_bindings", "credential_id", Text, false, Opaque, "idx_miniapp_credential_bindings_credential_id", KeepHistory),
+    text_ref!("miniapp_kv", "owner_user_id" => "users", "user_id", false, "idx_miniapp_kv_owner_user_id", Cascade),
+    text_ref!("miniapp_kv", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_kv_miniapp_id", Cascade),
     // Delivery receipts intentionally survive Terminal/Requirement deletion so
     // a replay can never regain PTY write authority.
     text_ref!("terminal_turn_admissions", "terminal_id" => "terminal_sessions", "terminal_id", false, "idx_terminal_turn_admissions_terminal_epoch", KeepHistory),

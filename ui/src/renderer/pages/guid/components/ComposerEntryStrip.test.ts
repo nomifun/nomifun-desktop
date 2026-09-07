@@ -46,20 +46,25 @@ describe('Guid composer entry strip', () => {
     }
   });
 
-  test('keeps summon and MiniApp as explicit session entries', () => {
+  test('keeps summon as the only explicit session entry', () => {
     const source = readSource(new URL('./ComposerEntryStrip.tsx', import.meta.url));
 
     expect(source.includes('onSummonCompanion?: () => void')).toBe(true);
     expect(source.includes('summonedCompanionName')).toBe(true);
     expect(source.includes('conversation.summon.button')).toBe(true);
-    expect(source.includes('onCreateMiniApp?: () => void')).toBe(true);
-    expect(source.includes('miniAppActive')).toBe(true);
-    expect(source.includes('miniApps.composer.entry')).toBe(true);
+    for (const retired of [
+      'onCreateMiniApp',
+      'miniAppActive',
+      'miniApps.composer',
+      'ApplicationOne',
+      'guid-miniapp-',
+    ]) {
+      expect(source.includes(retired)).toBe(false);
+    }
 
     const summonPos = source.indexOf('{summonEntry}');
-    const miniAppPos = source.indexOf('{miniAppEntry}');
     expect(summonPos).toBeGreaterThan(-1);
-    expect(miniAppPos).toBeGreaterThan(summonPos);
+    expect(source.includes('{miniAppEntry}')).toBe(false);
   });
 
   test('keeps compact labels responsive without an unimplemented shortcut', () => {

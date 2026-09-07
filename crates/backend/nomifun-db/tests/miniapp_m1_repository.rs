@@ -1,20 +1,81 @@
+use std::collections::BTreeMap;
+
 use nomifun_db::{
-    CreateMiniAppM1Params, IMiniAppM1Repository, MiniAppM1Kind,
-    MiniAppM1ProjectSourceState, MiniAppM1Snapshot,
-    MiniAppReleaseArtifactRow, MiniAppReleaseRow,
-    RecordMiniAppM1ReadyReleaseParams, CommitMiniAppM1PointerStateParams,
-    SqliteMiniAppM1Repository, UpdateMiniAppM1ProjectSourceParams,
-    init_database_memory, installation_owner_id,
+    CommitMiniAppM1PointerStateParams, CreateMiniAppM1Params, IMiniAppM1Repository,
+    MiniAppM1Kind, MiniAppM1ProjectSourceState, MiniAppM1Snapshot, MiniAppReleaseArtifactRow,
+    MiniAppReleaseRow, RecordMiniAppM1ReadyReleaseParams, SqliteMiniAppM1Repository,
+    UpdateMiniAppM1ProjectSourceParams, installation_owner_id,
 };
 use serde_json::json;
+use sqlx::migrate::{Migrate, Migrator};
 use uuid::Uuid;
+
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 const MINIAPP_ID: &str = "0190f5fe-7c00-7000-8000-000000000101";
 const PROJECT_ID: &str = "0190f5fe-7c00-7000-8000-000000000102";
 
+struct MiniAppTestDatabase {
+    pool: nomifun_db::SqlitePool,
+}
+
+impl MiniAppTestDatabase {
+    fn pool(&self) -> &nomifun_db::SqlitePool {
+        &self.pool
+    }
+}
+
+async fn init_miniapp_test_database() -> MiniAppTestDatabase {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    connection.ensure_migrations_table().await.unwrap();
+    for migration in MIGRATOR.iter() {
+        connection.apply(migration).await.unwrap();
+    }
+    drop(connection);
+    let owner = Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO users (
+            user_id, username, password_hash, jwt_secret, created_at, updated_at
+         ) VALUES (?, 'admin', '', '', 1, 1)",
+    )
+    .bind(&owner)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO installation_identity (singleton_key, owner_user_id)
+         VALUES ('installation', ?)",
+    )
+    .bind(owner)
+    .execute(&pool)
+    .await
+    .unwrap();
+    MiniAppTestDatabase { pool }
+}
+
+async fn insert_other_owner(pool: &nomifun_db::SqlitePool) -> String {
+    let owner = Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO users (
+            user_id, username, password_hash, jwt_secret, created_at, updated_at
+         ) VALUES (?, ?, '', '', 1, 1)",
+    )
+    .bind(&owner)
+    .bind(&owner)
+    .execute(pool)
+    .await
+    .unwrap();
+    owner
+}
+
 #[tokio::test]
 async fn owner_scoped_library_create_and_project_source_cas_are_exact() {
-    let database = init_database_memory().await.unwrap();
+    let database = init_miniapp_test_database().await;
     let owner = installation_owner_id(database.pool()).await.unwrap();
     let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
 
@@ -83,7 +144,7 @@ async fn owner_scoped_library_create_and_project_source_cas_are_exact() {
 
 #[tokio::test]
 async fn new_repository_never_reads_the_retired_miniapps_store() {
-    let database = init_database_memory().await.unwrap();
+    let database = init_miniapp_test_database().await;
     let owner = installation_owner_id(database.pool()).await.unwrap();
     let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
     assert!(repository
@@ -224,7 +285,7 @@ async fn create_editable_app(
 
 #[tokio::test]
 async fn ready_release_and_pointer_cas_bind_exact_lineage_and_owner() {
-    let database = init_database_memory().await.unwrap();
+    let database = init_miniapp_test_database().await;
     let owner = installation_owner_id(database.pool()).await.unwrap();
     let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
     let _created = create_editable_app(&repository, &owner).await;
@@ -357,4 +418,243 @@ async fn ready_release_and_pointer_cas_bind_exact_lineage_and_owner() {
         .await
         .unwrap_err();
     assert!(stale.to_string().contains("CAS"));
+}
+
+#[tokio::test]
+async fn product_config_and_credential_references_use_exact_owner_scoped_cas() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let other_owner = insert_other_owner(database.pool()).await;
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    repository
+        .create(&CreateMiniAppM1Params {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            expected_library_revision: 0,
+            display_name: "Runtime state app".to_owned(),
+            description: None,
+            icon_asset_id: None,
+            kind: MiniAppM1Kind::UiOnly,
+            materialized_catalog_digest: "a".repeat(64),
+            config_schema_json: r#"{"type":"object"}"#.to_owned(),
+            config_json: "{}".to_owned(),
+            created_at: 10,
+        })
+        .await
+        .unwrap();
+
+    let configured = repository
+        .update_config_cas(
+            &owner,
+            MINIAPP_ID,
+            1,
+            1,
+            1,
+            r#"{"type":"object"}"#,
+            r#"{"theme":"dark"}"#,
+            20,
+        )
+        .await
+        .unwrap();
+    assert_eq!(configured.product.product_revision, 2);
+    assert_eq!(configured.product.config_revision, 2);
+    assert_eq!(configured.product.config_json, r#"{"theme":"dark"}"#);
+    assert_eq!(configured.library_revision, 2);
+
+    let stale_schema = repository
+        .update_config_cas(
+            &owner,
+            MINIAPP_ID,
+            2,
+            1,
+            2,
+            r#"{"type":"object","properties":{}}"#,
+            r#"{"theme":"light"}"#,
+            21,
+        )
+        .await
+        .unwrap_err();
+    assert!(stale_schema.to_string().contains("exact CAS"));
+
+    let bindings = BTreeMap::from([
+        ("primary".to_owned(), "credential-primary".to_owned()),
+        ("secondary".to_owned(), "credential-secondary".to_owned()),
+    ]);
+    let bound = repository
+        .replace_credential_bindings_cas(
+            &owner,
+            MINIAPP_ID,
+            2,
+            1,
+            1,
+            &bindings,
+            30,
+        )
+        .await
+        .unwrap();
+    assert_eq!(bound.product.product_revision, 3);
+    assert_eq!(bound.product.credential_bindings_revision, 2);
+    assert_eq!(bound.library_revision, 3);
+    assert_eq!(bound.credential_bindings.len(), 2);
+    assert_eq!(bound.credential_bindings[0].slot_key, "primary");
+    assert_eq!(
+        bound.credential_bindings[0].credential_id,
+        "credential-primary"
+    );
+
+    let stale = repository
+        .replace_credential_bindings_cas(
+            &owner,
+            MINIAPP_ID,
+            2,
+            1,
+            1,
+            &BTreeMap::new(),
+            31,
+        )
+        .await
+        .unwrap_err();
+    assert!(stale.to_string().contains("exact CAS"));
+
+    let cross_owner = repository
+        .update_config_cas(
+            &other_owner,
+            MINIAPP_ID,
+            3,
+            1,
+            2,
+            r#"{"type":"object"}"#,
+            r#"{"theme":"light"}"#,
+            32,
+        )
+        .await
+        .unwrap_err();
+    assert!(cross_owner.to_string().contains("not found"));
+}
+
+#[tokio::test]
+async fn host_kv_is_owner_and_namespace_scoped_with_checked_revision_cas() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let other_owner = insert_other_owner(database.pool()).await;
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    repository
+        .create(&CreateMiniAppM1Params {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            expected_library_revision: 0,
+            display_name: "KV app".to_owned(),
+            description: None,
+            icon_asset_id: None,
+            kind: MiniAppM1Kind::UiOnly,
+            materialized_catalog_digest: "a".repeat(64),
+            config_schema_json: r#"{"type":"object"}"#.to_owned(),
+            config_json: "{}".to_owned(),
+            created_at: 10,
+        })
+        .await
+        .unwrap();
+
+    let first = repository
+        .put_kv_cas(
+            &owner,
+            MINIAPP_ID,
+            "surface",
+            "state",
+            &json!({"value": 1}),
+            None,
+            11,
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.revision, 1);
+    assert_eq!(first.value_json, r#"{"value":1}"#);
+
+    let isolated = repository
+        .put_kv_cas(
+            &owner,
+            MINIAPP_ID,
+            "preview",
+            "state",
+            &json!({"value": "preview"}),
+            None,
+            12,
+        )
+        .await
+        .unwrap();
+    assert_eq!(isolated.revision, 1);
+
+    let updated = repository
+        .put_kv_cas(
+            &owner,
+            MINIAPP_ID,
+            "surface",
+            "state",
+            &json!({"value": 2}),
+            Some(1),
+            13,
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.revision, 2);
+    let fetched = repository
+        .get_kv(&owner, MINIAPP_ID, "surface", "state")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.value_json, r#"{"value":2}"#);
+
+    let stale = repository
+        .put_kv_cas(
+            &owner,
+            MINIAPP_ID,
+            "surface",
+            "state",
+            &json!({"value": 3}),
+            Some(1),
+            14,
+        )
+        .await
+        .unwrap_err();
+    assert!(stale.to_string().contains("CAS"));
+
+    let cross_owner = repository
+        .get_kv(&other_owner, MINIAPP_ID, "surface", "state")
+        .await
+        .unwrap_err();
+    assert!(cross_owner.to_string().contains("not found"));
+
+    let stale_delete = repository
+        .delete_kv_cas(&owner, MINIAPP_ID, "surface", "state", 1, 15)
+        .await
+        .unwrap_err();
+    assert!(stale_delete.to_string().contains("CAS"));
+    assert!(
+        repository
+            .delete_kv_cas(&owner, MINIAPP_ID, "surface", "state", 2, 15)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repository
+            .delete_kv_cas(&owner, MINIAPP_ID, "surface", "state", 2, 16)
+            .await
+            .unwrap()
+    );
+    assert!(
+        repository
+            .get_kv(&owner, MINIAPP_ID, "surface", "state")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        repository
+            .get_kv(&owner, MINIAPP_ID, "preview", "state")
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
