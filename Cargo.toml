@@ -50,6 +50,7 @@ nomifun-agent-contracts = { path = "crates/backend/nomifun-agent-contracts" }
 nomifun-v4-root = { path = "crates/backend/nomifun-v4-root" }
 nomifun-agent-session = { path = "crates/backend/nomifun-agent-session" }
 nomifun-agent-kernel = { path = "crates/backend/nomifun-agent-kernel" }
+nomifun-js-authoring = { path = "crates/backend/nomifun-js-authoring" }
 nomifun-js-host = { path = "crates/backend/nomifun-js-host" }
 nomifun-js-kernel-adapter = { path = "crates/backend/nomifun-js-kernel-adapter" }
 nomifun-js-runtime = { path = "crates/backend/nomifun-js-runtime" }

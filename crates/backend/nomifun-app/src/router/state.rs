@@ -14,7 +14,7 @@ use nomifun_ai_agent::{
 };
 use nomifun_agent_contracts::{
     CapabilityConsumer, CanonicalErrorCode, CodingRuntimeFeatureInventoryPayload,
-    RuntimeProfileKind, RuntimeTarget, VersionString,
+    PluginSourceKind, RuntimeProfileKind, RuntimeTarget, VersionString,
     digest_payload,
     fresh_v4_schema_manifest_payload, official_preset_seed_manifest_payload,
 };
@@ -22,9 +22,11 @@ use nomifun_agent_control_plane::{
     AgentControlPlane, CompilerReleaseInputs, OfficialTemplateCatalog, PresetPreviewCompiler,
 };
 use nomifun_agent_kernel::{
-    CompilerEnvironment, InMemoryPluginStatePersistence, KernelRegistry, MaterializationPolicy,
+    CompilerEnvironment, KernelRegistry, MaterializationPolicy,
 };
-use nomifun_agent_platform::KernelCatalogProvider;
+use nomifun_agent_platform::{
+    KernelCatalogProvider, SqlitePluginStatePersistence,
+};
 use nomifun_api_types::{AgentResolvedSnapshot, TerminalExitEvent};
 use nomifun_auth::extract_token_from_ws_headers;
 use nomifun_channel::ChannelRouterState;
@@ -114,6 +116,9 @@ pub struct ModuleStates {
     pub workshop: WorkshopRouterState,
     /// 小程序 (mini-app) library: metadata CRUD + the document serve channel.
     pub miniapp: nomifun_miniapp::MiniAppRouterState,
+    /// Phase N1 Plugin Library and lifecycle product state. Capability
+    /// execution remains owned by the shared Kernel registry.
+    pub plugin: nomifun_plugin_service::PluginRouterState,
     /// 生成引擎 (creation) media task queue.
     pub creation: CreationRouterState,
     pub webhook: WebhookRouterState,
@@ -518,10 +523,15 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         conversation_service,
         services.agent_runtime_registry.clone(),
     ));
-    let nomi_core_agent_api = build_nomi_core_agent_api_state(
-        services,
-        conversation_owner.clone(),
-    );
+    let (nomi_core_agent_api, plugin_state) =
+        build_nomi_core_agent_api_state(
+            services,
+            conversation_owner.clone(),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("Nomi-core Agent/Plugin platform composition failed: {error:#}")
+        });
     let cron = build_cron_state(services, conversation_owner.clone());
     cron.cron_service.with_agent_preset_resolver(Arc::new(
         NomiCoreCronAgentPresetResolver {
@@ -623,6 +633,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         },
         workshop: build_workshop_state(services),
         miniapp: build_miniapp_state(services),
+        plugin: plugin_state,
         creation: build_creation_state(services),
         webhook: build_webhook_state(services),
         // REST routes, model tools and attempt conversations share this one engine
@@ -652,10 +663,13 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
 /// runtime.  It materializes the same declarative catalog for Preview/Save
 /// while Session execution remains owned by `NomiCoreSessionOwner` and the
 /// existing Conversation/Nomi engine.
-fn build_nomi_core_agent_api_state(
+async fn build_nomi_core_agent_api_state(
     services: &AppServices,
     conversation_owner: Arc<NomiCoreSessionOwner>,
-) -> NomiCoreAgentApiState {
+) -> anyhow::Result<(
+    NomiCoreAgentApiState,
+    nomifun_plugin_service::PluginRouterState,
+)> {
     const CONTRACT_VERSION: &str = "1.0.0";
     const RUNTIME_FEATURE_INVENTORY_JSON: &str = include_str!(
         "../../../nomifun-agent-contracts/contracts/runtime/coding-runtime-feature-inventory.payload.json"
@@ -663,36 +677,69 @@ fn build_nomi_core_agent_api_state(
 
     let registrations = nomifun_agent_domain_support::registrations(
         nomifun_agent_domain_support::c7_package_specs(),
-    )
-    .unwrap_or_else(|error| panic!("Nomi-core Agent catalog registration failed: {error}"));
+    )?;
 
     let mut policy = MaterializationPolicy::stable(CONTRACT_VERSION);
+    policy.allowed_sources.insert(PluginSourceKind::ManagedLocal);
     // Nomi-core is the current managed runtime.  It intentionally does not
     // advertise the future Codex-native feature inventory as executable
     // features; coding-native previews therefore remain explicitly blocked
     // until that runtime is separately commissioned.
     policy.available_runtime_features = Default::default();
-    let kernel = Arc::new(
-        KernelRegistry::new(
-            policy,
-            Arc::new(InMemoryPluginStatePersistence::new()),
+    let state_persistence = Arc::new(
+        SqlitePluginStatePersistence::from_pool(
+            services.database.pool().clone(),
         )
-        .unwrap_or_else(|error| panic!("Nomi-core Agent catalog kernel failed: {error}")),
+        .await?,
     );
+    let kernel = Arc::new(KernelRegistry::new(
+        policy,
+        state_persistence,
+    )?);
     let materialized = kernel
-        .replace_all(registrations)
-        .unwrap_or_else(|error| panic!("Nomi-core Agent catalog materialization failed: {error}"));
+        .replace_all(registrations.clone())?;
+    let unavailable_capabilities = materialized
+        .capabilities
+        .values()
+        .filter(|capability| {
+            capability
+                .manifest
+                .supports_consumer(CapabilityConsumer::Agent)
+        })
+        .filter_map(|capability| {
+            super::nomi_core_agent_projection::nomi_capability_projection(
+                capability.manifest.id.as_ref(),
+            )
+            .err()
+            .map(|_| {
+                (
+                    capability.manifest.id.clone(),
+                    CanonicalErrorCode::from("CAPABILITY_UNAVAILABLE"),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    let catalog = Arc::new(
+        KernelCatalogProvider::new(Arc::clone(&kernel))
+            .with_unavailable_capabilities(unavailable_capabilities),
+    );
+    let plugin_state = super::plugin_platform::build_nomi_core_plugin_state(
+        services.database.pool().clone(),
+        services.data_dir.clone(),
+        services.authoritative_user_id.as_ref(),
+        Arc::clone(&kernel),
+        Arc::clone(&catalog),
+        registrations,
+    )
+    .await?;
 
     let feature_inventory: CodingRuntimeFeatureInventoryPayload =
-        serde_json::from_str(RUNTIME_FEATURE_INVENTORY_JSON)
-            .unwrap_or_else(|error| panic!("runtime feature inventory is invalid: {error}"));
+        serde_json::from_str(RUNTIME_FEATURE_INVENTORY_JSON)?;
     feature_inventory
         .validate()
-        .unwrap_or_else(|error| panic!("runtime feature inventory contract failed: {}", error.message));
-    let feature_digest = digest_payload(&feature_inventory)
-        .unwrap_or_else(|error| panic!("runtime feature inventory digest failed: {error}"));
-    let schema_digest = digest_payload(&fresh_v4_schema_manifest_payload())
-        .unwrap_or_else(|error| panic!("schema manifest digest failed: {error}"));
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let feature_digest = digest_payload(&feature_inventory)?;
+    let schema_digest = digest_payload(&fresh_v4_schema_manifest_payload())?;
     let seed = official_preset_seed_manifest_payload();
     let environment = CompilerEnvironment {
         resolver_version: VersionString::from(CONTRACT_VERSION),
@@ -719,40 +766,12 @@ fn build_nomi_core_agent_api_state(
         target_contribution_manifest_digest: seed.target_first_party_contribution_digest,
         availability_evidence_revision: "nomi-core-local-2026-09-04".to_owned(),
     };
-    let templates = OfficialTemplateCatalog::load()
-        .unwrap_or_else(|error| panic!("official Agent template catalog failed: {error}"));
+    let templates = OfficialTemplateCatalog::load()?;
     let compiler = PresetPreviewCompiler::new(release, templates.clone())
-        .with_materialized_registry(materialized, environment);
+        .with_canonical_registry(Arc::clone(&kernel), environment);
     // The Nomi engine exposes its existing session-scoped ToolSearch activation
     // boundary. AgentPreset on-demand capabilities are projected onto that
     // deferred tool set instead of being rejected by the control plane.
-    let unavailable_capabilities = kernel
-        .snapshot()
-        .unwrap_or_else(|error| panic!("Nomi-core Agent catalog snapshot failed: {error}"))
-        .capabilities
-        .values()
-        .filter(|capability| {
-            capability
-                .manifest
-                .supports_consumer(CapabilityConsumer::Agent)
-        })
-        .filter_map(|capability| {
-            super::nomi_core_agent_projection::nomi_capability_projection(
-                capability.manifest.id.as_ref(),
-            )
-            .err()
-            .map(|_| {
-                (
-                    capability.manifest.id.clone(),
-                    CanonicalErrorCode::from("CAPABILITY_UNAVAILABLE"),
-                )
-            })
-        })
-        .collect::<BTreeMap<_, _>>();
-    let catalog = Arc::new(
-        KernelCatalogProvider::new(kernel)
-            .with_unavailable_capabilities(unavailable_capabilities),
-    );
     let store = Arc::new(NomiCoreControlPlaneStore::new(
         services.database.pool().clone(),
     ));
@@ -768,12 +787,15 @@ fn build_nomi_core_agent_api_state(
     let remote_repository: Arc<dyn IRemoteBindingRepository> = Arc::new(
         SqliteRemoteBindingRepository::new(services.database.pool().clone()),
     );
-    NomiCoreAgentApiState::new(
-        conversation_owner,
-        control_plane,
-        remote_repository,
-        services.nomi_core_remote_runtime.clone(),
-    )
+    Ok((
+        NomiCoreAgentApiState::new(
+            conversation_owner,
+            control_plane,
+            remote_repository,
+            services.nomi_core_remote_runtime.clone(),
+        ),
+        plugin_state,
+    ))
 }
 
 struct NomiCoreCronAgentPresetResolver {

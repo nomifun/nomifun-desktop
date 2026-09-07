@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::{
-    Arc, Mutex as StdMutex,
+    Arc, Mutex as StdMutex, RwLock as StdRwLock,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -2145,14 +2145,15 @@ pub fn materialize_capability_catalog_entries(
 
 pub struct KernelCatalogProvider {
     registry: Arc<KernelRegistry>,
-    unavailable_capabilities: BTreeMap<CapabilityId, nomifun_agent_contracts::CanonicalErrorCode>,
+    unavailable_capabilities:
+        StdRwLock<BTreeMap<CapabilityId, nomifun_agent_contracts::CanonicalErrorCode>>,
 }
 
 impl KernelCatalogProvider {
     pub fn new(registry: Arc<KernelRegistry>) -> Self {
         Self {
             registry,
-            unavailable_capabilities: BTreeMap::new(),
+            unavailable_capabilities: StdRwLock::new(BTreeMap::new()),
         }
     }
 
@@ -2164,8 +2165,28 @@ impl KernelCatalogProvider {
         mut self,
         unavailable: impl IntoIterator<Item = (CapabilityId, nomifun_agent_contracts::CanonicalErrorCode)>,
     ) -> Self {
-        self.unavailable_capabilities = unavailable.into_iter().collect();
+        self.unavailable_capabilities = StdRwLock::new(unavailable.into_iter().collect());
         self
+    }
+
+    pub fn replace_unavailable_capabilities(
+        &self,
+        unavailable: impl IntoIterator<
+            Item = (
+                CapabilityId,
+                nomifun_agent_contracts::CanonicalErrorCode,
+            ),
+        >,
+    ) -> Result<(), AgentPlatformError> {
+        *self
+            .unavailable_capabilities
+            .write()
+            .map_err(|_| {
+                AgentPlatformError::Contract(
+                    "Kernel Catalog availability registry is poisoned".to_owned(),
+                )
+            })? = unavailable.into_iter().collect();
+        Ok(())
     }
 }
 
@@ -2208,7 +2229,15 @@ impl CatalogProvider for KernelCatalogProvider {
             skills,
             mcp_tools,
             package_sources,
-            unavailable_capabilities: self.unavailable_capabilities.clone(),
+            unavailable_capabilities: self
+                .unavailable_capabilities
+                .read()
+                .map_err(|_| {
+                    ControlPlaneError::Wire(
+                        "Kernel Catalog availability registry is poisoned".to_owned(),
+                    )
+                })?
+                .clone(),
             service_key_diagnostics: Vec::new(),
         }))
     }
