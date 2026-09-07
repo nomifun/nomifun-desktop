@@ -41,10 +41,10 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 14 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-01`～`N1-1-03`、`N1-2-00`～`N1-2-02`、`N1-3-03`、`N1-X-01` |
-| 正在实施 | 4 | `N1-2-03`、`N1-3-01`、`N1-4-01`、`N1-U-01` |
+| 已关闭 | 15 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-01`～`N1-1-03`、`N1-2-00`～`N1-2-02`、`N1-3-01`、`N1-3-03`、`N1-X-01` |
+| 正在实施 | 4 | `N1-2-03`、`N1-3-02`、`N1-4-01`、`N1-U-01` |
 | 已解锁待领取 | 0 | 无 |
-| 依赖阻塞 | 14 | 其余 N1/M1 Windows 项与最终合流 |
+| 依赖阻塞 | 13 | 其余 N1/M1 Windows 项与最终合流 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
 | 明确延后 | 2 | Marketplace/远程分发、第二 Runtime |
 
@@ -204,6 +204,19 @@
       Plugin UI 定向 28 tests、i18n、icons 与 production build 通过；真实 Desktop
       accessibility/视觉走查和 Runtime Manager 尚未完成，因此 `N1-U-01` 保持
       `in-progress`。
+13. `N1-3-01` 已关闭：
+    - Kernel 的 Tool、Context、Resource、Skill 和 MCP 五类物化都保留正式 owner、
+      contribution、contract、Mount 与 Package Artifact facts；
+    - ManagedLocal MCP-backed Capability 同时保留 MCP binding identity 和真实 Mount，
+      不再用 mapping schema digest 冒充 Package Artifact，也不复制第二个 MCP
+      contribution；
+    - ManagedLocal Skill 使用 canonical `skill:<skill_id>` contribution identity，
+      exact lock 进入 AgentPreset Revision，Mount/contract 漂移 fail closed；
+    - Control Plane Catalog、Compiler 和 impact 直接消费 Kernel materialization，删除
+      package/source-kind 推测、合成 Mount 和 synthetic MCP impact；
+    - duplicate Skill/MCP、missing target、cross-package mapping 在 Registry swap 前失败，
+      旧 generation/digest 原样保留。Kernel 26、Control Plane 17、Agent Platform 23、
+      JS Kernel Adapter 4 项测试通过。
 
 ## W0：一期交接
 
@@ -242,8 +255,8 @@
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `N1-3-01` | in-progress | Catalog lane | ManagedLocal Package/Mount materialization、五类 Contribution、provenance/availability | `N1-0-03`,`N1-1-03`,`N1-2-03` | 正式 ManagedLocal entry 与 Tool/Context/Resource provenance 已接；仍需 Skill、MCP-backed 完整物化与 duplicate/fault closing |
-| `N1-3-02` | blocked | Nomi consumer lane | 用动态 action schema/Kernel invoke 替换 Nomi 硬编码 Capability→Tool 表 | `N1-3-01` | AgentPreset compile/invoke/impact |
+| `N1-3-01` | closed | Catalog lane | ManagedLocal Package/Mount materialization、五类 Contribution、provenance/availability | `N1-0-03`,`N1-1-03`,`N1-2-03` | 五类 exact materialization；ManagedLocal Skill/MCP binding+Mount+Artifact；duplicate/fault atomicity；Kernel 26、Control Plane 17、Platform 23、JS Adapter 4 |
+| `N1-3-02` | in-progress | Nomi consumer lane | 用动态 action schema/Kernel invoke 替换 Nomi 硬编码 Capability→Tool 表 | `N1-3-01` | AgentPreset compile/invoke/impact |
 | `N1-3-03` | closed | 非 Agent consumer lane | 一个共享 Capability 与一个 non-Agent-only reference contribution | `N1-3-01` | source-neutral operation handler；Agent+Gateway shared Tool、UI-only Tool、exact lock/Artifact drift 与 Agent filtering 均通过 |
 
 ## N1-4：Authoring 与 Self-Evolution

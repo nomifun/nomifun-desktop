@@ -2,15 +2,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use nomifun_agent_contracts::{
-    CapabilityCatalogEntry, CapabilityCatalogMaterialization,
-    CapabilityCatalogMaterializer, CapabilityConsumer, CapabilityId,
-    CapabilityManifest, CapabilityOwner, CapabilityProvenance, CapabilityRef,
-    CapabilityReleaseState, CanonicalErrorCode, CatalogAvailability,
-    ContributionSourceKind, McpBindingId,
-    McpToolCapabilityMapping, OfficialPresetKey,
-    OfficialPresetSeedManifestPayload, PackageRef, PluginSourceKind,
-    SkillDefinition, SkillRef, StableSourceIdentity,
+    CanonicalErrorCode, CapabilityCatalogEntry, CapabilityConsumer,
+    CapabilityId, CapabilityOwner, CapabilityRef, CatalogAvailability,
+    ContributionSourceKind, McpBindingId, McpServerId, McpToolKey,
+    OfficialPresetKey, OfficialPresetSeedManifestPayload, PluginSourceKind,
+    SkillRef, digest_payload,
     official_preset_seed_manifest_payload,
+};
+use nomifun_agent_kernel::{
+    MaterializedCapability, MaterializedMcpTool, MaterializedSkill,
 };
 use nomifun_api_types::{
     AgentCatalogResponse, CapabilityCatalogItemDto, CatalogMaterializationStateDto,
@@ -23,71 +23,257 @@ use crate::wire::{wire_cast, wire_name};
 
 #[derive(Clone, Debug, Default)]
 pub struct CatalogSnapshot {
-    pub capabilities: Vec<CapabilityManifest>,
+    pub capabilities: Vec<MaterializedCapability>,
     pub formal_capability_entries: BTreeMap<CapabilityRef, CapabilityCatalogEntry>,
-    pub skills: Vec<SkillDefinition>,
-    pub mcp_tools: Vec<McpToolCapabilityMapping>,
-    pub package_sources: BTreeMap<PackageRef, PluginSourceKind>,
+    pub skills: Vec<MaterializedSkill>,
+    pub mcp_tools: Vec<MaterializedMcpTool>,
     pub unavailable_capabilities: BTreeMap<CapabilityId, CanonicalErrorCode>,
     pub service_key_diagnostics: Vec<String>,
 }
 
 impl CatalogSnapshot {
-    pub fn find_capability(&self, reference: &CapabilityRef) -> Option<&CapabilityManifest> {
+    pub fn validate(&self) -> Result<(), ControlPlaneError> {
+        let mut capabilities = BTreeSet::new();
+        let mut contribution_ids = BTreeSet::new();
+        for capability in &self.capabilities {
+            let reference = capability_reference(capability);
+            if !capabilities.insert(reference.clone()) {
+                return Err(catalog_invalid(format!(
+                    "duplicate materialized capability {}@{}",
+                    reference.id.as_ref(),
+                    reference.version.as_ref()
+                )));
+            }
+            match capability.source.source_kind {
+                PluginSourceKind::TestFixture => {
+                    if self.formal_capability_entries.contains_key(&reference) {
+                        return Err(catalog_invalid(format!(
+                            "test-host capability {}@{} entered the formal Catalog",
+                            reference.id.as_ref(),
+                            reference.version.as_ref()
+                        )));
+                    }
+                }
+                PluginSourceKind::Bundled | PluginSourceKind::ManagedLocal => {
+                    let entry = self
+                        .formal_capability_entries
+                        .get(&reference)
+                        .ok_or_else(|| {
+                            catalog_invalid(format!(
+                                "materialized capability {}@{} has no formal Catalog entry",
+                                reference.id.as_ref(),
+                                reference.version.as_ref()
+                            ))
+                        })?;
+                    validate_capability_entry(capability, entry)?;
+                }
+            }
+            if !contribution_ids
+                .insert(capability.contribution_id.clone())
+            {
+                return Err(catalog_invalid(format!(
+                    "duplicate contribution identity {}",
+                    capability.contribution_id.as_ref()
+                )));
+            }
+        }
+        if let Some(reference) = self
+            .formal_capability_entries
+            .keys()
+            .find(|reference| !capabilities.contains(*reference))
+        {
+            return Err(catalog_invalid(format!(
+                "formal Catalog entry {}@{} has no materialized capability",
+                reference.id.as_ref(),
+                reference.version.as_ref()
+            )));
+        }
+        let derived_unavailable = self
+            .formal_capability_entries
+            .values()
+            .filter_map(|entry| {
+                entry
+                    .availability_for(CapabilityConsumer::Agent)
+                    .and_then(availability_code)
+                    .map(|code| (entry.capability.id.clone(), code))
+            })
+            .collect::<BTreeMap<_, _>>();
+        if self.unavailable_capabilities != derived_unavailable {
+            return Err(catalog_invalid(
+                "unavailable capability index differs from formal Catalog availability",
+            ));
+        }
+
+        let mut skills = BTreeSet::new();
+        for skill in &self.skills {
+            let reference = SkillRef {
+                id: skill.definition.id.clone(),
+                version: skill.definition.version.clone(),
+            };
+            if !skills.insert(reference.clone()) {
+                return Err(catalog_invalid(format!(
+                    "duplicate materialized Skill {}@{}",
+                    reference.id.as_ref(),
+                    reference.version.as_ref()
+                )));
+            }
+            validate_skill(skill)?;
+            if !contribution_ids.insert(skill.contribution_id.clone()) {
+                return Err(catalog_invalid(format!(
+                    "duplicate contribution identity {}",
+                    skill.contribution_id.as_ref()
+                )));
+            }
+        }
+
+        let mut mcp_tools = BTreeSet::new();
+        let mut mcp_capabilities = BTreeSet::new();
+        for mcp in &self.mcp_tools {
+            let key = (
+                mcp.mapping.server_id.clone(),
+                mcp.mapping.canonical_tool_key.clone(),
+            );
+            if !mcp_tools.insert(key.clone()) {
+                return Err(catalog_invalid(format!(
+                    "duplicate materialized MCP binding {}/{}",
+                    key.0.as_ref(),
+                    key.1.as_ref()
+                )));
+            }
+            if !mcp_capabilities.insert(mcp.mapping.capability.clone()) {
+                return Err(catalog_invalid(format!(
+                    "capability {}@{} has more than one MCP binding",
+                    mcp.mapping.capability.id.as_ref(),
+                    mcp.mapping.capability.version.as_ref()
+                )));
+            }
+            let capability = self
+                .materialized_capability(&mcp.mapping.capability)
+                .ok_or_else(|| {
+                    catalog_invalid(format!(
+                        "MCP binding {}/{} targets a missing capability {}@{}",
+                        key.0.as_ref(),
+                        key.1.as_ref(),
+                        mcp.mapping.capability.id.as_ref(),
+                        mcp.mapping.capability.version.as_ref()
+                    ))
+                })?;
+            validate_mcp_tool(mcp, capability)?;
+        }
+        if let Some(capability) = self.capabilities.iter().find(|capability| {
+            capability.contribution_lock.source_kind
+                == ContributionSourceKind::McpBinding
+                && !mcp_capabilities.contains(&capability_reference(capability))
+        }) {
+            return Err(catalog_invalid(format!(
+                "MCP-backed capability {}@{} has no materialized binding",
+                capability.manifest.id.as_ref(),
+                capability.manifest.version.as_ref()
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn materialized_capability(
+        &self,
+        reference: &CapabilityRef,
+    ) -> Option<&MaterializedCapability> {
         self.capabilities.iter().find(|capability| {
-            capability.id == reference.id && capability.version == reference.version
-                && capability.supports_consumer(CapabilityConsumer::Agent)
+            capability.manifest.id == reference.id
+                && capability.manifest.version == reference.version
         })
+    }
+
+    pub fn find_capability(
+        &self,
+        reference: &CapabilityRef,
+    ) -> Option<&nomifun_agent_contracts::CapabilityManifest> {
+        let capability = self.materialized_capability(reference)?;
+        if !capability
+            .manifest
+            .supports_consumer(CapabilityConsumer::Agent)
+        {
+            return None;
+        }
+        if capability.source.source_kind != PluginSourceKind::TestFixture
+            && !self.formal_capability_entries.contains_key(reference)
+        {
+            return None;
+        }
+        Some(&capability.manifest)
     }
 
     pub fn capability_catalog_entry(
         &self,
         reference: &CapabilityRef,
     ) -> Result<Option<CapabilityCatalogEntry>, ControlPlaneError> {
-        if let Some(entry) = self.formal_capability_entries.get(reference) {
-            entry.validate().map_err(|error| {
-                ControlPlaneError::canonical(
-                    "CAPABILITY_CATALOG_INVALID",
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    error.to_string(),
-                )
-            })?;
-            return Ok(Some(entry.clone()));
-        }
-        let Some(manifest) = self.capabilities.iter().find(|capability| {
-            capability.id == reference.id && capability.version == reference.version
-        }) else {
+        let Some(capability) = self.materialized_capability(reference) else {
             return Ok(None);
         };
-        self.materialize_capability_entry(manifest).map(Some)
+        if capability.source.source_kind == PluginSourceKind::TestFixture {
+            return Ok(None);
+        }
+        let entry = self
+            .formal_capability_entries
+            .get(reference)
+            .ok_or_else(|| {
+                catalog_invalid(format!(
+                    "materialized capability {}@{} has no formal Catalog entry",
+                    reference.id.as_ref(),
+                    reference.version.as_ref()
+                ))
+            })?;
+        validate_capability_entry(capability, entry)?;
+        Ok(Some(entry.clone()))
     }
 
-    pub fn find_skill(&self, reference: &SkillRef) -> Option<&SkillDefinition> {
+    pub fn materialized_skill(
+        &self,
+        reference: &SkillRef,
+    ) -> Option<&MaterializedSkill> {
         self.skills
             .iter()
-            .find(|skill| skill.id == reference.id && skill.version == reference.version)
+            .find(|skill| {
+                skill.definition.id == reference.id
+                    && skill.definition.version == reference.version
+            })
     }
 
-    pub fn source_kind(&self, package: &PackageRef) -> PluginSourceKind {
-        self.package_sources
-            .get(package)
-            .copied()
-            .unwrap_or(PluginSourceKind::Bundled)
+    pub fn find_skill(
+        &self,
+        reference: &SkillRef,
+    ) -> Option<&nomifun_agent_contracts::SkillDefinition> {
+        self.materialized_skill(reference)
+            .map(|skill| &skill.definition)
+    }
+
+    pub fn materialized_mcp_tool(
+        &self,
+        server_id: &McpServerId,
+        tool_key: &McpToolKey,
+    ) -> Option<&MaterializedMcpTool> {
+        self.mcp_tools.iter().find(|mcp| {
+            &mcp.mapping.server_id == server_id
+                && &mcp.mapping.canonical_tool_key == tool_key
+        })
     }
 
     pub fn as_api(&self) -> Result<AgentCatalogResponse, ControlPlaneError> {
+        self.validate()?;
         let capabilities = self
             .capabilities
             .iter()
             .filter(|capability| {
-                capability.supports_consumer(CapabilityConsumer::Agent)
-                    && self.source_kind(&capability.package)
-                        != PluginSourceKind::TestFixture
+                capability
+                    .manifest
+                    .supports_consumer(CapabilityConsumer::Agent)
+                    && capability.source.source_kind != PluginSourceKind::TestFixture
             })
             .map(|capability| {
+                let manifest = &capability.manifest;
                 let reference = CapabilityRef {
-                    id: capability.id.clone(),
-                    version: capability.version.clone(),
+                    id: manifest.id.clone(),
+                    version: manifest.version.clone(),
                 };
                 let entry = self
                     .capability_catalog_entry(&reference)?
@@ -97,8 +283,8 @@ impl CatalogSnapshot {
                             axum::http::StatusCode::NOT_FOUND,
                             format!(
                                 "capability {}@{} is not materialized",
-                                capability.id.as_ref(),
-                                capability.version.as_ref()
+                                manifest.id.as_ref(),
+                                manifest.version.as_ref()
                             ),
                         )
                     })?;
@@ -120,17 +306,17 @@ impl CatalogSnapshot {
                 };
                 Ok(CapabilityCatalogItemDto {
                     capability: ExactCatalogRefDto {
-                        id: capability.id.as_ref().to_owned(),
-                        version: capability.version.as_ref().to_owned(),
+                        id: manifest.id.as_ref().to_owned(),
+                        version: manifest.version.as_ref().to_owned(),
                     },
-                    kind: wire_name(&capability.kind)?,
-                    display_name: capability.display.name.clone(),
-                    description: capability.display.description.clone(),
+                    kind: wire_name(&manifest.kind)?,
+                    display_name: manifest.display.name.clone(),
+                    description: manifest.display.description.clone(),
                     source_package: ExactCatalogRefDto {
-                        id: capability.package.id.as_ref().to_owned(),
-                        version: capability.package.version.as_ref().to_owned(),
+                        id: manifest.package.id.as_ref().to_owned(),
+                        version: manifest.package.version.as_ref().to_owned(),
                     },
-                    source_kind: wire_name(&self.source_kind(&capability.package))?,
+                    source_kind: wire_name(&capability.source.source_kind)?,
                     materialization_state: if unavailable_code.is_some() {
                         CatalogMaterializationStateDto::Unavailable
                     } else {
@@ -138,18 +324,18 @@ impl CatalogSnapshot {
                     },
                     unavailable_code,
                     supported_surfaces: entry.host_surfaces.clone(),
-                    required_runtime_features: capability
+                    required_runtime_features: manifest
                         .requires_runtime_features
                         .iter()
                         .map(|feature| feature.id.as_ref().to_owned())
                         .collect(),
-                    required_resource_kinds: capability
+                    required_resource_kinds: manifest
                         .contributions
                         .resource_kinds
                         .iter()
                         .map(|kind| kind.as_ref().to_owned())
                         .collect(),
-                    required_capabilities: capability
+                    required_capabilities: manifest
                         .requires
                         .iter()
                         .map(|reference| ExactCatalogRefDto {
@@ -157,7 +343,7 @@ impl CatalogSnapshot {
                             version: reference.version.as_ref().to_owned(),
                         })
                         .collect(),
-                    conflicting_capabilities: capability
+                    conflicting_capabilities: manifest
                         .conflicts
                         .iter()
                         .map(|conflict| ExactCatalogRefDto {
@@ -165,8 +351,8 @@ impl CatalogSnapshot {
                             version: conflict.capability.version.as_ref().to_owned(),
                         })
                         .collect(),
-                    action_count: capability.contributions.actions.len() as u32,
-                    context_contributor_count: capability
+                    action_count: manifest.contributions.actions.len() as u32,
+                    context_contributor_count: manifest
                         .contributions
                         .context_schema_refs
                         .len() as u32,
@@ -177,20 +363,24 @@ impl CatalogSnapshot {
         let skills = self
             .skills
             .iter()
+            .filter(|skill| {
+                skill.source.source_kind != PluginSourceKind::TestFixture
+            })
             .map(|skill| {
+                let definition = &skill.definition;
                 Ok(SkillCatalogItemDto {
                     skill: ExactCatalogRefDto {
-                        id: skill.id.as_ref().to_owned(),
-                        version: skill.version.as_ref().to_owned(),
+                        id: definition.id.as_ref().to_owned(),
+                        version: definition.version.as_ref().to_owned(),
                     },
-                    display_name: skill.display.name.clone(),
-                    description: skill.display.description.clone(),
+                    display_name: definition.display.name.clone(),
+                    description: definition.display.description.clone(),
                     source_package: ExactCatalogRefDto {
-                        id: skill.package.id.as_ref().to_owned(),
-                        version: skill.package.version.as_ref().to_owned(),
+                        id: definition.package.id.as_ref().to_owned(),
+                        version: definition.package.version.as_ref().to_owned(),
                     },
-                    source_kind: wire_name(&self.source_kind(&skill.package))?,
-                    required_capabilities: skill
+                    source_kind: wire_name(&skill.source.source_kind)?,
+                    required_capabilities: definition
                         .requires_capabilities
                         .iter()
                         .map(|reference| ExactCatalogRefDto {
@@ -198,7 +388,7 @@ impl CatalogSnapshot {
                             version: reference.version.as_ref().to_owned(),
                         })
                         .collect(),
-                    supported_surfaces: skill.supported_surfaces.clone(),
+                    supported_surfaces: definition.supported_surfaces.clone(),
                 })
             })
             .collect::<Result<Vec<_>, ControlPlaneError>>()?;
@@ -206,7 +396,12 @@ impl CatalogSnapshot {
         let mcp_tools = self
             .mcp_tools
             .iter()
-            .map(|mapping| McpToolCatalogItemDto {
+            .filter(|mcp| {
+                mcp.source.source_kind != PluginSourceKind::TestFixture
+            })
+            .map(|mcp| {
+                let mapping = &mcp.mapping;
+                McpToolCatalogItemDto {
                 server_id: mapping.server_id.as_ref().to_owned(),
                 canonical_tool_key: mapping.canonical_tool_key.as_ref().to_owned(),
                 capability: ExactCatalogRefDto {
@@ -219,7 +414,7 @@ impl CatalogSnapshot {
                 },
                 schema_digest: mapping.schema_digest.as_ref().to_owned(),
                 materialization_version: mapping.materialization_version.as_ref().to_owned(),
-            })
+            }})
             .collect();
 
         Ok(AgentCatalogResponse {
@@ -228,108 +423,179 @@ impl CatalogSnapshot {
             mcp_tools,
         })
     }
+}
 
-    fn materialize_capability_entry(
-        &self,
-        manifest: &CapabilityManifest,
-    ) -> Result<CapabilityCatalogEntry, ControlPlaneError> {
-        let source_kind = self.source_kind(&manifest.package);
-        let release_state = match source_kind {
-            PluginSourceKind::TestFixture => CapabilityReleaseState::TestHost,
-            PluginSourceKind::Bundled | PluginSourceKind::ManagedLocal => {
-                CapabilityReleaseState::PublishedActive
-            }
-        };
-        let mcp_mapping = self.mcp_tools.iter().find(|mapping| {
-            mapping.capability.id == manifest.id
-                && mapping.capability.version == manifest.version
-        });
-        let provenance = if let Some(mapping) = mcp_mapping {
-            CapabilityProvenance {
-                owner: CapabilityOwner::Package {
-                    package: manifest.package.clone(),
-                },
-                source_kind: ContributionSourceKind::McpBinding,
-                source_identity: StableSourceIdentity::from(format!(
-                    "mcp:{}",
-                    mapping.server_id.as_ref()
-                )),
-                mount_id: None,
-                miniapp_id: None,
-                mcp_binding_id: Some(McpBindingId::from(format!(
-                    "{}:{}",
-                    mapping.server_id.as_ref(),
-                    mapping.canonical_tool_key.as_ref()
-                ))),
-                artifact_digest: Some(mapping.schema_digest.clone()),
-            }
-        } else {
-            match source_kind {
-                PluginSourceKind::Bundled | PluginSourceKind::TestFixture => {
-                    CapabilityProvenance {
-                        owner: CapabilityOwner::Package {
-                            package: manifest.package.clone(),
-                        },
-                        source_kind: ContributionSourceKind::PlatformBuiltin,
-                        source_identity: StableSourceIdentity::from(
-                            manifest.package.id.as_ref().to_owned(),
-                        ),
-                        mount_id: None,
-                        miniapp_id: None,
-                        mcp_binding_id: None,
-                        artifact_digest: None,
-                    }
-                }
-                PluginSourceKind::ManagedLocal => {
-                    return Err(ControlPlaneError::canonical(
-                        "CAPABILITY_PROVENANCE_UNAVAILABLE",
-                        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                        format!(
-                            "managed capability {}@{} is missing its formal mount provenance",
-                            manifest.id.as_ref(),
-                            manifest.version.as_ref()
-                        ),
-                    ));
-                }
-            }
-        };
-        let consumers = manifest.supported_consumers().map_err(|reason| {
-            ControlPlaneError::canonical(
-                "CAPABILITY_CATALOG_INVALID",
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                reason,
-            )
-        })?;
-        let mut availability = consumers
-            .iter()
-            .copied()
-            .map(|consumer| (consumer, CatalogAvailability::Active))
-            .collect::<BTreeMap<_, _>>();
-        if let Some(code) = self.unavailable_capabilities.get(&manifest.id) {
-            if consumers.contains(&CapabilityConsumer::Agent) {
-                availability.insert(
-                    CapabilityConsumer::Agent,
-                    CatalogAvailability::Unavailable {
-                        reason: code.as_ref().to_owned(),
-                    },
-                );
-            }
+fn capability_reference(capability: &MaterializedCapability) -> CapabilityRef {
+    CapabilityRef {
+        id: capability.manifest.id.clone(),
+        version: capability.manifest.version.clone(),
+    }
+}
+
+fn validate_capability_entry(
+    capability: &MaterializedCapability,
+    entry: &CapabilityCatalogEntry,
+) -> Result<(), ControlPlaneError> {
+    entry
+        .validate()
+        .map_err(|error| catalog_invalid(error.to_string()))?;
+    capability
+        .contribution_lock
+        .validate()
+        .map_err(|error| catalog_invalid(error.message))?;
+    let owner_matches = matches!(
+        &entry.provenance.owner,
+        CapabilityOwner::Package { package }
+            if package == &capability.manifest.package
+    );
+    if entry.capability != capability_reference(capability)
+        || entry.contract_digest != capability.schema_digest
+        || entry.contribution_id != capability.contribution_id
+        || entry.provenance.source_kind
+            != capability.contribution_lock.source_kind
+        || entry.provenance.source_identity
+            != capability.contribution_lock.source_identity
+        || entry.provenance.mount_id
+            != capability.contribution_lock.mount_id
+        || entry.provenance.miniapp_id
+            != capability.contribution_lock.miniapp_id
+        || entry.provenance.mcp_binding_id
+            != capability.contribution_lock.mcp_binding_id
+        || entry.provenance.artifact_digest.as_ref()
+            != Some(&capability.target_artifact_digest)
+        || capability.contribution_lock.contract_digest
+            != capability.schema_digest
+        || !owner_matches
+    {
+        return Err(catalog_invalid(format!(
+            "formal Catalog entry {}@{} differs from the exact Kernel materialization",
+            capability.manifest.id.as_ref(),
+            capability.manifest.version.as_ref()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_skill(skill: &MaterializedSkill) -> Result<(), ControlPlaneError> {
+    skill
+        .contribution_lock
+        .validate()
+        .map_err(|error| catalog_invalid(error.message))?;
+    let contract_digest = digest_payload(&skill.definition)
+        .map_err(|error| catalog_invalid(error.to_string()))?;
+    let expected_contribution_id = format!("skill:{}", skill.definition.id.as_ref());
+    let exact_source = match skill.source.source_kind {
+        PluginSourceKind::ManagedLocal => {
+            skill.contribution_lock.source_kind
+                == ContributionSourceKind::PluginMount
+                && skill.contribution_lock.mount_id.as_ref()
+                    == Some(&skill.mount_id)
         }
-        CapabilityCatalogMaterializer::materialize(
-            CapabilityCatalogMaterialization {
-                manifest: manifest.clone(),
-                provenance,
-                release_state,
-                availability,
-            },
-        )
-        .map_err(|error| {
-            ControlPlaneError::canonical(
-                "CAPABILITY_CATALOG_INVALID",
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                error.to_string(),
-            )
-        })
+        PluginSourceKind::Bundled | PluginSourceKind::TestFixture => {
+            skill.contribution_lock.source_kind
+                == ContributionSourceKind::PlatformBuiltin
+                && skill.contribution_lock.mount_id.is_none()
+        }
+    };
+    if skill.contribution_id.as_ref() != expected_contribution_id
+        || skill.contribution_lock.contribution_id != skill.contribution_id
+        || skill.contract_digest != contract_digest
+        || skill.contribution_lock.contract_digest != contract_digest
+        || skill.contribution_lock.source_identity.as_ref()
+            != skill.source.source_identity
+        || skill.contribution_lock.mcp_binding_id.is_some()
+        || skill.contribution_lock.miniapp_id.is_some()
+        || skill
+            .source
+            .source_digest
+            .as_ref()
+            .is_some_and(|digest| digest != &skill.target_artifact_digest)
+        || !is_digest(&skill.target_artifact_digest)
+        || !exact_source
+    {
+        return Err(catalog_invalid(format!(
+            "materialized Skill {}@{} has inconsistent owner/provenance/contract/Artifact facts",
+            skill.definition.id.as_ref(),
+            skill.definition.version.as_ref()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_mcp_tool(
+    mcp: &MaterializedMcpTool,
+    capability: &MaterializedCapability,
+) -> Result<(), ControlPlaneError> {
+    mcp.contribution_lock
+        .validate()
+        .map_err(|error| catalog_invalid(error.message))?;
+    let expected_binding = McpBindingId::from(format!(
+        "{}:{}",
+        mcp.mapping.server_id.as_ref(),
+        mcp.mapping.canonical_tool_key.as_ref()
+    ));
+    let expected_mount = match mcp.source.source_kind {
+        PluginSourceKind::ManagedLocal => Some(&mcp.mount_id),
+        PluginSourceKind::Bundled | PluginSourceKind::TestFixture => None,
+    };
+    if mcp.mapping.package != capability.manifest.package
+        || mcp.mapping.capability != capability_reference(capability)
+        || mcp.binding_id != expected_binding
+        || mcp.contribution_lock != capability.contribution_lock
+        || mcp.target_artifact_digest
+            != capability.target_artifact_digest
+        || mcp.mount_id != capability.mount_id
+        || mcp.source.source_kind != capability.source.source_kind
+        || mcp.source.source_identity != capability.source.source_identity
+        || mcp.source.source_digest != capability.source.source_digest
+        || mcp.contribution_lock.source_kind
+            != ContributionSourceKind::McpBinding
+        || mcp.contribution_lock.mcp_binding_id.as_ref()
+            != Some(&expected_binding)
+        || mcp.contribution_lock.mount_id.as_ref() != expected_mount
+        || !is_digest(&mcp.mapping.schema_digest)
+        || !is_digest(&mcp.target_artifact_digest)
+    {
+        return Err(catalog_invalid(format!(
+            "materialized MCP binding {}/{} differs from its exact Capability/Mount/Artifact facts",
+            mcp.mapping.server_id.as_ref(),
+            mcp.mapping.canonical_tool_key.as_ref()
+        )));
+    }
+    Ok(())
+}
+
+fn is_digest(value: &nomifun_agent_contracts::DigestHex) -> bool {
+    value.as_ref().len() == 64
+        && value
+            .as_ref()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn catalog_invalid(message: impl Into<String>) -> ControlPlaneError {
+    ControlPlaneError::canonical(
+        "CAPABILITY_CATALOG_INVALID",
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        message,
+    )
+}
+
+fn availability_code(
+    availability: &CatalogAvailability,
+) -> Option<CanonicalErrorCode> {
+    match availability {
+        CatalogAvailability::Active => None,
+        CatalogAvailability::Unavailable { reason }
+        | CatalogAvailability::Disabled { reason } => {
+            Some(CanonicalErrorCode::from(reason.clone()))
+        }
+        CatalogAvailability::NeedsRuntime { .. } => {
+            Some(CanonicalErrorCode::from("CAPABILITY_NEEDS_RUNTIME"))
+        }
+        CatalogAvailability::ContractMismatch { .. } => Some(
+            CanonicalErrorCode::from("CAPABILITY_CONTRACT_MISMATCH"),
+        ),
     }
 }
 
@@ -352,6 +618,7 @@ impl StaticCatalogProvider {
 
 impl CatalogProvider for StaticCatalogProvider {
     fn snapshot(&self) -> Result<Arc<CatalogSnapshot>, ControlPlaneError> {
+        self.snapshot.validate()?;
         Ok(Arc::clone(&self.snapshot))
     }
 }

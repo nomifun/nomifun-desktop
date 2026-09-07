@@ -20,7 +20,7 @@ use nomifun_agent_contracts::{
     CapabilityProvenance, CapabilityReleaseState, CatalogAvailability,
     ChatRouteIdentity, ChatRouteLookupError, ChatRouteLookupKey, ChatRouteRecord,
     ChatRouteRecordRow, CompactOnDemandCapabilityEntry, ContributionLock,
-    ContributionSourceKind, CorrelationId, DeleteAgentSessionCommand, DigestHex,
+    CorrelationId, DeleteAgentSessionCommand, DigestHex,
     EventId, EventProducerId,
     ExactRoleContractRef, ExecutionRoleId, FullAutoExecutionWire, IdempotencyKey,
     InstallationRoleBinding, ModelRouteId, NativeActionStart, NativeActionStartAck, OperationId,
@@ -32,7 +32,7 @@ use nomifun_agent_contracts::{
     RuntimeStartTurnParams, ScopeKey, SemanticSessionEventDraft, SessionEventAppend,
     SessionEventCursor, SessionEventKind,
     SessionEventPayloadRef, StrictJsonValue, TypedResourceBindings, UserId, VersionString,
-    StableSourceIdentity, canonical_json_bytes, digest_payload,
+    canonical_json_bytes, digest_payload,
     resolve_exact_chat_route_record,
 };
 use nomifun_agent_control_plane::{
@@ -2026,12 +2026,6 @@ pub fn materialize_capability_catalog_entries(
     let mut entries = Vec::new();
     for capability in registry.capabilities.values() {
         let manifest = &capability.manifest;
-        let package = registry.packages.get(&manifest.package.id).ok_or_else(|| {
-            AgentPlatformError::Contract(format!(
-                "materialized capability {} has no owning package",
-                manifest.id.as_ref()
-            ))
-        })?;
         let release_state = match capability.source.source_kind {
             nomifun_agent_contracts::PluginSourceKind::TestFixture => {
                 CapabilityReleaseState::TestHost
@@ -2041,70 +2035,17 @@ pub fn materialize_capability_catalog_entries(
                 CapabilityReleaseState::PublishedActive
             }
         };
-        let mcp = registry
-            .mcp_for_capability(&manifest.id)
-            .and_then(|mapping| {
-                (mapping.mapping.capability.version == manifest.version)
-                    .then_some(mapping)
-            });
-        let provenance = if let Some(mapping) = mcp {
-            CapabilityProvenance {
-                owner: CapabilityOwner::Package {
-                    package: manifest.package.clone(),
-                },
-                source_kind: ContributionSourceKind::McpBinding,
-                source_identity: StableSourceIdentity::from(format!(
-                    "mcp:{}",
-                    mapping.mapping.server_id.as_ref()
-                )),
-                mount_id: Some(mapping.mount_id.clone()),
-                miniapp_id: None,
-                mcp_binding_id: Some(format!(
-                    "{}:{}",
-                    mapping.mapping.server_id.as_ref(),
-                    mapping.mapping.canonical_tool_key.as_ref()
-                ).into()),
-                artifact_digest: Some(mapping.mapping.schema_digest.clone()),
-            }
-        } else {
-            let artifact_digest = capability
-                .source
-                .source_digest
-                .clone()
-                .or_else(|| Some(package.manifest_digest.clone()));
-            match capability.source.source_kind {
-                nomifun_agent_contracts::PluginSourceKind::Bundled
-                | nomifun_agent_contracts::PluginSourceKind::TestFixture => {
-                    CapabilityProvenance {
-                        owner: CapabilityOwner::Package {
-                            package: manifest.package.clone(),
-                        },
-                        source_kind: ContributionSourceKind::PlatformBuiltin,
-                        source_identity: StableSourceIdentity::from(
-                            capability.source.source_identity.clone(),
-                        ),
-                        mount_id: None,
-                        miniapp_id: None,
-                        mcp_binding_id: None,
-                        artifact_digest,
-                    }
-                }
-                nomifun_agent_contracts::PluginSourceKind::ManagedLocal => {
-                    CapabilityProvenance {
-                        owner: CapabilityOwner::Package {
-                            package: manifest.package.clone(),
-                        },
-                        source_kind: ContributionSourceKind::PluginMount,
-                        source_identity: StableSourceIdentity::from(
-                            capability.source.source_identity.clone(),
-                        ),
-                        mount_id: Some(capability.mount_id.clone()),
-                        miniapp_id: None,
-                        mcp_binding_id: None,
-                        artifact_digest,
-                    }
-                }
-            }
+        let lock = &capability.contribution_lock;
+        let provenance = CapabilityProvenance {
+            owner: CapabilityOwner::Package {
+                package: manifest.package.clone(),
+            },
+            source_kind: lock.source_kind,
+            source_identity: lock.source_identity.clone(),
+            mount_id: lock.mount_id.clone(),
+            miniapp_id: lock.miniapp_id.clone(),
+            mcp_binding_id: lock.mcp_binding_id.clone(),
+            artifact_digest: Some(capability.target_artifact_digest.clone()),
         };
         let consumers = manifest.supported_consumers().map_err(|reason| {
             AgentPlatformError::Contract(reason)
@@ -2114,15 +2055,15 @@ pub fn materialize_capability_catalog_entries(
             .copied()
             .map(|consumer| (consumer, CatalogAvailability::Active))
             .collect::<BTreeMap<_, _>>();
-        if let Some(code) = unavailable_capabilities.get(&manifest.id) {
-            if consumers.contains(&CapabilityConsumer::Agent) {
-                availability.insert(
-                    CapabilityConsumer::Agent,
-                    CatalogAvailability::Unavailable {
-                        reason: code.as_ref().to_owned(),
-                    },
-                );
-            }
+        if let Some(code) = unavailable_capabilities.get(&manifest.id)
+            && consumers.contains(&CapabilityConsumer::Agent)
+        {
+            availability.insert(
+                CapabilityConsumer::Agent,
+                CatalogAvailability::Unavailable {
+                    reason: code.as_ref().to_owned(),
+                },
+            );
         }
         match CapabilityCatalogMaterializer::materialize(
             CapabilityCatalogMaterialization {
@@ -2141,6 +2082,33 @@ pub fn materialize_capability_catalog_entries(
     }
     entries.sort_by(|left, right| left.capability.cmp(&right.capability));
     Ok(entries)
+}
+
+pub fn materialize_catalog_snapshot(
+    registry: &nomifun_agent_kernel::MaterializedRegistry,
+    unavailable_capabilities: &BTreeMap<
+        CapabilityId,
+        nomifun_agent_contracts::CanonicalErrorCode,
+    >,
+) -> Result<CatalogSnapshot, AgentPlatformError> {
+    let formal_capability_entries =
+        materialize_capability_catalog_entries(
+            registry,
+            unavailable_capabilities,
+        )?
+        .into_iter()
+        .map(|entry| (entry.capability.clone(), entry))
+        .collect();
+    let snapshot = CatalogSnapshot {
+        capabilities: registry.capabilities.values().cloned().collect(),
+        formal_capability_entries,
+        skills: registry.skills.values().cloned().collect(),
+        mcp_tools: registry.mcp_tools.values().cloned().collect(),
+        unavailable_capabilities: unavailable_capabilities.clone(),
+        service_key_diagnostics: Vec::new(),
+    };
+    snapshot.validate()?;
+    Ok(snapshot)
 }
 
 pub struct KernelCatalogProvider {
@@ -2205,52 +2173,161 @@ impl CatalogProvider for KernelCatalogProvider {
                 )
             })?
             .clone();
-        let formal_capability_entries =
-            materialize_capability_catalog_entries(
-                &registry,
-                &unavailable_capabilities,
-            )
-            .map_err(|error| ControlPlaneError::Wire(error.to_string()))?
-            .into_iter()
-            .map(|entry| (entry.capability.clone(), entry))
-            .collect();
-        let capabilities = registry
-            .capabilities
-            .values()
-            .map(|capability| capability.manifest.clone())
-            .collect();
-        let skills = registry
-            .skills
-            .values()
-            .map(|skill| skill.definition.clone())
-            .collect();
-        let mcp_tools = registry
-            .mcp_tools
-            .values()
-            .map(|mapping| mapping.mapping.clone())
-            .collect();
-        let package_sources = registry
-            .packages
-            .values()
-            .map(|package| {
-                (
-                    nomifun_agent_contracts::PackageRef {
-                        id: package.manifest.package_id.clone(),
-                        version: package.manifest.package_version.clone(),
-                    },
-                    package.source.source_kind,
-                )
-            })
-            .collect();
-        Ok(Arc::new(CatalogSnapshot {
-            capabilities,
-            formal_capability_entries,
-            skills,
-            mcp_tools,
-            package_sources,
-            unavailable_capabilities,
-            service_key_diagnostics: Vec::new(),
-        }))
+        materialize_catalog_snapshot(&registry, &unavailable_capabilities)
+            .map(Arc::new)
+            .map_err(|error| ControlPlaneError::Wire(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod catalog_materialization_tests {
+    use super::*;
+    use nomifun_agent_contracts::{
+        CapabilityContributions, CapabilityManifest, CapabilityRef,
+        ContributionId, LocalizedMetadata, McpBindingId, McpServerId,
+        McpToolCapabilityMapping, McpToolKey, PackageId, PackageRef,
+        PluginSourceKind, PluginSourceMetadata, StableSourceIdentity,
+        capability_surface_declarations,
+    };
+    use nomifun_agent_kernel::{
+        MaterializedCapability, MaterializedMcpTool,
+    };
+
+    #[test]
+    fn managed_mcp_projection_preserves_exact_owner_mount_and_artifact() {
+        let package = PackageRef {
+            id: PackageId::from("managed.catalog"),
+            version: VersionString::from("1.0.0"),
+        };
+        let mount_id = PluginMountId::from("managed-catalog-mount");
+        let artifact_digest = DigestHex::from("a".repeat(64));
+        let capability_ref = CapabilityRef {
+            id: CapabilityId::from("managed.catalog.run"),
+            version: VersionString::from("1.0.0"),
+        };
+        let manifest = CapabilityManifest {
+            id: capability_ref.id.clone(),
+            contribution_id: ContributionId::from(
+                "capability:managed.catalog.run",
+            ),
+            version: capability_ref.version.clone(),
+            kind: CapabilityKind::Tool,
+            package: package.clone(),
+            display: LocalizedMetadata {
+                name: "Managed Catalog".to_owned(),
+                description: "Managed MCP Catalog fixture".to_owned(),
+                localized_names: BTreeMap::new(),
+                localized_descriptions: BTreeMap::new(),
+            },
+            requires: Vec::new(),
+            conflicts: Vec::new(),
+            supported_surfaces: capability_surface_declarations(
+                ["desktop"],
+                [CapabilityConsumer::Agent],
+            ),
+            requires_runtime_features: Vec::new(),
+            supported_platforms: Vec::new(),
+            config_schema: StrictJsonValue(json!({"type": "object"})),
+            contributions: CapabilityContributions::default(),
+        };
+        let contract_digest = digest_payload(&manifest).unwrap();
+        let binding_id =
+            McpBindingId::from("managed.catalog.server:run");
+        let server_id = McpServerId::from("managed.catalog.server");
+        let tool_key = McpToolKey::from("run");
+        let contribution_lock = ContributionLock {
+            source_kind:
+                nomifun_agent_contracts::ContributionSourceKind::McpBinding,
+            source_identity: StableSourceIdentity::from(
+                "mcp:managed.catalog.server",
+            ),
+            mount_id: Some(mount_id.clone()),
+            miniapp_id: None,
+            mcp_binding_id: Some(binding_id.clone()),
+            contribution_id: manifest.contribution_id.clone(),
+            contract_digest: contract_digest.clone(),
+        };
+        let mut registry =
+            nomifun_agent_kernel::MaterializedRegistry::empty();
+        registry.capabilities.insert(
+            capability_ref.id.clone(),
+            MaterializedCapability {
+                manifest,
+                schema_digest: contract_digest.clone(),
+                contribution_id: contribution_lock
+                    .contribution_id
+                    .clone(),
+                contribution_lock: contribution_lock.clone(),
+                target_artifact_digest: artifact_digest.clone(),
+                mount_id: mount_id.clone(),
+                source: PluginSourceMetadata {
+                    source_kind: PluginSourceKind::ManagedLocal,
+                    source_identity: mount_id.as_ref().to_owned(),
+                    source_digest: Some(artifact_digest.clone()),
+                },
+            },
+        );
+        let mapping = McpToolCapabilityMapping {
+            package: package.clone(),
+            server_id: server_id.clone(),
+            canonical_tool_key: tool_key.clone(),
+            schema_digest: DigestHex::from("b".repeat(64)),
+            capability: capability_ref.clone(),
+            materialization_version: VersionString::from("1.0.0"),
+        };
+        registry.mcp_by_capability.insert(
+            capability_ref.id.clone(),
+            (server_id.clone(), tool_key.clone()),
+        );
+        registry.mcp_tools.insert(
+            (server_id, tool_key),
+            MaterializedMcpTool {
+                mapping,
+                binding_id: binding_id.clone(),
+                contribution_lock: contribution_lock.clone(),
+                target_artifact_digest: artifact_digest.clone(),
+                mount_id: mount_id.clone(),
+                source: PluginSourceMetadata {
+                    source_kind: PluginSourceKind::ManagedLocal,
+                    source_identity: mount_id.as_ref().to_owned(),
+                    source_digest: Some(artifact_digest.clone()),
+                },
+            },
+        );
+        let snapshot =
+            materialize_catalog_snapshot(&registry, &BTreeMap::new())
+                .unwrap();
+        let entry = snapshot
+            .formal_capability_entries
+            .get(&capability_ref)
+            .unwrap();
+        assert_eq!(
+            entry.provenance.owner,
+            CapabilityOwner::Package { package }
+        );
+        assert_eq!(entry.provenance.mount_id.as_ref(), Some(&mount_id));
+        assert_eq!(
+            entry.provenance.mcp_binding_id.as_ref(),
+            Some(&binding_id)
+        );
+        assert_eq!(
+            entry.provenance.artifact_digest.as_ref(),
+            Some(&artifact_digest)
+        );
+        assert_eq!(entry.contract_digest, contract_digest);
+        assert_eq!(
+            entry
+                .operation_lock(CapabilityConsumer::Agent)
+                .unwrap()
+                .contribution,
+            contribution_lock
+        );
+
+        let mut missing_mount = snapshot;
+        missing_mount.mcp_tools[0]
+            .contribution_lock
+            .mount_id = None;
+        assert!(missing_mount.validate().is_err());
     }
 }
 

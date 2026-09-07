@@ -1,3 +1,4 @@
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use jsonschema::Validator;
@@ -83,6 +84,10 @@ impl MaterializedCapability {
 #[derive(Clone, Debug)]
 pub struct MaterializedSkill {
     pub definition: SkillDefinition,
+    pub contribution_id: ContributionId,
+    pub contract_digest: DigestHex,
+    pub contribution_lock: ContributionLock,
+    pub target_artifact_digest: DigestHex,
     pub mount_id: PluginMountId,
     pub source: PluginSourceMetadata,
 }
@@ -90,8 +95,20 @@ pub struct MaterializedSkill {
 #[derive(Clone, Debug)]
 pub struct MaterializedMcpTool {
     pub mapping: McpToolCapabilityMapping,
+    pub binding_id: McpBindingId,
+    pub contribution_lock: ContributionLock,
+    pub target_artifact_digest: DigestHex,
     pub mount_id: PluginMountId,
     pub source: PluginSourceMetadata,
+}
+
+#[derive(Clone, Debug)]
+struct PendingMcpTool {
+    mapping: McpToolCapabilityMapping,
+    binding_id: McpBindingId,
+    target_artifact_digest: DigestHex,
+    mount_id: PluginMountId,
+    source: PluginSourceMetadata,
 }
 
 #[derive(Clone, Debug)]
@@ -305,7 +322,7 @@ impl Materializer {
             }
         }
 
-        let mut mcp_tools = BTreeMap::new();
+        let mut pending_mcp_tools = BTreeMap::new();
         let mut mcp_by_capability = BTreeMap::new();
         for registration in &ordered {
             let manifest = &registration.manifest.payload;
@@ -314,11 +331,14 @@ impl Materializer {
                     mapping.server_id.clone(),
                     mapping.canonical_tool_key.clone(),
                 );
-                if mcp_tools
+                if pending_mcp_tools
                     .insert(
                         key.clone(),
-                        MaterializedMcpTool {
+                        PendingMcpTool {
                             mapping: mapping.clone(),
+                            binding_id: mcp_binding_id(mapping),
+                            target_artifact_digest:
+                                target_artifact_digest(registration),
                             mount_id: registration.mount_id.clone(),
                             source: registration.source.clone(),
                         },
@@ -358,7 +378,7 @@ impl Materializer {
                         &schema_digest,
                         mcp_by_capability
                             .get(&capability.id)
-                            .and_then(|key| mcp_tools.get(key)),
+                            .and_then(|key| pending_mcp_tools.get(key)),
                     );
                 if capabilities
                     .insert(
@@ -381,22 +401,72 @@ impl Materializer {
                 }
             }
             for skill in &manifest.contributions.skills {
-                if skills
-                    .insert(
-                        skill.id.clone(),
-                        MaterializedSkill {
+                match skills.entry(skill.id.clone()) {
+                    Entry::Occupied(_) => {
+                        return Err(KernelError::DuplicateSkill {
+                            skill_id: skill.id.clone(),
+                        });
+                    }
+                    Entry::Vacant(entry) => {
+                        let contribution_id =
+                            skill_contribution_id(&skill.id);
+                        if !contribution_ids
+                            .insert(contribution_id.clone())
+                        {
+                            return Err(KernelError::DuplicateContribution {
+                                contribution_id,
+                            });
+                        }
+                        let contract_digest = digest_payload(skill).map_err(
+                            |error| KernelError::Digest {
+                                reason: error.to_string(),
+                            },
+                        )?;
+                        let target_artifact_digest =
+                            target_artifact_digest(registration);
+                        let contribution_lock = package_contribution_lock(
+                            registration,
+                            contribution_id.clone(),
+                            contract_digest.clone(),
+                        );
+                        entry.insert(MaterializedSkill {
                             definition: skill.clone(),
+                            contribution_id,
+                            contract_digest,
+                            contribution_lock,
+                            target_artifact_digest,
                             mount_id: registration.mount_id.clone(),
                             source: registration.source.clone(),
-                        },
-                    )
-                    .is_some()
-                {
-                    return Err(KernelError::DuplicateSkill {
-                        skill_id: skill.id.clone(),
-                    });
+                        });
+                    }
                 }
             }
+        }
+
+        let mut mcp_tools = BTreeMap::new();
+        for (key, pending) in pending_mcp_tools {
+            let capability = capabilities
+                .get(&pending.mapping.capability.id)
+                .filter(|capability| {
+                    capability.manifest.version
+                        == pending.mapping.capability.version
+                })
+                .ok_or_else(|| KernelError::MissingMcpCapability {
+                    server_id: key.0.clone(),
+                    tool_key: key.1.clone(),
+                    capability_id: pending.mapping.capability.id.clone(),
+                })?;
+            mcp_tools.insert(
+                key,
+                MaterializedMcpTool {
+                    mapping: pending.mapping,
+                    binding_id: pending.binding_id,
+                    contribution_lock: capability.contribution_lock.clone(),
+                    target_artifact_digest: pending.target_artifact_digest,
+                    mount_id: pending.mount_id,
+                    source: pending.source,
+                },
+            );
         }
 
         validate_capability_dependencies(&capabilities)?;
@@ -440,10 +510,15 @@ fn capability_provenance(
     registration: &PluginRegistrationMetadata,
     contribution_id: &ContributionId,
     schema_digest: &DigestHex,
-    mcp: Option<&MaterializedMcpTool>,
+    mcp: Option<&PendingMcpTool>,
 ) -> (ContributionLock, DigestHex) {
     if let Some(mcp) = mcp {
-        let target_artifact_digest = mcp.mapping.schema_digest.clone();
+        let mount_id = match registration.source.source_kind {
+            PluginSourceKind::ManagedLocal => {
+                Some(registration.mount_id.clone())
+            }
+            PluginSourceKind::Bundled | PluginSourceKind::TestFixture => None,
+        };
         return (
             ContributionLock {
                 source_kind: ContributionSourceKind::McpBinding,
@@ -451,25 +526,31 @@ fn capability_provenance(
                     "mcp:{}",
                     mcp.mapping.server_id.as_ref()
                 )),
-                mount_id: None,
+                mount_id,
                 miniapp_id: None,
-                mcp_binding_id: Some(McpBindingId::from(format!(
-                    "{}:{}",
-                    mcp.mapping.server_id.as_ref(),
-                    mcp.mapping.canonical_tool_key.as_ref()
-                ))),
+                mcp_binding_id: Some(mcp.binding_id.clone()),
                 contribution_id: contribution_id.clone(),
                 contract_digest: schema_digest.clone(),
             },
-            target_artifact_digest,
+            mcp.target_artifact_digest.clone(),
         );
     }
 
-    let target_artifact_digest = registration
-        .source
-        .source_digest
-        .clone()
-        .unwrap_or_else(|| registration.manifest.payload_digest.clone());
+    (
+        package_contribution_lock(
+            registration,
+            contribution_id.clone(),
+            schema_digest.clone(),
+        ),
+        target_artifact_digest(registration),
+    )
+}
+
+fn package_contribution_lock(
+    registration: &PluginRegistrationMetadata,
+    contribution_id: ContributionId,
+    contract_digest: DigestHex,
+) -> ContributionLock {
     let (source_kind, mount_id) = match registration.source.source_kind {
         PluginSourceKind::Bundled | PluginSourceKind::TestFixture => {
             (ContributionSourceKind::PlatformBuiltin, None)
@@ -479,20 +560,39 @@ fn capability_provenance(
             Some(registration.mount_id.clone()),
         ),
     };
-    (
-        ContributionLock {
-            source_kind,
-            source_identity: StableSourceIdentity::from(
-                registration.source.source_identity.clone(),
-            ),
-            mount_id,
-            miniapp_id: None,
-            mcp_binding_id: None,
-            contribution_id: contribution_id.clone(),
-            contract_digest: schema_digest.clone(),
-        },
-        target_artifact_digest,
-    )
+    ContributionLock {
+        source_kind,
+        source_identity: StableSourceIdentity::from(
+            registration.source.source_identity.clone(),
+        ),
+        mount_id,
+        miniapp_id: None,
+        mcp_binding_id: None,
+        contribution_id,
+        contract_digest,
+    }
+}
+
+fn target_artifact_digest(
+    registration: &PluginRegistrationMetadata,
+) -> DigestHex {
+    registration
+        .source
+        .source_digest
+        .clone()
+        .unwrap_or_else(|| registration.manifest.payload_digest.clone())
+}
+
+fn skill_contribution_id(skill_id: &SkillId) -> ContributionId {
+    ContributionId::from(format!("skill:{}", skill_id.as_ref()))
+}
+
+fn mcp_binding_id(mapping: &McpToolCapabilityMapping) -> McpBindingId {
+    McpBindingId::from(format!(
+        "{}:{}",
+        mapping.server_id.as_ref(),
+        mapping.canonical_tool_key.as_ref()
+    ))
 }
 
 fn registration_sort_key(
@@ -963,16 +1063,44 @@ fn validate_mcp_mappings(
     capabilities: &BTreeMap<CapabilityId, MaterializedCapability>,
 ) -> Result<(), KernelError> {
     for ((server_id, tool_key), mapping) in mappings {
-        if !capabilities
+        let Some(capability) = capabilities
             .get(&mapping.mapping.capability.id)
-            .is_some_and(|capability| {
-                capability.manifest.version == mapping.mapping.capability.version
+            .filter(|capability| {
+                capability.manifest.version
+                    == mapping.mapping.capability.version
             })
-        {
+        else {
             return Err(KernelError::MissingMcpCapability {
                 server_id: server_id.clone(),
                 tool_key: tool_key.clone(),
                 capability_id: mapping.mapping.capability.id.clone(),
+            });
+        };
+        let expected_binding = mcp_binding_id(&mapping.mapping);
+        let expected_mount = match mapping.source.source_kind {
+            PluginSourceKind::ManagedLocal => Some(&mapping.mount_id),
+            PluginSourceKind::Bundled | PluginSourceKind::TestFixture => None,
+        };
+        if mapping.mapping.package != capability.manifest.package
+            || mapping.mount_id != capability.mount_id
+            || mapping.source != capability.source
+            || mapping.binding_id != expected_binding
+            || mapping.contribution_lock != capability.contribution_lock
+            || mapping.target_artifact_digest
+                != capability.target_artifact_digest
+            || mapping.contribution_lock.source_kind
+                != ContributionSourceKind::McpBinding
+            || mapping.contribution_lock.mcp_binding_id.as_ref()
+                != Some(&expected_binding)
+            || mapping.contribution_lock.mount_id.as_ref()
+                != expected_mount
+        {
+            return Err(KernelError::InvalidMcpMaterialization {
+                server_id: server_id.clone(),
+                tool_key: tool_key.clone(),
+                reason:
+                    "mapping owner/Mount/source/Artifact/binding differs from its Capability"
+                        .to_owned(),
             });
         }
     }

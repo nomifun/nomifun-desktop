@@ -105,13 +105,17 @@
    Shared Extension Host 共进程。每次测试使用一次性 dataDir，默认不注入生产
    Credential；只完成真实 Artifact load/activate 而没有受管测试输入时，对带可调用
    contribution 的 Candidate 记录 `needs_test_input`，不得把“可加载”冒充“行为测试通过”。
-10. ManagedLocal Catalog 不再从 raw manifest 反推 provenance。Kernel publication
-    生成的正式 Catalog entry 会原样进入 Control Plane，Agent picker、impact 和非 Agent
-    operation lock 共享 exact Mount/contribution/contract/Artifact 事实。普通 Plugin Tool
-    已有独立 non-Agent operation handler/context，Gateway/UI/Automation 等 consumer
-    不需要伪造 AgentSession；Agent consumer 仍必须走 Snapshot-bound 路径。当前真实
-    App E2E 已覆盖 Agent+Gateway 共享 contribution，JS adapter 同时覆盖 UI-only
-    contribution 与旧 Artifact lock fail-closed。
+10. `N1-3-01` 已关闭。ManagedLocal Catalog 不再从 raw manifest、Package source kind
+    或命名约定反推 provenance：Kernel 的 Tool、Context、Resource、Skill 和 MCP 五类
+    materialization 原样进入 Control Plane。ManagedLocal MCP-backed Capability 同时保留
+    MCP binding identity、真实 Mount 和 Package Artifact，不复制第二个 MCP contribution；
+    Skill 以 canonical `skill:<skill_id>` contribution lock 进入 Revision。Agent picker、
+    impact、Agent Snapshot 和 non-Agent operation lock 共享 exact
+    Mount/contribution/contract/Artifact 事实；duplicate/missing/cross-owner fault 在
+    Registry swap 前失败并保留旧 generation。普通 Plugin Tool 已有独立 non-Agent
+    operation handler/context，Gateway/UI/Automation 等 consumer 不需要伪造
+    AgentSession；Agent consumer 仍必须走 Snapshot-bound 路径。当前 Kernel 26、
+    Control Plane 17、Agent Platform 23、JS Adapter 4 项定向验证通过。
 
 ## 0. 怎样阅读这份文档
 

@@ -12,8 +12,9 @@ use nomifun_agent_contracts::{
     CanonicalSchemaRef, CorrelationId, DeclaredServiceViewDescriptor, DigestHex, EffectClass,
     ExactRoleContractRef, HostPortId, HostPortRef, IdempotencyKey,
     InProcessEntrypointMetadata, JavaScriptEntrypointMetadata, LocalizedMetadata,
-    LogicalArtifactRef, ManagedTaskRegistrationDescriptor, McpServerId,
-    McpToolCapabilityMapping, McpToolKey, OperationId, PackageContributions,
+    LogicalArtifactRef, ManagedTaskRegistrationDescriptor, McpBindingId,
+    McpServerId, McpToolCapabilityMapping, McpToolKey, OperationId,
+    PackageContributions,
     PackageEntrypointMetadata, PackageId, PackageManifest, PackageRef, PlatformConstraint,
     PluginBootCriticality, PluginBootState, PluginContextDescriptor, PluginDesiredState,
     PluginEffectiveState, PluginIdentityDescriptor, PluginMountId, PluginRegistrarDescriptor,
@@ -26,7 +27,7 @@ use nomifun_agent_contracts::{
     ServiceHandleDescriptor, ServiceKeyRef,
     ServiceProvision, ServiceRequirement, SkillDefinition, SkillId, SkillRef, StrictJsonValue,
     ToolPresentationKind, TypedResourceBinding, UserId, ValidatedPluginConfig, VersionString,
-    digest_bytes, digest_payload,
+    ContributionSourceKind, digest_bytes, digest_payload,
 };
 use serde_json::json;
 
@@ -303,6 +304,24 @@ fn sample_registration(prefix: &str) -> PluginRegistration {
         "sample.echo.server",
         prefix,
     )
+}
+
+fn managed_sample_registration(prefix: &str) -> PluginRegistration {
+    let mut registration = sample_registration(prefix);
+    registration.metadata.source = PluginSourceMetadata {
+        source_kind: PluginSourceKind::ManagedLocal,
+        source_identity: SAMPLE_MOUNT.to_owned(),
+        source_digest: Some(DigestHex::from("a".repeat(64))),
+    };
+    registration
+}
+
+fn managed_policy() -> MaterializationPolicy {
+    MaterializationPolicy {
+        host_contract_version: VersionString::from(VERSION),
+        available_runtime_features: BTreeSet::new(),
+        allowed_sources: BTreeSet::from([PluginSourceKind::ManagedLocal]),
+    }
 }
 
 struct EchoHandler {
@@ -1007,10 +1026,9 @@ async fn sample_echo_uses_materialize_compile_activate_authorize_invoke_and_rest
     assert_eq!(
         exact_capability.target_artifact_digest,
         materialized
-            .mcp_for_capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+            .package(&PackageId::from(SAMPLE_PACKAGE))
             .unwrap()
-            .mapping
-            .schema_digest
+            .manifest_digest
     );
 
     let owner = principal("user-a");
@@ -1118,6 +1136,115 @@ async fn sample_echo_uses_materialize_compile_activate_authorize_invoke_and_rest
         .await
         .unwrap();
     assert_eq!(second.0, json!({"echo": "prefix:again", "count": 2}));
+}
+
+#[test]
+fn managed_skill_and_mcp_backed_capability_keep_exact_provenance() {
+    let registry = KernelRegistry::new(
+        managed_policy(),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry
+        .replace_all(vec![managed_sample_registration("managed:")])
+        .unwrap();
+    let artifact_digest = DigestHex::from("a".repeat(64));
+    let mount_id = PluginMountId::from(SAMPLE_MOUNT);
+    let binding_id = McpBindingId::from(format!(
+        "{SAMPLE_SERVER}:{SAMPLE_SERVER}.echo"
+    ));
+
+    let capability = materialized
+        .capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+        .unwrap();
+    assert_eq!(
+        capability.contribution_lock.source_kind,
+        ContributionSourceKind::McpBinding
+    );
+    assert_eq!(
+        capability.contribution_lock.mount_id.as_ref(),
+        Some(&mount_id)
+    );
+    assert_eq!(
+        capability.contribution_lock.mcp_binding_id.as_ref(),
+        Some(&binding_id)
+    );
+    assert_eq!(capability.target_artifact_digest, artifact_digest);
+
+    let skill = materialized.skill(&SkillId::from(SAMPLE_SKILL)).unwrap();
+    assert_eq!(
+        skill.contribution_lock.source_kind,
+        ContributionSourceKind::PluginMount
+    );
+    assert_eq!(skill.contribution_lock.mount_id.as_ref(), Some(&mount_id));
+    assert_eq!(
+        skill.contribution_lock.source_identity.as_ref(),
+        SAMPLE_MOUNT
+    );
+    assert_eq!(
+        skill.contract_digest,
+        digest_payload(&skill.definition).unwrap()
+    );
+    assert_eq!(
+        skill.contribution_lock.contract_digest,
+        skill.contract_digest
+    );
+    assert_eq!(skill.target_artifact_digest, artifact_digest);
+
+    let mcp = materialized
+        .mcp_for_capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+        .unwrap();
+    assert_eq!(mcp.binding_id, binding_id);
+    assert_eq!(mcp.contribution_lock, capability.contribution_lock);
+    assert_eq!(mcp.mount_id, mount_id);
+    assert_eq!(mcp.target_artifact_digest, artifact_digest);
+    assert_eq!(mcp.mapping.package, capability.manifest.package);
+}
+
+#[test]
+fn managed_skill_revision_lock_fails_closed_on_mount_drift() {
+    let registry = KernelRegistry::new(
+        managed_policy(),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let materialized = registry
+        .replace_all(vec![managed_sample_registration("managed:")])
+        .unwrap();
+    let capability = materialized
+        .capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+        .unwrap();
+    let skill = materialized.skill(&SkillId::from(SAMPLE_SKILL)).unwrap();
+    let mut revision = sample_revision("managed-owner");
+    revision.contribution_locks = vec![
+        capability.contribution_lock.clone(),
+        skill.contribution_lock.clone(),
+    ];
+    revision.contribution_locks.sort();
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+
+    AgentPresetCompiler::compile(
+        &materialized,
+        &compiler_environment(materialized.registry_digest.clone()),
+        compile_request(revision.clone(), principal("managed-owner")),
+    )
+    .unwrap();
+
+    let skill_lock = revision
+        .contribution_locks
+        .iter_mut()
+        .find(|lock| lock.contribution_id == skill.contribution_id)
+        .unwrap();
+    skill_lock.mount_id = Some(PluginMountId::from("different-mount"));
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    assert!(matches!(
+        AgentPresetCompiler::compile(
+            &materialized,
+            &compiler_environment(materialized.registry_digest.clone()),
+            compile_request(revision, principal("managed-owner")),
+        ),
+        Err(KernelError::SkillProvenanceDrift { .. })
+    ));
 }
 
 #[tokio::test]
@@ -1335,13 +1462,19 @@ fn compiler_rejects_revision_contribution_lock_drift() {
     .unwrap();
     let owner = principal("revision-lock-owner");
     let mut revision = sample_revision(&owner.principal_id);
-    revision.contribution_locks = vec![
-        materialized
-            .capability(&CapabilityId::from(SAMPLE_CAPABILITY))
-            .unwrap()
-            .contribution_lock
-            .clone(),
-    ];
+    let capability_lock = materialized
+        .capability(&CapabilityId::from(SAMPLE_CAPABILITY))
+        .unwrap()
+        .contribution_lock
+        .clone();
+    let skill_lock = materialized
+        .skill(&SkillId::from(SAMPLE_SKILL))
+        .unwrap()
+        .contribution_lock
+        .clone();
+    revision.contribution_locks =
+        vec![capability_lock.clone(), skill_lock];
+    revision.contribution_locks.sort();
     revision.reference.revision_digest = revision.revision_digest().unwrap();
     AgentPresetCompiler::compile(
         &materialized,
@@ -1350,7 +1483,14 @@ fn compiler_rejects_revision_contribution_lock_drift() {
     )
     .expect("matching exact lock must compile");
 
-    revision.contribution_locks[0].source_identity =
+    revision
+        .contribution_locks
+        .iter_mut()
+        .find(|lock| {
+            lock.contribution_id == capability_lock.contribution_id
+        })
+        .unwrap()
+        .source_identity =
         nomifun_agent_contracts::StableSourceIdentity::from("drifted-source");
     revision.reference.revision_digest = revision.revision_digest().unwrap();
     assert!(matches!(
@@ -1748,6 +1888,131 @@ fn invalid_config_and_duplicate_capability_do_not_publish_partial_generation() {
         Err(KernelError::DuplicateContribution { .. })
     ));
     assert_eq!(registry.snapshot().unwrap().generation, first.generation);
+}
+
+#[test]
+fn duplicate_skill_and_mcp_faults_do_not_publish_partial_generation() {
+    let registry = KernelRegistry::new(
+        MaterializationPolicy::stable_with_test_fixtures(VERSION),
+        Arc::new(InMemoryPluginStatePersistence::new()),
+    )
+    .unwrap();
+    let first = registry
+        .replace_all(vec![sample_registration("stable:")])
+        .unwrap();
+
+    let duplicate_skill = registration_for(
+        "sample.duplicate-skill",
+        "sample-duplicate-skill",
+        "sample.duplicate-skill.capability",
+        SAMPLE_SKILL,
+        "sample.duplicate-skill.server",
+        "duplicate:",
+    );
+    assert!(matches!(
+        registry.replace_all(vec![
+            sample_registration("stable:"),
+            duplicate_skill,
+        ]),
+        Err(KernelError::DuplicateSkill { .. })
+    ));
+    let after_duplicate_skill = registry.snapshot().unwrap();
+    assert_eq!(after_duplicate_skill.generation, first.generation);
+    assert_eq!(after_duplicate_skill.registry_digest, first.registry_digest);
+
+    let duplicate_mcp = registration_for(
+        "sample.duplicate-mcp",
+        "sample-duplicate-mcp",
+        "sample.duplicate-mcp.capability",
+        "sample.duplicate-mcp.skill",
+        SAMPLE_SERVER,
+        "duplicate:",
+    );
+    assert!(matches!(
+        registry.replace_all(vec![
+            sample_registration("stable:"),
+            duplicate_mcp,
+        ]),
+        Err(KernelError::DuplicateMcpTool { .. })
+    ));
+    let after_duplicate_mcp = registry.snapshot().unwrap();
+    assert_eq!(after_duplicate_mcp.generation, first.generation);
+    assert_eq!(after_duplicate_mcp.registry_digest, first.registry_digest);
+
+    let mut missing_mcp_target = registration_for(
+        "sample.missing-mcp-target",
+        "sample-missing-mcp-target",
+        "sample.missing-mcp-target.capability",
+        "sample.missing-mcp-target.skill",
+        "sample.missing-mcp-target.server",
+        "missing:",
+    );
+    missing_mcp_target
+        .metadata
+        .manifest
+        .payload
+        .contributions
+        .mcp_tools[0]
+        .capability
+        .id = CapabilityId::from("missing.mcp.capability");
+    refresh_manifest(&mut missing_mcp_target);
+    assert!(matches!(
+        registry.replace_all(vec![
+            sample_registration("stable:"),
+            missing_mcp_target,
+        ]),
+        Err(KernelError::MissingMcpCapability { .. })
+    ));
+    let after_missing_target = registry.snapshot().unwrap();
+    assert_eq!(after_missing_target.generation, first.generation);
+    assert_eq!(after_missing_target.registry_digest, first.registry_digest);
+
+    let mut target = registration_for(
+        "sample.mcp-target",
+        "sample-mcp-target",
+        "sample.mcp-target.capability",
+        "sample.mcp-target.skill",
+        "sample.mcp-target.server",
+        "target:",
+    );
+    target
+        .metadata
+        .manifest
+        .payload
+        .contributions
+        .mcp_tools
+        .clear();
+    refresh_manifest(&mut target);
+    let mut cross_owner = registration_for(
+        "sample.mcp-owner",
+        "sample-mcp-owner",
+        "sample.mcp-owner.capability",
+        "sample.mcp-owner.skill",
+        "sample.mcp-owner.server",
+        "owner:",
+    );
+    cross_owner
+        .metadata
+        .manifest
+        .payload
+        .contributions
+        .mcp_tools[0]
+        .capability = CapabilityRef {
+        id: CapabilityId::from("sample.mcp-target.capability"),
+        version: VersionString::from(VERSION),
+    };
+    refresh_manifest(&mut cross_owner);
+    assert!(matches!(
+        registry.replace_all(vec![
+            sample_registration("stable:"),
+            target,
+            cross_owner,
+        ]),
+        Err(KernelError::InvalidMcpMaterialization { .. })
+    ));
+    let after_cross_owner = registry.snapshot().unwrap();
+    assert_eq!(after_cross_owner.generation, first.generation);
+    assert_eq!(after_cross_owner.registry_digest, first.registry_digest);
 }
 
 #[test]

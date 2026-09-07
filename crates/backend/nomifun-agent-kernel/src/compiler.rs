@@ -208,7 +208,7 @@ impl AgentPresetCompiler {
 
         validate_direct_selections(registry, &initial_direct)?;
         validate_direct_selections(registry, &on_demand_direct)?;
-        validate_revision_capability_locks(registry, &request.revision)?;
+        validate_revision_contribution_locks(registry, &request.revision)?;
 
         let mut paths = BTreeMap::<CapabilityId, Vec<CapabilityId>>::new();
         let mut initial_ids = BTreeSet::new();
@@ -447,7 +447,7 @@ fn validate_direct_selections(
     Ok(())
 }
 
-fn validate_revision_capability_locks(
+fn validate_revision_contribution_locks(
     registry: &MaterializedRegistry,
     revision: &AgentPresetRevision,
 ) -> Result<(), KernelError> {
@@ -484,6 +484,39 @@ fn validate_revision_capability_locks(
                 capability_id: selection.capability.id.clone(),
                 reason: "Revision contribution lock does not match the materialized target"
                     .to_owned(),
+            });
+        }
+    }
+    for reference in &revision.payload.skill_bindings {
+        let skill = registry
+            .skill(&reference.id)
+            .filter(|skill| skill.definition.version == reference.version)
+            .ok_or_else(|| KernelError::SkillNotMaterialized {
+                skill_id: reference.id.clone(),
+                version: reference.version.clone(),
+            })?;
+        if skill.source.source_kind
+            == nomifun_agent_contracts::PluginSourceKind::TestFixture
+        {
+            continue;
+        }
+        let frozen = revision
+            .contribution_locks
+            .iter()
+            .find(|lock| lock.contribution_id == skill.contribution_id)
+            .ok_or_else(|| KernelError::SkillProvenanceDrift {
+                skill_id: reference.id.clone(),
+                reason: format!(
+                    "Revision is missing contribution lock {}",
+                    skill.contribution_id.as_ref()
+                ),
+            })?;
+        if frozen != &skill.contribution_lock {
+            return Err(KernelError::SkillProvenanceDrift {
+                skill_id: reference.id.clone(),
+                reason:
+                    "Revision contribution lock does not match the materialized Skill target"
+                        .to_owned(),
             });
         }
     }

@@ -725,31 +725,18 @@ fn catalog_from_registry(registry: &MaterializedRegistry) -> CatalogSnapshot {
         capabilities: registry
             .capabilities
             .values()
-            .map(|capability| capability.manifest.clone())
+            .cloned()
             .collect(),
         formal_capability_entries: BTreeMap::new(),
         skills: registry
             .skills
             .values()
-            .map(|skill| skill.definition.clone())
+            .cloned()
             .collect(),
         mcp_tools: registry
             .mcp_tools
             .values()
-            .map(|mcp| mcp.mapping.clone())
-            .collect(),
-        package_sources: registry
-            .packages
-            .values()
-            .map(|package| {
-                (
-                    PackageRef {
-                        id: package.manifest.package_id.clone(),
-                        version: package.manifest.package_version.clone(),
-                    },
-                    package.source.source_kind,
-                )
-            })
+            .cloned()
             .collect(),
         unavailable_capabilities: BTreeMap::new(),
         service_key_diagnostics: Vec::new(),

@@ -116,6 +116,14 @@ pub enum KernelError {
         tool_key: McpToolKey,
         capability_id: CapabilityId,
     },
+    #[error(
+        "MCP mapping {server_id:?}/{tool_key:?} has invalid materialized provenance: {reason}"
+    )]
+    InvalidMcpMaterialization {
+        server_id: McpServerId,
+        tool_key: McpToolKey,
+        reason: String,
+    },
     #[error("duplicate service provider for {service_id:?}")]
     DuplicateServiceProvider { service_id: ServiceKeyId },
     #[error("mount {mount_id:?} requires missing service {service_id:?}@{version:?}")]
@@ -270,6 +278,11 @@ pub enum KernelError {
         capability_id: CapabilityId,
         reason: String,
     },
+    #[error("skill {skill_id:?} exact provenance drifted: {reason}")]
+    SkillProvenanceDrift {
+        skill_id: SkillId,
+        reason: String,
+    },
     #[error("capability {capability_id:?} is not active")]
     CapabilityNotActive { capability_id: CapabilityId },
     #[error("active generation conflict: expected {expected}, current {current}")]
@@ -301,7 +314,8 @@ impl KernelError {
 
         let code = match self {
             Self::CapabilityNotInPreset { .. } => CAPABILITY_NOT_IN_PRESET,
-            Self::CapabilityProvenanceDrift { .. } => CAPABILITY_NOT_MATERIALIZED,
+            Self::CapabilityProvenanceDrift { .. }
+            | Self::SkillProvenanceDrift { .. } => CAPABILITY_NOT_MATERIALIZED,
             Self::CapabilityNotActive { .. } | Self::ActivationGenerationConflict { .. } => {
                 CAPABILITY_NOT_ACTIVE
             }
